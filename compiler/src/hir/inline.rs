@@ -1204,6 +1204,12 @@ pub fn blank_unreachable(body: &mut HirBody) {
             body.exprs[i].kind = HirKind::Block { stmts: kept, tail: None };
         }
     }
+    blank_orphans(body, root);
+}
+
+/// Blank the nodes not reachable from `root`: what a query that scans the
+/// whole arena reads is then only code that can run.
+pub fn blank_orphans(body: &mut HirBody, root: HirId) {
     let mut live = vec![false; body.exprs.len()];
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {

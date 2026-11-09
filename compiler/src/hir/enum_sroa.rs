@@ -347,7 +347,14 @@ fn rewrite(body: &mut HirBody, local: LocalId, split: &Split) {
                         let taken = split.fixed.and_then(|t| {
                             arms.iter().find(|a| matches!(a.pat, HirPat::Wild) || a.pat == HirPat::Int(i64::from(t)))
                         });
+                        // A field or index read straight off the match
+                        // takes the match's own layout as its base, which
+                        // a block does not have: the arm stays a match.
+                        let based = parent[p.0 as usize].is_some_and(|up| {
+                            matches!(body.expr(up).kind, HirKind::Field { base, .. } | HirKind::Index { base, .. } if base == p)
+                        });
                         body.exprs[p.0 as usize].kind = match taken {
+                            Some(a) if based => HirKind::Match { scrutinee, arms: vec![HirArm { pat: HirPat::Wild, ..a.clone() }] },
                             Some(a) => HirKind::Block { stmts: Vec::new(), tail: Some(a.body) },
                             None => HirKind::Match { scrutinee, arms },
                         };

@@ -611,9 +611,6 @@ impl Compiler {
     /// is emitted once a body that calls it is ([`Self::queue_outlined`]).
     fn hir_outline_cold(&self, callee: &HirBody, foreign: Option<crate::hir::Span>) -> Option<HirBody> {
         use crate::hir::Callee;
-        if self.outline_refused.contains(&callee.name) {
-            return None;
-        }
         let cold_call = |id: HirId| match &callee.expr(id).kind {
             HirKind::Call { callee: Callee::Named { name, .. }, .. } => self.is_cold_fn(name),
             HirKind::Call { callee: Callee::Resolved(r), .. } => self.is_cold_fn(&r.key),
@@ -646,26 +643,22 @@ impl Compiler {
         Some(body)
     }
 
-    /// Whether the helpers `body` calls each plan as a function of their
-    /// own, as [`Self::flush_outlined`] emits them. A callee whose helper
-    /// does not is not cut again.
-    fn outlined_plan(&mut self, body: &HirBody) -> bool {
+    /// Plan the helpers `body` calls, each a function of its own, as
+    /// [`Self::flush_outlined`] emits them.
+    fn outlined_plan(&mut self, body: &HirBody) {
         for name in self.outlined_calls(body) {
             if self.outlined_planned.contains(&name) {
                 continue;
             }
             let w = self.outlined.borrow()[&name].body.clone();
             let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(&w));
-            let planned = self.plan_hir_body(&w).is_ok();
+            let planned = self.plan_hir_body(&w);
             self.hir_body_frame = outer;
-            if !planned {
-                let callee = name.rsplit_once("$cold").map_or(name.as_str(), |(c, _)| c);
-                self.outline_refused.insert(callee.to_string());
-                return false;
+            if let Err(why) = planned {
+                panic!("internal error: outlined cold arm `{name}` does not plan: {why}");
             }
             self.outlined_planned.insert(name);
         }
-        true
     }
 
     /// The partial-inlining helpers `body` calls.
@@ -1404,6 +1397,7 @@ impl Compiler {
         .and_then(|mut emit| self.plan_hir_lambdas(&module, hir, &mut emit).map(|()| emit));
         // Typed inlining rewrites the body and plans it again; a body whose
         // inlined form does not plan keeps its calls.
+        let ground_was = self.hir_ground_splice.replace(false);
         let mut inlined = None;
         let plan = match plan {
             Ok(mut emit) if self.hir_inline_on(hir) => {
@@ -1442,7 +1436,7 @@ impl Compiler {
                             inlined = Some(next);
                             Ok(replanned)
                         }
-                        Err(_) => Ok(emit),
+                        Err(why) => panic!("internal error: `{}` does not plan with its local values split: {why}", hir.name),
                     },
                     None => Ok(emit),
                 }
@@ -1481,7 +1475,7 @@ impl Compiler {
                             inlined = Some(next);
                             Ok(replanned)
                         }
-                        Err(_) => Ok(emit),
+                        Err(why) => panic!("internal error: `{}` does not plan unrolled and folded: {why}", hir.name),
                     },
                     None => Ok(emit),
                 }
@@ -1548,6 +1542,7 @@ impl Compiler {
             plan => plan,
         };
         let hir = freed.as_ref().unwrap_or(hir);
+        self.hir_ground_splice.set(ground_was);
         let plan = plan.and_then(|emit| hir_bisect(&hir.name, self.opt_options.hir_bisect).then_some(emit).ok_or("bisect"));
         let lowered = match plan {
             Ok(mut emit) => {
@@ -2623,12 +2618,10 @@ impl Compiler {
             found.ok()
         };
         // A body with no dictionaries plans a spliced clone body as the
-        // clone would (`hir_ground_splice`).
-        let ground_splice = !self.compiling_mono_clone && !hir.is_generic && !method_clones.is_empty();
+        // clone would (`hir_ground_splice`), from here to its last plan.
+        let ground_splice = self.hir_ground_splice.get() || (!self.compiling_mono_clone && !hir.is_generic && !method_clones.is_empty());
         let plan = |this: &mut Self, body: &HirBody| {
-            if !this.outlined_plan(body) {
-                return Err("outlined-plan");
-            }
+            this.outlined_plan(body);
             let was = this.hir_ground_splice.replace(ground_splice);
             let planned = refusal::refusal(body, &this.checker)
                 .map_or_else(|| this.plan_hir_body(body), Err)
@@ -2641,7 +2634,9 @@ impl Compiler {
                     });
                     if open { Err("inline-open-instance") } else { Ok(emit) }
                 });
-            this.hir_ground_splice.set(was);
+            if planned.is_err() {
+                this.hir_ground_splice.set(was);
+            }
             planned
         };
         let opaque = |id: HirId| emit.plan.lens.contains_key(&id.0);
@@ -3906,9 +3901,10 @@ impl Compiler {
                 self.compiling_two_word_enum = prev_two_word;
                 let mut plan = match plan {
                     Ok(plan) => plan,
-                    // The twin is an optimization: without it the value
-                    // calls read the box.
-                    Err(_) if !plans.is_empty() => break,
+                    // The twin is the same body returning two words.
+                    Err(why) if !plans.is_empty() => {
+                        panic!("internal error: the two-word twin of a lambda in `{}` does not plan: {why}", hir.name)
+                    }
                     Err(why) => return Err(why),
                 };
                 self.hir_lambda_pairs.borrow_mut().clear();

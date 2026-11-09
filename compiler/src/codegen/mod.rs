@@ -645,10 +645,8 @@ pub struct Compiler {
     outlined: std::cell::RefCell<HashMap<String, compiler::emit_hir::Outlined>>,
     outlined_queue: Vec<String>,
     outlined_emitted: HashSet<String>,
-    /// Helpers that plan as functions of their own, and the callees whose
-    /// helpers do not (those inline whole or not at all).
+    /// Helpers already planned as functions of their own.
     outlined_planned: HashSet<String>,
-    outline_refused: HashSet<String>,
     /// Scalar function bodies of modules compiled so far, by table key,
     /// with their calls named by key: callees another module's typed
     /// inlining may splice ([`Compiler::hir_portable_body`]).
@@ -822,7 +820,6 @@ impl Default for Compiler {
             outlined_queue: Vec::new(),
             outlined_emitted: HashSet::new(),
             outlined_planned: HashSet::new(),
-            outline_refused: HashSet::new(),
             hir_portable: HashMap::new(),
             hir_resolved_clones: HashMap::new(),
             module_outer_namespace: None,
