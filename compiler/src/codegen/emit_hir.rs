@@ -1937,16 +1937,10 @@ impl Compiler {
         // A finalizer object's local is pinned (`HirMirInput::pinned`) so
         // it lives as long as its frame slot would.
         let checker = &self.checker;
-        let pure_fns = &self.pure_fns;
-        let steady_fns = &self.steady_fns;
         use crate::mir::LowerCx;
         let cx = HirLowerCx { c: self };
         let is_class = |t: &Ty| cx.is_class(t);
-        let niche = move |t: &Ty| match crate::layout::value_layout(checker, t) {
-            ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
-            ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
-            ValueLayout::Boxed => None,
-        };
+        let niche = |t: &Ty| cx.niche(t);
         // A generic body's type variable values are opaque words it only
         // moves; a generic class's shared method sees its class's
         // parameters as type variables too.
@@ -2425,57 +2419,7 @@ impl Compiler {
             ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx[..] } else { &[] },
             lens: &emit.plan.lens,
             alloc_steady: self.alloc_steady,
-            pure_fn: Box::new(move |n: &str| crate::pure_call::name_in(pure_fns, n)),
-            steady_fn: Box::new(move |n: &str| crate::pure_call::name_in(steady_fns, n)),
             box_at: &emit.plan.box_at,
-            niche: Box::new(niche),
-            boxed_enum: Box::new(move |t: &Ty, variant: Option<&str>| {
-                let t = apply_ty_prune(checker.subst(), t);
-                if crate::typechecking::ty::is_option_ty(&t)
-                    || crate::typechecking::ty::is_result_ty(&t)
-                    || crate::layout::of_resolved(checker, &t) != crate::layout::Layout::Word
-                {
-                    return None;
-                }
-                Self::boxed_payloads(checker, &t, variant)
-            }),
-            payload_names: Box::new(move |enum_name: &str, variant: &str| {
-                checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
-            }),
-            unit_tags: Box::new(move |t: &Ty| {
-                let t = apply_ty_prune(checker.subst(), t);
-                let Some(kind) = crate::layout::two_word_kind(checker, &t).and_then(|k| k.enum_name().map(str::to_string)) else {
-                    return 0;
-                };
-                checker.enum_variants(&kind).into_iter().flatten().fold(0, |m, (name, tag, _)| {
-                    let unit = Self::payload_tys_of(checker, &t, &name).is_some_and(|p| matches!(p.as_slice(), [p] if crate::layout::is_unit(p)));
-                    if unit { m | 1u64.checked_shl(tag).unwrap_or(0) } else { m }
-                })
-            }),
-            pair_variants: Box::new(move |t: &Ty| {
-                let t = apply_ty_prune(checker.subst(), t);
-                let kind = crate::layout::two_word_kind(checker, &t)?.enum_name()?.to_string();
-                let mut variants = Vec::new();
-                for (name, tag, _) in checker.enum_variants(&kind)? {
-                    let payload = Self::payload_tys_of(checker, &t, &name)?;
-                    let word = match payload.as_slice() {
-                        [] => None,
-                        [p] if crate::layout::is_unit(p) => Some(crate::mir::MirTy::I64),
-                        [p] if !crate::layout::is_immediate(p) => Some(crate::mir::MirTy::HeapRef),
-                        [p] => Some(crate::mir::scalar_mir_ty(p)?),
-                        _ => return None,
-                    };
-                    variants.push((tag, word));
-                }
-                Some((kind, variants))
-            }),
-            boxed_view: Box::new(move |t: &Ty, variant: Option<&str>| {
-                let t = apply_ty_prune(checker.subst(), t);
-                if crate::layout::value_layout(checker, &t) != ValueLayout::Boxed {
-                    return None;
-                }
-                Self::boxed_payloads(checker, &t, variant)
-            }),
             heap_fields,
             pair_fields,
             invariant_fields,
@@ -11550,7 +11494,8 @@ impl crate::hir::tables::GlobalTables for HirTables<'_> {
 }
 
 /// What direct MIR lowering asks the compiler as it lowers a body
-/// ([`crate::mir::LowerCx`]).
+/// ([`crate::mir::LowerCx`]): the checker's layouts, and which callees are
+/// pure or never resize an array.
 struct HirLowerCx<'a> {
     c: &'a Compiler,
 }
@@ -11599,5 +11544,77 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
 
     fn array_stamp(&self, t: &Ty) -> u8 {
         crate::layout::array_elem_stamp(&self.c.checker, t)
+    }
+
+    fn boxed_enum(&self, t: &Ty, variant: Option<&str>) -> Option<Vec<Ty>> {
+        let checker = &self.c.checker;
+        let t = apply_ty_prune(checker.subst(), t);
+        if crate::typechecking::ty::is_option_ty(&t)
+            || crate::typechecking::ty::is_result_ty(&t)
+            || crate::layout::of_resolved(checker, &t) != crate::layout::Layout::Word
+        {
+            return None;
+        }
+        Compiler::boxed_payloads(checker, &t, variant)
+    }
+
+    fn boxed_view(&self, t: &Ty, variant: Option<&str>) -> Option<Vec<Ty>> {
+        let checker = &self.c.checker;
+        let t = apply_ty_prune(checker.subst(), t);
+        if crate::layout::value_layout(checker, &t) != ValueLayout::Boxed {
+            return None;
+        }
+        Compiler::boxed_payloads(checker, &t, variant)
+    }
+
+    fn pair_variants(&self, t: &Ty) -> Option<(String, Vec<(u32, Option<crate::mir::MirTy>)>)> {
+        let checker = &self.c.checker;
+        let t = apply_ty_prune(checker.subst(), t);
+        let kind = crate::layout::two_word_kind(checker, &t)?.enum_name()?.to_string();
+        let mut variants = Vec::new();
+        for (name, tag, _) in checker.enum_variants(&kind)? {
+            let payload = Compiler::payload_tys_of(checker, &t, &name)?;
+            let word = match payload.as_slice() {
+                [] => None,
+                [p] if crate::layout::is_unit(p) => Some(crate::mir::MirTy::I64),
+                [p] if !crate::layout::is_immediate(p) => Some(crate::mir::MirTy::HeapRef),
+                [p] => Some(crate::mir::scalar_mir_ty(p)?),
+                _ => return None,
+            };
+            variants.push((tag, word));
+        }
+        Some((kind, variants))
+    }
+
+    fn unit_tags(&self, t: &Ty) -> u64 {
+        let checker = &self.c.checker;
+        let t = apply_ty_prune(checker.subst(), t);
+        let Some(kind) = crate::layout::two_word_kind(checker, &t).and_then(|k| k.enum_name().map(str::to_string)) else {
+            return 0;
+        };
+        checker.enum_variants(&kind).into_iter().flatten().fold(0, |m, (name, tag, _)| {
+            let unit = Compiler::payload_tys_of(checker, &t, &name).is_some_and(|p| matches!(p.as_slice(), [p] if crate::layout::is_unit(p)));
+            if unit { m | 1u64.checked_shl(tag).unwrap_or(0) } else { m }
+        })
+    }
+
+    fn payload_names(&self, enum_name: &str, variant: &str) -> Vec<String> {
+        self.c.checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
+    }
+
+    fn niche(&self, t: &Ty) -> Option<crate::mir::MirTy> {
+        match crate::layout::value_layout(&self.c.checker, t) {
+            ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
+            ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
+            ValueLayout::Boxed => None,
+        }
+    }
+
+    fn pure_fn(&self, name: &str) -> bool {
+        crate::pure_call::name_in(&self.c.pure_fns, name)
+    }
+
+    fn steady_fn(&self, name: &str) -> bool {
+        crate::pure_call::name_in(&self.c.steady_fns, name)
     }
 }
