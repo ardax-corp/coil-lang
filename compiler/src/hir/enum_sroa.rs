@@ -115,9 +115,9 @@ pub fn scalarize(body: &HirBody, ok: impl Fn(&str) -> bool) -> Option<HirBody> {
                     _ => false,
                 },
                 HirKind::Defer { captures, .. } => !captures.contains(&Some(local)),
-                HirKind::LetPat { pat, .. } => !binds(pat, local),
-                HirKind::Match { arms, .. } => !arms.iter().any(|a| binds(&a.pat, local)),
-                HirKind::ForIn { pat, .. } => !binds(pat, local),
+                HirKind::LetPat { pat, .. } => !pat.binds(local),
+                HirKind::Match { arms, .. } => !arms.iter().any(|a| a.pat.binds(local)),
+                HirKind::ForIn { pat, .. } => !pat.binds(local),
                 _ => true,
             };
             if !use_ok {
@@ -162,15 +162,6 @@ fn variant_of(body: &HirBody, v: HirId) -> Option<(&str, u32)> {
 /// A type a field local holds: a scalar, or a `string`.
 fn field(t: &Ty) -> bool {
     super::lower::primitive(t).is_some() || matches!(ty::strip_readonly(t), Ty::Con(n) if n == "string")
-}
-
-fn binds(pat: &HirPat, local: LocalId) -> bool {
-    match pat {
-        HirPat::Bind(l) => *l == local,
-        HirPat::Variant { fields: HirPatFields::Tuple(ps), .. } | HirPat::Tuple(ps) => ps.iter().any(|p| binds(p, local)),
-        HirPat::Variant { fields: HirPatFields::Record(fs), .. } | HirPat::Record(fs) => fs.iter().any(|(_, p)| binds(p, local)),
-        _ => false,
-    }
 }
 
 /// The tag and field locals for `local`: a field's type from a build's

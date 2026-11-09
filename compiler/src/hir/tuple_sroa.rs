@@ -49,9 +49,9 @@ pub fn scalarize(body: &HirBody, ok: impl Fn(&Ty) -> bool) -> Option<HirBody> {
                 _ => false,
             },
             HirKind::Defer { captures, .. } => !captures.contains(&Some(local)),
-            HirKind::LetPat { pat, .. } => !binds(pat, local),
-            HirKind::Match { arms, .. } => !arms.iter().any(|a| binds(&a.pat, local)),
-            HirKind::ForIn { pat, .. } => !binds(pat, local),
+            HirKind::LetPat { pat, .. } => !pat.binds(local),
+            HirKind::Match { arms, .. } => !arms.iter().any(|a| a.pat.binds(local)),
+            HirKind::ForIn { pat, .. } => !pat.binds(local),
             _ => true,
         });
         if !(fits && built && read) {
@@ -122,23 +122,6 @@ fn constant(body: &HirBody, index: HirId) -> Option<usize> {
     match body.expr(index).kind {
         HirKind::Lit(Lit::Int(k)) => usize::try_from(k).ok(),
         _ => None,
-    }
-}
-
-fn binds(pat: &HirPat, local: LocalId) -> bool {
-    match pat {
-        HirPat::Bind(l) => *l == local,
-        HirPat::Variant {
-            fields: super::HirPatFields::Tuple(ps),
-            ..
-        }
-        | HirPat::Tuple(ps) => ps.iter().any(|p| binds(p, local)),
-        HirPat::Variant {
-            fields: super::HirPatFields::Record(fs),
-            ..
-        }
-        | HirPat::Record(fs) => fs.iter().any(|(_, p)| binds(p, local)),
-        _ => false,
     }
 }
 

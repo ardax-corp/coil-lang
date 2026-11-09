@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 
 use super::tuple_sroa::{fresh, mentions, set, set_block, staged};
-use super::{HirBody, HirFlags, HirId, HirKind, HirPat, LocalId, LocalKind, MakeKind};
+use super::{HirBody, HirFlags, HirId, HirKind, LocalId, LocalKind, MakeKind};
 use crate::typechecking::ty::Ty;
 
 /// The most whole uses one local is rebuilt at.
@@ -120,8 +120,8 @@ fn candidate(
                 _ => uses.push(id),
             },
             HirKind::Defer { captures, .. } if captures.contains(&Some(local)) => return None,
-            HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } if binds(pat, local) => return None,
-            HirKind::Match { arms, .. } if arms.iter().any(|a| binds(&a.pat, local)) => return None,
+            HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } if pat.binds(local) => return None,
+            HirKind::Match { arms, .. } if arms.iter().any(|a| a.pat.binds(local)) => return None,
             _ => {}
         }
     }
@@ -187,23 +187,6 @@ fn exclusive(body: &HirBody, a: &[HirId], b: &[HirId]) -> bool {
             let arm = |c: HirId| arms.iter().position(|a| a.body == c);
             matches!((arm(x), arm(y)), (Some(p), Some(q)) if p != q)
         }
-        _ => false,
-    }
-}
-
-fn binds(pat: &HirPat, local: LocalId) -> bool {
-    match pat {
-        HirPat::Bind(l) => *l == local,
-        HirPat::Variant {
-            fields: super::HirPatFields::Tuple(ps),
-            ..
-        }
-        | HirPat::Tuple(ps) => ps.iter().any(|p| binds(p, local)),
-        HirPat::Variant {
-            fields: super::HirPatFields::Record(fs),
-            ..
-        }
-        | HirPat::Record(fs) => fs.iter().any(|(_, p)| binds(p, local)),
         _ => false,
     }
 }

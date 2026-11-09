@@ -335,7 +335,7 @@ impl BodyBuilder {
             for e in &self.body.exprs {
                 match &e.kind {
                     HirKind::Let { local, init: Some(v) } if self.mut_marks.contains(v) => borrows.push(*local),
-                    HirKind::ForIn { pat, iterable, .. } if self.mut_marks.contains(iterable) => super::effects::pat_binds(pat, &mut borrows),
+                    HirKind::ForIn { pat, iterable, .. } if self.mut_marks.contains(iterable) => pat.for_each_bind(&mut |l| borrows.push(l)),
                     _ => {}
                 }
             }
@@ -387,7 +387,7 @@ impl BodyBuilder {
                         HirKind::ForIn { iterable, .. } if consumed.contains(iterable) => {
                             let mut binds = Vec::new();
                             if let HirKind::ForIn { pat, .. } = &e.kind {
-                                super::effects::pat_binds(pat, &mut binds);
+                                pat.for_each_bind(&mut |l| binds.push(l));
                             }
                             binds.contains(&l).then(|| self.body.exprs[iterable.0 as usize].span)
                         }

@@ -645,7 +645,7 @@ fn match_temps(body: &HirBody, e: &mut Escape<'_, '_>, parents: &HashMap<HirId, 
         }
         let mut binds = Vec::new();
         for arm in arms {
-            super::pat_binds(&arm.pat, &mut binds);
+            arm.pat.for_each_bind(&mut |l| binds.push(l));
         }
         if binds.iter().any(|b| body.local(*b).captured) {
             continue;

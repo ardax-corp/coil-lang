@@ -1426,20 +1426,6 @@ fn local_roots(body: &HirBody, derived: &HashMap<LocalId, u64>, l: LocalId) -> u
     own | derived.get(&l).copied().unwrap_or(0)
 }
 
-pub(crate) fn pat_binds(pat: &HirPat, out: &mut Vec<LocalId>) {
-    match pat {
-        HirPat::Bind(l) => out.push(*l),
-        HirPat::Tuple(items) => items.iter().for_each(|p| pat_binds(p, out)),
-        HirPat::Record(fields) => fields.iter().for_each(|(_, p)| pat_binds(p, out)),
-        HirPat::Variant { fields, .. } => match fields {
-            HirPatFields::Unit => {}
-            HirPatFields::Tuple(items) => items.iter().for_each(|p| pat_binds(p, out)),
-            HirPatFields::Record(fields) => fields.iter().for_each(|(_, p)| pat_binds(p, out)),
-        },
-        HirPat::Wild | HirPat::Int(_) => {}
-    }
-}
-
 /// [`BodyFacts::derived`]: what each local may reach of the parameters,
 /// through `let`, assignment, pattern bindings and `for` variables.
 fn derived_locals(body: &HirBody) -> HashMap<LocalId, u64> {
@@ -1474,16 +1460,16 @@ fn derived_locals(body: &HirBody) -> HashMap<LocalId, u64> {
                     _ => 0,
                 },
                 HirKind::LetPat { pat, init } => {
-                    pat_binds(pat, &mut binds);
+                    pat.for_each_bind(&mut |l| binds.push(l));
                     param_roots(body, &derived, *init)
                 }
                 HirKind::ForIn { pat, iterable, .. } => {
-                    pat_binds(pat, &mut binds);
+                    pat.for_each_bind(&mut |l| binds.push(l));
                     param_roots(body, &derived, *iterable)
                 }
                 HirKind::Match { scrutinee, arms } => {
                     for arm in arms {
-                        pat_binds(&arm.pat, &mut binds);
+                        arm.pat.for_each_bind(&mut |l| binds.push(l));
                     }
                     param_roots(body, &derived, *scrutinee)
                 }

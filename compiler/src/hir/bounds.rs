@@ -351,9 +351,9 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
             HirKind::Let { local, .. } => {
                 w.locals.insert(*local);
             }
-            HirKind::LetPat { pat, .. } => binds(pat, &mut w.locals),
-            HirKind::Match { arms, .. } => arms.iter().for_each(|a| binds(&a.pat, &mut w.locals)),
-            HirKind::ForIn { pat, .. } => binds(pat, &mut w.locals),
+            HirKind::LetPat { pat, .. } => pat.for_each_bind(&mut |l| { w.locals.insert(l); }),
+            HirKind::Match { arms, .. } => arms.iter().for_each(|a| a.pat.for_each_bind(&mut |l| { w.locals.insert(l); })),
+            HirKind::ForIn { pat, .. } => pat.for_each_bind(&mut |l| { w.locals.insert(l); }),
             HirKind::Assign { place, .. } => {
                 if let HirKind::Local(l) = body.expr(*place).kind {
                     w.locals.insert(l);
@@ -385,25 +385,6 @@ fn length_of(body: &HirBody, args: &[HirId]) -> bool {
         let t = ty::strip_readonly(t);
         matches!(t, Ty::Array { .. }) || ty::vec_element_ty(t).is_some() || matches!(t, Ty::Con(n) if n == "string")
     })
-}
-
-fn binds(pat: &HirPat, out: &mut HashSet<LocalId>) {
-    match pat {
-        HirPat::Bind(l) => {
-            out.insert(*l);
-        }
-        HirPat::Variant {
-            fields: super::HirPatFields::Tuple(ps),
-            ..
-        }
-        | HirPat::Tuple(ps) => ps.iter().for_each(|p| binds(p, out)),
-        HirPat::Variant {
-            fields: super::HirPatFields::Record(fs),
-            ..
-        }
-        | HirPat::Record(fs) => fs.iter().for_each(|(_, p)| binds(p, out)),
-        _ => {}
-    }
 }
 
 /// The nodes under `id` that run when it does: not inside a lambda or a

@@ -3265,7 +3265,7 @@ impl Compiler {
                     holds(&callee.expr(*scrutinee).ty)
                         || arms.iter().any(|a| {
                             let mut hit = false;
-                            Self::hir_pat_locals(&a.pat, &mut |l| hit |= holds(&callee.local(l).ty));
+                            a.pat.for_each_bind(&mut |l| hit |= holds(&callee.local(l).ty));
                             hit
                         })
                 }

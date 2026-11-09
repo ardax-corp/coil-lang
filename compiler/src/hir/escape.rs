@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use super::{Builtin, BinOp, Callee, Cx, HirBody, HirId, HirKind, HirModule, HirPat, LocalId, LocalKind, MakeKind, Summary, Walk};
-use super::{is_vec, pat_binds, VEC_MUTATORS};
+use super::{is_vec, VEC_MUTATORS};
 use crate::typechecking::ty::Ty;
 
 /// Bit `i` of [`Src::sites`] for the first 63 allocation sites; later
@@ -296,7 +296,7 @@ impl<'c, 'a> Escape<'c, 'a> {
 
     fn bind(&mut self, pat: &HirPat, s: Src) {
         let mut binds = Vec::new();
-        pat_binds(pat, &mut binds);
+        pat.for_each_bind(&mut |l| binds.push(l));
         for l in binds {
             if !no_heap(self.body.local(l).ty.as_ref()) {
                 self.add_local(l, s);
@@ -564,13 +564,13 @@ pub(super) fn region_leaks(module: &HirModule, body: &HirBody, lookup: &CallLook
                 }
                 HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } => {
                     let mut binds = Vec::new();
-                    pat_binds(pat, &mut binds);
+                    pat.for_each_bind(&mut |l| binds.push(l));
                     declared.extend(binds);
                 }
                 HirKind::Match { arms, .. } => {
                     for arm in arms {
                         let mut binds = Vec::new();
-                        pat_binds(&arm.pat, &mut binds);
+                        arm.pat.for_each_bind(&mut |l| binds.push(l));
                         declared.extend(binds);
                     }
                 }

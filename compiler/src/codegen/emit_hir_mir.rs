@@ -255,7 +255,7 @@ impl Compiler {
                 }
             }
             HirKind::LetPat { pat, .. } if !defer => {
-                Self::hir_pat_locals(pat, &mut |l| {
+                pat.for_each_bind(&mut |l| {
                     bound.insert(l.0);
                 });
             }
@@ -305,7 +305,7 @@ impl Compiler {
             }
             HirKind::ForIn { pat, iterable, body, .. } => {
                 if !defer {
-                    Self::hir_pat_locals(pat, &mut |l| {
+                    pat.for_each_bind(&mut |l| {
                         bound.insert(l.0);
                     });
                 }
@@ -340,7 +340,7 @@ impl Compiler {
         };
         if lower::has_nested_test(arms) || lower::is_scalar_match(&self.checker, hir, scrutinee, arms) {
             for arm in arms {
-                Self::hir_pat_locals(&arm.pat, &mut |l| out.push(l));
+                arm.pat.for_each_bind(&mut |l| out.push(l));
             }
             return out;
         }
@@ -425,21 +425,6 @@ impl Compiler {
             }
         }
         out
-    }
-
-    /// Each local `pat` binds.
-    pub(super) fn hir_pat_locals(pat: &HirPat, f: &mut impl FnMut(LocalId)) {
-        match pat {
-            HirPat::Bind(l) => f(*l),
-            HirPat::Tuple(items) => items.iter().for_each(|p| Self::hir_pat_locals(p, f)),
-            HirPat::Record(fields) => fields.iter().for_each(|(_, p)| Self::hir_pat_locals(p, f)),
-            HirPat::Variant { fields, .. } => match fields {
-                HirPatFields::Unit => {}
-                HirPatFields::Tuple(items) => items.iter().for_each(|p| Self::hir_pat_locals(p, f)),
-                HirPatFields::Record(fields) => fields.iter().for_each(|(_, p)| Self::hir_pat_locals(p, f)),
-            },
-            _ => {}
-        }
     }
 
     fn hir_mir_walk(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) {
@@ -2052,7 +2037,7 @@ impl Compiler {
 
     fn hir_plan_par_walk(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, bound: &mut HashSet<u32>) {
         let bind_pat = |pat: &HirPat, bound: &mut HashSet<u32>| {
-            Self::hir_pat_locals(pat, &mut |l| {
+            pat.for_each_bind(&mut |l| {
                 bound.insert(l.0);
             })
         };

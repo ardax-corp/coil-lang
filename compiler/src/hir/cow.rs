@@ -28,7 +28,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::escape::CallLookup;
-use super::{is_vec, pat_binds, Summary, VEC_MUTATORS};
+use super::{is_vec, Summary, VEC_MUTATORS};
 use crate::hir::lower::pure_index;
 use crate::hir::{Builtin, Callee, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span};
 use crate::typechecking::infer::{Checker, ForInKind};
@@ -305,7 +305,7 @@ impl<'b> Facts<'b> {
             HirKind::Match { scrutinee, arms } => {
                 for arm in arms {
                     let mut ls = Vec::new();
-                    pat_binds(&arm.pat, &mut ls);
+                    arm.pat.for_each_bind(&mut |l| ls.push(l));
                     for l in ls {
                         self.bound.insert(l, (*scrutinee, arm.body));
                     }
@@ -314,7 +314,7 @@ impl<'b> Facts<'b> {
             HirKind::ForIn { pat, iterable, kind, .. } => {
                 if matches!(kind, Some(ForInKind::Array)) {
                     let mut ls = Vec::new();
-                    pat_binds(pat, &mut ls);
+                    pat.for_each_bind(&mut |l| ls.push(l));
                     for l in ls {
                         self.bound.insert(l, (*iterable, id));
                     }
@@ -322,7 +322,7 @@ impl<'b> Facts<'b> {
             }
             HirKind::LetPat { pat, init } => {
                 let mut ls = Vec::new();
-                pat_binds(pat, &mut ls);
+                pat.for_each_bind(&mut |l| ls.push(l));
                 for l in ls {
                     self.bound.insert(l, (*init, id));
                 }
@@ -1853,9 +1853,3 @@ fn relocate(out: &mut HirBody, id: HirId) -> HirId {
     new
 }
 
-#[allow(dead_code)]
-fn pat_locals(pat: &HirPat) -> Vec<LocalId> {
-    let mut out = Vec::new();
-    pat_binds(pat, &mut out);
-    out
-}

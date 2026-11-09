@@ -1247,10 +1247,10 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             hir.visit(*body, &mut |x| match &x.kind {
                 HirKind::Let { local, .. } => binds.push(*local),
                 HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } => {
-                    crate::hir::effects::pat_binds(pat, &mut binds);
+                    pat.for_each_bind(&mut |l| binds.push(l));
                 }
                 HirKind::Match { arms, .. } => {
-                    arms.iter().for_each(|a| crate::hir::effects::pat_binds(&a.pat, &mut binds));
+                    arms.iter().for_each(|a| a.pat.for_each_bind(&mut |l| binds.push(l)));
                 }
                 _ => {}
             });
