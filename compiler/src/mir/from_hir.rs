@@ -1192,8 +1192,7 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
     // dictionary at entry, as the prologue loads them into their slots.
     for &(slot, own, index) in inp.ctx_dicts {
         let own = *dict_params.get(&own).ok_or("context dictionary")?;
-        let at = b.ins_const(MirConst::I64(i64::from(index))).map_err(mir)?;
-        let dict = b.ins_index(own, at, MirTy::HeapRef, false).map_err(mir)?;
+        let dict = b.ins_tuple_item(own, index, MirTy::HeapRef).map_err(mir)?;
         dict_params.insert(slot, dict);
     }
     let cur = b.entry();
@@ -2200,14 +2199,14 @@ impl Lower<'_> {
             let Some(obj) = self.boxed_word(base)? else {
                 return Ok(None);
             };
-            return Ok(Some(self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?));
+            return Ok(Some(self.b.ins_product_load(obj, slot, ty).map_err(mir)?));
         }
         // So does a frame-slot class local's open niche field: its slot's box.
         if let Some(&slot) = self.inp.fields.get(&id.0)
             && self.open_slot_niche(id).is_some_and(|w| Ok(w) == niche_word(layout))
         {
             return Ok(Some(match self.boxed_field(id, slot)? {
-                Some((obj, index)) => self.b.ins_heap_field_load(obj, index, MirTy::HeapRef).map_err(mir)?,
+                Some((obj, index)) => self.b.ins_product_load(obj, index, MirTy::HeapRef).map_err(mir)?,
                 None => self.b.use_local(LocalId(slot), MirTy::HeapRef).map_err(mir)?,
             }));
         }
@@ -2400,17 +2399,15 @@ impl Lower<'_> {
             if items.len() != 2 {
                 return Err("unbox pair type".into());
             }
-            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-            let lo = self.b.ins_index(v, zero, lo_ty, false).map_err(mir)?;
-            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
-            let hi = self.b.ins_index(v, one, hi_ty, false).map_err(mir)?;
+            let lo = self.b.ins_tuple_item(v, 0, lo_ty).map_err(mir)?;
+            let hi = self.b.ins_tuple_item(v, 1, hi_ty).map_err(mir)?;
             return Ok(Val::Pair(lo, hi));
         }
         // A boxed numeric range: a typed object, start and end its fields;
         // a readonly class pair: an instance, its two fields (#1562).
         if crate::layout::two_word_range_kind(ty).is_some() || (self.inp.pair_class)(ty).is_some() {
-            let lo = self.b.ins_heap_field_load(v, 0, lo_ty).map_err(mir)?;
-            let hi = self.b.ins_heap_field_load(v, 1, hi_ty).map_err(mir)?;
+            let lo = self.b.ins_product_load(v, 0, lo_ty).map_err(mir)?;
+            let hi = self.b.ins_product_load(v, 1, hi_ty).map_err(mir)?;
             return Ok(Val::Pair(lo, hi));
         }
         if hi_ty != MirTy::I64 {
@@ -3386,8 +3383,8 @@ impl Lower<'_> {
                 if self.b.value_ty(obj) != MirTy::HeapRef {
                     return Err("pair field base".into());
                 }
-                let lo = self.b.ins_heap_field_load(obj, slot, lo_ty).map_err(mir)?;
-                let hi = self.b.ins_heap_field_load(obj, tail, hi_ty).map_err(mir)?;
+                let lo = self.b.ins_product_load(obj, slot, lo_ty).map_err(mir)?;
+                let hi = self.b.ins_product_load(obj, tail, hi_ty).map_err(mir)?;
                 if self.inp.invariant_fields.contains(&id.0) {
                     self.b.mark_invariant_load(lo);
                     self.b.mark_invariant_load(hi);
@@ -3431,7 +3428,7 @@ impl Lower<'_> {
                     }
                     // One word (a parameter, an element): its instance.
                     Val::V(obj) if self.b.value_ty(obj) == MirTy::HeapRef => {
-                        let w = self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?;
+                        let w = self.b.ins_product_load(obj, slot, ty).map_err(mir)?;
                         if self.inp.invariant_fields.contains(&id.0) {
                             self.b.mark_invariant_load(w);
                         }
@@ -3449,7 +3446,7 @@ impl Lower<'_> {
                 let Some(obj) = self.boxed_word(*base)? else {
                     return Ok(Val::Never);
                 };
-                let w = self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?;
+                let w = self.b.ins_product_load(obj, slot, ty).map_err(mir)?;
                 if self.inp.invariant_fields.contains(&id.0) {
                     self.b.mark_invariant_load(w);
                 }
@@ -3502,7 +3499,7 @@ impl Lower<'_> {
                 let Some(obj) = self.word(*base)? else {
                     return Ok(Val::Never);
                 };
-                Ok(Val::V(self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?))
+                Ok(Val::V(self.b.ins_product_load(obj, slot, ty).map_err(mir)?))
             }
             HirKind::Assign { place, value }
                 if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
@@ -3566,7 +3563,7 @@ impl Lower<'_> {
             // An open niche field's box, read back as its niche word.
             HirKind::Field { .. } if let Some(&slot) = self.inp.fields.get(&id.0) && let Some(niche) = self.open_slot_niche(id) => {
                 let obj = match self.boxed_field(id, slot)? {
-                    Some((obj, index)) => self.b.ins_heap_field_load(obj, index, MirTy::HeapRef).map_err(mir)?,
+                    Some((obj, index)) => self.b.ins_product_load(obj, index, MirTy::HeapRef).map_err(mir)?,
                     None => self.b.use_local(LocalId(slot), MirTy::HeapRef).map_err(mir)?,
                 };
                 self.unbox_niche(obj, niche)
@@ -3580,7 +3577,7 @@ impl Lower<'_> {
                     .or_else(|| self.expr_ty(id).is_some_and(is_heap_tuple).then_some(MirTy::HeapRef))
                     .ok_or("field type")?;
                 if let Some((obj, index)) = self.boxed_field(id, slot)? {
-                    return Ok(Val::V(self.b.ins_heap_field_load(obj, index, ty).map_err(mir)?));
+                    return Ok(Val::V(self.b.ins_product_load(obj, index, ty).map_err(mir)?));
                 }
                 Ok(Val::V(self.b.use_local(LocalId(slot), ty).map_err(mir)?))
             }
@@ -3629,10 +3626,8 @@ impl Lower<'_> {
                 let ab = match heap {
                     Some((ta, tb)) => match self.word(*init)? {
                         Some(obj) if self.b.value_ty(obj) == MirTy::HeapRef => {
-                            let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
-                            let a = self.b.ins_index(obj, zero, ta, false).map_err(mir)?;
-                            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
-                            Some((a, self.b.ins_index(obj, one, tb, false).map_err(mir)?))
+                            let a = self.b.ins_tuple_item(obj, 0, ta).map_err(mir)?;
+                            Some((a, self.b.ins_tuple_item(obj, 1, tb).map_err(mir)?))
                         }
                         Some(_) => return Err("let pattern tuple".into()),
                         None => None,
@@ -3672,7 +3667,7 @@ impl Lower<'_> {
                 }
                 for ((_, part), word) in parts.iter().zip(words) {
                     if let (HirPat::Bind(local), Some((slot, ty))) = (part, *word) {
-                        let v = self.b.ins_heap_field_load(obj, slot, ty).map_err(mir)?;
+                        let v = self.b.ins_product_load(obj, slot, ty).map_err(mir)?;
                         self.bind(*local, v)?;
                     }
                 }
@@ -4855,8 +4850,7 @@ impl Lower<'_> {
             HirRetItems::Tuple { items, kinds } => {
                 let mut words = Vec::with_capacity(items.len());
                 for (i, it) in items.iter().enumerate() {
-                    let at = self.b.ins_const(MirConst::I64(i as i64)).map_err(mir)?;
-                    let v = self.b.ins_index(obj, at, read_ty(it), false).map_err(mir)?;
+                    let v = self.b.ins_tuple_item(obj, i as u32, read_ty(it)).map_err(mir)?;
                     words.push(item(self, it, v)?);
                 }
                 let t = self.b.ins_alloc_kinds(MirAllocKind::TUPLE, words, *kinds).map_err(mir)?;
@@ -4915,8 +4909,7 @@ impl Lower<'_> {
                 HirDictOp::Interned { slot, ref ops } => stack.push(self.interned_dict(slot, ops)?),
                 HirDictOp::Field(n) => {
                     let dict = stack.pop().ok_or("dictionary field")?;
-                    let at = self.b.ins_const(MirConst::I64(i64::from(n))).map_err(mir)?;
-                    stack.push(self.b.ins_index(dict, at, MirTy::I64, false).map_err(mir)?);
+                    stack.push(self.b.ins_tuple_item(dict, n, MirTy::I64).map_err(mir)?);
                 }
             }
         }
@@ -5183,8 +5176,7 @@ impl Lower<'_> {
         let dict = *self.dict_params.get(&bound.dict).ok_or("dictionary parameter")?;
         words.push(dict);
         words.extend(self.dict_values(&bound.dicts)?);
-        let slot = self.b.ins_const(MirConst::I64(i64::from(bound.method))).map_err(mir)?;
-        let callee = self.b.ins_index(dict, slot, MirTy::I64, false).map_err(mir)?;
+        let callee = self.b.ins_tuple_item(dict, bound.method, MirTy::I64).map_err(mir)?;
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
         if let Some(want) = niche {
             return self.unbox_niche(dest, want);
@@ -5222,18 +5214,14 @@ impl Lower<'_> {
             };
             rest_words.push(v);
         }
-        let field = |l: &mut Self, i: i64, ty: MirTy| -> Result<ValueId, Refusal> {
-            let at = l.b.ins_const(MirConst::I64(i)).map_err(mir)?;
-            l.b.ins_index(pack, at, ty, false).map_err(mir)
-        };
+        let field = |l: &mut Self, i: u32, ty: MirTy| -> Result<ValueId, Refusal> { l.b.ins_tuple_item(pack, i, ty).map_err(mir) };
         let value = field(self, 0, MirTy::HeapRef)?;
         let dict = field(self, 1, MirTy::HeapRef)?;
         let mut words = Vec::with_capacity(args.len() + 1);
         words.push(value);
         words.extend(rest_words);
         words.push(dict);
-        let at = self.b.ins_const(MirConst::I64(i64::from(slot))).map_err(mir)?;
-        let callee = self.b.ins_index(dict, at, MirTy::I64, false).map_err(mir)?;
+        let callee = self.b.ins_tuple_item(dict, slot, MirTy::I64).map_err(mir)?;
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
         Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
@@ -6072,6 +6060,13 @@ impl Lower<'_> {
         let Some(arr) = self.word_or_boxed(base)? else {
             return Ok(Val::Never);
         };
+        // A tuple's item at a constant index: one slot read.
+        if self.expr_ty(base).is_some_and(|t| matches!(strip_readonly(t), Ty::Tuple(_)))
+            && let HirKind::Lit(Lit::Int(k)) = self.hir.expr(index).kind
+            && let Ok(k) = u32::try_from(k)
+        {
+            return Ok(Val::V(self.b.ins_tuple_item(arr, k, ty).map_err(mir)?));
+        }
         let Some(idx) = self.index_word(index)? else {
             return Ok(Val::Never);
         };
@@ -6461,8 +6456,7 @@ impl Lower<'_> {
             }
             &HirShow::Bound { dict, method } => {
                 let dict = *self.dict_params.get(&dict).ok_or("dictionary parameter")?;
-                let slot = self.b.ins_const(MirConst::I64(i64::from(method))).map_err(mir)?;
-                let callee = self.b.ins_index(dict, slot, MirTy::I64, false).map_err(mir)?;
+                let callee = self.b.ins_tuple_item(dict, method, MirTy::I64).map_err(mir)?;
                 return self.at_expr(id, |l| l.b.ins_call_indirect(callee, vec![v, dict], MirTy::HeapRef).map_err(mir));
             }
             HirShow::Tuple { fmt, items } => (fmt, items.iter().map(|(t, s)| (None, t, s)).collect::<Vec<_>>()),
@@ -6483,11 +6477,8 @@ impl Lower<'_> {
                 .ok_or("show item type")?;
             let w = match key {
                 // A record's slot.
-                Some(slot) => self.at_expr(id, |l| l.b.ins_heap_field_load(v, slot, ty_w).map_err(mir))?,
-                None => {
-                    let k = self.b.ins_const(MirConst::I64(i as i64)).map_err(mir)?;
-                    self.at_expr(id, |l| l.b.ins_index(v, k, ty_w, false).map_err(mir))?
-                }
+                Some(slot) => self.at_expr(id, |l| l.b.ins_product_load(v, slot, ty_w).map_err(mir))?,
+                None => self.at_expr(id, |l| l.b.ins_tuple_item(v, i as u32, ty_w).map_err(mir))?,
             };
             words.push(self.show(id, w, item)?);
         }
@@ -6876,7 +6867,7 @@ impl Lower<'_> {
         self.switch(err);
         self.at_expr(id, |l| {
             let e = l.b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(mir)?;
-            let msg = l.b.ins_heap_field_load(e, 1, MirTy::HeapRef).map_err(mir)?;
+            let msg = l.b.ins_product_load(e, 1, MirTy::HeapRef).map_err(mir)?;
             l.keep_pins()?;
             l.b.panic(msg).map_err(mir)
         })?;
@@ -7121,8 +7112,7 @@ impl Lower<'_> {
                         && !self.unit_local(*l)
                     {
                         let (l, ty) = parts.next().ok_or("for in pattern")?;
-                        let c = self.b.ins_const(MirConst::I64(k as i64)).map_err(mir)?;
-                        let v = self.b.ins_index(item, c, ty, false).map_err(mir)?;
+                        let v = self.b.ins_tuple_item(item, k as u32, ty).map_err(mir)?;
                         if self.pair_local(l).is_some() {
                             self.bind_item(l, v, None)?;
                         } else {
@@ -7368,8 +7358,7 @@ impl Lower<'_> {
                         continue;
                     }
                     let item_ty = self.tuple_item(t).ok_or("let pattern")?;
-                    let index = self.b.ins_const(MirConst::I64(k as i64)).map_err(mir)?;
-                    let x = self.b.ins_index(v, index, item_ty, false).map_err(mir)?;
+                    let x = self.b.ins_tuple_item(v, k as u32, item_ty).map_err(mir)?;
                     self.bind_tuple_item(item, x, Some(t))?;
                 }
                 Ok(())

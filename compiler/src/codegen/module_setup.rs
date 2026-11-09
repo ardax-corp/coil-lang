@@ -217,7 +217,7 @@ impl Compiler {
         b.jump_if_match(obj, 0, vec![word], ok, err).map_err(mir)?;
         b.switch_to_block(err);
         let e = b.ins_match_payload(obj, 0, MirTy::HeapRef).map_err(mir)?;
-        let msg = b.ins_heap_field_load(e, 1, MirTy::HeapRef).map_err(mir)?;
+        let msg = b.ins_product_load(e, 1, MirTy::HeapRef).map_err(mir)?;
         b.panic(msg).map_err(mir)?;
         b.switch_to_block(ok);
         Ok(word)

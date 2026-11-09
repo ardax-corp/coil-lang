@@ -32,6 +32,11 @@ major.
   now `UnitEnum` of `PRODUCT_TAG`) are free. An `Alloc`'s words are in
   declaration order for every kind; engines no longer reverse an enum's.
   MIR section `FORMAT` 15.
+- `HeapFieldLoad` is `ProductLoad` (same tag, `I_FIELD`; text `productload`):
+  slot `k` of any product object, a constant-index tuple read among them.
+  Helpers `coil_native_field` (which read `0` from a wrong object) and
+  `coil_native_enum_payload` are gone; `coil_native_product_load` bails.
+  MIR section `FORMAT` 16.
 
 ## Major 7
 

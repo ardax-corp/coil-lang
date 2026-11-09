@@ -783,8 +783,8 @@ fn motion(
         MirInst::Index { .. } => (!fx.elements && !fx.lengths).then_some(Motion::Traps),
         MirInst::ArrayLen { .. } => free(!fx.lengths),
         // A readonly class's field never changes (#1560).
-        MirInst::HeapFieldLoad { dest, .. } if func.invariant_loads.contains(dest) => Some(Motion::Free),
-        MirInst::HeapFieldLoad { .. } => free(!fx.fields),
+        MirInst::ProductLoad { dest, .. } if func.invariant_loads.contains(dest) => Some(Motion::Free),
+        MirInst::ProductLoad { .. } => free(!fx.fields),
         MirInst::Call { dest, args, .. } if func.pure_calls.contains(dest) => {
             let reads_heap = args.iter().any(|a| super::cse::reads_heap(func.ty(*a)));
             (!reads_heap || !fx.heap() && !fx.lengths).then_some(Motion::Traps)
@@ -1400,11 +1400,11 @@ bb5:
     fn field_read_moves_past_element_stores() {
         let mut f = counted(
             "v0: i64, v1: heapref, v10: heapref",
-            "    v6 = heaploadfield v10, 0\n    v12 = storeindex v1, v4, v3",
+            "    v6 = productload v10, 0\n    v12 = storeindex v1, v4, v3",
         );
         assert!(licm(&mut f, true) >= 1);
         f.verify().unwrap();
-        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 0);
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::ProductLoad { .. })), 0);
     }
 
     #[test]
@@ -1412,11 +1412,11 @@ bb5:
         // `v1` may be `v10`.
         let mut f = counted(
             "v0: i64, v1: heapref, v10: heapref",
-            "    v6 = heaploadfield v10, 0\n    v12 = heapsetfield.slot v1, v4, 0",
+            "    v6 = productload v10, 0\n    v12 = heapsetfield.slot v1, v4, 0",
         );
         licm(&mut f, true);
         f.verify().unwrap();
-        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 1);
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::ProductLoad { .. })), 1);
     }
 
     #[test]
@@ -1424,12 +1424,12 @@ bb5:
         // #1560: no store changes a readonly class instance's field.
         let mut f = counted(
             "v0: i64, v1: heapref, v10: heapref",
-            "    v6 = heaploadfield v10, 0\n    v12 = heapsetfield.slot v1, v4, 0",
+            "    v6 = productload v10, 0\n    v12 = heapsetfield.slot v1, v4, 0",
         );
         f.invariant_loads.insert(ValueId(6));
         assert!(licm(&mut f, true) >= 1);
         f.verify().unwrap();
-        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::HeapFieldLoad { .. })), 0);
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::ProductLoad { .. })), 0);
     }
 
     #[test]

@@ -1170,7 +1170,7 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(dest)?;
                         need_heap(array)?;
                     }
-                    MirInst::HeapFieldLoad { dest, object, .. } => {
+                    MirInst::ProductLoad { dest, object, .. } => {
                         need(dest)?;
                         need_heap(object)?;
                     }
@@ -1449,7 +1449,6 @@ struct Ids {
     /// Heap reads (`machine::native::coil_native_*`).
     index: FuncId,
     len: FuncId,
-    field: FuncId,
     store_index: FuncId,
     set_field: FuncId,
     view: FuncId,
@@ -1472,7 +1471,6 @@ struct Ids {
     probe: FuncId,
     /// Boxed enum matches.
     enum_tag: FuncId,
-    enum_payload: FuncId,
     /// Program strings (`STRING`).
     string: FuncId,
     /// Content / structural `==` (`StrEq`).
@@ -1608,7 +1606,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let (s8, s7) = (words(8), words(7));
     let index = module.declare_function("coil_native_index", Linkage::Import, &s3).map_err(e)?;
     let len = module.declare_function("coil_native_len", Linkage::Import, &s1).map_err(e)?;
-    let field = module.declare_function("coil_native_field", Linkage::Import, &s2).map_err(e)?;
     let store_index = module.declare_function("coil_native_store_index", Linkage::Import, &s4).map_err(e)?;
     let set_field = module.declare_function("coil_native_set_field", Linkage::Import, &s4).map_err(e)?;
     let view = module.declare_function("coil_native_view", Linkage::Import, &s3).map_err(e)?;
@@ -1633,7 +1630,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let eq = module.declare_function("coil_native_eq", Linkage::Import, &s3).map_err(e)?;
     let string = module.declare_function("coil_native_string", Linkage::Import, &s2).map_err(e)?;
     let enum_tag = module.declare_function("coil_native_enum_tag", Linkage::Import, &s1).map_err(e)?;
-    let enum_payload = module.declare_function("coil_native_enum_payload", Linkage::Import, &s3).map_err(e)?;
     let mut s3v = module.make_signature();
     s3v.params.extend((0..3).map(|_| AbiParam::new(types::I64)));
     let unwind = module.declare_function("coil_native_unwind", Linkage::Import, &s3v).map_err(e)?;
@@ -1668,7 +1664,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         ipow,
         index,
         len,
-        field,
         store_index,
         set_field,
         view,
@@ -1686,7 +1681,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         lanes_to_words,
         probe,
         enum_tag,
-        enum_payload,
         string,
         eq,
         stringify,
@@ -1764,7 +1758,6 @@ struct Lower<'a> {
     ipow: FuncRef,
     index: FuncRef,
     len: FuncRef,
-    field: FuncRef,
     store_index: FuncRef,
     set_field: FuncRef,
     view: FuncRef,
@@ -1784,7 +1777,6 @@ struct Lower<'a> {
     lanes_to_words: FuncRef,
     probe: FuncRef,
     enum_tag: FuncRef,
-    enum_payload: FuncRef,
     string: FuncRef,
     eq: FuncRef,
     stringify: FuncRef,
@@ -1914,7 +1906,6 @@ impl<'a> Lower<'a> {
         let ipow = module.declare_func_in_func(ids.ipow, func);
         let index = module.declare_func_in_func(ids.index, func);
         let len = module.declare_func_in_func(ids.len, func);
-        let field = module.declare_func_in_func(ids.field, func);
         let store_index = module.declare_func_in_func(ids.store_index, func);
         let set_field = module.declare_func_in_func(ids.set_field, func);
         let view = module.declare_func_in_func(ids.view, func);
@@ -1933,7 +1924,6 @@ impl<'a> Lower<'a> {
         let lanes_to_words = module.declare_func_in_func(ids.lanes_to_words, func);
         let probe = module.declare_func_in_func(ids.probe, func);
         let enum_tag = module.declare_func_in_func(ids.enum_tag, func);
-        let enum_payload = module.declare_func_in_func(ids.enum_payload, func);
         let string = module.declare_func_in_func(ids.string, func);
         let eq = module.declare_func_in_func(ids.eq, func);
         let stringify = module.declare_func_in_func(ids.stringify, func);
@@ -1977,7 +1967,6 @@ impl<'a> Lower<'a> {
             ipow,
             index,
             len,
-            field,
             store_index,
             set_field,
             view,
@@ -1996,7 +1985,6 @@ impl<'a> Lower<'a> {
             lanes_to_words,
             probe,
             enum_tag,
-            enum_payload,
             string,
             eq,
             stringify,
@@ -3260,25 +3248,9 @@ impl<'a> Lower<'a> {
                 let w = self.b.block_params(join)[0];
                 self.set(f, *dest, w);
             }
-            MirInst::HeapFieldLoad { dest, object, index } => {
+            MirInst::ProductLoad { dest, object, slot } => {
                 let o = self.get(f, *object);
-                let o = self.coerce(o, types::I64);
-                // An instance's slot in place; anything else (an enum's
-                // payload) through the helper.
-                let (fast, slow) = self.instance_slot(o, *index, false);
-                let join = self.b.create_block();
-                self.b.append_block_param(join, types::I64);
-                self.b.switch_to_block(fast);
-                let at = self.b.block_params(fast)[0];
-                let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
-                self.b.ins().jump(join, &[w.into()]);
-                self.b.switch_to_block(slow);
-                let i = self.b.ins().iconst(types::I64, i64::from(*index));
-                let call = self.b.ins().call(self.field, &[o, i]);
-                let w = self.b.inst_results(call)[0];
-                self.b.ins().jump(join, &[w.into()]);
-                self.b.switch_to_block(join);
-                let w = self.b.block_params(join)[0];
+                let w = self.product_load(o, *slot);
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
@@ -3306,9 +3278,9 @@ impl<'a> Lower<'a> {
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
                 let join = self.b.create_block();
-                if machine::native::instance_slots().inline_stores {
+                if machine::native::product_slots().inline_stores {
                     // In place, unless the write barrier must log the object.
-                    let (fast, slow) = self.instance_slot(o, *index, true);
+                    let (fast, slow) = self.product_slot(o, *index, true);
                     self.b.switch_to_block(fast);
                     let at = self.b.block_params(fast)[0];
                     self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
@@ -3852,9 +3824,21 @@ impl<'a> Lower<'a> {
         if matches!(ty_of(f, scrutinee), MirTy::NicheOpt | MirTy::NicheRes) {
             return s;
         }
-        let i = self.b.ins().iconst(types::I64, i64::from(index));
-        let call = self.call_checked(self.enum_payload, &[self.ctx, s, i]);
-        self.b.inst_results(call)[0]
+        self.product_load(s, index)
+    }
+
+    /// Word `slot` of product object `o`, read in place
+    /// ([`Self::product_slot`]). Only a compiler bug reads a slot of
+    /// anything else, or past the object: that bails (a panic).
+    fn product_load(&mut self, o: cranelift_codegen::ir::Value, slot: u32) -> cranelift_codegen::ir::Value {
+        let o = self.coerce(o, types::I64);
+        let (fast, slow) = self.product_slot(o, slot, false);
+        self.b.switch_to_block(slow);
+        let args = self.bail_args(TRAP_HELPER);
+        self.b.ins().jump(self.bail, &args);
+        self.b.switch_to_block(fast);
+        let at = self.b.block_params(fast)[0];
+        self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0)
     }
 
     /// Fill `v`'s view right after `v` is defined, when the body indexes it.
@@ -4165,12 +4149,14 @@ impl<'a> Lower<'a> {
         (fast, slow, join)
     }
 
-    /// Where slot `index` of `o` is when `o` is an instance that has it
-    /// (`machine::native::instance_slots`): branches to the first block,
-    /// with the slot's address as its parameter, or to the second. With
-    /// `store`, an object the write barrier must log takes the second.
-    fn instance_slot(&mut self, o: cranelift_codegen::ir::Value, index: u32, store: bool) -> (Block, Block) {
-        let l = machine::native::instance_slots();
+    /// Where slot `index` of `o` is when `o` is a product object that has
+    /// it (`machine::native::product_slots`): an instance's field or an
+    /// enum's payload word (a tuple's item), one store at one offset.
+    /// Branches to the first block, with the slot's address as its
+    /// parameter, or to the second. A `store` takes instances only, and an
+    /// object the write barrier must log takes the second.
+    fn product_slot(&mut self, o: cranelift_codegen::ir::Value, index: u32, store: bool) -> (Block, Block) {
+        let l = machine::native::product_slots();
         let flags = MemFlagsData::trusted();
         let (fast, slow) = (self.b.create_block(), self.b.create_block());
         self.b.append_block_param(fast, types::I64);
@@ -4181,15 +4167,25 @@ impl<'a> Lower<'a> {
         self.b.ins().brif(o, kind, &[], slow, &[]);
         self.b.switch_to_block(kind);
         let k = self.b.ins().uload8(types::I64, flags, o, l.kind_at as i32);
-        let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
         if store {
+            let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
             let g = self.b.ins().uload8(types::I64, flags, o, l.generation_at as i32);
             let logged = self.b.ins().band_imm_u(g, i64::from(l.unlogged));
             let clear = self.b.ins().icmp_imm_s(IntCC::Equal, logged, 0);
             let both = self.b.ins().band(is, clear);
             self.b.ins().brif(both, storage, &[], slow, &[]);
         } else {
-            self.b.ins().brif(is, storage, &[], slow, &[]);
+            // The two kinds differ in one bit: one test for both.
+            let bit = l.kind ^ l.enum_kind;
+            let either = if bit.is_power_of_two() {
+                let k = self.b.ins().band_imm_u(k, i64::from(!bit));
+                self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind & !bit))
+            } else {
+                let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
+                let is_enum = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.enum_kind));
+                self.b.ins().bor(is, is_enum)
+            };
+            self.b.ins().brif(either, storage, &[], slow, &[]);
         }
         self.b.switch_to_block(storage);
         let tag = self.b.ins().uload8(types::I64, flags, o, l.storage_at as i32);

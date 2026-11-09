@@ -39,7 +39,7 @@ Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`. `heapref`,
 sorted by name, so `{y: 9, x: 8}` and `{x: 8, y: 9}` share one layout. `emit_hir.rs`
 plans a field's slot (`record_fields`, `records`, `record_pats`) and
 `Checker::record_type_id` gives each shape (names and word kinds) a type id with
-precise `ClassWordKinds`. Reads and writes are `HeapFieldLoad` / `HeapFieldStore`:
+precise `ClassWordKinds`. Reads and writes are `ProductLoad` / `HeapFieldStore`:
 CSE and LICM treat them as any class field. The host's records
 (`io::fs::metadata`, FFI `extern struct` returns) use the same layout. Record type
 ids come from their own range (`RECORD_TYPE_ID_BASE`,
@@ -106,8 +106,12 @@ cannot resize or write that kind of heap word (`effects::may_resize` /
 bench: `examples/perf/mir_licm_divf.coil`.
 
 The heap summary has two kinds (#1559): elements (`StoreIndex`, which applies only
-to arrays) and fields (`HeapFieldStore`, only instances; `HeapFieldLoad` reads
-instance slots and enum payloads, `Index` arrays and tuples). An element store
+to arrays) and fields (`HeapFieldStore`, only instances; `ProductLoad` reads
+slot `k` of a product object: an instance's field, a tuple's item at a
+constant index, an enum's payload word; `Index` reads arrays and a tuple at a
+runtime index). A `ProductLoad` of a tuple (a dictionary and an existential
+pack among them) is in `MirFunc::invariant_loads`, as a `readonly class`
+field's is: tuples are immutable. An element store
 therefore keeps no field read in its loop, and a field store no element read; CSE
 kills a `Field` key only on a field store and an `Index` key only on an element
 store. A store still kills every read of its own kind, whatever object it names,

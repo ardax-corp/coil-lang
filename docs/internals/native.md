@@ -107,10 +107,10 @@ leaves the second in `NativeCtx::ret_hi` (`NativeEntry::ret_words`).
 `machine::native` holds the table of entries. `NativeCtx` is the state native code
 and the runtime share, read at fixed offsets.
 
-Heap reads and writes (`Index`, `ArrayLen`, `HeapFieldLoad`, `StoreIndex`,
-`HeapFieldStore`) call helpers in `machine::native` (`coil_native_index`, `_len`,
-`_field`, `_store_index`, `_set_field`) when they cannot work in place: see the views
-below and "Inline field access".
+Heap reads and writes (`Index`, `ArrayLen`, `StoreIndex`, `HeapFieldStore`) call
+helpers in `machine::native` (`coil_native_index`, `_len`, `_store_index`,
+`_set_field`) when they cannot work in place: see the views below and "Inline field
+access". `ProductLoad` and a boxed `MatchPayload` never call one.
 
 An array a body indexes gets a *view* where its value is defined (a parameter, a φ,
 a load): `coil_native_view` hands back the pointer and length of its element words,
@@ -351,20 +351,26 @@ take the helper.
 
 ## Inline field access
 
-`HeapFieldLoad` and `HeapFieldStore` on an instance work in place. The offsets come
-from `machine::memory::instance_slots`, probed like the allocation images: where the
-header keeps the kind and generation bytes, where `ObjInstance::storage` sits, its
-`Inline` and `Spill` tags, the inline length byte and slots, and the `Vec` pointer and
-length words of spilled storage. Native code checks, in order, that the object is not
-null, that its kind is an instance, for a store that the generation byte has no
-unlogged bit (the write barrier would have to log the object), that the storage is
-inline or spilled, and that the index is under the length. It then loads or stores the
-slot word. Any failed check calls `_field` / `_set_field`, which handle tables, enum
-payloads, logged objects and panics as before. `layout_fingerprint` covers these
-offsets, so an AOT object made against another layout is refused.
+`ProductLoad`, `MatchPayload` of a boxed enum (a `JumpIfMatch`'s payloads too) and
+`HeapFieldStore` work in place. An instance's fields and an enum's payload (a
+tuple's items) are one store at one offset (`EnumPayload`, at 8), so one read
+serves every product. The offsets come from `machine::memory::product_slots`,
+probed like the allocation images: where the header keeps the kind and generation
+bytes, where the store sits, its `Inline` and `Spill` tags, the inline length byte
+and slots, and the `Vec` pointer and length words of a spilled store. Native code
+checks, in order, that the object is not null, that its kind is an instance or an
+enum (one test: the two kinds differ in one bit; a store takes instances only), for
+a store that the generation byte has no unlogged bit (the write barrier would have
+to log the object), that the store is inline or spilled, and that the slot is under
+the length. It then loads or stores the slot word. A failed load check is a
+compiler bug and bails, a panic, with no helper call; the interpreter's
+`coil_native_product_load` bails on the same objects. A failed store check calls
+`_set_field`, which handles logged objects and panics as before.
+`layout_fingerprint` covers these offsets, so an AOT object made against another
+layout is refused.
 
 In-place stores are compiled only into release builds without `gc-stress`
-(`InstanceSlots::inline_stores`): debug and `gc-stress` builds check epoch writes in
+(`ProductSlots::inline_stores`): debug and `gc-stress` builds check epoch writes in
 `GcData::as_mut`, which native code would skip. Loads are in place in every build.
 
 ## Operation semantics

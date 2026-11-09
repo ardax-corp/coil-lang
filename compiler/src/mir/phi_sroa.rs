@@ -16,7 +16,7 @@
 //! 2. A `HeapRef` φ whose every incoming value is a fresh `alloc.object`
 //!    (seen through `Word` casts to and from the niche word), used for
 //!    nothing but `heapsetfield` in its own block, and whose own uses are
-//!    all `heaploadfield`, becomes one φ per read field.
+//!    all `productload`, becomes one φ per read field.
 //!
 //! An object that escapes or is stored to after the φ keeps its
 //! allocation. The passes run before the deopt sites are drawn from the
@@ -334,7 +334,7 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
         for b in &func.blocks {
             for inst in &b.insts {
                 match inst {
-                    MirInst::HeapFieldLoad { dest, object, index } if *object == phi => loads.push((*dest, *index)),
+                    MirInst::ProductLoad { dest, object, slot } if *object == phi => loads.push((*dest, *slot)),
                     MirInst::Phi { dest, .. } if *dest == phi => {}
                     MirInst::GcBarrier { .. } => {}
                     _ if inst.operands().contains(&phi) => ok = false,

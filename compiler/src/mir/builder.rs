@@ -113,6 +113,14 @@ impl MirBuilder {
         self.func.invariant_loads.insert(dest);
     }
 
+    /// Item `slot` of the tuple `object` (a dictionary, an existential
+    /// pack): a `ProductLoad` no store changes, as tuples are immutable.
+    pub fn ins_tuple_item(&mut self, object: ValueId, slot: u32, dest_ty: MirTy) -> Result<ValueId, MirError> {
+        let dest = self.ins_product_load(object, slot, dest_ty)?;
+        self.mark_invariant_load(dest);
+        Ok(dest)
+    }
+
     /// `dest` is an `Index` read of a `byte` element
     /// ([`MirFunc::byte_loads`]).
     pub fn mark_byte_load(&mut self, dest: ValueId) {
@@ -750,7 +758,7 @@ impl MirBuilder {
 
     /// Heap LoadField of slot `index`. `object` is heapref; dest is the
     /// field word.
-    pub fn ins_heap_field_load(
+    pub fn ins_product_load(
         &mut self,
         object: ValueId,
         index: u32,
@@ -758,18 +766,18 @@ impl MirBuilder {
     ) -> Result<ValueId, MirError> {
         if !self.field_object_ok(object) {
             return Err(MirError::msg(format!(
-                "HeapFieldLoad object {}",
+                "ProductLoad object {}",
                 self.resolve_ty(object)
             )));
         }
         if !dest_ty.is_specialized() {
-            return Err(MirError::msg(format!("HeapFieldLoad dest {dest_ty}")));
+            return Err(MirError::msg(format!("ProductLoad dest {dest_ty}")));
         }
         let dest = self.alloc(dest_ty);
-        self.push(MirInst::HeapFieldLoad {
+        self.push(MirInst::ProductLoad {
             dest,
             object: self.resolve(object),
-            index,
+            slot: index,
         })?;
         Ok(dest)
     }

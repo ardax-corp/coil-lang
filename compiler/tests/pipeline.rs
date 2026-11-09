@@ -60,7 +60,7 @@ fn allocates_object(inst: &MirInst) -> bool {
 }
 
 fn touches_field(inst: &MirInst) -> bool {
-    matches!(inst, MirInst::HeapFieldLoad { .. } | MirInst::HeapFieldStore { .. })
+    matches!(inst, MirInst::ProductLoad { .. } | MirInst::HeapFieldStore { .. })
 }
 
 /// Run `compile` with a capture open, as a run does: without one a compile

@@ -290,7 +290,7 @@ pub const NATIVE_CTX_CALLS: i32 = std::mem::offset_of!(NativeCtx, calls) as i32;
 /// Byte offset of [`NativeCtx::roots`].
 pub const NATIVE_CTX_ROOTS: i32 = std::mem::offset_of!(NativeCtx, roots) as i32;
 
-pub use crate::memory::{InlineObject, InlineShape, InstanceSlots, inline_object, instance_slots, layout_fingerprint};
+pub use crate::memory::{InlineObject, InlineShape, ProductSlots, inline_object, product_slots, layout_fingerprint};
 
 /// Byte offsets of [`NativeCtx::alloc_counts`] and [`NativeCtx::alloc_bumps`].
 pub const NATIVE_CTX_ALLOC_COUNTS: i32 = std::mem::offset_of!(NativeCtx, alloc_counts) as i32;
@@ -1220,16 +1220,26 @@ pub extern "C" fn coil_native_len(addr: u64) -> u64 {
     }) as u64
 }
 
-/// `LoadField` of slot `index`.
+/// `ProductLoad`, and `MatchPayload` of a boxed enum: word `slot` of a
+/// product object, an instance's field or an enum's payload word (a tuple's
+/// item). Native code reads it in place ([`product_slots`]); this is the
+/// interpreter's read. Anything else, or a slot past the object, is a
+/// compiler bug: bail, which panics, as native code's read does.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
 #[unsafe(no_mangle)]
-pub extern "C" fn coil_native_field(addr: u64, index: u64) -> u64 {
-    let index = index as usize;
-    match object(addr) {
-        Some(crate::memory::Object::Enum(e)) => e.as_ref().payload.get(index).map_or(0, |v| v.bits()),
-        Some(crate::memory::Object::Instance(gc)) => {
-            gc.as_ref().slot(index).map_or(0, |v| v.bits())
-        }
-        _ => 0,
+pub unsafe extern "C" fn coil_native_product_load(ctx: *mut NativeCtx, addr: u64, slot: u64) -> u64 {
+    let slot = slot as usize;
+    let word = match object(addr) {
+        Some(crate::memory::Object::Enum(e)) => e.as_ref().payload.get(slot).copied(),
+        Some(crate::memory::Object::Instance(gc)) => gc.as_ref().slot(slot),
+        _ => None,
+    };
+    match word {
+        Some(v) => v.bits(),
+        // SAFETY: the caller passes its live context.
+        None => unsafe { bail(ctx) },
     }
 }
 
@@ -1844,22 +1854,6 @@ pub unsafe extern "C" fn coil_native_enum_tag(addr: u64) -> u64 {
             u64::from(e.tag) | ((e.payload.len() as u64) << 32)
         }
         _ => NOT_AN_ENUM,
-    }
-}
-
-/// Payload word `index` (declaration order) of the enum object `addr`.
-/// Not an enum or out of range: bail.
-///
-/// # Safety
-/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn coil_native_enum_payload(ctx: *mut NativeCtx, addr: u64, index: u64) -> u64 {
-    match object(addr) {
-        Some(crate::memory::Object::Enum(gc)) => match gc.as_ref().payload.get(index as usize) {
-            Some(v) => v.bits(),
-            None => unsafe { bail(ctx) },
-        },
-        _ => unsafe { bail(ctx) },
     }
 }
 
@@ -2826,7 +2820,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_ipow", coil_native_ipow as *const u8),
         ("coil_native_index", coil_native_index as *const u8),
         ("coil_native_len", coil_native_len as *const u8),
-        ("coil_native_field", coil_native_field as *const u8),
+        ("coil_native_product_load", coil_native_product_load as *const u8),
         ("coil_native_store_index", coil_native_store_index as *const u8),
         ("coil_native_set_field", coil_native_set_field as *const u8),
         ("coil_native_view", coil_native_view as *const u8),
@@ -2849,7 +2843,6 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_eq", coil_native_eq as *const u8),
         ("coil_native_string", coil_native_string as *const u8),
         ("coil_native_enum_tag", coil_native_enum_tag as *const u8),
-        ("coil_native_enum_payload", coil_native_enum_payload as *const u8),
         ("coil_native_unwind", coil_native_unwind as *const u8),
         ("coil_native_print", coil_native_print as *const u8),
         ("coil_native_host", coil_native_host as *const u8),
@@ -2867,4 +2860,4 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 42;
+const HELPERS: usize = 41;
