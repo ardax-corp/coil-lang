@@ -181,7 +181,7 @@ fn nest_of(func: &MirFunc, lp: &LoopInfo) -> Option<Nest> {
         if b.insts.iter().any(|i| i.operands().iter().any(|v| inside.contains(v))) {
             return None;
         }
-        if b.term.as_ref().is_some_and(|t| super::gc::term_uses(t).iter().any(|v| inside.contains(v))) {
+        if b.term.as_ref().is_some_and(|t| t.uses().any(|v| inside.contains(&v))) {
             return None;
         }
     }

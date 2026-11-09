@@ -18,17 +18,7 @@ pub fn used_params(f: &MirFunc) -> usize {
         for inst in &b.insts {
             used.extend(inst.operands());
         }
-        match &b.term {
-            Some(Terminator::Br { cond, .. }) => {
-                used.insert(*cond);
-            }
-            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
-                used.insert(*scrutinee);
-                used.extend(payloads.iter().copied());
-            }
-            Some(Terminator::Return { lo, hi }) => used.extend(lo.iter().chain(hi.iter()).copied()),
-            _ => {}
-        }
+        used.extend(b.term.iter().flat_map(Terminator::uses));
     }
     f.params.iter().rposition(|p| used.contains(p)).map_or(0, |i| i + 1)
 }

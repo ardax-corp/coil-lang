@@ -1039,12 +1039,7 @@ fn tail_sites(bodies: &[NativeBody], ok: &HashMap<usize, Vec<usize>>, by_label: 
 fn value_used(f: &MirFunc, v: ValueId) -> bool {
     f.blocks.iter().any(|b| {
         b.insts.iter().any(|i| i.operands().contains(&v))
-            || match &b.term {
-                Some(Terminator::Br { cond, .. }) => *cond == v,
-                Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => *scrutinee == v || payloads.contains(&v),
-                Some(Terminator::Return { lo, hi }) => *lo == Some(v) || *hi == Some(v),
-                _ => false,
-            }
+            || b.term.as_ref().is_some_and(|t| t.uses().any(|u| u == v) || t.binds().contains(&v))
     })
 }
 

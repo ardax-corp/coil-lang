@@ -456,33 +456,9 @@ fn rpo(func: &MirFunc) -> Vec<BlockId> {
 
 pub(super) fn dce(func: &mut MirFunc) {
     let mut live: HashSet<ValueId> = HashSet::new();
-    for block in &func.blocks {
-        if let Some(term) = &block.term {
-            match term {
-                super::inst::Terminator::Br { cond, .. } => {
-                    live.insert(*cond);
-                }
-                super::inst::Terminator::JumpIfMatch {
-                    scrutinee,
-                    payloads,
-                    ..
-                } => {
-                    live.insert(*scrutinee);
-                    for p in payloads {
-                        live.insert(*p);
-                    }
-                }
-                super::inst::Terminator::Return { lo, hi } => {
-                    if let Some(v) = lo {
-                        live.insert(*v);
-                    }
-                    if let Some(v) = hi {
-                        live.insert(*v);
-                    }
-                }
-                _ => {}
-            }
-        }
+    for term in func.blocks.iter().filter_map(|b| b.term.as_ref()) {
+        // A match's payloads keep the `MatchPayload`s that name them.
+        live.extend(term.uses().chain(term.binds().iter().copied()));
     }
     // An op that can panic stays for its trap even when its value is dead.
     let traps: HashSet<ValueId> = func

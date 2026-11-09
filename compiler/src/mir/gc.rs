@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 
 use super::func::MirFunc;
-use super::inst::{BlockId, LocalId, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, LocalId, MirInst, ValueId};
 
 /// Live heap words at one Alloc or GcBarrier dest (S2a).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,9 +185,7 @@ pub fn liveness(func: &MirFunc) -> (Vec<HashSet<ValueId>>, Vec<Vec<HashSet<Value
         for bi in (0..n).rev() {
             let mut live = live_out_of(func, BlockId(bi as u32), &live_in);
             if let Some(term) = &func.blocks[bi].term {
-                for u in term_uses(term) {
-                    live.insert(u);
-                }
+                live.extend(term.uses());
             }
             let insts = &func.blocks[bi].insts;
             for ii in (0..insts.len()).rev() {
@@ -254,15 +252,6 @@ fn data_uses(inst: &MirInst) -> Vec<ValueId> {
     match inst {
         MirInst::GcBarrier { .. } | MirInst::Const { .. } => Vec::new(),
         other => other.operands(),
-    }
-}
-
-pub(super) fn term_uses(term: &Terminator) -> Vec<ValueId> {
-    match term {
-        Terminator::Br { cond, .. } => vec![*cond],
-        Terminator::JumpIfMatch { scrutinee, .. } => vec![*scrutinee],
-        Terminator::Return { lo, hi } => lo.iter().copied().chain(hi.iter().copied()).collect(),
-        Terminator::Jump { .. } | Terminator::Unreachable => Vec::new(),
     }
 }
 

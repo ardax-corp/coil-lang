@@ -485,12 +485,8 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
             Some(Terminator::Br { cond, .. }) => {
                 tested.insert(*cond);
             }
-            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
-                read_elsewhere.insert(*scrutinee);
-                read_elsewhere.extend(payloads);
-            }
-            Some(Terminator::Return { lo, hi }) => read_elsewhere.extend(lo.iter().chain(hi)),
-            Some(Terminator::Jump { .. } | Terminator::Unreachable) | None => {}
+            Some(t) => read_elsewhere.extend(t.uses().chain(t.binds().iter().copied())),
+            None => {}
         }
     }
 
@@ -655,11 +651,7 @@ fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guar
             read.extend(inst.operands());
         }
         if let Some(term) = &block.term {
-            let mut term = term.clone();
-            term.rewrite_values(|v| {
-                read.insert(v);
-                v
-            });
+            read.extend(term.uses().chain(term.binds().iter().copied()));
         }
     }
     read.extend(func.debug_slots.values().copied());

@@ -121,28 +121,7 @@ fn used_values(func: &MirFunc) -> std::collections::HashSet<ValueId> {
             }
         }
         if let Some(term) = &block.term {
-            match term {
-                super::inst::Terminator::Br { cond, .. } => {
-                    used.insert(*cond);
-                }
-                super::inst::Terminator::JumpIfMatch {
-                    scrutinee,
-                    payloads,
-                    ..
-                } => {
-                    used.insert(*scrutinee);
-                    used.extend(payloads.iter().copied());
-                }
-                super::inst::Terminator::Return { lo, hi } => {
-                    if let Some(v) = lo {
-                        used.insert(*v);
-                    }
-                    if let Some(v) = hi {
-                        used.insert(*v);
-                    }
-                }
-                _ => {}
-            }
+            used.extend(term.uses().chain(term.binds().iter().copied()));
         }
     }
     used
