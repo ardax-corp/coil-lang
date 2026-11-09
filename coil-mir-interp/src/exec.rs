@@ -2,10 +2,10 @@
 //! does, through the same helpers.
 
 use compiler::native_mir::{
-    MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, heap_word, ty_of, vector_op, word_kind,
+    AllocCall, MirAllocKind, MirBinOp, alloc_call, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, heap_word, ty_of, vector_op, word_kind,
 };
 use machine::native::{
-    self as rt, ALLOC_ARRAY, ALLOC_LANES, Applied, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_OBJECT, ALLOC_POLY_FN, ALLOC_TUPLE, NOT_AN_ENUM, NativeCtx,
+    self as rt, Applied, NOT_AN_ENUM, NativeCtx,
     ROOTS_AMBIGUOUS, TRAP_BUDGET, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_NEGATIVE_EXPONENT, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -806,32 +806,9 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 if matches!(kind, MirAllocKind::Enum { .. } | MirAllocKind::DropEnum { .. }) {
                     order.reverse();
                 }
-                let packed = || u64::from(if *kinds != 0 { *kinds } else { packed_kinds(f, &order) });
                 let pc_of = |t| program(body).body_at(t).map(|b| b.pc).filter(|&pc| pc != u32::MAX);
-                let n = order.len() as u64;
-                let (code, n, extra, last) = match *kind {
-                    MirAllocKind::Array => (ALLOC_ARRAY, n, u64::from(*kinds), None),
-                    MirAllocKind::Lanes { tag_mask } => (ALLOC_LANES, n, tag_mask, None),
-                    MirAllocKind::Tuple => (ALLOC_TUPLE, n, packed(), None),
-                    MirAllocKind::Enum { tag } => (ALLOC_ENUM, n, u64::from(tag) | (packed() << 32), None),
-                    MirAllocKind::Object { type_id, nfields } => (ALLOC_OBJECT, u64::from(nfields), u64::from(type_id), None),
-                    MirAllocKind::DropEnum { tag, type_id } => (ALLOC_DROP_ENUM, n + 1, u64::from(tag) | (packed() << 32), Some(u64::from(type_id))),
-                    MirAllocKind::Fn { target, operand, mask } => {
-                        let Some(pc) = pc_of(target) else { return Flow::Trap(TRAP_HELPER) };
-                        (ALLOC_FN, n + 1, u64::from(pc) | (u64::from(operand) << 32), Some(u64::from(mask)))
-                    }
-                    MirAllocKind::Coro { target } => {
-                        let Some(pc) = pc_of(target) else { return Flow::Trap(TRAP_HELPER) };
-                        (ALLOC_CORO, n, u64::from(pc), None)
-                    }
-                    MirAllocKind::PolyFn { target } => {
-                        let Some(pc) = pc_of(target) else { return Flow::Trap(TRAP_HELPER) };
-                        (ALLOC_POLY_FN, n, u64::from(pc), None)
-                    }
-                    MirAllocKind::PolyFnCapture { target, params } => {
-                        let Some(pc) = pc_of(target) else { return Flow::Trap(TRAP_HELPER) };
-                        (ALLOC_POLY_FN, n, u64::from(pc) | (u64::from(params) << 32), None)
-                    }
+                let Ok(AllocCall { code, n, extra, last }) = alloc_call(*kind, order.len(), *kinds, || packed_kinds(f, &order), pc_of) else {
+                    return Flow::Trap(TRAP_HELPER);
                 };
                 let s = &mut (*act).scratch;
                 s.clear();

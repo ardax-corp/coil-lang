@@ -1640,15 +1640,9 @@ pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, fi
 // helpers: they allocate and never collect.
 
 /// [`coil_native_alloc`] kinds.
-pub const ALLOC_ARRAY: u64 = 0;
-pub const ALLOC_TUPLE: u64 = 1;
-pub const ALLOC_ENUM: u64 = 2;
-pub const ALLOC_OBJECT: u64 = 3;
-pub const ALLOC_FN: u64 = 4;
-pub const ALLOC_POLY_FN: u64 = 5;
-pub const ALLOC_DROP_ENUM: u64 = 6;
-pub const ALLOC_CORO: u64 = 7;
-pub const ALLOC_LANES: u64 = 8;
+pub use common::native_alloc::{
+    ALLOC_ARRAY, ALLOC_CORO, ALLOC_DROP_ENUM, ALLOC_ENUM, ALLOC_FN, ALLOC_LANES, ALLOC_OBJECT, ALLOC_POLY_FN, ALLOC_TUPLE,
+};
 
 /// A new object of `kind` from the `n` words at `words`, in declaration
 /// order (an enum's payload order):

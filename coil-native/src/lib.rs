@@ -22,7 +22,7 @@ use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use compiler::native_mir::{
-    BlockId, Label, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp,
+    AllocCall, BlockId, Label, MirAllocKind, alloc_call, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp,
     NativeBody, Terminator, ValueId, allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pair_words, pointer_words, scalar,
     ty_of, root_handles, used_params, word_kind,
 };
@@ -3330,7 +3330,6 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, v);
             }
             MirInst::Alloc { dest, kind, elems, kinds } => {
-                use machine::native::{ALLOC_ARRAY, ALLOC_ENUM, ALLOC_OBJECT, ALLOC_TUPLE};
                 // Declaration order: an enum's elems are in push order and
                 // its payload starts with the last push, as `DenseMake`.
                 let mut words = elems.clone();
@@ -3340,35 +3339,14 @@ impl<'a> Lower<'a> {
                 // An opaque body's `int` words may be objects: their kinds
                 // stay unknown.
                 let packed = || if f.opaque_words { 0 } else { common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w)))) };
-                let (code, n, extra) = match *kind {
-                    MirAllocKind::Array => (ALLOC_ARRAY, words.len() as u64, u64::from(*kinds)),
-                    MirAllocKind::Lanes { tag_mask } => (machine::native::ALLOC_LANES, words.len() as u64, tag_mask),
-                    MirAllocKind::Tuple => {
-                        (ALLOC_TUPLE, words.len() as u64, u64::from(if *kinds != 0 { *kinds } else { packed() }))
-                    }
-                    MirAllocKind::Enum { tag } => {
-                        let k = if *kinds != 0 { *kinds } else { packed() };
-                        (ALLOC_ENUM, words.len() as u64, u64::from(tag) | (u64::from(k) << 32))
-                    }
-                    MirAllocKind::Object { type_id, nfields } => (ALLOC_OBJECT, u64::from(nfields), u64::from(type_id)),
-                    MirAllocKind::DropEnum { tag, .. } => {
-                        let k = if *kinds != 0 { *kinds } else { packed() };
-                        (machine::native::ALLOC_DROP_ENUM, words.len() as u64 + 1, u64::from(tag) | (u64::from(k) << 32))
-                    }
-                    MirAllocKind::Fn { target, operand, .. } => {
-                        let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no body id")?;
-                        (machine::native::ALLOC_FN, words.len() as u64 + 1, u64::from(pc) | (u64::from(operand) << 32))
-                    }
-                    MirAllocKind::Coro { target } => {
-                        let pc = *self.plan.pcs.get(&target).ok_or("generator of a body with no body id")?;
-                        (machine::native::ALLOC_CORO, words.len() as u64, u64::from(pc))
-                    }
-                    MirAllocKind::PolyFn { target } | MirAllocKind::PolyFnCapture { target, .. } => {
-                        let pc = *self.plan.pcs.get(&target).ok_or("function value of a body with no body id")?;
-                        let params = if let MirAllocKind::PolyFnCapture { params, .. } = *kind { params } else { 0 };
-                        (machine::native::ALLOC_POLY_FN, words.len() as u64, u64::from(pc) | (u64::from(params) << 32))
-                    }
-                };
+                let AllocCall { code, n, extra, last } =
+                    alloc_call(*kind, words.len(), *kinds, packed, |t| self.plan.pcs.get(&t).copied()).map_err(|_| {
+                        if matches!(kind, MirAllocKind::Coro { .. }) {
+                            "generator of a body with no body id"
+                        } else {
+                            "function value of a body with no body id"
+                        }
+                    })?;
                 let inline = inline_shape(*kind, words.len(), extra).and_then(machine::native::inline_object);
                 let join = inline.map(|obj| {
                     let join = self.b.create_block();
@@ -3376,10 +3354,9 @@ impl<'a> Lower<'a> {
                     self.inline_alloc(f, &obj, *kind, &words, join);
                     join
                 });
-                let p = match *kind {
-                    MirAllocKind::Fn { mask, .. } => self.words_slot_with(f, &words, Some(i64::from(mask))),
-                    MirAllocKind::DropEnum { type_id, .. } => self.words_slot_with(f, &words, Some(i64::from(type_id))),
-                    _ => self.words_slot(f, &words),
+                let p = match last {
+                    Some(w) => self.words_slot_with(f, &words, Some(w as i64)),
+                    None => self.words_slot(f, &words),
                 };
                 let code = self.b.ins().iconst(types::I64, code as i64);
                 let n = self.b.ins().iconst(types::I64, n as i64);

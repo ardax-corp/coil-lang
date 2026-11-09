@@ -12,6 +12,7 @@ mod host;
 mod interner;
 pub mod int_arith;
 mod lane;
+pub mod native_alloc;
 mod package;
 mod seekable_iter;
 mod snapshot;

@@ -58,6 +58,8 @@ pub use inst::{BlockId, MirUnaryOp, Terminator};
 pub use inst::LocalId;
 pub mod archive;
 mod frame_words;
+mod native_alloc;
+pub use native_alloc::{AllocCall, alloc_call};
 mod native_capture;
 pub mod coverage;
 pub mod native_expand;
