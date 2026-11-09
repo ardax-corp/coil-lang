@@ -729,7 +729,7 @@ impl Walk<'_> {
                 let recv = *args.first().ok_or("method-receiver")?;
                 // A trait method `Vec` has no method of (`v.show()`,
                 // #1848) is any receiver's.
-                let inherent = matches!(name.as_str(), "push" | "pop" | "insert" | "remove" | "clear" | "reserve" | "capacity" | "len");
+                let inherent = crate::typechecking::ty::vec_method(name).is_some();
                 if is_vec(body, self.checker, recv) && inherent {
                     return self.vec_method(name, args);
                 }

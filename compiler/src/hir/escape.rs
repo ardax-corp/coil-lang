@@ -73,10 +73,7 @@ pub(super) fn leaf(ty: Option<&Ty>) -> bool {
 pub(super) fn no_heap(ty: Option<&Ty>) -> bool {
     match ty {
         Some(Ty::Readonly(inner)) => no_heap(Some(inner)),
-        Some(Ty::Con(n)) => matches!(
-            n.as_str(),
-            "int" | "float" | "bool" | "byte" | "unit" | "char" | "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
-        ),
+        Some(Ty::Con(n)) => crate::typechecking::ty::BuiltinScalar::named(n).is_some_and(|s| s.no_heap),
         _ => false,
     }
 }

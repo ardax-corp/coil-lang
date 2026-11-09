@@ -298,7 +298,7 @@ fn type_hashes<'a>(decls: &[Output<'a>], ty: &Output<'a>, params: &[&str], seen:
         Expression::Readonly(inner) => type_hashes(decls, inner, params, seen),
         Expression::Tuple(items) => items.iter().all(|t| type_hashes(decls, t, params, seen)),
         Expression::Type(n) => {
-            matches!(*n, "int" | "float" | "string" | "bool" | "byte" | "unit")
+            crate::typechecking::ty::BuiltinScalar::named(n).is_some_and(|s| s.traits.contains(&"Hash"))
                 || params.contains(n)
                 || named_type_hashes(decls, n, seen)
         }

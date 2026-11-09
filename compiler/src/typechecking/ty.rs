@@ -178,6 +178,11 @@ impl Ty {
         Ty::Con(name.to_string())
     }
 
+    /// The curried function type `p1 -> p2 -> … -> ret`.
+    pub fn fun(params: &[Ty], ret: Ty) -> Ty {
+        params.iter().rev().fold(ret, |acc, p| Ty::Fun(Box::new(p.clone()), Box::new(acc)))
+    }
+
     /// `self` with `f` applied to each direct child type. A leaf (`Var`,
     /// `Con`, `Existential`, `Never`) is returned as it is; names, tags,
     /// lengths and `forall` binders are kept.
@@ -504,6 +509,118 @@ pub const ROOT: &str = "Root";
 /// Name of the `Weak` type constructor (`gc::Weak`).
 pub const WEAK: &str = "Weak";
 
+/// A builtin scalar type, as its `Ty::Con` names it: what the checker,
+/// the HIR passes and the instance registry know about it.
+#[derive(Debug)]
+pub struct BuiltinScalar {
+    pub name: &'static str,
+    /// An immediate word: a copy, never a heap object (`string` is one and
+    /// `unit` the shared empty tuple). A `mut` borrow of one binds a copy.
+    pub word: bool,
+    /// Nothing behind the value: no heap object it could share or change.
+    pub no_heap: bool,
+    /// May back a `#[repr(..)]` enum ([`ScalarBacking`]).
+    pub repr_backing: bool,
+    /// The scalars `x as T` and its builtin `Into` instance convert it to.
+    pub casts_to: &'static [&'static str],
+    /// The builtin trait instances it has, in registration order.
+    pub traits: &'static [&'static str],
+}
+
+/// The builtin scalars. Their operators are the primitive ones: no user
+/// `impl` of an operator trait applies to them.
+pub const BUILTIN_SCALARS: [BuiltinScalar; 6] = [
+    BuiltinScalar {
+        name: INT,
+        word: true,
+        no_heap: true,
+        repr_backing: true,
+        casts_to: &[FLOAT, BYTE, BOOL],
+        traits: &[
+            "Add", "Sub", "Mul", "Div", "Neg", "Rem", "Pow", "Lt", "Le", "Gt", "Ge", "Num", "Ord", "Shl", "Shr", "BitAnd", "BitOr", "BitXor", "BitNot", "Integral", "Eq", "Show", "Hash",
+            "Default",
+        ],
+    },
+    BuiltinScalar {
+        name: FLOAT,
+        word: true,
+        no_heap: true,
+        repr_backing: true,
+        casts_to: &[INT],
+        traits: &[
+            "Add", "Sub", "Mul", "Div", "Neg", "Rem", "Pow", "Lt", "Le", "Gt", "Ge", "Num", "Ord", "Eq", "Show", "Hash", "Default",
+        ],
+    },
+    BuiltinScalar {
+        name: STRING,
+        word: false,
+        no_heap: false,
+        repr_backing: true,
+        casts_to: &[],
+        traits: &["Eq", "Show", "Lt", "Le", "Gt", "Ge", "Ord", "Length", "Hash", "Default"],
+    },
+    BuiltinScalar {
+        name: BOOL,
+        word: true,
+        no_heap: true,
+        repr_backing: true,
+        casts_to: &[INT],
+        traits: &["Eq", "Show", "Hash", "Default"],
+    },
+    BuiltinScalar {
+        name: BYTE,
+        word: true,
+        no_heap: true,
+        repr_backing: false,
+        casts_to: &[INT],
+        traits: &["Shl", "Shr", "BitAnd", "BitOr", "BitXor", "Eq", "Show", "Lt", "Le", "Gt", "Ge", "Ord", "Hash", "Default"],
+    },
+    BuiltinScalar {
+        name: UNIT,
+        word: false,
+        no_heap: true,
+        repr_backing: false,
+        casts_to: &[],
+        traits: &["Eq", "Show", "Hash"],
+    },
+];
+
+impl BuiltinScalar {
+    /// The builtin scalar `name` names, if it is one.
+    pub fn named(name: &str) -> Option<&'static BuiltinScalar> {
+        BUILTIN_SCALARS.iter().find(|s| s.name == name)
+    }
+
+    /// The builtin scalar `ty` is, if it is one (a bare `Ty::Con`).
+    pub fn of(ty: &Ty) -> Option<&'static BuiltinScalar> {
+        match ty {
+            Ty::Con(name) => Self::named(name),
+            _ => None,
+        }
+    }
+
+    /// Whether `x as T` from this scalar to `to` is allowed (itself included).
+    pub fn casts_to(&self, to: &str) -> bool {
+        self.name == to || self.casts_to.contains(&to)
+    }
+
+    /// Whether `as` converts this scalar at all (`int`, `float`, `byte`, `bool`).
+    pub fn castable(&self) -> bool {
+        !self.casts_to.is_empty()
+    }
+}
+
+/// The FFI integer types: opaque `Con`s by name, each one word.
+pub const FFI_INTS: [&str; 7] = ["int8", "int16", "int32", "uint8", "uint16", "uint32", "uint64"];
+
+/// The FFI pointer type, an opaque `Con` by name.
+pub const FFI_PTR: &str = "ptr";
+
+/// Whether `name` is a builtin scalar type ([`BUILTIN_SCALARS`]).
+pub fn is_builtin_scalar(name: &str) -> bool {
+    BuiltinScalar::named(name).is_some()
+}
+
 /// Build the `int` type.
 pub fn int() -> Ty {
     Ty::Con(INT.into())
@@ -647,6 +764,34 @@ pub fn vec_app_ty(inner: Ty) -> Ty {
         Box::new(Ty::Con(common::BUILTIN_VEC_TYPE.into())),
         vec![inner],
     )
+}
+
+/// One inherent method of the builtin `Vec<T>` (the receiver not counted
+/// in `params`).
+#[derive(Debug)]
+pub struct VecMethod {
+    pub name: &'static str,
+    pub params: &'static [&'static str],
+    /// Changes the `Vec`'s length: a write through a `readonly Vec<T>`,
+    /// and a type error on a fixed `[T; N]`.
+    pub mutates: bool,
+}
+
+/// The builtin `Vec<T>`'s inherent methods.
+pub const VEC_METHODS: [VecMethod; 8] = [
+    VecMethod { name: "push", params: &["x"], mutates: true },
+    VecMethod { name: "pop", params: &[], mutates: true },
+    VecMethod { name: "insert", params: &["i", "x"], mutates: true },
+    VecMethod { name: "remove", params: &["i"], mutates: true },
+    VecMethod { name: "clear", params: &[], mutates: true },
+    VecMethod { name: "reserve", params: &["n"], mutates: true },
+    VecMethod { name: "capacity", params: &[], mutates: false },
+    VecMethod { name: "len", params: &[], mutates: false },
+];
+
+/// The builtin `Vec<T>` method `name`, if it is one.
+pub fn vec_method(name: &str) -> Option<&'static VecMethod> {
+    VEC_METHODS.iter().find(|m| m.name == name)
 }
 
 /// Element type of `Vec<T>`, if `ty` is (or peels to) that application.
@@ -838,15 +983,7 @@ pub fn is_shallow_const_mutable(ty: &Ty) -> bool {
     match ty {
         Ty::Readonly(_) => false,
         Ty::Array { .. } | Ty::Record { .. } => true,
-        Ty::Con(name) => {
-            name != "int"
-                && name != "float"
-                && name != "string"
-                && name != "bool"
-                && name != "byte"
-                && name != "unit"
-                && !is_opaque_handle(name)
-        }
+        Ty::Con(name) => !is_builtin_scalar(name) && !is_opaque_handle(name),
         Ty::App(head, args) => match (head.as_ref(), args.as_slice()) {
             (Ty::Con(n), [target]) if n == ROOT || n == WEAK => is_shallow_const_mutable(target),
             (Ty::Con(n), [_]) if THREAD_HANDLES.contains(&n.as_str()) => false,
