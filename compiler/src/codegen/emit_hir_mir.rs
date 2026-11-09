@@ -904,17 +904,10 @@ impl Compiler {
             .fn_return_ty(next_fqn)
             .and_then(|r| crate::typechecking::ty::option_inner(&r))
             .filter(|t| !crate::layout::ty_is_closed(t));
-        let shared = declared.is_some();
         let item = declared.or_else(|| hir.local(local).ty.clone());
         let niche = item
             .as_ref()
             .is_some_and(|ty| crate::layout::niche_heap_only(&self.checker, ty));
-        // Pinned as emission pins it, so `next`'s `CALL` agrees.
-        if let Some(item) = item.as_ref().filter(|_| !shared) {
-            let opt = crate::typechecking::ty::option_ty(item.clone());
-            let pair = crate::layout::two_word_kind(&self.checker, &opt);
-            self.pin_two_word_return_kind(next_fqn, pair);
-        }
         let two_slot = self.two_word_return_kind(next_fqn).is_some();
         // No `into_iter`: the iterable is the iterator.
         let (into_iter, iter_ty) = match into_iter_fqn {
