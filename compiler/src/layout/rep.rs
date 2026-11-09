@@ -419,56 +419,33 @@ pub fn niche_heap_only(checker: &Checker, ty: &Ty) -> bool {
         {
             false
         }
-        Ty::Tuple(items) => items.iter().all(ty_is_closed),
-        Ty::Record { fields } => fields.iter().all(|(_, field)| ty_is_closed(field)),
-        Ty::Sum { variants, .. } => variants
-            .iter()
-            .all(|(_, payload)| payload.field_types().into_iter().all(ty_is_closed)),
+        Ty::Tuple(_) | Ty::Record { .. } | Ty::Sum { .. } => ty.all_children(ty_is_closed),
         _ => false,
     }
 }
 
-/// No unresolved type variables anywhere in `ty`.
+/// No unresolved type variables anywhere in `ty`. A function or a
+/// rank-n type is never closed, nor an existential; an application's head
+/// is not looked at.
 pub fn ty_is_closed(ty: &Ty) -> bool {
-    let ty = strip_readonly(ty);
-    match ty {
+    match strip_readonly(ty) {
         Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-        Ty::Constructor { owner: inner, .. } => ty_is_closed(inner),
         // A `thread` handle is one host word whatever it carries (#1905).
-        Ty::App(..) if crate::typechecking::ty::opaque_handle_name(ty).is_some() => true,
+        t @ Ty::App(..) if crate::typechecking::ty::opaque_handle_name(t).is_some() => true,
         Ty::App(_, args) => args.iter().all(ty_is_closed),
-        Ty::Tuple(items) => items.iter().all(ty_is_closed),
-        Ty::Record { fields } => fields.iter().all(|(_, f)| ty_is_closed(f)),
-        Ty::Array { element, .. } => ty_is_closed(element),
-        Ty::Sum { variants, .. } => variants
-            .iter()
-            .all(|(_, p)| p.field_types().into_iter().all(ty_is_closed)),
-        Ty::Con(_) | Ty::Never => true,
-        Ty::Readonly(_) => unreachable!("stripped"),
+        t => t.all_children(ty_is_closed),
     }
 }
 
 /// `ty` with each named type parameter in `params` replaced by the matching
 /// type in `args` (a generic declaration's field at one instance).
 pub fn bind_params(ty: &Ty, params: &[String], args: &[Ty]) -> Ty {
-    let bind = |t: &Ty| bind_params(t, params, args);
     match ty {
         Ty::Con(name) => match params.iter().position(|p| p == name) {
             Some(i) => args.get(i).cloned().unwrap_or_else(|| ty.clone()),
             None => ty.clone(),
         },
-        Ty::App(head, items) => Ty::App(Box::new(bind(head)), items.iter().map(bind).collect()),
-        Ty::Fun(a, b) => Ty::Fun(Box::new(bind(a)), Box::new(bind(b))),
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(bind(inner))),
-        Ty::Tuple(items) => Ty::Tuple(items.iter().map(bind).collect()),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(bind(element)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields.iter().map(|(n, f)| (n.clone(), bind(f))).collect(),
-        },
-        _ => ty.clone(),
+        _ => ty.map_children(|t| bind_params(t, params, args)),
     }
 }
 

@@ -77,28 +77,6 @@ pub(super) enum VarEqDict {
     Any,
 }
 
-/// The type variables of `ty`, in order of first appearance.
-fn vars_in_order(ty: &Ty, out: &mut Vec<TyVarId>) {
-    match ty {
-        Ty::Var(v) => {
-            if !out.contains(v) {
-                out.push(*v);
-            }
-        }
-        Ty::App(head, items) => {
-            vars_in_order(head, out);
-            items.iter().for_each(|t| vars_in_order(t, out));
-        }
-        Ty::Fun(a, r) => {
-            vars_in_order(a, out);
-            vars_in_order(r, out);
-        }
-        Ty::Tuple(items) => items.iter().for_each(|t| vars_in_order(t, out)),
-        Ty::Record { fields } => fields.iter().for_each(|(_, t)| vars_in_order(t, out)),
-        Ty::Array { element, .. } | Ty::Readonly(element) => vars_in_order(element, out),
-        _ => {}
-    }
-}
 
 /// How a glue function takes its type apart.
 #[derive(Clone, Debug)]
@@ -128,25 +106,6 @@ impl GlueShape {
             Self::Record(fields) => fields.iter().map(|(_, t)| t).collect(),
             Self::Enum { variants, .. } => variants.iter().flat_map(|v| &v.fields).collect(),
         }
-    }
-}
-
-/// `ty` with the type parameters `params` replaced by `args`.
-fn subst_params(ty: &Ty, params: &[String], args: &[Ty]) -> Ty {
-    let go = |t: &Ty| subst_params(t, params, args);
-    match ty {
-        Ty::Con(name) => params.iter().position(|p| p == name).and_then(|i| args.get(i).cloned()).unwrap_or_else(|| ty.clone()),
-        Ty::App(head, items) => Ty::App(Box::new(go(head)), items.iter().map(go).collect()),
-        Ty::Tuple(items) => Ty::Tuple(items.iter().map(go).collect()),
-        Ty::Record { fields } => Ty::Record {
-            fields: fields.iter().map(|(n, t)| (n.clone(), go(t))).collect(),
-        },
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(go(element)),
-            length: *length,
-        },
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(go(inner))),
-        other => other.clone(),
     }
 }
 
@@ -233,7 +192,7 @@ impl Compiler {
                     .map(|(vname, tag, fields)| GlueVariant {
                         name: vname.clone(),
                         tag: Some(*tag),
-                        fields: fields.iter().map(|t| key(&subst_params(t, &params, &args))).collect(),
+                        fields: fields.iter().map(|t| key(&crate::layout::bind_params(t, &params, &args))).collect(),
                     })
                     .collect();
                 Some(GlueShape::Enum { name, variants })
@@ -435,7 +394,7 @@ impl Compiler {
             return None;
         }
         let mut order = Vec::new();
-        vars_in_order(&key, &mut order);
+        key.collect_vars(&mut order);
         if order.len() != coil_ty::ftv_ty(&key).len() {
             return None;
         }

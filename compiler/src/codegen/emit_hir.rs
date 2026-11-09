@@ -844,8 +844,8 @@ impl Compiler {
         }
         // A copy-on-write op, a local's read and its `let` take the
         // closed type of what they pass through.
-        let open = |t: &Option<Ty>| t.as_ref().is_none_or(|t| Self::ty_has_var(&apply_ty_prune(self.checker.subst(), t)));
-        let closed = |t: &Option<Ty>| t.as_ref().filter(|t| !Self::ty_has_var(&apply_ty_prune(self.checker.subst(), t))).cloned();
+        let open = |t: &Option<Ty>| t.as_ref().is_none_or(|t| Ty::has_var(&apply_ty_prune(self.checker.subst(), t)));
+        let closed = |t: &Option<Ty>| t.as_ref().filter(|t| !Ty::has_var(&apply_ty_prune(self.checker.subst(), t))).cloned();
         for _ in 0..8 {
             let mut changed = false;
             for i in 0..out.exprs.len() {
@@ -857,7 +857,7 @@ impl Compiler {
                         let Some(fty) = self.hir_class_fields(class).and_then(|f| f.into_iter().find(|(n, _)| n == name).map(|(_, t)| t)) else {
                             continue;
                         };
-                        close_params(&fty, &args).filter(|t| !Self::ty_has_var(t))
+                        close_params(&fty, &args).filter(|t| !Ty::has_var(t))
                     }
                     HirKind::Builtin { op: crate::hir::Builtin::Cow { .. }, args } if args.len() == 1 => closed(&out.expr(args[0]).ty),
                     HirKind::Local(l) => closed(&out.local(*l).ty),
@@ -886,7 +886,7 @@ impl Compiler {
         let close = |t: &Option<Ty>| -> Option<Option<Ty>> {
             let Some(t) = t else { return Some(None) };
             let t = self.hir_qualified_ty(&apply_ty_prune(self.checker.subst(), t))?;
-            (!Self::ty_has_var(&t)).then_some(Some(t))
+            (!Ty::has_var(&t)).then_some(Some(t))
         };
         for o in out.exprs.iter_mut() {
             o.ty = close(&o.ty)?;
@@ -1058,7 +1058,7 @@ impl Compiler {
         }
         out.ret = ty(&out.ret);
         // A generic body's lambda (in a mono clone) has its open types.
-        let open = |t: &Option<Ty>| t.as_ref().is_none_or(Self::ty_has_var);
+        let open = |t: &Option<Ty>| t.as_ref().is_none_or(Ty::has_var);
         if out.exprs.iter().any(|e| open(&e.ty)) || out.locals.iter().any(|l| open(&l.ty)) || open(&out.ret) {
             return None;
         }
@@ -1193,7 +1193,7 @@ impl Compiler {
         let mut vars = HashSet::new();
         for l in &generic.locals {
             if let Some(t) = &l.ty {
-                vars.extend(crate::typechecking::subst::ftv(t));
+                vars.extend(crate::typechecking::ty::ftv_ty(t));
             }
         }
         let map: HashMap<_, _> = vars
@@ -1439,7 +1439,7 @@ impl Compiler {
             Ok(emit) if self.opt_options.escape_analysis && !self.debugger_attached && !hir.is_coro => {
                 let body = inlined.as_ref().unwrap_or(hir);
                 let enums = crate::hir::enum_sroa::scalarize(body, |n| !self.checker.enum_has_drop(n));
-                let tuples = crate::hir::tuple_sroa::scalarize(enums.as_ref().unwrap_or(body), |t| !Self::ty_has_var(t));
+                let tuples = crate::hir::tuple_sroa::scalarize(enums.as_ref().unwrap_or(body), |t| !Ty::has_var(t));
                 let split = tuples.or(enums);
                 let classes = crate::hir::readonly_sroa::scalarize(split.as_ref().unwrap_or(body), |name| self.hir_readonly_split_fields(name));
                 let split = classes.or(split);
@@ -2089,7 +2089,7 @@ impl Compiler {
             let at_layout = crate::layout::value_layout(checker, at);
             // A bare parameter (`item: T`) holds rep(ground T): a niche
             // value as its niche word.
-            (Self::ty_has_var(fty)
+            (Ty::has_var(fty)
                 && field_word(fty) == Some(crate::mir::MirTy::HeapRef)
                 && crate::layout::value_layout(checker, fty) == ValueLayout::Boxed
                 && crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), fty)) == crate::layout::Layout::Word
@@ -2306,7 +2306,7 @@ impl Compiler {
                             // at a still open type (a shared generic body's
                             // `Option::None`): its boxed enum object.
                             let at = Self::hir_ty(hir, arg)?;
-                            (Self::ty_has_var(t)
+                            (Ty::has_var(t)
                                 && field_word(t) == Some(crate::mir::MirTy::HeapRef)
                                 && crate::layout::value_layout(checker, t) == ValueLayout::Boxed
                                 && crate::layout::value_layout(checker, at) == ValueLayout::Boxed)
@@ -2752,7 +2752,7 @@ impl Compiler {
             Ty::Array { element, .. } => element.as_ref(),
             _ => crate::typechecking::ty::vec_element_ty(&ty)?,
         };
-        if Self::ty_has_var(elem) {
+        if Ty::has_var(elem) {
             return None;
         }
         let (lo, hi) = self.hir_mir_pair_tys(elem)?;
@@ -3115,7 +3115,7 @@ impl Compiler {
                 (call.builtin.is_some(), "builtin"),
                 (call.mono && !instances.contains_key(&id.0), "mono"),
                 (call.generic.is_some(), "generic"),
-                (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var)), "instance"),
+                (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Ty::has_var)), "instance"),
                 (!call.own_dicts.is_empty(), "own-bounds"),
                 (self.coroutine_fns.contains(&call.key), "coroutine"),
                 // An auto-parallel callee's call runs its split worker.
@@ -3172,7 +3172,7 @@ impl Compiler {
             // instance's types; a default method's or an open instance's
             // body is shared across instances and dispatches.
             let shared = |b: &crate::hir::HirBody| {
-                b.locals.iter().any(|l| l.ty.as_ref().is_none_or(|t| Self::ty_has_var(&apply_ty_prune(self.checker.subst(), t))))
+                b.locals.iter().any(|l| l.ty.as_ref().is_none_or(|t| Ty::has_var(&apply_ty_prune(self.checker.subst(), t))))
             };
             if callee.name == hir.name
                 || if call.instance.is_some() { shared(callee) } else { callee.name.contains(" for ") }
@@ -3381,7 +3381,7 @@ impl Compiler {
                     // A mono clone's instance call whose context came from
                     // the generic body's bounds has no dictionary here.
                     let open = emit.plan.calls.iter().any(|(&id, call)| {
-                        id as usize >= hir.exprs.len() && call.instance.as_ref().is_some_and(|i| i.args.iter().any(Self::ty_has_var))
+                        id as usize >= hir.exprs.len() && call.instance.as_ref().is_some_and(|i| i.args.iter().any(Ty::has_var))
                     });
                     if open { Err("inline-open-instance") } else { Ok(emit) }
                 });
@@ -4645,7 +4645,7 @@ impl Compiler {
             let resolved = apply_ty_prune(self.checker.subst(), ret_ty);
             let twin_kind = crate::layout::two_word_kind(&self.checker, &resolved)
                 .filter(|k| !matches!(k, PairKind::Range { .. }))
-                .filter(|_| !Self::ty_has_var(&resolved) && self.hir_mir_pair_tys(&resolved).is_some())
+                .filter(|_| !Ty::has_var(&resolved) && self.hir_mir_pair_tys(&resolved).is_some())
                 .filter(|_| !lam.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. })));
             let mut plans = Vec::with_capacity(2);
             for rep in std::iter::once(ret).chain(twin_kind.clone().map(Rep::Pair)) {
@@ -5248,7 +5248,7 @@ impl Compiler {
         {
             return None;
         }
-        let q = |t: &Ty| self.hir_qualified_ty(&apply_ty_prune(self.checker.subst(), t)).filter(|t| !Self::ty_has_var(t));
+        let q = |t: &Ty| self.hir_qualified_ty(&apply_ty_prune(self.checker.subst(), t)).filter(|t| !Ty::has_var(t));
         let mut plan = call.clone();
         plan.mono = false;
         plan.mono_of = None;
@@ -6586,7 +6586,7 @@ impl Compiler {
                     Ok(self.value_layout(ty))
                 }
                 Some(ValueClass::Enum) => match declared {
-                    Some(d) if crate::typechecking::subst::ftv(d).is_empty() => Ok(self.value_layout(ty)),
+                    Some(d) if !d.has_free_var() => Ok(self.value_layout(ty)),
                     Some(_) => Ok(ValueLayout::Boxed),
                     None => Err("callee-trait"),
                 },
@@ -6751,7 +6751,7 @@ impl Compiler {
                 self.checker.generics().find_instance_relaxed(&hint.class, &heads?).cloned()
             })
             .ok_or("callee-trait")?;
-        let lookup = if instance.args.iter().any(Self::ty_has_var) {
+        let lookup = if instance.args.iter().any(Ty::has_var) {
             lookup
         } else {
             instance.args.clone()
@@ -6852,7 +6852,7 @@ impl Compiler {
         // A generic instance's head (`impl Id for Option<T>`) at an open
         // argument (`Id::id(o)`, `o: Option<E>`): called as the method call
         // `o.id()` is (#1609). A structural tuple's has its own call.
-        if inst_args.iter().any(Self::ty_has_var)
+        if inst_args.iter().any(Ty::has_var)
             && !self.checker.generics().structural_tuples().any(|(_, _, f)| f == fqn)
             && let HirKind::Call { args, .. } = &node.kind
             && !args.is_empty()
@@ -6880,7 +6880,7 @@ impl Compiler {
         };
         // Facts that cannot be checked against the arguments keep the
         // first, as before.
-        if args.is_empty() || dicts.iter().any(|d| d.args.is_empty() || d.args.iter().any(Self::ty_has_var)) {
+        if args.is_empty() || dicts.iter().any(|d| d.args.is_empty() || d.args.iter().any(Ty::has_var)) {
             return Ok(dicts.first());
         }
         let lookup: Option<Vec<Ty>> = args
@@ -6934,7 +6934,7 @@ impl Compiler {
             if !(layout.is_niche_option() || layout.is_niche_result() || layout.is_niche_unit_result()) {
                 return Err("callee-trait");
             }
-            if Self::ty_has_var(&declared) {
+            if Ty::has_var(&declared) {
                 return if self.value_layout(&declared) == ValueLayout::Boxed {
                     Ok(ValueLayout::Boxed)
                 } else {
@@ -6992,7 +6992,7 @@ impl Compiler {
         // A tuple with an open item (#1479): its arity-wide instance, called
         // as `t.show()` is, the receiver boxed and the dictionary built from
         // the frame's.
-        if inst_args.iter().any(Self::ty_has_var)
+        if inst_args.iter().any(Ty::has_var)
             && let [recv] = args.as_slice()
             && self.checker.generics().structural_tuples().any(|(_, _, f)| f == fqn)
         {
@@ -7018,7 +7018,7 @@ impl Compiler {
                 own_dicts: Vec::new(),
             });
         }
-        if inst_args.iter().any(Self::ty_has_var) || self.two_word_return_kind(&fqn).is_some() {
+        if inst_args.iter().any(Ty::has_var) || self.two_word_return_kind(&fqn).is_some() {
             return Err("callee-trait");
         }
         let is_default = Self::is_default_method_fqn(&class, method, &fqn);
@@ -7651,10 +7651,10 @@ impl Compiler {
                 None if !forwarded.is_empty() => continue,
                 lookup => lookup.ok_or("callee-trait")?,
             };
-            if lookup_tys.iter().any(Self::ty_has_var) && !forwarded.is_empty() {
+            if lookup_tys.iter().any(Ty::has_var) && !forwarded.is_empty() {
                 continue;
             }
-            if lookup_tys.iter().any(Self::ty_has_var)
+            if lookup_tys.iter().any(Ty::has_var)
                 || self.checker.generics().find_instance_relaxed(&constraint.class, &lookup_tys).is_none()
             {
                 return Err("callee-trait");
@@ -7815,14 +7815,10 @@ impl Compiler {
     fn ty_names_con(ty: &Ty, names: &[String]) -> bool {
         match ty {
             Ty::Con(n) => names.contains(n),
-            Ty::App(h, args) => Self::ty_names_con(h, names) || args.iter().any(|a| Self::ty_names_con(a, names)),
-            Ty::Tuple(items) => items.iter().any(|a| Self::ty_names_con(a, names)),
-            Ty::Fun(a, r) => Self::ty_names_con(a, names) || Self::ty_names_con(r, names),
-            Ty::Array { element, .. } | Ty::Readonly(element) => Self::ty_names_con(element, names),
-            Ty::Record { fields } => fields.iter().any(|(_, t)| Self::ty_names_con(t, names)),
-            Ty::Var(_) | Ty::Never | Ty::Existential { .. } => false,
-            // A structural sum or a constructor: told apart no further.
-            _ => true,
+            // A structural sum, a constructor or a `forall`: told apart no
+            // further, so taken to name one.
+            Ty::Sum { .. } | Ty::Constructor { .. } | Ty::Forall { .. } => true,
+            _ => ty.any_child(|t| Self::ty_names_con(t, names)),
         }
     }
 
@@ -8336,7 +8332,7 @@ impl Compiler {
     pub(super) fn hir_unpair(&mut self, ty: &Ty) -> Option<IlLabel> {
         let ty = apply_ty_prune(self.checker.subst(), ty);
         let kind = crate::layout::two_word_kind(&self.checker, &ty)?;
-        if matches!(kind, crate::layout::PairKind::Range { .. }) || Self::ty_has_var(&ty) || self.hir_mir_pair_tys(&ty).is_none() {
+        if matches!(kind, crate::layout::PairKind::Range { .. }) || Ty::has_var(&ty) || self.hir_mir_pair_tys(&ty).is_none() {
             return None;
         }
         let key = format!("{ty:?}");
@@ -8629,7 +8625,7 @@ impl Compiler {
             return None;
         }
         let ty = apply_ty_prune(self.checker.subst(), hir.local(local).ty.as_ref()?);
-        if Self::ty_has_var(&ty) || classify::is_open_range(&ty) {
+        if Ty::has_var(&ty) || classify::is_open_range(&ty) {
             return None;
         }
         self.hir_mir_pair_tys(&ty)?;
@@ -8955,7 +8951,7 @@ impl Compiler {
         // A bare parameter field holds a niche value as its niche word.
         let bare_niche = matches!(crate::typechecking::ty::strip_readonly(&fty), Ty::Var(_))
             && matches!(own, ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult);
-        (Self::ty_has_var(&fty) && stored != own && !bare_niche).then_some(Rep::Word(stored))
+        (Ty::has_var(&fty) && stored != own && !bare_niche).then_some(Rep::Word(stored))
     }
 
     /// `typeof e`'s text: `e`'s ground type.
@@ -9656,7 +9652,7 @@ impl Compiler {
     /// grounds. As [`Self::hir_class_ty_args_at`], the slot holds the
     /// boxed-layout word of the field's type there.
     fn hir_clone_self_field_at(&self, ty: &Ty, fty: &Ty, at: &Ty) -> Option<Ty> {
-        if !self.compiling_mono_clone || !Self::ty_has_var(fty) {
+        if !self.compiling_mono_clone || !Ty::has_var(fty) {
             return None;
         }
         let ty = apply_ty_prune(self.checker.subst(), ty);
@@ -9665,7 +9661,7 @@ impl Compiler {
         }
         let at = apply_ty_prune(self.checker.subst(), at);
         let bare = matches!(crate::typechecking::ty::strip_readonly(fty), Ty::Var(_));
-        (!Self::ty_has_var(&at) && (self.value_layout(&at) == ValueLayout::Boxed || (bare && self.hir_niche_word(&at)))).then_some(at)
+        (!Ty::has_var(&at) && (self.value_layout(&at) == ValueLayout::Boxed || (bare && self.hir_niche_word(&at)))).then_some(at)
     }
 
     /// Declared field type `fty` of a generic class (its parameters opened
@@ -9674,7 +9670,7 @@ impl Compiler {
     /// layout, or a bare `T` slot, which holds rep(ground T): a niche word;
     /// a niche `Option<T>` slot holds the open type's boxed enum object).
     fn hir_class_ty_args_at(&self, ty: &Ty, fty: &Ty) -> Option<Ty> {
-        if !Self::ty_has_var(fty) {
+        if !Ty::has_var(fty) {
             return None;
         }
         let ty = apply_ty_prune(self.checker.subst(), ty);
@@ -9683,7 +9679,7 @@ impl Compiler {
         };
         let at = close_params(fty, args)?;
         let bare = matches!(crate::typechecking::ty::strip_readonly(fty), Ty::Var(_));
-        (!Self::ty_has_var(&at) && (self.value_layout(&at) == ValueLayout::Boxed || (bare && self.hir_niche_word(&at)))).then_some(at)
+        (!Ty::has_var(&at) && (self.value_layout(&at) == ValueLayout::Boxed || (bare && self.hir_niche_word(&at)))).then_some(at)
     }
 
     /// Field type `fty`, a bare class parameter, at made type `ty` when a
@@ -9700,7 +9696,7 @@ impl Compiler {
             return None;
         };
         let at = apply_ty_prune(self.checker.subst(), &close_params(fty, args)?);
-        if !Self::ty_has_var(&at) {
+        if !Ty::has_var(&at) {
             return self.hir_class_ty_args_at(ty, fty);
         }
         // An `Option` / `Result` open in a type variable is a boxed enum
@@ -9746,7 +9742,7 @@ impl Compiler {
         let fits = (1..=32).contains(&fields.len())
             && codegen.len() == fields.len()
             && codegen.iter().zip(&fields).all(|((a, _), (b, _))| a == b)
-            && fields.iter().all(|(_, t)| !Self::ty_has_var(t) && !crate::layout::is_unit(t));
+            && fields.iter().all(|(_, t)| !Ty::has_var(t) && !crate::layout::is_unit(t));
         fits.then_some(fields)
     }
 
@@ -11523,46 +11519,28 @@ fn ground_fun(ty: &Ty) -> bool {
 /// `ty` with each named type parameter in `params` replaced by a type
 /// variable (a distinct one per parameter).
 fn open_params(ty: &Ty, params: &[String]) -> Ty {
-    let open = |t: &Ty| open_params(t, params);
     match ty {
         Ty::Con(name) => match params.iter().position(|p| p == name) {
             Some(i) => Ty::Var(crate::typechecking::ty::TyVarId(u32::MAX - i as u32)),
             None => ty.clone(),
         },
-        Ty::App(head, args) => Ty::App(Box::new(open(head)), args.iter().map(open).collect()),
-        Ty::Fun(a, b) => Ty::Fun(Box::new(open(a)), Box::new(open(b))),
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(open(inner))),
-        Ty::Tuple(items) => Ty::Tuple(items.iter().map(open).collect()),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(open(element)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields.iter().map(|(n, f)| (n.clone(), open(f))).collect(),
-        },
-        _ => ty.clone(),
+        _ => ty.map_children(|t| open_params(t, params)),
     }
 }
 
 /// [`open_params`] undone at type arguments `args`: parameter `i`'s
 /// variable becomes `args[i]`. `None` when a parameter has no argument.
 fn close_params(ty: &Ty, args: &[Ty]) -> Option<Ty> {
-    let close = |t: &Ty| close_params(t, args);
-    Some(match ty {
-        Ty::Var(crate::typechecking::ty::TyVarId(v)) if *v > u32::MAX - 64 => args.get((u32::MAX - v) as usize)?.clone(),
-        Ty::App(head, items) => Ty::App(Box::new(close(head)?), items.iter().map(close).collect::<Option<_>>()?),
-        Ty::Fun(a, b) => Ty::Fun(Box::new(close(a)?), Box::new(close(b)?)),
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(close(inner)?)),
-        Ty::Tuple(items) => Ty::Tuple(items.iter().map(close).collect::<Option<_>>()?),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(close(element)?),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields.iter().map(|(n, f)| Some((n.clone(), close(f)?))).collect::<Option<_>>()?,
-        },
-        _ => ty.clone(),
-    })
+    let missing = std::cell::Cell::new(false);
+    let closed = ty.subst_vars(&|crate::typechecking::ty::TyVarId(v)| {
+        if v <= u32::MAX - 64 {
+            return None;
+        }
+        let arg = args.get((u32::MAX - v) as usize);
+        missing.set(missing.get() || arg.is_none());
+        arg.cloned()
+    });
+    (!missing.get()).then_some(closed)
 }
 
 /// A two-word `Option`, `Result` or user enum: a payload word and a tag,

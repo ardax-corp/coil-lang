@@ -391,12 +391,6 @@ pub fn union(s1: &Subst, s2: &Subst) -> Subst {
     result
 }
 
-/// Re-export of `ftv_ty` at the module level for ergonomics.
-#[allow(dead_code)]
-pub fn ftv(ty: &Ty) -> HashSet<TyVarId> {
-    ftv_ty(ty)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
