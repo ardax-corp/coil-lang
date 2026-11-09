@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::cse::dce;
-use super::func::MirFunc;
+use super::func::{MirFunc, resolve};
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
 };
@@ -96,17 +96,10 @@ fn instcombine_once(func: &mut MirFunc, strength: bool) -> usize {
         }
     }
 
-    let map = |v: ValueId| resolve(&subst, v);
+    func.replace_uses(&subst);
     for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(map);
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(map);
-        }
         block.insts.retain(|i| !drop.contains(&i.dest()));
     }
-    func.rewrite_debug_slots(map);
 
     let mut known: HashMap<ValueId, MirConst> = HashMap::new();
     for block in &func.blocks {
@@ -734,15 +727,6 @@ fn eval_cast(kind: MirCastKind, to: MirTy, c: MirConst) -> Option<MirConst> {
     }
 }
 
-fn resolve(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
-    while let Some(&n) = subst.get(&v) {
-        if n == v {
-            break;
-        }
-        v = n;
-    }
-    v
-}
 
 #[cfg(test)]
 mod tests {

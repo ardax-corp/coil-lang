@@ -149,6 +149,35 @@ pub struct MirFunc {
     pub pair_twin: Option<crate::bodies::Label>,
 }
 
+/// Where `v` ends up under `subst`: its replacement's replacement, and
+/// so on. A cycle stops at the first value seen twice.
+pub fn resolve(subst: &HashMap<ValueId, ValueId>, start: ValueId) -> ValueId {
+    let (mut v, mut steps) = (start, 0);
+    while let Some(&n) = subst.get(&v) {
+        if n == v {
+            break;
+        }
+        steps += 1;
+        if steps > subst.len() {
+            return resolve_cycle(subst, start);
+        }
+        v = n;
+    }
+    v
+}
+
+#[cold]
+fn resolve_cycle(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
+    let mut seen = HashSet::new();
+    while let Some(&n) = subst.get(&v) {
+        if n == v || !seen.insert(v) {
+            break;
+        }
+        v = n;
+    }
+    v
+}
+
 impl MirFunc {
     /// Drop the spare capacity building left in this body's vectors (about
     /// half its instruction storage): it is kept until the program lowers
@@ -209,6 +238,28 @@ impl MirFunc {
 
     /// A pass replaced values: each named local follows its value to the
     /// one that replaces it.
+    /// Rename every value an instruction or terminator reads, and the
+    /// debug slots, through `map`. Dests stay as they are.
+    pub fn map_values(&mut self, map: impl Fn(ValueId) -> ValueId) {
+        for block in &mut self.blocks {
+            for inst in &mut block.insts {
+                inst.rewrite_values(&map);
+            }
+            if let Some(term) = &mut block.term {
+                term.rewrite_values(&map);
+            }
+        }
+        self.rewrite_debug_slots(map);
+    }
+
+    /// [`Self::map_values`] through `subst`, following chains to their end
+    /// ([`resolve`]).
+    pub fn replace_uses(&mut self, subst: &HashMap<ValueId, ValueId>) {
+        if !subst.is_empty() {
+            self.map_values(|v| resolve(subst, v));
+        }
+    }
+
     pub fn rewrite_debug_slots(&mut self, map: impl Fn(ValueId) -> ValueId) {
         for v in self.debug_slots.values_mut() {
             *v = map(*v);

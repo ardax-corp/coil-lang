@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::func::MirFunc;
+use super::func::{MirFunc, resolve};
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, ValueId,
 };
@@ -166,15 +166,6 @@ pub fn gvn(func: &mut MirFunc) -> usize {
     removed
 }
 
-fn resolve(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
-    while let Some(&n) = subst.get(&v) {
-        if n == v {
-            break;
-        }
-        v = n;
-    }
-    v
-}
 
 fn gvn_dom(func: &mut MirFunc) -> usize {
     let n = func.blocks.len();
@@ -409,16 +400,7 @@ fn inst_from_key(key: ExprKey, dest: ValueId) -> MirInst {
 }
 
 fn apply_subst(func: &mut MirFunc, subst: &HashMap<ValueId, ValueId>) -> usize {
-    let map = |v: ValueId| resolve(subst, v);
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(map);
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(map);
-        }
-    }
-    func.rewrite_debug_slots(map);
+    func.replace_uses(subst);
     let removed: HashSet<ValueId> = subst.keys().copied().collect();
     for block in &mut func.blocks {
         block.insts.retain(|i| !removed.contains(&i.dest()));

@@ -255,15 +255,7 @@ fn forward_word_round_trips(func: &mut MirFunc) {
     if subst.is_empty() {
         return;
     }
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-        }
-    }
-    func.rewrite_debug_slots(|v| subst.get(&v).copied().unwrap_or(v));
+    func.map_values(|v| subst.get(&v).copied().unwrap_or(v));
 }
 
 /// One fresh object reaching a φ: its allocation and the value each field
@@ -421,13 +413,8 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
                 let d = i.dest();
                 d != phi && !allocs.contains(&d) && !dead_stores.contains(&d) && !subst.contains_key(&d)
             });
-            for inst in &mut b.insts {
-                inst.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-            }
-            if let Some(term) = &mut b.term {
-                term.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-            }
         }
+        func.map_values(|v| subst.get(&v).copied().unwrap_or(v));
         let mut new_phis: Vec<(u32, MirInst)> = field_phis
             .into_iter()
             .map(|(i, (dest, args))| (i, MirInst::Phi { dest, ty: func.ty(dest), args }))
@@ -437,7 +424,6 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
         for (k, (_, inst)) in new_phis.into_iter().enumerate() {
             at.insts.insert(k, inst);
         }
-        func.rewrite_debug_slots(|v| subst.get(&v).copied().unwrap_or(v));
         for env in func.slot_env.values_mut() {
             for (_, v) in env.iter_mut() {
                 *v = subst.get(v).copied().unwrap_or(*v);

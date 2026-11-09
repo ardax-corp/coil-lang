@@ -109,21 +109,7 @@ pub fn sccp(func: &mut MirFunc) -> usize {
     if hits == 0 {
         return 0;
     }
-    let resolve = |mut v: ValueId| {
-        while let Some(&n) = subst.get(&v) {
-            v = n;
-        }
-        v
-    };
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(resolve);
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(resolve);
-        }
-    }
-    func.rewrite_debug_slots(resolve);
+    func.replace_uses(&subst);
     // Blocks that never run lose their edges into blocks that do.
     for block in &mut func.blocks {
         if !reached.contains(&block.id) {

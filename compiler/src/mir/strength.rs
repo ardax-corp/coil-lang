@@ -286,16 +286,7 @@ fn apply_sr(func: &mut MirFunc, lp: &LoopInfo, cand: Candidate) -> bool {
         );
     }
 
-    let map = |v: ValueId| if v == cand.mul_dest { new_phi } else { v };
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(map);
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(map);
-        }
-    }
-    func.rewrite_debug_slots(map);
+    func.map_values(|v| if v == cand.mul_dest { new_phi } else { v });
     for block in &mut func.blocks {
         block.insts.retain(|i| i.dest() != cand.mul_dest);
     }

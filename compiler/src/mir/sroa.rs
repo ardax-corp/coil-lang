@@ -85,15 +85,7 @@ pub fn sroa(func: &mut MirFunc) -> usize {
     if subst.is_empty() {
         return 0;
     }
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(|v| *subst.get(&v).unwrap_or(&v));
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(|v| *subst.get(&v).unwrap_or(&v));
-        }
-    }
-    func.rewrite_debug_slots(|v| *subst.get(&v).unwrap_or(&v));
+    func.map_values(|v| *subst.get(&v).unwrap_or(&v));
     let used = used_values(func);
     let mut removed = 0;
     for block in &mut func.blocks {

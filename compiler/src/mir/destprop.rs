@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::cse::dce;
-use super::func::MirFunc;
+use super::func::{MirFunc, resolve};
 use super::inst::{MirInst, ValueId};
 
 /// Forward trivial copies. Returns how many φ dests were rewritten.
@@ -57,16 +57,7 @@ fn destprop_once(func: &mut MirFunc) -> usize {
         return 0;
     }
     let drop: HashSet<ValueId> = subst.keys().copied().collect();
-    let map = |v: ValueId| resolve(&subst, v);
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(map);
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(map);
-        }
-    }
-    func.rewrite_debug_slots(map);
+    func.replace_uses(&subst);
     for block in &mut func.blocks {
         block.insts.retain(|i| !drop.contains(&i.dest()));
     }
@@ -98,16 +89,6 @@ fn trivial_src(
     same
 }
 
-fn resolve(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
-    let mut seen = HashSet::new();
-    while let Some(&n) = subst.get(&v) {
-        if n == v || !seen.insert(v) {
-            break;
-        }
-        v = n;
-    }
-    v
-}
 
 #[cfg(test)]
 mod tests {
