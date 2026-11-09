@@ -13,7 +13,8 @@ test("a field of a match on a variant built in place") {
     let got = (match some {
         Option::Some(c) => c,
         Option::None => new Cell(0, "d"),
-    }).v;
+    })
+        .v;
     assert!(got == 3);
 }
 
@@ -22,7 +23,8 @@ test("a string field of a match on a variant built in place") {
     let got = (match none {
         Option::Some(c) => c,
         Option::None => new Cell(0, "d"),
-    }).tag;
+    })
+        .tag;
     assert!(got == "d");
 }
 
