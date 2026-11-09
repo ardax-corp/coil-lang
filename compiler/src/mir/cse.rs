@@ -605,6 +605,23 @@ mod tests {
     use crate::mir::builder::MirBuilder;
     use crate::mir::{MirBinOp, MirConst, MirTy};
 
+    /// A coverage probe counts a run: nothing reads its token, and it stays.
+    #[test]
+    fn dce_keeps_a_coverage_probe() {
+        let mut b = MirBuilder::new("probe");
+        let x = b.add_param(MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(x)).unwrap();
+        let mut f = b.finish().unwrap();
+        let token = ValueId(f.types.len() as u32);
+        f.types.push(MirTy::Bool);
+        let entry = f.entry.index();
+        f.blocks[entry].insts.push(MirInst::Probe { dest: token, id: 0 });
+        dce(&mut f);
+        assert!(f.blocks[entry].insts.iter().any(|i| matches!(i, MirInst::Probe { .. })), "{f}");
+        assert!(MirInst::Probe { dest: token, id: 0 }.is_effect_barrier());
+    }
+
     /// A pure two-word native whose first word is unused: its second word
     /// still keeps it.
     #[test]
