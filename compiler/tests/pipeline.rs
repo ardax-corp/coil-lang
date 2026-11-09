@@ -4435,6 +4435,48 @@ fn compile_is_deterministic_for_many_drop_classes() {
     }
 }
 
+/// The archive of a program built from several modules is the same bytes on
+/// every compile. String, label, static and clone ids are handed out as
+/// lowering reaches each use, so nothing on that path may follow hash order.
+#[test]
+fn compile_is_deterministic_for_multi_module_programs() {
+    use compiler::native_mir::archive;
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root");
+    // Programs over the stdlib and `examples/src`: generics and their
+    // clones, trait dictionaries, derives, macros, closures, generators,
+    // contracts, hash maps, string formatting.
+    let programs = [
+        "examples/perf/text_scan_long.coil",
+        "examples/perf/generic_many_types.coil",
+        "examples/derive_show_eq.coil",
+        "examples/modules_brace.coil",
+        "examples/macro_fn.coil",
+        "tests/macros/attr_macro.coil",
+        "tests/comptime/generated_macros.coil",
+        "tests/programs/bits_and_floats.coil",
+        "tests/programs/priority_queue.coil",
+        "tests/programs/gen_fold_zip.coil",
+        "tests/programs/pipeline_ranges.coil",
+        "tests/collections/hashmap_for_in_entry_types.coil",
+        "tests/traits/trait_method_bound_dispatch.coil",
+        "tests/contracts/contract_failure_messages.coil",
+        "tests/representation/drop_enum__hashmap_entry.coil",
+    ];
+    for program in programs {
+        let path = workspace_root.join(program);
+        let archive = || {
+            let mut pipeline = test_pipeline();
+            let compiled = compile_file(&mut pipeline, path.to_str().expect("utf-8 path")).unwrap_or_else(|_| panic!("{program} failed to compile"));
+            let program = pipeline.archive(compiled.constants, |_| archive::encode(&compiled.bodies, &body_ids(&pipeline)));
+            rkyv::to_bytes::<rkyv::rancor::Error>(&program).expect("serialize").to_vec()
+        };
+        let first = archive();
+        for _ in 0..2 {
+            assert!(archive() == first, "{program}: the archive differs between identical compiles");
+        }
+    }
+}
+
 /// E3: a function whose effects exceed its `pure fn` / `uses {…}` (or its
 /// trait method's) does not compile.
 #[test]
