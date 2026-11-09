@@ -5565,42 +5565,19 @@ impl Checker {
                 Some("write `x.len()` instead of `len(x)`".to_string()),
             );
         }
+        // A builtin callable takes its arguments in parameter order: named
+        // ones reordered (and inferred) here, positional ones as written.
+        let builtin = self.string_fn_for_call(&ident).is_some()
+            || self.prelude_fn_in_scope(&ident).is_some()
+            || self.ffi_fn_in_scope(&ident).is_some();
+        let reordered;
+        let arg_slice: &[Output] = if builtin && has_named {
+            reordered = self.infer_and_reorder_call_args(&ident, raw_args, &range).1;
+            &reordered
+        } else {
+            args.as_deref().unwrap_or(&[])
+        };
         if let Some(kind) = self.string_fn_for_call(&ident) {
-            let arg_slice = if has_named {
-                let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
-                return match kind {
-                    StringBuiltin::Format => {
-                        self.infer_string_format_call(reordered.as_slice(), range)
-                    }
-                    _ => {
-                        if matches!(kind, StringBuiltin::FromBytes | StringBuiltin::SliceBytes)
-                            && !self.enums.contains_key(common::BUILTIN_STRING_ERROR_ENUM)
-                        {
-                            self.register_builtin_string_error();
-                        }
-                        let fun_ty = self.instantiate_ty(&Self::string_fn_scheme(kind));
-                        let flat_args = self.flatten_spread_call_args(reordered.as_slice());
-                        let arg_tys: Vec<Ty> = flat_args
-                            .iter()
-                            .map(|arg| self.infer_call_arg(arg))
-                            .collect();
-                        self.apply_function(
-                            Some(&ident),
-                            &fun_ty,
-                            &arg_tys,
-                            if flat_args.is_empty() {
-                                None
-                            } else {
-                                Some(&flat_args)
-                            },
-                            id,
-                            range,
-                        )
-                    }
-                };
-            } else {
-                args.as_deref().unwrap_or(&[])
-            };
             return match kind {
                 StringBuiltin::Format => self.infer_string_format_call(arg_slice, range),
                 _ => {
@@ -5632,22 +5609,6 @@ impl Checker {
         }
         // Prelude callables (auto-imported or via `use`).
         if let Some(kind) = self.prelude_fn_in_scope(&ident) {
-            if has_named {
-                let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
-                return match kind {
-                    PreludeFn::Dot => self.infer_dot(&reordered, id, range),
-                    PreludeFn::MatMul => self.infer_matmul(&reordered, id, range),
-                    PreludeFn::Cross => self.infer_cross(&reordered, id, range),
-                    PreludeFn::Matrix => self.infer_matrix_ctor(&reordered, id, range),
-                    PreludeFn::Intersect => {
-                        self.infer_matrix_cells_call(&reordered, id, range, "intersect")
-                    }
-                    PreludeFn::Diff => self.infer_matrix_cells_call(&reordered, id, range, "diff"),
-                    PreludeFn::BlackBox => self.infer_black_box(&reordered, range),
-                    PreludeFn::FnKey => self.infer_fn_key(&reordered, range),
-                };
-            }
-            let arg_slice = args.as_deref().unwrap_or(&[]);
             return match kind {
                 PreludeFn::Dot => self.infer_dot(arg_slice, id, range),
                 PreludeFn::MatMul => self.infer_matmul(arg_slice, id, range),
@@ -5663,15 +5624,6 @@ impl Checker {
         }
         // `dload` / `declare` / `invoke` after `use ffi::{…}`.
         if let Some(kind) = self.ffi_fn_in_scope(&ident) {
-            if has_named {
-                let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
-                return match kind {
-                    FfiBuiltin::Dload => self.infer_ffi_dload(&reordered, range),
-                    FfiBuiltin::Declare => self.infer_ffi_declare(&reordered, range),
-                    FfiBuiltin::Invoke => self.infer_ffi_invoke(&reordered, range),
-                };
-            }
-            let arg_slice = args.as_deref().unwrap_or(&[]);
             return match kind {
                 FfiBuiltin::Dload => self.infer_ffi_dload(arg_slice, range),
                 FfiBuiltin::Declare => self.infer_ffi_declare(arg_slice, range),
