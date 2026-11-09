@@ -72,9 +72,7 @@ pub fn build_standard_host_natives(
     out
 }
 
-/// Push `make(sig)` as the next standard native, `name`: the row of
-/// [`common::HOST_NATIVES`] at `out.len()`. `sig` takes that row's arity of
-/// `word`s and returns a `word`.
+/// Push `make(sig)` as the next standard native, `name` ([`next_signature`]).
 fn register<N: NativeFn + 'static>(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut dyn FnMut(&str, usize),
@@ -82,13 +80,24 @@ fn register<N: NativeFn + 'static>(
     word: FfiType,
     make: impl FnOnce(FfiSignature) -> N,
 ) {
+    let sig = next_signature(out, register_id, name, word);
+    out.push(Arc::new(make(sig)));
+}
+
+/// Register `name` as the next standard native, the row of
+/// [`common::HOST_NATIVES`] at `out.len()`, and return its signature: that
+/// row's arity of `word`s, returning a `word`.
+fn next_signature(
+    out: &[Arc<dyn NativeFn>],
+    register_id: &mut dyn FnMut(&str, usize),
+    name: &str,
+    word: FfiType,
+) -> FfiSignature {
     let id = out.len();
     let row = &common::HOST_NATIVES[id];
     assert_eq!(row.name, name, "host native `{name}` pushed at the id of `{}`", row.name);
-    let sig = FfiSignature::from_parts(name.to_string(), vec![word; usize::from(row.arity)], word)
-        .expect("host native signature");
     register_id(name, id);
-    out.push(Arc::new(make(sig)));
+    FfiSignature::from_parts(name.to_string(), vec![word; usize::from(row.arity)], word).expect("host native signature")
 }
 
 /// Wrap each native that takes a `Stream` first in [`UnsentStreamGuard`].
@@ -886,8 +895,9 @@ fn push_io_native(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(
         value_as_open_mode,
     };
 
-    let name = common::HOST_NATIVES[kind as usize].name;
-    register(out, register_id, name, FfiType::Int, |sig| match kind {
+    // The match stays in this inlined body, so each group keeps one arm.
+    let sig = next_signature(out, register_id, common::HOST_NATIVES[kind as usize].name, FfiType::Int);
+    let native = match kind {
         // The stdio handles are plain lookups: direct natives.
         IoKind::Stdin => HostClosureFn::new_direct(sig, |heap, _| stream_stdin(heap).unwrap_or_default()),
         IoKind::Stdout => HostClosureFn::new_direct(sig, |heap, _| stream_stdout(heap).unwrap_or_default()),
@@ -993,7 +1003,8 @@ fn push_io_native(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(
             let r = udp_local_port(heap, args[0]).map(Value::from);
             Ok(Some(as_result_value(heap, r)))
         }),
-    });
+    };
+    out.push(Arc::new(native));
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
