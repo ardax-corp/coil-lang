@@ -2424,10 +2424,6 @@ impl Object {
                     }
                     heap.mark_value(*v, grey_objects);
                 }
-                heap.mark_value(coro.pending_send, grey_objects);
-                for link in [coro.yield_from, coro.delegator].into_iter().flatten() {
-                    Object::Coroutine(link).mark(grey_objects);
-                }
             }
             Self::Boxed(b) => Self::mark_member(heap, &b.as_ref().payload, grey_objects),
             Self::Root(r) => {
@@ -2523,10 +2519,6 @@ impl Object {
                         continue;
                     }
                     word(*v, masked, visit);
-                }
-                word(coro.pending_send, false, visit);
-                for link in [coro.yield_from, coro.delegator].into_iter().flatten() {
-                    visit(Object::Coroutine(link).addr(), true);
                 }
             }
             Self::Boxed(b) => member(&b.as_ref().payload, visit),
@@ -4179,17 +4171,6 @@ pub struct ObjCoroutine {
     /// Bitmask of `saved_stack` slots that hold heap pointers (for precise GC).
     /// When zero, GC conservatively scans every slot.
     pub saved_live_mask: u64,
-    /// `(ip, sp_offset)` pairs; `sp_offset` is relative to the coroutine segment base.
-    pub saved_frames: Vec<(usize, usize)>,
-    /// Value from the resumer's `resume h with v` (delivered at the next binding yield).
-    pub pending_send: Value,
-    /// Active `yield from` delegate, if any.
-    pub yield_from: Option<RefCoroutine>,
-    /// Coroutine delegating to this one via `yield from` (back edge of
-    /// `yield_from`). Traced: a running delegate keeps its parent alive.
-    pub delegator: Option<RefCoroutine>,
-    /// Outer continuation IP when the delegate completes.
-    pub yield_from_resume_ip: usize,
     /// The body has run: a close has `defer`s to run only after this.
     pub started: bool,
     /// Listed for a close by the collector: it suspended with a `defer`
@@ -4397,7 +4378,7 @@ impl GcSized for ObjArray {
 
 impl GcSized for ObjCoroutine {
     fn size(&self) -> usize {
-        // `saved_stack` / `saved_frames` use Rust's allocator, not the runtime
+        // `saved_stack` uses Rust's allocator, not the runtime
         // heap byte counter (same contract as `ObjInstance`).
         mem::size_of::<Self>()
     }

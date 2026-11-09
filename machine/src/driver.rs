@@ -409,7 +409,7 @@ impl<'a> Driver<'a> {
                 // A body with no `yield` compiles as a plain function: the
                 // first resume runs it to its return.
                 let c = gc.as_ref();
-                let plain = !c.started && c.state == crate::memory::CoroState::Suspended && c.yield_from.is_none();
+                let plain = !c.started && c.state == crate::memory::CoroState::Suspended;
                 if plain && self.program.native.lookup(c.resume_ip).is_some_and(|e| !e.generator) {
                     let (pc, args) = (c.resume_ip, c.saved_stack.clone());
                     gc.payload_mut().started = true;
@@ -430,17 +430,8 @@ impl<'a> Driver<'a> {
         let Some(crate::memory::Object::Coroutine(gc)) = self.rt.heap.find_object_by_addr(handle.bits()) else {
             return true;
         };
-        // A delegating generator is suspended in its innermost delegate.
-        let mut target = gc;
-        while let Some(sub) = target.as_ref().yield_from {
-            target = sub;
-        }
-        let pads = crate::gen_fiber::close(self, target);
-        let mut link = Some(gc);
-        while let Some(c) = link {
-            link = c.as_ref().yield_from;
-            crate::gen_fiber::finish(c);
-        }
+        let pads = crate::gen_fiber::close(self, gc);
+        crate::gen_fiber::finish(gc);
         if let Some(pads) = pads {
             self.run_pads(pads);
         }
