@@ -378,7 +378,7 @@ impl BodyBuilder {
                 if let Some(ty) = &local.ty
                     && matches!(
                         crate::typechecking::ty::strip_readonly(ty),
-                        Ty::Con(n) if matches!(n.as_str(), "int" | "float" | "bool" | "byte" | "char" | "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64")
+                        Ty::Con(n) if crate::typechecking::ty::BuiltinScalar::named(n).is_some_and(|s| s.word)
                     )
                 {
                     let ty = ty.to_string();

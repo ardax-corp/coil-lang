@@ -1336,10 +1336,7 @@ fn owned_locals(body: &HirBody, owned: &mut HashSet<LocalId>) {
 fn may_hold_mutable(ty: Option<&Ty>) -> bool {
     match ty {
         Some(Ty::Readonly(inner)) => may_hold_mutable(Some(inner)),
-        Some(Ty::Con(n)) => !matches!(
-            n.as_str(),
-            "int" | "float" | "bool" | "byte" | "string" | "unit" | "char" | "f32" | "f64"
-        ),
+        Some(Ty::Con(n)) => !crate::typechecking::ty::is_builtin_scalar(n),
         Some(Ty::Fun(..)) => false,
         _ => true,
     }

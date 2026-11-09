@@ -1113,10 +1113,10 @@ impl Checker {
         type_params: &[parser::ast::TypeParam<'_>],
         range: &Range<usize>,
     ) -> bool {
-        const PRIMITIVES: &[&str] = &["int", "float", "string", "bool", "void", "unit", "byte"];
         let Some(tp) = type_params.iter().find(|tp| {
             let key = self.qualify_module_name(tp.name);
-            PRIMITIVES.contains(&tp.name)
+            crate::typechecking::ty::is_builtin_scalar(tp.name)
+                || tp.name == "void"
                 || self.classes.contains_key(&key)
                 || self.enums.contains_key(&key)
         }) else {
