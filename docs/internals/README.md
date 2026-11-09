@@ -13,6 +13,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Compiler peak memory](compile-memory.md) | Where `coil compile`'s own peak RSS comes from per phase, how it was measured, what was cut (2026-10-27: spool 93 → 65 MiB) and what is left |
 | [Build cache](build-cache.md) | #1881: `coil FILE` / `coil compile` reuse the archive of an unchanged program from `~/.cache/coil/build`; key, inputs, what is not cached, `--no-build-cache` |
 | [Macros](macros.md) | User `derive` / attribute macros: `macro` model, `quote`, compile-time stage on the MIR interpreter, hygiene, sandbox |
+| [HIR → MIR lowering plan](hir-mir-lowering-plan.md) | Proposed 2026-11: drop the emit cursor and phased emit, number frames from HIR, lowering asks for what it needs (no `HirMirInput` / `HirMirTables`), plan each body once |
 | [MIR](mir.md) | Every body lowers from HIR to typed SSA, which every engine runs; the passes by level; two-word values |
 | [MIR language islands](mir-islands.md) | Historical: COI-292 I0–I8 ladder that grew MIR coverage before every body went through MIR (M4/M5, 2026-10) |
 | [Int overflow](int-overflow.md) | Int `+ - * / % **` and negation give the exact result or panic; where the engines, folds, optimizations, auto-par, SIMD and packed kernels keep that |
