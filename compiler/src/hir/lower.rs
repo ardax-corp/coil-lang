@@ -393,7 +393,6 @@ pub struct StackArrays {
     pub box_at: HashMap<u32, Vec<u32>>,
 }
 
-/// Whether some node of `id`'s subtree satisfies `f`.
 /// A `defer` body the thunk cannot hold: a `return`, or a `break` /
 /// `continue` outside the body's own loops (the checker rejects those,
 /// E0146), a `yield`, or a nested `defer`. A loop of the body keeps its own
@@ -406,10 +405,6 @@ fn defer_body_refused(body: &HirBody, id: HirId, loops: usize) -> bool {
         _ => loops,
     };
     body.children(id).any(|k| defer_body_refused(body, k, loops))
-}
-
-fn any_id(body: &HirBody, id: HirId, f: &impl Fn(HirId) -> bool) -> bool {
-    f(id) || body.children(id).any(|k| any_id(body, k, f))
 }
 
 /// The stack arrays of `body`: each `let a = [..]` with 1..=32 items, or
@@ -682,7 +677,7 @@ pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
                     .iter()
                     .chain(tail)
                     .copied()
-                    .find(|&s| any_id(body, s, &|id| uses.contains(&id.0)));
+                    .find(|&s| body.any(s, &|id| uses.contains(&id.0)));
                 let Some(first) = first else {
                     continue;
                 };
@@ -730,7 +725,7 @@ pub fn class_boxes(body: &HirBody, checker: &Checker) -> HashMap<u32, Vec<u32>> 
                 matches!(body.expr(id).kind, HirKind::Local(l) if l == local)
                     && !body.exprs.iter().any(|f| matches!(f.kind, HirKind::Field { base, .. } if base == id))
             };
-            if let Some(&first) = stmts[k + 1..].iter().chain(tail).find(|&&s| any_id(body, s, &whole)) {
+            if let Some(&first) = stmts[k + 1..].iter().chain(tail).find(|&&s| body.any(s, &whole)) {
                 out.entry(first.0).or_default().push(local.0);
             }
         }
@@ -1376,7 +1371,9 @@ pub fn unrolled_range(hir: &HirBody, iterable: HirId, body: HirId, inclusive: bo
     } else {
         e.saturating_sub(*s)
     };
-    if !(0..=8).contains(&count) || has_own_jump(hir, body) || has_lambda(hir, body) || has_defer(hir, body) {
+    // A lambda is planned for one emission, so its body cannot repeat.
+    let lambda_or_defer = |k: HirId| matches!(hir.expr(k).kind, HirKind::Lambda { .. } | HirKind::Defer { .. });
+    if !(0..=8).contains(&count) || has_own_jump(hir, body) || hir.any(body, &lambda_or_defer) {
         return None;
     }
     Some((*s, count as u32))
@@ -1384,21 +1381,12 @@ pub fn unrolled_range(hir: &HirBody, iterable: HirId, body: HirId, inclusive: bo
 
 /// Each copy of a `defer` is its own site that every later exit checks,
 /// so repeating one grows the exits with the square of the copies.
-fn has_defer(hir: &HirBody, id: HirId) -> bool {
-    matches!(hir.expr(id).kind, HirKind::Defer { .. }) || hir.children(id).any(|k| has_defer(hir, k))
-}
-
 fn has_own_jump(hir: &HirBody, id: HirId) -> bool {
     match &hir.expr(id).kind {
         HirKind::Break | HirKind::Continue => true,
         HirKind::Loop { .. } | HirKind::ForIn { .. } => false,
         _ => hir.children(id).any(|k| has_own_jump(hir, k)),
     }
-}
-
-/// A lambda is planned for one emission, so its body cannot repeat.
-fn has_lambda(hir: &HirBody, id: HirId) -> bool {
-    matches!(hir.expr(id).kind, HirKind::Lambda { .. }) || hir.children(id).any(|k| has_lambda(hir, k))
 }
 
 /// Whether `body` holds a `continue` of its own loop (nested loops' are
@@ -2757,7 +2745,7 @@ impl Walk<'_> {
                 self.stage_at = Some(id);
                 Err("assign-value")
             }
-            _ => Err(kind_name(&body.expr(id).kind)),
+            _ => Err(body.expr(id).kind.name()),
         }
     }
 
@@ -3162,53 +3150,12 @@ impl Walk<'_> {
                 op: Builtin::Done | Builtin::TypeOf | Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. },
                 ..
             } => self.value(id),
-            other => Err(kind_name(other)),
+            other => Err(other.name()),
         }
     }
 }
 
 /// Fallback reason for a node kind the lowering does not take.
-fn kind_name(kind: &HirKind) -> &'static str {
-    match kind {
-        HirKind::Lit(_) => "literal",
-        HirKind::Local(_) => "local",
-        HirKind::Global { .. } => "global",
-        HirKind::Field { .. } => "field",
-        HirKind::Index { .. } => "index",
-        HirKind::Bin { .. } => "operator",
-        HirKind::Logic { .. } => "logic",
-        HirKind::Un { .. } => "unary",
-        HirKind::Cast { .. } => "cast",
-        HirKind::Call { .. } => "call",
-        HirKind::Named { .. } => "named-argument",
-        HirKind::Spread(_) => "spread",
-        HirKind::Make { kind, .. } => match kind {
-            MakeKind::Range { .. } => "make-range",
-            MakeKind::Record(_) => "make-record",
-            MakeKind::Tuple => "make-unit",
-            _ => "make",
-        },
-        HirKind::Block { .. } => "block-value",
-        HirKind::Let { .. } => "let",
-        HirKind::LetPat { .. } => "let-pattern",
-        HirKind::Assign { .. } => "assign",
-        HirKind::Append { .. } => "append",
-        HirKind::If { .. } => "if-value",
-        HirKind::Loop { .. } => "loop",
-        HirKind::ForIn { .. } => "for-in",
-        HirKind::Break | HirKind::Continue => "jump",
-        HirKind::Return(_) => "return",
-        HirKind::Match { .. } => "match",
-        HirKind::Lambda { .. } => "lambda",
-        HirKind::Yield { .. } => "yield",
-        HirKind::Resume { .. } => "resume",
-        HirKind::Defer { .. } => "defer",
-        HirKind::Builtin { .. } => "builtin",
-        HirKind::Clear(_) => "clear",
-        HirKind::Unsupported(_) => "unsupported",
-    }
-}
-
 #[cfg(test)]
 #[path = "lower.tests.rs"]
 mod tests;

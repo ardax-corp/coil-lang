@@ -270,8 +270,8 @@ impl HirBody {
 
     /// Whether some node of `id`'s subtree, `id` included, satisfies
     /// `pred`; stops at the first that does.
-    pub fn any(&self, id: HirId, pred: &mut impl FnMut(&HirExpr) -> bool) -> bool {
-        pred(self.expr(id)) || self.children(id).any(|k| self.any(k, pred))
+    pub fn any(&self, id: HirId, pred: &impl Fn(HirId) -> bool) -> bool {
+        pred(id) || self.children(id).any(|k| self.any(k, pred))
     }
 
     /// Each node's parent, by id (`None` for a root and for an unreached
@@ -355,6 +355,50 @@ impl DoubleEndedIterator for Children<'_> {
             return Some(id);
         }
         self.head[1].take().or_else(|| self.head[0].take())
+    }
+}
+
+impl HirKind {
+    /// A short name for the construct, as refusal reasons give it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            HirKind::Lit(_) => "literal",
+            HirKind::Local(_) => "local",
+            HirKind::Global { .. } => "global",
+            HirKind::Field { .. } => "field",
+            HirKind::Index { .. } => "index",
+            HirKind::Bin { .. } => "operator",
+            HirKind::Logic { .. } => "logic",
+            HirKind::Un { .. } => "unary",
+            HirKind::Cast { .. } => "cast",
+            HirKind::Call { .. } => "call",
+            HirKind::Named { .. } => "named-argument",
+            HirKind::Spread(_) => "spread",
+            HirKind::Make { kind, .. } => match kind {
+                MakeKind::Range { .. } => "make-range",
+                MakeKind::Record(_) => "make-record",
+                MakeKind::Tuple => "make-unit",
+                _ => "make",
+            },
+            HirKind::Block { .. } => "block-value",
+            HirKind::Let { .. } => "let",
+            HirKind::LetPat { .. } => "let-pattern",
+            HirKind::Assign { .. } => "assign",
+            HirKind::Append { .. } => "append",
+            HirKind::If { .. } => "if-value",
+            HirKind::Loop { .. } => "loop",
+            HirKind::ForIn { .. } => "for-in",
+            HirKind::Break | HirKind::Continue => "jump",
+            HirKind::Return(_) => "return",
+            HirKind::Match { .. } => "match",
+            HirKind::Lambda { .. } => "lambda",
+            HirKind::Yield { .. } => "yield",
+            HirKind::Resume { .. } => "resume",
+            HirKind::Defer { .. } => "defer",
+            HirKind::Builtin { .. } => "builtin",
+            HirKind::Clear(_) => "clear",
+            HirKind::Unsupported(_) => "unsupported",
+        }
     }
 }
 

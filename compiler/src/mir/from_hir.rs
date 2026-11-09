@@ -8514,17 +8514,10 @@ impl Lower<'_> {
     }
 }
 
-/// A short name for a construct this phase does not lower.
+/// A short name for a construct MIR lowering does not take: a `for`'s
+/// iteration kind, else [`HirKind::name`].
 fn kind_name(kind: &HirKind) -> &'static str {
     match kind {
-        HirKind::Global { .. } => "global",
-        HirKind::Field { .. } => "field",
-        HirKind::Index { .. } => "index",
-        HirKind::Call { .. } => "call",
-        HirKind::Named { .. } | HirKind::Spread(_) => "argument",
-        HirKind::Make { .. } => "make",
-        HirKind::LetPat { .. } => "let pattern",
-        HirKind::Append { .. } => "append",
         HirKind::ForIn { kind, pat, .. } => match kind {
             Some(ForInKind::Array) if !matches!(pat, HirPat::Bind(_)) => "for in array pattern",
             Some(ForInKind::Array) => "for in array",
@@ -8534,13 +8527,6 @@ fn kind_name(kind: &HirKind) -> &'static str {
             Some(ForInKind::Custom { .. }) => "for in iterator",
             _ => "for in",
         },
-        HirKind::Match { .. } => "match",
-        HirKind::Lambda { .. } => "lambda",
-        HirKind::Yield { .. } | HirKind::Resume { .. } => "coroutine",
-        HirKind::Defer { .. } => "defer",
-        HirKind::Builtin { .. } => "builtin",
-        HirKind::Clear(_) => "clear",
-        HirKind::Unsupported(_) => "unsupported",
-        _ => "construct",
+        other => other.name(),
     }
 }
