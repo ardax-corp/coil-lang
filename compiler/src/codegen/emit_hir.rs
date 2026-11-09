@@ -1831,7 +1831,6 @@ impl Compiler {
         file: Option<u32>,
         entry_words: Option<u32>,
     ) -> Result<crate::mir::HirMirInput<'a>, String> {
-        use crate::mir::LowerCx;
         let frame = &tables.frame;
         // Each planned pair local has its two word types
         // ([`HirLowerCx::pair_local`]).
@@ -1839,353 +1838,31 @@ impl Compiler {
             let ty = hir.local(LocalId(local)).ty.as_ref().ok_or("pair local type")?;
             self.hir_mir_pair_tys(ty).ok_or("pair local type")?;
         }
-        // The locals of outlined parallel loop bodies live in their chunk
-        // worker's frame, not this body's.
-        let mut outlined = HashSet::new();
-        for par in emit.plan.par_loops.values() {
-            hir.visit(par.tail.body, &mut |x| match x.kind {
-                HirKind::Local(l) | HirKind::Let { local: l, .. } if frame.slots[l.0 as usize].is_none() => {
-                    outlined.insert(l.0);
-                }
-                _ => {}
-            });
+        // Each stack array, scalar-replaced local and field of one has its
+        // slots and word types ([`HirLowerCx::stack`], `sroa`,
+        // `frame_field`).
+        for &local in emit.plan.stacks.keys() {
+            cx.try_stack(local)?;
         }
-        // Stack arrays and scalar-replaced class locals: one frame slot per
-        // element or field, each one word.
-        let mut stacks = HashMap::new();
-        for (&local, &n) in emit.plan.stacks.iter().filter(|(l, _)| !outlined.contains(*l)) {
-            let ty = hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
-            // An array literal bound to a `Vec` local is slots too.
-            let element = ty.as_ref().and_then(|t| match crate::typechecking::ty::strip_readonly(t) {
-                Ty::Array { element, .. } => Some(element.as_ref()),
-                t => crate::typechecking::ty::vec_element_ty(t),
-            });
-            let elem = match element {
-                // A heap element's slot holds its boxed word; a
-                // pointer-niche `Option` / `Result` element its niche word
-                // (`hir_stack_rep`).
-                Some(element) => crate::mir::scalar_mir_ty(element)
-                    .or_else(|| Self::scalar_enum_mir_ty(&self.checker, element))
-                    // A trait object element: its `[value, dictionary]` pack (#1853).
-                    .or_else(|| {
-                        matches!(crate::typechecking::ty::strip_readonly(element), Ty::Existential { .. })
-                            .then_some(crate::mir::MirTy::HeapRef)
-                    })
-                    .or_else(|| {
-                    use crate::layout::{value_layout, word_kind};
-                    match value_layout(&self.checker, element) {
-                        // So does a two-word enum's: its boxed object.
-                        ValueLayout::Boxed => (word_kind(&self.checker, element) == common::WORD_POINTER
-                            || Self::boxed_payloads(&self.checker, element, None).is_some())
-                        .then_some(crate::mir::MirTy::HeapRef),
-                        ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
-                        ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
-                    }
-                }),
-                _ => None,
-            };
-            let base = frame.slots[local as usize].ok_or("stack array slot")?;
-            stacks.insert(local, (base, n, elem.ok_or("stack array type")?));
-        }
-        // Words in direct MIR: scalars, int/float arrays, and class objects.
-        // A finalizer object's local is pinned (`LowerCx::pinned`) so
-        // it lives as long as its frame slot would.
-        let checker = &self.checker;
-        let scalar_enum = |t: &Ty| cx.scalar_enum(t);
-        let word = |t: &Ty| cx.word(t);
-        let field_word = |t: &Ty| cx.field_word(t);
-        let mut sroa = HashMap::new();
         for e in &hir.exprs {
             if let HirKind::Let { local, init: Some(init) } = e.kind
                 && emit.plan.sroa.contains_key(&local.0)
-                && !outlined.contains(&local.0)
+                && !cx.outlined.contains(&local.0)
             {
-                let (_, tys) = self.hir_new_layout(hir, init).ok_or("scalar-replaced local")?;
-                // A generic class's field at the made type's arguments.
-                let made = Self::hir_ty(hir, init);
-                let tys: Option<Vec<_>> = tys
-                    .iter()
-                    // A string or boxed enum field's slot holds its boxed
-                    // word, as `new` stores it; an enum with a niche layout
-                    // (`Option<int>`) holds its niche word, not a heap one.
-                    .map(|t| {
-                        // A field open in a class parameter holds the word
-                        // of its type at the made type's arguments, not an
-                        // opaque parameter word (#1553).
-                        if let Some(w) = made.and_then(|m| self.hir_param_field_at(m, t)).and_then(|at| word(&at)) {
-                            return Some(w);
-                        }
-                        word(t)
-                            .or_else(|| scalar_enum(t))
-                            // An existential field holds its pack's heap word.
-                            .or_else(|| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Existential { .. }).then_some(crate::mir::MirTy::HeapRef))
-                            .or_else(|| {
-                                field_word(t).filter(|_| crate::layout::value_layout(checker, t) == ValueLayout::Boxed)
-                            })
-                            .or_else(|| word(&self.hir_class_ty_args_at(made?, t)?))
-                            // A class parameter's boxed enum at the made type's
-                            // arguments (`Option<Option<string>>`): its heap word.
-                            .or_else(|| {
-                                let at = self.hir_param_field_at(made?, t)?;
-                                field_word(&at).filter(|_| crate::layout::value_layout(checker, &at) == ValueLayout::Boxed)
-                            })
-                            // A two-word field's slot holds its box, as
-                            // `new` stores it (`Rep::Word` of a boxed layout).
-                            .or_else(|| {
-                                // A class parameter's at the made type's arguments.
-                                let at = made.and_then(|m| self.hir_param_field_at(m, t)).unwrap_or_else(|| t.clone());
-                                matches!(crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), &at)), crate::layout::Layout::Pair(_))
-                                    .then_some(crate::mir::MirTy::HeapRef)
-                            })
-                            // Any other tuple is a heap tuple object (#1170).
-                            .or_else(|| {
-                                matches!(apply_ty_prune(checker.subst(), t), Ty::Tuple(ref items) if !items.is_empty())
-                                    .then_some(crate::mir::MirTy::HeapRef)
-                            })
-                    })
-                    .collect();
-                sroa.insert(local.0, tys.ok_or("scalar-replaced field type")?);
+                cx.try_sroa_words(init)?;
             }
         }
-        let mut fields = HashMap::new();
-        for (i, e) in hir.exprs.iter().enumerate() {
-            if let HirKind::Field { base, name } = &e.kind
-                && let HirKind::Local(local) = hir.expr(*base).kind
-                && emit.plan.sroa.contains_key(&local.0)
-                && !outlined.contains(&local.0)
-            {
-                // The field's slot whether or not the local is boxed by
-                // the end: direct MIR goes through the box only after it.
-                let Some((FieldAt::Slot(idx), _)) = self.hir_field(hir, *base, name) else {
-                    return Err("scalar-replaced field".into());
-                };
-                fields.insert(i as u32, frame.slots[local.0 as usize].ok_or("scalar-replaced field")? + idx);
-            }
-        }
-        // A frame-slot class local that escapes is boxed into an object of
-        // its class: the type id and field count.
-        let sroa_classes = sroa
-            .keys()
-            .filter_map(|l| {
-                let class = emit.plan.sroa.get(l)?;
-                let n = self.checker.class_fields(class).map_or(0, |f| f.len());
-                Some((*l, (self.checker.class_type_id(class), n as u32)))
-            })
-            .collect();
-        let open_niche = |fty: &Ty, at: &Ty| cx.open_niche(fty, at);
-        let record_word = |t: &Ty| cx.record_word(t);
-        let mut boxed_niches = HashMap::new();
-        // Record fields by slot (the fields sorted by name), and record
-        // literals, whose words are the ones their types name.
-        let mut record_fields = HashMap::new();
-        let mut records = HashMap::new();
-        let mut record_pats = HashMap::new();
-        for (i, e) in hir.exprs.iter().enumerate() {
-            match &e.kind {
-                HirKind::Field { base, name }
-                    if let Some((FieldAt::Record(slot), fty)) = self.hir_field(hir, *base, name)
-                        && let Some(w) = record_word(&fty)
-                        && e.ty.as_ref().and_then(record_word) == Some(w) =>
-                {
-                    record_fields.insert(i as u32, (slot, w));
-                }
-                // A `()` field holds the empty tuple object (#1510).
-                HirKind::Field { base, name }
-                    if let Some((FieldAt::Record(slot), fty)) = self.hir_field(hir, *base, name)
-                        && crate::layout::is_unit(&apply_ty_prune(checker.subst(), &fty)) =>
-                {
-                    record_fields.insert(i as u32, (slot, crate::mir::MirTy::HeapRef));
-                }
-                HirKind::Make {
-                    kind: MakeKind::Record(names),
-                    args,
-                } if let Some(&type_id) = tables.record_types.get(&(i as u32)) => {
-                    let ty = e.ty.as_ref().map(|t| apply_ty_prune(checker.subst(), t));
-                    let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
-                        continue;
-                    };
-                    let words = names
-                        .iter()
-                        .zip(args)
-                        .map(|(n, &arg)| {
-                            let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
-                            let slot = fields.iter().filter(|(f, _)| f < n).count() as u32;
-                            // A `()` field holds the empty tuple object (#1510).
-                            if crate::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
-                                return Some((slot, crate::mir::MirTy::HeapRef));
-                            }
-                            let w = record_word(fty)?;
-                            (Self::hir_ty(hir, arg).and_then(record_word) == Some(w)).then_some((slot, w))
-                        })
-                        .collect::<Option<Vec<_>>>();
-                    if let Some(words) = words {
-                        records.insert(i as u32, (type_id, words));
-                    }
-                }
-                // A record `let` pattern that binds only locals and
-                // wildcards: each bound field's slot and the word its type
-                // names, which the bound local holds.
-                HirKind::LetPat {
-                    pat: HirPat::Record(parts),
-                    init,
-                } => {
-                    let ty = Self::hir_ty(hir, *init).map(|t| apply_ty_prune(checker.subst(), t));
-                    let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
-                        continue;
-                    };
-                    let words = parts
-                        .iter()
-                        .map(|(n, part)| match part {
-                            HirPat::Wild => Some(None),
-                            HirPat::Bind(_) => {
-                                let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
-                                // A `()` binding has no slot (#1510).
-                                if crate::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
-                                    return Some(None);
-                                }
-                                let slot = fields.iter().filter(|(f, _)| f < n).count() as u32;
-                                Some(Some((slot, record_word(fty)?)))
-                            }
-                            _ => None,
-                        })
-                        .collect::<Option<Vec<_>>>();
-                    if let Some(words) = words {
-                        record_pats.insert(i as u32, words);
-                    }
-                }
-                _ => {}
-            }
-        }
-        // `new C(..)` of a class whose every field holds the word its type
-        // names: the type id and each field's word type.
-        let mut news = HashMap::new();
-        let mut new_tails = HashMap::new();
         for i in 0..hir.exprs.len() as u32 {
-            if let Some((class, tys)) = self.hir_new_layout(hir, HirId(i))
-                && let HirKind::Make { args, .. } = &hir.expr(HirId(i)).kind
-                && let Some(words) = tys
-                    .iter()
-                    .zip(args)
-                    .map(|(t, &arg)| {
-                        // A field open in a class parameter holds a niche
-                        // argument boxed.
-                        if let Some(layout) = Self::hir_ty(hir, arg).and_then(|at| open_niche(t, at)) {
-                            boxed_niches.insert(arg.0, layout);
-                            return Some(crate::mir::MirTy::HeapRef);
-                        }
-                        // A two-word field value is stored boxed.
-                        let stored = |t: &Ty| {
-                            word(t).or_else(|| scalar_enum(t)).or_else(|| {
-                                (crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::layout::Layout::Word
-                                    && crate::layout::value_layout(checker, t) == ValueLayout::Boxed)
-                                    .then_some(crate::mir::MirTy::HeapRef)
-                            })
-                            // A boxed user enum (a case of two or more
-                            // payload fields) is one heap word already (#1167).
-                            .or_else(|| {
-                                field_word(t).filter(|_| crate::layout::value_layout(checker, t) == ValueLayout::Boxed)
-                            })
-                            // A heap tuple is its object's word (#1170).
-                            .or_else(|| {
-                                matches!(apply_ty_prune(checker.subst(), t), Ty::Tuple(ref items) if !items.is_empty())
-                                    .then_some(crate::mir::MirTy::HeapRef)
-                            })
-                        };
-                        // A generic class's field at the made type's
-                        // arguments (`new Box(1)`: `T` is `int`).
-                        // A field open in a class parameter at the made
-                        // type's arguments, not an opaque parameter word
-                        // (#1553).
-                        let made = Self::hir_ty(hir, HirId(i));
-                        if let Some(w) = made.and_then(|m| self.hir_param_field_at(m, t)).and_then(|at| stored(&at)) {
-                            return Some(w);
-                        }
-                        stored(t).or_else(|| stored(&self.hir_class_ty_args_at(made?, t)?)).or_else(|| {
-                            // An enum field open in a class parameter, made
-                            // at a still open type (a shared generic body's
-                            // `Option::None`): its boxed enum object.
-                            let at = Self::hir_ty(hir, arg)?;
-                            (Ty::has_var(t)
-                                && field_word(t) == Some(crate::mir::MirTy::HeapRef)
-                                && crate::layout::value_layout(checker, t) == ValueLayout::Boxed
-                                && crate::layout::value_layout(checker, at) == ValueLayout::Boxed)
-                                .then_some(crate::mir::MirTy::HeapRef)
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()
-            {
-                let tails = checker.class_flat_tails(&class);
-                if tails.iter().any(Option::is_some) {
-                    new_tails.insert(i, tails);
-                }
-                for ((name, field_ty), &arg) in checker.class_fields(&class).unwrap_or_default().iter().zip(args) {
-                    if checker.field_names_class_param(&class, field_ty)
-                        && let Some(at) = Self::hir_ty(hir, arg)
-                    {
-                        let shown = crate::typechecking::pretty::format_ty_for_diag(&Default::default(), &apply_ty_prune(checker.subst(), at));
-                        self.note_box_residue(
-                            format!("field {class}.{name} {shown}"),
-                            at,
-                            hir.expr(arg).span,
-                            &format!("field `{name}` of `{class}` has a class parameter's type, one word in every instance"),
-                            "a field of a concrete type keeps both words in the instance",
-                        );
-                    }
-                }
-                news.insert(i, (checker.class_type_id(&class), words));
+            cx.try_frame_field(HirId(i))?;
+        }
+        if self.residue_lint.get() {
+            for i in 0..hir.exprs.len() as u32 {
+                cx.note_new_residue(HirId(i));
             }
         }
-        let push_key = format!("{}::push", common::BUILTIN_VEC_TYPE);
-        let pushes: HashSet<u32> = emit.plan.calls.iter().filter(|(_, c)| c.key == push_key).map(|(&i, _)| i).collect();
-        // Host natives taking plain words and returning one (a niche word
-        // comes back as the layout asks; no pair conversion at the edge),
-        // and `gc::root` / `gc::weak` taking any word.
-        let hosts = emit
-            .plan
-            .calls
-            .iter()
-            .filter_map(|(&i, c)| match c.builtin {
-                Some(HirBuiltin::Host(native))
-                    if c.pair.is_none()
-                        && (c.params.iter().all(|&p| p == ValueLayout::Boxed) || self.hir_generic_host(native)) =>
-                {
-                    // A two-word enum result is unboxed at the edge, one
-                    // `JumpIfMatch` per variant: each variant's tag and arity.
-                    let ty = Self::hir_ty(hir, HirId(i)).map(|t| apply_ty_prune(self.checker.subst(), t));
-                    let unbox = match ty.as_ref().and_then(|t| crate::layout::two_word_kind(&self.checker, t)) {
-                        Some(kind) => Some(
-                            self.checker
-                                .enum_variants(kind.enum_name()?)?
-                                .into_iter()
-                                .map(|(_, tag, payload)| (tag, payload.len() as u32))
-                                .collect::<Vec<_>>(),
-                        ),
-                        None => None,
-                    };
-                    let layout = u8::try_from(c.ret.host_enum_layout()).ok()?;
-                    Some((i, (u16::try_from(native).ok()?, layout, unbox)))
-                }
-                _ => None,
-            })
-            .collect();
-        // Array loops the checker pinned.
-        let pinned_for = (0..hir.exprs.len() as u32)
-            .filter(|&i| {
-                let node = hir.expr(HirId(i));
-                let (start, end) = node.span;
-                matches!(node.kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. })
-                    && (node.node.is_some_and(|n| self.typed_sidecar.is_for_in_pin(n)) || self.typed_sidecar.is_for_in_pin_span(start, end))
-            })
-            .collect();
         if matches!(emit.plan.ret, Rep::Pair(_)) {
             hir.ret.as_ref().and_then(|t| self.hir_mir_pair_tys(t)).ok_or("return type")?;
         }
-        // A body that returns a niche-layout value boxed (a test body's
-        // `Result`) builds the box at each return.
-        let ret_boxed_niche = match (&emit.plan.ret, hir.ret.as_ref().map(|t| self.value_layout(t))) {
-            (Rep::Word(ValueLayout::Boxed), Some(l @ (ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult))) => Some(l),
-            _ => None,
-        };
         // A `defer`'s cleanup pad ends in `unwind_resume`.
         let unwind_native = self.native_id("unwind_resume").and_then(|n| u16::try_from(n).ok());
         // A `for` loop left early closes the generator it runs over.
@@ -2194,18 +1871,10 @@ impl Compiler {
             unwind_native,
             coro_close_native,
             slots: &frame.slots,
-            stacks,
-            sroa,
-            sroa_classes,
-            fields,
             calls: &tables.calls,
-            tail_calls: &emit.plan.tail_calls,
             into_iters: &tables.into_iters,
             iter_loops: &tables.iter_loops,
             strings: &tables.strings,
-            statics: &emit.plan.statics,
-            static_tails: emit.plan.statics.iter().filter_map(|(&id, &slot)| Some((id, self.checker.static_tail_of_slot(slot)?))).collect(),
-            consts: &emit.plan.consts,
             formats: &tables.formats,
             format_shows: &tables.format_shows,
             op_calls: &tables.op_calls,
@@ -2219,17 +1888,11 @@ impl Compiler {
             bound_calls: &tables.bound_calls,
             existential_calls: &tables.existential_calls,
             ctx_dicts: if entry_words.is_some() { &self.hir_mir_ctx[..] } else { &[] },
-            lens: &emit.plan.lens,
             alloc_steady: self.alloc_steady,
-            box_at: &emit.plan.box_at,
             frozen_arrays: HashMap::new(),
-            boxed_niches,
             niche_args: &tables.niche_args,
             existential_packs: tables.existential_packs,
             packs: &tables.packs,
-            record_fields,
-            records,
-            record_pats,
             matrix_wraps: &tables.matrix_wraps,
             field_news: &tables.field_news,
             linalgs: &tables.linalgs,
@@ -2237,21 +1900,6 @@ impl Compiler {
             crosses: &tables.crosses,
             ffis: &tables.ffis,
             unrolled_las: &tables.unrolled_las,
-            aggregates: emit
-                .plan
-                .ops
-                .iter()
-                .filter_map(|(&i, op)| match op {
-                    HirOp::Aggregate(info) => Some((i, info.clone())),
-                    _ => None,
-                })
-                .collect(),
-            news,
-            new_tails,
-            pushes,
-            hosts,
-            pinned_for,
-            cold_ok: emit.plan.cold_ok,
             cold_calls: if emit.plan.cold_ok && !self.cold_labels.is_empty() {
                 tables.calls.iter().filter(|(_, s)| self.cold_labels.contains(&s.target)).map(|(&i, _)| i).collect()
             } else {
@@ -2260,10 +1908,8 @@ impl Compiler {
             file,
             entry_words,
             lambda_dicts: self.hir_lambda_dicts.filter(|&(_, n)| n > 0),
-            opaque_vars: cx.opaque_vars,
             debugger: self.debugger_attached,
             coverage: self.keep_fns_in.is_some(),
-            ret_boxed_niche,
         })
     }
 
@@ -11290,6 +10936,9 @@ struct HirLowerCx<'a> {
     /// moves; a generic class's shared method sees its class's
     /// parameters as type variables too.
     opaque_vars: bool,
+    /// The locals of outlined parallel loop bodies: they live in their
+    /// chunk worker's frame, not this body's.
+    outlined: HashSet<u32>,
 }
 
 impl<'a> HirLowerCx<'a> {
@@ -11300,7 +10949,151 @@ impl<'a> HirLowerCx<'a> {
         let opaque_vars = hir.is_generic
             || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(holds_var))
             || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(holds_var));
-        HirLowerCx { c, hir, emit, tables, opaque_vars }
+        let mut outlined = HashSet::new();
+        for par in emit.plan.par_loops.values() {
+            hir.visit(par.tail.body, &mut |x| match x.kind {
+                HirKind::Local(l) | HirKind::Let { local: l, .. } if tables.frame.slots[l.0 as usize].is_none() => {
+                    outlined.insert(l.0);
+                }
+                _ => {}
+            });
+        }
+        HirLowerCx { c, hir, emit, tables, opaque_vars, outlined }
+    }
+
+    /// A stack array local's first slot, length and element word type:
+    /// one frame slot per element, each one word. An error when the plan
+    /// keeps one in slots that direct MIR cannot type.
+    fn try_stack(&self, local: u32) -> Result<Option<(u32, usize, crate::mir::MirTy)>, String> {
+        let c = self.c;
+        let Some(&n) = self.emit.plan.stacks.get(&local).filter(|_| !self.outlined.contains(&local)) else {
+            return Ok(None);
+        };
+        let ty = self.hir.local(LocalId(local)).ty.as_ref().map(|t| apply_ty_prune(c.checker.subst(), t));
+        // An array literal bound to a `Vec` local is slots too.
+        let element = ty.as_ref().and_then(|t| match crate::typechecking::ty::strip_readonly(t) {
+            Ty::Array { element, .. } => Some(element.as_ref()),
+            t => crate::typechecking::ty::vec_element_ty(t),
+        });
+        let elem = match element {
+            // A heap element's slot holds its boxed word; a pointer-niche
+            // `Option` / `Result` element its niche word (`hir_stack_rep`).
+            Some(element) => crate::mir::scalar_mir_ty(element)
+                .or_else(|| Compiler::scalar_enum_mir_ty(&c.checker, element))
+                // A trait object element: its `[value, dictionary]` pack (#1853).
+                .or_else(|| matches!(crate::typechecking::ty::strip_readonly(element), Ty::Existential { .. }).then_some(crate::mir::MirTy::HeapRef))
+                .or_else(|| {
+                    use crate::layout::{value_layout, word_kind};
+                    match value_layout(&c.checker, element) {
+                        // So does a two-word enum's: its boxed object.
+                        ValueLayout::Boxed => (word_kind(&c.checker, element) == common::WORD_POINTER
+                            || Compiler::boxed_payloads(&c.checker, element, None).is_some())
+                        .then_some(crate::mir::MirTy::HeapRef),
+                        ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
+                        ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
+                    }
+                }),
+            _ => None,
+        };
+        let base = self.tables.frame.slots[local as usize].ok_or("stack array slot")?;
+        Ok(Some((base, n, elem.ok_or("stack array type")?)))
+    }
+
+    /// The word type of each field slot of a scalar-replaced class local
+    /// bound to `init` (a `new`). An error when one has none.
+    fn try_sroa_words(&self, init: HirId) -> Result<Vec<crate::mir::MirTy>, String> {
+        use crate::mir::LowerCx;
+        let (c, hir) = (self.c, self.hir);
+        let checker = &c.checker;
+        let (_, tys) = c.hir_new_layout(hir, init).ok_or("scalar-replaced local")?;
+        // A generic class's field at the made type's arguments.
+        let made = Compiler::hir_ty(hir, init);
+        let tys: Option<Vec<_>> = tys
+            .iter()
+            // A string or boxed enum field's slot holds its boxed word, as
+            // `new` stores it; an enum with a niche layout (`Option<int>`)
+            // holds its niche word, not a heap one.
+            .map(|t| {
+                // A field open in a class parameter holds the word of its
+                // type at the made type's arguments, not an opaque
+                // parameter word (#1553).
+                if let Some(w) = made.and_then(|m| c.hir_param_field_at(m, t)).and_then(|at| self.word(&at)) {
+                    return Some(w);
+                }
+                self.word(t)
+                    .or_else(|| self.scalar_enum(t))
+                    // An existential field holds its pack's heap word.
+                    .or_else(|| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Existential { .. }).then_some(crate::mir::MirTy::HeapRef))
+                    .or_else(|| self.field_word(t).filter(|_| crate::layout::value_layout(checker, t) == ValueLayout::Boxed))
+                    .or_else(|| self.word(&c.hir_class_ty_args_at(made?, t)?))
+                    // A class parameter's boxed enum at the made type's
+                    // arguments (`Option<Option<string>>`): its heap word.
+                    .or_else(|| {
+                        let at = c.hir_param_field_at(made?, t)?;
+                        self.field_word(&at).filter(|_| crate::layout::value_layout(checker, &at) == ValueLayout::Boxed)
+                    })
+                    // A two-word field's slot holds its box, as `new`
+                    // stores it (`Rep::Word` of a boxed layout).
+                    .or_else(|| {
+                        // A class parameter's at the made type's arguments.
+                        let at = made.and_then(|m| c.hir_param_field_at(m, t)).unwrap_or_else(|| t.clone());
+                        matches!(crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), &at)), crate::layout::Layout::Pair(_))
+                            .then_some(crate::mir::MirTy::HeapRef)
+                    })
+                    // Any other tuple is a heap tuple object (#1170).
+                    .or_else(|| matches!(apply_ty_prune(checker.subst(), t), Ty::Tuple(ref items) if !items.is_empty()).then_some(crate::mir::MirTy::HeapRef))
+            })
+            .collect();
+        Ok(tys.ok_or("scalar-replaced field type")?)
+    }
+
+    /// The frame slot of field read or write `id` on a scalar-replaced
+    /// class local, whether or not the local is boxed by the end: direct
+    /// MIR goes through the box only after it. An error when the field has
+    /// no slot.
+    fn try_frame_field(&self, id: HirId) -> Result<Option<u32>, String> {
+        let hir = self.hir;
+        let HirKind::Field { base, name } = &hir.expr(id).kind else {
+            return Ok(None);
+        };
+        let HirKind::Local(local) = hir.expr(*base).kind else {
+            return Ok(None);
+        };
+        if !self.emit.plan.sroa.contains_key(&local.0) || self.outlined.contains(&local.0) {
+            return Ok(None);
+        }
+        let Some((FieldAt::Slot(idx), _)) = self.c.hir_field(hir, *base, name) else {
+            return Err("scalar-replaced field".into());
+        };
+        Ok(Some(self.tables.frame.slots[local.0 as usize].ok_or("scalar-replaced field")? + idx))
+    }
+
+    /// The boxed-residue lint for `new` `id`: each field of a class
+    /// parameter's type it fills, when direct MIR makes the object.
+    fn note_new_residue(&self, id: HirId) {
+        use crate::mir::LowerCx;
+        let (c, hir) = (self.c, self.hir);
+        let checker = &c.checker;
+        if self.new_object(id).object.is_none() {
+            return;
+        }
+        let (Some((class, _)), HirKind::Make { args, .. }) = (c.hir_new_layout(hir, id), &hir.expr(id).kind) else {
+            return;
+        };
+        for ((name, field_ty), &arg) in checker.class_fields(&class).unwrap_or_default().iter().zip(args) {
+            if checker.field_names_class_param(&class, field_ty)
+                && let Some(at) = Compiler::hir_ty(hir, arg)
+            {
+                let shown = crate::typechecking::pretty::format_ty_for_diag(&Default::default(), &apply_ty_prune(checker.subst(), at));
+                c.note_box_residue(
+                    format!("field {class}.{name} {shown}"),
+                    at,
+                    hir.expr(arg).span,
+                    &format!("field `{name}` of `{class}` has a class parameter's type, one word in every instance"),
+                    "a field of a concrete type keeps both words in the instance",
+                );
+            }
+        }
     }
 
     /// The word a value of type `t` is in a frame slot or a heap slot that
@@ -11614,6 +11407,267 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         let calls = Compiler::hir_lane_calls(hir, emit, &lanes);
         let escapes = c.hir_lane_escapes(hir, emit, &lanes, &pushes, &calls);
         crate::mir::HirLaneUses { calls, escapes }
+    }
+
+    fn opaque_vars(&self) -> bool {
+        self.opaque_vars
+    }
+
+    fn stack(&self, local: u32) -> Option<(u32, usize, crate::mir::MirTy)> {
+        self.try_stack(local).ok().flatten()
+    }
+
+    fn sroa(&self, local: u32) -> Option<Vec<crate::mir::MirTy>> {
+        if !self.emit.plan.sroa.contains_key(&local) || self.outlined.contains(&local) {
+            return None;
+        }
+        // The local's last `let` with a value.
+        let init = self.hir.exprs.iter().rev().find_map(|e| match e.kind {
+            HirKind::Let { local: l, init: Some(init) } if l.0 == local => Some(init),
+            _ => None,
+        })?;
+        self.try_sroa_words(init).ok()
+    }
+
+    fn sroa_class(&self, local: u32) -> Option<(u32, u32)> {
+        let checker = &self.c.checker;
+        let class = self.emit.plan.sroa.get(&local)?;
+        let n = checker.class_fields(class).map_or(0, |f| f.len());
+        Some((checker.class_type_id(class), n as u32))
+    }
+
+    fn frame_field(&self, id: HirId) -> Option<u32> {
+        self.try_frame_field(id).ok().flatten()
+    }
+
+    fn record_field(&self, id: HirId) -> Option<(u32, crate::mir::MirTy)> {
+        let (c, hir) = (self.c, self.hir);
+        let e = hir.expr(id);
+        let HirKind::Field { base, name } = &e.kind else {
+            return None;
+        };
+        let (FieldAt::Record(slot), fty) = c.hir_field(hir, *base, name)? else {
+            return None;
+        };
+        if let Some(w) = self.record_word(&fty)
+            && e.ty.as_ref().and_then(|t| self.record_word(t)) == Some(w)
+        {
+            return Some((slot, w));
+        }
+        // A `()` field holds the empty tuple object (#1510).
+        crate::layout::is_unit(&apply_ty_prune(c.checker.subst(), &fty)).then_some((slot, crate::mir::MirTy::HeapRef))
+    }
+
+    fn record(&self, id: HirId) -> Option<(u32, Vec<(u32, crate::mir::MirTy)>)> {
+        let (checker, hir) = (&self.c.checker, self.hir);
+        let e = hir.expr(id);
+        let HirKind::Make {
+            kind: MakeKind::Record(names),
+            args,
+        } = &e.kind
+        else {
+            return None;
+        };
+        let &type_id = self.tables.record_types.get(&id.0)?;
+        let ty = e.ty.as_ref().map(|t| apply_ty_prune(checker.subst(), t));
+        let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
+            return None;
+        };
+        let words = names
+            .iter()
+            .zip(args)
+            .map(|(n, &arg)| {
+                let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
+                let slot = fields.iter().filter(|(f, _)| f < n).count() as u32;
+                // A `()` field holds the empty tuple object (#1510).
+                if crate::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
+                    return Some((slot, crate::mir::MirTy::HeapRef));
+                }
+                let w = self.record_word(fty)?;
+                (Compiler::hir_ty(hir, arg).and_then(|t| self.record_word(t)) == Some(w)).then_some((slot, w))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some((type_id, words))
+    }
+
+    fn record_pat(&self, id: HirId) -> Option<Vec<Option<(u32, crate::mir::MirTy)>>> {
+        let (checker, hir) = (&self.c.checker, self.hir);
+        let HirKind::LetPat {
+            pat: HirPat::Record(parts),
+            init,
+        } = &hir.expr(id).kind
+        else {
+            return None;
+        };
+        let ty = Compiler::hir_ty(hir, *init).map(|t| apply_ty_prune(checker.subst(), t));
+        let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
+            return None;
+        };
+        parts
+            .iter()
+            .map(|(n, part)| match part {
+                HirPat::Wild => Some(None),
+                HirPat::Bind(_) => {
+                    let (_, fty) = fields.iter().find(|(f, _)| f == n)?;
+                    // A `()` binding has no slot (#1510).
+                    if crate::layout::is_unit(&apply_ty_prune(checker.subst(), fty)) {
+                        return Some(None);
+                    }
+                    let slot = fields.iter().filter(|(f, _)| f < n).count() as u32;
+                    Some(Some((slot, self.record_word(fty)?)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn new_object(&self, id: HirId) -> crate::mir::HirNew {
+        let (c, hir) = (self.c, self.hir);
+        let checker = &c.checker;
+        let mut out = crate::mir::HirNew::default();
+        let (Some((class, tys)), HirKind::Make { args, .. }) = (c.hir_new_layout(hir, id), &hir.expr(id).kind) else {
+            return out;
+        };
+        let words = tys
+            .iter()
+            .zip(args)
+            .map(|(t, &arg)| {
+                // A field open in a class parameter holds a niche argument
+                // boxed.
+                if let Some(layout) = Compiler::hir_ty(hir, arg).and_then(|at| self.open_niche(t, at)) {
+                    out.arg_niches.push((arg.0, layout));
+                    return Some(crate::mir::MirTy::HeapRef);
+                }
+                // A two-word field value is stored boxed.
+                let stored = |t: &Ty| {
+                    self.word(t)
+                        .or_else(|| self.scalar_enum(t))
+                        .or_else(|| {
+                            (crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), t)) != crate::layout::Layout::Word
+                                && crate::layout::value_layout(checker, t) == ValueLayout::Boxed)
+                                .then_some(crate::mir::MirTy::HeapRef)
+                        })
+                        // A boxed user enum (a case of two or more payload
+                        // fields) is one heap word already (#1167).
+                        .or_else(|| self.field_word(t).filter(|_| crate::layout::value_layout(checker, t) == ValueLayout::Boxed))
+                        // A heap tuple is its object's word (#1170).
+                        .or_else(|| matches!(apply_ty_prune(checker.subst(), t), Ty::Tuple(ref items) if !items.is_empty()).then_some(crate::mir::MirTy::HeapRef))
+                };
+                // A generic class's field at the made type's arguments
+                // (`new Box(1)`: `T` is `int`). A field open in a class
+                // parameter at the made type's arguments, not an opaque
+                // parameter word (#1553).
+                let made = Compiler::hir_ty(hir, id);
+                if let Some(w) = made.and_then(|m| c.hir_param_field_at(m, t)).and_then(|at| stored(&at)) {
+                    return Some(w);
+                }
+                stored(t).or_else(|| stored(&c.hir_class_ty_args_at(made?, t)?)).or_else(|| {
+                    // An enum field open in a class parameter, made at a
+                    // still open type (a shared generic body's
+                    // `Option::None`): its boxed enum object.
+                    let at = Compiler::hir_ty(hir, arg)?;
+                    (Ty::has_var(t)
+                        && self.field_word(t) == Some(crate::mir::MirTy::HeapRef)
+                        && crate::layout::value_layout(checker, t) == ValueLayout::Boxed
+                        && crate::layout::value_layout(checker, at) == ValueLayout::Boxed)
+                        .then_some(crate::mir::MirTy::HeapRef)
+                })
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(words) = words {
+            let tails = checker.class_flat_tails(&class);
+            if tails.iter().any(Option::is_some) {
+                out.tails = tails;
+            }
+            out.object = Some((checker.class_type_id(&class), words));
+        }
+        out
+    }
+
+    fn push(&self, id: HirId) -> bool {
+        let push_key = format!("{}::push", common::BUILTIN_VEC_TYPE);
+        self.emit.plan.calls.get(&id.0).is_some_and(|c| c.key == push_key)
+    }
+
+    fn host(&self, id: HirId) -> Option<crate::mir::HirHost> {
+        let c = self.c;
+        let call = self.emit.plan.calls.get(&id.0)?;
+        // Host natives taking plain words and returning one (a niche word
+        // comes back as the layout asks; no pair conversion at the edge),
+        // and `gc::root` / `gc::weak` taking any word.
+        let Some(HirBuiltin::Host(native)) = call.builtin else {
+            return None;
+        };
+        if call.pair.is_some() || !(call.params.iter().all(|&p| p == ValueLayout::Boxed) || c.hir_generic_host(native)) {
+            return None;
+        }
+        // A two-word enum result is unboxed at the edge, one `JumpIfMatch`
+        // per variant: each variant's tag and arity.
+        let ty = Compiler::hir_ty(self.hir, id).map(|t| apply_ty_prune(c.checker.subst(), t));
+        let unbox = match ty.as_ref().and_then(|t| crate::layout::two_word_kind(&c.checker, t)) {
+            Some(kind) => Some(
+                c.checker
+                    .enum_variants(kind.enum_name()?)?
+                    .into_iter()
+                    .map(|(_, tag, payload)| (tag, payload.len() as u32))
+                    .collect::<Vec<_>>(),
+            ),
+            None => None,
+        };
+        let layout = u8::try_from(call.ret.host_enum_layout()).ok()?;
+        Some((u16::try_from(native).ok()?, layout, unbox))
+    }
+
+    fn pinned_for(&self, id: HirId) -> bool {
+        let node = self.hir.expr(id);
+        let (start, end) = node.span;
+        let sidecar = &self.c.typed_sidecar;
+        matches!(node.kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. })
+            && (node.node.is_some_and(|n| sidecar.is_for_in_pin(n)) || sidecar.is_for_in_pin_span(start, end))
+    }
+
+    fn ret_boxed_niche(&self) -> Option<ValueLayout> {
+        // A body that returns a niche-layout value boxed (a test body's
+        // `Result`) builds the box at each return.
+        match (&self.emit.plan.ret, self.hir.ret.as_ref().map(|t| self.c.value_layout(t))) {
+            (Rep::Word(ValueLayout::Boxed), Some(l @ (ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult))) => Some(l),
+            _ => None,
+        }
+    }
+
+    fn static_slot(&self, id: HirId) -> Option<u32> {
+        self.emit.plan.statics.get(&id.0).copied()
+    }
+
+    fn static_tail(&self, id: HirId) -> Option<u32> {
+        self.c.checker.static_tail_of_slot(self.static_slot(id)?)
+    }
+
+    fn const_value(&self, id: HirId) -> Option<&crate::const_fold::ConstValue> {
+        self.emit.plan.consts.get(&id.0)
+    }
+
+    fn aggregate(&self, id: HirId) -> Option<&crate::typechecking::AggregateArithInfo> {
+        match self.emit.plan.ops.get(&id.0)? {
+            HirOp::Aggregate(info) => Some(info),
+            _ => None,
+        }
+    }
+
+    fn tail_call(&self, id: HirId) -> bool {
+        self.emit.plan.tail_calls.contains(&id.0)
+    }
+
+    fn len_of(&self, id: HirId) -> Option<Option<u32>> {
+        self.emit.plan.lens.get(&id.0).copied()
+    }
+
+    fn box_at(&self, id: HirId) -> Option<&[u32]> {
+        self.emit.plan.box_at.get(&id.0).map(Vec::as_slice)
+    }
+
+    fn cold_ok(&self) -> bool {
+        self.emit.plan.cold_ok
     }
 }
 
