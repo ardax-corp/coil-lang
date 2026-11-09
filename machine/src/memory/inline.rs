@@ -109,7 +109,6 @@ pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
             put_header(&mut img, KIND_ENUM);
             put(&mut img, data + off(&obj, &obj.tag), &obj.tag.to_le_bytes());
             put(&mut img, data + off(&obj, &obj.type_id), &obj.type_id.to_le_bytes());
-            put(&mut img, data + off(&obj, &obj.finalized), &[u8::from(obj.finalized)]);
             let base = data + off(&obj, &obj.payload);
             let (d, len, k, slots, words) = payload_probe(&obj.payload);
             put(&mut img, base, &[d]);
@@ -153,7 +152,6 @@ pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
             let mut img = vec![0u8; layout.size()];
             put_header(&mut img, KIND_INSTANCE);
             put(&mut img, data + off(&obj, &obj.type_id), &obj.type_id.to_le_bytes());
-            put(&mut img, data + off(&obj, &obj.finalized), &[u8::from(obj.finalized)]);
             let base = data + off(&obj, &obj.storage);
             // SAFETY: `repr(u8)`: the discriminant is the first byte.
             let d = unsafe { *std::ptr::from_ref(&obj.storage).cast::<u8>() };

@@ -152,12 +152,12 @@ impl Runtime {
     /// Drop PC for a tagged instance or enum whose finalizer has not run.
     pub(crate) fn pending_finalizer(&self, obj: crate::memory::Object) -> Option<u32> {
         use crate::memory::Object;
-        let (type_id, finalized) = match obj {
-            Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
-            Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+        let type_id = match obj {
+            Object::Instance(gc) => gc.as_ref().type_id,
+            Object::Enum(gc) => gc.as_ref().type_id,
             _ => return None,
         };
-        if type_id == 0 || finalized {
+        if type_id == 0 || obj.is_finalized() {
             return None;
         }
         self.finalizer_by_type.get(&type_id).copied()
@@ -192,16 +192,10 @@ impl Runtime {
     pub(crate) fn claim_finalizer(&self, v: Value) -> bool {
         use crate::memory::Object;
         match self.heap.find_object_by_addr(v.bits()) {
-            Some(Object::Instance(gc)) => {
-                let inst = gc.payload_mut();
-                !std::mem::replace(&mut inst.finalized, true)
-            }
+            Some(obj @ Object::Instance(_)) => obj.claim_finalizer(),
             // Untagged enums (unit variants: shared immortals) are never
             // finalized, so an explicit `drop()` on one just runs the body.
-            Some(Object::Enum(gc)) => {
-                let e = gc.payload_mut();
-                e.type_id == 0 || !std::mem::replace(&mut e.finalized, true)
-            }
+            Some(obj @ Object::Enum(gc)) => gc.as_ref().type_id == 0 || obj.claim_finalizer(),
             _ => false,
         }
     }

@@ -924,8 +924,8 @@ impl Heap {
                 return false;
             };
             let (type_id, finalized) = match obj {
-                Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
-                Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+                Object::Instance(gc) => (gc.as_ref().type_id, obj.is_finalized()),
+                Object::Enum(gc) => (gc.as_ref().type_id, obj.is_finalized()),
                 // A closeable generator stays listed until it is done.
                 Object::Coroutine(gc) => {
                     let open = gc.as_ref().closeable && gc.as_ref().state == CoroState::Suspended;
@@ -1452,11 +1452,8 @@ impl Heap {
     /// Whether `obj` has a `drop` that has not run yet.
     fn pending_drop(&self, obj: Object) -> bool {
         self.finalizer_object(obj)
-            && match obj {
-                Object::Instance(gc) => !gc.as_ref().finalized,
-                Object::Enum(gc) => !gc.as_ref().finalized,
-                _ => false,
-            }
+            && matches!(obj, Object::Instance(_) | Object::Enum(_))
+            && !obj.is_finalized()
     }
 
     /// Whether [`Self::free_early`] may free `obj` (when nothing reaches it).
@@ -2584,6 +2581,20 @@ impl Object {
         unsafe { &*(self.addr() as *const GcHeader) }.shared.get()
     }
 
+    /// Whether this object's `drop` has been claimed.
+    #[inline]
+    pub fn is_finalized(&self) -> bool {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.finalized.get()
+    }
+
+    /// Claim this object's `drop`: `false` when it was claimed already.
+    #[inline]
+    pub fn claim_finalizer(&self) -> bool {
+        // SAFETY: as in `is_finalized`.
+        !unsafe { &*(self.addr() as *const GcHeader) }.finalized.replace(true)
+    }
+
     #[inline]
     pub(crate) fn set_shared(&self) {
         unsafe { &*(self.addr() as *const GcHeader) }.shared.set(true);
@@ -2775,8 +2786,6 @@ pub struct ObjInstance {
     storage: InstanceStorage,
     /// Compile-time class identity (`0` = none).
     pub type_id: u32,
-    /// Set when `drop` has run (GC or explicit); drop must not run twice.
-    pub finalized: bool,
 }
 
 impl Default for ObjInstance {
@@ -2784,7 +2793,6 @@ impl Default for ObjInstance {
         Self {
             storage: InstanceStorage::typed_slots(0),
             type_id: 0,
-            finalized: false,
         }
     }
 }
@@ -2797,7 +2805,6 @@ impl ObjInstance {
         Self {
             storage: InstanceStorage::typed_slots(nfields),
             type_id,
-            finalized: false,
         }
     }
 
@@ -2836,7 +2843,6 @@ impl ObjInstance {
         Self {
             storage: InstanceStorage::from_vec(slots),
             type_id,
-            finalized: false,
         }
     }
 }
@@ -3037,12 +3043,10 @@ impl<'a> IntoIterator for &'a EnumPayload {
 #[repr(C)]
 pub struct ObjEnum {
     pub tag: u32,
-    pub payload: EnumPayload,
     /// Finalizer key for an enum with `fn drop()` (`TagEnumType`); `0` = none.
     /// Unit variants are shared immortals and are never tagged.
     pub type_id: u32,
-    /// Set once the finalizer has been claimed, like [`ObjInstance::finalized`].
-    pub finalized: bool,
+    pub payload: EnumPayload,
 }
 
 impl ObjEnum {
@@ -3051,7 +3055,6 @@ impl ObjEnum {
             tag,
             payload,
             type_id: 0,
-            finalized: false,
         }
     }
 }
@@ -4634,6 +4637,9 @@ struct GcHeader {
     /// copies it first ([`Heap::cow_unique`]). Sticky until the slot is
     /// reused.
     shared: Cell<bool>,
+    /// An instance's or enum's `drop` has been claimed: it never runs
+    /// twice ([`Object::claim_finalizer`]).
+    finalized: Cell<bool>,
     /// Debug / gc-stress: generation of the steal epoch the object was
     /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes a
     /// byte of what is header padding before an 8-aligned payload; release
@@ -4656,6 +4662,7 @@ impl GcHeader {
             fresh: Cell::new(false),
             generation: Cell::new(0),
             shared: Cell::new(false),
+            finalized: Cell::new(false),
             #[cfg(any(debug_assertions, feature = "gc-stress"))]
             epoch: Cell::new(0),
         }
@@ -6010,9 +6017,7 @@ mod tests {
         let drops = heap.early_drops(Value::from(late.addr()), false, &keep).expect("listed");
         assert_eq!(drops.iter().map(|o| o.addr()).collect::<Vec<_>>(), vec![late.addr()]);
         assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 0, "its drop has not run");
-        if let Object::Instance(gc) = late {
-            gc.payload_mut().finalized = true;
-        }
+        late.claim_finalizer();
         assert!(heap.early_drops(Value::from(late.addr()), false, &keep).is_some_and(|d| d.is_empty()));
         assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 1);
     }
@@ -6036,8 +6041,7 @@ mod tests {
         let mut want = vec![early.addr(), tagged.addr()];
         want.sort_unstable();
         assert_eq!(got, want);
-        let Object::Instance(gc) = early else { unreachable!() };
-        gc.payload_mut().finalized = true;
+        early.claim_finalizer();
         let left: Vec<u64> = heap.unmarked_finalizable().iter().map(|o| o.addr()).collect();
         assert_eq!(left, vec![tagged.addr()]);
         assert_eq!(heap.finalizable.len(), 2, "finalized entries leave the list");
