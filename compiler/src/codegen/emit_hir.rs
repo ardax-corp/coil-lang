@@ -9,8 +9,8 @@
 //! The plan walk ([`Compiler::hir_check_value`]) decides each value's
 //! [`Rep`]: one word in its type's one-word layout (immediate, heap pointer,
 //! boxed `ObjEnum` or pointer niche), or the `[payload, tag]` pair a
-//! two-word `CALL` / `RETURN` carries, and records the layout, dictionary
-//! and call tables `from_hir` reads.
+//! two-word `CALL` / `RETURN` carries, and records the layouts, dictionaries
+//! and calls `from_hir` asks for as it lowers each node (`HirLowerCx`).
 
 use super::*;
 use crate::hir::classify::{self, ValueClass};
@@ -1560,7 +1560,7 @@ impl Compiler {
                 self.hir_mir_why = None;
                 // A shared generic body takes its dictionaries as trailing
                 // parameters: direct MIR lowers it when its code reads them
-                // only as it plans (`HirMirTables::reads_dicts`), its open
+                // only as it plans (`hir_mir_reads_dicts`), its open
                 // parameters unboxed on entry (the call boxed them, and a
                 // boxed word stored into a field or container would reach
                 // a ground reader as the box, #802).
@@ -1665,15 +1665,27 @@ impl Compiler {
         self.queue_hir_lambdas(emit);
         Self::queue_hir_par_loops(emit);
         let emit = &*emit;
-        // A lambda's captured dictionaries sit below its parameters.
-        self.hir_mir_dict_sp = entry_words.or(self.hir_lambda_dicts.filter(|&(_, n)| n > 0).map(|(at, n)| at + n));
-        let tables = self.hir_mir_tables(hir, emit);
+        // A lambda's captured dictionaries sit below its parameters, and
+        // are parameters too.
+        let lambda_dicts = self.hir_lambda_dicts.filter(|&(_, n)| n > 0);
+        self.hir_mir_dict_sp = entry_words.or(lambda_dicts.map(|(at, n)| at + n));
+        let lowered = self.hir_lower_mir_in(hir, emit, entry_words.is_some() || lambda_dicts.is_some());
         self.hir_mir_dict_sp = None;
+        lowered
+    }
+
+    /// [`Self::hir_lower_mir`], with the body's dictionary parameters known
+    /// (`dict_params`: the frame's dictionaries are parameters of its MIR).
+    fn hir_lower_mir_in(&mut self, hir: &HirBody, emit: &HirEmit, dict_params: bool) -> Option<crate::mir::MirFunc> {
+        // What is decided over the whole body before it lowers: the values
+        // it packs, the residue lint, and whether it reads a dictionary.
+        let reach = self.hir_mir_reach(hir, emit);
+        let packs = self.hir_mir_packs(hir, emit, &reach);
         // A shared generic body's dictionaries are trailing parameters
         // direct MIR reads only through dictionary programs: a body whose
         // code reads one any other way gets no MIR, and is never a
         // tree-shake root (a mono clone stands in for it).
-        if (entry_words.is_some() || self.hir_lambda_dicts.is_some_and(|(_, n)| n > 0)) && tables.reads_dicts {
+        if dict_params && self.hir_mir_reads_dicts(hir, emit, &reach) {
             self.hir_mir_why = Some("converted or shared generic entry".into());
             return None;
         }
@@ -1681,17 +1693,12 @@ impl Compiler {
         let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
             .filter(|loc| loc.is_known() && self.hir_synth_calls.is_none())
             .map(|loc| loc.file);
-        let plan = &emit.plan;
-        let why = if plan.par_inline {
+        let why = if emit.plan.par_inline {
             Err("parallel loop".to_string())
         } else {
             let frozen = self.hir_frozen_arrays(hir);
-            // A lambda's captured dictionaries are parameters too.
-            let dict_params = entry_words.is_some() || self.hir_lambda_dicts.is_some_and(|(_, n)| n > 0);
-            let cx = HirLowerCx::new(self, hir, emit, &tables, dict_params);
-            let mut inp = self.hir_mir_input(emit, &tables, file);
-            inp.frozen_arrays = frozen;
-            crate::mir::lower_from_hir(hir, &inp, &cx)
+            let cx = HirLowerCx::new(self, hir, emit, HirLowerBody { reach: &reach, packs, frozen, file, dict_params });
+            crate::mir::lower_from_hir(hir, &cx)
         };
         match why {
             Ok((mut func, frame)) => {
@@ -1804,55 +1811,6 @@ impl Compiler {
         }
     }
 
-    /// What direct MIR lowering needs from emission: the side tables
-    /// planned over the HIR ([`Self::hir_mir_tables`]) and the call sites.
-    fn hir_mir_input<'a>(&'a self, emit: &'a HirEmit, tables: &'a emit_hir_mir::HirMirTables, file: Option<u32>) -> crate::mir::HirMirInput<'a> {
-        // A `defer`'s cleanup pad ends in `unwind_resume`.
-        let unwind_native = self.native_id("unwind_resume").and_then(|n| u16::try_from(n).ok());
-        // A `for` loop left early closes the generator it runs over.
-        let coro_close_native = self.native_id(common::CORO_CLOSE_NATIVE).and_then(|n| u16::try_from(n).ok());
-        crate::mir::HirMirInput {
-            unwind_native,
-            coro_close_native,
-            calls: &tables.calls,
-            into_iters: &tables.into_iters,
-            iter_loops: &tables.iter_loops,
-            strings: &tables.strings,
-            formats: &tables.formats,
-            format_shows: &tables.format_shows,
-            op_calls: &tables.op_calls,
-            par_loops: &tables.par_loops,
-            par_forks: &tables.par_forks,
-            op_prims: &tables.op_prims,
-            fn_values: &tables.fn_values,
-            value_calls: &tables.value_calls,
-            value_pair_calls: &tables.value_pair_calls,
-            poly_calls: &tables.poly_calls,
-            bound_calls: &tables.bound_calls,
-            existential_calls: &tables.existential_calls,
-            alloc_steady: self.alloc_steady,
-            frozen_arrays: HashMap::new(),
-            niche_args: &tables.niche_args,
-            existential_packs: tables.existential_packs,
-            packs: &tables.packs,
-            matrix_wraps: &tables.matrix_wraps,
-            field_news: &tables.field_news,
-            linalgs: &tables.linalgs,
-            array_copies: &tables.array_copies,
-            crosses: &tables.crosses,
-            ffis: &tables.ffis,
-            unrolled_las: &tables.unrolled_las,
-            cold_calls: if emit.plan.cold_ok && !self.cold_labels.is_empty() {
-                tables.calls.iter().filter(|(_, s)| self.cold_labels.contains(&s.target)).map(|(&i, _)| i).collect()
-            } else {
-                HashSet::new()
-            },
-            file,
-            debugger: self.debugger_attached,
-            coverage: self.keep_fns_in.is_some(),
-        }
-    }
-
     /// A type whose value can hold an object with a `drop` (a class or
     /// enum with one, or a type built from such).
     fn finalized(checker: &crate::typechecking::Checker, ty: &Ty) -> bool {
@@ -1911,7 +1869,7 @@ impl Compiler {
 
     /// The lane arrays of `hir` (`lane_arrays`) whose value goes on to code
     /// that reads it one word per element, so is turned into that form
-    /// first (`HirMirInput::lane_escapes`). A use keeps the lanes when it
+    /// first (`HirLaneUses::escapes`). A use keeps the lanes when it
     /// is an element read or store, a push, a length, a `for` loop, a `let`
     /// or local assignment, the function's own lane-array result, or an
     /// argument of a ground function whose parameter is a lane array; a
@@ -10692,23 +10650,22 @@ impl Compiler {
         Some(HirParCall::Dynamic { cutoff, orig, worker })
     }
 
-    /// Record auto-par site `id` for direct MIR when its result comes back
-    /// in its own type's one-word layout.
-    fn hir_note_par_fork(
+    /// Auto-par site `id` for direct MIR, when its result comes back in
+    /// its own type's one-word layout.
+    fn hir_par_fork(
         &self,
         hir: &HirBody,
         emit: &HirEmit,
         id: HirId,
         worker: crate::bodies::Label,
         seq: Option<(crate::bodies::Label, i64)>,
-        par_forks: &mut HashMap<u32, crate::mir::HirParFork>,
-    ) {
+    ) -> Option<crate::mir::HirParFork> {
         let natural = Self::hir_call_rep(&emit.plan.calls[&id.0]);
         if self.hir_ret_shape(hir, id, &natural) != Some(false) || natural.words() != 1 {
-            return;
+            return None;
         }
         let hops = i64::from(crate::typechecking::PAR_SPEC_HOPS as i32);
-        par_forks.insert(id.0, crate::mir::HirParFork { worker, hops, seq });
+        Some(crate::mir::HirParFork { worker, hops, seq })
     }
 
     /// A fresh slot for `local`. HIR locals are distinct even when their
@@ -10833,14 +10790,25 @@ impl crate::hir::tables::GlobalTables for HirTables<'_> {
 /// ([`crate::mir::LowerCx`]): the checker's layouts, which callees are
 /// pure or never resize an array, and the facts of the body's plan.
 struct HirLowerCx<'a> {
-    c: &'a Compiler,
+    /// Asking for a node's site ([`crate::mir::LowerCx::site`]) changes the
+    /// compiler; a fact only reads it.
+    c: std::cell::RefCell<&'a mut Compiler>,
     hir: &'a HirBody,
     emit: &'a HirEmit,
-    tables: &'a emit_hir_mir::HirMirTables,
     /// The body's entry frame.
-    frame: &'a frame::BodyFrame,
+    frame: frame::BodyFrame,
     /// The frame's dictionaries are parameters of the body's MIR.
     dict_params: bool,
+    /// The nodes whose code emission writes ([`Compiler::hir_mir_reach`]),
+    /// by node: any other has no site.
+    reach: Vec<bool>,
+    /// The values a reached `let` or assignment binds.
+    bound_values: HashSet<u32>,
+    packs: crate::mir::HirPacks,
+    /// Function-local `const` tables: the array `Make` and its static slot.
+    frozen: HashMap<u32, u32>,
+    /// Source file of the body.
+    file: Option<u32>,
     /// A generic body's type variable values are opaque words it only
     /// moves; a generic class's shared method sees its class's
     /// parameters as type variables too.
@@ -10851,16 +10819,51 @@ struct HirLowerCx<'a> {
     outlined: std::cell::OnceCell<HashSet<u32>>,
 }
 
+/// What [`Compiler::hir_lower_mir`] works out over a body before it lowers.
+struct HirLowerBody<'a> {
+    reach: &'a [HirId],
+    packs: crate::mir::HirPacks,
+    frozen: HashMap<u32, u32>,
+    file: Option<u32>,
+    dict_params: bool,
+}
+
 impl<'a> HirLowerCx<'a> {
-    fn new(c: &'a Compiler, hir: &'a HirBody, emit: &'a HirEmit, tables: &'a emit_hir_mir::HirMirTables, dict_params: bool) -> Self {
+    fn new(c: &'a mut Compiler, hir: &'a HirBody, emit: &'a HirEmit, body: HirLowerBody<'_>) -> Self {
         // A `Vec<T>` of them too (`len(self.keys)` in a `HashMap<K, V>`
         // invariant reads no `K`).
         let holds_var = |t: &Ty| is_var_ty(t) || crate::typechecking::ty::vec_element_ty(t).is_some_and(is_var_ty);
         let opaque_vars = hir.is_generic
             || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(holds_var))
             || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(holds_var));
-        let frame = c.hir_body_frame.as_ref().expect("the frame of the body being lowered");
-        HirLowerCx { c, hir, emit, tables, frame, dict_params, opaque_vars, outlined: std::cell::OnceCell::new() }
+        let frame = c.hir_body_frame.clone().expect("the frame of the body being lowered");
+        let mut reach = vec![false; hir.exprs.len()];
+        let mut bound_values = HashSet::new();
+        for &id in body.reach {
+            reach[id.0 as usize] = true;
+            if let HirKind::Let { init: Some(value), .. } | HirKind::Assign { value, .. } = hir.expr(id).kind {
+                bound_values.insert(value.0);
+            }
+        }
+        HirLowerCx {
+            c: std::cell::RefCell::new(c),
+            hir,
+            emit,
+            frame,
+            dict_params: body.dict_params,
+            reach,
+            bound_values,
+            packs: body.packs,
+            frozen: body.frozen,
+            file: body.file,
+            opaque_vars,
+            outlined: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The compiler, to read.
+    fn c(&self) -> std::cell::Ref<'_, Compiler> {
+        std::cell::Ref::map(self.c.borrow(), |c| &**c)
     }
 
     /// A local of an outlined parallel loop's body.
@@ -10872,7 +10875,7 @@ impl<'a> HirLowerCx<'a> {
     /// per element, each one word. An error when the plan keeps one in
     /// slots that direct MIR cannot type.
     fn try_stack(&self, local: u32) -> Result<Option<(usize, crate::mir::MirTy)>, String> {
-        let c = self.c;
+        let c = self.c();
         let Some(&n) = self.emit.plan.stacks.get(&local).filter(|_| !self.outlined(local)) else {
             return Ok(None);
         };
@@ -10909,7 +10912,7 @@ impl<'a> HirLowerCx<'a> {
     /// bound to `init` (a `new`). An error when one has none.
     fn try_sroa_words(&self, init: HirId) -> Result<Vec<crate::mir::MirTy>, String> {
         use crate::mir::LowerCx;
-        let (c, hir) = (self.c, self.hir);
+        let (c, hir) = (self.c(), self.hir);
         let checker = &c.checker;
         let (_, tys) = c.hir_new_layout(hir, init).ok_or("scalar-replaced local")?;
         // A generic class's field at the made type's arguments.
@@ -10968,7 +10971,7 @@ impl<'a> HirLowerCx<'a> {
         if !self.emit.plan.sroa.contains_key(&local.0) || self.outlined(local.0) {
             return Ok(None);
         }
-        let Some((FieldAt::Slot(idx), _)) = self.c.hir_field(hir, *base, name) else {
+        let Some((FieldAt::Slot(idx), _)) = self.c().hir_field(hir, *base, name) else {
             return Err("scalar-replaced field".into());
         };
         Ok(Some((local.0, idx)))
@@ -10978,7 +10981,7 @@ impl<'a> HirLowerCx<'a> {
     /// parameter's type it fills, when direct MIR makes the object.
     fn note_new_residue(&self, id: HirId) {
         use crate::mir::LowerCx;
-        let (c, hir) = (self.c, self.hir);
+        let (c, hir) = (self.c(), self.hir);
         let checker = &c.checker;
         if self.new_object(id).object.is_none() {
             return;
@@ -11006,7 +11009,7 @@ impl<'a> HirLowerCx<'a> {
     /// holds it as its type says.
     fn word(&self, t: &Ty) -> Option<crate::mir::MirTy> {
         use crate::mir::LowerCx;
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         crate::mir::word_mir_ty(t)
             .or_else(|| {
                 let opaque = crate::mir::opaque_heap_ty(&apply_ty_prune(checker.subst(), t));
@@ -11038,7 +11041,7 @@ impl<'a> HirLowerCx<'a> {
     /// holds its boxed heap word.
     fn field_word(&self, t: &Ty) -> Option<crate::mir::MirTy> {
         use crate::mir::LowerCx;
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         self.word(t).or_else(|| self.scalar_enum(t)).or_else(|| {
             let boxed = match classify::classify(checker, t)? {
                 ValueClass::Opaque => matches!(apply_ty_prune(checker.subst(), t), Ty::Con(ref n) if n == crate::typechecking::ty::STRING),
@@ -11051,7 +11054,7 @@ impl<'a> HirLowerCx<'a> {
 
     /// A field's word, a two-word value (a pair) held boxed.
     fn record_word(&self, t: &Ty) -> Option<crate::mir::MirTy> {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         self.field_word(t).or_else(|| {
             let t = apply_ty_prune(checker.subst(), t);
             // A heap tuple is its object's word (#1170).
@@ -11065,7 +11068,7 @@ impl<'a> HirLowerCx<'a> {
     /// Option<Node<T>>`) holds its boxed word; read or written at a ground
     /// type `at` with a niche layout of its own it converts there.
     fn open_niche(&self, fty: &Ty, at: &Ty) -> Option<ValueLayout> {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         let at_layout = crate::layout::value_layout(checker, at);
         // A bare parameter (`item: T`) holds rep(ground T): a niche
         // value as its niche word.
@@ -11080,7 +11083,7 @@ impl<'a> HirLowerCx<'a> {
     /// A `readonly class` instance's fields never change after `new`
     /// (#1560): their reads are invariant.
     fn readonly_class(&self, t: &Ty) -> bool {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         match crate::typechecking::ty::strip_readonly(&apply_ty_prune(checker.subst(), t)) {
             Ty::Con(n) => checker.is_readonly_class(n),
             Ty::App(head, _) => matches!(head.as_ref(), Ty::Con(n) if checker.is_readonly_class(n)),
@@ -11092,7 +11095,7 @@ impl<'a> HirLowerCx<'a> {
     /// uses, when it is not a scalar-replaced local's.
     fn field_slot(&self, id: HirId, base: HirId, name: &str) -> crate::mir::HirFieldWord {
         use crate::mir::{HirFieldWord, LowerCx};
-        let (c, hir) = (self.c, self.hir);
+        let (c, hir) = (self.c(), self.hir);
         let checker = &c.checker;
         let ty = hir.expr(id).ty.as_ref();
         let base_ty = Compiler::hir_ty(hir, base);
@@ -11144,52 +11147,52 @@ impl<'a> HirLowerCx<'a> {
 
 impl crate::mir::LowerCx for HirLowerCx<'_> {
     fn is_class(&self, t: &Ty) -> bool {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         checker.ty_is_class(&apply_ty_prune(checker.subst(), t))
     }
 
     fn pair_class(&self, t: &Ty) -> Option<u32> {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         crate::layout::readonly_pair_class(checker, &apply_ty_prune(checker.subst(), t)).map(|key| checker.class_type_id(&key))
     }
 
     fn pinned(&self, t: &Ty) -> bool {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         Compiler::finalized(checker, &apply_ty_prune(checker.subst(), t))
     }
 
     fn scalar_enum(&self, t: &Ty) -> Option<crate::mir::MirTy> {
-        Compiler::scalar_enum_mir_ty(&self.c.checker, t)
+        Compiler::scalar_enum_mir_ty(&self.c().checker, t)
     }
 
     fn scalar_variant(&self, enum_name: &str, variant: &str) -> Option<crate::mir::ScalarLit> {
         use crate::mir::{MirConst, ScalarLit};
         use crate::typechecking::ty::ScalarBacking;
-        match self.c.checker.scalar_for(enum_name, variant)? {
-            ScalarBacking::Int(n) => Some(ScalarLit::Const(MirConst::I64(*n))),
-            ScalarBacking::Float(bits) => Some(ScalarLit::Const(MirConst::F64(*bits))),
-            ScalarBacking::Bool(b) => Some(ScalarLit::Const(MirConst::Bool(*b))),
-            // Emission interned the string where it pushed it; a string
-            // this body never pushed is not one to read.
-            ScalarBacking::String(s) => self.c.string_indices.get(unescape_coil_string(s).as_str()).copied().map(ScalarLit::Str),
+        let backing = self.c().checker.scalar_for(enum_name, variant)?.clone();
+        match backing {
+            ScalarBacking::Int(n) => Some(ScalarLit::Const(MirConst::I64(n))),
+            ScalarBacking::Float(bits) => Some(ScalarLit::Const(MirConst::F64(bits))),
+            ScalarBacking::Bool(b) => Some(ScalarLit::Const(MirConst::Bool(b))),
+            // Interned where lowering first reads it.
+            ScalarBacking::String(s) => Some(ScalarLit::Str(self.c.borrow_mut().intern_string(unescape_coil_string(&s)))),
         }
     }
 
     fn enum_drop(&self, name: &str) -> Option<u32> {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         checker.enum_has_drop(name).then(|| checker.class_type_id(name))
     }
 
     fn word_kind(&self, t: &Ty) -> u8 {
-        crate::layout::word_kind(&self.c.checker, t)
+        crate::layout::word_kind(&self.c().checker, t)
     }
 
     fn array_stamp(&self, t: &Ty) -> u8 {
-        crate::layout::array_elem_stamp(&self.c.checker, t)
+        crate::layout::array_elem_stamp(&self.c().checker, t)
     }
 
     fn boxed_enum(&self, t: &Ty, variant: Option<&str>) -> Option<Vec<Ty>> {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         let t = apply_ty_prune(checker.subst(), t);
         if crate::typechecking::ty::is_option_ty(&t)
             || crate::typechecking::ty::is_result_ty(&t)
@@ -11201,7 +11204,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn boxed_view(&self, t: &Ty, variant: Option<&str>) -> Option<Vec<Ty>> {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         let t = apply_ty_prune(checker.subst(), t);
         if crate::layout::value_layout(checker, &t) != ValueLayout::Boxed {
             return None;
@@ -11210,7 +11213,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn pair_variants(&self, t: &Ty) -> Option<crate::mir::PairVariants> {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         let t = apply_ty_prune(checker.subst(), t);
         let kind = crate::layout::two_word_kind(checker, &t)?.enum_name()?.to_string();
         let mut variants = Vec::new();
@@ -11229,7 +11232,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn unit_tags(&self, t: &Ty) -> u64 {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         let t = apply_ty_prune(checker.subst(), t);
         let Some(kind) = crate::layout::two_word_kind(checker, &t).and_then(|k| k.enum_name().map(str::to_string)) else {
             return 0;
@@ -11241,11 +11244,11 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn payload_names(&self, enum_name: &str, variant: &str) -> Vec<String> {
-        self.c.checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
+        self.c().checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
     }
 
     fn niche(&self, t: &Ty) -> Option<crate::mir::MirTy> {
-        match crate::layout::value_layout(&self.c.checker, t) {
+        match crate::layout::value_layout(&self.c().checker, t) {
             ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
             ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
             ValueLayout::Boxed => None,
@@ -11253,27 +11256,77 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn pure_fn(&self, name: &str) -> bool {
-        crate::pure_call::name_in(&self.c.pure_fns, name)
+        crate::pure_call::name_in(&self.c().pure_fns, name)
     }
 
     fn steady_fn(&self, name: &str) -> bool {
-        crate::pure_call::name_in(&self.c.steady_fns, name)
+        crate::pure_call::name_in(&self.c().steady_fns, name)
     }
 
     fn pair_tys(&self, t: &Ty) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {
-        self.c.hir_mir_pair_tys(t)
+        self.c().hir_mir_pair_tys(t)
     }
 
     fn pair_holds_heap(&self, t: &Ty) -> bool {
-        self.c.hir_pair_holds_heap(t)
+        self.c().hir_pair_holds_heap(t)
     }
 
     fn lane_elem(&self, t: &Ty) -> Option<crate::mir::HirLaneElem> {
-        self.c.hir_lane_elem(t)
+        self.c().hir_lane_elem(t)
     }
 
     fn frame(&self) -> &frame::BodyFrame {
-        self.frame
+        &self.frame
+    }
+
+    fn site(&self, id: HirId) -> crate::mir::HirSite {
+        if !self.reach[id.0 as usize] {
+            return crate::mir::HirSite::default();
+        }
+        self.c.borrow_mut().hir_mir_site(self.hir, self.emit, id)
+    }
+
+    fn packs(&self) -> &crate::mir::HirPacks {
+        &self.packs
+    }
+
+    fn array_copy(&self, value: HirId) -> Option<u16> {
+        if !self.bound_values.contains(&value.0) {
+            return None;
+        }
+        self.c().hir_array_copy(self.hir, self.emit, value).and_then(|n| u16::try_from(n).ok())
+    }
+
+    fn cold_target(&self, target: crate::bodies::Label) -> bool {
+        self.c().cold_labels.contains(&target)
+    }
+
+    fn alloc_steady(&self) -> bool {
+        self.c().alloc_steady
+    }
+
+    fn frozen_array(&self, id: HirId) -> Option<u32> {
+        self.frozen.get(&id.0).copied()
+    }
+
+    fn unwind_native(&self) -> Option<u16> {
+        self.c().native_id("unwind_resume").and_then(|n| u16::try_from(n).ok())
+    }
+
+    fn coro_close_native(&self) -> Option<u16> {
+        self.c().native_id(common::CORO_CLOSE_NATIVE).and_then(|n| u16::try_from(n).ok())
+    }
+
+    fn file(&self) -> Option<u32> {
+        self.file
+    }
+
+    fn debugger(&self) -> bool {
+        self.c().debugger_attached
+    }
+
+    fn coverage(&self) -> bool {
+        self.c().keep_fns_in.is_some()
     }
 
     fn dict_params(&self) -> bool {
@@ -11281,7 +11334,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn bound_locals(&self) -> HashSet<u32> {
-        self.c.hir_bound_locals(self.hir, self.emit)
+        self.c().hir_bound_locals(self.hir, self.emit)
     }
 
     fn local_words(&self, local: u32) -> crate::mir::LocalWords {
@@ -11295,7 +11348,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
                 HirKind::Let { local: l, init: Some(init) } if l.0 == local => Some(init),
                 _ => None,
             });
-            LocalWords::Slots(init.and_then(|init| self.c.hir_new_layout(self.hir, init)).map_or(1, |(_, tys)| tys.len() as u32))
+            LocalWords::Slots(init.and_then(|init| self.c().hir_new_layout(self.hir, init)).map_or(1, |(_, tys)| tys.len() as u32))
         } else if plan.pair_locals.contains_key(&local) {
             LocalWords::Pair
         } else {
@@ -11304,7 +11357,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn check_frame(&self, slots: &[Option<u32>]) -> Result<(), String> {
-        let (c, hir, emit) = (self.c, self.hir, self.emit);
+        let (c, hir, emit) = (self.c(), self.hir, self.emit);
         let slot = |local: u32| slots.get(local as usize).copied().flatten();
         let mut outlined = HashSet::new();
         for par in emit.plan.par_loops.values() {
@@ -11357,12 +11410,12 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         if !self.emit.plan.pair_locals.contains_key(&local) {
             return None;
         }
-        self.c.hir_mir_pair_tys(self.hir.local(LocalId(local)).ty.as_ref()?)
+        self.c().hir_mir_pair_tys(self.hir.local(LocalId(local)).ty.as_ref()?)
     }
 
     fn ret_pair(&self) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {
         match &self.emit.plan.ret {
-            Rep::Pair(_) => self.c.hir_mir_pair_tys(self.hir.ret.as_ref()?),
+            Rep::Pair(_) => self.c().hir_mir_pair_tys(self.hir.ret.as_ref()?),
             Rep::Word(_) => None,
         }
     }
@@ -11378,7 +11431,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn lane_uses(&self) -> crate::mir::HirLaneUses {
-        let (c, hir, emit) = (self.c, self.hir, self.emit);
+        let (c, hir, emit) = (self.c(), self.hir, self.emit);
         let lanes = hir
             .exprs
             .iter()
@@ -11413,7 +11466,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn sroa_class(&self, local: u32) -> Option<(u32, u32)> {
-        let checker = &self.c.checker;
+        let checker = &self.c().checker;
         let class = self.emit.plan.sroa.get(&local)?;
         let n = checker.class_fields(class).map_or(0, |f| f.len());
         Some((checker.class_type_id(class), n as u32))
@@ -11424,7 +11477,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn record_field(&self, id: HirId) -> Option<(u32, crate::mir::MirTy)> {
-        let (c, hir) = (self.c, self.hir);
+        let (c, hir) = (self.c(), self.hir);
         let e = hir.expr(id);
         let HirKind::Field { base, name } = &e.kind else {
             return None;
@@ -11442,7 +11495,8 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn record(&self, id: HirId) -> Option<(u32, Vec<(u32, crate::mir::MirTy)>)> {
-        let (checker, hir) = (&self.c.checker, self.hir);
+        let c = self.c();
+        let (checker, hir) = (&c.checker, self.hir);
         let e = hir.expr(id);
         let HirKind::Make {
             kind: MakeKind::Record(names),
@@ -11451,7 +11505,9 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         else {
             return None;
         };
-        let &type_id = self.tables.record_types.get(&id.0)?;
+        if !self.reach[id.0 as usize] {
+            return None;
+        }
         let ty = e.ty.as_ref().map(|t| apply_ty_prune(checker.subst(), t));
         let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else {
             return None;
@@ -11470,11 +11526,14 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
                 (Compiler::hir_ty(hir, arg).and_then(|t| self.record_word(t)) == Some(w)).then_some((slot, w))
             })
             .collect::<Option<Vec<_>>>()?;
+        drop(c);
+        // The shape's `InitTyped` type id.
+        let type_id = self.c.borrow_mut().checker.record_type_id(fields);
         Some((type_id, words))
     }
 
     fn record_pat(&self, id: HirId) -> Option<Vec<Option<(u32, crate::mir::MirTy)>>> {
-        let (checker, hir) = (&self.c.checker, self.hir);
+        let (checker, hir) = (&self.c().checker, self.hir);
         let HirKind::LetPat {
             pat: HirPat::Record(parts),
             init,
@@ -11505,7 +11564,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn new_object(&self, id: HirId) -> crate::mir::HirNew {
-        let (c, hir) = (self.c, self.hir);
+        let (c, hir) = (self.c(), self.hir);
         let checker = &c.checker;
         let mut out = crate::mir::HirNew::default();
         let (Some((class, tys)), HirKind::Make { args, .. }) = (c.hir_new_layout(hir, id), &hir.expr(id).kind) else {
@@ -11573,7 +11632,10 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn host(&self, id: HirId) -> Option<crate::mir::HirHost> {
-        let c = self.c;
+        // Noted for the capability check before lowering can write its
+        // `HostInvoke`.
+        self.c.borrow_mut().hir_note_host_call(self.hir, self.emit, id);
+        let c = self.c();
         let call = self.emit.plan.calls.get(&id.0)?;
         // Host natives taking plain words and returning one (a niche word
         // comes back as the layout asks; no pair conversion at the edge),
@@ -11604,7 +11666,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     fn pinned_for(&self, id: HirId) -> bool {
         let node = self.hir.expr(id);
         let (start, end) = node.span;
-        let sidecar = &self.c.typed_sidecar;
+        let sidecar = &self.c().typed_sidecar;
         matches!(node.kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. })
             && (node.node.is_some_and(|n| sidecar.is_for_in_pin(n)) || sidecar.is_for_in_pin_span(start, end))
     }
@@ -11612,7 +11674,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     fn ret_boxed_niche(&self) -> Option<ValueLayout> {
         // A body that returns a niche-layout value boxed (a test body's
         // `Result`) builds the box at each return.
-        match (&self.emit.plan.ret, self.hir.ret.as_ref().map(|t| self.c.value_layout(t))) {
+        match (&self.emit.plan.ret, self.hir.ret.as_ref().map(|t| self.c().value_layout(t))) {
             (Rep::Word(ValueLayout::Boxed), Some(l @ (ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult))) => Some(l),
             _ => None,
         }
@@ -11623,7 +11685,7 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
     }
 
     fn static_tail(&self, id: HirId) -> Option<u32> {
-        self.c.checker.static_tail_of_slot(self.static_slot(id)?)
+        self.c().checker.static_tail_of_slot(self.static_slot(id)?)
     }
 
     fn const_value(&self, id: HirId) -> Option<&crate::const_fold::ConstValue> {
