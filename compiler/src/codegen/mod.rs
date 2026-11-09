@@ -202,6 +202,18 @@ struct Context {
     unboxed_enum_locals: HashMap<String, (u32, u32, PairKind)>,
 }
 
+/// The function state a body compiles under ([`Compiler::with_body_frame`]).
+pub(super) struct BodyFrame {
+    /// [`Compiler::current_function_qualified`].
+    qualified: Option<String>,
+    /// [`Compiler::current_function_table_key`].
+    table_key: Option<String>,
+    result_mode: bool,
+    result_ok_is_result: bool,
+    /// [`Compiler::compiling_two_word_enum`].
+    two_word: Option<PairKind>,
+}
+
 /// Target-side layouts at a trait-method call across a generic boundary;
 /// see [`Compiler::trait_method_boundary_sig`].
 pub(super) struct BoundarySig {
