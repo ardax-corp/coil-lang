@@ -4589,6 +4589,39 @@ fn tests_are_entry_points_for_capabilities() {
     );
 }
 
+/// E4: a gated call a macro wrote is checked as one the user wrote. Its
+/// span is the expansion's, not a place in a file, and the check finds the
+/// call's `HostInvoke` by that span: in an expression where the macro is
+/// used, and in a function the macro declares.
+#[test]
+fn macro_generated_host_calls_still_need_their_capabilities() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("coil_gated_macros_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    let provider = "use macro::{Expr, Code};\n\nmacro probe(Expr path) -> Code {\n    return quote expr { exists(${path}) };\n}\n\nmacro prober(Expr name) -> Code {\n    return quote items {\n        fn ${name}() -> bool {\n            let _ = exists(\"gen.toml\");\n            return true;\n        }\n    };\n}\n";
+    let main = "use io::fs::{exists};\nuse gated_macros::{probe, prober};\n\nprober!(generated);\n\nfn main() {\n    let _ = probe!(\"cfg.toml\");\n    if generated() {\n        return;\n    }\n}\n";
+    std::fs::write(dir.join("src/gated_macros.coil"), provider).expect("write the provider");
+    let file = dir.join("main.coil");
+    std::fs::write(&file, main).expect("write the program");
+    let pipeline = |grant: bool| {
+        let mut pipeline = deny_pipeline();
+        pipeline.bind_project_roots_with_default(dir.clone(), Pipeline::workspace_language_extra_roots());
+        if grant {
+            assert!(pipeline.grant_capability("read"));
+        }
+        pipeline
+    };
+    let mut denied = pipeline(false);
+    assert!(denied.compile_src_from_file(file.to_str().expect("utf-8 path")).is_err(), "compiled with no grant");
+    let msgs: Vec<String> = denied.messages().iter().map(|m| m.message().to_string()).collect();
+    assert!(msgs.iter().any(|m| m == "`io::fs::exists` requires `--allow-read`: reached from `main`"), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m == "`io::fs::exists` requires `--allow-read`: reached from `main` → `generated`"), "{msgs:?}");
+    let mut granted = pipeline(true);
+    assert!(granted.compile_src_from_file(file.to_str().expect("utf-8 path")).is_ok(), "{:?}", granted.messages().iter().map(|m| m.message().to_string()).collect::<Vec<_>>());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Compile and run with contract checks at `level`, from a file so panics
 /// name their locations (`contracts.coil:LINE:COL`).
 fn run_contracts_src(src: &str, level: compiler::ContractLevel) -> String {

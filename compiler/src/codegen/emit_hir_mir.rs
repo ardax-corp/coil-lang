@@ -1,13 +1,13 @@
-//! The side tables direct MIR lowering reads ([`crate::mir::HirMirInput`]),
-//! worked out over a planned HIR body: the entries its code calls and the
-//! strings it interns, from the plan, the function and label tables and
-//! the string interner.
+//! What direct MIR lowering asks about a planned HIR body's nodes
+//! ([`crate::mir::HirSite`]): the entry each one's code calls, the strings
+//! it interns and the function values it makes, from the plan, the function
+//! and label tables and the string interner.
 //!
-//! "Emission" below is the code MIR lowering writes for the plan. The walk
-//! visits what that code evaluates (an operand it skips, such as
-//! `typeof`'s, is skipped here too) and repeats the plan's side effects
-//! through the same helpers (interning, method clones), so it gives the
-//! same answer whether or not the plan ran them first.
+//! "Emission" below is the code MIR lowering writes for the plan. Lowering
+//! asks for a node's site where it emits the node's code, and asking runs
+//! the plan's side effects through the same helpers (interning, method
+//! clones). A node whose code is never written is never asked. The nodes a
+//! site exists for are the ones [`Compiler::hir_mir_reach`] visits.
 
 use super::*;
 use super::compiler::DictStep;
@@ -21,149 +21,136 @@ fn kind_arity(kind: crate::typechecking::FfiBuiltin) -> usize {
     }
 }
 
-/// What [`Compiler::hir_mir_tables`] plans for one body.
-#[derive(Default)]
-pub(super) struct HirMirTables {
-    /// String table index of each `string` literal (and `const` string,
-    /// `typeof` name, string index panic message), by expression.
-    pub(super) strings: HashMap<u32, u32>,
-    /// String table index of the format string of each `format` call
-    /// whose arguments all print as words (`%v` as `%s`), and of string
-    /// `+` (`"%s%s"`), by expression.
-    pub(super) formats: HashMap<u32, u32>,
-    /// Per argument of such a `format` call (after the format string): how
-    /// a `%v` argument is shown, `None` for a word.
-    pub(super) format_shows: HashMap<u32, Vec<Option<crate::mir::HirShow>>>,
-    /// `matrix(data)` calls, whose value is the data itself.
-    pub(super) matrix_wraps: HashSet<u32>,
-    /// Matrix / vector operators and `dot` / `matmul` calls on a packed
-    /// kernel: the native and the
-    /// meta word packing the shape, by expression.
-    pub(super) linalgs: HashMap<u32, (u16, u32)>,
-    /// `cross(a, b)` calls emission unrolls: whether the result is a
-    /// tuple and whether its elements are floats, by call.
-    pub(super) crosses: HashMap<u32, (bool, bool)>,
-    /// `extern` calls and `dload` / `declare` / `invoke`
-    /// (`HirBuiltin::Ffi` / `FfiDyn`): their opcode and operands, by call.
-    pub(super) ffis: HashMap<u32, crate::mir::HirFfi>,
-    /// `dot` / `matmul` calls and matrix operators emission unrolls (a
-    /// shape past the packed kernel's limits), by expression.
-    pub(super) unrolled_las: HashMap<u32, crate::typechecking::LinearAlgebraKind>,
-    /// Fixed array locals copied as they are bound or assigned to another
-    /// local ([`Compiler::hir_array_copy`]): the `vec_from_array` native,
-    /// by value.
-    pub(super) array_copies: HashMap<u32, u16>,
-    /// Entry of each plain one-word-ABI `CALL` (no dictionaries), by call
-    /// site: calls, and user operators on a raw instance method.
-    pub(super) calls: HashMap<u32, crate::mir::HirCallSite>,
-    /// User operators that call their instance method with boxed operands.
-    pub(super) op_calls: HashMap<u32, crate::mir::HirOpCall>,
-    /// User operators emitted as a raw opcode on the operands.
-    pub(super) op_prims: HashSet<u32>,
-    /// Calls through a function value emitted as a plain `CallIndirect`.
-    pub(super) value_calls: HashSet<u32>,
-    /// Of those, the calls of a two-word result: its `unpair` body.
-    pub(super) value_pair_calls: HashMap<u32, crate::bodies::Label>,
-    /// Calls through a `PolyFn` local with no dictionaries.
-    pub(super) poly_calls: HashMap<u32, crate::mir::HirPolyCall>,
-    /// Trait methods and operators on a bound type parameter through one
-    /// of the body's dictionary parameters (`HirBuiltin::Bound`,
-    /// `HirOp::Bound`), by call or operator.
-    pub(super) bound_calls: HashMap<u32, crate::mir::HirBoundCall>,
-    /// Trait methods on a bare-class existential pack
-    /// (`HirBuiltin::Existential`): the method's dictionary slot, by call.
-    pub(super) existential_calls: HashMap<u32, u32>,
-    /// Parallel loops the plan moved into their own fork-join functions,
-    /// by loop: the direct MIR lowering's calls.
-    pub(super) par_loops: HashMap<u32, crate::mir::HirParLoop>,
-    /// Auto-par call sites sent to a fork-join worker, by call: the direct
-    /// MIR lowering's calls.
-    pub(super) par_forks: HashMap<u32, crate::mir::HirParFork>,
-    /// Some value emission packs as a bare-class existential has no
-    /// [`crate::mir::HirDictOp`] program in `packs`.
-    pub(super) existential_packs: bool,
-    /// Values emission packs as a bare-class existential, by expression:
-    /// `plan_existential_pack` as a dictionary program run on the
-    /// value's word.
-    pub(super) packs: HashMap<u32, Vec<crate::mir::HirDictOp>>,
-    /// Function values built with `MakeFn` / `MakePolyFn` (lambdas, named
-    /// functions read as values and partial applications), by expression.
-    pub(super) fn_values: HashMap<u32, crate::mir::HirFnValue>,
-    /// Entry of the user `into_iter` a counted `for` loop calls, by loop.
-    pub(super) into_iters: HashMap<u32, crate::bodies::Label>,
-    /// The `into_iter` and `next` entries a `for` loop over a user
-    /// iterator calls, by loop.
-    pub(super) iter_loops: HashMap<u32, crate::mir::HirIterLoop>,
-    /// Some code emission writes for this body reads one of the frame's
-    /// dictionaries (`__dictN`) ([`Compiler::hir_mir_dict_reads`]).
-    pub(super) reads_dicts: bool,
-    /// The `InitTyped` type id of each record literal's slotted object
-    /// ([`Checker::record_type_id`]), by literal.
-    pub(super) record_types: HashMap<u32, u32>,
-    /// Shared generic call arguments of a niche layout passed in a boxed
-    /// parameter ([`Compiler::hir_niche_arg`]): boxed to their enum
-    /// object, by argument.
-    pub(super) niche_args: HashMap<u32, ValueLayout>,
-    /// `new C(args).f` reads emission elides the object of
-    /// ([`Compiler::hir_field_of_new`]): each argument runs in order and
-    /// `f`'s is the value, by field read.
-    pub(super) field_news: HashSet<u32>,
-}
-
 /// Which children of an expression emission evaluates.
 enum Kids {
     All,
     None,
     /// All but the first (a `format` call's literal format string).
     Rest,
+    /// A `declare` / `invoke`'s value operands.
+    These(Vec<HirId>),
 }
 
 impl Compiler {
-    /// The side tables direct MIR lowers `hir` with.
-    pub(super) fn hir_mir_tables(&mut self, hir: &HirBody, emit: &HirEmit) -> HirMirTables {
-        let mut tables = HirMirTables::default();
-        self.hir_mir_intern_keys(hir);
-        if let Some(root) = hir.root {
-            self.hir_mir_walk(hir, emit, root, &mut tables);
+    /// The nodes of `hir` whose code emission writes, in pre-order: not an
+    /// outlined parallel loop's parts, nor an operand emission never
+    /// evaluates (`typeof`'s, a fixed `len`'s, a `format` call's literal
+    /// format string, an FFI signature or callback).
+    pub(super) fn hir_mir_reach(&self, hir: &HirBody, emit: &HirEmit) -> Vec<HirId> {
+        let mut reach = Vec::new();
+        let mut todo: Vec<HirId> = hir.root.into_iter().collect();
+        while let Some(id) = todo.pop() {
+            reach.push(id);
+            // A parallel loop outlined into its fork-join function: its
+            // code is not this body's.
+            if emit.plan.par_loops.contains_key(&id.0) {
+                continue;
+            }
+            let kids: Vec<HirId> = match self.hir_mir_kids(hir, emit, id) {
+                Kids::All => hir.children(id).collect(),
+                Kids::None => Vec::new(),
+                Kids::Rest => hir.children(id).skip(1).collect(),
+                Kids::These(kids) => kids,
+            };
+            todo.extend(kids.into_iter().rev());
         }
-        tables
+        reach
     }
 
-    /// Intern the strings direct MIR reads by name that `hir`'s code
-    /// pushes: the backing string of each string-backed scalar enum
-    /// variant it makes or matches.
-    fn hir_mir_intern_keys(&mut self, hir: &HirBody) {
-        let mut variants: Vec<(String, String)> = Vec::new();
-        fn pat_variants(pat: &HirPat, out: &mut Vec<(String, String)>) {
-            match pat {
-                HirPat::Variant { enum_name, variant, fields, .. } => {
-                    out.push((enum_name.clone(), variant.clone()));
-                    match fields {
-                        HirPatFields::Unit => {}
-                        HirPatFields::Tuple(ps) => ps.iter().for_each(|p| pat_variants(p, out)),
-                        HirPatFields::Record(ps) => ps.iter().for_each(|(_, p)| pat_variants(p, out)),
-                    }
+    /// Which children of `id` emission evaluates.
+    fn hir_mir_kids(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Kids {
+        let call = || emit.plan.calls.get(&id.0);
+        match &hir.expr(id).kind {
+            // The operand's type name; the operand is not evaluated.
+            HirKind::Builtin { op: Builtin::TypeOf, .. } => Kids::None,
+            // `while false { .. }` is dropped.
+            HirKind::Loop { body }
+                if query::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
+            {
+                Kids::None
+            }
+            HirKind::Call { callee: Callee::Value(_), .. } => Kids::All,
+            // A fixed `len` of a local, literal or literal array evaluates
+            // nothing.
+            HirKind::Call { args, .. } if let Some(Some(_)) = emit.plan.lens.get(&id.0) => {
+                if matches!(hir.expr(args[0]).kind, HirKind::Local(_) | HirKind::Lit(_) | HirKind::Make { .. }) {
+                    Kids::None
+                } else {
+                    Kids::All
                 }
-                HirPat::Tuple(ps) => ps.iter().for_each(|p| pat_variants(p, out)),
-                HirPat::Record(ps) => ps.iter().for_each(|(_, p)| pat_variants(p, out)),
-                HirPat::Wild | HirPat::Bind(_) | HirPat::Int(_) => {}
             }
+            HirKind::Call { .. } if matches!(call(), Some(HirCall { builtin: Some(HirBuiltin::LinAlg), .. })) => Kids::All,
+            // What emission evaluates: an `extern`'s arguments, or the
+            // value operands (a signature's tags are constants, a
+            // callback its code pointer).
+            HirKind::Call { args, .. } if let Some(HirCall { builtin: Some(builtin @ HirBuiltin::FfiDyn(_)), .. }) = call() => Kids::These(
+                Self::hir_ffi_operands(hir, *builtin, args)
+                    .into_iter()
+                    .filter(|&a| self.hir_ffi_callback(hir, *builtin, a).is_none())
+                    .collect(),
+            ),
+            HirKind::Call { .. } if matches!(call(), Some(HirCall { builtin: Some(HirBuiltin::Ffi { .. } | HirBuiltin::Matrix), .. })) => Kids::All,
+            HirKind::Call { .. } if !emit.plan.lens.contains_key(&id.0) && matches!(call(), Some(HirCall { builtin: Some(HirBuiltin::Format), .. })) => Kids::Rest,
+            _ => Kids::All,
         }
-        for e in &hir.exprs {
-            match &e.kind {
-                    HirKind::Make { kind: MakeKind::Variant { enum_name, variant, .. }, .. } => {
-                    variants.push((enum_name.clone(), variant.clone()));
+    }
+
+    /// Whether the code emission writes for `reach` reads one of the
+    /// frame's dictionaries any way but through a dictionary program
+    /// ([`Self::hir_mir_dict_reads`]).
+    pub(super) fn hir_mir_reads_dicts(&mut self, hir: &HirBody, emit: &HirEmit, reach: &[HirId]) -> bool {
+        reach.iter().any(|&id| !emit.plan.par_loops.contains_key(&id.0) && self.hir_mir_dict_reads(hir, emit, id))
+    }
+
+    /// The values of `reach` emission packs as a bare-class existential
+    /// after they are built, each with `plan_existential_pack` as a
+    /// dictionary program run on the value's word. Worked out for the
+    /// whole body before it lowers: a pack with no program, or one lowering
+    /// passes by, leaves the body's MIR unused. The boxed-residue lint of
+    /// the body's packs and `PolyFn` calls is reported here too, so a
+    /// warning does not depend on what lowering reaches.
+    pub(super) fn hir_mir_packs(&mut self, hir: &HirBody, emit: &HirEmit, reach: &[HirId]) -> crate::mir::HirPacks {
+        let mut packs = crate::mir::HirPacks::default();
+        let lint = self.residue_lint.get();
+        for &id in reach {
+            if emit.plan.par_loops.contains_key(&id.0) {
+                continue;
+            }
+            // The boxed-residue lint of a `PolyFn` call's arguments is the
+            // body's, whether or not lowering gets to the call.
+            if lint
+                && let HirKind::Call { callee: Callee::Value(f), args } = &hir.expr(id).kind
+                && query::polyfn_callee(hir, &self.checker, *f)
+            {
+                let source = self.hir_polyfn_source(hir, emit, *f);
+                let _ = self.hir_polyfn_args(hir, emit, source.as_deref(), *f, args);
+            }
+            let Some(pack) = self.hir_existential_pack(hir, id) else {
+                continue;
+            };
+            if let Some(ty) = Self::hir_ty(hir, id) {
+                let span = hir.expr(id).span;
+                self.note_box_residue(
+                    format!("pack {}", span.0),
+                    ty,
+                    span,
+                    "a value of a bare trait type is one word",
+                    "take it as a generic `T: Trait` parameter, whose clone keeps the value's two words",
+                );
+            }
+            let steps = self.hir_mir_once(|this| {
+                let mut steps = Vec::new();
+                this.plan_existential_pack(&mut steps, &pack);
+                steps
+            });
+            match self.hir_mir_dict_program(&steps) {
+                Some(ops) => {
+                    packs.programs.insert(id.0, ops);
                 }
-                HirKind::Match { arms, .. } => arms.iter().for_each(|a| pat_variants(&a.pat, &mut variants)),
-                HirKind::LetPat { pat, .. } => pat_variants(pat, &mut variants),
-                _ => {}
+                None => packs.unplanned = true,
             }
         }
-        for (enum_name, variant) in variants {
-            if let Some(crate::typechecking::ty::ScalarBacking::String(s)) = self.checker.scalar_for(&enum_name, &variant).cloned() {
-                self.intern_string(unescape_coil_string(&s));
-            }
-        }
+        packs
     }
 
     /// The locals emission binds in `hir`'s frame, from the HIR and the
@@ -369,53 +356,37 @@ impl Compiler {
         out
     }
 
-    fn hir_mir_walk(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) {
-        // A parallel loop outlined into its fork-join function: its code is
-        // not this body's.
-        if let Some(par) = emit.plan.par_loops.get(&id.0) {
-            t.par_loops.insert(id.0, par.call.clone());
-            return;
-        }
-        if !t.reads_dicts {
-            t.reads_dicts = self.hir_mir_dict_reads(hir, emit, id);
-        }
-        let kids = self.hir_mir_note(hir, emit, id, t);
-        let all: Vec<HirId> = hir.children(id).collect();
-        let kids = match kids {
-            Kids::All => &all[..],
-            Kids::None => &[],
-            Kids::Rest => all.get(1..).unwrap_or_default(),
-        };
-        for &k in kids {
-            self.hir_mir_walk(hir, emit, k, t);
+    /// Note host call `id` for the capability check when its native needs
+    /// one: the check finds the call's `HostInvoke` in this body's MIR by
+    /// the call's loc. Direct MIR asks for a host call's native through
+    /// [`crate::mir::LowerCx::host`], which notes it first, so no
+    /// `HostInvoke` of a gated native is written unnoted.
+    pub(super) fn hir_note_host_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId) {
+        let e = hir.expr(id);
+        if let HirKind::Call { args, .. } = &e.kind
+            && let Some(HirBuiltin::Host(native)) = emit.plan.calls.get(&id.0).and_then(|c| c.builtin)
+            && let Some(row) = common::HOST_NATIVES.get(native)
+            && self.native_id(row.name) == Some(native)
+        {
+            let mode = match args.get(1).map(|&a| &hir.expr(a).kind) {
+                Some(HirKind::Lit(Lit::Str(m))) => Some(m.as_str()),
+                _ => None,
+            };
+            self.note_gated_host_call(row.name, e.span, mode);
         }
     }
 
-    /// Plan `id`'s own entries.
-    fn hir_mir_note(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, t: &mut HirMirTables) -> Kids {
-        // A value packed after it is built.
-        if let Some(pack) = self.hir_existential_pack(hir, id) {
-            if let Some(ty) = Self::hir_ty(hir, id) {
-                let span = hir.expr(id).span;
-                self.note_box_residue(
-                    format!("pack {}", span.0),
-                    ty,
-                    span,
-                    "a value of a bare trait type is one word",
-                    "take it as a generic `T: Trait` parameter, whose clone keeps the value's two words",
-                );
-            }
-            let steps = self.hir_mir_once(|this| {
-                let mut steps = Vec::new();
-                this.plan_existential_pack(&mut steps, &pack);
-                steps
-            });
-            match self.hir_mir_dict_program(&steps) {
-                Some(ops) => {
-                    t.packs.insert(id.0, ops);
-                }
-                None => t.existential_packs = true,
-            }
+    /// What emission planned for node `id`, as direct MIR lowers it
+    /// ([`crate::mir::HirSite`]). It runs the plan's side effects for the
+    /// node: lowering asks once, where it writes the node's code.
+    pub(super) fn hir_mir_site(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId) -> crate::mir::HirSite {
+        let mut site = crate::mir::HirSite::default();
+        let t = &mut site;
+        // A parallel loop outlined into its fork-join function: its code is
+        // not this body's.
+        if let Some(par) = emit.plan.par_loops.get(&id.0) {
+            t.par_loop = Some(par.call.clone());
+            return site;
         }
         let e = hir.expr(id);
         // A bound type parameter's operator or method through one of this
@@ -444,31 +415,18 @@ impl Compiler {
             && self.hir_mir_dict_param(dict)
             && let Some(dicts) = self.hir_mir_own_dicts(&own)
         {
-            t.bound_calls.insert(id.0, crate::mir::HirBoundCall { dict, method, boxed_ret, dicts });
+            t.bound_call = Some(crate::mir::HirBoundCall { dict, method, boxed_ret, dicts });
         }
         if let HirKind::Call { .. } = e.kind
             && !emit.plan.lens.contains_key(&id.0)
             && let Some(HirBuiltin::Existential { slot }) = emit.plan.calls.get(&id.0).and_then(|c| c.builtin)
         {
-            t.existential_calls.insert(id.0, slot);
-        }
-        // A host call that needs a capability: the check finds its
-        // `HostInvoke` in this body's MIR by the call's loc.
-        if let HirKind::Call { args, .. } = &e.kind
-            && let Some(HirBuiltin::Host(native)) = emit.plan.calls.get(&id.0).and_then(|c| c.builtin)
-            && let Some(row) = common::HOST_NATIVES.get(native)
-            && self.native_id(row.name) == Some(native)
-        {
-            let mode = match args.get(1).map(|&a| &hir.expr(a).kind) {
-                Some(HirKind::Lit(Lit::Str(m))) => Some(m.as_str()),
-                _ => None,
-            };
-            self.note_gated_host_call(row.name, e.span, mode);
+            t.existential_call = Some(slot);
         }
         if let HirKind::Field { base, name } = &e.kind
             && self.hir_field_of_new(hir, *base, name).is_some()
         {
-            t.field_news.insert(id.0);
+            t.field_new = true;
         }
         match &e.kind {
             HirKind::Lit(Lit::Str(raw))
@@ -476,7 +434,7 @@ impl Compiler {
                     && !Self::hir_ty(hir, id).is_some_and(classify::is_byte_array) =>
             {
                 let idx = self.intern_string(unescape_coil_string(raw));
-                t.strings.insert(id.0, idx);
+                t.string = Some(idx);
             }
             HirKind::Global { .. } if emit.plan.statics.contains_key(&id.0) => {}
             HirKind::Lambda { .. } => {
@@ -491,9 +449,7 @@ impl Compiler {
                     let operand = make_fn_operand(words, 0, lam.body.params.len() as u32, false);
                     let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
                     let dicts = lam.dicts.iter().map(|&(_, slot)| crate::mir::HirDictOp::Load(slot)).collect();
-                    t.fn_values.insert(
-                        id.0,
-                        crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, pairs, dicts },
+                    t.fn_value = Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, pairs, dicts },
                     );
                 }
             }
@@ -524,7 +480,7 @@ impl Compiler {
                             .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, captures: Vec::new(), pairs: Vec::new(), dicts })
                     };
                     if let Some(value) = value {
-                        t.fn_values.insert(id.0, value);
+                        t.fn_value = Some(value);
                     }
                 }
             }
@@ -532,47 +488,29 @@ impl Compiler {
                 if let Some(target) = self.bodies.entry_label_for_offset(entry) {
                     let target = self.fn_value_target(&name, target);
                     let operand = make_fn_operand(0, 0, arity, rest);
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() });
+                    t.fn_value = Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() });
                 }
             }
             HirKind::Global { .. } => {
                 if let Some(crate::const_fold::ConstValue::Str(text)) = emit.plan.consts.get(&id.0) {
                     let idx = self.intern_string(text);
-                    t.strings.insert(id.0, idx);
-                }
-            }
-            // A fixed array local bound or assigned to another is copied.
-            HirKind::Let { init: Some(value), .. } | HirKind::Assign { value, .. }
-                if let Some(native) = self.hir_array_copy(hir, emit, *value).and_then(|n| u16::try_from(n).ok()) =>
-            {
-                t.array_copies.insert(value.0, native);
-            }
-            // `{a: x, b: y}`: a slotted object of its shape's type id.
-            HirKind::Make { kind: MakeKind::Record(_), .. } => {
-                let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-                if let Some(Ty::Record { fields }) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
-                    let type_id = self.checker.record_type_id(fields);
-                    t.record_types.insert(id.0, type_id);
+                    t.string = Some(idx);
                 }
             }
             HirKind::Bin { op: BinOp::StrConcat, .. } => {
                 let idx = self.intern_string("%s".repeat(hir.concat_leaves(id).len()));
-                t.formats.insert(id.0, idx);
+                t.format = Some(idx);
             }
             // The operand's type name; the operand is not evaluated.
             HirKind::Builtin { op: Builtin::TypeOf, args } => {
                 if let Some(name) = self.hir_typeof(hir, args[0]) {
                     let idx = self.intern_string(&name);
-                    t.strings.insert(id.0, idx);
+                    t.string = Some(idx);
                 }
-                return Kids::None;
             }
             // `while false { .. }` is dropped.
             HirKind::Loop { body }
-                if query::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) =>
-            {
-                return Kids::None;
-            }
+                if query::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) => {}
             // An element-wise operator on the packed kernel: its operands
             // boxed, then the meta word.
             HirKind::Bin { .. } | HirKind::Un { .. }
@@ -580,7 +518,7 @@ impl Compiler {
                     && let Some(meta) = Self::packed_aggregate_meta(info)
                     && let Some(native) = self.native_id(common::PACKED_VEC_ARITH) =>
             {
-                t.linalgs.insert(id.0, (native as u16, meta));
+                t.linalg = Some((native as u16, meta));
             }
             // A matrix operator on a packed kernel, its operands each one
             // word as emission passes them.
@@ -595,10 +533,10 @@ impl Compiler {
                     self.hir_arg_passes(hir, emit, x, layout)
                 });
                 if words && let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, operands.len()) {
-                    t.linalgs.insert(id.0, (native as u16, meta));
+                    t.linalg = Some((native as u16, meta));
                 } else if words {
                     // Past the kernel's limits: unrolled.
-                    t.unrolled_las.insert(id.0, info.kind.clone());
+                    t.unrolled_la = Some(info.kind.clone());
                 }
             }
             HirKind::Bin {
@@ -607,13 +545,13 @@ impl Compiler {
                 rhs,
             } => match emit.plan.ops.get(&id.0) {
                 Some(HirOp::Prim) => {
-                    t.op_prims.insert(id.0);
+                    t.op_prim = true;
                 }
                 Some(HirOp::Call { lookup, fqn, class, method }) => {
                     let (lookup, fqn) = (lookup.clone(), fqn.clone());
                     self.hir_mir_op_call(hir, id, &[*lhs, *rhs], (class, method, fqn), lookup, t);
                 }
-                Some(HirOp::Glue(glue)) => self.hir_mir_glue_call(id, glue, t),
+                Some(HirOp::Glue(glue)) => self.hir_mir_glue_call(glue, t),
                 _ => {}
             },
             // A negated literal is its constant.
@@ -628,19 +566,14 @@ impl Compiler {
                 if query::polyfn_callee(hir, &self.checker, *f) {
                     self.hir_mir_polyfn_call(hir, emit, id, *f, args, t);
                 } else {
-                    t.value_calls.insert(id.0);
+                    t.value_call = true;
                     if let Some(unpair) = hir.expr(id).ty.clone().and_then(|ty| self.hir_unpair(&ty)) {
-                        t.value_pair_calls.insert(id.0, unpair);
+                        t.value_pair_call = Some(unpair);
                     }
                 }
             }
-            // A fixed `len` of a local, literal or literal array evaluates
-            // nothing.
-            HirKind::Call { args, .. } if let Some(Some(_)) = emit.plan.lens.get(&id.0) => {
-                if matches!(hir.expr(args[0]).kind, HirKind::Local(_) | HirKind::Lit(_) | HirKind::Make { .. }) {
-                    return Kids::None;
-                }
-            }
+            // A fixed `len` evaluates at most its operand.
+            HirKind::Call { .. } if let Some(Some(_)) = emit.plan.lens.get(&id.0) => {}
             // `dot` / `matmul` on a packed kernel.
             HirKind::Call { args, .. }
                 if let Some(HirCall {
@@ -653,17 +586,17 @@ impl Compiler {
                     && let Some(info) = self.hir_linear_algebra(hir, id)
                 {
                     if let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, args.len()) {
-                        t.linalgs.insert(id.0, (native as u16, meta));
+                        t.linalg = Some((native as u16, meta));
                     } else if let crate::typechecking::LinearAlgebraKind::Cross { left_is_tuple, elem_is_float } = info.kind
                         && args.len() == 2
                     {
                         // Unrolled.
-                        t.crosses.insert(id.0, (left_is_tuple, elem_is_float));
+                        t.cross = Some((left_is_tuple, elem_is_float));
                     } else if matches!(info.kind, crate::typechecking::LinearAlgebraKind::Dot { .. } | crate::typechecking::LinearAlgebraKind::MatMul { .. })
                         && args.len() == 2
                     {
                         // So are these, past the kernel's limits.
-                        t.unrolled_las.insert(id.0, info.kind.clone());
+                        t.unrolled_la = Some(info.kind.clone());
                     }
                 }
             }
@@ -676,29 +609,17 @@ impl Compiler {
             {
                 let (builtin, params) = (*builtin, params.clone());
                 if let Some(site) = self.hir_mir_ffi(hir, emit, id, builtin, args, &params) {
-                    t.ffis.insert(id.0, site);
-                }
-                // What emission evaluates: an `extern`'s arguments, or the
-                // value operands (a signature's tags are constants, a
-                // callback its code pointer).
-                if let HirBuiltin::FfiDyn(_) = builtin {
-                    for a in Self::hir_ffi_operands(hir, builtin, args) {
-                        if self.hir_ffi_callback(hir, builtin, a).is_none() {
-                            self.hir_mir_walk(hir, emit, a, t);
-                        }
-                    }
-                    return Kids::None;
+                    t.ffi = Some(site);
                 }
             }
             HirKind::Call { .. } if emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Matrix))) => {
-                t.matrix_wraps.insert(id.0);
+                t.matrix_wrap = true;
             }
             HirKind::Call { args, .. }
                 if !emit.plan.lens.contains_key(&id.0)
                     && emit.plan.calls.get(&id.0).is_some_and(|c| matches!(c.builtin, Some(HirBuiltin::Format))) =>
             {
-                self.hir_mir_format(hir, id, args, t);
-                return Kids::Rest;
+                self.hir_mir_format(hir, args, t);
             }
             // A partial application: `MakeFn` over the filled prefix, each
             // argument its own word.
@@ -715,7 +636,7 @@ impl Compiler {
                     && let Some(target) = self.partial_value_target(entry, label, value)
                 {
                     let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
-                    t.fn_values.insert(id.0, crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() });
+                    t.fn_value = Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() });
                 }
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && emit.plan.calls.contains_key(&id.0) => {
@@ -726,18 +647,18 @@ impl Compiler {
                 iterable,
                 kind: Some(kind),
                 ..
-            } => self.hir_mir_for_in(hir, id, pat, *iterable, kind, t),
+            } => self.hir_mir_for_in(hir, pat, *iterable, kind, t),
             HirKind::Index {
                 base,
                 index,
                 kind: IndexKind::String,
             } if Self::hir_product_index(hir, emit, *base, *index).is_none() => {
                 let idx = self.intern_string("index out of bounds");
-                t.strings.insert(id.0, idx);
+                t.string = Some(idx);
             }
             _ => {}
         }
-        Kids::All
+        site
     }
 
     /// An FFI call's opcode and operands for `HirBuiltin::Ffi` /
@@ -819,7 +740,7 @@ impl Compiler {
 
     /// The user `into_iter` / `next` entries `for` loop `id` calls, as
     /// MIR calls them.
-    fn hir_mir_for_in(&mut self, hir: &HirBody, id: HirId, pat: &HirPat, iterable: HirId, kind: &ForInKind, t: &mut HirMirTables) {
+    fn hir_mir_for_in(&mut self, hir: &HirBody, pat: &HirPat, iterable: HirId, kind: &ForInKind, t: &mut crate::mir::HirSite) {
         let ForInKind::Custom { into_iter_fqn, next_fqn, counted } = kind else {
             return;
         };
@@ -832,7 +753,7 @@ impl Compiler {
             }
             self.raw_instance_call = false;
             if let Some(target) = into_iter_fqn.as_deref().and_then(|f| self.named_entry_target(f, true)) {
-                t.into_iters.insert(id.0, target);
+                t.into_iter = Some(target);
             }
             return;
         }
@@ -876,7 +797,7 @@ impl Compiler {
                 let some = self.checker.tag_for(common::BUILTIN_OPTION_ENUM, "Some").unwrap_or(1);
                 crate::mir::HirIterNext::Boxed { some }
             };
-            t.iter_loops.insert(id.0, crate::mir::HirIterLoop { into_iter, next, iter_ty, shape });
+            t.iter_loop = Some(crate::mir::HirIterLoop { into_iter, next, iter_ty, shape });
         }
     }
 
@@ -893,7 +814,7 @@ impl Compiler {
         operands: &[HirId],
         (class, method, fqn): (&str, &str, String),
         lookup: Ty,
-        t: &mut HirMirTables,
+        t: &mut crate::mir::HirSite,
     ) {
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup)).unwrap_or(fqn);
         if Self::is_eq_glue(&fqn) {
@@ -941,18 +862,18 @@ impl Compiler {
                     || (Self::is_eq_glue(&fqn) && declared.and_then(|p| p.get(i)).is_some_and(|t| self.value_layout(t) == layout))
             };
             if operands.iter().enumerate().all(|(i, &o)| Self::hir_ty(hir, o).is_some_and(|t| fits(i, self.value_layout(t)))) {
-                t.calls.insert(id.0, site);
+                t.call = Some(site);
             }
         } else if arity == 2 && Self::ty_to_value_tag(&lookup).is_some() {
             let shift = matches!(class, "Shl" | "Shr");
-            t.op_calls.insert(id.0, crate::mir::HirOpCall { site, shift });
+            t.op_call = Some(crate::mir::HirOpCall { site, shift });
         }
     }
 
     /// `==` / `!=` `id` through open glue `glue` (`HirOp::Glue`, #1642):
     /// a plain call of the two operands' words, then each type variable's
     /// `Eq` dictionary, loaded from this body's dictionary parameters.
-    fn hir_mir_glue_call(&mut self, id: HirId, glue: &super::eq_glue::DictGlue, t: &mut HirMirTables) {
+    fn hir_mir_glue_call(&mut self, glue: &super::eq_glue::DictGlue, t: &mut crate::mir::HirSite) {
         self.reserve_eq_dict_glue(glue);
         if !glue.slots().all(|slot| self.hir_mir_dict_param(slot)) {
             return;
@@ -982,7 +903,7 @@ impl Compiler {
             ret_adapt: None,
             ret_items: None,
         };
-        t.calls.insert(id.0, site);
+        t.call = Some(site);
     }
 
     /// The clone a ground instance call goes to: at the instance's types,
@@ -1002,7 +923,7 @@ impl Compiler {
     /// Call `id` of a function or method, past the builtins: its entry when it is one
     /// plain `CALL` (or `TailCall` / `MakeCoro`) of the arguments' own
     /// words with no dictionary.
-    fn hir_mir_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, args: &[HirId], t: &mut HirMirTables) {
+    fn hir_mir_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, args: &[HirId], t: &mut crate::mir::HirSite) {
         let call = &emit.plan.calls[&id.0];
         if call.builtin.is_some() || call.key == format!("{}::push", common::BUILTIN_VEC_TYPE) {
             return;
@@ -1065,12 +986,10 @@ impl Compiler {
                     if let Some(layout) = layout
                         && !clone
                     {
-                        t.niche_args.insert(arg.0, layout);
+                        t.niche_args.push((arg.0, layout));
                     }
                 }
-                t.calls.insert(
-                    id.0,
-                    crate::mir::HirCallSite {
+                t.call = Some(crate::mir::HirCallSite {
                         target,
                         pair_args: vec![false; args.len()],
                         pair_ret: natural.words() == 2,
@@ -1184,12 +1103,10 @@ impl Compiler {
                             .flatten()
                     });
                     if let Some(layout) = layout {
-                        t.niche_args.insert(arg.0, layout);
+                        t.niche_args.push((arg.0, layout));
                     }
                 }
-                t.calls.insert(
-                    id.0,
-                    crate::mir::HirCallSite {
+                t.call = Some(crate::mir::HirCallSite {
                         target,
                         // An inherent method's two-word parameters.
                         pair_args: (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect(),
@@ -1220,7 +1137,7 @@ impl Compiler {
                 Some((orig, cutoff)) => label(orig).map(|l| Some((l, cutoff))),
             };
             if let (Some(worker), Some(seq)) = (label(worker), seq) {
-                self.hir_note_par_fork(hir, emit, id, worker, seq, &mut t.par_forks);
+                t.par_fork = self.hir_par_fork(hir, emit, id, worker, seq);
             }
             return;
         }
@@ -1255,7 +1172,7 @@ impl Compiler {
                     if !self.hir_arg_passes(hir, emit, arg, param)
                         && let Some(layout) = self.hir_niche_arg(hir, emit, arg, param)
                     {
-                        t.niche_args.insert(arg.0, layout);
+                        t.niche_args.push((arg.0, layout));
                     }
                 }
             }
@@ -1264,9 +1181,7 @@ impl Compiler {
             // A `TailCall`'s callee returns for this function, so in this
             // function's words, whatever the call's own rep.
             let pair_ret = if tail { matches!(emit.plan.ret, Rep::Pair(_)) } else { natural.words() == 2 };
-            t.calls.insert(
-                id.0,
-                crate::mir::HirCallSite {
+            t.call = Some(crate::mir::HirCallSite {
                     target,
                     pair_args,
                     pair_ret,
@@ -1283,16 +1198,14 @@ impl Compiler {
         }
     }
 
-    /// Call `id` through `PolyFn` local `f`: which arguments go as their
-    /// words, the call site's dictionaries and whether the result comes
-    /// back as its word.
-    fn hir_mir_polyfn_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, f: HirId, args: &[HirId], t: &mut HirMirTables) {
-        let source = self.hir_polyfn_source(hir, emit, f);
+    /// The arguments of a call through `PolyFn` local `f` (bound from
+    /// generic function `source`): which go as their words, and their
+    /// types. It warns of each two-word argument a bare type parameter
+    /// takes boxed (the boxed-residue lint).
+    fn hir_polyfn_args(&self, hir: &HirBody, emit: &HirEmit, source: Option<&str>, f: HirId, args: &[HirId]) -> Option<(Vec<bool>, Vec<Ty>)> {
         // Only a bare type-parameter parameter is retyped to a word; the
         // shared body takes a concrete one as its own word (#1089).
-        let Some(bare) = self.hir_polyfn_bare_params(hir, source.as_deref(), f, args.len()) else {
-            return;
-        };
+        let bare = self.hir_polyfn_bare_params(hir, source, f, args.len())?;
         let mut words = Vec::with_capacity(args.len());
         let mut arg_tys = Vec::with_capacity(args.len());
         for (i, &arg) in args.iter().enumerate() {
@@ -1305,12 +1218,9 @@ impl Compiler {
                 // (An inlined call's block has no natural rep: its value's
                 // words are taken as MIR lowers them.)
                 Some(Rep::Pair(_) | Rep::Word(_)) | None if bare[i] => {}
-                _ => return,
+                _ => return None,
             }
-            let Some(ty) = Self::hir_ty(hir, arg) else {
-                return;
-            };
-            let ty = apply_ty_prune(self.checker.subst(), ty);
+            let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
             if bare[i] {
                 let span = hir.expr(arg).span;
                 self.note_box_residue(
@@ -1324,6 +1234,17 @@ impl Compiler {
             words.push(bare[i] && Self::ty_to_value_tag(&ty).is_some());
             arg_tys.push(ty);
         }
+        Some((words, arg_tys))
+    }
+
+    /// Call `id` through `PolyFn` local `f`: which arguments go as their
+    /// words, the call site's dictionaries and whether the result comes
+    /// back as its word.
+    fn hir_mir_polyfn_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, f: HirId, args: &[HirId], t: &mut crate::mir::HirSite) {
+        let source = self.hir_polyfn_source(hir, emit, f);
+        let Some((words, arg_tys)) = self.hir_polyfn_args(hir, emit, source.as_deref(), f, args) else {
+            return;
+        };
         let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
         // The call site's dictionaries, as emission pushes them.
         let dicts = match &source {
@@ -1367,7 +1288,7 @@ impl Compiler {
             Some(Err(_)) => return,
         };
         let word_ret = unbox && call_ty.as_ref().and_then(Self::ty_to_value_tag).is_some();
-        t.poly_calls.insert(id.0, crate::mir::HirPolyCall { words, dicts, word_ret, ret_adapt });
+        t.poly_call = Some(crate::mir::HirPolyCall { words, dicts, word_ret, ret_adapt });
     }
 
     /// Whether each of a `PolyFn` call's `n` parameters is a bare type
@@ -1844,11 +1765,10 @@ impl Compiler {
         steps.iter().any(|step| matches!(step, DictStep::Load(slot) if dicts.contains(slot)))
     }
 
-    /// `f(self)`, an emission helper the walk asks for its decision, with
+    /// `f(self)`, an emission helper a site asks for its decision, with
     /// each diagnostic it reports kept once: one already reported (the
-    /// same message at the same place, as emission reports it when it runs
-    /// the helper first) is not repeated. The walk's diagnostics are its
-    /// own, so they stand whether or not emission ran.
+    /// same message at the same place, as the plan reports it when it runs
+    /// the helper first) is not repeated.
     fn hir_mir_once<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         let before = self.messages.len();
         let r = f(self);
@@ -1863,7 +1783,7 @@ impl Compiler {
     /// A `format` call whose `%v` arguments each show as
     /// [`Self::hir_show_plan`] plans: its format string (`%v` as `%s`) and
     /// those plans.
-    fn hir_mir_format(&mut self, hir: &HirBody, id: HirId, args: &[HirId], t: &mut HirMirTables) {
+    fn hir_mir_format(&mut self, hir: &HirBody, args: &[HirId], t: &mut crate::mir::HirSite) {
         let HirKind::Lit(Lit::Str(fmt)) = &hir.expr(args[0]).kind else {
             return;
         };
@@ -1882,9 +1802,9 @@ impl Compiler {
         }
         if shows_ok {
             let idx = self.intern_string(unescape_coil_string(&fmt));
-            t.formats.insert(id.0, idx);
+            t.format = Some(idx);
             if specs.contains(&'v') {
-                t.format_shows.insert(id.0, shows);
+                t.format_shows = Some(shows);
             }
         }
     }
