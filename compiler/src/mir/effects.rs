@@ -52,46 +52,122 @@ pub fn host_may_hoist(id: u16) -> bool {
     }
 }
 
+/// Whether an op may run user code with effects ([`OpProps::effects`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Effects {
+    No,
+    Yes,
+    /// A direct call: unless the callee is pure ([`CallFacts::pure`]).
+    UnlessPureCall,
+}
+
+/// Whether an op may panic ([`OpProps::traps`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Traps {
+    No,
+    Yes,
+    /// A negation: when its operand is an `int`.
+    IfIntOperand,
+}
+
+/// What an op may do, as the passes that move, merge, drop or vectorize
+/// code ask it. [`MirInst::props`] has one row per op and no fall-through,
+/// so a new op decides each column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpProps {
+    /// Never hoisted, merged or deleted, even when its value is unused
+    /// ([`MirInst::is_effect_barrier`]).
+    pub barrier: bool,
+    /// May run user code with effects ([`MirInst::runs_effects`]).
+    pub effects: Effects,
+    /// May panic, so it runs even when its value is unused
+    /// ([`MirInst::may_trap`]).
+    pub traps: Traps,
+    /// An allocation or GC safepoint: specialize and native code must not
+    /// move code across it ([`MirInst::is_gc_edge`]).
+    pub gc_edge: bool,
+    /// Its runtime helper may allocate, so a body holding it may collect
+    /// ([`super::frame_words::allocates`]).
+    pub allocates: bool,
+    /// A vector loop body may not hold it (with any [`Self::gc_edge`]).
+    pub vector_barrier: bool,
+}
+
+impl OpProps {
+    /// An op that only computes its value.
+    pub const PURE: Self = Self { barrier: false, effects: Effects::No, traps: Traps::No, gc_edge: false, allocates: false, vector_barrier: false };
+}
+
 impl MirInst {
-    /// Int arithmetic or negation (overflow, a zero divisor, a negative
-    /// exponent) or a checked
-    /// index: an op that can panic, so it runs even when its value is
-    /// unused (#925).
-    pub fn may_trap(&self, func: &super::func::MirFunc) -> bool {
-        use super::inst::{MirBinOp, MirUnaryOp};
+    /// This op's row of the property table ([`OpProps`]).
+    pub fn props(&self) -> OpProps {
+        use super::inst::{MirBinOp, MirUnaryOp, VecLoopKind};
         use super::ty::MirTy;
+        const P: OpProps = OpProps::PURE;
         match self {
-            Self::Bin { op, ty, .. } => {
-                *ty == MirTy::I64
-                    && matches!(
-                        op,
-                        MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul | MirBinOp::Div | MirBinOp::Rem | MirBinOp::Pow | MirBinOp::Shl | MirBinOp::Shr
-                    )
+            Self::Const { .. } | Self::Cmp { .. } | Self::Cast { .. } | Self::Phi { .. } | Self::ArrayLen { .. } | Self::DoneCoro { .. } | Self::ByteScan { .. } => P,
+            // Int arithmetic traps on overflow, a zero divisor or a negative
+            // exponent (#925); bit ops and floats never trap.
+            Self::Bin { op, ty, .. } => OpProps {
+                traps: if *ty == MirTy::I64 && !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor) { Traps::Yes } else { Traps::No },
+                ..P
+            },
+            Self::Unary { op, .. } => OpProps { traps: if *op == MirUnaryOp::Neg { Traps::IfIntOperand } else { Traps::No }, ..P },
+            Self::Index { unchecked, .. } => OpProps { traps: if *unchecked { Traps::No } else { Traps::Yes }, ..P },
+            Self::LaneIndex { .. } => OpProps { traps: Traps::Yes, ..P },
+            Self::StrEq { .. } | Self::Probe { .. } => P,
+            Self::MatchPayload { .. } | Self::HeapFieldLoad { .. } | Self::CodePtr { .. } | Self::LoadStatic { .. } | Self::HomeLoad { .. } => {
+                OpProps { vector_barrier: true, ..P }
             }
-            Self::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,
-            Self::Index { unchecked, .. } => !unchecked,
-            Self::VecLoop { .. } | Self::LaneIndex { .. } | Self::LaneStore { .. } => true,
-            _ => false,
+            Self::String { .. } => OpProps { allocates: true, vector_barrier: true, ..P },
+            Self::HostInvoke { native_id, .. } => {
+                let impure = !host_is_pure(*native_id);
+                OpProps { barrier: impure, effects: if impure { Effects::Yes } else { Effects::No }, allocates: true, vector_barrier: true, ..P }
+            }
+            Self::Call { .. } => OpProps { barrier: true, effects: Effects::UnlessPureCall, vector_barrier: true, ..P },
+            Self::CallIndirect { .. } | Self::Ffi { .. } => {
+                OpProps { barrier: true, effects: Effects::Yes, allocates: true, vector_barrier: true, ..P }
+            }
+            Self::ResumeCoro { .. } | Self::Yield { .. } => OpProps { barrier: true, effects: Effects::Yes, allocates: true, ..P },
+            Self::Alloc { .. } => OpProps { barrier: true, gc_edge: true, allocates: true, ..P },
+            Self::GcBarrier { .. } => OpProps { barrier: true, gc_edge: true, ..P },
+            Self::ArrayPush { .. } | Self::LanePush { .. } => OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, ..P },
+            Self::LanesToWords { .. } => OpProps { barrier: true, gc_edge: true, allocates: true, ..P },
+            Self::Format { .. } | Self::Stringify { .. } | Self::Cow { .. } => {
+                OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, vector_barrier: true, ..P }
+            }
+            Self::StoreIndex { .. } => OpProps { barrier: true, ..P },
+            Self::LaneStore { .. } => OpProps { barrier: true, traps: Traps::Yes, ..P },
+            Self::HeapFieldStore { .. } | Self::StoreStatic { .. } | Self::HomeStore { .. } | Self::ClearWord { .. } | Self::KeepAlive { .. } | Self::Print { .. } | Self::Panic { .. } => {
+                OpProps { barrier: true, vector_barrier: true, ..P }
+            }
+            Self::FreeEarly { .. } => OpProps { barrier: true, allocates: true, vector_barrier: true, ..P },
+            Self::VecLoop { kind, .. } => OpProps {
+                barrier: true,
+                effects: if matches!(kind, VecLoopKind::Push { .. }) { Effects::Yes } else { Effects::No },
+                traps: Traps::Yes,
+                ..P
+            },
+        }
+    }
+
+    /// An op that can panic (int arithmetic or negation, a checked index,
+    /// a lane access), so it runs even when its value is unused (#925).
+    pub fn may_trap(&self, func: &super::func::MirFunc) -> bool {
+        match self.props().traps {
+            Traps::No => false,
+            Traps::Yes => true,
+            Traps::IfIntOperand => matches!(self, Self::Unary { src, .. } if func.ty(*src) == super::ty::MirTy::I64),
         }
     }
 
     /// Code that may run user code with effects: an impure call or
     /// native, a coroutine step, an append, a `Show` format.
     fn runs_effects(&self, calls: &CallFacts) -> bool {
-        match self {
-            Self::VecLoop { kind: super::inst::VecLoopKind::Push { .. }, .. } => true,
-            Self::Call { dest, .. } => !calls.pure.contains(dest),
-            Self::HostInvoke { native_id, .. } => !host_is_pure(*native_id),
-            Self::CallIndirect { .. }
-            | Self::Ffi { .. }
-            | Self::Yield { .. }
-            | Self::ResumeCoro { .. }
-            | Self::ArrayPush { .. }
-            | Self::LanePush { .. }
-            | Self::Format { .. }
-            | Self::Stringify { .. }
-            | Self::Cow { .. } => true,
-            _ => false,
+        match self.props().effects {
+            Effects::No => false,
+            Effects::Yes => true,
+            Effects::UnlessPureCall => !calls.pure.contains(&self.dest()),
         }
     }
 
@@ -127,36 +203,15 @@ impl MirInst {
         }
     }
 
-    /// Impure HostInvoke / CALL / alloc / field store — never silently hoist.
+    /// Impure HostInvoke / CALL / alloc / store / output: never hoisted,
+    /// merged or dropped.
     pub fn is_effect_barrier(&self) -> bool {
-        match self {
-            Self::HostInvoke { native_id, .. } => !host_is_pure(*native_id),
-            Self::Ffi { .. }
-            | Self::Call { .. }
-            | Self::CallIndirect { .. }
-            | Self::ResumeCoro { .. }
-            | Self::Yield { .. }
-            | Self::Alloc { .. }
-            | Self::GcBarrier { .. }
-            | Self::HeapFieldStore { .. }
-            | Self::StoreIndex { .. }
-            | Self::LaneStore { .. }
-            | Self::LanePush { .. }
-            | Self::LanesToWords { .. }
-            | Self::StoreStatic { .. }
-            | Self::HomeStore { .. }
-            | Self::ClearWord { .. }
-            | Self::KeepAlive { .. }
-            | Self::ArrayPush { .. }
-            | Self::Print { .. }
-            | Self::FreeEarly { .. }
-            | Self::Panic { .. }
-            | Self::Format { .. }
-            | Self::Stringify { .. }
-            | Self::VecLoop { .. }
-            | Self::Cow { .. } => true,
-            _ => false,
-        }
+        self.props().barrier
+    }
+
+    /// Allocation or GC safepoint: specialize / native must not cross.
+    pub fn is_gc_edge(&self) -> bool {
+        self.props().gc_edge
     }
 }
 

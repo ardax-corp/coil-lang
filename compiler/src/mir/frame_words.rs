@@ -30,23 +30,7 @@ pub fn is_generator(f: &MirFunc) -> bool {
 
 /// An instruction whose helper may allocate.
 pub fn allocates(inst: &MirInst) -> bool {
-    matches!(
-        inst,
-        MirInst::Alloc { .. }
-            | MirInst::ArrayPush { .. }
-            | MirInst::LanePush { .. }
-            | MirInst::LanesToWords { .. }
-            | MirInst::String { .. }
-            | MirInst::Format { .. }
-            | MirInst::Stringify { .. }
-            | MirInst::Cow { .. }
-            | MirInst::HostInvoke { .. }
-            | MirInst::CallIndirect { .. }
-            | MirInst::ResumeCoro { .. }
-            | MirInst::FreeEarly { .. }
-            | MirInst::Yield { .. }
-            | MirInst::Ffi { .. }
-    )
+    inst.props().allocates
 }
 
 /// A value native code holds: a scalar, or a heap word it passes along and

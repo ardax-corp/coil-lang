@@ -1227,21 +1227,6 @@ impl MirInst {
         std::iter::once(self.dest()).chain(hi)
     }
 
-    /// Allocation or GC safepoint — specialize / native must not cross.
-    pub fn is_gc_edge(&self) -> bool {
-        matches!(
-            self,
-            Self::Alloc { .. }
-                | Self::ArrayPush { .. }
-                | Self::LanePush { .. }
-                | Self::LanesToWords { .. }
-                | Self::Format { .. }
-                | Self::Stringify { .. }
-                | Self::Cow { .. }
-                | Self::GcBarrier { .. }
-        )
-    }
-
     pub fn is_phi(&self) -> bool {
         matches!(self, Self::Phi { .. })
     }

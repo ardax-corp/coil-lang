@@ -1225,33 +1225,10 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
 }
 
 /// An op no vector loop body may hold: an allocation or GC edge, a call,
-/// a field or static access, an effect.
+/// a field or static access, an effect ([`super::effects::OpProps`]).
 fn region_has_barrier_inst(_func: &MirFunc, inst: &MirInst) -> bool {
-    inst.is_gc_edge()
-        || matches!(
-            inst,
-            MirInst::Call { .. }
-                | MirInst::CallIndirect { .. }
-                | MirInst::HostInvoke { .. }
-                | MirInst::Ffi { .. }
-                | MirInst::MatchPayload { .. }
-                | MirInst::HeapFieldLoad { .. }
-                | MirInst::HeapFieldStore { .. }
-                | MirInst::String { .. }
-                | MirInst::CodePtr { .. }
-                | MirInst::LoadStatic { .. }
-                | MirInst::StoreStatic { .. }
-                | MirInst::HomeLoad { .. }
-                | MirInst::HomeStore { .. }
-                | MirInst::ClearWord { .. }
-                | MirInst::KeepAlive { .. }
-                | MirInst::Print { .. }
-                | MirInst::FreeEarly { .. }
-                | MirInst::Panic { .. }
-                | MirInst::Format { .. }
-                | MirInst::Stringify { .. }
-                | MirInst::Cow { .. }
-        )
+    let p = inst.props();
+    p.gc_edge || p.vector_barrier
 }
 
 /// The `string_byte_at` host id, the read of `s[i]` on a `string`.
