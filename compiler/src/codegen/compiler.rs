@@ -4054,6 +4054,47 @@ impl Compiler {
         self.context.methods = inner.methods;
     }
 
+    /// Compile one function body named `record` under `frame`: a fresh
+    /// frame of locals and the function's own key, result mode and return
+    /// ABI while `body` runs (its parameters, then
+    /// [`Self::try_lower_hir_function`]); then record the body with its
+    /// MIR and emit the lambdas and parallel workers its plan queued, and
+    /// put the enclosing body's state back.
+    pub(super) fn with_body_frame<R>(&mut self, record: &str, frame: BodyFrame, body: impl FnOnce(&mut Self) -> R) -> R {
+        let vars = std::mem::take(&mut self.context.variables);
+        let unboxed = std::mem::take(&mut self.context.unboxed_enum_locals);
+        let qualified = std::mem::replace(&mut self.current_function_qualified, frame.qualified);
+        let table_key = std::mem::replace(&mut self.current_function_table_key, frame.table_key);
+        let result_mode = std::mem::replace(&mut self.compiling_result_mode, frame.result_mode);
+        let result_ok_is_result = std::mem::replace(&mut self.compiling_result_ok_is_result, frame.result_ok_is_result);
+        let two_word = std::mem::replace(&mut self.compiling_two_word_enum, frame.two_word);
+        let r = body(self);
+        let entry = self.fn_entry_labels.get(record).copied();
+        self.bodies.record(record.to_string(), entry);
+        self.attach_hir_mir();
+        self.flush_hir_par_tail();
+        self.compiling_two_word_enum = two_word;
+        self.compiling_result_ok_is_result = result_ok_is_result;
+        self.compiling_result_mode = result_mode;
+        self.current_function_table_key = table_key;
+        self.current_function_qualified = qualified;
+        self.context.unboxed_enum_locals = unboxed;
+        self.context.variables = vars;
+        r
+    }
+
+    /// The enclosing state's own values, for a [`BodyFrame`] that keeps
+    /// some of them.
+    fn current_body_frame(&self) -> BodyFrame {
+        BodyFrame {
+            qualified: self.current_function_qualified.clone(),
+            table_key: self.current_function_table_key.clone(),
+            result_mode: self.compiling_result_mode,
+            result_ok_is_result: self.compiling_result_ok_is_result,
+            two_word: self.compiling_two_word_enum.clone(),
+        }
+    }
+
     /// Mark compiler-provided instance thunk `fqn` raw: its entry takes the
     /// receiver's own word and no dictionary, and its `$dict` adapter (which
     /// the caller emits next) the boxed receiver and the dictionary.
@@ -5008,18 +5049,6 @@ impl Compiler {
             self.coroutine_fns.insert(qualified.clone());
         }
 
-        let prev_vars = std::mem::take(&mut self.context.variables);
-        let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-        let prev_fn_table_key = self.current_function_table_key.take();
-        self.current_function_table_key = Some(qualified.clone());
-        self.context.variables = Interner::default();
-        if self.compiling_method {
-            let slot = self.context.variables.intern("self".to_string()) as u32;
-            self.record_debug_local("self", slot);
-        }
-
-        let prev_result_mode = self.compiling_result_mode;
-        let prev_result_ok_is_result = self.compiling_result_ok_is_result;
         // Instance methods are recorded under their FQN; the bare name may
         // belong to a free fn (or another instance).
         // A clone (`source`) is checked under the method it clones.
@@ -5030,10 +5059,7 @@ impl Compiler {
             }
             None => name,
         };
-        self.compiling_result_mode = self.checker.fn_is_result_mode(mode_key);
-        self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(mode_key);
-        let prev_two_word_enum = self.compiling_two_word_enum.clone();
-        self.compiling_two_word_enum = if *is_coro {
+        let two_word = if *is_coro {
             self.pin_two_word_return_kind(&qualified, None);
             None
         } else if source.is_some() && !self.method_clone_plans.borrow().contains_key(&qualified) {
@@ -5044,52 +5070,50 @@ impl Compiler {
         } else {
             self.two_word_return_kind(&qualified)
         };
-
-        self.do_compile(args);
-        for dict_idx in 0..dict_arity {
-            self.context.variables.intern(format!("__dict{}", dict_idx));
-        }
-        // A trait method's own bounds: dictionary parameters after the
-        // instance's (#1471).
-        if let Some((base, n)) = own_dicts {
-            self.context.variables.intern("__dict0".to_string());
-            for i in 0..n {
-                self.context.variables.intern(format!("__dict{}", base + i));
+        let frame = BodyFrame {
+            table_key: Some(qualified.clone()),
+            result_mode: self.checker.fn_is_result_mode(mode_key),
+            result_ok_is_result: self.checker.fn_result_ok_is_result(mode_key),
+            two_word,
+            ..self.current_body_frame()
+        };
+        self.with_body_frame(&qualified, frame, |c| {
+            if c.compiling_method {
+                let slot = c.context.variables.intern("self".to_string()) as u32;
+                c.record_debug_local("self", slot);
             }
-        }
-        let entry_sp = self.context.variables.len() as u32;
-        // Direct MIR loads the context dictionaries (`hir_entry_ctx`).
-        self.hir_entry_sp = Some(entry_sp);
-        // Bounded generic instance method: `__dict0` is the instance's own
-        // dictionary, whose tail holds the context dictionaries.
-        if let Some((base, n)) = self.pending_instance_ctx.take()
-            && let Some(own) = self.lookup_slot("__dict0")
-        {
-            for i in 0..n {
-                let slot = self.context.variables.intern(format!("__dict{}", i + 1)) as u32;
-                self.hir_entry_ctx.push((slot, own, (base + i) as u32));
+            c.do_compile(args);
+            for dict_idx in 0..dict_arity {
+                c.context.variables.intern(format!("__dict{}", dict_idx));
             }
-        }
-        let lowered = self.try_lower_hir_function(&method.0, body);
-        if !lowered {
-            // Every body runs from its direct MIR, so one whose HIR does not
-            // lower (an instance clone included) is a compile error.
-            self.report_unlowered(&method.0, &qualified);
-        }
-
-        self.bodies.advance();
-
-        let entry = self.fn_entry_labels.get(&qualified).copied();
-        self.bodies.record(qualified.clone(), entry);
-        self.attach_hir_mir();
-        self.flush_hir_par_tail();
-
-        self.compiling_result_mode = prev_result_mode;
-        self.compiling_result_ok_is_result = prev_result_ok_is_result;
-        self.compiling_two_word_enum = prev_two_word_enum;
-        self.context.variables = prev_vars;
-        self.context.unboxed_enum_locals = prev_unboxed_enum;
-        self.current_function_table_key = prev_fn_table_key;
+            // A trait method's own bounds: dictionary parameters after the
+            // instance's (#1471).
+            if let Some((base, n)) = own_dicts {
+                c.context.variables.intern("__dict0".to_string());
+                for i in 0..n {
+                    c.context.variables.intern(format!("__dict{}", base + i));
+                }
+            }
+            let entry_sp = c.context.variables.len() as u32;
+            // Direct MIR loads the context dictionaries (`hir_entry_ctx`).
+            c.hir_entry_sp = Some(entry_sp);
+            // Bounded generic instance method: `__dict0` is the instance's own
+            // dictionary, whose tail holds the context dictionaries.
+            if let Some((base, n)) = c.pending_instance_ctx.take()
+                && let Some(own) = c.lookup_slot("__dict0")
+            {
+                for i in 0..n {
+                    let slot = c.context.variables.intern(format!("__dict{}", i + 1)) as u32;
+                    c.hir_entry_ctx.push((slot, own, (base + i) as u32));
+                }
+            }
+            if !c.try_lower_hir_function(&method.0, body) {
+                // Every body runs from its direct MIR, so one whose HIR does
+                // not lower (an instance clone included) is a compile error.
+                c.report_unlowered(&method.0, &qualified);
+            }
+            c.bodies.advance();
+        });
     }
 
     fn instance_method_unbox_tys(
@@ -5284,20 +5308,14 @@ impl Compiler {
             self.mono_names
                 .insert(specialization.key.clone(), mono_name.clone());
 
-            let prev_fn_vars = std::mem::take(&mut self.context.variables);
-            let prev_result_mode = self.compiling_result_mode;
-            let prev_result_ok_is_result = self.compiling_result_ok_is_result;
-            let prev_mono_clone = self.compiling_mono_clone;
-            let prev_fn_qualified = self.current_function_qualified.take();
-            let prev_fn_table_key = self.current_function_table_key.take();
-            self.context.variables = Interner::default();
-            self.compiling_result_mode = self.checker.fn_is_result_mode(source_name);
-            self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(source_name);
-            self.compiling_mono_clone = true;
-            let clone_pair = self.mono_clone_pair(qualified).or_else(|| self.mono_clone_pair(source_name));
-            let prev_two_word_enum = std::mem::replace(&mut self.compiling_two_word_enum, clone_pair);
-            self.current_function_qualified = Some(qualified.to_string());
-            self.current_function_table_key = Some(qualified.to_string());
+            let prev_mono_clone = std::mem::replace(&mut self.compiling_mono_clone, true);
+            let frame = BodyFrame {
+                qualified: Some(qualified.to_string()),
+                table_key: Some(qualified.to_string()),
+                result_mode: self.checker.fn_is_result_mode(source_name),
+                result_ok_is_result: self.checker.fn_result_ok_is_result(source_name),
+                two_word: self.mono_clone_pair(qualified).or_else(|| self.mono_clone_pair(source_name)),
+            };
             self.mono_codegen_var_types.push(overrides);
             let var_tys = self.mono_var_tys_for(source_name, qualified, type_params, &type_param_tys);
             self.mono_type_param_tys.push(type_param_tys);
@@ -5310,34 +5328,24 @@ impl Compiler {
             if let Some(id) = self.checker.id_table().id_of_output(args) {
                 self.emit_idx = id.0 as usize;
             }
-            self.do_compile(args);
-            // One HIR per instance: the generic body's HIR at this clone's
-            // type arguments.
-            let lowered = self.try_lower_hir_function(span, body);
-            if !lowered {
-                self.report_unlowered(span, &mono_name);
-            }
-
-            self.bodies.advance();
             // Its own body record: a clone left as trailing glue of the source
             // body has no registered entry, so a CALL to it from another
             // function was resolved through another body's private label ids.
-            let entry = self.fn_entry_labels.get(&mono_name).copied();
-            self.bodies.record(mono_name, entry);
-            self.attach_hir_mir();
-            self.flush_hir_par_tail();
+            self.with_body_frame(&mono_name, frame, |c| {
+                c.do_compile(args);
+                // One HIR per instance: the generic body's HIR at this clone's
+                // type arguments.
+                if !c.try_lower_hir_function(span, body) {
+                    c.report_unlowered(span, &mono_name);
+                }
+                c.bodies.advance();
+            });
 
             self.mono_codegen_var_types.pop();
             self.mono_type_param_tys.pop();
             self.mono_var_tys.pop();
             self.emit_idx = prev_idx;
-            self.compiling_result_mode = prev_result_mode;
-            self.compiling_result_ok_is_result = prev_result_ok_is_result;
             self.compiling_mono_clone = prev_mono_clone;
-            self.compiling_two_word_enum = prev_two_word_enum;
-            self.current_function_qualified = prev_fn_qualified;
-            self.current_function_table_key = prev_fn_table_key;
-            self.context.variables = prev_fn_vars;
         }
     }
 
@@ -5713,41 +5721,28 @@ impl Compiler {
         self.bind_function_entry(name.clone());
         self.fn_arities.insert(name.clone(), (0, false));
 
-        let prev_fn_vars = std::mem::take(&mut self.context.variables);
-        let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-        let prev_fn_qualified = self.current_function_qualified.replace(name.clone());
-        let prev_fn_table_key = self.current_function_table_key.replace(name.clone());
-        let prev_result_mode = std::mem::replace(&mut self.compiling_result_mode, false);
-        let prev_result_ok_is_result =
-            std::mem::replace(&mut self.compiling_result_ok_is_result, false);
-        let prev_two_word_enum = self.compiling_two_word_enum.take();
         // A two-word static's initializer returns the two words, which the
         // setup region stores in its slot and its tail.
         let tail = self.checker.static_tail(fqn);
-        if tail.is_some() {
-            self.compiling_two_word_enum = self
-                .checker
+        let two_word = tail.and_then(|_| {
+            self.checker
                 .static_slot_ty(slot)
                 .map(|ty| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty))
-                .and_then(|ty| crate::layout::two_word_kind(&self.checker, &ty));
-        }
-
+                .and_then(|ty| crate::layout::two_word_kind(&self.checker, &ty))
+        });
+        let frame = BodyFrame {
+            qualified: Some(name.clone()),
+            table_key: Some(name.clone()),
+            result_mode: false,
+            result_ok_is_result: false,
+            two_word,
+        };
         // The initializer returns the value; the setup region stores it.
-        if !self.try_lower_hir_function(&init.0, init) {
-            self.report_unlowered(&init.0, fqn);
-        }
-        let entry = self.fn_entry_labels.get(&name).copied();
-        self.bodies.record(name, entry);
-        self.attach_hir_mir();
-        self.flush_hir_par_tail();
-
-        self.compiling_two_word_enum = prev_two_word_enum;
-        self.compiling_result_ok_is_result = prev_result_ok_is_result;
-        self.compiling_result_mode = prev_result_mode;
-        self.current_function_table_key = prev_fn_table_key;
-        self.current_function_qualified = prev_fn_qualified;
-        self.context.unboxed_enum_locals = prev_unboxed_enum;
-        self.context.variables = prev_fn_vars;
+        self.with_body_frame(&name, frame, |c| {
+            if !c.try_lower_hir_function(&init.0, init) {
+                c.report_unlowered(&init.0, fqn);
+            }
+        });
 
         self.setup_steps
             .push(module_setup::SetupStep::Static { init: format!("{STATIC_INIT_FN_PREFIX}{fqn}"), slot, tail, comptime: false });
@@ -6025,22 +6020,17 @@ impl Compiler {
         let root = b.block(stmts, None, coil_ty::never());
         let hir = b.finish(root);
 
-        let prev_vars = std::mem::take(&mut self.context.variables);
-        let prev_fn_table_key = self.current_function_table_key.replace("main".to_string());
+        let frame = BodyFrame { table_key: Some("main".to_string()), ..self.current_body_frame() };
         // A case returns its `Result<(), string>` boxed.
         let calls = names.iter().map(|n| (n.clone(), (Vec::new(), ValueLayout::Boxed))).collect();
-        if !self.lower_synth_hir(&hir, calls, |c: &mut Self| {
-            c.bind_function_entry("main".to_string());
-        }) {
-            self.report_unlowered(&SimpleSpan::from(0..0), "main");
-            self.bind_function_entry("main".to_string());
-        }
-        let entry = self.fn_entry_labels.get("main").copied();
-        self.bodies.record("main".to_string(), entry);
-        self.attach_hir_mir();
-        self.flush_hir_par_tail();
-        self.current_function_table_key = prev_fn_table_key;
-        self.context.variables = prev_vars;
+        self.with_body_frame("main", frame, |c| {
+            if !c.lower_synth_hir(&hir, calls, |c: &mut Self| {
+                c.bind_function_entry("main".to_string());
+            }) {
+                c.report_unlowered(&SimpleSpan::from(0..0), "main");
+                c.bind_function_entry("main".to_string());
+            }
+        });
     }
 
     fn do_compile<'compiler>(&mut self, ast: &(SimpleSpan, Box<Expression<'compiler>>)) {
@@ -6125,89 +6115,78 @@ impl Compiler {
                 self.coroutine_fns.insert(qualified.clone());
             }
 
-            // Fresh slot map per function (locals from 0/1); shared Interner left holes / garbage match binds.
-            let prev_fn_vars = std::mem::take(&mut self.context.variables);
-            let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-            let prev_fn_qualified = self.current_function_qualified.take();
-            let prev_fn_table_key = self.current_function_table_key.take();
-            let prev_fn_table_key_was_none = prev_fn_table_key.is_none();
-            self.current_function_qualified = Some(qualified.clone());
-            self.current_function_table_key = Some(table_key.clone());
-            // Sync checker so `is_ffi_declare_variadic_for_fn_id` can see
-            // param call-site `declare` metadata for bare fn-id params.
-            let prev_checker_fn = if !self.compiling_method {
-                self.checker.set_current_function(Some(name.to_string()))
-            } else {
-                None
-            };
-            self.push_const_env();
-            self.context.variables = Interner::default();
-            self.context.unboxed_enum_locals.clear();
-            let saved_debug_scope = self.debug_scope_enter(body.0.start as u32, body.0.end as u32);
-            if self.compiling_method {
-                let slot = self.context.variables.intern("self".to_string()) as u32;
-                self.record_debug_param("self", slot);
-            }
-
-            let prev_result_mode = self.compiling_result_mode;
-            let prev_result_ok_is_result = self.compiling_result_ok_is_result;
-            self.compiling_result_mode = self.checker.fn_is_result_mode(name);
-            self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
-            let prev_two_word_enum = self.compiling_two_word_enum.clone();
-            self.compiling_two_word_enum = if *is_coro {
+            let prev_fn_table_key_was_none = self.current_function_table_key.is_none();
+            let two_word = if *is_coro {
                 self.pin_two_word_return_kind(&table_key, None);
                 None
             } else {
                 self.two_word_return_kind(&table_key)
             };
-
-            self.do_compile(args);
-
-            // Reserve `__dictN` slots for CallIndirect (FQN preferred; bare
-            // names are dropped by `fn_dict_arity.retain(|k| k.contains("::"))`).
-            let dict_arity = {
-                let via_fqn = self.checker.dict_arity_for(&qualified);
-                if via_fqn > 0 {
-                    via_fqn
-                } else {
-                    self.checker.dict_arity_for(name)
-                }
+            let frame = BodyFrame {
+                qualified: Some(qualified.clone()),
+                table_key: Some(table_key.clone()),
+                result_mode: self.checker.fn_is_result_mode(name),
+                result_ok_is_result: self.checker.fn_result_ok_is_result(name),
+                two_word,
             };
-            for dict_idx in 0..dict_arity {
-                self.context.variables.intern(format!("__dict{}", dict_idx));
-            }
-
-            // Args + self + dicts occupy the shared stack at body entry.
-            let entry_sp = self.context.variables.len() as u32;
-            self.hir_entry_sp = Some(entry_sp);
-
-
-            let lowered = prev_fn_table_key_was_none && self.try_lower_hir_function(span, body);
-            if !lowered {
-                if !prev_fn_table_key_was_none {
-                    self.hir_refusal = Some("nested-fn");
+            // The lambdas, outlined arms and workers this body queued are
+            // emitted under the enclosing function's state.
+            let outer = self.current_body_frame();
+            self.with_body_frame(&table_key, frame, |c| {
+                // Sync checker so `is_ffi_declare_variadic_for_fn_id` can see
+                // param call-site `declare` metadata for bare fn-id params.
+                let prev_checker_fn = if !c.compiling_method {
+                    c.checker.set_current_function(Some(name.to_string()))
+                } else {
+                    None
+                };
+                c.push_const_env();
+                let saved_debug_scope = c.debug_scope_enter(body.0.start as u32, body.0.end as u32);
+                if c.compiling_method {
+                    let slot = c.context.variables.intern("self".to_string()) as u32;
+                    c.record_debug_param("self", slot);
                 }
-                self.report_unlowered(span, &table_key);
-            }
 
-            self.bodies.advance();
-            self.debug_scope_exit(saved_debug_scope);
+                c.do_compile(args);
 
-            self.compiling_result_mode = prev_result_mode;
-            self.compiling_result_ok_is_result = prev_result_ok_is_result;
-            self.compiling_two_word_enum = prev_two_word_enum;
-            self.pop_const_env();
-            if !self.compiling_method {
-                self.checker.set_current_function(prev_checker_fn);
-            }
-            self.current_function_qualified = prev_fn_qualified;
-            self.current_function_table_key = prev_fn_table_key;
-            let entry = self.fn_entry_labels.get(&table_key).copied();
-            self.bodies.record(table_key.clone(), entry);
-            self.attach_hir_mir();
-            self.flush_hir_par_tail();
-            self.context.variables = prev_fn_vars;
-            self.context.unboxed_enum_locals = prev_unboxed_enum;
+                // Reserve `__dictN` slots for CallIndirect (FQN preferred; bare
+                // names are dropped by `fn_dict_arity.retain(|k| k.contains("::"))`).
+                let dict_arity = {
+                    let via_fqn = c.checker.dict_arity_for(&qualified);
+                    if via_fqn > 0 {
+                        via_fqn
+                    } else {
+                        c.checker.dict_arity_for(name)
+                    }
+                };
+                for dict_idx in 0..dict_arity {
+                    c.context.variables.intern(format!("__dict{}", dict_idx));
+                }
+
+                // Args + self + dicts occupy the shared stack at body entry.
+                let entry_sp = c.context.variables.len() as u32;
+                c.hir_entry_sp = Some(entry_sp);
+
+                let lowered = prev_fn_table_key_was_none && c.try_lower_hir_function(span, body);
+                if !lowered {
+                    if !prev_fn_table_key_was_none {
+                        c.hir_refusal = Some("nested-fn");
+                    }
+                    c.report_unlowered(span, &table_key);
+                }
+
+                c.bodies.advance();
+                c.debug_scope_exit(saved_debug_scope);
+                c.pop_const_env();
+                if !c.compiling_method {
+                    c.checker.set_current_function(prev_checker_fn);
+                }
+                c.current_function_qualified = outer.qualified;
+                c.current_function_table_key = outer.table_key;
+                c.compiling_result_mode = outer.result_mode;
+                c.compiling_result_ok_is_result = outer.result_ok_is_result;
+                c.compiling_two_word_enum = outer.two_word;
+            });
 
             self.emit_mono_specializations_for_function(
                 &qualified,
@@ -6734,37 +6713,20 @@ impl Compiler {
                 }
                 self.test_cases.push((desc, offset));
 
-                let prev_fn_vars = std::mem::take(&mut self.context.variables);
-                let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
-                self.context.variables = Interner::default();
-                self.context.unboxed_enum_locals.clear();
-
-                let prev_result_mode = self.compiling_result_mode;
-                let prev_result_ok_is_result = self.compiling_result_ok_is_result;
-                self.compiling_result_mode = self.checker.fn_is_result_mode(&fn_name);
-                self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(&fn_name);
-                let prev_two_word_enum = self.compiling_two_word_enum.clone();
-                self.compiling_two_word_enum = self.two_word_return_kind(&fn_name);
-
-                let lowered = self.try_lower_hir_function(span, body);
-                if !lowered {
-                    self.report_unlowered(span, &fn_name);
-                }
-
-                self.bodies.advance();
-
-                // Flatten remaps per IlFunc; unrecorded tests share the epilogue
-                // and collide with ArrayPin labels in earlier bodies.
-                let entry = self.fn_entry_labels.get(&fn_name).copied();
-                self.bodies.record(fn_name.clone(), entry);
-                self.attach_hir_mir();
-                self.flush_hir_par_tail();
-
-                self.compiling_result_mode = prev_result_mode;
-                self.compiling_result_ok_is_result = prev_result_ok_is_result;
-                self.compiling_two_word_enum = prev_two_word_enum;
-                self.context.variables = prev_fn_vars;
-                self.context.unboxed_enum_locals = prev_unboxed_enum;
+                let frame = BodyFrame {
+                    result_mode: self.checker.fn_is_result_mode(&fn_name),
+                    result_ok_is_result: self.checker.fn_result_ok_is_result(&fn_name),
+                    two_word: self.two_word_return_kind(&fn_name),
+                    ..self.current_body_frame()
+                };
+                // Recorded as a body of its own: unrecorded tests would share
+                // the epilogue and collide with labels in earlier bodies.
+                self.with_body_frame(&fn_name, frame, |c| {
+                    if !c.try_lower_hir_function(span, body) {
+                        c.report_unlowered(span, &fn_name);
+                    }
+                    c.bodies.advance();
+                });
             }
             // Layout comes from the typechecker; no bytes.
             Expression::ExternStruct(_) => {}

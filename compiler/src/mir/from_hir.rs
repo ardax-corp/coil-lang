@@ -1015,7 +1015,7 @@ fn opaque_moves_only(hir: &HirBody, inp: &HirMirInput) -> Result<(), Refusal> {
     let mut todo: Vec<HirId> = hir.root.into_iter().collect();
     while let Some(id) = todo.pop() {
         reached.push(id);
-        todo.extend(lower::children(hir, id));
+        todo.extend(hir.children(id));
     }
     for id in reached {
         let e = hir.expr(id);
@@ -1244,13 +1244,13 @@ pub fn lower_body(hir: &HirBody, inp: &HirMirInput) -> Result<MirFunc, Refusal> 
             // The body's own bindings (`let`, a `for` variable, a pattern)
             // live in the thunk's frame, not the function's (#2134).
             let mut binds = Vec::new();
-            lower::visit(hir, *body, &mut |x| match &x.kind {
+            hir.visit(*body, &mut |x| match &x.kind {
                 HirKind::Let { local, .. } => binds.push(*local),
                 HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } => {
-                    crate::hir::effects::pat_binds(pat, &mut binds);
+                    pat.for_each_bind(&mut |l| binds.push(l));
                 }
                 HirKind::Match { arms, .. } => {
-                    arms.iter().for_each(|a| crate::hir::effects::pat_binds(&a.pat, &mut binds));
+                    arms.iter().for_each(|a| a.pat.for_each_bind(&mut |l| binds.push(l)));
                 }
                 _ => {}
             });
@@ -1416,7 +1416,7 @@ fn lower_pad(hir: &HirBody, inp: &HirMirInput, parts: PadParts<'_>) -> Result<Mi
         // A `use (mut x)` the body assigns writes `x`'s home back, so the
         // pads of outer blocks read the new value.
         let mut assigned = Vec::new();
-        lower::visit(hir, body, &mut |x| {
+        hir.visit(body, &mut |x| {
             if let HirKind::Assign { place, .. } = x.kind
                 && let HirKind::Local(l) = hir.expr(place).kind
                 && captures.contains(&l)
@@ -6174,7 +6174,7 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         let mut quiet = true;
-        lower::visit(self.hir, value, &mut |e| {
+        self.hir.visit(value, &mut |e| {
             quiet &= !matches!(
                 e.kind,
                 HirKind::Call { .. } | HirKind::Assign { .. } | HirKind::Append { .. } | HirKind::Yield { .. } | HirKind::Resume { .. }
@@ -8336,7 +8336,7 @@ impl Lower<'_> {
             if self.inp.cold_calls.contains(&at.0) {
                 return true;
             }
-            stack.extend(lower::children(self.hir, at));
+            stack.extend(self.hir.children(at));
         }
         false
     }
@@ -8514,17 +8514,10 @@ impl Lower<'_> {
     }
 }
 
-/// A short name for a construct this phase does not lower.
+/// A short name for a construct MIR lowering does not take: a `for`'s
+/// iteration kind, else [`HirKind::name`].
 fn kind_name(kind: &HirKind) -> &'static str {
     match kind {
-        HirKind::Global { .. } => "global",
-        HirKind::Field { .. } => "field",
-        HirKind::Index { .. } => "index",
-        HirKind::Call { .. } => "call",
-        HirKind::Named { .. } | HirKind::Spread(_) => "argument",
-        HirKind::Make { .. } => "make",
-        HirKind::LetPat { .. } => "let pattern",
-        HirKind::Append { .. } => "append",
         HirKind::ForIn { kind, pat, .. } => match kind {
             Some(ForInKind::Array) if !matches!(pat, HirPat::Bind(_)) => "for in array pattern",
             Some(ForInKind::Array) => "for in array",
@@ -8534,13 +8527,6 @@ fn kind_name(kind: &HirKind) -> &'static str {
             Some(ForInKind::Custom { .. }) => "for in iterator",
             _ => "for in",
         },
-        HirKind::Match { .. } => "match",
-        HirKind::Lambda { .. } => "lambda",
-        HirKind::Yield { .. } | HirKind::Resume { .. } => "coroutine",
-        HirKind::Defer { .. } => "defer",
-        HirKind::Builtin { .. } => "builtin",
-        HirKind::Clear(_) => "clear",
-        HirKind::Unsupported(_) => "unsupported",
-        _ => "construct",
+        other => other.name(),
     }
 }

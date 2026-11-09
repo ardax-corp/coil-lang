@@ -144,27 +144,11 @@ fn run_compiled(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) -
 /// `compiled` as a `.ccoil` holds it: to bytes and back, then run from what
 /// came back.
 fn run_through_archive(compiled: Compiled, pipeline: &Pipeline) -> Run {
-    use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
+    use common::decode_archived_program;
     use compiler::native_mir::archive;
     use rkyv::rancor::Error;
 
-    let mut program = ArchivedProgram {
-        version: ARCHIVE_VERSION,
-        static_slot_count: pipeline.static_slot_count(),
-        constants: compiled.constants,
-        strings: pipeline.strings().to_vec(),
-        source_files: Vec::new(),
-        debug_locs: Vec::new(),
-        debug_lines: Vec::new(),
-        fn_symbols: Vec::new(),
-        struct_layouts: pipeline.archived_struct_layouts(),
-        class_word_kinds: pipeline.class_word_kinds(),
-        static_word_kinds: pipeline.static_word_kinds(),
-        startup: pipeline.startup(),
-        main: pipeline.main_offset(),
-        native_mir: archive::encode(&compiled.bodies, &body_ids(pipeline)),
-    };
-    program.set_debug(pipeline.program_debug_full(), pipeline.debug_level());
+    let program = pipeline.archive(compiled.constants, |_| archive::encode(&compiled.bodies, &body_ids(pipeline)));
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let loaded = decode_archived_program(bytes.as_slice()).expect("decode");
     let (bodies, pcs) = archive::decode(&loaded.native_mir).expect("decode the MIR section");

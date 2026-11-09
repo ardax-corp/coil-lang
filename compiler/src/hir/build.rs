@@ -300,15 +300,7 @@ impl BodyBuilder {
     }
 
     fn temp(&mut self, name: &str, ty: Option<Ty>) -> LocalId {
-        let id = LocalId(self.body.locals.len() as u32);
-        self.body.locals.push(HirLocal {
-            name: name.to_string(),
-            ty,
-            kind: LocalKind::Temp,
-            captured: false,
-            borrow: false,
-        });
-        id
+        self.body.temp_named(name.to_string(), ty)
     }
 
     fn lookup(&mut self, name: &str) -> Option<LocalId> {
@@ -343,7 +335,7 @@ impl BodyBuilder {
             for e in &self.body.exprs {
                 match &e.kind {
                     HirKind::Let { local, init: Some(v) } if self.mut_marks.contains(v) => borrows.push(*local),
-                    HirKind::ForIn { pat, iterable, .. } if self.mut_marks.contains(iterable) => super::effects::pat_binds(pat, &mut borrows),
+                    HirKind::ForIn { pat, iterable, .. } if self.mut_marks.contains(iterable) => pat.for_each_bind(&mut |l| borrows.push(l)),
                     _ => {}
                 }
             }
@@ -395,7 +387,7 @@ impl BodyBuilder {
                         HirKind::ForIn { iterable, .. } if consumed.contains(iterable) => {
                             let mut binds = Vec::new();
                             if let HirKind::ForIn { pat, .. } = &e.kind {
-                                super::effects::pat_binds(pat, &mut binds);
+                                pat.for_each_bind(&mut |l| binds.push(l));
                             }
                             binds.contains(&l).then(|| self.body.exprs[iterable.0 as usize].span)
                         }
@@ -1839,7 +1831,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 HirKind::Break | HirKind::Continue if !in_loop => exits.push(at),
                 HirKind::Loop { body } => work.push((*body, true)),
                 HirKind::ForIn { iterable, body, .. } => work.extend([(*iterable, in_loop), (*body, true)]),
-                _ => work.extend(super::lower::children(&b.body, at).into_iter().map(|k| (k, in_loop))),
+                _ => work.extend(b.body.children(at).map(|k| (k, in_loop))),
             }
         }
         for at in exits {
@@ -3386,7 +3378,7 @@ fn shareable_catch_all(body: &HirBody, arm: &HirArm) -> bool {
         _ => return false,
     };
     let mut ok = true;
-    super::lower::visit(body, arm.body, &mut |e| {
+    body.visit(arm.body, &mut |e| {
         ok &= !matches!(
             &e.kind,
             HirKind::Lambda { .. }

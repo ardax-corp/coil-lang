@@ -250,7 +250,7 @@ fn fold_exit(b: &mut HirBody, stmts: &[HirId], tail: Option<HirId>, folded: &mut
         (None, _) => (stmts.to_vec(), None),
     };
     let ty = ret_ty(b);
-    let value = value.unwrap_or_else(|| push_expr(b, HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
+    let value = value.unwrap_or_else(|| b.push_new(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
     Some(push_block(b, stmts, Some(value), ty, span))
 }
 
@@ -286,25 +286,12 @@ fn exits(b: &HirBody, branch: HirId) -> bool {
 /// Some `return` under `e`.
 fn has_return(b: &HirBody, e: HirId) -> bool {
     let mut found = false;
-    super::lower::visit(b, e, &mut |x| found |= matches!(x.kind, HirKind::Return(_)));
+    b.visit(e, &mut |x| found |= matches!(x.kind, HirKind::Return(_)));
     found
 }
 
 fn push_block(b: &mut HirBody, stmts: Vec<HirId>, tail: Option<HirId>, ty: Option<ty::Ty>, span: super::Span) -> HirId {
-    push_expr(b, HirKind::Block { stmts, tail }, ty, span)
-}
-
-fn push_expr(b: &mut HirBody, kind: HirKind, ty: Option<ty::Ty>, span: super::Span) -> HirId {
-    let id = HirId(b.exprs.len() as u32);
-    b.exprs.push(HirExpr {
-        kind,
-        ty,
-        layout: crate::layout::Layout::Word,
-        span,
-        node: None,
-        flags: HirFlags::default(),
-    });
-    id
+    b.push_new(HirKind::Block { stmts, tail }, ty, span)
 }
 
 /// Rewrite every eligible call site of `caller`. `callee_of(call)` names
@@ -346,7 +333,7 @@ pub fn inline_calls<'a>(
         if !std::mem::replace(&mut live[id.0 as usize], true) {
             looped[id.0 as usize] = in_loop;
             let inner = in_loop || matches!(caller.expr(id).kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
-            todo.extend(super::lower::children(caller, id).into_iter().map(|c| (c, inner)));
+            todo.extend(caller.children(id).map(|c| (c, inner)));
         }
     }
     for (i, live) in live.into_iter().enumerate() {
@@ -377,7 +364,7 @@ pub fn inline_calls<'a>(
             let returns = s.is_some_and(|s| matches!(b.body.expr(s).kind, HirKind::Return(_)));
             if !clear.is_empty() && !returns {
                 let span = b.body.exprs[i].span;
-                out.push(b.push(HirKind::Clear(clear), Some(ty::unit()), span));
+                out.push(b.body.push_new(HirKind::Clear(clear), Some(ty::unit()), span));
             }
         }
         // A tail's calls hoist into the statements; the tail itself stays,
@@ -467,7 +454,7 @@ impl Inliner<'_> {
                 Site::Stmt => s = result?,
                 Site::Direct => {
                     let span = self.body.expr(call).span;
-                    let value = result.unwrap_or_else(|| self.push(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
+                    let value = result.unwrap_or_else(|| self.body.push_new(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
                     match &mut self.body.exprs[s.0 as usize].kind {
                         HirKind::Let { init: Some(i), .. } => *i = value,
                         HirKind::Return(Some(v)) => *v = value,
@@ -656,7 +643,7 @@ impl Inliner<'_> {
         e: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
     ) -> Option<(HirId, &'a HirBody, Shape)> {
-        super::lower::children(&self.body, e)
+        self.body.children(e)
             .into_iter()
             .find_map(|x| self.in_place_site(x, callee_of, false))
     }
@@ -679,7 +666,7 @@ impl Inliner<'_> {
         let span = self.body.expr(call).span;
         let mut stmts = Vec::new();
         let result = self.splice(call, callee, shape, Site::Direct, &mut stmts);
-        let tail = result.unwrap_or_else(|| self.push(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
+        let tail = result.unwrap_or_else(|| self.body.push_new(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
         // The call's node becomes the block (or the bare result), so its
         // parent still reads it. A result packed into the call's trait
         // object stays a node of its own: its pack is keyed on it (#1757).
@@ -741,7 +728,7 @@ impl Inliner<'_> {
         node.kind = HirKind::Local(local);
         node.node = None;
         node.flags = HirFlags::default();
-        self.push(HirKind::Let { local, init: Some(init) }, Some(ty::unit()), span)
+        self.body.push_new(HirKind::Let { local, init: Some(init) }, Some(ty::unit()), span)
     }
 
     /// Splice `callee` in for `call`: hoisted statements go to `out`. For
@@ -805,7 +792,7 @@ impl Inliner<'_> {
                 self.tombstone(a);
             } else {
                 let local = LocalId(p.0 + loff);
-                hoisted.push(self.push(HirKind::Let { local, init: Some(a) }, Some(ty::unit()), span));
+                hoisted.push(self.body.push_new(HirKind::Let { local, init: Some(a) }, Some(ty::unit()), span));
             }
         }
         hoisted.extend(shape.stmts.iter().map(|s| HirId(s.0 + off)));
@@ -835,7 +822,7 @@ impl Inliner<'_> {
                             captured: false,
                             borrow: false,
                         });
-                        out.push(self.push(HirKind::Let { local, init: Some(r) }, Some(ty::unit()), span));
+                        out.push(self.body.push_new(HirKind::Let { local, init: Some(r) }, Some(ty::unit()), span));
                         self.body.exprs[call.0 as usize].kind = HirKind::Local(local);
                     }
                     None => self.body.exprs[call.0 as usize].kind = HirKind::Lit(Lit::Unit),
@@ -855,18 +842,6 @@ impl Inliner<'_> {
         e.node = None;
     }
 
-    fn push(&mut self, kind: HirKind, ty: Option<crate::typechecking::ty::Ty>, span: super::Span) -> HirId {
-        let id = HirId(self.body.exprs.len() as u32);
-        self.body.exprs.push(HirExpr {
-            kind,
-            ty,
-            layout: crate::layout::Layout::Word,
-            span,
-            node: None,
-            flags: HirFlags::default(),
-        });
-        id
-    }
 }
 
 /// A bare-class existential (`Sum`): a `[value, dictionary]` pack.
@@ -885,7 +860,7 @@ fn value_ty(t: &Option<ty::Ty>) -> bool {
 fn reads_only(callee: &HirBody, p: LocalId) -> bool {
     let mut parent = vec![None; callee.exprs.len()];
     for i in 0..callee.exprs.len() {
-        for c in super::lower::children(callee, HirId(i as u32)) {
+        for c in callee.children(HirId(i as u32)) {
             parent[c.0 as usize] = Some(HirId(i as u32));
         }
     }
@@ -1103,7 +1078,7 @@ pub fn invariant_locals(body: &HirBody) -> std::collections::HashSet<LocalId> {
             _ => {}
         }
         let inner = in_loop || matches!(body.expr(id).kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
-        todo.extend(super::lower::children(body, id).into_iter().map(|c| (c, inner)));
+        todo.extend(body.children(id).map(|c| (c, inner)));
     }
     body.params
         .iter()
@@ -1235,7 +1210,7 @@ pub fn blank_unreachable(body: &mut HirBody) {
         if std::mem::replace(&mut live[id.0 as usize], true) {
             continue;
         }
-        stack.extend(super::lower::children(body, id));
+        stack.extend(body.children(id));
     }
     for (e, live) in body.exprs.iter_mut().zip(live) {
         if !live {

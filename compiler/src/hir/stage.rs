@@ -126,7 +126,7 @@ fn split_adjust(body: &HirBody, target: HirId) -> Option<HirBody> {
     let mut stmts = Vec::new();
     if prefix {
         // The adjust itself as a statement, then the new value.
-        let store = push(&mut b, node.clone());
+        let store = b.push(node.clone());
         stmts.push(store);
         let read = copy_tree(&mut b, place);
         stmts.push(push_let(&mut b, temp, read, node.span));
@@ -139,20 +139,20 @@ fn split_adjust(body: &HirBody, target: HirId) -> Option<HirBody> {
             node: None,
             ..b.expr(read).clone()
         };
-        let old = push(&mut b, old);
+        let old = b.push(old);
         let one = copy_tree(&mut b, one);
         let bin = HirExpr {
             kind: HirKind::Bin { op, lhs: old, rhs: one },
             node: None,
             ..b.expr(value).clone()
         };
-        let bin = push(&mut b, bin);
+        let bin = b.push(bin);
         let dst = copy_tree(&mut b, place);
         let mut store = node.clone();
         store.kind = HirKind::Assign { place: dst, value: bin };
         store.flags = HirFlags::default();
         store.node = None;
-        stmts.push(push(&mut b, store));
+        stmts.push(b.push(store));
     }
     let e = &mut b.exprs[target.0 as usize];
     e.kind = HirKind::Local(temp);
@@ -200,12 +200,12 @@ fn split_assign(body: &HirBody, target: HirId) -> Option<HirBody> {
         node: None,
         ..b.expr(value).clone()
     };
-    let read = push(&mut b, read);
+    let read = b.push(read);
     let mut store = node.clone();
     store.kind = HirKind::Assign { place, value: read };
     store.flags = HirFlags::default();
     store.node = None;
-    let store = push(&mut b, store);
+    let store = b.push(store);
     let e = &mut b.exprs[target.0 as usize];
     e.kind = HirKind::Local(temp);
     e.ty = ty;
@@ -268,7 +268,7 @@ fn stage_place_indices(body: &HirBody, target: HirId) -> Option<HirBody> {
             captured: false,
             borrow: false,
         });
-        let init = push(&mut b, moved.clone());
+        let init = b.push(moved.clone());
         let bind = push_let(&mut b, temp, init, moved.span);
         for id in [index, twin] {
             let e = &mut b.exprs[id.0 as usize];
@@ -350,27 +350,11 @@ fn copy_tree(b: &mut HirBody, id: HirId) -> HirId {
         HirKind::Un { op, operand } => HirKind::Un { op, operand: copy_tree(b, operand) },
         kind => kind,
     };
-    push(b, e)
-}
-
-fn push(b: &mut HirBody, e: HirExpr) -> HirId {
-    let id = HirId(b.exprs.len() as u32);
-    b.exprs.push(e);
-    id
+    b.push(e)
 }
 
 fn push_let(b: &mut HirBody, local: LocalId, init: HirId, span: super::Span) -> HirId {
-    push(
-        b,
-        HirExpr {
-            kind: HirKind::Let { local, init: Some(init) },
-            ty: Some(ty::unit()),
-            layout: crate::layout::Layout::Word,
-            span,
-            node: None,
-            flags: HirFlags::default(),
-        },
-    )
+    b.push_new(HirKind::Let { local, init: Some(init) }, Some(ty::unit()), span)
 }
 
 /// Where statement `s` starts evaluating operands: a `let` or `return`

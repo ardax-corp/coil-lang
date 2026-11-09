@@ -6,7 +6,7 @@
 //! lowering returns better as a value (see [`keeps_value`]). Bodies with a
 //! `defer` are left alone: every return would repeat the deferred code.
 
-use super::lower::{children, is_identity_arm};
+use super::lower::is_identity_arm;
 use super::{HirBody, HirExpr, HirId, HirKind};
 use crate::typechecking::ty::Ty;
 
@@ -26,7 +26,7 @@ pub fn sink(body: &HirBody) -> Option<HirBody> {
         {
             returns.push(k);
         }
-        stack.extend(children(body, k));
+        stack.extend(body.children(k));
     }
     if returns.is_empty() {
         return None;

@@ -10,7 +10,7 @@ use coil_host::{
     CachedProgram, ExecutePipelineArgs, bind_cli_roots, execute_cached, execute_pipeline,
     ffi_entry_path, pipeline_dload_gate,
 };
-use common::{ARCHIVE_VERSION, ArchivedProgram, ProgramDebug, format_archive_version};
+use common::{ARCHIVE_VERSION, ProgramDebug, format_archive_version};
 use compiler::{CompileStep, Pipeline};
 use reporting::progress::{ClearingWriter, Progress};
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
@@ -161,28 +161,13 @@ fn write_archive(pipeline: &mut Pipeline, output: &str, bytes: &[u8]) {
 /// The `.ccoil` bytes of the program `pipeline` just compiled, with a native
 /// MIR section when it has `bodies`.
 fn archive_bytes(pipeline: &mut Pipeline, constants: Vec<u64>, bodies: &[compiler::native_mir::NativeBody]) -> Vec<u8> {
-    let mut program = ArchivedProgram {
-        version: ARCHIVE_VERSION,
-        static_slot_count: pipeline.static_slot_count(),
-        constants,
-        strings: pipeline.strings().to_vec(),
-        source_files: Vec::new(),
-        debug_locs: Vec::new(),
-        fn_symbols: Vec::new(),
-        struct_layouts: pipeline.archived_struct_layouts(),
-        class_word_kinds: pipeline.class_word_kinds(),
-        static_word_kinds: pipeline.static_word_kinds(),
-        debug_lines: Vec::new(),
-        native_mir: Vec::new(),
-        startup: pipeline.startup(),
-        main: pipeline.main_offset(),
-    };
-    let full = pipeline.program_debug_full();
-    let level = pipeline.debug_level();
-    if !bodies.is_empty() {
-        program.native_mir = compiler::native_mir::archive::encode(bodies, &body_ids(&full));
-    }
-    program.set_debug(full, level);
+    let program = pipeline.archive(constants, |full| {
+        if bodies.is_empty() {
+            Vec::new()
+        } else {
+            compiler::native_mir::archive::encode(bodies, &body_ids(full))
+        }
+    });
 
     match rkyv::to_bytes::<Error>(&program) {
         Ok(b) => b.to_vec(),

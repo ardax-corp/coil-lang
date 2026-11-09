@@ -28,9 +28,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::escape::CallLookup;
-use super::{is_vec, pat_binds, Summary, VEC_MUTATORS};
-use crate::hir::lower::{children, pure_index};
-use crate::hir::{Builtin, Callee, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirModule, HirPat, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span};
+use super::{is_vec, Summary, VEC_MUTATORS};
+use crate::hir::lower::pure_index;
+use crate::hir::{Builtin, Callee, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span};
 use crate::typechecking::infer::{Checker, ForInKind};
 use reporting::{ErrorCode, Message};
 use crate::typechecking::ty::{self as ty, Ty, strip_readonly};
@@ -221,8 +221,7 @@ impl<'b> Facts<'b> {
             f.order[id.0 as usize] = next;
             next += 1;
             stack.push((id, true));
-            let kids = children(body, id);
-            for &k in kids.iter().rev() {
+            for k in body.children(id).rev() {
                 f.parent.insert(k, id);
                 stack.push((k, false));
             }
@@ -306,7 +305,7 @@ impl<'b> Facts<'b> {
             HirKind::Match { scrutinee, arms } => {
                 for arm in arms {
                     let mut ls = Vec::new();
-                    pat_binds(&arm.pat, &mut ls);
+                    arm.pat.for_each_bind(&mut |l| ls.push(l));
                     for l in ls {
                         self.bound.insert(l, (*scrutinee, arm.body));
                     }
@@ -315,7 +314,7 @@ impl<'b> Facts<'b> {
             HirKind::ForIn { pat, iterable, kind, .. } => {
                 if matches!(kind, Some(ForInKind::Array)) {
                     let mut ls = Vec::new();
-                    pat_binds(pat, &mut ls);
+                    pat.for_each_bind(&mut |l| ls.push(l));
                     for l in ls {
                         self.bound.insert(l, (*iterable, id));
                     }
@@ -323,7 +322,7 @@ impl<'b> Facts<'b> {
             }
             HirKind::LetPat { pat, init } => {
                 let mut ls = Vec::new();
-                pat_binds(pat, &mut ls);
+                pat.for_each_bind(&mut |l| ls.push(l));
                 for l in ls {
                     self.bound.insert(l, (*init, id));
                 }
@@ -1543,7 +1542,7 @@ fn twins_of(body: &HirBody, at: HirId, id: HirId) -> Vec<HirId> {
             continue;
         }
         if n != id {
-            work.extend(children(body, n));
+            work.extend(body.children(n));
         }
     }
     out
@@ -1617,7 +1616,7 @@ impl Plan {
         for &(at, l) in &self.unique_before {
             let span = span_of(out, at.1);
             let ty = out.local(l).ty.clone();
-            let read = push(out, HirKind::Local(l), ty, span);
+            let read = out.push_new(HirKind::Local(l), ty, span);
             let stmt = unique_stmt(out, read, span);
             before.add(at, stmt);
         }
@@ -1671,9 +1670,9 @@ impl Plan {
             && !pure_index(out, value)
             && chain.iter().all(|&st| twins_of(out, value, st).is_empty())
         {
-            let t = temp(out, out.expr(value).ty.clone(), "$cowv");
+            let t = out.temp("$cowv", out.expr(value).ty.clone());
             let moved = relocate(out, value);
-            stmts.push(push(out, HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
+            stmts.push(out.push_new(HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
             let x = &mut out.exprs[value.0 as usize];
             x.kind = HirKind::Local(t);
             x.node = None;
@@ -1684,7 +1683,7 @@ impl Plan {
             if let HirKind::Index { index, .. } = out.expr(step).kind.clone()
                 && !pure_index(out, index)
             {
-                let t = temp(out, out.expr(index).ty.clone(), "$cowi");
+                let t = out.temp("$cowi", out.expr(index).ty.clone());
                 // A compound assignment reads the place again through a
                 // twin of the index (same span and shape), which lowering
                 // pairs with this one: it reads the temporary too.
@@ -1695,7 +1694,7 @@ impl Plan {
                     x.kind = HirKind::Local(t);
                     x.node = None;
                 }
-                stmts.push(push(out, HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
+                stmts.push(out.push_new(HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
                 let x = &mut out.exprs[index.0 as usize];
                 x.kind = HirKind::Local(t);
                 x.node = None;
@@ -1719,14 +1718,14 @@ impl Plan {
             _ if chain.len() == 1 && (fresh_ctor(out, root) || pack_site(checker, out, root) || !cow_ty(checker, out.expr(root).ty.as_ref())) => {}
             _ => {
                 let ty = out.expr(root).ty.clone();
-                let t = temp(out, ty.clone(), "$cowt");
+                let t = out.temp("$cowt", ty.clone());
                 let moved = relocate(out, root);
                 let init = if cow_ty(checker, ty.as_ref()) {
-                    push(out, HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![moved] }, ty.clone(), span)
+                    out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![moved] }, ty.clone(), span)
                 } else {
                     moved
                 };
-                stmts.push(push(out, HirKind::Let { local: t, init: Some(init) }, Some(ty::unit()), span));
+                stmts.push(out.push_new(HirKind::Let { local: t, init: Some(init) }, Some(ty::unit()), span));
                 let x = &mut out.exprs[root.0 as usize];
                 x.kind = HirKind::Local(t);
                 x.node = None;
@@ -1758,9 +1757,9 @@ fn unique_stmt(out: &mut HirBody, place: HirId, span: Span) -> HirId {
     let read = dup(out, place);
     let ty = out.expr(place).ty.clone();
     let layout = out.expr(place).layout.clone();
-    let u = push(out, HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![read] }, ty, span);
+    let u = out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![read] }, ty, span);
     out.exprs[u.0 as usize].layout = layout;
-    push(out, HirKind::Assign { place: target, value: u }, Some(ty::unit()), span)
+    out.push_new(HirKind::Assign { place: target, value: u }, Some(ty::unit()), span)
 }
 
 /// A copy of the subtree at `id` with new nodes (a place: locals, fields,
@@ -1784,8 +1783,8 @@ fn dup(out: &mut HirBody, id: HirId) -> HirId {
 
 fn share_local(out: &mut HirBody, l: LocalId, span: Span) -> HirId {
     let ty = out.local(l).ty.clone();
-    let read = push(out, HirKind::Local(l), ty.clone(), span);
-    push(out, HirKind::Builtin { op: Builtin::Cow { unique: false }, args: vec![read] }, ty, span)
+    let read = out.push_new(HirKind::Local(l), ty.clone(), span);
+    out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: false }, args: vec![read] }, ty, span)
 }
 
 /// Statements to run before others, gathered per place: `(block, at)`
@@ -1845,31 +1844,6 @@ fn prepend(out: &mut HirBody, at: HirId, mut stmts: Vec<HirId>) {
     x.layout = layout;
 }
 
-fn push(out: &mut HirBody, kind: HirKind, ty: Option<Ty>, span: Span) -> HirId {
-    let id = HirId(out.exprs.len() as u32);
-    out.exprs.push(HirExpr {
-        kind,
-        ty,
-        layout: crate::layout::Layout::Word,
-        span,
-        node: None,
-        flags: HirFlags::default(),
-    });
-    id
-}
-
-fn temp(out: &mut HirBody, ty: Option<Ty>, prefix: &str) -> LocalId {
-    let id = LocalId(out.locals.len() as u32);
-    out.locals.push(HirLocal {
-        name: format!("{prefix}{}", id.0),
-        ty,
-        kind: LocalKind::Temp,
-        captured: false,
-        borrow: false,
-    });
-    id
-}
-
 /// Move node `id` to a new node and return it, so `id` can be rewritten
 /// while its parent still points at it.
 fn relocate(out: &mut HirBody, id: HirId) -> HirId {
@@ -1879,9 +1853,3 @@ fn relocate(out: &mut HirBody, id: HirId) -> HirId {
     new
 }
 
-#[allow(dead_code)]
-fn pat_locals(pat: &HirPat) -> Vec<LocalId> {
-    let mut out = Vec::new();
-    pat_binds(pat, &mut out);
-    out
-}
