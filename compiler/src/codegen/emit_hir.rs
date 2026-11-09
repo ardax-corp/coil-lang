@@ -1721,7 +1721,7 @@ impl Compiler {
             let frozen = self.hir_frozen_arrays(hir);
             self.hir_mir_input(hir, emit, &tables, file, entry_words).and_then(|mut inp| {
                 inp.frozen_arrays = frozen;
-                crate::mir::lower_from_hir(hir, &inp)
+                crate::mir::lower_from_hir(hir, &inp, &HirLowerCx { c: self })
             })
         };
         match why {
@@ -1939,11 +1939,9 @@ impl Compiler {
         let checker = &self.checker;
         let pure_fns = &self.pure_fns;
         let steady_fns = &self.steady_fns;
-        let string_indices = &self.string_indices;
-        let is_class = move |t: &Ty| {
-            let t = apply_ty_prune(checker.subst(), t);
-            checker.ty_is_class(&t)
-        };
+        use crate::mir::LowerCx;
+        let cx = HirLowerCx { c: self };
+        let is_class = |t: &Ty| cx.is_class(t);
         let niche = move |t: &Ty| match crate::layout::value_layout(checker, t) {
             ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
             ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
@@ -1959,8 +1957,7 @@ impl Compiler {
         let opaque_vars = hir.is_generic
             || hir.locals.iter().any(|l| l.ty.as_ref().is_some_and(holds_var))
             || hir.exprs.iter().any(|e| e.ty.as_ref().is_some_and(holds_var));
-        // The backing word of a scalar enum type.
-        let scalar_enum = move |t: &Ty| Self::scalar_enum_mir_ty(checker, t);
+        let scalar_enum = |t: &Ty| cx.scalar_enum(t);
         let word = |t: &Ty| {
             crate::mir::word_mir_ty(t)
                 .or_else(|| {
@@ -1989,8 +1986,6 @@ impl Compiler {
                 // (#1507).
                 .or_else(|| (matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == "ptr") && !is_class(t)).then_some(crate::mir::MirTy::I64))
         };
-        // A scalar enum's backing word.
-        let scalar_enum = move |t: &Ty| Self::scalar_enum_mir_ty(checker, t);
         // Fields of heap class objects whose slot holds the word the
         // field's type names (a generic field holds a boxed value).
         // A string field, or a two-word enum's, holds its boxed heap word.
@@ -2433,11 +2428,6 @@ impl Compiler {
             pure_fn: Box::new(move |n: &str| crate::pure_call::name_in(pure_fns, n)),
             steady_fn: Box::new(move |n: &str| crate::pure_call::name_in(steady_fns, n)),
             box_at: &emit.plan.box_at,
-            is_class: Box::new(is_class),
-            pair_class: Box::new(move |t: &Ty| {
-                crate::layout::readonly_pair_class(checker, &apply_ty_prune(checker.subst(), t)).map(|key| checker.class_type_id(&key))
-            }),
-            scalar_enum: Box::new(scalar_enum),
             niche: Box::new(niche),
             boxed_enum: Box::new(move |t: &Ty, variant: Option<&str>| {
                 let t = apply_ty_prune(checker.subst(), t);
@@ -2449,12 +2439,6 @@ impl Compiler {
                 }
                 Self::boxed_payloads(checker, &t, variant)
             }),
-            pinned: Box::new(move |t: &Ty| Self::finalized(checker, &apply_ty_prune(checker.subst(), t))),
-            enum_drop: Box::new(move |name: &str| {
-                checker.enum_has_drop(name).then(|| checker.class_type_id(name))
-            }),
-            word_kind: Box::new(move |t: &Ty| crate::layout::word_kind(checker, t)),
-            array_stamp: Box::new(move |t: &Ty| crate::layout::array_elem_stamp(checker, t)),
             payload_names: Box::new(move |enum_name: &str, variant: &str| {
                 checker.payload_tys_for(enum_name, variant).into_iter().map(|(name, _)| name).collect()
             }),
@@ -2491,18 +2475,6 @@ impl Compiler {
                     return None;
                 }
                 Self::boxed_payloads(checker, &t, variant)
-            }),
-            scalar_variant: Box::new(move |enum_name: &str, variant: &str| {
-                use crate::mir::{MirConst, ScalarLit};
-                use crate::typechecking::ty::ScalarBacking;
-                match checker.scalar_for(enum_name, variant)? {
-                    ScalarBacking::Int(n) => Some(ScalarLit::Const(MirConst::I64(*n))),
-                    ScalarBacking::Float(bits) => Some(ScalarLit::Const(MirConst::F64(*bits))),
-                    ScalarBacking::Bool(b) => Some(ScalarLit::Const(MirConst::Bool(*b))),
-                    // Emission interned the string where it pushed it; a
-                    // string this body never pushed is not one to read.
-                    ScalarBacking::String(s) => string_indices.get(unescape_coil_string(s).as_str()).copied().map(ScalarLit::Str),
-                }
             }),
             heap_fields,
             pair_fields,
@@ -11574,5 +11546,58 @@ impl crate::hir::tables::GlobalTables for HirTables<'_> {
             ConstValue::Bool(b) if prim == Some(crate::typechecking::ty::BOOL) => Some(Lit::Bool(*b)),
             _ => None,
         }
+    }
+}
+
+/// What direct MIR lowering asks the compiler as it lowers a body
+/// ([`crate::mir::LowerCx`]).
+struct HirLowerCx<'a> {
+    c: &'a Compiler,
+}
+
+impl crate::mir::LowerCx for HirLowerCx<'_> {
+    fn is_class(&self, t: &Ty) -> bool {
+        let checker = &self.c.checker;
+        checker.ty_is_class(&apply_ty_prune(checker.subst(), t))
+    }
+
+    fn pair_class(&self, t: &Ty) -> Option<u32> {
+        let checker = &self.c.checker;
+        crate::layout::readonly_pair_class(checker, &apply_ty_prune(checker.subst(), t)).map(|key| checker.class_type_id(&key))
+    }
+
+    fn pinned(&self, t: &Ty) -> bool {
+        let checker = &self.c.checker;
+        Compiler::finalized(checker, &apply_ty_prune(checker.subst(), t))
+    }
+
+    fn scalar_enum(&self, t: &Ty) -> Option<crate::mir::MirTy> {
+        Compiler::scalar_enum_mir_ty(&self.c.checker, t)
+    }
+
+    fn scalar_variant(&self, enum_name: &str, variant: &str) -> Option<crate::mir::ScalarLit> {
+        use crate::mir::{MirConst, ScalarLit};
+        use crate::typechecking::ty::ScalarBacking;
+        match self.c.checker.scalar_for(enum_name, variant)? {
+            ScalarBacking::Int(n) => Some(ScalarLit::Const(MirConst::I64(*n))),
+            ScalarBacking::Float(bits) => Some(ScalarLit::Const(MirConst::F64(*bits))),
+            ScalarBacking::Bool(b) => Some(ScalarLit::Const(MirConst::Bool(*b))),
+            // Emission interned the string where it pushed it; a string
+            // this body never pushed is not one to read.
+            ScalarBacking::String(s) => self.c.string_indices.get(unescape_coil_string(s).as_str()).copied().map(ScalarLit::Str),
+        }
+    }
+
+    fn enum_drop(&self, name: &str) -> Option<u32> {
+        let checker = &self.c.checker;
+        checker.enum_has_drop(name).then(|| checker.class_type_id(name))
+    }
+
+    fn word_kind(&self, t: &Ty) -> u8 {
+        crate::layout::word_kind(&self.c.checker, t)
+    }
+
+    fn array_stamp(&self, t: &Ty) -> u8 {
+        crate::layout::array_elem_stamp(&self.c.checker, t)
     }
 }
