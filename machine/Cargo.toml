@@ -29,6 +29,4 @@ libffi = "5.1.1"
 corosensei = "0.3.4"
 
 [dev-dependencies]
-# Lib tests format `Instruction`/`Value` with Debug, also under `--release` (#1686).
-common = { path = "../common", features = ["debug-fmt"] }
 libc = "0.2"
