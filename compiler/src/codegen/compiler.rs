@@ -14,6 +14,8 @@ mod emit_call;
 pub(super) mod emit_hir;
 #[path = "eq_glue.rs"]
 mod eq_glue;
+#[path = "frame.rs"]
+pub(super) mod frame;
 #[path = "module_setup.rs"]
 pub(super) mod module_setup;
 
@@ -834,24 +836,38 @@ impl Compiler {
             .map(str::to_string)
     }
 
+    /// Parameter `name`'s two-word kind in function `key`'s signature, by
+    /// position, from the same signature every caller reads (`None`: no
+    /// such parameter there).
+    fn signature_param_pair(&self, key: &str, name: &str) -> Option<Option<PairKind>> {
+        // A method's scheme may list `self` ahead of the named parameters.
+        let names = self
+            .checker
+            .fn_param_names(key)
+            .or_else(|| self.checker.fn_param_names(strip_overload_key(key)))
+            // A method clone's names are its source method's.
+            .or_else(|| self.current_function_qualified.as_deref().and_then(|q| self.checker.fn_param_names(q)))?;
+        let i = names.iter().position(|n| n == name)?;
+        let pairs = self.callee_param_pairs(key);
+        let skip = pairs.len().saturating_sub(names.len());
+        pairs.get(skip + i).cloned()
+    }
+
+    /// Parameter `name` (of type `ty`)'s two-word kind in function `key`:
+    /// its signature's, else a numeric range's.
+    pub(super) fn param_pair_kind(&self, key: &str, name: &str, ty: Option<&Ty>) -> Option<PairKind> {
+        match self.signature_param_pair(key, name) {
+            Some(kind) => kind,
+            None => ty.and_then(crate::layout::two_word_range_kind),
+        }
+    }
+
     fn argument_unboxed_range_kind(&self, arg: &Output<'_>) -> Option<PairKind> {
         let key = self.current_fn_pair_key()?;
-        // By position, from the same signature every caller reads.
-        // A method's scheme may list `self` ahead of the named parameters.
         if let Expression::Argument { name, .. } = arg.1.as_ref()
-            && let Some(names) = self
-                .checker
-                .fn_param_names(&key)
-                .or_else(|| self.checker.fn_param_names(strip_overload_key(&key)))
-                // A method clone's names are its source method's.
-                .or_else(|| self.current_function_qualified.as_deref().and_then(|q| self.checker.fn_param_names(q)))
-            && let Some(i) = names.iter().position(|n| n == name)
+            && let Some(kind) = self.signature_param_pair(&key, name)
         {
-            let pairs = self.callee_param_pairs(&key);
-            let skip = pairs.len().saturating_sub(names.len());
-            if let Some(kind) = pairs.get(skip + i) {
-                return kind.clone();
-            }
+            return kind;
         }
         if let Some(ty) = self.sidecar_ty_of(arg)
             && let Some(kind) = crate::layout::two_word_range_kind(&ty) {
@@ -3665,7 +3681,7 @@ impl Compiler {
     /// [`Self::try_lower_hir_function`]); then record the body with its
     /// MIR and emit the lambdas and parallel workers its plan queued, and
     /// put the enclosing body's state back.
-    pub(super) fn with_body_frame<R>(&mut self, record: &str, frame: BodyFrame, body: impl FnOnce(&mut Self) -> R) -> R {
+    pub(super) fn with_body_frame<R>(&mut self, record: &str, frame: BodyState, body: impl FnOnce(&mut Self) -> R) -> R {
         let vars = std::mem::take(&mut self.context.variables);
         let unboxed = std::mem::take(&mut self.context.unboxed_enum_locals);
         let qualified = std::mem::replace(&mut self.current_function_qualified, frame.qualified);
@@ -3688,10 +3704,10 @@ impl Compiler {
         r
     }
 
-    /// The enclosing state's own values, for a [`BodyFrame`] that keeps
+    /// The enclosing state's own values, for a [`BodyState`] that keeps
     /// some of them.
-    fn current_body_frame(&self) -> BodyFrame {
-        BodyFrame {
+    fn current_body_frame(&self) -> BodyState {
+        BodyState {
             qualified: self.current_function_qualified.clone(),
             table_key: self.current_function_table_key.clone(),
             result_mode: self.compiling_result_mode,
@@ -4670,7 +4686,7 @@ impl Compiler {
         } else {
             self.two_word_return_kind(&qualified)
         };
-        let frame = BodyFrame {
+        let frame = BodyState {
             table_key: Some(qualified.clone()),
             result_mode: self.checker.fn_is_result_mode(mode_key),
             result_ok_is_result: self.checker.fn_result_ok_is_result(mode_key),
@@ -4697,9 +4713,15 @@ impl Compiler {
             let entry_sp = c.context.variables.len() as u32;
             // Direct MIR loads the context dictionaries (`hir_entry_ctx`).
             c.hir_entry_sp = Some(entry_sp);
+            let instance_ctx = c.pending_instance_ctx.take();
+            c.hir_frame_dicts = frame::FrameDicts {
+                arity: dict_arity,
+                own: own_dicts,
+                context: instance_ctx.map_or(0, |(_, n)| n),
+            };
             // Bounded generic instance method: `__dict0` is the instance's own
             // dictionary, whose tail holds the context dictionaries.
-            if let Some((base, n)) = c.pending_instance_ctx.take()
+            if let Some((base, n)) = instance_ctx
                 && let Some(own) = c.lookup_slot("__dict0")
             {
                 for i in 0..n {
@@ -4887,7 +4909,7 @@ impl Compiler {
                 .insert(specialization.key.clone(), mono_name.clone());
 
             let prev_mono_clone = std::mem::replace(&mut self.compiling_mono_clone, true);
-            let frame = BodyFrame {
+            let frame = BodyState {
                 qualified: Some(qualified.to_string()),
                 table_key: Some(qualified.to_string()),
                 result_mode: self.checker.fn_is_result_mode(source_name),
@@ -5299,7 +5321,7 @@ impl Compiler {
                 .map(|ty| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty))
                 .and_then(|ty| crate::layout::two_word_kind(&self.checker, &ty))
         });
-        let frame = BodyFrame {
+        let frame = BodyState {
             qualified: Some(name.clone()),
             table_key: Some(name.clone()),
             result_mode: false,
@@ -5589,7 +5611,7 @@ impl Compiler {
         let root = b.block(stmts, None, coil_ty::never());
         let hir = b.finish(root);
 
-        let frame = BodyFrame { table_key: Some("main".to_string()), ..self.current_body_frame() };
+        let frame = BodyState { table_key: Some("main".to_string()), ..self.current_body_frame() };
         // A case returns its `Result<(), string>` boxed.
         let calls = names.iter().map(|n| (n.clone(), (Vec::new(), ValueLayout::Boxed))).collect();
         self.with_body_frame("main", frame, |c| {
@@ -5689,7 +5711,7 @@ impl Compiler {
             } else {
                 self.two_word_return_kind(&table_key)
             };
-            let frame = BodyFrame {
+            let frame = BodyState {
                 qualified: Some(qualified.clone()),
                 table_key: Some(table_key.clone()),
                 result_mode: self.checker.fn_is_result_mode(name),
@@ -5733,6 +5755,7 @@ impl Compiler {
                 // Args + self + dicts occupy the shared stack at body entry.
                 let entry_sp = c.context.variables.len() as u32;
                 c.hir_entry_sp = Some(entry_sp);
+                c.hir_frame_dicts = frame::FrameDicts { arity: dict_arity, ..frame::FrameDicts::default() };
 
                 let lowered = prev_fn_table_key_was_none && c.try_lower_hir_function(span);
                 if !lowered {
@@ -6251,7 +6274,7 @@ impl Compiler {
                 }
                 self.test_cases.push((desc, offset));
 
-                let frame = BodyFrame {
+                let frame = BodyState {
                     result_mode: self.checker.fn_is_result_mode(&fn_name),
                     result_ok_is_result: self.checker.fn_result_ok_is_result(&fn_name),
                     two_word: self.two_word_return_kind(&fn_name),

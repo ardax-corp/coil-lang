@@ -203,7 +203,7 @@ struct Context {
 }
 
 /// The function state a body compiles under ([`Compiler::with_body_frame`]).
-pub(super) struct BodyFrame {
+pub(super) struct BodyState {
     /// [`Compiler::current_function_qualified`].
     qualified: Option<String>,
     /// [`Compiler::current_function_table_key`].
@@ -596,6 +596,11 @@ pub struct Compiler {
     /// Frame words at entry of the function being compiled (its arguments
     /// and dictionaries), when its compile path records them.
     hir_entry_sp: Option<u32>,
+    /// The dictionaries of the function whose body
+    /// [`Compiler::try_lower_hir_function`] lowers next.
+    hir_frame_dicts: compiler::frame::FrameDicts,
+    /// The frame of the body being planned, numbered from its HIR.
+    hir_body_frame: Option<compiler::frame::BodyFrame>,
     /// Frame words at entry of the body the direct MIR plan walk is
     /// planning: its dictionary parameters sit below it.
     hir_mir_dict_sp: Option<u32>,
@@ -812,6 +817,8 @@ impl Default for Compiler {
             hir_mir: None,
             hir_mir_why: None,
             hir_entry_sp: None,
+            hir_frame_dicts: compiler::frame::FrameDicts::default(),
+            hir_body_frame: None,
             hir_mir_dict_sp: None,
             hir_lambda_dicts: None,
             hir_lambda_pairs: std::cell::RefCell::new(Vec::new()),

@@ -662,7 +662,9 @@ impl Compiler {
             for &p in &w.params {
                 self.context.variables.intern(w.local(p).name.clone());
             }
+            let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(&w));
             let planned = self.plan_hir_body(&w).is_ok();
+            self.hir_body_frame = outer;
             self.par_frame_exit(frame);
             if !planned {
                 let callee = name.rsplit_once("$cold").map_or(name.as_str(), |(c, _)| c);
@@ -708,7 +710,10 @@ impl Compiler {
             for &p in &w.params {
                 self.context.variables.intern(w.local(p).name.clone());
             }
-            let Ok(mut emit) = self.plan_hir_body(&w) else {
+            let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(&w));
+            let planned = self.plan_hir_body(&w);
+            self.hir_body_frame = outer;
+            let Ok(mut emit) = planned else {
                 panic!("internal error: outlined cold arm `{name}` does not plan");
             };
             let (_, label) = self.bind_function_entry(name.clone());
@@ -1278,6 +1283,7 @@ impl Compiler {
         let (Some(&index), Some(module)) = (self.hir_fns.get(&span), self.hir_module.take()) else {
             return false;
         };
+        let outer = self.hir_body_frame.take();
         let ok = self.mono_var_tys.last().is_some_and(|map| {
             let inst = self.hir_instance(&module.bodies[index], map);
             let r = match self.hir_call_shapes(&inst) {
@@ -1289,6 +1295,7 @@ impl Compiler {
             // slots) is not set up yet, so a frame refusal says nothing.
             !r.is_err_and(|why| why.starts_with("callee"))
         });
+        self.hir_body_frame = outer;
         self.hir_module = Some(module);
         ok
     }
@@ -1297,6 +1304,14 @@ impl Compiler {
     /// when the body is outside what the lowering emits; the caller reports
     /// it ([`Self::report_unlowered`]).
     pub(super) fn try_lower_hir_function(&mut self, span: &SimpleSpan) -> bool {
+        let dicts = std::mem::take(&mut self.hir_frame_dicts);
+        let outer = self.hir_body_frame.take();
+        let lowered = self.try_lower_hir_function_in(span, dicts);
+        self.hir_body_frame = outer;
+        lowered
+    }
+
+    fn try_lower_hir_function_in(&mut self, span: &SimpleSpan, dicts: frame::FrameDicts) -> bool {
         self.hir_refusal = None;
         *self.polyfn_over_application.borrow_mut() = None;
         // Clones an earlier body planned but never called give back their room.
@@ -1324,6 +1339,14 @@ impl Compiler {
         let hir = instance.as_ref().unwrap_or(&module.bodies[index]);
         let moded = self.hir_fold_key_eq_modes(hir);
         let hir = moded.as_ref().unwrap_or(hir);
+        let frame = self.hir_function_frame(hir, dicts);
+        debug_assert!(
+            entry_sp.is_none_or(|sp| sp == frame.entry_sp),
+            "entry words of `{}`: interned {entry_sp:?}, numbered from HIR {}",
+            hir.name,
+            frame.entry_sp
+        );
+        self.hir_body_frame = Some(frame);
         // A generic fn with a nested type parameter read as a value that the
         // HIR could not alias: if the body is refused, that read is why (#916).
         *self.generic_fn_value_refusal.borrow_mut() = hir.exprs.iter().enumerate().find_map(|(i, e)| match &e.kind {
@@ -1642,7 +1665,21 @@ impl Compiler {
                 self.context.variables.len() as u32
             })
         });
+        let dicts = match (self.synth_entry_dicts, self.synth_plain_dicts) {
+            (Some((_, n)), _) => frame::FrameDicts { own: Some((0, 0)), context: n, ..frame::FrameDicts::default() },
+            (None, Some(n)) => frame::FrameDicts { arity: n, ..frame::FrameDicts::default() },
+            (None, None) => frame::FrameDicts::default(),
+        };
+        let frame = frame::BodyFrame::function(hir, |i| pairs.get(skip + i).cloned().flatten(), dicts);
+        debug_assert!(
+            entry_words.is_none_or(|words| words == frame.entry_sp),
+            "entry words of `{}`: interned {entry_words:?}, numbered from HIR {}",
+            hir.name,
+            frame.entry_sp
+        );
+        let outer = self.hir_body_frame.replace(frame);
         let plan = refusal::refusal(hir, &self.checker).map_or_else(|| self.plan_hir_body(hir), Err);
+        self.hir_body_frame = outer;
         let lowered = match plan {
             Ok(mut emit) => {
                 start(self);
@@ -3999,6 +4036,9 @@ impl Compiler {
                 let prev_vars = std::mem::take(&mut self.context.variables);
                 let prev_two_word = self.compiling_two_word_enum.take();
                 Self::hir_lambda_frame(&mut self.context.variables, lam, &dicts, &pair_captures);
+                let dict_ns = dicts.iter().filter_map(|(name, _)| name.strip_prefix("__dict")?.parse().ok());
+                let lambda_frame = frame::BodyFrame::lambda(lam, &pair_captures, dict_ns);
+                let prev_frame = self.hir_body_frame.replace(lambda_frame);
                 let prev_dicts = self.hir_lambda_dicts.replace((capture_words, dicts.len() as u32));
                 *self.hir_lambda_pairs.borrow_mut() = Self::hir_lambda_capture_slots(lam, &pair_captures)
                     .filter_map(|(inner, slot, kind)| Some((inner.0, slot, kind?)))
@@ -4008,6 +4048,7 @@ impl Compiler {
                     .plan_hir_body_ret(lam, rep)
                     .and_then(|mut plan| self.plan_hir_lambdas(module, lam, &mut plan).map(|()| plan));
                 self.hir_lambda_dicts = prev_dicts;
+                self.hir_body_frame = prev_frame;
                 self.context.variables = prev_vars;
                 self.compiling_two_word_enum = prev_two_word;
                 let mut plan = match plan {
@@ -4132,6 +4173,9 @@ impl Compiler {
     }
 
     fn plan_hir_body_ret(&self, hir: &HirBody, ret: Rep) -> Result<HirEmit, &'static str> {
+        if let Some(frame) = &self.hir_body_frame {
+            self.debug_check_body_frame(hir, frame);
+        }
         let mut emit = HirEmit {
             plan: HirPlan {
                 calls: HashMap::new(),
@@ -5389,8 +5433,10 @@ impl Compiler {
             for &param in &body.params {
                 self.context.variables.intern(body.local(param).name.clone());
             }
+            let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(body));
             let ret = Rep::Word(body.ret.as_ref().map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
             let _ = self.plan_hir_body_ret(body, ret);
+            self.hir_body_frame = outer;
             self.context.variables = prev;
         }
         self.planning_for_clones = false;
@@ -10730,7 +10776,10 @@ impl Compiler {
         for &p in &w.params {
             self.context.variables.intern(w.local(p).name.clone());
         }
-        let Ok(mut emit) = self.plan_hir_body(w) else {
+        let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(w));
+        let planned = self.plan_hir_body(w);
+        self.hir_body_frame = outer;
+        let Ok(mut emit) = planned else {
             self.par_frame_exit(frame);
             return None;
         };
