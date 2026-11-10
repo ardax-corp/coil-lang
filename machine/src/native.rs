@@ -1063,9 +1063,13 @@ fn run_call(entry: &NativeEntry, args: &[u64], resume: Option<(*mut std::ffi::c_
         ctx.resume_how = how;
     }
     ctx.entry_data = entry.data as u64;
+    // A speculative job's call can be cancelled: its stack limit is
+    // poisoned then (#2442). Listed until the call returns.
+    let cancel = crate::thread::CallGuard::enter(&raw mut ctx.stack_limit);
     // SAFETY: the backend compiled `entry` for exactly `arity` argument
     // words, which `args` holds; `ctx` outlives the call.
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
+    drop(cancel);
     if !ctx.parked.is_null() {
         let (Some(scan), Some(free)) = (ctx.park_scan, ctx.park_free) else {
             unreachable!("a parked call names its engine's hooks");
@@ -1573,6 +1577,22 @@ pub unsafe extern "C" fn coil_native_collect(ctx: *mut NativeCtx) {
     let (machine, collect) = (c.machine, c.host.collect);
     // SAFETY: `machine` is the live machine `host` was made for.
     unsafe { collect(machine, ctx) };
+}
+
+/// The interpreter's fuel ran out at a step it charges: whether the run
+/// goes on, with fuel refilled ([`crate::thread::refuel`]). A speculative
+/// job runs on slices and stops once cancelled; a step budget or a heap
+/// over its cap stops any run.
+///
+/// # Safety
+/// `ctx` is the running call's context.
+pub unsafe fn coil_native_refuel(ctx: *mut NativeCtx) -> bool {
+    // SAFETY: the running call's context.
+    let c = unsafe { &*ctx };
+    if c.fuel.is_null() || unsafe { heap(ctx) }.is_some_and(|h| h.over_byte_cap()) {
+        return false;
+    }
+    crate::thread::refuel(c.fuel)
 }
 
 /// `--cow-report`: the copies `ctx`'s heap had made, when it counts them.

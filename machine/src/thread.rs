@@ -382,6 +382,148 @@ pub struct JoinState {
     shared_epoch: Option<Arc<crate::shared_heap::SharedHeapEpoch>>,
     /// Tasks waiting in `join` (woken when the result is stored).
     waiters: ThreadWaiters,
+    /// How a speculative job is stopped ([`Self::cancel`]); `None` for
+    /// any other, which nothing cancels.
+    cancel: Option<Box<Cancel>>,
+    /// The list of the run that spawned it, a speculative job
+    /// ([`crate::runtime::Runtime::speculative_out`]).
+    spawned_in: OnceLock<std::sync::Weak<Mutex<Vec<Arc<JoinState>>>>>,
+    /// It failed and cancelled what came after it ([`Self::cancel_later`]):
+    /// until it is joined, a job its spawner adds is cancelled too.
+    failed: AtomicBool,
+}
+
+/// The speculative jobs a run has out, in the order it spawned them
+/// ([`crate::runtime::Runtime::speculative_out`]). Shared, so a job that
+/// fails can cancel the ones its spawner made after it
+/// ([`JoinState::cancel_later`]).
+pub(crate) type SpeculativeOut = Arc<Mutex<Vec<Arc<JoinState>>>>;
+
+/// What stops a speculative job ([`crate::reactor::Job::speculative`])
+/// whose result its spawner will not use (#2442). Nothing on the job's
+/// fast paths reads it: native code traps at the next function entry on
+/// a poisoned stack limit, and the interpreter looks at the flag only
+/// when a slice of its fuel runs out ([`refuel`]).
+pub(crate) struct Cancel {
+    flag: AtomicBool,
+    inner: Mutex<CancelInner>,
+}
+
+#[derive(Default)]
+struct CancelInner {
+    /// [`crate::native::NativeCtx::stack_limit`] of each native call the
+    /// job is in.
+    limits: Vec<StackLimit>,
+    /// The speculative jobs the job spawned.
+    children: Vec<std::sync::Weak<JoinState>>,
+}
+
+/// A running call's stack limit, written by the thread that cancels.
+struct StackLimit(*mut u64);
+
+// SAFETY: written only through `AtomicU64::from_ptr`, while the call it
+// belongs to is registered ([`CallGuard`]).
+unsafe impl Send for StackLimit {}
+
+/// The stack limit of a cancelled job's native calls: below every stack
+/// pointer, so the next function entry traps.
+pub(crate) const CANCELLED_STACK_LIMIT: u64 = u64::MAX;
+
+/// The fuel a speculative job runs on the interpreter between looks at
+/// its cancel flag ([`refuel`]).
+pub(crate) const FUEL_SLICE: u64 = 1 << 12;
+
+thread_local! {
+    /// The speculative job this thread runs, while it runs it.
+    static CURRENT_JOB: RefCell<Option<Arc<JoinState>>> = const { RefCell::new(None) };
+}
+
+/// [`CURRENT_JOB`] for the length of a job's run on this thread
+/// (`None` for a job nothing cancels); the one before it after.
+pub(crate) struct JobScope(Option<Arc<JoinState>>);
+
+impl JobScope {
+    pub(crate) fn enter(job: Option<Arc<JoinState>>) -> Self {
+        Self(CURRENT_JOB.with(|c| c.replace(job)))
+    }
+}
+
+impl Drop for JobScope {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        CURRENT_JOB.with(|c| *c.borrow_mut() = prev);
+    }
+}
+
+/// A native call of the job this thread runs, listed so a cancel can
+/// poison its stack limit ([`JoinState::cancel`]).
+pub(crate) struct CallGuard(Option<(Arc<JoinState>, *mut u64)>);
+
+impl CallGuard {
+    /// List the call whose context's stack limit is at `limit`, for as
+    /// long as the guard lives; a job cancelled already gets it poisoned
+    /// now.
+    pub(crate) fn enter(limit: *mut u64) -> Self {
+        CURRENT_JOB.with(|c| {
+            let c = c.borrow();
+            let Some(job) = c.as_ref().filter(|j| j.cancel.is_some()) else { return Self(None) };
+            let cancel = job.cancel.as_deref().expect("filtered");
+            let mut inner = cancel.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if cancel.flag.load(Ordering::SeqCst) {
+                // SAFETY: the caller's context, not running yet.
+                unsafe { *limit = CANCELLED_STACK_LIMIT };
+            }
+            inner.limits.push(StackLimit(limit));
+            Self(Some((Arc::clone(job), limit)))
+        })
+    }
+}
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        let Some((job, limit)) = self.0.take() else { return };
+        let Some(cancel) = job.cancel.as_deref() else { return };
+        let mut inner = cancel.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = inner.limits.iter().rposition(|l| l.0 == limit) {
+            inner.limits.swap_remove(i);
+        }
+    }
+}
+
+/// The interpreter's fuel ran out: whether it goes on. A speculative
+/// job runs on slices of [`FUEL_SLICE`] and gets another unless it was
+/// cancelled; any other run stops (a step budget, a heap cap).
+pub(crate) fn refuel(fuel: *mut u64) -> bool {
+    CURRENT_JOB.with(|c| {
+        let c = c.borrow();
+        let Some(cancel) = c.as_ref().and_then(|j| j.cancel.as_deref()) else { return false };
+        if cancel.flag.load(Ordering::SeqCst) {
+            return false;
+        }
+        // SAFETY: the running call's fuel, on this thread.
+        unsafe { *fuel = FUEL_SLICE };
+        true
+    })
+}
+
+/// Note `child`, a speculative job just spawned, under the job this
+/// thread runs: cancelling that cancels `child` too.
+fn note_child(child: &Arc<JoinState>) {
+    let parent = CURRENT_JOB.with(|c| c.borrow().clone());
+    let Some(parent) = parent else { return };
+    let Some(cancel) = parent.cancel.as_deref() else { return };
+    let cancelled = {
+        let mut inner = cancel.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // Drop the finished ones now and then: a long job may spawn many.
+        if inner.children.len() >= 64 && inner.children.len().is_power_of_two() {
+            inner.children.retain(|w| w.strong_count() > 0);
+        }
+        inner.children.push(Arc::downgrade(child));
+        cancel.flag.load(Ordering::SeqCst)
+    };
+    if cancelled {
+        child.cancel();
+    }
 }
 
 /// Join-state payload (result slot).
@@ -403,7 +545,69 @@ impl JoinState {
             done: AtomicBool::new(false),
             shared_epoch: None,
             waiters: ThreadWaiters::default(),
+            cancel: None,
+            spawned_in: OnceLock::new(),
+            failed: AtomicBool::new(false),
         }
+    }
+
+    /// A speculative job's state, which [`Self::cancel`] stops.
+    pub(crate) fn speculative(mut self) -> Self {
+        self.cancel = Some(Box::new(Cancel { flag: AtomicBool::new(false), inner: Mutex::new(CancelInner::default()) }));
+        self
+    }
+
+    /// Stop the job, which is speculative and whose result nobody will
+    /// use, as soon as it can: a job not started yet does not start, one
+    /// running traps at its next function entry (native) or fuel slice
+    /// (the interpreter) and unwinds quietly, and the jobs it spawned are
+    /// cancelled too. A job nothing cancels (a thread the program
+    /// spawned) is left alone.
+    pub(crate) fn cancel(&self) {
+        let Some(cancel) = self.cancel.as_deref() else { return };
+        if cancel.flag.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let children = {
+            let inner = cancel.inner.lock().unwrap_or_else(|e| e.into_inner());
+            for limit in &inner.limits {
+                // SAFETY: a registered call's context is alive; native
+                // code and the interpreter only read the limit.
+                unsafe { AtomicU64::from_ptr(limit.0) }.store(CANCELLED_STACK_LIMIT, Ordering::Relaxed);
+            }
+            inner.children.clone()
+        };
+        for child in children {
+            if let Some(child) = child.upgrade() {
+                child.cancel();
+            }
+        }
+    }
+
+    /// The job failed, so its fork-join did: cancel the jobs its spawner
+    /// made after it that are still out. Those are the later arms or
+    /// chunks of the same fork-join and whatever the spawner forked since
+    /// (the self-arms it runs itself), all of it work the sequential rerun
+    /// replaces: a fork-join joins every job it spawns before it returns,
+    /// so none after this one belongs to another. The ones ahead of it are
+    /// an enclosing fork-join's, and run on.
+    pub(crate) fn cancel_later(&self) {
+        let Some(out) = self.spawned_in.get().and_then(std::sync::Weak::upgrade) else { return };
+        let later: Vec<Arc<JoinState>> = {
+            let jobs = out.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(at) = jobs.iter().position(|s| std::ptr::eq(Arc::as_ptr(s), self)) else { return };
+            // The spawner may not be done spawning this fork-join's arms.
+            self.failed.store(true, Ordering::SeqCst);
+            jobs[at + 1..].iter().filter(|s| !s.joined.load(Ordering::SeqCst)).cloned().collect()
+        };
+        for job in later {
+            job.cancel();
+        }
+    }
+
+    /// Whether [`Self::cancel`] stopped the job.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancel.as_deref().is_some_and(|c| c.flag.load(Ordering::SeqCst))
     }
 
     pub(crate) fn with_shared_epoch(epoch: Arc<crate::shared_heap::SharedHeapEpoch>) -> Self {
@@ -792,9 +996,18 @@ impl HostStateGuard {
     }
 
     unsafe fn driver_speculative_out(raw: *mut (), state: Arc<JoinState>) {
-        let out = &mut unsafe { Self::driver(raw) }.rt.speculative_out;
-        out.retain(|s| !s.joined.load(Ordering::SeqCst));
-        out.push(state);
+        let out = &unsafe { Self::driver(raw) }.rt.speculative_out;
+        let _ = state.spawned_in.set(Arc::downgrade(out));
+        let mut jobs = out.lock().unwrap_or_else(|e| e.into_inner());
+        jobs.retain(|s| !s.joined.load(Ordering::SeqCst));
+        // A job ahead of it failed and is not joined yet: this one is part
+        // of that failed fork-join's attempt ([`JoinState::cancel_later`]).
+        let doomed = jobs.iter().any(|s| s.failed.load(Ordering::SeqCst));
+        jobs.push(Arc::clone(&state));
+        drop(jobs);
+        if doomed {
+            state.cancel();
+        }
     }
 
 }
@@ -1556,7 +1769,7 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value], speculative: bool) -> Result<
     let ctx = host_spawn_context()?;
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
-    let state = Arc::new(JoinState::new());
+    let state = Arc::new(if speculative { JoinState::new().speculative() } else { JoinState::new() });
     let statics = copy_statics_out(heap, &ctx.statics, &ctx.program.static_word_kinds);
     let mut job = crate::reactor::job_from_spawn_context(
         ctx,
@@ -1566,6 +1779,12 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value], speculative: bool) -> Result<
     );
     job.statics = Some(crate::reactor::JobStatics::Copied(statics));
     job.speculative = speculative;
+    if speculative {
+        // Listed and noted as a shared-heap job is, so a failed join or
+        // a panic cancels it too.
+        note_child(&state);
+        host_speculative_out(&state);
+    }
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);
@@ -1604,7 +1823,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     let epoch = host_begin_shared_steal()?;
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
-    let state = Arc::new(JoinState::with_shared_epoch(Arc::clone(&epoch)));
+    let state = Arc::new(JoinState::with_shared_epoch(Arc::clone(&epoch)).speculative());
     // Opening the epoch may collect and move objects, so the statics are
     // read again after it: `ctx`'s copy can name a moved object's old slot.
     let statics = host_static_words().unwrap_or_else(|| Arc::clone(&ctx.statics));
@@ -1617,6 +1836,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     job.epoch = Some(epoch);
     job.statics = Some(crate::reactor::JobStatics::Shared(statics));
     job.speculative = true;
+    note_child(&state);
     host_speculative_out(&state);
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
@@ -2233,6 +2453,65 @@ mod tests {
     use super::*;
     use crate::memory::{Member, ObjFn};
     use std::time::Duration;
+
+    /// A thread the program spawns has no cancel; a speculative job's
+    /// cancel reaches the jobs it spawned, the ones it spawns after, and
+    /// the stack limits of its calls (#2442).
+    #[test]
+    fn a_cancel_stops_a_speculative_job_and_its_children_only() {
+        let user = Arc::new(JoinState::new());
+        user.cancel();
+        assert!(!user.cancelled(), "a thread the program spawns is never cancelled");
+
+        let job = Arc::new(JoinState::new().speculative());
+        let child = Arc::new(JoinState::new().speculative());
+        let mut early = 7u64;
+        let mut late = 9u64;
+        let (child_before, child_after);
+        {
+            let _scope = JobScope::enter(Some(Arc::clone(&job)));
+            note_child(&child);
+            let early_call = CallGuard::enter(&raw mut early);
+            let mut fuel = 0u64;
+            assert!(refuel(&raw mut fuel), "a running job gets another slice");
+            assert_eq!(fuel, FUEL_SLICE);
+            job.cancel();
+            assert_eq!(early, CANCELLED_STACK_LIMIT, "a call in progress is poisoned");
+            assert!(!refuel(&raw mut fuel), "a cancelled job gets no more fuel");
+            child_before = child.cancelled();
+            // Calls and spawns after the cancel start cancelled.
+            let late_call = CallGuard::enter(&raw mut late);
+            let spawned = Arc::new(JoinState::new().speculative());
+            note_child(&spawned);
+            child_after = spawned.cancelled();
+            drop(late_call);
+            drop(early_call);
+        }
+        assert!(child_before, "a child is cancelled with its parent");
+        assert!(child_after, "a child spawned after the cancel is cancelled");
+        assert_eq!(late, CANCELLED_STACK_LIMIT, "a call entered after the cancel is poisoned");
+        let mut fuel = 0u64;
+        assert!(!refuel(&raw mut fuel), "outside a job, a zero stops the run");
+    }
+
+    /// A failed job cancels what its spawner added after it, and what it
+    /// adds until the failed job is joined; not what came before it.
+    #[test]
+    fn a_failed_job_cancels_the_jobs_spawned_after_it() {
+        let out = SpeculativeOut::default();
+        let push = |s: &Arc<JoinState>| {
+            let _ = s.spawned_in.set(Arc::downgrade(&out));
+            out.lock().unwrap().push(Arc::clone(s));
+        };
+        let [before, failed, after] = [(); 3].map(|()| Arc::new(JoinState::new().speculative()));
+        for s in [&before, &failed, &after] {
+            push(s);
+        }
+        failed.cancel_later();
+        assert!(!before.cancelled(), "an enclosing fork-join's job runs on");
+        assert!(after.cancelled(), "a later arm of the failed fork-join is cancelled");
+        assert!(failed.failed.load(Ordering::SeqCst));
+    }
 
     #[test]
     fn live_thread_registries_are_per_runtime() {

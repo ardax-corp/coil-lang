@@ -27,7 +27,9 @@ pub(crate) unsafe extern "C" fn entry(ctx: *mut NativeCtx, args: *const u64) -> 
         let body = &*((*ctx).entry_data as *const Body);
         // Frames cost no thread stack, but a callback nests an activation.
         let marker = 0u8;
-        if (std::ptr::addr_of!(marker) as u64) < (*ctx).stack_limit {
+        // Another thread may poison the limit to cancel the call.
+        let limit = std::sync::atomic::AtomicU64::from_ptr(&raw mut (*ctx).stack_limit).load(std::sync::atomic::Ordering::Relaxed);
+        if (std::ptr::addr_of!(marker) as u64) < limit {
             rt::coil_native_unwind(ctx, TRAP_STACK, u64::from(body.entry_site));
             return 0;
         }
@@ -317,8 +319,8 @@ unsafe fn yield_word(act: *mut Activation, ctx: *mut NativeCtx, word: u64) -> u6
     }
 }
 
-/// Charge one step (a call or a taken back-edge):
-/// `false` when the budget ran out.
+/// Charge one step (a call or a taken back-edge): `false` when the fuel
+/// ran out, which [`rt::coil_native_refuel`] may refill.
 #[inline(always)]
 unsafe fn charge(ctx: *mut NativeCtx) -> bool {
     // SAFETY: a live context; `fuel` points into the runtime that runs it.
@@ -350,7 +352,7 @@ unsafe fn run<const DEBUG: bool>(act: *mut Activation) -> u64 {
                 if DEBUG {
                     crate::debug::frame_entered(act);
                 }
-                if !charge(ctx) {
+                if !charge(ctx) && !rt::coil_native_refuel(ctx) {
                     return unwind(act, TRAP_BUDGET);
                 }
                 if (*ctx).gc_due != 0 {
@@ -462,7 +464,7 @@ unsafe fn run<const DEBUG: bool>(act: *mut Activation) -> u64 {
                 let Some(e) = &exec.blocks[block].edges[edge] else {
                     return unwind(act, TRAP_HELPER);
                 };
-                if e.back && !charge(ctx) {
+                if e.back && !charge(ctx) && !rt::coil_native_refuel(ctx) {
                     return unwind(act, TRAP_BUDGET);
                 }
                 match e.moves.as_slice() {

@@ -518,17 +518,59 @@ are the sequential program's ([coil-lang#2419](https://github.com/ardax-corp/coi
 
 Expression IPA follows the same rule; its worker is described above. An
 arm the worker runs on its own thread can panic while later arms are still
-jobs, which unwinds the worker past its joins. The run that panicked joins
-those jobs itself, once the panic is reported (`Driver::settle_speculative`
-over `Runtime::speculative_out`, which every shared-heap spawn is added
-to): no job runs on while the heap is used or dropped under it, and the
-steal epoch closes. That holds for a panic a task scope catches and for a
-quiet job's panic too.
+jobs, which unwinds the worker past its joins. The run that panicked
+cancels and joins those jobs itself, once the panic is reported
+(`Driver::settle_speculative` over `Runtime::speculative_out`, which every
+speculative spawn is added to): no job runs on while the heap is used or
+dropped under it, and the steal epoch closes. That holds for a panic a
+task scope catches and for a quiet job's panic too.
 
-One thing is left: a job cannot be cancelled. When an arm panics, the jobs
-still out are waited for, so the program ends later than the sequential
-one, and never if one of those arms does not terminate
-([coil-lang#2442](https://github.com/ardax-corp/coil-lang/issues/2442)).
+### Cancelling a failed attempt
+
+A failed attempt's jobs are not waited for
+([coil-lang#2442](https://github.com/ardax-corp/coil-lang/issues/2442)):
+when an arm or chunk fails, the work after it is cancelled, so the
+program reports about when the sequential one does, and not never when a
+later arm does not terminate.
+
+- **What is cancelled.** A job that fails (`worker::run_on`, before it
+  stores its result, so before its fork-join can go past the join)
+  cancels the speculative jobs its spawner added after it and has not
+  joined (`JoinState::cancel_later`): the later arms or chunks of the same
+  fork-join, and whatever the spawner forked since in the self-arms it
+  runs itself. A fork-join joins every job it spawns before it returns,
+  so none of those belongs to another, and the sequential rerun replaces
+  all of them. Until the failed job is joined, a job its spawner adds is
+  cancelled as it is added (the spawner may not be done spawning that
+  fork-join's arms). The jobs ahead of it are an enclosing fork-join's and
+  run on. A panic on the spawner's own thread cancels every job it has out
+  (`settle_speculative`). Cancelling a job cancels the jobs it spawned
+  (`Cancel::children`).
+- **Only speculative jobs.** A `JoinState` made by `thread_spawn_shared`
+  (and its isolate fallback) has a `Cancel`; one made for `thread::spawn`
+  has none, and nothing cancels it.
+- **How it stops, at no cost to its code.** A job not started yet does not
+  start. Native code compares the stack pointer with
+  `NativeCtx::stack_limit` at every function entry: each native call a
+  speculative job runs (`native::run_call`) is listed under the job
+  (`CallGuard`), and a cancel stores `CANCELLED_STACK_LIMIT` into each
+  listed limit, so the job traps at its next call. The interpreter
+  charges fuel at every call and taken back-edge: a speculative job runs
+  on slices of `FUEL_SLICE` (4096) steps, and when a slice runs out
+  (`coil_native_refuel`) it gets another unless it was cancelled. The
+  store comes from another thread, so it is atomic, and the job reads it
+  where it already reads the limit or the fuel.
+- **What it leaves.** A cancelled job unwinds as a quiet panic does and
+  fails its join with no message. A speculative job runs a pure body (and
+  the compiler-made fork-joins in it), which takes no lock and has no
+  `defer`; its frames' heap words are stack-map roots that go with the
+  frames, and its allocations are on the steal epoch's heap like those of
+  a job that panics. A job it had out is cancelled and joined by its own
+  settle.
+
+A native loop that makes no call is not a cancellation point (`spin` in
+the issue's repro, a `while n > 0` that never ends): such an arm is still
+waited for. The MIR interpreter stops it.
 
 Array / dict / coro / user-`Iterator` `for` stays sequential: isolate IPA does not
 send the heap collection (that is C1 shared-heap steal, COI-365).

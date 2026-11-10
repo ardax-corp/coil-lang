@@ -64,6 +64,13 @@ fn run_on(rt: &mut Runtime, job: Job) {
         native,
         speculative,
     } = job;
+    // Cancelled before it started: nothing to run (#2442).
+    if state.cancelled() {
+        state.store_result_with_panic(Err(ThreadErrorTag::JoinFailed), None);
+        reactor.job_done();
+        return;
+    }
+    let job_scope = crate::thread::JobScope::enter(speculative.then(|| Arc::clone(&state)));
     // The print redirects of a job this thread runs while helping a join
     // are put back after it (as the runtime's job run does).
     let redirected = shared_print.is_some();
@@ -77,7 +84,8 @@ fn run_on(rt: &mut Runtime, job: Job) {
         rt.heap.bind(e.heap_ptr());
         rt.shared_epoch = Some(Arc::clone(e));
     }
-    rt.speculative_out.clear();
+    // A list of its own: a job of an earlier run must not find it.
+    rt.speculative_out = crate::thread::SpeculativeOut::default();
     let outer_exit = crate::env::take_exit_request();
     let outer_static_kinds = crate::collect::swap_static_word_kinds(Arc::clone(&program.static_word_kinds));
     let mut panic_message = None;
@@ -136,6 +144,10 @@ fn run_on(rt: &mut Runtime, job: Job) {
         };
         let mut d = Driver::new(rt, driver_program);
         d.set_quiet(speculative);
+        if speculative {
+            // On the interpreter a cancel is seen when a slice runs out.
+            d.rt.fuel = crate::thread::FUEL_SLICE;
+        }
         let guard = HostStateGuard::enter_driver(&mut d);
         let write_scope = crate::memory::EpochWriteScope::enter(d.rt.heap.get(), shared);
         let out = (|| {
@@ -176,11 +188,25 @@ fn run_on(rt: &mut Runtime, job: Job) {
         crate::io::set_shared_stderr_redirect(prev_shared_stderr);
     }
     crate::io::restore_captures(prev_captures);
-    let stored = match result {
+    drop(job_scope);
+    let mut stored = match result {
         Ok(Ok(pv)) => Ok(pv),
         Ok(Err(tag)) => Err(tag),
         Err(_) => Err(ThreadErrorTag::JoinFailed),
     };
+    if state.cancelled() {
+        // Stopped part way: whatever it left is no result (#2442).
+        stored = Err(ThreadErrorTag::JoinFailed);
+        panic_message = None;
+    } else if speculative && stored.is_err() {
+        // Its fork-join failed: the arms or chunks after it will not be
+        // used. Before the result is stored, so before the fork-join goes
+        // on past its join.
+        state.cancel_later();
+    }
+    // The next job on this runtime starts with no budget.
+    rt.fuel = u64::MAX;
+    rt.step_budget_hit = false;
     if shared {
         // Before the joiner can see the result and close the epoch.
         rt.heap.get_mut().flush_epoch_batch();
