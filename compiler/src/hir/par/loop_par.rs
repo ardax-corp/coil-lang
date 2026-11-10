@@ -856,8 +856,9 @@ impl Scan<'_> {
                 }
             }
         }
+        // A local `const` is a `let` nothing writes again.
         if let HirKind::Let { local, init: Some(init) } = e.kind
-            && body.local(local).kind == LocalKind::Let
+            && matches!(body.local(local).kind, LocalKind::Let | LocalKind::Const)
         {
             if let Some(v) = const_val(body, init, consts) {
                 consts.insert(local, v);

@@ -745,9 +745,12 @@ fn main() { return; }
     assert_eq!(ends, [50, 100]);
 }
 
-/// The reach of the AST walk this analysis replaced, kept as it was.
-#[test]
-fn leaves_trait_methods_if_let_and_const_bounds() {
+/// The ends of the sites of a program with one loop in each place the AST
+/// walk this analysis replaced did not look: a trait's default body
+/// (`101`), an instance's method (`102`), under `if let` (`103`) and
+/// `while let` (`106`), up to a local `const` (`104`), and with no name
+/// for its index (`105`).
+fn reach() -> Vec<i64> {
     let sites = sites_of(
         r#"
 fn sq(int i) -> int { return i * i; }
@@ -756,37 +759,60 @@ trait Tot<A> {
     fn tot(A self) -> int {}
     fn twice(A self) -> int {
         let acc = 0;
-        for x in 0..100 { acc = acc + sq(x); }
+        for x in 0..101 { acc = acc + sq(x); }
         return acc;
     }
 }
 impl Tot for C {
     fn tot(C self) -> int {
         let acc = 0;
-        for x in 0..100 { acc = acc + sq(x); }
+        for x in 0..102 { acc = acc + sq(x); }
         return acc;
     }
 }
 fn under_if_let(Option<int> o) -> int {
     let acc = 0;
-    if let Some(v) = o { for x in 0..100 { acc = acc + sq(x); } }
+    if let Some(v) = o { for x in 0..103 { acc = acc + sq(x); } }
     return acc;
 }
 fn const_bound() -> int {
-    const N = 100;
+    const N = 104;
     let acc = 0;
     for x in 0..N { acc = acc + sq(x); }
     return acc;
 }
-fn unnamed_index() -> int {
+fn unnamed_index(int k) -> int {
     let acc = 0;
-    for _ in 0..100 { acc = acc + sq(3); }
+    for _ in 0..105 { acc = acc ^ k; }
     return acc;
+}
+fn next(int at) -> Option<int> {
+    if at < 3 { return Some(at); }
+    return None;
+}
+fn under_while_let() -> int {
+    let total = 0;
+    let at = 0;
+    while let Some(v) = next(at) {
+        let acc = 0;
+        for x in 0..106 { acc = acc + sq(x); }
+        total = total + acc + v;
+        at = at + 1;
+    }
+    return total;
 }
 fn main() { return; }
 "#,
     );
-    assert!(sites.is_empty(), "{sites:?}");
+    let mut ends: Vec<i64> = sites.iter().map(|s| s.end).collect();
+    ends.sort_unstable();
+    ends
+}
+
+/// A local `const` bounds a loop as a `let` of the same value does.
+#[test]
+fn a_local_const_bounds_a_loop() {
+    assert!(reach().contains(&104), "{:?}", reach());
 }
 
 /// `Trait::m(x)` lowers under the bare method name: no call of a function.
