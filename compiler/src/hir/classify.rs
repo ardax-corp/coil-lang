@@ -176,9 +176,18 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
 /// caller may pass a closure returning the pinned enum's pair.
 pub(super) fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: bool) -> bool {
     // A bare type parameter (a shared generic body's own `T -> U`
-    // parameter) is one boxed word too.
+    // parameter) is one boxed word too, and so is a generic class's
+    // instance over type parameters (`Cell<T> -> T`, #2530): one object
+    // word on both sides, its fields of `T` the ground type's words.
+    let class_word = |t: &Ty| match strip_readonly(t) {
+        Ty::App(head, args) => {
+            matches!(head.as_ref(), Ty::Con(name) if is_generic_class(checker, name) && checker.enum_variants(name).is_none())
+                && args.iter().all(params_closed)
+        }
+        _ => false,
+    };
     let plain = |t: &Ty, seen: &mut Vec<String>| {
-        (crate::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..) | Ty::Var(_)))
+        (crate::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..) | Ty::Var(_)) || class_word(t))
             && matches!(
                 classify_in(checker, t, seen),
                 Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object | ValueClass::Aggregate)
