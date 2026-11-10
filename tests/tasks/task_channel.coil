@@ -33,9 +33,11 @@ fn put(Channel<int> ch, int v) {
     }
 }
 
-fn slow_square(int n) -> int {
-    sleep_ms(30);
-    return n * n;
+// Waits until another task says go, so it cannot finish before that task
+// ran, however the threads are scheduled.
+fn square_after((Receiver, int) a) -> int {
+    let _ = recv(a[0]);
+    return a[1] * a[1];
 }
 
 fn slow_seven() -> int {
@@ -122,17 +124,19 @@ test("a sent value is the receiver's own copy") {
 
 test("blocking runs on a worker while other tasks keep going") {
     let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        let b = s.spawn(fn () use (mut log) {
-            let n = match task::blocking_with(slow_square, 6) {
+    let (go_tx, go_rx) = thread_channel()?;
+    let r = scope(fn (Scope s) use (go_tx, go_rx, mut log) {
+        let b = s.spawn(fn () use (go_rx, mut log) {
+            let n = match task::blocking_with(square_after, (go_rx, 6)) {
                 Result::Ok(v) => v,
                 Result::Err(_) => -1,
             };
             log.push("blocking done");
             n
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (go_tx, mut log) {
             log.push("other task ran");
+            let _ = send(go_tx, 1);
             0
         });
         let seven = match task::blocking(slow_seven) {
@@ -206,17 +210,19 @@ test("a contended with_lock suspends only the waiting task") {
 
 test("join on a running thread suspends only the joining task") {
     let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        let joiner = s.spawn(fn () use (mut log) {
-            let n = match spawn(slow_square, 4) {
+    let (go_tx, go_rx) = thread_channel()?;
+    let r = scope(fn (Scope s) use (go_tx, go_rx, mut log) {
+        let joiner = s.spawn(fn () use (go_rx, mut log) {
+            let n = match spawn(square_after, (go_rx, 4)) {
                 Result::Ok(t) => got(join(t)),
                 Result::Err(_) => -1,
             };
             log.push("joined");
             n
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (go_tx, mut log) {
             log.push("ticker");
+            let _ = send(go_tx, 1);
             0
         });
         ok_or(joiner.join(), -100)
