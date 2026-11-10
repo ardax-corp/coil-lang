@@ -5428,11 +5428,15 @@ impl Compiler {
         // Each type argument one word in its own layout (no pair): a niche
         // word is the same word in the shared body (rep(ground T)), so a
         // clone is only a cost decision.
-        // `()` is a type argument like any one-word type (#2489).
+        // `()` is a type argument like any one-word type (#2489), which a
+        // clone-only method (`fn_sig_split`: its shared body holds a nested
+        // open enum or a function over its parameters in its own layout)
+        // takes its clone at too; elsewhere its shared body serves `()`.
+        let unit_clone = self.fn_sig_split(key);
         let word = |ty: &Ty| {
             crate::layout::ty_is_closed(ty)
                 && (classify::classify(&self.checker, ty).is_some_and(classify::is_word)
-                    || crate::layout::is_unit(ty)
+                    || unit_clone && crate::layout::is_unit(ty)
                     || matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_)))
         };
         let lookup_tys = src
@@ -5457,7 +5461,7 @@ impl Compiler {
         for (slot, param) in param_tys.iter().enumerate() {
             let ty = at(param);
             // A `()` argument is passed as the empty tuple object.
-            if !one(&ty) && !crate::layout::is_unit(&ty) {
+            if !one(&ty) && !(unit_clone && crate::layout::is_unit(&ty)) {
                 return None;
             }
             // `self` is one word in a method body: a two-word receiver
