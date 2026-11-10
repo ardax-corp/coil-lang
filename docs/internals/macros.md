@@ -485,8 +485,16 @@ variants: their payloads are bound by the pattern (`E::V(s_p0)`) since the old
 `Matrix<D>` anywhere in its type is `D`. The checker types the call
 (`infer_call_expr`) and the HIR builder drops it (`call`), so the body is the
 one `e` alone gives. Without it a `Matrix` field's `==` is the element-wise
-comparison (a `Matrix` of `byte`, not a `bool`) and the field has no `Hash` or
-`Show`. A user derive may write the same call.
+comparison (a `Matrix` of `byte`, not a `bool`). A user derive may write the
+same call. A bare `Matrix<D>` value has the data's instances too
+(coil-lang#2466): a `Show`, `Eq` or `Hash` goal that names a `Matrix<D>`, at
+any depth, is looked up as the goal on `D` (`Generics::matrix_data_args`, in
+every instance lookup, and `Checker::matching_instances` /
+`ensure_structural_instance`), so the instance a call records is the data's,
+the one code generation's run-time types name. No instance of those traits
+can have a `Matrix` head (trait and type are both builtin), so nothing is
+shadowed. The `==` operator on matrices is typed before any goal and stays
+element-wise.
 `Serialize` / `Deserialize` were removed (placeholders that cast fields to a
 byte); serializers belong in format packages as user derives. The `String`
 trait (`to_string`, a second copy of `Show`) was removed too: `Show` is the

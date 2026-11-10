@@ -373,7 +373,20 @@ impl Generics {
     }
 
     /// Find an instance for `class` applied to `args` (exact type match).
+    /// The arguments a `Show`, `Eq` or `Hash` goal is looked up by: a
+    /// `Matrix<D>` in them is its data `D`, at any depth (#2466). A matrix
+    /// is its data at run time and shows, compares and hashes as it does;
+    /// no instance of these traits has a `Matrix` head (both are builtin).
+    pub fn matrix_data_args<'a>(class: &str, args: &'a [Ty]) -> std::borrow::Cow<'a, [Ty]> {
+        use crate::typechecking::aggregate_arith::{erase_matrix_ty, is_matrix_ty};
+        if matches!(class, "Show" | "Eq" | "Hash") && args.iter().any(|ty| ty.any(is_matrix_ty)) {
+            return std::borrow::Cow::Owned(args.iter().map(erase_matrix_ty).collect());
+        }
+        std::borrow::Cow::Borrowed(args)
+    }
+
     pub fn find_instance(&self, class: &str, args: &[Ty]) -> Option<&InstanceDef> {
+        let args = &*Self::matrix_data_args(class, args);
         self.instances.iter().find(|inst| {
             inst.class == class
                 && inst.args.len() == args.len()
@@ -385,6 +398,7 @@ impl Generics {
     /// Constructor type against `impl Collect for Option<int>`). Does not mutate
     /// any global substitution.
     pub fn find_unifying_instances(&self, class: &str, args: &[Ty]) -> Vec<&InstanceDef> {
+        let args = &*Self::matrix_data_args(class, args);
         self.instances
             .iter()
             .filter(|inst| Self::instances_unify(class, args, inst))
@@ -780,6 +794,7 @@ impl Generics {
     /// head unifies with `args`: the fallback after an exact
     /// [`Self::find_instance`] miss. Concrete instances are never returned.
     pub fn find_generic_instance(&self, class: &str, args: &[Ty]) -> Option<&InstanceDef> {
+        let args = &*Self::matrix_data_args(class, args);
         self.instances.iter().find(|inst| {
             inst.args.iter().any(Ty::has_var) && Self::instances_unify(class, args, inst)
         })
