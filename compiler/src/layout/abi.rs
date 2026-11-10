@@ -66,9 +66,10 @@ pub fn range_heap_type_id(inclusive: bool) -> u32 {
 /// `docs/internals/layout.md`, "Open enums"); `split` says whether ground
 /// code holds that one differently. The parameter and result of a function
 /// type that is itself a top count as tops (a function argument's adapter
-/// converts them). A function below the top (an element of `Vec<unit ->
-/// Option<T>>`) has no adapter: its parameter and result are nested too
-/// (#2488).
+/// converts them), except a function among the parameters, which nothing
+/// converts (`fn(fn(T) -> Option<T>) -> T`, #2591). A function below the
+/// top (an element of `Vec<unit -> Option<T>>`) has no adapter: its
+/// parameter and result are nested too (#2488).
 ///
 /// A user class or enum over open arguments is read through its
 /// declaration, its parameters bound to the arguments, for each nominal
@@ -140,8 +141,12 @@ impl NestedOpen<'_, '_> {
         if !top && app.is_some() && (self.split)(ty) {
             return true;
         }
+        // A top function's parameters and result are converted by its
+        // adapter, but a function among its parameters is converted
+        // nowhere: its own parts are below the top (#2591).
         if let Ty::Fun(param, ret) = ty {
-            return self.ty(param, top) || self.ty(ret, top);
+            let param_top = top && !matches!(crate::typechecking::ty::strip_readonly(param), Ty::Fun(..));
+            return self.ty(param, param_top) || self.ty(ret, top);
         }
         let mut found = false;
         ty.for_each_child(|child| found = found || self.ty(child, false));

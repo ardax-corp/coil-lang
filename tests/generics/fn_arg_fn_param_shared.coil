@@ -1,0 +1,39 @@
+// A function a shared generic body passes to its function parameter's own
+// function parameter (`g: fn(fn(T) -> Option<T>) -> T`) is converted by no
+// adapter: only `g`'s own parameters and result are. So the signature is
+// clone-only, as `Vec<fn(T) -> Option<T>>` is, and each ground call takes
+// its clone past the clone budget (coil-lang#2591).
+// @flags --clone-budget 0
+use tests::assert;
+
+class C {
+    pub n: int,
+}
+
+fn use_s(fn(string) -> Option<string> k) -> string {
+    return k("a") ?? "none";
+}
+
+fn use_i(fn(int) -> Option<int> k) -> int {
+    return k(4) ?? 0;
+}
+
+fn use_c(fn(C) -> Option<C> k) -> C {
+    return k(new C(2)) ?? new C(0);
+}
+
+fn run<T>(fn(fn(T) -> Option<T>) -> T g) -> T {
+    return g(fn (T x) => Some(x));
+}
+
+fn run_none<T>(fn(fn(T) -> Option<T>) -> T g) -> T {
+    return g(fn (T x) => None);
+}
+
+test("a closure the body passes to a function argument's parameter") {
+    assert!(run(use_s) == "a");
+    assert!(run(use_i) == 4);
+    assert!(run(use_c).n == 2);
+    assert!(run_none(use_s) == "none");
+    assert!(run_none(use_i) == 0);
+}
