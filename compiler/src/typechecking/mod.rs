@@ -50,9 +50,7 @@ pub use par_profit::{
     DEFAULT_LOOP_GRAIN, par_worker_name, unary_dynamic_cutoff,
 };
 #[allow(unused_imports)] // public API re-export
-pub use purity::{
-    RecursivePureSet, analyze_fn_effects, analyze_recursive_fns, analyze_recursive_pure,
-};
+pub use purity::{analyze_fn_effects, analyze_recursive_fns};
 #[allow(unused_imports)] // public API re-export
 pub use ty::{ScalarBacking, Ty};
 #[allow(unused_imports)] // public API for Vec helpers / codegen

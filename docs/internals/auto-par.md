@@ -30,9 +30,8 @@ on the typed sidecar (`DefId` + bind names). Codegen copies those names into
 - Calls to names that are not user `fn`s (e.g. imported `write_all`, `spawn`,
   `collect`, `attach`) take the matching effect bit (unknown names are impure).
 - Impurity propagates through the user-function call graph (fixed point).
-- `analyze_pure_fns` returns everything that survives; `analyze_recursive_pure`
-  keeps only the subset that **calls itself**. `$mono$` clones of a pure bind
-  stay pure for LICM.
+- Everything that survives is pure, whether or not it calls itself. `$mono$`
+  clones of a pure bind stay pure for LICM.
 
 With HIR lowering on, codegen also solves effects on the module's HIR
 ([`hir::effects`](../../compiler/src/hir/effects.rs), E1) and adds the

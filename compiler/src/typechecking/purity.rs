@@ -2,8 +2,7 @@
 //!
 //! A function is **pure** when its body has no observable host side effects
 //! (IO / threads / FFI / yield / attach) and only calls other pure user
-//! functions. Unknown callees are conservatively impure. **Recursive pure**
-//! functions may be auto-parallelized at `f(a) ⊕ f(b)` sites.
+//! functions. Unknown callees are conservatively impure.
 
 use std::collections::{HashMap, HashSet};
 
@@ -13,9 +12,6 @@ use crate::effects::{LengthStability, classify_host_name};
 
 use super::bare_cases::BareCases;
 use super::id::walk_children;
-
-/// Names of user functions that are pure and self-recursive.
-pub type RecursivePureSet = HashSet<String>;
 
 use common::EffectFlags;
 
@@ -321,9 +317,8 @@ pub fn analyze_fn_effects(ast: &Output<'_>, cases: &BareCases) -> HashMap<String
 
 /// Names of user functions with no observable side effects.
 ///
-/// Unlike [`analyze_recursive_pure`] this keeps non-recursive functions, so
-/// callers that only need "safe to evaluate on another thread" (loop IPA) can
-/// admit ordinary helpers such as `fn sq(int i) -> int { i * i }`.
+/// Recursion does not matter here: an ordinary helper such as
+/// `fn sq(int i) -> int { i * i }` is in the set.
 #[cfg(test)]
 pub fn analyze_pure_fns(ast: &Output<'_>, cases: &BareCases) -> HashSet<String> {
     analyze_fn_effects(ast, cases)
@@ -368,27 +363,6 @@ pub fn length_stability(
         .map(|(name, _)| name.clone())
         .collect();
     LengthStability { fns, alloc_stable }
-}
-
-/// Analyze top-level / nested `fn` declarations and return self-recursive pure names.
-pub fn analyze_recursive_pure(ast: &Output<'_>, cases: &BareCases) -> RecursivePureSet {
-    let facts = collect_fn_facts(ast, cases);
-    let impure = impure_closure(&facts);
-    facts
-        .iter()
-        .filter(|(name, f)| !impure.contains(*name) && f.callees.contains(*name))
-        .map(|(name, _)| name.clone())
-        .collect()
-}
-
-/// Fixed point of "impure if locally impure, or any callee is impure / not a
-/// user `fn`" over the call graph.
-fn impure_closure(facts: &HashMap<String, FnFacts>) -> HashSet<String> {
-    effect_closure(facts)
-        .into_iter()
-        .filter(|(_, flags)| !flags.is_pure())
-        .map(|(name, _)| name)
-        .collect()
 }
 
 fn effect_closure(facts: &HashMap<String, FnFacts>) -> HashMap<String, EffectFlags> {
@@ -1031,10 +1005,10 @@ mod tests {
     use super::*;
     use parser::Pratt;
 
-    fn pure_set(src: &str) -> RecursivePureSet {
+    fn pure_set(src: &str) -> HashSet<String> {
         let owned = src.to_string();
         let ast = Pratt::default().parse(owned.as_str()).expect("parse");
-        analyze_recursive_pure(&ast, BareCases::none())
+        analyze_pure_fns(&ast, BareCases::none())
     }
 
     #[test]
@@ -1116,7 +1090,7 @@ fn main() { return; }
     }
 
     #[test]
-    fn fib_is_recursive_pure() {
+    fn recursive_fib_is_pure() {
         let set = pure_set(
             r#"
 fn fib(int n) -> int {
@@ -1126,8 +1100,7 @@ fn fib(int n) -> int {
 fn main() { return; }
 "#,
         );
-        assert!(set.contains("fib"), "fib should be recursive pure: {set:?}");
-        assert!(!set.contains("main"));
+        assert!(set.contains("fib"), "fib should be pure: {set:?}");
     }
 
     fn parse_ast(src: &str) -> parser::ast::Output<'static> {
@@ -1189,17 +1162,6 @@ fn main() { return; }
         assert!(!set.contains("speak"), "speak uses IO: {set:?}");
     }
 
-    #[test]
-    fn pure_non_recursive_excluded() {
-        let set = pure_set(
-            r#"
-fn add(int a, int b) -> int { return a + b; }
-fn main() { return; }
-"#,
-        );
-        assert!(!set.contains("add"));
-    }
-
     /// `analyze_pure_fns` keeps the non-recursive helpers that loop IPA needs.
     #[test]
     fn analyze_pure_fns_keeps_non_recursive_helpers() {
@@ -1242,7 +1204,7 @@ fn main() { return; }
         assert!(!set.contains("leaf"), "leaf uses IO: {set:?}");
         assert!(
             !set.contains("rec"),
-            "rec must not be recursive-pure when it reaches impure leaf: {set:?}"
+            "rec must not be pure when it reaches impure leaf: {set:?}"
         );
     }
 
@@ -1304,27 +1266,6 @@ fn main() { return; }
         );
     }
 
-    #[test]
-    fn mutual_recursion_without_self_call_excluded() {
-        let set = pure_set(
-            r#"
-fn a(int n) -> int {
-    if n <= 0 { return 0; }
-    return b(n - 1);
-}
-fn b(int n) -> int {
-    if n <= 0 { return 1; }
-    return a(n - 1);
-}
-fn main() { return; }
-"#,
-        );
-        assert!(
-            !set.contains("a") && !set.contains("b"),
-            "only self-recursive pure fns are auto-par candidates: {set:?}"
-        );
-    }
-
     /// Skipping `Construct` payloads hid IO inside `Tree::Node(shout(n), …)`.
     #[test]
     fn impure_call_in_enum_ctor_payload_marks_impure() {
@@ -1353,10 +1294,10 @@ fn main() { return; }
         );
     }
 
-    /// Self-calls that only appear inside `Tree::Node(…)` must still mark the
-    /// builder recursive-pure so EnumCtor IPA can fire.
+    /// Self-calls that only appear inside `Tree::Node(…)` are walked, and the
+    /// builder stays pure so EnumCtor IPA can fire.
     #[test]
-    fn self_recursion_only_via_enum_ctor_is_recursive_pure() {
+    fn self_recursion_only_via_enum_ctor_is_pure() {
         let set = pure_set(
             r#"
 enum Tree {
@@ -1372,7 +1313,7 @@ fn main() { return; }
         );
         assert!(
             set.contains("build"),
-            "enum-building self-recursion must be recursive-pure: {set:?}"
+            "enum-building self-recursion must be pure: {set:?}"
         );
     }
 

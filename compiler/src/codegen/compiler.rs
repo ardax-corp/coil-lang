@@ -1868,7 +1868,6 @@ impl Compiler {
             steady_fns: self.steady_fns.clone(),
             alloc_steady: self.alloc_steady,
             recursive_fns: self.recursive_fns.clone(),
-            recursive_pure: self.recursive_pure.clone(),
             par_shapes: self.par_shapes.clone(),
             par_workers: self.par_workers.clone(),
             loop_par_sites: self.loop_par_sites.clone(),
@@ -1904,7 +1903,6 @@ impl Compiler {
         std::mem::swap(&mut self.steady_fns, &mut ctx.steady_fns);
         std::mem::swap(&mut self.alloc_steady, &mut ctx.alloc_steady);
         std::mem::swap(&mut self.recursive_fns, &mut ctx.recursive_fns);
-        std::mem::swap(&mut self.recursive_pure, &mut ctx.recursive_pure);
         std::mem::swap(&mut self.par_shapes, &mut ctx.par_shapes);
         std::mem::swap(&mut self.par_workers, &mut ctx.par_workers);
         std::mem::swap(&mut self.loop_par_sites, &mut ctx.loop_par_sites);
@@ -6287,11 +6285,6 @@ impl Compiler {
         self.build_hir_for_lowering(module, ast);
         let bare_cases = self.checker.bare_cases().clone();
         self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
-        self.recursive_pure = if self.auto_par && self.opt_options.auto_par {
-            crate::typechecking::analyze_recursive_pure(ast, &bare_cases)
-        } else {
-            HashSet::new()
-        };
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
         self.steady_fns = self.typed_sidecar.length_stability().fns.clone();
         self.alloc_steady = self.typed_sidecar.length_stability().alloc_stable;
