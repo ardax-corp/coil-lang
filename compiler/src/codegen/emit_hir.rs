@@ -11206,8 +11206,12 @@ impl<'a> HirLowerCx<'a> {
                         matches!(crate::layout::of_resolved(checker, &apply_ty_prune(checker.subst(), &at)), crate::layout::Layout::Pair(_))
                             .then_some(crate::mir::MirTy::HeapRef)
                     })
-                    // Any other tuple is a heap tuple object (#1170).
-                    .or_else(|| matches!(apply_ty_prune(checker.subst(), t), Ty::Tuple(ref items) if !items.is_empty()).then_some(crate::mir::MirTy::HeapRef))
+                    // Any other tuple is a heap tuple object (#1170), a
+                    // class parameter's at the made type's arguments too.
+                    .or_else(|| {
+                        let at = made.and_then(|m| c.hir_param_field_at(m, t)).unwrap_or_else(|| t.clone());
+                        matches!(apply_ty_prune(checker.subst(), &at), Ty::Tuple(ref items) if !items.is_empty()).then_some(crate::mir::MirTy::HeapRef)
+                    })
             })
             .collect();
         Ok(tys.ok_or("scalar-replaced field type")?)
@@ -11291,6 +11295,19 @@ impl<'a> HirLowerCx<'a> {
             // A foreign `ptr`: a raw address word, as a local holds it
             // (#1507).
             .or_else(|| (matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == "ptr") && !self.is_class(t)).then_some(crate::mir::MirTy::I64))
+            // An array or `Vec` of heap words (strings, objects, arrays,
+            // tuples, enums) is its heap object, as one of scalars is
+            // (#2427).
+            .or_else(|| {
+                let t = apply_ty_prune(checker.subst(), t);
+                let elem = match crate::typechecking::ty::strip_readonly(&t) {
+                    Ty::Array { element, .. } => element.as_ref(),
+                    t => crate::typechecking::ty::vec_element_ty(t)?,
+                };
+                (self.field_word(elem).is_some()
+                    || matches!(crate::typechecking::ty::strip_readonly(elem), Ty::Tuple(items) if !items.is_empty()))
+                .then_some(crate::mir::MirTy::HeapRef)
+            })
     }
 
     /// The word a heap class object's field of type `t` holds (a generic

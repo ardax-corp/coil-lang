@@ -19129,12 +19129,12 @@ impl Checker {
         let mut out = Vec::with_capacity(names.len());
         for (i, name) in names.iter().enumerate() {
             let tag = tags.get(name).copied().unwrap_or(i as u32);
+            // Run-time types, as [`Self::class_fields`] gives them.
+            let erase = crate::typechecking::aggregate_arith::erase_matrix_ty;
             let payload_tys: Vec<Ty> = match payloads.get(i) {
                 Some(EnumVariantPayloadTy::Unit) => Vec::new(),
-                Some(EnumVariantPayloadTy::Tuple(tys)) => tys.clone(),
-                Some(EnumVariantPayloadTy::Record(fields)) => {
-                    fields.iter().map(|(_, ty)| ty.clone()).collect()
-                }
+                Some(EnumVariantPayloadTy::Tuple(tys)) => tys.iter().map(erase).collect(),
+                Some(EnumVariantPayloadTy::Record(fields)) => fields.iter().map(|(_, ty)| erase(ty)).collect(),
                 None => Vec::new(),
             };
             out.push((name.clone(), tag, payload_tys));
@@ -19164,7 +19164,12 @@ impl Checker {
             .get(&key)
             .and_then(|p| p.get(tag as usize))
         {
-            Some(payload) => payload.field_pairs(),
+            // Run-time types, as [`Self::class_fields`] gives them.
+            Some(payload) => payload
+                .field_pairs()
+                .into_iter()
+                .map(|(name, ty)| (name, crate::typechecking::aggregate_arith::erase_matrix_ty(&ty)))
+                .collect(),
             None => Vec::new(),
         }
     }
@@ -19402,7 +19407,7 @@ impl Checker {
                 }
             }
             Ty::Con(name) => {
-                if let Some(fty) = self.class_field_ty(name, field) {
+                if let Some(fty) = self.declared_class_field_ty(name, field) {
                     let vis = self.classes.get(name).and_then(|fields| {
                         fields
                             .iter()
@@ -20644,8 +20649,9 @@ impl Checker {
         Self::class_name_of_ty(ty).is_some_and(|n| self.is_class(n))
     }
 
-    /// Declared type of a class field (codegen / Access).
-    pub fn class_field_ty(&self, class: &str, field: &str) -> Option<&Ty> {
+    /// Declared type of a class field, as written: a `Matrix<D>` keeps its
+    /// wrapper, which the linear-algebra operators are picked from.
+    fn declared_class_field_ty(&self, class: &str, field: &str) -> Option<&Ty> {
         self.classes
             .get(class)?
             .iter()
@@ -20653,7 +20659,13 @@ impl Checker {
             .map(|(_, _, ty)| ty)
     }
 
-    /// Class fields in declaration order: `(name, Ty)`.
+    /// The type a class field's value has at run time: its declared type,
+    /// a `Matrix<D>` in it erased to its data `D` as the HIR's own types
+    /// are (`hir/build.rs`, `runtime_types`).
+    pub fn class_field_ty(&self, class: &str, field: &str) -> Option<Ty> {
+        self.declared_class_field_ty(class, field).map(crate::typechecking::aggregate_arith::erase_matrix_ty)
+    }
+
     /// Every registered class name (debug type tables).
     pub fn class_names(&self) -> Vec<String> {
         self.classes.keys().cloned().collect()
@@ -20664,11 +20676,14 @@ impl Checker {
         self.enums.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
+    /// Class fields in declaration order, each with the type its value has
+    /// at run time ([`Self::class_field_ty`]): what layout, HIR passes and
+    /// codegen read. Inference reads the declared types itself.
     pub fn class_fields(&self, class: &str) -> Option<Vec<(String, Ty)>> {
         self.classes.get(class).map(|fields| {
             fields
                 .iter()
-                .map(|(_, name, ty)| (name.clone(), ty.clone()))
+                .map(|(_, name, ty)| (name.clone(), crate::typechecking::aggregate_arith::erase_matrix_ty(ty)))
                 .collect()
         })
     }

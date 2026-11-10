@@ -5350,7 +5350,7 @@ impl Compiler {
     /// Class field type for codegen, substituting type args from `App`.
     fn codegen_class_field_ty(&self, class: &str, field: &str, receiver_ty: &Ty) -> Option<Ty> {
         use crate::typechecking::ty::subst_ty_params;
-        let fty = self.checker.class_field_ty(class, field)?.clone();
+        let fty = self.checker.class_field_ty(class, field)?;
         let params = self
             .checker
             .generics()
