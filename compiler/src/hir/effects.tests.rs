@@ -1292,6 +1292,33 @@ fn fresh(Box b) -> Vec<int> {
     assert_eq!(fresh.returns_inner, 0, "{fresh:?}");
 }
 
+#[test]
+fn a_type_parameter_result_from_a_call_is_returned_inner() {
+    // #2502: a shared generic body cannot share a value of its type
+    // parameter, so the caller shares what the body hands back from a call.
+    let src = "
+class Cell<T> {
+    value: T,
+}
+impl Cell<T> {
+    pub fn get() -> T {
+        return self.value;
+    }
+}
+fn through<T>(int n, Cell<T> c) -> T {
+    return c.get();
+}
+fn count<T>(Cell<T> c) -> int {
+    let _ = c.get();
+    return 1;
+}
+";
+    let (m, out) = summaries(src);
+    let through = of(&m, &out, "through");
+    assert_eq!(through.returns_inner, 0b10, "{through:?}");
+    assert_eq!(of(&m, &out, "count").returns_inner, 0);
+}
+
 /// A copy that is changed, then a block that leaves on every path, and a
 /// match on a fresh string whose arms all leave.
 const LEAVERS: &str = "

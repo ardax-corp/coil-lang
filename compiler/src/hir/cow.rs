@@ -93,6 +93,18 @@ fn open_param(checker: &Checker, ty: Option<&Ty>) -> bool {
     ty.is_some_and(|t| matches!(strip_readonly(&crate::typechecking::subst::apply_ty_prune(checker.subst(), t)), Ty::Var(_)))
 }
 
+/// Whether `body` returns a value of a type parameter (`T`, or `F<A>` over
+/// a type parameter `F`): what its shared form holds as an opaque word,
+/// where a share is no op.
+pub(super) fn open_result(checker: &Checker, body: &HirBody) -> bool {
+    !body.is_coro
+        && body.ret.as_ref().is_some_and(|t| match strip_readonly(&crate::typechecking::subst::apply_ty_prune(checker.subst(), t)) {
+            Ty::Var(_) => true,
+            Ty::App(head, _) => matches!(strip_readonly(head), Ty::Var(_)),
+            _ => false,
+        })
+}
+
 /// What a call does with each argument (bit `i` for argument `i`).
 #[derive(Debug, Clone, Copy, Default)]
 struct ArgUse {

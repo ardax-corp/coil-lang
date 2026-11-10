@@ -15,7 +15,7 @@ docs under `language/memory`. View classes are covered in
 | `mutates` | the callee may write through the parameter (inout: the caller's place sees the write) | effects walk |
 | `keeps` | the parameter's object is stored past the call (field, element, capture, `yield`) | `cow::keeps` |
 | `returns_arg` | the result may be the parameter's object itself | `cow::keeps` (`return p`, through `let x = p` and calls that return their argument) |
-| `returns_inner` | the result may be an object held inside the parameter (`return p.f`, `return p.xs[i]`) | `cow::keeps` via `inner_params` |
+| `returns_inner` | the result may be an object held inside the parameter (`return p.f`, `return p.xs[i]`) | `cow::keeps` via `inner_params`; for a result of a bare type parameter, also every parameter the result may reach (`returns`, `escapes`) |
 | `opaque_args` | the parameter reaches code not known here (a trait call on a type parameter, a function value) | `cow::keeps` |
 
 Code that is not known (`ArgUse` `unknown`: a function value, a trait
@@ -28,6 +28,17 @@ A `return` of a parameter, or of a parameter's field or element, does
 not share: `Plan::store_result` records the value as stored and leaves
 the share to the caller. Coroutines keep the old rule (they share what
 they hand back), since a resumed frame outlives the call.
+
+A generic body whose result is a bare type parameter (`T`, or `F<A>` over
+a type parameter `F`) leaves more to the caller (#2502). Its shared form
+holds a `T` as an opaque word, which may be a scalar, so a share of one is
+no op there (`mir/from_hir.rs`, `Builtin::Cow`). A result it would have
+shared itself, one a call handed back from inside a parameter
+(`return c.get()`), comes back unshared. So when the result is not fresh
+(`shared_ret`), `returns_inner` names every parameter the result may reach,
+and the caller, which knows the type, shares the result by the rule below.
+A per-type clone still shares it too: the second share sets a flag that is
+already set.
 
 ## The caller
 
@@ -67,6 +78,8 @@ an operator operand.
   per call (the result is shared because the dictionary call is opaque).
 
 Tests: `tests/cow_call_share_cli.rs` (copy counts),
+`tests/memory/cow_generic_bodies_shared.coil` (a type parameter result of
+a shared body),
 `tests/memory/cow_returned_param_names.coil` and
 `tests/memory/cow_returned_field.coil` (soundness). Benches:
 `examples/perf/cow_call_reassign.coil`, `cow_call_field.coil`,
