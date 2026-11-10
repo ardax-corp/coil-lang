@@ -7055,9 +7055,25 @@ impl Compiler {
         self.messages.extend(self.checker.take_messages());
 
         // Structural thunks (a `Result<_, IoError>`'s `show`) can mark a
-        // builtin enum's `Show` thunk used, so they go first (#1984).
-        self.emit_structural_thunks();
-        self.emit_used_builtin_show_thunks();
+        // builtin enum's `Show` thunk used, so they go first (#1984). A
+        // thunk may ask for an instance clone (`Show<Option<Box<int>>>`'s
+        // payload is `Show<Box<int>>`'s clone, #2580), whose body may
+        // reserve more thunks: to a fixed point.
+        let children: &[Output<'_>] = match ast.1.as_ref() {
+            Expression::Program(children) => children,
+            _ => &[],
+        };
+        loop {
+            self.emit_structural_thunks();
+            self.emit_used_builtin_show_thunks();
+            if self.inst_clone_queue.is_empty() {
+                break;
+            }
+            // Under the module's namespace, as its own clones were.
+            let outer = std::mem::replace(&mut self.namespace, module.to_string());
+            self.emit_instance_clones(children);
+            self.namespace = outer;
+        }
         let (_, residue) = std::mem::take(&mut *self.residue.borrow_mut());
         self.messages.extend(residue);
         // Kept while this module holds methods a later module may clone.
@@ -7567,6 +7583,27 @@ impl Compiler {
         self.emit_synth_fn(name, &hir, calls);
     }
 
+    /// Each `caller -> callee` whose callee entry (a call, function value
+    /// or code pointer target) is no emitted body's.
+    fn unbound_code_targets(&self, names: &HashMap<u32, String>) -> Vec<String> {
+        let funcs = self.bodies.funcs();
+        let bound: HashSet<u32> = funcs.iter().filter_map(|f| f.entry.map(|l| l.0)).collect();
+        let mut out: Vec<String> = funcs
+            .iter()
+            .filter_map(|f| Some((f, f.mir.as_deref()?)))
+            .flat_map(|(f, mir)| {
+                mir.code_targets()
+                    .into_iter()
+                    .filter(|t| !bound.contains(&t.0))
+                    .map(|t| format!("`{}` -> `{}`", f.name, names.get(&t.0).map_or("?", String::as_str)))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
     /// Resolve labels and link the bodies into program code.
     ///
     /// Called once after multi-file linking by the pipeline, or at the end
@@ -7595,6 +7632,9 @@ impl Compiler {
             .filter(|f| f.mir.is_none() && f.mir_why.is_some())
             .map(|f| f.name.clone())
             .collect();
+        // Every reserved entry's name, before the dead ones are dropped:
+        // one no body was emitted for is named in the check below.
+        let entry_names: HashMap<u32, String> = self.fn_entry_labels.iter().map(|(n, l)| (l.0, n.clone())).collect();
         let has_main = self.functions.contains_key("main");
         if has_main || !no_mir.is_empty() {
             let mut roots = if has_main {
@@ -7639,6 +7679,15 @@ impl Compiler {
             .collect();
         if clean && !missing.is_empty() {
             panic!("internal compiler error: {} bod{} without MIR: {}", missing.len(), if missing.len() == 1 { "y" } else { "ies" }, missing.join(", "));
+        }
+        // Nor may a body name an entry no body was emitted for (a clone
+        // reserved and never compiled, #2580): the check above sees only
+        // the bodies there are.
+        if clean {
+            let unbound = self.unbound_code_targets(&entry_names);
+            if !unbound.is_empty() {
+                panic!("internal compiler error: {} reference{} to a body that was never emitted: {}", unbound.len(), if unbound.len() == 1 { "" } else { "s" }, unbound.join(", "));
+            }
         }
         if crate::mir::capture_open() {
             let opts = self.opt_options.clone();
