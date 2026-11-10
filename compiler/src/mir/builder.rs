@@ -1263,12 +1263,17 @@ impl MirBuilder {
     }
 
     /// [`MirInst::Cow`]; with `field`, unique field `field` of object `src`
-    /// in place.
+    /// in place. A share of an `I64` word (a shared generic body's type
+    /// parameter, which may be no object) keeps the source type: the
+    /// runtime leaves a non-object word alone, and the result roots nothing.
     pub fn ins_cow_at(&mut self, src: ValueId, unique: bool, field: Option<u32>) -> Result<ValueId, MirError> {
         let src = self.resolve(src);
-        let dest = self.alloc(MirTy::HeapRef);
+        let word = !unique && field.is_none() && self.func.ty(src) == MirTy::I64;
+        let dest = self.alloc(if word { MirTy::I64 } else { MirTy::HeapRef });
         self.push(MirInst::Cow { dest, src, unique, field })?;
-        self.snapshot_slots(dest);
+        if !word {
+            self.snapshot_slots(dest);
+        }
         Ok(dest)
     }
 

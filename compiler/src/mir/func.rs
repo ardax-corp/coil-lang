@@ -1079,8 +1079,12 @@ impl MirFunc {
                     }
                 }
             }
-            MirInst::Cow { dest, src, .. } => {
-                if self.ty(*dest) != MirTy::HeapRef || self.ty(*src) != MirTy::HeapRef {
+            MirInst::Cow { dest, src, unique, field } => {
+                // A share of a word that may be no object (a shared generic
+                // body's type parameter) is `I64` to `I64`.
+                let word = !*unique && field.is_none() && self.ty(*src) == MirTy::I64;
+                let ok = if word { self.ty(*dest) == MirTy::I64 } else { self.ty(*dest) == MirTy::HeapRef && self.ty(*src) == MirTy::HeapRef };
+                if !ok {
                     return Err(format!("{dest} Cow type"));
                 }
             }
