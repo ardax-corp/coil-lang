@@ -1,0 +1,107 @@
+// A generic body's element-wise operator cloned at a user type calls the
+// type's operator instance once per element: zip, negation, broadcast on
+// either side, 8 or more elements, tuples and `Vec`.
+use tests::assert;
+
+class Money {
+    pub cents: int,
+}
+
+impl Add for Money {
+    pub fn add(Money a, Money b) -> Money {
+        return new Money(a.cents + b.cents);
+    }
+}
+
+impl Sub for Money {
+    pub fn sub(Money a, Money b) -> Money {
+        return new Money(a.cents - b.cents);
+    }
+}
+
+impl Mul for Money {
+    pub fn mul(Money a, Money b) -> Money {
+        return new Money(a.cents * b.cents);
+    }
+}
+
+impl Neg for Money {
+    pub fn neg(Money a) -> Money {
+        return new Money(0 - a.cents);
+    }
+}
+
+fn m(int cents) -> Money {
+    return new Money(cents);
+}
+
+fn add<T: Add>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return a + b;
+}
+
+fn mixed<T: Add + Sub + Mul>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return (a - b) * a + b;
+}
+
+fn neg<T: Neg>([T; 3] a) -> [T; 3] {
+    return -a;
+}
+
+fn scale<T: Mul>([T; 3] a, T k) -> [T; 3] {
+    return a * k;
+}
+
+fn from<T: Sub>(T k, [T; 3] a) -> [T; 3] {
+    return k - a;
+}
+
+fn wide<T: Add>([T; 9] a, [T; 9] b) -> [T; 9] {
+    return a + b;
+}
+
+fn triple<T: Sub>((T, T, T) a, (T, T, T) b) -> (T, T, T) {
+    return a - b;
+}
+
+fn vec_scale<T: Mul>(Vec<T> v, T k) -> Vec<T> {
+    return v * k;
+}
+
+fn vec_neg<T: Neg>(Vec<T> v) -> Vec<T> {
+    return -v;
+}
+
+test("zip and negation") {
+    let a = add([m(1), m(2), m(3)], [m(10), m(20), m(30)]);
+    assert!(a[0].cents == 11 && a[1].cents == 22 && a[2].cents == 33);
+    let x = mixed([m(8), m(9), m(10)], [m(2), m(3), m(1)]);
+    assert!(x[0].cents == 50 && x[1].cents == 57 && x[2].cents == 91);
+    let n = neg([m(1), m(-2), m(3)]);
+    assert!(n[0].cents == -1 && n[1].cents == 2 && n[2].cents == -3);
+}
+
+test("broadcast on either side") {
+    let s = scale([m(1), m(2), m(3)], m(3));
+    assert!(s[0].cents == 3 && s[1].cents == 6 && s[2].cents == 9);
+    let f = from(m(10), [m(1), m(2), m(3)]);
+    assert!(f[0].cents == 9 && f[1].cents == 8 && f[2].cents == 7);
+}
+
+test("9 elements, a tuple and a Vec") {
+    let one = [m(1), m(2), m(3), m(4), m(5), m(6), m(7), m(8), m(9)];
+    let w = wide(one, one);
+    assert!(w[0].cents == 2 && w[4].cents == 10 && w[8].cents == 18);
+    let t = triple((m(1), m(2), m(3)), (m(3), m(2), m(1)));
+    assert!(t[0].cents == -2 && t[1].cents == 0 && t[2].cents == 2);
+    let v = vec_scale(Vec::from([m(1), m(2)]), m(5));
+    assert!(v.len() == 2 && v[0].cents == 5 && v[1].cents == 10);
+    let vn = vec_neg(Vec::from([m(1), m(2)]));
+    assert!(vn[0].cents == -1 && vn[1].cents == -2);
+}
+
+test("the same bodies at int") {
+    let a = add([1, 2, 3], [10, 20, 30]);
+    assert!(a[0] == 11 && a[2] == 33);
+    let s = scale([1, 2, 3], 3);
+    assert!(s[2] == 9);
+}
