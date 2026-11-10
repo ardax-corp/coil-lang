@@ -2766,9 +2766,10 @@ impl Compiler {
         // bound's dictionary, and as the shared entry in the entry's own
         // ([`Self::plan_entry_dict`], #2477).
         //
-        // A superclass method that reads its dictionary and has no clone
-        // here (an open goal, past the budget, a method on its own clone
-        // chain) is reached through a forwarder (#2476).
+        // A superclass method that reads its dictionary takes its clone
+        // at a ground goal past the budget too; with no clone (an open
+        // goal, a method on its own clone chain) it is reached through a
+        // forwarder (#2476).
         let mut unbuilt = None;
         let mut forwarded: Vec<usize> = Vec::new();
         let fqns: Vec<String> = if open {
@@ -2797,7 +2798,10 @@ impl Compiler {
                     }).or_else(|| nested_slots.get(slot).cloned().flatten().map(|method| {
                         format!("its `{method}` reads the `Option` / `Result` the value holds as an enum object, and has no per-type clone that reads its own word (coil-lang#2446)")
                     }));
-                    match self.instance_clone_at(&name, lookup, takes_object.is_some()) {
+                    // Past the budget too for a dictionary-reading
+                    // superclass method: its clone is a direct call, a
+                    // forwarder one more indirect call into the shared body.
+                    match self.instance_clone_at(&name, lookup, takes_object.is_some() || reads.is_some()) {
                         Some(clone) => Self::dict_adapter_name(&clone),
                         None => {
                             if let Some(why) = takes_object {

@@ -12,7 +12,7 @@ A dictionary of instance `I` of class `S` at `X` is one tuple (`plan_instance_di
 (methods.., context.., superclass dictionaries..)
 ```
 
-- **methods**: `S`'s flattened methods (`TypeClassDef::flattened_methods`): its own, then each superclass's, in declaration order. A slot holds a code pointer: the method's `$dict` adapter, its per-type clone's adapter for a ground goal within the clone budget, or a forwarder (below).
+- **methods**: `S`'s flattened methods (`TypeClassDef::flattened_methods`): its own, then each superclass's, in declaration order. A slot holds a code pointer: the method's `$dict` adapter, its per-type clone's adapter for a ground goal within the clone budget (past it too for a superclass method that reads its dictionary), or a forwarder (below).
 - **context**: one dictionary per bound of `I`'s head (`impl Show for Box<T: Show>` holds `Show<T>`), instantiated for the goal. `I`'s methods read them at those indices at entry.
 - **superclass dictionaries** (#2476): one `C<X>` dictionary, planned like any other, for each superclass `C` with a slot that holds a forwarder. Empty for every other dictionary, so an instance with no context and no dictionary-reading superclass method keeps the two-part shape (every `int` / `float` / `string` one).
 
@@ -20,13 +20,13 @@ A bound call does not know which kind of slot it calls: it loads the slot and ca
 
 ## Forwarders
 
-A superclass's method called with the subclass's dictionary would read the wrong one where it reads its dictionary at all: a default body calls its siblings at its own trait's slot numbers, and a bounded instance's method unpacks its context after its own trait's methods. Such a slot, where no clone fills it, holds a forwarder (`Compiler::dict_forwarder`, emitted by `emit_dict_forwarder` with the other reserved thunks):
+A superclass's method called with the subclass's dictionary would read the wrong one where it reads its dictionary at all: a default body calls its siblings at its own trait's slot numbers, and a bounded instance's method unpacks its context after its own trait's methods. At a ground goal such a slot takes the method's clone past the clone budget too, a direct call. Where no clone fills it (an open goal, a method on its own clone chain), it holds a forwarder (`Compiler::dict_forwarder`, emitted by `emit_dict_forwarder` with the other reserved thunks):
 
 ```
 C__m$fwd$<index>$<slot>(args.., D, own..) = D[index][slot](args.., D[index], own..)
 ```
 
-`index` is where `C`'s dictionary sits in `D`, `slot` the method's slot in it. The forwarder moves its words and never reads them (a scalar parameter keeps its type, anything else is an opaque word, as in a shared generic body), so one forwarder serves every instance whose dictionary has `C`'s at that index. Its one call is a `HirBoundCall` with `forward` set (`mir/from_hir.rs`). The cost is one more indirect call for such a method on the shared path; a method that reads no dictionary is in the slot itself.
+`index` is where `C`'s dictionary sits in `D`, `slot` the method's slot in it. The forwarder moves its words and never reads them (a scalar parameter keeps its type, anything else is an opaque word, as in a shared generic body), so one forwarder serves every instance whose dictionary has `C`'s at that index. Its one call is a `HirBoundCall` with `forward` set (`mir/from_hir.rs`). The cost is one more indirect call for such a method on the shared path, plus the shared method's own dictionary reads (`examples/perf/dict_super_forward.coil` under `--clone-budget 0`: 310 M `instructions:u` with the clone, 749 M through the forwarder); a method that reads no dictionary is in the slot itself.
 
 ## A superclass's dictionary from a bound
 
