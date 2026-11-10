@@ -886,14 +886,8 @@ impl<'s> Formatter<'s> {
                 }
             }
 
-            Expression::Negate(n) => {
-                self.push_str("-");
-                self.fmt_operand(n, PREC_UNARY);
-            }
-            Expression::Positive(n) => {
-                self.push_str("+");
-                self.fmt_operand(n, PREC_UNARY);
-            }
+            Expression::Negate(n) => self.fmt_prefix("-", |f| f.fmt_operand(n, PREC_UNARY)),
+            Expression::Positive(n) => self.fmt_prefix("+", |f| f.fmt_operand(n, PREC_UNARY)),
             Expression::Not(n) => {
                 self.push_str("~");
                 self.fmt_operand(n, PREC_UNARY);
@@ -991,8 +985,7 @@ impl<'s> Formatter<'s> {
                     AdjustOp::Dec => "--",
                 };
                 if *prefix {
-                    self.push_str(sym);
-                    self.fmt_output(target);
+                    self.fmt_prefix(sym, |f| f.fmt_output(target));
                 } else {
                     self.fmt_output(target);
                     self.push_str(sym);
@@ -2347,6 +2340,21 @@ impl<'s> Formatter<'s> {
     }
 
     /// Format `e`, in parentheses when it binds looser than `min`.
+    /// The prefix `op` (`-`, `+`, `--`, `++`) and then its operand, which
+    /// `operand` prints. An operand that starts with the operator's sign gets
+    /// a space before it: `- -a` glued is `--a`, a decrement, and `+ +a` is
+    /// `++a` (#2519). No other prefix operator forms a longer token with what
+    /// can start an operand.
+    fn fmt_prefix(&mut self, op: &str, operand: impl FnOnce(&mut Self)) {
+        self.push_str(op);
+        let at = self.out.len();
+        operand(self);
+        let sign = op.as_bytes()[op.len() - 1];
+        if self.out.as_bytes().get(at) == Some(&sign) {
+            self.out.insert(at, ' ');
+        }
+    }
+
     fn fmt_operand(&mut self, e: &Output<'_>, min: u8) {
         self.fmt_operand_expr(e.1.as_ref(), min);
     }
