@@ -60,10 +60,11 @@ enum Val {
 /// How a `%v` argument of a planned `format` call becomes its text.
 #[derive(Clone, Debug)]
 pub enum HirShow {
-    /// A plain one-word `CALL` of the value's `show` entry: on the value
-    /// itself for a raw entry, else on its word (`word`, a `float` / `bool`
-    /// as its bits).
-    Call { target: Label, word: bool },
+    /// A one-word `CALL` of the value's `show` entry: on the value itself
+    /// for a raw entry, else on its word (`word`, a `float` / `bool` as
+    /// its bits), then the instance's dictionary when the entry takes one
+    /// (`dicts`: a bounded generic instance's shared entry, #2479).
+    Call { target: Label, word: bool, dicts: Vec<HirDictOp> },
     /// `STRINGIFY` (a type with no `Show` instance).
     Stringify,
     /// A bound type parameter's `show` through one of the body's
@@ -6799,7 +6800,7 @@ impl Lower<'_> {
     /// tuple's or record's items shown and formatted.
     fn show(&mut self, id: HirId, v: ValueId, show: &HirShow) -> Result<ValueId, Refusal> {
         let (fmt, parts, tuple) = match show {
-            HirShow::Call { target, word } => {
+            HirShow::Call { target, word, dicts } => {
                 // Only a heap carrier goes as a word here, as an operator's
                 // operand.
                 let v = match *word {
@@ -6807,12 +6808,14 @@ impl Lower<'_> {
                     true if self.b.value_ty(v) != MirTy::HeapRef => return Err("show word".into()),
                     true => self.b.ins_word(v).map_err(mir)?,
                 };
+                let mut words = vec![v];
+                words.extend(self.dict_values(dicts)?);
                 let abi = CallAbi {
-                    params: vec![self.b.value_ty(v)],
+                    params: words.iter().map(|&w| self.b.value_ty(w)).collect(),
                     ret: MirTy::HeapRef,
                     ret_hi: None,
                 };
-                return Ok(self.at_expr(id, |l| l.b.ins_call(*target, vec![v], &abi).map_err(mir))?.0);
+                return Ok(self.at_expr(id, |l| l.b.ins_call(*target, words, &abi).map_err(mir))?.0);
             }
             HirShow::Stringify => {
                 let s = self.at_expr(id, |l| l.b.ins_stringify(v, None).map_err(mir))?;
