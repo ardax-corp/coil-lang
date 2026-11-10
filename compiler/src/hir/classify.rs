@@ -204,7 +204,8 @@ pub(super) fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, o
 ///   parameter): the ground type's word;
 /// - a generic class's instance over type parameters (`Cell<T>`, `Vec<T>`,
 ///   #2530): one object word on both sides, its fields of `T` the ground
-///   type's words;
+///   type's words; a fixed array over them (`[T; 3]`) too, the same heap
+///   array a `Vec` is (#2615);
 /// - a function: one closure word;
 /// - a tuple of such words or `()` (`(T, T)`, #2493): the tuple object,
 ///   whose items are each one word (a two-word value boxed), never a pair
@@ -219,6 +220,7 @@ fn plain_word(checker: &Checker, t: &Ty, seen: &mut Vec<String>, open_enum: bool
             matches!(head.as_ref(), Ty::Con(name) if is_generic_class(checker, name) && checker.enum_variants(name).is_none())
                 && args.iter().all(params_closed)
         }
+        Ty::Array { element, .. } => params_closed(element),
         _ => false,
     };
     let word = (crate::layout::ty_is_closed(t) || matches!(strip_readonly(t), Ty::Fun(..) | Ty::Var(_)) || class_word(t))
