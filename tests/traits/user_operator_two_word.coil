@@ -1,0 +1,357 @@
+// A scalar user operator (`a + b`, `-a`) whose instance takes and returns a
+// two-word class (`readonly`, two fields), an enum or a generic class, in
+// ground code and in a generic body's clone and shared body
+// (coil-lang#2433): the same call as the method spelling `a.add(b)`.
+use tests::assert;
+
+readonly class V2 {
+    pub x: int,
+    pub y: int,
+}
+
+readonly class F2 {
+    pub x: float,
+    pub n: int,
+}
+
+enum Sign {
+    Pos,
+    Neg,
+}
+
+#[repr(int)]
+enum Bit {
+    Zero = 0,
+    One = 1,
+}
+
+#[repr(string)]
+enum Tone {
+    Hi = "hi",
+    Lo = "lo",
+}
+
+// A payload enum of two words.
+enum Amt {
+    Int(int),
+    Zero,
+}
+
+class Box<T> {
+    pub v: T,
+}
+
+readonly class P<T> {
+    pub a: T,
+    pub b: T,
+}
+
+impl Add for V2 {
+    pub fn add(V2 a, V2 b) -> V2 {
+        return new V2(a.x + b.x, a.y + b.y);
+    }
+}
+
+impl Sub for V2 {
+    pub fn sub(V2 a, V2 b) -> V2 {
+        return new V2(a.x - b.x, a.y - b.y);
+    }
+}
+
+impl Mul for V2 {
+    pub fn mul(V2 a, V2 b) -> V2 {
+        return new V2(a.x * b.x, a.y * b.y);
+    }
+}
+
+impl Div for V2 {
+    pub fn div(V2 a, V2 b) -> V2 {
+        return new V2(a.x / b.x, a.y / b.y);
+    }
+}
+
+impl Rem for V2 {
+    pub fn rem(V2 a, V2 b) -> V2 {
+        return new V2(a.x % b.x, a.y % b.y);
+    }
+}
+
+impl Pow for V2 {
+    pub fn pow(V2 a, V2 b) -> V2 {
+        return new V2(a.x ** b.x, a.y ** b.y);
+    }
+}
+
+impl Shl for V2 {
+    pub fn shl(V2 a, int n) -> V2 {
+        return new V2(a.x << n, a.y << n);
+    }
+}
+
+impl Shr for V2 {
+    pub fn shr(V2 a, int n) -> V2 {
+        return new V2(a.x >> n, a.y >> n);
+    }
+}
+
+impl BitAnd for V2 {
+    pub fn bitand(V2 a, V2 b) -> V2 {
+        return new V2(a.x & b.x, a.y & b.y);
+    }
+}
+
+impl BitOr for V2 {
+    pub fn bitor(V2 a, V2 b) -> V2 {
+        return new V2(a.x | b.x, a.y | b.y);
+    }
+}
+
+impl BitXor for V2 {
+    pub fn bitxor(V2 a, V2 b) -> V2 {
+        return new V2(a.x ^ b.x, a.y ^ b.y);
+    }
+}
+
+impl Neg for V2 {
+    pub fn neg(V2 a) -> V2 {
+        return new V2(0 - a.x, 0 - a.y);
+    }
+}
+
+impl Add for F2 {
+    pub fn add(F2 a, F2 b) -> F2 {
+        return new F2(a.x + b.x, a.n + b.n);
+    }
+}
+
+impl Neg for F2 {
+    pub fn neg(F2 a) -> F2 {
+        return new F2(0.0 - a.x, 0 - a.n);
+    }
+}
+
+impl Mul for Sign {
+    pub fn mul(Sign a, Sign b) -> Sign {
+        if a == b {
+            return Sign::Pos;
+        }
+        return Sign::Neg;
+    }
+}
+
+impl Neg for Sign {
+    pub fn neg(Sign a) -> Sign {
+        return match a {
+            Sign::Pos => Sign::Neg,
+            Sign::Neg => Sign::Pos,
+        };
+    }
+}
+
+impl Mul for Bit {
+    pub fn mul(Bit a, Bit b) -> Bit {
+        return match a {
+            Bit::Zero => Bit::Zero,
+            Bit::One => b,
+        };
+    }
+}
+
+impl Neg for Bit {
+    pub fn neg(Bit a) -> Bit {
+        return match a {
+            Bit::Zero => Bit::One,
+            Bit::One => Bit::Zero,
+        };
+    }
+}
+
+impl Mul for Tone {
+    pub fn mul(Tone a, Tone b) -> Tone {
+        if a == b {
+            return Tone::Hi;
+        }
+        return Tone::Lo;
+    }
+}
+
+impl Add for Amt {
+    pub fn add(Amt a, Amt b) -> Amt {
+        return match a {
+            Amt::Int(x) => Amt::Int(x + amt(b)),
+            Amt::Zero => b,
+        };
+    }
+}
+
+impl Neg for Amt {
+    pub fn neg(Amt a) -> Amt {
+        return match a {
+            Amt::Int(x) => Amt::Int(0 - x),
+            Amt::Zero => Amt::Zero,
+        };
+    }
+}
+
+impl Add for Box<T: Add> {
+    pub fn add(Box<T> a, Box<T> b) -> Box<T> {
+        return new Box(a.v + b.v);
+    }
+}
+
+impl Mul for P<T: Mul> {
+    pub fn mul(P<T> x, P<T> y) -> P<T> {
+        return new P(x.a * y.a, x.b * y.b);
+    }
+}
+
+fn amt(Amt a) -> int {
+    return match a {
+        Amt::Int(x) => x,
+        Amt::Zero => 0,
+    };
+}
+
+fn sign(Sign s) -> int {
+    return match s {
+        Sign::Pos => 1,
+        Sign::Neg => -1,
+    };
+}
+
+fn bit(Bit b) -> int {
+    return match b {
+        Bit::Zero => 0,
+        Bit::One => 1,
+    };
+}
+
+fn tone(Tone t) -> string {
+    return match t {
+        Tone::Hi => "hi",
+        Tone::Lo => "lo",
+    };
+}
+
+// A generic body: its clone at the type, or its shared body.
+fn plus<T: Add>(T a, T b) -> T {
+    return a + b;
+}
+
+fn times<T: Mul>(T a, T b) -> T {
+    return a * b;
+}
+
+fn minus<T: Neg>(T a) -> T {
+    return -a;
+}
+
+fn twice<T: Add>(T a) -> T {
+    let s = a + a;
+    return s + a;
+}
+
+test("every operator trait on a two-word class") {
+    let a = new V2(12, 20);
+    let b = new V2(2, 3);
+    let r0 = a + b;
+    assert!(r0.x == 14 && r0.y == 23);
+    let r1 = a - b;
+    assert!(r1.x == 10 && r1.y == 17);
+    let r2 = a * b;
+    assert!(r2.x == 24 && r2.y == 60);
+    let r3 = a / b;
+    assert!(r3.x == 6 && r3.y == 6);
+    let r4 = a % b;
+    assert!(r4.x == 0 && r4.y == 2);
+    let r5 = a ** b;
+    assert!(r5.x == 144 && r5.y == 8000);
+    let r6 = a << 2;
+    assert!(r6.x == 48 && r6.y == 80);
+    let r7 = a >> 2;
+    assert!(r7.x == 3 && r7.y == 5);
+    let r8 = a & b;
+    assert!(r8.x == 0 && r8.y == 0);
+    let r9 = a | b;
+    assert!(r9.x == 14 && r9.y == 23);
+    let r10 = a ^ b;
+    assert!(r10.x == 14 && r10.y == 23);
+    let n = -a;
+    assert!(n.x == -12 && n.y == -20);
+}
+
+test("a two-word class operator in expressions") {
+    let a = new V2(5, 6);
+    let q = a + new V2(1, 2);
+    assert!(q.x == 6 && q.y == 8);
+    // Nested, with a method call and a negation as operands.
+    let r = (a + a) * -a.sub(new V2(6, 8));
+    assert!(r.x == 10 && r.y == 24);
+    assert!((new V2(1, 2) + new V2(3, 4)).y == 6);
+    let acc = new V2(0, 0);
+    let i = 0;
+    while i < 10 {
+        acc = acc + new V2(i, 1);
+        i = i + 1;
+    }
+    assert!(acc.x == 45 && acc.y == 10);
+    let f = new F2(1.5, 2) + new F2(2.25, 3);
+    assert!(f.x == 3.75 && f.n == 5);
+    let g = -f;
+    assert!(g.x == -3.75 && g.n == -5);
+    let held = Vec::from([a + a, a * a]);
+    assert!(held[0].y == 12 && held[1].x == 25);
+}
+
+test("an enum operator") {
+    assert!(sign(Sign::Pos * Sign::Neg) == -1);
+    assert!(sign(Sign::Neg * Sign::Neg) == 1);
+    assert!(sign(-Sign::Pos) == -1);
+    let s = Sign::Neg;
+    assert!(sign(s * -s) == -1);
+    // A scalar-backed enum's binary operator is its backing's (it
+    // coerces); a unary one is the instance's.
+    assert!(bit(-Bit::Zero) == 1 && bit(-(-Bit::Zero)) == 0);
+    assert!(amt(Amt::Int(3) + Amt::Int(4)) == 7);
+    assert!(amt(Amt::Zero + Amt::Int(4)) == 4);
+    assert!(amt(-(Amt::Int(3) + Amt::Zero)) == -3);
+    let z = Amt::Zero + Amt::Zero;
+    let none = match z {
+        Amt::Zero => true,
+        Amt::Int(_) => false,
+    };
+    assert!(none);
+}
+
+test("a generic class operator") {
+    let b = new Box(3) + new Box(4);
+    assert!(b.v == 7);
+    let f = new Box(1.5) + new Box(2.0);
+    assert!(f.v == 3.5);
+    let p = new P(2, 3) * new P(4, 5);
+    assert!(p.a == 8 && p.b == 15);
+    let nested = new Box(new V2(1, 2)) + new Box(new V2(3, 4));
+    assert!(nested.v.x == 4 && nested.v.y == 6);
+}
+
+test("the operator in a generic body") {
+    let v = plus(new V2(5, 6), new V2(1, 2));
+    assert!(v.x == 6 && v.y == 8);
+    let t = twice(new V2(1, 2));
+    assert!(t.x == 3 && t.y == 6);
+    let m = times(new V2(2, 3), new V2(4, 5));
+    assert!(m.x == 8 && m.y == 15);
+    let n = minus(new V2(1, 2));
+    assert!(n.x == -1 && n.y == -2);
+    assert!(sign(times(Sign::Pos, Sign::Neg)) == -1);
+    assert!(sign(minus(Sign::Pos)) == -1);
+    assert!(bit(minus(Bit::One)) == 0 && bit(times(Bit::One, Bit::One)) == 1);
+    assert!(tone(times(Tone::Lo, Tone::Lo)) == "hi");
+    assert!(amt(plus(Amt::Int(1), Amt::Int(2))) == 3);
+    assert!(amt(minus(Amt::Int(1))) == -1);
+    assert!(plus(new Box(1), new Box(2)).v == 3);
+    let p = times(new P(2, 3), new P(4, 5));
+    assert!(p.a == 8 && p.b == 15);
+    let f = plus(new F2(1.5, 1), new F2(1.5, 1));
+    assert!(f.x == 3.0 && f.n == 2);
+}

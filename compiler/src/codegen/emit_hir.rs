@@ -9020,10 +9020,15 @@ impl Compiler {
             }
             _ => self.checker.fn_return_ty(&fqn)?,
         };
-        if !matches!(
-            classify::classify(&self.checker, &ret),
-            Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
-        ) {
+        // A raw method is called as `a.add(b)` is, whatever it returns (an
+        // enum, a two-word class, #2433); the boxed operator call of any
+        // other instance takes one word back.
+        if !self.raw_instance_methods.contains(&fqn)
+            && !matches!(
+                classify::classify(&self.checker, &ret),
+                Some(ValueClass::Scalar | ValueClass::Opaque | ValueClass::Object)
+            )
+        {
             return None;
         }
         Some(HirOp::Call {
