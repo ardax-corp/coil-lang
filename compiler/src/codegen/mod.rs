@@ -631,6 +631,9 @@ pub struct Compiler {
     /// generic body's dictionaries as captures (#1526): `(first slot,
     /// count)`, after its own captures. It is no shared body itself.
     hir_lambda_dicts: Option<(u32, u32)>,
+    /// The names of the body whose dictionaries the lambda being planned
+    /// or emitted captures: its goals are that body's (#2600).
+    hir_dict_owner: Option<Vec<String>>,
     /// The lambda about to be planned takes these captures as two words:
     /// `(capture local, first slot, kind)`. Its plan takes them.
     hir_lambda_pairs: std::cell::RefCell<Vec<(u32, u32, PairKind)>>,
@@ -855,6 +858,7 @@ impl Default for Compiler {
             hir_body_frame: None,
             hir_mir_dict_sp: None,
             hir_lambda_dicts: None,
+            hir_dict_owner: None,
             hir_lambda_pairs: std::cell::RefCell::new(Vec::new()),
             residue_lint: std::cell::Cell::new(false),
             residue: std::cell::RefCell::new((HashSet::new(), Vec::new())),
