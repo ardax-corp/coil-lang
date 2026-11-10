@@ -104,49 +104,7 @@ fn format_ty_fqn_inner(ty: &Ty, nominal_modules: &HashMap<String, String>) -> Op
                 .join(", ");
             Some(format!("{}<{}>", head, inner))
         }
-        Ty::Sum { name, variants } => {
-            let head = qualify_nominal(name, nominal_modules);
-            if name == common::BUILTIN_OPTION_ENUM {
-                let inner =
-                    variants
-                        .iter()
-                        .find(|(n, _)| n == "Some")
-                        .and_then(|(_, p)| match p {
-                            EnumVariantPayloadTy::Tuple(tys) => tys.first(),
-                            _ => None,
-                        })?;
-                return Some(format!(
-                    "{}<{}>",
-                    head,
-                    format_ty_fqn_inner(inner, nominal_modules)?
-                ));
-            }
-            if name == common::BUILTIN_RESULT_ENUM {
-                let ok = variants
-                    .iter()
-                    .find(|(n, _)| n == "Ok")
-                    .and_then(|(_, p)| match p {
-                        EnumVariantPayloadTy::Tuple(tys) => tys.first(),
-                        _ => None,
-                    })?;
-                let err = variants
-                    .iter()
-                    .find(|(n, _)| n == "Err")
-                    .and_then(|(_, p)| match p {
-                        EnumVariantPayloadTy::Tuple(tys) => tys.first(),
-                        _ => None,
-                    })?;
-                return Some(format!(
-                    "{}<{}, {}>",
-                    head,
-                    format_ty_fqn_inner(ok, nominal_modules)?,
-                    format_ty_fqn_inner(err, nominal_modules)?
-                ));
-            }
-            // User generic enums stored as Sum: recover args from the first
-            // non-unit payload field types when they look like type params.
-            Some(head)
-        }
+        Ty::Sum { name, .. } => Some(qualify_nominal(name, nominal_modules)),
         Ty::Constructor { owner, .. } => format_ty_fqn_inner(owner, nominal_modules),
         Ty::Tuple(tys) => {
             let inner = tys
@@ -234,27 +192,6 @@ fn format_ty_renamed(ty: &Ty, rename: &mut HashMap<TyVarId, String>, next: &mut 
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{}<{}>", head, inner)
-            }
-        }
-        // A builtin `Option` / `Result` construct carries its structural
-        // sum: print it as written (`Result<int, a>`).
-        Ty::Sum { name, variants } if common::is_poly_builtin_enum(name) => {
-            let payload = |variant: &str, rename: &mut HashMap<TyVarId, String>, next: &mut u32| {
-                variants
-                    .iter()
-                    .find(|(n, _)| n == variant)
-                    .and_then(|(_, p)| match p {
-                        EnumVariantPayloadTy::Tuple(tys) => tys.first(),
-                        _ => None,
-                    })
-                    .map_or("_".to_string(), |t| format_ty_renamed(t, rename, next))
-            };
-            if common::is_builtin_option_enum(name) {
-                format!("{}<{}>", name, payload("Some", rename, next))
-            } else {
-                let ok = payload("Ok", rename, next);
-                let err = payload("Err", rename, next);
-                format!("{}<{}, {}>", name, ok, err)
             }
         }
         Ty::Sum { name, variants } => {

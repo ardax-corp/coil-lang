@@ -791,7 +791,7 @@ impl Generics {
 mod tests {
     use super::*;
     use crate::typechecking::ty::{
-        TyVarId, boolean, byte, float, int, option_app_ty, string, unit,
+        TyVarId, boolean, byte, float, int, option_ty, string, unit,
     };
 
     fn method(name: &str, has_default: bool) -> TypeClassMethodDef {
@@ -885,14 +885,14 @@ mod tests {
             class: "Collect".to_string(),
             defined_module: "test".to_string(),
             range: 0..0,
-            args: vec![option_app_ty(int())],
+            args: vec![option_ty(int())],
             method_fqns: HashMap::new(),
             assoc_tys: HashMap::new(),
             context: Vec::new(),
         });
 
         assert!(
-            generics.has_overlapping_instance("Collect", &[option_app_ty(Ty::Var(TyVarId(999)))])
+            generics.has_overlapping_instance("Collect", &[option_ty(Ty::Var(TyVarId(999)))])
         );
     }
 

@@ -60,21 +60,11 @@ impl TyInterner {
 /// The type a mono key names for `ty`: an enum value's type as its applied
 /// enum type, as an annotation spells it. A variant's constructor type
 /// (`Option::Some(1)`, `Pick::Zero`) is its owner's, and a structural sum
-/// is `Option<T>` / `Result<T, E>` for the builtins and the enum's name
-/// otherwise, so `f(Option::Some(1))`, `f(Option::None)` at `Option<int>`
-/// and `f(x)` with `Option<int> x` share one clone (#1477).
+/// is the enum's name, so `f(Option::Some(1))`, `f(Option::None)` at
+/// `Option<int>` and `f(x)` with `Option<int> x` share one clone (#1477).
 pub fn mono_key_ty(ty: &Ty) -> Ty {
-    use crate::typechecking::ty::{option_app_ty, option_inner, result_app_ty, result_ok_err};
     match ty {
         Ty::Constructor { owner, .. } => mono_key_ty(owner),
-        Ty::Sum { name, .. } if common::is_builtin_option_enum(name) => match option_inner(ty) {
-            Some(inner) => option_app_ty(mono_key_ty(&inner)),
-            None => ty.clone(),
-        },
-        Ty::Sum { name, .. } if common::is_builtin_result_enum(name) => match result_ok_err(ty) {
-            Some((ok, err)) => result_app_ty(mono_key_ty(&ok), mono_key_ty(&err)),
-            None => ty.clone(),
-        },
         Ty::Sum { name, .. } => Ty::Con(name.clone()),
         // `readonly` is a type-checking qualifier with no runtime form, so
         // `f(x)` and `f(readonly x)` share one clone (#1555).

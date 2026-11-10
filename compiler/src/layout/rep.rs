@@ -414,11 +414,6 @@ pub fn niche_heap_only(checker: &Checker, ty: &Ty) -> bool {
             }
             checker.is_class(name) && args.iter().all(ty_is_closed)
         }
-        Ty::Sum { name, .. }
-            if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) =>
-        {
-            false
-        }
         Ty::Tuple(_) | Ty::Record { .. } | Ty::Sum { .. } => ty.all_children(ty_is_closed),
         _ => false,
     }
