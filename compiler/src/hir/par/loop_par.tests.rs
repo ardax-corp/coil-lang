@@ -745,9 +745,12 @@ fn main() { return; }
     assert_eq!(ends, [50, 100]);
 }
 
-/// The reach of the AST walk this analysis replaced, kept as it was.
-#[test]
-fn leaves_trait_methods_if_let_and_const_bounds() {
+/// The ends of the sites of a program with one loop in each place the AST
+/// walk this analysis replaced did not look: a trait's default body
+/// (`101`), an instance's method (`102`), under `if let` (`103`) and
+/// `while let` (`106`), up to a local `const` (`104`), and with no name
+/// for its index (`105`).
+fn reach() -> Vec<i64> {
     let sites = sites_of(
         r#"
 fn sq(int i) -> int { return i * i; }
@@ -756,37 +759,60 @@ trait Tot<A> {
     fn tot(A self) -> int {}
     fn twice(A self) -> int {
         let acc = 0;
-        for x in 0..100 { acc = acc + sq(x); }
+        for x in 0..101 { acc = acc + sq(x); }
         return acc;
     }
 }
 impl Tot for C {
     fn tot(C self) -> int {
         let acc = 0;
-        for x in 0..100 { acc = acc + sq(x); }
+        for x in 0..102 { acc = acc + sq(x); }
         return acc;
     }
 }
 fn under_if_let(Option<int> o) -> int {
     let acc = 0;
-    if let Some(v) = o { for x in 0..100 { acc = acc + sq(x); } }
+    if let Some(v) = o { for x in 0..103 { acc = acc + sq(x); } }
     return acc;
 }
 fn const_bound() -> int {
-    const N = 100;
+    const N = 104;
     let acc = 0;
     for x in 0..N { acc = acc + sq(x); }
     return acc;
 }
-fn unnamed_index() -> int {
+fn unnamed_index(int k) -> int {
     let acc = 0;
-    for _ in 0..100 { acc = acc + sq(3); }
+    for _ in 0..105 { acc = acc ^ k; }
     return acc;
+}
+fn next(int at) -> Option<int> {
+    if at < 3 { return Some(at); }
+    return None;
+}
+fn under_while_let() -> int {
+    let total = 0;
+    let at = 0;
+    while let Some(v) = next(at) {
+        let acc = 0;
+        for x in 0..106 { acc = acc + sq(x); }
+        total = total + acc + v;
+        at = at + 1;
+    }
+    return total;
 }
 fn main() { return; }
 "#,
     );
-    assert!(sites.is_empty(), "{sites:?}");
+    let mut ends: Vec<i64> = sites.iter().map(|s| s.end).collect();
+    ends.sort_unstable();
+    ends
+}
+
+/// A local `const` bounds a loop as a `let` of the same value does.
+#[test]
+fn a_local_const_bounds_a_loop() {
+    assert!(reach().contains(&104), "{:?}", reach());
 }
 
 /// `Trait::m(x)` lowers under the bare method name: no call of a function.
@@ -1072,4 +1098,41 @@ fn main() { return; }
 "#,
     );
     assert_eq!(bounded.len(), 2, "{bounded:?}");
+}
+
+/// `for _ in` counts like any other range: its index has a local, which
+/// the body cannot name.
+#[test]
+fn a_loop_with_no_name_for_its_index_is_a_site() {
+    assert!(reach().contains(&105), "{:?}", reach());
+    // The builder calls that local `item`; a capture of the same name is
+    // not it.
+    let sites = sites_of(
+        r#"
+fn run(int n, int item) -> int {
+    let acc = 0;
+    for _ in 0..n { acc = acc ^ item; }
+    return acc;
+}
+fn main() { return; }
+"#,
+    );
+    assert!(sites.is_empty(), "{sites:?}");
+}
+
+/// An `if let` is a `match`, and a `while let` a loop that is not
+/// counted: a counted loop inside either is a site.
+#[test]
+fn a_loop_under_if_let_or_while_let_is_a_site() {
+    let ends = reach();
+    assert!(ends.contains(&103) && ends.contains(&106), "{ends:?}");
+}
+
+/// A trait's method is a body like any other: an instance's, and a
+/// default one.
+#[test]
+fn a_loop_in_a_trait_method_is_a_site() {
+    let ends = reach();
+    assert!(ends.contains(&101) && ends.contains(&102), "{ends:?}");
+    assert_eq!(ends, [101, 102, 103, 104, 105, 106]);
 }

@@ -238,7 +238,7 @@ impl<'a> Cx<'a> {
     /// node the AST walk this one replaced did not enter.
     fn parts(&self, body: &'a HirBody, id: HirId) -> Option<Vec<Result<HirId, &'a HirBody>>> {
         let e = body.expr(id);
-        if e.flags.contains(HirFlags::IF_LET) || in_contract(body, id) {
+        if in_contract(body, id) {
             return None;
         }
         if let Some(made) = made_match(body, id) {

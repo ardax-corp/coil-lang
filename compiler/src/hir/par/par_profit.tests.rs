@@ -267,6 +267,32 @@ fn main() {
     assert_eq!(demanded.len(), 1, "one worker per function: {demanded:?}");
 }
 
+/// A const call under an `if let` demands its function's worker like one
+/// anywhere else.
+#[test]
+fn a_const_call_under_if_let_demands_a_worker() {
+    let m = lower(
+        r#"
+fn fib(int n) -> int {
+    if n <= 1 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn pick(int n) -> Option<int> {
+    if n > 0 { return Some(n); }
+    return None;
+}
+fn main() {
+    if let Some(v) = pick(3) {
+        let a = fib(27);
+    }
+    return;
+}
+"#,
+    );
+    let sites = m.sites();
+    assert!(m.workers(&sites).contains("fib"));
+}
+
 #[test]
 fn below_threshold_const_does_not_demand_a_worker() {
     let m = lower(
@@ -858,17 +884,21 @@ fn main() {{ return; }}
     m.sites().remove("f")
 }
 
+/// Parentheses change nothing: a group is the expression in it.
 #[test]
-fn let_bound_arms_are_not_seen_from_inside_parentheses() {
-// The group is the fork itself: the pending lets are its arms.
+fn parentheses_do_not_hide_let_bound_arms() {
+    let opaque = |body: &str| f_site("int", body).expect("site").guards.contains(&ParGuard::Opaque);
+    // The group is the fork itself: the pending lets are its arms.
     let site = f_site("int", "let a = fib(n - 1); let b = fib(n - 2); return (a + b);").expect("site");
     assert_eq!(site.arms.len(), 2);
-// Below the group they are not.
-    assert!(f_site("int", "let a = fib(n - 1); let b = fib(n - 2); if !(a - b == 0) { return 1; } return 2;").is_none());
-    assert!(f_site("int", "let a = fib(n - 1); let b = fib(n - 2); if a - b == 0 { return 1; } return 2;").is_some());
-// A group hides pending lets the fork inside it does not use.
+    assert!(!site.guards.contains(&ParGuard::Opaque));
+    // Below a group they are arms too, of a fork that is a part of
+    // another expression and so never specialized (#2425).
+    assert!(opaque("let a = fib(n - 1); let b = fib(n - 2); if !(a - b == 0) { return 1; } return 2;"));
+    assert!(opaque("let a = fib(n - 1); let b = fib(n - 2); if a - b == 0 { return 1; } return 2;"));
+    // A fork that leaves a pending let unused is none, in a group or not.
     assert!(f_site("int", "let a = fib(n - 1); return fib(n - 1) + fib(n - 2);").is_none());
-    assert!(f_site("int", "let a = fib(n - 1); return 1 * (fib(n - 1) + fib(n - 2));").is_some());
+    assert!(f_site("int", "let a = fib(n - 1); return 1 * (fib(n - 1) + fib(n - 2));").is_none());
 }
 
 #[test]
@@ -878,10 +908,16 @@ fn a_variant_named_bare_is_no_combine() {
     assert!(f_site("Pair", "return Both(fib(n - 1), fib(n - 2));").is_none());
 }
 
+/// An `if let` is a `match`: a fork in an arm that runs only when a
+/// constructor pattern matched, or missed, is found and never specialized
+/// (a worker's guards compare `int` parameters, and cannot test either).
 #[test]
-fn nothing_under_if_let_is_looked_at() {
-    assert!(f_site("int", "if let Some(v) = maybe(n) { return fib(n - 1) + fib(n - 2); } return 0;").is_none());
-// It is a statement a fork after it would skip, like any other (#2425).
+fn a_fork_under_if_let_is_never_specialized() {
+    let opaque = |body: &str| f_site("int", body).expect("site").guards.contains(&ParGuard::Opaque);
+    assert!(opaque("if let Some(v) = maybe(n) { return fib(n - 1) + fib(n - 2); } return 0;"));
+    assert!(opaque("if let Some(v) = maybe(n) { return v; } else { return fib(n - 1) + fib(n - 2); }"));
+    assert!(opaque("match maybe(n) { Some(v) => { return v; }, default => { return fib(n - 1) + fib(n - 2); }, }"));
+    // It is a statement a fork after it would skip, like any other (#2425).
     let site = f_site("int", "if let Some(v) = maybe(n) { return v; } return fib(n - 1) + fib(n - 2);").expect("site");
     assert_eq!(site.guards, [ParGuard::Opaque]);
     let site = f_site("int", "match maybe(n) { Some(v) => { return v; }, None => {}, } return fib(n - 1) + fib(n - 2);").expect("site");

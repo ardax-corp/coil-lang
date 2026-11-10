@@ -446,9 +446,12 @@ impl HirModule {
     }
 
     /// Functions and inherent methods, in source order (a later function
-    /// of the same bare name replaces an earlier one's site). Tests and
-    /// trait methods are left out, with the functions declared in them:
-    /// the reach of the AST walk this analysis replaced.
+    /// of the same bare name replaces an earlier one's site). Tests are
+    /// left out, and so are trait methods, with the functions declared in
+    /// them: a site is keyed by its function's bare name and its worker is
+    /// reached from a bare call (`f(32)`), which is never how a trait's
+    /// method is called, so a site there could get no worker and would
+    /// take the key of a function of the same name.
     pub(super) fn fork_bodies(&self) -> Vec<&HirBody> {
         let mut bodies: Vec<&HirBody> = self
             .bodies
@@ -458,6 +461,16 @@ impl HirModule {
             .collect();
         bodies.sort_by_key(|b| b.span.0);
         bodies
+    }
+}
+
+impl HirModule {
+    /// Whether `body` is a trait's method, an instance's or a default, or
+    /// a function declared in one.
+    fn in_trait(&self, body: &HirBody) -> bool {
+        let path: Vec<&str> = body.name.split("::").collect();
+        path.iter().any(|segment| segment.contains(" for "))
+            || path.windows(2).any(|pair| self.trait_effects.iter().any(|t| t.trait_name == pair[0] && t.method == pair[1]))
     }
 }
 
@@ -754,22 +767,6 @@ impl Scan<'_> {
         true
     }
 
-    fn walk(&mut self, id: HirId, on_return: bool) {
-        if !self.ctx.body.expr(id).flags.contains(HirFlags::PAREN) {
-            return self.walk_written(id, on_return);
-        }
-        // `(e)` is a fork with the pending lets as its arms, or else a
-        // statement list of its own, which sees none of them.
-        if let Some(site) = match_fork(self.ctx.peel(id), self.ctx, &self.guards, &self.pure_lets) {
-            self.found(on_return, site);
-        }
-        let depth = self.guards.len();
-        let saved_lets = std::mem::take(&mut self.pure_lets);
-        self.walk_written(id, on_return);
-        self.guards.truncate(depth);
-        self.pure_lets = saved_lets;
-    }
-
     /// Walk the operand of a `return`: all the function returns there.
     fn walk_returned(&mut self, value: HirId) {
         let whole = std::mem::replace(&mut self.whole, true);
@@ -777,14 +774,10 @@ impl Scan<'_> {
         self.whole = whole;
     }
 
-    fn walk_written(&mut self, id: HirId, on_return: bool) {
+    fn walk(&mut self, id: HirId, on_return: bool) {
         let ctx = self.ctx;
         let body = ctx.body;
         let id = ctx.peel(id);
-        // The AST walk this one replaced did not look under `if let`.
-        if body.expr(id).flags.contains(HirFlags::IF_LET) {
-            return;
-        }
         if let Some(site) = match_fork(id, ctx, &self.guards, &self.pure_lets) {
             self.found(on_return, site);
         }
@@ -822,14 +815,20 @@ impl Scan<'_> {
             }
             // Arms are scanned independently — a fork never spans two arms.
             // Constructor patterns are not evaluable from const int args, so
-            // those bodies stay opaque. Irrefutable binding / wildcard arms
-            // inherit only the outer path guards (fork-inside-arm is OK).
+            // those bodies stay opaque, and so does every arm after one:
+            // it runs only when that pattern missed (the `else` of an `if
+            // let` is such an arm). Binding / wildcard / literal arms ahead
+            // of any constructor inherit only the outer path guards.
             HirKind::Match { scrutinee, arms } => {
                 self.walk_part(scrutinee, on_return);
+                let mut missed = false;
                 for arm in &arms {
                     match arm.pat {
-                        HirPat::Wild | HirPat::Bind(_) | HirPat::Int(_) => self.walk(arm.body, on_return),
-                        _ => self.walk_guarded(arm.body, on_return, ParGuard::Opaque),
+                        HirPat::Wild | HirPat::Bind(_) | HirPat::Int(_) if !missed => self.walk(arm.body, on_return),
+                        _ => {
+                            missed = true;
+                            self.walk_guarded(arm.body, on_return, ParGuard::Opaque);
+                        }
                     }
                 }
             }
@@ -871,9 +870,6 @@ fn diverging_if_negation(item: HirId, ctx: &FnCtx<'_>) -> Option<ParGuard> {
 fn contains_return(ctx: &FnCtx<'_>, id: HirId) -> bool {
     let body = ctx.body;
     let id = ctx.peel(id);
-    if body.expr(id).flags.contains(HirFlags::IF_LET) {
-        return false;
-    }
     if written_return(body, id) {
         return true;
     }
@@ -1085,8 +1081,8 @@ impl ConstCalls<'_> {
     fn collect(&self, body: &HirBody, id: HirId, work: &mut WorkEstimate<'_>, out: &mut HashMap<String, BTreeSet<Vec<i64>>>) {
         let id = unwrap_byte(body, id);
         let e = body.expr(id);
-        // Neither a contract's checks nor an `if let` were looked into.
-        if e.flags.contains(HirFlags::IF_LET) || in_contract(body, id) {
+        // A contract's checks are not looked into.
+        if in_contract(body, id) {
             return;
         }
         if let Some(made) = made_match(body, id) {

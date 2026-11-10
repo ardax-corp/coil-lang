@@ -168,7 +168,7 @@ impl HirModule {
             let Some(root) = body.root else { continue };
             // The top level holds declarations only; a lambda, a test and
             // a static's initializer run sequentially.
-            if !matches!(body.kind, BodyKind::Function | BodyKind::Method) || self.in_trait(body) {
+            if !matches!(body.kind, BodyKind::Function | BodyKind::Method) {
                 continue;
             }
             let mut ints: IntLocals = body
@@ -184,15 +184,6 @@ impl HirModule {
             scan.walk(root, &mut ConstLocals::new(), &mut ints);
         }
         (out, unsigned)
-    }
-
-    /// Whether `body` is a trait's method, an instance's or a default, or
-    /// a function declared in one. The AST walk this analysis replaced
-    /// looked at functions and inherent methods only, and it keeps to those.
-    pub(super) fn in_trait(&self, body: &HirBody) -> bool {
-        let path: Vec<&str> = body.name.split("::").collect();
-        path.iter().any(|segment| segment.contains(" for "))
-            || path.windows(2).any(|pair| self.trait_effects.iter().any(|t| t.trait_name == pair[0] && t.method == pair[1]))
     }
 }
 
@@ -306,9 +297,6 @@ impl Scan<'_> {
     fn walk(&mut self, id: HirId, consts: &mut ConstLocals, ints: &mut IntLocals) {
         let body = self.body;
         let e = body.expr(id);
-        if e.flags.contains(HirFlags::IF_LET) {
-            return;
-        }
         match &e.kind {
             // A nested block's own bindings do not outlive it.
             HirKind::Block { stmts, tail } => {
@@ -333,8 +321,10 @@ impl Scan<'_> {
                 }
             }
             HirKind::Loop { body: loop_body } => {
-                // A `while let` is no counted loop, and nothing in it is.
-                let Some((checks, cond, then)) = query::while_parts(body, *loop_body) else { return };
+                // A `while let` is no counted loop; one inside it may be.
+                let Some((checks, cond, then)) = query::while_parts(body, *loop_body) else {
+                    return self.walk_loop_body(id, *loop_body, consts, ints);
+                };
                 // A `while` runs its checks ahead of each test, the last
                 // one too, and once when it runs no trips: no chunk
                 // worker's loop does that, so a checked `while` is no site.
@@ -430,8 +420,9 @@ impl Scan<'_> {
     fn counted_for(&self, pat: &HirPat, iterable: HirId, (checks, own): (&[HirId], HirId), consts: &ConstLocals, ints: &IntLocals) -> Option<Counted> {
         let body = self.body;
         let HirPat::Bind(index) = *pat else { return None };
-        // `for mut x in` borrows; `for _ in` binds nothing a body names.
-        if body.local(index).borrow || body.local(index).kind != LocalKind::Pattern {
+        // `for mut x in` borrows. `for _ in` binds a local of the
+        // builder's that no body names: an index like any other.
+        if body.local(index).borrow || !matches!(body.local(index).kind, LocalKind::Pattern | LocalKind::Temp) {
             return None;
         }
         let (begin, end, begin_local, end_local, end_bias) = if let Some(ConstVal::Range { begin, end }) = const_val(body, iterable, consts) {
@@ -699,6 +690,12 @@ impl Scan<'_> {
                 if *l == scan.index || locals.contains(l) {
                     return true;
                 }
+                // The plan finds the index by name, and `for _ in` names
+                // its own `item`: a local of the program's by that name
+                // would be taken for it.
+                if self.name(*l) == self.name(scan.index) {
+                    return false;
+                }
                 match scan.consts.get(l) {
                     Some(ConstVal::Int(k)) => {
                         scan.captures.insert((self.name(*l).to_string(), *k));
@@ -856,8 +853,9 @@ impl Scan<'_> {
                 }
             }
         }
+        // A local `const` is a `let` nothing writes again.
         if let HirKind::Let { local, init: Some(init) } = e.kind
-            && body.local(local).kind == LocalKind::Let
+            && matches!(body.local(local).kind, LocalKind::Let | LocalKind::Const)
         {
             if let Some(v) = const_val(body, init, consts) {
                 consts.insert(local, v);

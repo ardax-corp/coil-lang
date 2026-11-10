@@ -1276,11 +1276,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Noop(_) => self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit())),
 
             E::Expr(inner) | E::Statement(inner) => self.expr(b, inner),
-            E::Group(inner) => {
-                let id = self.expr(b, inner);
-                b.body.exprs[id.0 as usize].flags.insert(HirFlags::PAREN);
-                id
-            }
+            E::Group(inner) => self.expr(b, inner),
             E::ExprStatement(inner) => self.expr(b, inner),
             E::NamedArg(name, value) => {
                 let value = self.expr(b, value);
@@ -1573,9 +1569,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 self.match_(b, node, scrutinee, &arms)
             }
             E::IfLet { scrutinee, then_arm, else_arm } => {
-                let m = self.match_(b, node, scrutinee, &[then_arm, else_arm]);
-                b.body.exprs[m.0 as usize].flags.insert(HirFlags::IF_LET);
-                m
+                self.match_(b, node, scrutinee, &[then_arm, else_arm])
             }
             E::WhileLet { scrutinee, then_arm, on_miss } => {
                 let m = self.match_(b, node, scrutinee, &[then_arm, on_miss]);
