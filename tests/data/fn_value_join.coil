@@ -72,7 +72,11 @@ test("a non-generic enum, an if and a capturing lambda") {
     };
     assert!(f(4) == 5);
     let flag = f(0) == 1;
-    let g = if flag { inc } else { fn (int x) => x * 2 };
+    let g = if flag {
+        inc
+    } else {
+        fn (int x) => x * 2
+    };
     assert!(g(3) == 4);
     let base = 7;
     let h = match s {
