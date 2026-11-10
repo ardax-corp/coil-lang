@@ -7055,9 +7055,25 @@ impl Compiler {
         self.messages.extend(self.checker.take_messages());
 
         // Structural thunks (a `Result<_, IoError>`'s `show`) can mark a
-        // builtin enum's `Show` thunk used, so they go first (#1984).
-        self.emit_structural_thunks();
-        self.emit_used_builtin_show_thunks();
+        // builtin enum's `Show` thunk used, so they go first (#1984). A
+        // thunk may ask for an instance clone (`Show<Option<Box<int>>>`'s
+        // payload is `Show<Box<int>>`'s clone, #2580), whose body may
+        // reserve more thunks: to a fixed point.
+        let children: &[Output<'_>] = match ast.1.as_ref() {
+            Expression::Program(children) => children,
+            _ => &[],
+        };
+        loop {
+            self.emit_structural_thunks();
+            self.emit_used_builtin_show_thunks();
+            if self.inst_clone_queue.is_empty() {
+                break;
+            }
+            // Under the module's namespace, as its own clones were.
+            let outer = std::mem::replace(&mut self.namespace, module.to_string());
+            self.emit_instance_clones(children);
+            self.namespace = outer;
+        }
         let (_, residue) = std::mem::take(&mut *self.residue.borrow_mut());
         self.messages.extend(residue);
         // Kept while this module holds methods a later module may clone.
