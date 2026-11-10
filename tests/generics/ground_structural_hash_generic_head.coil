@@ -57,13 +57,14 @@ test("Hash of nested boxes and Option items") {
     let n: (Option<Box<int>>, int) = (None, 1);
     assert!(o.hash() == p.hash());
     assert!(o.hash() != n.hash());
-    // Annotated: a literal `(Some(3), 1)` beside them is #2607.
-    let i: (Option<int>, int) = (Some(3), 1);
+    // A literal beside the annotated type is one instance (#2607).
+    let i = (Some(3), 1);
     let j: (Option<int>, int) = (Some(3), 1);
-    let k: (Option<int>, int) = (Some(4), 1);
+    let k = (Some(4), 1);
     assert!(i.hash() == j.hash());
     assert!(i.hash() != k.hash());
-    let s: (Option<string>, int) = (Some("x"), 1);
+    assert!((Some(3), 1).hash() == j.hash());
+    let s = (Some("x"), 1);
     let t: (Option<string>, int) = (Some("x"), 1);
     let none: (Option<string>, int) = (None, 1);
     assert!(s.hash() == t.hash());
