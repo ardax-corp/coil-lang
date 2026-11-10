@@ -2255,6 +2255,11 @@ impl Cx<'_> {
             // As the AST walk: the deferred body is still walked.
             HirKind::Defer { .. } => self.note_hidden(w, id, EffectFlags::UNKNOWN, || "has a `defer`".into()),
             HirKind::Builtin { op, .. } => match op {
+                // A failed `requires` / `ensures` / `invariant` check: the
+                // function is as pure as its body, as it is with the
+                // checks compiled out. The clause itself is walked like
+                // any other code.
+                Builtin::Panic if body.contract_spans.contains(&body.expr(id).span) => {}
                 // Not a user-visible effect: bounds checks panic almost
                 // anywhere.
                 Builtin::Panic => self.note_hidden(w, id, EffectFlags::UNKNOWN, || "may panic".into()),
