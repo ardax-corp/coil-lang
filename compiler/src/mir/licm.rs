@@ -785,7 +785,9 @@ fn motion(
         // A readonly class's field never changes (#1560).
         MirInst::ProductLoad { dest, .. } if func.invariant_loads.contains(dest) => Some(Motion::Free),
         MirInst::ProductLoad { .. } => free(!fx.fields),
-        MirInst::Call { dest, args, .. } if func.pure_calls.contains(dest) => {
+        // One word only: the moved value is read through one φ behind the
+        // guard, and lowering marks no two-word call pure.
+        MirInst::Call { dest, args, dest_hi: None, .. } if func.pure_calls.contains(dest) => {
             let reads_heap = args.iter().any(|a| super::cse::reads_heap(func.ty(*a)));
             (!reads_heap || !fx.heap() && !fx.lengths).then_some(Motion::Traps)
         }
@@ -899,6 +901,9 @@ fn retarget(term: &mut Terminator, from: BlockId, to: BlockId) {
     }
 }
 
+/// The header's φs take their outside values through the new preheader
+/// `ph` (which joins them in φs of its own when they differ); the code
+/// after the φs stays as it is.
 fn split_header_phis(func: &mut MirFunc, header: BlockId, ph: BlockId, external: &[BlockId]) {
     let ext: HashSet<BlockId> = external.iter().copied().collect();
     let header_insts = func.block(header).insts.clone();
@@ -943,14 +948,8 @@ fn split_header_phis(func: &mut MirFunc, header: BlockId, ph: BlockId, external:
         insts.append(&mut block.insts);
         block.insts = insts;
     }
-    let rest: Vec<MirInst> = func
-        .block(header)
-        .insts
-        .iter()
-        .filter(|i| !i.is_phi())
-        .cloned()
-        .collect();
-    new_header.extend(rest);
+    // `new_header` is the whole header: its φs as rewritten and the code
+    // after them as it was, each instruction once (#2422).
     func.block_mut(header).insts = new_header;
 }
 
@@ -1315,6 +1314,17 @@ bb3:
     }
 
     #[test]
+    fn two_word_pure_call_stays() {
+        // The guard gives a moved value one φ, so a call that defines two
+        // words has no place behind it.
+        let mut f = counted("v0: i64, v1: i64", "    v6, v16 = call.i64 7 v1\n    v17 = iadd v6, v16\n    v18 = storestatic 0, v17");
+        f.pure_calls.insert(ValueId(6));
+        licm(&mut f, true);
+        f.verify().and_then(|()| f.verify_dominance()).unwrap_or_else(|e| panic!("{e}\n{f}"));
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Call { .. })), 1, "{f}");
+    }
+
+    #[test]
     fn impure_call_stays() {
         let mut f = counted("v0: i64, v1: i64", "    v6 = call.i64 7 v1");
         licm(&mut f, false);
@@ -1482,6 +1492,51 @@ bb3:
         let entry = &f.block(f.entry).insts;
         let at = |want: &dyn Fn(&MirInst) -> bool| entry.iter().position(want).expect("in the entry block");
         assert!(at(&|i| matches!(i, MirInst::Cast { .. })) < at(&|i| matches!(i, MirInst::Bin { op: MirBinOp::Mul, .. })));
+    }
+
+    #[test]
+    fn a_new_preheader_leaves_the_header_one_copy_of_its_code() {
+        // The inner loop's header (`bb2`) is entered by the outer header's
+        // branch, so hoisting `v14` makes a preheader. The header keeps its
+        // call and its test once each, with or without a φ ahead of them
+        // (#2422).
+        for phi in ["", "    v30 = phi.i64 [bb1: v1, bb3: v17]\n"] {
+            let src = format!(
+                r#"
+func @f(v0: i64) -> i64 {{
+bb0:
+    v1 = iconst.i64 0
+    jump bb1
+bb1:
+    v9 = phi.i64 [bb0: v1, bb4: v24]
+    v10 = icmp.slt v9, v0
+    brif v10, bb2, bb5
+bb2:
+{phi}    v12, v13 = call.i64 9 v0
+    v14 = iconst.i64 0
+    v15 = icmp.eq v13, v14
+    brif v15, bb4, bb3
+bb3:
+    v17 = iadd v12, v9
+    v18 = storestatic 0, v17
+    jump bb2
+bb4:
+    v20 = iconst.i64 1
+    v24 = iadd v9, v20
+    jump bb1
+bb5:
+    return v9
+}}
+"#
+            );
+            let mut f = crate::mir::parse_func(&src).expect(&src);
+            assert!(licm(&mut f, true) >= 1, "the literal moves");
+            f.verify().and_then(|()| f.verify_dominance()).unwrap_or_else(|e| panic!("{e}\n{f}"));
+            let count = |want: &dyn Fn(&MirInst) -> bool| f.blocks.iter().flat_map(|b| &b.insts).filter(|i| want(i)).count();
+            assert_eq!(count(&|i| matches!(i, MirInst::Call { .. })), 1, "{f}");
+            assert_eq!(count(&|i| matches!(i, MirInst::StoreStatic { .. })), 1, "{f}");
+            assert_eq!(count(&|i| matches!(i, MirInst::Cmp { .. })), 2, "{f}");
+        }
     }
 
     #[test]

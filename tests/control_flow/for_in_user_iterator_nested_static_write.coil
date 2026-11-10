@@ -1,0 +1,100 @@
+// A `for v in c` over a user iterator sits directly in an outer loop's body,
+// so the inner loop's header (the `next` call and the test of its result) is
+// the first thing the outer body runs. `next` runs once per trip and once
+// more to end the loop, never twice, whatever the body writes (#2422).
+use tests::assert;
+
+static let HITS: int = 0;
+
+static let CALLS: int = 0;
+
+class Empty {
+    pub cur: int,
+    pub end: int,
+}
+
+impl Iterator for Empty {
+    type Item = int;
+    fn next(Empty c) -> Option<int> {
+        return Option::None;
+    }
+}
+
+class Count {
+    pub cur: int,
+    pub end: int,
+}
+
+impl Iterator for Count {
+    type Item = int;
+    fn next(Count c) -> Option<int> {
+        CALLS = CALLS + 1;
+        if c.cur < c.end {
+            c.cur = c.cur + 1;
+            return Option::Some(c.cur);
+        }
+        return Option::None;
+    }
+}
+
+fn sum_empty(int n) -> int {
+    let s = 0;
+    let c = new Empty(0, 1);
+    for i in 0..n {
+        for v in c {
+            HITS = HITS + v;
+        }
+        s = s + 1;
+    }
+    return s;
+}
+
+fn sum_count(int n, int end) -> int {
+    let s = 0;
+    let c = new Count(0, end);
+    for i in 0..n {
+        for v in c {
+            HITS = HITS + v;
+        }
+        s = s + 1;
+    }
+    return s;
+}
+
+fn sum_local(int n, int end) -> int {
+    let s = 0;
+    let c = new Count(0, end);
+    for i in 0..n {
+        for v in c {
+            s = s + v;
+        }
+        s = s + 100;
+    }
+    return s;
+}
+
+test("an iterator that ends at once, static write in the body") {
+    HITS = 0;
+    assert!(sum_empty(5) == 5);
+    assert!(HITS == 0);
+    assert!(sum_empty(0) == 0);
+}
+
+test("next runs once per item and once per exhausted pass") {
+    HITS = 0;
+    CALLS = 0;
+    assert!(sum_count(5, 3) == 5);
+    // The first outer trip drains the iterator: 3 items and the `None`;
+    // each later trip asks once and gets `None`.
+    assert!(HITS == 1 + 2 + 3);
+    assert!(CALLS == 4 + 4);
+}
+
+test("the same nest with a local accumulator") {
+    CALLS = 0;
+    assert!(sum_local(4, 3) == 6 + 400);
+    assert!(CALLS == 4 + 3);
+    CALLS = 0;
+    assert!(sum_local(0, 3) == 0);
+    assert!(CALLS == 0);
+}
