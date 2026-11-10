@@ -652,7 +652,9 @@ impl Generics {
     /// Register the structural instance of `class` for the ground tuple,
     /// record, array, `Option` or `Result` `ty` (#1451, #1479): `Show` as `%v` shows it, `Eq`
     /// as `==` compares it, `Hash` combining its items', and a tuple's
-    /// `Lt` / `Le` / `Gt` / `Ge` / `Ord` ordering it lexicographically (#1721). The checker adds
+    /// `Lt` / `Le` / `Gt` / `Ge` / `Ord` ordering it lexicographically (#1721), and a
+    /// homogeneous aggregate's `Add` .. `Pow`, `Neg` and `Num` as its
+    /// element-wise operators compute them (#2513). The checker adds
     /// one the first time a goal asks for it
     /// (`Checker::ensure_structural_instance`); codegen emits its thunks
     /// ([`Self::structural_instances`]).
@@ -668,6 +670,16 @@ impl Generics {
             "Gt" => &["gt"],
             "Ge" => &["ge"],
             "Ord" => &[],
+            // An aggregate's element-wise arithmetic (#2513); `Num` has no
+            // methods.
+            "Add" => &["add"],
+            "Sub" => &["sub"],
+            "Mul" => &["mul"],
+            "Div" => &["div"],
+            "Rem" => &["rem"],
+            "Pow" => &["pow"],
+            "Neg" => &["neg"],
+            "Num" => &[],
             _ => return,
         };
         let ty_str = ty.to_string();
