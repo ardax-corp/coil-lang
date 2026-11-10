@@ -1063,6 +1063,14 @@ fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Ve
             mono_fun(checker, &t, &mut Vec::new()) || index && open_fun(checker, &t, &mut Vec::new())
         });
     }
+    // A field holding a monomorphic function, called in place as
+    // `(o.f)(x)` (#2472): the closure word stored there, as a `let` of it.
+    if let HirKind::Field { .. } = body.expr(f).kind {
+        return body.expr(f).ty.as_ref().is_some_and(|t| {
+            let t = apply_ty_prune(checker.subst(), t);
+            mono_fun(checker, &t, &mut Vec::new())
+        });
+    }
     // A call's returned closure called in place (#1533), as a `let` of it.
     if let HirKind::Call { .. } = body.expr(f).kind {
         return body.expr(f).ty.as_ref().is_some_and(|t| {

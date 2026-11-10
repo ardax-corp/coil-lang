@@ -2380,7 +2380,7 @@ impl<'s> Formatter<'s> {
                 self.fmt_output(&args[0]);
             }
             Expression::Call { name, args } => {
-                self.fmt_output(name);
+                self.fmt_callee(name);
                 // A lone block lambda argument opens on the call's line:
                 // `scope(fn (Scope s) {` (#1796), as after a short receiver.
                 if let Some([arg]) = args.as_deref()
@@ -2394,6 +2394,19 @@ impl<'s> Formatter<'s> {
                 }
             }
             other => self.fmt_expression(other),
+        }
+    }
+
+    /// A call's callee. Parens around a field read stay: `(o.f)(x)` calls
+    /// the function the field `f` holds, `o.f(x)` the method `f` (#2472).
+    fn fmt_callee(&mut self, name: &Output<'_>) {
+        let inner = strip_groups(name);
+        if has_group(name) && matches!(inner.1.as_ref(), Expression::Access(..) | Expression::OptionalAccess(..)) {
+            self.push_str("(");
+            self.fmt_output(inner);
+            self.push_str(")");
+        } else {
+            self.fmt_output(name);
         }
     }
 
@@ -3088,6 +3101,19 @@ fn strip_groups<'a, 'e>(mut output: &'a Output<'e>) -> &'a Output<'e> {
             Expression::Group(inner) | Expression::Expr(inner) => output = inner,
             Expression::Fragment(items) if items.len() == 1 => output = &items[0],
             _ => return output,
+        }
+    }
+}
+
+/// Whether `output` is wrapped in parentheses (above what [`strip_groups`]
+/// strips to).
+fn has_group(mut output: &Output<'_>) -> bool {
+    loop {
+        match output.1.as_ref() {
+            Expression::Group(_) => return true,
+            Expression::Expr(inner) => output = inner,
+            Expression::Fragment(items) if items.len() == 1 => output = &items[0],
+            _ => return false,
         }
     }
 }
@@ -3877,6 +3903,38 @@ fn main() { return; }
             text.match_indices(k).count()
                 + usize::from(k == " Access(") * text.match_indices("(Access(").count()
         })
+    }
+
+    #[test]
+    fn parens_around_a_field_callee_stay() {
+        // #2472: `(o.f)(1)` calls the function the field `f` holds;
+        // `o.f(1)` is the method call.
+        let chain = ".show().len()".repeat(7);
+        for (body, kept) in [
+            ("(o.f)(1)".to_string(), "(o.f)(1)"),
+            ("((o.f))(1)".to_string(), "(o.f)(1)"),
+            ("(a.b.f)(x)".to_string(), "(a.b.f)(x)"),
+            ("(o.f)(1)(2)".to_string(), "(o.f)(1)(2)"),
+            ("(o.f)(1).show()".to_string(), "(o.f)(1).show()"),
+            ("(self.f)(self.v)".to_string(), "(self.f)(self.v)"),
+            ("(o?.f)(1)".to_string(), "(o?.f)(1)"),
+            ("g((o.f)(1), (o.f)(2))".to_string(), "g((o.f)(1), (o.f)(2))"),
+            (format!("(o.f)(1){chain}"), "(o.f)(1)"),
+        ] {
+            let src = format!("fn main() {{\n    let n = {body};\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert!(once.contains(kept), "{src}\n=>\n{once}");
+            stable(&once);
+        }
+        // A statement, too.
+        stable("fn main() {\n    (o.f)(1);\n}\n");
+        // Parens around any other callee are still dropped, and a method
+        // call stays one.
+        for (body, want) in [("(f)(1)", "f(1)"), ("(m::f)(1)", "m::f(1)"), ("(fs[0])(1)", "fs[0](1)"), ("o.f(1)", "o.f(1)")] {
+            let src = format!("fn main() {{\n    let n = {body};\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert!(once.contains(&format!("let n = {want};")), "{src}\n=>\n{once}");
+        }
     }
 
     #[test]

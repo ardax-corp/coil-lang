@@ -2274,7 +2274,10 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let call = self.split_over_application(b, call, &[&format!("{owner}::{member}"), member]);
                 self.after(b, span_of(node), stmts, call)
             }
-            E::Access(recv, method) => {
+            // `recv.method(args)`. A parenthesized `(recv.field)(args)` is
+            // not one: it calls the function the field holds, as the checker
+            // typed it (#2472), and takes the last arm.
+            E::Access(recv, method) if matches!(name.1.as_ref(), E::Access(..)) => {
                 let mut recv = self.expr(b, recv);
                 let mut args = self.exprs(b, args);
                 let mut stmts = self.named_args_in_source_order(b, span_of(node), &mut args);
