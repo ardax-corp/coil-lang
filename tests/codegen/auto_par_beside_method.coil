@@ -1,7 +1,9 @@
+// @output 832040 121589417 832040 242982417
 // An auto-par worker belongs to the free function it forks. A static or
 // instance method of the same name is a different function: its calls run
 // its own body, not the free function's worker.
-use tests::assert;
+use io::{stdout, write};
+use string::{format, to_bytes};
 
 class K {
     pub k: int,
@@ -37,12 +39,8 @@ fn grow(int n) -> int {
     return grow(n - 1) + grow(n - 2);
 }
 
-test("a free recursive function forks and a same-named static method keeps its body") {
-    assert!(fib(30) == 832040);
-    assert!(K::fib(25) == 121589417);
-}
-
-test("a free recursive function beside a same-named instance method") {
-    assert!(grow(30) == 832040);
-    assert!(new K(0).grow(25) == 242982417);
+fn main() {
+    // Constant calls: the free functions fork, the methods run their own bodies.
+    let line = format("%i %i %i %i", fib(30), K::fib(25), grow(30), new K(0).grow(25));
+    let _ = write(stdout(), to_bytes(line));
 }
