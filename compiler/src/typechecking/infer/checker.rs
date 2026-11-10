@@ -5996,8 +5996,15 @@ impl Checker {
         &mut self,
         call_id: Option<NodeId>,
         range: &Range<usize>,
-        instance: InstanceDef,
+        mut instance: InstanceDef,
     ) {
+        // An instance still being checked (its own bodies, or an impl
+        // earlier in the file) is its stub, which lists only the methods
+        // the impl writes. The defaults it leaves out are its methods
+        // too (#2491).
+        if let Some(class_def) = self.generics.typeclass(&instance.class) {
+            Generics::fill_default_method_fqns(class_def, &mut instance.method_fqns);
+        }
         self.call_site_dicts.push(call_id, (range.start, range.end), instance);
     }
 
