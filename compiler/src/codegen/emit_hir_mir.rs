@@ -1937,9 +1937,9 @@ impl Compiler {
     }
 
     /// Decide, before `root` is emitted, which parallel loops under it move
-    /// into their own fork-join functions ([`HirPlan::par_loops`]) and
-    /// whether one runs its fork-join inline ([`HirPlan::par_inline`]), as
-    /// direct MIR lowers each site. A site's enclosing locals
+    /// into their own fork-join functions ([`HirPlan::par_loops`]), as
+    /// direct MIR lowers each site; every other loop runs sequentially.
+    /// A site's enclosing locals
     /// are the ones bound when it runs: `emit`'s bound slots (parameters
     /// and captures, or a chunk worker's site locals), then each local
     /// bound before the site in emission order.
@@ -1963,6 +1963,14 @@ impl Compiler {
                     self.hir_plan_par_walk(hir, emit, cond, bound);
                     self.hir_plan_par_walk(hir, emit, then, bound);
                 }
+            }
+            // A loop of any other shape (a `while` under contract checks,
+            // a `while let`) is no site.
+            HirKind::Loop { body } => {
+                if self.loop_par_sites.contains_key(&hir.expr(id).span) {
+                    self.hir_par_disagreement(hir, id, "it is not a plain `while`");
+                }
+                self.hir_plan_par_walk(hir, emit, *body, bound);
             }
             HirKind::ForIn {
                 pat: HirPat::Bind(local),
@@ -2023,21 +2031,20 @@ impl Compiler {
         body: HirId,
         bound: &mut HashSet<u32>,
     ) -> bool {
-        let Some(locals) = self.hir_par_site(hir, &emit.plan, id, head, bind, body, &|l| bound.contains(&l.0)) else {
+        let locals = match self.hir_par_site(hir, &emit.plan, id, head, bind, body, &|l| bound.contains(&l.0)) {
+            Ok(locals) => locals,
+            Err(why) => {
+                if let Some(why) = why {
+                    self.hir_par_disagreement(hir, id, why);
+                }
+                return false;
+            }
+        };
+        let Some(planned) = self.hir_par_outline(hir, id, &locals, bind, body) else {
+            self.hir_par_disagreement(hir, id, "a word of it is not an `int` local");
             return false;
         };
-        if let Some(planned) = self.hir_par_outline(hir, id, &locals, bind, body) {
-            emit.plan.par_loops.insert(id.0, planned);
-            return true;
-        }
-        // Inline: the body runs in the chunk worker's frame; what it binds
-        // there is unbound after it.
-        emit.plan.par_inline = true;
-        if let Some(local) = bind {
-            bound.insert(local.0);
-        }
-        let mut inner = bound.clone();
-        self.hir_plan_par_walk(hir, emit, body, &mut inner);
+        emit.plan.par_loops.insert(id.0, planned);
         true
     }
 }

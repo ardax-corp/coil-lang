@@ -822,6 +822,16 @@ pub(crate) fn hir_capture_active() -> bool {
     HIR_CAPTURE.with(|c| c.borrow().is_some())
 }
 
+/// Record `problem` with the captured HIR's, when capture is on: something
+/// a later stage found wrong with a body.
+pub(crate) fn capture_problem(problem: impl FnOnce() -> String) {
+    HIR_CAPTURE.with(|c| {
+        if let Some(out) = c.borrow_mut().as_mut() {
+            out.problems.push(problem());
+        }
+    });
+}
+
 /// Build `ast`'s HIR and record it, when capture is on.
 pub(crate) fn capture_module(
     checker: &crate::typechecking::infer::Checker,
