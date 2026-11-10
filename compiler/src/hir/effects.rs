@@ -224,6 +224,8 @@ pub struct ProgramEffects {
     /// Why a body mutates each parameter it mutates, by full body name:
     /// `(parameter index, "writes field `x`")`.
     mutations: Mutations,
+    /// A `drop` so far may change the length of an array or `Vec`.
+    drop_resizes: bool,
 }
 
 impl ProgramEffects {
@@ -362,6 +364,14 @@ impl ProgramEffects {
         })
     }
 
+    /// Whether a `drop` of the modules so far may change the length of an
+    /// array or `Vec`. A finalizer runs at any allocation, so while this is
+    /// `false` and no later module has such a `drop` either, an allocation
+    /// leaves every length as it was.
+    pub fn drop_may_resize(&self) -> bool {
+        self.drop_resizes
+    }
+
     /// Keep why a module's bodies mutate their parameters
     /// ([`ModuleEffects::mutations`]), so a later module's E0107 can say so.
     pub fn record_mutations(&mut self, mutations: Mutations) {
@@ -376,6 +386,7 @@ impl ProgramEffects {
                 continue;
             }
             self.by_name.insert(body.name.clone(), s);
+            self.drop_resizes |= short_name(&body.name) == "drop" && !s.is_steady();
             if body.kind == BodyKind::Function
                 && let Some(def) = def_of(checker, module_path, &body.name)
             {
@@ -684,14 +695,14 @@ fn short_name(path: &str) -> &str {
 }
 
 /// `name` without the module prefix, or `None` when it is not this module's.
-fn local_name<'a>(module_path: &str, name: &'a str) -> Option<&'a str> {
+pub(super) fn local_name<'a>(module_path: &str, name: &'a str) -> Option<&'a str> {
     if module_path.is_empty() {
         return Some(name);
     }
     name.strip_prefix(module_path)?.strip_prefix("::")
 }
 
-fn def_of(checker: &Checker, module_path: &str, name: &str) -> Option<DefId> {
+pub(super) fn def_of(checker: &Checker, module_path: &str, name: &str) -> Option<DefId> {
     let local = local_name(module_path, name)?;
     checker
         .interned_def(module_path, local)
