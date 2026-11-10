@@ -329,6 +329,9 @@ struct HirLambda {
     /// The enclosing shared generic body's `kinds` word, captured after the
     /// dictionaries (#2506).
     kinds: Option<frame::FrameKinds>,
+    /// The names of the body whose dictionaries `dicts` are
+    /// ([`Compiler::dict_owner_names`]).
+    owner: Vec<String>,
     /// A two-word result: the plan and entry of its twin, the same body
     /// returning the two words (`MirFunc::pair_twin`).
     twin: Option<(HirEmit, IlLabel, PairKind)>,
@@ -349,6 +352,8 @@ pub(in crate::codegen) struct HirLambdaTail {
     dicts: Vec<(String, u32)>,
     /// [`HirLambda::kinds`].
     kinds: Option<frame::FrameKinds>,
+    /// [`HirLambda::owner`].
+    owner: Vec<String>,
 }
 
 /// What planning decided for one body: the representation of each value,
@@ -1739,6 +1744,7 @@ impl Compiler {
                     label: lam.label,
                     dicts: lam.dicts.clone(),
                     kinds: lam.kinds.clone(),
+                    owner: lam.owner.clone(),
                     twin: lam.twin.take(),
                 };
                 self.hir_lambda_tail.push(tail);
@@ -4076,6 +4082,8 @@ impl Compiler {
             };
             // Its `kinds` word, after them (#2506).
             let kinds = if self.compiling_mono_clone { None } else { self.hir_body_frame.as_ref().and_then(|f| f.kinds.clone()) };
+            // Their goals are the enclosing body's (#2600).
+            let owner = self.dict_owner_names();
             // A two-word result (`Option<int>`) gets a twin returning the
             // two words, which a two-word call through the value enters.
             // A lambda inside it would be planned twice: no twin then.
@@ -4091,6 +4099,7 @@ impl Compiler {
                 let lambda_frame = frame::BodyFrame::lambda(lam, &pair_captures, dict_ns, kinds.as_ref());
                 let prev_frame = self.hir_body_frame.replace(lambda_frame);
                 let prev_dicts = self.hir_lambda_dicts.replace((capture_words, dicts.len() as u32));
+                let prev_owner = self.hir_dict_owner.replace(owner.clone());
                 *self.hir_lambda_pairs.borrow_mut() = Self::hir_lambda_capture_slots(lam, &pair_captures)
                     .filter_map(|(inner, slot, kind)| Some((inner.0, slot, kind?)))
                     .collect();
@@ -4099,6 +4108,7 @@ impl Compiler {
                     .plan_hir_body_ret(lam, rep)
                     .and_then(|mut plan| self.plan_hir_lambdas(module, lam, &mut plan).map(|()| plan));
                 self.hir_lambda_dicts = prev_dicts;
+                self.hir_dict_owner = prev_owner;
                 self.hir_body_frame = prev_frame;
                 self.compiling_two_word_enum = prev_two_word;
                 let mut plan = match plan {
@@ -4123,7 +4133,7 @@ impl Compiler {
             // ([`Self::hir_label_lambdas`]).
             let twin = plans.next().zip(twin_kind).map(|(p, k)| (p, UNLABELLED, k));
             let label = UNLABELLED;
-            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts, kinds, twin, pair_captures }));
+            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts, kinds, owner, twin, pair_captures }));
         }
         Ok(())
     }
@@ -11021,9 +11031,10 @@ impl Compiler {
     }
 
     fn hir_lambda_fn(&mut self, lam: HirLambdaTail) {
-        let HirLambdaTail { body, emit, label, dicts, kinds, twin } = lam;
+        let HirLambdaTail { body, emit, label, dicts, kinds, owner, twin } = lam;
+        let prev_owner = self.hir_dict_owner.replace(owner);
         let twin = twin.map(|(emit, twin_label, kind)| {
-            let tail = HirLambdaTail { body: body.clone(), emit, label: twin_label, dicts: dicts.clone(), kinds: kinds.clone(), twin: None };
+            let tail = HirLambdaTail { body: body.clone(), emit, label: twin_label, dicts: dicts.clone(), kinds: kinds.clone(), owner: Vec::new(), twin: None };
             (tail, twin_label, kind)
         });
         self.hir_lambda_body(body, emit, label, (dicts, kinds), None);
@@ -11034,6 +11045,7 @@ impl Compiler {
             self.hir_lambda_body(body, emit, twin_label, (dicts, kinds), Some(kind));
             self.bodies.set_pair_twin(label, twin_label);
         }
+        self.hir_dict_owner = prev_owner;
     }
 
     /// [`Self::hir_lambda_fn`]'s function for one plan of the lambda, at

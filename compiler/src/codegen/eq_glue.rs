@@ -279,7 +279,7 @@ impl Compiler {
             return Some((slot, eq_slot("Eq")?));
         }
         let subst = self.checker.subst();
-        for name in [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()].into_iter().flatten() {
+        for name in &self.dict_owner_names() {
             let Some(dicts) = self.body_dicts_of(name) else {
                 continue;
             };
@@ -437,7 +437,7 @@ impl Compiler {
         }
         let generics = self.checker.generics();
         let subst = self.checker.subst();
-        for name in [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()].into_iter().flatten() {
+        for name in &self.dict_owner_names() {
             let Some(dicts) = self.body_dicts_of(name) else {
                 continue;
             };

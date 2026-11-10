@@ -2993,7 +2993,7 @@ impl Compiler {
         let var = Ty::Var(v);
         let generics = self.checker.generics();
         let subst = self.checker.subst();
-        for name in [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()].into_iter().flatten() {
+        for name in &self.dict_owner_names() {
             let Some(dicts) = self.body_dicts_of(name) else {
                 continue;
             };
@@ -3172,13 +3172,7 @@ impl Compiler {
                     .zip(&args)
                     .all(|(a, b)| &apply_ty_prune(subst, a) == b)
         };
-        let names: Vec<&str> = [
-            self.current_function_qualified.as_deref(),
-            self.current_function_table_key.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
+        let names = self.dict_owner_names();
         let slot_of = |i: usize| self.frame_dict(i);
         for name in &names {
             if let Some(inst) = self
@@ -3202,6 +3196,19 @@ impl Compiler {
             }
         }
         None
+    }
+
+    /// The names of the body whose dictionaries the frame holds: the body
+    /// being compiled, or a lambda's enclosing one (#2600).
+    pub(super) fn dict_owner_names(&self) -> Vec<String> {
+        if let Some(owner) = &self.hir_dict_owner {
+            return owner.clone();
+        }
+        [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Body `name`'s dictionary constraints, by frame index (`__dictN`).
