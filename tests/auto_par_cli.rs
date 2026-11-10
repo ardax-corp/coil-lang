@@ -217,6 +217,70 @@ fn main() {
     same_as_sequential("product-overflow", product, "  in run at");
 }
 
+/// A product's fold step at each edge of the range, by the signs of the
+/// running product and the partial: the step that overflows panics in the
+/// loop, and the one that just fits gives the product.
+#[test]
+fn a_product_fold_at_the_edge_of_the_range_is_the_sequential_one() {
+    const MAX: i64 = i64::MAX;
+    const MIN: i64 = i64::MIN;
+    let edges = [
+        (MAX / 2, 2),
+        (MAX / 2 + 1, 2),
+        (MIN / 2, 2),
+        (MIN / 2 - 1, 2),
+        (2, MIN / 2),
+        (2, MIN / 2 - 1),
+        (MAX / 2 + 1, -2),
+        (MAX / 2 + 2, -2),
+        (-2, MIN / 2 + 1),
+        (-2, MIN / 2),
+        (-1, MIN),
+        (MIN, -1),
+        (MAX, -1),
+        (MIN, 0),
+        (0, MIN),
+        (MIN, 1),
+    ];
+    for (n, (first, second)) in edges.into_iter().enumerate() {
+        let overflows = first.checked_mul(second).is_none();
+        // `MIN` has no literal: it is written as `MIN + 1 - 1`.
+        let lit = |v: i64| if v == MIN { format!("(0 - {MAX} - 1)") } else if v < 0 { format!("(0 - {})", -v) } else { v.to_string() };
+        let program = format!(
+            r#"
+use io::{{stdout, write}};
+use string::to_bytes;
+
+fn factor(int i, int first, int second) -> int {{
+    if i == 0 {{
+        return first;
+    }}
+    if i == 100000 {{
+        return second;
+    }}
+    return 1;
+}}
+
+fn run(int first, int second) -> int {{
+    let total = 1;
+    for i in 0..400000 {{
+        total = total * factor(i, first, second);
+    }}
+    return total;
+}}
+
+fn main() {{
+    let r = run({}, {});
+    let _ = write(stdout(), to_bytes(r.show()));
+}}
+"#,
+            lit(first),
+            lit(second)
+        );
+        same_as_sequential(&format!("product-edge-{n}"), &program, if overflows { "  in run at" } else { "" });
+    }
+}
+
 /// A contract over values the loop leaves alone fails in every chunk and
 /// is reported once.
 #[test]
@@ -272,4 +336,36 @@ fn main() {
 }
 "#;
     same_as_sequential("phantom", program, "");
+}
+
+/// Only a fork-join's own jobs keep their panics to themselves: a thread
+/// the program spawns still reports its panic.
+#[test]
+fn a_spawned_thread_still_reports_its_panic() {
+    let dir = std::env::temp_dir().join(format!("coil-auto-par-{}-user-thread", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join("thread.coil");
+    let program = r#"
+use thread::{join, spawn};
+
+fn boom(int n) -> int {
+    return 9223372036854775807 + n;
+}
+
+fn main() {
+    match spawn(fn () => boom(1)) {
+        Result::Ok(t) => {
+            let _ = join(t);
+        },
+        Result::Err(_) => {},
+    }
+}
+"#;
+    std::fs::write(&src, program).expect("write source");
+    for engine in [&[][..], &["--mir"][..]] {
+        let (_, err, _) = observed(&src, engine, Some("8"));
+        assert_eq!(err.matches("panic: integer overflow at").count(), 1, "{engine:?}: {err}");
+        assert!(err.contains("  in boom at"), "{engine:?}: {err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
