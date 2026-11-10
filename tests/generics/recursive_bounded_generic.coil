@@ -38,7 +38,11 @@ enum Tree<T> {
 fn insert<T: Ord>(Tree<T> t, T x) -> Tree<T> {
     return match t {
         Tree::Leaf => Tree::Node(Tree::Leaf, x, Tree::Leaf),
-        Tree::Node(l, v, r) => if x < v { Tree::Node(insert(l, x), v, r) } else { Tree::Node(l, v, insert(r, x)) },
+        Tree::Node(l, v, r) => if x < v {
+            Tree::Node(insert(l, x), v, r)
+        } else {
+            Tree::Node(l, v, insert(r, x))
+        },
     };
 }
 
