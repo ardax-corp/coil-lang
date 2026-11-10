@@ -766,10 +766,11 @@ fn main() {
 
 
 
-/// How many dictionaries the program's one `PolyFnCapture` holds.
+/// How many dictionaries the program's one `PolyFnCapture` holds, past
+/// the shared entry's `kinds` word it captures last (#2506).
 fn polyfn_capture_elems(compiled: &Compiled) -> usize {
     let capture = compiled.all_insts().find_map(|i| match i {
-        MirInst::Alloc { kind: MirAllocKind::PolyFnCapture { .. }, elems, .. } => Some(elems.len()),
+        MirInst::Alloc { kind: MirAllocKind::PolyFnCapture { .. }, elems, .. } => Some(elems.len() - 1),
         _ => None,
     });
     capture.expect("expected a PolyFn capture when the function escapes a constrained scope")
@@ -869,7 +870,7 @@ use string::{format, to_bytes};
     assert!(
         compiled
             .all_insts()
-            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::PolyFn { .. }, .. }))
+            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. }, .. }))
     );
     let output = run_compiled(compiled, &pipeline, None);
     // fib(6) = 8
