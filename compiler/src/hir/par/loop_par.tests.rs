@@ -2,18 +2,16 @@
 
 use super::*;
 use crate::hir::build_module;
-use crate::typechecking::bare_cases::BareCases;
 use crate::typechecking::infer::Checker;
-use crate::typechecking::purity::analyze_pure_fns;
 
 fn sites_of(src: &str) -> Vec<LoopParSite> {
     let owned = Box::leak(src.to_string().into_boxed_str());
     let ast = parser::Pratt::default().parse(owned).expect("parse");
-    let pure = analyze_pure_fns(&ast, BareCases::none());
     let mut checker = Checker::new();
     let _ = checker.check_program(&ast);
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", &ast);
+    let (pure, _) = crate::hir::effects::lone_module_effects(&module, &checker);
     let mut sites: Vec<LoopParSite> = module.loop_par_sites(&checker, &pure).into_values().collect();
     sites.sort_by_key(|a| a.begin);
     sites

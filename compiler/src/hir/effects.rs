@@ -438,6 +438,28 @@ pub fn steady_names(module: &HirModule, module_path: &str, summaries: &[Summary]
     names_where(module, module_path, summaries, Summary::is_steady)
 }
 
+/// Whether some body of each short name (`f`, the `m` of `Owner::m`) among
+/// `module`'s functions and methods is impure: the names and verdicts the
+/// E0805 hints go by ([`HirModule::par_escape_hints`]).
+pub fn impure_short_names(module: &HirModule, summaries: &[Summary]) -> HashMap<String, bool> {
+    let mut out: HashMap<String, bool> = HashMap::new();
+    for (body, s) in module.bodies.iter().zip(summaries) {
+        if matches!(body.kind, BodyKind::Function | BodyKind::Method) {
+            *out.entry(short_name(&body.name).to_string()).or_default() |= !s.is_pure();
+        }
+    }
+    out
+}
+
+/// The pure functions of a lone module, for the tests of the passes that
+/// take them.
+#[cfg(test)]
+pub(crate) fn lone_module_effects(module: &HirModule, checker: &Checker) -> (HashSet<String>, HashMap<String, bool>) {
+    let program = ProgramEffects::default();
+    let summaries = ModuleEffects::solve(module, checker, "", &program).summaries;
+    (pure_names(module, "", &summaries), impure_short_names(module, &summaries))
+}
+
 /// How a function or method body is written: what its names are keyed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NameShape {
