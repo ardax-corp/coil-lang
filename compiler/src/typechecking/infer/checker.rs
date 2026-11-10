@@ -289,6 +289,7 @@ impl Checker {
             partial_fills_by_span: std::collections::HashMap::new(),
             named_arg_slots_by_span: std::collections::HashMap::new(),
             partial_filled_tys_by_span: std::collections::HashMap::new(),
+            rest_pack_tys_by_span: std::collections::HashMap::new(),
             current_assoc_projections: None,
             open_assoc_projections: HashMap::new(),
         };
@@ -1710,6 +1711,7 @@ impl Checker {
         self.partial_fills_by_span.clear();
         self.named_arg_slots_by_span.clear();
         self.partial_filled_tys_by_span.clear();
+        self.rest_pack_tys_by_span.clear();
         self.lambda_uncaptured_outer = None;
         self.call_site_dicts.clear();
         self.call_site_forward_dicts.clear();
@@ -14751,6 +14753,12 @@ impl Checker {
         self.partial_fills_by_span.get(&(start, end)).copied()
     }
 
+    /// The `Vec<T>` the call at `start..end` packs its rest arguments
+    /// into, as unification left it (#2537).
+    pub fn rest_pack_ty_at(&self, start: usize, end: usize) -> Option<Ty> {
+        self.rest_pack_tys_by_span.get(&(start, end)).map(|t| apply_ty_prune(&self.subst, t))
+    }
+
     /// Expand `...expr` spread nodes in a call argument list using inferred
     /// tuple/array types. Returns a flat argument list for arity checking.
     pub fn flatten_spread_call_args<'a>(&mut self, args: &[Output<'a>]) -> Vec<Output<'a>> {
@@ -15252,7 +15260,11 @@ impl Checker {
                         None => elem_ty = Some(t_pruned),
                         Some(prev) => {
                             let prev_pruned = apply_ty_prune(&self.subst, prev);
-                            if unify_with(&self.subst, &prev_pruned, &t_pruned).is_err() {
+                            // The items are one type: `None` next to
+                            // `Some(1)` takes its payload from it (#2537).
+                            match unify_with(&self.subst, &prev_pruned, &t_pruned) {
+                                Ok(s) => self.absorb(s),
+                                Err(_) => {
                                 let _ = self.error_with_help(
                                 ErrorCode::TypeMismatch,
                                 {
@@ -15268,12 +15280,14 @@ impl Checker {
                                         .to_string(),
                                 ),
                             );
+                                }
                             }
                         }
                     }
                 }
                 let element = elem_ty.unwrap_or_else(|| Ty::Var(self.counter.fresh()));
                 let rest_ty = vec_app_ty(element);
+                self.rest_pack_tys_by_span.insert((range.start, range.end), rest_ty.clone());
                 tys.push(rest_ty);
             }
             // Stand-in for apply_function's expression hooks (array packing

@@ -806,6 +806,11 @@ pub struct Checker {
     /// parameters or fields; later stages read this instead.
     named_arg_slots_by_span: std::collections::HashMap<(usize, usize), NamedArgSlots>,
 
+    /// The `Vec<T>` a call packs its rest arguments into (`T... xs`), by
+    /// the call's span (#2537): an empty pack has no item to type it, and
+    /// its element is the callee's `T` as the call bound it.
+    rest_pack_tys_by_span: std::collections::HashMap<(usize, usize), Ty>,
+
     /// Per-slot types for [`partial_fills_by_span`] entries (slot index, ty).
     /// Needed when named holes are non-prefix (`add(b: 2)`) so typing does
     /// not feed args into `apply_function` in the wrong order.

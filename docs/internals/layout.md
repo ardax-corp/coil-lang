@@ -148,7 +148,10 @@ words:
   rest arguments into it (`hir_call_shapes`), a `...vec` spread is the
   pack itself, and the shared body takes it as the clone does, a `Vec` of
   `T` words. A shared body's own call packs its values of `T` the same way
-  (#2510).
+  (#2510). The pack's type is the one the checker unified its items to,
+  the callee's `T` as the call bound it: `None` next to `Some(1)` is an
+  `Option<int>`, and an empty pack takes it from the fixed arguments or
+  the expected type (`Checker::rest_pack_ty_at`, #2537).
 - `hir_method_clone` clones niche types too: the per-type clone is a cost
   decision (speed), never a correctness one.
 
