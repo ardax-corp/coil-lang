@@ -62,7 +62,7 @@ impl Twice for Box {
 }
 
 trait Thrice<T: Twice> {
-    fn thrice(T x) -> int;
+    fn thrice(T x) -> int {}
 }
 
 impl Thrice for Box {
@@ -76,7 +76,7 @@ fn via_sub<T: Thrice>(T x) -> T {
 }
 
 trait Visit<T> {
-    fn visit<W>(T x, W w, W -> unit f) -> W;
+    fn visit<W>(T x, W w, W -> unit f) -> W {}
 }
 
 impl Visit for Box {
