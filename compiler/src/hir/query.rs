@@ -1008,7 +1008,7 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         // variable nothing pinned (`fn () => Ok(2)`'s error type, #1520):
         // it is `MakeFn`'s plain closure word.
         LocalKind::Let => {
-            poly_fun(t) && !let_init_is_lambda(body, local) && !let_init_is_element(body, local)
+            poly_fun(t) && !let_init_is_lambda(body, local) && !let_init_is_element(body, local) && !let_init_is_field(body, local)
                 || matches!(strip_readonly(t), Ty::Fun(..))
                     && body.exprs.iter().any(|e| match &e.kind {
                         HirKind::Let { local: l, init: Some(init) } if *l == local => {
@@ -1031,6 +1031,15 @@ fn let_init_is_lambda(body: &HirBody, local: LocalId) -> bool {
     body.exprs.iter().any(|e| {
         matches!(&e.kind, HirKind::Let { local: l, init: Some(init) }
             if *l == local && matches!(body.expr(*init).kind, HirKind::Lambda { .. }))
+    })
+}
+
+/// A `let` bound to a field read (`let g = self.f`): the closure word the
+/// object stored, never a `PolyFn` (#2485).
+fn let_init_is_field(body: &HirBody, local: LocalId) -> bool {
+    body.exprs.iter().any(|e| {
+        matches!(&e.kind, HirKind::Let { local: l, init: Some(init) }
+            if *l == local && matches!(body.expr(*init).kind, HirKind::Field { .. }))
     })
 }
 
@@ -1068,13 +1077,10 @@ fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Ve
             mono_fun(checker, &t, &mut Vec::new()) || index && open_fun(checker, &t, &mut Vec::new())
         });
     }
-    // A field holding a monomorphic function, called in place as
-    // `(o.f)(x)` (#2472): the closure word stored there, as a `let` of it.
+    // A field holding a function, called in place as `(o.f)(x)` (#2472):
+    // the closure word stored there, as a `let` of it.
     if let HirKind::Field { .. } = body.expr(f).kind {
-        return body.expr(f).ty.as_ref().is_some_and(|t| {
-            let t = apply_ty_prune(checker.subst(), t);
-            mono_fun(checker, &t, &mut Vec::new())
-        });
+        return field_fun(body, checker, f);
     }
     // A call's returned closure called in place (#1533), as a `let` of it.
     if let HirKind::Call { .. } = body.expr(f).kind {
@@ -1147,6 +1153,20 @@ fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Ve
     words
 }
 
+/// A field read whose value is a closure word a call takes: a monomorphic
+/// function, or a generic class's function over its parameters read in a
+/// generic body (`f: fn(T) -> T`, #2485), whose words are plain: each bare
+/// `T` is the one word ground code passes for it, so the closure a ground
+/// instance stored is called as it is. A function holding a parameter below
+/// the top (`fn(T) -> Option<T>`) is no such word: its result would be read
+/// as the open enum's object where a ground closure returns its own layout.
+fn field_fun(body: &HirBody, checker: &Checker, field: HirId) -> bool {
+    body.expr(field).ty.as_ref().is_some_and(|t| {
+        let t = apply_ty_prune(checker.subst(), t);
+        matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words_in(checker, &t, &mut Vec::new(), false)
+    })
+}
+
 /// Whether `value`, bound to or stored into a function-typed local, is a
 /// plain closure word a call through the local can take.
 fn closure_word(body: &HirBody, checker: &Checker, value: HirId, seen: &mut Vec<LocalId>) -> bool {
@@ -1158,10 +1178,7 @@ fn closure_word(body: &HirBody, checker: &Checker, value: HirId, seen: &mut Vec<
         // generic one, whose `MakePolyFn` calls differently).
         HirKind::Global { .. } | HirKind::Lambda { .. } => true,
         // A function field or element: the closure word stored there.
-        HirKind::Field { .. } => body.expr(value).ty.as_ref().is_some_and(|t| {
-            let t = apply_ty_prune(checker.subst(), t);
-            mono_fun(checker, &t, &mut Vec::new())
-        }),
+        HirKind::Field { .. } => field_fun(body, checker, value),
         // An element of a shared generic body's `Vec<unit -> T>` too (#2136).
         HirKind::Index { .. } => body.expr(value).ty.as_ref().is_some_and(|t| {
             let t = apply_ty_prune(checker.subst(), t);
@@ -1214,8 +1231,25 @@ fn returned_closure(body: &HirBody, checker: &Checker, call: HirId, seen: &mut V
                 .first()
                 .and_then(|r| body.expr(*r).ty.as_ref())
                 .map(|t| apply_ty_prune(checker.subst(), t));
-            matches!(owner.as_ref().map(strip_readonly), Some(Ty::Con(owner))
-                if checker.has_method(owner, name) && !checker.is_generic_fn(&format!("{owner}::{name}")))
+            // A generic class's method at a ground instance too (`a.get()`
+            // on a `Slot<int>` returning its `fn(T) -> T` field, #2485),
+            // where the result is a monomorphic function.
+            let class = match owner.as_ref().map(strip_readonly) {
+                Some(Ty::Con(owner)) => Some(owner),
+                Some(Ty::App(head, _)) => match head.as_ref() {
+                    Ty::Con(owner)
+                        if body.expr(call).ty.as_ref().is_some_and(|t| {
+                            let t = apply_ty_prune(checker.subst(), t);
+                            mono_fun(checker, &t, &mut Vec::new())
+                        }) =>
+                    {
+                        Some(owner)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+            class.is_some_and(|owner| checker.has_method(owner, name) && !checker.is_generic_fn(&format!("{owner}::{name}")))
                 && checker.bound_method_call_for_span(start, end).is_none()
                 && checker.existential_method_call_for_span(start, end).is_none()
         }
