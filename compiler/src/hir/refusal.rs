@@ -14,7 +14,7 @@ use crate::typechecking::infer::{Checker, ForInCounted, ForInKind};
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
 use super::classify::{ValueClass, classify, is_byte_array, is_byte_vec, is_generic_class, is_open_range, is_range_pair, is_scalar, is_unit_local, is_vec, is_word, primitive, tuple_items, user_operand};
-use super::query::{AggregateSrc, aggregate_info, aggregate_packed, aggregate_src, arm_fields, byte_literal, class_boxes, clobbers, existential_hint, ffi_builtin, ffi_fn_variadic, ffi_tag, ffi_variadic_tags, has_nested_test, index_stages, indirect_callee, is_scalar_match, is_unit_make, is_unit_value, let_pat_shape, linear_algebra, nested_pattern, only_field_base, polyfn_callee, pure_index, range_bounds, read_base, reassigned, returned_value, sroa_class, sroa_local, stack_arrays, structural_len, writes_field_of};
+use super::query::{AggregateSrc, aggregate_info, aggregate_packed, aggregate_src, arm_fields, byte_literal, class_boxes, clobbers, existential_hint, ffi_builtin, ffi_fn_variadic, ffi_tag, ffi_variadic_tags, has_nested_test, index_stages, indirect_callee, is_scalar_match, is_unit_make, is_unit_value, let_pat_shape, linear_algebra, nested_pattern, only_field_base, polyfn_callee, pure_index, range_bounds, read_base, reassigned, returned_value, sroa_class, sroa_local, stack_arrays, structural_len, typeof_text, writes_field_of};
 
 /// A `defer` body the thunk cannot hold: a `return`, or a `break` /
 /// `continue` outside the body's own loops (the checker rejects those,
@@ -472,6 +472,20 @@ impl Walk<'_> {
         matches!(self.ty(id).map(strip_readonly), Some(Ty::Record { .. }))
     }
 
+    /// `enum_name::variant` built or matched at type `ty`: `ty` names that
+    /// enum, the variant has a tag, and its payload is `fields` words
+    /// (`None`: a pattern that names none of them).
+    fn variant(&self, ty: &Ty, enum_name: &str, variant: &str, fields: Option<usize>, [tag, payload]: [&'static str; 2]) -> Check {
+        use crate::codegen::Compiler;
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        Compiler::tag_of(self.checker, &ty, enum_name, variant).ok_or(tag)?;
+        let tys = Compiler::payload_tys_of(self.checker, &ty, variant).ok_or(payload)?;
+        if fields.is_some_and(|n| n != tys.len()) {
+            return Err(payload);
+        }
+        Ok(())
+    }
+
     fn object(&self, id: HirId) -> Check {
         if self.class(id) == Some(ValueClass::Object) || self.shared_receiver(id) || self.record(id) {
             Ok(())
@@ -880,6 +894,8 @@ impl Walk<'_> {
                 if self.class(id) != Some(ValueClass::Enum) {
                     return Err("make-type");
                 }
+                let ty = self.ty(id).ok_or("make-type")?;
+                self.variant(ty, enum_name, variant, Some(args.len()), ["make-tag", "make-payload"])?;
                 for &arg in args {
                     // `Ok(())`: the emitter checks the layout carries it.
                     if is_unit_make(body, arg) {
@@ -950,11 +966,11 @@ impl Walk<'_> {
                 self.word(id)?;
                 self.value(*inner)
             }
-            // `typeof e`: a string constant; `e` is not evaluated.
+            // `typeof e`: a string constant, `e`'s type; `e` is not evaluated.
             HirKind::Builtin {
                 op: Builtin::TypeOf,
                 args,
-            } if args.len() == 1 => Ok(()),
+            } if args.len() == 1 => typeof_text(body, self.checker, args[0]).map(|_| ()).ok_or("typeof-type"),
             // `done(h)`: the handle, `DoneCoro`.
             HirKind::Builtin {
                 op: Builtin::Done,
@@ -1019,8 +1035,13 @@ impl Walk<'_> {
             if self.class(scrutinee) != Some(ValueClass::Enum) {
                 return Err("match-type");
             }
+            let ty = self.ty(scrutinee).ok_or("match-type")?;
             for arm in arms {
-                arm_fields(self.body, &arm.pat)?;
+                let fields = arm_fields(self.body, &arm.pat)?;
+                if let HirPat::Variant { enum_name, variant, .. } = &arm.pat {
+                    let named = Some(fields.len()).filter(|&n| n > 0);
+                    self.variant(ty, enum_name, variant, named, ["pattern-tag", "pattern-payload"])?;
+                }
             }
         }
         if value {
