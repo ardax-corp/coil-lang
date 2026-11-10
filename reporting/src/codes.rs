@@ -125,6 +125,9 @@ pub enum ErrorCode {
     /// A bare `m(args)` that names only a trait method: write `x.m(rest)`
     /// or `Trait::m(args)`.
     BareTraitCall,
+    /// Modules that import each other, directly or through others
+    /// (`a -> b -> a`): each module is checked after those it imports.
+    ImportCycle,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -261,6 +264,7 @@ impl ErrorCode {
             Self::ViewEscape => "E0151",
             Self::DeferAssignsCapture => "E0152",
             Self::BareTraitCall => "E0153",
+            Self::ImportCycle => "E0154",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -374,6 +378,7 @@ impl ErrorCode {
             Self::ViewEscape => "view value outlives its borrows",
             Self::DeferAssignsCapture => "`defer` assigns a variable that is gone when it runs",
             Self::BareTraitCall => "a trait method called as a free function",
+            Self::ImportCycle => "modules import each other",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -495,6 +500,7 @@ mod tests {
             | ViewEscape
             | DeferAssignsCapture
             | BareTraitCall
+            | ImportCycle
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -598,6 +604,7 @@ mod tests {
             ViewEscape,
             DeferAssignsCapture,
             BareTraitCall,
+            ImportCycle,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,
