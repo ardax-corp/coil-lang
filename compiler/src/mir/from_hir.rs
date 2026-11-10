@@ -1630,7 +1630,6 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
     }
     // A trait method's `kinds` word out of its own dictionary, its bits
     // first and the entry word's after them (#2506).
-    let mut kinds = kinds;
     if let Some(f) = kinds_frame
         && let Some((own, index, n)) = f.dict
     {

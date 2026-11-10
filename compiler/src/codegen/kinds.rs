@@ -42,6 +42,10 @@ pub(crate) fn check_on() -> bool {
     cfg!(debug_assertions) || crate::mir::verify_asked()
 }
 
+/// A trait method's dictionary `kinds` word: its index in the
+/// dictionary, how many bits it has, and each type variable's bit.
+pub(super) type DictKinds = (u32, u32, Vec<(TyVarId, u32)>);
+
 /// Where one bit of a call's `kinds` word comes from.
 enum Bit {
     Const(bool),
@@ -321,7 +325,7 @@ impl Compiler {
     /// parameters, or a generic-head instance's method, over its head's
     /// variables. Each type variable's bit in the word, how many bits it
     /// has, and the word's index in the dictionary (after the methods).
-    pub(super) fn dict_kinds_layout(&self, fqn: &str) -> Option<(u32, u32, Vec<(TyVarId, u32)>)> {
+    pub(super) fn dict_kinds_layout(&self, fqn: &str) -> Option<DictKinds> {
         let generics = self.checker.generics();
         let class = match fqn.split_once("__default__") {
             Some((class, _)) => class.to_string(),
