@@ -81,6 +81,9 @@ pub struct TestOptions {
     pub wall_timeout: Option<std::time::Duration>,
     /// What runs the compiled code (`--engine`).
     pub engine: Engine,
+    /// `--cell`: the name of this run's configuration, which selects the
+    /// `// @xfail` header lines that apply ([`known_failure`]).
+    pub cell: Option<String>,
 }
 
 /// `--engine`: native code (`docs/internals/native.md`) or the MIR
@@ -293,6 +296,27 @@ pub fn missing_platform_feature(src: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Why a file is a known failure in the configuration `cell` names: the
+/// text after the name on its `// @xfail <cell> #<issue> <why>` header line.
+/// `Ok(None)` when no line names `cell`; `Err` when the line has no issue
+/// number, so every known failure points at one.
+pub fn known_failure(src: &str, cell: &str) -> Result<Option<String>, String> {
+    for line in test_headers::values(src, "xfail") {
+        let (name, why) = line.trim().split_once(char::is_whitespace).unwrap_or((line.trim(), ""));
+        if name != cell {
+            continue;
+        }
+        let issue = why.split(|c: char| !(c == '#' || c.is_ascii_digit())).any(|w| {
+            w.strip_prefix('#').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        });
+        if !issue {
+            return Err(format!("`// @xfail {cell}` names no issue: write `// @xfail {cell} #<issue> <why>`"));
+        }
+        return Ok(Some(why.trim().to_string()));
+    }
+    Ok(None)
+}
+
 /// The stdout a `fn main()`-only file declares on the `// @output` line of
 /// its leading comment header, unescaped (`\n`, `\t`, `\e`, `\\`), as
 /// `examples/` document theirs. `None` when there is no such line.
@@ -378,6 +402,8 @@ pub struct SuiteResult {
     pub failures: Vec<String>,
     /// Passing files whose compiler warnings were not shown.
     pub quiet_diagnostics: usize,
+    /// Files that failed as their `// @xfail` line for this `--cell` says.
+    pub known_failures: usize,
 }
 
 /// One case's verdict, as `coil mutate` needs it from the baseline run.
@@ -632,10 +658,40 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
             Report::Silent => {}
         }
     }
+    // A known failure of this `--cell` (`// @xfail`): the file must fail.
+    // Its failing cases are not counted, and a file that passes fails, so
+    // the line goes when its issue is fixed.
+    let known = run.options.cell.as_deref().filter(|_| !is_compile_fail(&file.path)).and_then(|cell| {
+        let src = std::fs::read_to_string(&file.path).unwrap_or_default();
+        known_failure(&src, cell).map(|why| why.map(|why| (cell, why))).transpose()
+    });
+    let mut xfail = None;
+    match known {
+        Some(Ok((_, why))) if failed != 0 => {
+            failed = 0;
+            blocks.clear();
+            result.known_failures += 1;
+            xfail = Some(why);
+        }
+        Some(Ok((cell, why))) => {
+            failed = 1;
+            let m = format!("passes, but `// @xfail {cell} {why}` lists it as a known failure: remove that line");
+            blocks.push(failure_block(&file.display, None, Some(&m), b"", b""));
+            message = Some(m);
+        }
+        Some(Err(why)) => {
+            failed = failed.max(1);
+            blocks.insert(0, failure_block(&file.display, None, Some(&why), b"", b""));
+            message = Some(why);
+        }
+        None => {}
+    }
     match report {
         Report::Human => {
             let verbose = run.options.verbose || run.options.show_output;
-            if pretty && !diagnostics.is_empty() {
+            if xfail.is_some() {
+                // Expected diagnostics and prints: nothing to show.
+            } else if pretty && !diagnostics.is_empty() {
                 let text = String::from_utf8_lossy(&diagnostics).trim_end().to_string();
                 if failed != 0 {
                     // With the file's first failure: they are often why.
@@ -649,7 +705,9 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
                     result.quiet_diagnostics += 1;
                 }
             }
-            let line = if failed == 0 {
+            let line = if let Some(why) = &xfail {
+                verbose.then(|| format!("{} {} ({why})", paint("xfail", true), file.display))
+            } else if failed == 0 {
                 verbose.then(|| format!("{}   {}", paint("ok", true), file.display))
             } else {
                 Some(format!("{} {}", paint("FAILED", false), file.display))
@@ -678,6 +736,7 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
                 .num("passed", passed)
                 .num("failed", failed)
                 .opt_str("message", message.as_deref())
+                .opt_str("xfail", xfail.as_deref())
                 .opt_str(
                     "diagnostics",
                     (!diagnostics.is_empty()).then_some(&*diagnostics),
@@ -1437,6 +1496,7 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
         result.cases.extend(more.cases);
         result.failures.extend(more.failures);
         result.quiet_diagnostics += more.quiet_diagnostics;
+        result.known_failures += more.known_failures;
     }
     reactor.shutdown();
     result.coverage = coverage.map(|c| c.into_inner().unwrap_or_else(|e| e.into_inner()));
@@ -1585,6 +1645,7 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
         coverage,
         failures,
         quiet_diagnostics,
+        known_failures,
         ..
     } = match run_test_suite(config.clone(), &options) {
         Ok(result) => result,
@@ -1610,8 +1671,12 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
             );
         }
         eprintln!();
+        let known = match known_failures {
+            0 => String::new(),
+            n => format!(" {n} known failure{} (`// @xfail`);", if n == 1 { "" } else { "s" }),
+        };
         eprintln!(
-            "test result: {}. {passed} passed; {failed} failed; {} total; finished in {:.2}s",
+            "test result: {}. {passed} passed; {failed} failed; {} total;{known} finished in {:.2}s",
             if failed == 0 { "ok" } else { "FAILED" },
             passed + failed,
             started.elapsed().as_secs_f64()
@@ -1667,6 +1732,7 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
             .num("passed", passed)
             .num("failed", failed)
             .num("total", passed + failed)
+            .num("known_failures", known_failures)
             .opt_str("seed", seed_of(options.order).as_deref())
             .raw("coverage", &coverage_event)
             .emit();

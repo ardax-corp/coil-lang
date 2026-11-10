@@ -120,6 +120,10 @@ struct TestCli {
     /// (the MIR interpreter)
     #[arg(long, value_name = "native|mir", value_parser = Engine::parse)]
     engine: Option<Engine>,
+    /// Name this run's configuration: a file whose header lists it
+    /// (`// @xfail NAME #issue`) must fail, and fails the run if it passes
+    #[arg(long, value_name = "NAME")]
+    cell: Option<String>,
     /// Test root (default: ./tests)
     #[arg(value_name = "PATH")]
     path: Option<String>,
@@ -252,6 +256,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
         },
         wall_timeout: cli.wall_timeout,
         engine: cli.engine.unwrap_or_else(Engine::host_default),
+        cell: cli.cell,
     })?;
     Ok(Parsed::Run(config, test))
 }
@@ -292,6 +297,7 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         wall_timeout: 0,
         // Only the interpreter charges steps, which the budget counts.
         engine: Engine::Mir,
+        cell: None,
     })?;
     let forwarded = original.get(2..).unwrap_or(&[]).to_vec();
     let operators = match cli.operators {
@@ -341,6 +347,7 @@ struct RunParts {
     /// Seconds per case before the run stops; 0: never.
     wall_timeout: u64,
     engine: Engine,
+    cell: Option<String>,
 }
 
 fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String> {
@@ -393,6 +400,7 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
             wall_timeout: (parts.wall_timeout != 0)
                 .then(|| std::time::Duration::from_secs(parts.wall_timeout)),
             engine: parts.engine,
+            cell: parts.cell,
         }),
     ))
 }

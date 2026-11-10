@@ -35,6 +35,7 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         doc_tests: DocTests::On,
         wall_timeout: None,
         engine: Default::default(),
+        cell: None,
     }
 }
 
@@ -687,4 +688,43 @@ fn flags_header_adds_to_the_run_grants() {
     assert!(declared_flags("fn main() {}\n// @flags --allow-read\n").unwrap().is_none());
     let bad = declared_flags("// @flags --comptime-steps lots\n").unwrap_err();
     assert!(bad.contains("bad `// @flags` header"), "{bad}");
+}
+
+#[test]
+fn xfail_lines_name_a_cell_and_an_issue() {
+    let src = "// @xfail clone-budget-0 #2510 rest arguments\n// @xfail mir-verify (#7): licm\nfn main() {}\n";
+    assert_eq!(known_failure(src, "clone-budget-0"), Ok(Some("#2510 rest arguments".to_string())));
+    assert_eq!(known_failure(src, "mir-verify"), Ok(Some("(#7): licm".to_string())));
+    assert_eq!(known_failure(src, "clone-budget"), Ok(None));
+    let err = known_failure("// @xfail auto-par flaky\n", "auto-par").unwrap_err();
+    assert!(err.contains("names no issue"), "{err}");
+    assert!(known_failure("// @xfail auto-par #x1\n", "auto-par").is_err());
+}
+
+/// In its cell a known failure must fail: it is not counted as a failure
+/// there, a pass is one, and outside the cell the line does nothing.
+#[test]
+fn a_known_failure_must_fail_in_its_cell() {
+    let root = unique_tmp("xfail");
+    std::fs::create_dir_all(&root).unwrap();
+    let failing = "test(\"no\") {\n  raise \"no\";\n}\ntest(\"yes\") {}\n";
+    std::fs::write(root.join("fails.coil"), format!("// @xfail slow #1 raises\n{failing}")).unwrap();
+    std::fs::write(root.join("fixed.coil"), "// @xfail slow #2 was broken\ntest(\"ok\") {}\n").unwrap();
+    std::fs::write(root.join("other.coil"), "// @xfail fast #3 another cell\ntest(\"ok\") {}\n").unwrap();
+    std::fs::write(root.join("bare.coil"), "// @xfail slow no issue\ntest(\"ok\") {}\n").unwrap();
+
+    let in_cell = TestOptions { cell: Some("slow".to_string()), ..options(&root, false) };
+    let result = run_test_suite(ReportConfig::default(), &in_cell).expect("suite runs");
+    assert_eq!(result.known_failures, 1, "fails.coil");
+    // fails.coil's passing case, other.coil, bare.coil's case and fixed.coil's.
+    assert_eq!(result.passed, 4);
+    assert_eq!(result.failed, 2, "fixed.coil passes and bare.coil names no issue");
+    let text = result.failures.join("\n");
+    assert!(text.contains("fixed.coil") && text.contains("remove that line"), "{text}");
+    assert!(text.contains("bare.coil") && text.contains("names no issue"), "{text}");
+    assert!(!text.contains("fails.coil"), "{text}");
+
+    let plain = run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
+    assert_eq!((plain.known_failures, plain.failed), (0, 1), "only fails.coil's raise");
+    let _ = std::fs::remove_dir_all(&root);
 }
