@@ -440,6 +440,15 @@ pub struct Checker {
     /// Open dictionaries forwarded from the enclosing generic function.
     call_site_forward_dicts: SideTable<Vec<usize>>,
 
+    /// A trait method body's dictionaries by its FQN, in frame order
+    /// (`__dict0..`): the instance's (or the trait's, for a default
+    /// body), the context, then the method's own bounds. What
+    /// `dict_index_for` numbers a forwarded goal by (#2594).
+    trait_body_dicts: HashMap<String, Vec<crate::typechecking::ty::Constraint>>,
+
+    /// The active constraints when the last `infer_function` left its body.
+    last_body_dicts: Vec<crate::typechecking::ty::Constraint>,
+
     /// Calls resolved through an active trait constraint.
     bound_method_calls: SideTable<BoundMethodCall>,
 

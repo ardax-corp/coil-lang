@@ -184,6 +184,8 @@ impl Checker {
             overload_decl_by_span: std::collections::HashMap::new(),
             call_site_dicts: SideTable::default(),
             call_site_forward_dicts: SideTable::default(),
+            trait_body_dicts: std::collections::HashMap::new(),
+            last_body_dicts: Vec::new(),
             bound_method_calls: SideTable::default(),
             bound_operator_calls: SideTable::default(),
             aggregate_arith: SideTable::default(),
@@ -6039,6 +6041,24 @@ impl Checker {
             Generics::fill_default_method_fqns(class_def, &mut instance.method_fqns);
         }
         self.call_site_dicts.push(call_id, (range.start, range.end), instance);
+    }
+
+    /// Record trait method body `fqn`'s dictionaries, the constraints its
+    /// `infer_function` left with from `from` (the impl's or trait's own
+    /// first) on.
+    pub(super) fn record_trait_body_dicts(&mut self, fqn: &str, from: usize) {
+        if let Some(dicts) = self.last_body_dicts.get(from..)
+            && !dicts.is_empty()
+        {
+            self.trait_body_dicts.insert(fqn.to_string(), dicts.to_vec());
+        }
+    }
+
+    /// Trait method body `fqn`'s dictionaries in frame order (`__dict0..`):
+    /// the instance's or the trait's own, the instance's context, then the
+    /// method's own bounds.
+    pub fn trait_body_dicts(&self, fqn: &str) -> Option<&[Constraint]> {
+        self.trait_body_dicts.get(fqn).map(Vec::as_slice)
     }
 
     pub fn forwarded_dicts_at(&self, id: NodeId) -> Option<&[usize]> {

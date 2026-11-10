@@ -893,6 +893,7 @@ impl Checker {
 
         // Pop type param scope.
         self.weak_checks.leave_fn();
+        self.last_body_dicts.clone_from(&self.active_constraints);
         self.active_constraints.truncate(prev_constraints_len);
         self.type_params_in_scope.pop();
 
