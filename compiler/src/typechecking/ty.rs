@@ -868,6 +868,16 @@ pub fn nominal_enum(ty: Ty) -> Ty {
     }
 }
 
+/// [`nominal_enum`] at every level: `(Some(3), 1)`'s type is
+/// `(Option<int>, int)`, the shape its structural instance is of (#2607).
+pub fn nominal_enum_deep(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Constructor { owner, .. } => nominal_enum_deep(owner),
+        Ty::Sum { name, .. } => Ty::Con(name.clone()),
+        _ => ty.map_children(nominal_enum_deep),
+    }
+}
+
 /// `Option<T>` / `Result<T, E>` behind a variant's constructor type as the
 /// application, the type an instance lookup matches (#1479). `None` for any
 /// other type.
