@@ -41,7 +41,9 @@ scalar, `string`, `Option`, tuple, enum or function). `Lower` emits both ops
 on such a word under a test of the bit (`guarded_cow`), so a body pays a
 test and a branch, and the op only where the type is an object, as its
 per-type clone does. A body with no bit for the variable (a cleanup pad, an
-outlined helper) emits no op. The bits past the mask carry a sentinel the
+outlined helper) emits no op. Native code sets a share's flag inline, with no
+call ([native.md](native.md), "Inline share"), so a body whose type is a scalar
+pays the test alone. The bits past the mask carry a sentinel the
 entry checks in debug builds and under `COIL_MIR_VERIFY`, so an edge that
 does not pass the word fails loudly.
 
@@ -64,7 +66,7 @@ Where the word comes from:
   it), `common::KINDS_FROM_CALL`, which the runtime replaces by the call's
   last word; a call through a `forall` parameter or such a local passes it
   last. A function of more type parameters read open captures every bit
-  clear (the `forall`'s order need not be its own): its ops stay off.
+  clear (the `forall`'s order need not be its own): its ops stay off (#2621).
 
 A ground call passes a constant; a shared caller forwards its own bit for a
 type parameter and a constant for a type with a known head (`Vec<T>` is 1,

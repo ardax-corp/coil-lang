@@ -3646,6 +3646,33 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
+            // A share of no field marks the object in place: no call, so a
+            // body whose only share is behind a `kinds` test stays a leaf
+            // (#2506). The header's kind byte says whether the word is a
+            // class instance or an array, the objects `Heap::cow_share`
+            // marks; anything else (null, a tagged word's object of another
+            // kind) is left as it is, as the helper leaves it.
+            MirInst::Cow { dest, src, unique: false, field: None } => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                let flags = MemFlagsData::trusted();
+                let o = self.b.ins().band_imm_u(s, !1i64);
+                let (check, mark, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(o, check, &[], join, &[]);
+                self.b.switch_to_block(check);
+                let k = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_KIND_OFFSET);
+                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
+                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
+                let either = self.b.ins().bor(inst, arr);
+                self.b.ins().brif(either, mark, &[], join, &[]);
+                self.b.switch_to_block(mark);
+                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_SHARED_SET));
+                self.b.ins().store(flags, set, o, machine::COW_SHARED_OFFSET);
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(join);
+                self.set_word(f, *dest, s);
+                self.view_of(f, *dest);
+            }
             MirInst::Cow { dest, src, unique, field } => {
                 let s = self.get(f, *src);
                 let s = self.coerce(s, types::I64);

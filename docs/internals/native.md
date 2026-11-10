@@ -376,6 +376,25 @@ compiler bug and bails, a panic, with no helper call; the interpreter's
 `layout_fingerprint` covers these offsets, so an AOT object made against another
 layout is refused.
 
+## Inline share
+
+A copy-on-write share of a word (`Cow` with `unique` false and no field) sets
+the object's shared flag in place, with no call (#2506): the word with its low
+tag bit cleared, nothing for null, then the header's kind byte, and for a class
+instance or an array (`KIND_INSTANCE`, `KIND_ARRAY`) a store of
+`COW_SHARED_SET` at `COW_SHARED_OFFSET`. Those constants sit next to
+`GcHeader` (`machine/src/memory/heap.rs`), tied to it by `offset_of!` and
+size asserts, and `Object::set_shared` writes the flag through the same pair;
+`layout_fingerprint` covers them. Any other word is left as it is, as
+`Heap::cow_share` leaves it. A share allocates nothing (`OpProps` of a share
+`Cow`: no `allocates`, no `gc_edge`), so a body whose only copy-on-write op on
+a type parameter is a share behind its `kinds` test stays without a GC poll
+and with no helper call. The flag is a `Cell<bool>` the runtime sets from a
+shared reference, never through `GcData::as_mut`, so the inline store is the
+same in debug and `gc-stress` builds. The interpreter keeps `coil_native_cow`,
+which also counts the share for `--cow-report`'s summary line; native code's
+inline shares are not in that count (the copies are).
+
 In-place stores are compiled only into release builds without `gc-stress`
 (`ProductSlots::inline_stores`): debug and `gc-stress` builds check epoch writes in
 `GcData::as_mut`, which native code would skip. Loads are in place in every build.
