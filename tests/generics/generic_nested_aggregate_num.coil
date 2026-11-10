@@ -1,0 +1,59 @@
+// A `Num` function called at a nested aggregate (#2544): a tuple of tuples,
+// an array of tuples, an array of arrays, three levels deep. The inner
+// aggregate has its structural instance too, so the operator runs one level
+// down through it, once per element, in a per-type clone and (the
+// `clone-budget-0` cell) in the shared body, through the outer instance's
+// dictionary.
+use tests::assert;
+
+fn add<T: Num>(T a, T b) -> T {
+    return a + b;
+}
+
+fn neg<T: Num>(T a) -> T {
+    return -a;
+}
+
+fn ops<T: Num>(T a, T b) -> (T, T, T, T, T) {
+    return (a - b, a * b, a / b, a % b, a ** b);
+}
+
+fn twice<T: Num>(T a) -> T {
+    return add(a, a);
+}
+
+test("a tuple of tuples") {
+    let p = add(((1, 2), (3, 4)), ((10, 20), (30, 40)));
+    assert!(p[0][1] == 22);
+    assert!(p == ((11, 22), (33, 44)));
+    assert!(neg(((1, 2), (3, 4))) == ((-1, -2), (-3, -4)));
+    let (d, m, q, r, e) = ops(((7, 9), (5, 6)), ((2, 4), (3, 1)));
+    assert!(d == ((5, 5), (2, 5)));
+    assert!(m == ((14, 36), (15, 6)));
+    assert!(q == ((3, 2), (1, 6)));
+    assert!(r == ((1, 1), (2, 0)));
+    assert!(e == ((49, 6561), (125, 6)));
+    assert!(add(((1, 2, 3), (4, 5, 6)), ((1, 1, 1), (2, 2, 2))) == ((2, 3, 4), (6, 7, 8)));
+    assert!(twice(((1.5, 2.5), (0.5, 1.0))) == ((3.0, 5.0), (1.0, 2.0)));
+}
+
+test("an array of tuples and an array of arrays") {
+    let xs = [(1, 2), (3, 4)];
+    let ys: [(int, int); 2] = [(10, 20), (30, 40)];
+    let r = add(xs, ys);
+    assert!(r[0] == (11, 22) && r[1] == (33, 44));
+    assert!(xs[1] == (3, 4));
+    let n = neg([(1, 2, 3)]);
+    assert!(n[0] == (-1, -2, -3));
+    let s = add([[1.5, 2.0], [3.0, 4.0]], [[2.0, 2.0], [2.0, 0.5]]);
+    assert!(s[0] == [3.5, 4.0] && s[1] == [5.0, 4.5]);
+    let t = twice([[1, 2], [3, 4]]);
+    assert!(t[0] == [2, 4] && t[1] == [6, 8]);
+}
+
+test("three levels") {
+    let a = (((1, 1), (2, 2)), ((3, 3), (4, 4)));
+    let b = add(a, a);
+    assert!(b == (((2, 2), (4, 4)), ((6, 6), (8, 8))));
+    assert!(b[1][0][1] + a[0][1][0] == 8);
+}
