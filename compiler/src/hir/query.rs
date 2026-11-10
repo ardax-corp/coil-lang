@@ -1232,8 +1232,21 @@ fn closure_word(body: &HirBody, checker: &Checker, value: HirId, seen: &mut Vec<
             let t = apply_ty_prune(checker.subst(), t);
             mono_fun(checker, &t, &mut Vec::new()) || open_fun(checker, &t, &mut Vec::new())
         }),
+        // A `match` or `if` whose every branch gives one, or leaves (#2565):
+        // the word of the branch taken.
+        HirKind::Match { arms, .. } => arms.iter().all(|arm| branch_closure_word(body, checker, arm.body, seen)),
+        HirKind::If { then, els: Some(els), .. } => {
+            branch_closure_word(body, checker, *then, seen) && branch_closure_word(body, checker, *els, seen)
+        }
+        HirKind::Block { tail: Some(tail), .. } => closure_word(body, checker, *tail, seen),
         _ => false,
     }
+}
+
+/// A branch of a `match` or `if` bound to a function local: a closure
+/// word, or a branch that never gives a value (`return`, `panic`).
+fn branch_closure_word(body: &HirBody, checker: &Checker, value: HirId, seen: &mut Vec<LocalId>) -> bool {
+    matches!(body.expr(value).ty, Some(Ty::Never)) || closure_word(body, checker, value, seen)
 }
 
 /// A call whose result is a plain closure word: a value call through an
