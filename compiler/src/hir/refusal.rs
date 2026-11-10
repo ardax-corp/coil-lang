@@ -14,7 +14,7 @@ use crate::typechecking::infer::{Checker, ForInCounted, ForInKind};
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::{self as coil_ty, Ty, strip_readonly};
 use super::classify::{ValueClass, classify, is_byte_array, is_byte_vec, is_generic_class, is_open_range, is_range_pair, is_scalar, is_unit_local, is_vec, is_word, primitive, tuple_items, user_operand};
-use super::query::{AggregateSrc, aggregate_info, aggregate_packed, aggregate_src, arm_fields, byte_literal, class_boxes, clobbers, existential_hint, ffi_builtin, ffi_fn_variadic, ffi_tag, ffi_variadic_tags, has_nested_test, index_stages, indirect_callee, is_scalar_match, is_unit_make, is_unit_value, let_pat_shape, linear_algebra, nested_pattern, only_field_base, polyfn_callee, pure_index, range_bounds, read_base, reassigned, returned_value, sroa_class, sroa_local, stack_arrays, structural_len, typeof_text, writes_field_of};
+use super::query::{AggregateSrc, aggregate_info, aggregate_packed, aggregate_src, arm_fields, byte_literal, class_boxes, existential_hint, ffi_builtin, ffi_fn_variadic, ffi_tag, ffi_variadic_tags, has_nested_test, index_stages, indirect_callee, is_scalar_match, is_unit_make, is_unit_value, let_pat_shape, linear_algebra, nested_pattern, only_field_base, polyfn_callee, pure_index, range_bounds, read_base, reassigned, returned_value, sroa_class, sroa_local, stack_arrays, structural_len, typeof_text, writes_field_of};
 
 /// A `defer` body the thunk cannot hold: a `return`, or a `break` /
 /// `continue` outside the body's own loops (the checker rejects those,
@@ -400,15 +400,11 @@ impl Walk<'_> {
         }
     }
 
-    /// Element `i` of `src`: a literal item must not store into frame
-    /// slots (it is computed in place).
+    /// Element `i` of `src`: a literal item is a scalar value.
     fn aggregate_elem(&mut self, src: HirId, i: usize) -> Check {
         match aggregate_src(self.body, &self.stack, src) {
             Some(AggregateSrc::Items(items)) => {
                 let &item = items.get(i).ok_or("operator-elementwise")?;
-                if clobbers(self.body, &self.stack, item) {
-                    return Err("operator-elementwise");
-                }
                 self.scalar(item)?;
                 self.value(item)
             }
