@@ -57,6 +57,17 @@ pub(super) mod weak_check;
 /// current per-call frame size, see docs/internals/limitations.md.
 const INFER_RECURSION_LIMIT: u32 = 2000;
 
+/// What [`Checker::ground_trait_methods_for_receiver`] finds for a method
+/// name and a receiver type.
+enum GroundMethod {
+    /// One trait: its name and the method's scheme.
+    One(String, Scheme),
+    /// Several traits with an instance for the receiver, by name.
+    Several(Vec<String>),
+    /// No trait method applies (or the receiver is open and several might).
+    None,
+}
+
 /// Private unwind payload for [`Checker::infer`]'s recursion-limit panic.
 /// Caught in [`Checker::check_program`]; never lets user input abort the
 /// process the way a genuine native stack overflow does.
@@ -5349,8 +5360,9 @@ impl Checker {
             return self.method_result(&recv_ty, result, false);
         }
 
-        // A ground trait method on a concrete receiver.
-        if self.ground_trait_method_for_receiver(method, &recv_ty).is_some() {
+        // A ground trait method on a concrete receiver (or several traits'
+        // with an instance for it, which the call reports).
+        if !matches!(self.ground_trait_methods_for_receiver(method, &recv_ty), GroundMethod::None) {
             return self.infer_method_trait_call(recv, &recv_ty, method, method_args, id, range);
         }
 
@@ -11238,13 +11250,28 @@ impl Checker {
     /// Resolve a ground trait method call on a concrete receiver
     /// (`recv.into()`, `recv.show()`, …) when no open bound is active.
     ///
-    /// Returns `(class, scheme)` when exactly one registered method scheme
-    /// named `method` has a first parameter that unifies with `recv_ty`.
+    /// Returns `(class, scheme)` when [`Self::ground_trait_methods_for_receiver`]
+    /// finds one trait.
     fn ground_trait_method_for_receiver(
         &mut self,
         method: &str,
         recv_ty: &Ty,
     ) -> Option<(String, Scheme)> {
+        match self.ground_trait_methods_for_receiver(method, recv_ty) {
+            GroundMethod::One(class, scheme) => Some((class, scheme)),
+            GroundMethod::Several(_) | GroundMethod::None => None,
+        }
+    }
+
+    /// The trait whose method `method` a call on a receiver of `recv_ty`
+    /// goes to: the one registered method scheme of that name whose first
+    /// parameter unifies with `recv_ty`. A trait method's first parameter is
+    /// usually the trait's own variable, which fits any receiver, so where
+    /// several traits declare the name (two user traits, or one and a
+    /// builtin: `io`'s `Read::read`, the prelude's `Length::len`) the one
+    /// with an instance for the receiver's type is taken (#2481). Several
+    /// with an instance are a real ambiguity, which `Trait::m(x)` settles.
+    fn ground_trait_methods_for_receiver(&mut self, method: &str, recv_ty: &Ty) -> GroundMethod {
         let recv = apply_ty_prune(&self.subst, recv_ty);
         let schemes: Vec<(String, Scheme)> = self
             .typeclass_method_schemes
@@ -11264,11 +11291,39 @@ impl Checker {
                 matches.push((class, scheme));
             }
         }
-        if matches.len() == 1 {
-            matches.pop()
-        } else {
-            None
+        // An open receiver has no instance yet to choose by.
+        let narrowed = matches.len() > 1 && !matches!(recv, Ty::Var(_));
+        if narrowed {
+            matches.retain(|(class, scheme)| self.trait_has_instance_for_receiver(class, scheme, &recv));
+            // The order of the scheme table is not the program's.
+            matches.sort_by(|a, b| a.0.cmp(&b.0));
         }
+        match matches.len() {
+            1 => {
+                let (class, scheme) = matches.pop().expect("one match");
+                GroundMethod::One(class, scheme)
+            }
+            n if narrowed && n > 1 => GroundMethod::Several(matches.into_iter().map(|(class, _)| class).collect()),
+            _ => GroundMethod::None,
+        }
+    }
+
+    /// Whether trait `class` has an instance for a receiver of type `recv`,
+    /// the first argument of its method of scheme `scheme`. Nothing is
+    /// bound.
+    fn trait_has_instance_for_receiver(&mut self, class: &str, scheme: &Scheme, recv: &Ty) -> bool {
+        let (fun_ty, constraints, _kinds) = instantiate_with_kinds(scheme, &mut self.counter);
+        let Some(first_param) = Self::first_fun_param(&fun_ty) else {
+            return false;
+        };
+        let Ok(local) = unify_with(&self.subst, &first_param, recv) else {
+            return false;
+        };
+        let Some(own) = constraints.iter().find(|c| c.class == class) else {
+            return false;
+        };
+        let wanted: Vec<Ty> = own.args.iter().map(|a| apply_ty_prune(&local, a)).collect();
+        !self.matching_instances(class, &wanted).is_empty()
     }
 
     fn first_fun_param(ty: &Ty) -> Option<Ty> {
@@ -21226,7 +21281,29 @@ impl Checker {
                 .get(&(class.to_string(), method.to_string()))
                 .cloned()
                 .map(|scheme| (class.to_string(), scheme)),
-            None => first.as_ref().and_then(|first| self.ground_trait_method_for_receiver(method, first)),
+            None => match first.as_ref().map(|first| self.ground_trait_methods_for_receiver(method, first)) {
+                Some(GroundMethod::One(class, scheme)) => Some((class, scheme)),
+                // Several traits have an instance for the receiver: only
+                // the trait's name says which.
+                Some(GroundMethod::Several(traits)) => {
+                    let names: Vec<String> = (0..arg_tys.len()).map(|i| ((b'a' + (i % 26) as u8) as char).to_string()).collect();
+                    let spellings = traits
+                        .iter()
+                        .map(|class| format!("`{}::{}({})`", class, method, names.join(", ")))
+                        .collect::<Vec<_>>()
+                        .join(" or ");
+                    let have = traits.iter().map(|class| format!("`{class}`")).collect::<Vec<_>>().join(" and ");
+                    let recv = first.as_ref().map(|ty| self.diag_ty(ty)).unwrap_or_default();
+                    let ty = self.error_with_help(
+                        ErrorCode::GenericTypeError,
+                        format!("Ambiguous trait method `{method}`: {have} each have an instance for `{recv}`"),
+                        range.clone(),
+                        Some(format!("name the trait: {spellings}")),
+                    );
+                    return Some((traits[0].clone(), ty));
+                }
+                Some(GroundMethod::None) | None => None,
+            },
         };
         // A type parameter whose bounds leave out the trait.
         if let Some(var) = receiver_var
