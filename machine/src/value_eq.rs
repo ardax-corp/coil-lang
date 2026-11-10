@@ -2,12 +2,11 @@
 //!
 //! Immediates and non-aggregate heap objects compare by machine word.
 //! Arrays (and nested arrays) compare by length and element-wise recursion.
-//! Strings compare by UTF-8 content (interned or not). Boxed `ObjEnum` values
-//! compare by tag and payload (so `Result::Ok(x) == Result::Ok(x)` holds when
-//! the constructs still box); a tuple is one of `PRODUCT_TAG`, so it compares
-//! element-wise.
-//! Records (instances whose type id [`common::is_record_type_id`]) compare
-//! slot by slot; class instances compare by identity.
+//! Strings compare by UTF-8 content (interned or not). A product compares
+//! slot by slot ([`product_slots`]): a boxed `ObjEnum` of the same tag (so
+//! `Result::Ok(x) == Result::Ok(x)` holds when the constructs still box; a
+//! tuple is one of `PRODUCT_TAG`) or a record (an instance whose type id
+//! [`common::is_record_type_id`]). Class instances compare by identity.
 //! Heap-heap Result `Err` (`pointer | 1`) never equals an `Ok`; two `Err`s
 //! compare their payloads.
 //!
@@ -19,7 +18,7 @@ use std::collections::HashMap;
 
 use common::Value;
 
-use crate::memory::{Heap, ObjInstance, Object};
+use crate::memory::{Heap, Object};
 
 /// Deep / structural equality for values.
 pub fn values_eq(heap: &Heap, a: Value, b: Value) -> bool {
@@ -32,8 +31,8 @@ pub fn values_eq(heap: &Heap, a: Value, b: Value) -> bool {
 }
 
 /// Answer without the cycle maps when no address can be visited twice:
-/// identical words, non-heap words, strings, and enums whose payload is at
-/// most one word that is itself flat (`Some(x)`, `Ok("s")`, `Err(e)`).
+/// identical words, non-heap words, strings, and products of at most one
+/// slot that is itself flat (`Some(x)`, `Ok("s")`, `Err(e)`).
 /// `None` means the value needs the full walk.
 fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
     if a.bits() == b.bits() {
@@ -50,24 +49,15 @@ fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
     let (Some(oa), Some(ob)) = (heap.find_object_by_addr(aa), heap.find_object_by_addr(bb)) else {
         return Some(false);
     };
-    match (oa, ob) {
+    match (&oa, &ob) {
         (Object::String(ga), Object::String(gb)) => Some(ga.as_ref().data == gb.as_ref().data),
-        (Object::Enum(ga), Object::Enum(gb)) => {
-            let (ea, eb) = (ga.as_ref(), gb.as_ref());
-            if ea.tag != eb.tag || ea.payload.len() != eb.payload.len() {
-                return Some(false);
-            }
-            match ea.payload.len() {
-                0 => Some(true),
-                1 => flat_eq(heap, ea.payload[0], eb.payload[0]),
-                _ => None,
-            }
-        }
         (Object::Array(_), _) => None,
-        (Object::Instance(ga), Object::Instance(gb)) => {
-            if record_slots(ga.as_ref(), gb.as_ref()).is_some() { None } else { Some(false) }
-        }
-        _ => Some(false),
+        _ => match product_slots(&oa, &ob) {
+            Some(([], _)) => Some(true),
+            Some(([x], [y])) => flat_eq(heap, *x, *y),
+            Some(_) => None,
+            None => Some(false),
+        },
     }
 }
 
@@ -109,7 +99,7 @@ fn values_eq_rec(
     let Some(ob) = heap.find_object_by_addr(bb) else {
         return false;
     };
-    match (oa, ob) {
+    match (&oa, &ob) {
         (Object::Array(ga), Object::Array(gb)) => {
             let (ea, eb) = (ga.as_ref(), gb.as_ref());
             if ea.len() != eb.len() {
@@ -123,34 +113,36 @@ fn values_eq_rec(
                 .all(|(x, y)| values_eq_rec(heap, x, y, fwd, rev))
         }
         (Object::String(ga), Object::String(gb)) => ga.as_ref().data == gb.as_ref().data,
-        (Object::Enum(ga), Object::Enum(gb)) => {
-            let ea = ga.as_ref();
-            let eb = gb.as_ref();
-            if ea.tag != eb.tag || ea.payload.len() != eb.payload.len() {
-                return false;
-            }
-            ea.payload
-                .iter()
-                .zip(eb.payload.iter())
-                .all(|(a, b)| values_eq_rec(heap, *a, *b, fwd, rev))
-        }
-        (Object::Instance(ga), Object::Instance(gb)) => match record_slots(ga.as_ref(), gb.as_ref()) {
+        _ => match product_slots(&oa, &ob) {
             Some((sa, sb)) => sa.iter().zip(sb).all(|(x, y)| values_eq_rec(heap, *x, *y, fwd, rev)),
             None => false,
         },
-        _ => false,
     }
 }
 
-/// The slots of two records of one shape: both instances' type ids name a
-/// record and they hold the same number of slots. `==` compares a value
-/// only with one of its own static type, so equal counts mean one record
-/// type (a host-built record and a compiled one can differ in id alone).
-fn record_slots<'a>(a: &'a ObjInstance, b: &'a ObjInstance) -> Option<(&'a [Value], &'a [Value])> {
-    if !common::is_record_type_id(a.type_id) || !common::is_record_type_id(b.type_id) {
-        return None;
-    }
-    let (sa, sb) = (a.slots(), b.slots());
+/// The slots of two products of one shape: enum objects of one tag
+/// (variants, or tuples) or records, with the same number of slots. Both
+/// instances' type ids must name a record; `==` compares a value only with
+/// one of its own static type, so equal counts mean one record type (a
+/// host-built record and a compiled one can differ in id alone).
+fn product_slots<'a>(a: &'a Object, b: &'a Object) -> Option<(&'a [Value], &'a [Value])> {
+    let (sa, sb) = match (a, b) {
+        (Object::Enum(ga), Object::Enum(gb)) => {
+            let (ea, eb) = (ga.as_ref(), gb.as_ref());
+            if ea.tag != eb.tag {
+                return None;
+            }
+            (&ea.payload[..], &eb.payload[..])
+        }
+        (Object::Instance(ga), Object::Instance(gb)) => {
+            let (ia, ib) = (ga.as_ref(), gb.as_ref());
+            if !common::is_record_type_id(ia.type_id) || !common::is_record_type_id(ib.type_id) {
+                return None;
+            }
+            (ia.slots(), ib.slots())
+        }
+        _ => return None,
+    };
     (sa.len() == sb.len()).then_some((sa, sb))
 }
 
