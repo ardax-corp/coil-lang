@@ -1055,3 +1055,173 @@ fn main() {
         "E0805",
     );
 }
+
+/// What a run leaves behind ([`observed`]), and how long it took.
+type Timed = ((String, String, Option<i32>), std::time::Duration);
+
+/// `observed`, but the run is stopped after `limit`: `None` when it did
+/// not finish by then; else what it left and how long it took.
+fn observed_within(src: &std::path::Path, flags: &[&str], workers: Option<&str>, limit: std::time::Duration) -> Option<Timed> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut cmd = Command::new(coil_bin());
+    cmd.args(["--contracts", "all", "--fold-calls", "off"]).args(flags).arg(src);
+    match workers {
+        Some(n) => cmd.env("COIL_MAX_WORKER_THREADS", n),
+        None => cmd.env_remove("COIL_MAX_WORKER_THREADS"),
+    };
+    let start = std::time::Instant::now();
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("spawn coil");
+    let drain = |mut r: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = r.read_to_string(&mut s);
+            s
+        })
+    };
+    let out = drain(Box::new(child.stdout.take().expect("stdout")));
+    let err = drain(Box::new(child.stderr.take().expect("stderr")));
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait on coil") {
+            break Some(status);
+        }
+        if start.elapsed() > limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let took = start.elapsed();
+    let (out, err) = (out.join().expect("stdout"), err.join().expect("stderr"));
+    status.map(|s| ((out, err, s.code()), took))
+}
+
+/// A recursive fork-join whose first arm panics (`divides` reaches
+/// `1 / 0`) and whose second is `later`, which the sequential program
+/// never calls.
+fn cancel_program(later: &str) -> String {
+    format!(
+        r#"
+fn divides(int n) -> int {{
+    if n <= 1 {{
+        return 1 / n;
+    }}
+    return divides(n - 1) + divides(n - 2);
+}}
+
+fn fib(int n) -> int {{
+    if n <= 1 {{
+        return n;
+    }}
+    return fib(n - 1) + fib(n - 2);
+}}
+
+fn spin(int n) -> int {{
+    let i = 0;
+    while n > 0 {{
+        i = i + 1;
+        if i > 1000000 {{
+            i = 0;
+        }}
+    }}
+    return i;
+}}
+
+fn top(int n) -> int {{
+    return divides(n) + {later};
+}}
+
+fn main() {{
+    let r = top(27);
+}}
+"#
+    )
+}
+
+/// `program` on `engine` reports and exits as `--auto-par off` does,
+/// within `limit` (the sequential run panics at once), at any worker
+/// count (#2442).
+fn reports_within(name: &str, program: &str, engine: &[&str], limit: std::time::Duration) {
+    let dir = std::env::temp_dir().join(format!("coil-auto-par-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join(format!("{name}.coil"));
+    std::fs::write(&src, program).expect("write source");
+    let (off, _) = observed_within(&src, &[engine, &["--auto-par", "off"]].concat(), None, limit)
+        .unwrap_or_else(|| panic!("{name} {engine:?}: the sequential run did not finish in {limit:?}"));
+    assert!(off.1.contains("panic: division by zero"), "{name} {engine:?}: sequential stderr={}", off.1);
+    for workers in [None, Some("1"), Some("8")] {
+        let flags = [engine, &["--auto-par", "on"]].concat();
+        let (on, took) = observed_within(&src, &flags, workers, limit)
+            .unwrap_or_else(|| panic!("{name} {engine:?} with {workers:?} workers: no report in {limit:?}"));
+        assert_eq!(on, off, "{name} {engine:?} with {workers:?} workers ({took:?}): auto-par on, then off");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A later arm that runs long, making calls all the way, is cancelled
+/// once an earlier arm's join fails: the panic is reported about as soon
+/// as the sequential program reports it, on both engines. `fib(52)`
+/// alone runs for minutes.
+#[test]
+fn a_failed_arm_cancels_a_slow_later_arm() {
+    let limit = std::time::Duration::from_secs(20);
+    for engine in [&[][..], &["--mir"][..]] {
+        reports_within("cancel-slow", &cancel_program("fib(n + 25)"), engine, limit);
+    }
+}
+
+/// A later arm that never ends is cancelled too, on the MIR interpreter:
+/// its fuel runs out in slices, and a cancelled job gets no more.
+#[test]
+fn a_failed_arm_cancels_a_later_arm_that_never_ends_on_the_interpreter() {
+    reports_within("cancel-spin-mir", &cancel_program("spin(n)"), &["--mir"], std::time::Duration::from_secs(20));
+}
+
+/// A thread the program spawns is never cancelled: a failed fork-join
+/// (a chunk's own product overflows; the loop's is `0`) cancels its own
+/// chunks only, and the thread's result is joined as it is without
+/// auto-par.
+#[test]
+fn a_failed_fork_join_never_cancels_a_spawned_thread() {
+    let program = r#"
+use io::{stdout, write};
+use string::to_bytes;
+use thread::{join, spawn};
+
+fn fib(int n) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn big(int i) -> int {
+    return i + 2;
+}
+
+// From `0` the product stays `0`; a chunk's from `1` overflows.
+fn zeroed(int n) -> int {
+    let acc = 0;
+    for i in 0..n {
+        acc = acc * big(i);
+    }
+    return acc;
+}
+
+fn main() {
+    let r = match spawn(fn () => fib(27)) {
+        Result::Ok(t) => {
+            let z = zeroed(400000);
+            match join(t) {
+                Result::Ok(v) => v + z,
+                Result::Err(_) => 0 - 1,
+            }
+        },
+        Result::Err(_) => 0 - 2,
+    };
+    let _ = write(stdout(), to_bytes(r.show()));
+}
+"#;
+    same_as_sequential("cancel-not-a-thread", program, "");
+}
