@@ -10638,7 +10638,8 @@ impl Checker {
     /// shows an array item through the array's): `Show` when `%v` shows
     /// its items (so has a ground `Option` / `Result`), `Eq` when its items
     /// have `Eq`, and for a tuple, record or array, `Hash` when they have
-    /// a ground `Hash` (its thunk calls theirs).
+    /// `Hash` (its thunk calls theirs; a bounded generic-head one's per-type
+    /// clone or shared entry, #2590).
     fn ensure_structural_instance(&mut self, class: &str, wanted: &[Ty]) {
         let [ty] = wanted else { return };
         if class == "Length" {
@@ -10694,14 +10695,50 @@ impl Checker {
                 self.generics.has_instance(class, &lookup)
                     || self.generics.find_generic_instance(class, std::slice::from_ref(&lookup)).is_some()
             }),
+            // An item of a bounded generic-head instance too (`Box<int>`
+            // under `impl Hash for Box<T: Hash>`) when its context holds:
+            // the thunk calls its per-type clone or its shared entry with
+            // its dictionary (#2590).
             _ => items.iter().all(|item| {
                 let lookup = nominal_enum(apply_ty_prune(&self.subst, item));
-                self.generics.find_instance(class, std::slice::from_ref(&lookup)).is_some_and(|inst| inst.context.is_empty())
+                self.ground_instance_holds(class, &lookup, 0)
             }),
         };
         if items_ok {
             self.generics.register_structural_instance(class, ty);
         }
+    }
+
+    /// Whether ground `ty` has a `class` instance: a concrete one, or a
+    /// bounded generic-head one whose context goals at `ty`'s types hold in
+    /// turn (`Hash<Box<int>>` under `impl Hash for Box<T: Hash>` needs
+    /// `Hash<int>`).
+    fn ground_instance_holds(&mut self, class: &str, ty: &Ty, depth: usize) -> bool {
+        if self.generics.has_instance(class, ty) {
+            return true;
+        }
+        let Some(inst) = self.generics.find_generic_instance(class, std::slice::from_ref(ty)).cloned() else {
+            return false;
+        };
+        let mut local = Subst::empty();
+        for (have, need) in inst.args.iter().zip(std::slice::from_ref(ty)) {
+            match unify_with(&local, need, have) {
+                Ok(s) => local = s,
+                Err(_) => return false,
+            }
+        }
+        // As deep as `check_instance_context` follows a context.
+        depth > 32
+            || inst.context.iter().all(|c| match c.args.as_slice() {
+                [arg] => {
+                    let arg = nominal_enum(apply_ty(&local, arg));
+                    arg.has_var() || {
+                        self.ensure_structural_instance(&c.class, std::slice::from_ref(&arg));
+                        self.ground_instance_holds(&c.class, &arg, depth + 1)
+                    }
+                }
+                _ => true,
+            })
     }
 
     /// The structural instance of `class` for the shape of open `ty`
