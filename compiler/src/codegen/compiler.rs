@@ -2375,12 +2375,14 @@ impl Compiler {
             },
             _ => None,
         };
-        // A tuple orders through its structural instance (#1721).
+        // A tuple orders through its structural instance (#1721); one with
+        // an open item through the shape's, its context the frame's
+        // dictionaries, as a call's goal does (#2601).
         if nominal.is_none() && matches!(lookup_ty, Ty::Tuple(_)) && matches!(class, "Lt" | "Le" | "Gt" | "Ge") {
-            let fqn = self
-                .checker
-                .generics()
-                .find_instance(class, std::slice::from_ref(&lookup_ty))?
+            let generics = self.checker.generics();
+            let lookup = std::slice::from_ref(&lookup_ty);
+            let instance = if lookup_ty.has_var() { generics.find_generic_instance(class, lookup) } else { generics.find_instance(class, lookup) };
+            let fqn = instance?
                 .method_fqns
                 .get(method)
                 .cloned()?;
