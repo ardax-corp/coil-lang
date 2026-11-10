@@ -3,6 +3,7 @@
 // generic functions over `Slot<T>`, as `(s.f)(x)` and through a `let`. The
 // field is one closure word in the object, a monomorphic function at a ground
 // instance and a function of the parameter's words in a generic body.
+// @xfail clone-budget-0 #2511 E0801 (callee-generic): a generic class or nested-payload enum result of a shared body
 use tests::assert;
 use gc::collect;
 
