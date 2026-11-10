@@ -6222,8 +6222,17 @@ impl Compiler {
         }
         // A generic instance's head (`impl Id for Option<T>`) at an open
         // argument (`Id::id(o)`, `o: Option<E>`): called as the method call
-        // `o.id()` is (#1609). A structural tuple's has its own call.
-        if inst_args.iter().any(Ty::has_var)
+        // `o.id()` is (#1609). A structural tuple's has its own call. At
+        // closed arguments too (`Pick::pick(a, b)`, `a: Option<int>`): the
+        // method call's plan reaches the instance's clone or, where there
+        // is none, its shared entry with a pair boxed (#2483).
+        let generic_head = || {
+            self.checker
+                .generics()
+                .find_generic_instance(&class, &inst_args)
+                .is_some_and(|def| def.method_fqns.get(method) == Some(&fqn))
+        };
+        if (inst_args.iter().any(Ty::has_var) || generic_head())
             && !self.checker.generics().structural_tuples().any(|(_, _, f)| f == fqn)
             && let HirKind::Call { args, .. } = &node.kind
             && !args.is_empty()
