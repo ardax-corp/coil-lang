@@ -493,7 +493,9 @@ jobs:
             mir) COIL_MIR_ARCHIVE_CHECK=1 $run -- --engine mir $FLAGS ;;
             # And each level above it, on the MIR native code compiles: a
             # failure here and not in `mir` is a pass's.
-            mir-opt) for level in 1 2 3 s g; do $run -- --engine mir -O $level $FLAGS; done ;;
+            # With the MIR verifier on after every pass (see `mir-verify`):
+            # it costs about 1% and names the pass.
+            mir-opt) for level in 1 2 3 s g; do COIL_MIR_VERIFY=1 $run -- --engine mir -O $level $FLAGS; done ;;
             # Generators and tasks parked on the heap instead of on fibers:
             # what wasm runs, where a failure is harder to read.
             mir-parked) COIL_NO_FIBERS=1 $run -- --engine mir $FLAGS ;;
@@ -503,6 +505,16 @@ jobs:
             # `// @flags --clone-budget N` still wins. `--cell` names the
             # run for the `// @xfail clone-budget-0 #issue` header lines:
             # those files must fail, and one that passes fails the cell.
+            # The MIR verifier (`MirFunc::verify`, `verify_dominance`) on every
+            # body as lowered and after each MIR pass, which only debug
+            # builds run otherwise: a pass that breaks SSA is a hang or a
+            # wrong value in a release build (#2422). A violation panics,
+            # naming the pass, the function and the file, and ends that
+            # corpus's process. `mir-opt` runs the other levels this way.
+            mir-verify)
+              for engine in native mir; do
+                COIL_MIR_VERIFY=1 $run -- --engine $engine $FLAGS
+              done ;;
             clone-budget-0)
               for engine in native mir; do
                 $run -- --engine $engine --clone-budget 0 --cell clone-budget-0 $FLAGS
@@ -559,7 +571,7 @@ jobs:
         mode: [release]
         # Native code runs in release only: a debug cell would test the
         # same Cranelift output at a fraction of the speed.
-        variant: [default, O0, leak-smoke, native, mir, mir-opt, mir-parked, clone-budget-0]
+        variant: [default, O0, leak-smoke, native, mir, mir-opt, mir-parked, mir-verify, clone-budget-0]
     env: *harness-env
     steps: *harness-steps
 

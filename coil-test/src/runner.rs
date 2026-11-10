@@ -843,6 +843,32 @@ impl Prepared {
     }
 }
 
+thread_local! {
+    /// The file this thread is compiling, for [`note_compiler_panics`].
+    static COMPILING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Make a panic inside a compile name the file being compiled. A release
+/// harness aborts on a panic (`panic = "abort"`), so the run's log ends at
+/// the panic message, which names a pass or a function at best (a
+/// `COIL_MIR_VERIFY` violation: `MIR verify failed after licm in main`).
+fn note_compiler_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            previous(info);
+            COMPILING.with(|c| {
+                if let Ok(c) = c.try_borrow()
+                    && let Some(file) = c.as_deref()
+                {
+                    eprintln!("note: the compiler panicked while compiling {file}");
+                }
+            });
+        }));
+    });
+}
+
 /// A test file's compile result.
 pub(crate) enum Compiled {
     /// The file's verdict is its compile (`compile_fail/`, errors, a file
@@ -924,9 +950,12 @@ pub(crate) fn compile_test_file(
     if native {
         options.engine.start_capture(options.opt_level);
     }
+    note_compiler_panics();
+    COMPILING.with(|c| *c.borrow_mut() = Some(display.clone()));
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&display)
     }));
+    COMPILING.with(|c| *c.borrow_mut() = None);
     let native = match &compiled {
         Ok(Ok(_)) if native => native_code(&pipeline, &display, options.engine, options.coverage.is_some()),
         _ => {

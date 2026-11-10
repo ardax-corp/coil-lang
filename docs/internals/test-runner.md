@@ -290,6 +290,7 @@ reaches. Each has a name, passed as `coil test --cell NAME`:
 | Cell | Flags (after `scripts/test_corpora.py --release --`) | What it reaches |
 |------|-------------------------------------------------------|-----------------|
 | `clone-budget-0` | `--engine native --clone-budget 0 --cell clone-budget-0 …`, then `--engine mir` | shared generic bodies: no per-type clone is made, so every generic call passes dictionaries and boxed words |
+| `mir-verify` | `COIL_MIR_VERIFY=1` with `--engine native …`, then `--engine mir` (and on the `mir-opt` cell's `-O 1 2 3 s g` runs) | the MIR verifier on every body as lowered and after each pass, in a release build |
 
 ```bash
 scripts/test_corpora.py --release -- --engine native --clone-budget 0 --cell clone-budget-0 \
@@ -300,6 +301,29 @@ scripts/test_corpora.py --release -- --engine native --clone-budget 0 --cell clo
 it to every file's compile. A file's own `// @flags --clone-budget N` replaces
 the run's value for that file (capabilities and lists add up; a limit given
 in the header wins).
+
+**`COIL_MIR_VERIFY=1`** (any value but `0`) makes the compiler check every
+body with `MirFunc::verify` and `verify_dominance` as an engine gets it from
+lowering, after each pass of `optimize_mir`, and after `native_expand`
+(dominance only: an expansion's join block is laid out after the block
+that uses its result, which `verify` reads as a use before its
+definition). Debug builds already check after each pass; release builds do
+only under the variable, at about 1% of the corpus time (95.3 s against
+96.3 s of CPU on native, 2026-11-10). It works for any command that
+compiles (`coil`, `coil compile`, `coil test`):
+
+```bash
+COIL_MIR_VERIFY=1 scripts/test_corpora.py --release -- --engine native \
+  --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src
+```
+
+A violation is a compiler bug and panics: `MIR verify failed after licm in
+main: value v7 defined twice`, then, from the harness, `note: the compiler
+panicked while compiling tests/…coil`. A release build aborts on a panic,
+so that corpus's process ends there (`no summary` in `test_corpora.py`,
+with the panic at the end of its log). An `// @xfail` line cannot list
+such a file: fix the pass, or file the issue and keep the file out of the
+corpus until it is fixed.
 
 **Known failures.** A file that fails in a cell for a filed bug says so in
 its header, one line per cell:
