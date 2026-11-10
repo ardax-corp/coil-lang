@@ -25,17 +25,40 @@ impl Locator<'_> {
         Some(format!("{path}:{}:{}", line.line, line.column))
     }
 
-    /// The backtrace line of native site `s`: `  in name at loc`. An AOT
-    /// executable's `__start` has none: it is no function of the program.
-    pub(crate) fn native_site_line(&self, code: &crate::native::NativeCode, s: u32) -> Option<String> {
-        let site = code.site(s)?;
-        let name = self.fn_symbol_at(site.body_id as usize).unwrap_or("<unknown>");
-        if name == common::NATIVE_START_NAME {
-            return None;
-        }
-        Some(match self.native_site_location(site) {
+    /// The backtrace of native `sites`, innermost first: `  in name at
+    /// loc` for each. An AOT executable's `__start` has no line: it is no
+    /// function of the program. Nor have the functions an auto-par loop
+    /// is compiled to: its chunk worker is the loop's body, so that frame's
+    /// location is shown in the function the loop is written in, in place
+    /// of the call that function makes into the fork-join.
+    pub(crate) fn backtrace(&self, code: &crate::native::NativeCode, sites: impl IntoIterator<Item = u32>) -> Vec<String> {
+        let line = |name: &str, loc: Option<String>| match loc {
             Some(loc) => format!("  in {name} at {loc}"),
             None => format!("  in {name}"),
-        })
+        };
+        let mut lines = Vec::new();
+        // The innermost chunk worker frame, until its loop's function.
+        let mut in_loop: Option<(&str, Option<String>)> = None;
+        for s in sites {
+            let Some(site) = code.site(s) else { continue };
+            let name = self.fn_symbol_at(site.body_id as usize).unwrap_or("<unknown>");
+            if name == common::NATIVE_START_NAME {
+                continue;
+            }
+            let loc = self.native_site_location(site);
+            match common::par_loop_fn(name) {
+                Some(common::ParLoopFn::Fork) => {}
+                Some(common::ParLoopFn::Worker) => {
+                    in_loop.get_or_insert((name, loc));
+                }
+                None => {
+                    let loc = in_loop.take().map_or(loc, |(_, inner)| inner);
+                    lines.push(line(name, loc));
+                }
+            }
+        }
+        // A worker with no caller in the trace: a chunk's own job.
+        lines.extend(in_loop.map(|(name, loc)| line(name, loc)));
+        lines
     }
 }
