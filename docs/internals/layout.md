@@ -127,8 +127,11 @@ object both sides hold: ground code reads and writes its elements as
 niche words where `T` is a heap type, the shared body as enum objects. A
 copy at the call would lose the body's writes to the caller's object,
 and the body cannot read the ground layout without being told each
-type's. So such a call does not take the shared body. The rule reads the
-signature alone (`layout::nested_open_enum`), for every ground type:
+type's. So such a call does not take the shared body. A function below the top
+is the same case (#2488): an element of `Vec<unit -> Option<T>>` returns
+the niche word from a ground closure, and only a function that is itself
+the argument gets an adapter. The rule reads the signature alone
+(`layout::nested_open_enum`), for every ground type:
 
 - a free function whose signature has that shape gets a clone for every
   ground call, past the clone budget, as a keyed or hot function does

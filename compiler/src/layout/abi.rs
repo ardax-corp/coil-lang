@@ -64,8 +64,11 @@ pub fn range_heap_type_id(inclusive: bool) -> u32 {
 /// shared generic body holds such a value as its enum object, and nothing
 /// converts it at a call (only the top of a parameter or result is,
 /// `docs/internals/layout.md`, "Open enums"); `split` says whether ground
-/// code holds that one differently. The top of a function type's parameter
-/// and result count as tops (a function argument's adapter converts them).
+/// code holds that one differently. The parameter and result of a function
+/// type that is itself a top count as tops (a function argument's adapter
+/// converts them). A function below the top (an element of `Vec<unit ->
+/// Option<T>>`) has no adapter: its parameter and result are nested too
+/// (#2488).
 pub fn nested_open_enum(ty: &Ty, top: bool, split: &mut dyn FnMut(&Ty) -> bool) -> bool {
     let ty = crate::typechecking::ty::strip_readonly(ty);
     if !ty.has_var() {
@@ -77,7 +80,7 @@ pub fn nested_open_enum(ty: &Ty, top: bool, split: &mut dyn FnMut(&Ty) -> bool) 
         return true;
     }
     if let Ty::Fun(param, ret) = ty {
-        return nested_open_enum(param, true, split) || nested_open_enum(ret, true, split);
+        return nested_open_enum(param, top, split) || nested_open_enum(ret, top, split);
     }
     let mut found = false;
     ty.for_each_child(|child| found = found || nested_open_enum(child, false, split));
