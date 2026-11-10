@@ -1,0 +1,47 @@
+// An element-wise operator on a `Vec` local initialised from an array
+// literal (coil-lang#2584): the literal kept the local in frame slots, and
+// the dynamic-length loop a `Vec` operand takes reads an array object, so
+// `-v` and `v * 2` were refused (E0801 operator-elementwise). A `Vec` the
+// operator reads is an array object, as a `Vec` parameter is.
+use tests::assert;
+
+test("negation of a Vec local built from a literal") {
+    let v: Vec<int> = [1, 2];
+    let w = -v;
+    assert!(w.show() == "[-1, -2]");
+    let f: Vec<float> = [1.5, -2.0, 3.0];
+    assert!((-f).show() == "[-1.5, 2.0, -3.0]");
+    assert!(v.show() == "[1, 2]");
+}
+
+test("scalar broadcast on a Vec local built from a literal") {
+    let v: Vec<int> = [3, 4];
+    assert!((v * 2).show() == "[6, 8]");
+    assert!((10 - v).show() == "[7, 6]");
+    let f: Vec<float> = [1.0, 2.0];
+    assert!((f / 2.0).show() == "[0.5, 1.0]");
+}
+
+test("a Vec literal local read by index and by an operator") {
+    let v: Vec<int> = [5, 6, 7];
+    let n = v[0] + v[2];
+    let w = v * n;
+    assert!(w.show() == "[60, 72, 84]");
+    v.push(8);
+    assert!(v.len() == 4);
+}
+
+test("a copied Vec literal local and one in a loop body") {
+    let v: Vec<int> = [1, 2];
+    let u = v;
+    assert!((-u).show() == "[-1, -2]");
+    let s = 0;
+    for i in [1, 2] {
+        let w: Vec<int> = [i, i * 10];
+        let n = -w;
+        s = s + n[1];
+    }
+    assert!(s == -30);
+    let r: readonly Vec<float> = [1.0, 2.0];
+    assert!((r * 3.0).show() == "[3.0, 6.0]");
+}
