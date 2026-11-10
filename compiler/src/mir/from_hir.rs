@@ -5477,6 +5477,15 @@ impl Lower<'_> {
         self.switch(op);
         let obj = self.b.ins_word_as(v, MirTy::HeapRef).map_err(mir)?;
         let out = self.at_expr(id, |l| l.b.ins_cow(obj, unique).map_err(mir))?;
+        // A share sets a flag on the object and gives it back: the word is
+        // the same, so nothing joins.
+        if !unique {
+            self.jump(join)?;
+            self.switch(skip);
+            self.jump(join)?;
+            self.switch(join);
+            return Ok(v);
+        }
         let out = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
         let out = self.b.ins_word_as(out, ty).map_err(mir)?;
         let op_from = self.cur;
