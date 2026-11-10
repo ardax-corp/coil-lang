@@ -588,8 +588,61 @@ fn rejects_accumulator_clobbered_before_loop() {
 }
 
 #[test]
-fn admits_a_loop_under_checks_of_what_it_leaves_alone() {
+fn admits_a_for_loop_under_checks_of_what_it_leaves_alone() {
+    let site = one_site(&program(
+        r#"
+    let k = 3;
+    let acc = 0;
+    for x in 0..100 invariant k > 0 {
+        acc = acc + sq(x) * k;
+    }
+"#,
+    ));
+    assert!(site.implicit_step);
+    // What only the check reads is the worker's too.
     let site = one_site(
+        r#"
+fn sq(int i) -> int { return i * i; }
+fn run(int n, int m) -> int {
+    let acc = 0;
+    for x in 0..n invariant m > 0 {
+        acc = acc + sq(x);
+    }
+    return acc;
+}
+fn main() { return; }
+"#,
+    );
+    assert_eq!(site.live_captures, ["m"]);
+}
+
+/// A chunk worker runs a `for` loop's checks with its body: one that reads
+/// what a body may not keeps the loop sequential.
+#[test]
+fn a_check_a_worker_cannot_run_keeps_a_for_loop_sequential() {
+    for (param, clause) in [("byte m", "m == m"), ("[int] m", "m.len() > 0"), ("float m", "m > 0.0")] {
+        let sites = sites_of(&format!(
+            r#"
+fn sq(int i) -> int {{ return i * i; }}
+fn run(int n, {param}) -> int {{
+    let acc = 0;
+    for x in 0..n invariant {clause} {{
+        acc = acc + sq(x);
+    }}
+    return acc;
+}}
+fn main() {{ return; }}
+"#
+        ));
+        assert!(sites.is_empty(), "{clause}: {sites:?}");
+    }
+}
+
+/// A `while` runs its checks ahead of every test, the one that ends it
+/// too; the plan builds no worker that does (#2450).
+#[test]
+fn a_checked_while_loop_is_sequential() {
+    let sites = sites_of(
         r#"
 fn sq(int i) -> int { return i * i; }
 fn run(int n) -> int {
@@ -604,17 +657,63 @@ fn run(int n) -> int {
 fn main() { return; }
 "#,
     );
-    assert_eq!((site.index.as_str(), site.acc.as_str()), ("i", "acc"));
-    let site = one_site(&program(
-        r#"
-    let k = 3;
+    assert!(sites.is_empty(), "{sites:?}");
+}
+
+/// The fork-join's words are `int` locals: a `byte` is none (#2450).
+#[test]
+fn a_byte_word_keeps_the_loop_sequential() {
+    let run = |params: &str, init: &str, body: &str| {
+        sites_of(&format!(
+            r#"
+fn sq(int i) -> int {{ return i * i; }}
+fn run({params}) -> int {{
     let acc = 0;
-    for x in 0..100 invariant k > 0 {
-        acc = acc + sq(x) * k;
-    }
+    {init}
+    while i < n {{
+        {body}
+        i = i + 1;
+    }}
+    return acc;
+}}
+fn main() {{ return; }}
+"#
+        ))
+    };
+    assert_eq!(run("int n, int w", "let i = 0;", "acc = acc + sq(i) * w;").len(), 1);
+    // A live capture.
+    let sites = run("int n, byte w", "let i = 0;", "if w == w { acc = acc + sq(i); }");
+    assert!(sites.is_empty(), "{sites:?}");
+    // The bound, and with it the index.
+    let sites = run("byte n", "let i = n & n;", "acc = acc + 1;");
+    assert!(sites.is_empty(), "{sites:?}");
+}
+
+/// A worker takes its bounds, the accumulator and each live capture as one
+/// spawn's arguments.
+#[test]
+fn more_live_captures_than_a_spawn_passes_keep_the_loop_sequential() {
+    let run = |captures: usize| {
+        let names: Vec<String> = (0..captures).map(|i| format!("c{i}")).collect();
+        let params: Vec<String> = names.iter().map(|n| format!("int {n}")).collect();
+        sites_of(&format!(
+            r#"
+fn run(int n, {}) -> int {{
+    let acc = 0;
+    for x in 0..n {{
+        acc = acc + x * ({});
+    }}
+    return acc;
+}}
+fn main() {{ return; }}
 "#,
-    ));
-    assert!(site.implicit_step);
+            params.join(", "),
+            names.join(" + ")
+        ))
+    };
+    let most = common::MAX_THREAD_SPAWN_ARGS - 3;
+    assert_eq!(run(most).len(), 1);
+    assert!(run(most + 1).is_empty());
 }
 
 #[test]

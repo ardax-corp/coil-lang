@@ -20,6 +20,13 @@
 //! The walk runs on a module's HIR as built, before any pass: a site is
 //! keyed by its loop's source span and names its locals, so the plan finds
 //! it again in a body the passes rewrote or inlined elsewhere.
+//!
+//! A site listed here is one the plan can build (codegen's `hir_par_site`
+//! and `hir_par_outline`): its accumulator, index, bounds and live captures
+//! are `int` locals, few enough for a spawn, and a `while` is the plain
+//! test-and-body shape. The plan may still leave a site sequential when
+//! chunking gains nothing; a site it cannot build is a bug on one side,
+//! which the corpus test reports (`compiler/tests/hir_corpus.rs`).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -203,6 +210,8 @@ struct Counted {
     end_local: Option<LocalId>,
     end_bias: i64,
     implicit_step: bool,
+    /// The contract checks a `for` runs ahead of its body.
+    checks: Vec<HirId>,
 }
 
 struct LoopScan<'a> {
@@ -234,6 +243,12 @@ struct IfArm {
 impl Scan<'_> {
     fn name(&self, l: LocalId) -> &str {
         &self.body.local(l).name
+    }
+
+    /// Whether local `l` is an `int`, the one type the fork-join's words
+    /// have (`ints` also holds `byte` locals).
+    fn is_int(&self, l: LocalId) -> bool {
+        self.body.local(l).ty.as_ref().and_then(crate::hir::classify::primitive) == Some(coil_ty::INT)
     }
 
     /// Statement list: each item may bind or invalidate a const local for
@@ -289,7 +304,10 @@ impl Scan<'_> {
             HirKind::Loop { body: loop_body } => {
                 // A `while let` is no counted loop, and nothing in it is.
                 let Some((checks, cond, then)) = query::while_parts(body, *loop_body) else { return };
-                let site = if self.checks_follow_the_loop(id, checks) { None } else { self.counted_while(cond, then, consts, ints) };
+                // A `while` runs its checks ahead of each test, the last
+                // one too, and once when it runs no trips: no chunk
+                // worker's loop does that, so a checked `while` is no site.
+                let site = if checks.is_empty() { self.counted_while(cond, then, consts, ints) } else { None };
                 match site.and_then(|c| self.finish(c, consts, ints)) {
                     Some(site) => {
                         self.out.insert(e.span, site);
@@ -297,9 +315,11 @@ impl Scan<'_> {
                     None => self.walk_loop_body(id, then, consts, ints),
                 }
             }
+            // A `for` runs its checks in its body, so a chunk worker runs
+            // them as the loop does.
             HirKind::ForIn { pat, iterable, .. } => {
                 let Some((checks, own)) = query::for_body_parts(body, id) else { return };
-                let site = if self.checks_follow_the_loop(id, checks) { None } else { self.counted_for(pat, *iterable, own, consts, ints) };
+                let site = if self.checks_follow_the_loop(id, checks) { None } else { self.counted_for(pat, *iterable, (checks, own), consts, ints) };
                 match site.and_then(|c| self.finish(c, consts, ints)) {
                     Some(site) => {
                         self.out.insert(e.span, site);
@@ -311,9 +331,9 @@ impl Scan<'_> {
         }
     }
 
-    /// Whether a contract check of loop `loop_id` (`invariant` /
+    /// Whether a contract check of `for` loop `loop_id` (`invariant` /
     /// `decreases`) reads a local the loop writes: the accumulator, a
-    /// `while` loop's index, a `decreases` clause's own previous value.
+    /// `decreases` clause's own previous value.
     ///
     /// Such a clause is about the state the sequential loop has at that
     /// iteration. A chunk has its own: its fold starts at the identity.
@@ -361,12 +381,12 @@ impl Scan<'_> {
         } else {
             (end_const, 0)
         };
-        Some(Counted { body: then, index, begin, end, begin_local, end_local, end_bias, implicit_step: false })
+        Some(Counted { body: then, index, begin, end, begin_local, end_local, end_bias, implicit_step: false, checks: Vec::new() })
     }
 
     /// `for x in START..END` / `..=`, or `for x in r` when `r` is a
     /// const-initialized counted range local (Q6 literal / B5).
-    fn counted_for(&self, pat: &HirPat, iterable: HirId, own: HirId, consts: &ConstLocals, ints: &HashSet<LocalId>) -> Option<Counted> {
+    fn counted_for(&self, pat: &HirPat, iterable: HirId, (checks, own): (&[HirId], HirId), consts: &ConstLocals, ints: &HashSet<LocalId>) -> Option<Counted> {
         let body = self.body;
         let HirPat::Bind(index) = *pat else { return None };
         // `for mut x in` borrows; `for _ in` binds nothing a body names.
@@ -389,11 +409,11 @@ impl Scan<'_> {
                 (begin, end, begin_local, end_local, i64::from(*inclusive))
             }
         };
-        Some(Counted { body: own, index, begin, end, begin_local, end_local, end_bias, implicit_step: true })
+        Some(Counted { body: own, index, begin, end, begin_local, end_local, end_bias, implicit_step: true, checks: checks.to_vec() })
     }
 
     fn finish(&self, counted: Counted, consts: &ConstLocals, ints: &HashSet<LocalId>) -> Option<LoopParSite> {
-        let Counted { body: loop_body, index, begin, end, begin_local, end_local, end_bias, implicit_step } = counted;
+        let Counted { body: loop_body, index, begin, end, begin_local, end_local, end_bias, implicit_step, checks } = counted;
         let dynamic = begin_local.is_some() || end_local.is_some();
         let forms = self.classify_body(loop_body, index, true)?;
         let mut reduces = Vec::new();
@@ -423,11 +443,27 @@ impl Scan<'_> {
         if !self.forms_independent(&forms, &mut HashSet::new(), &mut scan) {
             return None;
         }
+        // A chunk worker runs the loop's checks with its body, so they
+        // read what a body may.
+        if !checks.iter().all(|&check| self.check_independent(check, &mut scan)) {
+            return None;
+        }
         let LoopScan { mut live, captures, .. } = scan;
+        // The fork-join passes each of these as an `int` word, and a
+        // `byte` is not one.
+        let while_index = (!implicit_step).then_some(index);
+        if [begin_local, end_local, while_index, Some(acc)].into_iter().flatten().any(|l| !self.is_int(l)) {
+            return None;
+        }
         // The bound locals are worker arguments already (lo/hi), not body
         // captures.
         for l in [begin_local, end_local, Some(index), Some(acc)].into_iter().flatten() {
             live.remove(self.name(l));
+        }
+        // The worker's arguments (`lo`, `hi`, the accumulator and the live
+        // captures) fit one thread spawn.
+        if 3 + live.len() > common::MAX_THREAD_SPAWN_ARGS {
+            return None;
         }
         let name = |l: LocalId| self.name(l).to_string();
         Some(LoopParSite {
@@ -504,7 +540,8 @@ impl Scan<'_> {
                         scan.captures.insert((self.name(*l).to_string(), *k));
                         true
                     }
-                    _ if scan.ints.contains(l) => {
+                    // A live capture is an `int` word of the worker's.
+                    _ if scan.ints.contains(l) && self.is_int(*l) => {
                         scan.live.insert(self.name(*l).to_string());
                         true
                     }
@@ -524,6 +561,24 @@ impl Scan<'_> {
             HirKind::Call { args, .. } => {
                 super::par_profit::bare_callee(self.checker, body, id).is_some_and(|name| self.pure_fns.contains(name))
                     && args.iter().all(|a| self.independent(*a, locals, scan))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether contract check `id`, as the builder writes one (`if
+    /// !(cond) { panic .. }`, or nothing for a clause `coil verify`
+    /// proved), tests a condition a loop body could compute
+    /// ([`Self::independent`]) and reports it reading no local.
+    fn check_independent(&self, id: HirId, scan: &mut LoopScan<'_>) -> bool {
+        let body = self.body;
+        match &body.expr(id).kind {
+            HirKind::Block { stmts, tail: None } => stmts.is_empty(),
+            &HirKind::If { cond, then, els: None } => {
+                let HirKind::Un { op: UnOp::Not, operand } = body.expr(cond).kind else { return false };
+                let mut reads = false;
+                body.visit(then, &mut |e| reads |= matches!(e.kind, HirKind::Local(_)));
+                !reads && self.independent(operand, &HashSet::new(), scan)
             }
             _ => false,
         }
