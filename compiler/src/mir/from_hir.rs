@@ -5736,15 +5736,18 @@ impl Lower<'_> {
                 words.push(v);
                 continue;
             }
-            // Only a heap carrier: its boxed form is the word itself.
+            // A heap carrier's boxed form is the word itself. A bare type
+            // parameter of a shared body (`site.words`) takes any type's
+            // own word, as a plain call passes it.
+            let open = site.words.get(i).copied().unwrap_or(false);
             let ty = self.expr_ty(operand).ok_or("operator operand type")?;
-            if self.word_ty(ty).is_some_and(|t| t != MirTy::HeapRef) {
+            if !open && self.word_ty(ty).is_some_and(|t| t != MirTy::HeapRef) {
                 return Err("operator operand word".into());
             }
             let Some(v) = self.boxed_word(operand)? else {
                 return Ok(Val::Never);
             };
-            if self.b.value_ty(v) != MirTy::HeapRef {
+            if !open && self.b.value_ty(v) != MirTy::HeapRef {
                 return Err("operator operand boxed".into());
             }
             words.push(self.b.ins_word(v).map_err(mir)?);
