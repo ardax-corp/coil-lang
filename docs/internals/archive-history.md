@@ -61,6 +61,10 @@ major.
   trait method with type parameters of its own takes their `kinds` word
   after its own bounds' dictionaries. Layout and convention only: `FORMAT`
   stays 16.
+- A `MakePolyFnCapture` word `1` (`common::KINDS_FROM_CALL`) is a `kinds`
+  slot the call fills with its last dictionary word (`machine::apply`); a
+  call through a `PolyFn` passes the callee's `kinds` word after its
+  dictionaries (#2506). `FORMAT` stays 16.
 
 ## Major 7
 

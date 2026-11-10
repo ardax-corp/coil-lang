@@ -45,7 +45,13 @@ sentinel the entry checks in debug builds and under `COIL_MIR_VERIFY`
 forwards its own bit for a type parameter and a constant for a type with a
 known head (`Vec<T>` is 1, `Option<T>` 0); a lambda captures the word after
 the dictionaries; a partial application fills it as its last parameter; a
-`PolyFn` value captures it with every bit clear, and a class's `drop`, which
+`PolyFn` value captures it after its dictionaries: the word at the type it
+is read at, or, for a function of one type parameter read where it stays
+open (an argument a `forall` parameter takes, a local bound from it),
+`common::KINDS_FROM_CALL`, which the runtime replaces by the call's last
+word: a call through a `forall` parameter or such a local passes the word
+last (#2506). A function of more type parameters read open captures every
+bit clear (the `forall`'s order need not be its own). A class's `drop`, which
 the runtime calls, takes none. `Lower` emits the unique under a test of the
 bit (`guarded_cow`). A trait method reads its bits from its dictionary,
 which carries a `kinds` word after its methods (the trait's parameters, then
@@ -107,6 +113,7 @@ Tests: `tests/cow_call_share_cli.rs` (copy counts),
 a shared body), `tests/memory/cow_generic_bodies_unique.coil` (a write
 through a copy of a type parameter's value, the `kinds` word),
 `tests/memory/cow_generic_trait_methods.coil` (the same in trait methods),
+`tests/memory/cow_generic_forall_values.coil` (through a `forall` value),
 `tests/memory/cow_returned_param_names.coil` and
 `tests/memory/cow_returned_field.coil` (soundness). Benches:
 `examples/perf/cow_call_reassign.coil`, `cow_call_field.coil`,
