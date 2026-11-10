@@ -3,6 +3,7 @@
 // bytes, and a copy of 1 MiB up to a quote. Prints ns per call; the
 // compiler runs each loop as one call (`mir/bulk.rs`), the last as a
 // byte scan and one call (`mir/copy_until.rs`).
+// @skip auto-par prints the nanoseconds each call took
 use clock::mono_nanos;
 use io::{stdout, write};
 use string::{format, from_bytes, to_bytes};
