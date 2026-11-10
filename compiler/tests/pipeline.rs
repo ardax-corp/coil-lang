@@ -2669,7 +2669,9 @@ fn main() {
 
 /// E1: a function that passes a pure lambda to a higher-order function is
 /// pure (HIR effects), so a loop over it splits; an impure lambda keeps it
-/// sequential. (`twice` is not generic: coil-lang#699.)
+/// sequential. (`twice` is not generic: coil-lang#699.) The fold is `^`:
+/// what a function value returns has no known sign, and a `+` fold of
+/// such terms runs sequentially (coil-lang#2423).
 #[test]
 fn auto_par_loop_over_a_pure_lambda_call_splits() {
     let body = |lambda: &str| {
@@ -2692,7 +2694,7 @@ fn main() {{
     let acc = 0;
     let i = 0;
     while i < 100 {{
-        acc = acc + score(i);
+        acc = acc ^ score(i);
         i = i + 1;
     }}
     write(stdout(), to_bytes(format("%i", acc)));
@@ -2701,14 +2703,14 @@ fn main() {{
         )
     };
     let mut pipeline = test_pipeline();
-    let compiled = compile(&mut pipeline, &body("fn (int x) => x + 1")).expect("pure lambda loop should compile");
+    let compiled = compile(&mut pipeline, &body("fn (int x) => x + 2")).expect("pure lambda loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "expected a chunk worker: score is pure through its lambda"
     );
-    // sum of i + 2 for i in 0..100.
+    // The xor of i + 4 for i in 0..100.
     let output = run_compiled(compiled, &pipeline, None);
-    assert_eq!(output, "5150");
+    assert_eq!(output, "0");
 
     let mut pipeline = test_pipeline();
     pipeline
@@ -2751,12 +2753,17 @@ fn main() {
 }
 
 /// An int parameter is a worker argument, not a reason to stay sequential.
+/// The guard gives it a sign: a `+` fold of terms whose sign is the
+/// caller's runs sequentially (coil-lang#2423).
 #[test]
 fn auto_par_loop_int_capture_matches_sequential() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
 fn run(int k) -> int {
+    if k < 0 {
+        return 0;
+    }
     let acc = 0;
     let i = 0;
     while i < 100 {
