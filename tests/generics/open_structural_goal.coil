@@ -1,0 +1,214 @@
+// A bounded generic called at a builtin shape over the caller's own type
+// parameter (coil-lang#2554): `Show<Option<T>>`, `Eq<Vec<T>>`,
+// `Hash<(T, int)>`, `Ord<(T, T)>` under `T: Show` / `Eq` / `Hash` / `Ord`.
+// Each goal is met by the shape's structural instance, its context the
+// frame's own dictionary for `T`: `P`'s instances below are not the
+// structural ones (its `==` compares tens, its `show` prefixes `P`), so a
+// result built without them differs. Also polymorphic recursion at
+// `Option<T>`. The `clone-budget-0` cell runs every case on the shared
+// bodies.
+use tests::assert;
+
+class P {
+    pub v: int,
+}
+
+impl Show for P {
+    fn show(P p) -> string {
+        return "P" + p.v.show();
+    }
+}
+
+impl Eq for P {
+    fn eq(P a, P b) -> bool {
+        return a.v / 10 == b.v / 10;
+    }
+}
+
+impl Hash for P {
+    fn hash(P p) -> int {
+        return p.v / 10;
+    }
+}
+
+impl Lt for P {
+    fn lt(P a, P b) -> bool {
+        return a.v / 10 < b.v / 10;
+    }
+}
+
+impl Le for P {
+    fn le(P a, P b) -> bool {
+        return a.v / 10 <= b.v / 10;
+    }
+}
+
+impl Gt for P {
+    fn gt(P a, P b) -> bool {
+        return a.v / 10 > b.v / 10;
+    }
+}
+
+impl Ge for P {
+    fn ge(P a, P b) -> bool {
+        return a.v / 10 >= b.v / 10;
+    }
+}
+
+impl Ord for P {
+}
+
+fn shown<U: Show>(U u) -> string {
+    return u.show();
+}
+
+fn same<U: Eq>(U a, U b) -> bool {
+    return a == b;
+}
+
+fn differ<U: Eq>(U a, U b) -> bool {
+    return a != b;
+}
+
+fn hashed<U: Hash>(U u) -> int {
+    return u.hash();
+}
+
+fn bit(bool x) -> string {
+    if x {
+        return "t";
+    }
+    return "f";
+}
+
+// `lt le gt ge` as four letters.
+fn order<U: Ord>(U a, U b) -> string {
+    return bit(a < b) + bit(a <= b) + bit(a > b) + bit(a >= b);
+}
+
+fn show_option<T: Show>(T x) -> string {
+    let none: Option<T> = None;
+    return shown(Some(x)) + " " + shown(none);
+}
+
+fn show_result<T: Show>(T x) -> string {
+    let ok: Result<T, string> = Ok(x);
+    let err: Result<int, T> = Err(x);
+    return shown(ok) + " " + shown(err);
+}
+
+fn show_shapes<T: Show>(Vec<T> xs, [T; 2] a, Vec<Option<T>> os) -> string {
+    return shown(xs) + " " + shown(a) + " " + shown(os) + " " + shown(Some((xs[0], 1)));
+}
+
+fn eq_option<T: Eq>(T x, T y) -> bool {
+    let none: Option<T> = None;
+    return same(Some(x), Some(y)) &&
+           !same(Some(x), none) &&
+           same(none, none) &&
+           !differ(Some(x), Some(y));
+}
+
+fn eq_result<T: Eq>(T x, T y) -> bool {
+    let a: Result<T, string> = Ok(x);
+    let b: Result<T, string> = Ok(y);
+    let e: Result<T, string> = Err("e");
+    return same(a, b) && !same(a, e) && differ(a, e);
+}
+
+fn eq_shapes<T: Eq>(Vec<T> xs, Vec<T> ys, [T; 2] a, [T; 2] b, T x, T y) -> bool {
+    return same(xs, ys) && same(a, b) && same((x, 1), (y, 1)) && !same((x, 1), (y, 2));
+}
+
+fn hash_shapes<T: Hash>(T x, [T; 2] a) -> (int, int) {
+    return (hashed((x, 1)), hashed(a));
+}
+
+fn order_pair<T: Ord>(T x, T y) -> string {
+    return order((x, 1), (y, 2)) + " " + order((x, y), (y, x));
+}
+
+fn nest<T: Show>(T x, int n) -> string {
+    if n == 0 {
+        return x.show();
+    }
+    return nest(Some(x), n - 1);
+}
+
+fn nest_eq<T: Eq>(T x, T y, int n) -> bool {
+    if n == 0 {
+        return x == y;
+    }
+    return nest_eq(Some(x), Some(y), n - 1);
+}
+
+test("Show of an Option, Result, Vec, array or tuple of a type parameter") {
+    assert!(show_option(1) == "Some(1) None");
+    assert!(show_option(new P(4)) == "Some(P4) None");
+    assert!(show_option("s") == shown(Some("s")) + " None");
+    assert!(show_result(new P(5)) == "Ok(P5) Err(P5)");
+    assert!(show_result(2) == "Ok(2) Err(2)");
+    let o: Option<P> = None;
+    assert!(
+        show_shapes([new P(1), new P(2)], [new P(3), new P(4)], [Some(new P(5)), o]) ==
+        "[P1, P2] [P3, P4] [Some(P5), None] Some((P1, 1))",
+    );
+    assert!(show_shapes([1], [2, 3], [Some(4)]) == "[1] [2, 3] [Some(4)] Some((1, 1))");
+}
+
+test("Eq of an Option, Result, Vec, array or tuple of a type parameter") {
+    assert!(eq_option(new P(31), new P(35)));
+    assert!(!eq_option(new P(31), new P(45)));
+    assert!(eq_option(3, 3) && !eq_option(3, 4));
+    assert!(eq_option("a", "a"));
+    assert!(eq_result(new P(31), new P(35)));
+    assert!(!eq_result(new P(31), new P(41)));
+    assert!(
+        eq_shapes(
+            [new P(10)],
+            [new P(19)],
+            [new P(1), new P(2)],
+            [new P(8), new P(9)],
+            new P(20),
+            new P(29),
+        ),
+    );
+    assert!(
+        !eq_shapes(
+            [new P(10)],
+            [new P(20)],
+            [new P(1), new P(2)],
+            [new P(8), new P(9)],
+            new P(20),
+            new P(29),
+        ),
+    );
+    assert!(!eq_shapes([1], [1], [1, 2], [1, 3], 5, 5));
+    assert!(eq_shapes([1, 2], [1, 2], [3, 4], [3, 4], 5, 5));
+}
+
+test("Hash of a tuple or array of a type parameter") {
+    let (t, a) = hash_shapes(new P(31), [new P(35), new P(42)]);
+    assert!(t == hashed((new P(31), 1)));
+    assert!(a == hashed([new P(35), new P(42)]));
+    let (u, b) = hash_shapes(new P(38), [new P(30), new P(49)]);
+    assert!(u == t && b == a);
+    let (i, j) = hash_shapes(7, [8, 9]);
+    assert!(i == hashed((7, 1)) && j == hashed([8, 9]));
+}
+
+test("Ord of a tuple of a type parameter") {
+    assert!(order_pair(new P(31), new P(35)) == "ttff ftft");
+    assert!(order_pair(new P(41), new P(35)) == "fftt fftt");
+    assert!(order_pair(1, 2) == "ttff ttff");
+    assert!(order_pair("b", "a") == "fftt fftt");
+}
+
+test("a bounded generic calls itself at Option of its type parameter") {
+    assert!(nest(1, 3) == "Some(Some(Some(1)))");
+    assert!(nest(new P(7), 2) == "Some(Some(P7))");
+    assert!(nest("s", 0) == "s");
+    assert!(nest_eq(new P(31), new P(35), 3));
+    assert!(!nest_eq(new P(31), new P(45), 2));
+    assert!(nest_eq(2, 2, 4) && !nest_eq(2, 3, 1));
+}
