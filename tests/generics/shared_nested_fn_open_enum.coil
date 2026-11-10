@@ -1,0 +1,93 @@
+// A generic whose parameter holds a function below its top (`Vec<unit ->
+// Option<T>>`, an array of functions) with an open `Option` /
+// `Result` in the function's result or parameter is never shared
+// (coil-lang#2488): ground closures return and take `Option<string>` as
+// its niche word, a shared body would read the enum object, and no adapter
+// reaches a function inside a `Vec`. Every ground call takes its clone,
+// past the clone budget too.
+// @flags --clone-budget 0
+use tests::assert;
+
+fn first_some<T>(Vec<unit -> Option<T>> bodies, T fallback) -> T {
+    for b in bodies {
+        match b() {
+            Option::Some(v) => {
+                return v;
+            },
+            Option::None => {},
+        }
+    }
+    return fallback;
+}
+
+fn first_ok<T>([unit -> Result<T, string>; 2] bodies, T fallback) -> T {
+    for b in bodies {
+        if let Ok(v) = b() {
+            return v;
+        }
+    }
+    return fallback;
+}
+
+// The open enum in the function's parameter.
+fn count_some<T>(Vec<Option<T> -> int> fs, T x) -> int {
+    let n = 0;
+    for f in fs {
+        n = n + f(Some(x)) + f(None);
+    }
+    return n;
+}
+
+class Name {
+    pub text: string,
+}
+
+fn has(Option<string> o) -> int {
+    return match o {
+        Some(s) => s.len(),
+        None => 100,
+    };
+}
+
+test("a Vec of functions returning a one-word Option") {
+    let fs: Vec<unit -> Option<string>> = Vec::new();
+    assert!(first_some(fs, "z") == "z");
+    fs.push(fn () => Option::None);
+    assert!(first_some(fs, "z") == "z");
+    fs.push(fn () => Option::Some("b"));
+    fs.push(fn () => Option::Some("c"));
+    assert!(first_some(fs, "z") == "b");
+    let ns: Vec<unit -> Option<Name>> = Vec::new();
+    ns.push(fn () => Option::None);
+    ns.push(fn () => Option::Some(new Name("n")));
+    assert!(first_some(ns, new Name("z")).text == "n");
+}
+
+test("a two-word Option and other element types") {
+    let is: Vec<unit -> Option<int>> = Vec::new();
+    is.push(fn () => Option::None);
+    is.push(fn () => Option::Some(7));
+    assert!(first_some(is, 0) == 7);
+    let xs: Vec<unit -> Option<float>> = Vec::new();
+    xs.push(fn () => Option::Some(2.5));
+    assert!(first_some(xs, 0.0) == 2.5);
+}
+
+test("an array of functions, a Result") {
+    let rs: [unit -> Result<string, string>; 2] = [fn () => Err("no"), fn () => Ok("yes")];
+    assert!(first_ok(rs, "z") == "yes");
+    let es: [unit -> Result<string, string>; 2] = [fn () => Err("no"), fn () => Err("never")];
+    assert!(first_ok(es, "z") == "z");
+    let ri: [unit -> Result<int, string>; 2] = [fn () => Err("no"), fn () => Ok(3)];
+    assert!(first_ok(ri, 0) == 3);
+}
+
+test("the open enum in the element's parameter") {
+    let fs: Vec<Option<string> -> int> = Vec::new();
+    fs.push(has);
+    fs.push(fn (Option<string> o) => has(o) * 2);
+    assert!(count_some(fs, "abc") == 309);
+    let gs: Vec<Option<int> -> int> = Vec::new();
+    gs.push(fn (Option<int> o) => o ?? -1);
+    assert!(count_some(gs, 5) == 4);
+}
