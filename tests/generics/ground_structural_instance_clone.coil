@@ -31,6 +31,14 @@ impl Hash for Box<T: Hash> {
     }
 }
 
+fn shown<T: Show>(T x) -> string {
+    return x.show();
+}
+
+fn same<T: Eq>(T x, T y) -> bool {
+    return x == y;
+}
+
 test("Show of an Option, Result, Vec, tuple or array of a generic-head class") {
     let o: Option<Box<int>> = Some(new Box(5));
     assert!(o.show() == "Some([5])");
@@ -76,4 +84,15 @@ test("Hash of an Option or Result of a generic-head class") {
     let r: Result<Box<int>, string> = Ok(new Box(42));
     let s: Result<Box<int>, string> = Ok(new Box(47));
     assert!(r.hash() == s.hash());
+}
+
+test("a bounded generic called at a ground shape around a generic-head class") {
+    let o: Option<Box<int>> = Some(new Box(5));
+    assert!(shown(o) == "Some([5])");
+    assert!(shown((new Box("a"), [new Box(1)])) == "([a], [[1]])");
+    let v: Vec<Option<Box<int>>> = Vec::new();
+    v.push(o);
+    assert!(shown(v) == "[Some([5])]");
+    assert!(same(o, Some(new Box(7))));
+    assert!(!same([o], [None]));
 }
