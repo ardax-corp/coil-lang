@@ -677,22 +677,56 @@ pub fn nested_fn_var_result(ty: &Ty, top: bool, unit: &mut dyn FnMut(&Ty) -> boo
 
 /// Whether a parameter or result of declared type `ty` holds a function
 /// over a type variable in a user class's field or a user enum's payload,
-/// the type's parameters bound to its arguments (`Slot<T>` with `f: fn(T)
-/// -> T`, `G<T>` with `F(fn(T) -> T)`), for each nominal instance `look`
-/// admits (#2511). Such a function crosses a shared generic body inside the
-/// object: a ground function takes a `float` or `bool` as its own MIR type
-/// and a two-word value as two words, a function the shared body made or
-/// adapted takes their words, and only a function that is itself an
-/// argument gets an adapter at the call. So the signature takes a clone
-/// for every ground call, as a nested open enum does.
+/// at any depth of the slot (`f: fn(T) -> T`, `fs: Vec<fn() -> T>`, a
+/// tuple item, `Box<fn() -> T>`), the type's parameters bound to its
+/// arguments (`Slot<T>` with `f: fn(T) -> T`, `G<T>` with `F(fn(T) ->
+/// T)`), for each nominal instance `look` admits (#2511). Such a function
+/// crosses a shared generic body inside the object: a ground function
+/// takes a `float` or `bool` as its own MIR type, a two-word value as two
+/// words and returns nothing for `()`, a function the shared body made or
+/// adapted takes and returns their words, and only a function that is
+/// itself an argument (or, for `()`, a slot's own function, filled through
+/// `HirPacks::unit_fns`) gets an adapter. So the signature takes a clone
+/// for every ground call, as a nested open enum does, and so do the
+/// type's own methods (`self` is such a parameter).
 pub fn nested_fn_field(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool) -> bool {
-    fn walk(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool, seen: &mut Vec<String>) -> bool {
+    fn open_fun(ty: &Ty) -> bool {
+        match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::Fun(..) => ty.has_var(),
+            t => t.any_child(open_fun),
+        }
+    }
+    nominal_slot(checker, ty, look, &mut open_fun)
+}
+
+/// Whether a parameter or result of declared type `ty` holds, in a user
+/// class's field or a user enum's payload (its parameters bound to its
+/// arguments, for each instance `look` admits), a function below the
+/// slot's top whose result is a bare type variable `unit` holds for
+/// ([`nested_fn_var_result`]): `fs: Vec<fn() -> T>` at `T = ()`. No adapter
+/// reaches it, so a call that takes a shared body there is refused (#2560).
+pub fn nested_fn_unit_slot(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool, unit: &mut dyn FnMut(&Ty) -> bool) -> bool {
+    nominal_slot(checker, ty, look, &mut |slot| nested_fn_var_result(slot, true, unit))
+}
+
+/// Whether `slot` holds for a field or payload type of a user class or
+/// enum instance named in `ty` (transitively, through recursive
+/// declarations, [`NESTED_OPEN_DEPTH`] deep), each slot's type with the
+/// type's parameters bound to the instance's arguments.
+fn nominal_slot(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool, slot: &mut dyn FnMut(&Ty) -> bool) -> bool {
+    fn walk(
+        checker: &Checker,
+        ty: &Ty,
+        look: &dyn Fn(&str, &[Ty]) -> bool,
+        slot: &mut dyn FnMut(&Ty) -> bool,
+        seen: &mut Vec<String>,
+    ) -> bool {
         let ty = crate::typechecking::ty::strip_readonly(ty);
         if !ty.has_var() {
             return false;
         }
         let mut found = false;
-        ty.for_each_child(|child| found = found || walk(checker, child, look, seen));
+        ty.for_each_child(|child| found = found || walk(checker, child, look, slot, seen));
         if found {
             return true;
         }
@@ -720,13 +754,12 @@ pub fn nested_fn_field(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) ->
             return false;
         };
         seen.push(key);
-        let found = slots.iter().any(|slot| {
-            let slot = super::bind_params(slot, &params, args);
-            let fun = matches!(crate::typechecking::ty::strip_readonly(&slot), Ty::Fun(..)) && slot.has_var();
-            fun || walk(checker, &slot, look, seen)
+        let found = slots.iter().any(|s| {
+            let s = super::bind_params(s, &params, args);
+            s.has_var() && slot(&s) || walk(checker, &s, look, slot, seen)
         });
         seen.pop();
         found
     }
-    walk(checker, ty, look, &mut Vec::new())
+    walk(checker, ty, look, slot, &mut Vec::new())
 }

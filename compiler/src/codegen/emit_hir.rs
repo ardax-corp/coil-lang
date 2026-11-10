@@ -7397,6 +7397,7 @@ impl Compiler {
         params.iter().chain([&ret]).any(|ty| {
             crate::layout::nested_open_enum(&self.checker, ty, true, &look, &mut niche)
                 || crate::layout::nested_fn_var_result(ty, true, &mut unit)
+                || crate::layout::nested_fn_unit_slot(&self.checker, ty, &look, &mut unit)
         })
     }
 
@@ -8080,13 +8081,15 @@ impl Compiler {
     }
 
     /// Why `hir` (or an anonymous `fn` in it) is refused: it stores a value
-    /// in a generic class's field or enum's payload whose declared type
-    /// holds a function below its top returning a type parameter that is
-    /// `()` there (`fs: Vec<fn() -> T>` at `T = ()`). The type's shared
-    /// methods keep such a function's result as their `T`, a ground `-> ()`
-    /// function returns nothing a caller reads, and no adapter reaches a
-    /// function inside another value (#2541). The diagnostic goes to
-    /// [`Compiler::unit_fn_nested_refusal`].
+    /// in a generic class's field whose declared type holds a function
+    /// below its top returning a type parameter that is `()` there (`fs:
+    /// Vec<fn() -> T>` at `T = ()`), where the class runs its shared
+    /// methods at these types (another module's class at types it does not
+    /// know). Those keep such a function's result as their `T`, a ground
+    /// `-> ()` function returns nothing a caller reads, and no adapter
+    /// reaches a function inside another value (#2541). Anywhere else the
+    /// type is clone-only and its clones read the `()` as it is (#2560).
+    /// The diagnostic goes to [`Compiler::unit_fn_nested_refusal`].
     pub(super) fn hir_unit_fn_nested(&self, module: &crate::hir::HirModule, hir: &HirBody) -> Option<&'static str> {
         for i in 0..hir.exprs.len() as u32 {
             let id = HirId(i);
@@ -8094,6 +8097,16 @@ impl Compiler {
                 && let Some(why) = self.hir_unit_fn_nested(module, &module.bodies[*body])
             {
                 return Some(why);
+            }
+            // A type holding a function over its parameters below a slot's
+            // top is clone-only (`layout::nested_fn_field`): its methods and
+            // every generic over it at these types are ground clones, which
+            // read `()` as the unit they are, and a call that would still
+            // take a shared body is refused there (`hir_shared_split`). Only
+            // another module's class at types that module does not know runs
+            // its shared bodies (`shared_only_class`).
+            if !self.hir_slot_owner_shared(hir, id) {
+                continue;
             }
             for (arg, decl, slot) in self.hir_generic_slots(hir, id) {
                 let Some(ground) = Self::hir_ty(hir, arg).map(|t| apply_ty_prune(self.checker.subst(), t)) else {
@@ -8109,6 +8122,24 @@ impl Compiler {
             }
         }
         None
+    }
+
+    /// Whether the instance whose slot `id` fills (a `new`, a variant, a
+    /// field store) is another module's class at types that module does
+    /// not know, whose methods are all its shared bodies there
+    /// ([`Self::shared_only_class`]).
+    fn hir_slot_owner_shared(&self, hir: &HirBody, id: HirId) -> bool {
+        let owner = match &hir.expr(id).kind {
+            HirKind::Assign { place, .. } => match &hir.expr(*place).kind {
+                HirKind::Field { base, .. } => Self::hir_ty(hir, *base),
+                _ => None,
+            },
+            _ => Self::hir_ty(hir, id),
+        };
+        match owner.map(|t| apply_ty_prune(self.checker.subst(), t)) {
+            Some(Ty::App(head, args)) => matches!(head.as_ref(), Ty::Con(name) if self.shared_only_class(name, &args)),
+            _ => false,
+        }
     }
 
     /// The adapter function [`Self::hir_closure_adapter`] reserved `label`
