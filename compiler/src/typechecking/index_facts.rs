@@ -40,6 +40,10 @@ struct Env {
     dry: bool,
     /// The innermost loop's `continue` / `break` facts (see [`Jumps`]).
     jumps: Option<std::rc::Rc<std::cell::RefCell<Jumps>>>,
+    /// Names the enclosing function binds (parameters, `let`s, patterns):
+    /// a call of one is a call of a function value, whatever function
+    /// shares its name.
+    bound: std::rc::Rc<HashSet<String>>,
 }
 
 /// What holds where a loop body jumps: at every `continue` (another trip
@@ -370,13 +374,26 @@ fn walk_tree(
         }
         Expression::Module(_, body) => walk_tree(checker, body, pure, env, calls),
         Expression::Function {
-            body: Some(body), ..
+            args,
+            body: Some(body),
+            ..
         }
-        | Expression::TestCase { body, .. }
-        | Expression::Lambda { body, .. } => {
+        | Expression::Lambda { args, body, .. } => {
             let mut inner = Env::default();
+            // A lambda also sees what its function binds.
+            let mut bound = if matches!(ast.1.as_ref(), Expression::Lambda { .. }) { (*env.bound).clone() } else { HashSet::new() };
+            super::purity::collect_binders(args, checker.bare_cases(), &mut bound);
+            super::purity::collect_binders(body, checker.bare_cases(), &mut bound);
+            inner.bound = std::rc::Rc::new(bound);
             // Params start nonneg only for ints we cannot prove; indices are
             // proven via caller transfer or a local `i < len` header.
+            walk_tree(checker, body, pure, &mut inner, calls);
+        }
+        Expression::TestCase { body, .. } => {
+            let mut inner = Env::default();
+            let mut bound = HashSet::new();
+            super::purity::collect_binders(body, checker.bare_cases(), &mut bound);
+            inner.bound = std::rc::Rc::new(bound);
             walk_tree(checker, body, pure, &mut inner, calls);
         }
         Expression::Implementation { methods, .. } => {
@@ -395,10 +412,7 @@ fn walk_tree(
         | Expression::ImplicitReturn(inner)
         | Expression::Raise(inner)
         | Expression::Try(inner)
-        | Expression::Negate(inner)
-        | Expression::Not(inner)
         | Expression::LogicalNot(inner)
-        | Expression::Positive(inner)
         | Expression::Cast(inner, _)
         | Expression::TypeOf(inner)
         | Expression::Readonly(inner)
@@ -415,6 +429,24 @@ fn walk_tree(
             env.lt_len.clear();
             walk_tree(checker, inner, pure, env, calls);
         }
+        // An operator on a class, an enum or a type parameter runs the
+        // type's trait impl: user code that may resize, as a call may
+        // (#2438).
+        Expression::Negate(inner) | Expression::Not(inner) | Expression::Positive(inner) => {
+            walk_tree(checker, inner, pure, env, calls);
+            if operand_runs_user_code(checker, inner) {
+                env.poison_all();
+            }
+        }
+        Expression::And(a, b)
+        | Expression::Or(a, b)
+        | Expression::Coalesce(a, b)
+        | Expression::Range {
+            start: a, end: b, ..
+        } => {
+            walk_tree(checker, a, pure, env, calls);
+            walk_tree(checker, b, pure, env, calls);
+        }
         Expression::Add(a, b)
         | Expression::Sub(a, b)
         | Expression::Mul(a, b)
@@ -424,22 +456,19 @@ fn walk_tree(
         | Expression::Shl(a, b)
         | Expression::Shr(a, b)
         | Expression::Xor(a, b)
-        | Expression::And(a, b)
         | Expression::BitAnd(a, b)
-        | Expression::Or(a, b)
         | Expression::BitOr(a, b)
         | Expression::Eq(a, b)
         | Expression::Neq(a, b)
         | Expression::Le(a, b)
         | Expression::Gt(a, b)
         | Expression::Leq(a, b)
-        | Expression::Geq(a, b)
-        | Expression::Coalesce(a, b)
-        | Expression::Range {
-            start: a, end: b, ..
-        } => {
+        | Expression::Geq(a, b) => {
             walk_tree(checker, a, pure, env, calls);
             walk_tree(checker, b, pure, env, calls);
+            if operand_runs_user_code(checker, a) || operand_runs_user_code(checker, b) {
+                env.poison_all();
+            }
         }
         // `let x` (its type, if any, is the second field): a new `x`
         // that holds nothing known yet.
@@ -461,6 +490,9 @@ fn walk_tree(
         Expression::CompoundAssign(lhs, op, rhs) => {
             walk_tree(checker, rhs, pure, env, calls);
             walk_tree(checker, lhs, pure, env, calls);
+            if operand_runs_user_code(checker, lhs) || operand_runs_user_code(checker, rhs) {
+                env.poison_all();
+            }
             apply_assign(checker, env, lhs, rhs, Some(*op));
         }
         Expression::Adjust { op, target, .. } => {
@@ -518,7 +550,7 @@ fn walk_tree(
                     walk_tree(checker, a, pure, env, calls);
                 }
             }
-            note_call(env, calls, name, args.as_deref(), pure);
+            note_call(checker, env, calls, name, args.as_deref(), pure);
         }
         Expression::Identifier(name) => {
             if env.nonneg.contains(*name) && !env.dry {
@@ -554,11 +586,24 @@ fn walk_tree(
                 walk_tree(checker, &arm.body, pure, env, calls);
             }
         }
-        Expression::Construct { fields, .. } => match fields {
-            EnumConstructPayload::Unit => {}
+        Expression::Construct { enum_name, variant_name, fields } => match fields {
+            // `Owner::name()` and `Owner::name` parse the same: a call when
+            // `name` is a static method.
+            EnumConstructPayload::Unit => {
+                if static_method_call(checker, enum_name, variant_name) && !pure.contains(&format!("{enum_name}::{variant_name}")) {
+                    env.poison_all();
+                }
+            }
             EnumConstructPayload::Tuple(args) => {
                 for a in args {
                     walk_tree(checker, a, pure, env, calls);
+                }
+                // `Owner::name(..)` that is no enum constructor is a call
+                // of a static method (the parser reads both the same).
+                let builds = checker.tag_for(enum_name, variant_name).is_some()
+                    || (*enum_name == "Vec" && matches!(*variant_name, "new" | "with_capacity" | "from"));
+                if !builds && !pure.contains(&format!("{enum_name}::{variant_name}")) {
+                    env.poison_all();
                 }
             }
             EnumConstructPayload::Record(parts) => {
@@ -721,6 +766,16 @@ fn walk_loop(args: WalkLoopArgs<'_>) {
     if let Some(binding) = identifier {
         // for-in
         walk_tree(checker, iterable, pure, env, calls);
+        // Anything but an array, a tuple or a range runs an iterator's
+        // `next` or resumes a generator before each trip: user code that
+        // may resize (#2438).
+        let builtin = matches!(
+            checker.for_in_info_for_span(loop_node.0.start, loop_node.0.end).map(|i| &i.kind),
+            Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. })
+        );
+        if !builtin {
+            env.poison_all();
+        }
         let (mut body_env, at_top) = loop_invariant(checker, body, pure, env, None);
         let jumps = std::rc::Rc::new(std::cell::RefCell::new(Jumps::default()));
         body_env.jumps = Some(jumps.clone());
@@ -817,6 +872,7 @@ fn loop_invariant(
 }
 
 fn note_call(
+    checker: &Checker,
     env: &mut Env,
     calls: &mut Vec<CallSite>,
     name: &Output<'_>,
@@ -826,20 +882,26 @@ fn note_call(
     let callee = match peel(name).1.as_ref() {
         Expression::Identifier(n) => Some((*n).to_string()),
         Expression::Access(recv, field) => {
-            if *field == "push" {
-                if let Some(arr) = ident_name(recv) {
-                    env.poison_arr(&arr);
-                } else {
-                    env.poison_all();
-                }
-            } else if *field != "len" {
-                env.poison_all();
+            // Only the built-in `len` and `push` are known: a user type's
+            // method of either name is a call like any other (#2438).
+            let recv_ty = checker.ty_at_span((recv.0.start, recv.0.end));
+            let recv_ty = recv_ty.as_ref().map(strip_readonly);
+            match *field {
+                "len" if recv_ty.is_some_and(Checker::is_structural_len_ty_for_codegen) => {}
+                "push" if recv_ty.is_some_and(|t| vec_element_ty(t).is_some()) => match ident_name(recv) {
+                    Some(arr) => env.poison_arr(&arr),
+                    None => env.poison_all(),
+                },
+                _ => env.poison_all(),
             }
             None
         }
-        Expression::QualifiedAccess { member, .. }
-            if matches!(*member, "len" | "new" | "with_capacity") =>
-        {
+        // `module::f(..)`, and a static method the parser did not read as
+        // a construction: length-stable when the walk says so.
+        Expression::QualifiedAccess { owner, member } => {
+            if !pure.contains(&format!("{owner}::{member}")) {
+                env.poison_all();
+            }
             None
         }
         _ => {
@@ -850,9 +912,6 @@ fn note_call(
     let Some(callee) = callee else {
         return;
     };
-    if callee == "len" {
-        return;
-    }
     let arg_names: Vec<Option<String>> = args.unwrap_or(&[]).iter().map(ident_name).collect();
     let mut arr_ok = HashSet::new();
     for a in arg_names.iter().flatten() {
@@ -861,6 +920,11 @@ fn note_call(
         }
     }
     if env.dry {
+        // A name the function binds is a function value: anything may be
+        // behind it.
+        if env.bound.contains(&callee) || !pure.contains(&callee) {
+            env.poison_all();
+        }
         return;
     }
     calls.push(CallSite {
@@ -870,9 +934,26 @@ fn note_call(
         nonneg: env.nonneg.clone(),
         arr_ok,
     });
-    if !pure.contains(&callee) {
+    if env.bound.contains(&callee) || !pure.contains(&callee) {
         env.poison_all();
     }
+}
+
+/// Whether `Owner::name` written with no arguments (`Owner::name()`, which
+/// the parser reads as the unit construction `Owner::name`) calls a static
+/// method: an inherent one of `Owner`, or a trait's (`K::default()`,
+/// `T::make()`), and no enum constructor. Otherwise it reads a class static.
+pub(super) fn static_method_call(checker: &Checker, owner: &str, name: &str) -> bool {
+    if checker.tag_for(owner, name).is_some() || (owner == "Vec" && matches!(name, "new" | "with_capacity")) {
+        return false;
+    }
+    checker.is_static_method(owner, name) || checker.generics().typeclasses.values().any(|t| t.methods.iter().any(|m| m.name == name))
+}
+
+/// Whether an operator with this operand runs a user's trait impl
+/// ([`crate::effects::operator_runs_user_code`]), by the operand's type.
+fn operand_runs_user_code(checker: &Checker, operand: &Output<'_>) -> bool {
+    crate::effects::operator_runs_user_code(checker.ty_at_span((operand.0.start, operand.0.end)).as_ref())
 }
 
 fn collect_value_uses(ast: &Output<'_>, used: &mut HashSet<String>) {
