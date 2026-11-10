@@ -57,6 +57,33 @@ pub fn range_heap_type_id(inclusive: bool) -> u32 {
     }
 }
 
+/// Whether `split` holds for an open `Option` / `Result` (one whose
+/// payload still has a type variable) that a parameter or result of
+/// declared type `ty` holds below its top: an element of an array or
+/// `Vec`, a tuple item, a type argument, a payload of another enum. A
+/// shared generic body holds such a value as its enum object, and nothing
+/// converts it at a call (only the top of a parameter or result is,
+/// `docs/internals/layout.md`, "Open enums"); `split` says whether ground
+/// code holds that one differently. The top of a function type's parameter
+/// and result count as tops (a function argument's adapter converts them).
+pub fn nested_open_enum(ty: &Ty, top: bool, split: &mut dyn FnMut(&Ty) -> bool) -> bool {
+    let ty = crate::typechecking::ty::strip_readonly(ty);
+    if !ty.has_var() {
+        return false;
+    }
+    let app = crate::typechecking::ty::builtin_enum_app(ty);
+    let ty = app.as_ref().unwrap_or(ty);
+    if !top && app.is_some() && split(ty) {
+        return true;
+    }
+    if let Ty::Fun(param, ret) = ty {
+        return nested_open_enum(param, true, split) || nested_open_enum(ret, true, split);
+    }
+    let mut found = false;
+    ty.for_each_child(|child| found = found || nested_open_enum(child, false, split));
+    found
+}
+
 /// `Some(PairKind::Range { .. })` when `ty` is a numeric `Range` /
 /// `RangeInclusive` two-slot pair.
 pub fn two_word_range_kind(ty: &Ty) -> Option<PairKind> {

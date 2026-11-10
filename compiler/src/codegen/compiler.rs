@@ -1326,7 +1326,8 @@ impl Compiler {
         // `Show<Tree<T>>`): a method already on this clone's chain takes the
         // shared body, as does any clone past `--clone-budget` but a hot
         // method's (`#[hot]`, `docs/internals/opt-hints.md`).
-        let past_budget = self.inst_clones.len() >= self.checker.host_grants().clone_budget() && !self.is_hot_fn(fqn);
+        let past_budget =
+            self.inst_clones.len() >= self.checker.host_grants().clone_budget() && !self.is_hot_fn(fqn) && !self.fn_sig_split(fqn);
         if past_budget || self.inst_clone_recursive(fqn) {
             return None;
         }
@@ -1441,7 +1442,9 @@ impl Compiler {
         if planned.contains(&key) {
             return true;
         }
-        let room = (self.inst_clones.len() + planned.len() < self.checker.host_grants().clone_budget() || self.is_hot_fn(fqn))
+        let room = (self.inst_clones.len() + planned.len() < self.checker.host_grants().clone_budget()
+            || self.is_hot_fn(fqn)
+            || self.fn_sig_split(fqn))
             && !self.inst_clone_recursive(fqn)
             && planned.len() < self.inst_clone_labels.len();
         if room {

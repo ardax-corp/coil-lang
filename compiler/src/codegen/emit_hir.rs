@@ -4809,6 +4809,11 @@ impl Compiler {
         {
             return Ok(clone);
         }
+        if let HirKind::Call { args, .. } = &hir.expr(call).kind
+            && self.hir_shared_split(hir, call, &lookup, args)
+        {
+            return Err("callee-generic");
+        }
         Ok(abi)
     }
 
@@ -5345,6 +5350,11 @@ impl Compiler {
         if adapts && !self.inst_clone_has_body(key, &lookup_tys) {
             return None;
         }
+        // A thunk clone calls the shared body, which a call holding a
+        // nested open enum as a niche word cannot take.
+        if !self.inst_clone_has_body(key, &lookup_tys) && self.hir_shared_split(hir, call, lookup, args) {
+            return None;
+        }
         if !self.method_clone_room(key, &lookup_tys) {
             return None;
         }
@@ -5656,6 +5666,9 @@ impl Compiler {
             && let Some(clone) = self.hir_method_clone(hir, call, &lookup, &lookup, &abi)
         {
             return Ok(clone);
+        }
+        if self.hir_shared_split(hir, call, &lookup, args) {
+            return Err("callee-generic");
         }
         let mut call = abi;
         call.method = true;
@@ -7098,6 +7111,43 @@ impl Compiler {
             return Err("callee-generic");
         }
         self.hir_items_rebuild(cur, vars, boxed, true)
+    }
+
+    /// Whether `call` of generic `lookup` cannot take the shared body: a
+    /// parameter or the result holds an open `Option` / `Result` below its
+    /// top (`Vec<Option<T>>`, `(Option<T>, int)`, `Option<Option<T>>`) that
+    /// is a niche word at the call's types (`Option<string>`). The shared
+    /// body holds that value as its enum object and ground code as the
+    /// niche word, inside an object both sides share, which no conversion
+    /// at the call reaches (#2441). Such a call takes a clone or is refused.
+    fn hir_shared_split(&self, hir: &HirBody, call: HirId, lookup: &str, args: &[HirId]) -> bool {
+        let Some((params, ret)) = self.checker.fn_call_sig(lookup, args.len()) else {
+            return false;
+        };
+        let mut vars = HashMap::new();
+        for (param, &arg) in params.iter().zip(args) {
+            if let Some(ty) = Self::hir_ty(hir, arg) {
+                Self::bind_scheme_vars(param, &apply_ty_prune(self.checker.subst(), ty), &mut vars);
+            }
+        }
+        if let Some(ty) = Self::hir_ty(hir, call) {
+            Self::bind_scheme_vars(&ret, &apply_ty_prune(self.checker.subst(), ty), &mut vars);
+        }
+        let mut niche = |open: &Ty| self.hir_niche_word(&apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(open, &vars)));
+        params.iter().chain([&ret]).any(|ty| crate::layout::nested_open_enum(ty, true, &mut niche))
+    }
+
+    /// Whether the signature of generic `fqn` holds an open `Option` /
+    /// `Result` below the top of a parameter or of the result: its ground
+    /// calls take a clone past the clone budget, as a hot method's do
+    /// ([`Self::hir_shared_split`]).
+    pub(super) fn fn_sig_split(&self, fqn: &str) -> bool {
+        self.checker
+            .fn_param_tys(fqn)
+            .into_iter()
+            .flatten()
+            .chain(self.checker.fn_return_ty(fqn))
+            .any(|ty| crate::layout::nested_open_enum(&ty, true, &mut |_| true))
     }
 
     /// Whether a shared body and ground code hold a value of `ty` as the
