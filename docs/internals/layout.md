@@ -335,8 +335,13 @@ Ground code reads, stores and pushes the two words (`LaneIndex`,
 `Show`) never sees a lane array: where a lane array's value goes to such a
 use (`hir_lane_escapes`), `LanesToWords` turns it into boxed elements in
 place, as the op's `MirLaneShape` says to box them. The array stays the
-same object, so every alias sees the change, and it never turns back. The
-lane ops in turn accept an array of boxed elements (one a generic body
+same object, so every alias sees the change, and it never turns back. A
+lane array a ground function returns to a shared body that calls it as a
+function value (`fn() -> Vec<T>`) is converted the same way by the
+argument's adapter (`HirFnRet::Lanes`); a function below a signature's top
+(`Vec<fn() -> Vec<T>>`) gets no adapter, so such a signature is
+clone-only, as for a `()` result (`layout::nested_fn_var_result`, #2592).
+The lane ops in turn accept an array of boxed elements (one a generic body
 made, or one converted earlier): `LaneIndex` unboxes the element, and
 `LaneStore` / `LanePush` box the new one. A one-word element op on a lane
 array is a compiler bug and panics in the runtime.

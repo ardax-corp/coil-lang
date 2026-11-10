@@ -652,7 +652,12 @@ pub struct CallAbi {
 /// body keeps the word its call gives as a `T`, and a `()` stored or passed
 /// is the empty tuple object. Only a function that is itself a top (a
 /// function argument) gets an adapter that returns that object (#2498);
-/// `unit` says whether ground code has `()` for the variable.
+/// `unit` says whether ground code has `()` for the variable. The same for
+/// a `Vec` or array of a type variable such a function returns
+/// (`Vec<fn() -> Vec<T>>`): a ground function of a closed two-word element
+/// returns a lane array, which only a function argument's adapter turns
+/// into the one word per element a shared body reads (#2592); `unit` is
+/// asked with the `Vec` and says whether ground code has a lane array.
 pub fn nested_fn_var_result(ty: &Ty, top: bool, unit: &mut dyn FnMut(&Ty) -> bool) -> bool {
     let ty = crate::typechecking::ty::strip_readonly(ty);
     if !ty.has_var() {
@@ -664,7 +669,12 @@ pub fn nested_fn_var_result(ty: &Ty, top: bool, unit: &mut dyn FnMut(&Ty) -> boo
             while let Ty::Fun(_, next) = result {
                 result = next;
             }
-            if matches!(crate::typechecking::ty::strip_readonly(result), Ty::Var(_)) && unit(result) {
+            let result = crate::typechecking::ty::strip_readonly(result);
+            let lanes = match result {
+                Ty::Array { element, .. } => element.has_var(),
+                t => crate::typechecking::ty::vec_element_ty(t).is_some_and(Ty::has_var),
+            };
+            if (matches!(result, Ty::Var(_)) || lanes) && unit(result) {
                 return true;
             }
         }
