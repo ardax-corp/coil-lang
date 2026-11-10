@@ -254,10 +254,28 @@ the same walk over the declarations) takes a clone for every ground
 call, past the budget, through the same two rules (`GenericFnSig::split`,
 `fn_sig_split`).
 
-Still refused (E0801): an enum payload or field `Option<fn(T) -> T>` (a
-niche word at a ground instance, an enum object in a shared body), and a
-function that holds the parameter below its top in another way
-(`fn(T) -> (T, T)`, `fn(Vec<T>) -> T`, #2493).
+**Plain words** (#2493, #2571). Which function types over a type
+parameter are one closure word that a shared body and ground code call
+alike is one predicate, `classify::fun_words_in`: each parameter and
+the result is `()` or a plain word (`plain_word`), which is
+
+- a closed one-word type or closed enum, a bare `T`, a generic class's
+  instance over type parameters (`Cell<T>`, `Vec<T>`), or a function;
+- a tuple of plain words (`fn(T) -> (T, T)`): the tuple object, whose
+  items are each one word, never a pair at a word position;
+- an `Option` / `Result` of such functions and words (`Option<fn(T) ->
+  T>`): a function is no niche payload and never closed, so the value
+  is the boxed object in every instance.
+
+A local, a binding (`let`, a pattern, a `match` or `if` of closure
+words, #2565), a field, a payload and an item of a `Vec`, array, tuple,
+`Option` or `Result` (`classify::fun_holder`) of such a function is
+then one word everywhere, and matching or binding it needs no refusal.
+What the predicate leaves out is what differs between the two sides:
+an open `Option<T>` in the function's signature (a niche word at a
+ground type) is a plain word only where every closure was made with the
+enum open (`open_enum`: a closure literal's type, a function argument,
+a value read from a nested open enum).
 
 ### Residue boxes (E0808)
 
