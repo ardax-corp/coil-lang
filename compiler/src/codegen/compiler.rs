@@ -4214,7 +4214,7 @@ impl Compiler {
                 self.note_raw_builtin_thunk(&fqn);
                 self.reserve_function_entry(Self::dict_adapter_name(&fqn));
                 self.reserve_function_entry(fqn.clone());
-                let arity = if matches!(method.as_str(), "eq" | "ne" | "lt" | "le" | "gt" | "ge") { 2 } else { 1 };
+                let arity = if matches!(method.as_str(), "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "add" | "sub" | "mul" | "div" | "rem" | "pow") { 2 } else { 1 };
                 let param = if method == "len" { Self::structural_shape_at_int(&ty) } else { ty.clone() };
                 self.structural_thunk_params.insert(fqn.clone(), vec![param; arity]);
                 if !self.structural_thunks.iter().any(|(f, ..)| *f == fqn) {
@@ -7043,6 +7043,33 @@ impl Compiler {
                             })
                         }
                         ("hash", _) => self.emit_structural_hash(&name, &ty, tag),
+                        // An aggregate's element-wise operator (#2513), on
+                        // locals, as a clone of a generic body lowers it.
+                        ("add" | "sub" | "mul" | "div" | "rem" | "pow", _) => {
+                            let sym = match method.as_str() {
+                                "add" => "+",
+                                "sub" => "-",
+                                "mul" => "*",
+                                "div" => "/",
+                                "rem" => "%",
+                                _ => "**",
+                            };
+                            let params = [(ty.clone(), tag), (ty.clone(), tag)];
+                            self.emit_builtin_entry(&name, &params, ty.clone(), tag, |b, a| {
+                                let (x, y) = (b.local("x", ty.clone(), crate::hir::LocalKind::Let), b.local("y", ty.clone(), crate::hir::LocalKind::Let));
+                                let stmts = vec![b.let_(x, a[0]), b.let_(y, a[1])];
+                                let (x, y) = (b.read(x), b.read(y));
+                                let value = b.bin(crate::hir::BinOp::Overloaded(sym), x, y, ty.clone());
+                                b.block(stmts, Some(value), ty.clone())
+                            })
+                        }
+                        ("neg", _) => self.emit_builtin_entry(&name, &[(ty.clone(), tag)], ty.clone(), tag, |b, a| {
+                            let x = b.local("x", ty.clone(), crate::hir::LocalKind::Let);
+                            let stmts = vec![b.let_(x, a[0])];
+                            let x = b.read(x);
+                            let value = b.push(crate::hir::HirKind::Un { op: crate::hir::UnOp::Neg, operand: x }, ty.clone());
+                            b.block(stmts, Some(value), ty.clone())
+                        }),
                         // The structural length read, as `x.len()` (#1536).
                         // A shape's (`Vec<a>`, #1542) reads it at any element
                         // type: its entry takes the shape at `int`.

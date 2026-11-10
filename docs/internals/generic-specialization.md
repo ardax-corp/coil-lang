@@ -22,6 +22,15 @@ method once per element (`Lower::bound_elem`), whatever the length: the
 packed kernels take primitive words only, so `emit_hir_mir` plans one only
 for a ground `int` / `float` / `byte` element.
 
+A bound met at the aggregate itself (`add<T: Num>(T a, T b)` called at
+`(int, int)` or `[float; 3]`) is the aggregate's structural instance
+(`Checker::ensure_structural_arith`, #2513): `Add` .. `Pow` and `Neg`
+(with `Num`, all seven) at a ground homogeneous tuple or array whose
+element has them, each method a thunk that runs the element-wise
+operator at that type (`emit_structural_thunks`). A clone still lowers
+the operator in place; a shared body gets the tuple's `Num` dictionary.
+A nested aggregate (`((int, int), (int, int))`) and a `Vec` have none.
+
 ## Ground dictionaries once (#1417)
 
 A dictionary made only of method pointers (and such dictionaries) is built

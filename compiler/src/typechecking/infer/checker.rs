@@ -10615,6 +10615,10 @@ impl Checker {
             self.ensure_structural_tuple_ord(ty);
             return;
         }
+        if crate::typechecking::aggregate_arith::is_liftable_arith_trait(class) {
+            self.ensure_structural_arith(class, ty);
+            return;
+        }
         if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
@@ -10663,6 +10667,38 @@ impl Checker {
         };
         if items_ok {
             self.generics.register_structural_instance(class, ty);
+        }
+    }
+
+    /// A ground homogeneous tuple or array whose element has an
+    /// arithmetic trait's instance has the trait's structural instance
+    /// (#2513): the element-wise operator, which a per-type clone lowers in
+    /// place and a shared body reaches through the instance's dictionary.
+    /// `Num` comes with its seven superclasses, registered together, as a
+    /// tuple's `Ord` with `Lt` .. `Ge`. A nested aggregate (`((int, int),
+    /// (int, int))`) has none: element-wise lowering takes one level only.
+    fn ensure_structural_arith(&mut self, class: &str, ty: &Ty) {
+        use crate::typechecking::aggregate_arith::homogeneous_aggregate_elem;
+        let ty = nominal_enum(apply_ty_prune(&self.subst, ty));
+        // A `Vec`'s operators are not element-wise in a clone either.
+        if !matches!(strip_readonly(&ty), Ty::Tuple(_) | Ty::Array { .. }) {
+            return;
+        }
+        let Some(elem) = homogeneous_aggregate_elem(strip_readonly(&ty)) else {
+            return;
+        };
+        let elem = nominal_enum(apply_ty_prune(&self.subst, &elem));
+        if ty.has_var() || matches!(strip_readonly(&elem), Ty::Tuple(_) | Ty::Array { .. }) || self.generics.has_instance(class, &ty) {
+            return;
+        }
+        let classes: &[&str] = if class == "Num" { &["Add", "Sub", "Mul", "Div", "Rem", "Pow", "Neg", "Num"] } else { &[class] };
+        let met = classes.iter().all(|&c| self.generics.find_instance_relaxed(c, std::slice::from_ref(&elem)).is_some());
+        if met {
+            for &c in classes {
+                if !self.generics.has_instance(c, &ty) {
+                    self.generics.register_structural_instance(c, ty.clone());
+                }
+            }
         }
     }
 
