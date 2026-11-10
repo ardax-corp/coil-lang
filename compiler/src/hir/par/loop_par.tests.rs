@@ -724,3 +724,60 @@ fn main() { return; }
     let sites: Vec<LoopParSite> = module.loop_par_sites(&checker, &pure).into_values().collect();
     assert_eq!(sites.iter().map(|s| s.end).collect::<Vec<_>>(), [50]);
 }
+
+/// The sites of `body` with every contract check built in.
+fn checked_sites(body: &str) -> Vec<LoopParSite> {
+    crate::hir::set_contract_level(crate::hir::ContractLevel::All);
+    sites_of(&program(body))
+}
+
+#[test]
+fn an_invariant_over_the_accumulator_keeps_a_for_loop_sequential() {
+    let sites = checked_sites(
+        r#"
+    let acc = 0;
+    for x in 0..100
+        invariant acc >= 0
+    {
+        acc = acc + sq(x);
+    }
+"#,
+    );
+    assert!(sites.is_empty(), "a chunk checks the clause against its partial fold: {sites:?}");
+}
+
+#[test]
+fn an_invariant_over_what_a_while_loop_writes_keeps_it_sequential() {
+    for clause in ["invariant i <= 100", "invariant acc >= 0", "decreases 100 - i"] {
+        let sites = checked_sites(&format!(
+            r#"
+    let acc = 0;
+    let i = 0;
+    while i < 100
+        {clause}
+    {{
+        acc = acc + sq(i);
+        i = i + 1;
+    }}
+"#
+        ));
+        assert!(sites.is_empty(), "`{clause}`: {sites:?}");
+    }
+}
+
+#[test]
+fn an_invariant_over_values_the_loop_leaves_alone_stays_a_site() {
+    let sites = checked_sites(
+        r#"
+    let k = 3;
+    let acc = 0;
+    for x in 0..100
+        invariant k > 0
+    {
+        acc = acc + sq(x) * k;
+    }
+"#,
+    );
+    assert_eq!(sites.len(), 1, "{sites:?}");
+    assert_eq!(sites[0].acc, "acc");
+}
