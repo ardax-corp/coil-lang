@@ -153,6 +153,21 @@ impl Compiler {
         packs
     }
 
+    /// [`crate::mir::HirPacks::unit_fns`] of `hir`: each reached value a
+    /// generic field or payload stores that takes the unit adapter
+    /// ([`Self::hir_unit_fn_slot`]), with the adapter's `MakeFn` entry.
+    pub(super) fn hir_mir_unit_fns(&mut self, hir: &HirBody, reach: &[HirId]) -> HashMap<u32, (crate::bodies::Label, u32)> {
+        let mut out = HashMap::new();
+        for &id in reach {
+            for (arg, decl, _) in self.hir_generic_slots(hir, id) {
+                if let Some(adapt) = self.hir_unit_fn_slot(hir, arg, &decl) {
+                    out.insert(arg.0, self.hir_fn_adapter(&adapt));
+                }
+            }
+        }
+        out
+    }
+
     /// The locals emission binds in `hir`'s frame, from the HIR and the
     /// plan alone: direct MIR numbers them after the entry words.
     pub(super) fn hir_bound_locals(&self, hir: &HirBody, emit: &HirEmit) -> HashSet<u32> {

@@ -1235,6 +1235,23 @@ impl Compiler {
             self.report_generic_fn_value(&value, at);
             return;
         }
+        if let Some((slot, at)) = self.unit_fn_nested_refusal.take()
+            && reason == "unit-fn-nested"
+        {
+            let mut msg = Message::error(
+                ErrorCode::CodegenError,
+                format!("a value holding a `-> ()` function cannot be stored in the {slot} here: the slot's type holds a function returning a type parameter inside another type"),
+                at.0..at.1,
+            );
+            msg.with_help(
+                "the type's methods run one shared body, which keeps that function's result as a word of the type parameter; a `-> ()` \
+                 function returns no such word, and only a field or payload declared as the function itself (`fn() -> T`) converts it \
+                 (coil-lang#2541)"
+                    .to_string(),
+            );
+            self.messages.push(msg);
+            return;
+        }
         if let Some((name, at)) = self.polyfn_over_application.take()
             && reason == "polyfn-over-application"
         {
@@ -1320,6 +1337,7 @@ impl Compiler {
         self.hir_refusal = None;
         *self.polyfn_over_application.borrow_mut() = None;
         *self.nested_split_refusal.borrow_mut() = None;
+        *self.unit_fn_nested_refusal.borrow_mut() = None;
         // Clones an earlier body planned but never called give back their room.
         self.planned_method_clones.borrow_mut().clear();
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
@@ -1420,6 +1438,7 @@ impl Compiler {
             None
         }
         .or_else(|| refusal::refusal(hir, &self.checker))
+        .or_else(|| self.hir_unit_fn_nested(&module, hir))
         .map_or_else(|| self.plan_hir_body(hir), Err)
         .and_then(|mut emit| self.plan_hir_lambdas(&module, hir, &mut emit).map(|()| emit));
         // The HIR passes rewrite the body, resolving its calls as they go,
@@ -1633,7 +1652,8 @@ impl Compiler {
         // What is decided over the whole body before it lowers: the values
         // it packs, the residue lint, and whether it reads a dictionary.
         let reach = self.hir_mir_reach(hir, emit);
-        let packs = self.hir_mir_packs(hir, emit, &reach);
+        let mut packs = self.hir_mir_packs(hir, emit, &reach);
+        packs.unit_fns = self.hir_mir_unit_fns(hir, &reach);
         // A shared generic body's dictionaries are trailing parameters
         // direct MIR reads only through dictionary programs: a body whose
         // code reads one any other way gets no MIR, and is never a
@@ -7765,6 +7785,133 @@ impl Compiler {
     /// word it gets, which for a `()` is the empty tuple object (#2498).
     fn hir_unit_ret(ground: &Ty) -> Option<HirFnRet> {
         crate::layout::is_unit(ground).then_some(HirFnRet::Unit)
+    }
+
+    /// The values node `id` stores in a generic class's field or a user
+    /// enum's payload, each with the slot's declared type (its parameters
+    /// type variables) and its name: `new C(..)`'s arguments, a variant's
+    /// payload, a field store's value.
+    pub(super) fn hir_generic_slots(&self, hir: &HirBody, id: HirId) -> Vec<(HirId, Ty, String)> {
+        match &hir.expr(id).kind {
+            HirKind::Make { kind: MakeKind::Class(_), args } => {
+                let Some((class, _)) = self.hir_new_layout(hir, id) else {
+                    return Vec::new();
+                };
+                let fields = self.hir_class_fields(&class).unwrap_or_default();
+                args.iter().zip(fields).map(|(&arg, (name, ty))| (arg, ty, format!("field `{name}` of `{class}`"))).collect()
+            }
+            HirKind::Make { kind: MakeKind::Variant { enum_name, variant, fields, .. }, args } => {
+                let Some(tys) = self.hir_variant_decl(enum_name, variant, fields.as_deref()).filter(|t| t.len() == args.len()) else {
+                    return Vec::new();
+                };
+                args.iter().zip(tys).map(|(&arg, ty)| (arg, ty, format!("payload of `{enum_name}::{variant}`"))).collect()
+            }
+            HirKind::Assign { place, value } => match &hir.expr(*place).kind {
+                HirKind::Field { base, name } => match self.hir_field(hir, *base, name) {
+                    Some((FieldAt::Slot(_), ty)) => vec![(*value, ty, format!("field `{name}`"))],
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// The declared payload types of generic user enum `enum_name`'s
+    /// `variant`, its parameters type variables, in the order a `Make`
+    /// passes them (`fields` for a record variant).
+    fn hir_variant_decl(&self, enum_name: &str, variant: &str, fields: Option<&[String]>) -> Option<Vec<Ty>> {
+        if common::is_builtin_option_enum(enum_name) || common::is_builtin_result_enum(enum_name) {
+            return None;
+        }
+        let ctors = &self.checker.generics().generic_type_ctors;
+        let params = ctors.get(enum_name).or_else(|| ctors.get(&self.checker.registry_enum_key(enum_name)))?;
+        let payload = self.checker.payload_tys_for(enum_name, variant);
+        match fields {
+            Some(names) => names.iter().map(|n| payload.iter().find(|(f, _)| f == n).map(|(_, t)| open_params(t, params))).collect(),
+            None => Some(payload.iter().map(|(_, t)| open_params(t, params)).collect()),
+        }
+    }
+
+    /// The unit adapter (`HirFnRet::Unit`) value `arg` takes where it is
+    /// stored in a slot declared `decl`: a function whose result is a type
+    /// parameter (`f: fn() -> T`), which the type's shared methods call and
+    /// keep as their `T`, while `arg` is a ground `-> ()` function, which
+    /// returns nothing a caller reads (#2541). Ground readers ignore the
+    /// object the adapter returns. A value read from such a slot is
+    /// converted already.
+    pub(super) fn hir_unit_fn_slot(&self, hir: &HirBody, arg: HirId, decl: &Ty) -> Option<HirFnAdapt> {
+        use crate::typechecking::ty::strip_readonly;
+        let decl = strip_readonly(decl);
+        if !matches!(decl, Ty::Fun(..)) {
+            return None;
+        }
+        let ground = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
+        let (mut d, mut g) = (decl, strip_readonly(&ground));
+        let mut arity = 0;
+        while let Ty::Fun(_, next) = d {
+            let Ty::Fun(_, ground_next) = g else {
+                return None;
+            };
+            (d, g) = (strip_readonly(next), strip_readonly(ground_next));
+            arity += 1;
+        }
+        if !matches!(d, Ty::Var(_)) || !crate::layout::is_unit(g) {
+            return None;
+        }
+        if let HirKind::Field { base, name } = &hir.expr(arg).kind
+            && self.hir_field(hir, *base, name).is_some_and(|(_, fty)| Self::fn_var_result(&fty))
+        {
+            return None;
+        }
+        if Self::nullary_fn_ty(decl) {
+            arity = 0;
+        }
+        Some(HirFnAdapt { unbox: vec![None; arity], ret: Some(HirFnRet::Unit) })
+    }
+
+    /// Whether `ty` is a function whose result is a bare type variable.
+    fn fn_var_result(ty: &Ty) -> bool {
+        let mut ty = crate::typechecking::ty::strip_readonly(ty);
+        if !matches!(ty, Ty::Fun(..)) {
+            return false;
+        }
+        while let Ty::Fun(_, next) = ty {
+            ty = crate::typechecking::ty::strip_readonly(next);
+        }
+        matches!(ty, Ty::Var(_))
+    }
+
+    /// Why `hir` (or an anonymous `fn` in it) is refused: it stores a value
+    /// in a generic class's field or enum's payload whose declared type
+    /// holds a function below its top returning a type parameter that is
+    /// `()` there (`fs: Vec<fn() -> T>` at `T = ()`). The type's shared
+    /// methods keep such a function's result as their `T`, a ground `-> ()`
+    /// function returns nothing a caller reads, and no adapter reaches a
+    /// function inside another value (#2541). The diagnostic goes to
+    /// [`Compiler::unit_fn_nested_refusal`].
+    pub(super) fn hir_unit_fn_nested(&self, module: &crate::hir::HirModule, hir: &HirBody) -> Option<&'static str> {
+        for i in 0..hir.exprs.len() as u32 {
+            let id = HirId(i);
+            if let HirKind::Lambda { body } = &hir.expr(id).kind
+                && let Some(why) = self.hir_unit_fn_nested(module, &module.bodies[*body])
+            {
+                return Some(why);
+            }
+            for (arg, decl, slot) in self.hir_generic_slots(hir, id) {
+                let Some(ground) = Self::hir_ty(hir, arg).map(|t| apply_ty_prune(self.checker.subst(), t)) else {
+                    continue;
+                };
+                let mut vars = HashMap::new();
+                Self::bind_scheme_vars(&decl, &ground, &mut vars);
+                let mut unit = |v: &Ty| matches!(v, Ty::Var(var) if vars.get(var).is_some_and(crate::layout::is_unit));
+                if crate::layout::nested_fn_var_result(&decl, true, &mut unit) {
+                    *self.unit_fn_nested_refusal.borrow_mut() = Some((slot, hir.expr(arg).span));
+                    return Some("unit-fn-nested");
+                }
+            }
+        }
+        None
     }
 
     /// The adapter function [`Self::hir_closure_adapter`] reserved `label`

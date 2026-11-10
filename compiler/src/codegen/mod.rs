@@ -311,6 +311,10 @@ pub struct Compiler {
     /// The generic function value (name, span) a body's HIR plan refused
     /// with `generic-fn-value`; reported as E0127 instead of E0801 (#916).
     generic_fn_value_refusal: std::cell::RefCell<Option<(String, (usize, usize))>>,
+    /// The slot and the value's span where a body stores a `-> ()`
+    /// function below a function type returning a type parameter of a
+    /// generic field or payload ([`Compiler::hir_unit_fn_nested`], #2541).
+    unit_fn_nested_refusal: std::cell::RefCell<Option<(String, (usize, usize))>>,
     /// The generic function (name, call span) a body's call through a
     /// `PolyFn` local recording no arity gave more arguments than it
     /// declares; reported as E0127 instead of E0801 (#1569, #1589).
@@ -726,6 +730,7 @@ impl Default for Compiler {
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
             fn_value_redirect_answers: std::cell::RefCell::new(HashMap::new()),
             generic_fn_value_refusal: std::cell::RefCell::new(None),
+            unit_fn_nested_refusal: std::cell::RefCell::new(None),
             polyfn_over_application: std::cell::RefCell::new(None),
             nested_split_refusal: std::cell::RefCell::new(None),
             fn_value_escaped_program: None,

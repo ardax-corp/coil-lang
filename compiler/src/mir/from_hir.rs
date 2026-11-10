@@ -896,8 +896,9 @@ pub struct HirSite {
     pub field_new: bool,
 }
 
-/// The values the body packs as a bare-class existential
-/// ([`LowerCx::packs`]).
+/// The values the body converts where it makes them ([`LowerCx::packs`]):
+/// those it packs as a bare-class existential, and the function values it
+/// stores where a shared body reads their `()` result as a type parameter.
 #[derive(Debug, Default)]
 pub struct HirPacks {
     /// By expression: the pack's program, run on the value's word
@@ -905,6 +906,12 @@ pub struct HirPacks {
     pub programs: HashMap<u32, Vec<HirDictOp>>,
     /// Some packed value has no program.
     pub unplanned: bool,
+    /// By expression: a ground `-> ()` function value stored in a generic
+    /// class's field or enum's payload declared `fn(..) -> V`, `V` a type
+    /// parameter, wrapped in the adapter that returns the empty tuple
+    /// object (`MakeFn` of its entry, the label, then the operand), as the
+    /// type's shared methods read the result as their `V` (#2541).
+    pub unit_fns: HashMap<u32, (Label, u32)>,
 }
 
 /// What lowering has asked [`LowerCx::site`] so far, by node. A body and
@@ -3295,6 +3302,15 @@ impl Lower<'_> {
     /// HIR emission packs it.
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
         let mut val = self.value_unpacked(id)?;
+        // A `-> ()` function stored where a shared body reads its result
+        // as a type parameter: wrapped to return the empty tuple object.
+        if let (Val::V(v), Some(&(target, operand))) = (val, self.cx.packs().unit_fns.get(&id.0)) {
+            if self.b.value_ty(v) != MirTy::HeapRef {
+                return Err("unit function adapter".into());
+            }
+            let f = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![v]).map_err(mir))?;
+            val = Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?);
+        }
         // A lane array leaving for one-word code: boxed in place.
         if self.lane_escape(id)
             && let (Val::V(v), Some(lane)) = (val, self.lane(id))
