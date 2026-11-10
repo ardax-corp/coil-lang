@@ -66,7 +66,7 @@ Where the word comes from:
   it), `common::KINDS_FROM_CALL`, which the runtime replaces by the call's
   last word; a call through a `forall` parameter or such a local passes it
   last. A function of more type parameters read open captures every bit
-  clear (the `forall`'s order need not be its own): its ops stay off.
+  clear (the `forall`'s order need not be its own): its ops stay off (#2621).
 
 A ground call passes a constant; a shared caller forwards its own bit for a
 type parameter and a constant for a type with a known head (`Vec<T>` is 1,
