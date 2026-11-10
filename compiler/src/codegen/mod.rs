@@ -323,6 +323,10 @@ pub struct Compiler {
     /// with a nested open enum that is a niche word at the call's types
     /// (`hir_shared_split`, #2446): reported with why and what to write.
     nested_split_refusal: std::cell::RefCell<Option<(String, (usize, usize))>>,
+    /// The (class instance, field, span) of a field this body would fill
+    /// or read in its own layout where another module's shared bodies hold
+    /// it in theirs (`hir_check_shared_field`, #2547).
+    shared_field_refusal: std::cell::RefCell<Option<SharedFieldRefusal>>,
 
     /// Whole-program names used as function *values* (`Some` after the
     /// pipeline seeds every AST in the compile). `None` means "sidecar
@@ -738,6 +742,7 @@ impl Default for Compiler {
             unit_fn_nested_refusal: std::cell::RefCell::new(None),
             polyfn_over_application: std::cell::RefCell::new(None),
             nested_split_refusal: std::cell::RefCell::new(None),
+            shared_field_refusal: std::cell::RefCell::new(None),
             fn_value_escaped_program: None,
             written_names_program: None,
             test_cases: Vec::new(),
@@ -895,6 +900,10 @@ pub(crate) struct InstCloneSrc {
     /// parameters: cloned per call site's ground type arguments.
     method_of: Option<MethodCloneSrc>,
 }
+
+/// A field refused as `field-shared-layout`: the class instance, the
+/// field and the span of the read, write or construction (#2547).
+type SharedFieldRefusal = (String, String, (usize, usize));
 
 /// The per-module state a function body compiles under, kept from the
 /// end of its module's compile so a later module can clone its methods.
