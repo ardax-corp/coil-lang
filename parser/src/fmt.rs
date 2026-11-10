@@ -3880,6 +3880,38 @@ fn main() { return; }
     }
 
     #[test]
+    fn parens_around_a_field_callee_stay() {
+        // #2472: `(o.f)(1)` calls the function the field `f` holds;
+        // `o.f(1)` is the method call.
+        let chain = ".show().len()".repeat(7);
+        for (body, kept) in [
+            ("(o.f)(1)".to_string(), "(o.f)(1)"),
+            ("((o.f))(1)".to_string(), "(o.f)(1)"),
+            ("(a.b.f)(x)".to_string(), "(a.b.f)(x)"),
+            ("(o.f)(1)(2)".to_string(), "(o.f)(1)(2)"),
+            ("(o.f)(1).show()".to_string(), "(o.f)(1).show()"),
+            ("(self.f)(self.v)".to_string(), "(self.f)(self.v)"),
+            ("(o?.f)(1)".to_string(), "(o?.f)(1)"),
+            ("g((o.f)(1), (o.f)(2))".to_string(), "g((o.f)(1), (o.f)(2))"),
+            (format!("(o.f)(1){chain}"), "(o.f)(1)"),
+        ] {
+            let src = format!("fn main() {{\n    let n = {body};\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert!(once.contains(kept), "{src}\n=>\n{once}");
+            stable(&once);
+        }
+        // A statement, too.
+        stable("fn main() {\n    (o.f)(1);\n}\n");
+        // Parens around any other callee are still dropped, and a method
+        // call stays one.
+        for (body, want) in [("(f)(1)", "f(1)"), ("(m::f)(1)", "m::f(1)"), ("(fs[0])(1)", "fs[0](1)"), ("o.f(1)", "o.f(1)")] {
+            let src = format!("fn main() {{\n    let n = {body};\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert!(once.contains(&format!("let n = {want};")), "{src}\n=>\n{once}");
+        }
+    }
+
+    #[test]
     fn member_after_try_keeps_its_meaning() {
         // #1540: `r? .len()` is `(r?).len()`; printing it as `r?.len()`
         // would turn it into optional access.
