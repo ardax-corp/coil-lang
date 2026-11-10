@@ -246,6 +246,10 @@ pub struct ProgramEffects {
     /// Why a body mutates each parameter it mutates, by full body name:
     /// `(parameter index, "writes field `x`")`.
     mutations: Mutations,
+    /// The full body name of each trait impl method so far, by the module
+    /// of its `impl` and the key its calls name (the instance's
+    /// `method_fqns`): what a later module's call of that instance runs.
+    instance_bodies: HashMap<(String, String), String>,
     /// A `drop` so far may change the length of an array or `Vec`.
     drop_resizes: bool,
 }
@@ -293,6 +297,19 @@ impl ProgramEffects {
         // A method of another class or trait says nothing of this call; a
         // name that is also some trait method's may still be a function.
         first(short_name(key), &of_owner).or_else(|| if method || trait_name.is_some() { None } else { first(key, &|_| true) })
+    }
+
+    /// The impl body an earlier module recorded for the method `fqn` of an
+    /// instance declared in `module`: its full name and summary.
+    fn instance_body(&self, module: &str, fqn: &str) -> Option<(&str, Summary)> {
+        let name = self.instance_bodies.get(&(module.to_string(), fqn.to_string()))?;
+        Some((name.as_str(), *self.by_name.get(name)?))
+    }
+
+    /// Why the body named `name` mutates its parameter `j`, when an earlier
+    /// module said.
+    fn reason_of(&self, name: &str, j: u32) -> Option<String> {
+        self.mutations.get(name)?.iter().find(|(k, _)| *k == j).map(|(_, r)| r.clone())
     }
 
     /// The summary of the body named `name` (`module::f`, `module::Owner::m`).
@@ -433,6 +450,9 @@ impl ProgramEffects {
     /// Keep `module`'s summaries for the modules compiled after it.
     pub fn record(&mut self, module: &HirModule, checker: &Checker, module_path: &str, summaries: &[Summary]) {
         self.traits.extend(module.trait_effects.iter().cloned());
+        for (fqn, &i) in &module.instance_fns {
+            self.instance_bodies.insert((module_path.to_string(), fqn.clone()), module.bodies[i].name.clone());
+        }
         // The overloads of a name share it and its def: a later module's
         // call may run any of them.
         let mut named: HashMap<&str, Summary> = HashMap::new();
@@ -982,7 +1002,7 @@ impl<'a> ModuleEffects<'a> {
             let w = self.cx.walk(i, &self.summaries, false);
             let lookup = |callee: &Callee, args: &[HirId]| match callee {
                 Callee::Named { name, def, .. } => Some(self.cx.named(&w, name, *def)),
-                Callee::Method { name } => self.cx.method(&w, *args.first()?, name).map(|(s, _)| s),
+                Callee::Method { name } => self.cx.method(&w, None, *args.first()?, name).map(|(s, _)| s),
                 Callee::Value(f) => self.cx.fn_value(&w, *f),
                 Callee::Resolved(_) => None,
             };
@@ -1688,6 +1708,14 @@ struct Cx<'a> {
     instances: HashMap<(String, String), Vec<InstanceBody>>,
 }
 
+/// The impl body a trait method call runs ([`Cx::call_impl`]): this
+/// module's, or an earlier module's by its full name with its summary.
+#[derive(Clone, Copy)]
+enum ImplBody<'a> {
+    Local(usize),
+    Program(&'a str, Summary),
+}
+
 /// A trait impl's method body: in this module, or summarised by an earlier one.
 #[derive(Clone, Copy)]
 enum InstanceBody {
@@ -1796,7 +1824,7 @@ impl Cx<'_> {
             let body = &self.module.bodies[index];
             let lookup = |callee: &Callee, args: &[HirId]| match callee {
                 Callee::Named { name, def, .. } => Some(self.named(&w, name, *def)),
-                Callee::Method { name } => self.method(&w, *args.first()?, name).map(|(s, _)| s),
+                Callee::Method { name } => self.method(&w, None, *args.first()?, name).map(|(s, _)| s),
                 Callee::Value(f) => self.fn_value(&w, *f),
                 Callee::Resolved(_) => None,
             };
@@ -1926,6 +1954,13 @@ impl Cx<'_> {
             let reason = match callee_body {
                 Some(b) => Some(self.mutation_reason(b, j, w.summaries)),
                 None => key.and_then(|k| {
+                    // An earlier module's impl the call runs says why itself.
+                    let picked = self.receiver_class(body, args).and_then(|owner| self.call_impl(body, at, k, &owner));
+                    if let Some(ImplBody::Program(name, _)) = picked
+                        && let Some(reason) = self.program.reason_of(name, j)
+                    {
+                        return Some(reason);
+                    }
                     let method = k.starts_with('.');
                     let owner = if method || self.is_trait_method(k) { self.receiver_class(body, args) } else { None };
                     let trait_name = if method || owner.is_none() { None } else { self.call_trait(body, at, short_name(k)) };
@@ -2439,7 +2474,7 @@ impl Cx<'_> {
                     }
                 }
                 let shown = format!(".{name}()");
-                match self.method(w, recv, name) {
+                match self.method(w, Some(at), recv, name) {
                     Some((s, callee)) => {
                         self.apply(w, at, &shown, s, callee, args);
                         let trait_decl = callee.is_none() && self.method_is_trait_dispatch(w, recv, name);
@@ -2780,6 +2815,14 @@ impl Cx<'_> {
             return None;
         }
         let owner = class_of(body.expr(recv).ty.as_ref())?;
+        // The impl the checker picked for the call, wherever the trait, the
+        // class and the impl are declared (#2468).
+        if let Some(found) = self.call_impl(body, at, name, owner) {
+            return Some(match found {
+                ImplBody::Local(i) => (w.summaries[i].mutates, Some(i)),
+                ImplBody::Program(_, s) => (s.mutates, None),
+            });
+        }
         match name.rsplit_once("::") {
             Some((trait_name, method)) => {
                 let mut traits: Vec<&String> =
@@ -2799,9 +2842,37 @@ impl Cx<'_> {
     /// The trait whose method `name` the call `at` runs, when the checker
     /// discharged an instance for it.
     fn call_trait(&self, body: &HirBody, at: HirId, name: &str) -> Option<&str> {
+        self.call_dicts(body, at)?.iter().find(|inst| inst.method_fqns.contains_key(name)).map(|inst| inst.class.as_str())
+    }
+
+    /// The instances the checker discharged for the call `at`.
+    fn call_dicts(&self, body: &HirBody, at: HirId) -> Option<&[crate::typechecking::generics::InstanceDef]> {
         let e = body.expr(at);
         let dicts = e.node.and_then(|n| self.checker.call_dicts_at(n)).or_else(|| self.checker.call_dicts_for_span(e.span.0, e.span.1))?;
-        dicts.iter().find(|inst| inst.method_fqns.contains_key(name)).map(|inst| inst.class.as_str())
+        Some(dicts)
+    }
+
+    /// The impl body the call `at` of trait method `name` (`m`, `Trait::m`,
+    /// `.m()`) runs on a receiver of class `owner`: the method of the
+    /// instance the checker picked for the call, in this module or an
+    /// earlier one. The instance names its module and the body's key, so
+    /// neither how the impl spells the trait and the class nor another
+    /// module's class of the same name comes into it (#2468). `None` when
+    /// the call has no instance for `owner` (a bound receiver), or the
+    /// instance no body for `name` (a builtin's, a default method).
+    fn call_impl(&self, body: &HirBody, at: HirId, name: &str, owner: &str) -> Option<ImplBody<'_>> {
+        let name = name.trim_start_matches('.').trim_end_matches("()");
+        let (trait_name, method) = name.rsplit_once("::").map_or((None, name), |(t, m)| (Some(t), m));
+        let (inst, fqn) = self.call_dicts(body, at)?.iter().find_map(|inst| {
+            let fqn = inst.method_fqns.get(method)?;
+            let fits = trait_name.is_none_or(|t| short_name(t) == short_name(&inst.class))
+                && class_of(inst.args.first()) == Some(owner);
+            fits.then_some((inst, fqn))
+        })?;
+        if inst.defined_module == self.module_path {
+            return self.module.instance_fns.get(fqn).map(|&i| ImplBody::Local(i));
+        }
+        self.program.instance_body(&inst.defined_module, fqn).map(|(name, s)| ImplBody::Program(name, s))
     }
 
     /// Fold what the trait operator `lhs op rhs` mutates into `w`, as the
@@ -3016,7 +3087,10 @@ impl Cx<'_> {
         out.map(|s| (s, None))
     }
 
-    fn method(&self, w: &Walk<'_>, recv: HirId, name: &str) -> Option<(Summary, Option<usize>)> {
+    /// The summary of `recv.name(..)`. `at` is the call, when the caller has
+    /// it: the instance the checker picked there names the impl a trait
+    /// method runs.
+    fn method(&self, w: &Walk<'_>, at: Option<HirId>, recv: HirId, name: &str) -> Option<(Summary, Option<usize>)> {
         let body = &self.module.bodies[w.index];
         let e = body.expr(recv);
         if let Some(Ty::Existential { class }) = e.ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
@@ -3044,10 +3118,19 @@ impl Cx<'_> {
                 }
             }
         }
-        // A trait method on a concrete receiver whose impl body is known
-        // costs what that body does (every impl for the receiver's head
-        // together, `Vec<int>` and `Vec<float>` alike), as an inherent
-        // method does (#2008).
+        // A trait method on a concrete receiver costs what the impl the
+        // checker picked for the call does, as `Trait::m(recv)` (#2468).
+        if let (Some(owner), Some(at)) = (owner.as_deref(), at)
+            && let Some(found) = self.call_impl(body, at, name, owner)
+        {
+            return Some(match found {
+                ImplBody::Local(i) => (w.summaries[i], Some(i)),
+                ImplBody::Program(_, s) => (s, None),
+            });
+        }
+        // With no instance on the call: every impl body known for the
+        // receiver's head together (`Vec<int>` and `Vec<float>` alike), as
+        // an inherent method (#2008).
         if let Some(owner) = owner.as_deref()
             && let Some(found) = self.instance_summary(w, owner, name)
         {

@@ -84,7 +84,7 @@ pub(super) fn summarize(cx: &Cx<'_>, w: &Walk<'_>) -> (u64, u64, bool) {
     let body = &cx.module.bodies[w.index];
     let lookup = |callee: &Callee, args: &[HirId]| match callee {
         Callee::Named { name, def, .. } => Some(cx.named(w, name, *def)),
-        Callee::Method { name } => cx.method(w, *args.first()?, name).map(|(s, _)| s),
+        Callee::Method { name } => cx.method(w, None, *args.first()?, name).map(|(s, _)| s),
         Callee::Value(f) => cx.fn_value(w, *f),
         Callee::Resolved(_) => None,
     };
