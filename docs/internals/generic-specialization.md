@@ -29,7 +29,11 @@ A bound met at the aggregate itself (`add<T: Num>(T a, T b)` called at
 element has them, each method a thunk that runs the element-wise
 operator at that type (`emit_structural_thunks`). A clone still lowers
 the operator in place; a shared body gets the tuple's `Num` dictionary.
-A nested aggregate (`((int, int), (int, int))`) and a `Vec` have none.
+A nested aggregate (`((int, int), (int, int))`, `[[float; 2]; 2]`) has
+the instance when its element has (#2544): the element's structural
+instance comes first, and the operator calls its thunk once per element
+(the element is one word, a pair boxed), as at a user type. A `Vec` has
+none.
 
 ## Ground dictionaries once (#1417)
 

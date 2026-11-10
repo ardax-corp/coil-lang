@@ -558,7 +558,11 @@ impl Compiler {
                 };
                 // Whatever the instance returns (a two-word class, an
                 // enum): an element is one word.
-                if let Some((lookup, fqn)) = self.concrete_operator_target_ty(&elem, class, method) {
+                // A nested aggregate's element is a tuple or an array: its
+                // structural instance's thunk, which runs the operator one
+                // level down (#2544).
+                let target = self.concrete_operator_target_ty(&elem, class, method).or_else(|| self.structural_arith_target(&elem, class, method));
+                if let Some((lookup, fqn)) = target {
                     let mut call = crate::mir::HirSite::default();
                     self.hir_mir_op_call_tys(hir, id, &vec![Some(elem); arity], (class, method, fqn), lookup, true, &mut call);
                     t.elem_call = call.call.map(|site| (site, true)).or(call.op_call.map(|op| (op.site, false)));

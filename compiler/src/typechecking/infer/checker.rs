@@ -10681,7 +10681,9 @@ impl Checker {
     /// place and a shared body reaches through the instance's dictionary.
     /// `Num` comes with its seven superclasses, registered together, as a
     /// tuple's `Ord` with `Lt` .. `Ge`. A nested aggregate (`((int, int),
-    /// (int, int))`) has none: element-wise lowering takes one level only.
+    /// (int, int))`) has the instance when its element has (#2544): the
+    /// element's structural instance is registered first, and the operator
+    /// calls it once per element, as at a user type.
     fn ensure_structural_arith(&mut self, class: &str, ty: &Ty) {
         use crate::typechecking::aggregate_arith::homogeneous_aggregate_elem;
         let ty = nominal_enum(apply_ty_prune(&self.subst, ty));
@@ -10693,10 +10695,13 @@ impl Checker {
             return;
         };
         let elem = nominal_enum(apply_ty_prune(&self.subst, &elem));
-        if ty.has_var() || matches!(strip_readonly(&elem), Ty::Tuple(_) | Ty::Array { .. }) || self.generics.has_instance(class, &ty) {
+        if ty.has_var() || self.generics.has_instance(class, &ty) {
             return;
         }
         let classes: &[&str] = if class == "Num" { &["Add", "Sub", "Mul", "Div", "Rem", "Pow", "Neg", "Num"] } else { &[class] };
+        for &c in classes {
+            self.ensure_structural_arith(c, &elem);
+        }
         let met = classes.iter().all(|&c| self.generics.find_instance_relaxed(c, std::slice::from_ref(&elem)).is_some());
         if met {
             for &c in classes {
