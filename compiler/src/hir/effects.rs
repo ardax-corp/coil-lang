@@ -1834,6 +1834,12 @@ impl Cx<'_> {
             }
             k
         };
+        // A result of a bare type parameter (#2502): the body's shared
+        // form holds it as an opaque word and cannot share it, so what it
+        // hands back from a call (`return c.get()`) is the caller's to
+        // share, like a field it returns itself. A fresh result is no
+        // one else's.
+        let returns_inner = if shared_ret { returns_inner | ((returns | escapes) & cow::holders_of_result(self.checker, &self.module.bodies[index])) } else { returns_inner };
         Summary {
             escapes,
             keeps,
