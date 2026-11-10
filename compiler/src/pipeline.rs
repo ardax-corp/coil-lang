@@ -1063,7 +1063,7 @@ impl Pipeline {
             if let Some(ast) = cached.ast() {
                 crate::static_writes::collect_written_names(ast, &mut written);
                 crate::typechecking::fn_value_escape::collect_fn_value_escaped(ast, &mut names);
-                finalizers_resize |= crate::typechecking::purity::finalizer_facts(ast).1;
+                finalizers_resize |= crate::typechecking::purity::finalizer_may_resize(ast);
             }
         }
         let compiler = self.compiler_lazy_mut();

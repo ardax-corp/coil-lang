@@ -51,8 +51,7 @@ pub use par_profit::{
 };
 #[allow(unused_imports)] // public API re-export
 pub use purity::{
-    EffectFlags, RecursivePureSet, analyze_fn_effects, analyze_recursive_fns,
-    analyze_recursive_pure, classify_host_name,
+    RecursivePureSet, analyze_fn_effects, analyze_recursive_fns, analyze_recursive_pure,
 };
 #[allow(unused_imports)] // public API re-export
 pub use ty::{ScalarBacking, Ty};

@@ -6,18 +6,18 @@
 //! functions may be auto-parallelized at `f(a) ⊕ f(b)` sites.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
 
 use parser::ast::{EnumConstructPayload, Expression, LetPattern, Output, PatternOutput};
 
+use crate::effects::{LengthStability, classify_host_name};
+
 use super::bare_cases::BareCases;
 use super::id::walk_children;
-use super::virtual_modules::{BuiltinExport, VirtualModules};
 
 /// Names of user functions that are pure and self-recursive.
 pub type RecursivePureSet = HashSet<String>;
 
-pub use common::EffectFlags;
+use common::EffectFlags;
 
 #[derive(Default)]
 struct FnFacts {
@@ -333,28 +333,13 @@ pub fn analyze_pure_fns(ast: &Output<'_>, cases: &BareCases) -> HashSet<String> 
         .collect()
 }
 
-/// What the loop length proofs may assume about calls (see
-/// `docs/internals/limitations.md`, impure calls in counted loops).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LengthStability {
-    /// User functions that cannot change the length of any array, even one
-    /// they can reach. Always a superset of the pure set.
-    pub fns: HashSet<String>,
-    /// No `fn drop()` can change an array length. Finalizers run at
-    /// allocation safepoints, so when this is false only pure calls are
-    /// length-stable and allocating ops stay barriers.
-    pub alloc_stable: bool,
-}
-
-/// Whether `ast` declares a `fn drop()`, and whether one may change an
-/// array's length.
+/// Whether a `fn drop()` declared in `ast` may change an array's length.
 ///
 /// This runs before the checker, so every bare pattern name counts as a
 /// binding. Only a function or static that shares a unit case's name and is
 /// used in the same body could tell the difference.
-pub fn finalizer_facts(ast: &Output<'_>) -> (bool, bool) {
-    let effects = analyze_fn_effects(ast, BareCases::none());
-    (effects.contains_key("drop"), finalizers_resize(&effects))
+pub fn finalizer_may_resize(ast: &Output<'_>) -> bool {
+    finalizers_resize(&analyze_fn_effects(ast, BareCases::none()))
 }
 
 fn finalizers_resize(effects: &HashMap<String, EffectFlags>) -> bool {
@@ -455,105 +440,6 @@ fn effect_closure_with(
 /// Host / virtual-module names that are not user `fn`s.
 fn classify_unknown_callee(name: &str) -> EffectFlags {
     classify_host_name(name)
-}
-
-/// Effect bits for a host / virtual-module callee (I6), by registry name
-/// (`math_sin`, `fs_exists`) or by the short name a virtual module exports
-/// (`exists`).
-///
-/// Registry names read the `effects` column of [`common::HOST_NATIVES`]. A
-/// short name takes the union of every row it is exported as (`close` is both
-/// `io::close` and `thread::close`). Unknown names fail closed
-/// (`UNKNOWN | HOST | RESIZE`) so they are never treated as hoistable.
-pub fn classify_host_name(name: &str) -> EffectFlags {
-    let short = name.rsplit("::").next().unwrap_or(name);
-    host_effect_table()
-        .get(short)
-        .copied()
-        .unwrap_or(UNKNOWN_CALLEE)
-}
-
-const UNKNOWN_CALLEE: EffectFlags = EffectFlags::from_bits(
-    EffectFlags::UNKNOWN | EffectFlags::HOST | EffectFlags::RESIZE,
-);
-
-fn host_effect_table() -> &'static HashMap<&'static str, EffectFlags> {
-    static TABLE: OnceLock<HashMap<&'static str, EffectFlags>> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut table: HashMap<&'static str, EffectFlags> = HashMap::new();
-        for row in common::HOST_NATIVES {
-            table.insert(row.name, row.effects);
-        }
-        for (_, export) in VirtualModules::new().all_exports() {
-            let Some(flags) = export_effects(export) else {
-                continue;
-            };
-            let entry = table.entry(export_surface(export)).or_default();
-            *entry = entry.union(flags);
-        }
-        // Names that are neither a host row nor a virtual export but reach
-        // this table unresolved (methods and stdlib helpers called by name).
-        for (name, bits) in [
-            ("len", EffectFlags::HOST | EffectFlags::UNKNOWN),
-            ("write_all", EffectFlags::WRITE),
-            ("fd", EffectFlags::ATTACH_PARK | EffectFlags::RESIZE),
-        ] {
-            table.entry(name).or_insert(EffectFlags::from_bits(bits));
-        }
-        table
-    })
-}
-
-fn export_surface(export: &BuiltinExport) -> &'static str {
-    match export {
-        BuiltinExport::Enum { name }
-        | BuiltinExport::TypeClass { name }
-        | BuiltinExport::OpaqueType { name } => name,
-        BuiltinExport::FfiTag { variant } => variant,
-        BuiltinExport::FfiFn { kind } => kind.as_str(),
-        BuiltinExport::Fn { kind } => kind.as_str(),
-        BuiltinExport::IoFn { kind } => kind.as_str(),
-        BuiltinExport::StringFn { kind } => kind.as_str(),
-        BuiltinExport::ThreadFn { kind } => kind.as_str(),
-        BuiltinExport::GcFn { kind } => kind.as_str(),
-        BuiltinExport::HostFn { surface, .. } => surface,
-    }
-}
-
-/// Effects of calling a virtual-module export; `None` for types.
-fn export_effects(export: &BuiltinExport) -> Option<EffectFlags> {
-    let row = |registry: &str| {
-        common::HOST_NATIVES
-            .iter()
-            .find(|n| n.name == registry)
-            .map(|n| n.effects)
-            .unwrap_or(UNKNOWN_CALLEE)
-    };
-    Some(match export {
-        BuiltinExport::Enum { .. }
-        | BuiltinExport::TypeClass { .. }
-        | BuiltinExport::OpaqueType { .. }
-        | BuiltinExport::FfiTag { .. } => return None,
-        BuiltinExport::FfiFn { .. } => {
-            EffectFlags::from_bits(EffectFlags::FFI | EffectFlags::RESIZE)
-        }
-        BuiltinExport::Fn { kind: crate::typechecking::PreludeFn::BlackBox } => row(common::BLACK_BOX_NATIVE),
-        // `fn_key()` is an `int` literal by the time anything runs.
-        BuiltinExport::Fn { kind: crate::typechecking::PreludeFn::FnKey } => EffectFlags::empty(),
-        // `ord`, `char`, matrix helpers: compiled inline or in userland,
-        // not a host row.
-        BuiltinExport::Fn { .. } => UNKNOWN_CALLEE,
-        BuiltinExport::IoFn { kind } => row(kind.native_name()),
-        BuiltinExport::StringFn { kind } => match kind.native_name() {
-            Some(registry) => row(registry),
-            // `format` lowers to the FORMAT opcode. Kept impure like the
-            // other text helpers (see `TEXT` in `common::host`).
-            None => EffectFlags::from_bits(EffectFlags::ALLOC),
-        },
-        BuiltinExport::ThreadFn { kind } => row(kind.native_name()),
-        BuiltinExport::GcFn { kind } => row(kind.native_name()),
-        BuiltinExport::HostFn { registry, .. } => row(registry),
-    })
 }
 
 /// `by_owner` keys impl methods `Owner::m` (so method calls can resolve to
@@ -1517,19 +1403,6 @@ fn main() { return; }
     }
 
     #[test]
-    fn classify_host_name_math_is_pure_clocks_and_io_are_not() {
-        assert!(classify_host_name("math_sin").is_pure());
-        assert!(classify_host_name("packed_dot").is_pure());
-        assert!(classify_host_name("simd_axpy_reduce").is_pure());
-        assert!(classify_host_name("mono_nanos").contains(EffectFlags::HOST));
-        assert!(classify_host_name("clock_sleep_ms").contains(EffectFlags::HOST));
-        assert!(classify_host_name("write").contains(EffectFlags::IO));
-        assert!(classify_host_name("gc_collect").contains(EffectFlags::GC));
-        assert!(classify_host_name("invoke").contains(EffectFlags::FFI));
-        assert!(!classify_host_name("mystery").is_pure());
-    }
-
-    #[test]
     fn float_helper_is_pure_clock_helper_is_not() {
         let ast = parse_ast(
             r#"
@@ -1832,53 +1705,6 @@ fn main() { return; }
         );
         assert!(!st.alloc_stable);
         assert!(!st.fns.contains("absorb"), "{:?}", st.fns);
-    }
-
-    #[test]
-    fn every_virtual_export_reaches_a_host_row() {
-        // A new export whose registry name has no HOST_NATIVES row would fall
-        // back to UNKNOWN: give it a row (with its effects) instead.
-        for (module, export) in VirtualModules::new().all_exports() {
-            let registry = match export {
-                BuiltinExport::IoFn { kind } => Some(kind.native_name()),
-                BuiltinExport::StringFn { kind } => kind.native_name(),
-                BuiltinExport::ThreadFn { kind } => Some(kind.native_name()),
-                BuiltinExport::GcFn { kind } => Some(kind.native_name()),
-                BuiltinExport::HostFn { registry, .. } => Some(*registry),
-                _ => None,
-            };
-            if let Some(registry) = registry {
-                assert!(
-                    common::HOST_NATIVES.iter().any(|n| n.name == registry),
-                    "{module}::{} -> `{registry}` has no host row",
-                    export_surface(export)
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn host_effects_come_from_the_table_not_the_name() {
-        // `close` is exported by both `io` and `thread`: union of both rows.
-        let close = classify_host_name("close");
-        assert!(close.contains(EffectFlags::IO) && close.contains(EffectFlags::THREAD));
-        // `io::fs` and `env` short names used to fall through to UNKNOWN.
-        assert!(classify_host_name("exists").contains(EffectFlags::IO));
-        assert!(!classify_host_name("exists").contains(EffectFlags::UNKNOWN));
-        assert!(classify_host_name("var").contains(EffectFlags::ENV));
-        assert!(classify_host_name("exit").contains(EffectFlags::EXEC));
-        assert!(classify_host_name("connect").contains(EffectFlags::NET));
-        assert!(classify_host_name("wait_ready").contains(EffectFlags::SUSPEND));
-        assert!(!classify_host_name("wait_ready").contains(EffectFlags::IO));
-        assert!(classify_host_name("remove_file").contains(EffectFlags::WRITE));
-        assert!(!classify_host_name("exists").contains(EffectFlags::WRITE));
-        assert!(classify_host_name("get").contains(EffectFlags::GC));
-        // Same row by registry name and by surface name.
-        assert_eq!(classify_host_name("fs_exists"), classify_host_name("exists"));
-        assert_eq!(classify_host_name("wait_readable"), classify_host_name("await_readable"));
-        // An unresolved name is unknown, even if it looks like math.
-        assert_eq!(classify_host_name("log"), UNKNOWN_CALLEE);
-        assert!(classify_host_name("vec_push_like").contains(EffectFlags::UNKNOWN));
     }
 
     #[test]

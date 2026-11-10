@@ -1,6 +1,7 @@
 mod ast_cache;
 mod attrs;
 pub mod builtin_docs;
+pub(crate) mod effects;
 pub(crate) mod escape;
 pub mod comptime_cache;
 mod comptime_expr;
