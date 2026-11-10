@@ -57,6 +57,15 @@ enum Deep<T> {
     Empty,
 }
 
+// A `Vec`, `Option` or `Result` of functions over the parameter: built and
+// called where the instance is ground.
+enum Held<T> {
+    Many(Vec<fn(T) -> T>),
+    Maybe(Option<fn(T) -> T>),
+    Tried(Result<fn(T) -> T, string>),
+    Nothing,
+}
+
 // A recursive generic enum of functions.
 enum Chain<T> {
     Link(fn(T) -> T, Chain<T>),
@@ -605,4 +614,33 @@ test("functions holding the parameter below the top, at ground instances") {
         default => 0,
     };
     assert!(k == 12);
+}
+
+test("a Vec, an Option and a Result of functions, at ground instances") {
+    let fns: Vec<fn(int) -> int> = [inc, fn (int x) => x * 3];
+    let many: Held<int> = Held::Many(fns);
+    collect();
+    let a = match many {
+        Held::Many(fs) => fs[1](fs[0](1)),
+        default => 0,
+    };
+    assert!(a == 6);
+    let maybe: Held<string> = Held::Maybe(Some(shout));
+    let b = match maybe {
+        Held::Maybe(Some(f)) => f("m"),
+        default => "",
+    };
+    assert!(b == "m!");
+    let tried: Held<float> = Held::Tried(Ok(half));
+    let c = match tried {
+        Held::Tried(Ok(f)) => f(1.0),
+        default => 0.0,
+    };
+    assert!(c == 0.5);
+    let failed: Held<float> = Held::Tried(Err("no"));
+    let d = match failed {
+        Held::Tried(Err(e)) => e,
+        default => "",
+    };
+    assert!(d == "no");
 }

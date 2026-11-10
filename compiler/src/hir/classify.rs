@@ -381,11 +381,31 @@ fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<
         generic_enum_payload(checker, name, variant, args).is_some_and(|payload| {
             payload
                 .iter()
-                .all(|field| params_closed(field) && classify_in(checker, field, seen).is_some())
+                .all(|field| generic_enum_field(checker, field, seen) && classify_in(checker, field, seen).is_some())
         })
     });
     seen.pop();
     ok.then_some(ValueClass::Enum)
+}
+
+/// A payload field of a generic user enum's instance (its parameters
+/// bound) that the lowering stores as one known word:
+///
+/// - closed but for type parameters;
+/// - a function whose words are plain ([`fun_words`]), one closure word in
+///   the enum's object: at a ground instance `F(fn(T) -> T)` is a
+///   monomorphic function, and in a shared body a function called with
+///   each `T` its one word, the word ground code passes it (#2473);
+/// - at a ground instance, what a non-generic enum's field may be
+///   ([`closed_field`]: a `Vec` or `Option` of such functions).
+///
+/// A function that holds a parameter below the top (`fn(T) -> Option<T>`)
+/// is taken at a ground instance only: a shared body would read its
+/// result as the open enum's object, a ground closure returns its word.
+fn generic_enum_field(checker: &Checker, field: &Ty, seen: &mut Vec<String>) -> bool {
+    params_closed(field)
+        || matches!(strip_readonly(field), Ty::Fun(..)) && fun_words(checker, field, seen)
+        || !field.has_free_var() && closed_field(checker, field, seen)
 }
 
 /// A numeric `Range` / `RangeInclusive`: `[start, end]` in a direct
