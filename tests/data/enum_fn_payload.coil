@@ -1,0 +1,240 @@
+// An enum variant may carry a function value (coil-lang#2460): the enum
+// had no layout the lowering took, so the first body with a local of it was
+// refused (E0801), and that was the default `Show` every non-generic enum
+// gets, used or not. The default `Show` prints the qualified variant name
+// with the payload elided, so it needs nothing from the function.
+use tests::assert;
+use string::format;
+use gc::collect;
+
+enum Step {
+    Map(fn(int) -> int),
+    Stop,
+}
+
+// Declared, never built.
+enum Unused {
+    Call(fn(int) -> int),
+    Idle,
+}
+
+enum Op {
+    Arrow(int -> int),
+    Two(int, fn(int) -> int),
+    Named { f: fn(int) -> int, n: int },
+    Join(fn(int, int) -> int),
+    Text(fn(string) -> string),
+    Maybe(Option<fn(int) -> int>),
+    Many(Vec<fn(int) -> int>),
+    Nothing,
+}
+
+// A payload function over the enum itself, returning an enum, and taking
+// or returning nothing.
+enum Walk {
+    Next(fn(Walk) -> Walk),
+    Half(fn(int) -> Option<int>),
+    Bump(fn() -> ()),
+    Const(fn() -> int),
+    Done,
+}
+
+static let bumps: int = 0;
+
+#[derive(Eq)]
+enum Tagged {
+    With(int, fn(int) -> int),
+    Bare(int),
+    Empty,
+}
+
+class Pipeline {
+    pub first: Step,
+    pub rest: Vec<Step>,
+}
+
+fn inc(int x) -> int {
+    return x + 1;
+}
+
+fn double(int x) -> int {
+    return x * 2;
+}
+
+fn add(int a, int b) -> int {
+    return a + b;
+}
+
+fn shout(string s) -> string {
+    return format("%v!", s);
+}
+
+fn run(Step s, int x) -> int {
+    return match s {
+        Step::Map(f) => f(x),
+        Step::Stop => x,
+    };
+}
+
+fn chain(Vec<fn(int) -> int> fs, int x) -> int {
+    let acc = x;
+    for f in fs {
+        acc = f(acc);
+    }
+    return acc;
+}
+
+fn apply(Op op, int x) -> int {
+    return match op {
+        Op::Arrow(f) => f(x),
+        Op::Two(k, f) => f(x) + k,
+        Op::Named { f, n } => f(x) * n,
+        Op::Join(f) => f(x, x),
+        Op::Text(f) => f("a").len() + x,
+        Op::Maybe(m) => match m {
+            Some(f) => f(x),
+            None => -1,
+        },
+        Op::Many(fs) => chain(fs, x),
+        Op::Nothing => 0,
+    };
+}
+
+fn done(Walk w) -> Walk {
+    return Walk::Done;
+}
+
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+
+fn bump() {
+    bumps = bumps + 1;
+}
+
+fn seven() -> int {
+    return 7;
+}
+
+fn adder(int k) -> Step {
+    return Step::Map(fn (int x) use (k) {
+        return x + k;
+    });
+}
+
+fn keep<T>(T x) -> T {
+    return x;
+}
+
+test("a function payload is built, matched and called") {
+    let s = Step::Map(inc);
+    let n = match s {
+        Step::Map(f) => f(1),
+        Step::Stop => 0,
+    };
+    assert!(n == 2);
+    assert!(run(Step::Map(double), 21) == 42);
+    assert!(run(Step::Stop, 7) == 7);
+}
+
+test("the arrow spelling, several fields, a record payload and other signatures") {
+    assert!(apply(Op::Arrow(inc), 1) == 2);
+    assert!(apply(Op::Two(10, double), 4) == 18);
+    assert!(apply(Op::Named { f: inc, n: 3 }, 2) == 9);
+    assert!(apply(Op::Join(add), 5) == 10);
+    assert!(apply(Op::Text(shout), 1) == 3);
+    assert!(apply(Op::Maybe(Some(double)), 8) == 16);
+    assert!(apply(Op::Maybe(None), 8) == -1);
+    let fs: Vec<fn(int) -> int> = [inc, double, inc];
+    assert!(apply(Op::Many(fs), 3) == 9);
+    assert!(apply(Op::Nothing, 3) == 0);
+}
+
+test("a payload function over the enum, with an enum result, and of no argument or result") {
+    let next = match Walk::Next(done) {
+        Walk::Next(f) => f(Walk::Const(seven)),
+        default => Walk::Half(half),
+    };
+    assert!(format("%v", next) == "Walk::Done");
+    let halved = match Walk::Half(half) {
+        Walk::Half(f) => (f(8), f(7)),
+        default => (None, None),
+    };
+    assert!(halved == (Some(4), None));
+    match Walk::Bump(bump) {
+        Walk::Bump(f) => f(),
+        default => (),
+    }
+    assert!(bumps == 1);
+    let n = match Walk::Const(seven) {
+        Walk::Const(f) => f(),
+        default => 0,
+    };
+    assert!(n == 7);
+}
+
+test("a closure payload keeps what it captured, across a collection") {
+    let steps: Vec<Step> = [];
+    let i = 0;
+    while i < 50 {
+        steps.push(adder(i));
+        i = i + 1;
+    }
+    collect();
+    let total = 0;
+    for s in steps {
+        total = total + run(s, 1);
+    }
+    // 50 ones and 0 + 1 + … + 49.
+    assert!(total == 50 + 1225);
+
+    let label = "n";
+    let named = Op::Text(fn (string s) use (label) {
+        return format("%v%v", label, s);
+    });
+    collect();
+    assert!(apply(named, 0) == 2);
+}
+
+test("the default Show is the variant name, the payload left out") {
+    assert!(format("%v", Step::Map(inc)) == "Step::Map");
+    assert!(format("%v", Step::Stop) == "Step::Stop");
+    assert!(Step::Map(double).show() == "Step::Map");
+    assert!(format("%v", Op::Named { f: inc, n: 1 }) == "Op::Named");
+    assert!(format("%v", Op::Two(1, inc)) == "Op::Two");
+    assert!(format("%v", [Step::Stop, Step::Map(inc)]) == "[Step::Stop, Step::Map]");
+    assert!(format("%v", Some(Step::Map(inc))) == "Some(Step::Map)");
+}
+
+test("the enum as a field, an element, an argument and a result") {
+    let p = new Pipeline(Step::Map(inc), [Step::Map(double), Step::Stop, adder(5)]);
+    let x = run(p.first, 1);
+    for s in p.rest {
+        x = run(s, x);
+    }
+    assert!(x == 9);
+
+    let kept = keep(Step::Map(double));
+    assert!(run(kept, 4) == 8);
+    let maybe: Option<Step> = Some(adder(2));
+    let got = match maybe {
+        Some(s) => run(s, 40),
+        None => 0,
+    };
+    assert!(got == 42);
+    let pair = (Step::Map(inc), 3);
+    let (st, k) = pair;
+    assert!(run(st, k) == 4);
+}
+
+test("a derived Eq compares the other fields and the variant") {
+    assert!(Tagged::Empty == Tagged::Empty);
+    assert!(Tagged::Bare(1) == Tagged::Bare(1));
+    assert!(Tagged::Bare(1) != Tagged::Bare(2));
+    assert!(Tagged::With(1, inc) != Tagged::Empty);
+    assert!(Tagged::With(1, inc) != Tagged::With(2, inc));
+    assert!(Tagged::With(1, inc) != Tagged::Bare(1));
+}
