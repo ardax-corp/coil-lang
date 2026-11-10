@@ -440,6 +440,15 @@ pub fn is_matrix_ty(ty: &Ty) -> bool {
     )
 }
 
+/// `ty` with every `Matrix<Data>` in it replaced by its `Data`: the type
+/// of the value at run time.
+pub fn erase_matrix_ty(ty: &Ty) -> Ty {
+    match unwrap_matrix_ty(ty) {
+        Some(data) => erase_matrix_ty(data),
+        None => ty.map_children(erase_matrix_ty),
+    }
+}
+
 /// Peel `Matrix<Data>` → `Data`.
 pub fn unwrap_matrix_ty(ty: &Ty) -> Option<&Ty> {
     match ty {

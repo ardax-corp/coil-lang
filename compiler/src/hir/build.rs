@@ -63,7 +63,7 @@ pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: 
             None,
         );
         top.body.root = Some(root);
-        let body = top.finish();
+        let body = top.finish(checker);
         module.bodies.insert(0, body);
         // Lambdas and trait instance methods name their body by index;
         // the top body now comes first.
@@ -328,7 +328,8 @@ impl BodyBuilder {
         None
     }
 
-    fn finish(mut self) -> HirBody {
+    fn finish(mut self, checker: &Checker) -> HirBody {
+        runtime_types(&mut self.body, checker);
         // `let x = mut place` and `for mut x in xs` bind borrows.
         if !self.mut_marks.is_empty() {
             let mut borrows = Vec::new();
@@ -700,7 +701,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let root = self.expr(&mut tb, body);
                 self.implicit_ok_return(&mut tb, root);
                 tb.body.root = Some(root);
-                let mut body = tb.finish();
+                let mut body = tb.finish(self.checker);
                 alias_generic_fn_calls(&mut body, self.checker);
                 self.module.bodies.push(body);
             }
@@ -747,7 +748,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let value = self.expr(&mut b, init);
         let root = b.push(HirKind::Return(Some(value)), Some(coil_ty::never()), span_of(init), None);
         b.body.root = Some(root);
-        self.module.bodies.push(b.finish());
+        self.module.bodies.push(b.finish(self.checker));
     }
 
     /// Build one function body. `owner` is set for inherent methods, whose
@@ -888,7 +889,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 }
             }
         }
-        let mut body = b.finish();
+        let mut body = b.finish(self.checker);
         alias_generic_fn_calls(&mut body, self.checker);
         self.module.bodies.push(body);
     }
@@ -3200,7 +3201,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             }
         }
         let index = self.module.bodies.len();
-        self.module.bodies.push(inner.finish());
+        self.module.bodies.push(inner.finish(self.checker));
         self.emit(b, node, HirKind::Lambda { body: index })
     }
 }
@@ -3265,6 +3266,39 @@ fn join(prefix: &str, name: &str) -> String {
     } else {
         format!("{prefix}::{name}")
     }
+}
+
+/// HIR carries run-time types: `Matrix<D>` is its data `D` at run time, at
+/// any depth of a node's or a local's type, so every later pass and the
+/// lowering see the data's own shape (a tuple, an array, a `Vec`). The
+/// checker keeps the wrapper: it picked the linear-algebra operators by
+/// node, and `typeof` names its operand's checked type.
+fn runtime_types(body: &mut HirBody, checker: &Checker) {
+    use crate::typechecking::aggregate_arith::{erase_matrix_ty, is_matrix_ty};
+    let erase = |ty: &mut Option<Ty>| {
+        let Some(t) = ty.as_ref().filter(|t| t.any(|t| matches!(t, Ty::Var(_)) || is_matrix_ty(t))) else {
+            return;
+        };
+        let pruned = crate::typechecking::subst::apply_ty_prune(checker.subst(), t);
+        if pruned.any(is_matrix_ty) {
+            *ty = Some(erase_matrix_ty(&pruned));
+        }
+    };
+    let mut named: HashSet<HirId> = HashSet::new();
+    for e in &body.exprs {
+        if let HirKind::Builtin { op: Builtin::TypeOf, args } = &e.kind {
+            named.extend(args.iter().copied());
+        }
+    }
+    for (i, e) in body.exprs.iter_mut().enumerate() {
+        if !named.contains(&HirId(i as u32)) {
+            erase(&mut e.ty);
+        }
+    }
+    for local in &mut body.locals {
+        erase(&mut local.ty);
+    }
+    erase(&mut body.ret);
 }
 
 fn index_kind(ty: Option<&Ty>) -> IndexKind {
