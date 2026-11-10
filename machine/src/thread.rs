@@ -1500,10 +1500,12 @@ fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<Spaw
 }
 
 pub fn host_spawn(heap: &mut Heap, args: &[Value]) -> Value {
-    let r = try_host_spawn(heap, args);
+    let r = try_host_spawn(heap, args, false);
     as_result_value(heap, ErrorSet::Thread, r)}
 
-fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
+/// `speculative`: the job is an attempt its spawner discards when it fails
+/// ([`crate::reactor::Job::speculative`]).
+fn try_host_spawn(heap: &mut Heap, args: &[Value], speculative: bool) -> Result<Value, ThreadErrorTag> {
     // A closure's frame starts with its captures, then its parameters.
     let (entry, arity, mut spawn_args) = spawn_fn_from_value(heap, args[0])?;
     if args.len() > 1 {
@@ -1526,23 +1528,28 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorT
         Arc::clone(&state),
     );
     job.statics = Some(crate::reactor::JobStatics::Copied(statics));
+    job.speculative = speculative;
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);
     Ok(Value::from(obj.addr()))
 }
 
+/// Spawn an auto-par chunk or arm on the spawner's heap. Only compiler-made
+/// fork-joins call this, and each runs the same code itself when the join
+/// fails, so the job is speculative: its panic is the join's failure and
+/// is not reported. That holds when it falls back to an isolate job too.
 pub fn host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_spawn_shared(heap, args);
     as_result_value(heap, ErrorSet::Thread, r)}
 
 fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
     if host_debugger_attached() {
-        return try_host_spawn(heap, args);
+        return try_host_spawn(heap, args, true);
     }
     let ctx = match host_spawn_context() {
         Ok(c) => c,
-        Err(_) => return try_host_spawn(heap, args),
+        Err(_) => return try_host_spawn(heap, args, true),
     };
     let (entry, arity) = fn_entry_from_value(heap, args[0])?;
     if args.len() > 1 && args.len() - 1 != arity as usize {
@@ -1554,7 +1561,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
         if crate::shared_heap::is_c1_shareable(heap, *v) {
             spawn_args.push(SpawnArg::Shared(v.bits()));
         } else {
-            return try_host_spawn(heap, args);
+            return try_host_spawn(heap, args, true);
         }
     }
     let epoch = host_begin_shared_steal()?;
@@ -1572,6 +1579,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     );
     job.epoch = Some(epoch);
     job.statics = Some(crate::reactor::JobStatics::Shared(statics));
+    job.speculative = true;
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);

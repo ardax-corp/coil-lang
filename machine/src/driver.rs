@@ -104,6 +104,9 @@ pub(crate) struct Driver<'a> {
     program: DriverProgram,
     /// A panic was reported: the run stops.
     panicked: bool,
+    /// Panics stop the run and are not printed: a speculative job's
+    /// ([`crate::reactor::Job::speculative`]).
+    quiet: bool,
     /// A `drop` the collector ran panicked: no later finalizer runs.
     finalizer_aborted: bool,
     /// Native calls in progress (what a [`Runtime::native_roots`] entry
@@ -164,6 +167,7 @@ impl<'a> Driver<'a> {
             rt,
             program,
             panicked: false,
+            quiet: false,
             finalizer_aborted: false,
             depth: 0,
             #[cfg(not(target_family = "wasm"))]
@@ -183,6 +187,11 @@ impl<'a> Driver<'a> {
             panic_without_location: false,
             panic_message: String::new(),
         }
+    }
+
+    /// Whether this run keeps its panics to itself: a speculative job does.
+    pub(crate) fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
     }
 
     /// [`NativeHost::apply`].
@@ -465,22 +474,14 @@ impl<'a> Driver<'a> {
             // A stack overflow traps in the prologue of a frame that never
             // started: the panic is at the call that made it.
             let skip = usize::from(p.code == crate::native::TRAP_STACK);
-            let mut loc = None;
-            let mut frames = Vec::new();
-            for (i, &s) in p.trace.iter().skip(skip).enumerate() {
-                let Some(site) = code.site(s) else { continue };
-                if i == 0 {
-                    loc = locator.native_site_location(site);
-                }
-                frames.extend(locator.native_site_line(&code, s));
-            }
+            let mut sites: Vec<u32> = p.trace.iter().skip(skip).copied().collect();
+            let loc = sites.first().and_then(|&s| locator.native_site_location(code.site(s)?));
             // The native calls under this one, innermost first.
             for &(ctx, _) in self.rt.native_roots.iter().rev() {
                 // SAFETY: a native call in progress keeps its context alive.
-                for s in unsafe { &*ctx }.call_sites() {
-                    frames.extend(locator.native_site_line(&code, s));
-                }
+                sites.extend(unsafe { &*ctx }.call_sites());
             }
+            let frames = locator.backtrace(&code, sites);
             let explicit = p.code == crate::native::TRAP_EXPLICIT;
             let message = if p.code == crate::native::TRAP_BUDGET { self.budget_panic() } else { Some(p.message()) };
             if let Some(message) = message {
@@ -510,15 +511,13 @@ impl<'a> Driver<'a> {
         let code = Arc::clone(&self.program.native);
         let locator = self.locator();
         // SAFETY: the calling native code's live context.
-        let sites = unsafe { &*ctx }.call_sites();
+        let mut sites = unsafe { &*ctx }.call_sites();
         let loc = sites.first().and_then(|&s| locator.native_site_location(code.site(s)?));
-        let mut frames: Vec<String> = sites.iter().filter_map(|&s| locator.native_site_line(&code, s)).collect();
         for &(c, _) in self.rt.native_roots.iter().rev() {
             // SAFETY: a native call in progress keeps its context alive.
-            for s in unsafe { &*c }.call_sites() {
-                frames.extend(locator.native_site_line(&code, s));
-            }
+            sites.extend(unsafe { &*c }.call_sites());
         }
+        let frames = locator.backtrace(&code, sites);
         self.report(message, loc, frames, false);
     }
 
@@ -548,6 +547,9 @@ impl<'a> Driver<'a> {
         if self.rt.sched.as_ref().is_some_and(|s| s.current != crate::task::ROOT) {
             // A child task's panic fails its scope, which reports it.
             self.task_panic = Some(message.to_string());
+            return;
+        }
+        if self.quiet {
             return;
         }
         let loc = loc.filter(|_| !without_location);

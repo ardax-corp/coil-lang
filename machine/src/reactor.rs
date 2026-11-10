@@ -90,6 +90,10 @@ pub struct Job {
     pub test: Option<TestJob>,
     /// The spawner's native code (`None`: interpreter only).
     pub native: Option<Arc<crate::native::NativeCode>>,
+    /// An attempt its spawner discards when it fails (an auto-par chunk or
+    /// arm): its panic fails the join and is not reported, since the
+    /// spawner then runs the same code itself and reports what that does.
+    pub speculative: bool,
 }
 
 /// A `test("…")` case (or a case-less file's `main`) run as a reactor job.
@@ -863,6 +867,7 @@ pub fn job_from_spawn_context(
         test: None,
         statics: None,
         native: ctx.native,
+        speculative: false,
     }
 }
 
@@ -927,6 +932,7 @@ mod tests {
             test: None,
             statics: None,
             native: const_code(imm),
+            speculative: false,
         };
         reactor.submit(job);
         state
@@ -1185,6 +1191,7 @@ mod tests {
             test: None,
             statics: None,
             native: None,
+            speculative: false,
         };
         // Must not push onto owner's deque — job goes to `foreign`'s injector.
         assert!(

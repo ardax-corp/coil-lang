@@ -1,0 +1,100 @@
+// A panic in a chunk of an auto-parallel loop discards the parallel
+// attempt: the loop reruns sequentially and the program does what the
+// sequential one does. An overflow every chunk hits, or one only the
+// running fold hits, panics once; a chunk whose partial overflows where
+// the running fold stays in range changes nothing (#2419).
+// @output ok
+use io::{stdout, write};
+use string::to_bytes;
+use task::{scope, Scope, TaskError};
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task; its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+fn big(int i) -> int {
+    return 4611686018427387904 + i % 3;
+}
+
+// Every chunk overflows by its second iteration.
+fn every_chunk() -> int {
+    let total = 0;
+    for i in 0..400000 {
+        total = total + big(i);
+    }
+    return total;
+}
+
+fn large(int i) -> int {
+    return 30000000000000 + i % 2;
+}
+
+// A quarter of the range adds up to 3e18; the whole to 1.2e19.
+fn sum_fold() -> int {
+    let total = 0;
+    for i in 0..400000 {
+        total = total + large(i);
+    }
+    return total;
+}
+
+fn doubling(int i) -> int {
+    if i % 100000 < 16 {
+        return 2;
+    }
+    return 1;
+}
+
+// A quarter of the range multiplies to 2^16; the whole to 3 * 2^64.
+fn product_fold() -> int {
+    let total = 3;
+    for i in 0..400000 {
+        total = total * doubling(i);
+    }
+    return total;
+}
+
+fn falling(int i) -> int {
+    if i < 100000 {
+        return 0 - 180000000000000;
+    }
+    return 0;
+}
+
+// The fold falls from 9e18 to -9e18; the first quarter alone, from 0,
+// to -1.8e19.
+fn one_chunk() -> int {
+    let total = 9000000000000000000;
+    for i in 0..400000 {
+        total = total + falling(i);
+    }
+    return total;
+}
+
+fn main() {
+    if outcome(fn () => every_chunk()) != "integer overflow" {
+        panic "every chunk: " + outcome(fn () => every_chunk());
+    }
+    if outcome(fn () => sum_fold()) != "integer overflow" {
+        panic "sum fold: " + outcome(fn () => sum_fold());
+    }
+    if outcome(fn () => product_fold()) != "integer overflow" {
+        panic "product fold: " + outcome(fn () => product_fold());
+    }
+    if one_chunk() != 0 - 9000000000000000000 {
+        panic "one chunk";
+    }
+    let _ = write(stdout(), to_bytes("ok"));
+}

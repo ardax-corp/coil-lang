@@ -62,6 +62,7 @@ fn run_on(rt: &mut Runtime, job: Job) {
         test,
         statics,
         native,
+        speculative,
     } = job;
     // The print redirects of a job this thread runs while helping a join
     // are put back after it (as the runtime's job run does).
@@ -133,6 +134,7 @@ fn run_on(rt: &mut Runtime, job: Job) {
             shared_print: shared_print.clone(),
         };
         let mut d = Driver::new(rt, driver_program);
+        d.set_quiet(speculative);
         let guard = HostStateGuard::enter_driver(&mut d);
         let write_scope = crate::memory::EpochWriteScope::enter(d.rt.heap.get(), shared);
         let out = (|| {

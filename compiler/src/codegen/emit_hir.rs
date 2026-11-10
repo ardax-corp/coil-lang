@@ -10160,7 +10160,7 @@ impl Compiler {
             Some(l) => Some((l, crate::mir::HirParIndex::Const(site.final_index()))),
             None => None,
         };
-        let driver = format!("__coil_par_loop_fork_{}", self.loop_par_forks);
+        let driver = format!("{}{}", common::PAR_LOOP_FORK_PREFIX, self.loop_par_forks);
         self.loop_par_forks += 1;
         self.reserve_function_entry(driver.clone());
         let target = self.fn_entry_labels[&driver];
@@ -10500,6 +10500,62 @@ impl Compiler {
             }
         };
 
+        // Whether folding partial `p` onto `a` overflows, without trapping
+        // (`None`: the fold cannot).
+        let overflows = |b: &mut Synth, a: LocalId, p: LocalId| -> Option<HirId> {
+            let boolean = coil_ty::boolean;
+            let cmp = |b: &mut Synth, op: BinOp, l: LocalId, r: HirId| {
+                let l = b.read(l);
+                b.bin(op, l, r, boolean())
+            };
+            let positive = |b: &mut Synth, l: LocalId| {
+                let zero = b.int(0);
+                cmp(b, BinOp::Gt, l, zero)
+            };
+            // `limit ⊘ x` for a literal `limit`.
+            let room = |b: &mut Synth, op: BinOp, limit: i64, x: LocalId| {
+                let (limit, x) = (b.int(limit), b.read(x));
+                b.bin(op, limit, x, coil_ty::int())
+            };
+            match site.op {
+                LoopReduceOp::Xor => None,
+                // `a + p` leaves the range past `MAX - p` or under `MIN - p`.
+                LoopReduceOp::Add => {
+                    let up = positive(b, p);
+                    let most = room(b, BinOp::IntSub, i64::MAX, p);
+                    let over = cmp(b, BinOp::Gt, a, most);
+                    let least = room(b, BinOp::IntSub, i64::MIN, p);
+                    let under = cmp(b, BinOp::Lt, a, least);
+                    Some(b.if_(up, over, Some(under), boolean()))
+                }
+                // `a * p` by the signs: each quotient is of a literal by a
+                // non-zero operand whose sign keeps it in range.
+                LoopReduceOp::Mul => {
+                    let a_up = positive(b, a);
+                    let on_up = {
+                        let p_up = positive(b, p);
+                        let most = room(b, BinOp::IntDiv, i64::MAX, p);
+                        let over = cmp(b, BinOp::Gt, a, most);
+                        let least = room(b, BinOp::IntDiv, i64::MIN, a);
+                        let under = cmp(b, BinOp::Lt, p, least);
+                        b.if_(p_up, over, Some(under), boolean())
+                    };
+                    let on_down = {
+                        let p_up = positive(b, p);
+                        let least = room(b, BinOp::IntDiv, i64::MIN, p);
+                        let under = cmp(b, BinOp::Lt, a, least);
+                        let zero = b.int(0);
+                        let p_down = cmp(b, BinOp::Lt, p, zero);
+                        let most = room(b, BinOp::IntDiv, i64::MAX, p);
+                        let over = cmp(b, BinOp::Lt, a, most);
+                        let over = b.push(HirKind::Logic { and: true, lhs: p_down, rhs: over }, boolean());
+                        b.if_(p_up, under, Some(over), boolean())
+                    };
+                    Some(b.if_(a_up, on_up, Some(on_down), boolean()))
+                }
+            }
+        };
+
         // A range of one or more chunks: spawn each, then join and fold.
         let fork = |b: &mut Synth, chunks: &[(Bound, Bound)], whole: (Bound, Bound)| -> HirId {
             let handles: Vec<LocalId> =
@@ -10507,12 +10563,26 @@ impl Compiler {
             let partials: Vec<LocalId> =
                 (0..chunks.len()).map(|i| b.local(&format!("__coil_par_part{i}"), coil_ty::int(), LocalKind::Pattern)).collect();
             // Innermost first: the fold, then each join, then each spawn.
-            let mut value = b.read(acc);
-            for &p in &partials {
-                let p = b.read(p);
-                value = b.bin(fold_op, value, p, coil_ty::int());
+            // A step of the fold that would overflow is one the sequential
+            // loop takes too, so the whole range runs here instead and
+            // panics where that loop does.
+            let mut fold = Vec::new();
+            let mut value = acc;
+            for (j, &p) in partials.iter().enumerate() {
+                if let Some(over) = overflows(b, value, p) {
+                    let rerun = seq(b, whole.0, whole.1);
+                    let rerun = b.block(vec![rerun], None, coil_ty::never());
+                    fold.push(b.if_(over, rerun, None, coil_ty::unit()));
+                }
+                let next = b.local(&format!("__coil_par_fold{j}"), coil_ty::int(), LocalKind::Temp);
+                let (l, r) = (b.read(value), b.read(p));
+                let folded = b.bin(fold_op, l, r, coil_ty::int());
+                fold.push(b.let_(next, folded));
+                value = next;
             }
-            let mut tail = b.ret(value);
+            let value = b.read(value);
+            fold.push(b.ret(value));
+            let mut tail = b.block(fold, None, coil_ty::never());
             for j in (0..chunks.len()).rev() {
                 let mut failed = Vec::new();
                 discard(b, &handles[j + 1..], &mut failed);
@@ -10715,7 +10785,7 @@ impl Compiler {
             return None;
         };
         self.loop_par_helpers += 1;
-        let name = format!("__coil_par_loop_{}", self.loop_par_helpers);
+        let name = format!("{}{}", common::PAR_LOOP_WORKER_PREFIX, self.loop_par_helpers);
         let (entry, label) = self.bind_function_entry(name.clone());
         let arity = w.params.len() as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
