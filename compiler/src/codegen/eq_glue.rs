@@ -462,8 +462,20 @@ impl Compiler {
     pub(super) fn plan_var_eq_dict(&mut self, out: &mut Vec<DictStep>, dict: VarEqDict) -> bool {
         match dict {
             VarEqDict::Frame(slot) => out.push(DictStep::Load(slot)),
+            // `(eq, ne, D)`: `D`'s `eq` and `ne` take `D` itself (each may
+            // be a forwarder into `D`, or read a context that follows
+            // `D`'s methods), so the two slots here forward to `D`, the
+            // third element (#2476).
             VarEqDict::Project { slot, eq, ne } => {
-                out.extend([DictStep::Load(slot), DictStep::Field(eq), DictStep::Load(slot), DictStep::Field(ne), DictStep::Tuple(2)]);
+                let start = out.len();
+                for (method, at) in [("eq", eq), ("ne", ne)] {
+                    let Some(code) = self.dict_forwarder("Eq", method, 2, Some(at)) else {
+                        out.truncate(start);
+                        return false;
+                    };
+                    out.push(code);
+                }
+                out.extend([DictStep::Load(slot), DictStep::Tuple(3)]);
             }
             VarEqDict::Any => {
                 let start = out.len();

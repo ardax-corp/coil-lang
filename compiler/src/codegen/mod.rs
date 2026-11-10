@@ -236,6 +236,11 @@ pub struct Compiler {
     /// (`(fqn, method, type)`, #1451, #1479), emitted after the module's
     /// own functions.
     structural_thunks: Vec<(String, String, Ty)>,
+    /// Reserved dictionary forwarders by name (#2476): the superclass
+    /// and method whose signature it has, the superclass dictionary's
+    /// index in the dictionary it is called with, and the method's slot
+    /// there.
+    dict_forwarders: HashMap<String, (String, String, u32, u32)>,
     /// Parameter types of each reserved structural thunk's raw entry, which
     /// the checker has no signature for.
     structural_thunk_params: HashMap<String, Vec<Ty>>,
@@ -686,6 +691,7 @@ impl Default for Compiler {
             builtin_show_thunks: Vec::new(),
             builtin_show_used: HashSet::new(),
             structural_thunks: Vec::new(),
+            dict_forwarders: HashMap::new(),
             structural_thunk_params: HashMap::new(),
             structural_tuple_thunks: Vec::new(),
             synth_entry_dicts: None,

@@ -150,6 +150,11 @@ pub struct HirBoundCall {
     /// The dictionaries of the method's own bounds (`fn third<W: Show>`),
     /// passed after the bound's (#1471).
     pub dicts: Vec<HirDictOp>,
+    /// A dictionary forwarder's call (#2476), `(index, own)`: the
+    /// dictionary is no frame slot but the argument before the last `own`,
+    /// and the call goes to element `index` of it, a superclass's
+    /// dictionary: that one's `method` slot, called with that one.
+    pub forward: Option<(u32, u32)>,
 }
 
 /// One step of building instance dictionaries, as codegen plans them
@@ -165,9 +170,6 @@ pub enum HirDictOp {
     Tuple(u32),
     /// The top value as its word: an existential pack's value.
     Word,
-    /// Element `n` of the top word, a dictionary: a method's code pointer
-    /// in it.
-    Field(u32),
     /// `Load` of frame slot `n`, one of the body's own dictionary
     /// parameters: a dictionary it forwards.
     Load(u32),
@@ -5277,10 +5279,6 @@ impl Lower<'_> {
                     stack.push(self.b.ins_word(v).map_err(mir)?);
                 }
                 HirDictOp::Interned { slot, ref ops } => stack.push(self.interned_dict(slot, ops)?),
-                HirDictOp::Field(n) => {
-                    let dict = stack.pop().ok_or("dictionary field")?;
-                    stack.push(self.b.ins_tuple_item(dict, n, MirTy::I64).map_err(mir)?);
-                }
             }
         }
         Ok(stack)
@@ -5556,9 +5554,20 @@ impl Lower<'_> {
             };
             words.push(v);
         }
-        let dict = *self.dict_params.get(&bound.dict).ok_or("dictionary parameter")?;
-        words.push(dict);
-        words.extend(self.dict_values(&bound.dicts)?);
+        let dict = match bound.forward {
+            Some((index, own)) => {
+                let at = words.len().checked_sub(1 + own as usize).ok_or("forwarded dictionary")?;
+                let dict = self.b.ins_tuple_item(words[at], index, MirTy::HeapRef).map_err(mir)?;
+                words[at] = dict;
+                dict
+            }
+            None => {
+                let dict = *self.dict_params.get(&bound.dict).ok_or("dictionary parameter")?;
+                words.push(dict);
+                words.extend(self.dict_values(&bound.dicts)?);
+                dict
+            }
+        };
         let callee = self.b.ins_tuple_item(dict, bound.method, MirTy::I64).map_err(mir)?;
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
         if let Some(want) = niche {
