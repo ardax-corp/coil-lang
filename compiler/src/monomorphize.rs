@@ -197,6 +197,12 @@ struct GenericFnSig {
     /// every ground call gets its clone, past the clone budget
     /// (`docs/internals/opt-hints.md`).
     hot: bool,
+    /// A parameter or the result holds an open `Option` / `Result` below
+    /// its top (`Vec<Option<T>>`): the shared body and ground code hold
+    /// that value differently where it is a niche word, so every ground
+    /// call gets its clone, past the clone budget (#2441,
+    /// `docs/internals/layout.md`, "Open enums").
+    split: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -276,7 +282,7 @@ fn collect_transitive(
         let Some(sig) = sigs.get(&spec.fn_name) else {
             continue;
         };
-        if seen.len() > budget && !sig.hot {
+        if seen.len() > budget && !sig.hot && !sig.split {
             continue;
         }
         let Some(params) = checker.fn_param_tys(&spec.fn_name) else {
@@ -395,6 +401,12 @@ fn collect_generic_functions(
                     }
                     sig.def_id = def_id;
                     sig.fn_name = (*name).to_string();
+                    sig.split = checker
+                        .fn_param_tys(name)
+                        .into_iter()
+                        .flatten()
+                        .chain(checker.fn_return_ty(name))
+                        .any(|ty| crate::layout::nested_open_enum(&ty, true, &mut |_| true));
                     sigs.insert(name.to_string(), sig.clone());
                     if !module.is_empty() {
                         sigs.insert(format!("{module}::{name}"), sig);
@@ -440,6 +452,7 @@ fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> Gene
         calls: BTreeSet::new(),
         keyed: false,
         hot: false,
+        split: false,
     }
 }
 
@@ -533,7 +546,7 @@ fn collect_candidates(
             out.push(MonoCandidate {
                 span: node.0,
                 specialization,
-                value: sig.alias || sig.keyed || sig.hot,
+                value: sig.alias || sig.keyed || sig.hot || sig.split,
                 recursive: false,
             });
         }

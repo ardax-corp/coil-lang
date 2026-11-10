@@ -96,8 +96,9 @@ words:
   or enum result whose own items are bare parameters' values is rebuilt
   at the call, to give it the ground type's word kinds (`hir_ret_items`,
   #1549). A call is still refused where `T` is a bare parameter and the
-  result or another parameter holds it any other way (an open
-  `Option<T>` below the top, a function, a class): see "Open enums".
+  result or another parameter holds it any other way (a function, a
+  class). An open `Option<T>` below the top is never shared: see
+  "Open enums".
 - `hir_method_clone` clones niche types too: the per-type clone is a cost
   decision (speed), never a correctness one.
 
@@ -112,6 +113,34 @@ unboxes on the way out. A generic-head instance's `self` receiver (#1609)
 is the main user. This is the only place a value changes representation at
 a boundary, and it is keyed on the static type of the parameter (open
 enum), not on the caller's context.
+
+**Below the top nothing converts** (#2441). An open enum nested in a
+parameter or result (an element of `Vec<Option<T>>` or `[Option<T>; N]`,
+a tuple item, a type argument, the payload of another enum) lives in an
+object both sides hold: ground code reads and writes its elements as
+niche words where `T` is a heap type, the shared body as enum objects. A
+copy at the call would lose the body's writes to the caller's object,
+and the body cannot read the ground layout without being told each
+type's. So such a call does not take the shared body. The rule reads the
+signature alone (`layout::nested_open_enum`), for every ground type:
+
+- a free function whose signature has that shape gets a clone for every
+  ground call, past the clone budget, as a keyed or hot function does
+  (`GenericFnSig::split`, `monomorphize.rs`);
+- an inherent, static or instance method of that shape gets its clone
+  past the budget too (`Compiler::fn_sig_split` in `instance_clone` and
+  `method_clone_room`); a clone that would be a thunk around the shared
+  entry does not count;
+- a call that would still reach the shared body, with the nested enum a
+  niche word at the call's types, is refused (`hir_shared_split`, E0801
+  `callee-generic`). That is a method with type parameters of its own on
+  a plain class, which has no clone, and a call through a function value
+  of such a generic.
+
+Not covered: a generic class whose own field has that shape (`xs:
+Vec<Option<T>>`), which its shared methods read as enum objects whoever
+filled it (#2446). The two refused calls want a clone of their own
+(#2447).
 
 ### Residue boxes (E0808)
 
