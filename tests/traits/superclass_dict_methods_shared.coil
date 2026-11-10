@@ -1,0 +1,191 @@
+// A method of a superclass reached through a subclass's dictionary (`!=`
+// or `<` in a `T: Ord` body, a `trait Ordered<T: Equal>` bound) is the
+// superclass instance's method (coil-lang#2476): a default body calls its
+// own siblings (`Eq`'s default `ne` calls `eq`, not `lt`), and a bounded
+// generic instance's method reads its own context (`Lt for Box<T: Ord +
+// Eq>`).
+// Here past the clone budget, where the generic functions are shared
+// bodies calling through the dictionary.
+// @flags --clone-budget 0
+use tests::assert;
+
+// `Eq` with the default `ne`, and `Ord` over it.
+class P {
+    pub n: int,
+}
+
+impl Eq for P {
+    fn eq(P a, P b) -> bool {
+        return a.n == b.n;
+    }
+}
+
+impl Lt for P {
+    fn lt(P a, P b) -> bool {
+        return a.n < b.n;
+    }
+}
+
+impl Le for P {
+    fn le(P a, P b) -> bool {
+        return a.n <= b.n;
+    }
+}
+
+impl Gt for P {
+    fn gt(P a, P b) -> bool {
+        return a.n > b.n;
+    }
+}
+
+impl Ge for P {
+    fn ge(P a, P b) -> bool {
+        return a.n >= b.n;
+    }
+}
+
+impl Ord for P {
+}
+
+// A user supertrait whose default body calls a sibling.
+trait Equal<T> {
+    fn same(T x, T y) -> bool {}
+
+    fn other(T x, T y) -> bool {
+        return !x.same(y);
+    }
+}
+
+trait Ordered<T: Equal> {
+    fn before(T x, T y) -> bool {}
+}
+
+impl Equal for int {
+    fn same(int x, int y) -> bool {
+        return x == y;
+    }
+}
+
+impl Ordered for int {
+    fn before(int x, int y) -> bool {
+        return x < y;
+    }
+}
+
+impl Equal for P {
+    fn same(P x, P y) -> bool {
+        return x.n == y.n;
+    }
+}
+
+impl Ordered for P {
+    fn before(P x, P y) -> bool {
+        return x.n < y.n;
+    }
+}
+
+// Bounded generic instances: each reads its context from its dictionary.
+#[derive(Eq, Ord)]
+class Box<T> {
+    pub item: T,
+}
+
+class Cell<T> {
+    pub v: T,
+}
+
+impl Equal for Cell<T: Equal> {
+    fn same(Cell<T> x, Cell<T> y) -> bool {
+        return x.v.same(y.v);
+    }
+}
+
+impl Ordered for Cell<T: Ordered> {
+    fn before(Cell<T> x, Cell<T> y) -> bool {
+        return x.v.before(y.v);
+    }
+}
+
+fn differ<T: Ord>(T a, T b) -> bool {
+    return a != b;
+}
+
+fn equal<T: Ord>(T a, T b) -> bool {
+    return a == b;
+}
+
+fn less<T: Ord>(T a, T b) -> bool {
+    return a < b;
+}
+
+fn at_least<T: Ord>(T a, T b) -> bool {
+    return a >= b;
+}
+
+fn other_of<T: Ordered>(T a, T b) -> bool {
+    return a.other(b);
+}
+
+fn same_of<T: Ordered>(T a, T b) -> bool {
+    return Equal::same(a, b);
+}
+
+fn before_of<T: Ordered>(T a, T b) -> bool {
+    return a.before(b);
+}
+
+test("a default body of the superclass calls its own sibling") {
+    assert!(differ(new P(1), new P(2)));
+    assert!(differ(new P(2), new P(1)));
+    assert!(!differ(new P(2), new P(2)));
+    assert!(equal(new P(3), new P(3)));
+    assert!(!equal(new P(3), new P(4)));
+    assert!(less(new P(1), new P(2)));
+    assert!(!less(new P(2), new P(1)));
+    assert!(at_least(new P(2), new P(2)));
+}
+
+test("a user supertrait's default body") {
+    assert!(other_of(1, 2));
+    assert!(other_of(2, 1));
+    assert!(!other_of(2, 2));
+    assert!(same_of(2, 2));
+    assert!(before_of(1, 2));
+    assert!(other_of(new P(1), new P(2)));
+    assert!(!other_of(new P(2), new P(2)));
+    assert!(!before_of(new P(2), new P(1)));
+}
+
+test("a bounded generic instance through the subclass") {
+    assert!(less(new Box(1), new Box(2)));
+    assert!(!less(new Box(2), new Box(1)));
+    assert!(!less(new Box(2), new Box(2)));
+    assert!(at_least(new Box(2), new Box(2)));
+    assert!(equal(new Box(2), new Box(2)));
+    assert!(differ(new Box(2), new Box(3)));
+    assert!(less(new Box("a"), new Box("b")));
+    assert!(less(new Box(1.5), new Box(2.5)));
+    assert!(less(new Box(new P(1)), new Box(new P(2))));
+    assert!(differ(new Box(new P(1)), new Box(new P(2))));
+    assert!(!differ(new Box(new P(2)), new Box(new P(2))));
+}
+
+test("nested bounded instances") {
+    assert!(less(new Box(new Box(4)), new Box(new Box(5))));
+    assert!(!less(new Box(new Box(5)), new Box(new Box(4))));
+    assert!(at_least(new Box(new Box(new Box(5))), new Box(new Box(new Box(5)))));
+    assert!(differ(new Box(new Box(4)), new Box(new Box(5))));
+    assert!(new Box(new Box(5)) >= new Box(new Box(4)));
+    assert!(new Box(new Box(4)) < new Box(new Box(5)));
+    assert!(new Box(new Box(4)) != new Box(new Box(5)));
+}
+
+test("a user supertrait's bounded generic instance") {
+    assert!(before_of(new Cell(1), new Cell(2)));
+    assert!(!before_of(new Cell(2), new Cell(1)));
+    assert!(other_of(new Cell(1), new Cell(2)));
+    assert!(!other_of(new Cell(2), new Cell(2)));
+    assert!(same_of(new Cell(new Cell(3)), new Cell(new Cell(3))));
+    assert!(other_of(new Cell(new Cell(3)), new Cell(new Cell(4))));
+    assert!(before_of(new Cell(new P(1)), new Cell(new P(2))));
+}

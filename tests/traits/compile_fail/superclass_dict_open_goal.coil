@@ -1,0 +1,24 @@
+// @expected E0801 — a shared generic body asks for `Ord<Box<T>>` at an
+// open `T`: the dictionary would hold the shared `Lt for Box<T: Ord + Eq>`
+// method, which reads its own instance's dictionary and would be called
+// with the `Ord` one (coil-lang#2476). `deep` instantiates itself at a
+// growing type, so `deeper`'s call of it takes the shared body.
+#[derive(Eq, Ord)]
+class Box<T> {
+    pub item: T,
+}
+
+fn deep<T: Ord + Eq>(T a, T b, int n) -> bool {
+    if n == 0 {
+        return a < b;
+    }
+    return deeper(a, b, n - 1);
+}
+
+fn deeper<T: Ord + Eq>(T a, T b, int n) -> bool {
+    return deep(new Box(a), new Box(b), n);
+}
+
+fn main() {
+    let _ = deep(1, 2, 2);
+}
