@@ -195,7 +195,9 @@ and the body cannot read the ground layout without being told each
 type's. So such a call does not take the shared body. A function below the top
 is the same case (#2488): an element of `Vec<unit -> Option<T>>` returns
 the niche word from a ground closure, and only a function that is itself
-the argument gets an adapter. The rule reads the signature (and the
+the argument gets an adapter. That adapter converts the argument's own
+parameters and result, not a function among its parameters: in `fn(fn(T)
+-> Option<T>) -> T` the inner function's result is below the top (#2591). The rule reads the signature (and the
 declarations of the types it names, below), `layout::nested_open_enum`,
 for every ground type:
 
