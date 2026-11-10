@@ -533,6 +533,61 @@ fn a_range_at_the_edge_of_int_runs_as_the_sequential_loop_does() {
     on_matches_off("edge-stride-long", &range_program(by_three, "100 / (i - 9)", "0, 9223372036854775806"));
 }
 
+/// An `if let` is read as the `match` it is: a const call in its arm
+/// takes its function's fork worker, and a fork in the arm it takes when
+/// its pattern misses is never a worker's, which could not test that.
+#[test]
+fn a_fork_under_if_let_is_the_sequential_one() {
+    let program = r#"
+use io::{stdout, write};
+use string::to_bytes;
+
+fn fib(int n) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn known(int n) -> Option<int> {
+    if n == 27 {
+        return Option::Some(5);
+    }
+    return Option::None;
+}
+
+fn g(int n) -> int {
+    if n < 2 {
+        return 1;
+    }
+    if let Option::Some(v) = known(n) {
+        return v;
+    } else {
+        return g(n - 1) + g(n - 2);
+    }
+}
+
+fn h(int n) -> int {
+    if n < 2 {
+        return 1;
+    }
+    return match known(n) {
+        Option::Some(v) => v,
+        default => h(n - 1) + h(n - 2),
+    };
+}
+
+fn main() {
+    if let Option::Some(v) = known(27) {
+        let x = fib(27);
+        let _ = write(stdout(), to_bytes(x.show() + " " + v.show() + " "));
+    }
+    let _ = write(stdout(), to_bytes(g(27).show() + " " + g(28).show() + " " + g(30).show() + " " + h(30).show()));
+}
+"#;
+    same_as_sequential("fork-under-if-let", program, "");
+}
+
 /// `fib` with `body` after its base case and `clause` on its signature,
 /// printed at 27: deep enough for a fork worker.
 fn fib_program(clause: &str, body: &str) -> String {

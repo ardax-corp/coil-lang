@@ -267,6 +267,32 @@ fn main() {
     assert_eq!(demanded.len(), 1, "one worker per function: {demanded:?}");
 }
 
+/// A const call under an `if let` demands its function's worker like one
+/// anywhere else.
+#[test]
+fn a_const_call_under_if_let_demands_a_worker() {
+    let m = lower(
+        r#"
+fn fib(int n) -> int {
+    if n <= 1 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn pick(int n) -> Option<int> {
+    if n > 0 { return Some(n); }
+    return None;
+}
+fn main() {
+    if let Some(v) = pick(3) {
+        let a = fib(27);
+    }
+    return;
+}
+"#,
+    );
+    let sites = m.sites();
+    assert!(m.workers(&sites).contains("fib"));
+}
+
 #[test]
 fn below_threshold_const_does_not_demand_a_worker() {
     let m = lower(
