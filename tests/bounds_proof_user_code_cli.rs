@@ -263,3 +263,49 @@ fn an_out_of_range_read_after_hidden_user_code_panics() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(missed.is_empty(), "no out-of-bounds panic:\n{}", missed.join("\n"));
 }
+
+/// `i < xs.len()` holds on the way into the loop and on its first trip
+/// only: the call at the end of each trip empties `xs`.
+const CARRIED: &str = "static let G: Vec<int> = Vec::new();
+
+fn shrink() {
+    while G.len() > 0 {
+        G.pop();
+    }
+}
+
+fn walk(Vec<int> xs) -> int {
+    let trips = 0;
+    let i = 0;
+    if i < xs.len() {
+        let n = 0;
+        while n < 3 {
+            let unused = xs[i];
+            shrink();
+            trips = trips + 1;
+            n = n + 1;
+        }
+    }
+    return trips;
+}
+
+fn main() {
+    for i in 0..100 {
+        G.push(7);
+    }
+    let trips = walk(G);
+}
+";
+
+#[test]
+fn a_fact_carried_into_a_loop_dies_at_a_call_on_its_back_edge() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let dir = std::env::temp_dir().join(format!("coil_bounds_proof_carried_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for mode in [&[][..], &["-O", "0"][..], &["--mir"][..]] {
+        let (panicked, stderr) = panics_out_of_bounds(&bin, &dir, CARRIED, mode);
+        assert!(panicked, "{mode:?}: no out-of-bounds panic on the second trip; stderr: {stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
