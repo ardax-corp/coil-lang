@@ -396,6 +396,7 @@ fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<
 ///   the enum's object: at a ground instance `F(fn(T) -> T)` is a
 ///   monomorphic function, and in a shared body a function called with
 ///   each `T` its one word, the word ground code passes it (#2473);
+/// - a `Vec` or an array of such functions (#2493);
 /// - at a ground instance, what a non-generic enum's field may be
 ///   ([`closed_field`]: a `Vec` or `Option` of such functions).
 ///
@@ -403,8 +404,17 @@ fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<
 /// is taken at a ground instance only: a shared body would read its
 /// result as the open enum's object, a ground closure returns its word.
 fn generic_enum_field(checker: &Checker, field: &Ty, seen: &mut Vec<String>) -> bool {
+    let plain_fun = |ty: &Ty, seen: &mut Vec<String>| matches!(strip_readonly(ty), Ty::Fun(..)) && fun_words(checker, ty, seen);
+    // The elements of a `Vec` or array of such functions are one closure
+    // word each on both sides, as a generic function's own `Vec<fn(T) ->
+    // T>` parameter's are (#2493).
+    let elem = match strip_readonly(field) {
+        Ty::Array { element, .. } => Some(element.as_ref()),
+        t => coil_ty::vec_element_ty(t),
+    };
     params_closed(field)
-        || matches!(strip_readonly(field), Ty::Fun(..)) && fun_words(checker, field, seen)
+        || plain_fun(field, seen)
+        || elem.is_some_and(|e| plain_fun(e, seen))
         || !field.has_free_var() && closed_field(checker, field, seen)
 }
 
