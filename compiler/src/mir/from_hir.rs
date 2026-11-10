@@ -176,6 +176,14 @@ pub enum HirDictOp {
     /// A ground dictionary: `ops` (only `Code` and `Tuple`) build it once
     /// into static `slot`; later runs load it from there.
     Interned { slot: u32, ops: Vec<HirDictOp> },
+    /// `Const`: a shared generic entry's `kinds` word, its bits known at
+    /// the call (#2506).
+    Kinds(u64),
+    /// The top `kinds` word with bit `to` set where the body's own `kinds`
+    /// word has bit `from`: a type parameter the call forwards.
+    KindsBit { from: u8, to: u8 },
+    /// The body's own `kinds` word: what a lambda of it captures.
+    KindsOwn,
 }
 
 /// How a user iterator's `next` returns `Option<Item>`, as HIR emission
@@ -1132,6 +1140,9 @@ struct Lower<'a> {
     packed: HashSet<u32>,
     /// The body's dictionary parameters, by frame slot.
     dict_params: HashMap<u32, ValueId>,
+    /// A shared generic body's `kinds` word (#2506), or the one a lambda
+    /// of it captures.
+    kinds: Option<ValueId>,
     /// Words already lowered for these expressions: an element or field
     /// `x++` used for its value reads its place once, and its store takes
     /// the new word.
@@ -1182,6 +1193,7 @@ impl<'a> Lower<'a> {
             pad: None,
             packed: HashSet::new(),
             dict_params: HashMap::new(),
+            kinds: None,
             preset: HashMap::new(),
             adjust_store: None,
         }
@@ -1542,12 +1554,21 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
     let dict_slots: HashSet<u32> = entry.dicts.values().copied().filter(|&slot| takes_dicts && slot < entry.entry_sp).collect();
     let mut next = 0;
     let mut dict_params = HashMap::new();
+    // A shared generic entry's `kinds` word follows its dictionaries; a
+    // lambda's follows the ones it captures.
+    let kinds_slot = entry.kinds.as_ref().map(|k| k.slot);
+    let mut kinds = None;
     let mut add_dicts = |lower: &mut Lower, next: &mut u32| -> Result<(), Refusal> {
-        while dict_slots.contains(next) {
-            dict_params.insert(*next, lower.b.add_param(MirTy::HeapRef).map_err(mir)?);
+        loop {
+            if dict_slots.contains(next) {
+                dict_params.insert(*next, lower.b.add_param(MirTy::HeapRef).map_err(mir)?);
+            } else if kinds_slot == Some(*next) && kinds.is_none() {
+                kinds = Some(lower.b.add_param(MirTy::I64).map_err(mir)?);
+            } else {
+                return Ok(());
+            }
             *next += 1;
         }
-        Ok(())
     };
     for &param in &hir.params {
         add_dicts(&mut lower, &mut next)?;
@@ -1580,6 +1601,13 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
     }
     // Dictionaries: read only where a dictionary program loads one.
     add_dicts(&mut lower, &mut next)?;
+    if kinds_slot.is_some() && kinds.is_none() {
+        return Err("kinds slot".into());
+    }
+    lower.kinds = kinds;
+    if let (Some(k), Some(msg)) = (kinds, entry.kinds.as_ref().and_then(|f| f.check.map(|m| (f.n, m)))) {
+        lower.check_kinds(k, msg.0, msg.1)?;
+    }
     if takes_dicts {
         if next != entry.entry_sp {
             return Err("param slot".into());
@@ -3564,6 +3592,15 @@ impl Lower<'_> {
                 // that stays out (#2506). Its per-type clones get the op at
                 // an object type.
                 let open = self.expr_ty(*inner).is_some_and(|t| is_var(t) || is_var_app(t));
+                // A unique of one whose `kinds` bit the body has: the op
+                // where the bit says the word is an object.
+                if open
+                    && *unique
+                    && matches!(self.b.value_ty(v), MirTy::I64 | MirTy::HeapRef)
+                    && let Some(bit) = self.expr_ty(*inner).cloned().and_then(|t| self.kinds_bit(&t))
+                {
+                    return Ok(Val::V(self.guarded_cow(id, v, true, bit)?));
+                }
                 if open && !*unique && self.b.value_ty(v) == MirTy::I64 {
                     let out = self.at_expr(id, |l| l.b.ins_cow(v, false).map_err(mir))?;
                     return Ok(Val::V(out));
@@ -5174,7 +5211,7 @@ impl Lower<'_> {
             // A pure function's one scalar word: an operator that may trap.
             if self.cx.pure_fn(name)
                 && !site.word_ret
-                && site.dicts.is_empty()
+                && site.dicts.iter().all(|d| matches!(d, HirDictOp::Kinds(_) | HirDictOp::KindsBit { .. }))
                 && niche.is_none()
                 && dest_hi.is_none()
                 && ret.is_numeric()
@@ -5301,9 +5338,97 @@ impl Lower<'_> {
                     stack.push(self.b.ins_word(v).map_err(mir)?);
                 }
                 HirDictOp::Interned { slot, ref ops } => stack.push(self.interned_dict(slot, ops)?),
+                HirDictOp::Kinds(bits) => stack.push(self.b.ins_const(MirConst::I64(bits as i64)).map_err(mir)?),
+                HirDictOp::KindsBit { from, to } => {
+                    let w = stack.pop().ok_or("kinds word")?;
+                    // A caller with no `kinds` word of its own (a defer
+                    // pad) passes the bit clear: no op, as before.
+                    let Some(own) = self.kinds else {
+                        stack.push(w);
+                        continue;
+                    };
+                    let mut bit = own;
+                    if from != to {
+                        let k = self.b.ins_const(MirConst::I64(i64::from(from))).map_err(mir)?;
+                        bit = self.b.ins_binop(MirBinOp::Shr, bit, k).map_err(mir)?;
+                        let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+                        bit = self.b.ins_binop(MirBinOp::BitAnd, bit, one).map_err(mir)?;
+                        if to > 0 {
+                            let k = self.b.ins_const(MirConst::I64(i64::from(to))).map_err(mir)?;
+                            bit = self.b.ins_binop(MirBinOp::Shl, bit, k).map_err(mir)?;
+                        }
+                    } else {
+                        let m = self.b.ins_const(MirConst::I64((1u64 << to) as i64)).map_err(mir)?;
+                        bit = self.b.ins_binop(MirBinOp::BitAnd, bit, m).map_err(mir)?;
+                    }
+                    stack.push(self.b.ins_binop(MirBinOp::BitOr, w, bit).map_err(mir)?);
+                }
+                HirDictOp::KindsOwn => stack.push(self.kinds.ok_or("kinds word")?),
             }
         }
         Ok(stack)
+    }
+
+    /// The entry check of a `kinds` word for `n` type parameters (#2506):
+    /// its bits past the mask are the sentinel's, else the entry was
+    /// called without it (a compiler bug), and panics with message `msg`.
+    fn check_kinds(&mut self, kinds: ValueId, n: u32, msg: u32) -> Result<(), Refusal> {
+        let high = if n >= 64 { 0 } else { u64::MAX << n };
+        if high == 0 {
+            return Ok(());
+        }
+        let m = self.b.ins_const(MirConst::I64(high as i64)).map_err(mir)?;
+        let got = self.b.ins_binop(MirBinOp::BitAnd, kinds, m).map_err(mir)?;
+        let want = self.b.ins_const(MirConst::I64((crate::codegen::kinds_sentinel(n)) as i64)).map_err(mir)?;
+        let bad = self.b.ins_cmp(MirCmpOp::Ne, got, want).map_err(mir)?;
+        let (fail, ok) = (self.b.create_block(), self.b.create_block());
+        self.b.branch(bad, fail, ok).map_err(mir)?;
+        self.switch(fail);
+        let text = self.b.ins_string(msg).map_err(mir)?;
+        self.b.panic(text).map_err(mir)?;
+        self.switch(ok);
+        Ok(())
+    }
+
+    /// The bit of the body's `kinds` word that says whether a value of
+    /// type `ty` (a type parameter, or one applied) is a copy-on-write
+    /// object, with the word: `None` where the body has none for it.
+    fn kinds_bit(&self, ty: &Ty) -> Option<(ValueId, u32)> {
+        let kinds = self.kinds?;
+        let var = match strip_readonly(ty) {
+            Ty::Var(v) => *v,
+            Ty::App(head, _) => match strip_readonly(head) {
+                Ty::Var(v) => *v,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let bit = self.cx.frame().kinds.as_ref()?.bit(var)?;
+        Some((kinds, bit))
+    }
+
+    /// Copy-on-write op `unique` on word `v` of a type parameter whose
+    /// `kinds` bit is `bit` of `kinds`: the op where the bit is set (the
+    /// word is an object), the word as it is where it is clear.
+    fn guarded_cow(&mut self, id: HirId, v: ValueId, unique: bool, (kinds, bit): (ValueId, u32)) -> Result<ValueId, Refusal> {
+        let ty = self.b.value_ty(v);
+        let m = self.b.ins_const(MirConst::I64((1u64 << bit) as i64)).map_err(mir)?;
+        let set = self.b.ins_binop(MirBinOp::BitAnd, kinds, m).map_err(mir)?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let object = self.b.ins_cmp(MirCmpOp::Ne, set, zero).map_err(mir)?;
+        let (op, skip, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.branch(object, op, skip).map_err(mir)?;
+        self.switch(op);
+        let obj = self.b.ins_word_as(v, MirTy::HeapRef).map_err(mir)?;
+        let out = self.at_expr(id, |l| l.b.ins_cow(obj, unique).map_err(mir))?;
+        let out = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+        let out = self.b.ins_word_as(out, ty).map_err(mir)?;
+        let op_from = self.cur;
+        self.jump(join)?;
+        self.switch(skip);
+        self.jump(join)?;
+        self.switch(join);
+        self.b.ins_stack_phi(vec![(op_from, out), (skip, v)]).map_err(mir)
     }
 
     /// Ground dictionary `ops` held in static `slot`: built and stored on
@@ -5503,6 +5628,8 @@ impl Lower<'_> {
             };
             words.push(v);
         }
+        // A shared generic entry's `kinds` word, its last filled parameter.
+        words.extend(self.dict_values(&f.dicts)?);
         let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
     }

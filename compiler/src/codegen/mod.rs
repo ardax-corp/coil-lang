@@ -655,6 +655,12 @@ pub struct Compiler {
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
+    /// The table keys of the free functions and inherent methods whose
+    /// shared entry takes a `kinds` word (#2506), reserved before any body
+    /// is emitted ([`Compiler::kinds_scheme`]).
+    kinds_keys: HashSet<String>,
+    /// [`Self::kinds_keys`] by their entry labels.
+    kinds_labels: HashMap<crate::bodies::Label, String>,
     /// Functions and methods of the modules built so far that are cold:
     /// `#[cold]`, or never returning ([`crate::hir::cold`]), by table key.
     cold_fns: HashSet<String>,
@@ -844,6 +850,8 @@ impl Default for Compiler {
             residue_lint: std::cell::Cell::new(false),
             residue: std::cell::RefCell::new((HashSet::new(), Vec::new())),
             hir_fn_names: HashMap::new(),
+            kinds_keys: HashSet::new(),
+            kinds_labels: HashMap::new(),
             cold_fns: HashSet::new(),
             cold_labels: HashSet::new(),
             inline_refused: HashSet::new(),
@@ -874,6 +882,7 @@ fn extract_enum_name(ty: &crate::typechecking::ty::Ty) -> Option<String> {
 
 mod compiler;
 pub(crate) use compiler::frame::BodyFrame;
+pub(crate) use compiler::kinds::sentinel as kinds_sentinel;
 mod inline_cost;
 
 /// One `defer` thunk of the function being compiled.
