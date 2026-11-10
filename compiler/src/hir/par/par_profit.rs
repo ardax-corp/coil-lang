@@ -408,7 +408,9 @@ impl HirModule {
         let mut out = HashMap::new();
         for body in self.fork_bodies() {
             let name = bare(&body.name);
-            if pure_fns.contains(name)
+            // The set lists a body under its own name (`f`, `Owner::m`,
+            // with the module's path), never a method under its bare one.
+            if pure_fns.contains(body.name.as_str())
                 && let Some(site) = detect_fork_site(name, body, checker, pure_fns)
             {
                 out.insert(name.to_string(), site);
