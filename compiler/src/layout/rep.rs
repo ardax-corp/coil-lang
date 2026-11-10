@@ -518,17 +518,16 @@ impl From<&Layout> for ValueLayout {
 
 /// How a heap word of static type `ty` reads (`common::WORD_*`): a number /
 /// bool / scalar enum is never a reference; a ground heap object or a niche
-/// word is `0` or an object address (bit 0 set for a `Result` `Err`);
-/// anything generic or unresolved stays unknown.
+/// word is `0` or an object address (bit 0 set for a `Result` `Err`), and
+/// so is a stored `()`, the empty tuple object (#2507); anything generic or
+/// unresolved stays unknown.
 pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     let ty = apply_ty_prune(checker.subst(), ty);
     let ty = strip_readonly(&ty);
-    if let Ty::Con(name) = ty
-        && matches!(
-            name.as_str(),
-            crate::typechecking::ty::INT | crate::typechecking::ty::FLOAT | crate::typechecking::ty::BOOL | crate::typechecking::ty::BYTE | UNIT
-        )
-    {
+    if is_unit(ty) {
+        return common::WORD_POINTER;
+    }
+    if is_immediate(ty) {
         return common::WORD_SCALAR;
     }
     if is_scalar_enum_ty(checker, ty) {
@@ -616,7 +615,8 @@ mod word_tests {
         assert_eq!(kind(int()), common::WORD_SCALAR);
         assert_eq!(kind(Ty::Con("float".into())), common::WORD_SCALAR);
         assert_eq!(kind(Ty::Con("bool".into())), common::WORD_SCALAR);
-        assert_eq!(kind(unit()), common::WORD_SCALAR);
+        // A stored `()` is the empty tuple object (#2507).
+        assert_eq!(kind(unit()), common::WORD_POINTER);
         assert_eq!(kind(string()), common::WORD_POINTER);
         assert_eq!(kind(option_ty(string())), common::WORD_POINTER);
         assert_eq!(kind(result_ty(string(), string())), common::WORD_POINTER);
