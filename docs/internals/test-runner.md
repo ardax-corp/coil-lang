@@ -285,12 +285,14 @@ assertions) fails one of them.
 ### Configuration cells and known failures
 
 Some cells run the corpus under a configuration the default run never
-reaches. Each has a name, passed as `coil test --cell NAME`:
+reaches. Each has a name, which `// @xfail` and `// @skip` header lines
+refer to; a `coil test` cell passes it as `--cell NAME`:
 
 | Cell | Flags (after `scripts/test_corpora.py --release --`) | What it reaches |
 |------|-------------------------------------------------------|-----------------|
 | `clone-budget-0` | `--engine native --clone-budget 0 --cell clone-budget-0 …`, then `--engine mir` | shared generic bodies: no per-type clone is made, so every generic call passes dictionaries and boxed words |
-| `mir-verify` | `COIL_MIR_VERIFY=1` with `--engine native …`, then `--engine mir` (and on the `mir-opt` cell's `-O 1 2 3 s g` runs) | the MIR verifier on every body as lowered and after each pass, in a release build |
+| `mir-verify` | `COIL_MIR_VERIFY=1` with `--engine native --cell mir-verify …`, then `--engine mir` (and on the `mir-opt` cell's `-O 1 2 3 s g` runs) | the MIR verifier on every body as lowered and after each pass, in a release build |
+| `auto-par` | `scripts/auto_par_diff.py --release -- …` (its own script, not `coil test`) | auto-par on against off: every program with a `main`, both ways, on 8 workers |
 
 ```bash
 scripts/test_corpora.py --release -- --engine native --clone-budget 0 --cell clone-budget-0 \
@@ -322,8 +324,48 @@ main: value v7 defined twice`, then, from the harness, `note: the compiler
 panicked while compiling tests/…coil`. A release build aborts on a panic,
 so that corpus's process ends there (`no summary` in `test_corpora.py`,
 with the panic at the end of its log). An `// @xfail` line cannot list
-such a file: fix the pass, or file the issue and keep the file out of the
-corpus until it is fixed.
+such a file, since the run does not survive it: fix the pass, or file the
+issue and keep the file out with `// @skip mir-verify #<issue> <why>`
+(the `mir-verify` and `mir-opt` runs pass `--cell mir-verify`; no file
+needs the line today).
+
+**`auto-par`: on against off.** The rule is that a program's stdout,
+stderr and exit code with automatic fork-join are those of
+`--auto-par off` ([auto-par](auto-par.md)). `tests/auto_par_cli.rs` checks
+it on a handful of programs written for it; `scripts/auto_par_diff.py`
+checks it on every file with a `fn main` under `tests/` (not
+`compile_fail/`), `examples/*.coil` and `examples/perf/*.coil`:
+
+```bash
+scripts/auto_par_diff.py --release -- --allow-read --allow-write --allow-net --allow-env \
+  --root examples/src --root .deps/coil-stdlib/src
+scripts/auto_par_diff.py --release --engine native tests/codegen examples/perf/fib.coil -- …
+```
+
+Each program is its own `coil <file>` process, once with `--auto-par off`
+and once with `on` per engine (`--engine native|mir`, default both), with
+`--contracts all --fold-calls off --no-build-cache` (a call folded at
+compile time never forks), the flags after `--`, the file's own
+`// @flags`, and `COIL_MAX_WORKER_THREADS=8` (`--workers N`), which
+overrides the one worker cargo's environment sets. `-p N` programs run at
+once and `--timeout S` (120) bounds one run. When the two ways differ, the
+sequential run is repeated twice to tell a bug from a program that does
+not print the same thing every time:
+
+| Verdict | Meaning | Fails the run |
+|---------|---------|---------------|
+| `same` | equal both ways on every engine (a program refused the same way both times counts) | no |
+| `differs` | `off` three times the same, `on` different: an auto-par bug. File it, then list the file with `// @xfail auto-par #<issue> <why>` | yes |
+| `unstable` | two of the `--auto-par off` runs differ: the output depends on time or scheduling. Add `// @skip auto-par <why>` | yes |
+| `timed out` | a run went past `--timeout` | yes |
+| `xfail` | listed, and it differs | no |
+| `fixed` | listed, and the same both ways: remove the line | yes |
+| `skip` | `// @skip auto-par`, or a `// @needs` the platform lacks | no |
+
+About 30 of the 840 programs compile to different code with auto-par on
+(the perf benches and `tests/codegen` mostly); the rest are the same
+program twice. The six skipped today are perf benches that print
+nanoseconds (`grep -rn '@skip auto-par' examples tests`).
 
 **Known failures.** A file that fails in a cell for a filed bug says so in
 its header, one line per cell:
@@ -352,6 +394,14 @@ of the cell until it is.
 
 To list a new failure: file the issue with a minimal repro, then add the
 line to every file that fails for it. `grep -rn '@xfail' tests` is the list.
+
+**Skipped files.** `// @skip <cell> <why>` keeps a file out of a cell: it
+is not compiled or run there, and the summary counts it (`N skipped
+(`// @skip`)`, `skipped` under `--json`). It is for what `@xfail` cannot
+hold: a failure that ends the process or never returns, and (in the
+`auto-par` cell) output that is not the same twice. The reason is
+required; give the issue number when there is one. A skipped file is no
+longer watched in that cell, so prefer `@xfail` wherever the run survives.
 
 On four cores the whole corpus takes ~14 s this way against ~31 s for one
 `coil test` process on a release build (2026-10-15).
