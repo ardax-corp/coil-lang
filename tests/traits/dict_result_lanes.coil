@@ -139,6 +139,46 @@ impl Items for Bin {
     }
 }
 
+// A default body that calls a sibling reads its dictionary: as a
+// superclass's method it takes its per-type clone, also past the budget,
+// and the clone returns a lane array.
+trait Base<S> {
+    fn one(S s) -> S {}
+
+    fn mk(S s) -> Vec<S> {
+        let v: Vec<S> = [s.one(), s];
+        return v;
+    }
+}
+
+impl Base for Option<int> {
+    fn one(Option<int> s) -> Option<int> {
+        return None;
+    }
+}
+
+impl Base for (int, int) {
+    fn one((int, int) s) -> (int, int) {
+        return (0, 0);
+    }
+}
+
+trait Derived<S: Base> {
+    fn at(S s) -> int {}
+}
+
+impl Derived for Option<int> {
+    fn at(Option<int> s) -> int {
+        return 1;
+    }
+}
+
+impl Derived for (int, int) {
+    fn at((int, int) s) -> int {
+        return 0;
+    }
+}
+
 fn last<T: Many>(T x) -> T {
     let v = x.many();
     return v[v.len() - 1];
@@ -193,6 +233,11 @@ fn texts<C: Items>(C c) -> string {
     return c.text(v[1]) + c.text(v[0]);
 }
 
+fn from_default<T: Derived>(T x) -> T {
+    let v = x.mk();
+    return v[x.at()];
+}
+
 test("a dictionary method's Vec result at two-word elements") {
     assert!(last(Some(4)) == Some(4));
     assert!(last((1, 2)) == (0, 0));
@@ -233,6 +278,8 @@ test("a Vec passed into a dictionary method") {
 test("a superclass method through a subclass bound") {
     assert!(through_super(Some(4)) == Some(4));
     assert!(through_super((1, 2)) == (0, 0));
+    assert!(from_default(Some(4)) == Some(4));
+    assert!(from_default((1, 2)) == (0, 0));
 }
 
 test("an associated type's Vec result") {
