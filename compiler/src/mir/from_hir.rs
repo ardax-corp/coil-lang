@@ -173,7 +173,7 @@ pub enum HirDictOp {
     /// `Load` of frame slot `n`, one of the body's own dictionary
     /// parameters: a dictionary it forwards.
     Load(u32),
-    /// A ground dictionary: `ops` (only `Code` and `Tuple`) build it once
+    /// A ground dictionary: `ops` (only `Code`, `Kinds` and `Tuple`) build it once
     /// into static `slot`; later runs load it from there.
     Interned { slot: u32, ops: Vec<HirDictOp> },
     /// `Const`: a shared generic entry's `kinds` word, its bits known at
@@ -207,6 +207,11 @@ pub struct HirIterLoop {
     pub next: Label,
     /// The iterator `into_iter` returns.
     pub iter_ty: Ty,
+    /// The instance dictionaries `into_iter` and `next` take after the
+    /// receiver, where they take one (a generic-head instance's method,
+    /// which reads its `kinds` word there, #2506).
+    pub into_iter_dicts: Vec<HirDictOp>,
+    pub next_dicts: Vec<HirDictOp>,
     pub shape: HirIterNext,
 }
 
@@ -1556,7 +1561,7 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
     let mut dict_params = HashMap::new();
     // A shared generic entry's `kinds` word follows its dictionaries; a
     // lambda's follows the ones it captures.
-    let kinds_slot = entry.kinds.as_ref().map(|k| k.slot);
+    let kinds_slot = entry.kinds.as_ref().and_then(|k| k.slot);
     let mut kinds = None;
     let mut add_dicts = |lower: &mut Lower, next: &mut u32| -> Result<(), Refusal> {
         loop {
@@ -1604,9 +1609,12 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
     if kinds_slot.is_some() && kinds.is_none() {
         return Err("kinds slot".into());
     }
-    lower.kinds = kinds;
-    if let (Some(k), Some(msg)) = (kinds, entry.kinds.as_ref().and_then(|f| f.check.map(|m| (f.n, m)))) {
-        lower.check_kinds(k, msg.0, msg.1)?;
+    let kinds_frame = entry.kinds.as_ref();
+    let dict_n = kinds_frame.and_then(|f| f.dict).map_or(0, |d| d.2);
+    if let (Some(k), Some(f)) = (kinds, kinds_frame)
+        && let Some(msg) = f.check
+    {
+        lower.check_kinds(k, f.n - dict_n, msg)?;
     }
     if takes_dicts {
         if next != entry.entry_sp {
@@ -1620,6 +1628,23 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
             dict_params.insert(slot, dict);
         }
     }
+    // A trait method's `kinds` word out of its own dictionary, its bits
+    // first and the entry word's after them (#2506).
+    let mut kinds = kinds;
+    if let Some(f) = kinds_frame
+        && let Some((own, index, n)) = f.dict
+    {
+        let own = *dict_params.get(&own).ok_or("kinds dictionary")?;
+        let d = lower.b.ins_tuple_item(own, index, MirTy::I64).map_err(mir)?;
+        if let Some(msg) = f.check {
+            lower.check_kinds(d, crate::codegen::KINDS_DICT_BITS, msg)?;
+        }
+        kinds = Some(match kinds {
+            None => d,
+            Some(p) => lower.merge_kinds(d, n, p, f.n)?,
+        });
+    }
+    lower.kinds = kinds;
     lower.dict_params = dict_params;
     lower.pin_locals()?;
     for (i, e) in hir.exprs.iter().enumerate() {
@@ -4541,15 +4566,19 @@ impl Lower<'_> {
         };
         let it = match plan.into_iter {
             Some(into_iter) => {
+                let mut words = vec![src];
+                words.extend(self.dict_values(&plan.into_iter_dicts)?);
                 let abi = CallAbi {
-                    params: vec![self.b.value_ty(src)],
+                    params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
                     ret: it_ty,
                     ret_hi: None,
                 };
-                self.b.ins_call(into_iter, vec![src], &abi).map_err(mir)?.0
+                self.b.ins_call(into_iter, words, &abi).map_err(mir)?.0
             }
             None => src,
         };
+        // `next`'s dictionaries, built once before the loop.
+        let next_dicts = self.dict_values(&plan.next_dicts)?;
         let item = self.hir.local(local).ty.clone().ok_or("local type")?;
         let opt = crate::typechecking::ty::option_ty(item);
         let (ret, ret_hi) = match plan.shape {
@@ -4571,12 +4600,14 @@ impl Lower<'_> {
         let exit = self.b.create_block();
         self.jump(head)?;
         self.switch(head);
+        let mut words = vec![it];
+        words.extend(next_dicts.iter().copied());
         let abi = CallAbi {
-            params: vec![it_ty],
+            params: words.iter().map(|&v| self.b.value_ty(v)).collect(),
             ret,
             ret_hi,
         };
-        let (w, hi) = self.b.ins_call(plan.next, vec![it], &abi).map_err(mir)?;
+        let (w, hi) = self.b.ins_call(plan.next, words, &abi).map_err(mir)?;
         let x = match (plan.shape, hi) {
             (HirIterNext::Niche, _) => {
                 let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
@@ -5388,6 +5419,23 @@ impl Lower<'_> {
         self.b.panic(text).map_err(mir)?;
         self.switch(ok);
         Ok(())
+    }
+
+    /// One `kinds` word of `n` bits from dictionary word `d` (its first
+    /// `dn` bits) and entry word `p` (the rest).
+    fn merge_kinds(&mut self, d: ValueId, dn: u32, p: ValueId, n: u32) -> Result<ValueId, Refusal> {
+        let low = |k: u32| if k >= 64 { u64::MAX } else { (1u64 << k) - 1 };
+        let dm = self.b.ins_const(MirConst::I64(low(dn) as i64)).map_err(mir)?;
+        let d = self.b.ins_binop(MirBinOp::BitAnd, d, dm).map_err(mir)?;
+        let pm = self.b.ins_const(MirConst::I64(low(n - dn) as i64)).map_err(mir)?;
+        let mut p = self.b.ins_binop(MirBinOp::BitAnd, p, pm).map_err(mir)?;
+        if dn > 0 {
+            let k = self.b.ins_const(MirConst::I64(i64::from(dn))).map_err(mir)?;
+            p = self.b.ins_binop(MirBinOp::Shl, p, k).map_err(mir)?;
+        }
+        let w = self.b.ins_binop(MirBinOp::BitOr, d, p).map_err(mir)?;
+        let s = self.b.ins_const(MirConst::I64(crate::codegen::kinds_sentinel(n) as i64)).map_err(mir)?;
+        self.b.ins_binop(MirBinOp::BitOr, w, s).map_err(mir)
     }
 
     /// The bit of the body's `kinds` word that says whether a value of
