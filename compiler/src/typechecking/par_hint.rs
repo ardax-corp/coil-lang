@@ -9,7 +9,7 @@ use std::ops::Range;
 use common::EffectFlags;
 use parser::ast::{EnumConstructPayload, Expression, Output};
 
-use super::par_profit::analyze_par_fork_sites;
+use crate::hir::par::ParForkSite;
 
 /// Kind of shared resource a covering userland lock would name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -113,26 +113,28 @@ impl ParEscapeHint {
 /// impurity without a lockable resource is skipped.
 ///
 /// `effects` are the checker's effect bits for this file's functions, by
-/// bind name ([`TypedSidecar::fn_effects`]).
+/// bind name ([`TypedSidecar::fn_effects`]). `sites` are the module's fork
+/// sites with every one of those functions taken as an arm
+/// ([`HirModule::par_fork_sites`] over [`hint_arms`]).
 ///
 /// [`TypedSidecar::fn_effects`]: super::infer::TypedSidecar::fn_effects
+/// [`HirModule::par_fork_sites`]: crate::hir::HirModule::par_fork_sites
 pub fn analyze_par_escape_hints(
     ast: &Output<'_>,
     effects: &HashMap<String, EffectFlags>,
-    cases: &super::bare_cases::BareCases,
+    sites: &HashMap<String, ParForkSite>,
 ) -> Vec<ParEscapeHint> {
-    let user_fns: HashSet<String> = effects.keys().cloned().collect();
+    let user_fns = hint_arms(effects);
     if user_fns.is_empty() {
         return Vec::new();
     }
-    let sites = analyze_par_fork_sites(ast, &user_fns, cases);
     let mut bodies = HashMap::new();
     collect_fn_bodies(ast, &mut bodies);
 
     let mut out = Vec::new();
     let mut hinted = HashSet::new();
 
-    for (name, site) in &sites {
+    for (name, site) in sites {
         let flags = effects
             .get(name)
             .copied()
@@ -207,6 +209,12 @@ pub fn analyze_par_escape_hints(
 
     out.sort_by(|a, b| a.fn_name.cmp(&b.fn_name));
     out
+}
+
+/// The candidate arms of a would-be call bag: every function with effects
+/// on record.
+pub fn hint_arms(effects: &HashMap<String, EffectFlags>) -> HashSet<String> {
+    effects.keys().cloned().collect()
 }
 
 fn site_span(body: &Output<'_>) -> Range<usize> {
@@ -904,8 +912,13 @@ mod tests {
 
     /// The hints for a lone file, on the effects of its own functions.
     fn hints_of(ast: &Output<'_>) -> Vec<ParEscapeHint> {
-        let cases = BareCases::none();
-        analyze_par_escape_hints(ast, &analyze_fn_effects(ast, cases), cases)
+        let effects = analyze_fn_effects(ast, BareCases::none());
+        let mut checker = crate::typechecking::infer::Checker::new();
+        let _ = checker.check_program(ast);
+        let sidecar = checker.typed_sidecar();
+        let module = crate::hir::build_module(&checker, &sidecar, "", ast);
+        let sites = module.par_fork_sites(&checker, &hint_arms(&effects));
+        analyze_par_escape_hints(ast, &effects, &sites)
     }
 
     fn parse(src: &'static str) -> parser::ast::Output<'static> {

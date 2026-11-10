@@ -3204,31 +3204,31 @@ impl Compiler {
     /// Self-arms with hop > 1 re-enter this worker; hop 0 / missed guards
     /// call the sequential original. Built as HIR ([`crate::hir::synth`])
     /// and lowered like any other body; no worker when it does not plan.
-    fn emit_one_par_worker(&mut self, site: &crate::typechecking::ParForkSite, table_key: &str) {
+    fn emit_one_par_worker(&mut self, site: &crate::hir::par::ParForkSite, table_key: &str) {
         if site.arms.len() < 2 {
             return;
         }
         if site
             .guards
             .iter()
-            .any(|g| matches!(g, crate::typechecking::par_profit::ParGuard::Opaque))
+            .any(|g| matches!(g, crate::hir::par::par_profit::ParGuard::Opaque))
         {
             return;
         }
-        let crate::typechecking::ParArm::Call {
+        let crate::hir::par::ParArm::Call {
             args: arm0_args, ..
         } = &site.arms[0];
         if arm0_args.len() > common::MAX_THREAD_SPAWN_ARGS {
             return;
         }
-        let self_arm0 = crate::typechecking::arm_callee(&site.arms[0]) == site.fn_name;
+        let self_arm0 = crate::hir::par::arm_callee(&site.arms[0]) == site.fn_name;
         if self_arm0 && arm0_args.len() + 1 > common::MAX_THREAD_SPAWN_ARGS {
             return;
         }
         if site
             .arms
             .iter()
-            .any(|arm| self.resolve_par_fn_entry(crate::typechecking::arm_callee(arm)).is_none())
+            .any(|arm| self.resolve_par_fn_entry(crate::hir::par::arm_callee(arm)).is_none())
         {
             return;
         }
@@ -3238,7 +3238,7 @@ impl Compiler {
         ) else {
             return;
         };
-        let worker_name = crate::typechecking::par_worker_name(&site.fn_name);
+        let worker_name = crate::hir::par::par_worker_name(&site.fn_name);
         if self.functions.contains_key(&worker_name) {
             return;
         }
@@ -3274,7 +3274,7 @@ impl Compiler {
     /// boxed word and its argument forms are `int`s.
     fn par_worker_hir(
         &self,
-        site: &crate::typechecking::ParForkSite,
+        site: &crate::hir::par::ParForkSite,
         table_key: &str,
         worker: &str,
         spawn: &str,
@@ -3282,9 +3282,9 @@ impl Compiler {
     ) -> Option<crate::hir::HirBody> {
         use crate::hir::synth::Synth;
         use crate::hir::{BinOp, HirId, HirKind, HirPat, LocalKind, MakeKind};
-        use crate::typechecking::par_profit::{CmpOp, ParGuard};
+        use crate::hir::par::par_profit::{CmpOp, ParGuard};
         use crate::typechecking::ty::{self as coil_ty, strip_readonly};
-        use crate::typechecking::{ArgForm, ParArm, ParBinOp, ParCombine};
+        use crate::hir::par::{ArgForm, ParArm, ParBinOp, ParCombine};
         let int = coil_ty::int();
         let is_con = |t: &Ty, name: &str| matches!(strip_readonly(t), Ty::Con(n) if n == name);
         let word = |t: &Ty| {
@@ -6306,7 +6306,7 @@ impl Compiler {
             if effects::effects_capture_active() {
                 let explained = (self.auto_par && self.opt_options.auto_par).then(|| {
                     let all: HashSet<String> = self.pure_fns.union(&pure).cloned().collect();
-                    effects::auto_par_explanations(ast, hir, module, &fx, &all, &bare_cases)
+                    effects::auto_par_explanations(hir, module, &fx, &all)
                 });
                 effects::capture(hir, &fx, explained);
             }
@@ -6367,6 +6367,28 @@ impl Compiler {
                 }
             }
         }
+        // Auto-par sites, from the HIR as built: copy-on-write below wraps
+        // the values a site's arms and bounds are read from.
+        self.par_shapes.clear();
+        self.par_workers.clear();
+        self.loop_par_sites.clear();
+        self.par_lock_hints.clear();
+        if self.auto_par && self.opt_options.auto_par
+            && let Some(hir) = self.hir_module.as_ref()
+        {
+            // IPA sites on any pure function (self-recursion or helper arms).
+            self.par_shapes = hir.par_fork_sites(&self.checker, &self.pure_fns);
+            self.par_workers = hir.par_worker_fns(&self.checker, &self.par_shapes);
+            self.loop_par_sites = hir.loop_par_sites(&self.checker, &self.pure_fns);
+            // E0805: the same detector with every user function an arm.
+            let effects = self.typed_sidecar.fn_effects();
+            let bags = hir.par_fork_sites(&self.checker, &crate::typechecking::hint_arms(effects));
+            for hint in crate::typechecking::analyze_par_escape_hints(ast, effects, &bags) {
+                let mut msg = Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
+                msg.with_help(hint.help());
+                self.par_lock_hints.push(msg);
+            }
+        }
         // Copy-on-write: share and unique ops in every body, before typed
         // inlining splices any of them.
         if crate::hir::effects::cow::enabled()
@@ -6405,24 +6427,7 @@ impl Compiler {
     /// thunks, and the context kept for later modules' clones.
     fn lower_module_bodies<'compiler>(&mut self, module: &str, ast: &mut (SimpleSpan, Box<Expression<'compiler>>)) {
         let ns = self.module_outer_namespace.take().unwrap_or_default();
-        let bare_cases = self.checker.bare_cases().clone();
-        if self.auto_par && self.opt_options.auto_par {
-            // IPA sites on any pure function (self-recursion or helper arms).
-            let pure = &self.pure_fns;
-            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure, &bare_cases);
-            self.par_workers = crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
-            self.loop_par_sites = self.hir_module.as_ref().map(|hir| hir.loop_par_sites(&self.pure_fns)).unwrap_or_default();
-            for hint in crate::typechecking::analyze_par_escape_hints(ast, self.typed_sidecar.fn_effects(), &bare_cases) {
-                let mut msg =
-                    Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
-                msg.with_help(hint.help());
-                self.messages.push(msg);
-            }
-        } else {
-            self.par_shapes.clear();
-            self.par_workers.clear();
-            self.loop_par_sites = crate::hir::par::LoopParSites::new();
-        }
+        self.messages.append(&mut self.par_lock_hints);
         self.emit_builtin_dict_thunks();
         self.emit_vec_method_thunks();
         self.emit_stream_method_thunks();

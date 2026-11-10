@@ -16,7 +16,6 @@ pub mod index_facts;
 pub mod infer;
 pub mod kind;
 pub mod par_hint;
-pub mod par_profit;
 pub mod pretty;
 pub mod purity;
 pub mod resolve;
@@ -40,12 +39,7 @@ pub use infer::{TestTry, TryInto,
 #[allow(unused_imports)] // public API for kind-aware callers / tests
 pub use kind::Kind;
 #[allow(unused_imports)] // public API re-export
-pub use par_hint::{EscapeKind, NamedEscape, ParEscapeHint, analyze_par_escape_hints};
-pub use par_profit::{
-    ArgForm, PAR_SPEC_HOPS, ParArm, ParBinOp, ParCombine, ParForkSite, analyze_par_fork_sites,
-    args_worth_parallel, arm_callee, collect_par_worker_fns, guards_hold,
-    DEFAULT_LOOP_GRAIN, par_worker_name, unary_dynamic_cutoff,
-};
+pub use par_hint::{EscapeKind, NamedEscape, ParEscapeHint, analyze_par_escape_hints, hint_arms};
 pub use purity::analyze_recursive_fns;
 #[allow(unused_imports)] // public API re-export
 pub use ty::{ScalarBacking, Ty};

@@ -605,15 +605,7 @@ pub fn effect_declaration_errors(checker: &Checker, ast: &parser::ast::Output<'_
 /// purity is all that stops it: each counted loop or fork site that would
 /// split if every function it calls were pure, with the impure callee and
 /// the first reason it is impure ("`step` calls `write_all` (write)").
-pub(crate) fn auto_par_explanations(
-    ast: &parser::ast::Output<'_>,
-    module: &HirModule,
-    module_path: &str,
-    fx: &ModuleEffects<'_>,
-    pure: &HashSet<String>,
-    cases: &crate::typechecking::bare_cases::BareCases,
-) -> Vec<String> {
-    use crate::typechecking::analyze_par_fork_sites;
+pub(crate) fn auto_par_explanations(module: &HirModule, module_path: &str, fx: &ModuleEffects<'_>, pure: &HashSet<String>) -> Vec<String> {
     let mut all = pure.clone();
     for body in &module.bodies {
         if matches!(body.kind, BodyKind::Function | BodyKind::Method)
@@ -624,8 +616,8 @@ pub(crate) fn auto_par_explanations(
         }
     }
     let mut out = Vec::new();
-    let actual = module.loop_par_sites(pure);
-    let mut blocked: Vec<_> = module.loop_par_sites(&all)
+    let actual = module.loop_par_sites(fx.cx.checker, pure);
+    let mut blocked: Vec<_> = module.loop_par_sites(fx.cx.checker, &all)
         .into_iter()
         .filter(|(span, _)| !actual.contains_key(span))
         .collect();
@@ -649,8 +641,9 @@ pub(crate) fn auto_par_explanations(
             reasons.join("; ")
         ));
     }
-    let actual = analyze_par_fork_sites(ast, pure, cases);
-    let mut blocked: Vec<String> = analyze_par_fork_sites(ast, &all, cases)
+    let actual = module.par_fork_sites(fx.cx.checker, pure);
+    let mut blocked: Vec<String> = module
+        .par_fork_sites(fx.cx.checker, &all)
         .into_keys()
         .filter(|name| !actual.contains_key(name))
         .collect();

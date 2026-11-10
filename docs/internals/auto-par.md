@@ -109,10 +109,14 @@ Disable both transforms with `--auto-par off`.
 
 ## Expression IPA: static profitability (no runtime threshold checks)
 
-[`par_profit`](../../compiler/src/typechecking/par_profit.rs) detects **fork
+[`par_profit`](../../compiler/src/hir/par/par_profit.rs) detects **fork
 sites** on pure functions — expressions whose operands are two or more
 independent pure calls — and collects **constant** call-site arguments
-(`fib(32)`, …). Combine shapes recognized:
+(`fib(32)`, …). It walks the module's HIR as built
+(`HirModule::par_fork_sites`, `par_worker_fns`), before the copy-on-write
+rewrite and every pass, and keys a site by its function's bare name: that is
+how arms name their callees and how the plan finds a call's worker. Combine
+shapes recognized:
 
 | Combine | Source shape |
 |---|---|
@@ -133,6 +137,16 @@ Arms are described structurally (`ArgForm::Const` / `Param` / `ParamMinus` /
 full function bodies, including **irrefutable** match arms (`_` / binding);
 constructor-pattern arms stay opaque (AlwaysPar would skip the match). Forks
 never span exclusive alternatives.
+
+The walk keeps the reach of the AST walk it replaced, and with it a few
+habits a follow-up may drop. It looks at functions and inherent methods (not
+a trait's methods, tests or lambdas), and into statement lists, `if` chains,
+`match` arms, loops, the operands of `+ - * / % ^` and comparisons, call and
+constructor arguments; not under `if let` / `while let`, `&&` / `||`, an
+index or a field. An arm is a bare call `f(…)`: a path (`m::f`, `C::f`), a
+call through a trait (`Trait::m(x)`) and a variant named without its enum
+are not. Pending `let`-bound arms are not seen from inside parentheses
+(`HirFlags::PAREN`), unless the parenthesized expression is the fork.
 
 For each demanded constant call whose **fork-tree grain** `W`
 exceeds `DEFAULT_EXPR_GRAIN` (default **10945**), and that still reaches the fork under the

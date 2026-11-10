@@ -14,7 +14,7 @@ fn sites_of(src: &str) -> Vec<LoopParSite> {
     let _ = checker.check_program(&ast);
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", &ast);
-    let mut sites: Vec<LoopParSite> = module.loop_par_sites(&pure).into_values().collect();
+    let mut sites: Vec<LoopParSite> = module.loop_par_sites(&checker, &pure).into_values().collect();
     sites.sort_by_key(|a| a.begin);
     sites
 }
@@ -689,4 +689,38 @@ fn main() { return; }
 "#,
     );
     assert!(sites.is_empty(), "{sites:?}");
+}
+
+/// `Trait::m(x)` lowers under the bare method name: no call of a function.
+#[test]
+fn a_call_through_a_trait_is_no_pure_call() {
+    let src = r#"
+trait Weigh<A> {
+    fn weigh(A self, int k) -> int {}
+}
+impl Weigh for int {
+    fn weigh(int x, int k) -> int { return x * k; }
+}
+fn weigh2(int x, int k) -> int { return x * k; }
+fn through() -> int {
+    let acc = 0;
+    for x in 0..100 { acc = acc + Weigh::weigh(x, 2); }
+    return acc;
+}
+fn bare() -> int {
+    let acc = 0;
+    for x in 0..50 { acc = acc + weigh2(x, 2); }
+    return acc;
+}
+fn main() { return; }
+"#;
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let pure = ["weigh", "weigh2"].map(String::from).into();
+    let sites: Vec<LoopParSite> = module.loop_par_sites(&checker, &pure).into_values().collect();
+    assert_eq!(sites.iter().map(|s| s.end).collect::<Vec<_>>(), [50]);
 }

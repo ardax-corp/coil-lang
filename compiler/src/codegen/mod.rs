@@ -530,7 +530,7 @@ pub struct Compiler {
     /// HIR effect summaries of every module compiled so far (E1).
     program_effects: crate::hir::effects::ProgramEffects,
     /// Detected independent-parallel-arm fork sites for pure fns.
-    par_shapes: HashMap<String, crate::typechecking::ParForkSite>,
+    par_shapes: HashMap<String, crate::hir::par::ParForkSite>,
     /// Functions that emit one parameterized `__coil_par_*` fork worker.
     par_workers: HashSet<String>,
     /// While a compiler-made body ([`crate::hir::synth`]) lowers: the
@@ -543,6 +543,9 @@ pub struct Compiler {
     hir_synth_callees: HashMap<String, compiler::SynthCallee>,
     /// Counted loops whose iterations are independent arms, by loop span.
     loop_par_sites: crate::hir::par::LoopParSites,
+    /// The module's E0805 hints, found with its auto-par sites and reported
+    /// when its bodies lower.
+    par_lock_hints: Vec<Message>,
     /// Chunk workers emitted so far, for `__coil_par_loop_*` naming.
     loop_par_helpers: usize,
     /// Fork-join functions of outlined parallel loops emitted so far, for
@@ -778,6 +781,7 @@ impl Default for Compiler {
             hir_synth_calls: None,
             hir_synth_callees: HashMap::new(),
             loop_par_sites: crate::hir::par::LoopParSites::new(),
+            par_lock_hints: Vec::new(),
             loop_par_helpers: 0,
             loop_par_forks: 0,
             hir_par_tail: None,
@@ -885,7 +889,7 @@ pub(crate) struct ModuleCtx {
     steady_fns: HashSet<String>,
     alloc_steady: bool,
     recursive_fns: HashSet<String>,
-    par_shapes: HashMap<String, crate::typechecking::ParForkSite>,
+    par_shapes: HashMap<String, crate::hir::par::ParForkSite>,
     par_workers: HashSet<String>,
     loop_par_sites: crate::hir::par::LoopParSites,
     current_source_file: Option<std::path::PathBuf>,
