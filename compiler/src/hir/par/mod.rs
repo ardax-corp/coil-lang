@@ -2,6 +2,7 @@
 //! (`docs/internals/auto-par.md`).
 
 pub mod loop_par;
+pub mod par_hint;
 pub mod par_profit;
 
 pub use loop_par::{LoopParSite, LoopParSites, LoopReduceOp};

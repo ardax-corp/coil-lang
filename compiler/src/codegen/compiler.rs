@@ -3559,6 +3559,26 @@ impl Compiler {
             })
     }
 
+    /// Check the HIR hint analysis against the AST one this module was
+    /// compiled with: the same hints with the same span, resources and
+    /// lock. `COIL_PAR_COMPARE=<file>` appends one line per module.
+    fn compare_par_hints(module: &str, ast: &[crate::typechecking::ParEscapeHint], hir: &[crate::typechecking::ParEscapeHint]) {
+        use std::io::Write;
+        let same = ast == hir;
+        if let Some(path) = std::env::var_os("COIL_PAR_COMPARE") {
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let mut text = String::new();
+                if !same {
+                    text.push_str(&format!("PARCMP hint DIFF {module:?} ast={ast:?} hir={hir:?}\n"));
+                }
+                text.push_str(&format!("PARCMP hint {module:?} ast={} hir={} {}\n", ast.len(), hir.len(), if same { "identical" } else { "DIFFERENT" }));
+                let _ = f.write_all(text.as_bytes());
+            }
+        } else {
+            debug_assert!(same, "par_hint: HIR and AST hints differ in {module:?}:\nast={ast:?}\nhir={hir:?}");
+        }
+    }
+
     // Loop IPA (chunked fork-join over an induction range)
 
     /// The parallel-loop site at `span`, when its induction is one this
@@ -6391,7 +6411,9 @@ impl Compiler {
             // E0805: the same detector with every user function an arm.
             let effects = self.typed_sidecar.fn_effects();
             let bags = hir.par_fork_sites(&self.checker, &crate::typechecking::hint_arms(effects));
-            for hint in crate::typechecking::analyze_par_escape_hints(ast, effects, &bags) {
+            let hints = crate::typechecking::analyze_par_escape_hints(ast, effects, &bags);
+            Self::compare_par_hints(module, &hints, &hir.par_escape_hints(&self.checker, effects));
+            for hint in hints {
                 let mut msg = Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
                 msg.with_help(hint.help());
                 self.par_lock_hints.push(msg);
