@@ -45,6 +45,11 @@ major.
   result wraps modulo 256. The byte bits `packed_matrix_zip` and
   `packed_matrix_neg` already had (29 and 20) now wrap `+`, `-` and
   arithmetic negation too, not only the bitwise cells.
+- A `Cow` share (`unique` false, no `field`) may take an `I64` source and
+  then has an `I64` dest: a shared generic body shares a type parameter's
+  word, which may be no object (#2506). The op's encoding is unchanged, so
+  the MIR section `FORMAT` stays 16; an engine that runs it already ignores
+  a non-object word.
 
 ## Major 7
 

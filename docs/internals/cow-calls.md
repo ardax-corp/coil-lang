@@ -31,8 +31,12 @@ they hand back), since a resumed frame outlives the call.
 
 A generic body whose result is a bare type parameter (`T`, or `F<A>` over
 a type parameter `F`) leaves more to the caller (#2502). Its shared form
-holds a `T` as an opaque word, which may be a scalar, so a share of one is
-no op there (`mir/from_hir.rs`, `Builtin::Cow`). A result it would have
+holds a `T` as an opaque word, which may be a scalar. A share of one is a
+`Cow` on the `I64` word (`mir/from_hir.rs`, `Builtin::Cow`; #2506): the
+runtime's `cow_share` leaves a non-object alone, so a `T` the body stores
+(into a field, a `Vec`, an `Option`, tuple or `Result` it returns) is
+shared. A `unique` of one is no op there, since it would replace the word.
+A result it would have
 shared itself, one a call handed back from inside a parameter
 (`return c.get()`), comes back unshared. So when the result is not fresh
 (`shared_ret`), `returns_inner` names every parameter the result may reach

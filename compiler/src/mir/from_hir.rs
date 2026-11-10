@@ -3560,9 +3560,16 @@ impl Lower<'_> {
                     other => return Ok(other),
                 };
                 // A shared generic body's type parameter word may be a
-                // scalar: no op, as before #2161. Its per-type clones get
-                // the op at an object type.
-                if self.b.value_ty(v) != MirTy::HeapRef || self.expr_ty(*inner).is_some_and(|t| is_var(t) || is_var_app(t)) {
+                // scalar. A share of it is emitted on the word (the runtime
+                // leaves a non-object alone); a unique would replace it, so
+                // that stays out (#2506). Its per-type clones get the op at
+                // an object type.
+                let open = self.expr_ty(*inner).is_some_and(|t| is_var(t) || is_var_app(t));
+                if open && !*unique && self.b.value_ty(v) == MirTy::I64 {
+                    let out = self.at_expr(id, |l| l.b.ins_cow(v, false).map_err(mir))?;
+                    return Ok(Val::V(out));
+                }
+                if self.b.value_ty(v) != MirTy::HeapRef || open {
                     return Ok(Val::V(v));
                 }
                 let out = self.at_expr(id, |l| l.b.ins_cow(v, *unique).map_err(mir))?;
