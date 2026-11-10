@@ -1145,14 +1145,34 @@ impl Compiler {
                 shared_entry && instance.is_some() && call.generic.is_none() && declared.is_some_and(|ty| self.generic_enum_layout(&ty).is_some())
             };
             let declared = if shared_entry && instance.is_some() { self.checker.fn_param_tys(&key) } else { None };
+            // A default body declares none of that: its signature is the
+            // trait's, over the trait's parameter. Where the receiver goes
+            // as its enum object (#1609), so does every other value of
+            // that parameter, an argument or the result: the body passes
+            // them to the same dictionary's methods (#2490).
+            let default_sig = (shared_entry && instance.is_some() && call.generic.is_none())
+                .then(|| key.split_once("__default__"))
+                .flatten()
+                .and_then(|(class, method)| self.checker.typeclass_method_scheme(class, method))
+                .map(|scheme| Self::fun_param_and_ret_tys(&scheme.ty))
+                .filter(|_| words.first() == Some(&true) && args.first().is_some_and(|&a| self.hir_niche_arg(hir, emit, a, ValueLayout::Boxed).is_some()));
+            let as_receiver = |ty: Option<&Ty>| {
+                default_sig.as_ref().is_some_and(|(params, _)| matches!(params.first(), Some(recv @ Ty::Var(_)) if ty == Some(recv)))
+            };
             let params: Vec<ValueLayout> = call
                 .params
                 .iter()
                 .enumerate()
-                .map(|(i, &p)| if open(declared.as_ref().and_then(|d| d.get(i).cloned())) { ValueLayout::Boxed } else { p })
+                .map(|(i, &p)| {
+                    let object = open(declared.as_ref().and_then(|d| d.get(i).cloned()))
+                        || (i > 0 && as_receiver(default_sig.as_ref().and_then(|(params, _)| params.get(i))));
+                    if object { ValueLayout::Boxed } else { p }
+                })
                 .collect();
             let natural = match natural {
-                Rep::Word(_) if open(self.checker.fn_return_ty(&key)) => Rep::Word(ValueLayout::Boxed),
+                Rep::Word(_) if open(self.checker.fn_return_ty(&key)) || as_receiver(default_sig.as_ref().map(|(_, ret)| ret)) => {
+                    Rep::Word(ValueLayout::Boxed)
+                }
                 natural => natural,
             };
             let niches: Vec<Option<ValueLayout>> = args
