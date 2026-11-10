@@ -6389,9 +6389,7 @@ impl Compiler {
             self.par_workers = hir.par_worker_fns(&self.checker, &self.par_shapes);
             self.loop_par_sites = hir.loop_par_sites(&self.checker, &self.pure_fns);
             // E0805: the same detector with every user function an arm.
-            let effects = self.typed_sidecar.fn_effects();
-            let bags = hir.par_fork_sites(&self.checker, &crate::typechecking::hint_arms(effects));
-            for hint in crate::typechecking::analyze_par_escape_hints(ast, effects, &bags) {
+            for hint in hir.par_escape_hints(&self.checker, self.typed_sidecar.fn_effects()) {
                 let mut msg = Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
                 msg.with_help(hint.help());
                 self.par_lock_hints.push(msg);

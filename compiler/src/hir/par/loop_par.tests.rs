@@ -20,27 +20,27 @@ fn sites_of(src: &str) -> Vec<LoopParSite> {
 }
 
 fn one_site(src: &str) -> LoopParSite {
-        let sites = sites_of(src);
-        assert_eq!(sites.len(), 1, "expected exactly one site: {sites:?}");
-        sites.into_iter().next().unwrap()
-    }
+    let sites = sites_of(src);
+    assert_eq!(sites.len(), 1, "expected exactly one site: {sites:?}");
+    sites.into_iter().next().unwrap()
+}
 
-    /// `fn main` wrapper with a threshold-beating trip count.
-    fn program(body: &str) -> String {
-        format!(
-            r#"
+/// `fn main` wrapper with a threshold-beating trip count.
+fn program(body: &str) -> String {
+    format!(
+        r#"
 fn sq(int i) -> int {{ return i * i; }}
 fn main() {{
 {body}
 }}
 "#
-        )
-    }
+    )
+}
 
-    #[test]
-    fn detects_add_reduction_over_pure_call() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn detects_add_reduction_over_pure_call() {
+    let site = one_site(&program(
+        r#"
     let acc = 0;
     let i = 0;
     while i < 100 {
@@ -48,69 +48,69 @@ fn main() {{
         i = i + 1;
     }
 "#,
-        ));
-        assert_eq!(site.index, "i");
-        assert_eq!(site.acc, "acc");
-        assert_eq!((site.begin, site.end), (0, 100));
-        assert_eq!(site.op, LoopReduceOp::Add);
-        assert_eq!(site.trip_count(), 100);
-        assert_eq!(site.midpoint(), 50);
-        assert!(!site.implicit_step);
-    }
+    ));
+    assert_eq!(site.index, "i");
+    assert_eq!(site.acc, "acc");
+    assert_eq!((site.begin, site.end), (0, 100));
+    assert_eq!(site.op, LoopReduceOp::Add);
+    assert_eq!(site.trip_count(), 100);
+    assert_eq!(site.midpoint(), 50);
+    assert!(!site.implicit_step);
+}
 
-    #[test]
-    fn detects_literal_for_range() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn detects_literal_for_range() {
+    let site = one_site(&program(
+        r#"
     let acc = 0;
     for x in 0..100 {
         acc = acc + sq(x);
     }
 "#,
-        ));
-        assert_eq!(site.index, "x");
-        assert_eq!(site.acc, "acc");
-        assert_eq!((site.begin, site.end), (0, 100));
-        assert_eq!(site.op, LoopReduceOp::Add);
-        assert!(site.implicit_step);
-        assert_eq!(site.trip_count(), 100);
-        assert_eq!(site.midpoint(), 50);
-    }
+    ));
+    assert_eq!(site.index, "x");
+    assert_eq!(site.acc, "acc");
+    assert_eq!((site.begin, site.end), (0, 100));
+    assert_eq!(site.op, LoopReduceOp::Add);
+    assert!(site.implicit_step);
+    assert_eq!(site.trip_count(), 100);
+    assert_eq!(site.midpoint(), 50);
+}
 
-    #[test]
-    fn detects_inclusive_for_range() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn detects_inclusive_for_range() {
+    let site = one_site(&program(
+        r#"
     let acc = 0;
     for x in 1..=60 {
         acc += sq(x);
     }
 "#,
-        ));
-        assert_eq!((site.begin, site.end), (1, 61));
-        assert!(site.implicit_step);
-        assert_eq!(site.trip_count(), 60);
-    }
+    ));
+    assert_eq!((site.begin, site.end), (1, 61));
+    assert!(site.implicit_step);
+    assert_eq!(site.trip_count(), 60);
+}
 
-    #[test]
-    fn detects_const_range_local() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn detects_const_range_local() {
+    let site = one_site(&program(
+        r#"
     let r = 0..100;
     let acc = 0;
     for x in r {
         acc = acc + sq(x);
     }
 "#,
-        ));
-        assert_eq!((site.begin, site.end), (0, 100));
-        assert!(site.implicit_step);
-    }
+    ));
+    assert_eq!((site.begin, site.end), (0, 100));
+    assert!(site.implicit_step);
+}
 
-    #[test]
-    fn inclusive_bound_normalizes_half_open() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn inclusive_bound_normalizes_half_open() {
+    let site = one_site(&program(
+        r#"
     let acc = 0;
     let i = 1;
     while i <= 60 {
@@ -118,16 +118,16 @@ fn main() {{
         i += 1;
     }
 "#,
-        ));
-        assert_eq!((site.begin, site.end), (1, 61));
-        assert_eq!(site.trip_count(), 60);
-        assert_eq!(site.midpoint(), 31);
-    }
+    ));
+    assert_eq!((site.begin, site.end), (1, 61));
+    assert_eq!(site.trip_count(), 60);
+    assert_eq!(site.midpoint(), 31);
+}
 
-    #[test]
-    fn detects_mul_reduction_and_identity() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn detects_mul_reduction_and_identity() {
+    let site = one_site(&program(
+        r#"
     let prod = 1;
     let i = 1;
     while i < 40 {
@@ -135,17 +135,17 @@ fn main() {{
         i = i + 1;
     }
 "#,
-        ));
-        assert_eq!(site.op, LoopReduceOp::Mul);
-        assert_eq!(site.acc, "prod");
-        assert_eq!(LoopReduceOp::Mul.identity(), 1);
-        assert_eq!(LoopReduceOp::Add.identity(), 0);
-    }
+    ));
+    assert_eq!(site.op, LoopReduceOp::Mul);
+    assert_eq!(site.acc, "prod");
+    assert_eq!(LoopReduceOp::Mul.identity(), 1);
+    assert_eq!(LoopReduceOp::Add.identity(), 0);
+}
 
-    #[test]
-    fn admits_loop_private_temps() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn admits_loop_private_temps() {
+    let site = one_site(&program(
+        r#"
     let acc = 0;
     let i = 0;
     while i < 100 {
@@ -155,16 +155,16 @@ fn main() {{
         i = i + 1;
     }
 "#,
-        ));
-        assert_eq!(site.trip_count(), 100);
-    }
+    ));
+    assert_eq!(site.trip_count(), 100);
+}
 
-    #[test]
-    fn rejects_trip_count_at_threshold() {
-        let t = DEFAULT_LOOP_GRAIN;
-        assert!(
-            sites_of(&program(&format!(
-                r#"
+#[test]
+fn rejects_trip_count_at_threshold() {
+    let t = DEFAULT_LOOP_GRAIN;
+    assert!(
+        sites_of(&program(&format!(
+            r#"
     let acc = 0;
     let i = 0;
     while i < {t} {{
@@ -172,28 +172,28 @@ fn main() {{
         i = i + 1;
     }}
 "#
-            )))
-            .is_empty(),
-            "trip count == threshold must stay sequential"
-        );
-        assert!(
-            sites_of(&program(&format!(
-                r#"
+        )))
+        .is_empty(),
+        "trip count == threshold must stay sequential"
+    );
+    assert!(
+        sites_of(&program(&format!(
+            r#"
     let acc = 0;
     for x in 0..{t} {{
         acc = acc + sq(x);
     }}
 "#
-            )))
-            .is_empty(),
-            "for-range trip count == threshold must stay sequential"
-        );
-    }
+        )))
+        .is_empty(),
+        "for-range trip count == threshold must stay sequential"
+    );
+}
 
-    #[test]
-    fn admits_flat_pixel_scan_with_literal_divisors() {
-        let site = one_site(
-            r#"
+#[test]
+fn admits_flat_pixel_scan_with_literal_divisors() {
+    let site = one_site(
+        r#"
 fn pixel(int x, int y) -> int {
     return x + y;
 }
@@ -210,17 +210,17 @@ fn mandelbrot() -> int {
 }
 fn main() { return; }
 "#,
-        );
-        assert_eq!(site.index, "i");
-        assert_eq!(site.acc, "sum");
-        assert_eq!(site.trip_count(), 25600);
-        assert!(!site.is_dynamic());
-    }
+    );
+    assert_eq!(site.index, "i");
+    assert_eq!(site.acc, "sum");
+    assert_eq!(site.trip_count(), 25600);
+    assert!(!site.is_dynamic());
+}
 
-    #[test]
-    fn admits_dynamic_parameter_bounds() {
-        let while_site = one_site(
-            r#"
+#[test]
+fn admits_dynamic_parameter_bounds() {
+    let while_site = one_site(
+        r#"
 fn sq(int i) -> int { return i * i; }
 fn run(int n) -> int {
     let acc = 0;
@@ -233,11 +233,11 @@ fn run(int n) -> int {
 }
 fn main() { return; }
 "#,
-        );
-        assert!(while_site.is_dynamic());
-        assert_eq!(while_site.end_local.as_deref(), Some("n"));
-        let for_site = one_site(
-            r#"
+    );
+    assert!(while_site.is_dynamic());
+    assert_eq!(while_site.end_local.as_deref(), Some("n"));
+    let for_site = one_site(
+        r#"
 fn sq(int i) -> int { return i * i; }
 fn run(int n) -> int {
     let acc = 0;
@@ -248,17 +248,17 @@ fn run(int n) -> int {
 }
 fn main() { return; }
 "#,
-        );
-        assert!(for_site.is_dynamic());
-        assert_eq!(for_site.end_local.as_deref(), Some("n"));
-        assert!(for_site.implicit_step);
-    }
+    );
+    assert!(for_site.is_dynamic());
+    assert_eq!(for_site.end_local.as_deref(), Some("n"));
+    assert!(for_site.implicit_step);
+}
 
-    #[test]
-    fn rejects_impure_body_call() {
-        assert!(
-            sites_of(
-                r#"
+#[test]
+fn rejects_impure_body_call() {
+    assert!(
+        sites_of(
+            r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
 fn shout(int i) -> int {
@@ -274,19 +274,19 @@ fn main() {
     }
 }
 "#
-            )
-            .is_empty(),
-            "an impure call is observable per iteration"
-        );
-    }
+        )
+        .is_empty(),
+        "an impure call is observable per iteration"
+    );
+}
 
-    /// `acc` on the right of its own reduction is a loop-carried dependence the
-    /// chunk split would reorder.
-    #[test]
-    fn rejects_accumulator_read_in_reduction_operand() {
-        assert!(
-            sites_of(&program(
-                r#"
+/// `acc` on the right of its own reduction is a loop-carried dependence the
+/// chunk split would reorder.
+#[test]
+fn rejects_accumulator_read_in_reduction_operand() {
+    assert!(
+        sites_of(&program(
+            r#"
     let acc = 0;
     let i = 0;
     while i < 100 {
@@ -294,17 +294,17 @@ fn main() {
         i = i + 1;
     }
 "#
-            ))
-            .is_empty(),
-            "reduction operand must not read the accumulator"
-        );
-    }
+        ))
+        .is_empty(),
+        "reduction operand must not read the accumulator"
+    );
+}
 
-    #[test]
-    fn rejects_second_reduction() {
-        assert!(
-            sites_of(&program(
-                r#"
+#[test]
+fn rejects_second_reduction() {
+    assert!(
+        sites_of(&program(
+            r#"
     let a = 0;
     let b = 0;
     let i = 0;
@@ -314,16 +314,16 @@ fn main() {
         i = i + 1;
     }
 "#
-            ))
-            .is_empty(),
-            "only a single reduction is representable"
-        );
-    }
+        ))
+        .is_empty(),
+        "only a single reduction is representable"
+    );
+}
 
-    #[test]
-    fn admits_int_parameter_capture() {
-        let site = one_site(
-            r#"
+#[test]
+fn admits_int_parameter_capture() {
+    let site = one_site(
+        r#"
 fn sq(int i) -> int { return i * i; }
 fn run(int k) -> int {
     let acc = 0;
@@ -336,16 +336,16 @@ fn run(int k) -> int {
 }
 fn main() { return; }
 "#,
-        );
-        assert_eq!(site.live_captures, vec!["k".to_string()]);
-        assert_eq!(site.trip_count(), 100);
-    }
+    );
+    assert_eq!(site.live_captures, vec!["k".to_string()]);
+    assert_eq!(site.trip_count(), 100);
+}
 
-    #[test]
-    fn rejects_non_int_capture() {
-        assert!(
-            sites_of(
-                r#"
+#[test]
+fn rejects_non_int_capture() {
+    assert!(
+        sites_of(
+            r#"
 fn sq(int i) -> int { return i * i; }
 fn run(string s) -> int {
     let acc = 0;
@@ -359,16 +359,16 @@ fn run(string s) -> int {
 }
 fn main() { return; }
 "#
-            )
-            .is_empty(),
-            "a string local is not an int capture"
-        );
-    }
+        )
+        .is_empty(),
+        "a string local is not an int capture"
+    );
+}
 
-    #[test]
-    fn admits_enclosing_const_int() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn admits_enclosing_const_int() {
+    let site = one_site(&program(
+        r#"
     let scale = 3;
     let acc = 0;
     let i = 0;
@@ -377,15 +377,15 @@ fn main() { return; }
         i = i + 1;
     }
 "#,
-        ));
-        assert_eq!(site.captures, vec![("scale".to_string(), 3)]);
-        assert_eq!(site.trip_count(), 100);
-    }
+    ));
+    assert_eq!(site.captures, vec![("scale".to_string(), 3)]);
+    assert_eq!(site.trip_count(), 100);
+}
 
-    #[test]
-    fn detects_xor_reduction() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn detects_xor_reduction() {
+    let site = one_site(&program(
+        r#"
     let acc = 0;
     let i = 0;
     while i < 40 {
@@ -393,15 +393,15 @@ fn main() { return; }
         i = i + 1;
     }
 "#,
-        ));
-        assert_eq!(site.op, LoopReduceOp::Xor);
-        assert_eq!(LoopReduceOp::Xor.identity(), 0);
-    }
+    ));
+    assert_eq!(site.op, LoopReduceOp::Xor);
+    assert_eq!(LoopReduceOp::Xor.identity(), 0);
+}
 
-    #[test]
-    fn admits_commuted_reduction() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn admits_commuted_reduction() {
+    let site = one_site(&program(
+        r#"
     let acc = 0;
     let i = 0;
     while i < 100 {
@@ -409,15 +409,15 @@ fn main() { return; }
         i = i + 1;
     }
 "#,
-        ));
-        assert_eq!(site.op, LoopReduceOp::Add);
-        assert_eq!(site.trip_count(), 100);
-    }
+    ));
+    assert_eq!(site.op, LoopReduceOp::Add);
+    assert_eq!(site.trip_count(), 100);
+}
 
-    #[test]
-    fn admits_pure_branch_on_one_reduction() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn admits_pure_branch_on_one_reduction() {
+    let site = one_site(&program(
+        r#"
     let acc = 0;
     let i = 0;
     while i < 100 {
@@ -425,16 +425,16 @@ fn main() { return; }
         i = i + 1;
     }
 "#,
-        ));
-        assert_eq!(site.op, LoopReduceOp::Add);
-        assert_eq!(site.trip_count(), 100);
-    }
+    ));
+    assert_eq!(site.op, LoopReduceOp::Add);
+    assert_eq!(site.trip_count(), 100);
+}
 
-    #[test]
-    fn rejects_mixed_ops_across_branch() {
-        assert!(
-            sites_of(&program(
-                r#"
+#[test]
+fn rejects_mixed_ops_across_branch() {
+    assert!(
+        sites_of(&program(
+            r#"
     let acc = 0;
     let i = 0;
     while i < 100 {
@@ -442,16 +442,16 @@ fn main() { return; }
         i = i + 1;
     }
 "#
-            ))
-            .is_empty(),
-            "both arms must fold with the same operator"
-        );
-    }
+        ))
+        .is_empty(),
+        "both arms must fold with the same operator"
+    );
+}
 
-    #[test]
-    fn admits_dynamic_end_and_const_stride() {
-        let site = one_site(
-            r#"
+#[test]
+fn admits_dynamic_end_and_const_stride() {
+    let site = one_site(
+        r#"
 fn sq(int i) -> int { return i * i; }
 fn run(int n) -> int {
     let acc = 0;
@@ -464,17 +464,17 @@ fn run(int n) -> int {
 }
 fn main() { return; }
 "#,
-        );
-        assert!(site.is_dynamic());
-        assert_eq!(site.end_local.as_deref(), Some("n"));
-        assert_eq!(site.stride, 1);
-        assert_eq!(site.trip_count(), 0);
-    }
+    );
+    assert!(site.is_dynamic());
+    assert_eq!(site.end_local.as_deref(), Some("n"));
+    assert_eq!(site.stride, 1);
+    assert_eq!(site.trip_count(), 0);
+}
 
-    #[test]
-    fn chunks_a_unit_stride_range_into_at_most_four() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn chunks_a_unit_stride_range_into_at_most_four() {
+    let site = one_site(&program(
+        r#"
     let acc = 0;
     let i = 0;
     while i < 100 {
@@ -482,15 +482,15 @@ fn main() { return; }
         i = i + 1;
     }
 "#,
-        ));
-        assert_eq!(site.chunk_bounds(20), Some(vec![0, 25, 50, 75, 100]));
-        assert_eq!(site.midpoint(), 50);
-    }
+    ));
+    assert_eq!(site.chunk_bounds(20), Some(vec![0, 25, 50, 75, 100]));
+    assert_eq!(site.midpoint(), 50);
+}
 
-    #[test]
-    fn admits_positive_stride() {
-        let site = one_site(&program(
-            r#"
+#[test]
+fn admits_positive_stride() {
+    let site = one_site(&program(
+        r#"
     let acc = 0;
     let i = 0;
     while i < 80 {
@@ -498,18 +498,18 @@ fn main() { return; }
         i = i + 2;
     }
 "#,
-        ));
-        assert_eq!(site.stride, 2);
-        assert_eq!(site.trip_count(), 40);
-        assert_eq!(site.final_index(), 80);
-        assert_eq!(site.chunk_bounds(20), Some(vec![0, 40, 80]));
-    }
+    ));
+    assert_eq!(site.stride, 2);
+    assert_eq!(site.trip_count(), 40);
+    assert_eq!(site.final_index(), 80);
+    assert_eq!(site.chunk_bounds(20), Some(vec![0, 40, 80]));
+}
 
-    #[test]
-    fn rejects_index_store_in_body() {
-        assert!(
-            sites_of(&program(
-                r#"
+#[test]
+fn rejects_index_store_in_body() {
+    assert!(
+        sites_of(&program(
+            r#"
     let acc = 0;
     let i = 0;
     let buf = [0, 0];
@@ -519,17 +519,17 @@ fn main() { return; }
         i = i + 1;
     }
 "#
-            ))
-            .is_empty(),
-            "a shared write is not an independent arm"
-        );
-    }
+        ))
+        .is_empty(),
+        "a shared write is not an independent arm"
+    );
+}
 
-    #[test]
-    fn rejects_missing_or_duplicated_step() {
-        assert!(
-            sites_of(&program(
-                r#"
+#[test]
+fn rejects_missing_or_duplicated_step() {
+    assert!(
+        sites_of(&program(
+            r#"
     let acc = 0;
     let i = 0;
     while i < 100 {
@@ -538,19 +538,19 @@ fn main() { return; }
         i = i + 1;
     }
 "#
-            ))
-            .is_empty(),
-            "two steps mean the induction range is not [begin, end)"
-        );
-    }
+        ))
+        .is_empty(),
+        "two steps mean the induction range is not [begin, end)"
+    );
+}
 
-    /// A const local's binding does not describe every visit to a program point
-    /// inside an enclosing loop, so the inner range would be wrong.
-    #[test]
-    fn rejects_counted_loop_nested_in_another_loop() {
-        assert!(
-            sites_of(&program(
-                r#"
+/// A const local's binding does not describe every visit to a program point
+/// inside an enclosing loop, so the inner range would be wrong.
+#[test]
+fn rejects_counted_loop_nested_in_another_loop() {
+    assert!(
+        sites_of(&program(
+            r#"
     let acc = 0;
     let i = 0;
     let outer = 0;
@@ -562,19 +562,19 @@ fn main() { return; }
         outer = outer + 1;
     }
 "#
-            ))
-            .is_empty(),
-            "an induction variable carried across an outer loop is not const"
-        );
-    }
+        ))
+        .is_empty(),
+        "an induction variable carried across an outer loop is not const"
+    );
+}
 
-    /// Reassigning the accumulator between its `let` and the loop drops the
-    /// locality proof.
-    #[test]
-    fn rejects_accumulator_clobbered_before_loop() {
-        assert!(
-            sites_of(&program(
-                r#"
+/// Reassigning the accumulator between its `let` and the loop drops the
+/// locality proof.
+#[test]
+fn rejects_accumulator_clobbered_before_loop() {
+    assert!(
+        sites_of(&program(
+            r#"
     let acc = 0;
     let i = 0;
     acc = sq(3);
@@ -583,11 +583,11 @@ fn main() { return; }
         i = i + 1;
     }
 "#
-            ))
-            .is_empty(),
-            "accumulator must still be provably a plain local at loop entry"
-        );
-    }
+        ))
+        .is_empty(),
+        "accumulator must still be provably a plain local at loop entry"
+    );
+}
 
 #[test]
 fn admits_a_loop_under_its_contract_checks() {

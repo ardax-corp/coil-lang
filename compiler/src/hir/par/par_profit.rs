@@ -445,7 +445,7 @@ impl HirModule {
     /// of the same bare name replaces an earlier one's site). Tests and
     /// trait methods are left out, with the functions declared in them:
     /// the reach of the AST walk this analysis replaced.
-    fn fork_bodies(&self) -> Vec<&HirBody> {
+    pub(super) fn fork_bodies(&self) -> Vec<&HirBody> {
         let mut bodies: Vec<&HirBody> = self
             .bodies
             .iter()
@@ -457,7 +457,7 @@ impl HirModule {
     }
 }
 
-fn bare(name: &str) -> &str {
+pub(super) fn bare(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)
 }
 
@@ -516,8 +516,7 @@ impl FnCtx<'_> {
 
     /// A contract check the builder put among a block's statements.
     fn contract_stmt(&self, id: HirId) -> bool {
-        let e = self.body.expr(id);
-        e.node.is_none() && self.body.contract_spans.iter().any(|c| c.0 <= e.span.0 && e.span.1 <= c.1)
+        in_contract(self.body, id)
     }
 
     /// The written statements of block `id`.
@@ -529,8 +528,15 @@ impl FnCtx<'_> {
     }
 }
 
+/// Whether `id` is a node the builder made for a contract clause: its
+/// check, or the `old(…)` value an `ensures` reads.
+pub(super) fn in_contract(body: &HirBody, id: HirId) -> bool {
+    let e = body.expr(id);
+    e.node.is_none() && body.contract_spans.iter().any(|c| c.0 <= e.span.0 && e.span.1 <= c.1)
+}
+
 /// What a `match` the builder made stands for.
-enum Made {
+pub(super) enum Made {
     /// `e?`.
     Try(HirId),
     /// `a ?? b`.
@@ -542,7 +548,7 @@ enum Made {
 }
 
 /// `id` as the builder's own `match`, when it wrote no arm of it.
-fn made_match(body: &HirBody, id: HirId) -> Option<Made> {
+pub(super) fn made_match(body: &HirBody, id: HirId) -> Option<Made> {
     let HirKind::Match { scrutinee, arms } = &body.expr(id).kind else { return None };
     let [first, second] = arms.as_slice() else { return None };
     let hit = body.expr(first.body);
@@ -569,7 +575,7 @@ fn written_return(body: &HirBody, id: HirId) -> bool {
 }
 
 /// The value of a written `return e`; `None` for `raise e` and `return;`.
-fn returned(body: &HirBody, id: HirId) -> Option<HirId> {
+pub(super) fn returned(body: &HirBody, id: HirId) -> Option<HirId> {
     if let Some(Made::MainReturn(value)) = made_match(body, id) {
         return Some(value);
     }
@@ -1023,7 +1029,7 @@ impl ConstCalls<'_> {
         let id = unwrap_byte(body, id);
         let e = body.expr(id);
         // Neither a contract's checks nor an `if let` were looked into.
-        if e.flags.contains(HirFlags::IF_LET) || (e.node.is_none() && body.contract_spans.iter().any(|c| c.0 <= e.span.0 && e.span.1 <= c.1)) {
+        if e.flags.contains(HirFlags::IF_LET) || in_contract(body, id) {
             return;
         }
         if let Some(made) = made_match(body, id) {
