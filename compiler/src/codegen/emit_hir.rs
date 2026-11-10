@@ -7115,7 +7115,7 @@ impl Compiler {
         if receivers > 0 {
             return Ok(None);
         }
-        if params.iter().any(|p| !Self::hir_word_holder(p, boxed)) {
+        if params.iter().any(|p| !self.hir_word_holder(p, boxed)) {
             return Err("callee-generic");
         }
         self.hir_items_rebuild(cur, vars, boxed, true)
@@ -7162,18 +7162,77 @@ impl Compiler {
     /// same words, for the variables of `boxed` in it: one of them (the
     /// body's values of a type parameter are the ground type's words, from
     /// a bare parameter as from an element), or an array, `Vec` or tuple
-    /// of such. A type with none of them is the same on both sides.
-    fn hir_word_holder(ty: &Ty, boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> bool {
+    /// of such, or a user enum whose payloads are such at its arguments
+    /// ([`Self::hir_nominal_words`]). A type with none of them is the same
+    /// on both sides.
+    fn hir_word_holder(&self, ty: &Ty, boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> bool {
+        self.hir_word_holder_in(ty, boxed, &mut Vec::new())
+    }
+
+    fn hir_word_holder_in(&self, ty: &Ty, boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>, seen: &mut Vec<Ty>) -> bool {
         use crate::typechecking::ty::{ftv_ty, strip_readonly, vec_element_ty};
         match strip_readonly(ty) {
             Ty::Var(_) => true,
-            Ty::Tuple(items) => items.iter().all(|t| Self::hir_word_holder(t, boxed)),
-            Ty::Array { element, .. } => Self::hir_word_holder(element, boxed),
+            Ty::Tuple(items) => items.iter().all(|t| self.hir_word_holder_in(t, boxed, seen)),
+            Ty::Array { element, .. } => self.hir_word_holder_in(element, boxed, seen),
             t => match vec_element_ty(t) {
-                Some(element) => Self::hir_word_holder(element, boxed),
-                None => !ftv_ty(t).iter().any(|v| boxed.contains_key(v)),
+                Some(element) => self.hir_word_holder_in(element, boxed, seen),
+                None if !ftv_ty(t).iter().any(|v| boxed.contains_key(v)) => true,
+                None => self.hir_nominal_words(t, boxed, seen),
             },
         }
+    }
+
+    /// Whether user enum instance `ty` (`List<T>`) holds the variables of
+    /// `boxed` only as word holders: every variant's payload, at the
+    /// instance's arguments. Its object is then the same words for a
+    /// shared body and ground code: an enum payload item is one word
+    /// whatever its type (a two-word value boxed), and an item the shared
+    /// body wrote that ground code reads as a scalar has the unknown word
+    /// kind, which the collector resolves (#2512). A recursive payload
+    /// (`Cons(T, List<T>)`) is the instance being asked about. `Option`
+    /// and `Result` are open enums, the shared body's objects ("Open
+    /// enums" in layout.md), and an enum with `drop` is refused.
+    fn hir_nominal_words(&self, ty: &Ty, boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>, seen: &mut Vec<Ty>) -> bool {
+        use crate::typechecking::ty::{is_option_ty, is_result_ty, subst_ty_params};
+        let Ty::App(head, args) = ty else {
+            return false;
+        };
+        let Ty::Con(name) = head.as_ref() else {
+            return false;
+        };
+        if is_option_ty(ty) || is_result_ty(ty) {
+            return false;
+        }
+        let (Some(decl), Some(names)) = (self.checker.enum_variants(name), self.checker.type_ctor_params(name)) else {
+            return false;
+        };
+        if names.len() != args.len() || self.checker.enum_has_drop(name) {
+            return false;
+        }
+        if seen.contains(ty) {
+            return true;
+        }
+        // Polymorphic recursion (`Cons(T, List<(T, T)>)`) meets new
+        // instances without end.
+        if seen.len() >= 8 {
+            return false;
+        }
+        let map: HashMap<String, Ty> = names.iter().cloned().zip(args.iter().cloned()).collect();
+        seen.push(ty.clone());
+        let words = decl.iter().all(|(_, _, payload)| {
+            payload
+                .iter()
+                .all(|p| !Self::ty_opaque(p) && self.hir_word_holder_in(&subst_ty_params(p, &map), boxed, seen))
+        });
+        seen.pop();
+        words
+    }
+
+    /// Whether `ty` holds a structural sum, a constructor or a `forall`,
+    /// which a payload's parameters are not substituted through.
+    fn ty_opaque(ty: &Ty) -> bool {
+        matches!(ty, Ty::Sum { .. } | Ty::Constructor { .. } | Ty::Forall { .. }) || ty.any_child(Self::ty_opaque)
     }
 
     /// How the object `cur` (a tuple, or an enum the checker declares)
@@ -7199,7 +7258,7 @@ impl Compiler {
         // variable, else kept as the word its ground type is.
         let item = |t: &Ty| -> Result<(HirRetItem, u8), &'static str> {
             let unbox = matches!(t, Ty::Var(v) if boxed.contains_key(v));
-            if !unbox && needy(t) && !(deep && Self::hir_word_holder(t, boxed)) {
+            if !unbox && needy(t) && !(deep && self.hir_word_holder(t, boxed)) {
                 return Err("callee-generic");
             }
             let g = ground(t);
@@ -7226,7 +7285,7 @@ impl Compiler {
             return Ok(Some(HirRetItems::Tuple { items, kinds }));
         }
         let app = crate::typechecking::ty::builtin_enum_app(cur).unwrap_or_else(|| cur.clone());
-        let held = if deep && Self::hir_word_holder(cur, boxed) { Ok(None) } else { Err("callee-generic") };
+        let held = if deep && self.hir_word_holder(cur, boxed) { Ok(None) } else { Err("callee-generic") };
         let Ty::App(head, args) = strip_readonly(&app) else {
             return held;
         };
@@ -7239,16 +7298,16 @@ impl Compiler {
         if names.len() != args.len() || self.checker.enum_has_drop(name) {
             return Err("callee-generic");
         }
+        let map: HashMap<String, Ty> = names.iter().cloned().zip(args.iter().cloned()).collect();
         let mut variants = Vec::new();
         for (_, tag, payload) in decl {
-            // A payload typed by the enum's parameter is the call's
-            // argument for it; any other names no parameter.
+            // A payload typed by the enum's parameters is the call's
+            // arguments for them (`List<T>` in `Cons(T, List<T>)`, #2512).
             let tys = payload
                 .iter()
                 .map(|p| match p {
-                    Ty::Con(n) if let Some(i) = names.iter().position(|m| m == n) => Ok(args[i].clone()),
-                    p if Self::ty_names_con(p, names) => Err("callee-generic"),
-                    p => Ok(p.clone()),
+                    p if Self::ty_opaque(p) && Self::ty_names_con(p, names) => Err("callee-generic"),
+                    p => Ok(crate::typechecking::ty::subst_ty_params(p, &map)),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             if !tys.iter().any(&needy) {
