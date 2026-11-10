@@ -420,7 +420,16 @@ impl Compiler {
             && self.hir_mir_dict_param(dict)
             && let Some(dicts) = self.hir_mir_own_dicts(&own)
         {
-            t.bound_call = Some(crate::mir::HirBoundCall { dict, method, boxed_ret, dicts });
+            t.bound_call = Some(crate::mir::HirBoundCall { dict, method, boxed_ret, dicts, forward: None });
+        }
+        // A dictionary forwarder's one call (#2476).
+        if let HirKind::Call { .. } = e.kind
+            && self.hir_synth_calls.is_some()
+            && let Some(call) = emit.plan.calls.get(&id.0)
+            && let Some((index, method, own)) = self.hir_synth_callees.get(&call.key).and_then(|c| c.forward)
+        {
+            t.bound_call = Some(crate::mir::HirBoundCall { dict: 0, method, boxed_ret: false, dicts: Vec::new(), forward: Some((index, own)) });
+            return site;
         }
         if let HirKind::Call { .. } = e.kind
             && !emit.plan.lens.contains_key(&id.0)
@@ -1611,7 +1620,6 @@ impl Compiler {
                 DictStep::Null => Some(HirDictOp::Null),
                 DictStep::Tuple(n) => Some(HirDictOp::Tuple(n)),
                 DictStep::Word => Some(HirDictOp::Word),
-                DictStep::Field(n) => Some(HirDictOp::Field(n)),
             })
             .collect()
     }
@@ -1656,7 +1664,7 @@ impl Compiler {
                         stack.push((start, false));
                     }
                 }
-                HirDictOp::Word | HirDictOp::Field(_) => {
+                HirDictOp::Word => {
                     let start = stack.pop().map_or(out.len(), |e| e.0);
                     out.push(op);
                     stack.push((start, false));

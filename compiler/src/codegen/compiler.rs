@@ -47,6 +47,10 @@ pub(super) struct SynthCallee {
     /// Per argument: the adapter a function value is wrapped in for the
     /// callee's shared body (a method clone's thunk, #2182).
     pub adapt: Vec<Option<emit_hir::HirFnAdapt>>,
+    /// A dictionary forwarder's call (#2476), `(index, method, own)`: to
+    /// slot `method` of the superclass dictionary at `index` of the
+    /// dictionary argument, which the last `own` arguments follow.
+    pub forward: Option<(u32, u32, u32)>,
 }
 
 /// One step of building trait dictionaries, a stack program over words:
@@ -67,9 +71,6 @@ pub(super) enum DictStep {
     Tuple(u32),
     /// The top value as its word (a `float` / `bool` as its bits).
     Word,
-    /// Element `n` of the top word, a dictionary: a method's code pointer
-    /// in it (a subclass bound's `Eq` methods, #1694).
-    Field(u32),
 }
 
 impl Compiler {
@@ -2630,13 +2631,21 @@ impl Compiler {
                 {
                     return self.plan_var_eq_dict(out, dict);
                 }
+                // `Equal<T>` under a bound `T: Ordered` whose class has
+                // `Equal` as a superclass: projected from that bound's
+                // dictionary (#2476).
+                None if let [Ty::Var(v)] = lookup
+                    && let Some((slot, sub)) = self.var_super_dict(class, *v) =>
+                {
+                    return self.plan_super_projection(out, class, &sub, slot);
+                }
                 // `Show<Box<T>>`: a generic instance whose context is
                 // resolved from scope below. A bare `Show<T>` has no instance.
                 None if lookup.iter().any(|t| matches!(t, Ty::Var(_))) => return false,
                 None => {}
             }
         }
-        let mut super_reads: Vec<(usize, String)> = Vec::new();
+        let mut super_reads: Vec<(usize, String, String)> = Vec::new();
         // Per slot: whether its instance is a [`Self::niche_head`] one, with
         // the method's name when it is the instance's own (not a default).
         let mut niche_slots: Vec<Option<Option<String>>> = Vec::new();
@@ -2683,11 +2692,13 @@ impl Compiler {
                 // A superclass's method is called with this dictionary,
                 // laid out for the subclass. One that reads its dictionary
                 // (a default body its siblings, a bounded instance's method
-                // its context) reads the wrong slots of it (#2476).
+                // its context) would read the wrong slots of it: its slot
+                // holds a forwarder to the superclass's own dictionary,
+                // which this one carries (#2476).
                 if *owner_class != instance.class.as_str()
                     && (Self::is_default_method_fqn(owner_class, &method_def.name, &name) || self.instance_context_len(&name) > 0)
                 {
-                    super_reads.push((slot, format!("{owner_class}::{}", method_def.name)));
+                    super_reads.push((slot, owner_class.to_string(), method_def.name.clone()));
                 }
                 // Dictionary calls use the generic signature's layouts.
                 let adapter = Self::dict_adapter_name(&name);
@@ -2721,43 +2732,49 @@ impl Compiler {
             (fqns, (instance.range.clone(), context))
         };
         let (diag_range, context) = diag_range;
-        // A ground goal of a generic-head instance: its clones' adapters.
-        // A superclass method that reads its dictionary goes in as its
-        // clone, past the clone budget too: the clone takes no dictionary.
-        // An open goal has no clone, and a method on its own clone chain
-        // none either: such a dictionary is not built (#2476).
+        // A ground goal of a generic-head instance: its clones' adapters,
+        // where the clone budget makes them. A clone reads no dictionary.
         //
         // A niche-head instance's method goes in as its clone too in a
         // bound's dictionary, and as the shared entry in the entry's own
         // ([`Self::plan_entry_dict`], #2477).
-        let reads_own = |method: &str| {
-            format!("its `{method}` reads its own instance's dictionary, which the `{class}` one does not hold (coil-lang#2476)")
-        };
+        //
+        // A superclass method that reads its dictionary and has no clone
+        // here (an open goal, past the budget, a method on its own clone
+        // chain) is reached through a forwarder (#2476).
         let mut unbuilt = None;
+        let mut forwarded: Vec<usize> = Vec::new();
         let fqns: Vec<String> = if open {
-            unbuilt = super_reads.first().map(|(_, method)| reads_own(method));
+            forwarded.extend(super_reads.iter().map(|(slot, ..)| *slot));
             fqns
         } else {
             fqns.into_iter()
                 .enumerate()
                 .map(|(slot, name)| {
-                    let reads = super_reads.iter().find(|(s, _)| *s == slot).map(|(_, method)| reads_own(method));
+                    let reads = super_reads.iter().find(|(s, ..)| *s == slot);
                     let niche = niche_slots.get(slot).cloned().flatten();
                     if entry && niche.is_some() {
-                        if let Some(why) = reads {
-                            unbuilt.get_or_insert(why);
+                        // The entry's own dictionary holds its shared
+                        // entries, which take the value as an enum object;
+                        // the superclass's dictionary a forwarder would go
+                        // to holds the clones, which take its own word.
+                        if let Some((_, owner, method)) = reads {
+                            unbuilt.get_or_insert(format!(
+                                "its `{owner}::{method}` reads its own instance's dictionary, which holds the methods that take the value's own word, not the enum object the entry holds (coil-lang#2476)"
+                            ));
                         }
                         return name;
                     }
                     let takes_object = niche.flatten().map(|method| {
                         format!("its `{method}` takes the value as an enum object, and has no per-type clone that takes the value's own word (coil-lang#2477)")
                     });
-                    let needed = reads.or(takes_object);
-                    match self.instance_clone_at(&name, lookup, needed.is_some()) {
+                    match self.instance_clone_at(&name, lookup, takes_object.is_some()) {
                         Some(clone) => Self::dict_adapter_name(&clone),
                         None => {
-                            if let Some(why) = needed {
+                            if let Some(why) = takes_object {
                                 unbuilt.get_or_insert(why);
+                            } else if reads.is_some() {
+                                forwarded.push(slot);
                             }
                             name
                         }
@@ -2769,8 +2786,23 @@ impl Compiler {
             self.dict_unbuilt(class, lookup, &why, diag_range);
             return false;
         }
-        for name in &fqns {
-            let Some(code) = self.dict_code_step(name) else {
+        // The superclasses a forwarder goes to, each one's dictionary after
+        // the context dictionaries.
+        let mut supers: Vec<&str> = Vec::new();
+        for (_, owner, _) in super_reads.iter().filter(|(slot, ..)| forwarded.contains(slot)) {
+            if !supers.contains(&owner.as_str()) {
+                supers.push(owner);
+            }
+        }
+        for (slot, name) in fqns.iter().enumerate() {
+            let code = match super_reads.iter().find(|(s, ..)| *s == slot && forwarded.contains(s)) {
+                Some((_, owner, method)) => {
+                    let index = fqns.len() + context.len() + supers.iter().position(|s| s == owner).expect("listed");
+                    self.dict_forwarder(owner, method, index as u32, None)
+                }
+                None => self.dict_code_step(name),
+            };
+            let Some(code) = code else {
                 self.missing_call_target(name, diag_range.clone());
                 return false;
             };
@@ -2780,17 +2812,154 @@ impl Compiler {
         // cannot build is a compile error (a context-less dictionary would
         // be read past at run time, #1580), reported once at the innermost
         // goal that fails.
-        for (ctx_class, ctx_args) in &context {
+        let supers = supers.iter().map(|s| (s.to_string(), lookup.to_vec()));
+        for (ctx_class, ctx_args) in context.iter().cloned().chain(supers).collect::<Vec<_>>() {
             let reported = self.messages.len();
-            if !self.plan_instance_dict(out, ctx_class, ctx_args) {
+            if !self.plan_instance_dict(out, &ctx_class, &ctx_args) {
                 if self.messages.len() == reported {
-                    self.missing_context_dict(ctx_class, ctx_args, diag_range.clone());
+                    self.missing_context_dict(&ctx_class, &ctx_args, diag_range.clone());
                 }
                 return false;
             }
         }
-        out.push(DictStep::Tuple((fqns.len() + context.len()) as u32));
+        out.push(DictStep::Tuple((fqns.len() + context.len() + forwarded.iter().map(|slot| &super_reads.iter().find(|(s, ..)| s == slot).expect("read").1).collect::<HashSet<_>>().len()) as u32));
         true
+    }
+
+    /// The bound of this function on type variable `v` whose class has
+    /// `class` as a superclass: its frame slot and class.
+    fn var_super_dict(&self, class: &str, v: crate::typechecking::ty::TyVarId) -> Option<(u32, String)> {
+        if self.compiling_mono_clone {
+            return None;
+        }
+        let var = Ty::Var(v);
+        let generics = self.checker.generics();
+        let subst = self.checker.subst();
+        for name in [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()].into_iter().flatten() {
+            let Some(scheme) = self.checker.env().lookup(name) else {
+                continue;
+            };
+            for (i, c) in scheme.constraints.iter().enumerate() {
+                let on_var = matches!(c.args.as_slice(), [a] if crate::typechecking::subst::apply_ty_prune(subst, a) == var);
+                if on_var
+                    && generics.typeclass(&c.class).is_some_and(|sub| sub.has_superclass(class, generics))
+                    && let Some(slot) = self.frame_dict(i)
+                {
+                    return Some((slot, c.class.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Plan superclass `class`'s dictionary out of the dictionary of its
+    /// subclass `sub` in frame slot `slot` (#2476): `(f.., D)`, a forwarder
+    /// per method of `class` to the method's slot in `D`, the subclass's
+    /// dictionary, which is called with itself.
+    fn plan_super_projection(&mut self, out: &mut Vec<DictStep>, class: &str, sub: &str, slot: u32) -> bool {
+        let pairs: Option<Vec<(String, String, u32)>> = {
+            let generics = self.checker.generics();
+            let (Some(class_def), Some(sub_def)) = (generics.typeclass(class), generics.typeclass(sub)) else {
+                return false;
+            };
+            let sub_flat = sub_def.flattened_methods(generics);
+            class_def
+                .flattened_methods(generics)
+                .iter()
+                .map(|(owner, m)| {
+                    let at = sub_flat.iter().position(|(o, sm)| o == owner && sm.name == m.name)?;
+                    Some((owner.to_string(), m.name.clone(), at as u32))
+                })
+                .collect()
+        };
+        let Some(pairs) = pairs else {
+            return false;
+        };
+        let start = out.len();
+        let n = pairs.len() as u32;
+        for (owner, method, at) in pairs {
+            let Some(code) = self.dict_forwarder(&owner, &method, n, Some(at)) else {
+                out.truncate(start);
+                return false;
+            };
+            out.push(code);
+        }
+        out.extend([DictStep::Load(slot), DictStep::Tuple(n + 1)]);
+        true
+    }
+
+    /// The code pointer of the forwarder for superclass `class`'s `method`
+    /// (#2476): called as the method is, with a dictionary that holds
+    /// `class`'s own at `index`, it calls the method's slot there (`slot`,
+    /// else its place in `class`'s dictionary) with that dictionary. It
+    /// moves its words and never reads them, so one serves every instance
+    /// with the dictionary at that index.
+    pub(super) fn dict_forwarder(&mut self, class: &str, method: &str, index: u32, slot: Option<u32>) -> Option<DictStep> {
+        let slot = match slot {
+            Some(slot) => slot,
+            None => {
+                let generics = self.checker.generics();
+                let flat = generics.typeclass(class)?.flattened_methods(generics);
+                flat.iter().position(|(owner, m)| *owner == class && m.name == method)? as u32
+            }
+        };
+        let fqn = format!("{class}__{method}$fwd${index}${slot}");
+        if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
+            self.reserve_function_entry(fqn.clone());
+            self.dict_forwarders.insert(fqn.clone(), (class.to_string(), method.to_string(), index, slot));
+            self.structural_thunks.push((fqn.clone(), "fwd".to_string(), crate::typechecking::ty::int()));
+        }
+        self.dict_code_step(&fqn)
+    }
+
+    /// Emit reserved forwarder `fqn` ([`Self::dict_forwarder`]): the
+    /// method's parameters as a dictionary call passes them (a word each;
+    /// a scalar as itself, anything else as a type parameter's opaque
+    /// word), the dictionary and the method's own bounds' dictionaries.
+    fn emit_dict_forwarder(&mut self, fqn: &str) {
+        use crate::hir::synth::Synth;
+        use crate::hir::LocalKind;
+        use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT, STRING, UNIT};
+        const CALLEE: &str = "$dict_forward";
+        let Some((class, method, index, slot)) = self.dict_forwarders.get(fqn).cloned() else {
+            return;
+        };
+        let Some(scheme) = self.checker.typeclass_method_scheme(&class, &method) else {
+            self.bind_function_entry(fqn.to_string());
+            self.missing_call_target(fqn, 0..0);
+            return;
+        };
+        let (open, open_ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let var = scheme.bounds.first().map(|v| Ty::Var(*v)).unwrap_or_else(crate::typechecking::ty::int);
+        let word = |ty: &Ty| match ty {
+            Ty::Var(_) => ty.clone(),
+            Ty::Con(n) if matches!(n.as_str(), INT | BYTE | FLOAT | BOOL | STRING | UNIT) => ty.clone(),
+            Ty::Tuple(items) if items.is_empty() => ty.clone(),
+            _ => var.clone(),
+        };
+        let ret = word(&open_ret);
+        let mut b = Synth::new(&self.checker, fqn, ret.clone());
+        let mut args = Vec::with_capacity(open.len() + 1);
+        for (i, ty) in open.iter().enumerate() {
+            let local = b.local(&format!("arg{i}"), word(ty), LocalKind::Param);
+            args.push(b.read(local));
+        }
+        let own = self.trait_method_own_bounds(&class, &method).len();
+        for i in 0..=own {
+            let name = if i == 0 { "dict".to_string() } else { format!("dict{i}") };
+            let local = b.local(&name, crate::typechecking::ty::array(crate::typechecking::ty::int()), LocalKind::Param);
+            args.push(b.read(local));
+        }
+        let params = args.iter().map(|&a| self.value_layout(b.body.expr(a).ty.as_ref().expect("typed"))).collect();
+        let calls = HashMap::from([(CALLEE.to_string(), (params, self.value_layout(&ret)))]);
+        let value = b.call(CALLEE, args, ret);
+        let ret = b.ret(value);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = Self::synth_generic(b.finish(root));
+        self.hir_synth_callees.insert(CALLEE.to_string(), SynthCallee { forward: Some((index, slot, own as u32)), ..SynthCallee::default() });
+        // No `CALL` names it: dictionaries hold it.
+        self.emit_synth_fn(fqn, &hir, calls);
+        self.hir_synth_callees.remove(CALLEE);
     }
 
     /// The code pointer step to method `name`, resolved as a `CodePtr`
@@ -6826,6 +6995,10 @@ impl Compiler {
                 }
                 if let Some(m) = method.strip_prefix("any_") {
                     self.emit_eq_any(&fqn, m == "ne");
+                    continue;
+                }
+                if method == "fwd" {
+                    self.emit_dict_forwarder(&fqn);
                     continue;
                 }
                 if Self::ty_to_value_tag(&ty).is_none() {

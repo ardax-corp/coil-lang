@@ -1,0 +1,32 @@
+// CPU: a superclass method reached through a subclass's dictionary
+// (`<` and `!=` at `T: Ord` on a derived `Ord` of a generic class, #2476).
+// Under `--clone-budget 0` the `Lt` and `Eq` slots hold forwarders to the
+// superclass's own dictionary; at default flags the body is a clone.
+use io::sync::print;
+use string::format;
+
+#[derive(Eq, Ord)]
+class Box<T> {
+    pub item: T,
+}
+
+fn count<T: Ord>(T a, T b, int n) -> int {
+    let c = 0;
+    let i = 0;
+    while i < n {
+        if a < b {
+            c = c + 1;
+        }
+        if a != b {
+            c = c + 2;
+        }
+        i = i + 1;
+    }
+    return c;
+}
+
+fn main() {
+    let a = new Box(new Box(1));
+    let b = new Box(new Box(2));
+    let _ = print(format("%i", count(a, b, 300000) + count(1, 2, 300000)));
+}
