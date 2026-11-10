@@ -70,7 +70,9 @@ test("a bounded instance at ground types") {
     let d = new Duo(3, 4);
     assert!(format("%v", d) == "<3|4>");
     assert!(format("%v", new Duo("x", "y")) == "<x|y>");
-    assert!(format("%v and %v", new Duo(1.5, 2.5), new Duo(true, false)) == "<1.5|2.5> and <true|false>");
+    assert!(
+        format("%v and %v", new Duo(1.5, 2.5), new Duo(true, false)) == "<1.5|2.5> and <true|false>",
+    );
     assert!(format("%v", new Duo(new Duo(1, 2), new Duo(3, 4))) == "<<1|2>|<3|4>>");
     assert!(format("%v", new Duo(new Name("a"), new Name("b"))) == "<#a|#b>");
     assert!(format("%v: %v!", 7, d) == "7: <3|4>!");
@@ -81,9 +83,13 @@ test("a derived Show of a generic type") {
     assert!(format("%v", new Box("s")) == "Box { item: s }");
     assert!(format("%v", new Box(new Box(1))) == "Box { item: Box { item: 1 } }");
     assert!(format("%v", new Pair(1, "x")) == "Pair { a: 1, b: x }");
-    assert!(format("%v", new Pair(new Box(1), new Duo(2, 3))) == "Pair { a: Box { item: 1 }, b: <2|3> }");
+    assert!(
+        format("%v", new Pair(new Box(1), new Duo(2, 3))) == "Pair { a: Box { item: 1 }, b: <2|3> }",
+    );
     let t: Tree<int> = Tree::Node(Tree::Leaf(1), Tree::Node(Tree::Leaf(2), Tree::Leaf(3)));
-    assert!(format("%v", t) == "Tree::Node(Tree::Leaf(1), Tree::Node(Tree::Leaf(2), Tree::Leaf(3)))");
+    assert!(
+        format("%v", t) == "Tree::Node(Tree::Leaf(1), Tree::Node(Tree::Leaf(2), Tree::Leaf(3)))",
+    );
     assert!(t.show() == format("%v", t));
     let s: Tree<string> = Tree::Leaf("x");
     assert!(format("%v", s) == "Tree::Leaf(x)");
