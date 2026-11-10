@@ -395,9 +395,10 @@ too is raised by the loop's body.
 A dynamic range's trip count is the fork-join's own arithmetic, which the
 sequential loop never does. `hi - lo` is tested before it is taken, and so
 is its rounding up to whole strides: a range longer than an `int` holds
-runs on the calling thread, as one worker call. (The native engine's
-vector loop has the same subtraction and does not run such a range at all,
-[coil-lang#2522](https://github.com/ardax-corp/coil-lang/issues/2522).)
+runs on the calling thread, as one worker call. The runtime's lane
+loops (`machine/src/lanes.rs`) count what is left of such a range as an
+unsigned difference, so a vector loop runs it too
+([coil-lang#2522](https://github.com/ardax-corp/coil-lang/issues/2522)).
 
 ### The sign rule
 

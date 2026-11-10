@@ -4008,9 +4008,14 @@ impl<'a> Lower<'a> {
         let (p, left) = (self.b.block_params(head)[0], self.b.block_params(head)[1]);
         self.b.ins().brif(left, more, &[], kern, &[p.into()]);
         self.b.switch_to_block(more);
-        let last = self.b.ins().iadd_imm_s(p, WIDE - 1);
+        // The last of the 16 lanes against the bound; past `MAX` it is
+        // past any bound (#2522).
+        let wide = self.b.ins().iconst(types::I64, WIDE - 1);
+        let (last, past) = self.b.ins().sadd_overflow(p, wide);
         let cc = if *inclusive { IntCC::SignedLessThanOrEqual } else { IntCC::SignedLessThan };
-        let inb = self.b.ins().icmp(cc, last, bound);
+        let below = self.b.ins().icmp(cc, last, bound);
+        let fits = self.b.ins().bxor_imm_u(past, 1);
+        let inb = self.b.ins().band(below, fits);
         self.b.ins().brif(inb, test, &[], kern, &[p.into()]);
         self.b.switch_to_block(test);
         let mut lanes = Vec::with_capacity(bytes.len());

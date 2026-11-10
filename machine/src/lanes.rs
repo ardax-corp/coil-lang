@@ -305,8 +305,11 @@ pub(crate) fn vloop_run<S: LaneSlots + ?Sized>(
     let mut narrow_until = from;
     let mut p = from;
     while p < to {
+        // The lanes left; `to - p` need not fit an `i64` (a range from
+        // below zero to above it, #2522), its unsigned difference does.
+        let left = to.abs_diff(p);
         if wide_ok && p >= narrow_until {
-            let n = ((to - p) as usize).min(crate::simd::WIDE);
+            let n = usize::try_from(left).unwrap_or(usize::MAX).min(crate::simd::WIDE);
             if pos {
                 stack[sp + dest] = Value::from(p);
             }
@@ -324,10 +327,10 @@ pub(crate) fn vloop_run<S: LaneSlots + ?Sized>(
         if pos {
             stack[sp + dest] = Value::from(p);
         }
-        if to - p < lanes {
+        if left < lanes as u64 {
             // The last lanes, fewer than a block: one padded block, or one
             // lane at a time when it traps.
-            let m = (to - p) as usize;
+            let m = left as usize;
             if !vloop_short_block(stack, sp, regs, ops, p, m, pending, saved)? {
                 vloop_lanes(stack, sp, regs, ops, p, m)?;
             }
