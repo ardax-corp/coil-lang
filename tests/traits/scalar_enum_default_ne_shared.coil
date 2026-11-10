@@ -196,7 +196,11 @@ test("`!=` on fields, call results, in a loop and in a condition") {
     }
     assert!(steps == 1);
 
-    let verdict = if Flag::On != Flag::Off { "differ" } else { "same" };
+    let verdict = if Flag::On != Flag::Off {
+        "differ"
+    } else {
+        "same"
+    };
     assert!(verdict == "same");
 }
 

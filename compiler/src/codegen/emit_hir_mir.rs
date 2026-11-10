@@ -903,6 +903,10 @@ impl Compiler {
         let Some(target) = self.named_entry_target(&fqn, false).filter(|_| one_word || adapter || plain) else {
             return;
         };
+        // A trait default (`Eq::ne`) is one shared body over the trait's
+        // type parameter: each operand goes as its own word, a
+        // scalar-backed enum's backing word included (#2462).
+        let open = !elem && Self::is_default_method_fqn(class, method, &fqn);
         let site = crate::mir::HirCallSite {
             target,
             pair_args: vec![false; arity],
@@ -910,7 +914,7 @@ impl Compiler {
             coro: false,
             boxed_ret: false,
             dicts,
-            words: Vec::new(),
+            words: if open { vec![true; arity] } else { Vec::new() },
             adapt: Vec::new(),
             word_ret: false,
             ret_adapt: None,
