@@ -128,6 +128,12 @@ impl<'a> ClassSlotKinds<'a> {
     }
 }
 
+/// A generic function value's captured `kinds` slot (`MakePolyFnCapture`)
+/// that the call fills (#2506): the call's last dictionary word, which a
+/// call through a `forall` value, or a local bound from the function,
+/// passes. No `kinds` word is this small: its high bits are a sentinel.
+pub const KINDS_FROM_CALL: u64 = 1;
+
 /// The tag of a product object: an enum object with no variant, which is
 /// how the runtime keeps a tuple (and `()`, its empty one). No enum has
 /// this many variants.

@@ -49,6 +49,8 @@ pub(crate) fn apply(heap: &mut Heap, raw: Value, args: &[Value], dicts: usize, c
         let mut call = values[..take].to_vec();
         for (k, slot) in captured.iter().enumerate() {
             call.push(match slot {
+                // A `kinds` word the call passes last (#2506).
+                Some(Member::Value(v)) if v.bits() == common::KINDS_FROM_CALL => app_dicts.last().copied().unwrap_or_default(),
                 Some(Member::Value(v)) => *v,
                 Some(Member::Object(o)) => Value::from(o.addr()),
                 None => app_dicts.get(k).copied().unwrap_or_default(),

@@ -496,10 +496,11 @@ impl Compiler {
                     // Its shared entry's `kinds` word, captured after the
                     // dictionaries (#2506): every bit clear, so a type
                     // parameter's copy-on-write ops stay off, as before.
-                    let kinds = self.kinds_scheme(name).map(|s| crate::mir::HirDictOp::Kinds(super::kinds_sentinel(s.bounds.len() as u32)));
+                    let escape = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                    let kinds = self.polyfn_kinds_slot(name, escape.as_ref());
                     let value = if let Some(kinds) = kinds.clone().filter(|_| self.checker.dict_arity_for(name) == 0) {
                         let kind = crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) };
-                        Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: vec![kinds] })
+                        Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: kinds })
                     } else if self.checker.dict_arity_for(name) == 0 {
                         let kind = match params {
                             Some(params) => crate::mir::MirAllocKind::PolyFnCapture { target, params },
@@ -514,7 +515,7 @@ impl Compiler {
                             steps
                         });
                         self.hir_mir_dict_program(&steps).map(|mut dicts| {
-                            dicts.extend(kinds);
+                            dicts.extend(kinds.into_iter().flatten());
                             crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, captures: Vec::new(), pairs: Vec::new(), dicts }
                         })
                     };
@@ -1507,6 +1508,18 @@ impl Compiler {
             Some(Err(_)) => return,
         };
         let word_ret = unbox && call_ty.as_ref().and_then(Self::ty_to_value_tag).is_some();
+        // The callee's `kinds` word after the dictionaries (#2506): in the
+        // function's order for a local bound from it, in the `forall`'s for a
+        // parameter, which a value read there takes in the same order.
+        let mut dicts = dicts;
+        match &source {
+            Some(source) => dicts.extend(self.kinds_ops(source, &arg_tys, call_ty.as_ref()).unwrap_or_default()),
+            None => {
+                if let Some(Ty::Forall { bounds, body, .. }) = Self::hir_forall_param_ty(hir, &self.checker, f) {
+                    dicts.extend(self.kinds_ops_for(&bounds, &body, &arg_tys, call_ty.as_ref()));
+                }
+            }
+        }
         t.poly_call = Some(crate::mir::HirPolyCall { words, dicts, word_ret, ret_adapt });
     }
 
