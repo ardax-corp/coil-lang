@@ -70,13 +70,11 @@ pub enum HirShow {
     /// dictionary parameters (by frame slot): the code pointer in its
     /// method slot, `CallIndirect` on the value's word and the dictionary.
     Bound { dict: u32, method: u32 },
-    /// A boxed tuple: each item read by index and shown, then `FORMAT` of
-    /// the tuple's format string (by string table index) on the texts.
-    Tuple { fmt: u32, items: Vec<(Ty, HirShow)> },
-    /// A record: each field read by key (string table index) and shown,
-    /// then `FORMAT` of the record's format string on the texts.
-    /// A record's fields by slot (sorted by name).
-    Record { fmt: u32, fields: Vec<(u32, Ty, HirShow)> },
+    /// A boxed tuple or a record: each part read from its slot and shown,
+    /// then `FORMAT` of the format string (by string table index) on the
+    /// texts. A record's slots are its fields sorted by name; a tuple's
+    /// (`tuple`) never change.
+    Product { fmt: u32, parts: Vec<(Ty, HirShow)>, tuple: bool },
 }
 
 /// A call site HIR emission lowered to a plain `CALL`.
@@ -6687,7 +6685,7 @@ impl Lower<'_> {
     /// The text of `v` for a `%v` argument of `format` call `id`: a raw `show` call, `STRINGIFY`, or a
     /// tuple's or record's items shown and formatted.
     fn show(&mut self, id: HirId, v: ValueId, show: &HirShow) -> Result<ValueId, Refusal> {
-        let (fmt, items) = match show {
+        let (fmt, parts, tuple) = match show {
             HirShow::Call { target, word } => {
                 // Only a heap carrier goes as a word here, as an operator's
                 // operand.
@@ -6712,14 +6710,13 @@ impl Lower<'_> {
                 let callee = self.b.ins_tuple_item(dict, method, MirTy::I64).map_err(mir)?;
                 return self.at_expr(id, |l| l.b.ins_call_indirect(callee, vec![v, dict], MirTy::HeapRef).map_err(mir));
             }
-            HirShow::Tuple { fmt, items } => (fmt, items.iter().map(|(t, s)| (None, t, s)).collect::<Vec<_>>()),
-            HirShow::Record { fmt, fields } => (fmt, fields.iter().map(|(k, t, s)| (Some(*k), t, s)).collect()),
+            HirShow::Product { fmt, parts, tuple } => (fmt, parts, *tuple),
         };
         if self.b.value_ty(v) != MirTy::HeapRef {
             return Err("show aggregate".into());
         }
-        let mut words = Vec::with_capacity(items.len());
-        for (i, (key, ty, item)) in items.into_iter().enumerate() {
+        let mut words = Vec::with_capacity(parts.len());
+        for (slot, (ty, part)) in parts.iter().enumerate() {
             // An enum item is held as its boxed object, the word its
             // `show` takes (#1176); a niche `Option` / `Result` item is its
             // niche word (`tuple_item`), which its raw `show` takes as it
@@ -6728,12 +6725,9 @@ impl Lower<'_> {
                 .tuple_item(ty)
                 .or_else(|| self.cx.boxed_view(ty, None).is_some().then_some(MirTy::HeapRef))
                 .ok_or("show item type")?;
-            let w = match key {
-                // A record's slot.
-                Some(slot) => self.at_expr(id, |l| l.b.ins_product_load(v, slot, ty_w).map_err(mir))?,
-                None => self.at_expr(id, |l| l.b.ins_tuple_item(v, i as u32, ty_w).map_err(mir))?,
-            };
-            words.push(self.show(id, w, item)?);
+            let slot = slot as u32;
+            let w = self.at_expr(id, |l| if tuple { l.b.ins_tuple_item(v, slot, ty_w) } else { l.b.ins_product_load(v, slot, ty_w) }.map_err(mir))?;
+            words.push(self.show(id, w, part)?);
         }
         let fmt = self.b.ins_string(*fmt).map_err(mir)?;
         let out = self.b.ins_format(fmt, words).map_err(mir)?;

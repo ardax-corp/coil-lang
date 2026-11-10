@@ -1829,20 +1829,17 @@ impl Compiler {
     fn hir_show_ty(&mut self, ty: &Ty) -> Option<crate::mir::HirShow> {
         match ty {
             Ty::Tuple(items) => {
-                let items = items.iter().map(|t| Some((t.clone(), self.hir_show_ty(t)?))).collect::<Option<Vec<_>>>()?;
-                let fmt = self.intern_string(unescape_coil_string(&Self::tuple_show_format(items.len())));
-                return Some(crate::mir::HirShow::Tuple { fmt, items });
+                let parts = items.iter().map(|t| Some((t.clone(), self.hir_show_ty(t)?))).collect::<Option<Vec<_>>>()?;
+                let fmt = self.intern_string(unescape_coil_string(&Self::tuple_show_format(parts.len())));
+                return Some(crate::mir::HirShow::Product { fmt, parts, tuple: true });
             }
             Ty::Record { fields } => {
                 // In slot order: the fields sorted by name.
                 let mut fields = fields.clone();
                 fields.sort_by(|a, b| a.0.cmp(&b.0));
-                let mut shown = Vec::with_capacity(fields.len());
-                for (slot, (_, t)) in fields.iter().enumerate() {
-                    shown.push((slot as u32, t.clone(), self.hir_show_ty(t)?));
-                }
+                let parts = fields.iter().map(|(_, t)| Some((t.clone(), self.hir_show_ty(t)?))).collect::<Option<Vec<_>>>()?;
                 let fmt = self.intern_string(unescape_coil_string(&Self::record_show_format(&fields)));
-                return Some(crate::mir::HirShow::Record { fmt, fields: shown });
+                return Some(crate::mir::HirShow::Product { fmt, parts, tuple: false });
             }
             // An arity-wide tuple thunk's item: its own dictionary (#1479).
             Ty::Var(v) if let Some(&n) = self.synth_show_dicts.get(v) => {
