@@ -6018,6 +6018,8 @@ impl Compiler {
             } = ast.1.borrow() else {
             unreachable!("compile_function_decl_into on another expression");
         };
+            // A `fn` nested in this one's body is no method.
+            let inherent_method = std::mem::take(&mut self.inherent_method_decl);
             let Some(body) = body else {
                 return;
             };
@@ -6121,14 +6123,10 @@ impl Compiler {
                 c.compiling_two_word_enum = outer.two_word;
             });
 
-            self.emit_mono_specializations_for_function(
-                &qualified,
-                type_params,
-                args,
-                Some(body),
-                name,
-                span,
-            );
+            // The plan's clones are free functions', by bare name.
+            if !inherent_method {
+                self.emit_mono_specializations_for_function(&qualified, type_params, args, Some(body), name, span);
+            }
             self.emit_par_specializations_for(name, &table_key);
     }
 
@@ -6303,7 +6301,9 @@ impl Compiler {
                                 // static methods start params at slot 0.
                                 self.compiling_method = !*is_static;
                                 self.note_inst_clone_compiled(&fqn);
+                                self.inherent_method_decl = true;
                                 self.do_compile(body);
+                                self.inherent_method_decl = false;
                                 self.compiling_method = false;
                                 self.context
                                     .methods
@@ -6333,7 +6333,9 @@ impl Compiler {
                     }
                 );
                 self.compiling_method = !is_static;
+                self.inherent_method_decl = true;
                 self.do_compile(body);
+                self.inherent_method_decl = false;
                 self.compiling_method = false;
             }
             Expression::Argument { name: n, .. } => {

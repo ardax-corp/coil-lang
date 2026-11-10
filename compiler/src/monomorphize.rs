@@ -351,23 +351,33 @@ fn ground_ty_at(checker: &Checker, expr: &Output, map: &HashMap<crate::typecheck
 }
 
 /// Run `f` on the body of the function named `name`; whether it was found.
+/// A method of that name is not it (#2548).
 fn with_fn_body(node: &Output, name: &str, f: &mut dyn FnMut(&Output)) -> bool {
-    if let Expression::Function { name: n, body, .. } = node.1.as_ref() {
-        let Some(body) = body else {
-            return false;
-        };
-        if *n == name {
-            f(body);
-            return true;
-        }
-        return with_fn_body(body, name, f);
-    }
     let mut found = false;
-    walk_children(node, &mut |child| {
-        if !found {
-            found = with_fn_body(child, name, f);
+    match node.1.as_ref() {
+        Expression::Function { name: n, body, .. } => {
+            let Some(body) = body else {
+                return false;
+            };
+            if *n == name {
+                f(body);
+                return true;
+            }
+            return with_fn_body(body, name, f);
         }
-    });
+        Expression::Implementation { .. } | Expression::TypeClass { .. } | Expression::TypeClassImpl { .. } => {
+            for_each_method_body(node, &mut |body| {
+                if !found {
+                    found = with_fn_body(body, name, f);
+                }
+            });
+        }
+        _ => walk_children(node, &mut |child| {
+            if !found {
+                found = with_fn_body(child, name, f);
+            }
+        }),
+    }
     found
 }
 
@@ -421,10 +431,30 @@ fn collect_generic_functions(
                 collect_generic_functions(module, body, checker, sigs);
             }
         }
+        // A method is no free function: its bare name may be one's, whose
+        // sig it must not replace (#2548). Its body may call or declare one.
+        Expression::Implementation { .. } | Expression::TypeClass { .. } | Expression::TypeClassImpl { .. } => {
+            for_each_method_body(node, &mut |body| collect_generic_functions(module, body, checker, sigs));
+        }
         _ => walk_children(node, &mut |child| {
             collect_generic_functions(module, child, checker, sigs)
         }),
     }
+}
+
+/// Run `f` on the body of each method of the `impl` / trait block `node`.
+fn for_each_method_body(node: &Output, f: &mut dyn FnMut(&Output)) {
+    walk_children(node, &mut |child| {
+        let child = match child.1.as_ref() {
+            Expression::Method(_, inner) => inner,
+            _ => child,
+        };
+        match child.1.as_ref() {
+            Expression::Function { body: Some(body), .. } => f(body),
+            Expression::Function { body: None, .. } => {}
+            _ => f(child),
+        }
+    });
 }
 
 fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> GenericFnSig {
