@@ -251,18 +251,48 @@ pub struct ProgramEffects {
 }
 
 impl ProgramEffects {
-    /// Why the body named `key` (or `module::key`, `.m()` for a method
-    /// `Owner::m`) mutates its parameter `j`, when an earlier module said.
-    fn mutation_reason(&self, key: &str, j: u32) -> Option<String> {
+    /// Why the body named `key` (or `module::key`) mutates its parameter
+    /// `j`, when an earlier module said. `.m()` names a method and a trait
+    /// method's name its impl: `owner` is the class it was called on and
+    /// `trait_name` the trait, when the call knows them; `module_path` is
+    /// the calling module.
+    ///
+    /// Several bodies may share a short name (`HashMap::insert`,
+    /// `SortedSet::insert`): the owner and the trait pick among them, and
+    /// what is still a tie goes to the first by name, never to the map's
+    /// iteration order (#2464).
+    fn mutation_reason(&self, key: &str, owner: Option<&str>, trait_name: Option<&str>, module_path: &str, j: u32) -> Option<String> {
+        let method = key.starts_with('.');
         let key = key.trim_start_matches('.').trim_end_matches("()");
-        let suffix = format!("::{key}");
-        let found = self.mutations.get(key).or_else(|| {
-            self.mutations
+        let reason = |name: &str| self.mutations.get(name)?.iter().find(|(k, _)| *k == j).map(|(_, r)| r.clone());
+        let exact = match owner {
+            // The keys `Cx::method` finds an inherent method's summary under.
+            Some(owner) if method => [format!("{owner}::{key}"), format!("{module_path}::{owner}::{key}"), format!("core::{owner}::{key}")]
                 .iter()
-                .find(|(name, _)| name.ends_with(&suffix))
-                .map(|(_, r)| r)
-        })?;
-        found.iter().find(|(k, _)| *k == j).map(|(_, r)| r.clone())
+                .find_map(|k| reason(k)),
+            _ => reason(key),
+        };
+        if exact.is_some() {
+            return exact;
+        }
+        // The first by name of the bodies `path::key` that `keep` takes.
+        let first = |key: &str, keep: &dyn Fn(&str) -> bool| {
+            let suffix = format!("::{key}");
+            let mut names: Vec<&str> =
+                self.mutations.keys().map(String::as_str).filter(|name| name.strip_suffix(&suffix).is_some_and(keep)).collect();
+            names.sort_unstable();
+            names.into_iter().find_map(reason)
+        };
+        let Some(head) = owner.map(type_head) else {
+            return first(key, &|_| true);
+        };
+        let of_owner = |path: &str| {
+            type_head(path) == head
+                && trait_name.is_none_or(|t| path.rsplit_once(" for ").is_some_and(|(tr, _)| short_name(tr) == short_name(t)))
+        };
+        // A method of another class or trait says nothing of this call; a
+        // name that is also some trait method's may still be a function.
+        first(short_name(key), &of_owner).or_else(|| if method || trait_name.is_some() { None } else { first(key, &|_| true) })
     }
 
     /// The summary of the body named `name` (`module::f`, `module::Owner::m`).
@@ -725,6 +755,13 @@ pub fn declares_effects(ast: &parser::ast::Output<'_>) -> bool {
 /// The last segment of a path: `shapes::Shape` → `Shape`.
 fn short_name(path: &str) -> &str {
     path.rsplit("::").next().unwrap_or(path)
+}
+
+/// The short name of the type a method's owner path names: `Tally` for
+/// `store::Tally`, `Pair<int>` and `store::Show for Tally`.
+fn type_head(owner: &str) -> &str {
+    let ty = owner.rsplit_once(" for ").map_or(owner, |(_, ty)| ty);
+    short_name(ty.split('<').next().unwrap_or(ty).trim())
 }
 
 /// `name` without the module prefix, or `None` when it is not this module's.
@@ -1888,7 +1925,12 @@ impl Cx<'_> {
             }
             let reason = match callee_body {
                 Some(b) => Some(self.mutation_reason(b, j, w.summaries)),
-                None => key.and_then(|k| self.program.mutation_reason(k, j)),
+                None => key.and_then(|k| {
+                    let method = k.starts_with('.');
+                    let owner = if method || self.is_trait_method(k) { self.receiver_class(body, args) } else { None };
+                    let trait_name = if method || owner.is_none() { None } else { self.call_trait(body, at, short_name(k)) };
+                    self.program.mutation_reason(k, owner.as_deref(), trait_name, self.module_path, j)
+                }),
             };
             let because = reason.map_or_else(String::new, |r| format!(" ({r})"));
             // A method call's receiver is what it is called on; any other
@@ -1998,8 +2040,7 @@ impl Cx<'_> {
         let name = match callee_body {
             Some(b) => self.module.bodies[b].name.clone(),
             None if method => {
-                let recv = body.expr(*args.first()?);
-                let owner = self.checker.class_owner_at_span(recv.span).or_else(|| class_of(recv.ty.as_ref()).map(str::to_string))?;
+                let owner = self.receiver_class(body, args)?;
                 format!("{owner}::{}", key?.trim_start_matches('.').trim_end_matches("()"))
             }
             None => key?.to_string(),
@@ -2057,6 +2098,12 @@ impl Cx<'_> {
             }
             _ => None,
         }
+    }
+
+    /// The class a method call's receiver (its first argument) is.
+    fn receiver_class(&self, body: &HirBody, args: &[HirId]) -> Option<String> {
+        let recv = body.expr(*args.first()?);
+        self.checker.class_owner_at_span(recv.span).or_else(|| class_of(recv.ty.as_ref()).map(str::to_string))
     }
 
     /// How a diagnostic names parameter `j` of a callee: `self` or
@@ -2363,7 +2410,7 @@ impl Cx<'_> {
                 let trait_decl = host && self.is_trait_method(name);
                 // `Trait::m(p)` on a concrete receiver runs its impl, whose
                 // body says what it mutates, as `p.m()` (#1647).
-                if trait_decl && let Some((mutates, impl_body)) = self.named_instance_mutates(w, name, args) {
+                if trait_decl && let Some((mutates, impl_body)) = self.named_instance_mutates(w, at, name, args) {
                     self.call_mutates(w, at, name, mutates, impl_body, Some(name), args, false);
                     return;
                 }
@@ -2726,7 +2773,7 @@ impl Cx<'_> {
     /// What trait method `name` (`m`, `Trait::m`) mutates when called on
     /// `args`, from the impl body of its first argument's class, when that
     /// is a class whose impl was seen.
-    fn named_instance_mutates(&self, w: &Walk<'_>, name: &str, args: &[HirId]) -> Option<(u64, Option<usize>)> {
+    fn named_instance_mutates(&self, w: &Walk<'_>, at: HirId, name: &str, args: &[HirId]) -> Option<(u64, Option<usize>)> {
         let recv = *args.first()?;
         let body = &self.module.bodies[w.index];
         if matches!(body.expr(recv).kind, HirKind::Named { .. } | HirKind::Spread(_)) {
@@ -2734,15 +2781,27 @@ impl Cx<'_> {
         }
         let owner = class_of(body.expr(recv).ty.as_ref())?;
         match name.rsplit_once("::") {
-            Some((trait_name, method)) => self
-                .checker
-                .generics()
-                .typeclasses
-                .keys()
-                .filter(|t| short_name(t) == short_name(trait_name))
-                .find_map(|t| self.instance_mutates_of(w, t, owner, method)),
-            None => self.instance_mutates(w, owner, name),
+            Some((trait_name, method)) => {
+                let mut traits: Vec<&String> =
+                    self.checker.generics().typeclasses.keys().filter(|t| short_name(t) == short_name(trait_name)).collect();
+                traits.sort_unstable();
+                traits.into_iter().find_map(|t| self.instance_mutates_of(w, t, owner, method))
+            }
+            // `Trait::m(x)` lowered under the bare `m`: the instance the
+            // checker picked for the call says which trait's `m` (#2464).
+            None => self
+                .call_trait(body, at, name)
+                .and_then(|t| self.instance_mutates_of(w, t, owner, name))
+                .or_else(|| self.instance_mutates(w, owner, name)),
         }
+    }
+
+    /// The trait whose method `name` the call `at` runs, when the checker
+    /// discharged an instance for it.
+    fn call_trait(&self, body: &HirBody, at: HirId, name: &str) -> Option<&str> {
+        let e = body.expr(at);
+        let dicts = e.node.and_then(|n| self.checker.call_dicts_at(n)).or_else(|| self.checker.call_dicts_for_span(e.span.0, e.span.1))?;
+        dicts.iter().find(|inst| inst.method_fqns.contains_key(name)).map(|inst| inst.class.as_str())
     }
 
     /// Fold what the trait operator `lhs op rhs` mutates into `w`, as the
@@ -2773,7 +2832,7 @@ impl Cx<'_> {
     /// What the impl of trait method `name` for class `owner` mutates, when
     /// its body was seen (this module's or an earlier one's).
     fn instance_mutates(&self, w: &Walk<'_>, owner: &str, name: &str) -> Option<(u64, Option<usize>)> {
-        let traits: Vec<&String> = self
+        let mut traits: Vec<&String> = self
             .checker
             .generics()
             .typeclasses
@@ -2781,6 +2840,9 @@ impl Cx<'_> {
             .filter(|(_, def)| def.methods.iter().any(|m| m.name == name))
             .map(|(t, _)| t)
             .collect();
+        // Two traits with a method `name`, both implemented for `owner`:
+        // the same one on every run.
+        traits.sort_unstable();
         traits.into_iter().find_map(|t| self.instance_mutates_of(w, t, owner, name))
     }
 

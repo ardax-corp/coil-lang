@@ -84,3 +84,64 @@ fn main() {
     let err = seen.keys().next().unwrap();
     assert!(err.contains("E0107") && err.contains("(writes field `n`)"), "{err}");
 }
+
+const TRAITS: &str = "\
+class Tally {
+    pub n: int,
+    pub items: Vec<int>,
+}
+
+class Ring {
+    pub slots: [int; 4],
+}
+
+trait Fill<T> {
+    fn put(T x, int v) -> unit {}
+}
+
+trait Load<T> {
+    fn put(T x, int v) -> unit {}
+}
+
+impl Fill for Tally {
+    pub fn put(Tally x, int v) -> unit {
+        x.n = v;
+    }
+}
+
+impl Load for Tally {
+    pub fn put(Tally x, int v) -> unit {
+        x.items.push(v);
+    }
+}
+
+impl Fill for Ring {
+    pub fn put(Ring x, int v) -> unit {
+        x.slots[0] = v;
+    }
+}
+";
+
+/// `Trait::m(x)` with two traits that both have an `m` implemented for the
+/// class: the reason is the named trait's impl's, in the module that
+/// declares them and in one that imports them.
+#[test]
+fn e0107_reason_names_the_called_trait_impl_on_every_run() {
+    let calls = "
+fn main() {
+    let t = readonly new Tally(0, [1]);
+    Load::put(t, 2);
+}
+";
+    let local = format!("{TRAITS}{calls}");
+    let seen = compile_outputs("trait-local", &[("main.coil", &local)], 24);
+    assert_eq!(seen.len(), 1, "one output over 24 runs, got: {seen:#?}");
+    let err = seen.keys().next().unwrap();
+    assert!(err.contains("E0107") && err.contains("(calls `.push()` on a `Vec`)"), "{err}");
+
+    let imported = format!("use store::{{Tally, Ring, Fill, Load}};\n{calls}");
+    let seen = compile_outputs("trait-imported", &[("store.coil", TRAITS), ("main.coil", &imported)], 24);
+    assert_eq!(seen.len(), 1, "one output over 24 runs, got: {seen:#?}");
+    let err = seen.keys().next().unwrap();
+    assert!(err.contains("E0107") && err.contains("(calls `.push()` on a `Vec`)"), "{err}");
+}
