@@ -373,6 +373,10 @@ pub struct Compiler {
     /// True while compiling an `impl` method. Function resets locals
     /// and reserves slot 0 for `self`.
     compiling_method: bool,
+    /// The `fn` declaration about to compile is an inherent method, static
+    /// or not: the mono plan's clones of a free function of the same bare
+    /// name are not its own (#2548). Taken by the declaration.
+    inherent_method_decl: bool,
     /// True while lowering a monomorphized clone. Bound-method hints still
     /// point at `__dictN`; the clone has ground types and must CALL instead.
     compiling_mono_clone: bool,
@@ -723,6 +727,7 @@ impl Default for Compiler {
             coroutine_fns: std::collections::HashSet::new(),
             codegen_depth: 0,
             compiling_method: false,
+            inherent_method_decl: false,
             compiling_mono_clone: false,
             compiling_result_mode: false,
             compiling_result_ok_is_result: false,
