@@ -2826,6 +2826,24 @@ impl Cx<'_> {
         def.and_then(|d| self.checker.def_interner().info(d)).is_some_and(|info| matches!(info.kind, DefKind::Fn | DefKind::Ffi))
     }
 
+    /// Whether a call named `name` runs a trait's method: `Trait::m(..)`,
+    /// `Type::m(..)` or `T::m(..)` for a method `m` some trait has, or the
+    /// bare `m` that `Trait::m(x)` lowers under. A bare `m` bound to a
+    /// builtin in this module's scope is that builtin: the checker names
+    /// the trait call `Trait::m` then.
+    fn names_trait_method(&self, name: &str) -> bool {
+        let traits = &self.checker.generics().typeclasses;
+        match name.rsplit_once("::") {
+            Some((owner, m)) => {
+                short_name(owner).starts_with(|c: char| c.is_ascii_uppercase()) && traits.values().any(|t| t.methods.iter().any(|d| d.name == m))
+            }
+            None => {
+                let builtin = self.checker.current_module_name() == self.module_path && self.checker.scope_binding(name).is_some();
+                !builtin && traits.values().any(|t| t.methods.iter().any(|d| d.name == name))
+            }
+        }
+    }
+
     /// [`Self::named`] for a name that is no user function or trait method.
     fn named_host(&self, name: &str) -> Summary {
         // A new `Vec` or variant holds its arguments and nothing else.
@@ -2852,7 +2870,9 @@ impl Cx<'_> {
         };
         // A user type's static is unknown code here, whatever its short
         // name: `Pool::with_capacity` is not the `with_capacity` native.
-        if user_type_member(self.checker, name) {
+        // So is a trait's method called through the trait, a type or a
+        // type parameter (#2437).
+        if user_type_member(self.checker, name) || self.names_trait_method(name) {
             return Summary::of(UNKNOWN);
         }
         escape::host_summary(&short, Summary::of(classify_host_name(&short)))
