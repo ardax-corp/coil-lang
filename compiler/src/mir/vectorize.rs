@@ -801,7 +801,7 @@ fn traps_in_store_order(func: &MirFunc, body: BlockId, term: ValueId, acc_next: 
 
 /// Int arithmetic that can overflow or divide by zero. Element reads are
 /// in range under the vector loop's guard; floats and bit ops never trap.
-fn may_trap(func: &MirFunc, inst: &MirInst) -> bool {
+pub(super) fn may_trap(func: &MirFunc, inst: &MirInst) -> bool {
     match inst {
         MirInst::Bin { op, ty: MirTy::I64, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
         MirInst::Unary { op: MirUnaryOp::Neg, src, .. } => func.ty(*src) == MirTy::I64,

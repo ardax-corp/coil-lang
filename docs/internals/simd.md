@@ -96,6 +96,13 @@ deleted.
   fold in one body (`feature/locality` step 2): the stores run before the
   fold. A block stores only once its other words ran; a block that traps
   runs again lane by lane, so a panic leaves the scalar loop's stores.
+  The panic is reported at the `VecLoop` op's location, which
+  `vec_loop::trap_loc` takes from the loop body's outermost op that can
+  trap. That is the scalar loop's own site when one op can trap or the
+  others are its operands (`100 / (i - k)`, #2539). When a body has
+  several independent trapping ops, the report names the first of them,
+  whichever lane op trapped. A callee inlined into the loop has no frame
+  of its own, as at `-O1`.
   Store loops keep the
   scalar order however the arrays alias: every read before the first
   store, one store offset `S`, no read at an offset below `S`. Runtime glue
