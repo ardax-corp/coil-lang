@@ -396,6 +396,11 @@ impl Compiler {
         let bound = match &e.kind {
             HirKind::Bin { .. } | HirKind::Un { .. } => match emit.plan.ops.get(&id.0) {
                 Some(&HirOp::Bound { dict, method }) => Some((dict, method, false)),
+                // An element-wise operator whose element is a bound type
+                // parameter: the element's operator, once per element.
+                Some(HirOp::Aggregate(_)) => self
+                    .bound_operator_hint(e.node, e.span.0, e.span.1)
+                    .and_then(|hint| Some((self.frame_dict(hint.dict_index)?, hint.method_slot as u32, false))),
                 _ => None,
             },
             HirKind::Call { .. } if !emit.plan.lens.contains_key(&id.0) => match emit.plan.calls.get(&id.0) {
@@ -512,9 +517,12 @@ impl Compiler {
             HirKind::Loop { body }
                 if query::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) => {}
             // An element-wise operator on the packed kernel: its operands
-            // boxed, then the meta word.
+            // boxed, then the meta word. The kernel takes primitive words
+            // only: a type parameter's elements (a shared generic body) or
+            // a user type's never reach it.
             HirKind::Bin { .. } | HirKind::Un { .. }
                 if let Some(HirOp::Aggregate(info)) = emit.plan.ops.get(&id.0)
+                    && query::aggregate_elem(&self.checker, hir, id).is_some_and(|elem| classify::is_scalar(&elem))
                     && let Some(meta) = Self::packed_aggregate_meta(info)
                     && let Some(native) = self.native_id(common::PACKED_VEC_ARITH) =>
             {

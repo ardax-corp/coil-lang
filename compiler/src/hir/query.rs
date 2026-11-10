@@ -479,7 +479,7 @@ pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ag
 
 /// The ground element type of the element-wise op at `id`: of an operand,
 /// else of the result. `None` while it is an open type parameter.
-fn aggregate_elem(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ty> {
+pub fn aggregate_elem(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ty> {
     use crate::typechecking::aggregate_arith::homogeneous_aggregate_elem;
     let operands = match body.expr(id).kind {
         HirKind::Bin { lhs, rhs, .. } => vec![lhs, rhs, id],

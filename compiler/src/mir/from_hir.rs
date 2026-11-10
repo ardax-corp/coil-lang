@@ -2740,13 +2740,6 @@ impl Lower<'_> {
     /// they are reached), a dynamic array in a loop pushing each result.
     fn aggregate(&mut self, id: HirId, info: &crate::typechecking::AggregateArithInfo, lhs: HirId, rhs: Option<HirId>) -> Result<Val, Refusal> {
         use crate::typechecking::{AggregateMode as M, AggregateOp, AggregateShape as S, ScalarSide};
-        // The packed kernel: each operand one word (boxed), then the meta
-        // word, as a matrix operator's.
-        if query::aggregate_packed(info).is_some() {
-            let la = *self.site(id).linalg.as_ref().ok_or("packed aggregate")?;
-            let args: Vec<HirId> = [lhs].into_iter().chain(rhs).collect();
-            return self.linalg(id, la, &args);
-        }
         let op = match info.op {
             AggregateOp::Add => Some(MirBinOp::Add),
             AggregateOp::Sub => Some(MirBinOp::Sub),
@@ -2758,9 +2751,13 @@ impl Lower<'_> {
         };
         let (shape, mode) = (info.kind.shape, info.kind.mode);
         let scalar_on = mode.scalar_on();
-        let ty = if info.kind.elem_is_float { MirTy::F64 } else { MirTy::I64 };
-        // Every operand's elements (and a scalar) must be that word.
-        for &o in std::iter::once(&lhs).chain(rhs.as_ref()) {
+        // In a shared generic body the element is a type parameter: each
+        // element is its one word and the operator its dictionary's method.
+        let bound = self.site(id).bound_call.clone();
+        let ty = if bound.is_none() && info.kind.elem_is_float { MirTy::F64 } else { MirTy::I64 };
+        // Else every operand's elements (and a scalar) must be that
+        // primitive word: no kernel and no int op runs on anything else.
+        for &o in std::iter::once(&lhs).chain(rhs.as_ref()).filter(|_| bound.is_none()) {
             let t = self.expr_ty(o).ok_or("aggregate operand")?;
             let elem = match strip_readonly(t) {
                 Ty::Tuple(items) => {
@@ -2773,9 +2770,19 @@ impl Lower<'_> {
                 return Err("aggregate operand".into());
             }
         }
+        // The packed kernel: each operand one word (boxed), then the meta
+        // word, as a matrix operator's.
+        if bound.is_none() && query::aggregate_packed(info).is_some() {
+            let la = *self.site(id).linalg.as_ref().ok_or("packed aggregate")?;
+            let args: Vec<HirId> = [lhs].into_iter().chain(rhs).collect();
+            return self.linalg(id, la, &args);
+        }
         // A `byte` element wraps modulo 256, as the scalar operator.
         let byte = info.kind.elem_is_byte;
         let apply = |l: &mut Self, a: ValueId, b: Option<ValueId>| -> Result<ValueId, Refusal> {
+            if let Some(bound) = &bound {
+                return l.bound_elem(id, bound, a, b);
+            }
             match (op, b) {
                 (Some(MirBinOp::Pow), Some(b)) if byte => l.byte_pow(a, b),
                 (Some(op), Some(b)) => {
@@ -2800,6 +2807,7 @@ impl Lower<'_> {
         // elements are read where they are (its literal items in order, with
         // no array made), a tuple is a value first.
         let array = !shape.is_tuple();
+        let open = bound.is_some();
         let side = |l: &mut Self, operand: HirId, on: ScalarSide| -> Result<Option<AggSide>, Refusal> {
             let scalar = scalar_on == Some(on);
             let Some(src) = l.agg_operand(operand, array && !scalar)? else {
@@ -2836,8 +2844,28 @@ impl Lower<'_> {
             };
         }
         let kind = if array { MirAllocKind::Array } else { MirAllocKind::TUPLE };
-        let obj = self.b.ins_alloc(kind, out).map_err(mir)?;
+        // A type parameter's words may be pointers: stamped as a literal of
+        // the result type is.
+        let kinds = match self.expr_ty(id).filter(|_| open).map(strip_readonly) {
+            Some(Ty::Tuple(items)) => common::pack_word_kinds(items.iter().map(|t| self.cx.word_kind(t))),
+            Some(t) => array_elem(t).map_or(0, |e| self.cx.array_stamp(e)),
+            None => 0,
+        };
+        let obj = self.b.ins_alloc_kinds(kind, out, kinds).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+    }
+
+    /// One element of an element-wise operator on a bound type parameter:
+    /// the operand words, the dictionary parameter (and the method's own
+    /// bounds' dictionaries), then the code pointer in the method's slot
+    /// through `CallIndirect`, as [`Self::bound_call`] on one value.
+    fn bound_elem(&mut self, id: HirId, bound: &HirBoundCall, a: ValueId, b: Option<ValueId>) -> Result<ValueId, Refusal> {
+        let dict = *self.dict_params.get(&bound.dict).ok_or("dictionary parameter")?;
+        let mut words: Vec<ValueId> = std::iter::once(a).chain(b).collect();
+        words.push(dict);
+        words.extend(self.dict_values(&bound.dicts)?);
+        let callee = self.b.ins_tuple_item(dict, bound.method, MirTy::I64).map_err(mir)?;
+        self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, MirTy::I64).map_err(mir))
     }
 
     /// An element-wise negation or broadcast over an array of dynamic
