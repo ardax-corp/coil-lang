@@ -1,0 +1,19 @@
+// @expected E0119 — a tuple item's bounded generic-head `Hash` instance whose context does not hold (`Hash<Q>`, needed by `Hash<Box<Q>>`) gives the tuple no `Hash` (#2590).
+class Box<T> {
+    pub item: T,
+}
+
+impl Hash for Box<T: Hash> {
+    fn hash(Box<T> b) -> int {
+        return b.item.hash();
+    }
+}
+
+class Q {
+    pub v: int,
+}
+
+fn main() {
+    let t: (Box<Q>, int) = (new Box(new Q(1)), 1);
+    let _ = t.hash();
+}
