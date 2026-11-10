@@ -319,7 +319,36 @@ fails its join, so the loop reruns sequentially, which panics where the
 program does, or finishes when only that chunk's partial overflowed. The
 fold waits for the last join, and folding in order makes each step a prefix
 of the sequential reduction, so a fold that overflows is one the sequential
-loop performs too.
+loop performs too. The fork-join tests each `+` / `*` step before taking it
+(compares against `MAX - p` / `MIN - p`, or the quotients `MAX / p` and
+`MIN / p` by sign) and reruns the range instead of trapping, so that panic
+too is raised by the loop's body.
+
+### A failed attempt reports nothing
+
+A parallel attempt is speculative: what the program prints and how it exits
+are the sequential program's ([coil-lang#2419](https://github.com/ardax-corp/coil-lang/issues/2419)).
+
+- A job spawned with `thread_spawn_shared` (only fork-joins call it) is
+  marked `Job::speculative`, also when it falls back to an isolate job. Its
+  driver runs quiet (`Driver::set_quiet`): a panic, a failed contract
+  included, stops the job and fails its join without a report. A thread the
+  program spawns itself (`thread::spawn`) is not speculative and reports as
+  before.
+- The rerun's panic is the program's. Its backtrace
+  (`Locator::backtrace`, `machine/src/locate.rs`) leaves out the loop's two
+  compiler-made functions, named by `common::par_loop_fn`: the chunk
+  worker's frame is printed as a frame of the function the loop is written
+  in, at the worker's location, in place of that function's call into the
+  fork-join.
+
+Expression IPA is not there yet. Its spawned arm is quiet, but the joiner
+runs the other arms itself and reports a panic of theirs although an
+earlier arm may panic first, and its frames name `__coil_par_{f}`
+([coil-lang#2424](https://github.com/ardax-corp/coil-lang/issues/2424)).
+A chunk also cannot see an overflow the running fold only reaches part way
+through its range
+([coil-lang#2423](https://github.com/ardax-corp/coil-lang/issues/2423)).
 
 Array / dict / coro / user-`Iterator` `for` stays sequential: isolate IPA does not
 send the heap collection (that is C1 shared-heap steal, COI-365).
