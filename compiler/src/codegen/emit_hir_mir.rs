@@ -532,9 +532,11 @@ impl Compiler {
                     A::Pow => (("Pow", "pow"), 2),
                     A::Neg => (("Neg", "neg"), 1),
                 };
-                if let Some(HirOp::Call { lookup, fqn, class, method }) = self.hir_instance_operator(&elem, class, method) {
+                // Whatever the instance returns (a two-word class, an
+                // enum): an element is one word.
+                if let Some((lookup, fqn)) = self.concrete_operator_target_ty(&elem, class, method) {
                     let mut call = crate::mir::HirSite::default();
-                    self.hir_mir_op_call_tys(hir, id, &vec![Some(elem); arity], (class, method, fqn), lookup, &mut call);
+                    self.hir_mir_op_call_tys(hir, id, &vec![Some(elem); arity], (class, method, fqn), lookup, true, &mut call);
                     t.elem_call = call.call.map(|site| (site, true)).or(call.op_call.map(|op| (op.site, false)));
                 }
             }
@@ -847,11 +849,15 @@ impl Compiler {
         t: &mut crate::mir::HirSite,
     ) {
         let operands: Vec<Option<Ty>> = operands.iter().map(|&o| Self::hir_ty(hir, o).cloned()).collect();
-        self.hir_mir_op_call_tys(hir, id, &operands, target, lookup, t);
+        self.hir_mir_op_call_tys(hir, id, &operands, target, lookup, false, t);
     }
 
     /// [`Self::hir_mir_op_call`] by the operands' types: an element-wise
-    /// operator calls the instance on elements, which are no HIR node.
+    /// operator (`elem`) calls the instance on elements, which are no HIR
+    /// node. An element is its boxed word, and so is the result: where the
+    /// instance's entry does not take and return them so, its dictionary
+    /// adapter does (as a shared body's dictionary call reaches it).
+    #[allow(clippy::too_many_arguments)]
     fn hir_mir_op_call_tys(
         &mut self,
         hir: &HirBody,
@@ -859,6 +865,7 @@ impl Compiler {
         operands: &[Option<Ty>],
         (class, method, fqn): (&str, &str, String),
         lookup: Ty,
+        elem: bool,
         t: &mut crate::mir::HirSite,
     ) {
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup)).unwrap_or(fqn);
@@ -879,11 +886,20 @@ impl Compiler {
         };
         // A two-word result comes back as two words (or boxed after the call).
         let one_word = self.two_word_return_kind(&fqn).is_none();
-        self.raw_instance_call = raw;
-        let Some(target) = self.named_entry_target(&fqn, false).filter(|_| one_word) else {
+        let arity = operands.len();
+        let declared = self.structural_thunk_params.get(&fqn);
+        let fits = |i: usize, layout: ValueLayout| {
+            layout == ValueLayout::Boxed
+                || (Self::is_eq_glue(&fqn) && declared.and_then(|p| p.get(i)).is_some_and(|t| self.value_layout(t) == layout))
+        };
+        let raw_fits = operands.iter().enumerate().all(|(i, o)| o.as_ref().is_some_and(|t| fits(i, self.value_layout(t))));
+        // An element through the adapter: the boxed word in, the boxed
+        // word out.
+        let adapter = elem && raw && !(one_word && raw_fits);
+        self.raw_instance_call = raw && !adapter;
+        let Some(target) = self.named_entry_target(&fqn, false).filter(|_| one_word || adapter) else {
             return;
         };
-        let arity = operands.len();
         let site = crate::mir::HirCallSite {
             target,
             pair_args: vec![false; arity],
@@ -897,19 +913,16 @@ impl Compiler {
             ret_adapt: None,
             ret_items: None,
         };
-        if raw {
+        if adapter {
+            t.op_call = Some(crate::mir::HirOpCall { site, shift: false });
+        } else if raw {
             // Each operand's MIR word is the boxed-layout word the stack passes.
             // A glue function (#1629) takes its own type's words, a niche
             // word as one.
-            let declared = self.structural_thunk_params.get(&fqn);
-            let fits = |i: usize, layout: ValueLayout| {
-                layout == ValueLayout::Boxed
-                    || (Self::is_eq_glue(&fqn) && declared.and_then(|p| p.get(i)).is_some_and(|t| self.value_layout(t) == layout))
-            };
-            if operands.iter().enumerate().all(|(i, o)| o.as_ref().is_some_and(|t| fits(i, self.value_layout(t)))) {
+            if raw_fits {
                 t.call = Some(site);
             }
-        } else if arity == 2 && Self::ty_to_value_tag(&lookup).is_some() {
+        } else if (arity == 2 || elem) && Self::ty_to_value_tag(&lookup).is_some() {
             let shift = matches!(class, "Shl" | "Shr");
             t.op_call = Some(crate::mir::HirOpCall { site, shift });
         }
