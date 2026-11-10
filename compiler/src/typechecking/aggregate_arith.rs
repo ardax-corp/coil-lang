@@ -107,6 +107,9 @@ pub struct AggregateArithKind {
     pub shape: AggregateShape,
     pub mode: AggregateMode,
     pub elem_is_float: bool,
+    /// Elements are `byte`: `+ - * **` and negation wrap modulo 256, as
+    /// the scalar operators do.
+    pub elem_is_byte: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,6 +134,10 @@ pub fn is_numeric_elem(ty: &Ty) -> bool {
 
 pub fn elem_is_float(ty: &Ty) -> bool {
     matches!(ty, Ty::Con(n) if n == "float")
+}
+
+pub fn elem_is_byte(ty: &Ty) -> bool {
+    matches!(ty, Ty::Con(n) if n == "byte")
 }
 
 /// Classify a pruned type as an arithmetic shape.
@@ -518,6 +525,7 @@ pub fn recover(lty: &Ty, rty: Option<&Ty>, op: AggregateOp) -> Option<AggregateA
             shape,
             mode,
             elem_is_float: elem_is_float(&elem),
+            elem_is_byte: elem_is_byte(&elem),
         },
         op,
     })

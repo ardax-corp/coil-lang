@@ -2773,10 +2773,19 @@ impl Lower<'_> {
                 return Err("aggregate operand".into());
             }
         }
+        // A `byte` element wraps modulo 256, as the scalar operator.
+        let byte = info.kind.elem_is_byte;
         let apply = |l: &mut Self, a: ValueId, b: Option<ValueId>| -> Result<ValueId, Refusal> {
             match (op, b) {
-                (Some(op), Some(b)) => l.b.ins_binop(op, a, b).map_err(mir),
-                (None, None) => l.b.ins_neg(a).map_err(mir),
+                (Some(MirBinOp::Pow), Some(b)) if byte => l.byte_pow(a, b),
+                (Some(op), Some(b)) => {
+                    let v = l.b.ins_binop(op, a, b).map_err(mir)?;
+                    l.mask_byte(v, byte && matches!(op, MirBinOp::Add | MirBinOp::Sub | MirBinOp::Mul))
+                }
+                (None, None) => {
+                    let v = l.b.ins_neg(a).map_err(mir)?;
+                    l.mask_byte(v, byte)
+                }
                 _ => Err("aggregate operands".into()),
             }
         };
@@ -6922,6 +6931,32 @@ impl Lower<'_> {
         }
         let mask = self.b.ins_const(MirConst::I64(255)).map_err(mir)?;
         self.b.ins_binop(MirBinOp::BitAnd, v, mask).map_err(mir)
+    }
+
+    /// `byte` `base ** exp` modulo 256 with no int overflow: square and
+    /// multiply over the 8 bits of `exp`, each step masked, as the scalar
+    /// operator (`build::byte_pow`).
+    fn byte_pow(&mut self, base: ValueId, exp: ValueId) -> Result<ValueId, Refusal> {
+        let int = |l: &mut Self, n: i64| l.b.ins_const(MirConst::I64(n)).map_err(mir);
+        let bin = |l: &mut Self, op: MirBinOp, a: ValueId, b: ValueId| l.b.ins_binop(op, a, b).map_err(mir);
+        let one = int(self, 1)?;
+        let (mut sq, mut acc) = (base, one);
+        for i in 0..8 {
+            // `sq` when bit `i` of `exp` is set, else 1.
+            let k = int(self, i)?;
+            let shifted = bin(self, MirBinOp::Shr, exp, k)?;
+            let bit = bin(self, MirBinOp::BitAnd, shifted, one)?;
+            let taken = bin(self, MirBinOp::Mul, bit, sq)?;
+            let skipped = bin(self, MirBinOp::Xor, bit, one)?;
+            let factor = bin(self, MirBinOp::Add, taken, skipped)?;
+            let product = bin(self, MirBinOp::Mul, acc, factor)?;
+            acc = self.mask_byte(product, true)?;
+            if i < 7 {
+                let square = bin(self, MirBinOp::Mul, sq, sq)?;
+                sq = self.mask_byte(square, true)?;
+            }
+        }
+        Ok(acc)
     }
 
     /// One cell of an element-wise matrix operator.
