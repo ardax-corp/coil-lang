@@ -1,0 +1,62 @@
+// A generic class's method takes its per-type clone at `T = ()` as at any
+// one-word type (#2489). A class that holds a nested open enum (a field
+// `Box<fn(T) -> Option<T>>`) is clone-only, so its methods at `()` were left
+// without a body: an internal compiler error ("body without MIR").
+use tests::assert;
+
+class Box<U> {
+    pub v: U,
+}
+
+class Hold<T> {
+    pub b: Box<fn(T) -> Option<T>>,
+}
+
+impl Hold<T> {
+    pub fn run(T x) -> Option<T> {
+        let f = self.b.v;
+        return f(x);
+    }
+}
+
+class Slots<T> {
+    pub xs: Vec<Option<T>>,
+}
+
+impl Slots<T> {
+    pub fn put(T x) -> () {
+        self.xs.push(Some(x));
+    }
+
+    pub fn count() -> int {
+        let n = 0;
+        for x in self.xs {
+            if x != None {
+                n = n + 1;
+            }
+        }
+        return n;
+    }
+}
+
+fn unit(() u) -> Option<()> {
+    return Some(u);
+}
+
+fn never(() u) -> Option<()> {
+    return None;
+}
+
+test("a nested open class's method at ()") {
+    assert!(new Hold(new Box(unit)).run(()) == Some(()));
+    assert!(new Hold(new Box(never)).run(()) == None);
+    assert!(new Hold(new Box(fn (int x) => Some(x + 1))).run(1) == Some(2));
+}
+
+test("a Vec<Option<T>> field at ()") {
+    let xs: Vec<Option<()>> = [];
+    let s = new Slots(xs);
+    s.put(());
+    s.put(());
+    assert!(s.count() == 2);
+}
