@@ -6293,15 +6293,17 @@ impl Compiler {
         self.build_hir_for_lowering(module, ast);
         let bare_cases = self.checker.bare_cases().clone();
         self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
-        self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
-        self.steady_fns = self.typed_sidecar.length_stability().fns.clone();
+        // The pure and length-stable functions come from the HIR summaries
+        // below; without a HIR module there are none.
+        self.pure_fns.clear();
+        self.steady_fns.clear();
         self.alloc_steady = self.typed_sidecar.length_stability().alloc_stable;
         self.pure_static_inits.clear();
         self.startup_consts.clear();
         self.fold_bodies.clear();
         let mut cow_mutates = None;
-        // E1: the HIR summaries also prove functions pure that call a
-        // function parameter only with pure functions (`map(xs, fn ...)`).
+        // E1: the HIR summaries say which functions are pure and which
+        // never change an array's length.
         if let Some(hir) = self.hir_module.as_ref() {
             use crate::hir::effects;
             let fx = effects::ModuleEffects::solve(hir, &self.checker, module, &self.program_effects);
@@ -6309,12 +6311,17 @@ impl Compiler {
             self.messages.extend(fx.readonly_messages());
             self.messages.extend(fx.escape_messages());
             self.messages.extend(fx.region_messages());
-            effects::log_seed_disagreements(hir, module, &fx, &self.pure_fns, &self.steady_fns);
-            let pure = effects::pure_names(hir, module, &fx.summaries, &self.pure_fns);
+            effects::log_seed_disagreements(
+                hir,
+                module,
+                &fx,
+                self.typed_sidecar.pure_fn_names(),
+                &self.typed_sidecar.length_stability().fns,
+            );
+            let pure = effects::pure_names(hir, module, &fx.summaries);
             if effects::effects_capture_active() {
                 let explained = (self.auto_par && self.opt_options.auto_par).then(|| {
-                    let all: HashSet<String> = self.pure_fns.union(&pure).cloned().collect();
-                    effects::auto_par_explanations(hir, module, &fx, &all)
+                    effects::auto_par_explanations(hir, module, &fx, &pure)
                 });
                 effects::capture(hir, &fx, explained);
             }
@@ -6327,7 +6334,7 @@ impl Compiler {
             let summaries = fx.summaries;
             cow_mutates = Some(summaries.iter().map(|s| s.mutates).collect::<Vec<u64>>());
             self.pure_fns.extend(pure);
-            self.steady_fns.extend(effects::steady_names(hir, module, &summaries, &self.pure_fns));
+            self.steady_fns.extend(effects::steady_names(hir, module, &summaries));
             self.program_effects.record(hir, &self.checker, module, &summaries);
             self.program_effects.record_mutations(mutations);
         }
