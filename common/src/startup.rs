@@ -26,6 +26,20 @@ pub const PAR_LOOP_WORKER_PREFIX: &str = "__coil_par_loop_";
 /// (`__coil_par_loop_fork_3`), which the loop's site calls.
 pub const PAR_LOOP_FORK_PREFIX: &str = "__coil_par_loop_fork_";
 
+/// Name prefix of a recursive fork-join's worker (`__coil_par_fib`): it
+/// stands in for a call of the function it is named after.
+pub const PAR_FORK_PREFIX: &str = "__coil_par_";
+
+/// The function a recursive fork-join worker named `name` stands in for
+/// (`__coil_par_fib` is `fib`'s). A backtrace shows the worker's frame as
+/// that function's, or not at all.
+pub fn par_fork_fn(name: &str) -> Option<&str> {
+    if par_loop_fn(name).is_some() {
+        return None;
+    }
+    name.strip_prefix(PAR_FORK_PREFIX).filter(|f| !f.is_empty())
+}
+
 /// What a function is to an auto-par loop, by its name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParLoopFn {
@@ -57,6 +71,15 @@ mod tests {
         // A fork worker of a function the user named `loop_body`, and the user's own functions.
         for name in ["__coil_par_loop_body", "__coil_par_loop_", "__coil_par_loop_fork_", "__coil_par_fib", "loop_1", "run"] {
             assert_eq!(par_loop_fn(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn par_fork_fn_names_the_function_a_worker_stands_in_for() {
+        assert_eq!(par_fork_fn("__coil_par_fib"), Some("fib"));
+        assert_eq!(par_fork_fn("__coil_par_loop_body"), Some("loop_body"));
+        for name in ["__coil_par_loop_1", "__coil_par_loop_fork_0", "__coil_par_", "fib", "par_fib"] {
+            assert_eq!(par_fork_fn(name), None, "{name}");
         }
     }
 }

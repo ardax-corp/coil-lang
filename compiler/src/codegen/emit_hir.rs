@@ -1618,10 +1618,11 @@ impl Compiler {
             self.hir_mir_why = Some("converted or shared generic entry".into());
             return None;
         }
-        // A compiler-made body has no source: its ops carry no location.
-        let file = Some(self.loc_from_span(SimpleSpan::from(0..1)))
-            .filter(|loc| loc.is_known() && self.hir_synth_calls.is_none())
-            .map(|loc| loc.file);
+        // A compiler-made body has no source: its ops carry no location,
+        // but for a node it gives a source span (a fork worker's call of
+        // an arm, located where the function makes that call).
+        let placed = self.hir_synth_calls.is_none() || hir.exprs.iter().any(|e| e.span != crate::hir::synth::SPAN);
+        let file = Some(self.loc_from_span(SimpleSpan::from(0..1))).filter(|loc| loc.is_known() && placed).map(|loc| loc.file);
         let why = if emit.plan.par_inline {
             Err("parallel loop".to_string())
         } else {
@@ -2450,8 +2451,9 @@ impl Compiler {
                 (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Ty::has_var)), "instance"),
                 (!call.own_dicts.is_empty(), "own-bounds"),
                 (self.coroutine_fns.contains(&call.key), "coroutine"),
-                // An auto-parallel callee's call runs its split worker.
-                (self.par_shapes.contains_key(Self::par_shape_key(&call.key)), "par"),
+                // An auto-parallel callee's call runs its split worker;
+                // with auto-par off it stays a call all the same.
+                (self.fork_fns.contains(Self::par_shape_key(&call.key)), "par"),
             ];
             if core.is_none()
                 && let Some((_, what)) = kind.iter().find(|(hit, _)| *hit)
@@ -10527,62 +10529,6 @@ impl Compiler {
             }
         };
 
-        // Whether folding partial `p` onto `a` overflows, without trapping
-        // (`None`: the fold cannot).
-        let overflows = |b: &mut Synth, a: LocalId, p: LocalId| -> Option<HirId> {
-            let boolean = coil_ty::boolean;
-            let cmp = |b: &mut Synth, op: BinOp, l: LocalId, r: HirId| {
-                let l = b.read(l);
-                b.bin(op, l, r, boolean())
-            };
-            let positive = |b: &mut Synth, l: LocalId| {
-                let zero = b.int(0);
-                cmp(b, BinOp::Gt, l, zero)
-            };
-            // `limit ⊘ x` for a literal `limit`.
-            let room = |b: &mut Synth, op: BinOp, limit: i64, x: LocalId| {
-                let (limit, x) = (b.int(limit), b.read(x));
-                b.bin(op, limit, x, coil_ty::int())
-            };
-            match site.op {
-                LoopReduceOp::Xor => None,
-                // `a + p` leaves the range past `MAX - p` or under `MIN - p`.
-                LoopReduceOp::Add => {
-                    let up = positive(b, p);
-                    let most = room(b, BinOp::IntSub, i64::MAX, p);
-                    let over = cmp(b, BinOp::Gt, a, most);
-                    let least = room(b, BinOp::IntSub, i64::MIN, p);
-                    let under = cmp(b, BinOp::Lt, a, least);
-                    Some(b.if_(up, over, Some(under), boolean()))
-                }
-                // `a * p` by the signs: each quotient is of a literal by a
-                // non-zero operand whose sign keeps it in range.
-                LoopReduceOp::Mul => {
-                    let a_up = positive(b, a);
-                    let on_up = {
-                        let p_up = positive(b, p);
-                        let most = room(b, BinOp::IntDiv, i64::MAX, p);
-                        let over = cmp(b, BinOp::Gt, a, most);
-                        let least = room(b, BinOp::IntDiv, i64::MIN, a);
-                        let under = cmp(b, BinOp::Lt, p, least);
-                        b.if_(p_up, over, Some(under), boolean())
-                    };
-                    let on_down = {
-                        let p_up = positive(b, p);
-                        let least = room(b, BinOp::IntDiv, i64::MIN, p);
-                        let under = cmp(b, BinOp::Lt, a, least);
-                        let zero = b.int(0);
-                        let p_down = cmp(b, BinOp::Lt, p, zero);
-                        let most = room(b, BinOp::IntDiv, i64::MAX, p);
-                        let over = cmp(b, BinOp::Lt, a, most);
-                        let over = b.push(HirKind::Logic { and: true, lhs: p_down, rhs: over }, boolean());
-                        b.if_(p_up, under, Some(over), boolean())
-                    };
-                    Some(b.if_(a_up, on_up, Some(on_down), boolean()))
-                }
-            }
-        };
-
         // A range of one or more chunks: spawn each, then join and fold.
         let fork = |b: &mut Synth, chunks: &[(Bound, Bound)], whole: (Bound, Bound)| -> HirId {
             let handles: Vec<LocalId> =
@@ -10596,7 +10542,7 @@ impl Compiler {
             let mut fold = Vec::new();
             let mut value = acc;
             for (j, &p) in partials.iter().enumerate() {
-                if let Some(over) = overflows(b, value, p) {
+                if let Some(over) = crate::hir::synth::int_overflows(b, fold_op, value, p) {
                     let rerun = seq(b, whole.0, whole.1);
                     let rerun = b.block(vec![rerun], None, coil_ty::never());
                     fold.push(b.if_(over, rerun, None, coil_ty::unit()));

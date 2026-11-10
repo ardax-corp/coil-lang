@@ -123,7 +123,7 @@ shapes recognized:
 
 | Combine | Source shape |
 |---|---|
-| `BinOp` | `f(…) ⊕ g(…)` (`+` / `-` / `*` / `^`); nested `+` / `*` / `^` flatten to N arms |
+| `BinOp` | `f(…) ⊕ g(…)` (`+` / `-` / `*` / `^`); a chain `a ⊕ b ⊕ c` of `+` / `*` / `^` is N arms, folded in the order written |
 | `EnumCtor` | `E::V(f(…), g(…))` (tuple or record payload) |
 | `SelfCall` | `f(f(…), f(…), …)` (tak-style) |
 | `ApplyCall` | `h(f(…), g(…))` for a pure `h` |
@@ -175,24 +175,57 @@ site's path guards, codegen emits **one** parameterized worker
 
 1. Path guards and `hop <= 0` fall through to the sequential original (reachability
    / depth, not a grain skip-threshold).
-2. `MakeFn` the first arm: self-arms with `hop > 1` re-enter this worker with
-   `hop - 1` and live `ArgForm` args; otherwise the sequential callee.
-3. `thread_spawn_shared` that arm (HostInvoke **137**; isolate
-   `thread_spawn` when an arg misses the C0 whitelist). No `GT` grain gate.
-4. On `Ok(handle)`: evaluate remaining arms locally (same hop policy), `join`
-   (help-steals), apply the site's combine. Shared join publishes raw `Value` bits
-   (no graph copy).
-5. On `Err` (spawn or non-sendable join): sequential fallback of all arms + combine.
-   Compile-time code takes this path: its `thread_spawn_shared` always fails.
+2. `thread_spawn_shared` every arm this thread does not run itself, the
+   last arm at least (HostInvoke **137**; isolate `thread_spawn` when an arg
+   misses the C0 whitelist). No `GT` grain gate. A self-arm with `hop > 1`
+   re-enters this worker with `hop - 1` and live `ArgForm` args; any other
+   arm is its sequential callee.
+3. Run the leading self-arms here, in order (same hop policy). These are
+   the function's calls of itself that come before any other arm.
+4. `join` each job in order (help-steals), then apply the site's combine.
+   Shared join publishes raw `Value` bits (no graph copy).
+5. On a failed spawn or join: join the jobs still out, then call the
+   sequential original with the worker's arguments. Compile-time code takes
+   this path: its `thread_spawn_shared` always fails.
+
+Which thread runs an arm is what keeps a panic the sequential program's
+([coil-lang#2424](https://github.com/ardax-corp/coil-lang/issues/2424)):
+
+- A job is quiet (see [below](#a-failed-attempt-reports-nothing)), so an
+  arm that panics there fails its join and nothing more. The worker then
+  calls the function itself, which panics where the program does: at the
+  first arm that fails, though a later one fails too.
+- An arm this thread runs is not quiet, so it must be one whose panic is
+  the program's as it stands. A leading self-arm is: every arm before it
+  has returned, and its call is a call in the sequential program too (a
+  function with a worker is never inlined, with auto-par on or off). An
+  arm that calls another function is always a job: the sequential function
+  may have that call inlined, and its frames would differ.
+- The combine does not trap in the worker. An `int` `+` / `-` / `*` step is
+  tested first (`hir::synth::int_overflows`, the loop fork-join's test) and
+  the function runs instead of a step that would overflow. Steps are taken
+  in the order the operands are written, since `(a + b) + c` can trap where
+  `a + (b + c)` does not; a float sum rounds by its order too. A combine
+  that calls another function (`ApplyCall`) is one more quiet job, joined
+  at once. A combine that calls the function itself (`SelfCall`) is the
+  function's last call, which runs in its frame.
+- In a backtrace (`Locator::backtrace`), a worker's frame at an arm's call
+  is printed as a frame of the function under it, at that call; its frame
+  at the call of the sequential original is left out
+  (`common::par_fork_fn`).
 
 The worker is a HIR body the compiler builds itself
 ([`hir::synth`](../../compiler/src/hir/synth.rs),
 `Compiler::par_worker_hir`): `thread_spawn_shared` / `thread_join` are host
-calls, arm 0 a function value, and the two results `match`ed as `Result`s.
+calls, each spawned arm a function value, and each result `match`ed as a `Result`.
 It lowers like any other body (HIR lowering, then direct MIR), with no HIR
 passes or inlining and no par rewrite of the calls inside it. A site whose
 parameters, arm results or combine are not one boxed word each, or whose
 argument forms are not `int`, gets no worker.
+
+A function that gets a worker is not inlined into its callers, and that
+holds with `--auto-par off` too (`Compiler::fork_fns`): the sequential
+program then has the frames the parallel one reruns into.
 
 Const call sites rewrite to an ordinary call of that worker (plus
 `PAR_SPEC_HOPS`, default **2**). Below-floor constant args stay on the
@@ -359,11 +392,21 @@ are the sequential program's ([coil-lang#2419](https://github.com/ardax-corp/coi
   in, at the worker's location, in place of that function's call into the
   fork-join.
 
-Expression IPA is not there yet. Its spawned arm is quiet, but the joiner
-runs the other arms itself and reports a panic of theirs although an
-earlier arm may panic first, and its frames name `__coil_par_{f}`
-([coil-lang#2424](https://github.com/ardax-corp/coil-lang/issues/2424)).
-A chunk also cannot see an overflow the running fold only reaches part way
+Expression IPA follows the same rule; its worker is described above. An
+arm the worker runs on its own thread can panic while later arms are still
+jobs, which unwinds the worker past its joins. The run that panicked joins
+those jobs itself, once the panic is reported (`Driver::settle_speculative`
+over `Runtime::speculative_out`, which every shared-heap spawn is added
+to): no job runs on while the heap is used or dropped under it, and the
+steal epoch closes. That holds for a panic a task scope catches and for a
+quiet job's panic too.
+
+One thing is left: a job cannot be cancelled. When an arm panics, the jobs
+still out are waited for, so the program ends later than the sequential
+one, and never if one of those arms does not terminate
+([coil-lang#2442](https://github.com/ardax-corp/coil-lang/issues/2442)).
+
+A chunk cannot see an overflow the running fold only reaches part way
 through its range
 ([coil-lang#2423](https://github.com/ardax-corp/coil-lang/issues/2423)).
 
@@ -377,7 +420,7 @@ no new floors):
 
 | Newly admits | Why it is sound |
 |---|---|
-| `f(a)+g(b)+h(c)` (and `*` / `^`) | `int` `+`/`*`/`^` are associative; one fork, N arms; hit bench `triple_fib` |
+| `f(a)+g(b)+h(c)` (and `*` / `^`) | one fork, N arms, folded left to right as the function does; hit bench `triple_fib` |
 | `let a = f(…); let b = g(…); return a ⊕ b` | same independent calls; unused/intervening stmts refuse |
 | `walk(n-1, k) + walk(n-1, k+1)` | `ParamPlus` is the same structural arg form as `ParamMinus` |
 | `acc = e + acc` / `acc = acc ^ e` | commutative/associative `int` fold; xor identity `0` |
@@ -388,6 +431,7 @@ Still refuses (and why):
 | Still sequential | Why |
 |---|---|
 | `a - b - c` as three arms | subtraction is not associative |
+| `f(a) + (g(b) + h(c))` as three arms | the function adds in that order, and `+` traps on overflow: only a chain written without parentheses is folded (#2424) |
 | `a + a` from one let | one value, not two calls |
 | `f(n) + (n - 2)` mixed operand | combine needs every leaf to be a pure call |
 | `f(n - 1) + f(n - 2) + n`, `g(f(n - 1) + f(n - 2))` | the fork is not all the function returns: the worker would drop the rest (#2425) |

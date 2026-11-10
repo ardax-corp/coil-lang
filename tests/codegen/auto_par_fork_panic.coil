@@ -1,0 +1,203 @@
+// A recursive fork-join whose arm or combine panics does what the
+// sequential function does: the first arm's panic is the one reported
+// though a later arm panics too, and operands fold in the order they are
+// written, so an overflow is one the function has and no other (#2424).
+use task::{scope, Scope, TaskError};
+use tests::assert;
+
+// Read at run time, so no call below is computed while compiling.
+static let depth: int = 27;
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task; its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+fn fib(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+// Every leaf overflows.
+fn overflows(int n) -> int {
+    if n <= 1 {
+        return (n + 1) * 4611686018427387904 * 2;
+    }
+    return overflows(n - 1) + overflows(n - 2);
+}
+
+// Every other leaf divides by zero.
+fn divides(int n) -> int {
+    if n <= 1 {
+        return 1 / n;
+    }
+    return divides(n - 1) + divides(n - 2);
+}
+
+// The first arm overflows before the second can divide by zero.
+fn first_arm(int n) -> int {
+    return overflows(n) + divides(n);
+}
+
+// Only the second arm panics.
+fn second_arm(int n) -> int {
+    return fib(n) + divides(n);
+}
+
+// No call below the top overflows: the sum of its two arms does.
+fn top_sum(int n) -> int {
+    if n <= 1 {
+        return 29021831242138;
+    }
+    return top_sum(n - 1) + top_sum(n - 2);
+}
+
+fn high(int n) -> int {
+    return 9223372036854775807 - n;
+}
+
+fn low(int n) -> int {
+    return 0 - fib(n);
+}
+
+// `fib(n) + high(n)` overflows; `high(n) + low(n)` would not.
+fn left_overflows(int n) -> int {
+    return fib(n) + high(n) + low(n);
+}
+
+// `low(n) + high(n)` stays in range; `high(n) + fib(n)` would not.
+fn left_fits(int n) -> int {
+    return low(n) + high(n) + fib(n);
+}
+
+fn weight(int n) -> float {
+    if n <= 2 {
+        return 0.1;
+    }
+    return weight(n - 1) + weight(n - 2);
+}
+
+fn large(int n) -> float {
+    return weight(n) * 10000000000000000000000.0;
+}
+
+fn small(int n) -> float {
+    return weight(n) / 3.0;
+}
+
+fn minus_large(int n) -> float {
+    return 0.0 - weight(n) * 10000000000000000000000.0;
+}
+
+// `small(n) + large(n)` is `large(n)`, so the sum is zero; added last,
+// `small(n)` would be the sum.
+fn absorbed(int n) -> float {
+    return small(n) + large(n) + minus_large(n);
+}
+
+fn ratio(int a, int b) -> int {
+    return a / b;
+}
+
+fn none(int n) -> int {
+    return fib(n) - fib(n);
+}
+
+// The combine is a call, and that call divides by zero.
+fn combine_call(int n) -> int {
+    return ratio(fib(n), none(n));
+}
+
+// The worker runs the first call on its own thread while the second is a
+// job: with `k` 1 the first leaf it reaches divides by zero.
+fn own_arm(int n, int k) -> int {
+    if n <= 1 {
+        return 100 / (n - k) + n;
+    }
+    return own_arm(n - 1, k) + own_arm(n - 2, k);
+}
+
+// A call with a constant argument is what asks for a function's worker;
+// the tests reach the same worker with a value read at run time.
+fn asks() -> float {
+    let a = first_arm(27) + second_arm(27) + top_sum(27) + left_overflows(27) + left_fits(27) +
+            combine_call(27) + own_arm(27, 1);
+    return absorbed(27) + (a as float);
+}
+
+fn first_arm_at(int n) -> int {
+    return first_arm(n);
+}
+
+fn second_arm_at(int n) -> int {
+    return second_arm(n);
+}
+
+fn top_sum_at(int n) -> int {
+    return top_sum(n);
+}
+
+fn left_overflows_at(int n) -> int {
+    return left_overflows(n);
+}
+
+fn left_fits_at(int n) -> int {
+    return left_fits(n);
+}
+
+fn absorbed_at(int n) -> float {
+    return absorbed(n);
+}
+
+fn combine_call_at(int n) -> int {
+    return combine_call(n);
+}
+
+fn own_arm_at(int n, int k) -> int {
+    return own_arm(n, k);
+}
+
+test("the first arm's panic is the one reported") {
+    assert!(outcome(fn () => first_arm_at(depth)) == "integer overflow");
+}
+
+test("a later arm's panic is reported when no earlier arm has one") {
+    assert!(outcome(fn () => second_arm_at(depth)) == "division by zero");
+}
+
+test("a combine that overflows panics") {
+    assert!(outcome(fn () => top_sum_at(depth)) == "integer overflow");
+    assert!(top_sum_at(depth - 1) == 29021831242138 * 196418);
+}
+
+test("three arms fold in the order they are written") {
+    assert!(outcome(fn () => left_overflows_at(depth)) == "integer overflow");
+    assert!(left_fits_at(depth) == 9223372036854775807 - depth);
+    assert!(absorbed_at(depth) == 0.0);
+}
+
+test("a panic in a combine call") {
+    assert!(outcome(fn () => combine_call_at(depth)) == "division by zero");
+}
+
+// The panic unwinds the worker while its other arm is still a job: that
+// job is joined, and the forks after it run as before.
+test("a panic in the arm the worker runs itself") {
+    assert!(outcome(fn () => own_arm_at(depth, 1)) == "division by zero");
+    assert!(outcome(fn () => own_arm_at(depth, 0)) == "division by zero");
+    assert!(own_arm_at(depth, 2) == own_arm_at(depth - 1, 2) + own_arm_at(depth - 2, 2));
+    assert!(left_fits_at(depth) == 9223372036854775807 - depth);
+}

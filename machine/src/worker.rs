@@ -77,6 +77,7 @@ fn run_on(rt: &mut Runtime, job: Job) {
         rt.heap.bind(e.heap_ptr());
         rt.shared_epoch = Some(Arc::clone(e));
     }
+    rt.speculative_out.clear();
     let outer_exit = crate::env::take_exit_request();
     let outer_static_kinds = crate::collect::swap_static_word_kinds(Arc::clone(&program.static_word_kinds));
     let mut panic_message = None;

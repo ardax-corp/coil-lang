@@ -533,6 +533,10 @@ pub struct Compiler {
     par_shapes: HashMap<String, crate::hir::par::ParForkSite>,
     /// Functions that emit one parameterized `__coil_par_*` fork worker.
     par_workers: HashSet<String>,
+    /// Functions auto-par gives a fork worker, whether or not it is on
+    /// (`--auto-par off`): none is inlined either way, so a panic under
+    /// one has the same frames in both programs.
+    fork_fns: HashSet<String>,
     /// While a compiler-made body ([`crate::hir::synth`]) lowers: the
     /// functions it calls that have no checker signature (test cases, the
     /// worker itself), with their parameter and result layouts.
@@ -778,6 +782,7 @@ impl Default for Compiler {
             program_effects: Default::default(),
             par_shapes: HashMap::new(),
             par_workers: HashSet::new(),
+            fork_fns: HashSet::new(),
             hir_synth_calls: None,
             hir_synth_callees: HashMap::new(),
             loop_par_sites: crate::hir::par::LoopParSites::new(),
@@ -891,6 +896,7 @@ pub(crate) struct ModuleCtx {
     recursive_fns: HashSet<String>,
     par_shapes: HashMap<String, crate::hir::par::ParForkSite>,
     par_workers: HashSet<String>,
+    fork_fns: HashSet<String>,
     loop_par_sites: crate::hir::par::LoopParSites,
     current_source_file: Option<std::path::PathBuf>,
     source_text: String,

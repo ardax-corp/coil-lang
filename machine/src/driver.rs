@@ -537,9 +537,27 @@ impl<'a> Driver<'a> {
         }
     }
 
+    /// A panic of this run: printed ([`Self::print_panic`]), then the
+    /// fork-join jobs it left out are joined.
+    fn report(&mut self, message: &str, loc: Option<String>, frames: Vec<String>, explicit: bool) {
+        self.print_panic(message, loc, frames, explicit);
+        self.settle_speculative();
+    }
+
+    /// Join the fork-join jobs this run has out on its heap. A panic
+    /// unwinds a fork-join past its joins (a recursive fork-join runs
+    /// arms on its own thread), and its jobs would run on while the heap
+    /// is used or dropped under them, with the steal epoch they hold left
+    /// open.
+    fn settle_speculative(&mut self) {
+        for job in std::mem::take(&mut self.rt.speculative_out) {
+            crate::thread::join_abandoned(self, &job);
+        }
+    }
+
     /// Print a panic as the runtime does: `panic: message at loc`, then the
     /// backtrace (an explicit `panic` only under `COIL_BACKTRACE`).
-    fn report(&mut self, message: &str, loc: Option<String>, frames: Vec<String>, explicit: bool) {
+    fn print_panic(&mut self, message: &str, loc: Option<String>, frames: Vec<String>, explicit: bool) {
         use std::io::Write;
         self.panicked = true;
         self.panic_message = message.to_string();

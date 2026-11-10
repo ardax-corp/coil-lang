@@ -4968,7 +4968,9 @@ impl Lower<'_> {
         let (start, end) = self.hir.expr(id).span;
         // Generated code without a place of its own has the enclosing one,
         // but for a host call: the capability check finds it by its own span.
-        let placeless = crate::attrs::is_fresh_span(start) && self.host_call(id).is_none();
+        // A compiler-made node ([`crate::hir::synth::SPAN`]) has none either.
+        let placeless =
+            (crate::attrs::is_fresh_span(start) && self.host_call(id).is_none()) || (start, end) == crate::hir::synth::SPAN;
         if let Some(file) = self.cx.file().filter(|_| !placeless) {
             let (start, end) = crate::variadic::written_span(start, end);
             self.b.pending_loc = DebugLoc {

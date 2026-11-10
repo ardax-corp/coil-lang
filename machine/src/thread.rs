@@ -676,6 +676,7 @@ pub(crate) struct MachineHostState {
     call_function: unsafe fn(*mut (), u32, &[Value]) -> Value,
     begin_shared_steal: unsafe fn(*mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag>,
     end_shared_steal: unsafe fn(*mut (), Value),
+    speculative_out: unsafe fn(*mut (), Arc<JoinState>),
     debugger_attached: bool,
     // Built on demand from `raw`: `execute` is re-entered after every FFI
     // call, so cloning these up front (the natives and the dload gate's
@@ -706,6 +707,7 @@ impl HostStateGuard {
             Err(ThreadErrorTag::Other)
         }
         unsafe fn no_end(_: *mut (), _: Value) {}
+        unsafe fn no_out(_: *mut (), _: Arc<JoinState>) {}
         unsafe fn no_context(_: *mut ()) -> Option<ThreadSpawnContext> {
             None
         }
@@ -722,6 +724,7 @@ impl HostStateGuard {
                 call_function: no_call,
                 begin_shared_steal: no_steal,
                 end_shared_steal: no_end,
+                speculative_out: no_out,
                 debugger_attached: false,
                 spawn_context: no_context,
                 static_words: no_statics,
@@ -745,6 +748,7 @@ impl HostStateGuard {
                 call_function: Self::driver_call,
                 begin_shared_steal: Self::driver_begin_steal,
                 end_shared_steal: Self::driver_end_steal,
+                speculative_out: Self::driver_speculative_out,
                 debugger_attached: false,
                 spawn_context: Self::driver_spawn_context,
                 static_words: Self::driver_static_words,
@@ -785,6 +789,12 @@ impl HostStateGuard {
 
     unsafe fn driver_end_steal(raw: *mut (), published: Value) {
         crate::collect::end_shared_steal(unsafe { Self::driver(raw) }, published);
+    }
+
+    unsafe fn driver_speculative_out(raw: *mut (), state: Arc<JoinState>) {
+        let out = &mut unsafe { Self::driver(raw) }.rt.speculative_out;
+        out.retain(|s| !s.joined.load(Ordering::SeqCst));
+        out.push(state);
     }
 
 }
@@ -837,6 +847,33 @@ fn host_begin_shared_steal() -> Result<Arc<crate::shared_heap::SharedHeapEpoch>,
         };
         Ok(unsafe { (state.begin_shared_steal)(state.raw) })
     })?
+}
+
+/// Note a shared-heap job the bound run has out, until it is joined.
+fn host_speculative_out(job: &Arc<JoinState>) {
+    HOST_STATE.with(|c| {
+        if let Some(state) = c.borrow().as_ref() {
+            unsafe { (state.speculative_out)(state.raw, Arc::clone(job)) }
+        }
+    });
+}
+
+/// Join a shared-heap job whose fork-join a panic unwound before its
+/// join, and close the job's share of the steal epoch. The fork-join's
+/// own `join` of it, should it still run (another task's), fails, and
+/// that fork reruns sequentially.
+pub(crate) fn join_abandoned<H: crate::collect::GcHost + ?Sized>(h: &mut H, state: &JoinState) {
+    if state.detached.load(Ordering::SeqCst) || state.joined.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let reactor = Arc::clone(&h.rt().reactor);
+    let _ = reactor.wait_join(state);
+    if let Some(handle) = state.join_handle.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = handle.join();
+    }
+    if state.shared_epoch() {
+        crate::collect::end_shared_steal(h, Value::default());
+    }
 }
 
 fn host_end_shared_steal(published: Value) {
@@ -1580,6 +1617,7 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     job.epoch = Some(epoch);
     job.statics = Some(crate::reactor::JobStatics::Shared(statics));
     job.speculative = true;
+    host_speculative_out(&state);
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);

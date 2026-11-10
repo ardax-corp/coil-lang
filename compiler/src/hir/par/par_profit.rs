@@ -130,8 +130,10 @@ pub enum ArgForm {
 /// One independent arm of a fork site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParArm {
-    /// Call to a pure function (often self); one [`ArgForm`] per callee parameter.
-    Call { callee: String, args: Vec<ArgForm> },
+    /// Call to a pure function (often self); one [`ArgForm`] per callee
+    /// parameter. `span` is the call in the source: where a worker that
+    /// makes this call on its own thread is located in a backtrace.
+    Call { callee: String, args: Vec<ArgForm>, span: super::super::Span },
 }
 
 /// How arm results are recombined once every arm has been joined.
@@ -361,7 +363,7 @@ pub fn unary_dynamic_cutoff(sites: &HashMap<String, ParForkSite>, fn_name: &str)
 ///
 /// `fib` → `__coil_par_fib`; one worker per site, not per const-arg vector.
 pub fn par_worker_name(fn_name: &str) -> String {
-    format!("__coil_par_{fn_name}")
+    format!("{}{fn_name}", common::PAR_FORK_PREFIX)
 }
 
 /// Concrete child args for `arm` given the enclosing call's `parent_args`.
@@ -977,14 +979,19 @@ fn match_fork(id: HirId, ctx: &FnCtx<'_>, guards: &[ParGuard], lets: &[(LocalId,
     })
 }
 
-/// Flatten a left/right tree of the same associative op into operand leaves.
+/// The operands of a chain of the same associative op, as written without
+/// parentheses (`a + b + c`, which is `(a + b) + c`). The worker folds
+/// them in that order, so each step is one the function takes: `+` and
+/// `*` trap on overflow, and `a + (b + c)` can trap where `(a + b) + c`
+/// does not. A right operand that is itself such a chain stays one
+/// operand, which is no arm.
 fn flatten_assoc(id: HirId, op: ParBinOp, ctx: &FnCtx<'_>, out: &mut Vec<HirId>) {
     let id = unwrap_byte(ctx.body, id);
     let same = |found: &str| matches!((op, found), (ParBinOp::Add, "+") | (ParBinOp::Mul, "*") | (ParBinOp::Xor, "^"));
     match *ctx.kind(id) {
         HirKind::Bin { op: found, lhs, rhs } if same(source_op(found)) => {
             flatten_assoc(lhs, op, ctx, out);
-            flatten_assoc(rhs, op, ctx, out);
+            out.push(unwrap_byte(ctx.body, rhs));
         }
         _ => out.push(id),
     }
@@ -1029,7 +1036,7 @@ fn pure_call_arm(id: HirId, ctx: &FnCtx<'_>) -> Option<ParArm> {
     // Arms of the enclosing specialization are keyed by the *enclosing*
     // function's params; each arm's forms must still parse under that ctx.
     let forms = args.iter().map(|a| arg_form(*a, ctx)).collect::<Option<Vec<_>>>()?;
-    Some(ParArm::Call { callee: name.to_string(), args: forms })
+    Some(ParArm::Call { callee: name.to_string(), args: forms, span: ctx.body.expr(id).span })
 }
 
 fn arg_form(id: HirId, ctx: &FnCtx<'_>) -> Option<ArgForm> {
