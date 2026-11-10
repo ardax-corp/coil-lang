@@ -896,14 +896,11 @@ impl Walk<'_> {
                     if is_unit_make(body, arg) {
                         continue;
                     }
-                    // `Ok(check(x)?)`: a `()` payload runs for its effect
-                    // (codegen takes it into a niche unit `Result` only).
-                    if args.len() == 1 && is_unit_value(body, self.checker, arg) {
-                        self.effect(arg)?;
-                        continue;
-                    }
-                    self.word(arg)?;
-                    self.value(arg)?;
+                    // `Ok(check(x)?)`, `P(1, x)` with `x: ()` in a clone at
+                    // `()`: a `()` payload runs for its effect, then is the
+                    // empty tuple object, as a `()` stored anywhere is
+                    // (nothing in a niche unit `Result`, #2612).
+                    self.stored(arg)?;
                 }
                 Ok(())
             }
