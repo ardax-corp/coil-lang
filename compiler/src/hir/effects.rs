@@ -422,10 +422,11 @@ impl ProgramEffects {
 }
 
 /// Names of `module`'s pure functions and methods, as a callee is looked
-/// up ([`crate::pure_call::name_in`]): each body's own name (`f`,
-/// `Owner::m`, `Trait for Owner::m`, `outer::inner`), with the module path
-/// in front as well for a method, and a bare `m` when every body of that
-/// short name is pure.
+/// up ([`crate::pure_call::name_in`]): each body's own name, local (`f`,
+/// `Owner::m`, `Trait for Owner::m`) and with the module path in front. A
+/// name with several bodies (overloads) is listed when all of them are
+/// pure. No body is listed under its short name alone: a bare `m(..)` or
+/// another type's `Other::m(..)` is not a call of `Owner::m` (#2436).
 pub fn pure_names(module: &HirModule, module_path: &str, summaries: &[Summary]) -> HashSet<String> {
     names_where(module, module_path, summaries, Summary::is_pure)
 }
@@ -469,28 +470,19 @@ fn name_shape(kind: BodyKind, local: &str) -> Option<(NameShape, &str)> {
 }
 
 fn names_where(module: &HirModule, module_path: &str, summaries: &[Summary], ok: impl Fn(Summary) -> bool) -> HashSet<String> {
-    let mut out = HashSet::new();
-    // Every body of a name has to qualify: the overloads of `f` share the
-    // name, and so do the bodies of a short name `m`.
+    // Every body of a name has to qualify: the overloads of `f` share it.
     let mut by_name: HashMap<&str, bool> = HashMap::new();
     for (body, s) in module.bodies.iter().zip(summaries) {
         let Some(local) = local_name(module_path, &body.name) else { continue };
-        let Some((shape, short)) = name_shape(body.kind, local) else { continue };
-        let mut names = vec![local, short];
-        if shape != NameShape::Function && !module_path.is_empty() {
-            names.push(body.name.as_str());
+        if name_shape(body.kind, local).is_none() {
+            continue;
         }
-        names.dedup();
-        for name in names {
-            *by_name.entry(name).or_insert(true) &= ok(*s);
+        *by_name.entry(local).or_insert(true) &= ok(*s);
+        if local != body.name {
+            *by_name.entry(body.name.as_str()).or_insert(true) &= ok(*s);
         }
     }
-    for (name, good) in by_name {
-        if good {
-            out.insert(name.to_string());
-        }
-    }
-    out
+    by_name.into_iter().filter(|(_, good)| *good).map(|(name, _)| name.to_string()).collect()
 }
 
 /// The env var that turns [`log_seed_disagreements`] on in a debug build.

@@ -254,8 +254,9 @@ fn has(Option<Money> o, Money m) -> bool { return o == Option::Some(m); }";
     }
 }
 
-/// A trait impl's method is listed under its own name, and the bare name
-/// is listed only when every body of that short name qualifies.
+/// A trait impl's method is listed under its own name, and no method
+/// under its short name alone: a bare `m(..)` is a call of a function, or
+/// of whatever impl a trait call picks (#2436).
 #[test]
 fn pure_names_list_trait_impl_methods_by_their_own_name() {
     let src = "
@@ -282,9 +283,7 @@ impl Weigh for P {
     assert!(names.contains("Weigh for P::weigh"), "{names:?}");
     assert!(!names.contains("Weigh for P::size"), "{names:?}");
     assert!(names.contains("P::size"), "{names:?}");
-    // `Weigh for P::size` is not pure, so a bare `size` is not either.
-    assert!(!names.contains("size"), "{names:?}");
-    assert!(names.contains("weigh"), "{names:?}");
+    assert!(!names.contains("size") && !names.contains("weigh"), "{names:?}");
     let steady = steady_names(&m, "", &out);
     assert!(steady.contains("Weigh for P::weigh") && steady.contains("Weigh for P::size"), "{steady:?}");
 }
@@ -1557,4 +1556,17 @@ fn plain(float x) -> float { return x * 2.0; }
     let wave = of(&module, &out, "wave");
     assert!(wave.flags.contains(EffectFlags::UNKNOWN) && !wave.is_steady(), "{wave:?}");
     assert!(of(&module, &out, "plain").is_pure());
+}
+
+/// A function is listed under its local name and with its module's path,
+/// and a call is matched by the whole name.
+#[test]
+fn names_carry_the_module_path_and_match_whole() {
+    let (m, out) = summaries("fn sq(int x) -> int { return x * x; }");
+    let mut m = m;
+    m.bodies[0].name = "util::sq".to_string();
+    let names = pure_names(&m, "util", &out);
+    assert!(names.contains("sq") && names.contains("util::sq"), "{names:?}");
+    assert!(crate::pure_call::name_in(&names, "util::sq") && crate::pure_call::name_in(&names, "sq"));
+    assert!(!crate::pure_call::name_in(&names, "other::sq") && !crate::pure_call::name_in(&names, "Type::sq"));
 }
