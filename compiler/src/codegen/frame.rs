@@ -7,11 +7,17 @@
 //! locals start after them, at [`BodyFrame::frame_base`]. A lambda's frame
 //! starts with its captures, then the enclosing body's dictionaries it
 //! captures, then its parameters.
+//!
+//! A shared generic entry's last word is its `kinds` mask (#2506): bit
+//! `i` set when its type parameter `i` is a copy-on-write object at the
+//! call ([`FrameKinds`]). A lambda of such a body captures it after the
+//! dictionaries.
 
 use std::collections::BTreeMap;
 
 use super::*;
 use crate::hir::HirBody;
+use crate::typechecking::ty::TyVarId;
 
 /// The dictionary parameters a body takes, and the context dictionaries it
 /// loads on entry.
@@ -26,6 +32,32 @@ pub(crate) struct FrameDicts {
     /// `__dict1..=n`, read out of `__dict0` after entry from its index
     /// `base` on: `(base, n)`.
     pub(crate) context: Option<(usize, usize)>,
+    /// A shared generic entry's `kinds` word, after the dictionaries.
+    pub(crate) kinds: bool,
+}
+
+/// A shared generic body's `kinds` word (#2506): its slot, and the bit of
+/// each type variable its code names.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FrameKinds {
+    pub(crate) slot: u32,
+    /// Each type variable's bit, in the scheme's order.
+    pub(crate) bits: Vec<(TyVarId, u32)>,
+    /// How many type parameters the mask has.
+    pub(crate) n: u32,
+    /// `self`'s type in the scheme (`Cell<T>`), where the body's own `self`
+    /// is typed by its class alone: what a sibling call's receiver binds.
+    pub(crate) self_ty: Option<Ty>,
+    /// The panic message index of the entry's sentinel check, in debug
+    /// builds and under `COIL_MIR_VERIFY`.
+    pub(crate) check: Option<u32>,
+}
+
+impl FrameKinds {
+    /// Type variable `v`'s bit.
+    pub(crate) fn bit(&self, v: TyVarId) -> Option<u32> {
+        self.bits.iter().find(|&&(w, _)| w == v).map(|&(_, b)| b)
+    }
 }
 
 /// A parameter's or capture's place in the frame.
@@ -53,6 +85,8 @@ pub(crate) struct BodyFrame {
     /// The context dictionaries read on entry: each one's slot, then the
     /// slot of the dictionary it is read out of and its index there.
     pub(crate) context: Vec<(u32, u32, u32)>,
+    /// The `kinds` word, for a shared generic entry or a lambda of one.
+    pub(crate) kinds: Option<FrameKinds>,
 }
 
 impl BodyFrame {
@@ -72,6 +106,10 @@ impl BodyFrame {
             for i in 0..n {
                 frame.dict(base + i);
             }
+        }
+        if dicts.kinds {
+            frame.kinds = Some(FrameKinds { slot: frame.frame_base, ..FrameKinds::default() });
+            frame.frame_base += 1;
         }
         frame.entry_sp = frame.frame_base;
         // Read out of the instance's own dictionary.
@@ -93,9 +131,9 @@ impl BodyFrame {
     }
 
     /// A lambda's frame: `lam`'s captures (two words where `pairs` has a
-    /// kind), the enclosing body's dictionaries `dicts` it captures, then its
-    /// parameters.
-    pub(crate) fn lambda(lam: &HirBody, pairs: &[Option<PairKind>], dicts: impl IntoIterator<Item = usize>) -> Self {
+    /// kind), the enclosing body's dictionaries `dicts` it captures and its
+    /// `kinds` word, then its parameters.
+    pub(crate) fn lambda(lam: &HirBody, pairs: &[Option<PairKind>], dicts: impl IntoIterator<Item = usize>, kinds: Option<&FrameKinds>) -> Self {
         let mut frame = Self::default();
         for (i, &(_, inner)) in lam.captures.iter().enumerate() {
             let local = frame.local(lam.local(inner).name.clone(), pairs.get(i).cloned().flatten());
@@ -103,6 +141,12 @@ impl BodyFrame {
         }
         for n in dicts {
             frame.dict(n);
+        }
+        // The enclosing body's `kinds` word, captured after its
+        // dictionaries; a lambda checks no sentinel.
+        if let Some(outer) = kinds {
+            frame.kinds = Some(FrameKinds { slot: frame.frame_base, check: None, ..outer.clone() });
+            frame.frame_base += 1;
         }
         for &p in &lam.params {
             let local = frame.local(lam.local(p).name.clone(), None);

@@ -286,7 +286,7 @@ fn two_module_polyfn_and_fib_run() {
     assert!(
         compiled
             .all_insts()
-            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::PolyFn { .. }, .. })),
+            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. }, .. })),
         "expected a PolyFn value in the linked program"
     );
 

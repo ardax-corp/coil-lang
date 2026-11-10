@@ -16,6 +16,8 @@ pub(super) mod emit_hir;
 mod eq_glue;
 #[path = "frame.rs"]
 pub(super) mod frame;
+#[path = "kinds.rs"]
+pub(super) mod kinds;
 #[path = "module_setup.rs"]
 pub(super) mod module_setup;
 
@@ -71,6 +73,8 @@ pub(super) enum DictStep {
     Tuple(u32),
     /// The top value as its word (a `float` / `bool` as its bits).
     Word,
+    /// A shared generic entry's `kinds` word, known at the call (#2506).
+    Kinds(u64),
 }
 
 impl Compiler {
@@ -538,8 +542,9 @@ impl Compiler {
                         self.coroutine_fns.insert(qualified.clone());
                     }
                     let key = self.overload_entry_key(name, &qualified, child);
-                    self.reserve_function_entry(key);
+                    self.reserve_function_entry(key.clone());
                     if body.is_some() {
+                        self.note_kinds_entry(key, &qualified);
                         self.reserve_mono_entries(&qualified, type_params, name);
                         self.note_fn_clone_src(&qualified, child);
                     }
@@ -567,6 +572,7 @@ impl Compiler {
                                 .entry(owner_key.clone())
                                 .or_default()
                                 .insert(name.to_string(), fqn.clone());
+                            self.note_kinds_entry(fqn.clone(), &fqn);
                             self.reserve_function_entry(fqn);
                         }
                     }
@@ -5107,6 +5113,7 @@ impl Compiler {
                 arity: dict_arity,
                 own: own_dicts,
                 context: c.pending_instance_ctx.take(),
+                kinds: false,
             });
             if !c.try_lower_hir_function(&method.0) {
                 // Every body runs from its direct MIR, so one whose HIR does
@@ -6132,8 +6139,18 @@ impl Compiler {
                         c.checker.dict_arity_for(name)
                     }
                 };
-                // Args + self + dicts occupy the shared stack at body entry.
-                c.hir_frame_dicts = Some(frame::FrameDicts { arity: dict_arity, ..frame::FrameDicts::default() });
+                // Args + self + dicts occupy the shared stack at body entry,
+                // then a shared generic entry's `kinds` word (#2506).
+                let kinds = !c.compiling_mono_clone && c.kinds_keys.contains(&table_key);
+                if kinds && c.kinds_scheme(&table_key).is_some_and(|s| s.bounds.len() > kinds::MAX_PARAMS) {
+                    let (start, end) = (span.start, span.end);
+                    c.messages.push(Message::error(
+                        ErrorCode::CodegenError,
+                        format!("`{name}` has more than {} type parameters, which a shared generic body cannot take", kinds::MAX_PARAMS),
+                        start..end,
+                    ));
+                }
+                c.hir_frame_dicts = Some(frame::FrameDicts { arity: dict_arity, kinds, ..frame::FrameDicts::default() });
 
                 let lowered = prev_fn_table_key_was_none && c.try_lower_hir_function(span);
                 if !lowered {

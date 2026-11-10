@@ -35,7 +35,20 @@ holds a `T` as an opaque word, which may be a scalar. A share of one is a
 `Cow` on the `I64` word (`mir/from_hir.rs`, `Builtin::Cow`; #2506): the
 runtime's `cow_share` leaves a non-object alone, so a `T` the body stores
 (into a field, a `Vec`, an `Option`, tuple or `Result` it returns) is
-shared. A `unique` of one is no op there, since it would replace the word.
+shared. A `unique` of one must be exact, since it replaces the word: the
+body reads it from its `kinds` word (#2506). A shared generic free function
+or inherent method takes that word after its dictionaries, bit `i` set when
+its scheme's type parameter `i` (`Scheme::bounds`, in order) is a type
+`cow_ty` holds copy-on-write at the call; the bits past the mask carry a
+sentinel the entry checks in debug builds and under `COIL_MIR_VERIFY`
+(`codegen/kinds.rs`). A ground call passes a constant; a shared caller
+forwards its own bit for a type parameter and a constant for a type with a
+known head (`Vec<T>` is 1, `Option<T>` 0); a lambda captures the word after
+the dictionaries; a partial application fills it as its last parameter; a
+`PolyFn` value captures it with every bit clear, and a class's `drop`, which
+the runtime calls, takes none. `Lower` emits the unique under a test of the
+bit (`guarded_cow`). Trait methods (instance, default, own `<W>`) take no
+word yet: their unique stays out.
 A result it would have
 shared itself, one a call handed back from inside a parameter
 (`return c.get()`), comes back unshared. So when the result is not fresh
@@ -86,7 +99,8 @@ an operator operand.
 
 Tests: `tests/cow_call_share_cli.rs` (copy counts),
 `tests/memory/cow_generic_bodies_shared.coil` (a type parameter result of
-a shared body),
+a shared body), `tests/memory/cow_generic_bodies_unique.coil` (a write
+through a copy of a type parameter's value, the `kinds` word),
 `tests/memory/cow_returned_param_names.coil` and
 `tests/memory/cow_returned_field.coil` (soundness). Benches:
 `examples/perf/cow_call_reassign.coil`, `cow_call_field.coil`,

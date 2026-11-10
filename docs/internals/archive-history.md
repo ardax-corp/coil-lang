@@ -50,6 +50,12 @@ major.
   word, which may be no object (#2506). The op's encoding is unchanged, so
   the MIR section `FORMAT` stays 16; an engine that runs it already ignores
   a non-object word.
+- A shared generic free function or inherent method takes one more entry
+  word after its dictionaries, its `kinds` mask (#2506, [cow-calls.md](cow-calls.md)):
+  every call, a coroutine's `MakeCoro`, a partial application's filled
+  words and a `PolyFn` value's captured words pass it. The calling
+  convention changed, not the encoding: no new op, MIR section `FORMAT`
+  stays 16.
 
 ## Major 7
 

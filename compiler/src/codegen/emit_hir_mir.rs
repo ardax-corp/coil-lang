@@ -474,10 +474,11 @@ impl Compiler {
                     // Its captured dictionaries follow its captures (#1526).
                     // A two-word capture is two of its words.
                     let pairs: Vec<bool> = lam.pair_captures.iter().map(Option::is_some).collect();
-                    let words = (lam.body.captures.len() + pairs.iter().filter(|&&p| p).count() + lam.dicts.len()) as u32;
+                    let words = (lam.body.captures.len() + pairs.iter().filter(|&&p| p).count() + lam.dicts.len() + usize::from(lam.kinds.is_some())) as u32;
                     let operand = make_fn_operand(words, 0, lam.body.params.len() as u32, false);
                     let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
-                    let dicts = lam.dicts.iter().map(|&(_, slot)| crate::mir::HirDictOp::Load(slot)).collect();
+                    // Then the body's `kinds` word (#2506).
+                    let dicts = lam.dicts.iter().map(|&(_, slot)| crate::mir::HirDictOp::Load(slot)).chain(lam.kinds.as_ref().map(|_| crate::mir::HirDictOp::KindsOwn)).collect();
                     t.fn_value = Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, pairs, dicts },
                     );
                 }
@@ -492,7 +493,14 @@ impl Compiler {
                     // curried one's value is `MakePolyFnCapture` of no
                     // dictionaries.
                     let params = self.polyfn_params(name);
-                    let value = if self.checker.dict_arity_for(name) == 0 {
+                    // Its shared entry's `kinds` word, captured after the
+                    // dictionaries (#2506): every bit clear, so a type
+                    // parameter's copy-on-write ops stay off, as before.
+                    let kinds = self.kinds_scheme(name).map(|s| crate::mir::HirDictOp::Kinds(super::kinds_sentinel(s.bounds.len() as u32)));
+                    let value = if let Some(kinds) = kinds.clone().filter(|_| self.checker.dict_arity_for(name) == 0) {
+                        let kind = crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) };
+                        Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: vec![kinds] })
+                    } else if self.checker.dict_arity_for(name) == 0 {
                         let kind = match params {
                             Some(params) => crate::mir::MirAllocKind::PolyFnCapture { target, params },
                             None => crate::mir::MirAllocKind::PolyFn { target },
@@ -505,8 +513,10 @@ impl Compiler {
                             this.plan_polyfn_escape_dicts(&mut steps, &name, ty.as_ref());
                             steps
                         });
-                        self.hir_mir_dict_program(&steps)
-                            .map(|dicts| crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, captures: Vec::new(), pairs: Vec::new(), dicts })
+                        self.hir_mir_dict_program(&steps).map(|mut dicts| {
+                            dicts.extend(kinds);
+                            crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, captures: Vec::new(), pairs: Vec::new(), dicts }
+                        })
                     };
                     if let Some(value) = value {
                         t.fn_value = Some(value);
@@ -696,7 +706,15 @@ impl Compiler {
                     && let Some(target) = self.partial_value_target(entry, label, value)
                 {
                     let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
-                    t.fn_value = Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() });
+                    // A shared generic entry's `kinds` word, its last filled
+                    // parameter (#2506).
+                    let dicts = match self.kinds_key_at(label).map(str::to_string) {
+                        Some(key) => self.hir_kinds_ops_partial(hir, id, &key, *mask, args),
+                        None => Some(Vec::new()),
+                    };
+                    if let Some(dicts) = dicts {
+                        t.fn_value = Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts });
+                    }
                 }
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && emit.plan.calls.contains_key(&id.0) => {
@@ -1015,8 +1033,24 @@ impl Compiler {
 
     /// Call `id` of a function or method, past the builtins: its entry when it is one
     /// plain `CALL` (or `TailCall` / `MakeCoro`) of the arguments' own
-    /// words with no dictionary.
+    /// words with no dictionary. A shared generic entry's `kinds` word
+    /// follows its dictionaries (#2506), unless a compiler-made body
+    /// planned it.
     fn hir_mir_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, args: &[HirId], t: &mut crate::mir::HirSite) {
+        self.hir_mir_call_site(hir, emit, id, args, t);
+        if let Some(site) = t.call.as_mut()
+            && !site.dicts.iter().any(|d| matches!(d, crate::mir::HirDictOp::Kinds(_)))
+            && let Some(key) = self.kinds_key_at(site.target).map(str::to_string)
+        {
+            match self.hir_kinds_ops(hir, id, &key, args) {
+                Some(ops) => site.dicts.extend(ops),
+                None => t.call = None,
+            }
+        }
+    }
+
+    /// [`Self::hir_mir_call`]'s site, before its `kinds` word.
+    fn hir_mir_call_site(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, args: &[HirId], t: &mut crate::mir::HirSite) {
         let call = &emit.plan.calls[&id.0];
         if call.builtin.is_some() || call.key == format!("{}::push", common::BUILTIN_VEC_TYPE) {
             return;
@@ -1639,6 +1673,7 @@ impl Compiler {
                 DictStep::Null => Some(HirDictOp::Null),
                 DictStep::Tuple(n) => Some(HirDictOp::Tuple(n)),
                 DictStep::Word => Some(HirDictOp::Word),
+                DictStep::Kinds(bits) => Some(HirDictOp::Kinds(bits)),
             })
             .collect()
     }
@@ -1683,12 +1718,12 @@ impl Compiler {
                         stack.push((start, false));
                     }
                 }
-                HirDictOp::Word => {
+                HirDictOp::Word | HirDictOp::KindsBit { .. } => {
                     let start = stack.pop().map_or(out.len(), |e| e.0);
                     out.push(op);
                     stack.push((start, false));
                 }
-                HirDictOp::Null | HirDictOp::Load(_) | HirDictOp::Interned { .. } => {
+                HirDictOp::Null | HirDictOp::Load(_) | HirDictOp::Interned { .. } | HirDictOp::Kinds(_) | HirDictOp::KindsOwn => {
                     stack.push((out.len(), false));
                     out.push(op);
                 }

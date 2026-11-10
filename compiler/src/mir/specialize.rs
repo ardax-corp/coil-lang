@@ -93,7 +93,7 @@ pub const MIR_VERIFY_ENV: &str = "COIL_MIR_VERIFY";
 /// `COIL_MIR_VERIFY` is set (to anything but nothing or `0`): every body is
 /// verified as lowered and after each pass, in release builds too. A pass
 /// that breaks SSA there shows as a hang or a wrong value at best (#2422).
-fn verify_asked() -> bool {
+pub(crate) fn verify_asked() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| asks(std::env::var_os(MIR_VERIFY_ENV).as_deref()))
 }

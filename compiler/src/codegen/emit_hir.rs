@@ -318,6 +318,9 @@ struct HirLambda {
     /// The enclosing shared generic body's dictionaries it captures after
     /// its own captures (#1526): each one's name and the enclosing slot.
     dicts: Vec<(String, u32)>,
+    /// The enclosing shared generic body's `kinds` word, captured after the
+    /// dictionaries (#2506).
+    kinds: Option<frame::FrameKinds>,
     /// A two-word result: the plan and entry of its twin, the same body
     /// returning the two words (`MirFunc::pair_twin`).
     twin: Option<(HirEmit, IlLabel, PairKind)>,
@@ -336,6 +339,8 @@ pub(in crate::codegen) struct HirLambdaTail {
     twin: Option<(HirEmit, IlLabel, PairKind)>,
     /// The dictionaries it captures ([`HirLambda::dicts`]).
     dicts: Vec<(String, u32)>,
+    /// [`HirLambda::kinds`].
+    kinds: Option<frame::FrameKinds>,
 }
 
 /// What planning decided for one body: the representation of each value,
@@ -1377,7 +1382,12 @@ impl Compiler {
         let hir = instance.as_ref().unwrap_or(&module.bodies[index]);
         let moded = self.hir_fold_key_eq_modes(hir);
         let hir = moded.as_ref().unwrap_or(hir);
-        let frame = self.hir_function_frame(hir, dicts.unwrap_or_default());
+        let mut frame = self.hir_function_frame(hir, dicts.unwrap_or_default());
+        if let Some(slot) = frame.kinds.as_ref().map(|k| k.slot)
+            && let Some(key) = self.current_function_table_key.clone()
+        {
+            frame.kinds = Some(self.kinds_frame(&key, hir, slot));
+        }
         let spans = std::mem::take(&mut self.param_name_spans);
         for param in &frame.params {
             self.record_debug_param_at(&param.name, param.slot, spans.get(&param.name).copied());
@@ -1717,6 +1727,7 @@ impl Compiler {
                     emit: code,
                     label: lam.label,
                     dicts: lam.dicts.clone(),
+                    kinds: lam.kinds.clone(),
                     twin: lam.twin.take(),
                 };
                 self.hir_lambda_tail.push(tail);
@@ -4052,6 +4063,8 @@ impl Compiler {
             } else {
                 (0..).map_while(|i| self.frame_dict(i).map(|slot| (format!("__dict{i}"), slot))).collect()
             };
+            // Its `kinds` word, after them (#2506).
+            let kinds = if self.compiling_mono_clone { None } else { self.hir_body_frame.as_ref().and_then(|f| f.kinds.clone()) };
             // A two-word result (`Option<int>`) gets a twin returning the
             // two words, which a two-word call through the value enters.
             // A lambda inside it would be planned twice: no twin then.
@@ -4064,7 +4077,7 @@ impl Compiler {
             for rep in std::iter::once(ret).chain(twin_kind.clone().map(Rep::Pair)) {
                 let prev_two_word = self.compiling_two_word_enum.take();
                 let dict_ns = dicts.iter().filter_map(|(name, _)| name.strip_prefix("__dict")?.parse().ok());
-                let lambda_frame = frame::BodyFrame::lambda(lam, &pair_captures, dict_ns);
+                let lambda_frame = frame::BodyFrame::lambda(lam, &pair_captures, dict_ns, kinds.as_ref());
                 let prev_frame = self.hir_body_frame.replace(lambda_frame);
                 let prev_dicts = self.hir_lambda_dicts.replace((capture_words, dicts.len() as u32));
                 *self.hir_lambda_pairs.borrow_mut() = Self::hir_lambda_capture_slots(lam, &pair_captures)
@@ -4099,7 +4112,7 @@ impl Compiler {
             // ([`Self::hir_label_lambdas`]).
             let twin = plans.next().zip(twin_kind).map(|(p, k)| (p, UNLABELLED, k));
             let label = UNLABELLED;
-            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts, twin, pair_captures }));
+            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts, kinds, twin, pair_captures }));
         }
         Ok(())
     }
@@ -4959,6 +4972,16 @@ impl Compiler {
         if classify::classify(&self.checker, ty) != Some(ValueClass::Opaque) {
             return Err("callee-partial");
         }
+        // A shared generic entry's `kinds` word is one more filled
+        // parameter, after the declared ones (#2506).
+        let (mask, filled_n, total) = if self.kinds_scheme(key).is_some() {
+            if total >= 31 {
+                return Err("callee-partial");
+            }
+            (mask | 1 << total, mask.count_ones() + 1, total + 1)
+        } else {
+            (mask, mask.count_ones(), total)
+        };
         Ok(Some(HirCall {
             key: String::new(),
             pair: None,
@@ -4969,7 +4992,7 @@ impl Compiler {
             builtin: Some(HirBuiltin::Partial {
                 entry: entry as u32,
                 mask,
-                operand: make_fn_operand(0, mask.count_ones(), total as u32, false),
+                operand: make_fn_operand(0, filled_n, total as u32, false),
                 value,
             }),
             generic: None,
@@ -5522,6 +5545,18 @@ impl Compiler {
         let mut dicts = Vec::new();
         if let Some(g) = &plan.generic {
             self.plan_call_site_dicts(&mut dicts, &g.lookup, &g.arg_tys, Some(&g.ret_ty));
+        }
+        // The shared entry's `kinds` word, at the clone's types (#2506).
+        let kinds = match &plan.generic {
+            Some(g) => self.kinds_ops(&plan.shared, &g.arg_tys, Some(&g.ret_ty)),
+            None => self.kinds_ops(&plan.shared, &plan.param_tys, Some(&plan.ret_ty)),
+        };
+        if let Some(ops) = kinds {
+            let bits = ops.iter().fold(0, |w, op| match op {
+                crate::mir::HirDictOp::Kinds(bits) => w | bits,
+                _ => w,
+            });
+            dicts.push(compiler::DictStep::Kinds(bits));
         }
         let mut b = Synth::new(&self.checker, name, plan.ret_ty.clone());
         let mut args = Vec::with_capacity(plan.params.len());
@@ -6616,6 +6651,11 @@ impl Compiler {
             (HirKind::Global { name, .. }, HirBuiltin::FfiDyn(crate::typechecking::FfiBuiltin::Invoke))
                 if !self.hir_global_is_value(hir, arg, name) =>
             {
+                // A shared generic entry takes a `kinds` word no C caller
+                // passes (#2506).
+                if self.kinds_scheme(name).is_some() {
+                    return Some(None);
+                }
                 Some(self.functions.get(name.as_str()).map(|&offset| offset as u32))
             }
             _ => None,
@@ -7514,7 +7554,7 @@ impl Compiler {
 
     /// The receiver type of the method clone being compiled, at its
     /// ground type arguments.
-    fn hir_clone_self_ty(&self) -> Option<Ty> {
+    pub(super) fn hir_clone_self_ty(&self) -> Option<Ty> {
         let (src, req) = self.inst_clone_fallback.as_ref()?;
         let m = src.method_of.as_ref()?;
         if m.is_static {
@@ -10784,24 +10824,24 @@ impl Compiler {
     }
 
     fn hir_lambda_fn(&mut self, lam: HirLambdaTail) {
-        let HirLambdaTail { body, emit, label, dicts, twin } = lam;
+        let HirLambdaTail { body, emit, label, dicts, kinds, twin } = lam;
         let twin = twin.map(|(emit, twin_label, kind)| {
-            let tail = HirLambdaTail { body: body.clone(), emit, label: twin_label, dicts: dicts.clone(), twin: None };
+            let tail = HirLambdaTail { body: body.clone(), emit, label: twin_label, dicts: dicts.clone(), kinds: kinds.clone(), twin: None };
             (tail, twin_label, kind)
         });
-        self.hir_lambda_body(body, emit, label, dicts, None);
+        self.hir_lambda_body(body, emit, label, (dicts, kinds), None);
         // Its twin returns the two words: the entry a two-word call through
         // the value takes.
         if let Some((tail, twin_label, kind)) = twin {
-            let HirLambdaTail { body, emit, dicts, .. } = tail;
-            self.hir_lambda_body(body, emit, twin_label, dicts, Some(kind));
+            let HirLambdaTail { body, emit, dicts, kinds, .. } = tail;
+            self.hir_lambda_body(body, emit, twin_label, (dicts, kinds), Some(kind));
             self.bodies.set_pair_twin(label, twin_label);
         }
     }
 
     /// [`Self::hir_lambda_fn`]'s function for one plan of the lambda, at
     /// `label`; `pair`: the twin's two-word result.
-    fn hir_lambda_body(&mut self, body: HirBody, mut emit: HirEmit, label: IlLabel, dicts: Vec<(String, u32)>, pair: Option<PairKind>) {
+    fn hir_lambda_body(&mut self, body: HirBody, mut emit: HirEmit, label: IlLabel, (dicts, kinds): (Vec<(String, u32)>, Option<frame::FrameKinds>), pair: Option<PairKind>) {
         // A lambda spliced into several bodies is a function per copy.
         let mut name = body.name.clone();
         let mut k = 1;
@@ -10826,7 +10866,7 @@ impl Compiler {
             })
             .collect();
         let dict_ns = dicts.iter().filter_map(|(name, _)| name.strip_prefix("__dict")?.parse().ok());
-        let lambda_frame = frame::BodyFrame::lambda(&body, &pairs, dict_ns);
+        let lambda_frame = frame::BodyFrame::lambda(&body, &pairs, dict_ns, kinds.as_ref());
         let capture_words = body.captures.len() + pairs.iter().flatten().count();
         let prev_dicts = self.hir_lambda_dicts.replace((capture_words as u32, dicts.len() as u32));
         for param in &lambda_frame.params {
@@ -10852,7 +10892,7 @@ impl Compiler {
         self.hir_lambda_dicts = prev_dicts;
         // A lambda with a `defer` gets its cleanup pad, as a function does,
         // so a cancelled task's unwinder runs it (#1194).
-        let arity = (capture_words + dicts.len() + body.params.len()) as u32;
+        let arity = (capture_words + dicts.len() + usize::from(kinds.is_some()) + body.params.len()) as u32;
         self.fn_arities.insert(name.clone(), (arity, false));
         self.bodies.record(name.clone(), Some(label));
         self.attach_hir_mir();
@@ -11305,8 +11345,9 @@ impl Compiler {
     /// Whether and how the call of `key` forks.
     fn hir_par_call_plan(&self, hir: &HirBody, key: &str, args: &[HirId]) -> Option<HirParCall> {
         let short = Self::par_shape_key(key);
-        // A fork-join worker calls the sequential functions it forks.
-        if args.is_empty() || !self.par_shapes.contains_key(short) || self.hir_synth_calls.is_some() {
+        // A fork-join worker calls the sequential functions it forks; a
+        // shared generic entry's `kinds` word has no worker edge (#2506).
+        if args.is_empty() || !self.par_shapes.contains_key(short) || self.hir_synth_calls.is_some() || self.kinds_scheme(key).is_some() {
             return None;
         }
         let spec = crate::hir::par::par_worker_name(short);

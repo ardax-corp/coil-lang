@@ -34,6 +34,7 @@ mod licm;
 mod from_hir;
 mod prefetch;
 mod specialize;
+pub(crate) use specialize::verify_asked;
 mod sccp;
 mod sroa;
 mod vectorize;
