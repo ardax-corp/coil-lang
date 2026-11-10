@@ -2156,6 +2156,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             b.mut_marks.insert(v);
             return v;
         }
+        // `__data(e)` is `e`: only its type differs, and a body's types hold
+        // a `Matrix` as its data already.
+        if let E::Identifier("__data") = callee_node.1.as_ref()
+            && let [arg] = args
+        {
+            return self.expr(b, arg);
+        }
         match callee_node.1.as_ref() {
             E::Identifier(n) if b.lookup(n).is_none() => {
                 // `symbol::fn_key()`: this body's key, as a literal, so

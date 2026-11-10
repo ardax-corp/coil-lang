@@ -5373,6 +5373,22 @@ impl Checker {
         )
     }
 
+    /// `e` of a `__data(e)` call.
+    fn data_arg<'e, 's>(name: &Output<'s>, args: Option<&'e [Output<'s>]>) -> Option<&'e Output<'s>> {
+        match (name.1.as_ref(), args) {
+            (Expression::Identifier("__data"), Some([arg])) => Some(arg),
+            _ => None,
+        }
+    }
+
+    /// `e` for `__data(e)`, any other node as it is.
+    fn peel_data<'e, 's>(node: &'e Output<'s>) -> &'e Output<'s> {
+        match node.1.as_ref() {
+            Expression::Call { name, args } => Self::data_arg(name, args.as_deref()).unwrap_or(node),
+            _ => node,
+        }
+    }
+
     fn infer_call_expr(
         &mut self,
         name: &Output,
@@ -5392,6 +5408,13 @@ impl Checker {
             && let Some([arg]) = args.as_deref()
         {
             return self.infer(arg);
+        }
+        // `__data(e)` (a derive reading a field or payload): `e` as the data
+        // it is at run time, a `Matrix<D>` in its type as `D`, so `==`,
+        // `.hash()` and `%v` on it are the data's.
+        if let Some(arg) = Self::data_arg(name, args.as_deref()) {
+            let ty = self.infer(arg);
+            return crate::typechecking::aggregate_arith::erase_matrix_ty(&apply_ty_prune(&self.subst, &ty));
         }
         if let Expression::Identifier(callee) = name.1.as_ref()
             && let Some(arg_list) = args.as_deref()
@@ -18658,7 +18681,9 @@ impl Checker {
                         // We have `%X`. Validate the Nth arg.
                         if let Some(arg) = p.get(spec_index) {
                             let arg_ty = self.infer(arg);
-                            let arg_range = arg.0.into_range();
+                            // `__data(e)` is `e` in the body: what the
+                            // argument needs is keyed by `e`.
+                            let arg_range = Self::peel_data(arg).0.into_range();
                             let arg_ty_pruned = apply_ty_prune(&self.subst, &arg_ty);
                             self.check_format_arg(
                                 spec,
