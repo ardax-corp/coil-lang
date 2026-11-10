@@ -76,9 +76,15 @@ it is stored: `new C(f)`, a variant `E::V(f)` and a field store `c.f = f`
 of a ground `-> ()` function wrap it (`HirPacks::unit_fns`,
 `Compiler::hir_unit_fn_slot`). Ground readers ignore the object it
 returns. A function below the top of such a slot (`fs: Vec<fn() -> T>`,
-a tuple item, another type's argument) has no adapter, so storing a value
-of that type at `T = ()` is refused with E0801, which names the slot
-(`Compiler::hir_unit_fn_nested`). A dictionary method whose declared
+a tuple item, another type's argument, `Option<fn(T) -> T>`) has no
+adapter, so the type is clone-only ("Functions in fields and payloads"
+below): its methods and every generic over it at `()` are per-type
+clones, which call the function as the ground `-> ()` call it is, and a
+call that would still take a shared body there is refused
+(`nested_fn_unit_slot` in `hir_shared_split`, #2560). Storing such a
+value is refused with E0801 `unit-fn-nested` only for another module's
+class at types that module does not know, whose methods are all its
+shared bodies (`Compiler::hir_unit_fn_nested`). A dictionary method whose declared
 result is the trait's type parameter, at an instance for `()`, goes in
 through its `$dict` adapter, which returns the empty tuple object
 (`Compiler::trait_method_unit_ret`, #2541).
@@ -251,8 +257,9 @@ nested enum, is refused (E0801 `field-shared-layout`,
 shape; in the prelude, `task::Channel`.
 
 **Functions in fields and payloads** (#2511). A function over a type
-parameter in a user class's field or enum payload (`Slot<T>` with `f:
-fn(T) -> T`, `G<T>` with `F(fn(T) -> T)`) crosses a shared body inside
+parameter in a user class's field or enum payload, at any depth of the
+slot (`Slot<T>` with `f: fn(T) -> T`, `G<T>` with `F(fn(T) -> T)`,
+`fs: Vec<fn() -> T>`, `(fn(T) -> (T, T), int)`, #2560) crosses a shared body inside
 the object too: a ground function takes a `float` or `bool` as its own
 MIR type and a two-word value as two words, while one the shared body
 made (`fn (T x) => x`) or adapted (a function argument) takes their
