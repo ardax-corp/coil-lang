@@ -133,8 +133,8 @@ fn own_arm(int n, int k) -> int {
 // A call with a constant argument is what asks for a function's worker;
 // the tests reach the same worker with a value read at run time.
 fn asks() -> float {
-    let a = first_arm(27) + second_arm(27) + top_sum(27) + left_overflows(27) + left_fits(27) + combine_call(27)
-        + own_arm(27, 1);
+    let a = first_arm(27) + second_arm(27) + top_sum(27) + left_overflows(27) + left_fits(27) +
+            combine_call(27) + own_arm(27, 1);
     return absorbed(27) + (a as float);
 }
 

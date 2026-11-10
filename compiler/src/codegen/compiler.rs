@@ -3605,9 +3605,9 @@ impl Compiler {
         }
         // With every job out: this thread's arms, then the joins.
         let mut running = Vec::new();
-        for i in 0..direct {
+        for (i, &arm) in joined.iter().enumerate().take(direct) {
             let value = direct_arm(&mut b, i);
-            running.push(b.let_(joined[i], value));
+            running.push(b.let_(arm, value));
         }
         running.push(tail);
         let mut tail = b.block(running, None, coil_ty::never());
