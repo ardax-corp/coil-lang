@@ -64,6 +64,11 @@ pub(crate) struct Runtime {
     /// The open shared-heap steal epoch (auto-par workers run on this heap
     /// meanwhile): nothing moves.
     pub(crate) shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
+    /// The fork-join jobs this run spawned on its heap and may not have
+    /// joined yet. A panic that unwinds a fork-join past its joins leaves
+    /// its jobs here: the run joins them before it goes on
+    /// ([`crate::driver::Driver::settle_speculative`]).
+    pub(crate) speculative_out: Vec<std::sync::Arc<crate::thread::JoinState>>,
     /// Step budget fuel: charged once per taken back-edge and per call by
     /// whatever counts steps (the runtime, the MIR interpreter); zero means
     /// exhausted. `u64::MAX` when no budget is set (2^64 charges cannot
@@ -232,7 +237,7 @@ impl Runtime {
     pub(crate) fn new() -> Self {
         let mut heap = crate::memory::HeapSlot::default();
         heap.get_mut().set_nursery(crate::memory::nursery_enabled());
-        Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None, probes: Vec::new(), fuel: u64::MAX, step_budget_hit: false, fuel_start: u64::MAX, heap_cap: usize::MAX, heap_cap_hit: false }
+        Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None, speculative_out: Vec::new(), probes: Vec::new(), fuel: u64::MAX, step_budget_hit: false, fuel_start: u64::MAX, heap_cap: usize::MAX, heap_cap_hit: false }
     }
 }
 
