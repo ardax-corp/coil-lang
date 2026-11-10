@@ -2431,6 +2431,16 @@ impl Checker {
     /// own id. Writing facts under the raw counter id lands them on another
     /// node once the counter drifts (it typed `lcm`'s int `a` as the float
     /// param of a later function in coil-stdlib `num.coil`).
+    /// Walk a declared type (an alias target, an enum payload) for ID
+    /// alignment only. The pre-pass that read it as a type reported what is
+    /// wrong with it; it is not a value, so what inferring it as one reports
+    /// is dropped (`[P; 2]` reads as an array literal of `P` and `2`).
+    fn walk_declared_ty(&mut self, ty: &Output) {
+        let msg_len = self.messages.len();
+        let _ = self.infer(ty);
+        self.messages.truncate(msg_len);
+    }
+
     fn next_walk_id(&mut self, node: &Output) -> NodeId {
         let seq_id = self.ids.ids().get(self.next_id_idx).copied();
         self.next_id_idx += 1;
@@ -3718,12 +3728,7 @@ impl Checker {
                     let params = type_params.iter().map(|tp| tp.name.to_string()).collect();
                     self.register_generic_alias(name, params, param_vars, alias_ty, range);
                 }
-                // ID alignment only: the annotation is not a value, so drop
-                // what inferring it as one reports (`[P; 2]` reads as an
-                // array of `P` and `2`).
-                let msg_len = self.messages.len();
-                let _ = self.infer(ty);
-                self.messages.truncate(msg_len);
+                self.walk_declared_ty(ty);
                 unit_ty()
             }
             Expression::ExternStruct(decl) => {
@@ -3759,12 +3764,12 @@ impl Checker {
                     EnumVariantPayload::Unit => {}
                     EnumVariantPayload::Tuple(parts) => {
                         for p in parts {
-                            let _ = self.infer(p);
+                            self.walk_declared_ty(p);
                         }
                     }
                     EnumVariantPayload::Record(fields) => {
                         for f in fields {
-                            let _ = self.infer(&f.value);
+                            self.walk_declared_ty(&f.value);
                         }
                     }
                 }
