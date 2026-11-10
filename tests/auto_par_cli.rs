@@ -629,3 +629,119 @@ fn total() -> int {
 "#;
     same_as_sequential("fork-built", &fork_program(built, "total()"), "");
 }
+
+/// A `while` loop that steps by two or three leaves its index at the first
+/// value at or past the bound, whether or not the range is a multiple of
+/// the stride, as the sequential loop does; a loop that counts down runs
+/// sequentially (#2450).
+#[test]
+fn a_strided_loop_leaves_its_index_where_the_sequential_one_does() {
+    let program = r#"
+use io::{stdout, write};
+use string::to_bytes;
+
+fn weight(int i) -> int {
+    return i % 7;
+}
+
+fn by_two(int begin, int n) -> int {
+    let total = 0;
+    let i = begin;
+    while i < n {
+        total = total + weight(i);
+        i = i + 2;
+    }
+    return total * 10000000 + i;
+}
+
+fn by_three(int n) -> int {
+    let total = 0;
+    let i = 0;
+    while i < n {
+        total = total + weight(i);
+        i = i + 3;
+    }
+    return total + i;
+}
+
+fn by_three_through(int n, int scale) -> int {
+    let total = 0;
+    let i = 1;
+    while i <= n {
+        total = total + weight(i) * scale;
+        i += 3;
+    }
+    return total * 10000000 + i;
+}
+
+fn down_by_two(int n) -> int {
+    let total = 0;
+    let i = n;
+    while i > 0 {
+        total = total + weight(i);
+        i = i - 2;
+    }
+    return total * 10000000 + i;
+}
+
+fn line(int value) {
+    let _ = write(stdout(), to_bytes(value.show() + "\n"));
+}
+
+fn main() {
+    for n in [400000, 400001, 400002, 41, 40, 1, 0, 0 - 5] {
+        line(by_two(0, n));
+        line(by_two(7, n));
+        line(by_three(n));
+        line(by_three_through(n, 5));
+        line(down_by_two(n));
+    }
+}
+"#;
+    same_as_sequential("stride", program, "");
+}
+
+/// A loop that reads a `byte` local, and a `while` under an invariant of
+/// what it leaves alone, compile and run as the sequential program (#2450).
+#[test]
+fn a_loop_the_fork_join_cannot_take_runs_sequentially() {
+    let program = r#"
+use io::{stdout, write};
+use string::to_bytes;
+
+fn weight(int i) -> int {
+    return i % 7;
+}
+
+fn with_byte(byte flag, int n) -> int {
+    let total = 0;
+    let i = 0;
+    while i < n {
+        total = total + weight(i);
+        if flag == flag {
+            total = total + 1;
+        }
+        i = i + 1;
+    }
+    return total;
+}
+
+fn checked(int n, int k) -> int {
+    let total = 0;
+    let i = 0;
+    while i < n
+        invariant k > 0
+    {
+        total = total + weight(i) * k;
+        i = i + 2;
+    }
+    return total * 10000000 + i;
+}
+
+fn main() {
+    let _ = write(stdout(), to_bytes(with_byte(3 as byte, 400000).show() + "\n"));
+    let _ = write(stdout(), to_bytes(checked(400001, 3).show() + "\n"));
+}
+"#;
+    same_as_sequential("declined", program, "");
+}
