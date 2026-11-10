@@ -103,13 +103,17 @@ words:
   its bits, a two-word value boxed), which is also the word an element of
   `[T; N]` or `Vec<T>` is. So the body's values of `T` are the same words
   wherever they come from, and an array, `Vec` or tuple of them it builds
-  is returned as it is, at any depth (`hir_word_holder`, #2415). A tuple
-  or enum result whose own items are bare parameters' values is rebuilt
-  at the call, to give it the ground type's word kinds (`hir_ret_items`,
-  #1549). A call is still refused where `T` is a bare parameter and the
-  result or another parameter holds it any other way (a function, a
-  class). An open `Option<T>` below the top is never shared: see
-  "Open enums".
+  is returned as it is, at any depth (`hir_word_holder`, #2415). So is a
+  user enum whose payloads, at its arguments, are such holders
+  (`List<T>` with `Cons(T, List<T>)`, #2512): a payload item is one word
+  whatever its type, and an item the body wrote has the unknown word
+  kind, which the collector resolves. A tuple or enum result whose own
+  items are bare parameters' values is rebuilt at the call, to give it
+  the ground type's word kinds (`hir_ret_items`, #1549). A call is still
+  refused where `T` is a bare parameter and the result or another
+  parameter holds it any other way (a function, a class, an enum with
+  `drop`). An open `Option<T>` below the top is never shared: see "Open
+  enums".
 - A rest parameter `T... xs` is one `Vec<T>` argument: the call packs the
   rest arguments into it (`hir_call_shapes`), a `...vec` spread is the
   pack itself, and the shared body takes it as the clone does, a `Vec` of
