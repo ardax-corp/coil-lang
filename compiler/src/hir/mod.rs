@@ -16,6 +16,7 @@
 //! flags, so a consumer never asks the checker again.
 
 pub mod build;
+pub mod call_graph;
 pub mod cold;
 pub mod check;
 pub mod effects;
