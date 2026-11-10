@@ -984,6 +984,24 @@ fn a_vector_loop_trap_matches_the_interpreter() {
 }
 
 #[test]
+fn a_vector_loop_trap_names_the_trapping_op() {
+    // `boom` inlines into `run`'s loop, which becomes a `VecLoop`: the lane
+    // that divides by zero reports `boom`'s division, in `run`, as the
+    // scalar loop does at -O1 (#2539).
+    let src = format!(
+        "{HEADER}fn boom(int i) -> int {{\n    return 100 / (i - 1000);\n}}\n\
+         fn run(int a, int b) -> int {{\n    let total = 0;\n    for i in a..b {{\n        total = total ^ boom(i);\n    }}\n    return total;\n}}\n\
+         fn main() {{ let _ = println(format(\"%i\", run(0, 5000))); }}\n"
+    );
+    let stderr = same_as_mir("vector_trap_loc", &src);
+    let report: Vec<&str> = stderr.lines().filter(|l| !l.starts_with("native:") && !l.starts_with("  native: ")).collect();
+    let at = |line: Option<&&str>, head: &str| line.is_some_and(|l| l.starts_with(head) && l.ends_with("vector_trap_loc.coil:4:11"));
+    assert!(at(report.first(), "panic: division by zero at "), "stderr: {stderr}");
+    assert!(at(report.get(1), "  in run at "), "stderr: {stderr}");
+    assert!(compiled(&stderr, "run"), "stderr: {stderr}");
+}
+
+#[test]
 fn an_archive_carries_generators_and_vector_loops() {
     // Every instruction steps 6 to 8 added goes through the native MIR
     // section: resumes, yields (`yield from` too), done checks, vector
