@@ -648,6 +648,9 @@ struct Plan {
     /// or call such a body): they have safepoints, and
     /// their callers root the heap words they hold across the call.
     may_gc: HashSet<usize>,
+    /// Bodies a speculative auto-par job may run ([`speculative_reach`]):
+    /// their loops that may run forever with no call poll the stack limit.
+    speculative: HashSet<usize>,
     /// Entry PCs of the bodies by label, for function values.
     pcs: HashMap<Label, u32>,
     /// Bodies that may reach the runtime ([`reaches_runtime`], or a call of
@@ -985,9 +988,60 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, body_i
             _ => None,
         }));
     }
+    let speculative = speculative_reach(bodies, &by_label);
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
-    Plan { compile, by_label, refused, moves, may_gc, pcs, drops, runtime_reach, used_params, tail_sites, tail_conv }
+    Plan { compile, by_label, refused, moves, may_gc, speculative, pcs, drops, runtime_reach, used_params, tail_sites, tail_conv }
+}
+
+/// The labels `inst` names: a call's target, a function value's or code
+/// pointer's code, a two-word call's `unpair`.
+fn named_labels(inst: &MirInst) -> Vec<Label> {
+    use compiler::native_mir::MirAllocKind as K;
+    match inst {
+        MirInst::Call { target, .. } | MirInst::CodePtr { target, .. } => vec![*target],
+        MirInst::CallIndirect { pair, .. } => pair.iter().map(|&(_, l)| l).collect(),
+        MirInst::Alloc { kind: K::Fn { target, .. } | K::PolyFn { target } | K::PolyFnCapture { target, .. } | K::Coro { target }, .. } => vec![*target],
+        _ => Vec::new(),
+    }
+}
+
+/// The bodies a speculative auto-par job may run (#2442): only those need
+/// a poll in a loop that may run forever, since a cancel reaches a job
+/// nowhere else. A job runs a function value a fork-join makes (the
+/// bodies that call `thread_spawn_shared`, all compiler-made), and from
+/// there whatever a body it runs names: its calls, the function values
+/// and code pointers it makes. A body that calls a value or the host
+/// (which may call one back) may reach any body whose code is taken
+/// anywhere, and an allocation may run a type's `drop`.
+fn speculative_reach(bodies: &[NativeBody], by_label: &HashMap<Label, usize>) -> HashSet<usize> {
+    let insts = |i: usize| bodies[i].mir.blocks.iter().flat_map(|b| &b.insts);
+    let mut work: Vec<usize> = Vec::new();
+    for (i, _) in bodies.iter().enumerate() {
+        if insts(i).any(|x| matches!(x, MirInst::HostInvoke { native_id, .. } if *native_id == common::THREAD_SPAWN_SHARED_ID)) {
+            work.extend(insts(i).filter(|x| matches!(x, MirInst::Alloc { .. })).flat_map(named_labels).filter_map(|l| by_label.get(&l).copied()));
+        }
+    }
+    let mut reach: HashSet<usize> = HashSet::new();
+    let (mut values, mut drops) = (false, false);
+    while let Some(i) = work.pop() {
+        if !reach.insert(i) {
+            continue;
+        }
+        work.extend(insts(i).flat_map(named_labels).filter_map(|l| by_label.get(&l).copied()));
+        if !values && insts(i).any(|x| matches!(x, MirInst::CallIndirect { .. } | MirInst::HostInvoke { .. })) {
+            values = true;
+            for b in bodies {
+                let taken = b.mir.blocks.iter().flat_map(|bb| &bb.insts).filter(|x| !matches!(x, MirInst::Call { .. }));
+                work.extend(taken.flat_map(named_labels).filter_map(|l| by_label.get(&l).copied()));
+            }
+        }
+        if !drops && insts(i).any(allocates) {
+            drops = true;
+            work.extend(bodies.iter().enumerate().filter(|(_, b)| b.name.ends_with("::drop")).map(|(j, _)| j));
+        }
+    }
+    reach
 }
 
 /// An instruction that may run interpreted code: a function value's call, a free
@@ -2751,12 +2805,31 @@ impl<'a> Lower<'a> {
                 headers.extend(targets.into_iter().filter(|t| order.get(t).is_some_and(|&j| j <= i)));
             }
         }
+        // A loop that may run forever with no call in it polls the stack
+        // limit at its header as an entry does, so a cancelled
+        // speculative job stops there too (#2442).
+        let spins = if self.body_index.is_some_and(|i| self.plan.speculative.contains(&i)) {
+            compiler::native_mir::spin_headers(f)
+        } else {
+            HashSet::new()
+        };
         let first = self.blocks[&f.entry];
         self.b.ins().jump(first, &[]);
 
         for (bi, blk) in f.blocks.iter().enumerate() {
             let cl = self.blocks[&blk.id];
             self.b.switch_to_block(cl);
+            if spins.contains(&blk.id) {
+                let sp = self.b.ins().get_stack_pointer(types::I64);
+                // An atomic load: another thread writes the limit, and a
+                // plain one with no store in the loop is the entry's
+                // load again to Cranelift's alias analysis.
+                let at = self.b.ins().iadd_imm_s(self.ctx, i64::from(NATIVE_CTX_STACK_LIMIT));
+                let limit = self.b.ins().atomic_load(types::I64, MemFlagsData::trusted(), at);
+                let low = self.b.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
+                self.at(None);
+                self.bail_if(low, TRAP_STACK);
+            }
             if headers.contains(&blk.id) {
                 self.at(None);
                 self.live = Some(past_phis(bi));

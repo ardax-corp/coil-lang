@@ -17,8 +17,9 @@
 use std::collections::HashSet;
 
 use super::cse::dce;
-use super::func::MirFunc;
+use super::func::{const_i64, MirFunc};
 use super::inst::{BlockId, MirBinOp, MirInst, Terminator, ValueId};
+use super::ty::MirTy;
 
 /// Hoist loop-invariant instructions. Returns how many moved. `dense`: a
 /// literal and a heap value may move too; with `false` a literal stays where it is
@@ -310,6 +311,164 @@ impl Dominators {
     pub(super) fn idom(&self, b: BlockId) -> Option<BlockId> {
         self.idom[b.index()]
     }
+}
+
+/// The headers of the loops that may run forever without a function
+/// entry: no `Call` or `CallIndirect` in them (each callee's entry checks
+/// the stack limit), and no exit test on a counter (#2442). Native code
+/// polls the stack limit at these headers, so a cancelled speculative job
+/// stops there too; a counted loop ends on its own and is not polled.
+///
+/// A loop is counted when a block of it that runs on every trip (it
+/// dominates each latch) leaves it on a compare of a basic induction
+/// variable (a header `φ` every latch steps by the same step of a known
+/// sign), or of its stepped value, against a value from outside the
+/// loop, the way the step runs toward: `iv < n`, `iv <= n` and, for a
+/// step of one, `iv != n` stay in while the variable climbs (and the
+/// mirrored tests while it falls). `int` arithmetic traps on overflow, so
+/// such a loop ends at its bound or at a trap. A step's sign is known for
+/// a non-zero constant, and for an enclosing loop's counter that starts
+/// at a constant of the sign and steps away from zero (the sieve's
+/// `k = k + p` with `p` from 2 up).
+pub fn spin_headers(func: &MirFunc) -> HashSet<BlockId> {
+    let loops = natural_loops(func);
+    if loops.is_empty() {
+        return HashSet::new();
+    }
+    let preds = func.preds();
+    let dom = Dominators::new(func, &preds);
+    let defs = func.defs();
+    let mut out = HashSet::new();
+    for lp in &loops {
+        let calls = lp.blocks.iter().any(|b| {
+            func.block(*b).insts.iter().any(|i| matches!(i, MirInst::Call { .. } | MirInst::CallIndirect { .. }))
+        });
+        if !calls && !counted(func, lp, &loops, &preds, &dom, &defs) {
+            out.insert(lp.header);
+        }
+    }
+    out
+}
+
+/// The sign of `v` (`1` or `-1`), for a value [`counted`] steps by: a
+/// non-zero constant, or the counter of a loop in `loops` that starts at
+/// constants of one sign and steps away from zero by constants. `None`
+/// when not known (it may be `0`).
+fn step_sign(v: ValueId, loops: &[LoopInfo], defs: &super::func::Defs) -> Option<i64> {
+    if let Some(k) = const_i64(defs, v) {
+        return (k != 0).then_some(k.signum());
+    }
+    let (block, MirInst::Phi { dest, ty: MirTy::I64, args }) = defs.get(&v)? else { return None };
+    let lp = loops.iter().find(|l| l.header == *block)?;
+    let mut sign = None;
+    for &(from, a) in args {
+        let s = if lp.blocks.contains(&from) {
+            // A step of the counter by a constant.
+            match defs.get(&a) {
+                Some((_, MirInst::Bin { op: MirBinOp::Add, ty: MirTy::I64, lhs, rhs, .. })) if lhs == dest => const_i64(defs, *rhs)?.signum(),
+                Some((_, MirInst::Bin { op: MirBinOp::Add, ty: MirTy::I64, lhs, rhs, .. })) if rhs == dest => const_i64(defs, *lhs)?.signum(),
+                Some((_, MirInst::Bin { op: MirBinOp::Sub, ty: MirTy::I64, lhs, rhs, .. })) if lhs == dest => -const_i64(defs, *rhs)?.signum(),
+                _ => return None,
+            }
+        } else {
+            const_i64(defs, a)?.signum()
+        };
+        if s == 0 || sign.is_some_and(|t| t != s) {
+            return None;
+        }
+        sign = Some(s);
+    }
+    sign
+}
+
+/// [`spin_headers`]' counted loop.
+fn counted(func: &MirFunc, lp: &LoopInfo, loops: &[LoopInfo], preds: &[Vec<BlockId>], dom: &Dominators, defs: &super::func::Defs) -> bool {
+    use super::inst::MirCmpOp as C;
+    let latches: Vec<BlockId> = preds[lp.header.index()].iter().copied().filter(|p| lp.blocks.contains(p)).collect();
+    if latches.is_empty() {
+        return false;
+    }
+    let inside = |v: ValueId| defs.get(&v).is_some_and(|(b, _)| lp.blocks.contains(b));
+    // A step of `iv` by `by`: its sign, and whether it is one.
+    let step_of = |by: ValueId, negate: bool| -> Option<(i64, bool)> {
+        if inside(by) {
+            return None;
+        }
+        let unit = const_i64(defs, by).is_some_and(|k| k.unsigned_abs() == 1);
+        let s = step_sign(by, loops, defs)?;
+        Some((if negate { -s } else { s }, unit))
+    };
+    // Each basic induction variable: the sign of its step, whether the
+    // step is one, and its stepped values.
+    let mut ivs: Vec<(ValueId, (i64, bool), Vec<ValueId>)> = Vec::new();
+    for inst in &func.block(lp.header).insts {
+        let MirInst::Phi { dest, ty: MirTy::I64, args } = inst else { continue };
+        let mut step = None;
+        let mut stepped = Vec::new();
+        let ok = args.iter().filter(|(from, _)| lp.blocks.contains(from)).all(|&(_, v)| {
+            let k = match defs.get(&v) {
+                Some((_, MirInst::Bin { op: MirBinOp::Add, ty: MirTy::I64, lhs, rhs, .. })) if lhs == dest => step_of(*rhs, false),
+                Some((_, MirInst::Bin { op: MirBinOp::Add, ty: MirTy::I64, lhs, rhs, .. })) if rhs == dest => step_of(*lhs, false),
+                Some((_, MirInst::Bin { op: MirBinOp::Sub, ty: MirTy::I64, lhs, rhs, .. })) if lhs == dest => step_of(*rhs, true),
+                _ => None,
+            };
+            let same = k.is_some_and(|k| step.is_none_or(|s| s == k));
+            if same {
+                step = k;
+                stepped.push(v);
+            }
+            same
+        });
+        if ok && let Some(k) = step {
+            ivs.push((*dest, k, stepped));
+        }
+    }
+    if ivs.is_empty() {
+        return false;
+    }
+    let mirror = |op: C| match op {
+        C::Lt => C::Gt,
+        C::Le => C::Ge,
+        C::Gt => C::Lt,
+        C::Ge => C::Le,
+        other => other,
+    };
+    let negate = |op: C| match op {
+        C::Lt => C::Ge,
+        C::Le => C::Gt,
+        C::Gt => C::Le,
+        C::Ge => C::Lt,
+        C::Eq => C::Ne,
+        C::Ne => C::Eq,
+    };
+    lp.blocks.iter().any(|&b| {
+        let Some(Terminator::Br { cond, taken, not_taken }) = &func.block(b).term else { return false };
+        let stays_taken = match (lp.blocks.contains(taken), lp.blocks.contains(not_taken)) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => return false,
+        };
+        if !latches.iter().all(|&l| dom.dominates(b, l)) {
+            return false;
+        }
+        let Some((_, MirInst::Cmp { op, ty: MirTy::I64, lhs, rhs, .. })) = defs.get(cond) else { return false };
+        let stay = if stays_taken { *op } else { negate(*op) };
+        ivs.iter().any(|(iv, (sign, unit), stepped)| {
+            let counter = |v: &ValueId| v == iv || stepped.contains(v);
+            // `iv stay bound`, the counter on the left.
+            let stay = match (counter(lhs), counter(rhs)) {
+                (true, false) if !inside(*rhs) => stay,
+                (false, true) if !inside(*lhs) => mirror(stay),
+                _ => return false,
+            };
+            match stay {
+                C::Lt | C::Le => *sign > 0,
+                C::Gt | C::Ge => *sign < 0,
+                C::Ne => *unit,
+                C::Eq => false,
+            }
+        })
+    })
 }
 
 fn loop_body(preds: &[Vec<BlockId>], latch: BlockId, header: BlockId) -> HashSet<BlockId> {
@@ -1459,6 +1618,45 @@ bb5:
         licm(&mut f, true);
         f.verify().unwrap();
         assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Index { .. })), 1);
+    }
+
+    /// `while` loops over `v0` from 0: `test` is the header's compare of
+    /// the counter `v2` (stepped to `v4` in `bb2` by `step`) and `body`
+    /// runs before the step.
+    fn spin_loop(test: &str, step: &str, body: &str) -> MirFunc {
+        let text = format!(
+            "func @f(v0: i64) -> i64 {{\nbb0:\n    v1 = iconst.i64 0\n    v3 = iconst.i64 1\n    jump bb1\nbb1:\n    v2 = phi.i64 [bb0: v1, bb2: v4]\n    v5 = {test}\n    brif v5, bb2, bb3\nbb2:\n{body}    v4 = {step}\n    jump bb1\nbb3:\n    return v2\n}}"
+        );
+        crate::mir::parse_func(&text).expect(&text)
+    }
+
+    /// A loop with no call is polled unless a counter it steps toward its
+    /// bound ends it (#2442).
+    #[test]
+    fn a_loop_with_no_call_and_no_counter_is_a_spin_header() {
+        let spins = |f: &MirFunc| spin_headers(f).len();
+        // `i < n`, `i += 1`: counted; `n > i` the same way round.
+        assert_eq!(spins(&spin_loop("icmp.slt v2, v0", "iadd v2, v3", "")), 0);
+        assert_eq!(spins(&spin_loop("icmp.sgt v0, v2", "iadd v2, v3", "")), 0);
+        // Counting down while `i > n`; and `i != n` by one.
+        assert_eq!(spins(&spin_loop("icmp.sgt v2, v0", "isub v2, v3", "")), 0);
+        assert_eq!(spins(&spin_loop("icmp.ne v2, v0", "iadd v2, v3", "")), 0);
+        // Away from the bound, or a test of something else: polled.
+        assert_eq!(spins(&spin_loop("icmp.slt v2, v0", "isub v2, v3", "")), 1);
+        assert_eq!(spins(&spin_loop("icmp.sgt v0, v1", "iadd v2, v3", "")), 1);
+        assert_eq!(spins(&spin_loop("icmp.slt v2, v0", "iadd v2, v2", "")), 1);
+        // A call ends a trip at a function entry, which checks the limit.
+        assert_eq!(spins(&spin_loop("icmp.sgt v0, v1", "iadd v2, v3", "    v9 = call.i64 3 v2\n")), 0);
+        // A step by an enclosing counter from `start` up (the sieve's
+        // `k = k + p`): counted only when `p` starts above zero.
+        let sieve = |start: i64| {
+            let text = format!(
+                "func @f(v0: i64) -> i64 {{\nbb0:\n    v1 = iconst.i64 {start}\n    v3 = iconst.i64 1\n    jump bb1\nbb1:\n    v2 = phi.i64 [bb0: v1, bb4: v7]\n    v5 = icmp.slt v2, v0\n    brif v5, bb2, bb5\nbb2:\n    v6 = phi.i64 [bb1: v2, bb3: v8]\n    v9 = icmp.slt v6, v0\n    brif v9, bb3, bb4\nbb3:\n    v8 = iadd v6, v2\n    jump bb2\nbb4:\n    v7 = iadd v2, v3\n    jump bb1\nbb5:\n    return v2\n}}"
+            );
+            spins(&crate::mir::parse_func(&text).expect(&text))
+        };
+        assert_eq!(sieve(2), 0);
+        assert_eq!(sieve(0), 1, "a step of `0` never ends the inner loop");
     }
 
     #[test]

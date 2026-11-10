@@ -29,7 +29,7 @@ pub mod native_mir {
     pub use crate::mir::{
         BlockId, LaneExpr, LaneVal, MirAllocKind, MirBlock, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy,
         MirUnaryOp, NativeBody, Terminator, ValueId, VectorOp, start_native_capture, start_raw_capture, vector_op,
-        VecExpr, VecLoopKind, liveness,
+        VecExpr, VecLoopKind, liveness, spin_headers,
         take_native_capture, ffi_use,
         alloc_call, AllocCall, allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pointer_words, root_handles, scalar, ty_of, used_params, word_kind, is_tail_call_inst, pair_words,
     };

@@ -568,9 +568,27 @@ later arm does not terminate.
   a job that panics. A job it had out is cancelled and joined by its own
   settle.
 
-A native loop that makes no call is not a cancellation point (`spin` in
-the issue's repro, a `while n > 0` that never ends): such an arm is still
-waited for. The MIR interpreter stops it.
+- **A loop with no call.** A native loop may run without a function
+  entry (`spin` in the issue's repro: `while n > 0 { … }` that never
+  ends). One that may run forever, in a body a speculative job may run,
+  polls the stack limit at its header as an entry does, a load, a compare
+  and a branch per trip. The bodies are those the function values a
+  fork-join spawns name, through their calls, function values and code
+  pointers; once one calls a value or the host, every body whose code is
+  taken anywhere, and once one allocates, every `drop`
+  (`coil-native`'s `speculative_reach`). Other code pays nothing. The
+  loops are those with no `Call` or `CallIndirect` and no exit test on a
+  counter (`mir::spin_headers`). A counted loop ends on its own and is not
+  polled: an exit test, on a block every trip runs, of a basic induction
+  variable (or its stepped value) against a value from outside the loop,
+  the way its step runs toward (`i < n` with `i` climbing). A step's sign
+  is known for a non-zero constant and for an enclosing loop's counter
+  that starts at a constant of the sign and steps away from zero (the
+  sieve's `k = k + p`). The poll is an atomic load: a plain one, with no
+  store in the loop, is the entry's load again to Cranelift's alias
+  analysis. A counted loop still runs to its end once cancelled, so a
+  long one delays the report until it ends (a later arm cancelled while
+  in it stops at its next call).
 
 Array / dict / coro / user-`Iterator` `for` stays sequential: isolate IPA does not
 send the heap collection (that is C1 shared-heap steal, COI-365).
