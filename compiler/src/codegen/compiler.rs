@@ -3561,46 +3561,6 @@ impl Compiler {
 
     // Loop IPA (chunked fork-join over an induction range)
 
-    /// Check the HIR loop analysis against the AST one this module was
-    /// compiled with: the same sites with the same parameters.
-    /// `COIL_PAR_COMPARE=<file>` appends one line per module and one per
-    /// site that differs.
-    fn compare_loop_par_sites(&self, module: &str) {
-        use std::io::Write;
-        let dump = std::env::var_os("COIL_PAR_COMPARE");
-        if dump.is_none() && !cfg!(debug_assertions) {
-            return;
-        }
-        let Some(hir) = self.hir_module.as_ref() else { return };
-        let strip = |s: &crate::typechecking::LoopParSite| {
-            let mut s = s.clone();
-            s.index_expr_ptr = 0;
-            s.reduce_expr_ptr = 0;
-            s
-        };
-        let found = hir.loop_par_sites(&self.pure_fns);
-        let mut spans: Vec<(usize, usize)> = self.loop_par_sites.keys().chain(found.keys()).copied().collect();
-        spans.sort_unstable();
-        spans.dedup();
-        let mut lines = Vec::new();
-        for span in spans {
-            let (ast, hir) = (self.loop_par_sites.get(&span).map(strip), found.get(&span).cloned());
-            if ast != hir {
-                lines.push(format!("PARCMP loop DIFF {module:?} {span:?} ast={ast:?} hir={hir:?}"));
-            }
-        }
-        let same = lines.is_empty();
-        if let Some(path) = dump
-            && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path)
-        {
-            let verdict = if same { "identical" } else { "DIFFERENT" };
-            lines.push(format!("PARCMP loop {module:?} ast={} hir={} {verdict}", self.loop_par_sites.len(), found.len()));
-            let _ = writeln!(f, "{}", lines.join("\n"));
-        } else {
-            debug_assert!(same, "loop_par: HIR and AST sites differ:\n{}", lines.join("\n"));
-        }
-    }
-
     /// The parallel-loop site at `span`, when its induction is one this
     /// codegen chunks: counted `for` needs Q6's int `Range` kind (`while`
     /// IVs are const ints from analysis; the per-iteration value is
@@ -3609,7 +3569,7 @@ impl Compiler {
         &self,
         span: SimpleSpan,
         loop_id: Option<crate::typechecking::id::NodeId>,
-    ) -> Option<crate::typechecking::LoopParSite> {
+    ) -> Option<crate::hir::par::LoopParSite> {
         let site = self.loop_par_sites.get(&(span.start, span.end)).cloned()?;
         // Reassociating a float reduction changes results.
         if site.implicit_step
@@ -6450,8 +6410,7 @@ impl Compiler {
             let pure = &self.pure_fns;
             self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure, &bare_cases);
             self.par_workers = crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
-            self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
-            self.compare_loop_par_sites(module);
+            self.loop_par_sites = self.hir_module.as_ref().map(|hir| hir.loop_par_sites(&self.pure_fns)).unwrap_or_default();
             for hint in crate::typechecking::analyze_par_escape_hints(ast, self.typed_sidecar.fn_effects(), &bare_cases) {
                 let mut msg =
                     Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
@@ -6461,7 +6420,7 @@ impl Compiler {
         } else {
             self.par_shapes.clear();
             self.par_workers.clear();
-            self.loop_par_sites = crate::typechecking::LoopParSites::new();
+            self.loop_par_sites = crate::hir::par::LoopParSites::new();
         }
         self.emit_builtin_dict_thunks();
         self.emit_vec_method_thunks();

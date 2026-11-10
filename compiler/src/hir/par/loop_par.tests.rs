@@ -14,15 +14,7 @@ fn sites_of(src: &str) -> Vec<LoopParSite> {
     let _ = checker.check_program(&ast);
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", &ast);
-    let found = module.loop_par_sites(&pure);
-    // Until the AST walk is gone: the two agree.
-    let mut old = crate::typechecking::analyze_loop_par_sites(&ast, &pure);
-    for site in old.values_mut() {
-        site.index_expr_ptr = 0;
-        site.reduce_expr_ptr = 0;
-    }
-    assert_eq!(found, old, "HIR and AST sites differ");
-    let mut sites: Vec<LoopParSite> = found.into_values().collect();
+    let mut sites: Vec<LoopParSite> = module.loop_par_sites(&pure).into_values().collect();
     sites.sort_by_key(|a| a.begin);
     sites
 }
@@ -596,3 +588,103 @@ fn main() { return; }
             "accumulator must still be provably a plain local at loop entry"
         );
     }
+
+#[test]
+fn admits_a_loop_under_its_contract_checks() {
+    let site = one_site(
+        r#"
+fn sq(int i) -> int { return i * i; }
+fn run(int n) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < n invariant i >= 0 {
+        acc = acc + sq(i);
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() { return; }
+"#,
+    );
+    assert_eq!((site.index.as_str(), site.acc.as_str()), ("i", "acc"));
+    let site = one_site(&program(
+        r#"
+    let acc = 0;
+    for x in 0..100 invariant acc >= 0 {
+        acc = acc + sq(x);
+    }
+"#,
+    ));
+    assert!(site.implicit_step);
+}
+
+#[test]
+fn looks_in_inherent_methods_and_match_arms() {
+    let sites = sites_of(
+        r#"
+fn sq(int i) -> int { return i * i; }
+class C { pub k: int, }
+impl C {
+    pub fn sum() -> int {
+        let acc = 0;
+        for x in 0..100 { acc = acc + sq(x); }
+        return acc;
+    }
+}
+fn pick(Option<int> o) -> int {
+    let acc = 0;
+    match o {
+        Some(v) => { for x in 0..50 { acc = acc + sq(x); } },
+        None => {},
+    }
+    return acc;
+}
+fn main() { return; }
+"#,
+    );
+    assert_eq!(sites.iter().map(|s| s.end).collect::<Vec<_>>(), [100, 50]);
+}
+
+/// The reach of the AST walk this analysis replaced, kept as it was.
+#[test]
+fn leaves_trait_methods_if_let_and_const_bounds() {
+    let sites = sites_of(
+        r#"
+fn sq(int i) -> int { return i * i; }
+class C { pub k: int, }
+trait Tot<A> {
+    fn tot(A self) -> int {}
+    fn twice(A self) -> int {
+        let acc = 0;
+        for x in 0..100 { acc = acc + sq(x); }
+        return acc;
+    }
+}
+impl Tot for C {
+    fn tot(C self) -> int {
+        let acc = 0;
+        for x in 0..100 { acc = acc + sq(x); }
+        return acc;
+    }
+}
+fn under_if_let(Option<int> o) -> int {
+    let acc = 0;
+    if let Some(v) = o { for x in 0..100 { acc = acc + sq(x); } }
+    return acc;
+}
+fn const_bound() -> int {
+    const N = 100;
+    let acc = 0;
+    for x in 0..N { acc = acc + sq(x); }
+    return acc;
+}
+fn unnamed_index() -> int {
+    let acc = 0;
+    for _ in 0..100 { acc = acc + sq(3); }
+    return acc;
+}
+fn main() { return; }
+"#,
+    );
+    assert!(sites.is_empty(), "{sites:?}");
+}

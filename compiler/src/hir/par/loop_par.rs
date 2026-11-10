@@ -26,7 +26,113 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use super::super::{BinOp, BodyKind, Callee, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, Lit, LocalId, LocalKind, MakeKind, UnOp, query};
 use crate::typechecking::par_profit::DEFAULT_LOOP_GRAIN;
 use crate::typechecking::ty::{self as coil_ty, Ty};
-use crate::typechecking::{LoopParSite, LoopParSites, LoopReduceOp};
+
+/// Associative operator folding a loop's per-iteration contributions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopReduceOp {
+    Add,
+    Mul,
+    /// Bitwise xor: associative, commutative, identity `0`.
+    Xor,
+}
+
+impl LoopReduceOp {
+    /// Identity element. Every chunk but the first starts here, so folding the
+    /// partials with `⊕` reproduces the sequential `acc`.
+    pub fn identity(self) -> i64 {
+        match self {
+            Self::Add => 0,
+            Self::Mul => 1,
+            Self::Xor => 0,
+        }
+    }
+}
+
+/// A counted loop whose iterations are independent apart from one reduction.
+///
+/// The induction range is normalized half-open (`i <= k` becomes `end = k + 1`)
+/// so an n-way split is just a partition of `[begin, end)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopParSite {
+    /// Induction variable, advanced by exactly one `+ 1` per iteration.
+    pub index: String,
+    pub begin: i64,
+    pub end: i64,
+    /// Reduction accumulator: a const-initialized local of an enclosing scope.
+    pub acc: String,
+    pub op: LoopReduceOp,
+    /// Counted `for x in` / range: the body does not contain the `+ 1` step;
+    /// the chunk worker emits it after each trip (Q6 latch lives in codegen).
+    pub implicit_step: bool,
+    /// Enclosing const-int locals the body reads (inlined into the worker).
+    pub captures: Vec<(String, i64)>,
+    /// Int parameters and non-const int locals passed as extra worker arguments.
+    pub live_captures: Vec<String>,
+    /// Added to the induction variable each trip. Always positive.
+    pub stride: i64,
+    /// Runtime start local. `None` means [`Self::begin`] is the start.
+    pub begin_local: Option<String>,
+    /// Runtime exclusive-end local, before [`Self::end_bias`].
+    pub end_local: Option<String>,
+    /// Added to a runtime end (`1` for `i <= n` / `..=`). Const ends bake this in.
+    pub end_bias: i64,
+}
+
+/// Upper bound on chunks for one counted loop. The joiner runs the first.
+pub const LOOP_PAR_MAX_CHUNKS: i64 = 4;
+
+impl LoopParSite {
+    pub fn is_dynamic(&self) -> bool {
+        self.begin_local.is_some() || self.end_local.is_some()
+    }
+
+    /// Iteration count of a const range. `0` when an endpoint is dynamic.
+    pub fn trip_count(&self) -> i64 {
+        if self.is_dynamic() {
+            return 0;
+        }
+        iteration_count(self.begin, self.end, self.stride).unwrap_or(0)
+    }
+
+    /// 2-way split on the induction lattice. Dynamic sites return `begin`.
+    pub fn midpoint(&self) -> i64 {
+        let half = self.trip_count() / 2;
+        self.begin + half * self.stride
+    }
+
+    /// Exclusive chunk edges, including `begin` and `end`.
+    ///
+    /// `None` for a dynamic range (the split is computed at runtime) or a
+    /// trip count that does not clear `grain`. At most [`LOOP_PAR_MAX_CHUNKS`]
+    /// pieces; each piece except the last has `trips / n` iterations.
+    pub fn chunk_bounds(&self, grain: i64) -> Option<Vec<i64>> {
+        if self.is_dynamic() {
+            return None;
+        }
+        let trips = iteration_count(self.begin, self.end, self.stride)?;
+        let grain = grain.max(1);
+        if trips <= grain {
+            return None;
+        }
+        let n = (trips / grain).clamp(2, LOOP_PAR_MAX_CHUNKS);
+        let base = trips / n;
+        let mut bounds = Vec::with_capacity(n as usize + 1);
+        bounds.push(self.begin);
+        for i in 1..n {
+            bounds.push(self.begin + i * base * self.stride);
+        }
+        bounds.push(self.end);
+        Some(bounds)
+    }
+
+    /// Induction variable after a const loop that actually runs.
+    pub fn final_index(&self) -> i64 {
+        self.begin + self.stride * self.trip_count()
+    }
+}
+
+/// Detected sites keyed by the loop node's source span (codegen's join key).
+pub type LoopParSites = HashMap<(usize, usize), LoopParSite>;
 
 impl HirModule {
     /// Every counted-loop fork site of the module.
@@ -302,8 +408,6 @@ impl Scan<'_> {
             acc: name(acc),
             op,
             implicit_step,
-            index_expr_ptr: 0,
-            reduce_expr_ptr: 0,
             captures: captures.into_iter().collect(),
             live_captures: live.into_iter().collect(),
             stride,

@@ -381,7 +381,7 @@ struct HirPlan {
 /// and the fork-join function `driver` that splits the range over it.
 #[derive(Clone)]
 struct HirParSite {
-    site: crate::typechecking::LoopParSite,
+    site: crate::hir::par::LoopParSite,
     driver: String,
     /// The enclosing body's locals the loop reads, by the site's names.
     outer: HashMap<String, LocalId>,
@@ -396,7 +396,7 @@ struct HirParSite {
 
 /// A parallel-loop site's locals ([`Compiler::hir_par_site`]).
 struct HirParSiteLocals {
-    site: crate::typechecking::LoopParSite,
+    site: crate::hir::par::LoopParSite,
     /// The enclosing body's locals the loop reads, by the site's names.
     outer: HashMap<String, LocalId>,
     /// Those the loop's head reads.
@@ -10401,7 +10401,7 @@ impl Compiler {
     /// when it does not plan: the caller writes its code by hand instead.
     fn hir_par_driver_fn(
         &mut self,
-        site: &crate::typechecking::LoopParSite,
+        site: &crate::hir::par::LoopParSite,
         driver: &str,
         worker: &str,
         (spawn_id, join_id): (usize, usize),
@@ -10436,7 +10436,7 @@ impl Compiler {
     /// when it has more trips than the grain, and otherwise runs here.
     fn hir_par_driver_body(
         &self,
-        site: &crate::typechecking::LoopParSite,
+        site: &crate::hir::par::LoopParSite,
         driver: &str,
         worker: &str,
         (spawn, join): (&str, &str),
@@ -10445,7 +10445,7 @@ impl Compiler {
         use crate::hir::synth::Synth;
         use crate::hir::LocalKind;
         use crate::typechecking::ty as coil_ty;
-        use crate::typechecking::LoopReduceOp;
+        use crate::hir::par::LoopReduceOp;
 
         #[derive(Clone, Copy)]
         enum Bound {

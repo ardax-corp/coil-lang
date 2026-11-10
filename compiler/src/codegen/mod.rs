@@ -542,7 +542,7 @@ pub struct Compiler {
     /// arguments, by name.
     hir_synth_callees: HashMap<String, compiler::SynthCallee>,
     /// Counted loops whose iterations are independent arms, by loop span.
-    loop_par_sites: crate::typechecking::LoopParSites,
+    loop_par_sites: crate::hir::par::LoopParSites,
     /// Chunk workers emitted so far, for `__coil_par_loop_*` naming.
     loop_par_helpers: usize,
     /// Fork-join functions of outlined parallel loops emitted so far, for
@@ -777,7 +777,7 @@ impl Default for Compiler {
             par_workers: HashSet::new(),
             hir_synth_calls: None,
             hir_synth_callees: HashMap::new(),
-            loop_par_sites: crate::typechecking::LoopParSites::new(),
+            loop_par_sites: crate::hir::par::LoopParSites::new(),
             loop_par_helpers: 0,
             loop_par_forks: 0,
             hir_par_tail: None,
@@ -887,7 +887,7 @@ pub(crate) struct ModuleCtx {
     recursive_fns: HashSet<String>,
     par_shapes: HashMap<String, crate::typechecking::ParForkSite>,
     par_workers: HashSet<String>,
-    loop_par_sites: crate::typechecking::LoopParSites,
+    loop_par_sites: crate::hir::par::LoopParSites,
     current_source_file: Option<std::path::PathBuf>,
     source_text: String,
     source_base: (usize, usize),
