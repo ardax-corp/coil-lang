@@ -201,7 +201,9 @@ struct GenericFnSig {
     /// its top (`Vec<Option<T>>`): the shared body and ground code hold
     /// that value differently where it is a niche word, so every ground
     /// call gets its clone, past the clone budget (#2441,
-    /// `docs/internals/layout.md`, "Open enums").
+    /// `docs/internals/layout.md`, "Open enums"). The same for a function
+    /// below the top whose result is a bare type parameter
+    /// (`Vec<unit -> T>`), which no adapter reaches at `T = ()` (#2498).
     split: bool,
 }
 
@@ -406,7 +408,10 @@ fn collect_generic_functions(
                         .into_iter()
                         .flatten()
                         .chain(checker.fn_return_ty(name))
-                        .any(|ty| crate::layout::nested_open_enum(&ty, true, &mut |_| true));
+                        .any(|ty| {
+                            crate::layout::nested_open_enum(&ty, true, &mut |_| true)
+                                || crate::layout::nested_fn_var_result(&ty, true, &mut |_| true)
+                        });
                     sigs.insert(name.to_string(), sig.clone());
                     if !module.is_empty() {
                         sigs.insert(format!("{module}::{name}"), sig);

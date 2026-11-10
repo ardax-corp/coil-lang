@@ -52,6 +52,20 @@ The value runs for its effect first; a read of such a place runs the
 base and yields nothing. So `()` is a type argument like any one-word
 type, in a clone and in a shared body (#2489).
 
+A ground `-> ()` function value a shared body calls where its result is
+a bare type parameter (`fn() -> T` at `T = ()`) gets the adapter that
+returns the empty tuple object (`HirFnRet::Unit`), as a niche result gets
+the one that boxes it: the body stores or passes the word it gets. A
+function value, a lambda and a closure passed as an argument all take
+it. A function below the top (an element of `Vec<unit -> T>`, a tuple
+item, a type argument) has no adapter, so such a signature takes a clone
+for every ground call past the clone budget, as a nested open enum does
+below, and a call still reaching the shared body at `T = ()` is refused
+(`layout::nested_fn_var_result`, #2498). Not covered: a function in a
+generic class's field or enum payload typed by its parameter
+(`f: unit -> T`), and a dictionary method whose result is the trait's
+type parameter (#2541).
+
 **GC.** A niche word is a pointer root: root marking strips bit 0 before
 `find_object_by_addr`, and `values_eq` compares the stripped words. A
 two-slot pair is two scalars, which are no roots.

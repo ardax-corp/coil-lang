@@ -537,3 +537,33 @@ pub struct CallAbi {
     /// Tag / second product word. `None` is the one-word ABI.
     pub ret_hi: Option<MirTy>,
 }
+
+/// Whether `unit` holds for the bare type variable a function below the
+/// top of a parameter or result of declared type `ty` returns: an element
+/// of `Vec<unit -> T>`, a tuple item, a type argument, a payload of an enum.
+/// A ground `-> ()` function returns nothing a caller reads, while a shared
+/// body keeps the word its call gives as a `T`, and a `()` stored or passed
+/// is the empty tuple object. Only a function that is itself a top (a
+/// function argument) gets an adapter that returns that object (#2498);
+/// `unit` says whether ground code has `()` for the variable.
+pub fn nested_fn_var_result(ty: &Ty, top: bool, unit: &mut dyn FnMut(&Ty) -> bool) -> bool {
+    let ty = crate::typechecking::ty::strip_readonly(ty);
+    if !ty.has_var() {
+        return false;
+    }
+    if let Ty::Fun(param, ret) = ty {
+        if !top {
+            let mut result = ret.as_ref();
+            while let Ty::Fun(_, next) = result {
+                result = next;
+            }
+            if matches!(crate::typechecking::ty::strip_readonly(result), Ty::Var(_)) && unit(result) {
+                return true;
+            }
+        }
+        return nested_fn_var_result(param, top, unit) || nested_fn_var_result(ret, top, unit);
+    }
+    let mut found = false;
+    ty.for_each_child(|child| found = found || nested_fn_var_result(child, false, unit));
+    found
+}
