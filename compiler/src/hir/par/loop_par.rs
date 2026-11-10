@@ -306,9 +306,6 @@ impl Scan<'_> {
     fn walk(&mut self, id: HirId, consts: &mut ConstLocals, ints: &mut IntLocals) {
         let body = self.body;
         let e = body.expr(id);
-        if e.flags.contains(HirFlags::IF_LET) {
-            return;
-        }
         match &e.kind {
             // A nested block's own bindings do not outlive it.
             HirKind::Block { stmts, tail } => {
@@ -333,8 +330,10 @@ impl Scan<'_> {
                 }
             }
             HirKind::Loop { body: loop_body } => {
-                // A `while let` is no counted loop, and nothing in it is.
-                let Some((checks, cond, then)) = query::while_parts(body, *loop_body) else { return };
+                // A `while let` is no counted loop; one inside it may be.
+                let Some((checks, cond, then)) = query::while_parts(body, *loop_body) else {
+                    return self.walk_loop_body(id, *loop_body, consts, ints);
+                };
                 // A `while` runs its checks ahead of each test, the last
                 // one too, and once when it runs no trips: no chunk
                 // worker's loop does that, so a checked `while` is no site.

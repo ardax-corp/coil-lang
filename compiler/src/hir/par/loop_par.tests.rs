@@ -1119,3 +1119,11 @@ fn main() { return; }
     );
     assert!(sites.is_empty(), "{sites:?}");
 }
+
+/// An `if let` is a `match`, and a `while let` a loop that is not
+/// counted: a counted loop inside either is a site.
+#[test]
+fn a_loop_under_if_let_or_while_let_is_a_site() {
+    let ends = reach();
+    assert!(ends.contains(&103) && ends.contains(&106), "{ends:?}");
+}
