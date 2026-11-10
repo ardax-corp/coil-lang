@@ -81,6 +81,9 @@ pub(crate) struct Body {
     pub(crate) program: *const Program,
     /// Entry id (`u32::MAX`: none).
     pub(crate) pc: u32,
+    /// The leading parameters it reads ([`used_params`]): a call of fewer
+    /// words is refused, as the native driver refuses one.
+    pub(crate) reads: u32,
     /// Its cleanup pad, run as a body of its own.
     pub(crate) pad: Option<Box<Body>>,
     /// Why it cannot run: a call goes through the host.
@@ -248,9 +251,10 @@ fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, sites: &mu
     let code = pc.unwrap_or(u32::MAX);
     let pad = cleanup.map(|c| Box::new(build_body(*c, program, pc, sites)));
     let is_drop = mir.name.ends_with("::drop") && mir.params.len() == 1;
+    let reads = used_params(&mir) as u32;
     let (op_sites, entry_site) = if pc.is_some() { body_sites(&mir, code, sites) } else { (mir.blocks.iter().map(|b| vec![machine::native::NO_SITE as u32; b.insts.len() + 1]).collect(), machine::native::NO_SITE as u32) };
     mir.shrink_to_fit();
-    Body { mir, program, pc: code, pad, refused, is_drop, sites: op_sites, entry_site, exec: OnceLock::new(), roots: OnceLock::new(), ops: None }
+    Body { mir, program, pc: code, reads, pad, refused, is_drop, sites: op_sites, entry_site, exec: OnceLock::new(), roots: OnceLock::new(), ops: None }
 }
 
 /// `COIL_MIR_ARCHIVE_CHECK`: what comes back from the archive format, which
@@ -314,7 +318,7 @@ pub(crate) fn prepare_with(bodies: Vec<NativeBody>, body_ids: &HashMap<String, u
             arity: b.mir.params.len() as u16,
             // Any call may reach a host call that waits.
             suspends: true,
-            reads: used_params(&b.mir) as u16,
+            reads: b.reads as u16,
             ret_words: if b.mir.ret_hi_ty.is_some() { 2 } else { 1 },
             generator: is_generator(&b.mir),
             cleanup: b.pad.is_some(),
