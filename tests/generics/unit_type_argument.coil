@@ -2,7 +2,6 @@
 // `T = ()` works wherever a one-word type does. A `()` is nothing to read in
 // a body that knows the type, and the empty tuple object where a word is
 // stored or passed (a shared body's bare `T`, an element, a field, a payload).
-// @xfail clone-budget-0 #2511 E0801 (callee-generic): a generic class or nested-payload enum result of a shared body
 use tests::assert;
 use string::format;
 use gc::collect;
