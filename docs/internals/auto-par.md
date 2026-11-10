@@ -350,6 +350,7 @@ Still refuses (and why):
 | `i = i - 1` countdown | the split walks a positive stride |
 | `break` / heap writes in the body | independence unproven |
 | `if` arms that use different folds | one associative operator per loop |
+| an `invariant` / `decreases` that reads a local the loop writes (the accumulator, a `while` index) | the clause is about the sequential state at that iteration; a chunk's fold starts at the identity (#2412). A clause over values the loop leaves alone is the same test in every chunk and stays |
 | array / dict / coro `for` | sendability (C1 leftover), not F2 |
 | a loop in a trait's method (an instance's or a default), under `if let` / `while let`, or bounded by a local `const` | not looked at: the reach of the AST walk the HIR one replaced, kept as it was |
 

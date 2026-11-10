@@ -97,6 +97,11 @@ time, or the panic says `(went negative)` / `(did not decrease)`. A `for`
 loop takes no `decreases`: it ends when its items do. Loop clauses are typed
 in the scope around the loop, so a `for` binding is not visible in them.
 
+A loop whose clause reads a local the loop writes runs sequentially: auto-par
+(`Scan::checks_follow_the_loop` in `hir/par/loop_par.rs`) does not chunk it,
+since a chunk worker has only its own partial of the accumulator. A clause
+over values the loop leaves alone is checked in every chunk.
+
 ## Class invariants
 
 `class C invariant e { … }` is typed with `self: C` and the class's private
