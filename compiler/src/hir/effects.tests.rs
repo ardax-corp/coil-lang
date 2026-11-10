@@ -225,6 +225,35 @@ fn noisy(int n) -> int
     assert!(!names.contains("noisy"), "{names:?}");
 }
 
+/// An operator that is not one of the scalar lanes is still built in when
+/// both operands are: element-wise arithmetic, `==` on an `Option`. On a
+/// class or a type parameter it runs a trait impl.
+#[test]
+fn operators_on_built_in_operands_are_pure() {
+    let src = "
+class Money {
+    pub cents: int,
+}
+impl Lt for Money {
+    pub fn lt(Money a, Money b) -> bool { return a.cents < b.cents; }
+}
+fn sum2([int; 2] a, [int; 2] b) -> [int; 2] { return a + b; }
+fn scaled(Vec<float> xs, float k) -> Vec<float> { return xs * k; }
+fn empty(Option<int> o) -> bool { return o == Option::None; }
+fn same((int, string) a, (int, string) b) -> bool { return a == b; }
+fn less(Money a, Money b) -> bool { return a < b; }
+fn less_of<T: Lt>(T a, T b) -> bool { return a < b; }
+fn has(Option<Money> o, Money m) -> bool { return o == Option::Some(m); }";
+    let (m, out) = summaries(src);
+    let names = pure_names(&m, "", &out, &HashSet::new());
+    for name in ["sum2", "scaled", "empty", "same"] {
+        assert!(names.contains(name), "`{name}`: {names:?}");
+    }
+    for name in ["less", "less_of", "has"] {
+        assert!(!names.contains(name), "`{name}`: {names:?}");
+    }
+}
+
 /// A trait impl's method is listed under its own name, and has no vote on
 /// the bare name.
 #[test]
