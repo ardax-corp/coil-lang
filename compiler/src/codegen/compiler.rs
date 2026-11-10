@@ -1048,18 +1048,33 @@ impl Compiler {
         for (bound, ty) in scheme.bounds.iter().zip(instance_args) {
             inst.insert(*bound, ty.clone());
         }
-        let layout_of = |ty: &Ty| -> Option<ValueLayout> {
+        // The instance method's own signature. Where the trait spells the
+        // enum through an associated type (`Option<Item>`), the instance's
+        // arguments leave it open and its layout would read as the boxed
+        // one; the method takes and returns it at its own closed type, a
+        // niche word for `Option<string>` (#2478).
+        let own = (!is_default)
+            .then(|| self.checker.generics().find_instance_relaxed(class, instance_args))
+            .flatten()
+            .and_then(|instance| instance.method_fqns.get(method))
+            .filter(|fqn| !Self::is_default_method_fqn(class, method, fqn));
+        let own_params = own.and_then(|fqn| self.checker.fn_param_tys(fqn)).unwrap_or_default();
+        let own_ret = own.and_then(|fqn| self.checker.fn_return_ty(fqn));
+        let layout_of = |ty: &Ty, own: Option<&Ty>| -> Option<ValueLayout> {
             let generic = self.generic_enum_layout(ty)?;
-            Some(if is_default {
-                generic
-            } else {
-                self.value_layout(&crate::typechecking::subst::apply_ty(&inst, ty))
+            if is_default {
+                return Some(generic);
+            }
+            let applied = crate::typechecking::subst::apply_ty(&inst, ty);
+            Some(match own {
+                Some(own) if !crate::layout::ty_is_closed(&applied) && crate::layout::ty_is_closed(own) => self.value_layout(own),
+                _ => self.value_layout(&applied),
             })
         };
         let (params, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
         let sig = BoundarySig {
-            params: params.iter().map(layout_of).collect(),
-            ret: layout_of(&ret),
+            params: params.iter().enumerate().map(|(i, ty)| layout_of(ty, own_params.get(i))).collect(),
+            ret: layout_of(&ret, own_ret.as_ref()),
         };
         (sig.ret.is_some() || sig.params.iter().any(Option::is_some)).then_some(sig)
     }
@@ -2095,7 +2110,18 @@ impl Compiler {
             Vec::new()
         };
         let nparams = sig.as_ref().map_or(unbox.len(), |s| s.params.len());
-        let ret = crate::typechecking::subst::apply_ty(&inst, &open_ret);
+        // The instance's side of an `Option` / `Result` the trait spells
+        // through an associated type (`Option<Item>`, which the instance's
+        // arguments leave open): the method's own declared type (#2478).
+        let own_side = |applied: Ty, own: Option<Ty>| match own {
+            Some(own) if !crate::layout::ty_is_closed(&applied) && crate::layout::ty_is_closed(&own) => own,
+            _ => applied,
+        };
+        let own_params = self.checker.fn_param_tys(fqn).unwrap_or_default();
+        let ret = own_side(
+            crate::typechecking::subst::apply_ty(&inst, &open_ret),
+            sig.as_ref().and_then(|s| s.ret).and_then(|_| self.checker.fn_return_ty(fqn)),
+        );
         // Its result, boxed back from the layout the method returns it in.
         let ret_from = sig.as_ref().and_then(|s| s.ret).filter(|&l| l != ValueLayout::Boxed);
         // A bare type parameter's niche `Option` / `Result` result goes
@@ -2122,8 +2148,9 @@ impl Compiler {
         let mut args = Vec::with_capacity(nparams + 1);
         for slot in 0..nparams {
             let open = open.get(slot).cloned().unwrap_or_else(crate::typechecking::ty::int);
-            let own = crate::typechecking::subst::apply_ty(&inst, &open);
-            let target = sig.as_ref().and_then(|s| s.params.get(slot).copied().flatten()).filter(|&l| l != ValueLayout::Boxed);
+            let planned = sig.as_ref().and_then(|s| s.params.get(slot).copied().flatten());
+            let own = own_side(crate::typechecking::subst::apply_ty(&inst, &open), planned.and_then(|_| own_params.get(slot).cloned()));
+            let target = planned.filter(|&l| l != ValueLayout::Boxed);
             let tag = unbox.get(slot).cloned().flatten().and_then(|ty| Some((Self::ty_to_value_tag(&ty)?, ty)));
             // A dictionary passes an `Option` / `Result` boxed, and a bare
             // type parameter as its word: each as the method takes it.
