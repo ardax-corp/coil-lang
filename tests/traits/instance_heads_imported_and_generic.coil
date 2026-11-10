@@ -1,0 +1,161 @@
+// One trait implemented for an imported class and for a generic class of this
+// module: each call takes the impl whose head is the receiver's type (#2480).
+// The same for an imported generic class and `()` beside other heads, in
+// either order of declaration, and for a call written before the impls.
+use tests::assert;
+use inst_head_parts::{Cell, Wrap};
+
+trait Mine<T> {
+    fn mine(T x) -> int {}
+}
+
+// Called before any impl of `Mine` is declared.
+fn early_cell(Cell c) -> int {
+    return Mine::mine(c) + c.mine();
+}
+
+fn early_shelf(Shelf<string> s) -> int {
+    return Mine::mine(s) + s.mine();
+}
+
+fn early_unit() -> int {
+    return Mine::mine(());
+}
+
+impl Mine for Cell {
+    pub fn mine(Cell x) -> int {
+        return x.n + 1;
+    }
+}
+
+class Shelf<T> {
+    pub item: T,
+    pub n: int,
+}
+
+impl Mine for Shelf<T> {
+    pub fn mine(Shelf<T> x) -> int {
+        return x.n;
+    }
+}
+
+class Crate<T> {
+    pub item: T,
+    pub n: int,
+}
+
+impl Mine for Crate<T> {
+    pub fn mine(Crate<T> x) -> int {
+        return x.n * 2;
+    }
+}
+
+impl Mine for Wrap<T> {
+    pub fn mine(Wrap<T> x) -> int {
+        return x.n * 3;
+    }
+}
+
+impl Mine for () {
+    pub fn mine(() x) -> int {
+        return 7;
+    }
+}
+
+impl Mine for int {
+    pub fn mine(int x) -> int {
+        return x + 100;
+    }
+}
+
+class Here {
+    pub n: int,
+}
+
+impl Mine for Here {
+    pub fn mine(Here x) -> int {
+        return x.n + 1000;
+    }
+}
+
+// The generic head first, the imported class after it.
+trait Yours<T> {
+    fn yours(T x) -> int {}
+}
+
+impl Yours for Shelf<T> {
+    pub fn yours(Shelf<T> x) -> int {
+        return x.n + 10;
+    }
+}
+
+impl Yours for Cell {
+    pub fn yours(Cell x) -> int {
+        return x.n + 20;
+    }
+}
+
+impl Yours for Wrap<T> {
+    pub fn yours(Wrap<T> x) -> int {
+        return x.n + 30;
+    }
+}
+
+fn total<T: Mine>(T x) -> int {
+    return x.mine() + Mine::mine(x);
+}
+
+test("a generic class's impl beside an imported class's") {
+    let s = new Shelf("a", 3);
+    assert!(Mine::mine(s) == 3);
+    assert!(s.mine() == 3);
+    let t = new Shelf(1.5, 4);
+    assert!(Mine::mine(t) == 4);
+    assert!(t.mine() == 4);
+    let c = new Cell(4);
+    assert!(Mine::mine(c) == 5);
+    assert!(c.mine() == 5);
+}
+
+test("every head of the trait takes its own impl") {
+    let k = new Crate(true, 5);
+    assert!(Mine::mine(k) == 10);
+    assert!(k.mine() == 10);
+    let w = new Wrap("w", 2);
+    assert!(Mine::mine(w) == 6);
+    assert!(w.mine() == 6);
+    assert!(Mine::mine(()) == 7);
+    assert!(().mine() == 7);
+    assert!(Mine::mine(1) == 101);
+    assert!(2.mine() == 102);
+    let h = new Here(1);
+    assert!(Mine::mine(h) == 1001);
+    assert!(h.mine() == 1001);
+}
+
+test("the generic head declared first") {
+    let s = new Shelf("a", 3);
+    assert!(Yours::yours(s) == 13);
+    assert!(s.yours() == 13);
+    let c = new Cell(4);
+    assert!(Yours::yours(c) == 24);
+    assert!(c.yours() == 24);
+    let w = new Wrap(0, 5);
+    assert!(Yours::yours(w) == 35);
+    assert!(w.yours() == 35);
+}
+
+test("a bound takes each head's instance") {
+    assert!(total(new Shelf("a", 3)) == 6);
+    assert!(total(new Cell(4)) == 10);
+    assert!(total(new Wrap("w", 2)) == 12);
+    assert!(total(new Crate(1, 5)) == 20);
+    assert!(total(()) == 14);
+    assert!(total(3) == 206);
+}
+
+test("a call written before the impls") {
+    assert!(early_cell(new Cell(1)) == 4);
+    assert!(early_shelf(new Shelf("s", 6)) == 12);
+    assert!(early_unit() == 7);
+}

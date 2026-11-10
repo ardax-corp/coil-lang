@@ -210,6 +210,7 @@ impl Checker {
             qualified_trait_calls_by_span: HashMap::new(),
             qualified_value_calls_by_span: HashMap::new(),
             bare_patterns_by_span: HashMap::new(),
+            impl_stubs: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
             pending_exhaustive: Vec::new(),
             open_operands: Vec::new(),
@@ -1870,7 +1871,9 @@ impl Checker {
         self.pre_import_classes(ast);
         // Forward-declare free fns so earlier `impl` methods can call them.
         self.pre_register_free_functions(ast);
-        // Trait instances before the main walk so later `impl` still feeds `for x in`.
+        // Trait instances before the main walk so later `impl` still feeds
+        // `for x in`. Again, now that imported classes are known: a head
+        // naming one is keyed as the real pass keys it.
         self.pre_register_typeclass_impls(ast);
 
         let ty = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.infer(ast))) {
@@ -15225,6 +15228,8 @@ impl Checker {
         for child in children {
             Self::collect_local_type_names(child, &mut local_types);
         }
+        // How many impls of each trait and span this run has seen.
+        let mut seen: HashMap<(String, String, usize, usize), usize> = HashMap::new();
         for child in children {
             let stmt = Self::pre_pass_unwrap_stmt(child);
             let Expression::TypeClassImpl {
@@ -15237,6 +15242,20 @@ impl Checker {
                 continue;
             };
             let class = self.impl_trait_key(class);
+            let span = stmt.0.into_range();
+            let stub_key = (self.current_module.clone(), class.to_string(), span.start, span.end);
+            let nth = {
+                let n = seen.entry(stub_key.clone()).or_default();
+                *n += 1;
+                *n - 1
+            };
+            // The stub an earlier run registered for this impl is brought
+            // up to date in place.
+            let earlier = self
+                .impl_stubs
+                .get(&stub_key)
+                .and_then(|stubs| stubs.get(nth).copied())
+                .filter(|&idx| self.generics.instances[idx].range.start == usize::MAX);
             let head_params: Vec<(String, TyVarId)> = Self::instance_head_params(args, type_params)
                 .into_iter()
                 .map(|n| (n.to_string(), self.counter.fresh()))
@@ -15260,10 +15279,11 @@ impl Checker {
                 .iter()
                 .map(|a| self.ast_instance_head_ty_with(a, &param_map, &local_types))
                 .collect();
-            if self
-                .generics
-                .find_overlapping_instance(class, &arg_tys)
-                .is_some()
+            if earlier.is_none()
+                && self
+                    .generics
+                    .find_overlapping_instance(class, &arg_tys)
+                    .is_some()
             {
                 continue;
             }
@@ -15305,7 +15325,7 @@ impl Checker {
                     _ => {}
                 }
             }
-            self.generics.instances.push(InstanceDef {
+            let stub = InstanceDef {
                 class: (*class).to_string(),
                 defined_module: self.current_module.clone(),
                 // Sentinel until `infer_typeclass_impl` claims this stub.
@@ -15314,7 +15334,14 @@ impl Checker {
                 method_fqns,
                 assoc_tys,
                 context,
-            });
+            };
+            match earlier {
+                Some(idx) => self.generics.instances[idx] = stub,
+                None => {
+                    self.impl_stubs.entry(stub_key).or_default().push(self.generics.instances.len());
+                    self.generics.instances.push(stub);
+                }
+            }
         }
         self.next_id_idx = saved_idx;
         self.messages.truncate(msg_len);
@@ -15733,7 +15760,12 @@ impl Checker {
                 if let Some(key) = self.pre_pass_local_head(name, local_types) {
                     return Ty::Con(key);
                 }
-                Ty::Con(Self::canonical_ctor_name(name))
+                let canon = Self::canonical_ctor_name(name);
+                if self.generics.generic_type_ctors.contains_key(&canon) {
+                    return Ty::Con(canon);
+                }
+                // An imported class, once the imports are known.
+                Ty::Con(self.resolve_class_key(name).unwrap_or(canon))
             }
             Expression::TypeApp { name, args } => {
                 let head = match name.to_ascii_lowercase().as_str() {
@@ -15741,6 +15773,7 @@ impl Checker {
                     "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
                     _ => Ty::Con(
                         self.pre_pass_local_head(name, local_types)
+                            .or_else(|| self.resolve_class_key(name))
                             .unwrap_or_else(|| (*name).to_string()),
                     ),
                 };
@@ -15762,6 +15795,13 @@ impl Checker {
                     .collect();
                 Ty::App(Box::new(head), arg_tys)
             }
+            // `impl Trait for ()` / `for (A, B)`.
+            Expression::Tuple(items) => crate::typechecking::ty::tuple(
+                items
+                    .iter()
+                    .map(|a| self.ast_instance_head_ty_with(a, params, local_types))
+                    .collect(),
+            ),
             _ => Ty::Con("unknown".into()),
         }
     }
