@@ -1,0 +1,21 @@
+// Helper module for tests/traits/instance_heads_imported_enums.coil (#2504):
+// a trait of this module implemented for an enum of `inst_head_shades`, and
+// called here and from the module that imports this one.
+use inst_head_shades::Shade;
+
+trait Glow<T> {
+    fn glow(T x) -> int {}
+}
+
+impl Glow for Shade {
+    pub fn glow(Shade x) -> int {
+        return match x {
+            Shade::Dark => 1,
+            Shade::Light(n) => n * 10,
+        };
+    }
+}
+
+fn glow_twice(Shade s) -> int {
+    return s.glow() + Glow::glow(s);
+}

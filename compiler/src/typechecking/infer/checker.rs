@@ -15887,8 +15887,8 @@ impl Checker {
                 if self.generics.generic_type_ctors.contains_key(&canon) {
                     return Ty::Con(canon);
                 }
-                // An imported class, once the imports are known.
-                Ty::Con(self.resolve_class_key(name).unwrap_or(canon))
+                // An imported class or enum, once the imports are known.
+                Ty::Con(self.resolve_instance_head_key(name).unwrap_or(canon))
             }
             Expression::TypeApp { name, args } => {
                 let head = match name.to_ascii_lowercase().as_str() {
@@ -15896,7 +15896,7 @@ impl Checker {
                     "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
                     _ => Ty::Con(
                         self.pre_pass_local_head(name, local_types)
-                            .or_else(|| self.resolve_class_key(name))
+                            .or_else(|| self.resolve_instance_head_key(name))
                             .unwrap_or_else(|| (*name).to_string()),
                     ),
                 };
@@ -20099,12 +20099,20 @@ impl Checker {
         }
     }
 
-    /// As [`Self::resolve_class_key`], also for this module's own enums:
-    /// the key an instance head names (`Show__m::Mode__show`, #1223).
+    /// As [`Self::resolve_class_key`], also for enums: this module's own
+    /// and another module's under its `use` name. The key an instance head
+    /// names (`Show__m::Mode__show`, #1223; `Mine__shades::Shade__mine`,
+    /// #2504).
     pub fn resolve_instance_head_key(&self, name: &str) -> Option<String> {
         self.resolve_class_key(name).or_else(|| {
             let qualified = self.qualify_module_name(name);
-            (qualified != name && self.enums.contains_key(&qualified)).then_some(qualified)
+            if qualified != name && self.enums.contains_key(&qualified) {
+                return Some(qualified);
+            }
+            self.imported_enum_keys
+                .get(name)
+                .filter(|key| self.enums.contains_key(key.as_str()))
+                .cloned()
         })
     }
 
