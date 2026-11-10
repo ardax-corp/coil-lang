@@ -52,6 +52,8 @@ Instance methods keep the explicit receiver parameter every trait method has (`f
   built as HIR, its call carrying the plan (`SynthCallee::dicts`).
 - **Allocation.** A ground dictionary is built once into a static ([generic-specialization.md](generic-specialization.md)); an open goal's dictionary is still built at each use.
 
+- **Superclass slots (#2476).** A subclass's dictionary (`Ord<X>`, a user `trait Ordered<T: Equal>`) is flat: its methods, each superclass's, then *its own* instance's context. A bound call passes the whole dictionary to the method it takes from a slot, so a superclass method that reads its dictionary (a default body calling a sibling by its own trait's slot number, a bounded instance's method unpacking its context) would read the wrong slots. Such a slot therefore only ever holds the method's per-type clone, which takes no dictionary: `plan_instance_dict_steps` asks for it past `--clone-budget` (`instance_clone_at`, `needed`). Where there is no clone (an open goal such as `Ord<Box<T>>` built inside a shared body, a method on its own clone chain) the dictionary is not built and the compile fails with E0801 (`superclass_dict_unbuilt`). Lifting that needs the dictionary to carry its superclass dictionaries: the design is in #2476.
+
 ## Derives (#552)
 
 Built-in and user derives on generic types expand to bounded instances: each
