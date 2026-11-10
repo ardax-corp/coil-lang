@@ -1,0 +1,205 @@
+// A shared generic body builds a subclass's dictionary at an open type
+// (`Ord<Box<T>>`, coil-lang#2476): a superclass method that reads its own
+// instance's dictionary (`Lt for Box<T: Ord + Eq>` its context, `Eq`'s
+// default `ne` its sibling) is reached through a forwarder to the
+// superclass's dictionary, which the subclass's carries. Each `deep`
+// instantiates itself at a growing type, so the inner calls take the
+// shared body.
+// Here past the clone budget too, where every bounded call builds its
+// dictionary in shared code.
+// @flags --clone-budget 0
+use tests::assert;
+
+class P {
+    pub n: int,
+}
+
+impl Eq for P {
+    fn eq(P a, P b) -> bool {
+        return a.n == b.n;
+    }
+}
+
+impl Lt for P {
+    fn lt(P a, P b) -> bool {
+        return a.n < b.n;
+    }
+}
+
+impl Le for P {
+    fn le(P a, P b) -> bool {
+        return a.n <= b.n;
+    }
+}
+
+impl Gt for P {
+    fn gt(P a, P b) -> bool {
+        return a.n > b.n;
+    }
+}
+
+impl Ge for P {
+    fn ge(P a, P b) -> bool {
+        return a.n >= b.n;
+    }
+}
+
+impl Ord for P {
+}
+
+#[derive(Eq, Ord)]
+class Box<T> {
+    pub item: T,
+}
+
+// A user supertrait with a default body, and bounded generic instances.
+trait Equal<T> {
+    fn same(T x, T y) -> bool {}
+
+    fn other(T x, T y) -> bool {
+        return !x.same(y);
+    }
+}
+
+trait Ordered<T: Equal> {
+    fn before(T x, T y) -> bool {}
+
+    fn after(T x, T y) -> bool {
+        return !x.before(y) && x.other(y);
+    }
+}
+
+impl Equal for int {
+    fn same(int x, int y) -> bool {
+        return x == y;
+    }
+}
+
+impl Ordered for int {
+    fn before(int x, int y) -> bool {
+        return x < y;
+    }
+}
+
+class Cell<T> {
+    pub v: T,
+}
+
+impl Equal for Cell<T: Equal> {
+    fn same(Cell<T> x, Cell<T> y) -> bool {
+        return x.v.same(y.v);
+    }
+}
+
+impl Ordered for Cell<T: Ordered> {
+    fn before(Cell<T> x, Cell<T> y) -> bool {
+        return x.v.before(y.v);
+    }
+}
+
+// 0: `<`, 1: `>=`, 2: `==`, 3: `!=`, 4: `<=`, 5: `>`.
+fn deep<T: Ord + Eq>(T a, T b, int n, int op) -> bool {
+    if n == 0 {
+        if op == 0 {
+            return a < b;
+        }
+        if op == 1 {
+            return a >= b;
+        }
+        if op == 2 {
+            return a == b;
+        }
+        if op == 3 {
+            return a != b;
+        }
+        if op == 4 {
+            return a <= b;
+        }
+        return a > b;
+    }
+    return deeper(a, b, n - 1, op);
+}
+
+fn deeper<T: Ord + Eq>(T a, T b, int n, int op) -> bool {
+    return deep(new Box(a), new Box(b), n, op);
+}
+
+// `Eq` taken from the `Ord` bound alone.
+fn deep_ord<T: Ord>(T a, T b, int n, bool differ) -> bool {
+    if n == 0 {
+        if differ {
+            return a != b;
+        }
+        return a == b;
+    }
+    return deeper_ord(a, b, n - 1, differ);
+}
+
+fn deeper_ord<T: Ord>(T a, T b, int n, bool differ) -> bool {
+    return deep_ord(new Box(a), new Box(b), n, differ);
+}
+
+// 0: `before`, 1: `other`, 2: `same`, 3: `after`.
+fn nest<T: Ordered>(T a, T b, int n, int op) -> bool {
+    if n == 0 {
+        if op == 0 {
+            return a.before(b);
+        }
+        if op == 1 {
+            return a.other(b);
+        }
+        if op == 2 {
+            return Equal::same(a, b);
+        }
+        return a.after(b);
+    }
+    return nester(a, b, n - 1, op);
+}
+
+fn nester<T: Ordered>(T a, T b, int n, int op) -> bool {
+    return nest(new Cell(a), new Cell(b), n, op);
+}
+
+test("a derived Ord of a generic class at an open type") {
+    let n = 0;
+    while n < 4 {
+        assert!(deep(1, 2, n, 0) && !deep(2, 1, n, 0) && !deep(2, 2, n, 0));
+        assert!(deep(2, 1, n, 1) && deep(2, 2, n, 1) && !deep(1, 2, n, 1));
+        assert!(deep(1, 2, n, 4) && deep(2, 2, n, 4) && !deep(2, 1, n, 4));
+        assert!(deep(2, 1, n, 5) && !deep(2, 2, n, 5));
+        n = n + 1;
+    }
+}
+
+test("the superclass's eq and its default ne") {
+    let n = 0;
+    while n < 4 {
+        assert!(deep(2, 2, n, 2) && !deep(1, 2, n, 2));
+        assert!(deep(1, 2, n, 3) && !deep(2, 2, n, 3));
+        assert!(deep("a", "a", n, 2) && deep("a", "b", n, 3) && deep("a", "b", n, 0));
+        assert!(deep(new P(1), new P(2), n, 3) && !deep(new P(2), new P(2), n, 3));
+        assert!(deep(new P(1), new P(2), n, 0) && deep(new P(2), new P(2), n, 1));
+        n = n + 1;
+    }
+}
+
+test("Eq from an Ord bound alone") {
+    let n = 0;
+    while n < 4 {
+        assert!(deep_ord(3, 3, n, false) && !deep_ord(3, 4, n, false));
+        assert!(deep_ord(3, 4, n, true) && !deep_ord(3, 3, n, true));
+        assert!(deep_ord(new P(3), new P(4), n, true) && deep_ord(new P(3), new P(3), n, false));
+        n = n + 1;
+    }
+}
+
+test("a user supertrait's methods and default bodies") {
+    let n = 0;
+    while n < 4 {
+        assert!(nest(1, 2, n, 0) && !nest(2, 1, n, 0));
+        assert!(nest(1, 2, n, 1) && !nest(2, 2, n, 1));
+        assert!(nest(2, 2, n, 2) && !nest(1, 2, n, 2));
+        assert!(nest(2, 1, n, 3) && !nest(1, 2, n, 3) && !nest(2, 2, n, 3));
+        n = n + 1;
+    }
+}
