@@ -685,7 +685,9 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
                 Expression::QualifiedAccess { owner, member } => {
                     facts.callees.insert(format!("{owner}::{member}"));
                 }
-                Expression::Access(recv, member) => {
+                // `(recv.field)(..)` is no method call: it calls whatever
+                // function the field holds (#2472).
+                Expression::Access(recv, member) if matches!(name.1.as_ref(), Expression::Access(..)) => {
                     facts
                         .method_calls
                         .push(((recv.0.start, recv.0.end), (*member).to_string()));
@@ -1540,6 +1542,32 @@ fn main() { return; }
         assert!(!side.name_is_pure("loud"), "IO method");
         // Same method name on another class: the receiver type decides.
         assert!(!side.name_is_pure("other"));
+    }
+
+    /// `(b.f)(1)` calls the function the field `f` holds, whatever a method
+    /// `f` of the class does (#2472).
+    #[test]
+    fn a_parenthesized_field_callee_is_no_method_call() {
+        use crate::typechecking::infer::Checker;
+
+        let ast = parse_ast(
+            r#"
+class Both {
+    pub f: fn(int) -> int,
+}
+impl Both {
+    pub fn f(int x) -> int { return x + 100; }
+}
+fn via_method(Both b) -> int { return b.f(1); }
+fn via_field(Both b) -> int { return (b.f)(1); }
+fn main() { return; }
+"#,
+        );
+        let mut c = Checker::new();
+        let _ = c.check_program(&ast);
+        let side = Checked::of(&c, &ast);
+        assert!(side.name_is_pure("via_method"), "the pure method");
+        assert!(!side.name_is_pure("via_field"), "an unknown function value");
     }
 
     /// `if let` bodies used to be skipped, hiding IO from purity.

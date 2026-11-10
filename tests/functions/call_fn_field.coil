@@ -30,12 +30,14 @@ class Slot<T> {
     pub v: T,
 }
 
-impl Slot<T> {
-    pub fn run() -> T {
-        return (self.f)(self.v);
-    }
+// A generic class whose function field does not mention its parameter.
+class Tagged<T> {
+    pub f: fn(int) -> int,
+    pub tag: T,
+}
 
-    pub fn run_on(T x) -> T {
+impl Tagged<T> {
+    pub fn apply(int x) -> int {
         return (self.f)(x);
     }
 }
@@ -120,8 +122,8 @@ fn wide() -> Wide {
     return new Wide(half, split, check, name, nothing, seven, add, adder);
 }
 
-fn run_slot<T>(Slot<T> s, T x) -> T {
-    return (s.f)(x);
+fn apply_tagged<T>(Tagged<T> t, int x) -> int {
+    return (t.f)(x);
 }
 
 fn make_adder(int n) -> Op {
@@ -190,18 +192,29 @@ test("a field holding a closure with captures") {
 }
 
 test("a generic class") {
+    // The field's type is over the class's parameter: called where the
+    // instance is ground.
     let a = new Slot(inc, 1);
     assert!((a.f)(a.v) == 2);
-    assert!(a.run() == 2);
-    assert!(a.run_on(9) == 10);
+    assert!((a.f)((a.f)(40)) == 42);
     let s = new Slot(shout, "hi");
     assert!((s.f)("yo") == "yo!");
-    assert!(s.run() == "hi!");
-    assert!(run_slot(a, 4) == 5);
-    assert!(run_slot(s, "go") == "go!");
+    assert!((s.f)(s.v) == "hi!");
     let p = new Slot(fn (float x) => x * 2.0, 1.5);
-    assert!(p.run() == 3.0);
-    assert!(run_slot(p, 0.25) == 0.5);
+    assert!((p.f)(p.v) == 3.0);
+    let scale = 3;
+    let c = new Slot(fn (int x) use (scale) => x * scale, 5);
+    collect();
+    assert!((c.f)(c.v) == 15);
+    // A function field that does not mention the parameter: in the
+    // class's method and in a generic function too.
+    let t = new Tagged(double, "t");
+    assert!((t.f)(4) == 8);
+    assert!(t.apply(5) == 10);
+    assert!(apply_tagged(t, 6) == 12);
+    let u = new Tagged(inc, 2.5);
+    assert!(u.apply(1) == 2);
+    assert!(apply_tagged(u, 2) == 3);
 }
 
 test("a call through a chain") {
