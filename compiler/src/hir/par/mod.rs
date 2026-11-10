@@ -4,6 +4,7 @@
 pub mod loop_par;
 pub mod par_hint;
 pub mod par_profit;
+pub mod sign;
 
 pub use loop_par::{LoopParSite, LoopParSites, LoopReduceOp};
 pub use par_profit::{

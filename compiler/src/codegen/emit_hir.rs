@@ -10545,7 +10545,9 @@ impl Compiler {
     /// chunk on `worker`, join each in order and fold its partial onto the
     /// accumulator. A failed spawn or join joins the handles still out and
     /// runs the whole range on this thread. A dynamic range splits in two
-    /// when it has more trips than the grain, and otherwise runs here.
+    /// when it has more trips than the grain, and otherwise runs here; so
+    /// does one too long for its trip count to be an `int`. The analysis
+    /// keeps an inclusive end below `MAX`, so the end plus one is in range.
     fn hir_par_driver_body(
         &self,
         site: &crate::hir::par::LoopParSite,
@@ -10691,26 +10693,47 @@ impl Compiler {
             stmts.push(b.let_(lo, v));
             let v = bound(&mut b, end, site.end, site.end_bias);
             stmts.push(b.let_(hi, v));
-            let diff = {
+            // The range's length, `hi - lo`, is more than an `int` holds
+            // for a start far below zero and an end far above it. The
+            // sequential loop does not compute it, so neither does this:
+            // such a range runs on this thread.
+            let above = |b: &mut Synth| {
                 let (h, l) = (b.read(hi), b.read(lo));
-                b.bin(BinOp::IntSub, h, l, coil_ty::int())
+                b.bin(BinOp::Gt, h, l, coil_ty::boolean())
             };
-            let positive = {
+            let span = b.local("__coil_par_span", int.clone(), LocalKind::Temp);
+            let too_long = {
+                let over = crate::hir::synth::int_overflows(&mut b, BinOp::IntSub, hi, lo).expect("a subtraction is tested");
+                let positive = above(&mut b);
+                b.push(HirKind::Logic { and: true, lhs: positive, rhs: over }, coil_ty::boolean())
+            };
+            let here = seq(&mut b, Bound::Local(lo), Bound::Local(hi));
+            let here = b.block(vec![here], None, coil_ty::never());
+            stmts.push(b.if_(too_long, here, None, coil_ty::unit()));
+            let length = {
+                let positive = above(&mut b);
                 let (h, l) = (b.read(hi), b.read(lo));
                 let d = b.bin(BinOp::IntSub, h, l, coil_ty::int());
-                let zero = b.int(0);
-                b.bin(BinOp::Gt, d, zero, coil_ty::boolean())
+                let none = b.int(0);
+                b.if_(positive, d, Some(none), coil_ty::int())
             };
+            stmts.push(b.let_(span, length));
             let trips = if site.stride > 1 {
-                let k = b.int(site.stride - 1);
-                let up = b.bin(BinOp::IntAdd, diff, k, coil_ty::int());
+                // Rounding up to whole strides must stay in range too.
+                let long = {
+                    let (d, most) = (b.read(span), b.int(i64::MAX - (site.stride - 1)));
+                    b.bin(BinOp::Gt, d, most, coil_ty::boolean())
+                };
+                let here = seq(&mut b, Bound::Local(lo), Bound::Local(hi));
+                let here = b.block(vec![here], None, coil_ty::never());
+                stmts.push(b.if_(long, here, None, coil_ty::unit()));
+                let (d, k) = (b.read(span), b.int(site.stride - 1));
+                let up = b.bin(BinOp::IntAdd, d, k, coil_ty::int());
                 let s = b.int(site.stride);
                 b.bin(BinOp::IntDiv, up, s, coil_ty::int())
             } else {
-                diff
+                b.read(span)
             };
-            let none = b.int(0);
-            let trips = b.if_(positive, trips, Some(none), coil_ty::int());
             stmts.push(b.let_(trip, trips));
             // Up to the grain: on this thread.
             let small = {

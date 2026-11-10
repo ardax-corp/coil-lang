@@ -699,20 +699,36 @@ pub(crate) fn auto_par_explanations(module: &HirModule, module_path: &str, fx: &
         }
     }
     let mut out = Vec::new();
-    let actual = module.loop_par_sites(fx.cx.checker, pure);
-    let mut blocked: Vec<_> = module.loop_par_sites(fx.cx.checker, &all)
+    let actual = module.loop_par_sites(fx.cx.checker, module_path, pure);
+    let mut blocked: Vec<_> = module.loop_par_sites(fx.cx.checker, module_path, &all)
         .into_iter()
         .filter(|(span, _)| !actual.contains_key(span))
         .collect();
     blocked.sort_by_key(|(span, _)| *span);
-    for ((start, end), site) in blocked {
-        let owner = module
+    let owner_of = |(start, end): (usize, usize)| {
+        module
             .bodies
             .iter()
             .filter(|b| matches!(b.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test))
             .filter(|b| b.span.0 <= start && end <= b.span.1)
-            .min_by_key(|b| b.span.1 - b.span.0);
-        let Some(owner) = owner else { continue };
+            .min_by_key(|b| b.span.1 - b.span.0)
+    };
+    // A fold whose terms are not proved to have one sign (#2423).
+    let mut unsigned: Vec<_> = module.loop_par_unsigned(fx.cx.checker, module_path, pure).into_iter().collect();
+    unsigned.sort_by_key(|(span, _)| *span);
+    for (span, site) in unsigned {
+        let Some(owner) = owner_of(span) else { continue };
+        let (op, signs) = match site.op {
+            crate::hir::par::LoopReduceOp::Mul => ("*", "`>= 1` or `<= -2`"),
+            _ => ("+", "all `>= 0` or all `<= 0`"),
+        };
+        out.push(format!(
+            "loop over `{}` in `{}` not parallelized: the terms of its `{op}` fold onto `{}` are not proved {signs}",
+            site.index, owner.name, site.acc
+        ));
+    }
+    for ((start, end), site) in blocked {
+        let Some(owner) = owner_of((start, end)) else { continue };
         let reasons = impure_callees(fx, owner, (start, end), pure);
         if reasons.is_empty() {
             continue;
@@ -785,7 +801,7 @@ fn type_head(owner: &str) -> &str {
 }
 
 /// `name` without the module prefix, or `None` when it is not this module's.
-pub(super) fn local_name<'a>(module_path: &str, name: &'a str) -> Option<&'a str> {
+pub(crate) fn local_name<'a>(module_path: &str, name: &'a str) -> Option<&'a str> {
     if module_path.is_empty() {
         return Some(name);
     }

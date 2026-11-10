@@ -33,6 +33,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use super::super::{BinOp, BodyKind, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, Lit, LocalId, LocalKind, MakeKind, UnOp, query};
 use crate::typechecking::infer::Checker;
 use super::par_profit::DEFAULT_LOOP_GRAIN;
+use super::sign::{Env, Interval, Range, Signs};
 use crate::typechecking::ty::{self as coil_ty, Ty};
 
 /// Associative operator folding a loop's per-iteration contributions.
@@ -143,12 +144,26 @@ impl LoopParSite {
 pub type LoopParSites = HashMap<(usize, usize), LoopParSite>;
 
 impl HirModule {
-    /// Every counted-loop fork site of the module.
+    /// Every counted-loop fork site of the module, whose path is
+    /// `module_path`.
     ///
     /// `pure_fns` is the side-effect-free user functions; a loop body may
     /// only call those.
-    pub fn loop_par_sites(&self, checker: &Checker, pure_fns: &HashSet<String>) -> LoopParSites {
+    pub fn loop_par_sites(&self, checker: &Checker, module_path: &str, pure_fns: &HashSet<String>) -> LoopParSites {
+        self.loop_par_scan(checker, module_path, pure_fns).0
+    }
+
+    /// The loops that are fork sites but for the sign of their fold's
+    /// terms ([`Scan::one_signed`]): each runs sequentially.
+    pub fn loop_par_unsigned(&self, checker: &Checker, module_path: &str, pure_fns: &HashSet<String>) -> LoopParSites {
+        self.loop_par_scan(checker, module_path, pure_fns).1
+    }
+
+    /// The sites, and the loops only the sign rule refuses.
+    fn loop_par_scan(&self, checker: &Checker, module_path: &str, pure_fns: &HashSet<String>) -> (LoopParSites, LoopParSites) {
         let mut out = LoopParSites::new();
+        let mut unsigned = LoopParSites::new();
+        let signs = Signs::new(self, checker, module_path);
         for body in &self.bodies {
             let Some(root) = body.root else { continue };
             // The top level holds declarations only; a lambda, a test and
@@ -156,16 +171,19 @@ impl HirModule {
             if !matches!(body.kind, BodyKind::Function | BodyKind::Method) || self.in_trait(body) {
                 continue;
             }
-            let mut ints: HashSet<LocalId> = body
+            let mut ints: IntLocals = body
                 .params
                 .iter()
                 .copied()
                 .filter(|&p| matches!(&body.local(p).ty, Some(Ty::Con(n)) if n == coil_ty::INT || n == coil_ty::BYTE))
+                .map(|p| (p, Some(Interval::of_type(body.local(p).ty.as_ref()))))
                 .collect();
-            let mut scan = Scan { module: self, checker, body, pure_fns, out: &mut out };
+            let mut written = HashSet::new();
+            assigned_in(self, body, root, &mut written);
+            let mut scan = Scan { module: self, checker, body, pure_fns, signs: &signs, written, out: &mut out, unsigned: &mut unsigned };
             scan.walk(root, &mut ConstLocals::new(), &mut ints);
         }
-        out
+        (out, unsigned)
     }
 
     /// Whether `body` is a trait's method, an instance's or a default, or
@@ -192,12 +210,21 @@ enum ConstVal {
 
 type ConstLocals = HashMap<LocalId, ConstVal>;
 
+/// The locals known to hold an `int` (or a `byte`) at this point, each
+/// with the range of what it holds.
+type IntLocals = Env;
+
 struct Scan<'a> {
     module: &'a HirModule,
     checker: &'a Checker,
     body: &'a HirBody,
     pure_fns: &'a HashSet<String>,
+    signs: &'a Signs<'a>,
+    /// The locals something in the body assigns after their `let`.
+    written: HashSet<LocalId>,
     out: &'a mut LoopParSites,
+    /// The loops only the sign rule refuses.
+    unsigned: &'a mut LoopParSites,
 }
 
 /// A counted loop's head, before its body is checked.
@@ -218,7 +245,7 @@ struct LoopScan<'a> {
     index: LocalId,
     acc: LocalId,
     consts: &'a ConstLocals,
-    ints: &'a HashSet<LocalId>,
+    ints: &'a IntLocals,
     captures: BTreeSet<(String, i64)>,
     live: BTreeSet<String>,
 }
@@ -254,7 +281,7 @@ impl Scan<'_> {
     /// Statement list: each item may bind or invalidate a const local for
     /// the statements that follow it. `ints` is every local still known to
     /// be an int.
-    fn walk_block(&mut self, items: &[HirId], consts: &mut ConstLocals, ints: &mut HashSet<LocalId>) {
+    fn walk_block(&mut self, items: &[HirId], consts: &mut ConstLocals, ints: &mut IntLocals) {
         for &item in items {
             self.walk(item, consts, ints);
             self.note_binding_effects(item, consts, ints);
@@ -266,7 +293,7 @@ impl Scan<'_> {
     /// Everything the loop assigns is dropped first: a const local's
     /// binding no longer describes every visit to a program point inside a
     /// loop.
-    fn walk_loop_body(&mut self, loop_id: HirId, body: HirId, consts: &ConstLocals, ints: &HashSet<LocalId>) {
+    fn walk_loop_body(&mut self, loop_id: HirId, body: HirId, consts: &ConstLocals, ints: &IntLocals) {
         let mut inner = consts.clone();
         let mut inner_ints = ints.clone();
         for l in self.assigned(loop_id) {
@@ -276,7 +303,7 @@ impl Scan<'_> {
         self.walk(body, &mut inner, &mut inner_ints);
     }
 
-    fn walk(&mut self, id: HirId, consts: &mut ConstLocals, ints: &mut HashSet<LocalId>) {
+    fn walk(&mut self, id: HirId, consts: &mut ConstLocals, ints: &mut IntLocals) {
         let body = self.body;
         let e = body.expr(id);
         if e.flags.contains(HirFlags::IF_LET) {
@@ -290,10 +317,14 @@ impl Scan<'_> {
             }
             HirKind::Let { init: Some(init), .. } => self.walk(*init, &mut consts.clone(), &mut ints.clone()),
             HirKind::Return(Some(value)) => self.walk(*value, consts, ints),
-            HirKind::If { then, els, .. } => {
-                self.walk(*then, &mut consts.clone(), &mut ints.clone());
+            HirKind::If { cond, then, els } => {
+                let mut on = ints.clone();
+                self.assume(*cond, true, &mut on);
+                self.walk(*then, &mut consts.clone(), &mut on);
                 if let Some(els) = els {
-                    self.walk(*els, &mut consts.clone(), &mut ints.clone());
+                    let mut off = ints.clone();
+                    self.assume(*cond, false, &mut off);
+                    self.walk(*els, &mut consts.clone(), &mut off);
                 }
             }
             HirKind::Match { arms, .. } => {
@@ -309,10 +340,15 @@ impl Scan<'_> {
                 // worker's loop does that, so a checked `while` is no site.
                 let site = if checks.is_empty() { self.counted_while(cond, then, consts, ints) } else { None };
                 match site.and_then(|c| self.finish(c, consts, ints)) {
-                    Some(site) => {
+                    Some((site, true)) => {
                         self.out.insert(e.span, site);
                     }
-                    None => self.walk_loop_body(id, then, consts, ints),
+                    refused => {
+                        if let Some((site, _)) = refused {
+                            self.unsigned.insert(e.span, site);
+                        }
+                        self.walk_loop_body(id, then, consts, ints)
+                    }
                 }
             }
             // A `for` runs its checks in its body, so a chunk worker runs
@@ -321,10 +357,15 @@ impl Scan<'_> {
                 let Some((checks, own)) = query::for_body_parts(body, id) else { return };
                 let site = if self.checks_follow_the_loop(id, checks) { None } else { self.counted_for(pat, *iterable, (checks, own), consts, ints) };
                 match site.and_then(|c| self.finish(c, consts, ints)) {
-                    Some(site) => {
+                    Some((site, true)) => {
                         self.out.insert(e.span, site);
                     }
-                    None => self.walk_loop_body(id, own, consts, ints),
+                    refused => {
+                        if let Some((site, _)) = refused {
+                            self.unsigned.insert(e.span, site);
+                        }
+                        self.walk_loop_body(id, own, consts, ints)
+                    }
                 }
             }
             _ => {}
@@ -357,7 +398,7 @@ impl Scan<'_> {
     }
 
     /// `while i < K { … }` against the loop-IPA shape.
-    fn counted_while(&self, cond: HirId, then: HirId, consts: &ConstLocals, ints: &HashSet<LocalId>) -> Option<Counted> {
+    fn counted_while(&self, cond: HirId, then: HirId, consts: &ConstLocals, ints: &IntLocals) -> Option<Counted> {
         let body = self.body;
         let HirKind::Bin { op, lhs, rhs } = body.expr(cond).kind else { return None };
         let inclusive = match op {
@@ -369,7 +410,7 @@ impl Scan<'_> {
         let (end_local, end_const) = int_endpoint(body, rhs, consts, ints)?;
         let (begin, begin_local) = if let Some(ConstVal::Int(b)) = consts.get(&index) {
             (*b, None)
-        } else if ints.contains(&index) {
+        } else if ints.contains_key(&index) {
             (0, Some(index))
         } else {
             return None;
@@ -386,7 +427,7 @@ impl Scan<'_> {
 
     /// `for x in START..END` / `..=`, or `for x in r` when `r` is a
     /// const-initialized counted range local (Q6 literal / B5).
-    fn counted_for(&self, pat: &HirPat, iterable: HirId, (checks, own): (&[HirId], HirId), consts: &ConstLocals, ints: &HashSet<LocalId>) -> Option<Counted> {
+    fn counted_for(&self, pat: &HirPat, iterable: HirId, (checks, own): (&[HirId], HirId), consts: &ConstLocals, ints: &IntLocals) -> Option<Counted> {
         let body = self.body;
         let HirPat::Bind(index) = *pat else { return None };
         // `for mut x in` borrows; `for _ in` binds nothing a body names.
@@ -412,7 +453,9 @@ impl Scan<'_> {
         Some(Counted { body: own, index, begin, end, begin_local, end_local, end_bias, implicit_step: true, checks: checks.to_vec() })
     }
 
-    fn finish(&self, counted: Counted, consts: &ConstLocals, ints: &HashSet<LocalId>) -> Option<LoopParSite> {
+    /// The site of counted loop `counted`, and whether its fold keeps
+    /// one sign ([`Self::one_signed`]): only then is it a site.
+    fn finish(&self, counted: Counted, consts: &ConstLocals, ints: &IntLocals) -> Option<(LoopParSite, bool)> {
         let Counted { body: loop_body, index, begin, end, begin_local, end_local, end_bias, implicit_step, checks } = counted;
         let dynamic = begin_local.is_some() || end_local.is_some();
         let forms = self.classify_body(loop_body, index, true)?;
@@ -465,8 +508,35 @@ impl Scan<'_> {
         if 3 + live.len() > common::MAX_THREAD_SPAWN_ARGS {
             return None;
         }
+        // The fork-join works on `[begin, end)`, so an inclusive end read
+        // at run time is one it can add one to: not `MAX`, where the
+        // sequential loop runs on and the sum would trap.
+        if end_bias != 0 {
+            let top = match end_local {
+                Some(l) => ints.get(&l).copied().flatten().map(|r| r.hi),
+                None => Some(end),
+            };
+            if top.is_none_or(|top| top == i64::MAX) {
+                return None;
+            }
+        }
+        // Every value the body reads the index at. A `while` body may
+        // read it after its step too.
+        let first = match begin_local {
+            Some(l) => ints.get(&l).copied().flatten().map(|r| r.lo),
+            None => Some(begin),
+        };
+        let last = match end_local {
+            Some(l) => ints.get(&l).copied().flatten().map(|r| r.hi as i128 + end_bias as i128 - 1),
+            None => Some(end as i128 - 1),
+        };
+        let over = match (first, last) {
+            (Some(first), Some(last)) => Interval::cut(first as i128, last + if implicit_step { 0 } else { stride as i128 }),
+            _ => None,
+        };
+        let signed = self.one_signed(&forms, &checks, (index, over), consts, ints);
         let name = |l: LocalId| self.name(l).to_string();
-        Some(LoopParSite {
+        let site = LoopParSite {
             index: name(index),
             begin,
             end,
@@ -479,7 +549,101 @@ impl Scan<'_> {
             begin_local: begin_local.map(name),
             end_local: end_local.map(name),
             end_bias,
-        })
+        };
+        Some((site, signed))
+    }
+
+    /// Whether the running fold of a loop with these `forms` leaves the
+    /// `int` range only when the whole fold does, given every value its
+    /// index takes (#2423).
+    ///
+    /// A chunk folds from the identity and the fork-join folds the
+    /// partials, each step tested, so together they see the whole fold
+    /// and each chunk's own. The sequential loop also traps on a running
+    /// value that leaves the range and comes back. That cannot happen
+    /// when:
+    ///
+    /// - `+`: every term is `>= 0`, or every term is `<= 0`. The running
+    ///   sum only moves one way, so once past an end it stays past it.
+    /// - `*`: every term is `>= 1` or `<= -2`. A value outside the range
+    ///   is at least `2^63` in magnitude and not `-2^63`; multiplied by
+    ///   such a term it stays so. A `0` or a `-1` could bring it back
+    ///   (`2^63 * -1` is `MIN`).
+    /// - `^`: it never traps.
+    ///
+    /// A term's sign is what [`Signs`] proves of it; unknown is refused.
+    fn one_signed(&self, forms: &[StmtForm], checks: &[HirId], (index, over): (LocalId, Range), consts: &ConstLocals, ints: &IntLocals) -> bool {
+        let mut env: Env = ints.clone();
+        for (&l, v) in consts {
+            if let ConstVal::Int(k) = v {
+                env.insert(l, Some(Interval::point(*k)));
+            }
+        }
+        env.insert(index, over);
+        // A `for` runs its checks ahead of each iteration's body: one
+        // that passed holds there.
+        for &check in checks {
+            if let HirKind::If { cond, then, els: None } = self.body.expr(check).kind
+                && crate::hir::cold::fails(self.body, then, &|_| false)
+                && !self.signs.assume(self.body, cond, false, &mut env)
+            {
+                return false;
+            }
+        }
+        let mut fold = FoldSigns { up: true, down: true, product: true };
+        self.fold_signs(forms, &mut env, &mut fold);
+        fold.product && (fold.up || fold.down)
+    }
+
+    fn fold_signs(&self, forms: &[StmtForm], env: &mut Env, fold: &mut FoldSigns) {
+        for form in forms {
+            match form {
+                StmtForm::Local { local, init } => {
+                    let r = self.signs.range(self.body, *init, env);
+                    env.insert(*local, r);
+                }
+                StmtForm::Reduce { op, expr, .. } => fold.note(*op, self.signs.range(self.body, *expr, env)),
+                StmtForm::Step(_) => {}
+                StmtForm::If { arms } => {
+                    // Where every condition so far failed.
+                    let mut rest = env.clone();
+                    let mut open = true;
+                    for arm in arms {
+                        if !open {
+                            break;
+                        }
+                        let mut inner = rest.clone();
+                        let reached = match arm.cond {
+                            Some(cond) => {
+                                let reached = self.signs.assume(self.body, cond, true, &mut inner);
+                                open = self.signs.assume(self.body, cond, false, &mut rest);
+                                reached
+                            }
+                            None => true,
+                        };
+                        if reached {
+                            self.fold_signs(&arm.body, &mut inner, fold);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Narrow `ints` to where `cond` is `truth`, for the locals nothing
+    /// in the body assigns: a fact that holds wherever it is read.
+    fn assume(&self, cond: HirId, truth: bool, ints: &mut IntLocals) {
+        let mut narrowed = ints.clone();
+        if !self.signs.assume(self.body, cond, truth, &mut narrowed) {
+            return;
+        }
+        for (l, r) in narrowed {
+            if !self.written.contains(&l)
+                && let Some(known) = ints.get_mut(&l)
+            {
+                *known = r;
+            }
+        }
     }
 
     fn forms_independent(&self, forms: &[StmtForm], locals: &mut HashSet<LocalId>, scan: &mut LoopScan<'_>) -> bool {
@@ -541,7 +705,7 @@ impl Scan<'_> {
                         true
                     }
                     // A live capture is an `int` word of the worker's.
-                    _ if scan.ints.contains(l) && self.is_int(*l) => {
+                    _ if scan.ints.contains_key(l) && self.is_int(*l) => {
                         scan.live.insert(self.name(*l).to_string());
                         true
                     }
@@ -663,7 +827,7 @@ impl Scan<'_> {
     }
 
     /// What statement `item` leaves known of the locals it binds or writes.
-    fn note_binding_effects(&self, item: HirId, consts: &mut ConstLocals, ints: &mut HashSet<LocalId>) {
+    fn note_binding_effects(&self, item: HirId, consts: &mut ConstLocals, ints: &mut IntLocals) {
         let body = self.body;
         let e = body.expr(item);
         match e.kind {
@@ -680,7 +844,7 @@ impl Scan<'_> {
                     Some(value)
                 };
                 if rhs.is_some_and(|rhs| is_int_expr(body, rhs, ints)) {
-                    ints.insert(l);
+                    ints.insert(l, Some(Interval::of_type(body.local(l).ty.as_ref())));
                 } else {
                     ints.remove(&l);
                 }
@@ -699,7 +863,18 @@ impl Scan<'_> {
                 consts.insert(local, v);
             }
             if is_int_expr(body, init, ints) {
-                ints.insert(local);
+                let floor = Interval::of_type(body.local(local).ty.as_ref());
+                let held = self.signs.range(body, init, ints).and_then(|r| r.meet(floor));
+                ints.insert(local, Some(held.unwrap_or(floor)));
+            }
+        }
+        // An `if` one of whose branches always returns was not taken
+        // that way.
+        if let HirKind::If { cond, then, els } = e.kind {
+            if query::exits(body, then) || crate::hir::cold::fails(body, then, &|_| false) {
+                self.assume(cond, false, ints);
+            } else if els.is_some_and(|els| query::exits(body, els)) {
+                self.assume(cond, true, ints);
             }
         }
     }
@@ -713,7 +888,7 @@ impl Scan<'_> {
     }
 }
 
-fn assigned_in(module: &HirModule, body: &HirBody, id: HirId, out: &mut HashSet<LocalId>) {
+pub(super) fn assigned_in(module: &HirModule, body: &HirBody, id: HirId, out: &mut HashSet<LocalId>) {
     body.visit(id, &mut |e| match &e.kind {
         HirKind::Assign { place, .. } => {
             if let Some(l) = local_read(body, *place) {
@@ -729,6 +904,34 @@ fn assigned_in(module: &HirModule, body: &HirBody, id: HirId, out: &mut HashSet<
         }
         _ => {}
     });
+}
+
+/// What the terms of a loop's fold allow ([`Scan::one_signed`]).
+struct FoldSigns {
+    /// Every `+` term so far is `>= 0`.
+    up: bool,
+    /// Every `+` term so far is `<= 0`.
+    down: bool,
+    /// Every `*` term so far is `>= 1` or `<= -2`.
+    product: bool,
+}
+
+impl FoldSigns {
+    fn note(&mut self, op: LoopReduceOp, term: Range) {
+        // A term with no value at all is not one to reason from.
+        let Some(term) = term else {
+            self.product = false;
+            return;
+        };
+        match op {
+            LoopReduceOp::Add => {
+                self.up &= term.lo >= 0;
+                self.down &= term.hi <= 0;
+            }
+            LoopReduceOp::Mul => self.product &= term.lo >= 1 || term.hi <= -2,
+            LoopReduceOp::Xor => {}
+        }
+    }
 }
 
 fn collect_forms(forms: &[StmtForm], reduces: &mut Vec<(LocalId, LoopReduceOp)>, steps: &mut Vec<i64>) {
@@ -819,12 +1022,12 @@ fn int_literal(body: &HirBody, id: HirId) -> Option<i64> {
 }
 
 /// Const int, or an int local. `(local, const value)`.
-fn int_endpoint(body: &HirBody, id: HirId, consts: &ConstLocals, ints: &HashSet<LocalId>) -> Option<(Option<LocalId>, i64)> {
+fn int_endpoint(body: &HirBody, id: HirId, consts: &ConstLocals, ints: &IntLocals) -> Option<(Option<LocalId>, i64)> {
     if let Some(k) = const_int(body, id, consts) {
         return Some((None, k));
     }
     let l = local_read(body, id)?;
-    ints.contains(&l).then_some((Some(l), 0))
+    ints.contains_key(&l).then_some((Some(l), 0))
 }
 
 fn const_val(body: &HirBody, id: HirId, consts: &ConstLocals) -> Option<ConstVal> {
@@ -857,10 +1060,10 @@ fn const_int(body: &HirBody, id: HirId, consts: &ConstLocals) -> Option<i64> {
 
 /// Whether `id` is an int by its shape: literals, int locals and the
 /// arithmetic over them.
-fn is_int_expr(body: &HirBody, id: HirId, ints: &HashSet<LocalId>) -> bool {
+fn is_int_expr(body: &HirBody, id: HirId, ints: &IntLocals) -> bool {
     match body.expr(id).kind {
         HirKind::Lit(Lit::Int(_)) => true,
-        HirKind::Local(l) => ints.contains(&l),
+        HirKind::Local(l) => ints.contains_key(&l),
         HirKind::Un { op: UnOp::Neg, operand } => is_int_expr(body, operand, ints),
         HirKind::Bin { op, lhs, rhs } => {
             matches!(source_op(op), "+" | "-" | "*" | "<<" | ">>" | "^" | "&" | "|") && is_int_expr(body, lhs, ints) && is_int_expr(body, rhs, ints)

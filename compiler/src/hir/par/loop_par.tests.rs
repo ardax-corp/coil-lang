@@ -12,7 +12,7 @@ fn sites_of(src: &str) -> Vec<LoopParSite> {
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", &ast);
     let (pure, _) = crate::hir::effects::lone_module_effects(&module, &checker);
-    let mut sites: Vec<LoopParSite> = module.loop_par_sites(&checker, &pure).into_values().collect();
+    let mut sites: Vec<LoopParSite> = module.loop_par_sites(&checker, "", &pure).into_values().collect();
     sites.sort_by_key(|a| a.begin);
     sites
 }
@@ -327,7 +327,7 @@ fn run(int k) -> int {
     let acc = 0;
     let i = 0;
     while i < 100 {
-        acc = acc + k;
+        acc = acc ^ k;
         i = i + 1;
     }
     return acc;
@@ -680,7 +680,7 @@ fn main() {{ return; }}
 "#
         ))
     };
-    assert_eq!(run("int n, int w", "let i = 0;", "acc = acc + sq(i) * w;").len(), 1);
+    assert_eq!(run("int n, int w", "let i = 0;", "acc = acc ^ (sq(i) * w);").len(), 1);
     // A live capture.
     let sites = run("int n, byte w", "let i = 0;", "if w == w { acc = acc + sq(i); }");
     assert!(sites.is_empty(), "{sites:?}");
@@ -701,7 +701,7 @@ fn more_live_captures_than_a_spawn_passes_keep_the_loop_sequential() {
 fn run(int n, {}) -> int {{
     let acc = 0;
     for x in 0..n {{
-        acc = acc + x * ({});
+        acc = acc ^ (x * ({}));
     }}
     return acc;
 }}
@@ -819,7 +819,7 @@ fn main() { return; }
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", &ast);
     let pure = ["weigh", "weigh2"].map(String::from).into();
-    let sites: Vec<LoopParSite> = module.loop_par_sites(&checker, &pure).into_values().collect();
+    let sites: Vec<LoopParSite> = module.loop_par_sites(&checker, "", &pure).into_values().collect();
     assert_eq!(sites.iter().map(|s| s.end).collect::<Vec<_>>(), [50]);
 }
 
@@ -867,4 +867,209 @@ fn main() {{ return; }}
         ));
         assert!(sites.is_empty(), "`{clause}`: {sites:?}");
     }
+}
+
+/// The sites of `run`, a fold of `term` onto `acc` from `start` by `op`
+/// over `range`, with `params`.
+fn fold_sites(params: &str, start: &str, range: &str, op: &str, term: &str) -> Vec<LoopParSite> {
+    sites_of(&format!(
+        r#"
+fn sq(int i) -> int {{ return i * i; }}
+fn weight(int i) -> int {{ return i % 7; }}
+fn abs(int x) -> int {{ if x < 0 {{ return 0 - x; }} return x; }}
+fn step(int i) -> int {{ if i < 10 {{ return 10; }} return 0 - 1; }}
+fn run({params}) -> int {{
+    let acc = {start};
+    for i in {range} {{
+        acc = acc {op} ({term});
+    }}
+    return acc;
+}}
+fn main() {{ return; }}
+"#
+    ))
+}
+
+/// A chunk folds from the identity, so it cannot see the running sum
+/// leave the `int` range and come back. Terms of one sign cannot bring
+/// it back (#2423).
+#[test]
+fn a_sum_is_a_site_when_its_terms_have_one_sign() {
+    for term in ["sq(i)", "i", "weight(i)", "abs(i - 50)", "7", "i & 3", "i / 2 + i % 3", "0 - i", "0 - sq(i)", "0", "abs(k)", "sq(k) * i"] {
+        assert_eq!(fold_sites("int n, int k", "5", "0..n", "+", term).len(), 1, "`{term}`");
+    }
+    for term in ["step(i)", "i - 50", "k", "i * k", "weight(k)", "sq(i) - 1", "0 - weight(i - 3)", "i ^ k"] {
+        assert!(fold_sites("int n, int k", "5", "0..n", "+", term).is_empty(), "`{term}`");
+    }
+}
+
+/// The index of a range that may start below zero has no sign.
+#[test]
+fn the_index_has_the_sign_of_its_range() {
+    assert!(fold_sites("int a, int n", "0", "a..n", "+", "i").is_empty());
+    assert!(fold_sites("int a, int n", "0", "a..n", "+", "weight(i)").is_empty());
+    assert_eq!(fold_sites("int a, int n", "0", "a..n", "+", "sq(i)").len(), 1);
+    assert_eq!(fold_sites("int n", "0", "3..n", "+", "i - 3").len(), 1);
+    assert!(fold_sites("int n", "0", "3..n", "+", "i - 4").is_empty());
+    // A `while` reads its index after the step too.
+    let down = |end: &str| {
+        sites_of(&format!(
+            r#"
+fn run() -> int {{
+    let acc = 0;
+    let i = 0 - 100;
+    while i < {end} {{
+        acc = acc + i;
+        i = i + 1;
+    }}
+    return acc;
+}}
+fn main() {{ return; }}
+"#
+        ))
+    };
+    assert_eq!(down("0").len(), 1);
+    assert!(down("1").is_empty());
+}
+
+/// A product stays out of range once it is out only when no term is `0`
+/// or `-1`: `2^63 * -1` is `MIN`, which is in range.
+#[test]
+fn a_product_is_a_site_when_no_term_is_zero_or_minus_one() {
+    for term in ["2", "i + 1", "sq(i) + 1", "0 - 2", "0 - i - 2", "1"] {
+        assert_eq!(fold_sites("int n, int k", "1", "0..n", "*", term).len(), 1, "`{term}`");
+    }
+    for term in ["i", "0", "0 - 1", "0 - i - 1", "k", "weight(i)", "i - 1", "sq(i)"] {
+        assert!(fold_sites("int n, int k", "1", "0..n", "*", term).is_empty(), "`{term}`");
+    }
+}
+
+/// `^` never traps.
+#[test]
+fn an_xor_fold_is_a_site_whatever_its_terms() {
+    for term in ["step(i)", "i - 50", "k", "0 - 1"] {
+        assert_eq!(fold_sites("int n, int k", "5", "0..n", "^", term).len(), 1, "`{term}`");
+    }
+}
+
+/// Every arm of an `if` folds one way, and a condition narrows what its
+/// arm reads.
+#[test]
+fn the_arms_of_an_if_agree_on_the_sign() {
+    let run = |body: &str| {
+        sites_of(&format!(
+            r#"
+fn run(int n, int k) -> int {{
+    let acc = 0;
+    for i in 0..n {{
+        {body}
+    }}
+    return acc;
+}}
+fn main() {{ return; }}
+"#
+        ))
+    };
+    assert_eq!(run("if i % 2 == 0 { acc = acc + i; } else { acc = acc + 1; }").len(), 1);
+    assert!(run("if i % 2 == 0 { acc = acc + i; } else { acc = acc - 0 + (0 - 1); }").is_empty());
+    assert!(run("if i % 2 == 0 { acc = acc + i; } else { acc = acc + (0 - 1); }").is_empty());
+    // `k` is not negative where the first arm reads it, and negative in
+    // the second.
+    assert_eq!(run("if k >= 0 { acc = acc + k; }").len(), 1);
+    assert!(run("if k >= 0 { acc = acc + k; } else { acc = acc + k; }").is_empty());
+    assert_eq!(run("if k >= 0 { acc = acc + k; } else { acc = acc + (0 - k); }").len(), 1);
+    assert_eq!(run("let d = i - 5; if d > 0 { acc = acc + d; }").len(), 1);
+    assert!(run("let d = i - 5; acc = acc + d;").is_empty());
+}
+
+/// What the function establishes ahead of the loop holds in it: a guard
+/// that returns, and a `let` nothing writes again.
+#[test]
+fn a_guard_ahead_of_the_loop_signs_a_capture() {
+    let run = |ahead: &str, term: &str| {
+        sites_of(&format!(
+            r#"
+fn run(int n, int k) -> int {{
+    {ahead}
+    let acc = 0;
+    for i in 0..n {{
+        acc = acc + ({term});
+    }}
+    return acc;
+}}
+fn main() {{ return; }}
+"#
+        ))
+    };
+    assert!(run("", "i * k").is_empty());
+    assert_eq!(run("if k < 0 { return 0; }", "i * k").len(), 1);
+    assert_eq!(run("if k < 0 { panic \"k\"; }", "i * k").len(), 1);
+    assert_eq!(run("let w = (k & 7) + 1;", "i * w").len(), 1);
+    assert!(run("let w = (k & 7) - 1;", "i * w").is_empty());
+    // The guard is about a `k` that is written afterwards.
+    assert!(run("if k < 0 { return 0; } k = k - 9;", "i * k").is_empty());
+    // A lambda may write it at any call.
+    assert!(run("if k < 0 { return 0; } let f = fn () { k = 0 - 9; };", "i * k").is_empty());
+}
+
+/// A `for` runs its checks ahead of each iteration, so a clause that
+/// passed holds in the body.
+#[test]
+fn a_loop_invariant_signs_a_capture() {
+    let sites = checked_sites_in(
+        "int n, int k",
+        r#"
+    let acc = 0;
+    for i in 0..n
+        invariant k > 0
+    {
+        acc = acc + i * k;
+    }
+    return acc;
+"#,
+    );
+    assert_eq!(sites.len(), 1, "{sites:?}");
+}
+
+fn checked_sites_in(params: &str, body: &str) -> Vec<LoopParSite> {
+    crate::hir::set_contract_level(crate::hir::ContractLevel::All);
+    sites_of(&format!("fn run({params}) -> int {{\n{body}\n}}\nfn main() {{ return; }}\n"))
+}
+
+/// The fork-join works on `[begin, end)`: an inclusive end read at run
+/// time must be one it can add one to, where the sequential loop runs
+/// through `MAX`.
+#[test]
+fn an_inclusive_end_that_may_be_max_keeps_the_loop_sequential() {
+    assert!(fold_sites("int n", "0", "0..=n", "^", "i").is_empty());
+    assert_eq!(fold_sites("int n", "0", "0..n", "^", "i").len(), 1);
+    let bounded = sites_of(
+        r#"
+fn run(int n) -> int {
+    if n > 1000000 { return 0; }
+    let acc = 0;
+    for i in 0..=n {
+        acc = acc ^ i;
+    }
+    let other = 0;
+    let j = 0;
+    while j <= n {
+        other = other ^ j;
+        j = j + 1;
+    }
+    return acc + other;
+}
+fn open(int n) -> int {
+    let acc = 0;
+    let j = 0;
+    while j <= n {
+        acc = acc ^ j;
+        j = j + 1;
+    }
+    return acc;
+}
+fn main() { return; }
+"#,
+    );
+    assert_eq!(bounded.len(), 2, "{bounded:?}");
 }
