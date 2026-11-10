@@ -163,7 +163,10 @@ the same size and a generator fiber 8 MiB. `NativeCtx::stack_limit` sits
 entry makes the compare, which is how a speculative auto-par job is cancelled at no
 cost: the canceller stores `thread::CANCELLED_STACK_LIMIT` into the limit of each
 native call the job is in, and its next call traps
-([auto-par](auto-par.md#cancelling-a-failed-attempt)). The
+([auto-par](auto-par.md#cancelling-a-failed-attempt)). In a body a speculative job
+may run (`speculative_reach`), the header of a loop that may run forever with no call
+in it (`mir::spin_headers`: no counter ends it) makes the compare too, with an atomic
+load of the limit. The
 interpreter's frames do not use the machine stack, and its limit is
 `frame::MAX_WORDS` words of registers per activation.
 
