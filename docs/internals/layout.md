@@ -61,10 +61,22 @@ it. A function below the top (an element of `Vec<unit -> T>`, a tuple
 item, a type argument) has no adapter, so such a signature takes a clone
 for every ground call past the clone budget, as a nested open enum does
 below, and a call still reaching the shared body at `T = ()` is refused
-(`layout::nested_fn_var_result`, #2498). Not covered: a function in a
-generic class's field or enum payload typed by its parameter
-(`f: unit -> T`), and a dictionary method whose result is the trait's
-type parameter (#2541).
+(`layout::nested_fn_var_result`, #2498).
+
+A generic class's or enum's own methods are the same case: they call a
+function in a field or payload declared `fn(..) -> V`, `V` the type's
+parameter, and keep its result as their `V`, and a class's methods are
+shared at any clone budget. So the function takes the unit adapter where
+it is stored: `new C(f)`, a variant `E::V(f)` and a field store `c.f = f`
+of a ground `-> ()` function wrap it (`HirPacks::unit_fns`,
+`Compiler::hir_unit_fn_slot`). Ground readers ignore the object it
+returns. A function below the top of such a slot (`fs: Vec<fn() -> T>`,
+a tuple item, another type's argument) has no adapter, so storing a value
+of that type at `T = ()` is refused with E0801, which names the slot
+(`Compiler::hir_unit_fn_nested`). A dictionary method whose declared
+result is the trait's type parameter, at an instance for `()`, goes in
+through its `$dict` adapter, which returns the empty tuple object
+(`Compiler::trait_method_unit_ret`, #2541).
 
 **GC.** A niche word is a pointer root: root marking strips bit 0 before
 `find_object_by_addr`, and `values_eq` compares the stripped words. A
