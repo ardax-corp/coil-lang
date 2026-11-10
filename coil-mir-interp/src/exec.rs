@@ -694,7 +694,10 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                         let found = program(body).body_at_pc(pc);
                         // The callee's two-word twin returns both words.
                         let twin = pair.and(found).and_then(|b| b.mir.pair_twin).and_then(|t| program(body).body_at(t));
-                        if let Some(callee) = twin.or(found) {
+                        // A call of fewer words than the body reads (a wrong
+                        // word in a dictionary slot) goes to the driver,
+                        // which refuses it as native code does.
+                        if let Some(callee) = twin.or(found).filter(|b| args.len() >= b.reads as usize) {
                             if !push(&mut *act, callee, std::ptr::null_mut()) {
                                 rt::coil_native_unwind(ctx, TRAP_STACK, u64::from(callee.entry_site));
                                 return Flow::Trap(TRAP_HELPER);

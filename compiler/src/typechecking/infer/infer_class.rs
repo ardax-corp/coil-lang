@@ -304,9 +304,11 @@ impl Checker {
             if default.is_some() {
                 self.clear_bare_result_modes(&shield);
             }
+            self.last_body_dicts.clear();
             let _ = self.infer(m);
             if let Some(mname) = default {
                 let fqn = Generics::default_method_fqn(name, mname);
+                self.record_trait_body_dicts(&fqn, active_len);
                 if self.result_mode_fns.contains(mname) {
                     self.result_mode_fns.insert(fqn.clone());
                 }
@@ -873,6 +875,7 @@ impl Checker {
                         let shield = self.shield_bare_names([mname]);
                         self.clear_bare_result_modes(&shield);
                         let outer_method = self.current_instance_method.replace(mname.to_string());
+                        self.last_body_dicts.clear();
                         self.infer_function(super::infer_fn::InferFunctionArgs {
                             name: mname,
                             type_params: mparams,
@@ -890,6 +893,7 @@ impl Checker {
                         });
                         self.current_instance_method = outer_method;
                         self.record_instance_method_under_fqn(mname, &fqn);
+                        self.record_trait_body_dicts(&fqn, prev_active_len);
                         // Checked once every `type X = ...` of the impl is
                         // collected, whichever side of the method it is on.
                         pending_signature_checks.push((mname.to_string(), fqn.clone(), m.0.into_range()));

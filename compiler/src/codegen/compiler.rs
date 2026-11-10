@@ -2994,10 +2994,10 @@ impl Compiler {
         let generics = self.checker.generics();
         let subst = self.checker.subst();
         for name in [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()].into_iter().flatten() {
-            let Some(scheme) = self.checker.env().lookup(name) else {
+            let Some(dicts) = self.body_dicts_of(name) else {
                 continue;
             };
-            for (i, c) in scheme.constraints.iter().enumerate() {
+            for (i, c) in dicts.iter().enumerate() {
                 let on_var = matches!(c.args.as_slice(), [a] if crate::typechecking::subst::apply_ty_prune(subst, a) == var);
                 if on_var
                     && generics.typeclass(&c.class).is_some_and(|sub| sub.has_superclass(class, generics))
@@ -3144,8 +3144,9 @@ impl Compiler {
 
     /// Dictionary for an open goal: the current bounded instance method's own
     /// dictionary (`__dict0`) or one of its context dictionaries
-    /// (`__dict{i+1}`), the current generic function's bound (`__dictN`, in
-    /// scheme order), or, in a mono clone, the goal at the clone's types.
+    /// (`__dict{i+1}`), a trait method's own bound (after those), the
+    /// current generic function's bound (`__dictN`, in scheme order), or, in
+    /// a mono clone, the goal at the clone's types ([`Self::body_dicts_of`]).
     fn resolve_open_dict_goal(&self, class: &str, args: &[Ty]) -> Option<OpenDictGoal> {
         use crate::typechecking::subst::apply_ty_prune;
         let subst = self.checker.subst();
@@ -3194,13 +3195,24 @@ impl Compiler {
                     return slot_of(i + 1).map(OpenDictGoal::Slot);
                 }
             }
-            if let Some(scheme) = self.checker.env().lookup(name)
-                && let Some(i) = scheme.constraints.iter().position(|c| same(&c.class, &c.args))
+            if let Some(dicts) = self.body_dicts_of(name)
+                && let Some(i) = dicts.iter().position(|c| same(&c.class, &c.args))
             {
                 return slot_of(i).map(OpenDictGoal::Slot);
             }
         }
         None
+    }
+
+    /// Body `name`'s dictionary constraints, by frame index (`__dictN`).
+    /// A trait method's are the instance's (the trait's, in a default
+    /// body), its context and then its own bounds, as the checker numbered
+    /// them; its scheme lists its own bounds alone (#2594). Any other
+    /// body's are its scheme's.
+    pub(super) fn body_dicts_of(&self, name: &str) -> Option<&[crate::typechecking::ty::Constraint]> {
+        self.checker
+            .trait_body_dicts(name)
+            .or_else(|| self.checker.env().lookup(name).map(|scheme| scheme.constraints.as_slice()))
     }
 
     /// Type-parameter variables of mono clone source `name` mapped to the

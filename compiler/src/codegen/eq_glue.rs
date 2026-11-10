@@ -280,10 +280,10 @@ impl Compiler {
         }
         let subst = self.checker.subst();
         for name in [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()].into_iter().flatten() {
-            let Some(scheme) = self.checker.env().lookup(name) else {
+            let Some(dicts) = self.body_dicts_of(name) else {
                 continue;
             };
-            for (i, c) in scheme.constraints.iter().enumerate() {
+            for (i, c) in dicts.iter().enumerate() {
                 let on_var = matches!(c.args.as_slice(), [a] if crate::typechecking::subst::apply_ty_prune(subst, a) == var);
                 if on_var
                     && let Some(method) = eq_slot(&c.class)
@@ -438,10 +438,10 @@ impl Compiler {
         let generics = self.checker.generics();
         let subst = self.checker.subst();
         for name in [self.current_function_qualified.as_deref(), self.current_function_table_key.as_deref()].into_iter().flatten() {
-            let Some(scheme) = self.checker.env().lookup(name) else {
+            let Some(dicts) = self.body_dicts_of(name) else {
                 continue;
             };
-            for (i, c) in scheme.constraints.iter().enumerate() {
+            for (i, c) in dicts.iter().enumerate() {
                 let on_var = matches!(c.args.as_slice(), [a] if crate::typechecking::subst::apply_ty_prune(subst, a) == var);
                 let Some(class) = generics.typeclass(&c.class).filter(|_| on_var) else {
                     continue;
