@@ -34,6 +34,13 @@ struct FnFacts {
     /// them are settled by [`settle_statics`].
     free: HashSet<String>,
     free_writes: HashSet<String>,
+    /// Operand spans of the operators a trait impl may stand behind
+    /// (`a < b`, `-a`, `a += b`), and the spans of `for … in` loops. With
+    /// the checker's types, [`settle_operators`] turns the ones that run
+    /// user code into effects; a lone-file walk has no types and leaves
+    /// them pure.
+    operands: Vec<(usize, usize)>,
+    for_ins: Vec<(usize, usize)>,
 }
 
 /// Record `f` under `name`. Methods are keyed by bare name, so two impls with
@@ -47,6 +54,8 @@ fn insert_facts(facts: &mut HashMap<String, FnFacts>, name: &str, f: FnFacts) {
     entry.method_calls.extend(f.method_calls);
     entry.free.extend(f.free);
     entry.free_writes.extend(f.free_writes);
+    entry.operands.extend(f.operands);
+    entry.for_ins.extend(f.for_ins);
 }
 
 /// `static let` names declared anywhere in `ast`.
@@ -92,6 +101,26 @@ fn settle_method_calls(facts: &mut HashMap<String, FnFacts>, target: &MethodTarg
             } else {
                 f.local.insert(EffectFlags::UNKNOWN | EffectFlags::RESIZE);
             }
+        }
+    }
+}
+
+/// An operator on a class, an enum or a type parameter runs the type's
+/// trait impl, and a `for … in` over anything but an array, a tuple or a
+/// range runs an iterator's `next` or resumes a generator: user code this
+/// walk does not follow, so unknown, and free to resize (#2388).
+/// `operand_runs` and `for_in_runs` answer for an operand's and a loop's
+/// span.
+fn settle_operators(
+    facts: &mut HashMap<String, FnFacts>,
+    operand_runs: &dyn Fn((usize, usize)) -> bool,
+    for_in_runs: &dyn Fn((usize, usize)) -> bool,
+) {
+    for f in facts.values_mut() {
+        let operands = std::mem::take(&mut f.operands);
+        let for_ins = std::mem::take(&mut f.for_ins);
+        if operands.into_iter().any(operand_runs) || for_ins.into_iter().any(for_in_runs) {
+            f.local.insert(EffectFlags::UNKNOWN | EffectFlags::RESIZE);
         }
     }
 }
@@ -647,14 +676,15 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         | Expression::ImplicitReturn(inner)
         | Expression::Raise(inner)
         | Expression::Try(inner)
-        | Expression::Negate(inner)
-        | Expression::Not(inner)
         | Expression::LogicalNot(inner)
-        | Expression::Positive(inner)
         | Expression::Cast(inner, _)
         | Expression::TypeOf(inner)
         | Expression::Readonly(inner)
         | Expression::OptionalAccess(inner, _) => walk_body(inner, facts),
+        Expression::Negate(inner) | Expression::Not(inner) | Expression::Positive(inner) => {
+            facts.operands.push((inner.0.start, inner.0.end));
+            walk_body(inner, facts);
+        }
         // The resumer (or the resumed body) runs arbitrary code.
         Expression::Yield(_) | Expression::YieldFrom(_) | Expression::Resume(_, _) => {
             facts.local.insert(EffectFlags::YIELD | EffectFlags::RESIZE);
@@ -676,16 +706,21 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         | Expression::Shl(a, b)
         | Expression::Shr(a, b)
         | Expression::Xor(a, b)
-        | Expression::And(a, b)
         | Expression::BitAnd(a, b)
-        | Expression::Or(a, b)
         | Expression::BitOr(a, b)
         | Expression::Eq(a, b)
         | Expression::Neq(a, b)
         | Expression::Leq(a, b)
         | Expression::Geq(a, b)
         | Expression::Le(a, b)
-        | Expression::Gt(a, b)
+        | Expression::Gt(a, b) => {
+            facts.operands.push((a.0.start, a.0.end));
+            facts.operands.push((b.0.start, b.0.end));
+            walk_body(a, facts);
+            walk_body(b, facts);
+        }
+        Expression::And(a, b)
+        | Expression::Or(a, b)
         | Expression::Coalesce(a, b)
         | Expression::Range {
             start: a, end: b, ..
@@ -702,6 +737,10 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
             }
             if let Expression::Identifier(n) = peel(lhs).1.as_ref() {
                 facts.free_writes.insert((*n).to_string());
+            }
+            if matches!(ast.1.as_ref(), Expression::CompoundAssign(..)) {
+                facts.operands.push((lhs.0.start, lhs.0.end));
+                facts.operands.push((rhs.0.start, rhs.0.end));
             }
             walk_body(lhs, facts);
             walk_body(rhs, facts);
@@ -774,10 +813,13 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         Expression::Loop {
             contracts: _,
             identifier,
-            pattern: _,
+            pattern,
             iterable,
             body,
         } => {
+            if identifier.is_some() || pattern.is_some() {
+                facts.for_ins.push((ast.0.start, ast.0.end));
+            }
             if let Some(id) = identifier {
                 walk_body(id, facts);
             }
@@ -956,6 +998,15 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
         };
         settle_method_calls(&mut facts, &target);
         settle_statics(&mut facts, ast);
+        let operand_runs = |span| crate::effects::operator_runs_user_code(checker.ty_at_span(span).as_ref());
+        let for_in_runs = |(start, end)| {
+            use super::infer::ForInKind;
+            !matches!(
+                checker.for_in_info_for_span(start, end).map(|i| &i.kind),
+                Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. })
+            )
+        };
+        settle_operators(&mut facts, &operand_runs, &for_in_runs);
         effect_closure_with(&facts, &resolve)
     };
     checker.length_stability = length_stability(
@@ -1388,6 +1439,58 @@ fn main() { return; }
             shout_fx.contains(EffectFlags::IO) || shout_fx.contains(EffectFlags::UNKNOWN),
             "shout should record IO/unknown, got {shout_fx:?}"
         );
+    }
+
+    /// An operator on a class or a type parameter, and a `for … in` over a
+    /// user iterator, run user code; on built-in types they do not (#2388).
+    #[test]
+    fn user_operators_and_iterators_are_not_pure() {
+        use crate::typechecking::infer::Checker;
+
+        let ast = parse_ast(
+            r#"
+class Money {
+    pub cents: int,
+}
+impl Lt for Money {
+    pub fn lt(Money a, Money b) -> bool { return a.cents < b.cents; }
+}
+impl Neg for Money {
+    pub fn neg(Money a) -> Money { return new Money(0 - a.cents); }
+}
+impl Add for Money {
+    pub fn add(Money a, Money b) -> Money { return new Money(a.cents + b.cents); }
+}
+class Count {
+    pub cur: int,
+}
+impl Iterator for Count {
+    type Item = int;
+    fn next(Count c) -> Option<int> { return Option::None; }
+}
+fn less(Money a, Money b) -> bool { return a < b; }
+fn less_of<T: Lt>(T a, T b) -> bool { return a < b; }
+fn flipped(Money a) -> int { let b = -a; return b.cents; }
+fn summed(Money a, Money b) -> int { let c = a; c += b; return c.cents; }
+fn drain(Count c) -> int { let s = 0; for x in c { s = s + x; } return s; }
+fn via(Money a, Money b) -> bool { return less(a, b); }
+fn ints(int a, int b) -> bool { return a < b && -a != b; }
+fn strs(string a, string b) -> bool { return a + b == b; }
+fn opts(Option<int> a, (int, float) t) -> bool { return a == Option::None && t == (1, 2.0); }
+fn each(Vec<int> xs) -> int { let s = 0; for x in xs { s += x; } for i in 0..3 { s += i; } return s; }
+fn main() { return; }
+"#,
+        );
+        let mut c = Checker::new();
+        let _ = c.check_program(&ast);
+        let side = c.typed_sidecar();
+        for name in ["less", "less_of", "flipped", "summed", "drain", "via"] {
+            assert!(!side.name_is_pure(name), "`{name}` runs user code");
+            assert!(!side.length_stability().fns.contains(name), "`{name}` may resize");
+        }
+        for name in ["ints", "strs", "opts", "each"] {
+            assert!(side.name_is_pure(name), "`{name}` only uses built-in operators");
+        }
     }
 
     #[test]

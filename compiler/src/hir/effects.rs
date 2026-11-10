@@ -30,7 +30,7 @@ use std::collections::{HashMap, HashSet};
 
 use common::EffectFlags;
 
-use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, LocalId, LocalKind, MakeKind};
+use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, LocalId, LocalKind, MakeKind, UnOp};
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::infer::{Checker, ForInKind};
 use crate::effects::classify_host_name;
@@ -2190,6 +2190,13 @@ impl Cx<'_> {
             HirKind::Bin { op: BinOp::Overloaded(op), lhs, rhs } => {
                 self.note(w, id, EffectFlags::UNKNOWN, || format!("uses a trait operator `{op}`"));
                 self.operator_mutates(w, id, op, *lhs, *rhs);
+            }
+            // As is `-a` or `~a` on anything but a built-in scalar.
+            HirKind::Un { op: op @ (UnOp::Neg | UnOp::BitNot), operand }
+                if crate::effects::operator_runs_user_code(body.expr(*operand).ty.as_ref()) =>
+            {
+                let sym = if *op == UnOp::Neg { "-" } else { "~" };
+                self.note(w, id, EffectFlags::UNKNOWN, || format!("uses a trait operator `{sym}`"));
             }
             HirKind::Unsupported(what) => {
                 self.note(w, id, UNKNOWN.bits(), || format!("uses {what}, which this analysis does not model"))
