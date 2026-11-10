@@ -5311,7 +5311,6 @@ impl Compiler {
     /// overrides that make it emit (an empty set emits none).
     fn planned_mono_specializations<'compiler>(
         &self,
-        qualified: &str,
         type_params: &[parser::ast::TypeParam<'compiler>],
         source_name: &str,
     ) -> Vec<crate::monomorphize::MonoSpecialization> {
@@ -5322,15 +5321,9 @@ impl Compiler {
             .checker
             .def_id_of(source_name)
             .or_else(|| self.checker.interned_def(&self.namespace, source_name));
-        if let Some(id) = def_id {
-            self.mono_plan.specializations_for_def(id).cloned().collect()
-        } else {
-            self.mono_plan
-                .specializations_for_fn(qualified)
-                .chain(self.mono_plan.specializations_for_fn(source_name))
-                .cloned()
-                .collect()
-        }
+        // The plan is keyed by `DefId`: a function with none has no clones,
+        // whatever its name shares with one that has.
+        def_id.map(|id| self.mono_plan.specializations_for_def(id).cloned().collect()).unwrap_or_default()
     }
 
     fn mono_clone_name(qualified: &str, key: &MonoKey) -> String {
@@ -5347,7 +5340,7 @@ impl Compiler {
         type_params: &[parser::ast::TypeParam<'compiler>],
         source_name: &str,
     ) {
-        for spec in self.planned_mono_specializations(qualified, type_params, source_name) {
+        for spec in self.planned_mono_specializations(type_params, source_name) {
             if self.mono_names.contains_key(&spec.key) || !self.mono_clone_emits(type_params, &spec.key) {
                 continue;
             }
@@ -5369,7 +5362,7 @@ impl Compiler {
         if body.is_none() {
             return;
         }
-        let specializations = self.planned_mono_specializations(qualified, type_params, source_name);
+        let specializations = self.planned_mono_specializations(type_params, source_name);
         if specializations.is_empty() {
             return;
         }
