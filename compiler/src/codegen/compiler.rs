@@ -1312,6 +1312,13 @@ impl Compiler {
     /// instance's own words and no dictionary, as a raw instance method.
     /// `None` when `fqn` has no clone there.
     pub(super) fn instance_clone(&mut self, fqn: &str, lookup: &[Ty]) -> Option<String> {
+        self.instance_clone_at(fqn, lookup, false)
+    }
+
+    /// [`Self::instance_clone`]; `needed` when the caller has no use for
+    /// the shared entry (a dictionary slot it cannot fill with it), so the
+    /// clone is made past `--clone-budget` too.
+    fn instance_clone_at(&mut self, fqn: &str, lookup: &[Ty], needed: bool) -> Option<String> {
         let src = self.inst_clone_srcs.get(fqn)?;
         // Keyed without `readonly`, which has no runtime form (#1806).
         let lookup = &lookup.iter().map(crate::typechecking::ty::strip_readonly_deep).collect::<Vec<_>>()[..];
@@ -1326,8 +1333,10 @@ impl Compiler {
         // `Show<Tree<T>>`): a method already on this clone's chain takes the
         // shared body, as does any clone past `--clone-budget` but a hot
         // method's (`#[hot]`, `docs/internals/opt-hints.md`).
-        let past_budget =
-            self.inst_clones.len() >= self.checker.host_grants().clone_budget() && !self.is_hot_fn(fqn) && !self.fn_sig_split(fqn);
+        let past_budget = !needed
+            && self.inst_clones.len() >= self.checker.host_grants().clone_budget()
+            && !self.is_hot_fn(fqn)
+            && !self.fn_sig_split(fqn);
         if past_budget || self.inst_clone_recursive(fqn) {
             return None;
         }
@@ -2565,6 +2574,7 @@ impl Compiler {
                 None => {}
             }
         }
+        let mut super_reads: Vec<(usize, String)> = Vec::new();
         let (fqns, diag_range) = {
             // An open goal looks among the generic instances first: a ground
             // one its variables unify with is never its instance.
@@ -2588,6 +2598,7 @@ impl Compiler {
             let flat = class_def.flattened_methods(self.checker.generics());
             let mut fqns = Vec::with_capacity(flat.len());
             for (owner_class, method_def) in &flat {
+                let slot = fqns.len();
                 let fqn = if *owner_class == instance.class.as_str() {
                     instance.method_fqns.get(&method_def.name).cloned()
                 } else {
@@ -2605,6 +2616,15 @@ impl Compiler {
                 {
                     self.missing_call_target(&name, instance.range.clone());
                     return false;
+                }
+                // A superclass's method is called with this dictionary,
+                // laid out for the subclass. One that reads its dictionary
+                // (a default body its siblings, a bounded instance's method
+                // its context) reads the wrong slots of it (#2476).
+                if *owner_class != instance.class.as_str()
+                    && (Self::is_default_method_fqn(owner_class, &method_def.name, &name) || self.instance_context_len(&name) > 0)
+                {
+                    super_reads.push((slot, format!("{owner_class}::{}", method_def.name)));
                 }
                 // Dictionary calls use the generic signature's layouts.
                 let adapter = Self::dict_adapter_name(&name);
@@ -2639,16 +2659,35 @@ impl Compiler {
         };
         let (diag_range, context) = diag_range;
         // A ground goal of a generic-head instance: its clones' adapters.
+        // A superclass method that reads its dictionary goes in as its
+        // clone, past the clone budget too: the clone takes no dictionary.
+        // An open goal has no clone, and a method on its own clone chain
+        // none either: such a dictionary is not built (#2476).
+        let mut unbuilt = None;
         let fqns: Vec<String> = if open {
+            unbuilt = super_reads.first().map(|(_, method)| method.clone());
             fqns
         } else {
             fqns.into_iter()
-                .map(|name| match self.instance_clone(&name, lookup) {
-                    Some(clone) => Self::dict_adapter_name(&clone),
-                    None => name,
+                .enumerate()
+                .map(|(slot, name)| {
+                    let needed = super_reads.iter().find(|(s, _)| *s == slot);
+                    match self.instance_clone_at(&name, lookup, needed.is_some()) {
+                        Some(clone) => Self::dict_adapter_name(&clone),
+                        None => {
+                            if let Some((_, method)) = needed {
+                                unbuilt.get_or_insert_with(|| method.clone());
+                            }
+                            name
+                        }
+                    }
                 })
                 .collect()
         };
+        if let Some(method) = unbuilt {
+            self.superclass_dict_unbuilt(class, lookup, &method, diag_range);
+            return false;
+        }
         for name in &fqns {
             let Some(code) = self.dict_code_step(name) else {
                 self.missing_call_target(name, diag_range.clone());
@@ -2865,6 +2904,27 @@ impl Compiler {
             "the instance's context dictionaries are not available here".to_string(),
             range,
         ));
+        self.messages.push(message);
+    }
+
+    /// Report that the dictionary for `class<lookup>` cannot hold superclass
+    /// method `method` (`Lt::lt`, #2476): it reads the dictionary it is called with as
+    /// its own instance's, and through `class` it is called with the
+    /// subclass's.
+    fn superclass_dict_unbuilt(&mut self, class: &str, lookup: &[Ty], method: &str, range: std::ops::Range<usize>) {
+        let goal = lookup
+            .iter()
+            .map(|t| crate::typechecking::pretty::format_ty_for_diag(self.checker.subst(), t))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut message = Message::error(
+            ErrorCode::CodegenError,
+            format!(
+                "Cannot build the trait dictionary for `{class}<{goal}>` in shared generic code: its `{method}` reads its own instance's dictionary, which the `{class}` one does not hold (coil-lang#2476)"
+            ),
+            range.clone(),
+        );
+        message.push(DiagLabel::new("the instance whose dictionary is asked for".to_string(), range));
         self.messages.push(message);
     }
 
