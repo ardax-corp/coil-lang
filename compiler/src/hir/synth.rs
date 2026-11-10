@@ -420,14 +420,20 @@ pub type OrderTarget = dyn Fn(&str, usize) -> String;
 /// as a derived `Hash` combines fields. `targets` names each item's `hash`
 /// entry (`None`: a `()` item, hashed as `0`); with `dict`, each is
 /// called with that local after the item (an open instance's, #2554).
-pub fn structural_hash(b: &mut Synth, value: HirId, product: Option<&Product>, targets: &[Option<String>], dict: Option<LocalId>) -> HirId {
+///
+/// `relayout[i]`, where given, is the type in whose layout item `i`'s
+/// `hash` takes it (a shared entry's open `Option<T>`, #2590).
+pub fn structural_hash(b: &mut Synth, value: HirId, product: Option<&Product>, targets: &[Option<String>], relayout: &[Option<Ty>], dict: Option<LocalId>) -> HirId {
     let int = coil_ty::int();
     let acc = b.local("h", int.clone(), LocalKind::Let);
     let zero = b.int(0);
     let init = b.let_(acc, zero);
-    let step = |b: &mut Synth, item: Option<HirId>, target: &Option<String>| {
-        let h = match (item, target) {
-            (Some(item), Some(target)) => {
+    let step = |b: &mut Synth, item: Option<HirId>, i: usize| {
+        let h = match (item, &targets[i]) {
+            (Some(mut item), Some(target)) => {
+                if let Some(Some(ty)) = relayout.get(i) {
+                    item = b.builtin(crate::hir::Builtin::Relayout, vec![item], ty.clone());
+                }
                 let mut args = vec![item];
                 args.extend(dict.map(|d| b.read(d)));
                 b.call(target, args, int.clone())
@@ -447,7 +453,7 @@ pub fn structural_hash(b: &mut Synth, value: HirId, product: Option<&Product>, t
         (None, Some(Ty::Array { element, .. })) => {
             let x = b.local("x", (*element).clone(), LocalKind::Pattern);
             let v = b.read(x);
-            let body = step(b, Some(v), &targets[0]);
+            let body = step(b, Some(v), 0);
             let body = b.block(vec![body], None, coil_ty::unit());
             let kind = Some(crate::typechecking::infer::ForInKind::Array);
             stmts.push(b.push(HirKind::ForIn { pat: HirPat::Bind(x), iterable: value, body, kind }, coil_ty::unit()));
@@ -468,9 +474,9 @@ pub fn structural_hash(b: &mut Synth, value: HirId, product: Option<&Product>, t
                 }
             }
             stmts.push(b.push(HirKind::LetPat { pat: product.pat_of(pats), init: value }, coil_ty::unit()));
-            for (local, target) in locals.into_iter().zip(targets) {
+            for (i, local) in locals.into_iter().enumerate() {
                 let v = local.map(|l| b.read(l));
-                let s = step(b, v, target);
+                let s = step(b, v, i);
                 stmts.push(s);
             }
         }

@@ -7476,7 +7476,7 @@ impl Compiler {
         let dict = b.local("dict", dict_ty, LocalKind::Param);
         let word = b.read(arg);
         let value = b.builtin(crate::hir::Builtin::Retype, vec![word], head);
-        let hashed = crate::hir::synth::structural_hash(&mut b, value, product.as_ref(), &targets, Some(dict));
+        let hashed = crate::hir::synth::structural_hash(&mut b, value, product.as_ref(), &targets, &[], Some(dict));
         let ret = b.ret(hashed);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
         let hir = Self::synth_generic(b.finish(root));
@@ -7630,29 +7630,47 @@ impl Compiler {
         };
         let mut calls = HashMap::new();
         let mut targets = Vec::with_capacity(items.len());
+        let mut relayout = Vec::with_capacity(items.len());
         for item in &items {
             if crate::layout::is_unit(item) {
                 targets.push(None);
+                relayout.push(None);
                 continue;
             }
             let lookup = Self::show_lookup_ty_for_instance(item);
-            let Some(fqn) = self
-                .checker
-                .generics()
-                .find_instance("Hash", std::slice::from_ref(&lookup))
-                .filter(|inst| inst.context.is_empty())
-                .and_then(|inst| inst.method_fqns.get("hash").cloned())
-            else {
+            let lookup = std::slice::from_ref(&lookup);
+            let found = {
+                let generics = self.checker.generics();
+                generics
+                    .find_instance("Hash", lookup)
+                    .filter(|inst| inst.context.is_empty())
+                    .or_else(|| generics.find_generic_instance("Hash", lookup))
+                    .and_then(|inst| Some((inst.method_fqns.get("hash")?.clone(), inst.args.first()?.clone())))
+            };
+            let Some((fqn, head)) = found else {
                 return;
             };
+            // A bounded generic-head instance's method (`Hash<Box<int>>`):
+            // its per-type clone, else its shared entry, which takes the
+            // instance's dictionary (#2590), as the `Show` and `Eq` thunks.
+            let fqn = self.instance_clone(&fqn, lookup).unwrap_or(fqn);
+            let mut dicts = Vec::new();
+            if self.instance_call_takes_dict("Hash", "hash", &fqn) && !self.plan_call_instance_dict(&mut dicts, ("Hash", "hash", &fqn), lookup, 0..0) {
+                return;
+            }
             let raw = self.raw_instance_methods.contains(&fqn);
-            self.hir_synth_callees.insert(fqn.clone(), SynthCallee { raw, ..SynthCallee::default() });
-            calls.insert(fqn.clone(), (vec![self.value_layout(item)], ValueLayout::Boxed));
+            // A shared entry over an open `Option` / `Result` takes the enum
+            // object, where the item is its niche word.
+            let layout = self.value_layout(item);
+            let shared_head = (!raw && head.has_var() && layout != ValueLayout::Boxed).then_some(head);
+            self.hir_synth_callees.insert(fqn.clone(), SynthCallee { raw, dicts, ..SynthCallee::default() });
+            calls.insert(fqn.clone(), (vec![if shared_head.is_some() { ValueLayout::Boxed } else { layout }], ValueLayout::Boxed));
+            relayout.push(shared_head);
             targets.push(Some(fqn));
         }
         let int = crate::typechecking::ty::int();
         let hir = crate::hir::synth::builtin_entry(&self.checker, name, &[(ty.clone(), retype)], int.clone(), false, |b, a| {
-            crate::hir::synth::structural_hash(b, a[0], product.as_ref(), &targets, None)
+            crate::hir::synth::structural_hash(b, a[0], product.as_ref(), &targets, &relayout, None)
         });
         self.emit_synth_fn(name, &hir, calls);
     }
