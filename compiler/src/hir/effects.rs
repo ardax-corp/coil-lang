@@ -624,8 +624,8 @@ pub(crate) fn auto_par_explanations(
         }
     }
     let mut out = Vec::new();
-    let actual = module.loop_par_sites(pure);
-    let mut blocked: Vec<_> = module.loop_par_sites(&all)
+    let actual = module.loop_par_sites(fx.cx.checker, pure);
+    let mut blocked: Vec<_> = module.loop_par_sites(fx.cx.checker, &all)
         .into_iter()
         .filter(|(span, _)| !actual.contains_key(span))
         .collect();

@@ -14,7 +14,7 @@ fn sites_of(src: &str) -> Vec<LoopParSite> {
     let _ = checker.check_program(&ast);
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", &ast);
-    let mut sites: Vec<LoopParSite> = module.loop_par_sites(&pure).into_values().collect();
+    let mut sites: Vec<LoopParSite> = module.loop_par_sites(&checker, &pure).into_values().collect();
     sites.sort_by_key(|a| a.begin);
     sites
 }

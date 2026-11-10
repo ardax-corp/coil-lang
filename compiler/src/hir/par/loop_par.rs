@@ -23,7 +23,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use super::super::{BinOp, BodyKind, Callee, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, Lit, LocalId, LocalKind, MakeKind, UnOp, query};
+use super::super::{BinOp, BodyKind, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, Lit, LocalId, LocalKind, MakeKind, UnOp, query};
+use crate::typechecking::infer::Checker;
 use crate::typechecking::par_profit::DEFAULT_LOOP_GRAIN;
 use crate::typechecking::ty::{self as coil_ty, Ty};
 
@@ -139,7 +140,7 @@ impl HirModule {
     ///
     /// `pure_fns` is the side-effect-free user functions; a loop body may
     /// only call those.
-    pub fn loop_par_sites(&self, pure_fns: &HashSet<String>) -> LoopParSites {
+    pub fn loop_par_sites(&self, checker: &Checker, pure_fns: &HashSet<String>) -> LoopParSites {
         let mut out = LoopParSites::new();
         for body in &self.bodies {
             let Some(root) = body.root else { continue };
@@ -154,7 +155,7 @@ impl HirModule {
                 .copied()
                 .filter(|&p| matches!(&body.local(p).ty, Some(Ty::Con(n)) if n == coil_ty::INT || n == coil_ty::BYTE))
                 .collect();
-            let mut scan = Scan { module: self, body, pure_fns, out: &mut out };
+            let mut scan = Scan { module: self, checker, body, pure_fns, out: &mut out };
             scan.walk(root, &mut ConstLocals::new(), &mut ints);
         }
         out
@@ -163,7 +164,7 @@ impl HirModule {
     /// Whether `body` is a trait's method, an instance's or a default, or
     /// a function declared in one. The AST walk this analysis replaced
     /// looked at functions and inherent methods only, and it keeps to those.
-    fn in_trait(&self, body: &HirBody) -> bool {
+    pub(super) fn in_trait(&self, body: &HirBody) -> bool {
         let path: Vec<&str> = body.name.split("::").collect();
         path.iter().any(|segment| segment.contains(" for "))
             || path.windows(2).any(|pair| self.trait_effects.iter().any(|t| t.trait_name == pair[0] && t.method == pair[1]))
@@ -186,6 +187,7 @@ type ConstLocals = HashMap<LocalId, ConstVal>;
 
 struct Scan<'a> {
     module: &'a HirModule,
+    checker: &'a Checker,
     body: &'a HirBody,
     pure_fns: &'a HashSet<String>,
     out: &'a mut LoopParSites,
@@ -492,9 +494,9 @@ impl Scan<'_> {
                 };
                 admitted && self.independent(*lhs, locals, scan) && self.independent(*rhs, locals, scan)
             }
-            // A bare name: a path or a method is not in `pure_fns` as written.
-            HirKind::Call { callee: Callee::Named { name, .. }, args } => {
-                !name.contains("::") && self.pure_fns.contains(name) && args.iter().all(|a| self.independent(*a, locals, scan))
+            HirKind::Call { args, .. } => {
+                super::par_profit::bare_callee(self.checker, body, id).is_some_and(|name| self.pure_fns.contains(name))
+                    && args.iter().all(|a| self.independent(*a, locals, scan))
             }
             _ => false,
         }
@@ -674,7 +676,7 @@ fn iteration_count(begin: i64, end: i64, stride: i64) -> Option<i64> {
 }
 
 /// The operator as written, whatever lane the types gave it.
-fn source_op(op: BinOp) -> &'static str {
+pub(super) fn source_op(op: BinOp) -> &'static str {
     match op {
         BinOp::IntAdd | BinOp::FloatAdd | BinOp::StrConcat => "+",
         BinOp::IntSub | BinOp::FloatSub => "-",
@@ -707,7 +709,7 @@ fn reduce_op(op: &str) -> Option<LoopReduceOp> {
 }
 
 /// `id` under the `& 255` the builder wraps `byte` arithmetic in.
-fn unwrap_byte(body: &HirBody, id: HirId) -> HirId {
+pub(super) fn unwrap_byte(body: &HirBody, id: HirId) -> HirId {
     let e = body.expr(id);
     if e.node.is_none()
         && let HirKind::Bin { op: BinOp::BitAnd, lhs, rhs } = e.kind

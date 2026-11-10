@@ -3559,6 +3559,63 @@ impl Compiler {
             })
     }
 
+    /// Check the HIR fork-site analysis against the AST one this module
+    /// was compiled with: the same sites with the same arms, combine and
+    /// guards, and the same demanded workers. `COIL_PAR_COMPARE=<file>`
+    /// appends one line per module and one per function that differs.
+    fn compare_par_fork_sites(&self, module: &str, ast: &parser::ast::Output<'_>) {
+        use std::io::Write;
+        let dump = std::env::var_os("COIL_PAR_COMPARE");
+        if dump.is_none() && !cfg!(debug_assertions) {
+            return;
+        }
+        let Some(hir) = self.hir_module.as_ref() else { return };
+        let found = hir.par_fork_sites(&self.checker, &self.pure_fns);
+        let mut names: Vec<&String> = self.par_shapes.keys().chain(found.keys()).collect();
+        names.sort_unstable();
+        names.dedup();
+        let mut lines = Vec::new();
+        for name in names {
+            let (ast, hir) = (self.par_shapes.get(name), found.get(name));
+            if ast != hir {
+                lines.push(format!("PARCMP fork DIFF {module:?} {name} ast={ast:?} hir={hir:?}"));
+            }
+        }
+        // The demanded workers, from the same sites.
+        let demanded = hir.par_worker_fns(&self.checker, &self.par_shapes);
+        if demanded != self.par_workers {
+            let (mut ast, mut hir): (Vec<_>, Vec<_>) = (self.par_workers.iter().collect(), demanded.iter().collect());
+            ast.sort_unstable();
+            hir.sort_unstable();
+            lines.push(format!("PARCMP fork WORKERS DIFF {module:?} ast={ast:?} hir={hir:?}"));
+        }
+        // The E0805 hints take the detector with every user function an arm.
+        let user_fns: HashSet<String> = self.typed_sidecar.fn_effects().keys().cloned().collect();
+        let hint_ast = crate::typechecking::analyze_par_fork_sites(ast, &user_fns, self.checker.bare_cases());
+        let hint_hir = hir.par_fork_sites(&self.checker, &user_fns);
+        let mut names: Vec<&String> = hint_ast.keys().chain(hint_hir.keys()).collect();
+        names.sort_unstable();
+        names.dedup();
+        for name in names {
+            let (ast, hir) = (hint_ast.get(name), hint_hir.get(name));
+            if ast != hir {
+                lines.push(format!("PARCMP hint-sites DIFF {module:?} {name} ast={ast:?} hir={hir:?}"));
+            }
+        }
+        let hints = hint_ast.len();
+        let same = lines.is_empty();
+        if let Some(path) = dump
+            && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+        {
+            let verdict = if same { "identical" } else { "DIFFERENT" };
+            lines.push(format!("PARCMP hintsites {module:?} n={hints}"));
+            lines.push(format!("PARCMP fork {module:?} ast={} hir={} workers={} {verdict}\n", self.par_shapes.len(), found.len(), self.par_workers.len()));
+            let _ = f.write_all(lines.join("\n").as_bytes());
+        } else {
+            debug_assert!(same, "par_profit: HIR and AST sites differ:\n{}", lines.join("\n"));
+        }
+    }
+
     // Loop IPA (chunked fork-join over an induction range)
 
     /// The parallel-loop site at `span`, when its induction is one this
@@ -6367,6 +6424,20 @@ impl Compiler {
                 }
             }
         }
+        // Auto-par sites, from the HIR as built: copy-on-write below wraps
+        // the values a site's arms and bounds are read from.
+        if self.auto_par && self.opt_options.auto_par {
+            // IPA sites on any pure function (self-recursion or helper arms).
+            let pure = &self.pure_fns;
+            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure, &bare_cases);
+            self.par_workers = crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
+            self.loop_par_sites = self.hir_module.as_ref().map(|hir| hir.loop_par_sites(&self.checker, &self.pure_fns)).unwrap_or_default();
+            self.compare_par_fork_sites(module, ast);
+        } else {
+            self.par_shapes.clear();
+            self.par_workers.clear();
+            self.loop_par_sites = crate::hir::par::LoopParSites::new();
+        }
         // Copy-on-write: share and unique ops in every body, before typed
         // inlining splices any of them.
         if crate::hir::effects::cow::enabled()
@@ -6407,21 +6478,12 @@ impl Compiler {
         let ns = self.module_outer_namespace.take().unwrap_or_default();
         let bare_cases = self.checker.bare_cases().clone();
         if self.auto_par && self.opt_options.auto_par {
-            // IPA sites on any pure function (self-recursion or helper arms).
-            let pure = &self.pure_fns;
-            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure, &bare_cases);
-            self.par_workers = crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
-            self.loop_par_sites = self.hir_module.as_ref().map(|hir| hir.loop_par_sites(&self.pure_fns)).unwrap_or_default();
             for hint in crate::typechecking::analyze_par_escape_hints(ast, self.typed_sidecar.fn_effects(), &bare_cases) {
                 let mut msg =
                     Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
                 msg.with_help(hint.help());
                 self.messages.push(msg);
             }
-        } else {
-            self.par_shapes.clear();
-            self.par_workers.clear();
-            self.loop_par_sites = crate::hir::par::LoopParSites::new();
         }
         self.emit_builtin_dict_thunks();
         self.emit_vec_method_thunks();

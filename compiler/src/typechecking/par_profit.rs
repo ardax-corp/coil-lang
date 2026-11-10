@@ -237,7 +237,7 @@ thread_local! {
 /// `SelfCall` combine's re-entry on joined values, the caps below) resolves
 /// *downwards*, so the count is a lower bound: unknown structure only refuses.
 /// Compared **directly** to [`par_expr_grain_for`] — no fib-unit inversion.
-struct WorkEstimate<'a> {
+pub(crate) struct WorkEstimate<'a> {
     sites: &'a HashMap<String, ParForkSite>,
     /// Counting past the floor cannot change the verdict, so totals stop here.
     cap: i64,
@@ -245,7 +245,7 @@ struct WorkEstimate<'a> {
 }
 
 impl<'a> WorkEstimate<'a> {
-    fn new(sites: &'a HashMap<String, ParForkSite>) -> Self {
+    pub(crate) fn new(sites: &'a HashMap<String, ParForkSite>) -> Self {
         Self {
             sites,
             cap: DEFAULT_EXPR_GRAIN.saturating_add(1),
@@ -267,7 +267,7 @@ impl<'a> WorkEstimate<'a> {
             .unwrap_or(DEFAULT_EXPR_GRAIN)
     }
 
-    fn worth_parallel(&mut self, fn_name: &str, args: &[i64]) -> bool {
+    pub(crate) fn worth_parallel(&mut self, fn_name: &str, args: &[i64]) -> bool {
         self.nodes(fn_name, args, 0) > self.site_floor(fn_name)
     }
 

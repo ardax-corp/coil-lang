@@ -1274,7 +1274,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             }
             E::Noop(_) => self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit())),
 
-            E::Expr(inner) | E::Group(inner) | E::Statement(inner) => self.expr(b, inner),
+            E::Expr(inner) | E::Statement(inner) => self.expr(b, inner),
+            E::Group(inner) => {
+                let id = self.expr(b, inner);
+                b.body.exprs[id.0 as usize].flags.insert(HirFlags::PAREN);
+                id
+            }
             E::ExprStatement(inner) => self.expr(b, inner),
             E::NamedArg(name, value) => {
                 let value = self.expr(b, value);

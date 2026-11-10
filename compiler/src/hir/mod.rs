@@ -471,6 +471,9 @@ impl HirFlags {
     /// Built from `if let`. The loop analysis keeps to the loops the AST
     /// walk it replaced found, which looked under `match` and not here.
     pub const IF_LET: Self = Self(256);
+    /// Written in parentheses. The fork analysis keeps one habit of the
+    /// AST walk it replaced: `let`-bound arms are not seen from inside them.
+    pub const PAREN: Self = Self(512);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
