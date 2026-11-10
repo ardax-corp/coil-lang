@@ -1148,6 +1148,9 @@ struct Lower<'a> {
     /// A shared generic body's `kinds` word (#2506), or the one a lambda
     /// of it captures.
     kinds: Option<ValueId>,
+    /// The `kinds` word's read out of the body's own dictionary, when that
+    /// is all it is: dropped again where nothing uses it.
+    kinds_load: Option<ValueId>,
     /// Words already lowered for these expressions: an element or field
     /// `x++` used for its value reads its place once, and its store takes
     /// the new word.
@@ -1199,6 +1202,7 @@ impl<'a> Lower<'a> {
             packed: HashSet::new(),
             dict_params: HashMap::new(),
             kinds: None,
+            kinds_load: None,
             preset: HashMap::new(),
             adjust_store: None,
         }
@@ -1638,6 +1642,9 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
         if let Some(msg) = f.check {
             lower.check_kinds(d, crate::codegen::KINDS_DICT_BITS, msg)?;
         }
+        if kinds.is_none() && f.check.is_none() {
+            lower.kinds_load = Some(d);
+        }
         kinds = Some(match kinds {
             None => d,
             Some(p) => lower.merge_kinds(d, n, p, f.n)?,
@@ -1708,8 +1715,17 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
     let boxed: HashSet<u32> = lower.boxes.keys().copied().collect();
     let packs = cx.packs();
     let unpacked = packs.programs.keys().any(|k| !lower.packed.contains(k));
+    let kinds_load = lower.kinds_load;
     let mut func = lower.b.finish().map_err(mir)?;
     func.lengths_steady = cx.alloc_steady();
+    // A dictionary `kinds` word the body never reads costs no load.
+    if let Some(load) = kinds_load
+        && !func.blocks.iter().any(|b| b.insts.iter().any(|i| i.operands().contains(&load)) || b.term.as_ref().is_some_and(|t| t.uses().any(|v| v == load)))
+    {
+        for b in &mut func.blocks {
+            b.insts.retain(|i| !matches!(i, MirInst::ProductLoad { dest, .. } if *dest == load));
+        }
+    }
     // A capture read at a `return` some path reaches without passing its
     // `let` would be a live-in word.
     if func.params.len() != params {
