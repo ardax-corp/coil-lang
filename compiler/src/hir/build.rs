@@ -1385,7 +1385,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::And(l, r) | E::Or(l, r) => {
                 let and = matches!(node.1.as_ref(), E::And(..));
                 let lhs = self.expr(b, l);
+                let lhs = self.backing(b, lhs);
                 let rhs = self.expr(b, r);
+                let rhs = self.backing(b, rhs);
                 self.emit_ty(b, node, HirKind::Logic { and, lhs, rhs }, Some(coil_ty::boolean()))
             }
             E::Negate(e) => self.unary(b, node, e, UnOp::Neg),
@@ -1530,6 +1532,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Branch(cond, body) => match cond {
                 Some(cond) => {
                     let cond = self.expr(b, cond);
+                    let cond = self.backing(b, cond);
                     let then = self.expr(b, body);
                     self.emit(b, node, HirKind::If { cond, then, els: None })
                 }
@@ -1935,6 +1938,11 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             let value = self.synth(b, span, HirKind::Lit(Lit::Bool(op == "==")), Some(coil_ty::boolean()));
             return self.emit_ty(b, node, HirKind::Block { stmts: vec![lhs, rhs], tail: Some(value) }, Some(coil_ty::boolean()));
         }
+        // A scalar-backed enum whose operator the checker typed as its
+        // backing's (no instance of its own takes these operands) is that
+        // primitive here: the operator is the backing type's (#2463).
+        let primitive = !matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=") && self.ty_of(node).as_ref().is_some_and(is_builtin_scalar);
+        let (lhs, rhs) = if primitive { (self.backing(b, lhs), self.backing(b, rhs)) } else { (lhs, rhs) };
         let op = resolve_bin(op, self.ty_at(b, lhs).as_ref(), self.ty_at(b, rhs).as_ref());
         let ty = self.ty_of(node).or_else(|| match op {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(coil_ty::boolean()),
@@ -1949,8 +1957,22 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
 
     fn unary(&mut self, b: &mut BodyBuilder, node: &Output<'_>, e: &Output<'_>, op: UnOp) -> HirId {
         let operand = self.expr(b, e);
+        // As `binary`: `-Status::Ok` the checker typed `int` is on the
+        // backing word; with an instance the node has the enum's type.
+        let operand = if self.ty_of(node).as_ref().is_some_and(is_builtin_scalar) { self.backing(b, operand) } else { operand };
         let id = self.emit(b, node, HirKind::Un { op, operand });
         self.wrap_byte(b, id)
+    }
+
+    /// `id` as its backing word when it is a scalar-backed enum standing
+    /// where its primitive is expected (an operand, a condition): the same
+    /// word, typed as the backing.
+    fn backing(&self, b: &mut BodyBuilder, id: HirId) -> HirId {
+        let Some(backing) = self.ty_at(b, id).and_then(|ty| self.checker.scalar_backing_ty_of(&ty)) else {
+            return id;
+        };
+        let span = b.body.exprs[id.0 as usize].span;
+        self.synth(b, span, HirKind::Builtin { op: Builtin::Retype, args: vec![id] }, Some(backing))
     }
 
     /// `byte` `+ - * <<` and negation keep the low 8 bits of the int result
@@ -2042,6 +2064,8 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let read = self.expr(b, target);
         let rhs = self.expr(b, value);
         let lhs_ty = self.ty_at(b, read);
+        // `x += Status::Ok` on an `int` `x` adds the backing word.
+        let rhs = if lhs_ty.as_ref().is_some_and(is_builtin_scalar) { self.backing(b, rhs) } else { rhs };
         let bin_op = resolve_bin(sym, lhs_ty.as_ref(), self.ty_at(b, rhs).as_ref());
         let bin = if bin_op == BinOp::IntPow && is_byte(lhs_ty.as_ref()) {
             self.byte_pow(b, span_of(node), read, rhs)
@@ -2525,6 +2549,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 Expression::Branch(Some(cond), body) => {
                     b.scopes.push(HashMap::new());
                     let cond = self.expr(b, cond);
+                    let cond = self.backing(b, cond);
                     let then = self.expr(b, body);
                     b.scopes.pop();
                     let kind = HirKind::If { cond, then, els };
@@ -2557,6 +2582,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         if identifier.is_none() && pattern.is_none() {
             // `while cond { body }` is `loop { if cond { body } else { break } }`.
             let cond = self.expr(b, iterable);
+            let cond = self.backing(b, cond);
             b.scopes.push(HashMap::new());
             let then = self.expr(b, body);
             b.scopes.pop();
@@ -3400,6 +3426,11 @@ pub(crate) fn resolve_bin(op: &'static str, l: Option<&Ty>, r: Option<&Ty>) -> B
         };
     }
     BinOp::Overloaded(op)
+}
+
+/// `int`, `float`, `bool`, `byte` or `string`.
+fn is_builtin_scalar(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Con(n) if [coil_ty::INT, coil_ty::FLOAT, coil_ty::BOOL, coil_ty::BYTE, coil_ty::STRING].contains(&n.as_str()))
 }
 
 fn is_byte(ty: Option<&Ty>) -> bool {

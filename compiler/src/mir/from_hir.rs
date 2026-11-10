@@ -5836,17 +5836,7 @@ impl Lower<'_> {
             ">" => MirCmpOp::Gt,
             "<=" => MirCmpOp::Le,
             ">=" => MirCmpOp::Ge,
-            _ => {
-                let op = match sym {
-                    "+" => MirBinOp::Add,
-                    "-" => MirBinOp::Sub,
-                    "*" => MirBinOp::Mul,
-                    "/" => MirBinOp::Div,
-                    "%" => MirBinOp::Rem,
-                    _ => return Err(format!("operator {sym}")),
-                };
-                return Ok(Val::V(self.b.ins_binop(op, l, r).map_err(mir)?));
-            }
+            _ => return Err(format!("operator {sym}")),
         };
         Ok(Val::V(self.b.ins_cmp(cmp, l, r).map_err(mir)?))
     }
