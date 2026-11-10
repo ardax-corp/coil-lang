@@ -15,7 +15,6 @@ pub mod id;
 pub mod index_facts;
 pub mod infer;
 pub mod kind;
-pub mod par_hint;
 pub mod pretty;
 pub mod purity;
 pub mod resolve;
@@ -38,8 +37,6 @@ pub use infer::{TestTry, TryInto,
 };
 #[allow(unused_imports)] // public API for kind-aware callers / tests
 pub use kind::Kind;
-#[allow(unused_imports)] // public API re-export
-pub use par_hint::{EscapeKind, NamedEscape, ParEscapeHint, analyze_par_escape_hints, hint_arms};
 pub use purity::analyze_recursive_fns;
 #[allow(unused_imports)] // public API re-export
 pub use ty::{ScalarBacking, Ty};

@@ -15,11 +15,7 @@ fn hints_of(ast: &Parsed) -> Vec<ParEscapeHint> {
     let _ = checker.check_program(ast);
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", ast);
-    let found = module.par_escape_hints(&checker, &effects);
-    // Until the AST walk is gone: the two agree.
-    let sites = module.par_fork_sites(&checker, &crate::typechecking::hint_arms(&effects));
-    assert_eq!(found, crate::typechecking::analyze_par_escape_hints(ast, &effects, &sites), "HIR and AST hints differ");
-    found
+    module.par_escape_hints(&checker, &effects)
 }
 
 fn parse(src: &'static str) -> Parsed {
