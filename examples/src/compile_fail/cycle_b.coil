@@ -1,0 +1,6 @@
+// Imports `cycle_a`, which imports this module: see cycle_a.coil (#2536).
+use compile_fail::cycle_a::Box1;
+
+fn twice(Box1 b) -> int {
+    return b.n * 2;
+}
