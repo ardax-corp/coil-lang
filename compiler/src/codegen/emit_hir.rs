@@ -6395,9 +6395,12 @@ impl Compiler {
                 own_dicts: Vec::new(),
             });
         }
-        if inst_args.iter().any(Ty::has_var) || self.two_word_return_kind(&fqn).is_some() {
+        if inst_args.iter().any(Ty::has_var) {
             return Err("callee-trait");
         }
+        // A pair return comes back as its two words, as `x.m(..)` takes it
+        // (#2434).
+        let pair = self.two_word_return_kind(&fqn);
         let is_default = Self::is_default_method_fqn(&class, method, &fqn);
         let sig = self.trait_method_boundary_sig(&class, method, &inst_args, is_default);
         if sig.as_ref().is_some_and(|s| s.params.len() != args.len()) {
@@ -6419,7 +6422,7 @@ impl Compiler {
             .collect();
         Ok(HirCall {
             key: fqn,
-            pair: None,
+            pair,
             params,
             ret,
             method: true,
