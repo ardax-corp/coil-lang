@@ -3,7 +3,7 @@
 MIR is typed SSA, and it is what every engine runs. Every function body lowers
 from HIR to MIR. Native code ([native.md](native.md)) compiles it with Cranelift
 and the interpreter ([mir-interp.md](mir-interp.md)) runs it directly, so a pass
-here serves both. A body MIR cannot take is an internal error (`finalize_bodies` panics on a clean compile with one).
+here serves both. A body MIR cannot take is an internal error (`finalize_bodies` panics on a clean compile with one), and so is a call, function value or code pointer naming an entry no body was emitted for (a clone reserved and never compiled, #2580).
 
 ## Where it lives
 
