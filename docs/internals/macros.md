@@ -480,6 +480,13 @@ derive-using program compiled to identical code except enums with tuple
 variants: their payloads are bound by the pattern (`E::V(s_p0)`) since the old
 `p.0` field access cannot be written in source.
 `comptime/tests/derive_golden.rs` pins the generated source.
+`Eq`, `Hash` and `Show` read each field or payload through `__data(e)`
+(coil-lang#2457): `e` itself, typed as the data it is at run time, so a
+`Matrix<D>` anywhere in its type is `D`. The checker types the call
+(`infer_call_expr`) and the HIR builder drops it (`call`), so the body is the
+one `e` alone gives. Without it a `Matrix` field's `==` is the element-wise
+comparison (a `Matrix` of `byte`, not a `bool`) and the field has no `Hash` or
+`Show`. A user derive may write the same call.
 `Serialize` / `Deserialize` were removed (placeholders that cast fields to a
 byte); serializers belong in format packages as user derives. The `String`
 trait (`to_string`, a second copy of `Show`) was removed too: `Show` is the
