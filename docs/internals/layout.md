@@ -114,6 +114,12 @@ is the main user. This is the only place a value changes representation at
 a boundary, and it is keyed on the static type of the parameter (open
 enum), not on the caller's context.
 
+A dictionary is not such an edge: a shared body calls its methods on a
+bare `W`, the niche word. A bound's dictionary for an instance with a
+generic head over `Option` / `Result` therefore holds the instance's
+per-type clones at a niche type, never the shared entries (#2477,
+[generic-instances.md](generic-instances.md)).
+
 **Below the top nothing converts** (#2441). An open enum nested in a
 parameter or result (an element of `Vec<Option<T>>` or `[Option<T>; N]`,
 a tuple item, a type argument, the payload of another enum) lives in an
