@@ -785,7 +785,9 @@ fn motion(
         // A readonly class's field never changes (#1560).
         MirInst::ProductLoad { dest, .. } if func.invariant_loads.contains(dest) => Some(Motion::Free),
         MirInst::ProductLoad { .. } => free(!fx.fields),
-        MirInst::Call { dest, args, .. } if func.pure_calls.contains(dest) => {
+        // One word only: the moved value is read through one φ behind the
+        // guard, and lowering marks no two-word call pure.
+        MirInst::Call { dest, args, dest_hi: None, .. } if func.pure_calls.contains(dest) => {
             let reads_heap = args.iter().any(|a| super::cse::reads_heap(func.ty(*a)));
             (!reads_heap || !fx.heap() && !fx.lengths).then_some(Motion::Traps)
         }
@@ -1309,6 +1311,17 @@ bb3:
         let Some(Terminator::Br { cond, taken, .. }) = f.block(*pre).term else { panic!("guarded: {f}") };
         assert_eq!(taken, at);
         assert!(f.block(*pre).insts.iter().any(|i| matches!(i, MirInst::Cmp { dest, lhs, rhs, .. } if *dest == cond && *lhs == ValueId(2) && *rhs == ValueId(0))));
+    }
+
+    #[test]
+    fn two_word_pure_call_stays() {
+        // The guard gives a moved value one φ, so a call that defines two
+        // words has no place behind it.
+        let mut f = counted("v0: i64, v1: i64", "    v6, v16 = call.i64 7 v1\n    v17 = iadd v6, v16\n    v18 = storestatic 0, v17");
+        f.pure_calls.insert(ValueId(6));
+        licm(&mut f, true);
+        f.verify().and_then(|()| f.verify_dominance()).unwrap_or_else(|e| panic!("{e}\n{f}"));
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Call { .. })), 1, "{f}");
     }
 
     #[test]
