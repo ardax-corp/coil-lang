@@ -1240,13 +1240,14 @@ impl Compiler {
         {
             let mut msg = Message::error(
                 ErrorCode::CodegenError,
-                format!("a value holding a `-> ()` function cannot be stored in the {slot} here: the slot's type holds a function returning a type parameter inside another type"),
+                format!("the compiler cannot lower `{name}` yet (unit-fn-nested): a value holding a `-> ()` function cannot be stored in the {slot} here"),
                 at.0..at.1,
             );
             msg.with_help(
-                "the type's methods run one shared body, which keeps that function's result as a word of the type parameter; a `-> ()` \
-                 function returns no such word, and only a field or payload declared as the function itself (`fn() -> T`) converts it \
-                 (coil-lang#2541)"
+                "the slot's type holds a function returning a type parameter inside another value (a `Vec`, a tuple, another type's \
+                 argument), and the type's methods run one shared body, which keeps that function's result as a word of the type \
+                 parameter; a `-> ()` function returns no such word, and only a field or payload declared as the function itself \
+                 (`fn() -> T`) converts it (coil-lang#2541)"
                     .to_string(),
             );
             self.messages.push(msg);
