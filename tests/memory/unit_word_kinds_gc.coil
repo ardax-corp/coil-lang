@@ -1,0 +1,150 @@
+// A stored `()` is the empty tuple object: every place that holds it as a
+// word (a class field, a generic class's `T` field, an enum payload, a tuple
+// item, a `Vec<()>` element, a record field, a flat `Option<()>` field) reads
+// as a pointer word to the collector. The gc-stress build checks each word
+// against its declared kind at every collection (#2507).
+use tests::assert;
+use gc::collect;
+
+class Plain {
+    pub u: (),
+    pub n: int,
+}
+
+class Box<T> {
+    pub v: T,
+}
+
+enum E {
+    A(()),
+    B(int),
+}
+
+fn nothing() -> () {
+    return;
+}
+
+fn id<T>(T x) -> T {
+    return x;
+}
+
+test("class field") {
+    let p = new Plain((), 2);
+    p.u = nothing();
+    collect();
+    assert!(p.n == 2);
+}
+
+test("generic class field") {
+    let b = new Box(nothing());
+    b.v = nothing();
+    collect();
+    let _ = b.v;
+    assert!(true);
+}
+
+test("enum payload") {
+    let e = E::A(nothing());
+    collect();
+    match e {
+        E::A(_) => {
+            assert!(true);
+        },
+        E::B(_) => {
+            assert!(false);
+        },
+    }
+}
+
+test("tuple item") {
+    let t = (nothing(), 3);
+    collect();
+    assert!(t[1] == 3);
+}
+
+test("vec element") {
+    let v: Vec<()> = Vec::new();
+    v.push(nothing());
+    v.push(());
+    collect();
+    assert!(v.len() == 2);
+}
+
+test("option of unit") {
+    let o: Option<()> = Option::Some(nothing());
+    let v: Vec<Option<()>> = Vec::new();
+    v.push(o);
+    v.push(Option::Some(id(nothing())));
+    collect();
+    assert!(v.len() == 2);
+}
+
+test("record") {
+    let r = { u: nothing(), n: 4 };
+    collect();
+    assert!(r.n == 4);
+}
+
+test("generic id") {
+    let t = (id(nothing()), id(()), 1);
+    collect();
+    assert!(t[2] == 1);
+}
+
+class Flags {
+    pub o: Option<()>,
+    pub r: Result<(), int>,
+    pub n: int,
+}
+
+fn pair_of<T>(T a, int n) -> (T, int) {
+    return (a, n);
+}
+
+fn wrap<T>(T a) -> Vec<T> {
+    let v: Vec<T> = Vec::new();
+    v.push(a);
+    return v;
+}
+
+class Holder<T> {
+    pub v: T,
+    pub n: int,
+}
+
+impl Holder<T> {
+    pub fn set(T x) {
+        self.v = x;
+    }
+}
+
+test("flat option field") {
+    let f = new Flags(Option::Some(nothing()), Result::Ok(nothing()), 5);
+    f.o = Option::Some(nothing());
+    collect();
+    assert!(f.n == 5);
+    assert!(f.o == Option::Some(()));
+}
+
+test("generic tuple and vec") {
+    let t = pair_of(nothing(), 7);
+    let v = wrap(nothing());
+    collect();
+    assert!(t[1] == 7);
+    assert!(v.len() == 1);
+}
+
+test("generic holder set") {
+    let h = new Holder(nothing(), 8);
+    h.set(nothing());
+    collect();
+    assert!(h.n == 8);
+}
+
+test("lane array of option unit") {
+    let xs: Vec<Option<()>> = Vec::new();
+    xs.push(Option::Some(nothing()));
+    xs.push(Option::None);
+    collect();
+    assert!(xs[0] == Option::Some(()));
+}

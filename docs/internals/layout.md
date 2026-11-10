@@ -49,7 +49,9 @@ object: an element of a `Vec<()>` or array, a tuple item, a class or record
 field, an enum payload, an argument (so a shared body's bare `T` at
 `T = ()` is that pointer), and the result of a shared body's bare `T`.
 The value runs for its effect first; a read of such a place runs the
-base and yields nothing. So `()` is a type argument like any one-word
+base and yields nothing. The collector reads such a word as a pointer
+(`layout::word_kind` of `()` is `WORD_POINTER`, #2507): it is the unit
+object or `0`, the word a dictionary adapter moves it as. So `()` is a type argument like any one-word
 type, in a clone and in a shared body (#2489).
 
 A ground `-> ()` function value a shared body calls where its result is

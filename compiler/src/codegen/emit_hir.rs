@@ -7337,12 +7337,7 @@ impl Compiler {
             {
                 return Err("callee-generic");
             }
-            let kind = if crate::layout::is_unit(&g) {
-                common::WORD_POINTER
-            } else {
-                crate::layout::word_kind(&self.checker, &g)
-            };
-            Ok((HirRetItem { ty, unbox }, kind))
+            Ok((HirRetItem { ty, unbox }, crate::layout::word_kind(&self.checker, &g)))
         };
         let pack = |items: Vec<(HirRetItem, u8)>| {
             let kinds = common::pack_word_kinds(items.iter().map(|&(_, k)| k));

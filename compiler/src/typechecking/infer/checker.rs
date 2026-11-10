@@ -19988,22 +19988,11 @@ impl Checker {
 
     /// The `InitTyped` type id of the slotted record `fields` (any order;
     /// slots are the fields sorted by name). One id per field names and
-    /// word kinds, so a structural type's values share it. A `()` field
-    /// holds the shared empty tuple object: an unknown word.
+    /// word kinds, so a structural type's values share it.
     pub fn record_type_id(&mut self, fields: &[(String, Ty)]) -> u32 {
         let mut sorted: Vec<&(String, Ty)> = fields.iter().collect();
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
-        let kinds = sorted
-            .iter()
-            .map(|(_, ty)| {
-                let ty = crate::typechecking::subst::apply_ty_prune(self.subst(), ty);
-                if crate::layout::is_unit(&ty) {
-                    common::WORD_UNKNOWN
-                } else {
-                    crate::layout::word_kind(self, &ty)
-                }
-            })
-            .collect();
+        let kinds = sorted.iter().map(|(_, ty)| crate::layout::word_kind(self, ty)).collect();
         let key = (sorted.iter().map(|(n, _)| n.clone()).collect(), kinds);
         if let Some(&id) = self.record_type_ids.get(&key) {
             return id;

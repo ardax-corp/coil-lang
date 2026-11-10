@@ -3090,11 +3090,7 @@ impl Lower<'_> {
         }
         // A `()` item is the empty tuple object, a pointer, as an enum's
         // `()` payload (#1427).
-        let kinds = common::pack_word_kinds(args.iter().map(|&a| match self.expr_ty(a) {
-            Some(t) if is_unit(t) => common::WORD_POINTER,
-            Some(t) => self.cx.word_kind(t),
-            None => common::WORD_UNKNOWN,
-        }));
+        let kinds = common::pack_word_kinds(args.iter().map(|&a| self.expr_ty(a).map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t))));
         let obj = self.b.ins_alloc_kinds(MirAllocKind::TUPLE, words, kinds).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }
