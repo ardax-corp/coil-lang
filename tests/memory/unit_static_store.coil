@@ -1,0 +1,63 @@
+// A `()` stored into a static, class field, array element, tuple local,
+// record field or local from a call is the empty tuple object, and reads
+// back as `()` (#2562).
+use tests::assert;
+
+static let su: () = ();
+
+class Cell {
+    pub u: (),
+    pub n: int,
+}
+
+fn nothing() {}
+
+fn make() -> Cell {
+    return new Cell(u: (), n: 1);
+}
+
+test("a unit static takes a literal store") {
+    su = ();
+    assert!(su == ());
+}
+
+test("a unit static takes a call's unit") {
+    su = nothing();
+    assert!(su == ());
+}
+
+test("a unit class field takes a store") {
+    let c = make();
+    c.u = nothing();
+    c.n = 2;
+    assert!(c.u == ());
+    assert!(c.n == 2);
+}
+
+test("a unit array element takes a store") {
+    let a = [(), ()];
+    a[1] = nothing();
+    a[0] = ();
+    assert!(a[0] == ());
+    assert!(a[1] == ());
+}
+
+test("a tuple local takes a unit element from a call") {
+    let t = (1, nothing());
+    assert!(t[0] == 1);
+    assert!(t[1] == ());
+    t = (2, ());
+    assert!(t[1] == ());
+}
+
+test("a unit record field takes a store") {
+    let r = { a: 1, u: () };
+    r.u = nothing();
+    assert!(r.u == ());
+}
+
+test("a unit local takes a call's unit") {
+    let x = ();
+    x = nothing();
+    assert!(x == ());
+}
