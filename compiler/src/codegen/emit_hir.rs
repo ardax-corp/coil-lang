@@ -370,9 +370,6 @@ struct HirPlan {
     /// Parallel loops moved into their own fork-join functions, by loop
     /// ([`Compiler::hir_plan_par_loops`]): the direct MIR lowering's calls.
     par_loops: HashMap<u32, HirParPlanned>,
-    /// A parallel loop runs its chunked fork-join inline, which the direct
-    /// MIR lowering does not model.
-    par_inline: bool,
     /// Each parameter's frame slot, and a two-word parameter's second.
     params: HashMap<u32, (u32, Option<u32>)>,
 }
@@ -1623,9 +1620,7 @@ impl Compiler {
         // an arm, located where the function makes that call).
         let placed = self.hir_synth_calls.is_none() || hir.exprs.iter().any(|e| e.span != crate::hir::synth::SPAN);
         let file = Some(self.loc_from_span(SimpleSpan::from(0..1))).filter(|loc| loc.is_known() && placed).map(|loc| loc.file);
-        let why = if emit.plan.par_inline {
-            Err("parallel loop".to_string())
-        } else {
+        let why = {
             let frozen = self.hir_frozen_arrays(hir);
             let cx = HirLowerCx::new(self, hir, emit, HirLowerBody { reach: &reach, packs, frozen, file, dict_params });
             crate::mir::lower_from_hir(hir, &cx)
@@ -4165,7 +4160,6 @@ impl Compiler {
                 box_at: HashMap::new(),
                 cold_ok: false,
                 par_loops: HashMap::new(),
-                par_inline: false,
                 params: HashMap::new(),
             },
             slots: vec![None; hir.locals.len()],
@@ -10046,7 +10040,10 @@ impl Compiler {
     /// Parallel-loop site `id`'s locals, when its loop can run chunked:
     /// the enclosing body's locals it reads, by the site's names, given
     /// which locals are `bound` in this frame when it runs (the body's own
-    /// locals are not). `None` when the loop runs sequentially.
+    /// locals are not). `Err` when the loop runs sequentially: with
+    /// nothing when no site is listed here or chunking it gains nothing,
+    /// and with what is missing when the analysis lists a site this cannot
+    /// build ([`Self::hir_par_disagreement`]).
     #[allow(clippy::too_many_arguments)]
     fn hir_par_site(
         &self,
@@ -10057,11 +10054,14 @@ impl Compiler {
         bind: Option<LocalId>,
         body: HirId,
         bound: &dyn Fn(LocalId) -> bool,
-    ) -> Option<HirParSiteLocals> {
+    ) -> Result<HirParSiteLocals, Option<&'static str>> {
         let e = hir.expr(id);
-        let site = self.par_loop_site(SimpleSpan::from(e.span.0..e.span.1), e.node)?;
+        if !self.loop_par_sites.contains_key(&e.span) {
+            return Err(None);
+        }
+        let site = self.par_loop_site(SimpleSpan::from(e.span.0..e.span.1), e.node).ok_or(Some("its range is not an `int` range"))?;
         if site.implicit_step != bind.is_some() {
-            return None;
+            return Err(Some("the site is of the other loop form"));
         }
         let planned = |l: LocalId| {
             plan.sroa.contains_key(&l.0) || plan.stacks.contains_key(&l.0) || plan.pair_locals.contains_key(&l.0)
@@ -10114,21 +10114,21 @@ impl Compiler {
             .chain(site.captures.iter().map(|(n, _)| n.as_str()))
             .collect();
         if !ok || in_body.keys().any(|n| !names.contains(n.as_str())) {
-            return None;
+            return Err(Some("its body reads or does what a chunk worker cannot"));
         }
         for (name, &l) in &in_body {
             if *outer.entry(name.clone()).or_insert(l) != l {
-                return None;
+                return Err(Some("two of its locals share a name"));
             }
         }
         // The accumulator, live captures, index and named bounds are each
         // one of those locals.
         let read = |name: &String| outer.contains_key(name);
         if !read(&site.acc) || !site.live_captures.iter().all(read) || (bind.is_none() && !read(&site.index)) {
-            return None;
+            return Err(Some("a local the site names is not read"));
         }
         if [&site.begin_local, &site.end_local].into_iter().flatten().any(|n| !heads.contains_key(n)) {
-            return None;
+            return Err(Some("a bound the site names is not in the loop's head"));
         }
         // An iteration that never reads its index and computes something
         // from captures alone repeats that work each time: MIR LICM moves
@@ -10138,11 +10138,25 @@ impl Compiler {
         let acc = outer.get(&site.acc).copied();
         let varies = |l: LocalId| Some(l) == index || Some(l) == acc || !bound(l);
         if index.is_some_and(|ix| !Self::hir_reads_index(hir, body, ix)) && Self::hir_invariant_work(hir, body, &varies) {
-            return None;
+            return Err(None);
         }
         // Only the number of live captures matters to the natives.
-        let natives = self.par_loop_natives(site.live_captures.len())?;
-        Some(HirParSiteLocals { site, outer, heads, natives })
+        if 3 + site.live_captures.len() > common::MAX_THREAD_SPAWN_ARGS {
+            return Err(Some("its worker takes more arguments than a spawn passes"));
+        }
+        // A target without threads has no natives.
+        let natives = self.par_loop_natives(site.live_captures.len()).ok_or(None)?;
+        Ok(HirParSiteLocals { site, outer, heads, natives })
+    }
+
+    /// Note that the auto-par analysis lists loop `id` as a site and the
+    /// plan cannot build it, for `why`. The loop runs sequentially, which
+    /// is always right, so a compile goes on; the HIR capture keeps the
+    /// note, and the corpus test (`compiler/tests/hir_corpus.rs`) fails on
+    /// one. Fix the side that is wrong: the two must agree (#2450).
+    pub(super) fn hir_par_disagreement(&self, hir: &HirBody, id: HirId, why: &str) {
+        let (start, end) = hir.expr(id).span;
+        crate::hir::capture_problem(|| format!("`{}`: auto-par lists the loop at {start}..{end}, which the plan cannot build: {why}", hir.name));
     }
 
     /// Whether `id` reads local `ix` other than in its own step (`ix = ix + 1`).
@@ -10193,11 +10207,10 @@ impl Compiler {
     /// and its worker, under a fresh fork-join name. The function takes
     /// the accumulator, the live captures and the runtime bounds, and
     /// returns the new accumulator; a const range's index is left at its
-    /// last value here, as the fork-join leaves it, and a dynamic
-    /// stride-one range's at the larger of its start and end. `None`, with
-    /// nothing reserved, when a word is not an `int` local or the loop's
-    /// index is read after a dynamic range of a longer stride: the loop
-    /// stays inline.
+    /// last value here, as the fork-join leaves it, and a dynamic range's
+    /// at the first value at or past its end. `None`, with nothing
+    /// reserved, when a word is not an `int` local, which the analysis
+    /// rules out: the loop then runs sequentially.
     fn hir_par_outline(&mut self, hir: &HirBody, id: HirId, locals: &HirParSiteLocals, bind: Option<LocalId>, body: HirId) -> Option<HirParPlanned> {
         let HirParSiteLocals { site, outer, heads, natives } = locals;
         let acc = *outer.get(&site.acc)?;
@@ -10219,9 +10232,9 @@ impl Compiler {
             return None;
         }
         // The index after the loop: a const range's last value; a dynamic
-        // stride-one range's larger of its start and end, read from the
+        // range's first value at or past its end, worked out from the
         // bounds' locals (the fork-join leaves this body's frame alone).
-        // A longer stride's only the fork-join knows, so it must be dead.
+        // A dead index is left as it is.
         let index = match index {
             Some(l) if site.is_dynamic() => {
                 let mut uses = 0usize;
@@ -10232,16 +10245,14 @@ impl Compiler {
                 hir.visit(id, &mut |x| inside += usize::from(matches!(x.kind, HirKind::Local(y) if y == l)));
                 if uses == inside {
                     None
-                } else if site.stride == 1 {
+                } else {
                     let bound = |local: Option<Option<LocalId>>, value: i64, bias: i64| match local {
                         Some(l) => crate::mir::HirParBound::Local(l.expect("bound local checked above"), bias),
                         None => crate::mir::HirParBound::Const(value),
                     };
                     let begin = bound(begin, site.begin, 0);
                     let end = bound(end, site.end, site.end_bias);
-                    Some((l, crate::mir::HirParIndex::Max(begin, end)))
-                } else {
-                    return None;
+                    Some((l, crate::mir::HirParIndex::Past { begin, end, stride: site.stride }))
                 }
             }
             Some(l) => Some((l, crate::mir::HirParIndex::Const(site.final_index()))),

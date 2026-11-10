@@ -303,12 +303,13 @@ pub struct HirParLoop {
     pub index: Option<(HirLocal, HirParIndex)>,
 }
 
-/// A parallel loop's index after it: a const range's last value, or the
-/// larger of a dynamic stride-one range's start and end.
+/// A parallel loop's index after it: a const range's last value, or a
+/// dynamic range's first value at or past its end, counting from its start
+/// by the stride (the start itself when the range is empty).
 #[derive(Clone, Copy, Debug)]
 pub enum HirParIndex {
     Const(i64),
-    Max(HirParBound, HirParBound),
+    Past { begin: HirParBound, end: HirParBound, stride: i64 },
 }
 
 /// A dynamic parallel loop's bound: a constant, or an `int` local plus a
@@ -5381,8 +5382,11 @@ impl Lower<'_> {
                 let v = self.b.ins_const(MirConst::I64(n)).map_err(mir)?;
                 self.b.def_local(slot, v).map_err(mir)?;
             }
-            // `i = begin; if i < end { i = end }`, as HIR emission.
-            HirParIndex::Max(begin, end) => {
+            // `i = begin; if i < end { i = end }`, as HIR emission; a
+            // longer stride lands on `begin + trips * stride`. The loop
+            // ran, so its last step computed that value: nothing here
+            // overflows.
+            HirParIndex::Past { begin, end, stride } => {
                 let b = self.par_bound(begin)?;
                 let e = self.par_bound(end)?;
                 self.b.def_local(slot, b).map_err(mir)?;
@@ -5391,7 +5395,18 @@ impl Lower<'_> {
                 let join = self.b.create_block();
                 self.b.branch(less, raise, join).map_err(mir)?;
                 self.switch(raise);
-                self.b.def_local(slot, e).map_err(mir)?;
+                let past = if stride == 1 {
+                    e
+                } else {
+                    let span = self.b.ins_binop(MirBinOp::Sub, e, b).map_err(mir)?;
+                    let round = self.b.ins_const(MirConst::I64(stride - 1)).map_err(mir)?;
+                    let span = self.b.ins_binop(MirBinOp::Add, span, round).map_err(mir)?;
+                    let step = self.b.ins_const(MirConst::I64(stride)).map_err(mir)?;
+                    let trips = self.b.ins_binop(MirBinOp::Div, span, step).map_err(mir)?;
+                    let run = self.b.ins_binop(MirBinOp::Mul, trips, step).map_err(mir)?;
+                    self.b.ins_binop(MirBinOp::Add, b, run).map_err(mir)?
+                };
+                self.b.def_local(slot, past).map_err(mir)?;
                 self.jump(join)?;
                 self.switch(join);
             }

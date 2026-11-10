@@ -348,9 +348,21 @@ The fork-join below is a second private function, `__coil_par_loop_fork_{n}(acc,
 …live captures, begin, end)`, returning the new `acc`; the loop site is a
 plain call of it. Both are emitted after the enclosing function, so neither
 sits inside its code: the enclosing body and the worker (planned as its own
-HIR body, `while lo < hi { body }; return acc`) each lower to MIR. A `while`
-site over a dynamic range whose index is read after the loop keeps the
-fork-join inline (only the fork-join knows the final index) and has no MIR.
+HIR body, `while lo < hi { body }; return acc`) each lower to MIR. After the
+call, the enclosing body sets a `while` site's index, when it is read after
+the loop, to the value the sequential loop leaves: a const range's last
+value, and a dynamic range's first value at or past its end counting from
+its start by the stride (`begin + trips * stride`; the start when the range
+is empty).
+
+A listed site is one the plan can build: the analysis holds its words (the
+accumulator, a `while` index, the bounds, the live captures) to `int` locals
+few enough for one spawn, and a `for` loop's checks to what its body may
+read. The plan may still leave a site sequential when chunking gains nothing
+(an iteration that never reads its index and repeats work LICM hoists). A
+listed site it cannot build runs sequentially and is a bug on one side:
+`Compiler::hir_par_disagreement` notes it, and the corpus HIR test
+(`compiler/tests/hir_corpus.rs`) fails on one (#2450).
 In the fork-join:
 
 1. `MakeFn` the worker, then `thread_spawn_shared(worker, lo, hi, identity)` for
@@ -441,11 +453,14 @@ Still refuses (and why):
 | a function with a contract check compiled in | the worker would not run it (#2425) |
 | `n % 2 == 0` path guard | unevaluable → `Opaque`, never specialize |
 | `acc = acc + k` for a non-int `k` | only int parameters and int locals are worker arguments |
+| a `byte` accumulator, index, bound or capture | the fork-join's words are `int` locals (#2450) |
+| more than 13 live captures | the worker's arguments fit one thread spawn |
 | `min` / `max` / user operators, float reduce | not proven associative here |
 | `i = i - 1` countdown | the split walks a positive stride |
 | `break` / heap writes in the body | independence unproven |
 | `if` arms that use different folds | one associative operator per loop |
-| an `invariant` / `decreases` that reads a local the loop writes (the accumulator, a `while` index) | the clause is about the sequential state at that iteration; a chunk's fold starts at the identity (#2412). A clause over values the loop leaves alone is the same test in every chunk and stays |
+| a `for` under an `invariant` / `decreases` that reads a local the loop writes (the accumulator) | the clause is about the sequential state at that iteration; a chunk's fold starts at the identity (#2412). A clause over values the loop leaves alone is the same test in every chunk and stays, when it reads and calls only what a body may |
+| a `while` under any `invariant` / `decreases` | it runs its checks ahead of every test, the one that ends it too, and once when it runs no trips; no chunk worker does (#2450) |
 | array / dict / coro `for` | sendability (C1 leftover), not F2 |
 | a loop in a trait's method (an instance's or a default), under `if let` / `while let`, or bounded by a local `const` | not looked at: the reach of the AST walk the HIR one replaced, kept as it was |
 
