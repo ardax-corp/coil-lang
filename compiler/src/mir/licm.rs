@@ -899,6 +899,9 @@ fn retarget(term: &mut Terminator, from: BlockId, to: BlockId) {
     }
 }
 
+/// The header's φs take their outside values through the new preheader
+/// `ph` (which joins them in φs of its own when they differ); the code
+/// after the φs stays as it is.
 fn split_header_phis(func: &mut MirFunc, header: BlockId, ph: BlockId, external: &[BlockId]) {
     let ext: HashSet<BlockId> = external.iter().copied().collect();
     let header_insts = func.block(header).insts.clone();
@@ -943,14 +946,8 @@ fn split_header_phis(func: &mut MirFunc, header: BlockId, ph: BlockId, external:
         insts.append(&mut block.insts);
         block.insts = insts;
     }
-    let rest: Vec<MirInst> = func
-        .block(header)
-        .insts
-        .iter()
-        .filter(|i| !i.is_phi())
-        .cloned()
-        .collect();
-    new_header.extend(rest);
+    // `new_header` is the whole header: its φs as rewritten and the code
+    // after them as it was, each instruction once (#2422).
     func.block_mut(header).insts = new_header;
 }
 
