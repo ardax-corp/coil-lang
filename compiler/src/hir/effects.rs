@@ -1,10 +1,11 @@
 //! Effects over HIR (E1): which bodies are pure, and which of their
 //! function-typed parameters they call.
 //!
-//! The AST walk ([`crate::typechecking::purity`]) keys effects by name and
-//! gives any call through a function value unknown effects, so every
-//! higher-order function (`map`, `filter`, `fold`) and every caller of one
-//! is impure. Here a body's [`Summary`] keeps the effects it has of its own
+//! The AST walk ([`crate::typechecking::purity`], which now only feeds the
+//! checker's bounds proofs) keys effects by name and gives any call through
+//! a function value unknown effects, so every higher-order function (`map`,
+//! `filter`, `fold`) and every caller of one is impure there. Here a body's
+//! [`Summary`] keeps the effects it has of its own
 //! apart from the parameters it calls (`latent`). A call site fills those in
 //! from its arguments, so `map(xs, fn (int x) => x * 2)` costs the lambda's
 //! effects, which are none: each instance of a generic function gets the
@@ -438,6 +439,28 @@ pub fn steady_names(module: &HirModule, module_path: &str, summaries: &[Summary]
     names_where(module, module_path, summaries, Summary::is_steady)
 }
 
+/// Whether some body of each short name (`f`, the `m` of `Owner::m`) among
+/// `module`'s functions and methods is impure: the names and verdicts the
+/// E0805 hints go by ([`HirModule::par_escape_hints`]).
+pub fn impure_short_names(module: &HirModule, summaries: &[Summary]) -> HashMap<String, bool> {
+    let mut out: HashMap<String, bool> = HashMap::new();
+    for (body, s) in module.bodies.iter().zip(summaries) {
+        if matches!(body.kind, BodyKind::Function | BodyKind::Method) {
+            *out.entry(short_name(&body.name).to_string()).or_default() |= !s.is_pure();
+        }
+    }
+    out
+}
+
+/// The pure functions of a lone module, for the tests of the passes that
+/// take them.
+#[cfg(test)]
+pub(crate) fn lone_module_effects(module: &HirModule, checker: &Checker) -> (HashSet<String>, HashMap<String, bool>) {
+    let program = ProgramEffects::default();
+    let summaries = ModuleEffects::solve(module, checker, "", &program).summaries;
+    (pure_names(module, "", &summaries), impure_short_names(module, &summaries))
+}
+
 /// How a function or method body is written: what its names are keyed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NameShape {
@@ -489,13 +512,12 @@ fn names_where(module: &HirModule, module_path: &str, summaries: &[Summary], ok:
 const SEED_DIFF_ENV: &str = "COIL_EFFECTS_SEED_DIFF";
 
 /// Debug builds, with `COIL_EFFECTS_SEED_DIFF` set: one stderr line for each
-/// function and method the checker's AST walk (which codegen no longer
-/// reads for this) and these summaries disagree on, with the body's shape and what makes it impure here. `ast_pure` and
-/// `ast_steady` are the walk's sets ([`TypedSidecar::pure_fn_names`], the
-/// length-stable names).
-///
-/// [`TypedSidecar::pure_fn_names`]: crate::typechecking::infer::TypedSidecar::pure_fn_names
-pub(crate) fn log_seed_disagreements(module: &HirModule, module_path: &str, fx: &ModuleEffects<'_>, ast_pure: &HashSet<String>, ast_steady: &HashSet<String>) {
+/// function and method the checker's AST walk and these summaries disagree
+/// on being length-stable, with the body's shape and what it does here.
+/// `ast_steady` is the walk's set ([`crate::effects::LengthStability::fns`]),
+/// which the checker's bounds proofs (`index_facts`) still read: it runs
+/// before there is any HIR.
+pub(crate) fn log_seed_disagreements(module: &HirModule, module_path: &str, fx: &ModuleEffects<'_>, ast_steady: &HashSet<String>) {
     if !cfg!(debug_assertions) || std::env::var_os(SEED_DIFF_ENV).is_none() {
         return;
     }
@@ -515,18 +537,10 @@ pub(crate) fn log_seed_disagreements(module: &HirModule, module_path: &str, fx: 
                 format!("{owner}::{short}")
             }
         };
-        let s = fx.summaries[index];
-        for (what, ast, hir) in [("pure", ast_pure.contains(&key), s.is_pure()), ("steady", ast_steady.contains(&key), s.is_steady())] {
-            if ast != hir {
-                let side = |yes: bool| if yes { what } else { "not" };
-                eprintln!(
-                    "effects-seed\t{what}\tast={}\thir={}\t{shape:?}\t{module_path}\t{}\t{}",
-                    side(ast),
-                    side(hir),
-                    body.name,
-                    fx.why(index)
-                );
-            }
+        let (ast, hir) = (ast_steady.contains(&key), fx.summaries[index].is_steady());
+        if ast != hir {
+            let side = |yes: bool| if yes { "steady" } else { "not" };
+            eprintln!("effects-seed\tsteady\tast={}\thir={}\t{shape:?}\t{module_path}\t{}\t{}", side(ast), side(hir), body.name, fx.why(index));
         }
     }
 }

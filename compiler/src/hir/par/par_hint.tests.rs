@@ -2,20 +2,18 @@
 
 use super::*;
 use crate::hir::build_module;
-use crate::typechecking::bare_cases::BareCases;
-use crate::typechecking::purity::analyze_fn_effects;
 
 /// A parsed file, kept for the hints' spans.
 type Parsed = parser::ast::Output<'static>;
 
 /// The hints for a lone file, on the effects of its own functions.
 fn hints_of(ast: &Parsed) -> Vec<ParEscapeHint> {
-    let effects = analyze_fn_effects(ast, BareCases::none());
     let mut checker = Checker::new();
     let _ = checker.check_program(ast);
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", ast);
-    module.par_escape_hints(&checker, &effects)
+    let (_, impure) = crate::hir::effects::lone_module_effects(&module, &checker);
+    module.par_escape_hints(&checker, &impure)
 }
 
 fn parse(src: &'static str) -> Parsed {
@@ -556,13 +554,15 @@ fn main() { return; }
 }
 
 /// A construction-shaped call is no call, its arguments are read; a method
-/// call names no host; a local called by a host's name does.
+/// call names no host; a local called by a host's name does (in a function
+/// that is impure for another reason: a pure one gets no hint).
 #[test]
 fn a_call_is_read_as_it_is_written() {
     let hints = summary(
         r#"
 use io::{stdout, stderr, write};
 use string::{to_bytes};
+static let SEEN: int = 0;
 class Sink { pub n: int, }
 impl Sink {
     pub static fn open(int n) -> int { return n; }
@@ -583,6 +583,7 @@ fn count(int n) -> int {
 }
 fn shadow(int n) -> int {
     let write = fn (int q) => q;
+    SEEN = SEEN + 1;
     return write(n);
 }
 fn rec(Sink s, int n) -> int {

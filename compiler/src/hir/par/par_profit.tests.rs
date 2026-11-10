@@ -2,9 +2,7 @@
 
 use super::*;
 use crate::hir::build_module;
-use crate::typechecking::bare_cases::BareCases;
 use crate::typechecking::infer::Checker;
-use crate::typechecking::purity::analyze_pure_fns;
 
 /// A checked module with its HIR and its pure functions.
 struct Lowered {
@@ -16,11 +14,11 @@ struct Lowered {
 fn lower(src: &str) -> Lowered {
     let owned = Box::leak(src.to_string().into_boxed_str());
     let ast = parser::Pratt::default().parse(owned).expect("parse");
-    let pure = analyze_pure_fns(&ast, &BareCases::checked(&ast));
     let mut checker = Checker::new();
     let _ = checker.check_program(&ast);
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", &ast);
+    let (pure, _) = crate::hir::effects::lone_module_effects(&module, &checker);
     Lowered { checker, module, pure }
 }
 

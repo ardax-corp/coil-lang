@@ -267,11 +267,9 @@ pub struct Checker {
     pub(crate) for_in_pin: HashSet<NodeId>,
     /// For-in pin by source span (emit_idx / clone fallback).
     pub(crate) for_in_pin_spans: HashSet<(usize, usize)>,
-    /// Whole-function effect bits of this file's functions, by bind name.
-    /// Impl methods share their bare name with any same-named `fn`.
-    pub(crate) fn_effects: HashMap<String, common::EffectFlags>,
-    /// Effect bits of every function checked so far (not reset per file),
-    /// so calls into an already-checked module resolve by [`DefId`].
+    /// The AST walk's effect bits of every function checked so far (not
+    /// reset per file), so its calls into an already-checked module resolve
+    /// by [`DefId`] (`purity::record_length_stability`).
     pub(crate) program_fn_effects: HashMap<DefId, common::EffectFlags>,
     /// Fixed parameter count and rest flag of every function and method
     /// checked so far, by module-qualified name (`m::f`, `m::C::f`; the
@@ -284,8 +282,6 @@ pub struct Checker {
     /// Impl method effects for every file checked so far, keyed
     /// `module::Owner::method` (methods have no [`DefId`] of their own).
     pub(crate) program_method_effects: HashMap<String, common::EffectFlags>,
-    /// Bind names proven pure (LICM / index facts / auto-par).
-    pub(crate) pure_fn_names: HashSet<String>,
     /// Functions that cannot change an array length, and whether allocation
     /// (which can run finalizers) is length-stable. Recomputed per file.
     pub(crate) length_stability: crate::effects::LengthStability,
