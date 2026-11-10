@@ -838,9 +838,9 @@ pub struct HirSite {
     /// A matrix / vector operator or `dot` / `matmul` call on a packed
     /// kernel: its native and the meta word packing the shape.
     pub linalg: Option<(u16, u32)>,
-    /// A `cross(a, b)` call unrolled: whether the result is a tuple and
-    /// whether its elements are floats.
-    pub cross: Option<(bool, bool)>,
+    /// A `cross(a, b)` call unrolled: whether the result is a tuple, and
+    /// whether its elements are floats or bytes.
+    pub cross: Option<(bool, bool, bool)>,
     /// An `extern` call or `dload` / `declare` / `invoke`.
     pub ffi: Option<HirFfi>,
     /// A `dot` / `matmul` call or matrix operator unrolled (a shape past
@@ -3302,7 +3302,7 @@ impl Lower<'_> {
             HirKind::Bin { lhs, rhs, .. } if let Some(&la) = self.site(id).linalg.as_ref() => self.linalg(id, la, &[*lhs, *rhs]),
             HirKind::Un { operand, .. } if let Some(&la) = self.site(id).linalg.as_ref() => self.linalg(id, la, &[*operand]),
             HirKind::Call { args, .. } if let Some(&la) = self.site(id).linalg.as_ref() => self.linalg(id, la, args),
-            HirKind::Call { args, .. } if let Some(&(tuple, float)) = self.site(id).cross.as_ref() => self.cross(id, tuple, float, args),
+            HirKind::Call { args, .. } if let Some(&(tuple, float, byte)) = self.site(id).cross.as_ref() => self.cross(id, (tuple, float, byte), args),
             HirKind::Call { args, .. } if let Some(kind) = self.site(id).unrolled_la.as_ref() => self.unrolled_la(id, kind.clone(), args),
             HirKind::Bin { lhs, rhs, .. } if let Some(kind) = self.site(id).unrolled_la.as_ref() => self.unrolled_la(id, kind.clone(), &[*lhs, *rhs]),
             HirKind::Un { operand, .. } if let Some(kind) = self.site(id).unrolled_la.as_ref() => self.unrolled_la(id, kind.clone(), &[*operand]),
@@ -6768,7 +6768,7 @@ impl Lower<'_> {
 
     /// `cross(a, b)` of two 3-vectors, unrolled: each component read, then
     /// `(ay*bz - az*by, az*bx - ax*bz, ax*by - ay*bx)` as a tuple or array.
-    fn cross(&mut self, id: HirId, tuple: bool, float: bool, args: &[HirId]) -> Result<Val, Refusal> {
+    fn cross(&mut self, id: HirId, (tuple, float, byte): (bool, bool, bool), args: &[HirId]) -> Result<Val, Refusal> {
         let [a, b] = *args else {
             return Err("cross arity".into());
         };
@@ -6801,7 +6801,7 @@ impl Lower<'_> {
                 let r = l2.b.ins_binop(MirBinOp::Mul, r, s).map_err(mir)?;
                 l2.b.ins_binop(MirBinOp::Sub, l, r).map_err(mir)
             })?;
-            words.push(w);
+            words.push(self.mask_byte(w, byte)?);
         }
         let ty = self.expr_ty(id).ok_or("cross type")?.clone();
         let obj = if tuple {
@@ -6866,7 +6866,7 @@ impl Lower<'_> {
             Ok(Val::V(made(l, outer, rows)?))
         };
         match kind {
-            K::Dot { length, elem_is_float, .. } if length > 0 && objs.len() == 2 => {
+            K::Dot { length, elem_is_float, elem_is_byte, .. } if length > 0 && objs.len() == 2 => {
                 let elem = elem_of(elem_is_float);
                 let mut acc = None;
                 for i in 0..length {
@@ -6878,9 +6878,10 @@ impl Lower<'_> {
                         Some(acc) => bin(self, MirBinOp::Add, acc, p)?,
                     });
                 }
-                Ok(Val::V(acc.ok_or("empty dot")?))
+                let sum = acc.ok_or("empty dot")?;
+                Ok(Val::V(self.mask_byte(sum, elem_is_byte)?))
             }
-            K::MatMul { m, k, n, outer_is_tuple, row_is_tuple, elem_is_float } if k > 0 && objs.len() == 2 => {
+            K::MatMul { m, k, n, outer_is_tuple, row_is_tuple, elem_is_float, elem_is_byte } if k > 0 && objs.len() == 2 => {
                 let elem = elem_of(elem_is_float);
                 let (a, b) = (objs[0], objs[1]);
                 matrix(self, (m, n), (outer_is_tuple, row_is_tuple), &mut |l, i, j| {
@@ -6894,7 +6895,8 @@ impl Lower<'_> {
                             Some(acc) => bin(l, MirBinOp::Add, acc, p)?,
                         });
                     }
-                    acc.ok_or_else(|| "empty matmul".into())
+                    let sum = acc.ok_or("empty matmul")?;
+                    l.mask_byte(sum, elem_is_byte)
                 })
             }
             K::MatrixZip { m, n, op, outer_is_tuple, row_is_tuple, elem_is_float, elem_is_byte, scalar_on } if objs.len() == 2 => {
@@ -6913,7 +6915,8 @@ impl Lower<'_> {
                 matrix(self, (m, n), (outer_is_tuple, row_is_tuple), &mut |l, i, j| {
                     let x = cell(l, a, i, j, elem)?;
                     if !bit_not {
-                        return l.at_expr(id, |l2| l2.b.ins_neg(x).map_err(mir));
+                        let v = l.at_expr(id, |l2| l2.b.ins_neg(x).map_err(mir))?;
+                        return l.mask_byte(v, elem_is_byte);
                     }
                     let ones = l.b.ins_const(MirConst::I64(-1)).map_err(mir)?;
                     let v = l.b.ins_binop(MirBinOp::Xor, x, ones).map_err(mir)?;
@@ -6924,7 +6927,7 @@ impl Lower<'_> {
         }
     }
 
-    /// `v & 255` for a `byte` cell, as emission's masked bitwise cells.
+    /// `v & 255` for a `byte` cell or element: the scalar operators' wrap.
     fn mask_byte(&mut self, v: ValueId, byte: bool) -> Result<ValueId, Refusal> {
         if !byte {
             return Ok(v);
@@ -6985,8 +6988,11 @@ impl Lower<'_> {
             _ => None,
         };
         match op {
-            C::Add => self.at_expr(id, |l| l.b.ins_binop(MirBinOp::Add, a, b).map_err(mir)),
-            C::Sub => self.at_expr(id, |l| l.b.ins_binop(MirBinOp::Sub, a, b).map_err(mir)),
+            C::Add | C::Sub => {
+                let op = if op == C::Add { MirBinOp::Add } else { MirBinOp::Sub };
+                let v = self.at_expr(id, |l| l.b.ins_binop(op, a, b).map_err(mir))?;
+                self.mask_byte(v, byte)
+            }
             C::Ne if float => {
                 let eq = self.b.ins_cmp(MirCmpOp::Eq, a, b).map_err(mir)?;
                 self.b.ins_not(eq).map_err(mir)

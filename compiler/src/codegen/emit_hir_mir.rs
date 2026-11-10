@@ -587,11 +587,11 @@ impl Compiler {
                 {
                     if let Some((native, meta)) = self.packed_linear_algebra_op(&info.kind, args.len()) {
                         t.linalg = Some((native as u16, meta));
-                    } else if let crate::typechecking::LinearAlgebraKind::Cross { left_is_tuple, elem_is_float } = info.kind
+                    } else if let crate::typechecking::LinearAlgebraKind::Cross { left_is_tuple, elem_is_float, elem_is_byte } = info.kind
                         && args.len() == 2
                     {
                         // Unrolled.
-                        t.cross = Some((left_is_tuple, elem_is_float));
+                        t.cross = Some((left_is_tuple, elem_is_float, elem_is_byte));
                     } else if matches!(info.kind, crate::typechecking::LinearAlgebraKind::Dot { .. } | crate::typechecking::LinearAlgebraKind::MatMul { .. })
                         && args.len() == 2
                     {

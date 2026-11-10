@@ -5330,6 +5330,7 @@ impl Compiler {
             LinearAlgebraKind::Dot {
                 length,
                 elem_is_float,
+                elem_is_byte,
                 ..
             } => {
                 if *length == 0 || *length > u16::MAX as usize || args_len != 2 {
@@ -5338,6 +5339,9 @@ impl Compiler {
                 let mut ops = (*length as u32) & 0xFFFF;
                 if *elem_is_float {
                     ops |= 1 << 16;
+                }
+                if *elem_is_byte {
+                    ops |= 1 << 17;
                 }
                 (common::PACKED_DOT, ops)
             }
@@ -5348,6 +5352,7 @@ impl Compiler {
                 outer_is_tuple,
                 row_is_tuple,
                 elem_is_float,
+                elem_is_byte,
             } => {
                 if args_len != 2
                     || *m == 0
@@ -5368,6 +5373,9 @@ impl Compiler {
                 }
                 if *row_is_tuple {
                     ops |= 1 << 26;
+                }
+                if *elem_is_byte {
+                    ops |= 1 << 27;
                 }
                 (common::PACKED_MATMUL, ops)
             }

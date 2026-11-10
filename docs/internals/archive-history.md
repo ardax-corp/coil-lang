@@ -40,6 +40,11 @@ major.
 - Host native `packed_vec_arith` (**91**): meta bit 28 says the elements
   are `byte`, and the kernel wraps each result modulo 256 (#2401). An
   archive made before this has the bit clear and keeps the int results.
+- Byte cells in the linear-algebra kernels (#2403): `packed_dot` (**87**)
+  meta bit 17 and `packed_matmul` (**88**) meta bit 27 say `byte`, and the
+  result wraps modulo 256. The byte bits `packed_matrix_zip` and
+  `packed_matrix_neg` already had (29 and 20) now wrap `+`, `-` and
+  arithmetic negation too, not only the bitwise cells.
 
 ## Major 7
 
