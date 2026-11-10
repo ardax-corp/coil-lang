@@ -156,6 +156,9 @@ def main():
         known = int(k.group(1)) if k else 0
         if known:
             summary += f", {known} known"
+        sk = re.search(r"; (\d+) skipped \(", text)
+        if sk:
+            summary += f", {sk.group(1)} skipped"
         ok = code == 0 and m is not None and m.group(1) == "ok"
         print(f"{'ok    ' if ok else 'FAILED'} {name:<13} {summary:<34} {secs:6.1f}s", flush=True)
         return name, ok, text, (int(m.group(2)), int(m.group(3)), known) if m else (0, 0, 0)
