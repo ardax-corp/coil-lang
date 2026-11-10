@@ -859,20 +859,41 @@ fn a_variant_named_bare_is_no_combine() {
 #[test]
 fn nothing_under_if_let_is_looked_at() {
     assert!(f_site("int", "if let Some(v) = maybe(n) { return fib(n - 1) + fib(n - 2); } return 0;").is_none());
-// Nor does its `return` close the path after it.
+// It is a statement a fork after it would skip, like any other (#2425).
     let site = f_site("int", "if let Some(v) = maybe(n) { return v; } return fib(n - 1) + fib(n - 2);").expect("site");
-    assert!(site.guards.is_empty(), "{:?}", site.guards);
+    assert_eq!(site.guards, [ParGuard::Opaque]);
     let site = f_site("int", "match maybe(n) { Some(v) => { return v; }, None => {}, } return fib(n - 1) + fib(n - 2);").expect("site");
     assert_eq!(site.guards, [ParGuard::Opaque]);
 }
 
 #[test]
 fn a_try_is_its_operand() {
-// `?` returns early, which the walk does not count as a `return`.
+// `?` returns early, which the walk does not count as a `return`: its
+// `let` is a statement the fork after it would skip.
     let site = f_site("Result<int, string>", "let k = checked(n)?; return fib(n - 1) + fib(n - 2);").expect("site");
-    assert!(site.guards.is_empty(), "{:?}", site.guards);
+    assert!(site.guards.contains(&ParGuard::Opaque), "{:?}", site.guards);
+// A fork under `??` is found, and is not what the function returns.
     let site = f_site("int", "let k = maybe(n) ?? (fib(n - 1) + fib(n - 2)); return k;").expect("site");
-    assert!(site.guards.is_empty(), "{:?}", site.guards);
+    assert!(site.guards.contains(&ParGuard::Opaque), "{:?}", site.guards);
+}
+
+#[test]
+fn a_fork_is_all_its_function_returns_or_never_specialized() {
+    let clear = |body: &str| !f_site("int", body).expect("site").guards.contains(&ParGuard::Opaque);
+    // The operand of a `return`, in a group or under an `if` too.
+    assert!(clear("return fib(n - 1) + fib(n - 2);"));
+    assert!(clear("return (fib(n - 1) + fib(n - 2));"));
+    assert!(clear("if n > 40 { return 0; } let a = fib(n - 1); let b = fib(n - 2); return a + b;"));
+    assert!(clear("if n <= 2 { return 1; } else { return fib(n - 1) + fib(n - 2); }"));
+    // A part of a larger expression, a call's argument, a `let`.
+    assert!(!clear("return fib(n - 1) + fib(n - 2) + n;"));
+    assert!(!clear("return sq(fib(n - 1) + fib(n - 2));"));
+    assert!(!clear("let both = fib(n - 1) + fib(n - 2); return both + 1;"));
+    assert!(!clear("fib(n - 1) + fib(n - 2); return 0;"));
+    // A statement ahead of it that is neither a guard nor one of its arms.
+    assert!(!clear("let d = 100 / (n - 27); return fib(n - 1) + fib(n - 2);"));
+    assert!(!clear("let t = 0; for i in 0..3 { t = t + i; } return fib(n - 1) + fib(n - 2);"));
+    assert!(!clear("let a = fib(n - 3); if n > 40 { return fib(n - 1) + fib(n - 2); } return a;"));
 }
 
 #[test]
@@ -901,7 +922,9 @@ fn main() { return; }
     let sites = m.sites();
     let f = sites.get("f").expect("site");
     assert_eq!(f.combine, ParCombine::BinOp(ParBinOp::Add));
-    assert!(f.guards.is_empty());
+    // The site is found past the checks, and never specialized: a worker
+    // would run none of them (#2425).
+    assert_eq!(f.guards, [ParGuard::Opaque]);
     assert!(!sites.contains_key("g"));
 }
 
