@@ -1,0 +1,242 @@
+// A shared generic body that calls a trait method through its bound gets
+// the elements of a `Vec` or array result one word each, whatever the
+// instance's method returns. A ground instance's method of a `Vec` of a
+// closed two-word type (`Option<int>`, `(int, int)`) returns a lane array,
+// which the body would read one word per element (coil-lang#2616): the
+// method's `$dict` adapter turns it into boxed elements, as a function
+// argument's adapter does (coil-lang#2592). A lane array the body passes
+// in, or one it gets back and passes on, reaches the method as one word
+// per element, which the lane ops read too.
+//
+// The same cases as dict_result_lanes.coil with no mono clones: each call
+// runs the shared body through the bound's dictionary.
+// @flags --clone-budget 0
+use gc::collect;
+use tests::assert;
+
+trait Many<S> {
+    fn many(S s) -> Vec<S> {}
+}
+
+impl Many for Option<int> {
+    fn many(Option<int> s) -> Vec<Option<int>> {
+        let v: Vec<Option<int>> = [s, None];
+        v.push(s);
+        return v;
+    }
+}
+
+impl Many for (int, int) {
+    fn many((int, int) s) -> Vec<(int, int)> {
+        let v: Vec<(int, int)> = [s, (0, 0)];
+        return v;
+    }
+}
+
+impl Many for string {
+    fn many(string s) -> Vec<string> {
+        let v: Vec<string> = [s, "-", s];
+        return v;
+    }
+}
+
+trait Pairs<S> {
+    fn two(S s) -> [S; 2] {}
+}
+
+impl Pairs for Option<int> {
+    fn two(Option<int> s) -> [Option<int>; 2] {
+        let a: [Option<int>; 2] = [None, s];
+        return a;
+    }
+}
+
+impl Pairs for (int, int) {
+    fn two((int, int) s) -> [(int, int); 2] {
+        let a: [(int, int); 2] = [(9, 9), s];
+        return a;
+    }
+}
+
+// The element holds the trait's parameter: `Vec<Option<int>>` at `int`.
+trait Wrapped<S> {
+    fn wrap(S s) -> Vec<Option<S>> {}
+}
+
+impl Wrapped for int {
+    fn wrap(int s) -> Vec<Option<int>> {
+        let v: Vec<Option<int>> = [Some(s), None, Some(s + 1)];
+        return v;
+    }
+}
+
+// A lane array passed in: the method reads and grows it.
+trait Takes<S> {
+    fn second(S s, Vec<S> v) -> S {}
+    fn grow(S s, Vec<S> v) -> Vec<S> {}
+}
+
+impl Takes for Option<int> {
+    fn second(Option<int> s, Vec<Option<int>> v) -> Option<int> {
+        return v[1];
+    }
+
+    fn grow(Option<int> s, Vec<Option<int>> v) -> Vec<Option<int>> {
+        v.push(s);
+        return v;
+    }
+}
+
+impl Takes for (int, int) {
+    fn second((int, int) s, Vec<(int, int)> v) -> (int, int) {
+        return v[1];
+    }
+
+    fn grow((int, int) s, Vec<(int, int)> v) -> Vec<(int, int)> {
+        v.push(s);
+        return v;
+    }
+}
+
+// A subclass bound reaches the superclass's method through its dictionary.
+trait MoreMany<S: Many> {
+    fn tag(S s) -> int {}
+}
+
+impl MoreMany for Option<int> {
+    fn tag(Option<int> s) -> int {
+        return 2;
+    }
+}
+
+impl MoreMany for (int, int) {
+    fn tag((int, int) s) -> int {
+        return 1;
+    }
+}
+
+// The trait spells the element through an associated type.
+trait Items<C> {
+    type Item;
+
+    fn items(C c) -> Vec<Item> {}
+
+    fn text(C c, Item e) -> string {}
+}
+
+class Bin {
+    pub n: int,
+}
+
+impl Items for Bin {
+    type Item = Option<int>;
+
+    fn items(Bin c) -> Vec<Option<int>> {
+        let v: Vec<Option<int>> = [None, Some(c.n)];
+        return v;
+    }
+
+    fn text(Bin c, Option<int> e) -> string {
+        return e.show();
+    }
+}
+
+fn last<T: Many>(T x) -> T {
+    let v = x.many();
+    return v[v.len() - 1];
+}
+
+fn later<T: Many>(T x) -> T {
+    let v = x.many();
+    collect();
+    let n = 0;
+    for e in v {
+        n = n + 1;
+    }
+    v.push(x);
+    collect();
+    return v[n];
+}
+
+fn kept<T: Many>(T x) -> Vec<T> {
+    let v = x.many();
+    v.push(x);
+    return v;
+}
+
+fn second_of<T: Pairs>(T x) -> T {
+    let a = x.two();
+    return a[1];
+}
+
+fn wrapped<T: Wrapped>(T x) -> Option<T> {
+    let v = x.wrap();
+    return v[2];
+}
+
+fn passed<T: Takes>(T x, T y) -> T {
+    let v: Vec<T> = [x, y];
+    return x.second(v);
+}
+
+fn round<T: Takes + Many>(T x) -> T {
+    let v = x.grow(x.many());
+    return v[v.len() - 1];
+}
+
+fn through_super<T: MoreMany>(T x) -> T {
+    let v = x.many();
+    return v[x.tag()];
+}
+
+fn texts<C: Items>(C c) -> string {
+    let v = c.items();
+    collect();
+    return c.text(v[1]) + c.text(v[0]);
+}
+
+test("a dictionary method's Vec result at two-word elements") {
+    assert!(last(Some(4)) == Some(4));
+    assert!(last((1, 2)) == (0, 0));
+    assert!(later(Some(4)) == Some(4));
+    assert!(later((1, 2)) == (1, 2));
+}
+
+test("a dictionary method's Vec result at one-word elements") {
+    assert!(last("a") == "a");
+    assert!(later("a") == "a");
+}
+
+test("the body pushes onto the result and returns it") {
+    let v = kept(Some(3));
+    assert!(v.len() == 4 && v[1] == None && v[3] == Some(3));
+    v.push(None);
+    assert!(v[4] == None && v[0] == Some(3));
+    let w = kept((5, 6));
+    assert!(w.len() == 3 && w[1] == (0, 0) && w[2] == (5, 6));
+}
+
+test("a dictionary method's fixed-array result") {
+    assert!(second_of(Some(7)) == Some(7));
+    assert!(second_of((1, 2)) == (1, 2));
+}
+
+test("an element holding the trait's parameter") {
+    assert!(wrapped(4) == Some(5));
+}
+
+test("a Vec passed into a dictionary method") {
+    assert!(passed(Some(1), None) == None);
+    assert!(passed((1, 2), (3, 4)) == (3, 4));
+    assert!(round(Some(8)) == Some(8));
+    assert!(round((1, 2)) == (1, 2));
+}
+
+test("a superclass method through a subclass bound") {
+    assert!(through_super(Some(4)) == Some(4));
+    assert!(through_super((1, 2)) == (0, 0));
+}
+
+test("an associated type's Vec result") {
+    assert!(texts(new Bin(3)) == "Some(3)None");
+}
