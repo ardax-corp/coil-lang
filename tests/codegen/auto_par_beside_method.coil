@@ -1,0 +1,48 @@
+// An auto-par worker belongs to the free function it forks. A static or
+// instance method of the same name is a different function: its calls run
+// its own body, not the free function's worker.
+use tests::assert;
+
+class K {
+    pub k: int,
+}
+
+impl K {
+    pub fn grow(int n) -> int {
+        if n < 2 {
+            return n + 2000;
+        }
+        return self.grow(n - 1) + self.grow(n - 2) + 1;
+    }
+
+    pub static fn fib(int n) -> int {
+        if n < 2 {
+            return n + 1000;
+        }
+        return K::fib(n - 1) + K::fib(n - 2) + 1;
+    }
+}
+
+fn fib(int n) -> int {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn grow(int n) -> int {
+    if n < 2 {
+        return n;
+    }
+    return grow(n - 1) + grow(n - 2);
+}
+
+test("a free recursive function forks and a same-named static method keeps its body") {
+    assert!(fib(30) == 832040);
+    assert!(K::fib(25) == 242982417);
+}
+
+test("a free recursive function beside a same-named instance method") {
+    assert!(grow(30) == 832040);
+    assert!(new K(0).grow(25) == 242982417);
+}
