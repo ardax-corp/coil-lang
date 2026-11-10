@@ -1,0 +1,90 @@
+// A call of an imported function runs that function, whatever this module
+// names its own methods: `bump` and `trim` below are pure and length-stable
+// as methods of `Foo`, and the imported `bump` and `trim` are neither
+// (#2436).
+use tests::assert;
+use counting_provider::{bump, trim, calls, reset};
+
+class Foo {
+    pub n: int,
+}
+
+impl Foo {
+    pub fn bump(int n) -> int {
+        return n + self.n;
+    }
+    pub fn trim(Vec<int> v) -> int {
+        return v.len() + self.n;
+    }
+}
+
+#[inline(never)]
+fn twice(int n) -> int {
+    return bump(n) + bump(n);
+}
+
+// The last trip of the loop that still finds `xs[i]`.
+#[inline(never)]
+fn last_seen(Vec<int> xs) -> int {
+    let seen = 0 - 1;
+    let i = 0;
+    while i < xs.len() {
+        let left = trim(xs);
+        if i < left {
+            seen = xs[i];
+        }
+        i += 1;
+    }
+    return seen;
+}
+
+test("every call of the imported function runs") {
+    reset();
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += bump(1);
+        i += 1;
+    }
+    assert!(acc == 10);
+    assert!(calls() == 10);
+}
+
+test("a call whose result is unused still runs") {
+    reset();
+    let i = 0;
+    while i < 10 {
+        bump(1);
+        i += 1;
+    }
+    assert!(calls() == 10);
+}
+
+test("two calls in one expression are two calls") {
+    reset();
+    assert!(twice(3) == 6);
+    assert!(calls() == 2);
+}
+
+test("the methods of the same names are still themselves") {
+    reset();
+    let f = new Foo(2);
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    v.push(2);
+    assert!(f.bump(1) == 3);
+    assert!(f.trim(v) == 4);
+    assert!(v.len() == 2);
+    assert!(calls() == 0);
+}
+
+test("a loop sees the length an imported call leaves") {
+    let xs: Vec<int> = Vec::new();
+    let i = 0;
+    while i < 8 {
+        xs.push(i + 10);
+        i += 1;
+    }
+    assert!(last_seen(xs) == 10);
+    assert!(xs.len() == 1);
+}
