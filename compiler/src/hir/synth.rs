@@ -211,6 +211,72 @@ impl Product {
     }
 }
 
+/// Whether `a ⊕ p` leaves the `int` range, as a test that does not trap
+/// (`None`: `op` cannot overflow). A fork-join asks before it folds two
+/// results, and runs the sequential code instead of trapping itself.
+pub fn int_overflows(b: &mut Synth, op: BinOp, a: LocalId, p: LocalId) -> Option<HirId> {
+    let boolean = coil_ty::boolean;
+    let cmp = |b: &mut Synth, op: BinOp, l: LocalId, r: HirId| {
+        let l = b.read(l);
+        b.bin(op, l, r, boolean())
+    };
+    let positive = |b: &mut Synth, l: LocalId| {
+        let zero = b.int(0);
+        cmp(b, BinOp::Gt, l, zero)
+    };
+    // `limit ⊘ x` for a literal `limit`.
+    let room = |b: &mut Synth, op: BinOp, limit: i64, x: LocalId| {
+        let (limit, x) = (b.int(limit), b.read(x));
+        b.bin(op, limit, x, coil_ty::int())
+    };
+    match op {
+        // `a + p` leaves the range past `MAX - p` or under `MIN - p`.
+        BinOp::IntAdd => {
+            let up = positive(b, p);
+            let most = room(b, BinOp::IntSub, i64::MAX, p);
+            let over = cmp(b, BinOp::Gt, a, most);
+            let least = room(b, BinOp::IntSub, i64::MIN, p);
+            let under = cmp(b, BinOp::Lt, a, least);
+            Some(b.if_(up, over, Some(under), boolean()))
+        }
+        // `a - p` leaves it under `MIN + p` or past `MAX + p`.
+        BinOp::IntSub => {
+            let up = positive(b, p);
+            let least = room(b, BinOp::IntAdd, i64::MIN, p);
+            let under = cmp(b, BinOp::Lt, a, least);
+            let most = room(b, BinOp::IntAdd, i64::MAX, p);
+            let over = cmp(b, BinOp::Gt, a, most);
+            Some(b.if_(up, under, Some(over), boolean()))
+        }
+        // `a * p` by the signs: each quotient is of a literal by a
+        // non-zero operand whose sign keeps it in range.
+        BinOp::IntMul => {
+            let a_up = positive(b, a);
+            let on_up = {
+                let p_up = positive(b, p);
+                let most = room(b, BinOp::IntDiv, i64::MAX, p);
+                let over = cmp(b, BinOp::Gt, a, most);
+                let least = room(b, BinOp::IntDiv, i64::MIN, a);
+                let under = cmp(b, BinOp::Lt, p, least);
+                b.if_(p_up, over, Some(under), boolean())
+            };
+            let on_down = {
+                let p_up = positive(b, p);
+                let least = room(b, BinOp::IntDiv, i64::MIN, p);
+                let under = cmp(b, BinOp::Lt, a, least);
+                let zero = b.int(0);
+                let p_down = cmp(b, BinOp::Lt, p, zero);
+                let most = room(b, BinOp::IntDiv, i64::MAX, p);
+                let over = cmp(b, BinOp::Lt, a, most);
+                let over = b.push(HirKind::Logic { and: true, lhs: p_down, rhs: over }, boolean());
+                b.if_(p_up, under, Some(over), boolean())
+            };
+            Some(b.if_(a_up, on_up, Some(on_down), boolean()))
+        }
+        _ => None,
+    }
+}
+
 /// `Range::to_vec` / `RangeInclusive::to_vec` (`float`: the
 /// `__float_to_vec` sibling a float range calls): every value `for x in
 /// self` visits, pushed onto a new `Vec`. An `int` body serves `byte`

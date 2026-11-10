@@ -30,7 +30,12 @@ impl Locator<'_> {
     /// function of the program. Nor have the functions an auto-par loop
     /// is compiled to: its chunk worker is the loop's body, so that frame's
     /// location is shown in the function the loop is written in, in place
-    /// of the call that function makes into the fork-join.
+    /// of the call that function makes into the fork-join. A recursive
+    /// fork-join's worker stands in for a call of its function. Where it
+    /// calls an arm on its own thread, that arm is the function again, and
+    /// the worker's frame is a frame of that function (the name of the
+    /// frame under it); where it calls the function in its own place (no
+    /// location) it is no frame.
     pub(crate) fn backtrace(&self, code: &crate::native::NativeCode, sites: impl IntoIterator<Item = u32>) -> Vec<String> {
         let line = |name: &str, loc: Option<String>| match loc {
             Some(loc) => format!("  in {name} at {loc}"),
@@ -39,6 +44,8 @@ impl Locator<'_> {
         let mut lines = Vec::new();
         // The innermost chunk worker frame, until its loop's function.
         let mut in_loop: Option<(&str, Option<String>)> = None;
+        // The function of the last frame printed.
+        let mut under: Option<&str> = None;
         for s in sites {
             let Some(site) = code.site(s) else { continue };
             let name = self.fn_symbol_at(site.body_id as usize).unwrap_or("<unknown>");
@@ -46,6 +53,12 @@ impl Locator<'_> {
                 continue;
             }
             let loc = self.native_site_location(site);
+            if let Some(stands_for) = common::par_fork_fn(name) {
+                if loc.is_some() {
+                    lines.push(line(under.unwrap_or(stands_for), loc));
+                }
+                continue;
+            }
             match common::par_loop_fn(name) {
                 Some(common::ParLoopFn::Fork) => {}
                 Some(common::ParLoopFn::Worker) => {
@@ -54,6 +67,7 @@ impl Locator<'_> {
                 None => {
                     let loc = in_loop.take().map_or(loc, |(_, inner)| inner);
                     lines.push(line(name, loc));
+                    under = Some(name);
                 }
             }
         }

@@ -25,7 +25,7 @@ pub use array_vec::*;
 pub use builtins::*;
 pub use caps::{Caps, open_mode_caps};
 pub use debug::*;
-pub use startup::{NATIVE_START_NAME, PAR_LOOP_FORK_PREFIX, PAR_LOOP_WORKER_PREFIX, ParLoopFn, StartupOp, par_loop_fn};
+pub use startup::{NATIVE_START_NAME, PAR_FORK_PREFIX, PAR_LOOP_FORK_PREFIX, PAR_LOOP_WORKER_PREFIX, ParLoopFn, StartupOp, par_fork_fn, par_loop_fn};
 pub use effects::EffectFlags;
 pub use ffi::tag;
 pub use ffi::*;

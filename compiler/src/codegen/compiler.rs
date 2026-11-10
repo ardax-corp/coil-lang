@@ -1870,6 +1870,7 @@ impl Compiler {
             recursive_fns: self.recursive_fns.clone(),
             par_shapes: self.par_shapes.clone(),
             par_workers: self.par_workers.clone(),
+            fork_fns: self.fork_fns.clone(),
             loop_par_sites: self.loop_par_sites.clone(),
             current_source_file: self.current_source_file.clone(),
             source_text: self.source_text.clone(),
@@ -1905,6 +1906,7 @@ impl Compiler {
         std::mem::swap(&mut self.recursive_fns, &mut ctx.recursive_fns);
         std::mem::swap(&mut self.par_shapes, &mut ctx.par_shapes);
         std::mem::swap(&mut self.par_workers, &mut ctx.par_workers);
+        std::mem::swap(&mut self.fork_fns, &mut ctx.fork_fns);
         std::mem::swap(&mut self.loop_par_sites, &mut ctx.loop_par_sites);
         std::mem::swap(&mut self.current_source_file, &mut ctx.current_source_file);
         std::mem::swap(&mut self.source_text, &mut ctx.source_text);
@@ -3199,8 +3201,12 @@ impl Compiler {
     /// Parameterized AlwaysPar worker (COI-366 F1 / C2): live args + hop.
     ///
     /// Grain is the const-site rewrite. Inside the worker, hop and path
-    /// guards are depth/reachability — not a grain skip-threshold. Arm 0 is
-    /// `thread_spawn_shared`; remaining arms run inline; join + combine.
+    /// guards are depth/reachability — not a grain skip-threshold. The
+    /// function's leading calls of itself run on this thread, in order;
+    /// every arm after them (the last arm at least) is a
+    /// `thread_spawn_shared` job; then join + combine. A job is quiet, so
+    /// one that panics fails its join and the worker calls the sequential
+    /// original instead, which reports what the program does (#2424).
     /// Self-arms with hop > 1 re-enter this worker; hop 0 / missed guards
     /// call the sequential original. Built as HIR ([`crate::hir::synth`])
     /// and lowered like any other body; no worker when it does not plan.
@@ -3215,14 +3221,14 @@ impl Compiler {
         {
             return;
         }
-        let crate::hir::par::ParArm::Call {
-            args: arm0_args, ..
-        } = &site.arms[0];
-        if arm0_args.len() > common::MAX_THREAD_SPAWN_ARGS {
-            return;
-        }
-        let self_arm0 = crate::hir::par::arm_callee(&site.arms[0]) == site.fn_name;
-        if self_arm0 && arm0_args.len() + 1 > common::MAX_THREAD_SPAWN_ARGS {
+        // Every arm is spawned: its arguments, and the hop of a self arm.
+        let fits = |arm: &crate::hir::par::ParArm| {
+            let crate::hir::par::ParArm::Call { callee, args, .. } = arm;
+            args.len() + usize::from(*callee == site.fn_name) <= common::MAX_THREAD_SPAWN_ARGS
+        };
+        // So is a combine that calls another function, over the arms.
+        let applies = matches!(site.combine, crate::hir::par::ParCombine::ApplyCall { .. });
+        if !site.arms.iter().all(fits) || (applies && site.arms.len() > common::MAX_THREAD_SPAWN_ARGS) {
             return;
         }
         if site
@@ -3281,7 +3287,7 @@ impl Compiler {
         join: &str,
     ) -> Option<crate::hir::HirBody> {
         use crate::hir::synth::Synth;
-        use crate::hir::{BinOp, HirId, HirKind, HirPat, LocalKind, MakeKind};
+        use crate::hir::{BinOp, HirKind, HirPat, LocalKind, MakeKind};
         use crate::hir::par::par_profit::{CmpOp, ParGuard};
         use crate::typechecking::ty::{self as coil_ty, strip_readonly};
         use crate::hir::par::{ArgForm, ParArm, ParBinOp, ParCombine};
@@ -3312,7 +3318,7 @@ impl Compiler {
         // Each arm's forms fit its callee's parameters.
         let mut arm_rets = Vec::with_capacity(site.arms.len());
         for arm in &site.arms {
-            let ParArm::Call { callee, args } = arm;
+            let ParArm::Call { callee, args, .. } = arm;
             let (tys, r) = sig(callee)?;
             if tys.len() != args.len() || args.iter().zip(&tys).any(|(f, t)| form_ty(f).as_ref() != Some(t)) {
                 return None;
@@ -3410,54 +3416,12 @@ impl Compiler {
             let one = b.int(1);
             b.bin(BinOp::Gt, h, one, coil_ty::boolean())
         };
-        // An arm on this thread: its sequential callee.
-        let seq_arm = |b: &mut Synth, i: usize| {
-            let ParArm::Call { callee, args } = &site.arms[i];
-            let args = args.iter().map(|f| form(b, f)).collect();
-            b.call(callee, args, arm_rets[i].clone())
-        };
-        // Or, with `hop > 1`, a self arm re-entering this worker.
-        let local_arm = |b: &mut Synth, i: usize| {
-            let ParArm::Call { callee, args } = &site.arms[i];
-            if *callee != site.fn_name {
-                return seq_arm(b, i);
-            }
-            let cond = hop_over_one(b);
-            let mut nested: Vec<_> = args.iter().map(|f| form(b, f)).collect();
-            nested.push(hop_less(b));
-            let nested = b.call(worker, nested, arm_rets[i].clone());
-            let seq = seq_arm(b, i);
-            b.if_(cond, nested, Some(seq), arm_rets[i].clone())
-        };
-        let combine = |b: &mut Synth, vals: Vec<HirId>| match &site.combine {
-            // Right-associated, as the arms' words fold on the stack.
-            ParCombine::BinOp(_) => {
-                let op = bin.expect("planned binary combine");
-                let mut vals = vals.into_iter().rev();
-                let last = vals.next().expect("two or more arms");
-                vals.fold(last, |acc, v| b.bin(op, v, acc, ret.clone()))
-            }
-            ParCombine::SelfCall => b.call(&site.fn_name, vals, ret.clone()),
-            ParCombine::ApplyCall { fn_name } => b.call(fn_name, vals, ret.clone()),
-            ParCombine::Tuple => b.push(HirKind::Make { kind: MakeKind::Tuple, args: vals }, ret.clone()),
-            ParCombine::EnumCtor { enum_name, variant_name } => b.push(
-                HirKind::Make {
-                    kind: MakeKind::Variant {
-                        enum_name: enum_name.clone(),
-                        variant: variant_name.clone(),
-                        tag: self.checker.tag_for(enum_name, variant_name),
-                        fields: None,
-                    },
-                    args: vals,
-                },
-                ret.clone(),
-            ),
-        };
-        // Every arm sequentially, combined and returned.
-        let seq_return = |b: &mut Synth| {
-            let vals = (0..site.arms.len()).map(|i| seq_arm(b, i)).collect();
-            let value = combine(b, vals);
-            b.ret(value)
+        // The function itself on this thread: what the worker does when it
+        // does not fork, and when a fork fails.
+        let sequential = |b: &mut Synth| {
+            let args = params.iter().map(|&p| b.read(p)).collect();
+            let call = b.call(&site.fn_name, args, ret.clone());
+            b.ret(call)
         };
         let mut stmts = Vec::new();
 
@@ -3481,60 +3445,179 @@ impl Compiler {
             let missed = b.bin(missed, l, r, coil_ty::boolean());
             fallback = b.push(HirKind::Logic { and: false, lhs: missed, rhs: fallback }, coil_ty::boolean());
         }
-        let args = params.iter().map(|&p| b.read(p)).collect();
-        let orig = b.call(&site.fn_name, args, ret.clone());
-        let orig = b.ret(orig);
+        let orig = sequential(&mut b);
         let orig = b.block(vec![orig], None, coil_ty::never());
         stmts.push(b.if_(fallback, orig, None, coil_ty::unit()));
 
-        // Spawn arm 0: its sequential callee, or this worker one hop down.
-        let ParArm::Call { callee: callee0, args: args0 } = &site.arms[0];
-        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(arm_rets[0].clone()), thread_err.clone());
-        let spawn_seq = {
-            let tys: Vec<Ty> = args0.iter().filter_map(&form_ty).collect();
-            let f = b.push(HirKind::Global { name: callee0.clone(), def: None }, fn_ty(&tys, &arm_rets[0]));
-            let mut args = vec![f];
-            args.extend(args0.iter().map(|a| form(&mut b, a)));
-            b.call(spawn, args, spawned_ty.clone())
+        // The arms this thread runs itself, in order, while the rest are
+        // jobs: the function's calls of itself that come first, but for
+        // the last arm. What one of them panics with is what the function
+        // panics with, since every arm before it has returned; and a call
+        // of the function is a call in the sequential program too (a
+        // forking function is never inlined), so its frames are that
+        // program's. An arm after another function's call waits for that
+        // call in the sequential program, and that call may be inlined
+        // there: both are jobs.
+        let arms = site.arms.len();
+        let direct = site.arms.iter().take(arms - 1).take_while(|arm| crate::hir::par::arm_callee(arm) == site.fn_name).count();
+        // Arm `i` here: this worker one hop down while hops are left, or
+        // the function. Located at the arm's call, so the worker's frame
+        // reads as the function's.
+        let direct_arm = |b: &mut Synth, i: usize| {
+            let ParArm::Call { args, span, .. } = &site.arms[i];
+            let cond = hop_over_one(b);
+            let mut nested: Vec<_> = args.iter().map(|f| form(b, f)).collect();
+            nested.push(hop_less(b));
+            let nested = b.call(worker, nested, ret.clone());
+            let args = args.iter().map(|f| form(b, f)).collect();
+            let seq = b.call(&site.fn_name, args, ret.clone());
+            for call in [nested, seq] {
+                b.body.exprs[call.0 as usize].span = *span;
+            }
+            b.if_(cond, nested, Some(seq), ret.clone())
         };
-        let spawned = if *callee0 == site.fn_name {
+        // Arm `i` as a job: its sequential callee, or, for a self arm with
+        // hops left, this worker one hop down.
+        let spawn_arm = |b: &mut Synth, i: usize| {
+            let ParArm::Call { callee, args, .. } = &site.arms[i];
+            let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(arm_rets[i].clone()), thread_err.clone());
+            let spawn_seq = {
+                let tys: Vec<Ty> = args.iter().filter_map(&form_ty).collect();
+                let f = b.push(HirKind::Global { name: callee.clone(), def: None }, fn_ty(&tys, &arm_rets[i]));
+                let mut spawn_args = vec![f];
+                spawn_args.extend(args.iter().map(|a| form(b, a)));
+                b.call(spawn, spawn_args, spawned_ty.clone())
+            };
+            if *callee != site.fn_name {
+                return spawn_seq;
+            }
             let mut tys = param_tys.clone();
             tys.push(int.clone());
-            let cond = hop_over_one(&mut b);
+            let cond = hop_over_one(b);
             let f = b.push(HirKind::Global { name: worker.to_string(), def: None }, fn_ty(&tys, &ret));
-            let mut args = vec![f];
-            args.extend(args0.iter().map(|a| form(&mut b, a)));
-            args.push(hop_less(&mut b));
-            let nested = b.call(spawn, args, spawned_ty.clone());
-            b.if_(cond, nested, Some(spawn_seq), spawned_ty.clone())
-        } else {
-            spawn_seq
+            let mut spawn_args = vec![f];
+            spawn_args.extend(args.iter().map(|a| form(b, a)));
+            spawn_args.push(hop_less(b));
+            let nested = b.call(spawn, spawn_args, spawned_ty.clone());
+            b.if_(cond, nested, Some(spawn_seq), spawned_ty)
+        };
+        let handles: Vec<_> = arm_rets
+            .iter()
+            .enumerate()
+            .map(|(i, r)| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(r.clone()), LocalKind::Pattern))
+            .collect();
+        let joined: Vec<_> = arm_rets
+            .iter()
+            .enumerate()
+            .map(|(i, r)| b.local(&format!("__coil_par_arm{i}"), r.clone(), if i < direct { LocalKind::Temp } else { LocalKind::Pattern }))
+            .collect();
+        // Join each job still out, dropping its result, then the function
+        // itself, which reports what the program does.
+        let failed = |b: &mut Synth, out: std::ops::Range<usize>| {
+            let mut stmts = Vec::new();
+            for i in out {
+                let h = b.read(handles[i]);
+                stmts.push(b.call(join, vec![h], coil_ty::result_ty(arm_rets[i].clone(), thread_err.clone())));
+            }
+            stmts.push(sequential(b));
+            b.block(stmts, None, coil_ty::never())
         };
 
-        // With a handle: the other arms here, then join arm 0 and combine.
-        let handle = b.local("__coil_par_handle", coil_ty::thread_ty(arm_rets[0].clone()), LocalKind::Pattern);
-        let joined = b.local("__coil_par_arm0", arm_rets[0].clone(), LocalKind::Pattern);
-        let mut on_handle = Vec::new();
-        let mut held = vec![joined];
-        for (i, r) in arm_rets.iter().enumerate().skip(1) {
-            let t = b.local(&format!("__coil_par_arm{i}"), r.clone(), LocalKind::Temp);
-            let value = local_arm(&mut b, i);
-            on_handle.push(b.let_(t, value));
-            held.push(t);
+        // Innermost first: the combine, then each join, then each spawn.
+        let mut fold = Vec::new();
+        match &site.combine {
+            // In the order the operands are written. A step that would
+            // overflow is one the function takes too, so the function runs
+            // instead and panics where it does.
+            ParCombine::BinOp(_) => {
+                let op = bin.expect("planned binary combine");
+                let mut value = joined[0];
+                for (j, &p) in joined.iter().enumerate().skip(1) {
+                    if let Some(over) = crate::hir::synth::int_overflows(&mut b, op, value, p) {
+                        let rerun = failed(&mut b, 0..0);
+                        fold.push(b.if_(over, rerun, None, coil_ty::unit()));
+                    }
+                    let next = b.local(&format!("__coil_par_fold{j}"), ret.clone(), LocalKind::Temp);
+                    let (l, r) = (b.read(value), b.read(p));
+                    let folded = b.bin(op, l, r, ret.clone());
+                    fold.push(b.let_(next, folded));
+                    value = next;
+                }
+                let value = b.read(value);
+                fold.push(b.ret(value));
+            }
+            // A call of another function, as one more quiet job (the join
+            // runs it here): where it panics the function runs instead,
+            // whose frames are the program's whether or not it inlines
+            // that call.
+            ParCombine::ApplyCall { fn_name } => {
+                let f = b.push(HirKind::Global { name: fn_name.clone(), def: None }, fn_ty(&arm_rets, &ret));
+                let mut spawn_args = vec![f];
+                spawn_args.extend(joined.iter().map(|&t| b.read(t)));
+                let spawning = b.call(spawn, spawn_args, coil_ty::result_ty(coil_ty::thread_ty(ret.clone()), thread_err.clone()));
+                let handle = b.local("__coil_par_combine", coil_ty::thread_ty(ret.clone()), LocalKind::Pattern);
+                let value = b.local("__coil_par_combined", ret.clone(), LocalKind::Pattern);
+                let h = b.read(handle);
+                let joining = b.call(join, vec![h], coil_ty::result_ty(ret.clone(), thread_err.clone()));
+                let done = b.read(value);
+                let done = b.ret(done);
+                let (ok, err, rerun) = (b.result_pat(true, HirPat::Bind(value)), b.result_pat(false, HirPat::Wild), failed(&mut b, 0..0));
+                let joining = b.match_(joining, vec![(ok, done), (err, rerun)], coil_ty::never());
+                let (ok, err, rerun) = (b.result_pat(true, HirPat::Bind(handle)), b.result_pat(false, HirPat::Wild), failed(&mut b, 0..0));
+                fold.push(b.match_(spawning, vec![(ok, joining), (err, rerun)], coil_ty::never()));
+            }
+            // The function's call of itself is the last thing it does, so
+            // it runs in the function's frame: the worker's is no frame.
+            ParCombine::SelfCall => {
+                let vals = joined.iter().map(|&t| b.read(t)).collect();
+                let value = b.call(&site.fn_name, vals, ret.clone());
+                fold.push(b.ret(value));
+            }
+            ParCombine::Tuple => {
+                let vals = joined.iter().map(|&t| b.read(t)).collect();
+                let value = b.push(HirKind::Make { kind: MakeKind::Tuple, args: vals }, ret.clone());
+                fold.push(b.ret(value));
+            }
+            ParCombine::EnumCtor { enum_name, variant_name } => {
+                let vals = joined.iter().map(|&t| b.read(t)).collect();
+                let value = b.push(
+                    HirKind::Make {
+                        kind: MakeKind::Variant {
+                            enum_name: enum_name.clone(),
+                            variant: variant_name.clone(),
+                            tag: self.checker.tag_for(enum_name, variant_name),
+                            fields: None,
+                        },
+                        args: vals,
+                    },
+                    ret.clone(),
+                );
+                fold.push(b.ret(value));
+            }
         }
-        let h = b.read(handle);
-        let joining = b.call(join, vec![h], coil_ty::result_ty(arm_rets[0].clone(), thread_err.clone()));
-        let reads = held.iter().map(|&t| b.read(t)).collect();
-        let value = combine(&mut b, reads);
-        let ok = b.ret(value);
-        let err = seq_return(&mut b);
-        let (ok_pat, err_pat) = (b.result_pat(true, HirPat::Bind(joined)), b.result_pat(false, HirPat::Wild));
-        on_handle.push(b.match_(joining, vec![(ok_pat, ok), (err_pat, err)], coil_ty::never()));
-        let on_handle = b.block(on_handle, None, coil_ty::never());
-        // A failed spawn or join: every arm sequentially.
-        let err = seq_return(&mut b);
-        let (ok_pat, err_pat) = (b.result_pat(true, HirPat::Bind(handle)), b.result_pat(false, HirPat::Wild));
-        stmts.push(b.match_(spawned, vec![(ok_pat, on_handle), (err_pat, err)], coil_ty::never()));
+        let mut tail = b.block(fold, None, coil_ty::never());
+        for j in (direct..arms).rev() {
+            let failed = failed(&mut b, j + 1..arms);
+            let h = b.read(handles[j]);
+            let joining = b.call(join, vec![h], coil_ty::result_ty(arm_rets[j].clone(), thread_err.clone()));
+            let (ok, err) = (b.result_pat(true, HirPat::Bind(joined[j])), b.result_pat(false, HirPat::Wild));
+            tail = b.match_(joining, vec![(ok, tail), (err, failed)], coil_ty::never());
+        }
+        // With every job out: this thread's arms, then the joins.
+        let mut running = Vec::new();
+        for i in 0..direct {
+            let value = direct_arm(&mut b, i);
+            running.push(b.let_(joined[i], value));
+        }
+        running.push(tail);
+        let mut tail = b.block(running, None, coil_ty::never());
+        for i in (direct..arms).rev() {
+            let failed = failed(&mut b, direct..i);
+            let spawning = spawn_arm(&mut b, i);
+            let (ok, err) = (b.result_pat(true, HirPat::Bind(handles[i])), b.result_pat(false, HirPat::Wild));
+            tail = b.match_(spawning, vec![(ok, tail), (err, failed)], coil_ty::never());
+        }
+        stmts.push(tail);
         let root = b.block(stmts, None, coil_ty::never());
         Some(b.finish(root))
     }
@@ -6391,12 +6474,23 @@ impl Compiler {
         self.par_workers.clear();
         self.loop_par_sites.clear();
         self.par_lock_hints.clear();
+        self.fork_fns.clear();
+        if self.opt_options.auto_par
+            && let Some(hir) = self.hir_module.as_ref()
+        {
+            // IPA sites on any pure function (self-recursion or helper
+            // arms). With `--auto-par off` they only say which functions
+            // stay calls, as they do with it on.
+            let shapes = hir.par_fork_sites(&self.checker, &self.pure_fns);
+            self.fork_fns = hir.par_worker_fns(&self.checker, &shapes);
+            if self.auto_par {
+                self.par_shapes = shapes;
+                self.par_workers = self.fork_fns.clone();
+            }
+        }
         if self.auto_par && self.opt_options.auto_par
             && let Some(hir) = self.hir_module.as_ref()
         {
-            // IPA sites on any pure function (self-recursion or helper arms).
-            self.par_shapes = hir.par_fork_sites(&self.checker, &self.pure_fns);
-            self.par_workers = hir.par_worker_fns(&self.checker, &self.par_shapes);
             self.loop_par_sites = hir.loop_par_sites(&self.checker, &self.pure_fns);
             // E0805: the same detector with every user function an arm.
             for hint in hir.par_escape_hints(&self.checker, self.typed_sidecar.fn_effects()) {
