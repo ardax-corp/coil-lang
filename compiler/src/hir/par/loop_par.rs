@@ -430,8 +430,9 @@ impl Scan<'_> {
     fn counted_for(&self, pat: &HirPat, iterable: HirId, (checks, own): (&[HirId], HirId), consts: &ConstLocals, ints: &IntLocals) -> Option<Counted> {
         let body = self.body;
         let HirPat::Bind(index) = *pat else { return None };
-        // `for mut x in` borrows; `for _ in` binds nothing a body names.
-        if body.local(index).borrow || body.local(index).kind != LocalKind::Pattern {
+        // `for mut x in` borrows. `for _ in` binds a local of the
+        // builder's that no body names: an index like any other.
+        if body.local(index).borrow || !matches!(body.local(index).kind, LocalKind::Pattern | LocalKind::Temp) {
             return None;
         }
         let (begin, end, begin_local, end_local, end_bias) = if let Some(ConstVal::Range { begin, end }) = const_val(body, iterable, consts) {
@@ -698,6 +699,12 @@ impl Scan<'_> {
                 }
                 if *l == scan.index || locals.contains(l) {
                     return true;
+                }
+                // The plan finds the index by name, and `for _ in` names
+                // its own `item`: a local of the program's by that name
+                // would be taken for it.
+                if self.name(*l) == self.name(scan.index) {
+                    return false;
                 }
                 match scan.consts.get(l) {
                     Some(ConstVal::Int(k)) => {

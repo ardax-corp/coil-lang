@@ -1099,3 +1099,23 @@ fn main() { return; }
     );
     assert_eq!(bounded.len(), 2, "{bounded:?}");
 }
+
+/// `for _ in` counts like any other range: its index has a local, which
+/// the body cannot name.
+#[test]
+fn a_loop_with_no_name_for_its_index_is_a_site() {
+    assert!(reach().contains(&105), "{:?}", reach());
+    // The builder calls that local `item`; a capture of the same name is
+    // not it.
+    let sites = sites_of(
+        r#"
+fn run(int n, int item) -> int {
+    let acc = 0;
+    for _ in 0..n { acc = acc ^ item; }
+    return acc;
+}
+fn main() { return; }
+"#,
+    );
+    assert!(sites.is_empty(), "{sites:?}");
+}

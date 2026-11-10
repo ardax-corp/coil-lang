@@ -101,6 +101,15 @@ fn repeated(int n, int k) -> int {
     return acc;
 }
 
+// A capture with the name the compiler gives the unnamed index.
+fn repeated_item(int n, int item) -> int {
+    let acc = 0;
+    for _ in 0..n {
+        acc = acc ^ item;
+    }
+    return acc;
+}
+
 fn under_if_let(Option<int> o, int n) -> int {
     let acc = 0;
     if let Option::Some(v) = o {
@@ -161,6 +170,7 @@ test("a loop with no name for its index") {
     assert!(repeated(vary(300000), 13) == 0);
     assert!(repeated(vary(300001), 13) == 13);
     assert!(repeated(vary(0), 13) == 0);
+    assert!(repeated_item(vary(300001), 13) == 13);
 }
 
 test("a loop under if let") {
