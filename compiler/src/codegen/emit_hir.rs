@@ -7204,16 +7204,19 @@ impl Compiler {
         }
     }
 
-    /// Whether user enum instance `ty` (`List<T>`) holds the variables of
-    /// `boxed` only as word holders: every variant's payload, at the
-    /// instance's arguments. Its object is then the same words for a
-    /// shared body and ground code: an enum payload item is one word
-    /// whatever its type (a two-word value boxed), and an item the shared
-    /// body wrote that ground code reads as a scalar has the unknown word
-    /// kind, which the collector resolves (#2512). A recursive payload
-    /// (`Cons(T, List<T>)`) is the instance being asked about. `Option`
-    /// and `Result` are open enums, the shared body's objects ("Open
-    /// enums" in layout.md), and an enum with `drop` is refused.
+    /// Whether user enum or class instance `ty` (`List<T>`, `Box<T>`)
+    /// holds the variables of `boxed` only as word holders: every
+    /// variant's payload, or every field, at the instance's arguments. Its
+    /// object is then the same words for a shared body and ground code: an
+    /// enum payload item is one word whatever its type (a two-word value
+    /// boxed), and an item the shared body wrote that ground code reads as
+    /// a scalar has the unknown word kind, which the collector resolves
+    /// (#2512); a class field typed by a class parameter is one word in
+    /// every instance, of the unknown kind in the class's row (#2511). A
+    /// recursive payload (`Cons(T, List<T>)`) is the instance being asked
+    /// about. `Option` and `Result` are open enums, the shared body's
+    /// objects ("Open enums" in layout.md), and an enum with `drop` is
+    /// refused.
     fn hir_nominal_words(&self, ty: &Ty, boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>, seen: &mut Vec<Ty>) -> bool {
         use crate::typechecking::ty::{is_option_ty, is_result_ty, subst_ty_params};
         let Ty::App(head, args) = ty else {
@@ -7225,10 +7228,16 @@ impl Compiler {
         if is_option_ty(ty) || is_result_ty(ty) {
             return false;
         }
-        let (Some(decl), Some(names)) = (self.checker.enum_variants(name), self.checker.type_ctor_params(name)) else {
+        let Some(names) = self.checker.type_ctor_params(name) else {
             return false;
         };
-        if names.len() != args.len() || self.checker.enum_has_drop(name) {
+        let items: Vec<Ty> = match (self.checker.enum_variants(name), self.checker.class_fields(name)) {
+            (Some(_), _) if self.checker.enum_has_drop(name) => return false,
+            (Some(decl), _) => decl.into_iter().flat_map(|(_, _, payload)| payload).collect(),
+            (None, Some(fields)) => fields.into_iter().map(|(_, ty)| ty).collect(),
+            (None, None) => return false,
+        };
+        if names.len() != args.len() {
             return false;
         }
         if seen.contains(ty) {
@@ -7241,11 +7250,7 @@ impl Compiler {
         }
         let map: HashMap<String, Ty> = names.iter().cloned().zip(args.iter().cloned()).collect();
         seen.push(ty.clone());
-        let words = decl.iter().all(|(_, _, payload)| {
-            payload
-                .iter()
-                .all(|p| !Self::ty_opaque(p) && self.hir_word_holder_in(&subst_ty_params(p, &map), boxed, seen))
-        });
+        let words = items.iter().all(|p| !Self::ty_opaque(p) && self.hir_word_holder_in(&subst_ty_params(p, &map), boxed, seen));
         seen.pop();
         words
     }

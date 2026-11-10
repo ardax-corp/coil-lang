@@ -1,7 +1,6 @@
 // Building a `Range<T>` / `RangeInclusive<T>` in a generic `T: Ord` body:
 // returned, bound to a local, forwarded, and through a function value
 // (#1230).
-// @xfail clone-budget-0 #2511 E0801 (callee-generic): a generic class or nested-payload enum result of a shared body
 use tests::assert;
 
 fn span<T: Ord>(T a, T b) -> Range<T> {
