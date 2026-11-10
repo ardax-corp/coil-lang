@@ -6,10 +6,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
+use common::EffectFlags;
 use parser::ast::{EnumConstructPayload, Expression, Output};
 
 use super::par_profit::analyze_par_fork_sites;
-use super::purity::{EffectFlags, analyze_fn_effects};
+use super::purity::analyze_fn_effects;
 
 /// Kind of shared resource a covering userland lock would name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

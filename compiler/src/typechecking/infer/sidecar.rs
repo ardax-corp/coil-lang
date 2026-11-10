@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::generics::InstanceDef;
 use crate::typechecking::id::NodeId;
-use crate::typechecking::purity::EffectFlags;
+use common::EffectFlags;
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::Ty;
 
@@ -43,7 +43,7 @@ pub struct TypedSidecar {
     /// Effect bits per function DefId (empty = pure). Missing DefId is unknown/impure.
     fn_effects: HashMap<DefId, EffectFlags>,
     pure_fn_names: HashSet<String>,
-    length_stability: crate::typechecking::purity::LengthStability,
+    length_stability: crate::effects::LengthStability,
     /// Names that appear as a function *value* in this module — see
     /// [`crate::typechecking::fn_value_escape`]. Package-wide proof is the
     /// pipeline seed; this set is the per-file snapshot.
@@ -135,7 +135,7 @@ impl TypedSidecar {
 
     /// Functions that cannot change any array's length, for the loop length
     /// proofs (superset of [`Self::pure_fn_names`]).
-    pub fn length_stability(&self) -> &crate::typechecking::purity::LengthStability {
+    pub fn length_stability(&self) -> &crate::effects::LengthStability {
         &self.length_stability
     }
 

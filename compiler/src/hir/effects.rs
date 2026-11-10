@@ -33,7 +33,7 @@ use common::EffectFlags;
 use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, LocalId, LocalKind, MakeKind};
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::infer::{Checker, ForInKind};
-use crate::typechecking::purity::classify_host_name;
+use crate::effects::classify_host_name;
 use crate::typechecking::ty::Ty;
 
 const UNKNOWN: EffectFlags =

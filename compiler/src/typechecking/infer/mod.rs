@@ -268,10 +268,10 @@ pub struct Checker {
     /// For-in pin by source span (emit_idx / clone fallback).
     pub(crate) for_in_pin_spans: HashSet<(usize, usize)>,
     /// Whole-function effect bits keyed by [`DefId`] (empty = pure).
-    pub(crate) fn_effects: HashMap<DefId, crate::typechecking::purity::EffectFlags>,
+    pub(crate) fn_effects: HashMap<DefId, common::EffectFlags>,
     /// [`Self::fn_effects`] for every file checked so far (not reset per
     /// file), so calls into an already-checked module resolve by [`DefId`].
-    pub(crate) program_fn_effects: HashMap<DefId, crate::typechecking::purity::EffectFlags>,
+    pub(crate) program_fn_effects: HashMap<DefId, common::EffectFlags>,
     /// Fixed parameter count and rest flag of every function and method
     /// checked so far, by module-qualified name (`m::f`, `m::C::f`; the
     /// entry file's unqualified), so a call into an already-checked module
@@ -282,12 +282,12 @@ pub struct Checker {
     program_typed_rest: HashMap<String, Vec<String>>,
     /// Impl method effects for every file checked so far, keyed
     /// `module::Owner::method` (methods have no [`DefId`] of their own).
-    pub(crate) program_method_effects: HashMap<String, crate::typechecking::purity::EffectFlags>,
+    pub(crate) program_method_effects: HashMap<String, common::EffectFlags>,
     /// Bind names proven pure (LICM / index facts / auto-par).
     pub(crate) pure_fn_names: HashSet<String>,
     /// Functions that cannot change an array length, and whether allocation
     /// (which can run finalizers) is length-stable. Recomputed per file.
-    pub(crate) length_stability: crate::typechecking::purity::LengthStability,
+    pub(crate) length_stability: crate::effects::LengthStability,
     /// Whole-compile "some `fn drop()` may resize an array" from the pipeline
     /// (every file in the use graph). `None` = this file is the program.
     pub(crate) program_finalizers_resize: Option<bool>,

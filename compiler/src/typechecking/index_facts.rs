@@ -2,7 +2,7 @@
 //!
 //! Fail-closed: facts are `0 <= i < arr.len()` plus length stability. Yield,
 //! `ArrayPush`, and calls that may change a length refuse (see
-//! [`crate::typechecking::purity::LengthStability`]; impure calls that only
+//! [`crate::effects::LengthStability`]; impure calls that only
 //! write fields, elements or output keep the facts). Callers may transfer
 //! a proven `(arr, i)` pair into a helper when every site agrees.
 //!
