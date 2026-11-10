@@ -17,7 +17,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::func::MirFunc;
 use super::inst::{BlockId, LocalId, MirInst, ValueId};
-use super::ty::MirTy;
 
 /// Live heap words at one Alloc or GcBarrier dest (S2a).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,11 +53,6 @@ pub fn fill_live_roots(func: &mut MirFunc) {
                 | MirInst::Format { dest, .. }
                 | MirInst::Stringify { dest, .. }
                 | MirInst::Cow { dest, .. } => {
-                    // A share of a word that may be no object roots nothing.
-                    if matches!(inst, MirInst::Cow { .. }) && func.ty(*dest) == MirTy::I64 {
-                        prev_alloc = None;
-                        continue;
-                    }
                     let mut roots = live_heap(func, &live_after[bi][ii], &barrier_tokens);
                     roots.insert(*dest);
                     roots.append(&mut slot_heap(func, &defined, *dest));

@@ -3627,23 +3627,16 @@ impl Lower<'_> {
                     other => return Ok(other),
                 };
                 // A shared generic body's type parameter word may be a
-                // scalar. A share of it is emitted on the word (the runtime
-                // leaves a non-object alone); a unique would replace it, so
-                // that stays out (#2506). Its per-type clones get the op at
-                // an object type.
+                // scalar: the op runs where the body's `kinds` word says the
+                // type is a copy-on-write object (#2506). A body with no
+                // bit for it (a cleanup pad, an outlined helper) leaves it
+                // out. Its per-type clones get the op at an object type.
                 let open = self.expr_ty(*inner).is_some_and(|t| is_var(t) || is_var_app(t));
-                // A unique of one whose `kinds` bit the body has: the op
-                // where the bit says the word is an object.
                 if open
-                    && *unique
                     && matches!(self.b.value_ty(v), MirTy::I64 | MirTy::HeapRef)
                     && let Some(bit) = self.expr_ty(*inner).cloned().and_then(|t| self.kinds_bit(&t))
                 {
-                    return Ok(Val::V(self.guarded_cow(id, v, true, bit)?));
-                }
-                if open && !*unique && self.b.value_ty(v) == MirTy::I64 {
-                    let out = self.at_expr(id, |l| l.b.ins_cow(v, false).map_err(mir))?;
-                    return Ok(Val::V(out));
+                    return Ok(Val::V(self.guarded_cow(id, v, *unique, bit)?));
                 }
                 if self.b.value_ty(v) != MirTy::HeapRef || open {
                     return Ok(Val::V(v));
