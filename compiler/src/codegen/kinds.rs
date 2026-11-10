@@ -230,8 +230,15 @@ impl Compiler {
     /// dictionaries, as ops; `None` when the entry takes none.
     pub(super) fn kinds_ops(&self, key: &str, arg_tys: &[Ty], ret_ty: Option<&Ty>) -> Option<Vec<HirDictOp>> {
         let scheme = self.kinds_scheme(key)?;
+        Some(self.kinds_ops_for(&scheme.bounds, &scheme.ty, arg_tys, ret_ty))
+    }
+
+    /// The `kinds` word of a call of a function typed `fun_ty`, its type
+    /// parameters `bounds` in bit order, on arguments of `arg_tys` (the
+    /// receiver first, for a method) returning `ret_ty`, as ops.
+    pub(super) fn kinds_ops_for(&self, bounds: &[TyVarId], fun_ty: &Ty, arg_tys: &[Ty], ret_ty: Option<&Ty>) -> Vec<HirDictOp> {
         let frame = self.hir_body_frame.as_ref().and_then(|f| f.kinds.as_ref());
-        let (params, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let (params, ret) = Self::fun_param_and_ret_tys(fun_ty);
         let mut vars = HashMap::new();
         // A method's receiver may be typed by its class alone (`self` in
         // the class's own body): the caller's scheme type of it binds the
@@ -249,17 +256,49 @@ impl Compiler {
         if let Some(r) = ret_ty {
             Self::bind_scheme_vars(&ret, &apply_ty_prune(self.checker.subst(), r), &mut vars);
         }
-        let n = scheme.bounds.len() as u32;
-        let mut word = sentinel(n);
+        self.kinds_ops_bound(bounds, &vars)
+    }
+
+    /// The `kinds` word of type parameters `bounds` (in bit order) bound as
+    /// `vars`, as ops.
+    pub(super) fn kinds_ops_bound(&self, bounds: &[TyVarId], vars: &HashMap<TyVarId, Ty>) -> Vec<HirDictOp> {
+        let frame = self.hir_body_frame.as_ref().and_then(|f| f.kinds.as_ref());
+        let mut word = sentinel(bounds.len() as u32);
         let mut from = Vec::new();
-        for (i, v) in scheme.bounds.iter().enumerate().take(MAX_PARAMS) {
+        for (i, v) in bounds.iter().enumerate().take(MAX_PARAMS) {
             match vars.get(v).map(|t| self.kinds_bit(t, frame)) {
                 Some(Bit::Const(true)) => word |= 1 << i,
                 Some(Bit::From(j)) => from.push(HirDictOp::KindsBit { from: j as u8, to: i as u8 }),
                 Some(Bit::Const(false)) | None => {}
             }
         }
-        Some(std::iter::once(HirDictOp::Kinds(word)).chain(from).collect())
+        std::iter::once(HirDictOp::Kinds(word)).chain(from).collect()
+    }
+
+    /// The `kinds` slot a `PolyFn` value of generic function `name` read at
+    /// type `ty` captures, after its dictionaries (#2506). A value of one
+    /// type parameter left open there (an argument a `forall` parameter
+    /// takes, a local bound from the function) has the call fill it
+    /// ([`common::KINDS_FROM_CALL`]): such a call passes the word last, in
+    /// that parameter's order. Any other has the word at `ty`, every bit of
+    /// a variable the body has none for clear.
+    pub(super) fn polyfn_kinds_slot(&self, name: &str, ty: Option<&Ty>) -> Option<Vec<HirDictOp>> {
+        let scheme = self.kinds_scheme(name)?;
+        let frame = self.hir_body_frame.as_ref().and_then(|f| f.kinds.as_ref());
+        let ty = ty.map(|t| apply_ty_prune(self.checker.subst(), t));
+        let mut free = Vec::new();
+        if let Some(t) = &ty {
+            t.collect_vars(&mut free);
+        }
+        let open = !free.is_empty() && free.iter().all(|v| frame.is_none_or(|f| f.bit(*v).is_none()));
+        if scheme.bounds.len() == 1 && open {
+            return Some(vec![HirDictOp::Kinds(common::KINDS_FROM_CALL)]);
+        }
+        let mut vars = HashMap::new();
+        if let Some(t) = &ty {
+            Self::bind_scheme_vars(&scheme.ty, t, &mut vars);
+        }
+        Some(self.kinds_ops_bound(&scheme.bounds, &vars))
     }
 
     /// [`Self::kinds_ops`] of call `id` in `hir` of `key`, its argument and

@@ -1,0 +1,76 @@
+// A generic function's value (a `PolyFn`) runs its shared body, which
+// writes through a copy of a type parameter's value (coil-lang#2506): the
+// copy is made unique before the write, so the value it came from keeps
+// its own state. Called through a `forall` parameter the call passes which
+// type parameters are copy-on-write objects; through a local bound from
+// the function, the function's own call does.
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+trait Bump<T> {
+    fn bump(T x) {}
+}
+
+impl Bump for Box {
+    fn bump(Box b) {
+        b.n = b.n + 1;
+    }
+}
+
+impl Bump for int {
+    fn bump(int x) {}
+}
+
+fn bump_copy<T: Bump>(T x) -> T {
+    let y = x;
+    y.bump();
+    return x;
+}
+
+fn bump_pair<T: Bump>(T x, int k) -> T {
+    let y = x;
+    y.bump();
+    return x;
+}
+
+fn run(forall T: Bump. T -> T g, Box b) -> Box {
+    return g(b);
+}
+
+fn run_int(forall T: Bump. T -> T g, int k) -> int {
+    return g(k);
+}
+
+fn run_pair(forall T: Bump. T -> int -> T g, Box b) -> Box {
+    return g(b, 3);
+}
+
+test("a forall parameter's call copies before the write") {
+    let b = new Box(1);
+    let r = run(bump_copy, b);
+    assert!(b.n == 1);
+    assert!(r.n == 1);
+}
+
+test("a forall parameter at an int leaves the value as it is") {
+    let big = 9223372036854775807;
+    assert!(run_int(bump_copy, big) == big);
+}
+
+test("a forall parameter of two arguments copies before the write") {
+    let b = new Box(4);
+    let r = run_pair(bump_pair, b);
+    assert!(b.n == 4);
+    assert!(r.n == 4);
+}
+
+test("a local bound from a generic function copies before the write") {
+    let f = bump_copy;
+    let b = new Box(2);
+    let r = f(b);
+    assert!(b.n == 2);
+    assert!(r.n == 2);
+}
