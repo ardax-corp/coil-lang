@@ -1,0 +1,85 @@
+// A pattern binding named like the scrutinee local shadows it in the arm's
+// body (coil-lang#2606): `match o { Some(o) => o + 1 }` reads the payload,
+// as a `let` or a lambda parameter of the same name shadows an outer one.
+// Also for `if let`, `while let`, nested and record patterns and a function
+// payload; an arm that does not rebind the name still sees the scrutinee,
+// and after the match the name is the scrutinee again.
+use tests::assert;
+
+enum Msg {
+    Move { x: int, y: int },
+    Say(string),
+}
+
+fn inc(int n) -> int {
+    return n + 1;
+}
+
+test("a match arm's binding shadows the scrutinee") {
+    let o: Option<int> = Some(5);
+    let s = match o {
+        Some(o) => o + 1,
+        None => 0,
+    };
+    assert!(s == 6);
+    assert!(o.unwrap_or(0) == 5);
+}
+
+test("a function payload named like the scrutinee is called") {
+    let g: Option<fn(int) -> int> = Some(inc);
+    let r = match g {
+        Some(g) => g(1),
+        None => 0,
+    };
+    assert!(r == 2);
+}
+
+test("a nested pattern's binding shadows the scrutinee") {
+    let r: Result<Option<int>, string> = Ok(Some(4));
+    let v = match r {
+        Ok(Some(r)) => r * 10,
+        default => -1,
+    };
+    assert!(v == 40);
+}
+
+test("a record pattern's field binding shadows the scrutinee") {
+    let x = Msg::Move { x: 3, y: 4 };
+    let a = match x {
+        Msg::Move { x, y } => x * 10 + y,
+        Msg::Say(s) => s.len(),
+    };
+    assert!(a == 34);
+    let b = match x {
+        Msg::Say(x) => x.len(),
+        Msg::Move { x: px, y } => px + y,
+    };
+    assert!(b == 7);
+}
+
+test("if let and while let bindings shadow the scrutinee") {
+    let o: Option<int> = Some(7);
+    let s = 0;
+    if let Some(o) = o {
+        s = o * 2;
+    }
+    assert!(s == 14);
+    let n: Option<string> = Some("abc");
+    let total = 0;
+    while let Some(n) = n {
+        total = total + n.len();
+        if total > 5 {
+            break;
+        }
+    }
+    assert!(total == 6);
+}
+
+test("an arm that does not rebind still sees the scrutinee") {
+    let o: Option<int> = Some(2);
+    let s = match o {
+        Some(v) => v + o.unwrap_or(0),
+        None => 0,
+    };
+    assert!(s == 4);
+}

@@ -73,10 +73,13 @@ impl Checker {
 
             // Narrow an Identifier scrutinee to the matched variant so
             // `p.0` / `p.field` inside the arm use tagged field lookup
-            // (tuple indices are shared across variants otherwise).
+            // (tuple indices are shared across variants otherwise). A
+            // pattern that binds the scrutinee's name shadows it (#2606):
+            // the arm's frame holds the pattern's bindings.
             let mut refined_scrut: Option<(String, Option<Ty>)> = None;
             let arm_pattern = self.resolved_pattern(&arm.pattern);
             if let Expression::Identifier(scrut_name) = scrutinee.1.as_ref()
+                && !self.env.top().is_some_and(|frame| frame.lookup(scrut_name).is_some())
                 && let Pattern::Constructor {
                     enum_name,
                     variant_name,
