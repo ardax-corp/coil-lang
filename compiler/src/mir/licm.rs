@@ -1485,6 +1485,51 @@ bb3:
     }
 
     #[test]
+    fn a_new_preheader_leaves_the_header_one_copy_of_its_code() {
+        // The inner loop's header (`bb2`) is entered by the outer header's
+        // branch, so hoisting `v14` makes a preheader. The header keeps its
+        // call and its test once each, with or without a φ ahead of them
+        // (#2422).
+        for phi in ["", "    v30 = phi.i64 [bb1: v1, bb3: v17]\n"] {
+            let src = format!(
+                r#"
+func @f(v0: i64) -> i64 {{
+bb0:
+    v1 = iconst.i64 0
+    jump bb1
+bb1:
+    v9 = phi.i64 [bb0: v1, bb4: v24]
+    v10 = icmp.slt v9, v0
+    brif v10, bb2, bb5
+bb2:
+{phi}    v12, v13 = call.i64 9 v0
+    v14 = iconst.i64 0
+    v15 = icmp.eq v13, v14
+    brif v15, bb4, bb3
+bb3:
+    v17 = iadd v12, v9
+    v18 = storestatic 0, v17
+    jump bb2
+bb4:
+    v20 = iconst.i64 1
+    v24 = iadd v9, v20
+    jump bb1
+bb5:
+    return v9
+}}
+"#
+            );
+            let mut f = crate::mir::parse_func(&src).expect(&src);
+            assert!(licm(&mut f, true) >= 1, "the literal moves");
+            f.verify().and_then(|()| f.verify_dominance()).unwrap_or_else(|e| panic!("{e}\n{f}"));
+            let count = |want: &dyn Fn(&MirInst) -> bool| f.blocks.iter().flat_map(|b| &b.insts).filter(|i| want(i)).count();
+            assert_eq!(count(&|i| matches!(i, MirInst::Call { .. })), 1, "{f}");
+            assert_eq!(count(&|i| matches!(i, MirInst::StoreStatic { .. })), 1, "{f}");
+            assert_eq!(count(&|i| matches!(i, MirInst::Cmp { .. })), 2, "{f}");
+        }
+    }
+
+    #[test]
     fn lir_keeps_literals_in_the_loop() {
         // `v10` feeds an invariant add (`v11`) and a variant one (`v13`).
         let body = "    v10 = fconst.f64 bits=0\n    v11 = fadd v1, v10\n    v12 = fcvt.f64.i64 v4\n    v13 = fadd v12, v10\n    v14 = fadd v11, v13\n    v6 = ftrunc.i64.f64 v14";
