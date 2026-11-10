@@ -40,8 +40,9 @@ pub struct TypedSidecar {
     pin_params: HashSet<(String, String)>,
     for_in_pin: HashSet<NodeId>,
     for_in_pin_spans: HashSet<(usize, usize)>,
-    /// Effect bits per function DefId (empty = pure). Missing DefId is unknown/impure.
-    fn_effects: HashMap<DefId, EffectFlags>,
+    /// Effect bits per function bind name (empty = pure); an impl method
+    /// shares its bare name with any same-named `fn`.
+    fn_effects: HashMap<String, EffectFlags>,
     pure_fn_names: HashSet<String>,
     length_stability: crate::effects::LengthStability,
     /// Names that appear as a function *value* in this module — see
@@ -119,13 +120,9 @@ impl TypedSidecar {
         self.for_in_pin_spans.contains(&(start, end))
     }
 
-    /// True when `id` is a user `fn` the checker proved effect-free.
-    pub fn is_pure_def(&self, id: DefId) -> bool {
-        self.fn_effects.get(&id).is_some_and(|f| f.is_pure())
-    }
-
-    pub fn effects(&self, id: DefId) -> Option<EffectFlags> {
-        self.fn_effects.get(&id).copied()
+    /// The checker's effect bits for this file's functions, by bind name.
+    pub fn fn_effects(&self) -> &HashMap<String, EffectFlags> {
+        &self.fn_effects
     }
 
     /// Bind names of proven-pure user functions (LICM / PureCallCtx).

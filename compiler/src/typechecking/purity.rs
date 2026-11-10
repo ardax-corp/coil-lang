@@ -975,6 +975,7 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
         if flags.is_pure() {
             checker.pure_fn_names.insert(short.to_string());
         }
+        checker.fn_effects.insert(short.to_string(), flags);
     }
     for (name, flags) in &effects {
         if name.contains("::") {
@@ -994,7 +995,6 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
             checker.pure_fn_names.insert(name.clone());
         }
         if let Some(id) = checker.def_id_of(name) {
-            checker.fn_effects.insert(id, *flags);
             checker.program_fn_effects.insert(id, *flags);
         }
     }
@@ -1382,11 +1382,8 @@ fn main() { return; }
         let side = c.typed_sidecar();
         assert!(side.name_is_pure("add"), "add must stay pure");
         assert!(!side.name_is_pure("shout"), "host write must be impure");
-        let add_id = c.def_id_of("add").expect("add DefId");
-        let shout_id = c.def_id_of("shout").expect("shout DefId");
-        assert!(side.is_pure_def(add_id));
-        assert!(!side.is_pure_def(shout_id));
-        let shout_fx = side.effects(shout_id).expect("shout effects");
+        assert!(side.fn_effects()["add"].is_pure());
+        let shout_fx = side.fn_effects()["shout"];
         assert!(
             shout_fx.contains(EffectFlags::IO) || shout_fx.contains(EffectFlags::UNKNOWN),
             "shout should record IO/unknown, got {shout_fx:?}"

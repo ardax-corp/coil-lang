@@ -267,10 +267,11 @@ pub struct Checker {
     pub(crate) for_in_pin: HashSet<NodeId>,
     /// For-in pin by source span (emit_idx / clone fallback).
     pub(crate) for_in_pin_spans: HashSet<(usize, usize)>,
-    /// Whole-function effect bits keyed by [`DefId`] (empty = pure).
-    pub(crate) fn_effects: HashMap<DefId, common::EffectFlags>,
-    /// [`Self::fn_effects`] for every file checked so far (not reset per
-    /// file), so calls into an already-checked module resolve by [`DefId`].
+    /// Whole-function effect bits of this file's functions, by bind name.
+    /// Impl methods share their bare name with any same-named `fn`.
+    pub(crate) fn_effects: HashMap<String, common::EffectFlags>,
+    /// Effect bits of every function checked so far (not reset per file),
+    /// so calls into an already-checked module resolve by [`DefId`].
     pub(crate) program_fn_effects: HashMap<DefId, common::EffectFlags>,
     /// Fixed parameter count and rest flag of every function and method
     /// checked so far, by module-qualified name (`m::f`, `m::C::f`; the
