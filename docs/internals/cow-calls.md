@@ -47,8 +47,13 @@ known head (`Vec<T>` is 1, `Option<T>` 0); a lambda captures the word after
 the dictionaries; a partial application fills it as its last parameter; a
 `PolyFn` value captures it with every bit clear, and a class's `drop`, which
 the runtime calls, takes none. `Lower` emits the unique under a test of the
-bit (`guarded_cow`). Trait methods (instance, default, own `<W>`) take no
-word yet: their unique stays out.
+bit (`guarded_cow`). A trait method reads its bits from its dictionary,
+which carries a `kinds` word after its methods (the trait's parameters, then
+the instance head's type variables; [dictionary-passing.md](dictionary-passing.md)):
+a default body and a generic-head instance's method read it at entry. A
+trait method with type parameters of its own (`fn visit<W>`) takes their
+word after its own bounds' dictionaries, at every entry of it: the shared
+one, a per-type clone, the `$dict` adapter, a forwarder, a clone's thunk.
 A result it would have
 shared itself, one a call handed back from inside a parameter
 (`return c.get()`), comes back unshared. So when the result is not fresh
@@ -101,6 +106,7 @@ Tests: `tests/cow_call_share_cli.rs` (copy counts),
 `tests/memory/cow_generic_bodies_shared.coil` (a type parameter result of
 a shared body), `tests/memory/cow_generic_bodies_unique.coil` (a write
 through a copy of a type parameter's value, the `kinds` word),
+`tests/memory/cow_generic_trait_methods.coil` (the same in trait methods),
 `tests/memory/cow_returned_param_names.coil` and
 `tests/memory/cow_returned_field.coil` (soundness). Benches:
 `examples/perf/cow_call_reassign.coil`, `cow_call_field.coil`,
