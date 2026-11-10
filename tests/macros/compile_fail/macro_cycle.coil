@@ -1,4 +1,6 @@
-// @expected E0119 — two modules need each other's derives.
+// @expected E0154 — two modules need each other's derives, so each imports
+// the other: an import cycle (`macro_cycle_a -> macro_cycle_b ->
+// macro_cycle_a`, #2536), reported before either macro module is compiled.
 use macro_cycle_a::CycleA;
 
 fn main() {}

@@ -4993,6 +4993,35 @@ fn missing_module_reports_no_internal_lowering_error() {
     assert!(!errors.iter().any(|(_, m)| m.contains("cannot lower")), "{errors:?}");
 }
 
+/// #2536: modules that import each other are one E0154 naming the cycle,
+/// at the import that starts it, not an E0100 for a name the other module
+/// does declare.
+#[test]
+fn import_cycle_is_one_error_naming_its_path() {
+    let dir = std::env::temp_dir().join(format!("coil-2536-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let ca = "use cb::twice;\n\nclass Box1 {\n    pub n: int,\n}\n\nfn box_twice(Box1 b) -> int {\n    return twice(b);\n}\n";
+    std::fs::write(dir.join("ca.coil"), ca).expect("write ca");
+    std::fs::write(dir.join("cb.coil"), "use ca::Box1;\n\nfn twice(Box1 b) -> int {\n    return b.n * 2;\n}\n").expect("write cb");
+    let entry = dir.join("main.coil");
+    std::fs::write(&entry, "use ca::{Box1, box_twice};\n\nfn main() {\n    let _ = box_twice(new Box1(3));\n}\n").expect("write entry");
+    let mut pipeline = test_pipeline();
+    pipeline.bind_project_root(dir.clone(), vec![dir.clone()]);
+    assert!(pipeline.compile_src_from_file(entry.to_str().expect("utf-8")).is_err());
+    let errors: Vec<_> = pipeline
+        .messages()
+        .iter()
+        .filter(|m| *m.kind() == reporting::MessageKind::ERROR)
+        .map(|m| (m.code(), m.message().to_string(), m.range().clone()))
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let (code, message, range) = &errors[0];
+    assert_eq!(*code, Some(compiler::ErrorCode::ImportCycle), "{errors:?}");
+    assert!(message.contains("`ca -> cb -> ca`"), "{errors:?}");
+    assert_eq!(&ca[range.clone()], "use cb::twice;", "{errors:?}");
+}
+
 #[test]
 fn gc_finalizer_runs_on_teardown() {
     let output = run_example_src(

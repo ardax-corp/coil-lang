@@ -117,6 +117,9 @@ pub struct Pipeline {
     worklist: VecDeque<WorkItem>,
     /// `use`/`mod` edges for topo-sort compile order (discovery can reorder worklist).
     module_deps: HashMap<PathBuf, Vec<PathBuf>>,
+    /// The span of the first `use` / `mod` of each edge in [`Self::module_deps`]
+    /// (`(from, on)`), for an import cycle's diagnostic.
+    module_dep_spans: HashMap<(PathBuf, PathBuf), std::ops::Range<usize>>,
     /// The entry file (the file passed to `compile`).
     /// This file is special: it's the program root and
     /// lives in the top-level namespace (no prefix),
@@ -304,6 +307,12 @@ impl Pipeline {
                 results.push((file.clone(), vec![err.clone()]));
                 broken.insert(file.clone());
             }
+        }
+        if let Some(cycle) = self.import_cycle() {
+            let (file, _, msg) = self.import_cycle_error(&cycle);
+            self.compiler_lazy_mut().push_message(msg.clone());
+            results.push((file, vec![msg]));
+            return results;
         }
         for item in self.worklist_in_dependency_order() {
             // Importers of an unparsable module would only report cascades
@@ -581,6 +590,7 @@ impl Pipeline {
             processed: Vec::new(),
             worklist: VecDeque::new(),
             module_deps: HashMap::new(),
+            module_dep_spans: HashMap::new(),
             entry_file: None,
             source_interner: common::Interner::default(),
             source_cache: Vec::new(),
@@ -777,7 +787,7 @@ impl Pipeline {
             Expression::Use { path, name, .. } => {
                 // The embedded `macro` model is coil source shipped in the compiler.
                 if let Some((file, _)) = crate::macros::embedded_use(path, name) {
-                    self.record_module_dep(parent_file, &file);
+                    self.record_use_dep(parent_file, &file, use_range.clone());
                     self.enqueue_file(file);
                     return;
                 }
@@ -798,7 +808,7 @@ impl Pipeline {
                         if let Some(file) =
                             resolve_use_in_roots(&self.roots, &self.project_root, &segments, &last)
                         {
-                            self.record_module_dep(parent_file, &file);
+                            self.record_use_dep(parent_file, &file, use_range.clone());
                             self.enqueue_file(file);
                         } else {
                             self.emit_module_not_found(
@@ -811,7 +821,7 @@ impl Pipeline {
                     } else if let Some(file) =
                         resolve_mod_in_roots(&self.roots, &self.project_root, "*")
                     {
-                        self.record_module_dep(parent_file, &file);
+                        self.record_use_dep(parent_file, &file, use_range.clone());
                         self.enqueue_file(file);
                     } else {
                         self.emit_module_not_found(parent_file, parent_src, use_range, "`use *`");
@@ -819,7 +829,7 @@ impl Pipeline {
                 } else if let Some(file) =
                     resolve_use_in_roots(&self.roots, &self.project_root, path, name)
                 {
-                    self.record_module_dep(parent_file, &file);
+                    self.record_use_dep(parent_file, &file, use_range.clone());
                     self.enqueue_file(file);
                 } else if let Some(help) = crate::typechecking::VirtualModules::removed_item(path, name) {
                     let mut msg = Message::error(
@@ -841,7 +851,7 @@ impl Pipeline {
             }
             Expression::Module(name, _body) => {
                 if let Some(file) = resolve_mod_in_roots(&self.roots, &self.project_root, name) {
-                    self.record_module_dep(parent_file, &file);
+                    self.record_use_dep(parent_file, &file, use_range.clone());
                     self.enqueue_file(file);
                 } else {
                     self.emit_module_not_found(
@@ -872,6 +882,102 @@ impl Pipeline {
         }
         self.record_module_dep(from, &core);
         self.enqueue_file(core);
+    }
+
+    /// [`Self::record_module_dep`] of a `use` / `mod` at `range` in `from`.
+    fn record_use_dep(&mut self, from: &Path, on: &Path, range: std::ops::Range<usize>) {
+        self.module_dep_spans.entry((from.to_path_buf(), on.to_path_buf())).or_insert(range);
+        self.record_module_dep(from, on);
+    }
+
+    /// The first import cycle among the discovered modules (`a -> b -> a`,
+    /// #2536): its modules, the first again at the end. Each module is checked after
+    /// the modules it imports, so in a cycle the module checked first sees
+    /// nothing the others declare. The search follows each module's imports
+    /// in source order from the modules in discovery order, so the same
+    /// program always reports the same cycle.
+    fn import_cycle(&self) -> Option<Vec<PathBuf>> {
+        let files: Vec<&PathBuf> = self.worklist.iter().map(|i| &i.file).collect();
+        let deps = |file: &PathBuf| -> Vec<&PathBuf> {
+            let mut out: Vec<&PathBuf> = Vec::new();
+            for d in self.module_deps.get(file).into_iter().flatten() {
+                if files.contains(&d) && !out.contains(&d) {
+                    out.push(d);
+                }
+            }
+            out
+        };
+        // 1: on the search path, 2: done (no cycle through it).
+        let mut state: HashMap<&PathBuf, u8> = HashMap::new();
+        for &root in &files {
+            if state.contains_key(root) {
+                continue;
+            }
+            let mut stack: Vec<(&PathBuf, Vec<&PathBuf>, usize)> = vec![(root, deps(root), 0)];
+            state.insert(root, 1);
+            while let Some((node, next, at)) = stack.last_mut() {
+                let node = *node;
+                let Some(&dep) = next.get(*at) else {
+                    state.insert(node, 2);
+                    stack.pop();
+                    continue;
+                };
+                *at += 1;
+                match state.get(dep) {
+                    Some(1) => {
+                        let from = stack.iter().position(|(f, ..)| *f == dep).expect("on the path");
+                        return Some(stack[from..].iter().map(|(f, ..)| (*f).clone()).chain([dep.clone()]).collect());
+                    }
+                    Some(_) => {}
+                    None => {
+                        state.insert(dep, 1);
+                        stack.push((dep, deps(dep), 0));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The error for import cycle `cycle` ([`Self::import_cycle`]), at the
+    /// import of `cycle[1]` in `cycle[0]`, with that file and its source.
+    fn import_cycle_error(&mut self, cycle: &[PathBuf]) -> (PathBuf, String, Message) {
+        let src = self.read_source(&cycle[0]).unwrap_or_default();
+        let name = |file: &PathBuf| {
+            self.worklist
+                .iter()
+                .find(|i| &i.file == file)
+                .and_then(|i| i.namespace.clone())
+                .filter(|ns| !ns.is_empty())
+                .or_else(|| file.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| file.display().to_string())
+        };
+        let path = cycle.iter().map(name).collect::<Vec<_>>().join(" -> ");
+        // The statement's span runs on to the next line: the import alone.
+        let mut range = self.module_dep_spans.get(&(cycle[0].clone(), cycle[1].clone())).cloned().unwrap_or(0..0);
+        if let Some(text) = src.get(range.clone()) {
+            range.end = range.start + text.trim_end().len();
+        }
+        let mut msg = Message::error(ErrorCode::ImportCycle, format!("import cycle: `{path}`"), range);
+        msg.with_help(format!(
+            "`{}` imports `{}`, and the imports lead back to it: a module is checked after the modules it imports, so modules cannot import each other, directly or through others; move what they share into a module of its own that each of them imports",
+            name(&cycle[0]),
+            name(&cycle[1]),
+        ));
+        (cycle[0].clone(), src, msg)
+    }
+
+    /// Report the first import cycle ([`Self::import_cycle`]) and fail the
+    /// compile: no module of the program is checked then, as each one in
+    /// the cycle would report the other's names missing. `true` if one was.
+    fn report_import_cycle(&mut self) -> bool {
+        let Some(cycle) = self.import_cycle() else {
+            return false;
+        };
+        let (file, src, msg) = self.import_cycle_error(&cycle);
+        self.emit_message(&file, &src, &msg);
+        self.failed = true;
+        true
     }
 
     /// Record that `from` `use`s/`mod`s `on` (compile `on` first).
@@ -1040,6 +1146,7 @@ impl Pipeline {
         self.processed.clear();
         self.worklist.clear();
         self.module_deps.clear();
+        self.module_dep_spans.clear();
         self.ast_cache.clear();
         self.generated_ranges.clear();
         self.derived_items.clear();
@@ -1074,6 +1181,9 @@ impl Pipeline {
 
     /// Compile every discovered module in dependency order.
     fn compile_discovered_modules(&mut self) {
+        if self.report_import_cycle() {
+            return;
+        }
         self.seed_fn_value_escapes();
         let order = self.worklist_in_dependency_order();
         self.step(CompileStep::Modules(order.len()));
