@@ -370,6 +370,73 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A fold of `step(i)` over `0..400000` from `start`: four chunks of
+/// 100000.
+fn fold_program(start: &str, op: &str, step: &str) -> String {
+    format!(
+        r#"
+use io::{{stdout, write}};
+use string::to_bytes;
+
+fn step(int i) -> int {{
+{step}
+}}
+
+fn run() -> int {{
+    let total = {start};
+    for i in 0..400000 {{
+        total = total {op} step(i);
+    }}
+    return total;
+}}
+
+fn main() {{
+    let r = run();
+    let _ = write(stdout(), to_bytes(r.show()));
+}}
+"#
+    )
+}
+
+/// A chunk folds from the identity, so its partial can stay in range
+/// where the running fold leaves it part way through the chunk and comes
+/// back. The chunk also returns the least and greatest value its partial
+/// took, and the fork-join tests the fold so far against both (#2423).
+#[test]
+fn an_overflow_the_fold_only_reaches_inside_a_chunk_is_reported() {
+    let overflow = "panic: integer overflow at";
+    // Past `MAX` in the first ten iterations, back under it by the end.
+    let rises = "    if i < 10 {\n        return 10;\n    }\n    return 0 - 1;";
+    same_as_sequential("chunk-rises", &fold_program("9223372036854775800", "+", rises), overflow);
+    // Under `MIN` and back.
+    let dips = "    if i < 10 {\n        return 0 - 10;\n    }\n    if i < 30 {\n        return 10;\n    }\n    return 0;";
+    same_as_sequential("chunk-dips", &fold_program("0 - 9223372036854775800", "+", dips), overflow);
+    // In the third chunk alone, for two iterations.
+    let third = "    if i == 250000 {\n        return 900;\n    }\n    if i == 250001 {\n        return 0 - 900;\n    }\n    return 0;";
+    same_as_sequential("chunk-third", &fold_program("9223372036854775000", "+", third), overflow);
+    // A product past `MAX` that a zero brings back.
+    let zeroed = "    if i == 5 {\n        return 2;\n    }\n    if i == 6 {\n        return 0;\n    }\n    return 1;";
+    same_as_sequential("chunk-product-zeroed", &fold_program("4611686018427387904", "*", zeroed), overflow);
+    // `MIN` fits; its negation does not.
+    let negated = "    if i == 300000 {\n        return 2;\n    }\n    if i == 300001 {\n        return 0 - 1;\n    }\n    return 1;";
+    same_as_sequential("chunk-product-negated", &fold_program("0 - 4611686018427387904", "*", negated), overflow);
+}
+
+/// The same test reports nothing for a fold that stays in range: one that
+/// touches `MAX` or `MIN` inside a chunk, and a product from zero whose
+/// chunks overflow on their own.
+#[test]
+fn a_fold_that_stays_in_range_inside_its_chunks_reports_nothing() {
+    let touches = "    if i == 250000 {\n        return 807;\n    }\n    if i == 250001 {\n        return 0 - 900;\n    }\n    return 0;";
+    same_as_sequential("chunk-touches-max", &fold_program("9223372036854775000", "+", touches), "");
+    let least = "    if i == 300000 {\n        return 2;\n    }\n    return 1;";
+    same_as_sequential("chunk-product-min", &fold_program("0 - 4611686018427387904", "*", least), "");
+    let flips = "    if i == 300000 {\n        return 0 - 2;\n    }\n    if i == 300007 {\n        return 0;\n    }\n    return 1;";
+    same_as_sequential("chunk-product-flips", &fold_program("4611686018427387904", "*", flips), "");
+    same_as_sequential("chunk-product-from-zero", &fold_program("0", "*", "    return 3;"), "");
+    same_as_sequential("chunk-sum", &fold_program("7", "+", "    return i % 7 - 3;"), "");
+}
+
 /// `fib` with `body` after its base case and `clause` on its signature,
 /// printed at 27: deep enough for a fork worker.
 fn fib_program(clause: &str, body: &str) -> String {

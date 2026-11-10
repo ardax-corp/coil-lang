@@ -368,11 +368,11 @@ the joiner while other chunks still use its heap. A chunk that overflows
 fails its join, so the loop reruns sequentially, which panics where the
 program does, or finishes when only that chunk's partial overflowed. The
 fold waits for the last join, and folding in order makes each step a prefix
-of the sequential reduction, so a fold that overflows is one the sequential
-loop performs too. The fork-join tests each `+` / `*` step before taking it
-(compares against `MAX - p` / `MIN - p`, or the quotients `MAX / p` and
-`MIN / p` by sign) and reruns the range instead of trapping, so that panic
-too is raised by the loop's body.
+of the sequential reduction. The fork-join tests each `+` / `*` step before
+taking it (compares against `MAX - p` / `MIN - p`, or the quotients
+`MAX / p` and `MIN / p` by sign) and reruns the range instead of trapping,
+so that panic too is raised by the loop's body. What it tests the fold
+against is described [below](#a-failed-attempt-reports-nothing).
 
 ### A failed attempt reports nothing
 
@@ -406,9 +406,20 @@ still out are waited for, so the program ends later than the sequential
 one, and never if one of those arms does not terminate
 ([coil-lang#2442](https://github.com/ardax-corp/coil-lang/issues/2442)).
 
-A chunk cannot see an overflow the running fold only reaches part way
-through its range
+A chunk folds from the identity, so its partial alone does not show an
+overflow the running fold only reaches part way through the chunk
 ([coil-lang#2423](https://github.com/ardax-corp/coil-lang/issues/2423)).
+A `+` or `*` site therefore has two workers. The plain one runs the range
+on the joining thread. The chunks run a tracked one
+(`Compiler::hir_par_tracked_body`), which follows the least and greatest
+value its accumulator takes, the identity included, and returns
+`(partial, least, greatest)`. Inside chunk `k` the running fold is
+`a ⊕ s`, for the fold `a` of the chunks before it and each value `s` the
+partial took. `s -> a + s` and `s -> a * s` are monotone, so the running
+fold leaves the `int` range iff it does at the least or the greatest `s`:
+the fork-join tests both (`int_overflows`) before it folds the partial, and
+reruns the range when either fails. A partial that overflows on its own
+(a product from `0`, a sum from far below zero) fails its join as before.
 
 Array / dict / coro / user-`Iterator` `for` stays sequential: isolate IPA does not
 send the heap collection (that is C1 shared-heap steal, COI-365).
