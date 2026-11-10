@@ -3,8 +3,7 @@
 // outside a scope they just wait.
 use tests::assert;
 use task::{scope, Scope, TaskError};
-use thread::ThreadError;
-use clock::sleep_ms;
+use thread::{ThreadError, Receiver, recv, send, channel as thread_channel};
 
 fn crunch() -> int {
     let total = 0;
@@ -16,8 +15,10 @@ fn crunch() -> int {
     return total;
 }
 
-fn slow_crunch() -> int {
-    sleep_ms(30);
+// Waits on the worker thread until the other task says go, so it cannot
+// finish before that task ran, however the threads are scheduled.
+fn crunch_after(Receiver go) -> int {
+    let _ = recv(go);
     return crunch();
 }
 
@@ -55,14 +56,16 @@ test("blocking returns a string result") {
 
 test("other tasks run while one waits on blocking") {
     let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        let worker = s.spawn(fn () use (mut log) {
-            let v = got(task::blocking(slow_crunch));
+    let (go_tx, go_rx) = thread_channel()?;
+    let r = scope(fn (Scope s) use (go_tx, go_rx, mut log) {
+        let worker = s.spawn(fn () use (go_rx, mut log) {
+            let v = got(task::blocking_with(crunch_after, go_rx));
             log.push("blocking done");
             v
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (go_tx, mut log) {
             log.push("other ran");
+            let _ = send(go_tx, 1);
             0
         });
         match worker.join() {
