@@ -1,0 +1,56 @@
+// A shared generic body whose result holds a value of `T` it got from a
+// function parameter (`opt<T>(T -> T f, T x) -> Option<T>`, a tuple
+// `(T, T)` from `fn(T) -> (T, T)`) returns the ground type's words: the
+// function argument's adapter gives the body the words a bare `T`
+// parameter would, so the call rebuilds the result as it does for one
+// (coil-lang#2579).
+// @flags --clone-budget 0
+use tests::assert;
+
+class C {
+    pub n: int,
+}
+
+fn opt<T>(T -> T f, T x) -> Option<T> {
+    return Option::Some(f(x));
+}
+
+fn opt2<T>(T -> Option<T> f, T x) -> Option<T> {
+    return f(x);
+}
+
+fn both<T>(fn(T) -> (T, T) f, T x) -> (T, T) {
+    return f(x);
+}
+
+fn first<T>(Vec<fn(T) -> (T, T)> fs, T x) -> (T, T) {
+    let f = fs[0];
+    return f(x);
+}
+
+fn ss(string s) -> string {
+    return s + "s";
+}
+
+fn dup(int x) -> (int, int) {
+    return (x, x + 1);
+}
+
+test("a function parameter and an Option<T> result") {
+    assert!((opt(fn (string s) => s, "q") ?? "") == "q");
+    assert!((opt(ss, "q") ?? "") == "qs");
+    assert!((opt(fn (int x) => x * 2, 4) ?? 0) == 8);
+    assert!((opt(fn (float x) => x / 2.0, 3.0) ?? 0.0) == 1.5);
+    assert!((opt(fn (C c) => new C(c.n + 1), new C(1)) ?? new C(0)).n == 2);
+    assert!((opt2(fn (string s) => Option::Some(s + "?"), "a") ?? "") == "a?");
+    assert!((opt2(fn (int x) => Option::None, 1) ?? 7) == 7);
+}
+
+test("a function parameter returning a tuple of T") {
+    assert!(both(dup, 3) == (3, 4));
+    assert!(both(fn (string s) => (s, s + "!"), "a") == ("a", "a!"));
+    assert!(both(fn (float x) => (x, x * 2.0), 1.5) == (1.5, 3.0));
+    assert!(both(fn (bool b) => (b, !b), true) == (true, false));
+    assert!(first([dup], 7) == (7, 8));
+    assert!(first([fn (string s) => (s, s)], "z") == ("z", "z"));
+}
