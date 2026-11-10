@@ -483,8 +483,9 @@ pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ag
 }
 
 /// The ground element type of the element-wise op at `id`: of an operand,
-/// else of the result (a named type, or a generic one at ground
-/// arguments). `None` while it is an open type parameter.
+/// else of the result (a named type, a generic one at ground arguments, or
+/// a ground tuple or array of a nested aggregate, #2544). `None` while it
+/// is an open type parameter.
 pub fn aggregate_elem(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ty> {
     use crate::typechecking::aggregate_arith::homogeneous_aggregate_elem;
     let operands = match body.expr(id).kind {
@@ -496,7 +497,7 @@ pub fn aggregate_elem(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ty
         .into_iter()
         .filter_map(|x| body.expr(x).ty.as_ref())
         .filter_map(|t| homogeneous_aggregate_elem(strip_readonly(&apply_ty_prune(checker.subst(), t))))
-        .find(|elem| matches!(elem, Ty::Con(_)) || (matches!(elem, Ty::App(..)) && !elem.has_var()))
+        .find(|elem| matches!(elem, Ty::Con(_)) || (matches!(elem, Ty::App(..) | Ty::Tuple(_) | Ty::Array { .. }) && !elem.has_var()))
 }
 
 /// The element-wise shape from the operand types where the checker kept

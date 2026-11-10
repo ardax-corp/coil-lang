@@ -2241,6 +2241,20 @@ impl Compiler {
 
     /// The trait instance type and method FQN an operator `class::method`
     /// on an operand of type `ty` calls.
+    /// The structural instance method of an arithmetic trait at a ground
+    /// tuple or array (#2513), as an element of a nested aggregate's
+    /// element-wise operator calls it (#2544). Not an operator's own target:
+    /// the operator on the aggregate is lowered element-wise in place.
+    pub(super) fn structural_arith_target(&self, ty: &Ty, class: &str, method: &str) -> Option<(Ty, String)> {
+        let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
+        let lookup = crate::typechecking::ty::strip_readonly(&resolved).clone();
+        if !matches!(lookup, Ty::Tuple(_) | Ty::Array { .. }) || !crate::typechecking::aggregate_arith::is_liftable_arith_trait(class) {
+            return None;
+        }
+        let fqn = self.checker.generics().find_instance(class, std::slice::from_ref(&lookup))?.method_fqns.get(method).cloned()?;
+        (self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn)).then_some((lookup, fqn))
+    }
+
     pub(super) fn concrete_operator_target_ty(&self, ty: &Ty, class: &str, method: &str) -> Option<(Ty, String)> {
         let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
         // A `readonly` operand's operator is its type's instance (#1645).

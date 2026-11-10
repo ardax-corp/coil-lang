@@ -2782,7 +2782,10 @@ impl Lower<'_> {
                     .chain(rhs.as_ref())
                     .filter_map(|&o| self.expr_ty(o))
                     .find_map(|t| crate::typechecking::aggregate_arith::homogeneous_aggregate_elem(strip_readonly(t)));
-                elem.and_then(|e| self.word_ty(&e)).ok_or("aggregate element word")?
+                // A nested aggregate's element is one word, a pair boxed,
+                // as a tuple or an array holds it (#2544).
+                let nested = |e: &Ty| matches!(strip_readonly(e), Ty::Tuple(_) | Ty::Array { .. }).then_some(MirTy::HeapRef);
+                elem.and_then(|e| self.word_ty(&e).or_else(|| nested(&e))).ok_or("aggregate element word")?
             }
             None if bound.is_none() && info.kind.elem_is_float => MirTy::F64,
             None => MirTy::I64,
