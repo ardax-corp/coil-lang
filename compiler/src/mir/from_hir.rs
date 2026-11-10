@@ -6637,7 +6637,7 @@ impl Lower<'_> {
                 .or_else(|| self.cx.boxed_view(t, None).map(|_| MirTy::HeapRef))
                 // An open tuple (`(T, int)` in a shared body): its heap
                 // tuple, as the ground one is stored.
-                .or_else(|| (self.opaque_vars && is_heap_tuple(t)).then_some(MirTy::HeapRef))
+                .or_else(|| is_heap_tuple(t).then_some(MirTy::HeapRef))
                 .ok_or("make payload type")?;
             // A two-word payload is stored boxed.
             let v = if want == MirTy::HeapRef { self.boxed_word(arg)? } else { self.word(arg)? };
@@ -8153,7 +8153,7 @@ impl Lower<'_> {
         self.word_ty(t)
             .or_else(|| is_unit(t).then_some(MirTy::I64))
             .or_else(|| self.cx.boxed_view(t, None).map(|_| MirTy::HeapRef))
-            .or_else(|| (self.opaque_vars && is_heap_tuple(t)).then_some(MirTy::HeapRef))
+            .or_else(|| is_heap_tuple(t).then_some(MirTy::HeapRef))
             .ok_or_else(|| "payload type".into())
     }
 
@@ -8406,7 +8406,7 @@ impl Lower<'_> {
                 self.word_ty(t)
                     .or_else(|| is_unit(t).then_some(MirTy::I64))
                     .or_else(|| self.cx.boxed_view(t, None).map(|_| MirTy::HeapRef))
-                    .or_else(|| (self.opaque_vars && is_heap_tuple(t)).then_some(MirTy::HeapRef))
+                    .or_else(|| is_heap_tuple(t).then_some(MirTy::HeapRef))
                     // A field of a type never resolved (a thread's or
                     // channel's value) that the arm ignores: its word is
                     // unpacked, as emission's, and never read.
