@@ -6291,13 +6291,14 @@ impl Compiler {
         crate::hir::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         crate::verify::capture_module(&self.checker, &self.typed_sidecar, module, ast);
         self.build_hir_for_lowering(module, ast);
-        let bare_cases = self.checker.bare_cases().clone();
-        self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast, &bare_cases);
+        self.recursive_fns = self.hir_module.as_ref().map(|hir| hir.recursive_fns(&self.checker, module)).unwrap_or_default();
         // The pure and length-stable functions come from the HIR summaries
         // below; without a HIR module there are none.
         self.pure_fns.clear();
         self.steady_fns.clear();
-        self.alloc_steady = self.typed_sidecar.length_stability().alloc_stable;
+        // A `drop` in any module of the compile, this one and the ones still
+        // to come included: the pipeline's answer from before any HIR.
+        self.alloc_steady = !self.checker.program_finalizers_resize.unwrap_or(false);
         self.pure_static_inits.clear();
         self.startup_consts.clear();
         self.fold_bodies.clear();
@@ -6337,6 +6338,8 @@ impl Compiler {
             self.steady_fns.extend(effects::steady_names(hir, module, &summaries));
             self.program_effects.record(hir, &self.checker, module, &summaries);
             self.program_effects.record_mutations(mutations);
+            // The same from the bodies themselves, for the modules so far.
+            self.alloc_steady &= !self.program_effects.drop_may_resize();
         }
         // E0148: local streams a body opens and never closes or hands on.
         if let Some(hir) = self.hir_module.as_ref() {

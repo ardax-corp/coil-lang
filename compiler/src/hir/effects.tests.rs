@@ -1420,3 +1420,64 @@ fn built(int n, string s) -> int {
     let (body, v) = scrutinee("built");
     assert!(early_free::allocates(body, v));
 }
+
+fn drop_resizes(src: &str) -> bool {
+    let (module, out) = summaries(src);
+    let checker = Checker::new();
+    let mut program = ProgramEffects::default();
+    program.record(&module, &checker, "", &out);
+    program.drop_may_resize()
+}
+
+/// A finalizer runs at any allocation: one that may change a length makes
+/// every allocation a point where lengths change.
+#[test]
+fn a_drop_that_pops_may_resize() {
+    assert!(drop_resizes(
+        "
+class Log {
+    pub lines: Vec<int>,
+}
+impl Log {
+    fn drop() {
+        self.lines.pop();
+    }
+}"
+    ));
+}
+
+#[test]
+fn a_drop_that_runs_unknown_code_may_resize() {
+    assert!(drop_resizes(
+        "
+class Hook {
+    pub f: int -> int,
+}
+impl Hook {
+    fn drop() {
+        let g = self.f;
+        let _ = g(1);
+    }
+}"
+    ));
+}
+
+#[test]
+fn a_drop_that_writes_a_field_or_a_static_leaves_lengths_alone() {
+    assert!(!drop_resizes(
+        "
+static let DROPS: int = 0;
+class Handle {
+    pub fd: int,
+}
+impl Handle {
+    fn drop() {
+        DROPS = DROPS + 1;
+        self.fd = 0 - 1;
+    }
+    pub fn grow(Vec<int> v) {
+        v.push(self.fd);
+    }
+}"
+    ));
+}
