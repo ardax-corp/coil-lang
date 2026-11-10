@@ -177,6 +177,38 @@ fn bump(int x) -> int {{
     assert!(!names.contains("bump"));
 }
 
+/// A trait impl's method is listed under its own name, and has no vote on
+/// the bare name.
+#[test]
+fn pure_names_list_trait_impl_methods_by_their_own_name() {
+    let src = "
+static let HITS: int = 0;
+class P {
+    pub x: int,
+}
+impl P {
+    pub fn size() -> int { return self.x; }
+}
+trait Weigh<T> {
+    fn weigh(T x) -> int;
+    fn size(T x) -> int;
+}
+impl Weigh for P {
+    fn weigh(P p) -> int { return p.x * 2; }
+    fn size(P p) -> int {
+        HITS = HITS + 1;
+        return p.x;
+    }
+}";
+    let (m, out) = summaries(src);
+    let names = pure_names(&m, "", &out, &HashSet::new());
+    assert!(names.contains("Weigh for P::weigh"), "{names:?}");
+    assert!(!names.contains("Weigh for P::size"), "{names:?}");
+    assert!(names.contains("P::size") && names.contains("size"), "{names:?}");
+    let steady = steady_names(&m, "", &out, &names);
+    assert!(steady.contains("Weigh for P::weigh") && steady.contains("Weigh for P::size"), "{steady:?}");
+}
+
 fn violations(src: &str) -> Vec<String> {
     let owned = Box::leak(src.to_string().into_boxed_str());
     let ast = parser::Pratt::default().parse(owned).expect("parse");

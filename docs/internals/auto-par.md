@@ -54,6 +54,14 @@ the pure functions whose result is a scalar or `string`: two calls that each
 return a fresh array are not the same value
 ([coil-lang#790](https://github.com/ardax-corp/coil-lang/issues/790)).
 
+The HIR set names every function and method body by its own name (`f`,
+`Owner::m`, `Trait for Owner::m`, `outer::inner`). A bare `m` is listed when
+every function and inherent method of that short name is pure, by HIR or by
+the AST walk. To see where the two analyses disagree, run a debug build with
+`COIL_EFFECTS_SEED_DIFF=1`: one stderr line per function or method, with the
+body's shape (`Function`, `Method`, `TraitImpl`, `Nested`), which side calls
+it pure or length-stable, and what makes it impure in HIR.
+
 A `static let` read is `HOST` and a write is `HEAP_MUT` in both analyses:
 a chunk worker reads a copy of the statics taken when it was spawned, and
 another call may change one
