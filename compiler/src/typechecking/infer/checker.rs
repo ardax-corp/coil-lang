@@ -10501,9 +10501,9 @@ impl Checker {
     /// instance (#1451, #1479), registered the first time a goal asks for
     /// it, with the instances of its structural items (`%v` of a tuple
     /// shows an array item through the array's): `Show` when `%v` shows
-    /// its items (so has a ground `Option` / `Result`), and for a tuple or
-    /// array, `Eq` when its items have `Eq`
-    /// and `Hash` when they have a ground `Hash` (its thunk calls theirs).
+    /// its items (so has a ground `Option` / `Result`), `Eq` when its items
+    /// have `Eq`, and for a tuple, record or array, `Hash` when they have
+    /// a ground `Hash` (its thunk calls theirs).
     fn ensure_structural_instance(&mut self, class: &str, wanted: &[Ty]) {
         let [ty] = wanted else { return };
         if class == "Length" {
@@ -10520,7 +10520,7 @@ impl Checker {
         let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
         let items: Vec<Ty> = match &ty {
             Ty::Tuple(items) if !items.is_empty() => items.clone(),
-            Ty::Record { fields } if !fields.is_empty() && matches!(class, "Show" | "Eq") => fields.iter().map(|(_, t)| t.clone()).collect(),
+            Ty::Record { fields } if !fields.is_empty() => fields.iter().map(|(_, t)| t.clone()).collect(),
             Ty::Array { element, .. } => vec![(**element).clone()],
             // `Option` / `Result` show their payload (#1479), and compare it
             // (#1629).

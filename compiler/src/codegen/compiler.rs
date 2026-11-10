@@ -6770,14 +6770,21 @@ impl Compiler {
         self.emit_synth_fn(name, &hir, HashMap::new());
     }
 
-    /// The `Hash` thunk `name` of a ground tuple or array `ty` (#1479): its
-    /// items' hashes combined as a derived `Hash` combines fields, each
-    /// through the item type's own ground instance (a `()` item hashes to
-    /// `0`).
+    /// The `Hash` thunk `name` of a ground tuple, record or array `ty`
+    /// (#1479, #2380): its items' hashes combined as a derived `Hash`
+    /// combines fields, a record's in name order, each through the item
+    /// type's own ground instance (a `()` item hashes to `0`).
     fn emit_structural_hash(&mut self, name: &str, ty: &Ty, retype: bool) {
-        let items: Vec<Ty> = match ty {
-            Ty::Tuple(items) => items.clone(),
-            Ty::Array { element, .. } => vec![(**element).clone()],
+        use crate::hir::synth::{Product, ProductCtor};
+        let (product, items): (Option<Product>, Vec<Ty>) = match ty {
+            Ty::Tuple(items) => (Some(Product::tuple(items)), items.clone()),
+            Ty::Record { fields } => {
+                let mut fields = fields.clone();
+                fields.sort_by(|a, b| a.0.cmp(&b.0));
+                let (names, parts): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
+                (Some(Product { ctor: ProductCtor::Record(names), parts: parts.clone() }), parts)
+            }
+            Ty::Array { element, .. } => (None, vec![(**element).clone()]),
             _ => return,
         };
         let mut calls = HashMap::new();
@@ -6804,7 +6811,7 @@ impl Compiler {
         }
         let int = crate::typechecking::ty::int();
         let hir = crate::hir::synth::builtin_entry(&self.checker, name, &[(ty.clone(), retype)], int.clone(), false, |b, a| {
-            crate::hir::synth::structural_hash(b, a[0], &items, &targets)
+            crate::hir::synth::structural_hash(b, a[0], product.as_ref(), &targets)
         });
         self.emit_synth_fn(name, &hir, calls);
     }
