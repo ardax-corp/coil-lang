@@ -135,6 +135,11 @@ impl Summary {
         self.flags.is_pure() && self.latent == 0
     }
 
+    /// Never changes the length of an array or `Vec`, whatever it is passed.
+    pub fn is_steady(self) -> bool {
+        self.latent == 0 && !self.flags.contains(EffectFlags::RESIZE | EffectFlags::UNKNOWN | EffectFlags::YIELD)
+    }
+
     fn of(flags: EffectFlags) -> Self {
         // Host tables pair `unknown` with host state to be safe; unknown
         // already says it all.
@@ -380,10 +385,12 @@ impl ProgramEffects {
     }
 }
 
-/// Names of `module`'s pure functions and methods, keyed as
-/// [`crate::typechecking::purity::record_fn_effects`] keys them: `f`,
-/// `Owner::m` and `module::Owner::m`. A bare `m` is listed when every body
-/// of that short name is pure, here or in `known` (the AST walk's set).
+/// Names of `module`'s pure functions and methods, as a callee is looked
+/// up ([`crate::pure_call::name_in`]): each body's own name (`f`,
+/// `Owner::m`, `Trait for Owner::m`, `outer::inner`), with the module path
+/// in front as well for a method. A bare `m` is listed when every function
+/// and inherent method of that short name is pure, here or in `known` (the
+/// AST walk's set).
 pub fn pure_names(module: &HirModule, module_path: &str, summaries: &[Summary], known: &HashSet<String>) -> HashSet<String> {
     names_where(module, module_path, summaries, known, Summary::is_pure)
 }
@@ -392,9 +399,38 @@ pub fn pure_names(module: &HirModule, module_path: &str, summaries: &[Summary], 
 /// `Vec` (no append, resize, yield or unknown code), whatever they are
 /// passed. `known` are names already known to qualify.
 pub fn steady_names(module: &HirModule, module_path: &str, summaries: &[Summary], known: &HashSet<String>) -> HashSet<String> {
-    names_where(module, module_path, summaries, known, |s| {
-        s.latent == 0 && !s.flags.contains(EffectFlags::RESIZE | EffectFlags::UNKNOWN | EffectFlags::YIELD)
-    })
+    names_where(module, module_path, summaries, known, Summary::is_steady)
+}
+
+/// How a function or method body is written: what its names are keyed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameShape {
+    /// `fn f` at the top of a module.
+    Function,
+    /// `fn inner` inside another body (`outer::inner`), or a method of an
+    /// impl written inside one.
+    Nested,
+    /// A method of `impl Owner`, or a trait's own default body.
+    Method,
+    /// A method of `impl Trait for Owner`.
+    TraitImpl,
+}
+
+/// The shape of `body` and its short name, from its module-local name.
+fn name_shape(kind: BodyKind, local: &str) -> Option<(NameShape, &str)> {
+    let (owner, short) = match local.rsplit_once("::") {
+        Some((owner, short)) => (Some(owner), short),
+        None => (None, local),
+    };
+    let shape = match (kind, owner) {
+        (BodyKind::Function, None) => NameShape::Function,
+        (BodyKind::Function, Some(_)) => NameShape::Nested,
+        (BodyKind::Method, Some(owner)) if owner.contains(' ') => NameShape::TraitImpl,
+        (BodyKind::Method, Some(owner)) if owner.contains("::") => NameShape::Nested,
+        (BodyKind::Method, Some(_)) => NameShape::Method,
+        _ => return None,
+    };
+    Some((shape, short))
 }
 
 fn names_where(
@@ -408,38 +444,72 @@ fn names_where(
     let mut by_short: HashMap<&str, bool> = HashMap::new();
     for (body, s) in module.bodies.iter().zip(summaries) {
         let Some(local) = local_name(module_path, &body.name) else { continue };
-        let (owner, short) = match local.rsplit_once("::") {
-            Some((owner, short)) => (Some(owner), short),
-            None => (None, local),
-        };
-        let pure = ok(*s) || known.contains(local);
-        match (body.kind, owner) {
-            (BodyKind::Function, None) => {
-                if ok(*s) {
-                    out.insert(local.to_string());
-                }
+        let Some((shape, short)) = name_shape(body.kind, local) else { continue };
+        if ok(*s) {
+            out.insert(local.to_string());
+            if shape != NameShape::Function && !module_path.is_empty() {
+                out.insert(body.name.clone());
             }
-            // Trait impls (`Show for P::m`) and nested functions keep the
-            // AST walk's verdict.
-            (BodyKind::Method, Some(owner)) if !owner.contains(' ') && !owner.contains("::") => {
-                if ok(*s) {
-                    out.insert(local.to_string());
-                    if !module_path.is_empty() {
-                        out.insert(body.name.clone());
-                    }
-                }
-            }
-            _ => continue,
         }
-        let all = by_short.entry(short).or_insert(true);
-        *all &= pure;
+        // A trait impl's method and a nested function do not vote on the
+        // bare name: the AST walk's verdict on it stands for them.
+        if matches!(shape, NameShape::Function | NameShape::Method) {
+            let all = by_short.entry(short).or_insert(true);
+            *all &= ok(*s) || known.contains(local);
+        }
     }
-    for (short, pure) in by_short {
-        if pure {
+    for (short, good) in by_short {
+        if good {
             out.insert(short.to_string());
         }
     }
     out
+}
+
+/// The env var that turns [`log_seed_disagreements`] on in a debug build.
+const SEED_DIFF_ENV: &str = "COIL_EFFECTS_SEED_DIFF";
+
+/// Debug builds, with `COIL_EFFECTS_SEED_DIFF` set: one stderr line for each
+/// function and method the checker's AST walk and these summaries disagree
+/// on, with the body's shape and what makes it impure here. `ast_pure` and
+/// `ast_steady` are the walk's sets ([`TypedSidecar::pure_fn_names`], the
+/// length-stable names).
+///
+/// [`TypedSidecar::pure_fn_names`]: crate::typechecking::infer::TypedSidecar::pure_fn_names
+pub(crate) fn log_seed_disagreements(module: &HirModule, module_path: &str, fx: &ModuleEffects<'_>, ast_pure: &HashSet<String>, ast_steady: &HashSet<String>) {
+    if !cfg!(debug_assertions) || std::env::var_os(SEED_DIFF_ENV).is_none() {
+        return;
+    }
+    for (index, body) in module.bodies.iter().enumerate() {
+        let Some(local) = local_name(module_path, &body.name) else { continue };
+        let Some((shape, short)) = name_shape(body.kind, local) else { continue };
+        // The walk keys a method `Owner::m` whatever trait the impl is
+        // for, without the owner's type arguments, and a nested function
+        // by its bare name.
+        let key = match shape {
+            NameShape::Function => local.to_string(),
+            NameShape::Nested => short.to_string(),
+            NameShape::Method | NameShape::TraitImpl => {
+                let owner = local.rsplit_once("::").map_or("", |(o, _)| o);
+                let owner = owner.rsplit_once(" for ").map_or(owner, |(_, o)| o);
+                let owner = owner.split('<').next().unwrap_or(owner);
+                format!("{owner}::{short}")
+            }
+        };
+        let s = fx.summaries[index];
+        for (what, ast, hir) in [("pure", ast_pure.contains(&key), s.is_pure()), ("steady", ast_steady.contains(&key), s.is_steady())] {
+            if ast != hir {
+                let side = |yes: bool| if yes { what } else { "not" };
+                eprintln!(
+                    "effects-seed\t{what}\tast={}\thir={}\t{shape:?}\t{module_path}\t{}\t{}",
+                    side(ast),
+                    side(hir),
+                    body.name,
+                    fx.why(index)
+                );
+            }
+        }
+    }
 }
 
 thread_local! {
@@ -867,6 +937,21 @@ impl<'a> ModuleEffects<'a> {
     /// Body `index`'s user-visible effects in one line: `pure`, or its
     /// `uses {…}` and the reasons for it (`uses {write}: calls `write_all`
     /// (write)`).
+    /// Every cause of an effect in `index`, hidden ones (a panic, a
+    /// `defer`) included, and the parameters it calls: `; `-separated.
+    fn why(&self, index: usize) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for cause in self.explain(index) {
+            if !parts.contains(&cause.what) {
+                parts.push(cause.what);
+            }
+        }
+        if self.summaries[index].latent != 0 {
+            parts.push("calls a parameter".into());
+        }
+        parts.join("; ")
+    }
+
     pub fn describe(&self, index: usize) -> String {
         let s = self.summaries[index];
         if s.visible.is_pure() && s.latent == 0 {
