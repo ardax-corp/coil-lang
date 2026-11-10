@@ -10854,8 +10854,10 @@ impl Compiler {
     /// accumulator. A failed spawn or join joins the handles still out and
     /// runs the whole range on this thread. A dynamic range splits in two
     /// when it has more trips than the grain, and otherwise runs here; so
-    /// does one too long for its trip count to be an `int`. The analysis
-    /// keeps an inclusive end below `MAX`, so the end plus one is in range.
+    /// does one too long for its trip count to be an `int`, and one whose
+    /// values fail a test of `site.guard` (the fold's terms may then have
+    /// both signs). The analysis keeps an inclusive end below `MAX`, so
+    /// the end plus one is in range.
     fn hir_par_driver_body(
         &self,
         site: &crate::hir::par::LoopParSite,
@@ -10973,12 +10975,41 @@ impl Compiler {
             tail
         };
 
+        // The tests that give the fold's terms one sign (`site.guard`):
+        // when one fails, the whole range runs here, as the loop does.
+        let guarded = |b: &mut Synth, whole: (Bound, Bound), stmts: &mut Vec<HirId>| {
+            let mut fails: Option<HirId> = None;
+            for test in &site.guard {
+                let named = |n: &Option<String>| n.as_deref() == Some(test.local.as_str());
+                let local = match site.live_captures.iter().position(|n| *n == test.local) {
+                    Some(i) => live[i],
+                    None if named(&site.begin_local) => begin.expect("a tested start is a word of the fork-join"),
+                    None => {
+                        assert!(named(&site.end_local), "a tested local is a word of the fork-join");
+                        end.expect("a tested end is a word of the fork-join")
+                    }
+                };
+                let (v, k) = (b.read(local), b.int(test.bound));
+                let miss = b.bin(if test.at_least { BinOp::Lt } else { BinOp::Gt }, v, k, coil_ty::boolean());
+                fails = Some(match fails {
+                    None => miss,
+                    Some(f) => b.push(HirKind::Logic { and: false, lhs: f, rhs: miss }, coil_ty::boolean()),
+                });
+            }
+            if let Some(fails) = fails {
+                let here = seq(b, whole.0, whole.1);
+                let here = b.block(vec![here], None, coil_ty::never());
+                stmts.push(b.if_(fails, here, None, coil_ty::unit()));
+            }
+        };
+
         if !site.is_dynamic() {
             let bounds = site
                 .chunk_bounds(crate::hir::par::DEFAULT_LOOP_GRAIN)
                 .unwrap_or_else(|| vec![site.begin, site.midpoint(), site.end]);
             let chunks: Vec<_> = bounds.windows(2).map(|w| (Bound::Const(w[0]), Bound::Const(w[1]))).collect();
             let whole = (Bound::Const(bounds[0]), Bound::Const(*bounds.last().expect("chunk bounds")));
+            guarded(&mut b, whole, &mut stmts);
             stmts.push(fork(&mut b, &chunks, whole));
         } else {
             // `[lo, hi)` and its trip count.
@@ -11001,6 +11032,7 @@ impl Compiler {
             stmts.push(b.let_(lo, v));
             let v = bound(&mut b, end, site.end, site.end_bias);
             stmts.push(b.let_(hi, v));
+            guarded(&mut b, (Bound::Local(lo), Bound::Local(hi)), &mut stmts);
             // The range's length, `hi - lo`, is more than an `int` holds
             // for a start far below zero and an end far above it. The
             // sequential loop does not compute it, so neither does this:
