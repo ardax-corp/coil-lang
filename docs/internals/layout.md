@@ -220,13 +220,21 @@ word there that returns the open enum's object: a field's
 (`query::field_fun`, `binds_from_nested`) and a payload's
 (`classify::generic_enum_field`).
 
-The walk reads a class of the module being compiled, and every user enum
-(`nested_open_look`). Another module's class is not read: its methods
-whose bodies hold an enum over its parameters are thunks to its shared
-bodies there (`layout_safe`), so the shared bodies make and read all of
-its nested enums. That fails where another module fills such a field
-itself (a `pub` one, #2547). In coil-stdlib only `collections::deque::VecDeque`
-(`buf: Vec<Option<T>>`) has the shape; in the prelude, `task::Channel`.
+The walk reads every user class and enum, another module's too
+(`nested_open_look`, #2547). Another module's clone of a generic whose
+signature has the shape is compiled from that module's body, where its
+body would otherwise make it a thunk to the shared one (`layout_safe`),
+so ground code here that constructs such a class or fills a `pub`
+field of it holds the layout its methods read. A type that module does
+not know (declared after it, a tuple: `knows_tys`) has no clone there:
+all the class's methods at it are its shared bodies, which agree on the
+enum objects. The walk skips such an instance where it decides whether a
+call or a dictionary may take a shared body (`shared_only_class`), and
+ground code that constructs one, or reads or writes a field holding the
+nested enum, is refused (E0801 `field-shared-layout`,
+`hir_check_shared_field`). In coil-stdlib only
+`collections::deque::VecDeque` (`buf: Vec<Option<T>>`, private) has the
+shape; in the prelude, `task::Channel`.
 
 **Functions in fields and payloads** (#2511). A function over a type
 parameter in a user class's field or enum payload (`Slot<T>` with `f:

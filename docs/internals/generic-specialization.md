@@ -97,7 +97,11 @@ their own layout and bounds resolve statically.
   class declared later is not in its checker), or when the generic body has
   an enum over its type parameters (`layout_safe`: `Option<T>` in a shared
   field would be stored in the clone's layout and read in the shared one,
-  as `task::Channel` did).
+  as `task::Channel` did). A generic enum's method, and a generic whose
+  signature holds a nested open enum (clone-only, `fn_sig_split`), are
+  compiled from their body anyway: no ground call of the latter reaches
+  its shared body, so nothing reads its values in the other layout
+  ([layout.md](layout.md), "Open enums", #2547).
 
 Tests: `perf_metrics::foreign_method_clone_is_specialized`,
 `perf_metrics::foreign_fn_clone_is_specialized`.
