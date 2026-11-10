@@ -1,0 +1,117 @@
+// A failed `requires` of a trait method blames its caller when the call
+// goes through a bound's dictionary (coil-lang#2503): the dictionary's
+// adapter is no caller, so the message names the generic body's call, as
+// a direct call's does. Past the clone budget, where the generic bodies
+// are shared.
+// `find_from` is a plain loop at the end of this file.
+// @flags --clone-budget 0
+use tests::assert;
+use task::{scope, Scope, TaskError};
+
+trait Area<T> {
+    fn area(T x, int k) -> int
+        requires k > 0, "positive"
+    {}
+
+    fn twice(T x, int k) -> int
+        requires k < 100, "small"
+    {
+        return x.area(k + 1) * 2;
+    }
+}
+
+impl Area for int {
+    fn area(int n, int k) -> int {
+        return n * k;
+    }
+}
+
+class Sq<T> {
+    pub n: int,
+    pub tag: T,
+}
+
+impl Area for Sq<T> {
+    fn area(Sq<T> s, int k) -> int {
+        return s.n * k;
+    }
+}
+
+fn show<T: Area>(T x, int k) -> int {
+    return x.area(k);
+}
+
+fn show_twice<T: Area>(T x, int k) -> int {
+    return Area::twice(x, k);
+}
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task; the panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+test("a kept requires runs the method") {
+    assert!(show(3, 3) == 9 && show_twice(4, 1) == 16);
+    assert!(show(new Sq(2, "a"), 2) == 4);
+}
+
+test("an instance method through a bound names the generic body's call") {
+    let m = outcome(fn () => show(3, 0));
+    assert!(
+        find_from(
+            m,
+            "contract violated: requires k > 0 (\"positive\") in Area for int::area, called from ",
+            0,
+        ) >= 0,
+        m,
+    );
+    assert!(find_from(m, "requires_blames_caller_through_dict.coil:41:", 0) >= 0, m);
+}
+
+test("a generic-head instance's method") {
+    let m = outcome(fn () => show(new Sq(2, "a"), 0));
+    assert!(find_from(m, ", called from ", 0) >= 0, m);
+    assert!(find_from(m, "requires_blames_caller_through_dict.coil:41:", 0) >= 0, m);
+}
+
+test("a default method through a bound") {
+    let m = outcome(fn () => show_twice(4, 100));
+    assert!(find_from(m, "(\"small\")", 0) >= 0, m);
+    assert!(find_from(m, ", called from ", 0) >= 0, m);
+    assert!(find_from(m, "requires_blames_caller_through_dict.coil:45:", 0) >= 0, m);
+}
+
+// The first `needle` in `hay` at or after `start` (clamped), or `-1`.
+fn find_from(string hay, string needle, int start) -> int {
+    let n = hay.len();
+    let m = needle.len();
+    let i = if start < 0 {
+        0
+    } else if start > n {
+        n
+    } else {
+        start
+    };
+    while i + m <= n {
+        let j = 0;
+        while j < m && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}

@@ -968,7 +968,8 @@ impl Driver<'_> {
     }
 
     /// `contract_fail(msg)`: a failed `requires` blames the caller, so the
-    /// message names the call site of the function that checks it.
+    /// message names the call site of the function that checks it, through
+    /// a dictionary call as through a direct one.
     fn contract_failure(&mut self, ctx: *mut NativeCtx, msg: Value) -> String {
         let ptr = msg.as_ptr::<crate::memory::GcData<crate::memory::ObjString>>();
         // SAFETY: the clause's message is a live string.
@@ -976,7 +977,10 @@ impl Driver<'_> {
         let code = Arc::clone(&self.program.native);
         // SAFETY: the calling native code's live context.
         let sites = unsafe { &*ctx }.call_sites();
-        if let Some(loc) = sites.get(1).and_then(|&s| self.locator().native_site_location(code.site(s)?)) {
+        // The caller is the first frame below with a source location: a
+        // dictionary's adapter between the two is compiler-made and has
+        // none (#2503).
+        if let Some(loc) = sites.iter().skip(1).find_map(|&s| self.locator().native_site_location(code.site(s)?)) {
             text.push_str(&format!(", called from {loc}"));
         }
         self.panic_without_location = true;

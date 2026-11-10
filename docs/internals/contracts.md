@@ -74,6 +74,9 @@ panic blames the caller. Its `Builtin::Panic` carries a second argument, and
 `emit_hir` turns that into `contract_fail` (HostInvoke **159**,
 `HostOp::Task`, archive minor 35). The driver adds `, called from
 <file:line:col>` from the frame below and prints no location of its own.
+A call through a bound's dictionary reaches the method through the
+instance's `$dict` adapter, a compiler-made body with no source location:
+the caller is the first frame below that has one (#2503).
 Calls of a function with a `requires` are not tiny-inlined
 (`Compiler::caller_blame_fns`), and the HIR inliner refuses any body with a
 `Builtin`, so the caller always has its own frame.
