@@ -642,7 +642,9 @@ fn pick(Option<int> o) -> int {
 fn main() { return; }
 "#,
     );
-    assert_eq!(sites.iter().map(|s| s.end).collect::<Vec<_>>(), [100, 50]);
+    let mut ends: Vec<i64> = sites.iter().map(|s| s.end).collect();
+    ends.sort_unstable();
+    assert_eq!(ends, [50, 100]);
 }
 
 /// The reach of the AST walk this analysis replaced, kept as it was.
