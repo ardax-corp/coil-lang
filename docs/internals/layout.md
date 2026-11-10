@@ -143,9 +143,14 @@ words:
   (a class's row keeps its generic fields unknown). A tuple or enum
   result whose own items are bare parameters' values is rebuilt at the
   call, to give it the ground type's word kinds (`hir_ret_items`,
-  #1549); a class result is the body's object. A call is still refused
-  where `T` is a bare parameter and the result or another parameter holds
-  it any other way (a function, an enum with `drop`). An open `Option<T>`
+  #1549); a class result is the body's object. A function parameter
+  whose parameters and result are such words, or an `Option` / `Result`
+  of them at its top (`T -> Option<T>`, `fn(T) -> (T, T)`, also in a
+  `Vec` or tuple), gives the body the same words: its adapter passes
+  and returns the ground words (`hir_param_words`, #2579). A call is
+  still refused where `T` is a bare parameter and the result or another
+  parameter holds it any other way (a function of functions, an enum
+  with `drop`). An open `Option<T>`
   below the top is never shared: see "Open enums".
 - A rest parameter `T... xs` is one `Vec<T>` argument: the call packs the
   rest arguments into it (`hir_call_shapes`), a `...vec` spread is the
