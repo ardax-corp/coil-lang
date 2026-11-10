@@ -382,6 +382,13 @@ fn twice(int x) -> int {{
     return x * 2;
 }}
 
+fn known(int n) -> Option<int> {{
+    if n == 27 {{
+        return Some(5);
+    }}
+    return None;
+}}
+
 fn fib(int n) -> int{clause} {{
     if n <= 2 {{
         return 1;
@@ -408,13 +415,16 @@ fn a_fork_inside_a_larger_expression_keeps_the_rest_of_it() {
 }
 
 /// Nor is one with a statement ahead of it that the worker would skip: a
-/// division that traps, a loop and its `invariant`.
+/// division that traps, a loop and its `invariant`, an `if let` that
+/// returns.
 #[test]
 fn a_statement_ahead_of_a_fork_still_runs() {
     let trap = "    let d = 100 / (n - 27);\n    return fib(n - 1) + fib(n - 2);";
     same_as_sequential("fork-after-trap", &fib_program("", trap), "panic: division by zero at");
     let looped = "    let total = 0;\n    for i in 0..3\n        invariant n != 27\n    {\n        total = total + i;\n    }\n    return fib(n - 1) + fib(n - 2);";
     same_as_sequential("fork-after-loop", &fib_program("", looped), "contract violated: invariant n != 27 in fib");
+    let early = "    if let Some(v) = known(n) {\n        return v;\n    }\n    return fib(n - 1) + fib(n - 2);";
+    same_as_sequential("fork-after-if-let", &fib_program("", early), "");
 }
 
 /// The function's own `requires` and `ensures` are checked at every call.
