@@ -2944,6 +2944,9 @@ impl Checker {
             Expression::And(lhs, rhs) | Expression::Or(lhs, rhs) => {
                 let lt = self.infer(lhs);
                 let rt = self.infer(rhs);
+                // A `bool`-backed enum is its `bool` here (#2463).
+                let lt = self.scalar_enum_as_backing(lt);
+                let rt = self.scalar_enum_as_backing(rt);
                 self.unify(&boolean(), &lt, &lhs.0.into_range(), "left of logical");
                 self.unify(&boolean(), &rt, &rhs.0.into_range(), "right of logical");
                 boolean()
@@ -2958,7 +2961,7 @@ impl Checker {
 
             Expression::Negate(e) => {
                 let inner = self.infer(e);
-                let pruned = apply_ty_prune(&self.subst, &inner);
+                let pruned = self.scalar_enum_unary_operand(apply_ty_prune(&self.subst, &inner), "Neg");
                 if crate::typechecking::aggregate_arith::is_matrix_ty(&pruned) {
                     return self.infer_matrix_neg(pruned, id, range);
                 }
@@ -2987,6 +2990,7 @@ impl Checker {
             }
             Expression::Not(e) => {
                 let t = self.infer(e);
+                let t = self.scalar_enum_unary_operand(apply_ty_prune(&self.subst, &t), "BitNot");
                 let pruned = apply_ty_prune(&self.subst, &t);
                 if crate::typechecking::aggregate_arith::is_matrix_ty(&pruned) {
                     return self.infer_matrix_bitnot(pruned, id, range);
@@ -3005,6 +3009,7 @@ impl Checker {
             }
             Expression::LogicalNot(e) => {
                 let t = self.infer(e);
+                let t = self.scalar_enum_as_backing(t);
                 let pruned = apply_ty_prune(&self.subst, &t);
                 match pruned {
                     Ty::Con(name) if name == BOOL || name == INT => boolean(),
@@ -3944,6 +3949,26 @@ impl Checker {
         };
         let tp = apply_ty_prune(&self.subst, &target_ty);
         let vp = apply_ty_prune(&self.subst, &val_ty);
+        // A scalar-backed enum without the operator's instance is its
+        // backing word (#2463). As the value it is that primitive; as the
+        // target the result is the backing type, which is no value of the
+        // enum, so nothing can be stored back.
+        if self.scalar_backing_ty_of(&tp).is_some() && !self.scalar_enum_operator_instance(&tp, &vp, op_name) {
+            let (enum_ty, backing) = (self.diag_ty(&nominal_enum(tp.clone())), self.scalar_backing_ty_of(&tp).map(|b| self.diag_ty(&b)).unwrap_or_default());
+            let class = Generics::operator_trait(op_name).map(|(class, _)| class).unwrap_or("the operator's trait");
+            return self.error_with_help(
+                ErrorCode::TypeMismatch,
+                format!("`{op_name}=` cannot update a value of type `{enum_ty}`: `{op_name}` on a scalar-backed enum gives its backing type `{backing}`, not `{enum_ty}`"),
+                range,
+                Some(format!("bind the result to a new `{backing}` local (`let n = x {op_name} y;`), or implement `{class}` for `{enum_ty}`")),
+            );
+        }
+        let (val_ty, vp) = match self.scalar_backing_ty_of(&vp) {
+            Some(backing) if !self.scalar_enum_operator_instance(&vp, &vp, op_name) || matches!(&tp, Ty::Con(n) if crate::typechecking::ty::is_builtin_scalar(n)) => {
+                (backing.clone(), backing)
+            }
+            _ => (val_ty, vp),
+        };
         if crate::typechecking::aggregate_arith::is_matrix_ty(&tp)
             || crate::typechecking::aggregate_arith::is_matrix_ty(&vp)
         {
@@ -6771,6 +6796,12 @@ impl Checker {
             if left_string && right_string {
                 return string();
             }
+            // A `string`-backed enum next to a `string` is its `string`
+            // (#2463); two of them take the backing rule below.
+            let backed = |ty: &Ty| self.scalar_backing_ty_of(ty).is_some_and(|b| is_string_ty(&b));
+            if left_string && backed(&rp) || right_string && backed(&lp) {
+                return string();
+            }
             if left_string || right_string {
                 return self.unify(&lt, &rt, &range, "operands of `+`");
             }
@@ -6782,6 +6813,14 @@ impl Checker {
         // the enum has the operator's instance: then that is the operator.
         let user = self.scalar_enum_operator_instance(&lp, &rp, op);
         if !user && let Some(backing) = self.arith_scalar_enum_backing(&lp, &rp) {
+            // The operator is the backing type's, so it takes what that
+            // type takes: no `&` on a `bool`, no `-` on a `string` (#2463).
+            if !(op == "+" && is_string_ty(&backing)) {
+                self.check_ground_arith_operands(&backing, op, &range);
+            }
+            if matches!(op, "<<" | ">>") {
+                self.check_shift_count(rhs, &range);
+            }
             return backing;
         }
         // The operands are the enum, not the cases they were built as; an
@@ -19207,7 +19246,8 @@ impl Checker {
             .map(|b| b.ty())
     }
 
-    fn scalar_backing_ty_of(&self, ty: &Ty) -> Option<Ty> {
+    /// The backing type of `ty` when it is a scalar-backed enum.
+    pub(crate) fn scalar_backing_ty_of(&self, ty: &Ty) -> Option<Ty> {
         let resolved = apply_ty_prune(&self.subst, ty);
         let name = Self::enum_name_of_resolved(&resolved)?;
         self.scalar_value_ty(&name)
@@ -19220,6 +19260,27 @@ impl Checker {
             (Ty::Con(e), Ty::Con(b)) if e == b => Some(expected.clone()),
             _ => None,
         }
+    }
+
+    /// `ty` as its backing type when it is a scalar-backed enum: an operand
+    /// that is the primitive wherever one is expected (`!flag`, `a && b`).
+    fn scalar_enum_as_backing(&self, ty: Ty) -> Ty {
+        self.scalar_backing_ty_of(&ty).unwrap_or(ty)
+    }
+
+    /// The operand of unary `-` / `~`: a scalar-backed enum without an
+    /// instance of the operator's trait `class` is its backing word, as it
+    /// is for the binary operators (#2463). With one, the instance is the
+    /// operator.
+    fn scalar_enum_unary_operand(&self, ty: Ty, class: &str) -> Ty {
+        let Some(backing) = self.scalar_backing_ty_of(&ty) else {
+            return ty;
+        };
+        let lookup = Self::operand_instance_lookup_ty(&ty);
+        if self.generics.find_instance(class, std::slice::from_ref(&lookup)).is_some() {
+            return ty;
+        }
+        backing
     }
 
     fn arith_scalar_enum_backing(&self, lp: &Ty, rp: &Ty) -> Option<Ty> {

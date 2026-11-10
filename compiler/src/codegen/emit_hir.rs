@@ -8998,15 +8998,13 @@ impl Compiler {
                 // (against its backing `string`, or another of its cases)
                 // orders the backing strings by their bytes (#1722).
                 "<" | ">" | "<=" | ">=" if self.hir_string_word(hir, lhs) && self.hir_string_word(hir, rhs) => Some(HirOp::Prim),
-                // Arithmetic or ordering on a number-backed scalar enum with
-                // no instance is on its backing word: a raw op over both
-                // operands, in the backing's lane.
+                // Ordering on a number-backed scalar enum with no instance
+                // is on its backing word: a raw compare over both operands,
+                // in the backing's lane. (Its arithmetic is the backing
+                // type's own operator: the HIR builder retypes the operands,
+                // #2463.)
                 _ => match (self.hir_number_lane(hir, lhs)?, self.hir_number_lane(hir, rhs)?) {
-                    (false, false) | (true, true)
-                        if matches!(sym, "+" | "-" | "*" | "/" | "%" | "**" | "<" | ">" | "<=" | ">=") =>
-                    {
-                        Some(HirOp::Prim)
-                    }
+                    (false, false) | (true, true) if matches!(sym, "<" | ">" | "<=" | ">=") => Some(HirOp::Prim),
                     _ => None,
                 },
             },

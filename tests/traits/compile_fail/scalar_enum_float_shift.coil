@@ -1,0 +1,11 @@
+// @expected E0102 — a shift on a `float`-backed enum is a shift on a `float`
+// (#2463).
+#[repr(float)]
+enum Ratio {
+    Half = 0.5,
+    Full = 1.0,
+}
+
+fn main() {
+    let z = Ratio::Half << 1;
+}
