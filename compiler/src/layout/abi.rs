@@ -673,15 +673,15 @@ pub fn nested_fn_var_result(ty: &Ty, top: bool, unit: &mut dyn FnMut(&Ty) -> boo
 /// Whether a parameter or result of declared type `ty` holds a function
 /// over a type variable in a user class's field or a user enum's payload,
 /// the type's parameters bound to its arguments (`Slot<T>` with `f: fn(T)
-/// -> T`, `G<T>` with `F(fn(T) -> T)`), for each nominal type `look`
+/// -> T`, `G<T>` with `F(fn(T) -> T)`), for each nominal instance `look`
 /// admits (#2511). Such a function crosses a shared generic body inside the
 /// object: a ground function takes a `float` or `bool` as its own MIR type
 /// and a two-word value as two words, a function the shared body made or
 /// adapted takes their words, and only a function that is itself an
 /// argument gets an adapter at the call. So the signature takes a clone
 /// for every ground call, as a nested open enum does.
-pub fn nested_fn_field(checker: &Checker, ty: &Ty, look: &dyn Fn(&str) -> bool) -> bool {
-    fn walk(checker: &Checker, ty: &Ty, look: &dyn Fn(&str) -> bool, seen: &mut Vec<String>) -> bool {
+pub fn nested_fn_field(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool) -> bool {
+    fn walk(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool, seen: &mut Vec<String>) -> bool {
         let ty = crate::typechecking::ty::strip_readonly(ty);
         if !ty.has_var() {
             return false;
@@ -698,7 +698,7 @@ pub fn nested_fn_field(checker: &Checker, ty: &Ty, look: &dyn Fn(&str) -> bool) 
             return false;
         };
         let key = format!("{ty}");
-        if seen.len() >= NESTED_OPEN_DEPTH || seen.contains(&key) || !look(name) {
+        if seen.len() >= NESTED_OPEN_DEPTH || seen.contains(&key) || !look(name, args) {
             return false;
         }
         let Some(params) = checker.type_ctor_params(name).cloned() else {
