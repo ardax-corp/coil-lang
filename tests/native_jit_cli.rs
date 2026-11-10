@@ -583,18 +583,23 @@ fn an_archive_carries_closures_defers_and_drops() {
 fn generic_bodies_keep_their_opaque_words_across_collections() {
     // A shared generic body's type-variable words may be objects: native
     // code roots them ambiguously (pinned, never rewritten) while the
-    // inserts allocate enough to collect. `HashMap::with_capacity` is one.
+    // inserts and its own allocations collect. `deep` instantiates itself
+    // at a growing type, so it always runs its shared body (E0804), holding
+    // `x` across `format` and `new Pair`. A stdlib body (`HashMap::new`)
+    // may be cloned at the ground type instead (#2572, #2589).
     let src = format!(
         "{HEADER}use collections::map::HashMap;\n\
          class Pair<T> {{ pub a: T, pub b: T }}\n\
          #[inline(never)]\nfn swap<T>(Pair<T> p) -> Pair<T> {{ let tmp = format(\"%i\", 1); let q = new Pair(p.b, p.a); return q; }}\n\
+         #[inline(never)]\nfn deep<T>(T x, int n) -> int {{ let tmp = format(\"%i\", n); if n == 0 {{ return tmp.len(); }} return deep(new Pair(x, x), n - 1) + tmp.len(); }}\n\
          fn main() {{\n  let m: HashMap<string, int> = HashMap::new();\n  let i = 0;\n\
            while i < 20000 {{ m.insert(format(\"k%i\", i % 5000), i); i = i + 1; }}\n\
-           let p = new Pair(\"left\", \"right\");\n  let j = 0;\n  while j < 2001 {{ p = swap(p); j = j + 1; }}\n\
-           let _ = println(format(\"%i %i \", m.len(), m.get(\"k42\").unwrap_or(-1)) + p.a);\n}}\n"
+           let p = new Pair(\"left\", \"right\");\n  let j = 0;\n  let t = 0;\n\
+           while j < 2001 {{ p = swap(p); t = t + deep(p.a, j % 12); j = j + 1; }}\n\
+           let _ = println(format(\"%i %i %i \", m.len(), m.get(\"k42\").unwrap_or(-1), t) + p.a);\n}}\n"
     );
     let stats = same_as_mir("opaque_words", &src);
-    assert!(compiled(&stats, "collections::map::HashMap::with_capacity"), "stats: {stats}");
+    assert!(compiled(&stats, "deep"), "stats: {stats}");
 }
 
 #[test]
