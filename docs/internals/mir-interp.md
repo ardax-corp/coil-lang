@@ -133,8 +133,11 @@ compile-time program cache stores `CompiledExpansion` in the same format.
   in the `Runtime`.
 - **Limits.** The budget and the cap live in the `Runtime`. The interpreter charges a
   step per call and per edge back in block order, and a zero stops the call with
-  `TRAP_BUDGET`. Cranelift's code charges nothing, so what has a budget runs here:
-  comptime, and every `coil mutate` run. `collect::over_cap` serves both hosts.
+  `TRAP_BUDGET`, unless `coil_native_refuel` gives it more: a speculative auto-par
+  job runs on slices of `thread::FUEL_SLICE` steps and gets another until it is
+  cancelled ([auto-par](auto-par.md#cancelling-a-failed-attempt)). Cranelift's code
+  charges nothing, so what has a budget runs here: comptime, and every `coil mutate`
+  run. `collect::over_cap` serves both hosts.
 - **Sandbox.** `coil_native_host` asks the runtime's table, and a native with no direct
   function there goes through the table, which holds the sandbox's stubs. This fails
   closed: a host that replaces a native needs no other step. FFI goes through

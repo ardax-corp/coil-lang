@@ -544,13 +544,18 @@ impl<'a> Driver<'a> {
         self.settle_speculative();
     }
 
-    /// Join the fork-join jobs this run has out on its heap. A panic
+    /// Cancel and join the fork-join jobs this run has out. A panic
     /// unwinds a fork-join past its joins (a recursive fork-join runs
     /// arms on its own thread), and its jobs would run on while the heap
     /// is used or dropped under them, with the steal epoch they hold left
     /// open.
     fn settle_speculative(&mut self) {
-        for job in std::mem::take(&mut self.rt.speculative_out) {
+        let out = std::mem::take(&mut *self.rt.speculative_out.lock().unwrap_or_else(|e| e.into_inner()));
+        // Nothing will use what they compute: stop them first (#2442).
+        for job in &out {
+            job.cancel();
+        }
+        for job in out {
             crate::thread::join_abandoned(self, &job);
         }
     }

@@ -159,7 +159,11 @@ stack switches to that thread's deep stack (`stacks::on_deep_stack`,
 `FIBER_STACK_BYTES`: 256 MiB reserved on 64-bit, 32 MiB otherwise). A task fiber has
 the same size and a generator fiber 8 MiB. `NativeCtx::stack_limit` sits
 `NATIVE_STACK_GUARD` (128 KiB) above the stack's end; past it native code panics with
-`TRAP_STACK` and the stack overflow message (`stacks::STACK_OVERFLOW`). The
+`TRAP_STACK` and the stack overflow message (`stacks::STACK_OVERFLOW`). Every function
+entry makes the compare, which is how a speculative auto-par job is cancelled at no
+cost: the canceller stores `thread::CANCELLED_STACK_LIMIT` into the limit of each
+native call the job is in, and its next call traps
+([auto-par](auto-par.md#cancelling-a-failed-attempt)). The
 interpreter's frames do not use the machine stack, and its limit is
 `frame::MAX_WORDS` words of registers per activation.
 
