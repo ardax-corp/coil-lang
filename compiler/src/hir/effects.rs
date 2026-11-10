@@ -140,6 +140,27 @@ impl Summary {
         self.latent == 0 && !self.flags.contains(EffectFlags::RESIZE | EffectFlags::YIELD)
     }
 
+    /// What a call costs that runs this body or `other`, the caller not
+    /// knowing which.
+    fn join(self, other: Self) -> Self {
+        Self {
+            flags: self.flags.union(other.flags),
+            visible: self.visible.union(other.visible),
+            latent: self.latent | other.latent,
+            mutates: self.mutates | other.mutates,
+            statics: self.statics || other.statics,
+            // Discharged only where both bodies' bits are.
+            param_only: self.param_only & other.param_only,
+            escapes: self.escapes | other.escapes,
+            keeps: self.keeps | other.keeps,
+            returns_arg: self.returns_arg | other.returns_arg,
+            returns_inner: self.returns_inner | other.returns_inner,
+            opaque_args: self.opaque_args | other.opaque_args,
+            returns: self.returns | other.returns,
+            shared_ret: self.shared_ret || other.shared_ret,
+        }
+    }
+
     fn of(flags: EffectFlags) -> Self {
         // Host tables pair `unknown` with host state to be safe; unknown
         // already says it all.
@@ -381,10 +402,14 @@ impl ProgramEffects {
     /// Keep `module`'s summaries for the modules compiled after it.
     pub fn record(&mut self, module: &HirModule, checker: &Checker, module_path: &str, summaries: &[Summary]) {
         self.traits.extend(module.trait_effects.iter().cloned());
+        // The overloads of a name share it and its def: a later module's
+        // call may run any of them.
+        let mut named: HashMap<&str, Summary> = HashMap::new();
         for (body, &s) in module.bodies.iter().zip(summaries) {
             if !matches!(body.kind, BodyKind::Function | BodyKind::Method) {
                 continue;
             }
+            let s = *named.entry(body.name.as_str()).and_modify(|all| *all = all.join(s)).or_insert(s);
             self.by_name.insert(body.name.clone(), s);
             self.drop_resizes |= short_name(&body.name) == "drop" && !s.is_steady();
             if body.kind == BodyKind::Function
@@ -445,22 +470,24 @@ fn name_shape(kind: BodyKind, local: &str) -> Option<(NameShape, &str)> {
 
 fn names_where(module: &HirModule, module_path: &str, summaries: &[Summary], ok: impl Fn(Summary) -> bool) -> HashSet<String> {
     let mut out = HashSet::new();
-    let mut by_short: HashMap<&str, bool> = HashMap::new();
+    // Every body of a name has to qualify: the overloads of `f` share the
+    // name, and so do the bodies of a short name `m`.
+    let mut by_name: HashMap<&str, bool> = HashMap::new();
     for (body, s) in module.bodies.iter().zip(summaries) {
         let Some(local) = local_name(module_path, &body.name) else { continue };
         let Some((shape, short)) = name_shape(body.kind, local) else { continue };
-        if ok(*s) {
-            out.insert(local.to_string());
-            if shape != NameShape::Function && !module_path.is_empty() {
-                out.insert(body.name.clone());
-            }
+        let mut names = vec![local, short];
+        if shape != NameShape::Function && !module_path.is_empty() {
+            names.push(body.name.as_str());
         }
-        let all = by_short.entry(short).or_insert(true);
-        *all &= ok(*s);
+        names.dedup();
+        for name in names {
+            *by_name.entry(name).or_insert(true) &= ok(*s);
+        }
     }
-    for (short, good) in by_short {
+    for (name, good) in by_name {
         if good {
-            out.insert(short.to_string());
+            out.insert(name.to_string());
         }
     }
     out
@@ -719,15 +746,12 @@ impl<'a> ModuleEffects<'a> {
     pub fn solve(module: &'a HirModule, checker: &'a Checker, module_path: &'a str, program: &'a ProgramEffects) -> Self {
         let mut by_def = HashMap::new();
         let mut by_name: HashMap<&str, Option<usize>> = HashMap::new();
+        let mut overloads: HashMap<&str, Vec<(Option<u32>, usize)>> = HashMap::new();
         for (i, body) in module.bodies.iter().enumerate() {
             if !matches!(body.kind, BodyKind::Function | BodyKind::Method) {
                 continue;
             }
-            if body.kind == BodyKind::Function
-                && let Some(def) = def_of(checker, module_path, &body.name)
-            {
-                by_def.insert(def, i);
-            }
+            let id = checker.overload_decl_at(body.span.0, body.span.1).map(|(id, ..)| id);
             let mut names = vec![body.name.as_str()];
             if let Some(local) = local_name(module_path, &body.name)
                 && local != body.name
@@ -736,6 +760,17 @@ impl<'a> ModuleEffects<'a> {
             }
             for n in names {
                 by_name.entry(n).and_modify(|seen| *seen = None).or_insert(Some(i));
+                overloads.entry(n).or_default().push((id, i));
+            }
+        }
+        overloads.retain(|_, bodies| bodies.len() > 1);
+        // The overloads of a name share its def, which then names no one body.
+        for (i, body) in module.bodies.iter().enumerate() {
+            if body.kind == BodyKind::Function
+                && !overloads.contains_key(body.name.as_str())
+                && let Some(def) = def_of(checker, module_path, &body.name)
+            {
+                by_def.insert(def, i);
             }
         }
         let facts: Vec<BodyFacts> = module.bodies.iter().map(|b| BodyFacts::new(module, b)).collect();
@@ -759,6 +794,7 @@ impl<'a> ModuleEffects<'a> {
             program,
             by_def,
             by_name,
+            overloads,
             facts,
             instances,
         };
@@ -1599,6 +1635,9 @@ struct Cx<'a> {
     program: &'a ProgramEffects,
     by_def: HashMap<DefId, usize>,
     by_name: HashMap<&'a str, Option<usize>>,
+    /// The bodies of each name that has several (overloads), each with the
+    /// checker's id for it.
+    overloads: HashMap<&'a str, Vec<(Option<u32>, usize)>>,
     facts: Vec<BodyFacts>,
     /// Trait impl bodies by receiver head and method: `Text for string`'s
     /// `trim` is `("string", "trim")`, `VecSum for Vec<int>`'s `sum` is
@@ -2306,9 +2345,10 @@ impl Cx<'_> {
     fn call(&self, w: &mut Walk<'_>, at: HirId, callee: &Callee, args: &[HirId]) {
         let body = &self.module.bodies[w.index];
         match callee {
-            Callee::Named { name, def, .. } => {
-                let mut s = self.named(w, name, *def);
-                let callee = self.local_body(name, *def);
+            Callee::Named { name, def, overload } => {
+                let picked = self.overload(name, *overload);
+                let mut s = picked.map_or_else(|| self.named(w, name, *def), |i| w.summaries[i]);
+                let callee = picked.or_else(|| self.local_body(name, *def));
                 if callee.is_none() {
                     s = open_mode_summary(body, name, args, s);
                 }
@@ -2535,6 +2575,19 @@ impl Cx<'_> {
     }
 
     /// This module's body for the function `name`.
+    /// The body a call of the overloaded `name` runs, when the checker
+    /// said which (`id`) and it is this module's.
+    fn overload(&self, name: &str, id: Option<u32>) -> Option<usize> {
+        let id = id?;
+        self.overloads.get(name)?.iter().find(|(body_id, _)| *body_id == Some(id)).map(|(_, i)| *i)
+    }
+
+    /// What a call of the overloaded `name` costs when it may run any of
+    /// its bodies: a method call, or a function not called by its id.
+    fn any_overload(&self, w: &Walk<'_>, name: &str) -> Option<Summary> {
+        self.overloads.get(name)?.iter().map(|(_, i)| w.summaries[*i]).reduce(Summary::join)
+    }
+
     fn local_body(&self, name: &str, def: Option<DefId>) -> Option<usize> {
         let def = def.or_else(|| {
             (self.checker.current_module_name() == self.module_path)
@@ -2815,6 +2868,9 @@ impl Cx<'_> {
         if let Some(Some(i)) = self.by_name.get(name) {
             return Some(w.summaries[*i]);
         }
+        if let Some(s) = self.any_overload(w, name) {
+            return Some(s);
+        }
         // An imported function: its def names the module it is in.
         let interner = self.checker.def_interner();
         let declared = def
@@ -2853,25 +2909,7 @@ impl Cx<'_> {
                 InstanceBody::Local(i) => w.summaries[i],
                 InstanceBody::Program(s) => s,
             };
-            out = Some(match out {
-                None => s,
-                Some(o) => Summary {
-                    flags: o.flags.union(s.flags),
-                    visible: o.visible.union(s.visible),
-                    latent: o.latent | s.latent,
-                    mutates: o.mutates | s.mutates,
-                    statics: o.statics || s.statics,
-                    // Discharged only where every impl's bits are.
-                    param_only: o.param_only & s.param_only,
-                    escapes: o.escapes | s.escapes,
-                    keeps: o.keeps | s.keeps,
-                    returns_arg: o.returns_arg | s.returns_arg,
-                    returns_inner: o.returns_inner | s.returns_inner,
-                    opaque_args: o.opaque_args | s.opaque_args,
-                    returns: o.returns | s.returns,
-                    shared_ret: o.shared_ret || s.shared_ret,
-                },
-            });
+            out = Some(out.map_or(s, |o| o.join(s)));
         }
         out.map(|s| (s, None))
     }
@@ -2890,6 +2928,10 @@ impl Cx<'_> {
             let key = format!("{owner}::{name}");
             if let Some(Some(i)) = self.by_name.get(key.as_str()) {
                 return Some((w.summaries[*i], Some(*i)));
+            }
+            // An overloaded method: the call does not say which body.
+            if let Some(s) = self.any_overload(w, &key) {
+                return Some((s, None));
             }
             let qualified = format!("{}::{key}", self.module_path);
             // The prelude's `Option` / `Result` methods live in `core`.

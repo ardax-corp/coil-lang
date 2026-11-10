@@ -1,0 +1,107 @@
+// Overloads of one name may differ in what they do: a call takes the
+// effects of the overload it names, not of the one declared last (#2426).
+// The overload that counts comes first and the pure one last, and the
+// callees are kept out of line so the calls stay calls.
+use tests::assert;
+
+static let HITS: int = 0;
+
+#[inline(never)]
+fn f(int a, int b) -> int {
+    HITS = HITS + 1;
+    return a + b;
+}
+
+#[inline(never)]
+fn f(int a) -> int {
+    return a + 1;
+}
+
+#[inline(never)]
+fn two(int a) -> int {
+    return f(a, a);
+}
+
+#[inline(never)]
+fn one(int a) -> int {
+    return f(a);
+}
+
+class C {
+    pub n: int,
+}
+
+impl C {
+    #[inline(never)]
+    pub fn m(int a, int b) -> int {
+        HITS = HITS + 1;
+        return a + b;
+    }
+    #[inline(never)]
+    pub fn m(int a) -> int {
+        return a + self.n;
+    }
+}
+
+#[inline(never)]
+fn mtwo(C c) -> int {
+    return c.m(1, 2);
+}
+
+test("a call that reaches the counting overload through a caller runs every time") {
+    HITS = 0;
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += two(1);
+        i += 1;
+    }
+    assert!(acc == 20);
+    assert!(HITS == 10);
+}
+
+test("an unused call of the counting overload still runs") {
+    HITS = 0;
+    let i = 0;
+    while i < 10 {
+        f(1, 1);
+        i += 1;
+    }
+    assert!(HITS == 10);
+}
+
+test("an unused call of a caller of the counting overload still runs") {
+    HITS = 0;
+    let i = 0;
+    while i < 10 {
+        two(1);
+        i += 1;
+    }
+    assert!(HITS == 10);
+}
+
+test("the same through a method") {
+    let c = new C(1);
+    HITS = 0;
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += mtwo(c);
+        c.m(1, 2);
+        i += 1;
+    }
+    assert!(acc == 30);
+    assert!(HITS == 20);
+}
+
+test("the pure overload and its caller are unchanged") {
+    HITS = 0;
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += one(1) + f(2);
+        i += 1;
+    }
+    assert!(acc == 50);
+    assert!(HITS == 0);
+}
