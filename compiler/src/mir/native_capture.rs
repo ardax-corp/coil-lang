@@ -75,6 +75,9 @@ pub fn peek_native_capture() -> Vec<NativeBody> {
 /// `bodies` as an engine runs them.
 fn finished(mut bodies: Vec<NativeBody>) -> Vec<NativeBody> {
     super::native_expand::apply_all(bodies.iter_mut().map(|b| &mut b.mir));
+    for body in &bodies {
+        super::specialize::check_expanded(&body.mir);
+    }
     bodies
 }
 
@@ -122,6 +125,7 @@ pub fn capture_native_bodies<'a>(bodies: impl Iterator<Item = (&'a str, Option<L
             let raw = capture.raw;
             capture.bodies.extend(bodies.map(|(name, entry, mir)| {
                 let mut mir = mir.clone();
+                super::specialize::check_lowered(&mir);
                 if !raw && optimizable(&mir) {
                     super::specialize::optimize_mir(&mut mir, opts);
                 }

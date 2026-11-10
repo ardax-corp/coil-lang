@@ -67,6 +67,7 @@ pub fn optimize_mir(func: &mut crate::mir::MirFunc, opts: &OptimizeOptions) {
     // Hints only: forward scans of pointer arrays prefetch ahead.
     if opts.mir_loop {
         crate::mir::mark_prefetch_scans(func);
+        check_after(func, "mark_prefetch_scans");
     }
 }
 
@@ -86,14 +87,80 @@ fn loop_opts(func: &mut crate::mir::MirFunc, dense: bool) {
     check_after(func, "cse");
 }
 
-/// Debug builds verify the MIR after each pass, so a pass that breaks SSA
-/// is named where it does instead of surfacing as a bad emit (#1869).
-#[cfg(debug_assertions)]
+/// The variable that turns the MIR verifier on in any build.
+pub const MIR_VERIFY_ENV: &str = "COIL_MIR_VERIFY";
+
+/// `COIL_MIR_VERIFY` is set (to anything but nothing or `0`): every body is
+/// verified as lowered and after each pass, in release builds too. A pass
+/// that breaks SSA there shows as a hang or a wrong value at best (#2422).
+fn verify_asked() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| asks(std::env::var_os(MIR_VERIFY_ENV).as_deref()))
+}
+
+/// Whether a `COIL_MIR_VERIFY` value turns the verifier on.
+fn asks(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// Debug builds, and any build under `COIL_MIR_VERIFY`, verify the MIR
+/// after each pass, so a pass that breaks SSA is named where it does
+/// instead of surfacing as a bad emit (#1869).
 fn check_after(func: &crate::mir::MirFunc, pass: &str) {
+    if cfg!(debug_assertions) || verify_asked() {
+        verify_or_panic(func, pass);
+    }
+}
+
+/// Under `COIL_MIR_VERIFY`, verify a body as an engine gets it from
+/// lowering, before any pass: what `-O0` and the interpreter run.
+pub(super) fn check_lowered(func: &crate::mir::MirFunc) {
+    if verify_asked() {
+        verify_or_panic(func, "lowering");
+    }
+}
+
+/// Under `COIL_MIR_VERIFY`, check that every use in an expanded body
+/// ([`crate::mir::native_expand`]) is dominated by its definition. Not
+/// [`crate::mir::MirFunc::verify`]: that one also wants a definition ahead
+/// of its uses in block order, and an expansion's join block, which defines
+/// the call's result, is laid out after the block that goes on to use it.
+pub(super) fn check_expanded(func: &crate::mir::MirFunc) {
+    if verify_asked()
+        && let Err(e) = func.verify_dominance()
+    {
+        panic!("MIR verify failed after native_expand in {}: {e}", func.name);
+    }
+}
+
+fn verify_or_panic(func: &crate::mir::MirFunc, pass: &str) {
     if let Err(e) = func.verify().and_then(|()| func.verify_dominance()) {
         panic!("MIR verify failed after {pass} in {}: {e}", func.name);
     }
 }
 
-#[cfg(not(debug_assertions))]
-fn check_after(_: &crate::mir::MirFunc, _: &str) {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn the_variable_is_off_when_unset_empty_or_zero() {
+        assert!(!asks(None));
+        assert!(!asks(Some(OsStr::new(""))));
+        assert!(!asks(Some(OsStr::new("0"))));
+        assert!(asks(Some(OsStr::new("1"))));
+        assert!(asks(Some(OsStr::new("on"))));
+    }
+
+    /// The header's value defined a second time: what LICM did in #2422.
+    #[test]
+    #[should_panic(expected = "MIR verify failed after licm in twice: value v2 defined twice")]
+    fn a_violation_panics_with_the_pass_and_the_function() {
+        let src = "func @twice(v0: f64, v1: f64) -> f64 {\nbb0:\n    v2 = fmul v0, v1\n    return v2\n}\n";
+        let mut func = crate::mir::parse_func(src).expect(src);
+        let again = func.blocks[0].insts[0].clone();
+        func.blocks[0].insts.push(again);
+        verify_or_panic(&func, "licm");
+    }
+}

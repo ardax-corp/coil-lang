@@ -566,8 +566,8 @@ impl MirFunc {
     /// Every use is dominated by its definition: a φ operand by the end of
     /// the block it comes from, any other use by an earlier instruction of
     /// its block or by a dominating block. Params and blocks nothing reaches
-    /// pass. Debug builds run it after each pass (#1869).
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    /// pass. Debug builds run it after each pass (#1869), and any build
+    /// under `COIL_MIR_VERIFY`.
     pub fn verify_dominance(&self) -> Result<(), String> {
         let dom = super::licm::Dominators::new(self, &self.preds());
         let mut def: Vec<Option<(BlockId, usize)>> = vec![None; self.types.len()];
