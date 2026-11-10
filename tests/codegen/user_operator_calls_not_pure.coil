@@ -1,0 +1,188 @@
+// A function that runs a user's operator method (`a < b`, `-a`, `a += b` on
+// a class with the trait impl, or on a bounded type parameter) or a user
+// iterator's `next` is not pure: every call of it runs, in order, on the
+// calling thread (#2388). The callees are kept out of line so the calls
+// stay calls.
+use tests::assert;
+
+static let CALLS: int = 0;
+
+class Money {
+    pub cents: int,
+}
+
+impl Lt for Money {
+    pub fn lt(Money a, Money b) -> bool {
+        CALLS++;
+        return a.cents < b.cents;
+    }
+}
+
+impl Neg for Money {
+    pub fn neg(Money a) -> Money {
+        CALLS++;
+        return new Money(0 - a.cents);
+    }
+}
+
+impl Add for Money {
+    pub fn add(Money a, Money b) -> Money {
+        CALLS++;
+        return new Money(a.cents + b.cents);
+    }
+}
+
+#[inline(never)]
+fn less(Money a, Money b) -> int {
+    if a < b {
+        return 1;
+    }
+    return 0;
+}
+
+#[inline(never)]
+fn less_of<T: Lt>(T a, T b) -> int {
+    if a < b {
+        return 1;
+    }
+    return 0;
+}
+
+// Reaches the operator only through a callee.
+#[inline(never)]
+fn less_twice(Money a, Money b) -> int {
+    return less(a, b) + less(b, a);
+}
+
+#[inline(never)]
+fn flipped(Money a) -> int {
+    let b = -a;
+    return b.cents;
+}
+
+#[inline(never)]
+fn summed(Money a, Money b) -> int {
+    let c = a;
+    c += b;
+    return c.cents;
+}
+
+class Count {
+    pub cur: int,
+    pub end: int,
+}
+
+impl Iterator for Count {
+    type Item = int;
+    fn next(Count c) -> Option<int> {
+        if c.cur < c.end {
+            let v = c.cur;
+            c.cur = c.cur + 1;
+            return Option::Some(v);
+        }
+        return Option::None;
+    }
+}
+
+#[inline(never)]
+fn drain(Count c) -> int {
+    let s = 0;
+    for x in c {
+        s = s + x + 1;
+    }
+    return s;
+}
+
+// A fork site if `walk` were pure: the leaves' `lt` calls would run on
+// worker threads, which have no statics.
+fn walk(int n) -> int {
+    if n <= 1 {
+        if new Money(n) < new Money(5) {
+            return 1;
+        }
+        return 0;
+    }
+    return walk(n - 1) + walk(n - 2);
+}
+
+test("a loop-invariant call that compares with a user `Lt` runs every time") {
+    let a = new Money(3);
+    let b = new Money(5);
+    CALLS = 0;
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += less(a, b);
+        i += 1;
+    }
+    assert!(acc == 10);
+    assert!(CALLS == 10);
+}
+
+test("a call whose result is unused still runs the operator") {
+    let a = new Money(3);
+    let b = new Money(5);
+    CALLS = 0;
+    let i = 0;
+    while i < 10 {
+        less(a, b);
+        i += 1;
+    }
+    assert!(CALLS == 10);
+}
+
+test("the operator on a bounded type parameter") {
+    let a = new Money(3);
+    let b = new Money(5);
+    CALLS = 0;
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += less_of(a, b);
+        i += 1;
+    }
+    assert!(acc == 10);
+    assert!(CALLS == 10);
+}
+
+test("the operator reached through a callee") {
+    let a = new Money(3);
+    let b = new Money(5);
+    CALLS = 0;
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += less_twice(a, b);
+        i += 1;
+    }
+    assert!(acc == 10);
+    assert!(CALLS == 20);
+}
+
+test("unary and compound-assignment operators") {
+    let a = new Money(3);
+    CALLS = 0;
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += flipped(a);
+        acc += summed(a, a);
+        i += 1;
+    }
+    assert!(acc == 30);
+    assert!(CALLS == 20);
+}
+
+test("two calls that drain a user iterator are not one call") {
+    let c = new Count(0, 5);
+    let first = drain(c);
+    let second = drain(c);
+    assert!(first == 15);
+    assert!(second == 0);
+}
+
+test("a recursion that compares with a user `Lt` at its leaves is not forked") {
+    CALLS = 0;
+    assert!(walk(27) == 317811);
+    assert!(CALLS == 317811);
+}

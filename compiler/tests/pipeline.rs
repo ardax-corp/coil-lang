@@ -1938,6 +1938,47 @@ fn main() {
 
 
 
+/// A recursion whose leaves compare with a user `Lt` is not pure, so it
+/// gets no fork worker: the impl's static updates would be lost on worker
+/// threads (#2388).
+#[test]
+fn auto_par_user_operator_recursion_is_not_forked() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+static let CALLS: int = 0;
+class Money {
+    pub cents: int,
+}
+impl Lt for Money {
+    pub fn lt(Money a, Money b) -> bool {
+        CALLS++;
+        return a.cents < b.cents;
+    }
+}
+fn walk(int n) -> int {
+    if n <= 1 {
+        if new Money(n) < new Money(5) {
+            return 1;
+        }
+        return 0;
+    }
+    return walk(n - 1) + walk(n - 2);
+}
+fn main() {
+    let r = walk(27);
+    write(stdout(), to_bytes(format("%i %i", r, CALLS)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    pipeline.set_call_fold(false);
+    compile(&mut pipeline, src).expect("walk should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_walk").is_none(),
+        "a recursion that runs a user operator must stay sequential"
+    );
+}
+
 /// Constant sites above the expression grain floor must emit `__coil_par_*` and stay correct.
 #[test]
 fn auto_par_fib_above_threshold_emits_spec_and_runs() {
