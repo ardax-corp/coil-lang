@@ -1128,6 +1128,11 @@ fn spin(int n) -> int {{
     return i;
 }}
 
+// A call away from the arm: the loop is in a body the job reaches.
+fn spin_twice(int n) -> int {{
+    return spin(n) + spin(n + 1);
+}}
+
 fn top(int n) -> int {{
     return divides(n) + {later};
 }}
@@ -1171,11 +1176,16 @@ fn a_failed_arm_cancels_a_slow_later_arm() {
     }
 }
 
-/// A later arm that never ends is cancelled too, on the MIR interpreter:
-/// its fuel runs out in slices, and a cancelled job gets no more.
+/// A later arm that never ends and makes no call is cancelled too: on
+/// the MIR interpreter when a fuel slice runs out, natively at its
+/// loop's header, which polls the stack limit because the loop has no
+/// counter (#2442).
 #[test]
-fn a_failed_arm_cancels_a_later_arm_that_never_ends_on_the_interpreter() {
-    reports_within("cancel-spin-mir", &cancel_program("spin(n)"), &["--mir"], std::time::Duration::from_secs(20));
+fn a_failed_arm_cancels_a_later_arm_that_never_ends() {
+    for engine in [&[][..], &["--mir"][..]] {
+        reports_within("cancel-spin", &cancel_program("spin(n)"), engine, std::time::Duration::from_secs(20));
+        reports_within("cancel-spin-below", &cancel_program("spin_twice(n)"), engine, std::time::Duration::from_secs(20));
+    }
 }
 
 /// A thread the program spawns is never cancelled: a failed fork-join
