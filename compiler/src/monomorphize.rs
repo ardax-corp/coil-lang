@@ -546,6 +546,29 @@ fn mark_hot(ast: &Output, sigs: &mut HashMap<String, GenericFnSig>) {
                 }
             }
         }
+        // A method is no free function: a hint on it must not reach a free
+        // function of the same bare name (#2570). What a hot method calls by
+        // name stays hot, and its body may declare functions.
+        if matches!(node.1.as_ref(), Expression::Implementation { .. } | Expression::TypeClass { .. } | Expression::TypeClassImpl { .. }) {
+            walk_children(node, &mut |child| {
+                let child = match child.1.as_ref() {
+                    Expression::Method(_, inner) => inner,
+                    _ => child,
+                };
+                match child.1.as_ref() {
+                    Expression::Function { attrs, body, .. } => {
+                        if let Some(body) = body {
+                            if attrs.iter().any(|a| a.name == "hot") && !attrs.iter().any(|a| a.name == "cold") {
+                                call_names(body, hot);
+                            }
+                            walk(body, hot, cold);
+                        }
+                    }
+                    _ => walk(child, hot, cold),
+                }
+            });
+            return;
+        }
         walk_children(node, &mut |child| walk(child, hot, cold));
     }
     let (mut hot, mut cold) = (BTreeSet::new(), BTreeSet::new());
