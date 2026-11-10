@@ -1,0 +1,293 @@
+// A shared generic body (no per-type clone) whose type parameter is both a
+// bare parameter and nested in the result (`T k` with `[T; N]`, `Vec<T>`
+// or a tuple of `T`), or also nested in another parameter: the body's
+// values of `T` are the ground type's words wherever they come from.
+// @flags --clone-budget 0
+use tests::assert;
+
+class Money {
+    pub cents: int,
+}
+
+impl Mul for Money {
+    pub fn mul(Money a, Money b) -> Money {
+        return new Money(a.cents * b.cents);
+    }
+}
+
+readonly class V2 {
+    pub x: int,
+    pub y: int,
+}
+
+impl Mul for V2 {
+    pub fn mul(V2 a, V2 b) -> V2 {
+        return new V2(a.x * b.x, a.y * b.y);
+    }
+}
+
+#[repr(int)]
+enum Bit {
+    Zero = 0,
+    One = 1,
+}
+
+impl Mul for Bit {
+    pub fn mul(Bit a, Bit b) -> Bit {
+        return match a {
+            Bit::Zero => Bit::Zero,
+            Bit::One => b,
+        };
+    }
+}
+
+fn bit(Bit b) -> int {
+    return match b {
+        Bit::Zero => 0,
+        Bit::One => 1,
+    };
+}
+
+fn one<T>(T k) -> [T; 1] {
+    return [k];
+}
+
+fn nine<T>(T k) -> [T; 9] {
+    return [k, k, k, k, k, k, k, k, k];
+}
+
+fn keep<T>([T; 3] a, T k) -> [T; 3] {
+    return a;
+}
+
+fn last<T>([T; 3] a, T k) -> [T; 3] {
+    return [a[0], a[1], k];
+}
+
+fn pushed<T>(T k, Vec<T> v) -> Vec<T> {
+    v.push(k);
+    return v;
+}
+
+fn fresh<T>(T k, T j) -> Vec<T> {
+    return Vec::from([k, j, k]);
+}
+
+fn both<T>([T; 2] a, T k) -> (T, T) {
+    return (a[1], k);
+}
+
+fn deep<T>(T k) -> (T, [T; 2]) {
+    return (k, [k, k]);
+}
+
+fn maybe<T>(T k) -> Option<[T; 1]> {
+    return Some([k]);
+}
+
+enum Shape {
+    Dot,
+    Box(int, int),
+}
+
+fn area(Shape s) -> int {
+    return match s {
+        Shape::Dot => 0,
+        Shape::Box(a, b) => a * b,
+    };
+}
+
+fn some<T>([T; 2] a, T k) -> Option<T> {
+    return Some(k);
+}
+
+fn first<T>([T; 2] a, T k) -> Result<T, string> {
+    return Ok(a[0]);
+}
+
+fn mid<T>(T k, (T, T) p) -> (T, T, T) {
+    return (p[0], k, p[1]);
+}
+
+fn tagged<T>(T x) -> Option<(T, int)> {
+    return Some((x, 1));
+}
+
+fn flipped<T>([T; 2] a) -> Option<(T, T)> {
+    return Some((a[1], a[0]));
+}
+
+fn joined<T>(T x, [T; 1] a) -> Result<(T, T), string> {
+    return Ok((a[0], x));
+}
+
+fn head<T>(Option<(T, int)> o, T d) -> T {
+    return match o {
+        Some(p) => p[0],
+        None => d,
+    };
+}
+
+fn scale<T: Mul>([T; 3] a, T k) -> [T; 3] {
+    return a * k;
+}
+
+fn lscale<T: Mul>(T k, [T; 3] a) -> [T; 3] {
+    return k * a;
+}
+
+fn wide<T: Mul>([T; 9] a, T k) -> [T; 9] {
+    return a * k;
+}
+
+fn pair_scale<T: Mul>((T, T) a, T k) -> (T, T) {
+    return a * k;
+}
+
+fn vec_scale<T: Mul>(Vec<T> v, T k) -> Vec<T> {
+    return v * k;
+}
+
+test("an array of the bare parameter") {
+    let f = one(2.5);
+    let i = one(2);
+    let b = one(true);
+    let y = one(200 as byte);
+    let s = one("s");
+    assert!(f[0] == 2.5 && i[0] == 2 && b[0] && y[0] as int == 200 && s[0] == "s");
+    assert!(f == [2.5] && i == [2] && b == [true] && s == ["s"]);
+    let m = one(new Money(7));
+    assert!(m[0].cents == 7);
+    let v = one(new V2(1, 2));
+    assert!(v[0].x == 1 && v[0].y == 2);
+    let n = nine(1.5);
+    assert!(n.len() == 9 && n[0] == 1.5 && n[8] == 1.5);
+    let nb = nine(3 as byte);
+    let sum = nb + nb;
+    assert!(sum[0] as int == 6 && sum[8] as int == 6);
+}
+
+test("the parameter also nested in another parameter") {
+    let k = keep([1.5, 2.5, 3.5], 9.5);
+    assert!(k == [1.5, 2.5, 3.5]);
+    let l = last([1.5, 2.5, 3.5], 9.5);
+    assert!(l == [1.5, 2.5, 9.5]);
+    let li = last([1, 2, 3], 9);
+    assert!(li == [1, 2, 9]);
+    let lb = last([true, true, true], false);
+    assert!(lb[0] && lb[1] && !lb[2]);
+    let ly = last([1 as byte, 2 as byte, 3 as byte], 250 as byte);
+    assert!(ly[0] as int == 1 && ly[2] as int == 250);
+    let ls = last(["a", "b", "c"], "z");
+    assert!(ls[0] + ls[1] + ls[2] == "abz");
+}
+
+test("a Vec of the bare parameter") {
+    let v = pushed(3.5, Vec::from([1.5, 2.5]));
+    assert!(v.len() == 3 && v[0] == 1.5 && v[2] == 3.5);
+    let y = pushed(105 as byte, Vec::from([104 as byte]));
+    assert!(y.len() == 2 && y[0] as int == 104 && y[1] as int == 105);
+    let s = pushed("c", Vec::from(["a", "b"]));
+    assert!(s.len() == 3 && s[2] == "c");
+    let f = fresh(1.5, 2.5);
+    f.push(4.5);
+    assert!(f.len() == 4 && f[0] == 1.5 && f[1] == 2.5 && f[2] == 1.5 && f[3] == 4.5);
+    let fb = fresh(true, false);
+    assert!(fb.len() == 3 && fb[0] && !fb[1] && fb[2]);
+}
+
+test("tuples and deeper holders") {
+    let b = both([1.5, 2.5], 9.5);
+    assert!(b[0] == 2.5 && b[1] == 9.5);
+    let bi = both([1, 2], 9);
+    assert!(bi == (2, 9));
+    let bs = both(["a", "b"], "z");
+    assert!(bs[0] == "b" && bs[1] == "z");
+    let d = deep(2.5);
+    assert!(d[0] == 2.5 && d[1][0] == 2.5 && d[1][1] == 2.5);
+    let di = deep(7);
+    assert!(di[0] == 7 && di[1] == [7, 7]);
+    let m = maybe(2.5);
+    let got = match m {
+        Some(a) => a[0],
+        None => 0.0,
+    };
+    assert!(got == 2.5);
+}
+
+test("an element-wise broadcast of the bare parameter") {
+    let s = scale([1, 2, 3], 3);
+    assert!(s == [3, 6, 9]);
+    let f = scale([1.5, 2.5, 3.5], 2.0);
+    assert!(f == [3.0, 5.0, 7.0]);
+    let l = lscale(2.0, [1.5, 2.5, 3.5]);
+    assert!(l == [3.0, 5.0, 7.0]);
+    let w = wide([1, 2, 3, 4, 5, 6, 7, 8, 9], 2);
+    assert!(w[0] == 2 && w[8] == 18);
+    let wf = wide([1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5], 2.0);
+    assert!(wf[0] == 3.0 && wf[8] == 19.0);
+    let p = pair_scale((1.5, 2.5), 2.0);
+    assert!(p[0] == 3.0 && p[1] == 5.0);
+    let pi = pair_scale((3, 4), 5);
+    assert!(pi == (15, 20));
+    let v = vec_scale(Vec::from([1.5, 2.5]), 2.0);
+    assert!(v.len() == 2 && v[0] == 3.0 && v[1] == 5.0);
+    let vi = vec_scale(Vec::from([1, 2, 3]), 4);
+    assert!(vi.len() == 3 && vi[0] == 4 && vi[2] == 12);
+}
+
+test("a broadcast at user types") {
+    let m = scale([new Money(1), new Money(2), new Money(3)], new Money(3));
+    assert!(m[0].cents == 3 && m[1].cents == 6 && m[2].cents == 9);
+    let v = scale([new V2(1, 2), new V2(3, 4), new V2(5, 6)], new V2(2, 10));
+    assert!(v[0].x == 2 && v[0].y == 20 && v[2].x == 10 && v[2].y == 60);
+    let b = scale([Bit::One, Bit::Zero, Bit::One], Bit::One);
+    assert!(bit(b[0]) == 1 && bit(b[1]) == 0 && bit(b[2]) == 1);
+    let z = lscale(Bit::Zero, [Bit::One, Bit::Zero, Bit::One]);
+    assert!(bit(z[0]) == 0 && bit(z[1]) == 0 && bit(z[2]) == 0);
+    let vb = vec_scale(Vec::from([Bit::One, Bit::Zero]), Bit::One);
+    assert!(vb.len() == 2 && bit(vb[0]) == 1 && bit(vb[1]) == 0);
+}
+
+test("two-word, niche and heap enum values of the parameter") {
+    let a = one(Some(1));
+    let b = one(Some("s"));
+    let c = one(Shape::Box(2, 3));
+    let d = one((1, 2.5));
+    assert!(a[0] == Some(1) && b[0] == Some("s") && area(c[0]) == 6 && d[0] == (1, 2.5));
+    let f = both([Some(1), None], Some(7));
+    assert!(f[0] == None && f[1] == Some(7));
+    let g = both([Some("a"), None], Some("z"));
+    assert!(g[0] == None && g[1] == Some("z"));
+    let h = both([Shape::Dot, Shape::Box(1, 2)], Shape::Box(3, 4));
+    assert!(area(h[0]) == 2 && area(h[1]) == 12);
+    let i = both([(1, 2.5), (3, 4.5)], (5, 6.5));
+    assert!(i[0] == (3, 4.5) && i[1] == (5, 6.5));
+    assert!(some([1.5, 2.5], 3.5) == Some(3.5) && some(["a", "b"], "c") == Some("c"));
+    assert!(some([Some(1), None], Some(7)) == Some(Some(7)));
+    assert!(first([1.5, 2.5], 3.5) == Ok(1.5) && first([true, false], false) == Ok(true));
+    let o = pushed(Some(7), Vec::from([Some(1), None]));
+    assert!(o.len() == 3 && o[0] == Some(1) && o[1] == None && o[2] == Some(7));
+    let q = pushed((5, 6.5), Vec::from([(1, 2.5)]));
+    assert!(q.len() == 2 && q[0] == (1, 2.5) && q[1] == (5, 6.5));
+    assert!(mid(2.5, (1.5, 3.5)) == (1.5, 2.5, 3.5));
+    assert!(mid(true, (false, false)) == (false, true, false));
+    assert!(mid(Some(2), (Some(1), None)) == (Some(1), Some(2), None));
+}
+
+test("a tuple of the parameter inside an enum") {
+    let t = match tagged(5) {
+        Some(p) => p,
+        None => (0, 0),
+    };
+    assert!(t == (5, 1));
+    assert!(
+        tagged(2.5) == Some((2.5, 1)) &&
+        tagged("s") == Some(("s", 1)) &&
+        tagged(true) == Some((true, 1)),
+    );
+    assert!(flipped([1.5, 2.5]) == Some((2.5, 1.5)) && flipped(["a", "b"]) == Some(("b", "a")));
+    assert!(flipped([1, 2]) == Some((2, 1)));
+    assert!(joined(1.5, [2.5]) == Ok((2.5, 1.5)) && joined(Some(1), [None]) == Ok((None, Some(1))));
+    assert!(head(Some((2.5, 1)), 0.5) == 2.5 && head(None, "d") == "d" && head(tagged(7), 0) == 7);
+}
