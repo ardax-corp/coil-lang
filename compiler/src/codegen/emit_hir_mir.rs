@@ -1104,7 +1104,7 @@ impl Compiler {
             {
                 let steps = self.hir_mir_once(|this| {
                     let mut steps = Vec::new();
-                    this.plan_instance_dict(&mut steps, &inst.class, &inst.args);
+                    this.plan_entry_dict(&mut steps, &inst.class, &inst.args);
                     steps
                 });
                 let prev = dicts.take();
@@ -1773,7 +1773,7 @@ impl Compiler {
                 };
                 !self.raw_instance_methods.contains(&key)
                     && self.hir_mir_probe_unplanned(|this, steps| {
-                        this.plan_instance_dict(steps, &inst.class, &inst.args);
+                        this.plan_entry_dict(steps, &inst.class, &inst.args);
                     })
             }
             _ => false,

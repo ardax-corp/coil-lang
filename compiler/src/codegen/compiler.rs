@@ -1963,8 +1963,10 @@ impl Compiler {
         };
         debug_assert_eq!(params.len(), n, "instance clone `{}` arity", req.name);
         let mut dict = Vec::new();
+        // The shared entry's own dictionary: the thunk converts each
+        // value to the enum object the entry holds.
         if self.instance_call_takes_dict(&src.class, &src.method, &req.src) {
-            self.plan_instance_dict(&mut dict, &src.class, trait_lookup);
+            self.plan_entry_dict(&mut dict, &src.class, trait_lookup);
         }
         // Then the own bounds' dictionaries, at the clone's types (#1471).
         let own_bounds = self.trait_method_own_bounds(&src.class, &src.method);
@@ -2517,12 +2519,44 @@ impl Compiler {
         class: &str,
         lookup: &[crate::typechecking::Ty],
     ) -> bool {
+        self.plan_dict(out, class, lookup, false)
+    }
+
+    /// [`Self::plan_instance_dict`] for the dictionary a direct call passes
+    /// to the instance's own shared entry or default body (`entry`), which
+    /// differs from a bound's dictionary for a generic-head instance over
+    /// `Option` / `Result` at a type with a niche (`impl Sz for Option<T>`
+    /// at `Option<string>`, #2477). The two hold the value differently:
+    ///
+    /// - a bound's dictionary serves code that holds the value as a bare
+    ///   type parameter, so as its own word, the niche: each method is the
+    ///   instance's per-type clone (its adapter), made past the clone
+    ///   budget too, and where there is none the dictionary is refused;
+    /// - the entry's own dictionary serves the shared entry, which holds
+    ///   the value as the enum object the call converted it to, and calls
+    ///   its siblings on it: each method is the shared entry.
+    pub(super) fn plan_entry_dict(&mut self, out: &mut Vec<DictStep>, class: &str, lookup: &[crate::typechecking::Ty]) -> bool {
+        self.plan_dict(out, class, lookup, true)
+    }
+
+    fn plan_dict(&mut self, out: &mut Vec<DictStep>, class: &str, lookup: &[crate::typechecking::Ty], entry: bool) -> bool {
         let start = out.len();
-        let planned = self.plan_instance_dict_steps(out, class, lookup);
+        let planned = self.plan_instance_dict_steps(out, class, lookup, entry);
         if !planned {
             out.truncate(start);
         }
         planned
+    }
+
+    /// Whether an instance with head `head` is a generic one over an
+    /// `Option` / `Result` that has a niche at `lookup`: its shared entry
+    /// holds the value as the enum object, ground code and a bare type
+    /// parameter as the niche word.
+    fn niche_head(&self, head: &[Ty], lookup: &[Ty]) -> bool {
+        use crate::typechecking::ty::{is_option_ty, result_ok_err};
+        head.iter().zip(lookup).any(|(h, t)| {
+            (is_option_ty(h) || result_ok_err(h).is_some()) && h.has_var() && !t.has_var() && self.value_layout(t) != ValueLayout::Boxed
+        })
     }
 
     fn plan_instance_dict_steps(
@@ -2530,6 +2564,7 @@ impl Compiler {
         out: &mut Vec<DictStep>,
         class: &str,
         lookup: &[crate::typechecking::Ty],
+        entry: bool,
     ) -> bool {
         // A built-in enum's sum or constructor type (`Some(e)`'s, in a mono
         // clone) as its `App` spelling, which a generic instance's head
@@ -2558,7 +2593,7 @@ impl Compiler {
                     return true;
                 }
                 Some(OpenDictGoal::Concrete(tys)) => {
-                    return self.plan_instance_dict(out, class, &tys);
+                    return self.plan_dict(out, class, &tys, entry);
                 }
                 // `Eq<T>` with no `Eq` bound in scope: one built from a
                 // subclass bound's, or the runtime's compare (#1694).
@@ -2575,6 +2610,9 @@ impl Compiler {
             }
         }
         let mut super_reads: Vec<(usize, String)> = Vec::new();
+        // Per slot: whether its instance is a [`Self::niche_head`] one, with
+        // the method's name when it is the instance's own (not a default).
+        let mut niche_slots: Vec<Option<Option<String>>> = Vec::new();
         let (fqns, diag_range) = {
             // An open goal looks among the generic instances first: a ground
             // one its variables unify with is never its instance.
@@ -2599,19 +2637,17 @@ impl Compiler {
             let mut fqns = Vec::with_capacity(flat.len());
             for (owner_class, method_def) in &flat {
                 let slot = fqns.len();
-                let fqn = if *owner_class == instance.class.as_str() {
-                    instance.method_fqns.get(&method_def.name).cloned()
+                let owner = if *owner_class == instance.class.as_str() {
+                    Some(instance)
                 } else {
-                    self.checker
-                        .generics()
-                        .find_instance_relaxed(owner_class, lookup)
-                        .and_then(|super_inst| {
-                            super_inst.method_fqns.get(&method_def.name).cloned()
-                        })
+                    self.checker.generics().find_instance_relaxed(owner_class, lookup)
                 };
-                let Some(name) = fqn else {
+                let Some(name) = owner.and_then(|inst| inst.method_fqns.get(&method_def.name).cloned()) else {
                     return false;
                 };
+                niche_slots.push(owner.filter(|inst| self.niche_head(&inst.args, lookup)).map(|_| {
+                    (!Self::is_default_method_fqn(owner_class, &method_def.name, &name)).then(|| format!("{owner_class}::{}", method_def.name))
+                }));
                 if !self.functions.contains_key(&name) && !self.fn_entry_labels.contains_key(&name)
                 {
                     self.missing_call_target(&name, instance.range.clone());
@@ -2663,20 +2699,38 @@ impl Compiler {
         // clone, past the clone budget too: the clone takes no dictionary.
         // An open goal has no clone, and a method on its own clone chain
         // none either: such a dictionary is not built (#2476).
+        //
+        // A niche-head instance's method goes in as its clone too in a
+        // bound's dictionary, and as the shared entry in the entry's own
+        // ([`Self::plan_entry_dict`], #2477).
+        let reads_own = |method: &str| {
+            format!("its `{method}` reads its own instance's dictionary, which the `{class}` one does not hold (coil-lang#2476)")
+        };
         let mut unbuilt = None;
         let fqns: Vec<String> = if open {
-            unbuilt = super_reads.first().map(|(_, method)| method.clone());
+            unbuilt = super_reads.first().map(|(_, method)| reads_own(method));
             fqns
         } else {
             fqns.into_iter()
                 .enumerate()
                 .map(|(slot, name)| {
-                    let needed = super_reads.iter().find(|(s, _)| *s == slot);
+                    let reads = super_reads.iter().find(|(s, _)| *s == slot).map(|(_, method)| reads_own(method));
+                    let niche = niche_slots.get(slot).cloned().flatten();
+                    if entry && niche.is_some() {
+                        if let Some(why) = reads {
+                            unbuilt.get_or_insert(why);
+                        }
+                        return name;
+                    }
+                    let takes_object = niche.flatten().map(|method| {
+                        format!("its `{method}` takes the value as an enum object, and has no per-type clone that takes the value's own word (coil-lang#2477)")
+                    });
+                    let needed = reads.or(takes_object);
                     match self.instance_clone_at(&name, lookup, needed.is_some()) {
                         Some(clone) => Self::dict_adapter_name(&clone),
                         None => {
-                            if let Some((_, method)) = needed {
-                                unbuilt.get_or_insert_with(|| method.clone());
+                            if let Some(why) = needed {
+                                unbuilt.get_or_insert(why);
                             }
                             name
                         }
@@ -2684,8 +2738,8 @@ impl Compiler {
                 })
                 .collect()
         };
-        if let Some(method) = unbuilt {
-            self.superclass_dict_unbuilt(class, lookup, &method, diag_range);
+        if let Some(why) = unbuilt {
+            self.dict_unbuilt(class, lookup, &why, diag_range);
             return false;
         }
         for name in &fqns {
@@ -2880,7 +2934,7 @@ impl Compiler {
             return false;
         }
         let reported = self.messages.len();
-        if self.plan_instance_dict(out, class, lookup) {
+        if self.plan_entry_dict(out, class, lookup) {
             return true;
         }
         if self.instance_context_len(fqn) > 0 && self.messages.len() == reported {
@@ -2907,11 +2961,12 @@ impl Compiler {
         self.messages.push(message);
     }
 
-    /// Report that the dictionary for `class<lookup>` cannot hold superclass
-    /// method `method` (`Lt::lt`, #2476): it reads the dictionary it is called with as
-    /// its own instance's, and through `class` it is called with the
-    /// subclass's.
-    fn superclass_dict_unbuilt(&mut self, class: &str, lookup: &[Ty], method: &str, range: std::ops::Range<usize>) {
+    /// Report that the dictionary for `class<lookup>` is not built, for
+    /// `why`: a method it would hold cannot be called through it (a
+    /// superclass method that reads its own instance's dictionary, #2476;
+    /// a shared entry that takes an enum object where the dictionary's
+    /// callers pass the niche word, #2477).
+    fn dict_unbuilt(&mut self, class: &str, lookup: &[Ty], why: &str, range: std::ops::Range<usize>) {
         let goal = lookup
             .iter()
             .map(|t| crate::typechecking::pretty::format_ty_for_diag(self.checker.subst(), t))
@@ -2919,9 +2974,7 @@ impl Compiler {
             .join(", ");
         let mut message = Message::error(
             ErrorCode::CodegenError,
-            format!(
-                "Cannot build the trait dictionary for `{class}<{goal}>` in shared generic code: its `{method}` reads its own instance's dictionary, which the `{class}` one does not hold (coil-lang#2476)"
-            ),
+            format!("Cannot build the trait dictionary for `{class}<{goal}>` in shared generic code: {why}"),
             range.clone(),
         );
         message.push(DiagLabel::new("the instance whose dictionary is asked for".to_string(), range));
