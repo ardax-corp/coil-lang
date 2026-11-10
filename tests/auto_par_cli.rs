@@ -48,3 +48,45 @@ fn auto_par_rejects_other_values() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("--auto-par"), "stderr={err}");
 }
+
+/// A loop invariant over the accumulator is checked against the running
+/// fold: a chunk's partial that breaks the clause on its own reports
+/// nothing (#2412).
+#[test]
+fn a_loop_invariant_reports_nothing_a_sequential_run_does_not() {
+    let dir = std::env::temp_dir().join(format!("coil-auto-par-{}-invariant", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join("dip.coil");
+    let program = r#"
+fn step(int i) -> int {
+    if i < 200000 {
+        return 0 - 1;
+    }
+    return 1;
+}
+
+fn dip() -> int {
+    let total = 0;
+    for i in 0..400000
+        invariant total <= 0
+    {
+        total = total + step(i);
+    }
+    return total;
+}
+
+fn main() {
+    if dip() != 0 {
+        panic "dip";
+    }
+}
+"#;
+    std::fs::write(&src, program).expect("write source");
+    for engine in [&[][..], &["--mir"][..]] {
+        let out = Command::new(coil_bin()).args(["--contracts", "all", "--fold-calls", "off"]).args(engine).arg(&src).output().expect("spawn coil");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{engine:?}: {err}");
+        assert!(!err.contains("contract violated"), "{engine:?}: {err}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -288,8 +288,9 @@ impl Scan<'_> {
             }
             HirKind::Loop { body: loop_body } => {
                 // A `while let` is no counted loop, and nothing in it is.
-                let Some((_, cond, then)) = query::while_parts(body, *loop_body) else { return };
-                match self.counted_while(cond, then, consts, ints).and_then(|c| self.finish(c, consts, ints)) {
+                let Some((checks, cond, then)) = query::while_parts(body, *loop_body) else { return };
+                let site = if self.checks_follow_the_loop(id, checks) { None } else { self.counted_while(cond, then, consts, ints) };
+                match site.and_then(|c| self.finish(c, consts, ints)) {
                     Some(site) => {
                         self.out.insert(e.span, site);
                     }
@@ -297,8 +298,9 @@ impl Scan<'_> {
                 }
             }
             HirKind::ForIn { pat, iterable, .. } => {
-                let Some((_, own)) = query::for_body_parts(body, id) else { return };
-                match self.counted_for(pat, *iterable, own, consts, ints).and_then(|c| self.finish(c, consts, ints)) {
+                let Some((checks, own)) = query::for_body_parts(body, id) else { return };
+                let site = if self.checks_follow_the_loop(id, checks) { None } else { self.counted_for(pat, *iterable, own, consts, ints) };
+                match site.and_then(|c| self.finish(c, consts, ints)) {
                     Some(site) => {
                         self.out.insert(e.span, site);
                     }
@@ -307,6 +309,31 @@ impl Scan<'_> {
             }
             _ => {}
         }
+    }
+
+    /// Whether a contract check of loop `loop_id` (`invariant` /
+    /// `decreases`) reads a local the loop writes: the accumulator, a
+    /// `while` loop's index, a `decreases` clause's own previous value.
+    ///
+    /// Such a clause is about the state the sequential loop has at that
+    /// iteration. A chunk has its own: its fold starts at the identity.
+    /// A clause over values the loop leaves alone is the same test in
+    /// every iteration of every chunk.
+    fn checks_follow_the_loop(&self, loop_id: HirId, checks: &[HirId]) -> bool {
+        if checks.is_empty() {
+            return false;
+        }
+        let written = self.assigned(loop_id);
+        let mut follows = false;
+        for &check in checks {
+            self.body.visit(check, &mut |e| match e.kind {
+                HirKind::Local(l) => follows |= written.contains(&l),
+                // Its body reads through captures this walk does not see.
+                HirKind::Lambda { .. } => follows = true,
+                _ => {}
+            });
+        }
+        follows
     }
 
     /// `while i < K { … }` against the loop-IPA shape.

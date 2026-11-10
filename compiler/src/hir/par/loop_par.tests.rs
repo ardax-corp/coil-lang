@@ -590,14 +590,14 @@ fn rejects_accumulator_clobbered_before_loop() {
 }
 
 #[test]
-fn admits_a_loop_under_its_contract_checks() {
+fn admits_a_loop_under_checks_of_what_it_leaves_alone() {
     let site = one_site(
         r#"
 fn sq(int i) -> int { return i * i; }
 fn run(int n) -> int {
     let acc = 0;
     let i = 0;
-    while i < n invariant i >= 0 {
+    while i < n invariant n >= 0 {
         acc = acc + sq(i);
         i = i + 1;
     }
@@ -609,9 +609,10 @@ fn main() { return; }
     assert_eq!((site.index.as_str(), site.acc.as_str()), ("i", "acc"));
     let site = one_site(&program(
         r#"
+    let k = 3;
     let acc = 0;
-    for x in 0..100 invariant acc >= 0 {
-        acc = acc + sq(x);
+    for x in 0..100 invariant k > 0 {
+        acc = acc + sq(x) * k;
     }
 "#,
     ));
@@ -723,4 +724,50 @@ fn main() { return; }
     let pure = ["weigh", "weigh2"].map(String::from).into();
     let sites: Vec<LoopParSite> = module.loop_par_sites(&checker, &pure).into_values().collect();
     assert_eq!(sites.iter().map(|s| s.end).collect::<Vec<_>>(), [50]);
+}
+
+/// The sites of `body` with every contract check built in.
+fn checked_sites(body: &str) -> Vec<LoopParSite> {
+    crate::hir::set_contract_level(crate::hir::ContractLevel::All);
+    sites_of(&program(body))
+}
+
+#[test]
+fn an_invariant_over_the_accumulator_keeps_a_for_loop_sequential() {
+    let sites = checked_sites(
+        r#"
+    let acc = 0;
+    for x in 0..100
+        invariant acc >= 0
+    {
+        acc = acc + sq(x);
+    }
+"#,
+    );
+    assert!(sites.is_empty(), "a chunk checks the clause against its partial fold: {sites:?}");
+}
+
+#[test]
+fn an_invariant_over_what_a_while_loop_writes_keeps_it_sequential() {
+    for clause in ["invariant i <= n", "invariant acc >= 0", "decreases n - i"] {
+        crate::hir::set_contract_level(crate::hir::ContractLevel::All);
+        let sites = sites_of(&format!(
+            r#"
+fn sq(int i) -> int {{ return i * i; }}
+fn run(int n) -> int {{
+    let acc = 0;
+    let i = 0;
+    while i < n
+        {clause}
+    {{
+        acc = acc + sq(i);
+        i = i + 1;
+    }}
+    return acc;
+}}
+fn main() {{ return; }}
+"#
+        ));
+        assert!(sites.is_empty(), "`{clause}`: {sites:?}");
+    }
 }
