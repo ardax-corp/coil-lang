@@ -6218,6 +6218,8 @@ impl Lower<'_> {
         self.word_ty(ty)
             .or_else(|| self.cx.boxed_view(ty, None).map(|_| MirTy::HeapRef))
             .or_else(|| matches!(strip_readonly(ty), Ty::Tuple(items) if !items.is_empty()).then_some(MirTy::HeapRef))
+            // A `()` static holds the empty tuple object (#1427, #2562).
+            .or_else(|| is_unit(ty).then_some(MirTy::HeapRef))
             .ok_or_else(|| format!("static type {}", ty_kind(ty)))
     }
 
@@ -6352,7 +6354,7 @@ impl Lower<'_> {
             return Ok(Val::Unit);
         }
         let ty = self.static_ty(place)?;
-        let Some(v) = (if ty == MirTy::HeapRef { self.boxed_word(value)? } else { self.word(value)? }) else {
+        let Some(v) = (if ty == MirTy::HeapRef { self.word_or_boxed(value)? } else { self.word(value)? }) else {
             return Ok(Val::Never);
         };
         if self.b.value_ty(v) != ty {

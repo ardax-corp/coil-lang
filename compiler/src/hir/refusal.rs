@@ -1190,9 +1190,8 @@ impl Walk<'_> {
                     }
                     // `STATIC = v`: the value, then `StoreStatic`.
                     HirKind::Global { .. } => {
-                        self.word(*place)?;
-                        self.word(*value)?;
-                        self.value(*value)
+                        self.read(*place)?;
+                        self.stored(*value)
                     }
                     _ => Err("assign-place"),
                 }
