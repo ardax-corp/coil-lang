@@ -8167,7 +8167,7 @@ impl Compiler {
     }
 
     /// [`Self::hir_payload_tys`] of a resolved type.
-    fn payload_tys_of(checker: &crate::typechecking::Checker, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
+    pub(crate) fn payload_tys_of(checker: &crate::typechecking::Checker, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
         fn go(this: &crate::typechecking::Checker, ty: &Ty, variant: &str) -> Option<Vec<Ty>> {
             match crate::typechecking::ty::strip_readonly(ty) {
                 Ty::Constructor { owner, .. } => go(this, owner, variant),
@@ -8208,14 +8208,17 @@ impl Compiler {
 
     /// The tag of `variant`, checked against the enum `ty` names.
     fn hir_tag(&self, ty: &Ty, enum_name: &str, variant: &str) -> Option<u32> {
-        let named = self.hir_enum_name(ty)?;
+        Self::tag_of(&self.checker, &apply_ty_prune(self.checker.subst(), ty), enum_name, variant)
+    }
+
+    /// [`Self::hir_tag`] of a resolved type.
+    pub(crate) fn tag_of(checker: &crate::typechecking::Checker, ty: &Ty, enum_name: &str, variant: &str) -> Option<u32> {
+        let named = Self::enum_name_of(ty)?;
         // `Opt::Some` after `use prelude::Option as Opt;` (#1700).
-        if !Self::hir_same_enum(&named, enum_name)
-            && !Self::hir_same_enum(&named, &self.checker.registry_enum_key(enum_name))
-        {
+        if !Self::hir_same_enum(&named, enum_name) && !Self::hir_same_enum(&named, &checker.registry_enum_key(enum_name)) {
             return None;
         }
-        self.checker.tag_for(enum_name, variant)
+        checker.tag_for(enum_name, variant)
     }
 
     /// Whether a value in `from` can be re-encoded as `to`.
@@ -8323,8 +8326,7 @@ impl Compiler {
 
     /// `typeof e`'s text: `e`'s ground type.
     fn hir_typeof(&self, hir: &HirBody, arg: HirId) -> Option<String> {
-        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?);
-        crate::typechecking::pretty::format_ty_fqn(&ty, &self.checker.generics().nominal_type_modules)
+        query::typeof_text(hir, &self.checker, arg)
     }
 
     /// A scalar-backed enum's variant: its backing constant.
@@ -9215,14 +9217,22 @@ impl Compiler {
     }
 
     // ---- plan: the same walk as emission, checking each edge ----
+    //
+    // `hir::refusal` has taken the body's shape before this runs: which
+    // nodes, places, patterns and types it has. These two check what only
+    // the plan knows: that each value reaches its consumer in a
+    // representation the consumer takes, and that the calls, slots and
+    // statics it names resolved.
 
     fn hir_check_value(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Check {
         match &hir.expr(id).kind {
             HirKind::Lit(_) | HirKind::Local(_) | HirKind::Global { .. } | HirKind::Lambda { .. } => {}
-            HirKind::Assign { place, .. } if hir.expr(id).flags.contains(HirFlags::ADJUST) => match hir.expr(*place).kind {
-                HirKind::Local(local) if !emit.plan.pair_locals.contains_key(&local.0) => {}
-                _ => return Err("assign"),
-            },
+            // A pair local has no one word to step.
+            HirKind::Assign { place, .. } if hir.expr(id).flags.contains(HirFlags::ADJUST) => {
+                if matches!(hir.expr(*place).kind, HirKind::Local(local) if emit.plan.pair_locals.contains_key(&local.0)) {
+                    return Err("assign");
+                }
+            }
             HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => {
                 self.hir_check_value(hir, emit, *lhs, &BOXED)?;
                 self.hir_check_value(hir, emit, *rhs, &BOXED)?;
@@ -9294,12 +9304,7 @@ impl Compiler {
                 op: Builtin::Done,
                 args,
             } => self.hir_check_value(hir, emit, args[0], &BOXED)?,
-            HirKind::Builtin {
-                op: Builtin::TypeOf,
-                args,
-            } => {
-                self.hir_typeof(hir, args[0]).ok_or("typeof-type")?;
-            }
+            HirKind::Builtin { op: Builtin::TypeOf, .. } => {}
             HirKind::Builtin {
                 op: Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout,
                 args,
@@ -9361,8 +9366,8 @@ impl Compiler {
                 // `Result` is stored as its niche word, as a tuple item
                 // (#1613).
                 for &item in args {
-                    let ty = Self::hir_ty(hir, item).ok_or("value-type")?;
-                    self.hir_check_value(hir, emit, item, &Rep::Word(self.value_layout(ty)))?;
+                    let layout = Self::hir_ty(hir, item).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty));
+                    self.hir_check_value(hir, emit, item, &Rep::Word(layout))?;
                 }
             }
             HirKind::Make {
@@ -9463,11 +9468,7 @@ impl Compiler {
             return Err("make");
         };
         let ty = Self::hir_ty(hir, id).ok_or("make-type")?;
-        self.hir_tag(ty, enum_name, variant).ok_or("make-tag")?;
-        let payload = self.hir_payload_tys(ty, variant).ok_or("make-payload")?;
-        if payload.len() != args.len() {
-            return Err("make-payload");
-        }
+        let payload = self.hir_payload_tys(ty, variant).filter(|p| p.len() == args.len()).ok_or("make-payload")?;
         let option = common::is_builtin_option_enum(enum_name);
         let result = common::is_builtin_result_enum(enum_name);
         let unit_arg = |i: usize| query::is_unit_make(hir, args[i]);
@@ -9538,8 +9539,7 @@ impl Compiler {
         else {
             return match pat {
                 HirPat::Bind(local) if self.hir_local_layout(hir, *local) != layout => Err("binding-layout"),
-                HirPat::Wild | HirPat::Bind(_) | HirPat::Int(_) => Ok(()),
-                _ => Err("pattern-nested"),
+                _ => Ok(()),
             };
         };
         if self.checker.scalar_for(enum_name, variant).is_some() {
@@ -9628,14 +9628,8 @@ impl Compiler {
         for arm in arms {
             let fields = query::arm_fields(hir, &arm.pat)?;
             match &arm.pat {
-                HirPat::Variant {
-                    enum_name, variant, ..
-                } => {
-                    self.hir_tag(ty, enum_name, variant).ok_or("pattern-tag")?;
+                HirPat::Variant { variant, .. } => {
                     let payload = self.hir_payload_tys(ty, variant).ok_or("pattern-payload")?;
-                    if !fields.is_empty() && fields.len() != payload.len() {
-                        return Err("pattern-payload");
-                    }
                     if let Rep::Word(layout) = &dispatch
                         && *layout != ValueLayout::Boxed
                         && !Self::hir_niche_variant(*layout, variant)
@@ -9719,13 +9713,6 @@ impl Compiler {
             // A type-only scalar `let x: T;`: zero until assigned.
             HirKind::Let { init: None, .. } => Ok(()),
             HirKind::LetPat { pat, init } => {
-                match pat {
-                    // `let { a, b } = r`: each binding takes its slot's word
-                    // as the field's type names it, a niche `Option` /
-                    // `Result` its niche word (#1613).
-                    HirPat::Record(parts) if parts.iter().all(|(_, p)| matches!(p, HirPat::Wild | HirPat::Bind(_))) => {}
-                    _ => self.hir_check_let_pat(hir, pat)?,
-                }
                 if self.hir_product_let(hir, emit, pat, *init).is_some() {
                     let want = self.hir_natural(hir, emit, *init).ok_or("value-shape")?;
                     return self.hir_check_value(hir, emit, *init, &want);
@@ -9788,15 +9775,6 @@ impl Compiler {
                 self.hir_check_effect(hir, emit, *body)
             }
             HirKind::ForIn { pat, iterable, body, kind } => {
-                // `for (k, v) in r` over a record: `v` takes each slot's
-                // word in its `(name, value)` item, a niche `Option` /
-                // `Result` its niche word (#1613).
-                let record_items = matches!(pat, HirPat::Tuple(ps) if ps.iter().all(|p| matches!(p, HirPat::Wild | HirPat::Bind(_))))
-                    && Self::hir_ty(hir, *iterable)
-                        .is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)), Ty::Record { .. }));
-                if !matches!(pat, HirPat::Bind(_)) && !record_items {
-                    self.hir_check_let_pat(hir, pat)?;
-                }
                 // The resumed word is stored as it comes back, in the local's
                 // layout (a niche word as the yield sent it).
                 // `into_iter` is a plain method call: a range comes
@@ -9875,9 +9853,7 @@ impl Compiler {
             HirKind::Match { scrutinee, arms } => {
                 self.hir_check_match(hir, emit, *scrutinee, arms, None)
             }
-            _ if query::is_unit_make(hir, id) || matches!(hir.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
             HirKind::Make { .. } => self.hir_check_value(hir, emit, id, &BOXED),
-            HirKind::Local(local) if classify::is_unit_local(hir, &self.checker, *local) => Ok(()),
             _ => {
                 let natural = self.hir_natural(hir, emit, id).ok_or("statement")?;
                 self.hir_check_value(hir, emit, id, &natural)
@@ -10808,28 +10784,6 @@ impl Compiler {
         Some(crate::mir::HirParFork { worker, hops, seq })
     }
 
-    /// A fresh slot for `local`. HIR locals are distinct even when their
-    /// names repeat, so a shadowing `let` gets its own `__shadow_` slot
-    /// (the debugger shows it under the source name).
-    /// Every name a `let` pattern binds is one word, as the item holds it:
-    /// boxed, or a niche `Option` / `Result`'s niche word.
-    fn hir_check_let_pat(&self, hir: &HirBody, pat: &HirPat) -> Check {
-        match pat {
-            HirPat::Wild => Ok(()),
-            HirPat::Bind(local)
-                if matches!(
-                    self.hir_local_layout(hir, *local),
-                    ValueLayout::Boxed | ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult
-                ) =>
-            {
-                Ok(())
-            }
-            HirPat::Bind(_) => Err("let-pattern-layout"),
-            HirPat::Tuple(items) => items.iter().try_for_each(|p| self.hir_check_let_pat(hir, p)),
-            HirPat::Record(fields) => fields.iter().try_for_each(|(_, p)| self.hir_check_let_pat(hir, p)),
-            _ => Err("let-pattern"),
-        }
-    }
 }
 
 /// `limit` (`COIL_HIR_BISECT=N`, [`crate::opt::OptimizeOptions::hir_bisect`])

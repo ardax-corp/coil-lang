@@ -857,6 +857,13 @@ pub fn is_unit_make(body: &HirBody, id: HirId) -> bool {
     )
 }
 
+/// `typeof e`'s text: `e`'s ground type, or `None` for one with no name to
+/// print.
+pub fn typeof_text(body: &HirBody, checker: &Checker, arg: HirId) -> Option<String> {
+    let ty = apply_ty_prune(checker.subst(), body.expr(arg).ty.as_ref()?);
+    crate::typechecking::pretty::format_ty_fqn(&ty, &checker.generics().nominal_type_modules)
+}
+
 /// The word a `return` pushes: bare `return;` carries `()` (an empty tuple
 /// make), which returns like `None`.
 pub fn returned_value(body: &HirBody, value: Option<HirId>) -> Option<HirId> {

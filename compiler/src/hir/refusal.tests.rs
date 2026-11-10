@@ -132,3 +132,46 @@ fn bytes_casts_and_unit_tries_are_in_the_subset() {
         }";
     assert_eq!(refusal_of(src, "twice"), None);
 }
+
+#[test]
+fn variants_built_and_matched_at_their_enum_are_in_the_subset() {
+    // The tag and payload of each variant built or matched are checked
+    // here, not by the plan.
+    let src = "enum Shape { Circle(int), Rect { w: int, h: int }, Empty }
+        fn make(int n) -> Shape {
+            if n == 0 {
+                return Shape::Empty;
+            }
+            if n == 1 {
+                return Shape::Circle(n);
+            }
+            return Shape::Rect { w: n, h: n };
+        }
+        fn size(Shape s) -> int {
+            return match s {
+                Shape::Circle(r) => r,
+                Shape::Empty => 0,
+                default => 1,
+            };
+        }";
+    assert_eq!(refusal_of(src, "make"), None);
+    assert_eq!(refusal_of(src, "size"), None);
+    let src = "fn f(Option<Result<int, string>> o) -> int {
+            return match o {
+                Option::Some(Result::Ok(v)) => v,
+                Option::Some(Result::Err(_)) => -1,
+                Option::None => 0,
+            };
+        }
+        fn g(int n) -> Result<Option<int>, string> { return Result::Ok(Option::Some(n)); }";
+    assert_eq!(refusal_of(src, "f"), None);
+    assert_eq!(refusal_of(src, "g"), None);
+}
+
+#[test]
+fn typeof_and_let_patterns_are_in_the_subset() {
+    let src = "fn f(Vec<int> xs) -> string { return typeof xs; }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f((int, (string, int)) t) -> int { let (a, (_, c)) = t; return a + c; }";
+    assert_eq!(refusal_of(src, "f"), None);
+}
