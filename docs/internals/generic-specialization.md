@@ -32,8 +32,12 @@ the operator in place; a shared body gets the tuple's `Num` dictionary.
 A nested aggregate (`((int, int), (int, int))`, `[[float; 2]; 2]`) has
 the instance when its element has (#2544): the element's structural
 instance comes first, and the operator calls its thunk once per element
-(the element is one word, a pair boxed), as at a user type. A `Vec` has
-none.
+(the element is one word, a pair boxed), as at a user type. A `Vec` (or
+`[T]`) has `Neg` only, its thunk the dynamic loop ground `-v` runs
+(`aggregate_dynamic`): ground `v + v` does not zip two dynamic lengths
+(E0119), so neither `Num` nor `Add` .. `Pow` is met at a `Vec`, and
+`add<T: Num>(v, v)` is the checker's "No instance for `Num<Vec<int>>`"
+(#2564).
 
 ## Ground dictionaries once (#1417)
 

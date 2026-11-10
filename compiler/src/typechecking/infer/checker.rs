@@ -10592,6 +10592,12 @@ impl Checker {
         if !is_liftable_arith_trait(class) || wanted.len() != 1 {
             return false;
         }
+        // A dynamic length (a `Vec`, `[T]`) negates element-wise, but its
+        // binary operators do not zip two lengths (ground `v + v` is
+        // E0119), so it has no `Num` or `Add` .. `Pow` (#2564).
+        if class != "Neg" && Self::is_dynamic_aggregate(&apply_ty_prune(&self.subst, &wanted[0])) {
+            return false;
+        }
         let Some(elem) = homogeneous_aggregate_elem(&wanted[0]) else {
             return false;
         };
@@ -10711,12 +10717,15 @@ impl Checker {
     /// tuple's `Ord` with `Lt` .. `Ge`. A nested aggregate (`((int, int),
     /// (int, int))`) has the instance when its element has (#2544): the
     /// element's structural instance is registered first, and the operator
-    /// calls it once per element, as at a user type.
+    /// calls it once per element, as at a user type. A `Vec` or `[T]` has
+    /// `Neg` only, the dynamic loop ground `-v` runs (#2564).
     fn ensure_structural_arith(&mut self, class: &str, ty: &Ty) {
         use crate::typechecking::aggregate_arith::homogeneous_aggregate_elem;
         let ty = nominal_enum(apply_ty_prune(&self.subst, ty));
-        // A `Vec`'s operators are not element-wise in a clone either.
-        if !matches!(strip_readonly(&ty), Ty::Tuple(_) | Ty::Array { .. }) {
+        // A dynamic length (a `Vec`, `[T]`) has only `Neg`: ground `v + v`
+        // does not zip two lengths (#2564).
+        let dynamic = Self::is_dynamic_aggregate(&ty);
+        if dynamic && class != "Neg" || !dynamic && !matches!(strip_readonly(&ty), Ty::Tuple(_) | Ty::Array { .. }) {
             return;
         }
         let Some(elem) = homogeneous_aggregate_elem(strip_readonly(&ty)) else {
@@ -10738,6 +10747,13 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// Whether `ty` is a `Vec` or a dynamic-length array: its element-wise
+    /// operators have no length to zip two of it by.
+    fn is_dynamic_aggregate(ty: &Ty) -> bool {
+        let ty = strip_readonly(ty);
+        matches!(ty, Ty::Array { length: ArrayLength::Dynamic, .. }) || crate::typechecking::ty::vec_element_ty(ty).is_some()
     }
 
     /// A ground tuple whose items are all `Ord` is `Ord` (#1721): it orders
