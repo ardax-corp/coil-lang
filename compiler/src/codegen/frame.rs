@@ -34,13 +34,21 @@ pub(crate) struct FrameDicts {
     pub(crate) context: Option<(usize, usize)>,
     /// A shared generic entry's `kinds` word, after the dictionaries.
     pub(crate) kinds: bool,
+    /// A trait method's `kinds` word in its own dictionary (`__dict0`):
+    /// its index there and how many bits it has (#2506).
+    pub(crate) kinds_dict: Option<(u32, u32)>,
 }
 
 /// A shared generic body's `kinds` word (#2506): its slot, and the bit of
 /// each type variable its code names.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FrameKinds {
-    pub(crate) slot: u32,
+    /// The entry word, for a shared generic entry or a lambda of one.
+    pub(crate) slot: Option<u32>,
+    /// The word read out of the body's own dictionary at entry: that
+    /// dictionary's slot, the index, and how many bits it has. Its bits come
+    /// first; the entry word's, where there is one too, after them.
+    pub(crate) dict: Option<(u32, u32, u32)>,
     /// Each type variable's bit, in the scheme's order.
     pub(crate) bits: Vec<(TyVarId, u32)>,
     /// How many type parameters the mask has.
@@ -108,10 +116,15 @@ impl BodyFrame {
             }
         }
         if dicts.kinds {
-            frame.kinds = Some(FrameKinds { slot: frame.frame_base, ..FrameKinds::default() });
+            frame.kinds = Some(FrameKinds { slot: Some(frame.frame_base), ..FrameKinds::default() });
             frame.frame_base += 1;
         }
         frame.entry_sp = frame.frame_base;
+        if let Some((index, n)) = dicts.kinds_dict
+            && let Some(own) = frame.dict_slot(0)
+        {
+            frame.kinds.get_or_insert_with(FrameKinds::default).dict = Some((own, index, n));
+        }
         // Read out of the instance's own dictionary.
         if let Some((base, n)) = dicts.context
             && let Some(own) = frame.dict_slot(0)
@@ -145,7 +158,7 @@ impl BodyFrame {
         // The enclosing body's `kinds` word, captured after its
         // dictionaries; a lambda checks no sentinel.
         if let Some(outer) = kinds {
-            frame.kinds = Some(FrameKinds { slot: frame.frame_base, check: None, ..outer.clone() });
+            frame.kinds = Some(FrameKinds { slot: Some(frame.frame_base), dict: None, check: None, ..outer.clone() });
             frame.frame_base += 1;
         }
         for &p in &lam.params {

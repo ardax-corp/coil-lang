@@ -1,0 +1,147 @@
+// A trait method's shared body writes through a copy of a type parameter's
+// value (coil-lang#2506): a generic-head instance's method over its head's
+// parameter, a default body over the trait's, a superclass's method
+// reached through a subclass's bound, and a method's own type parameter.
+// The copy is made unique before the write, so the value it came from
+// keeps its own state: the body reads which type parameters are
+// copy-on-write objects from its dictionary, or for its own parameters
+// from the call. Past the clone budget, where every call reaches the
+// shared bodies.
+// @flags --clone-budget 0
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+fn inc(Box q) {
+    q.n = q.n + 1;
+}
+
+trait Bump<T> {
+    fn bump(T x) {}
+}
+
+impl Bump for Box {
+    fn bump(Box b) {
+        b.n = b.n + 1;
+    }
+}
+
+impl Bump for int {
+    fn bump(int x) {}
+}
+
+class Cell<T> {
+    pub value: T,
+    pub seen: int,
+}
+
+impl Bump for Cell<T: Bump> {
+    fn bump(Cell<T> c) {
+        let y = c.value;
+        y.bump();
+        c.seen = c.seen + 1;
+    }
+}
+
+trait Twice<T> {
+    fn once(T x) {}
+
+    fn copy_once(T x) -> T {
+        let y = x;
+        y.once();
+        return x;
+    }
+}
+
+impl Twice for Box {
+    fn once(Box b) {
+        b.n = b.n + 1;
+    }
+}
+
+trait Thrice<T: Twice> {
+    fn thrice(T x) -> int {}
+}
+
+impl Thrice for Box {
+    fn thrice(Box b) -> int {
+        return b.n * 3;
+    }
+}
+
+fn via_sub<T: Thrice>(T x) -> T {
+    return x.copy_once();
+}
+
+trait Visit<T> {
+    fn visit<W>(T x, W w, W -> unit f) -> W {}
+}
+
+impl Visit for Box {
+    fn visit<W>(Box x, W w, W -> unit f) -> W {
+        let y = w;
+        f(y);
+        return w;
+    }
+}
+
+fn visit_through<T: Visit, W>(T x, W w, W -> unit f) -> W {
+    return x.visit(w, f);
+}
+
+test("a generic-head instance's method copies its head's value before the write") {
+    let c = new Cell(new Box(1), 0);
+    c.bump();
+    assert!(c.value.n == 1);
+    assert!(c.seen == 1);
+}
+
+test("a generic-head instance's method through a bound copies too") {
+    let c = new Cell(new Box(2), 0);
+    let d = bump_copy(c);
+    assert!(c.value.n == 2);
+    assert!(d.value.n == 2);
+    assert!(d.seen == 1);
+}
+
+fn bump_copy<T: Bump>(T x) -> T {
+    let y = x;
+    y.bump();
+    return y;
+}
+
+test("a default body copies its trait's value before the write") {
+    let b = new Box(1);
+    let r = b.copy_once();
+    assert!(b.n == 1);
+    assert!(r.n == 1);
+}
+
+test("a superclass's default body through a subclass's bound copies too") {
+    let b = new Box(4);
+    let r = via_sub(b);
+    assert!(b.n == 4);
+    assert!(r.n == 4);
+}
+
+test("a trait method's own type parameter copies before the write") {
+    let b = new Box(0);
+    let w = new Box(1);
+    let r = b.visit(w, inc);
+    assert!(w.n == 1);
+    assert!(r.n == 1);
+    let w2 = new Box(5);
+    let r2 = visit_through(b, w2, inc);
+    assert!(w2.n == 5);
+    assert!(r2.n == 5);
+}
+
+test("an int value through the same bodies is left as it is") {
+    let big = 9223372036854775807;
+    let c = new Cell(big, 0);
+    c.bump();
+    assert!(c.value == big);
+    assert!(c.seen == 1);
+}

@@ -75,6 +75,11 @@ pub(super) enum DictStep {
     Word,
     /// A shared generic entry's `kinds` word, known at the call (#2506).
     Kinds(u64),
+    /// The top `kinds` word with bit `to` set where the body's own has bit
+    /// `from`: a dictionary's goal over the body's type parameters.
+    KindsBit { from: u8, to: u8 },
+    /// The body's own `kinds` word, passed on (a clone's thunk).
+    KindsOwn,
 }
 
 impl Compiler {
@@ -1656,6 +1661,11 @@ impl Compiler {
                         Some(_) => req.src.rsplit("::").next().unwrap_or(&req.src).to_string(),
                         None => req.src.clone(),
                     };
+                    // A trait method's clone with type parameters of its own
+                    // takes their `kinds` word too (#2506).
+                    if src.method_of.is_none() {
+                        self.pending_own_kinds = self.own_kinds_vars(&src.class, &src.method).map(|_| (src.class.clone(), src.method.clone()));
+                    }
                     self.compile_function_output_with_name(method, req.name.clone(), 0, Some(&mode_src));
                     self.inst_clone_fallback = None;
                     self.mono_var_tys.pop();
@@ -2106,10 +2116,18 @@ impl Compiler {
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
         let hir = Self::synth_generic(b.finish(root));
         let pair = self.two_word_return_kind(&req.src);
+        // A method with type parameters of its own: their `kinds` word, as
+        // the clone's callers pass it after the arguments (#2506).
+        let own_kinds = self.own_kinds_vars(&src.class, &src.method).is_some();
+        if own_kinds {
+            dict.push(DictStep::KindsOwn);
+        }
         self.hir_synth_callees.insert(req.src.clone(), SynthCallee { dicts: dict, pair, ..SynthCallee::default() });
         // Its callers pass the instance's dictionary after the arguments;
         // it builds its own.
+        let prev = std::mem::replace(&mut self.synth_kinds, own_kinds);
         self.emit_synth_fn(&req.name, &hir, calls);
+        self.synth_kinds = prev;
         self.hir_synth_callees.clear();
     }
 
@@ -2235,13 +2253,26 @@ impl Compiler {
         // Any other takes the trailing one, a heap word it only moves, and
         // after it the dictionaries of the method's own bounds (#1471; such
         // a method is never raw).
-        if !raw {
+        // A method with type parameters of its own takes their `kinds`
+        // word after all of them (#2506), which the adapter passes on: to a
+        // shared entry after the dictionaries, to a clone, which takes no
+        // dictionary, after the arguments.
+        let own_kinds = self.own_kinds_vars(class, method).is_some();
+        let shared = self.trait_entry_shared(fqn);
+        if !raw || own_kinds {
             let own = self.trait_method_own_bounds(class, method).len();
             for i in 0..=own {
                 let name = if i == 0 { "dict".to_string() } else { format!("dict{i}") };
                 let local = b.local(&name, crate::typechecking::ty::array(crate::typechecking::ty::int()), LocalKind::Param);
-                args.push(b.read(local));
+                let word = b.read(local);
+                if !raw && (shared || !own_kinds) {
+                    args.push(word);
+                }
             }
+        }
+        if own_kinds {
+            let local = b.local("kinds", crate::typechecking::ty::int(), LocalKind::Param);
+            args.push(b.read(local));
         }
         let params = args.iter().map(|&a| self.value_layout(b.body.expr(a).ty.as_ref().expect("typed"))).collect();
         let calls = HashMap::from([(fqn.to_string(), (params, self.value_layout(&ret)))]);
@@ -2809,7 +2840,9 @@ impl Compiler {
                 // holds a forwarder to the superclass's own dictionary,
                 // which this one carries (#2476).
                 if *owner_class != instance.class.as_str()
-                    && (Self::is_default_method_fqn(owner_class, &method_def.name, &name) || self.instance_context_len(&name) > 0)
+                    && (Self::is_default_method_fqn(owner_class, &method_def.name, &name)
+                        || self.instance_context_len(&name) > 0
+                        || self.instance_reads_kinds(&name))
                 {
                     super_reads.push((slot, owner_class.to_string(), method_def.name.clone()));
                 }
@@ -2842,9 +2875,9 @@ impl Compiler {
                     )
                 })
                 .collect();
-            (fqns, (instance.range.clone(), context))
+            (fqns, (instance.range.clone(), context, instance.args.clone()))
         };
-        let (diag_range, context) = diag_range;
+        let (diag_range, context, head) = diag_range;
         // A ground goal of a generic-head instance: its clones' adapters,
         // where the clone budget makes them. A clone reads no dictionary.
         //
@@ -2916,7 +2949,7 @@ impl Compiler {
         for (slot, name) in fqns.iter().enumerate() {
             let code = match super_reads.iter().find(|(s, ..)| *s == slot && forwarded.contains(s)) {
                 Some((_, owner, method)) => {
-                    let index = fqns.len() + context.len() + supers.iter().position(|s| s == owner).expect("listed");
+                    let index = fqns.len() + 1 + context.len() + supers.iter().position(|s| s == owner).expect("listed");
                     self.dict_forwarder(owner, method, index as u32, None)
                 }
                 None => self.dict_code_step(name),
@@ -2927,6 +2960,12 @@ impl Compiler {
             };
             out.push(code);
         }
+        // The `kinds` word after the methods (#2506).
+        let Some(kinds) = self.dict_kinds_steps(&head, lookup) else {
+            self.dict_unbuilt(class, lookup, &format!("its head has more than {} type parameters and variables", kinds::DICT_BITS), diag_range);
+            return false;
+        };
+        out.extend(kinds);
         // The instance is found and its methods planned: a context goal it
         // cannot build is a compile error (a context-less dictionary would
         // be read past at run time, #1580), reported once at the innermost
@@ -2941,7 +2980,7 @@ impl Compiler {
                 return false;
             }
         }
-        out.push(DictStep::Tuple((fqns.len() + context.len() + forwarded.iter().map(|slot| &super_reads.iter().find(|(s, ..)| s == slot).expect("read").1).collect::<HashSet<_>>().len()) as u32));
+        out.push(DictStep::Tuple((fqns.len() + 1 + context.len() + forwarded.iter().map(|slot| &super_reads.iter().find(|(s, ..)| s == slot).expect("read").1).collect::<HashSet<_>>().len()) as u32));
         true
     }
 
@@ -3063,11 +3102,17 @@ impl Compiler {
             let local = b.local(&format!("arg{i}"), word(ty), LocalKind::Param);
             args.push(b.read(local));
         }
-        let own = self.trait_method_own_bounds(&class, &method).len();
+        let mut own = self.trait_method_own_bounds(&class, &method).len();
         for i in 0..=own {
             let name = if i == 0 { "dict".to_string() } else { format!("dict{i}") };
             let local = b.local(&name, crate::typechecking::ty::array(crate::typechecking::ty::int()), LocalKind::Param);
             args.push(b.read(local));
+        }
+        // The method's own `kinds` word, moved on after them (#2506).
+        if self.own_kinds_vars(&class, &method).is_some() {
+            let local = b.local("kinds", crate::typechecking::ty::int(), LocalKind::Param);
+            args.push(b.read(local));
+            own += 1;
         }
         let params = args.iter().map(|&a| self.value_layout(b.body.expr(a).ty.as_ref().expect("typed"))).collect();
         let calls = HashMap::from([(CALLEE.to_string(), (params, self.value_layout(&ret)))]);
@@ -3198,9 +3243,17 @@ impl Compiler {
     /// dictionary: a default body reaches its siblings through it, and a
     /// bounded generic instance's method reads its context dictionaries from
     /// it (#551).
-    fn instance_call_takes_dict(&self, class: &str, method: &str, fqn: &str) -> bool {
+    pub(super) fn instance_call_takes_dict(&self, class: &str, method: &str, fqn: &str) -> bool {
+        // A per-type clone takes none: its `kinds` word follows its
+        // arguments (#2506).
+        self.trait_entry_shared(fqn) && self.instance_entry_takes_dict(class, method, fqn)
+    }
+
+    fn instance_entry_takes_dict(&self, class: &str, method: &str, fqn: &str) -> bool {
         Self::is_default_method_fqn(class, method, fqn)
             || self.instance_context_len(fqn) > 0
+            // It reads its `kinds` word there (#2506).
+            || self.instance_reads_kinds(fqn)
             || !self.trait_method_own_bounds(class, method).is_empty()
     }
 
@@ -3230,14 +3283,15 @@ impl Compiler {
             return None;
         }
         let class_def = self.checker.generics().typeclass(class)?;
-        Some((class_def.flattened_methods(self.checker.generics()).len(), n))
+        // After the methods and the `kinds` word.
+        Some((class_def.flattened_methods(self.checker.generics()).len() + 1, n))
     }
 
     /// Plan the trailing dictionary for a direct call to instance method
     /// `target = (class, method, fqn)` when it takes one. A bounded instance
     /// whose context cannot be built here is a compile error, not a
     /// dictionary-less call that fails at runtime.
-    fn plan_call_instance_dict(
+    pub(super) fn plan_call_instance_dict(
         &mut self,
         out: &mut Vec<DictStep>,
         target: (&str, &str, &str),
@@ -5088,6 +5142,7 @@ impl Compiler {
         source: Option<&str>,
     ) {
         let own_dicts = self.pending_own_dicts.take();
+        let own_kinds = self.pending_own_kinds.take();
         let Expression::Function {
             docs: _,
             name,
@@ -5147,13 +5202,20 @@ impl Compiler {
                 arity: dict_arity,
                 own: own_dicts,
                 context: c.pending_instance_ctx.take(),
-                kinds: false,
+                kinds: own_kinds.is_some(),
+                // A default body or a generic-head instance's method reads
+                // its `kinds` word out of its own dictionary (#2506).
+                kinds_dict: (source.is_none() && dict_arity > 0 && !c.compiling_mono_clone)
+                    .then(|| c.dict_kinds_layout(&qualified).map(|(index, n, _)| (index, n)))
+                    .flatten(),
             });
+            let prev_own_kinds = std::mem::replace(&mut c.hir_own_kinds, own_kinds.clone());
             if !c.try_lower_hir_function(&method.0) {
                 // Every body runs from its direct MIR, so one whose HIR does
                 // not lower (an instance clone included) is a compile error.
                 c.report_unlowered(&method.0, &qualified);
             }
+            c.hir_own_kinds = prev_own_kinds;
             c.bodies.advance();
         });
     }
@@ -6461,6 +6523,7 @@ impl Compiler {
                                     );
                                 self.note_inst_clone_compiled(&fqn);
                                 self.pending_own_dicts = self.own_dict_layout(name, method_name, 1);
+                                self.pending_own_kinds = self.own_kinds_vars(name, method_name).map(|_| (name.to_string(), method_name.to_string()));
                                 self.compile_function_output_with_name(method, fqn, 1, None);
                             } else {
                                 self.consume_function_signature_output(method);
@@ -6506,6 +6569,7 @@ impl Compiler {
                             let raw = self.note_raw_instance_method(class, method_name, &arg_tys, &fqn, is_coro);
                             self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
                             self.pending_own_dicts = self.own_dict_layout(class, method_name, 1 + self.instance_context_len(&fqn));
+                            self.pending_own_kinds = self.own_kinds_vars(class, method_name).map(|_| (class.to_string(), method_name.to_string()));
                             self.note_inst_clone_compiled(&fqn);
                             self.compile_function_output_with_name(method, fqn.clone(), usize::from(!raw), None);
                             self.emit_dict_adapter_thunk(class, method_name, &arg_tys, &fqn);
@@ -6523,6 +6587,7 @@ impl Compiler {
                                 self.pending_instance_ctx = self.instance_ctx_layout(class, &fqn);
                                 self.pending_own_dicts =
                                     self.own_dict_layout(class, method_name, 1 + self.instance_context_len(&fqn));
+                            self.pending_own_kinds = self.own_kinds_vars(class, method_name).map(|_| (class.to_string(), method_name.to_string()));
                                 self.note_inst_clone_compiled(&fqn);
                                 self.compile_function_output_with_name(
                                     body,
@@ -7355,7 +7420,7 @@ impl Compiler {
             .checker
             .generics()
             .typeclass(class)
-            .map_or(arity, |def| def.flattened_methods(self.checker.generics()).len());
+            .map_or(arity, |def| def.flattened_methods(self.checker.generics()).len()) + 1;
         self.synth_entry_dicts = Some((base, vars.len()));
         if class == "Eq" {
             self.synth_eq_dicts = vars.into_iter().enumerate().map(|(i, v)| (v, (i + 1, 0))).collect();
@@ -7385,7 +7450,8 @@ impl Compiler {
             return;
         }
         let int = crate::typechecking::ty::int();
-        let base = self.checker.generics().typeclass("Hash").map_or(1, |def| def.flattened_methods(self.checker.generics()).len());
+        // After the methods and the `kinds` word (#2506).
+        let base = self.checker.generics().typeclass("Hash").map_or(1, |def| def.flattened_methods(self.checker.generics()).len()) + 1;
         let dict_ty = crate::typechecking::ty::array(int.clone());
         let mut calls = HashMap::new();
         let mut targets = Vec::with_capacity(items.len());
@@ -7428,7 +7494,8 @@ impl Compiler {
             return;
         }
         let generics = self.checker.generics();
-        let base = generics.typeclass(class).map_or(1, |def| def.flattened_methods(generics).len());
+        // After the methods and the `kinds` word (#2506).
+        let base = generics.typeclass(class).map_or(1, |def| def.flattened_methods(generics).len()) + 1;
         let Some(ord) = generics.typeclass("Ord").map(|def| def.flattened_methods(generics)) else {
             return;
         };

@@ -818,6 +818,37 @@ impl Compiler {
 
     /// The user `into_iter` / `next` entries `for` loop `id` calls, as
     /// MIR calls them.
+    /// The dictionary a `for` loop passes to `into_iter` / `next` entry
+    /// `fqn` on a receiver of type `ty`, as a program: none unless the
+    /// entry takes one (#2506). `None` when it takes one this cannot build.
+    fn hir_iter_dicts(&mut self, fqn: &str, ty: &Ty) -> Option<Vec<crate::mir::HirDictOp>> {
+        let (class, method) = self.checker.generics().instances.iter().find_map(|inst| {
+            let (method, _) = inst.method_fqns.iter().find(|(_, f)| *f == fqn)?;
+            Some((inst.class.clone(), method.clone()))
+        })?;
+        if !self.instance_call_takes_dict(&class, &method, fqn) || self.raw_instance_methods.contains(fqn) {
+            return Some(Vec::new());
+        }
+        let mut steps = Vec::new();
+        let lookup = [ty.clone()];
+        if !self.hir_mir_once(|this| this.plan_call_instance_dict(&mut steps, (&class, &method, fqn), &lookup, 0..0)) {
+            return None;
+        }
+        self.hir_mir_dict_program(&steps)
+    }
+
+    /// The iterator `into_iter` entry `fqn` returns on an iterable of type
+    /// `iterable`: its declared result `declared`, its instance head's
+    /// variables bound from `iterable`.
+    fn hir_iter_ty_at(&self, fqn: &str, iterable: &Ty, declared: &Ty) -> Option<Ty> {
+        let head = self.checker.generics().instances.iter().find(|inst| inst.method_fqns.values().any(|f| f == fqn))?.args.clone();
+        let mut vars = HashMap::new();
+        for h in &head {
+            Self::bind_scheme_vars(h, iterable, &mut vars);
+        }
+        Some(apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(declared, &vars)))
+    }
+
     fn hir_mir_for_in(&mut self, hir: &HirBody, pat: &HirPat, iterable: HirId, kind: &ForInKind, t: &mut crate::mir::HirSite) {
         let ForInKind::Custom { into_iter_fqn, next_fqn, counted } = kind else {
             return;
@@ -875,7 +906,25 @@ impl Compiler {
                 let some = self.checker.tag_for(common::BUILTIN_OPTION_ENUM, "Some").unwrap_or(1);
                 crate::mir::HirIterNext::Boxed { some }
             };
-            t.iter_loop = Some(crate::mir::HirIterLoop { into_iter, next, iter_ty, shape });
+            // A generic-head instance's `into_iter` / `next` takes its
+            // dictionary (#2506): planned at the iterable's and the
+            // iterator's types.
+            let iterable_ty = hir.expr(iterable).ty.clone().map(|t| apply_ty_prune(self.checker.subst(), &t));
+            let iterator_ty = match (into_iter_fqn, &iterable_ty) {
+                (Some(f), Some(it)) => self.hir_iter_ty_at(f, it, &iter_ty),
+                (None, it) => it.clone(),
+                _ => None,
+            };
+            let (Some(into_iter_dicts), Some(next_dicts)) = (
+                match (into_iter_fqn, &iterable_ty) {
+                    (Some(f), Some(ty)) => self.hir_iter_dicts(f, ty),
+                    _ => Some(Vec::new()),
+                },
+                iterator_ty.as_ref().map_or(Some(Vec::new()), |ty| self.hir_iter_dicts(next_fqn, ty)),
+            ) else {
+                return;
+            };
+            t.iter_loop = Some(crate::mir::HirIterLoop { into_iter, next, iter_ty, shape, into_iter_dicts, next_dicts });
         }
     }
 
@@ -1025,6 +1074,7 @@ impl Compiler {
         for own in &call.own_dicts {
             match own {
                 super::HirOwnDict::Ground { lookup: l, .. } if l.len() == 1 => lookup.push(l[0].clone()),
+                super::HirOwnDict::Kinds(_) => {}
                 _ => return self.instance_clone(&call.key, inst_args),
             }
         }
@@ -1039,7 +1089,7 @@ impl Compiler {
     fn hir_mir_call(&mut self, hir: &HirBody, emit: &HirEmit, id: HirId, args: &[HirId], t: &mut crate::mir::HirSite) {
         self.hir_mir_call_site(hir, emit, id, args, t);
         if let Some(site) = t.call.as_mut()
-            && !site.dicts.iter().any(|d| matches!(d, crate::mir::HirDictOp::Kinds(_)))
+            && !matches!(site.dicts.last(), Some(crate::mir::HirDictOp::Kinds(_) | crate::mir::HirDictOp::KindsBit { .. }))
             && let Some(key) = self.kinds_key_at(site.target).map(str::to_string)
         {
             match self.hir_kinds_ops(hir, id, &key, args) {
@@ -1073,8 +1123,9 @@ impl Compiler {
                 steps
             });
             // A clone at the own bounds' types takes none of their
-            // dictionaries.
-            let own_dicts: &[super::HirOwnDict] = if key != call.key { &[] } else { &call.own_dicts };
+            // dictionaries, only the own `kinds` word (#2506).
+            let own_kept: Vec<super::HirOwnDict> = call.own_dicts.iter().filter(|d| matches!(d, super::HirOwnDict::Kinds(_))).cloned().collect();
+            let own_dicts: &[super::HirOwnDict] = if key != call.key || !self.trait_entry_shared(&key) { &own_kept } else { &call.own_dicts };
             let dicts = self.hir_mir_dict_program(&steps).and_then(|mut d| {
                 d.extend(self.hir_mir_own_dicts(own_dicts)?);
                 Some(d)
@@ -1179,11 +1230,12 @@ impl Compiler {
             }
             // A trait method's own bounds' dictionaries follow the
             // instance's (#1471); its clone at their types takes none.
+            let shared_key = key == call.key && (self.trait_entry_shared(&key) || !call.own_dicts.iter().any(|d| matches!(d, super::HirOwnDict::Kinds(_))));
+            let own_kept: Vec<super::HirOwnDict> = call.own_dicts.iter().filter(|d| shared_key || matches!(d, super::HirOwnDict::Kinds(_))).cloned().collect();
             if let Some(d) = dicts.as_mut()
-                && !call.own_dicts.is_empty()
-                && key == call.key
+                && !own_kept.is_empty()
             {
-                match self.hir_mir_own_dicts(&call.own_dicts) {
+                match self.hir_mir_own_dicts(&own_kept) {
                     Some(own) => d.extend(own),
                     None => dicts = None,
                 }
@@ -1621,8 +1673,10 @@ impl Compiler {
             return Some(Vec::new());
         }
         let mut steps = Vec::new();
+        let mut kinds = Vec::new();
         for dict in own {
             match dict {
+                super::HirOwnDict::Kinds(ops) => kinds.extend(ops.iter().cloned()),
                 super::HirOwnDict::Frame(slot) => {
                     if !self.hir_mir_dict_param(*slot) {
                         return None;
@@ -1637,7 +1691,9 @@ impl Compiler {
                 }
             }
         }
-        self.hir_mir_dict_program(&steps)
+        let mut ops = self.hir_mir_dict_program(&steps)?;
+        ops.extend(kinds);
+        Some(ops)
     }
 
     /// Whether frame slot `slot` is one of this body's dictionary
@@ -1674,6 +1730,8 @@ impl Compiler {
                 DictStep::Tuple(n) => Some(HirDictOp::Tuple(n)),
                 DictStep::Word => Some(HirDictOp::Word),
                 DictStep::Kinds(bits) => Some(HirDictOp::Kinds(bits)),
+                DictStep::KindsBit { from, to } => Some(HirDictOp::KindsBit { from, to }),
+                DictStep::KindsOwn => Some(HirDictOp::KindsOwn),
             })
             .collect()
     }
@@ -1723,7 +1781,12 @@ impl Compiler {
                     out.push(op);
                     stack.push((start, false));
                 }
-                HirDictOp::Null | HirDictOp::Load(_) | HirDictOp::Interned { .. } | HirDictOp::Kinds(_) | HirDictOp::KindsOwn => {
+                // A constant `kinds` word: a ground dictionary still is.
+                HirDictOp::Kinds(_) => {
+                    stack.push((out.len(), true));
+                    out.push(op);
+                }
+                HirDictOp::Null | HirDictOp::Load(_) | HirDictOp::Interned { .. } | HirDictOp::KindsOwn => {
                     stack.push((out.len(), false));
                     out.push(op);
                 }

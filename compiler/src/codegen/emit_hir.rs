@@ -116,6 +116,9 @@ pub(super) enum HirOwnDict {
     Frame(u32),
     /// A ground goal's instance dictionary.
     Ground { class: String, lookup: Vec<Ty> },
+    /// The method's own type parameters' `kinds` word, after its own
+    /// bounds' dictionaries (#2506).
+    Kinds(Vec<crate::mir::HirDictOp>),
 }
 
 /// A call of an inherent method's clone at ground type arguments
@@ -1383,10 +1386,10 @@ impl Compiler {
         let moded = self.hir_fold_key_eq_modes(hir);
         let hir = moded.as_ref().unwrap_or(hir);
         let mut frame = self.hir_function_frame(hir, dicts.unwrap_or_default());
-        if let Some(slot) = frame.kinds.as_ref().map(|k| k.slot)
+        if let Some(base) = frame.kinds.take()
             && let Some(key) = self.current_function_table_key.clone()
         {
-            frame.kinds = Some(self.kinds_frame(&key, hir, slot));
+            frame.kinds = Some(self.kinds_frame(&key, hir, base));
         }
         let spans = std::mem::take(&mut self.param_name_spans);
         for param in &frame.params {
@@ -1615,11 +1618,14 @@ impl Compiler {
         // A bounded instance method's dictionaries (#1479): its own after
         // the parameters, the context read out of it on entry. An open glue
         // body's `Eq` dictionaries (#1642): plain parameters after its own.
-        let dicts = match (self.synth_entry_dicts, self.synth_plain_dicts) {
+        let mut dicts = match (self.synth_entry_dicts, self.synth_plain_dicts) {
             (Some(context), _) => frame::FrameDicts { own: Some((0, 0)), context: Some(context), ..frame::FrameDicts::default() },
             (None, Some(n)) => frame::FrameDicts { arity: n, ..frame::FrameDicts::default() },
             (None, None) => frame::FrameDicts::default(),
         };
+        // A clone's thunk of a method with type parameters of its own takes
+        // their `kinds` word after its arguments and passes it on (#2506).
+        dicts.kinds = self.synth_kinds;
         let frame = frame::BodyFrame::function(hir, |i| pairs.get(skip + i).cloned().flatten(), dicts);
         let entry_words = (self.synth_entry_dicts.is_some() || self.synth_plain_dicts.is_some()).then_some(frame.entry_sp);
         let outer = self.hir_body_frame.replace(frame);
@@ -4728,7 +4734,11 @@ impl Compiler {
     fn hir_resolved_callee(&self, call: &HirCall) -> Option<crate::hir::ResolvedCall> {
         if !matches!(call.builtin, None | Some(HirBuiltin::Host(_)))
             || call.generic.is_some()
-            || call.own_dicts.iter().any(|d| matches!(d, HirOwnDict::Frame(_)))
+            || call.own_dicts.iter().any(|d| match d {
+                HirOwnDict::Frame(_) => true,
+                HirOwnDict::Kinds(ops) => ops.iter().any(|op| !matches!(op, crate::mir::HirDictOp::Kinds(_))),
+                HirOwnDict::Ground { .. } => false,
+            })
         {
             return None;
         }
@@ -7572,7 +7582,8 @@ impl Compiler {
         skip: usize,
     ) -> Result<Vec<HirOwnDict>, &'static str> {
         let bounds = self.trait_method_own_bounds(class, method);
-        if bounds.is_empty() {
+        let own_kinds = self.own_kinds_vars(class, method);
+        if bounds.is_empty() && own_kinds.is_none() {
             return Ok(Vec::new());
         }
         let scheme = self.checker.typeclass_method_scheme(class, method).ok_or("callee-trait")?;
@@ -7595,7 +7606,7 @@ impl Compiler {
             .unwrap_or_default()
             .into_iter()
             .skip(skip);
-        bounds
+        let mut own: Vec<HirOwnDict> = bounds
             .iter()
             .map(|c| match Self::resolve_constraint_lookup(c, &vars, &self.checker) {
                 Some(lookup) => {
@@ -7607,7 +7618,11 @@ impl Compiler {
                     self.frame_dict(i).map(HirOwnDict::Frame).ok_or("callee-trait")
                 }
             })
-            .collect()
+            .collect::<Result<_, _>>()?;
+        if let Some(own_vars) = own_kinds {
+            own.push(HirOwnDict::Kinds(self.own_kinds_ops(&own_vars, &vars)));
+        }
+        Ok(own)
     }
 
     /// A clone has no dictionaries to forward: its types are ground, so a

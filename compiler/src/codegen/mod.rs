@@ -661,6 +661,15 @@ pub struct Compiler {
     kinds_keys: HashSet<String>,
     /// [`Self::kinds_keys`] by their entry labels.
     kinds_labels: HashMap<crate::bodies::Label, String>,
+    /// The trait method (class, method) whose body is compiled next, when
+    /// it has type parameters of its own: its entry takes their `kinds`
+    /// word (#2506).
+    pending_own_kinds: Option<(String, String)>,
+    /// [`Self::pending_own_kinds`] of the body being lowered.
+    hir_own_kinds: Option<(String, String)>,
+    /// The compiler-made body emitted next takes a `kinds` word after its
+    /// parameters (a clone's thunk, #2506).
+    synth_kinds: bool,
     /// Functions and methods of the modules built so far that are cold:
     /// `#[cold]`, or never returning ([`crate::hir::cold`]), by table key.
     cold_fns: HashSet<String>,
@@ -852,6 +861,9 @@ impl Default for Compiler {
             hir_fn_names: HashMap::new(),
             kinds_keys: HashSet::new(),
             kinds_labels: HashMap::new(),
+            pending_own_kinds: None,
+            hir_own_kinds: None,
+            synth_kinds: false,
             cold_fns: HashSet::new(),
             cold_labels: HashSet::new(),
             inline_refused: HashSet::new(),
@@ -883,6 +895,7 @@ fn extract_enum_name(ty: &crate::typechecking::ty::Ty) -> Option<String> {
 mod compiler;
 pub(crate) use compiler::frame::BodyFrame;
 pub(crate) use compiler::kinds::sentinel as kinds_sentinel;
+pub(crate) use compiler::kinds::DICT_BITS as KINDS_DICT_BITS;
 mod inline_cost;
 
 /// One `defer` thunk of the function being compiled.

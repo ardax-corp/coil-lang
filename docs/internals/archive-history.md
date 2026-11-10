@@ -56,6 +56,11 @@ major.
   words and a `PolyFn` value's captured words pass it. The calling
   convention changed, not the encoding: no new op, MIR section `FORMAT`
   stays 16.
+- A trait dictionary holds a `kinds` word after its methods:
+  `(methods.., kinds, context.., superclass dictionaries..)` (#2506). A
+  trait method with type parameters of its own takes their `kinds` word
+  after its own bounds' dictionaries. Layout and convention only: `FORMAT`
+  stays 16.
 
 ## Major 7
 
