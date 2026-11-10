@@ -133,15 +133,17 @@ fn settle_operators(
 }
 
 /// `Owner::name(..)` that is not an enum constructor is a call of
-/// `Owner::name`, and a bare `Owner::name` that is not one reads or writes
-/// a class static (#2407). `is_variant` answers for an owner and a name.
-fn settle_constructs(facts: &mut HashMap<String, FnFacts>, is_variant: &dyn Fn(&str, &str) -> bool) {
+/// `Owner::name`, and so is `Owner::name()` when `name` is a static method
+/// (`is_call`; the parser reads it as the bare `Owner::name`). Any other
+/// bare `Owner::name` that is no constructor reads or writes a class static
+/// (#2407). `is_variant` answers for an owner and a name.
+fn settle_constructs(facts: &mut HashMap<String, FnFacts>, is_variant: &dyn Fn(&str, &str) -> bool, is_call: &dyn Fn(&str, &str) -> bool) {
     for f in facts.values_mut() {
         for (owner, name, bare) in std::mem::take(&mut f.constructs) {
             if is_variant(&owner, &name) {
                 continue;
             }
-            if bare {
+            if bare && !is_call(&owner, &name) {
                 f.local.insert(EffectFlags::HOST | EffectFlags::HEAP_MUT);
             } else {
                 f.callees.insert(format!("{owner}::{name}"));
@@ -152,7 +154,7 @@ fn settle_constructs(facts: &mut HashMap<String, FnFacts>, is_variant: &dyn Fn(&
 
 /// Every name `ast` binds, at any depth: params, `let`, `const`, for-in and
 /// match / `if let` pattern bindings.
-fn collect_binders(ast: &Output<'_>, cases: &BareCases, out: &mut HashSet<String>) {
+pub(super) fn collect_binders(ast: &Output<'_>, cases: &BareCases, out: &mut HashSet<String>) {
     each_binder(ast, cases, &mut |n| {
         out.insert(n.to_string());
     });
@@ -934,7 +936,9 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
             )
         };
         settle_operators(&mut facts, &operand_runs, &for_in_runs);
-        settle_constructs(&mut facts, &|owner, name| checker.tag_for(owner, name).is_some());
+        settle_constructs(&mut facts, &|owner, name| checker.tag_for(owner, name).is_some(), &|owner, name| {
+            super::index_facts::static_method_call(checker, owner, name)
+        });
         effect_closure_with(&facts, &resolve)
     };
     checker.length_stability = length_stability(

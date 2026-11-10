@@ -11,7 +11,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{BinOp, Callee, HirBody, HirFlags, HirId, HirKind, HirPat, IndexKind, Lit, LocalId, MakeKind};
+use super::{BinOp, Callee, HirBody, HirFlags, HirId, HirKind, HirPat, IndexKind, Lit, LocalId, MakeKind, UnOp};
+use crate::effects::operator_runs_user_code;
+use crate::typechecking::infer::ForInKind;
 use crate::typechecking::ty::{self, Ty};
 
 /// `body` with proven index sites flagged, or `None` when none are new.
@@ -353,7 +355,22 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
             }
             HirKind::LetPat { pat, .. } => pat.for_each_bind(&mut |l| { w.locals.insert(l); }),
             HirKind::Match { arms, .. } => arms.iter().for_each(|a| a.pat.for_each_bind(&mut |l| { w.locals.insert(l); })),
-            HirKind::ForIn { pat, .. } => pat.for_each_bind(&mut |l| { w.locals.insert(l); }),
+            // Anything but an array, a tuple or a range runs an iterator's
+            // `next` or resumes a generator: user code (#2438).
+            HirKind::ForIn { pat, kind, .. } => {
+                pat.for_each_bind(&mut |l| { w.locals.insert(l); });
+                w.steady &= matches!(kind, Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. }));
+            }
+            // An operator on anything but built-in operands runs a trait
+            // impl, as a call would.
+            HirKind::Bin { op: BinOp::Overloaded(_), lhs, rhs } => {
+                let user = |operand: HirId| operator_runs_user_code(body.expr(operand).ty.as_ref());
+                w.steady &= !user(*lhs) && !user(*rhs);
+            }
+            HirKind::Un { op: UnOp::Neg | UnOp::BitNot, operand } => {
+                w.steady &= !operator_runs_user_code(body.expr(*operand).ty.as_ref());
+            }
+            HirKind::Unsupported(_) => w.steady = false,
             HirKind::Assign { place, .. } => {
                 if let HirKind::Local(l) = body.expr(*place).kind {
                     w.locals.insert(l);
