@@ -1008,6 +1008,7 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         // A closure literal is never one, though its type may keep a
         // variable nothing pinned (`fn () => Ok(2)`'s error type, #1520):
         // it is `MakeFn`'s plain closure word.
+        LocalKind::Let if let Some(source) = let_init_local(body, local) => polyfn_callee(body, checker, source),
         LocalKind::Let => {
             poly_fun(t) && !let_init_is_lambda(body, local) && !let_init_is_element(body, local) && !let_init_is_field(body, local)
                 || matches!(strip_readonly(t), Ty::Fun(..))
@@ -1032,6 +1033,15 @@ fn let_init_is_lambda(body: &HirBody, local: LocalId) -> bool {
     body.exprs.iter().any(|e| {
         matches!(&e.kind, HirKind::Let { local: l, init: Some(init) }
             if *l == local && matches!(body.expr(*init).kind, HirKind::Lambda { .. }))
+    })
+}
+
+/// The local a `let` copies (`let g = f`): the same word, so a `PolyFn`
+/// exactly when that local is one (#2555).
+fn let_init_local(body: &HirBody, local: LocalId) -> Option<HirId> {
+    body.exprs.iter().find_map(|e| match &e.kind {
+        HirKind::Let { local: l, init: Some(init) } if *l == local && matches!(body.expr(*init).kind, HirKind::Local(_)) => Some(*init),
+        _ => None,
     })
 }
 
@@ -1150,7 +1160,10 @@ fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Ve
                         // the closure word stored there (#2153).
                         || assigned.is_empty() && (let_init_is_element(body, local) || for_binds_element(body, local))
                         // Read from a nested open enum's field or payload (#2493, #2509).
-                        || assigned.is_empty() && binds_from_nested(body, checker, local),
+                        || assigned.is_empty() && binds_from_nested(body, checker, local)
+                        // A copy of another function local holds its word,
+                        // which that local's own check below admits (#2555).
+                        || info.kind == LocalKind::Let && assigned.is_empty() && let_init_local(body, local).is_some(),
                 )
         })
     {
