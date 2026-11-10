@@ -2,7 +2,6 @@
 // open `Option` (`let g = f;` with `f: T -> Option<T>`) is the closure word
 // `f` is, so the call through it returns the open enum's object as `f(x)`
 // does (coil-lang#2555).
-// @xfail clone-budget-0 #2579 E0801 (callee-generic): a shared generic with a function parameter and an `Option<T>` result
 use tests::assert;
 
 class C {

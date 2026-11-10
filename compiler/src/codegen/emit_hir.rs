@@ -7320,10 +7320,47 @@ impl Compiler {
         if receivers > 0 {
             return Ok(None);
         }
-        if params.iter().any(|p| !self.hir_word_holder(p, boxed)) {
+        if params.iter().any(|p| !self.hir_param_words(p, boxed)) {
             return Err("callee-generic");
         }
         self.hir_items_rebuild(cur, vars, boxed, true)
+    }
+
+    /// Whether parameter type `ty` gives a shared body the variables of
+    /// `boxed` as the ground types' words ([`Self::hir_word_holder`]), also
+    /// through a function, or an array, `Vec` or tuple of functions, whose
+    /// parameters and result are such words (#2579): a function argument's
+    /// adapter passes and returns the ground words, boxing a niche result
+    /// at its top (`T -> Option<T>`, `HirFnAdapt`); a function below the
+    /// top whose words would differ makes the signature clone-only
+    /// ([`Self::fn_sig_split`]), so a shared call never meets it.
+    fn hir_param_words(&self, ty: &Ty, boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> bool {
+        use crate::typechecking::ty::{builtin_enum_app, strip_readonly, vec_element_ty};
+        let part = |t: &Ty| {
+            self.hir_word_holder(t, boxed)
+                || builtin_enum_app(t).is_some_and(|app| match strip_readonly(&app) {
+                    Ty::App(_, args) => args.iter().all(|a| self.hir_word_holder(a, boxed)),
+                    _ => false,
+                })
+        };
+        match strip_readonly(ty) {
+            Ty::Fun(..) => {
+                let mut cur = strip_readonly(ty);
+                while let Ty::Fun(param, ret) = cur {
+                    if !part(param) {
+                        return false;
+                    }
+                    cur = strip_readonly(ret);
+                }
+                part(cur)
+            }
+            Ty::Tuple(items) => items.iter().all(|t| self.hir_param_words(t, boxed)),
+            Ty::Array { element, .. } => self.hir_param_words(element, boxed),
+            t => match vec_element_ty(t) {
+                Some(element) => self.hir_param_words(element, boxed),
+                None => self.hir_word_holder(t, boxed),
+            },
+        }
     }
 
     /// Whether `call` of generic `lookup` cannot take the shared body: a
