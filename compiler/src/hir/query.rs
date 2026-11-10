@@ -462,11 +462,34 @@ pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ag
     if linear_algebra(checker, body, id) {
         return None;
     }
-    e.node
+    let mut info = e
+        .node
         .and_then(|n| checker.aggregate_arith_at(n))
         .or_else(|| checker.aggregate_arith_for_span(start, end))
         .cloned()
-        .or_else(|| recover_aggregate(checker, body, id))
+        .or_else(|| recover_aggregate(checker, body, id))?;
+    // A mono clone keeps its generic body's nodes, so the checker's plan has
+    // the element of the signature (`T`): the clone's types name the word.
+    if let Some(elem) = aggregate_elem(checker, body, id) {
+        info.kind.elem_is_float = crate::typechecking::aggregate_arith::elem_is_float(&elem);
+    }
+    Some(info)
+}
+
+/// The ground element type of the element-wise op at `id`: of an operand,
+/// else of the result. `None` while it is an open type parameter.
+fn aggregate_elem(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ty> {
+    use crate::typechecking::aggregate_arith::homogeneous_aggregate_elem;
+    let operands = match body.expr(id).kind {
+        HirKind::Bin { lhs, rhs, .. } => vec![lhs, rhs, id],
+        HirKind::Un { operand, .. } => vec![operand, id],
+        _ => return None,
+    };
+    operands
+        .into_iter()
+        .filter_map(|x| body.expr(x).ty.as_ref())
+        .filter_map(|t| homogeneous_aggregate_elem(strip_readonly(&apply_ty_prune(checker.subst(), t))))
+        .find(|elem| matches!(elem, Ty::Con(_)))
 }
 
 /// The element-wise shape from the operand types where the checker kept

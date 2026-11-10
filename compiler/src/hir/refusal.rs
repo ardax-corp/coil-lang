@@ -307,6 +307,15 @@ impl Walk<'_> {
         }
     }
 
+    /// An element or broadcast scalar of an element-wise op: a primitive
+    /// word, or a type parameter (its clone names the word).
+    fn elem(&self, id: HirId) -> Check {
+        match self.ty(id).map(strip_readonly) {
+            Some(Ty::Var(_)) => self.word(id),
+            _ => self.scalar(id),
+        }
+    }
+
     /// A value a local, argument or payload can hold.
     /// Whether `base` names a frame-slot stack array.
     fn stack_base(&self, base: HirId) -> bool {
@@ -372,7 +381,7 @@ impl Walk<'_> {
                     ScalarSide::Left => (rhs, lhs),
                 };
                 self.aggregate_src(vec)?;
-                self.scalar(scalar)?;
+                self.elem(scalar)?;
                 self.value(scalar)?;
                 for i in 0..n {
                     self.aggregate_elem(vec, i)?;
@@ -405,7 +414,7 @@ impl Walk<'_> {
         match aggregate_src(self.body, &self.stack, src) {
             Some(AggregateSrc::Items(items)) => {
                 let &item = items.get(i).ok_or("operator-elementwise")?;
-                self.scalar(item)?;
+                self.elem(item)?;
                 self.value(item)
             }
             Some(AggregateSrc::Slots(local)) if i < self.stack[&local.0] => Ok(()),
