@@ -213,6 +213,22 @@ pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
             _ => {}
         }
     }
+    // A dynamic-length (`Vec`) element-wise operand is read by the loop
+    // over the array object (`aggregate_dynamic`), never from slots
+    // (#2584): its local stays the array object.
+    let dynamic = |id: HirId| {
+        body.expr(id).ty.as_ref().is_some_and(|t| match crate::typechecking::ty::strip_readonly(&apply_ty_prune(checker.subst(), t)) {
+            Ty::Array { length, .. } => !matches!(length, crate::typechecking::ty::ArrayLength::Static(_)),
+            t => crate::typechecking::ty::vec_element_ty(t).is_some(),
+        })
+    };
+    for &id in slot_reads.keys() {
+        if let HirKind::Local(local) = body.expr(HirId(id)).kind
+            && dynamic(HirId(id))
+        {
+            refused.insert(local.0);
+        }
+    }
     // Reads of each local that are not an index base or element-wise operand.
     let mut reads: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut slot_uses: HashMap<u32, Vec<(u32, usize)>> = HashMap::new();
