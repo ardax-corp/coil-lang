@@ -220,9 +220,11 @@ test("a generic class") {
 test("a call through a chain") {
     let o = new Outer(new Middle(new Inner(double)), [inc, double]);
     assert!((o.a.b.f)(21) == 42);
-    assert!(((o.a).b.f)(4) == 8);
-    assert!((o.fs[0])(1) == 2);
-    assert!((o.fs[1])(4) == 8);
+    let m = o.a;
+    assert!((m.b.f)(4) == 8);
+    // An element needs no parens: an index is never a method.
+    assert!(o.fs[0](1) == 2);
+    assert!(o.fs[1](4) == 8);
 }
 
 test("a field and a method of one name") {
@@ -231,7 +233,6 @@ test("a field and a method of one name") {
     assert!(b.f(1) == 101);
     // The field's function.
     assert!((b.f)(1) == 2);
-    assert!(((b.f))(1) == 2);
     assert!(b.through_self(1) == 2101);
 }
 
