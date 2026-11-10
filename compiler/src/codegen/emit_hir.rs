@@ -3394,9 +3394,10 @@ impl Compiler {
                 }
                 next += 1;
             }
-            // A generic pack's type is its items' one ground type (`P` and
-            // `readonly P` are one, as for the mono key, #1728); a tuple
-            // pack's is its items' types in order.
+            // A generic pack's type is its items' one type (`P` and
+            // `readonly P` are one, as for the mono key, #1728), a type
+            // parameter of the caller's in a shared body (#2510); a tuple
+            // pack's is its items' ground types in order.
             let rest_ty = match rest_ty {
                 _ if whole_rest.is_some() => None,
                 Some(_) if tuple_rest => {
@@ -3420,7 +3421,7 @@ impl Compiler {
                         rest.iter().all(|&r| key(r).as_ref() == Some(&k))
                     };
                     match (declared, item) {
-                        (Ty::App(head, params), Some(item)) if params.len() == 1 && same(&item) && crate::layout::ty_is_closed(&item) => {
+                        (Ty::App(head, params), Some(item)) if params.len() == 1 && same(&item) => {
                             Some(Ty::App(head, vec![item]))
                         }
                         _ => return Err("call-argument"),
@@ -6691,8 +6692,9 @@ impl Compiler {
             // A rest parameter takes its pack as one more argument
             // ([`Self::hir_call_shapes`]).
             // A method's pack too, a `Vec` or tuple as any other (#1729,
-            // #1734).
-            Some(&(fixed, true)) if fixed as usize + 1 == explicit && (self_layout.is_some() || !open) => {}
+            // #1734). A shared generic body takes a `T... xs` pack as the
+            // one `Vec<T>` word a clone takes (#2510).
+            Some(&(fixed, true)) if fixed as usize + 1 == explicit => {}
             // Declared later in the file: its entry is reserved but its
             // arity not yet recorded, so read it from the signature. Its
             // two-word return kind comes from the
@@ -6700,7 +6702,7 @@ impl Compiler {
             // A rest pack is one more argument, as above.
             None if key == lookup
                 && self.hir_entry_known(&key)
-                && (!self.checker.fn_has_rest(&lookup) || (self_layout.is_none() && !open))
+                && (!self.checker.fn_has_rest(&lookup) || self_layout.is_none())
                 && self
                     .checker
                     .fn_param_names(&lookup)

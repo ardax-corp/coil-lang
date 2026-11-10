@@ -1,6 +1,5 @@
 // A generic rest pack takes `P` and `readonly P` items together, and a
 // `Vec` spread is the whole pack (#1728).
-// @xfail clone-budget-0 #2510 E0801 (callee-arity): a generic rest parameter has no shared-body path
 use tests::assert;
 
 trait Reset<R> {
@@ -62,4 +61,13 @@ test("a Vec spread is a generic rest pack") {
     let w: Vec<int> = [1, 2, 3];
     assert!(count(...w) == 3);
     assert!(first("a", ...w) == "a");
+}
+
+fn twice<T>(T a, T b) -> int {
+    return count(a, b, a);
+}
+
+test("a generic body packs its own values") {
+    assert!(twice(1, 2) == 3);
+    assert!(twice(new P(1), new P(2)) == 3);
 }
