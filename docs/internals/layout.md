@@ -166,8 +166,9 @@ and the body cannot read the ground layout without being told each
 type's. So such a call does not take the shared body. A function below the top
 is the same case (#2488): an element of `Vec<unit -> Option<T>>` returns
 the niche word from a ground closure, and only a function that is itself
-the argument gets an adapter. The rule reads the signature alone
-(`layout::nested_open_enum`), for every ground type:
+the argument gets an adapter. The rule reads the signature (and the
+declarations of the types it names, below), `layout::nested_open_enum`,
+for every ground type:
 
 - a free function whose signature has that shape gets a clone for every
   ground call, past the clone budget, as a keyed or hot function does
@@ -178,14 +179,42 @@ the argument gets an adapter. The rule reads the signature alone
   entry does not count;
 - a call that would still reach the shared body, with the nested enum a
   niche word at the call's types, is refused (`hir_shared_split`, E0801
-  `callee-generic`). That is a method with type parameters of its own on
-  a plain class, which has no clone, and a call through a function value
-  of such a generic.
+  `callee-generic`). A method with type parameters of its own on a plain
+  class takes its clone where its signature has the shape (#2447), and a
+  call through a `let g = wrap;` value takes `wrap`'s clone, its type
+  arguments bound from `wrap`'s signature.
 
-Not covered: a generic class whose own field has that shape (`xs:
-Vec<Option<T>>`), which its shared methods read as enum objects whoever
-filled it (#2446). The two refused calls want a clone of their own
-(#2447).
+**Nominal types** (#2446, #2493, #2509). A user class or enum whose
+declaration holds such an enum is one itself, wherever it is named:
+`nested_open_enum` reads a class's fields and an enum's payloads with
+the type's parameters bound to its arguments, transitively and through
+recursive types. A class's field is a top (it is stored in its declared
+layout, `hir_field_rep`) unless it is a function; an enum's payload is
+below the enum's top. So `W<T>` with `xs: Vec<Option<T>>`, `E<T>` with a
+payload `Option<T>` or `Vec<Option<T>>`, `Deep<T>` with a field `find:
+fn(T) -> Option<T>`, `P<T>` with a payload of that type, and a class
+holding any of them are all nested open enums. Their methods (`self` is
+one), every generic over them and every dictionary for them at a niche
+type are clone-only, past the budget too (`nested_head` in
+`plan_instance_dict_steps`), and a call that still reaches a shared body
+is refused as above. Since a shared body then sees only instances made
+where the parameters are open, a function such a type holds is a closure
+word there that returns the open enum's object: a field's
+(`query::field_fun`, `binds_from_nested`) and a payload's
+(`classify::generic_enum_field`).
+
+The walk reads a class of the module being compiled, and every user enum
+(`nested_open_look`). Another module's class is not read: its methods
+whose bodies hold an enum over its parameters are thunks to its shared
+bodies there (`layout_safe`), so the shared bodies make and read all of
+its nested enums. That fails where another module fills such a field
+itself (a `pub` one, #2547). In coil-stdlib only `collections::deque::VecDeque`
+(`buf: Vec<Option<T>>`) has the shape; in the prelude, `task::Channel`.
+
+Still refused (E0801): an enum payload or field `Option<fn(T) -> T>` (a
+niche word at a ground instance, an enum object in a shared body), and a
+function that holds the parameter below its top in another way
+(`fn(T) -> (T, T)`, `fn(Vec<T>) -> T`, #2493).
 
 ### Residue boxes (E0808)
 
