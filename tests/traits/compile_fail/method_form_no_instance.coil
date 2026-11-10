@@ -1,0 +1,18 @@
+// @expected E0101 — two traits declare `level` and `Plain` has an instance of
+// neither: the method is not found (#2481).
+trait Gauge<T> {
+    fn level(T x, int v) -> int {}
+}
+
+trait Other<T> {
+    fn level(T x, int v) -> int {}
+}
+
+class Plain {
+    pub n: int,
+}
+
+fn main() {
+    let p = new Plain(0);
+    let n = p.level(1);
+}

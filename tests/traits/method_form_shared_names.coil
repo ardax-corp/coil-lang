@@ -1,0 +1,269 @@
+// `x.m()` where several traits declare a method `m`: the one trait with an
+// instance for the receiver's type answers (#2481). A builtin trait's method
+// of the same name (`io`'s `Read::read` / `Write::write`, the prelude's
+// `Length::len`) is such a trait too, as is another user trait's. Both call
+// spellings reach the same impl.
+use tests::assert;
+
+trait Gauge<T> {
+    fn read(T x, int v) -> int {}
+    fn write(T x, int v) -> int {}
+    fn len(T x) -> int {}
+    fn level(T x, int v) -> int {}
+}
+
+trait Other<T> {
+    fn level(T x, int v) -> int {}
+    fn name(T x) -> string {}
+}
+
+trait Third<T> {
+    fn level(T x, int v) -> int {}
+}
+
+class Here {
+    pub n: int,
+}
+
+impl Gauge for Here {
+    pub fn read(Here x, int v) -> int {
+        return x.n + v;
+    }
+
+    pub fn write(Here x, int v) -> int {
+        x.n = x.n + v;
+        return x.n;
+    }
+
+    pub fn len(Here x) -> int {
+        return x.n * 10;
+    }
+
+    pub fn level(Here x, int v) -> int {
+        return x.n * v;
+    }
+}
+
+class There {
+    pub n: int,
+}
+
+impl Other for There {
+    pub fn level(There x, int v) -> int {
+        return x.n - v;
+    }
+
+    pub fn name(There x) -> string {
+        return "there";
+    }
+}
+
+// Both traits: only `Trait::level(x, v)` says which.
+class Both {
+    pub n: int,
+}
+
+impl Gauge for Both {
+    pub fn read(Both x, int v) -> int {
+        return v;
+    }
+
+    pub fn write(Both x, int v) -> int {
+        return v;
+    }
+
+    pub fn len(Both x) -> int {
+        return 2;
+    }
+
+    pub fn level(Both x, int v) -> int {
+        return 1000 + v;
+    }
+}
+
+impl Other for Both {
+    pub fn level(Both x, int v) -> int {
+        return 2000 + v;
+    }
+
+    pub fn name(Both x) -> string {
+        return "both";
+    }
+}
+
+class Shelf<T> {
+    pub item: T,
+    pub n: int,
+}
+
+impl Gauge for Shelf<T> {
+    pub fn read(Shelf<T> x, int v) -> int {
+        return x.n + v + 1;
+    }
+
+    pub fn write(Shelf<T> x, int v) -> int {
+        x.n = v;
+        return x.n;
+    }
+
+    pub fn len(Shelf<T> x) -> int {
+        return x.n;
+    }
+
+    pub fn level(Shelf<T> x, int v) -> int {
+        return x.n + 100 * v;
+    }
+}
+
+// `Other` for one instance of the generic class only.
+impl Third for Shelf<bool> {
+    pub fn level(Shelf<bool> x, int v) -> int {
+        return 0 - v;
+    }
+}
+
+impl Gauge for int {
+    pub fn read(int x, int v) -> int {
+        return x + v;
+    }
+
+    pub fn write(int x, int v) -> int {
+        return x - v;
+    }
+
+    pub fn len(int x) -> int {
+        return x;
+    }
+
+    pub fn level(int x, int v) -> int {
+        return x * v;
+    }
+}
+
+impl Other for string {
+    pub fn level(string x, int v) -> int {
+        return x.len() + v;
+    }
+
+    pub fn name(string x) -> string {
+        return x;
+    }
+}
+
+enum Dial {
+    Off,
+    At(int),
+}
+
+impl Other for Dial {
+    pub fn level(Dial x, int v) -> int {
+        return match x {
+            Dial::Off => 0,
+            Dial::At(n) => n + v,
+        };
+    }
+
+    pub fn name(Dial x) -> string {
+        return "dial";
+    }
+}
+
+// An inherent method of the name wins over every trait's.
+class Own {
+    pub n: int,
+}
+
+impl Own {
+    pub fn level(int v) -> int {
+        return 7;
+    }
+}
+
+impl Gauge for Own {
+    pub fn read(Own x, int v) -> int {
+        return 1;
+    }
+
+    pub fn write(Own x, int v) -> int {
+        return 2;
+    }
+
+    pub fn len(Own x) -> int {
+        return 3;
+    }
+
+    pub fn level(Own x, int v) -> int {
+        return 8;
+    }
+}
+
+fn through<T: Gauge>(T x) -> int {
+    return x.level(2) + x.read(1);
+}
+
+fn other_through<T: Other>(T x) -> int {
+    return x.level(2);
+}
+
+test("a user trait's read, write and len in the method spelling") {
+    let h = new Here(4);
+    assert!(Gauge::read(h, 2) == 6);
+    assert!(h.read(2) == 6);
+    assert!(h.write(3) == 7);
+    assert!(Gauge::write(h, 1) == 8);
+    assert!(h.len() == 80);
+    assert!(Gauge::len(h) == 80);
+}
+
+test("two user traits share a name: the receiver's instance says which") {
+    let h = new Here(4);
+    let t = new There(10);
+    assert!(h.level(3) == 12);
+    assert!(Gauge::level(h, 3) == 12);
+    assert!(t.level(3) == 7);
+    assert!(Other::level(t, 3) == 7);
+    assert!(t.name() == "there");
+}
+
+test("a generic class, a primitive and an enum as the receiver") {
+    let s = new Shelf("a", 3);
+    assert!(s.level(2) == 203);
+    assert!(s.read(1) == 5);
+    assert!(s.len() == 3);
+    assert!(s.write(9) == 9);
+    assert!(5.level(4) == 20);
+    assert!(5.read(1) == 6);
+    assert!("abc".level(4) == 7);
+    assert!(Dial::At(2).level(3) == 5);
+    assert!(Dial::Off.level(3) == 0);
+}
+
+test("a class with both instances takes the qualified spelling") {
+    let b = new Both(0);
+    assert!(Gauge::level(b, 1) == 1001);
+    assert!(Other::level(b, 1) == 2001);
+    assert!(b.read(5) == 5);
+    assert!(b.name() == "both");
+    let s = new Shelf(true, 3);
+    assert!(Gauge::level(s, 2) == 203);
+    assert!(Third::level(s, 2) == 0 - 2);
+}
+
+test("an inherent method still wins, and a bound still dispatches") {
+    let o = new Own(0);
+    assert!(o.level(1) == 7);
+    assert!(Gauge::level(o, 1) == 8);
+    assert!(o.read(1) == 1);
+    assert!(through(new Here(4)) == 13);
+    assert!(through(new Shelf(1.5, 3)) == 208);
+    assert!(other_through(new There(10)) == 8);
+    assert!(other_through(new Both(0)) == 2002);
+}
+
+test("the builtin traits of those names are not disturbed") {
+    let v = [1, 2, 3];
+    assert!(v.len() == 3);
+    assert!("four".len() == 4);
+    let t = (1, 2);
+    assert!(t.len() == 2);
+}
