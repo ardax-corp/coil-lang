@@ -5792,6 +5792,33 @@ impl Compiler {
     /// instance (`call_dicts_at`), checked before inherent methods.
     /// The dictionaries a generic body forwards (`forwards`) reach only a
     /// method with bounds of its own (#1471).
+    /// A structural instance with open items (`Show<Option<T>>`, #2554)
+    /// that a call took, in a per-type clone where its types are ground:
+    /// the types and the ground structural instance's `method`, which the
+    /// call takes instead, as ground code does. The open one takes the
+    /// value as a shared body holds it.
+    fn hir_clone_ground_structural(&self, class: &str, inst_args: &[Ty], fqn: &str, method: &str) -> Option<(Vec<Ty>, String)> {
+        if !self.checker.generics().is_structural_open_fqn(fqn) {
+            return None;
+        }
+        let vars = self.mono_var_tys.last()?;
+        let concrete: Vec<Ty> = inst_args
+            .iter()
+            .map(|a| Self::show_lookup_ty_for_instance(&Self::apply_ty_var_map(&apply_ty_prune(self.checker.subst(), a), vars)))
+            .collect();
+        if concrete.iter().any(Ty::has_free_var) {
+            return None;
+        }
+        let ground = self
+            .checker
+            .generics()
+            .find_instance(class, &concrete)
+            .filter(|inst| inst.context.is_empty())
+            .and_then(|inst| inst.method_fqns.get(method).cloned())
+            .filter(|f| self.functions.contains_key(f) || self.fn_entry_labels.contains_key(f))?;
+        Some((concrete, ground))
+    }
+
     fn resolve_hir_instance_method(
         &self,
         hir: &HirBody,
@@ -5819,6 +5846,9 @@ impl Compiler {
         };
         if forwards && self.trait_method_own_bounds(&class, method).is_empty() {
             return Ok(None);
+        }
+        if let Some((concrete, ground)) = self.hir_clone_ground_structural(&class, &inst_args, &fqn, method) {
+            return self.hir_ground_direct(hir, call, class, concrete, ground, method).map(Some);
         }
         let own_dicts = self.hir_own_dicts(hir, call, &class, method, args, 0)?;
         // A pair return comes back as its two words (#1938). (An open goal
@@ -6345,6 +6375,9 @@ impl Compiler {
         // closed arguments too (`Pick::pick(a, b)`, `a: Option<int>`): the
         // method call's plan reaches the instance's clone or, where there
         // is none, its shared entry with a pair boxed (#2483).
+        if let Some((concrete, ground)) = self.hir_clone_ground_structural(&class, &inst_args, &fqn, method) {
+            return self.hir_ground_direct(hir, call, class, concrete, ground, method).map(Some);
+        }
         let generic_head = || {
             self.checker
                 .generics()
@@ -6352,7 +6385,7 @@ impl Compiler {
                 .is_some_and(|def| def.method_fqns.get(method) == Some(&fqn))
         };
         if (inst_args.iter().any(Ty::has_var) || generic_head())
-            && !self.checker.generics().structural_tuples().any(|(_, _, f)| f == fqn)
+            && !self.checker.generics().is_structural_open_fqn(&fqn)
             && let HirKind::Call { args, .. } = &node.kind
             && !args.is_empty()
         {
@@ -6488,12 +6521,12 @@ impl Compiler {
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return Err("callee");
         };
-        // A tuple with an open item (#1479): its arity-wide instance, called
-        // as `t.show()` is, the receiver boxed and the dictionary built from
-        // the frame's.
+        // A shape with an open item (#1479, #2554): its structural
+        // instance, called as `t.show()` is, the receiver boxed and the
+        // dictionary built from the frame's.
         if inst_args.iter().any(Ty::has_var)
             && let [recv] = args.as_slice()
-            && self.checker.generics().structural_tuples().any(|(_, _, f)| f == fqn)
+            && self.checker.generics().is_structural_open_fqn(&fqn)
         {
             let recv_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, *recv).ok_or("method-receiver")?);
             let layout = |id: HirId| Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |t| self.value_layout(t));
@@ -8278,11 +8311,13 @@ impl Compiler {
         Some((dict, hint.method_slot as u32))
     }
 
-    /// An arity-wide tuple thunk's argument (#1479): a tuple whose open
-    /// items each have the thunk's dictionary.
+    /// An open structural `Show` thunk's argument (#1479, #2554): a tuple
+    /// whose open items each have the thunk's dictionary, or one such item
+    /// (an `Option`'s payload, an array's element).
     fn synth_shows_items(&self, ty: &Ty) -> bool {
-        matches!(ty, Ty::Tuple(items) if !self.synth_show_dicts.is_empty()
-            && items.iter().all(|t| crate::layout::ty_is_closed(t) || matches!(t, Ty::Var(v) if self.synth_show_dicts.contains_key(v))))
+        let item = |t: &Ty| matches!(t, Ty::Var(v) if self.synth_show_dicts.contains_key(v));
+        !self.synth_show_dicts.is_empty()
+            && (item(ty) || matches!(ty, Ty::Tuple(items) if items.iter().all(|t| crate::layout::ty_is_closed(t) || item(t))))
     }
 
     /// An open type whose `Show` is a bounded generic instance

@@ -718,43 +718,67 @@ impl Generics {
         Self::builtin_instance_fqn(class, &shape, method)
     }
 
-    /// Register `class`'s structural instance for every tuple of `arity`
-    /// (#1479): head `(a, b, ..)` over the fresh variables `vars`, context
-    /// `class<a>`, `class<b>`, .. (one dictionary per item), so a tuple with
-    /// a type-parameter item meets the class inside a generic body. Its
-    /// thunk reads each item's dictionary from its own. A no-op when one is
-    /// registered.
-    pub fn register_structural_tuple(&mut self, class: &str, vars: Vec<TyVarId>) {
-        let fqn = Self::structural_tuple_fqn(class, vars.len(), "show");
-        if class != "Show" || self.instances.iter().any(|inst| inst.method_fqns.values().any(|f| *f == fqn)) {
+    /// The method of `class`'s structural instance for the open shape
+    /// `head` ([`Self::register_structural_open`]), its variables spelled
+    /// `_`: `Show__(_, _)__show`, `Eq__Option<_>__eq`, `Show__[_]__show`.
+    pub fn structural_open_fqn(class: &str, head: &Ty, method: &str) -> String {
+        match head {
+            Ty::Tuple(items) => Self::structural_tuple_fqn(class, items.len(), method),
+            _ => Self::builtin_instance_fqn(class, &head.subst_vars(&|_| Some(Ty::Con("_".into()))).to_string(), method),
+        }
+    }
+
+    /// The structural instances with open items: `Show` of a tuple,
+    /// `Option`, `Result`, `Vec` or array, `Eq` of those, `Hash` of a
+    /// tuple or array, a tuple's `Lt` .. `Ge` / `Ord` (#1479, #2554). Head
+    /// `head` is the shape over fresh variables (`(a, b)`, `Option<a>`,
+    /// `[a]`, which a fixed array matches), context `context<a>`, .. (one
+    /// dictionary per variable, in the head's order; `context` is `class`,
+    /// or `Ord` for an order, whose items compare with `<` and `<=`), so
+    /// a goal on the shape at a type parameter (`Show<Option<T>>`) meets
+    /// the class inside a generic body with the frame's `Show<T>`. Its
+    /// thunks read each variable's dictionary from their own. A no-op when
+    /// one is registered.
+    pub fn register_structural_open(&mut self, class: &str, head: Ty, context: &str) {
+        let methods: &[&str] = match class {
+            "Show" => &["show"],
+            "Eq" => &["eq", "ne"],
+            "Hash" => &["hash"],
+            "Lt" => &["lt"],
+            "Le" => &["le"],
+            "Gt" => &["gt"],
+            "Ge" => &["ge"],
+            "Ord" => &[],
+            _ => return,
+        };
+        if self.has_structural_open(class, &head) {
             return;
         }
-        let items: Vec<Ty> = vars.iter().map(|v| Ty::Var(*v)).collect();
-        let context = items
+        let mut vars = Vec::new();
+        head.collect_vars(&mut vars);
+        let context = vars
             .iter()
-            .map(|item| Constraint {
-                class: class.into(),
-                args: vec![item.clone()],
+            .map(|&v| Constraint {
+                class: context.into(),
+                args: vec![Ty::Var(v)],
             })
             .collect();
+        let method_fqns = methods.iter().map(|m| (m.to_string(), Self::structural_open_fqn(class, &head, m))).collect();
         self.instances.push(InstanceDef {
             class: class.into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
             range: 0..0,
-            args: vec![Ty::Tuple(items)],
-            method_fqns: HashMap::from([("show".to_string(), fqn)]),
+            args: vec![head],
+            method_fqns,
             assoc_tys: HashMap::new(),
             context,
         });
     }
 
-    /// Whether `inst` is a structural instance for tuples with open items
-    /// ([`Self::register_structural_tuple`]).
-    pub fn is_structural_tuple(inst: &InstanceDef) -> bool {
-        inst.range == (0..0)
-            && inst.defined_module == PRELUDE_OPS_MODULE
-            && !inst.context.is_empty()
-            && matches!(inst.args.as_slice(), [Ty::Tuple(_)])
+    /// Whether `inst` is a structural instance for a shape with open items
+    /// ([`Self::register_structural_open`]).
+    pub fn is_structural_open(inst: &InstanceDef) -> bool {
+        inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE && !inst.context.is_empty() && inst.args.len() == 1
     }
 
     /// Whether `inst` is a structural instance for a shape with open
@@ -768,13 +792,29 @@ impl Generics {
             && inst.args.iter().any(|a| !super::ty::ftv_ty(a).is_empty())
     }
 
-    /// `(class, arity, method fqn)` of each instance
-    /// [`Self::register_structural_tuple`] registered.
-    pub fn structural_tuples(&self) -> impl Iterator<Item = (&str, usize, &str)> {
-        self.instances.iter().filter(|inst| Self::is_structural_tuple(inst)).filter_map(|inst| match inst.args.as_slice() {
-            [Ty::Tuple(items)] => Some((inst.class.as_str(), items.len(), inst.method_fqns.get("show")?.as_str())),
-            _ => None,
-        })
+    /// `(class, head, method, method fqn)` of each method of each instance
+    /// [`Self::register_structural_open`] registered.
+    pub fn structural_opens(&self) -> impl Iterator<Item = (&str, &Ty, &str, &str)> {
+        self.instances
+            .iter()
+            .filter(|inst| Self::is_structural_open(inst))
+            .flat_map(|inst| inst.method_fqns.iter().map(move |(m, f)| (inst.class.as_str(), &inst.args[0], m.as_str(), f.as_str())))
+    }
+
+    /// Whether `class` has the structural instance for the shape of `head`
+    /// ([`Self::register_structural_open`]; its variables or holes match
+    /// any).
+    pub fn has_structural_open(&self, class: &str, head: &Ty) -> bool {
+        let key = Self::structural_open_fqn(class, head, "");
+        self.instances
+            .iter()
+            .any(|inst| inst.class == class && Self::is_structural_open(inst) && Self::structural_open_fqn(class, &inst.args[0], "") == key)
+    }
+
+    /// Whether `fqn` is a method of an instance
+    /// [`Self::register_structural_open`] registered.
+    pub fn is_structural_open_fqn(&self, fqn: &str) -> bool {
+        self.structural_opens().any(|(.., f)| f == fqn)
     }
 
     /// The `(class, type)` of each instance

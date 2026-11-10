@@ -611,6 +611,12 @@ pub struct Checker {
     /// weakened, directly (#1644) or through a type parameter (#1670).
     weak_checks: checker::weak_check::WeakChecks,
 
+    /// The goals a structural instance with open items met (`Show<Option<T>>`
+    /// under `T: Show`, #2554), at the goal's types: a per-type clone of
+    /// the body asks for each at its types, whose ground structural
+    /// instance codegen has registered first
+    /// ([`Checker::ensure_clone_structural_goals`]).
+    open_structural_goals: Vec<Constraint>,
 
     /// Nesting depth inside `gen fn` bodies (for `yield` validation).
     async_depth: usize,

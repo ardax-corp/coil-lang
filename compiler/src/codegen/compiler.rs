@@ -1595,6 +1595,15 @@ impl Compiler {
                 .filter(|_| self.inst_clone_ground(src.span, &vars));
             match method {
                 Some((method, head_args)) => {
+                    let context = self
+                        .checker
+                        .generics()
+                        .instances
+                        .iter()
+                        .find(|inst| inst.method_fqns.values().any(|f| *f == req.src))
+                        .map(|inst| inst.context.clone())
+                        .unwrap_or_default();
+                    self.ensure_clone_structural(&context, &vars);
                     // The instance's type parameter names (`T::m(..)`).
                     let mut names = HashMap::new();
                     for ((arg, have), want) in head_args.iter().zip(&src.head).zip(&req.lookup) {
@@ -2709,6 +2718,11 @@ impl Compiler {
         // in scope, or by the mono clone's concrete types; looking it up
         // would match an arbitrary instance (#551).
         let open = lookup.iter().any(Ty::has_free_var);
+        // A ground goal of a structural instance no checker goal asked for
+        // (a clone's, #2554).
+        if !open && self.checker.ensure_ground_structural(class, lookup) {
+            self.reserve_structural_thunks();
+        }
         if open {
             match self.resolve_open_dict_goal(class, lookup) {
                 Some(OpenDictGoal::Slot(slot)) => {
@@ -4138,6 +4152,65 @@ impl Compiler {
         self.raw_instance_methods.insert(fqn.to_string());
     }
 
+    /// Reserve the thunks of the structural instances the checker has
+    /// registered and this module has not (#1451, #1479, #2554): at the
+    /// module's start, and again when a per-type clone registers ground
+    /// ones ([`Self::ensure_clone_structural`]).
+    fn reserve_structural_thunks(&mut self) {
+        use crate::typechecking::generics::Generics;
+        // Structural thunks of ground tuples, records and arrays (#1451, #1479):
+        // reserved here, raw (the value's own word) with a `$dict` adapter,
+        // as the string thunk; emitted by `emit_structural_thunks` once the
+        // module's own instance entries exist, so an item's are called.
+        let structural: Vec<(String, Ty)> =
+            self.checker.generics().structural_instances().map(|(class, ty)| (class.to_string(), ty.clone())).collect();
+        for (class, ty) in structural {
+            let Some(class_def) = self.checker.generics().typeclass(&class) else {
+                continue;
+            };
+            let methods: Vec<String> = class_def.methods.iter().map(|m| m.name.clone()).collect();
+            for method in methods {
+                let fqn = Generics::builtin_instance_fqn(&class, &ty.to_string(), &method);
+                // Reserved earlier in this module, or emitted.
+                if self.functions.contains_key(&fqn) || self.structural_thunks.iter().any(|(f, ..)| *f == fqn) {
+                    continue;
+                }
+                self.note_raw_builtin_thunk(&fqn);
+                self.reserve_function_entry(Self::dict_adapter_name(&fqn));
+                self.reserve_function_entry(fqn.clone());
+                let arity = if matches!(method.as_str(), "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "add" | "sub" | "mul" | "div" | "rem" | "pow") { 2 } else { 1 };
+                let param = if method == "len" { Self::structural_shape_at_int(&ty) } else { ty.clone() };
+                self.structural_thunk_params.insert(fqn.clone(), vec![param; arity]);
+                self.structural_thunks.push((fqn, method, ty.clone()));
+            }
+        }
+
+        // The thunks of the structural instances with open items (#1479,
+        // #2554): one entry each, taking the boxed values and the instance
+        // dictionary, whose context holds each variable's dictionary.
+        let opens: Vec<(String, String, String, Ty)> = self
+            .checker
+            .generics()
+            .structural_opens()
+            .map(|(class, head, method, fqn)| (fqn.to_string(), class.to_string(), method.to_string(), head.clone()))
+            .collect();
+        for open in opens {
+            if self.functions.contains_key(&open.0) || self.structural_open_thunks.iter().any(|(f, ..)| *f == open.0) {
+                continue;
+            }
+            self.reserve_function_entry(open.0.clone());
+            self.structural_open_thunks.push(open);
+        }
+    }
+
+    /// Register the ground structural instances a per-type clone at
+    /// `vars` with `bounds` needs, and reserve their thunks (#2554).
+    fn ensure_clone_structural(&mut self, bounds: &[crate::typechecking::ty::Constraint], vars: &HashMap<crate::typechecking::ty::TyVarId, Ty>) {
+        if self.checker.ensure_clone_structural_goals(bounds, vars) {
+            self.reserve_structural_thunks();
+        }
+    }
+
     /// Emit the bodies of the compiler-provided primitive instances, each
     /// built as HIR ([`crate::hir::synth::builtin_entry`]) and lowered like
     /// any other body. The stream `Read` / `Write` entries call their
@@ -4300,46 +4373,7 @@ impl Compiler {
             });
         }
 
-        // Structural thunks of ground tuples, records and arrays (#1451, #1479):
-        // reserved here, raw (the value's own word) with a `$dict` adapter,
-        // as the string thunk; emitted by `emit_structural_thunks` once the
-        // module's own instance entries exist, so an item's are called.
-        let structural: Vec<(String, Ty)> =
-            self.checker.generics().structural_instances().map(|(class, ty)| (class.to_string(), ty.clone())).collect();
-        for (class, ty) in structural {
-            let Some(class_def) = self.checker.generics().typeclass(&class) else {
-                continue;
-            };
-            let methods: Vec<String> = class_def.methods.iter().map(|m| m.name.clone()).collect();
-            for method in methods {
-                let fqn = Generics::builtin_instance_fqn(&class, &ty.to_string(), &method);
-                if self.functions.contains_key(&fqn) {
-                    continue;
-                }
-                self.note_raw_builtin_thunk(&fqn);
-                self.reserve_function_entry(Self::dict_adapter_name(&fqn));
-                self.reserve_function_entry(fqn.clone());
-                let arity = if matches!(method.as_str(), "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "add" | "sub" | "mul" | "div" | "rem" | "pow") { 2 } else { 1 };
-                let param = if method == "len" { Self::structural_shape_at_int(&ty) } else { ty.clone() };
-                self.structural_thunk_params.insert(fqn.clone(), vec![param; arity]);
-                if !self.structural_thunks.iter().any(|(f, ..)| *f == fqn) {
-                    self.structural_thunks.push((fqn, method, ty.clone()));
-                }
-            }
-        }
-
-        // The arity-wide tuple instances' thunks (#1479): one entry each,
-        // taking the boxed tuple and the instance dictionary, whose context
-        // holds each item's dictionary.
-        let tuples: Vec<(String, usize)> =
-            self.checker.generics().structural_tuples().map(|(_, arity, fqn)| (fqn.to_string(), arity)).collect();
-        for (fqn, arity) in tuples {
-            if self.functions.contains_key(&fqn) || self.structural_tuple_thunks.iter().any(|(f, _)| *f == fqn) {
-                continue;
-            }
-            self.reserve_function_entry(fqn.clone());
-            self.structural_tuple_thunks.push((fqn, arity));
-        }
+        self.reserve_structural_thunks();
 
         // Show thunks for the builtin error enums: reserved here, emitted by
         // `emit_used_builtin_show_thunks` once a call uses one.
@@ -5304,6 +5338,8 @@ impl Compiler {
             };
             self.mono_codegen_var_types.push(overrides);
             let var_tys = self.mono_var_tys_for(source_name, qualified, type_params, &type_param_tys);
+            let bounds = self.checker.env().lookup(qualified).or_else(|| self.checker.env().lookup(source_name)).map(|s| s.constraints.clone()).unwrap_or_default();
+            self.ensure_clone_structural(&bounds, &var_tys);
             self.mono_type_param_tys.push(type_param_tys);
             self.mono_var_tys.push(var_tys);
 
@@ -7095,19 +7131,25 @@ impl Compiler {
             .into_iter()
             .filter(|(fqn, ..)| !self.functions.contains_key(fqn))
             .collect();
-        let tuples: Vec<_> = std::mem::take(&mut self.structural_tuple_thunks)
+        let opens: Vec<_> = std::mem::take(&mut self.structural_open_thunks)
             .into_iter()
-            .filter(|(fqn, _)| !self.functions.contains_key(fqn))
+            .filter(|(fqn, ..)| !self.functions.contains_key(fqn))
             .collect();
-        if due.is_empty() && tuples.is_empty() {
+        if due.is_empty() && opens.is_empty() {
             return;
         }
         let string = crate::typechecking::ty::string();
         let int = crate::typechecking::ty::int();
         self.hir_synth_callees.insert("format".to_string(), SynthCallee { format: true, ..SynthCallee::default() });
+        // An open instance's thunk may reserve open glue (#1642), emitted
+        // with the rest below.
+        for (fqn, class, method, head) in opens {
+            self.emit_structural_open(&fqn, &class, &method, head);
+        }
         // A glue body reserves its parts' glue as it is planned (#1629):
         // emitted in the next round.
         let mut due = due;
+        due.extend(std::mem::take(&mut self.structural_thunks).into_iter().filter(|(fqn, ..)| !self.functions.contains_key(fqn)));
         while !due.is_empty() {
             for (fqn, method, ty) in std::mem::take(&mut due) {
                 if let Some(m) = method.strip_prefix("glue_") {
@@ -7164,7 +7206,7 @@ impl Compiler {
                             let items = items.clone();
                             let params = [(ty.clone(), tag), (ty.clone(), tag)];
                             self.emit_builtin_entry(&name, &params, boolean.clone(), false, |b, a| {
-                                crate::hir::synth::tuple_order(b, a[0], a[1], &items, &method)
+                                crate::hir::synth::tuple_order(b, a[0], a[1], &items, &method, None)
                             })
                         }
                         ("hash", _) => self.emit_structural_hash(&name, &ty, tag),
@@ -7216,9 +7258,7 @@ impl Compiler {
                 .filter(|(fqn, ..)| !self.functions.contains_key(fqn))
                 .collect();
         }
-        for (fqn, arity) in tuples {
-            self.emit_structural_tuple_show(&fqn, arity);
-        }
+
         self.hir_synth_callees.clear();
     }
 
@@ -7240,54 +7280,182 @@ impl Compiler {
         }
     }
 
-    /// The `Show` thunk of the tuples of `arity` with open items (#1479):
-    /// `format("%v", t)` over the tuple (unboxed: every caller passes it
-    /// boxed, as a dictionary does), each item shown through its
-    /// own dictionary, which the instance dictionary (`__dict0`) holds after
-    /// its method: the entry reads them into `__dict1..` as a bounded
-    /// instance method's does.
-    fn emit_structural_tuple_show(&mut self, fqn: &str, arity: usize) {
+    /// The thunk `fqn` of `class`'s structural instance for open shape
+    /// `head` (#1479, #2554): `method` over the values (unboxed: every
+    /// caller passes them boxed, as a dictionary does), each variable's
+    /// part through its own dictionary, which the instance dictionary
+    /// (`__dict0`) holds after its methods: the entry reads them into
+    /// `__dict1..` as a bounded instance method's does. `show` is
+    /// `format("%v", t)` over a tuple, an `Option` / `Result`'s variant
+    /// and payload, an array's or `Vec`'s elements; `eq` / `ne` is `==` /
+    /// `!=`, which compares a variable's part through its dictionary
+    /// (open glue, #1642).
+    fn emit_structural_open(&mut self, fqn: &str, class: &str, method: &str, head: Ty) {
         use crate::hir::LocalKind;
-        let string = crate::typechecking::ty::string();
-        // The instance head's own variables.
-        let Some(ty) = self
-            .checker
-            .generics()
-            .instances
-            .iter()
-            .find(|inst| inst.method_fqns.get("show").is_some_and(|f| f == fqn))
-            .and_then(|inst| inst.args.first().cloned())
-        else {
-            return;
-        };
-        let vars: Vec<crate::typechecking::ty::TyVarId> = match &ty {
-            Ty::Tuple(items) => items.iter().filter_map(|t| if let Ty::Var(v) = t { Some(*v) } else { None }).collect(),
-            _ => return,
-        };
-        if vars.len() != arity {
+        let mut vars = Vec::new();
+        head.collect_vars(&mut vars);
+        if class == "Hash" {
+            self.emit_structural_open_hash(fqn, head, vars.len());
             return;
         }
-        let mut b = crate::hir::synth::Synth::new(&self.checker, fqn, string.clone());
-        // The tuple comes boxed, as a dictionary passes it.
-        let arg = b.local("arg0", ty.clone(), LocalKind::Param);
-        let word = b.read(arg);
-        let t = b.builtin(crate::hir::Builtin::Retype, vec![word], ty);
-        let fmt = b.str("%v");
-        let shown = b.call("format", vec![fmt, t], string);
-        let ret = b.ret(shown);
+        if matches!(class, "Lt" | "Le" | "Gt" | "Ge") {
+            self.emit_structural_open_order(fqn, class, method, head, vars.len());
+            return;
+        }
+        let ret = if class == "Eq" { crate::typechecking::ty::boolean() } else { crate::typechecking::ty::string() };
+        let mut b = crate::hir::synth::Synth::new(&self.checker, fqn, ret.clone());
+        let arity = if class == "Eq" { 2 } else { 1 };
+        let values: Vec<crate::hir::HirId> = (0..arity)
+            .map(|i| {
+                let arg = b.local(&format!("arg{i}"), head.clone(), LocalKind::Param);
+                let word = b.read(arg);
+                b.builtin(crate::hir::Builtin::Retype, vec![word], head.clone())
+            })
+            .collect();
+        let value = match (class, method, &head) {
+            ("Show", "show", Ty::Tuple(_)) => {
+                let fmt = b.str("%v");
+                b.call("format", vec![fmt, values[0]], ret.clone())
+            }
+            ("Show", "show", Ty::Array { element, .. }) => crate::hir::synth::array_show(&mut b, values[0], (**element).clone()),
+            ("Show", "show", _) if let Some(element) = crate::typechecking::ty::vec_element_ty(&head) => {
+                crate::hir::synth::array_show(&mut b, values[0], element.clone())
+            }
+            ("Show", "show", _) => match Self::builtin_enum_show_match(&self.checker, &mut b, values[0], &head) {
+                Some(value) => value,
+                None => return,
+            },
+            ("Eq", "eq" | "ne", _) => {
+                let sym = if method == "eq" { "==" } else { "!=" };
+                b.bin(crate::hir::BinOp::Overloaded(sym), values[0], values[1], ret.clone())
+            }
+            _ => return,
+        };
+        let ret = b.ret(value);
         let root = b.block(vec![ret], None, crate::typechecking::ty::never());
         let hir = Self::synth_generic(b.finish(root));
-        // `__dict0` follows the parameter; `__dict{i + 1}` is item `i`'s.
+        // `__dict0` follows the parameters; `__dict{i + 1}` is variable `i`'s.
         let base = self
             .checker
             .generics()
-            .typeclass("Show")
-            .map_or(1, |class| class.flattened_methods(self.checker.generics()).len());
-        self.synth_entry_dicts = Some((base, arity));
-        self.synth_show_dicts = vars.into_iter().enumerate().map(|(i, v)| (v, i + 1)).collect();
+            .typeclass(class)
+            .map_or(arity, |def| def.flattened_methods(self.checker.generics()).len());
+        self.synth_entry_dicts = Some((base, vars.len()));
+        if class == "Eq" {
+            self.synth_eq_dicts = vars.into_iter().enumerate().map(|(i, v)| (v, (i + 1, 0))).collect();
+        } else {
+            self.synth_show_dicts = vars.into_iter().enumerate().map(|(i, v)| (v, i + 1)).collect();
+        }
         self.emit_synth_fn(fqn, &hir, HashMap::new());
         self.synth_entry_dicts = None;
         self.synth_show_dicts.clear();
+        self.synth_eq_dicts.clear();
+    }
+
+    /// The `hash` thunk `fqn` of the structural `Hash` instance for an
+    /// open tuple or array `head` (#2554): the items' hashes combined as a
+    /// ground tuple's or array's thunk combines them, item `i`'s through
+    /// the instance dictionary's context `i`, which the thunk takes as a
+    /// plain parameter and calls as a dictionary forwarder calls (#2476).
+    fn emit_structural_open_hash(&mut self, fqn: &str, head: Ty, contexts: usize) {
+        use crate::hir::LocalKind;
+        use crate::hir::synth::{Product, Synth};
+        let (product, items) = match &head {
+            Ty::Tuple(items) => (Some(Product::tuple(items)), items.clone()),
+            Ty::Array { element, .. } => (None, vec![(**element).clone()]),
+            _ => return,
+        };
+        if items.len() != contexts {
+            return;
+        }
+        let int = crate::typechecking::ty::int();
+        let base = self.checker.generics().typeclass("Hash").map_or(1, |def| def.flattened_methods(self.checker.generics()).len());
+        let dict_ty = crate::typechecking::ty::array(int.clone());
+        let mut calls = HashMap::new();
+        let mut targets = Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            let target = format!("$hash_context{i}");
+            calls.insert(target.clone(), (vec![self.value_layout(item), self.value_layout(&dict_ty)], self.value_layout(&int)));
+            self.hir_synth_callees
+                .insert(target.clone(), SynthCallee { forward: Some(((base + i) as u32, 0, 0)), ..SynthCallee::default() });
+            targets.push(Some(target));
+        }
+        let mut b = Synth::new(&self.checker, fqn, int.clone());
+        // The value comes boxed, as a dictionary passes it, then the
+        // instance dictionary.
+        let arg = b.local("arg0", head.clone(), LocalKind::Param);
+        let dict = b.local("dict", dict_ty, LocalKind::Param);
+        let word = b.read(arg);
+        let value = b.builtin(crate::hir::Builtin::Retype, vec![word], head);
+        let hashed = crate::hir::synth::structural_hash(&mut b, value, product.as_ref(), &targets, Some(dict));
+        let ret = b.ret(hashed);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = Self::synth_generic(b.finish(root));
+        self.emit_synth_fn(fqn, &hir, calls);
+        for target in targets.into_iter().flatten() {
+            self.hir_synth_callees.remove(&target);
+        }
+    }
+
+    /// The `lt` .. `ge` thunk `fqn` of `class`'s structural instance for
+    /// an open tuple `head` (#2554): lexicographic, as a ground tuple's
+    /// (`tuple_order`), item `i` compared through the instance
+    /// dictionary's context `i` (an `Ord` one), which the thunk takes as a
+    /// plain parameter and calls as a dictionary forwarder calls (#2476).
+    fn emit_structural_open_order(&mut self, fqn: &str, class: &str, method: &str, head: Ty, contexts: usize) {
+        use crate::hir::LocalKind;
+        use crate::hir::synth::Synth;
+        let Ty::Tuple(items) = &head else {
+            return;
+        };
+        if items.len() != contexts {
+            return;
+        }
+        let generics = self.checker.generics();
+        let base = generics.typeclass(class).map_or(1, |def| def.flattened_methods(generics).len());
+        let Some(ord) = generics.typeclass("Ord").map(|def| def.flattened_methods(generics)) else {
+            return;
+        };
+        let slot = |owner: &str, name: &str| ord.iter().position(|(o, m)| *o == owner && m.name == name).map(|i| i as u32);
+        let mut ops = Vec::new();
+        for (sym, owner, name) in [("<", "Lt", "lt"), ("<=", "Le", "le"), (">", "Gt", "gt"), (">=", "Ge", "ge")] {
+            let Some(at) = slot(owner, name) else {
+                return;
+            };
+            ops.push((sym, at));
+        }
+        let target = |sym: &str, i: usize| format!("$order_context{i}{sym}");
+        let (boolean, dict_ty) = (crate::typechecking::ty::boolean(), crate::typechecking::ty::array(crate::typechecking::ty::int()));
+        let mut calls = HashMap::new();
+        let mut targets = Vec::new();
+        for (i, item) in items.iter().enumerate() {
+            for &(sym, at) in &ops {
+                let name = target(sym, i);
+                let item = self.value_layout(item);
+                calls.insert(name.clone(), (vec![item, item, self.value_layout(&dict_ty)], self.value_layout(&boolean)));
+                self.hir_synth_callees.insert(name.clone(), SynthCallee { forward: Some(((base + i) as u32, at, 0)), ..SynthCallee::default() });
+                targets.push(name);
+            }
+        }
+        let mut b = Synth::new(&self.checker, fqn, boolean.clone());
+        // The values come boxed, as a dictionary passes them, then the
+        // instance dictionary.
+        let values: Vec<_> = (0..2)
+            .map(|i| {
+                let arg = b.local(&format!("arg{i}"), head.clone(), LocalKind::Param);
+                let word = b.read(arg);
+                b.builtin(crate::hir::Builtin::Retype, vec![word], head.clone())
+            })
+            .collect();
+        let dict = b.local("dict", dict_ty, LocalKind::Param);
+        let ordered = crate::hir::synth::tuple_order(&mut b, values[0], values[1], items, method, Some((dict, &target)));
+        let ret = b.ret(ordered);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = Self::synth_generic(b.finish(root));
+        self.emit_synth_fn(fqn, &hir, calls);
+        for name in targets {
+            self.hir_synth_callees.remove(&name);
+        }
     }
 
     /// The `Show` thunk `name` of a ground `Option` / `Result` `ty`
@@ -7296,15 +7464,8 @@ impl Compiler {
     /// enum as a dictionary passes it, its own word boxed.
     fn emit_builtin_enum_show(&mut self, name: &str, ty: &Ty, adapter: bool) {
         use crate::hir::synth::Synth;
-        use crate::hir::{Builtin, HirPat, HirPatFields, LocalKind};
+        use crate::hir::{Builtin, LocalKind};
         let string = crate::typechecking::ty::string();
-        let (enum_name, variants): (&str, Vec<(&str, Ty)>) = match crate::typechecking::ty::option_inner(ty) {
-            Some(inner) => (common::BUILTIN_OPTION_ENUM, vec![("Some", inner)]),
-            None => match crate::typechecking::ty::result_ok_err(ty) {
-                Some((ok, err)) => (common::BUILTIN_RESULT_ENUM, vec![("Ok", ok), ("Err", err)]),
-                None => return,
-            },
-        };
         let mut b = Synth::new(&self.checker, name, string.clone());
         let value = if adapter {
             let arg = b.local("arg0", ty.clone(), LocalKind::Param);
@@ -7314,13 +7475,34 @@ impl Compiler {
             let arg = b.local("arg0", ty.clone(), LocalKind::Param);
             b.read(arg)
         };
+        let Some(shown) = Self::builtin_enum_show_match(&self.checker, &mut b, value, ty) else {
+            return;
+        };
+        let ret = b.ret(shown);
+        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
+        let hir = b.finish(root);
+        self.emit_synth_fn(name, &hir, HashMap::new());
+    }
+
+    /// `Some(x)` / `None` / `Ok(x)` / `Err(e)` of `Option` / `Result`
+    /// `value` (of type `ty`), the payload as `format("%v", x)` shows it.
+    fn builtin_enum_show_match(checker: &crate::typechecking::Checker, b: &mut crate::hir::synth::Synth, value: crate::hir::HirId, ty: &Ty) -> Option<crate::hir::HirId> {
+        use crate::hir::{HirPat, HirPatFields, LocalKind};
+        let string = crate::typechecking::ty::string();
+        let (enum_name, variants): (&str, Vec<(&str, Ty)>) = match crate::typechecking::ty::option_inner(ty) {
+            Some(inner) => (common::BUILTIN_OPTION_ENUM, vec![("Some", inner)]),
+            None => {
+                let (ok, err) = crate::typechecking::ty::result_ok_err(ty)?;
+                (common::BUILTIN_RESULT_ENUM, vec![("Ok", ok), ("Err", err)])
+            }
+        };
         let mut arms = Vec::with_capacity(variants.len() + 1);
         for (variant, payload) in &variants {
             let x = b.local("x", payload.clone(), LocalKind::Pattern);
             let pat = HirPat::Variant {
                 enum_name: enum_name.to_string(),
                 variant: (*variant).to_string(),
-                tag: self.checker.tag_for(enum_name, variant),
+                tag: checker.tag_for(enum_name, variant),
                 fields: HirPatFields::Tuple(vec![HirPat::Bind(x)]),
             };
             let fmt = b.str(&format!("{variant}(%v)"));
@@ -7331,16 +7513,12 @@ impl Compiler {
             let pat = HirPat::Variant {
                 enum_name: enum_name.to_string(),
                 variant: "None".to_string(),
-                tag: self.checker.tag_for(enum_name, "None"),
+                tag: checker.tag_for(enum_name, "None"),
                 fields: HirPatFields::Unit,
             };
             arms.push((pat, b.str("None")));
         }
-        let shown = b.match_(value, arms, string);
-        let ret = b.ret(shown);
-        let root = b.block(vec![ret], None, crate::typechecking::ty::never());
-        let hir = b.finish(root);
-        self.emit_synth_fn(name, &hir, HashMap::new());
+        Some(b.match_(value, arms, string))
     }
 
     /// The `Hash` thunk `name` of a ground tuple, record or array `ty`
@@ -7384,7 +7562,7 @@ impl Compiler {
         }
         let int = crate::typechecking::ty::int();
         let hir = crate::hir::synth::builtin_entry(&self.checker, name, &[(ty.clone(), retype)], int.clone(), false, |b, a| {
-            crate::hir::synth::structural_hash(b, a[0], product.as_ref(), &targets)
+            crate::hir::synth::structural_hash(b, a[0], product.as_ref(), &targets, None)
         });
         self.emit_synth_fn(name, &hir, calls);
     }
