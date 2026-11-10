@@ -4456,6 +4456,29 @@ impl Compiler {
         }
     }
 
+    /// The word type of a stack array slot holding an element of type
+    /// `element`, if it has one. A heap element's slot holds its boxed
+    /// word; a pointer-niche `Option` / `Result` element its niche word
+    /// (`hir_stack_rep`). A type parameter's value in a shared body (an
+    /// open `T`, `(T, int)`) has none (#2581).
+    fn stack_slot_ty(checker: &Checker, element: &Ty) -> Option<crate::mir::MirTy> {
+        crate::mir::scalar_mir_ty(element)
+            .or_else(|| Compiler::scalar_enum_mir_ty(checker, element))
+            // A trait object element: its `[value, dictionary]` pack (#1853).
+            .or_else(|| matches!(crate::typechecking::ty::strip_readonly(element), Ty::Existential { .. }).then_some(crate::mir::MirTy::HeapRef))
+            .or_else(|| {
+                use crate::layout::{value_layout, word_kind};
+                match value_layout(checker, element) {
+                    // So does a two-word enum's: its boxed object.
+                    ValueLayout::Boxed => (word_kind(checker, element) == common::WORD_POINTER
+                        || Compiler::boxed_payloads(checker, element, None).is_some())
+                    .then_some(crate::mir::MirTy::HeapRef),
+                    ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
+                    ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
+                }
+            })
+    }
+
     /// How each local of `hir` is held, decided once before emission:
     /// stack arrays and escaping class locals with their box points,
     /// `[start, end]` range parameters, class locals kept in frame slots
@@ -4464,9 +4487,18 @@ impl Compiler {
     fn plan_hir_local_layouts(&self, hir: &HirBody, emit: &mut HirEmit) -> Result<(), &'static str> {
         let mut stacks = query::stack_arrays(hir, &self.checker);
         // A lane array (two-word elements) is never a stack array: its
-        // slots would hold each element boxed.
+        // slots would hold each element boxed. Nor is one whose element
+        // no slot word holds (a shared body's open `T`, #2581): it stays
+        // the array object.
         stacks.len.retain(|&l, _| {
-            hir.local(LocalId(l)).ty.as_ref().is_none_or(|t| self.hir_lane_elem(t).is_none())
+            hir.local(LocalId(l)).ty.as_ref().is_none_or(|t| {
+                let t = apply_ty_prune(self.checker.subst(), t);
+                let element = match crate::typechecking::ty::strip_readonly(&t) {
+                    Ty::Array { element, .. } => Some(element.as_ref()),
+                    t => crate::typechecking::ty::vec_element_ty(t),
+                };
+                self.hir_lane_elem(&t).is_none() && element.is_none_or(|e| Compiler::stack_slot_ty(&self.checker, e).is_some())
+            })
         });
         for locals in stacks.box_at.values_mut() {
             locals.retain(|l| stacks.len.contains_key(l));
@@ -11683,26 +11715,7 @@ impl<'a> HirLowerCx<'a> {
             Ty::Array { element, .. } => Some(element.as_ref()),
             t => crate::typechecking::ty::vec_element_ty(t),
         });
-        let elem = match element {
-            // A heap element's slot holds its boxed word; a pointer-niche
-            // `Option` / `Result` element its niche word (`hir_stack_rep`).
-            Some(element) => crate::mir::scalar_mir_ty(element)
-                .or_else(|| Compiler::scalar_enum_mir_ty(&c.checker, element))
-                // A trait object element: its `[value, dictionary]` pack (#1853).
-                .or_else(|| matches!(crate::typechecking::ty::strip_readonly(element), Ty::Existential { .. }).then_some(crate::mir::MirTy::HeapRef))
-                .or_else(|| {
-                    use crate::layout::{value_layout, word_kind};
-                    match value_layout(&c.checker, element) {
-                        // So does a two-word enum's: its boxed object.
-                        ValueLayout::Boxed => (word_kind(&c.checker, element) == common::WORD_POINTER
-                            || Compiler::boxed_payloads(&c.checker, element, None).is_some())
-                        .then_some(crate::mir::MirTy::HeapRef),
-                        ValueLayout::NicheOption | ValueLayout::NicheUnitResult => Some(crate::mir::MirTy::NicheOpt),
-                        ValueLayout::NicheResult => Some(crate::mir::MirTy::NicheRes),
-                    }
-                }),
-            _ => None,
-        };
+        let elem = element.and_then(|element| Compiler::stack_slot_ty(&c.checker, element));
         Ok(Some((n, elem.ok_or("stack array type")?)))
     }
 
