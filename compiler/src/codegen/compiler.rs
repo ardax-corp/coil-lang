@@ -1080,6 +1080,22 @@ impl Compiler {
         (sig.ret.is_some() || sig.params.iter().any(Option::is_some)).then_some(sig)
     }
 
+    /// Whether trait method `class::method`'s declared result is a bare
+    /// type parameter of the trait that instance `inst_args` sets to `()`.
+    /// A dictionary caller (a shared body) keeps that result as its word,
+    /// while the instance's `-> ()` method returns nothing a caller reads:
+    /// its `$dict` adapter returns the empty tuple object (#2541).
+    fn trait_method_unit_ret(&self, class: &str, method: &str, inst_args: &[Ty]) -> bool {
+        let Some(scheme) = self.checker.typeclass_method_scheme(class, method) else {
+            return false;
+        };
+        let (_, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let Ty::Var(var) = crate::typechecking::ty::strip_readonly(&ret) else {
+            return false;
+        };
+        scheme.bounds.iter().zip(inst_args).any(|(bound, ty)| bound == var && crate::layout::is_unit(ty))
+    }
+
     fn dict_adapter_name(fqn: &str) -> String {
         format!("{fqn}$dict")
     }
@@ -2086,7 +2102,8 @@ impl Compiler {
         let inst_args = head.as_deref().unwrap_or(inst_args);
         let raw = self.raw_instance_methods.contains(fqn);
         let sig = self.trait_method_boundary_sig(class, method, inst_args, false);
-        if sig.is_none() && !raw {
+        let unit_ret = self.trait_method_unit_ret(class, method, inst_args);
+        if sig.is_none() && !raw && !unit_ret {
             return;
         }
         let adapter = Self::dict_adapter_name(fqn);
@@ -2140,7 +2157,7 @@ impl Compiler {
             .filter(|_| ret_from.is_none() && ret_box.is_none());
         let body_ret = if ret_from.is_some() || pair_ret.is_some() {
             open_ret
-        } else if ret_box.is_some() {
+        } else if ret_box.is_some() || unit_ret {
             crate::typechecking::ty::int()
         } else {
             ret.clone()
@@ -2192,7 +2209,9 @@ impl Compiler {
             value = b.builtin(Builtin::Retype, vec![value], body_ret.clone());
         } else if ret_from.is_some() {
             value = b.builtin(Builtin::Relayout, vec![value], body_ret);
-        } else if ret_box.is_some() {
+        } else if ret_box.is_some() || unit_ret {
+            // A `()` result: the method's call for its effect, then the
+            // empty tuple object, the word of a `()` that is passed.
             value = b.builtin(Builtin::Retype, vec![value], crate::typechecking::ty::int());
         }
         let ret = b.ret(value);
