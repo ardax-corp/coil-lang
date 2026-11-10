@@ -1135,6 +1135,26 @@ impl Compiler {
             // a two-word `Option` / `Result` boxed from its pair (#1609).
             // A bare type parameter's argument goes as its own word.
             let shared_entry = key == call.key;
+            // The call was planned in its own types' layouts, which the
+            // instance's clone takes. The shared entry declares an
+            // `Option` / `Result` over the instance's parameters open
+            // (`fn pick(Option<T> x, Option<T> y) -> Option<T>`): each is
+            // its enum object there, so a niche word converts at the call,
+            // on the way in and on the way out (#2475).
+            let open = |declared: Option<Ty>| {
+                shared_entry && instance.is_some() && call.generic.is_none() && declared.is_some_and(|ty| self.generic_enum_layout(&ty).is_some())
+            };
+            let declared = if shared_entry && instance.is_some() { self.checker.fn_param_tys(&key) } else { None };
+            let params: Vec<ValueLayout> = call
+                .params
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| if open(declared.as_ref().and_then(|d| d.get(i).cloned())) { ValueLayout::Boxed } else { p })
+                .collect();
+            let natural = match natural {
+                Rep::Word(_) if open(self.checker.fn_return_ty(&key)) => Rep::Word(ValueLayout::Boxed),
+                natural => natural,
+            };
             let niches: Vec<Option<ValueLayout>> = args
                 .iter()
                 .zip(&words)
@@ -1143,7 +1163,7 @@ impl Compiler {
                 .collect();
             if let Some(dicts) = dicts
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
-                && args.iter().zip(&call.params).zip(&words).zip(&niches).all(|(((&a, &p), &w), n)| {
+                && args.iter().zip(&params).zip(&words).zip(&niches).all(|(((&a, &p), &w), n)| {
                     // A boxed argument goes from its own word, its enum
                     // object (a niche word) or its pair boxed (a pair
                     // constructor such as `Some(1)` or `None` too, #1861);
@@ -1161,7 +1181,7 @@ impl Compiler {
                 })
                 && let Some(target) = target
             {
-                for ((&arg, &param), (&w, &layout)) in args.iter().zip(&call.params).zip(words.iter().zip(&niches)) {
+                for ((&arg, &param), (&w, &layout)) in args.iter().zip(&params).zip(words.iter().zip(&niches)) {
                     let layout = layout.or_else(|| {
                         (!w && !self.hir_arg_passes(hir, emit, arg, param))
                             .then(|| self.hir_niche_arg(hir, emit, arg, param))
