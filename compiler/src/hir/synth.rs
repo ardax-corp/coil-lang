@@ -159,6 +159,55 @@ impl<'a> Synth<'a> {
     }
 }
 
+/// A product type taken apart: a tuple, an anonymous record or one enum
+/// variant. At run time each is one slot store; here they differ only in
+/// the pattern that opens them.
+#[derive(Clone, Debug)]
+pub struct Product {
+    pub ctor: ProductCtor,
+    /// Each part's type, in pattern order (a record variant's too: a
+    /// pattern binds it positionally).
+    pub parts: Vec<Ty>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ProductCtor {
+    Tuple,
+    /// A record, by its field names.
+    Record(Vec<String>),
+    Variant { enum_name: String, name: String, tag: Option<u32> },
+}
+
+impl Product {
+    pub fn tuple(items: &[Ty]) -> Self {
+        Self { ctor: ProductCtor::Tuple, parts: items.to_vec() }
+    }
+
+    /// The pattern that binds each part to a new local `{side}{i}`, and
+    /// those locals.
+    pub fn pat(&self, b: &mut Synth, side: &str) -> (HirPat, Vec<LocalId>) {
+        let locals: Vec<_> = self.parts.iter().enumerate().map(|(i, t)| b.local(&format!("{side}{i}"), t.clone(), LocalKind::Pattern)).collect();
+        let binds = locals.iter().map(|&l| HirPat::Bind(l));
+        let pat = match &self.ctor {
+            ProductCtor::Tuple => HirPat::Tuple(binds.collect()),
+            ProductCtor::Record(names) => HirPat::Record(names.iter().cloned().zip(binds).collect()),
+            ProductCtor::Variant { enum_name, name, tag } => HirPat::Variant {
+                enum_name: enum_name.clone(),
+                variant: name.clone(),
+                tag: *tag,
+                fields: if locals.is_empty() { super::HirPatFields::Unit } else { super::HirPatFields::Tuple(binds.collect()) },
+            },
+        };
+        (pat, locals)
+    }
+
+    /// `let <pat> = init` of [`Self::pat`], for a tuple or record.
+    pub fn bind(&self, b: &mut Synth, init: HirId, side: &str) -> (HirId, Vec<LocalId>) {
+        let (pat, locals) = self.pat(b, side);
+        (b.push(HirKind::LetPat { pat, init }, coil_ty::unit()), locals)
+    }
+}
+
 /// `Range::to_vec` / `RangeInclusive::to_vec` (`float`: the
 /// `__float_to_vec` sibling a float range calls): every value `for x in
 /// self` visits, pushed onto a new `Vec`. An `int` body serves `byte`
@@ -365,17 +414,10 @@ pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str
         "gt" => (">", ">"),
         _ => (">", ">="),
     };
-    let mut stmts = Vec::with_capacity(2);
-    let mut sides = [Vec::with_capacity(items.len()), Vec::with_capacity(items.len())];
-    for (side, (value, prefix)) in [(a, "x"), (c, "y")].into_iter().enumerate() {
-        let mut pats = Vec::with_capacity(items.len());
-        for (i, item) in items.iter().enumerate() {
-            let l = b.local(&format!("{prefix}{i}"), item.clone(), LocalKind::Pattern);
-            pats.push(HirPat::Bind(l));
-            sides[side].push(l);
-        }
-        stmts.push(b.push(HirKind::LetPat { pat: HirPat::Tuple(pats), init: value }, coil_ty::unit()));
-    }
+    let product = Product::tuple(items);
+    let (la, xs) = product.bind(b, a, "x");
+    let (lc, ys) = product.bind(b, c, "y");
+    let sides = [xs, ys];
     let cmp = |b: &mut Synth, sym: &'static str, i: usize, swap: bool| {
         let (l, r) = if swap { (sides[1][i], sides[0][i]) } else { (sides[0][i], sides[1][i]) };
         let (l, r) = (b.read(l), b.read(r));
@@ -392,5 +434,5 @@ pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str
         let rest = b.push(HirKind::Logic { and: true, lhs: same, rhs: acc }, boolean.clone());
         acc = b.push(HirKind::Logic { and: false, lhs: before, rhs: rest }, boolean.clone());
     }
-    b.block(stmts, Some(acc), boolean)
+    b.block(vec![la, lc], Some(acc), boolean)
 }

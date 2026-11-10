@@ -25,8 +25,8 @@
 //! after the two values and compares a bare variable's part through it.
 
 use super::*;
-use crate::hir::{BinOp, Builtin, Callee, HirId, HirKind, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, UnOp};
-use crate::hir::synth::Synth;
+use crate::hir::{BinOp, Builtin, Callee, HirId, HirKind, HirPat, IndexKind, Lit, LocalId, LocalKind, UnOp};
+use crate::hir::synth::{Product, ProductCtor, Synth};
 use crate::typechecking::generics::Generics;
 use crate::typechecking::ty::{self as coil_ty, TyVarId, strip_readonly};
 
@@ -83,28 +83,19 @@ pub(super) enum VarEqDict {
 pub(super) enum GlueShape {
     /// An array or `Vec` of this element.
     Seq(Ty),
-    Tuple(Vec<Ty>),
-    /// A record's fields.
-    Record(Vec<(String, Ty)>),
+    /// A tuple or a record.
+    Product(Product),
     /// An enum's variants, each with its payload's types in declaration
-    /// order (a record variant's too: a pattern binds it positionally).
-    Enum { name: String, variants: Vec<GlueVariant> },
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct GlueVariant {
-    name: String,
-    tag: Option<u32>,
-    fields: Vec<Ty>,
+    /// order.
+    Enum(Vec<Product>),
 }
 
 impl GlueShape {
     fn parts(&self) -> Vec<&Ty> {
         match self {
             Self::Seq(element) => vec![element],
-            Self::Tuple(items) => items.iter().collect(),
-            Self::Record(fields) => fields.iter().map(|(_, t)| t).collect(),
-            Self::Enum { variants, .. } => variants.iter().flat_map(|v| &v.fields).collect(),
+            Self::Product(product) => product.parts.iter().collect(),
+            Self::Enum(variants) => variants.iter().flat_map(|v| &v.parts).collect(),
         }
     }
 }
@@ -153,8 +144,11 @@ impl Compiler {
         }
         match ty {
             Ty::Array { element, .. } => Some(GlueShape::Seq(key(element))),
-            Ty::Tuple(items) if !items.is_empty() => Some(GlueShape::Tuple(items.iter().map(key).collect())),
-            Ty::Record { fields } if !fields.is_empty() => Some(GlueShape::Record(fields.iter().map(|(n, t)| (n.clone(), key(t))).collect())),
+            Ty::Tuple(items) if !items.is_empty() => Some(GlueShape::Product(Product { ctor: ProductCtor::Tuple, parts: items.iter().map(key).collect() })),
+            Ty::Record { fields } if !fields.is_empty() => Some(GlueShape::Product(Product {
+                ctor: ProductCtor::Record(fields.iter().map(|(n, _)| n.clone()).collect()),
+                parts: fields.iter().map(|(_, t)| key(t)).collect(),
+            })),
             Ty::Con(_) | Ty::App(..) if !self.eq_user_instance(ty) => {
                 let (name, args) = match ty {
                     Ty::Con(name) => (name.clone(), Vec::new()),
@@ -164,20 +158,18 @@ impl Compiler {
                     },
                     _ => return None,
                 };
-                let variant = |vname: &str, fields: Vec<Ty>| GlueVariant {
-                    name: vname.to_string(),
-                    tag: self.checker.tag_for(&name, vname),
-                    fields,
+                let variant = |vname: &str, tag: Option<u32>, parts: Vec<Ty>| Product {
+                    ctor: ProductCtor::Variant { enum_name: name.clone(), name: vname.to_string(), tag },
+                    parts,
                 };
+                let builtin = |vname: &str, parts: Vec<Ty>| variant(vname, self.checker.tag_for(&name, vname), parts);
                 if name == common::BUILTIN_OPTION_ENUM {
                     let [some] = args.as_slice() else { return None };
-                    let variants = vec![variant("Some", vec![key(some)]), variant("None", Vec::new())];
-                    return Some(GlueShape::Enum { name, variants });
+                    return Some(GlueShape::Enum(vec![builtin("Some", vec![key(some)]), builtin("None", Vec::new())]));
                 }
                 if name == common::BUILTIN_RESULT_ENUM {
                     let [ok, err] = args.as_slice() else { return None };
-                    let variants = vec![variant("Ok", vec![key(ok)]), variant("Err", vec![key(err)])];
-                    return Some(GlueShape::Enum { name, variants });
+                    return Some(GlueShape::Enum(vec![builtin("Ok", vec![key(ok)]), builtin("Err", vec![key(err)])]));
                 }
                 if self.checker.is_class(&name) {
                     return None;
@@ -189,13 +181,9 @@ impl Compiler {
                 }
                 let variants = declared
                     .iter()
-                    .map(|(vname, tag, fields)| GlueVariant {
-                        name: vname.clone(),
-                        tag: Some(*tag),
-                        fields: fields.iter().map(|t| key(&crate::layout::bind_params(t, &params, &args))).collect(),
-                    })
+                    .map(|(vname, tag, fields)| variant(vname, Some(*tag), fields.iter().map(|t| key(&crate::layout::bind_params(t, &params, &args))).collect()))
                     .collect();
-                Some(GlueShape::Enum { name, variants })
+                Some(GlueShape::Enum(variants))
             }
             _ => None,
         }
@@ -589,7 +577,7 @@ fn float_leaf(shape: &GlueShape) -> bool {
             _ => false,
         }
     }
-    !matches!(shape, GlueShape::Enum { .. }) && shape.parts().into_iter().any(ty_leaf)
+    !matches!(shape, GlueShape::Enum(_)) && shape.parts().into_iter().any(ty_leaf)
 }
 
 /// `x == y` at `ty`; `()` parts are always equal.
@@ -612,6 +600,45 @@ fn all(b: &mut Synth, parts: Vec<HirId>) -> HirId {
 
 fn bool_lit(b: &mut Synth, v: bool) -> HirId {
     b.push(HirKind::Lit(Lit::Bool(v)), coil_ty::boolean())
+}
+
+/// One part of an opened product: a local its pattern bound, or a
+/// record's field, read from the record each time.
+enum Part {
+    Local(LocalId),
+    Field(LocalId, String, Ty),
+}
+
+/// The parts of tuple or record `v`, with the `let` that binds a tuple's
+/// to `{side}{i}`.
+fn open(b: &mut Synth, product: &Product, v: LocalId, side: &str) -> (Option<HirId>, Vec<Part>) {
+    if let ProductCtor::Record(names) = &product.ctor {
+        return (None, names.iter().zip(&product.parts).map(|(n, t)| Part::Field(v, n.clone(), t.clone())).collect());
+    }
+    let init = b.read(v);
+    let (bound, locals) = product.bind(b, init, side);
+    (Some(bound), locals.into_iter().map(Part::Local).collect())
+}
+
+/// `x0 == y0 && ..` over the parts of two values of one product.
+fn parts_eq(b: &mut Synth, xs: Vec<Part>, ys: Vec<Part>, tys: &[Ty]) -> HirId {
+    let read = |b: &mut Synth, part: Part| match part {
+        Part::Local(l) => b.read(l),
+        Part::Field(v, name, ty) => {
+            let base = b.read(v);
+            b.push(HirKind::Field { base, name }, ty)
+        }
+    };
+    let parts = xs
+        .into_iter()
+        .zip(ys)
+        .zip(tys)
+        .map(|((x, y), t)| {
+            let (xv, yv) = (read(b, x), read(b, y));
+            part_eq(b, xv, yv, t)
+        })
+        .collect();
+    all(b, parts)
 }
 
 /// Whether `a` and `c` (of the shape's type) are equal, part by part.
@@ -659,70 +686,24 @@ fn glue_body(b: &mut Synth, a: LocalId, c: LocalId, shape: &GlueShape) -> HirId 
             let yes = bool_lit(b, true);
             b.block(vec![check_len, init, each], Some(yes), boolean)
         }
-        GlueShape::Tuple(items) => {
-            let bind = |b: &mut Synth, v: LocalId, side: &str| {
-                let v = b.read(v);
-                let locals: Vec<_> = items.iter().enumerate().map(|(i, t)| b.local(&format!("{side}{i}"), t.clone(), LocalKind::Pattern)).collect();
-                let pat = HirPat::Tuple(locals.iter().map(|&l| HirPat::Bind(l)).collect());
-                (b.push(HirKind::LetPat { pat, init: v }, coil_ty::unit()), locals)
-            };
-            let (la, xs) = bind(b, a, "x");
-            let (lc, ys) = bind(b, c, "y");
-            let parts = xs
-                .into_iter()
-                .zip(ys)
-                .zip(items)
-                .map(|((x, y), t)| {
-                    let (xv, yv) = (b.read(x), b.read(y));
-                    part_eq(b, xv, yv, t)
-                })
-                .collect();
-            let eq = all(b, parts);
-            b.block(vec![la, lc], Some(eq), boolean)
-        }
-        GlueShape::Record(fields) => {
-            let parts = fields
-                .iter()
-                .map(|(name, t)| {
-                    let (av, cv) = (b.read(a), b.read(c));
-                    let x = b.push(HirKind::Field { base: av, name: name.clone() }, t.clone());
-                    let y = b.push(HirKind::Field { base: cv, name: name.clone() }, t.clone());
-                    part_eq(b, x, y, t)
-                })
-                .collect();
-            all(b, parts)
+        // `let (x..) = a; let (y..) = c; x.. == y..`; a record's fields
+        // are read in place, each as it is compared.
+        GlueShape::Product(product) => {
+            let (la, xs) = open(b, product, a, "x");
+            let (lc, ys) = open(b, product, c, "y");
+            let eq = parts_eq(b, xs, ys, &product.parts);
+            match (la, lc) {
+                (Some(la), Some(lc)) => b.block(vec![la, lc], Some(eq), boolean),
+                _ => eq,
+            }
         }
         // `match a { V(x..) => match c { V(y..) => x.. == y.., _ => false }, .. }`
-        GlueShape::Enum { name, variants } => {
-            let pat = |b: &mut Synth, v: &GlueVariant, side: &str| {
-                let locals: Vec<_> = v.fields.iter().enumerate().map(|(i, t)| b.local(&format!("{side}{i}"), t.clone(), LocalKind::Pattern)).collect();
-                let fields = if v.fields.is_empty() {
-                    HirPatFields::Unit
-                } else {
-                    HirPatFields::Tuple(locals.iter().map(|&l| HirPat::Bind(l)).collect())
-                };
-                let pat = HirPat::Variant {
-                    enum_name: name.clone(),
-                    variant: v.name.clone(),
-                    tag: v.tag,
-                    fields,
-                };
-                (pat, locals)
-            };
+        GlueShape::Enum(variants) => {
             let mut arms = Vec::with_capacity(variants.len());
             for v in variants {
-                let (pa, xs) = pat(b, v, "x");
-                let (pc, ys) = pat(b, v, "y");
-                let parts = xs
-                    .into_iter()
-                    .zip(ys)
-                    .zip(&v.fields)
-                    .map(|((x, y), t)| {
-                        let (xv, yv) = (b.read(x), b.read(y));
-                        part_eq(b, xv, yv, t)
-                    })
-                    .collect();
-                let eq = all(b, parts);
+                let (pa, xs) = v.pat(b, "x");
+                let (pc, ys) = v.pat(b, "y");
+                let eq = parts_eq(b, xs.into_iter().map(Part::Local).collect(), ys.into_iter().map(Part::Local).collect(), &v.parts);
                 let no = bool_lit(b, false);
                 let cv = b.read(c);
                 let inner = b.match_(cv, vec![(pc, eq), (HirPat::Wild, no)], boolean.clone());
