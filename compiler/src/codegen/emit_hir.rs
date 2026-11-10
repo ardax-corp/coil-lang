@@ -7233,6 +7233,7 @@ impl Compiler {
             .any(|ty| {
                 crate::layout::nested_open_enum(&self.checker, &ty, true, &crate::layout::nested_open_look(&self.checker), &mut |_| true)
                     || crate::layout::nested_fn_var_result(&ty, true, &mut |_| true)
+                    || crate::layout::nested_fn_field(&self.checker, &ty, &crate::layout::nested_open_look(&self.checker))
             })
     }
 
