@@ -11,15 +11,19 @@ use crate::typechecking::AggregateArithInfo;
 use super::classify::{fun_words_in, mono_fun, open_fun, poly_fun, primitive};
 
 /// The class `let x = new C(..)` keeps in frame slots instead of a heap
-/// object: no `fn drop()` and 1 to 32 fields.
+/// object: no `fn drop()` and 1 to 32 fields, none of them a `()` (which no
+/// slot holds as a word).
 pub fn sroa_class(body: &HirBody, checker: &Checker, init: HirId) -> Option<String> {
     let HirKind::Make {
         kind: MakeKind::Class(name),
-        ..
+        args,
     } = &body.expr(init).kind
     else {
         return None;
     };
+    if args.iter().any(|&a| is_unit_value(body, checker, a)) {
+        return None;
+    }
     let key = checker.resolve_class_key(name)?;
     let n = checker.class_fields(&key)?.len();
     // A flat two-word field takes two slots in the object (its tail), which
@@ -169,10 +173,11 @@ pub fn stack_arrays(body: &HirBody, checker: &Checker) -> StackArrays {
         }
     }
     // A function or coroutine element stays in the array object: its
-    // closure or handle word has no slot type (#1331).
+    // closure or handle word has no slot type (#1331). So does a `()`,
+    // which no local holds as a word.
     let no_slot = |e: &Ty| {
         let e = crate::typechecking::ty::strip_readonly(e);
-        matches!(e, Ty::Fun(..)) || Checker::coroutine_parts(e).is_some()
+        matches!(e, Ty::Fun(..)) || Checker::coroutine_parts(e).is_some() || crate::layout::is_unit(e)
     };
     cands.retain(|&local, _| {
         !body.local(LocalId(local)).ty.as_ref().is_some_and(|t| match crate::typechecking::ty::strip_readonly(&apply_ty_prune(checker.subst(), t)) {

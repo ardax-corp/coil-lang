@@ -39,8 +39,7 @@ impl Walk<'_> {
         match (name, args) {
             ("push", [recv, value]) => {
                 self.value(*recv)?;
-                self.word(*value)?;
-                self.value(*value)
+                self.stored(*value)
             }
             ("capacity" | "clear", [_]) | ("reserve", [_, _]) | ("insert", [_, _, _]) | ("pop", [_]) | ("remove", [_, _]) => {
                 self.args(args)
@@ -442,16 +441,27 @@ impl Walk<'_> {
     /// Each of `items`, in order.
     fn items(&mut self, items: &[HirId]) -> Check {
         for &item in items {
-            // A `()` item runs for its effect; the tuple stores the empty
-            // tuple object (#1427).
-            if is_unit_value(self.body, self.checker, item) {
-                self.effect(item)?;
-                continue;
-            }
-            self.word(item)?;
-            self.value(item)?;
+            self.stored(item)?;
         }
         Ok(())
+    }
+
+    /// A value stored or passed as one word. A `()` runs for its effect and
+    /// is the empty tuple object there (#1427, #2489).
+    fn stored(&mut self, id: HirId) -> Check {
+        if is_unit_value(self.body, self.checker, id) {
+            return self.effect(id);
+        }
+        self.word(id)?;
+        self.value(id)
+    }
+
+    /// A place read as one word; a `()` one is nothing to read.
+    fn read(&self, id: HirId) -> Check {
+        if is_unit_value(self.body, self.checker, id) {
+            return Ok(());
+        }
+        self.word(id)
     }
 
     /// A generic class instance: its methods are one shared body.
@@ -563,14 +573,8 @@ impl Walk<'_> {
             ) {
                 return Err("call-argument");
             }
-            // A `()` argument runs for its effect; the call passes the
-            // empty tuple object (#1086).
-            if is_unit_value(self.body, self.checker, arg) {
-                self.effect(arg)?;
-                continue;
-            }
-            self.word(arg)?;
-            self.value(arg)?;
+            // A `()` argument is passed as the empty tuple object (#1086).
+            self.stored(arg)?;
         }
         Ok(())
     }
@@ -591,6 +595,8 @@ impl Walk<'_> {
                 }
             }
             HirKind::Lit(_) => Err("literal"),
+            // A `()` local (a clone's `T x` at `T = ()`) is nothing to read.
+            HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
             HirKind::Local(_) => self.word(id),
             // A `const` read or a `static let` load: the codegen plan finds
             // which (`Compiler::hir_global_const` / `hir_global_static`).
@@ -796,11 +802,9 @@ impl Walk<'_> {
                 if !matches!(kind, IndexKind::Array | IndexKind::Tuple) {
                     return Err("index-kind");
                 }
-                // A tuple's `()` item is read for the base's and index's
-                // effects only (#1427).
-                if !(*kind == IndexKind::Tuple && is_unit_value(body, self.checker, id)) {
-                    self.word(id)?;
-                }
+                // A `()` item is read for the base's and index's effects
+                // only (#1427).
+                self.read(id)?;
                 self.aggregate(*base)?;
                 self.scalar(*index)?;
                 // A slot `LOAD`, or a select over the slots.
@@ -821,10 +825,8 @@ impl Walk<'_> {
                 self.items(args)
             }
             HirKind::Field { base, .. } => {
-                // A record's `()` field is read for the base's effects only.
-                if !(self.record(*base) && is_unit_value(body, self.checker, id)) {
-                    self.word(id)?;
-                }
+                // A `()` field is read for the base's effects only.
+                self.read(id)?;
                 // A record variant's field reads `LoadField` on the boxed
                 // enum (codegen checks the field resolves).
                 if self.class(*base) != Some(ValueClass::Enum) {
@@ -838,17 +840,7 @@ impl Walk<'_> {
                 args,
             } => {
                 self.word(id)?;
-                for &arg in args {
-                    // A `()` value runs for its effect; the record stores
-                    // the empty tuple object.
-                    if is_unit_value(body, self.checker, arg) {
-                        self.effect(arg)?;
-                        continue;
-                    }
-                    self.word(arg)?;
-                    self.value(arg)?;
-                }
-                Ok(())
+                self.items(args)
             }
             // `a..b` over a shared generic body's open `T` (#1230): the
             // typed range object, its bounds the unboxed words.
@@ -966,7 +958,10 @@ impl Walk<'_> {
                 let [inner] = args.as_slice() else {
                     return Err("builtin");
                 };
-                self.word(id)?;
+                // A clone's share of a `T` value at `T = ()`: the `()`.
+                if !(matches!(body.expr(id).kind, HirKind::Builtin { op: Builtin::Cow { .. }, .. }) && is_unit_value(body, self.checker, id)) {
+                    self.word(id)?;
+                }
                 self.value(*inner)
             }
             // `typeof e`: a string constant, `e`'s type; `e` is not evaluated.
@@ -1155,10 +1150,7 @@ impl Walk<'_> {
                         }
                         _ => Ok(()),
                     },
-                    HirKind::Local(_) => {
-                        self.word(*value)?;
-                        self.value(*value)
-                    }
+                    HirKind::Local(_) => self.stored(*value),
                     // `base.f = v`: the value, then the base on top of it.
                     HirKind::Field { base, .. } => {
                         if !read_base(body, *base) {
@@ -1171,10 +1163,9 @@ impl Walk<'_> {
                             self.effect(*value)?;
                             return self.value(*base);
                         }
-                        self.word(*place)?;
+                        self.read(*place)?;
                         self.object(*base)?;
-                        self.word(*value)?;
-                        self.value(*value)?;
+                        self.stored(*value)?;
                         self.value(*base)
                     }
                     // `base[i] = v`: the value to a temp, then base and index.
@@ -1188,11 +1179,10 @@ impl Walk<'_> {
                             self.stage_at = Some(id);
                             return Err("assign-index");
                         }
-                        self.word(*place)?;
+                        self.read(*place)?;
                         self.aggregate(*base)?;
                         self.scalar(*index)?;
-                        self.word(*value)?;
-                        self.value(*value)?;
+                        self.stored(*value)?;
                         if !self.stack_base(*base) {
                             self.value(*base)?;
                         }

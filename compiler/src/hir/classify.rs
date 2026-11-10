@@ -61,7 +61,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             .iter()
             .all(|(_, f)| classify_in(checker, f, seen).is_some_and(|class| is_word(class) || class == ValueClass::Unit))
             .then_some(ValueClass::Opaque),
-        Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), false, seen),
+        Ty::Array { element, .. } => aggregate(checker, std::iter::once(element.as_ref()), true, seen),
         // A bare-class existential (`Show x`): one `[value, dictionary]`
         // tuple word, only moved and called through its dictionary.
         Ty::Existential { .. } => Some(ValueClass::Opaque),
@@ -70,7 +70,7 @@ fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<Val
             classify_in(checker, crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty)?, seen)
         }
         Ty::App(..) if coil_ty::vec_element_ty(ty).is_some() => {
-            aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), false, seen)
+            aggregate(checker, coil_ty::vec_element_ty(ty).into_iter(), true, seen)
         }
         // A higher-kinded parameter's instance (`F<A>` in a shared body):
         // the instance's one word, only moved and passed to its dictionary.

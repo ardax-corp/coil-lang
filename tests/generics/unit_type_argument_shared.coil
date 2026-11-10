@@ -1,0 +1,662 @@
+// `()` as a type argument (#2489): a generic function, class or enum at
+// `T = ()` works wherever a one-word type does. A `()` is nothing to read in
+// a body that knows the type, and the empty tuple object where a word is
+// stored or passed (a shared body's bare `T`, an element, a field, a payload).
+//
+// The same cases as unit_type_argument.coil with no mono clones: every generic
+// function here runs its shared body.
+// @flags --clone-budget 0
+use tests::assert;
+use string::format;
+use gc::collect;
+use collections::map::HashMap;
+
+class Count {
+    pub n: int,
+}
+
+fn bump(Count c) -> () {
+    c.n = c.n + 1;
+}
+
+fn idt<T>(T x) -> T {
+    return x;
+}
+
+fn take<T>(T x) -> int {
+    return 1;
+}
+
+fn second<T, U>(T x, U y) -> U {
+    return y;
+}
+
+fn app<T>(fn(T) -> T f, T x) -> T {
+    return f(x);
+}
+
+fn mk<T>(fn() -> T f) -> T {
+    return f();
+}
+
+fn sink<T>(fn(T) -> int f, T x) -> int {
+    return f(x) + 1;
+}
+
+fn twice<T>(fn(T) -> T f, T x) -> T {
+    let y = f(x);
+    return f(y);
+}
+
+fn shown<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+fn same<T: Eq>(T a, T b) -> bool {
+    return a == b;
+}
+
+enum H<T> {
+    S(T),
+    N,
+}
+
+fn get<T>(H<T> h, T x) -> T {
+    return match h {
+        H::S(v) => v,
+        H::N => x,
+    };
+}
+
+fn hold<T>(T x) -> H<T> {
+    return H::S(x);
+}
+
+fn held<T>(H<T> h) -> bool {
+    return match h {
+        H::S(_) => true,
+        H::N => false,
+    };
+}
+
+fn vlen<T>(Vec<T> v) -> int {
+    return v.len();
+}
+
+fn first<T>(Vec<T> v) -> T {
+    return v[0];
+}
+
+fn append<T>(Vec<T> v, T x) -> Vec<T> {
+    v.push(x);
+    return v;
+}
+
+fn fill<T>(T x, int n) -> Vec<T> {
+    let v: Vec<T> = [];
+    let i = 0;
+    while i < n {
+        v.push(x);
+        i = i + 1;
+    }
+    return v;
+}
+
+fn count<T>(Vec<T> v) -> int {
+    let n = 0;
+    for x in v {
+        n = n + 1;
+    }
+    return n;
+}
+
+fn some<T>(T x) -> Option<T> {
+    return Some(x);
+}
+
+fn none<T>(T x) -> Option<T> {
+    return None;
+}
+
+fn or<T>(Option<T> o, T d) -> T {
+    return match o {
+        Some(v) => v,
+        None => d,
+    };
+}
+
+fn is_some<T>(Option<T> o) -> bool {
+    return match o {
+        Some(_) => true,
+        None => false,
+    };
+}
+
+fn ok<T>(T x) -> Result<T, string> {
+    return Ok(x);
+}
+
+fn fail<T>(T x) -> Result<int, T> {
+    return Err(x);
+}
+
+fn is_ok<T, E>(Result<T, E> r) -> bool {
+    return match r {
+        Ok(_) => true,
+        Err(_) => false,
+    };
+}
+
+fn pair<T>(T x, int n) -> (T, int) {
+    return (x, n);
+}
+
+fn dup<T>(T x) -> (T, T) {
+    return (x, x);
+}
+
+fn snd<T>((T, int) p) -> int {
+    return p[1];
+}
+
+fn fst<T>((T, int) p) -> T {
+    return p[0];
+}
+
+class Box<T> {
+    pub v: T,
+    pub n: int,
+}
+
+impl Box<T> {
+    pub fn get() -> T {
+        return self.v;
+    }
+
+    pub fn set(T x) {
+        self.v = x;
+        self.n = self.n + 1;
+    }
+
+    pub fn swap(T x) -> T {
+        let old = self.v;
+        self.v = x;
+        return old;
+    }
+}
+
+fn unbox<T>(Box<T> b) -> T {
+    return b.v;
+}
+
+fn shows<T: Show>(fn() -> T f) -> string {
+    return format("%v", f());
+}
+
+fn eqs<T: Eq>(fn() -> T f, T x) -> bool {
+    return f() == x;
+}
+
+fn keep<T>(fn() -> T f, int n) -> Vec<T> {
+    let v: Vec<T> = [];
+    let i = 0;
+    while i < n {
+        v.push(f());
+        i = i + 1;
+    }
+    return v;
+}
+
+fn show_all<T: Show>(Vec<T> v) -> string {
+    let s = "";
+    for x in v {
+        s = s + format("%v", x);
+    }
+    return s;
+}
+
+fn each<T>(Vec<T> v, fn(T) -> () f) {
+    for x in v {
+        f(x);
+    }
+}
+
+fn map<T, U>(Vec<T> v, fn(T) -> U f) -> Vec<U> {
+    let out: Vec<U> = [];
+    for x in v {
+        out.push(f(x));
+    }
+    return out;
+}
+
+fn swap<A, B>((A, B) p) -> (B, A) {
+    return (p[1], p[0]);
+}
+
+fn both<T>(T a, T b) -> Vec<T> {
+    return [a, b];
+}
+
+fn nest<T>(T x) -> Option<Option<T>> {
+    return Some(Some(x));
+}
+
+fn triple<T>(T x) -> (T, T, T) {
+    return (x, x, x);
+}
+
+fn pick<T>(bool b, T x, T y) -> T {
+    if b {
+        return x;
+    }
+    return y;
+}
+
+fn settle<T>(T x, int n) -> T {
+    let y = x;
+    let i = 0;
+    while i < n {
+        y = pick(i > 1, y, x);
+        i = i + 1;
+    }
+    return y;
+}
+
+fn maybe<T>(bool b, T x) -> Option<T> {
+    let o: Option<T> = None;
+    if b {
+        o = Some(x);
+    }
+    return o;
+}
+
+fn three<T>(T x) -> [T; 3] {
+    return [x, x, x];
+}
+
+fn down<T>(T x, int n) -> T {
+    if n == 0 {
+        return x;
+    }
+    return down(x, n - 1);
+}
+
+enum Tree<T> {
+    Leaf(T),
+    Node(Tree<T>, Tree<T>),
+}
+
+fn size<T>(Tree<T> t) -> int {
+    return match t {
+        Tree::Leaf(_) => 1,
+        Tree::Node(a, b) => size(a) + size(b),
+    };
+}
+
+fn leftmost<T>(Tree<T> t) -> T {
+    return match t {
+        Tree::Leaf(v) => v,
+        Tree::Node(a, _) => leftmost(a),
+    };
+}
+
+class Duo<A, B> {
+    pub a: A,
+    pub b: B,
+}
+
+impl Duo<A, B> {
+    pub fn fst() -> A {
+        return self.a;
+    }
+
+    pub fn snd() -> B {
+        return self.b;
+    }
+
+    pub fn flip() -> Duo<B, A> {
+        return new Duo(self.b, self.a);
+    }
+}
+
+class Cell<T> {
+    pub v: T,
+}
+
+impl Cell<T> {
+    pub fn map<U>(fn(T) -> U f) -> Cell<U> {
+        return new Cell(f(self.v));
+    }
+
+    pub fn get() -> T {
+        return self.v;
+    }
+}
+
+class Plain {
+    pub u: (),
+    pub n: int,
+}
+
+test("a parameter of type T takes a unit") {
+    assert!(take(()) == 1);
+    assert!(second((), 4) == 4);
+    assert!(second("a", ()) == ());
+    let c = new Count(0);
+    assert!(take(bump(c)) == 1);
+    assert!(c.n == 1);
+    let u = bump(c);
+    assert!(take(u) == 1);
+    assert!(c.n == 2);
+}
+
+test("a result of type T is a unit") {
+    let u = idt(());
+    assert!(u == ());
+    assert!(format("%v", u) == "()");
+    assert!(format("%v", idt(())) == "()");
+    let c = new Count(0);
+    let w = idt(bump(c));
+    assert!(c.n == 1);
+    assert!(w == ());
+    idt(bump(c));
+    assert!(c.n == 2);
+    assert!(idt(idt(())) == ());
+}
+
+test("a function over T is called at unit") {
+    let c = new Count(0);
+    let u = app(fn (() u) => u, ());
+    assert!(u == ());
+    let v = app(fn (() u) use (mut c) => bump(c), ());
+    assert!(v == ());
+    assert!(c.n == 1);
+    let w = mk(fn () use (mut c) => bump(c));
+    assert!(w == ());
+    assert!(c.n == 2);
+    assert!(sink(fn (() u) => 4, ()) == 5);
+    let t = twice(fn (() u) use (mut c) => bump(c), ());
+    assert!(t == ());
+    assert!(c.n == 4);
+    assert!(mk(fn () => ()) == ());
+}
+
+test("a bound's instance at unit") {
+    assert!(shown(()) == "()");
+    assert!(same((), ()));
+    let u = idt(());
+    assert!(shown(u) == "()");
+    assert!(same(u, ()));
+}
+
+test("a generic enum at unit") {
+    let n: H<()> = H::N;
+    let s: H<()> = H::S(());
+    assert!(get(n, ()) == ());
+    assert!(get(s, ()) == ());
+    assert!(!held(n));
+    assert!(held(s));
+    let h = hold(());
+    assert!(held(h));
+    assert!(get(h, ()) == ());
+    let c = new Count(0);
+    let k = hold(bump(c));
+    assert!(c.n == 1);
+    assert!(held(k));
+    let m = match k {
+        H::S(u) => format("%v", u),
+        H::N => "none",
+    };
+    assert!(m == "()");
+}
+
+test("a Vec of units") {
+    let v: Vec<()> = [(), (), ()];
+    assert!(v.len() == 3);
+    assert!(vlen(v) == 3);
+    assert!(count(v) == 3);
+    assert!(first(v) == ());
+    let u = v[1];
+    assert!(u == ());
+    v.push(());
+    assert!(v.len() == 4);
+    v[0] = ();
+    let e: Vec<()> = [];
+    let w = append(e, ());
+    let w = append(w, ());
+    assert!(w.len() == 2);
+    assert!(vlen(w) == 2);
+    let f = fill((), 5);
+    assert!(f.len() == 5);
+    assert!(f[4] == ());
+    assert!(count(f) == 5);
+    let c = new Count(0);
+    let g = fill(bump(c), 2);
+    assert!(c.n == 1);
+    assert!(g.len() == 2);
+    let n = 0;
+    for x in f {
+        assert!(x == ());
+        n = n + 1;
+    }
+    assert!(n == 5);
+    assert!(format("%v", f[0]) == "()");
+}
+
+test("an array of units") {
+    let a = [(), ()];
+    assert!(a.len() == 2);
+    assert!(a[1] == ());
+    let n = 0;
+    for x in a {
+        n = n + 1;
+    }
+    assert!(n == 2);
+}
+
+test("an Option of unit") {
+    let o = some(());
+    assert!(is_some(o));
+    assert!(or(o, ()) == ());
+    let n: Option<()> = None;
+    assert!(!is_some(n));
+    assert!(or(n, ()) == ());
+    assert!(!is_some(none(())));
+    let g: Option<()> = Some(());
+    assert!(is_some(g));
+    let m = match o {
+        Some(u) => format("%v", u),
+        None => "none",
+    };
+    assert!(m == "()");
+    let c = new Count(0);
+    let s = some(bump(c));
+    assert!(c.n == 1);
+    assert!(is_some(s));
+    assert!(idt(g) == Some(()));
+    assert!(is_some(idt(o)));
+}
+
+test("a Result of unit") {
+    let r = ok(());
+    assert!(is_ok(r));
+    let m = match r {
+        Ok(u) => format("%v", u),
+        Err(e) => e,
+    };
+    assert!(m == "()");
+    let f = fail(());
+    assert!(!is_ok(f));
+    let k = match f {
+        Ok(n) => "ok",
+        Err(u) => format("%v", u),
+    };
+    assert!(k == "()");
+    let g: Result<(), string> = Ok(());
+    assert!(is_ok(g));
+    let b: Result<(), string> = Err("bad");
+    assert!(!is_ok(b));
+    assert!(is_ok(idt(g)));
+    let uu: Result<(), ()> = Ok(());
+    assert!(is_ok(uu));
+}
+
+test("a tuple with a unit") {
+    let p = pair((), 4);
+    assert!(snd(p) == 4);
+    assert!(fst(p) == ());
+    assert!(p[1] == 4);
+    assert!(p[0] == ());
+    let q = ((), 7);
+    assert!(snd(q) == 7);
+    assert!(fst(q) == ());
+    let d = dup(());
+    assert!(d[0] == ());
+    assert!(d[1] == ());
+    let c = new Count(0);
+    let r = pair(bump(c), 2);
+    assert!(c.n == 1);
+    assert!(r[1] == 2);
+    let t = idt(((), 3));
+    assert!(t[1] == 3);
+    let s = second((), ((), "x"));
+    assert!(s[1] == "x");
+}
+
+test("a generic class at unit") {
+    let b = new Box((), 0);
+    assert!(b.get() == ());
+    b.set(());
+    assert!(b.n == 1);
+    assert!(b.swap(()) == ());
+    assert!(b.v == ());
+    b.v = ();
+    assert!(unbox(b) == ());
+    let c = new Count(0);
+    b.set(bump(c));
+    assert!(c.n == 1);
+    assert!(b.n == 2);
+    assert!(format("%v", b.get()) == "()");
+}
+
+test("a unit a function returns into a bound, a Vec and a collection") {
+    assert!(shows(fn () => ()) == "()");
+    assert!(eqs(fn () => (), ()));
+    let k = keep(fn () => (), 3);
+    collect();
+    assert!(k.len() == 3);
+    assert!(show_all(k) == "()()()");
+    assert!(k[2] == ());
+}
+
+test("Vec methods and structural instances on units") {
+    let v: Vec<()> = [(), ()];
+    let w: Vec<()> = [(), ()];
+    assert!(v == w);
+    assert!(format("%v", v) == "[(), ()]");
+    assert!(v.pop() == Some(()));
+    assert!(v.len() == 1);
+    v.insert(0, ());
+    assert!(v.len() == 2);
+    assert!(v.remove(0) == Some(()));
+    assert!(v.len() == 1);
+    let t = ((), 1);
+    assert!(format("%v", t) == "((), 1)");
+    assert!(t == ((), 1));
+    let big: Vec<()> = [];
+    let i = 0;
+    while i < 1000 {
+        big.push(());
+        i = i + 1;
+    }
+    collect();
+    assert!(big.len() == 1000);
+    assert!(count(big) == 1000);
+    assert!(big[999] == ());
+}
+
+test("a HashMap with unit values is a set") {
+    let m: HashMap<string, ()> = HashMap::new();
+    m.insert("a", ());
+    m.insert("b", ());
+    m.insert("a", ());
+    assert!(m.len() == 2);
+    assert!(m.contains("a"));
+    assert!(!m.contains("z"));
+    assert!(m.get("z") == None);
+    assert!(m.get("a") == Some(()));
+    assert!(m.get_or("q", ()) == ());
+    assert!(m.values().len() == 2);
+    let n = 0;
+    for e in m {
+        n = n + 1;
+    }
+    assert!(n == 2);
+}
+
+test("functions over a Vec map to and from units") {
+    let c = new Count(0);
+    let us = map([1, 2, 3], fn (int x) => ());
+    assert!(us.len() == 3);
+    each(us, fn (() u) use (mut c) => bump(c));
+    assert!(c.n == 3);
+    let ns = map(us, fn (() u) => 5);
+    assert!(ns.len() == 3 && ns[0] + ns[2] == 10);
+    let uu = map(us, fn (() u) => u);
+    assert!(uu.len() == 3);
+}
+
+test("units below the top of a result") {
+    let s = swap(((), 2));
+    assert!(s[0] == 2);
+    assert!(s[1] == ());
+    assert!(format("%v", s) == "(2, ())");
+    let b = both((), ());
+    assert!(b.len() == 2);
+    assert!(format("%v", nest(())) == "Some(Some(()))");
+    assert!(format("%v", triple(())) == "((), (), ())");
+    let a = three(());
+    assert!(a.len() == 3);
+    assert!(a[2] == ());
+    assert!(maybe(true, ()) == Some(()));
+    assert!(maybe(false, ()) == None);
+}
+
+test("a unit through locals, loops and recursion of a generic body") {
+    assert!(settle((), 4) == ());
+    assert!(down((), 5) == ());
+    assert!(pick(true, (), ()) == ());
+    let c = new Count(0);
+    let u = settle(bump(c), 3);
+    assert!(c.n == 1);
+    assert!(u == ());
+}
+
+test("a recursive generic enum and a two-parameter class at unit") {
+    let t = Tree::Node(Tree::Leaf(()), Tree::Node(Tree::Leaf(()), Tree::Leaf(())));
+    assert!(size(t) == 3);
+    assert!(leftmost(t) == ());
+    let p = new Duo((), 3);
+    assert!(p.fst() == ());
+    assert!(p.snd() == 3);
+    let q = p.flip();
+    assert!(q.fst() == 3);
+    assert!(q.snd() == ());
+    let c = new Cell(3);
+    let u = c.map(fn (int x) => ());
+    assert!(u.get() == ());
+    assert!(u.map(fn (() x) => 7).get() == 7);
+}
+
+test("a class field of type unit") {
+    let p = new Plain((), 2);
+    assert!(p.u == ());
+    p.u = ();
+    assert!(p.n == 2);
+    let c = new Count(0);
+    p.u = bump(c);
+    assert!(c.n == 1);
+    let ps = [new Plain((), 1), new Plain((), 2)];
+    assert!(ps[1].n == 2);
+    assert!(ps[0].u == ());
+}
