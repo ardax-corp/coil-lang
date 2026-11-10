@@ -16,12 +16,12 @@ use crate::typechecking::generics::{
 use crate::typechecking::id::{self, IdTable, NodeId};
 use crate::typechecking::kind::Kind;
 use crate::typechecking::subst::{Subst, apply_ty, apply_ty_prune};
-use crate::typechecking::ty::{ArrayLength, array, array_fixed, peel_constructor_refinement, tuple as tuple_ty};
+use crate::typechecking::ty::{ArrayLength, array, array_fixed, nominal_enum, tuple as tuple_ty};
 use crate::typechecking::ty::{AssocProjection, BOOL, BYTE, Constraint, FLOAT, INT, STRING, Scheme, UNIT};
 use crate::typechecking::ty::{
     EnumVariantPayloadTy, RANGE, RANGE_INCLUSIVE, Ty, TyVarId, boolean, float, ftv_ty, int,
-    is_option_ty, is_result_ty, never, option_app_ty, option_inner, option_ty, range_app,
-    range_inclusive_ty, range_ty, readonly_ty, result_app_ty, result_ok_err, result_ty,
+    is_option_ty, is_result_ty, never, option_inner, option_ty, range_app,
+    range_inclusive_ty, range_ty, readonly_ty, result_ok_err, result_ty,
     schemaize_ty, string, strip_readonly, subst_ty_params,
     unit as unit_ty, vec_app_ty, vec_element_ty,
 };
@@ -333,7 +333,7 @@ impl Checker {
             let (name, arity) = (*name, params.len());
             let t = self.counter.fresh();
             let vec_t = vec_app_ty(Ty::Var(t));
-            let opt_t = option_app_ty(Ty::Var(t));
+            let opt_t = option_ty(Ty::Var(t));
             let ty = match name {
                 "push" => Ty::fun(&[vec_t, Ty::Var(t)], unit.clone()),
                 "pop" => Ty::fun(&[vec_t], opt_t),
@@ -467,9 +467,9 @@ impl Checker {
         let dummy = 0..0;
         let stream = stream_ty();
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
-        let res_stream = result_app_ty(stream.clone(), io_err.clone());
-        let res_unit = result_app_ty(unit_ty(), io_err.clone());
-        let res_int = result_app_ty(int(), io_err);
+        let res_stream = result_ty(stream.clone(), io_err.clone());
+        let res_unit = result_ty(unit_ty(), io_err.clone());
+        let res_int = result_ty(int(), io_err);
 
         let attach_ty = Ty::fun(
             &[stream.clone(), int(), int(), int(), int(), int()],
@@ -1002,17 +1002,17 @@ impl Checker {
         let stream = stream_ty();
         let bytes = vec_app_ty(byte());
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
-        let opt_int = option_app_ty(int());
-        let res_opt_int = result_app_ty(opt_int, io_err.clone());
-        let res_int = result_app_ty(int(), io_err.clone());
-        let res_unit = result_app_ty(unit_ty(), io_err.clone());
-        let res_stream = result_app_ty(stream.clone(), io_err.clone());
-        let res_string = result_app_ty(string(), Ty::Con(common::BUILTIN_STRING_ERROR_ENUM.into()));
+        let opt_int = option_ty(int());
+        let res_opt_int = result_ty(opt_int, io_err.clone());
+        let res_int = result_ty(int(), io_err.clone());
+        let res_unit = result_ty(unit_ty(), io_err.clone());
+        let res_stream = result_ty(stream.clone(), io_err.clone());
+        let res_string = result_ty(string(), Ty::Con(common::BUILTIN_STRING_ERROR_ENUM.into()));
         let addr_ty = tuple(vec![string(), int()]);
-        let res_addr = result_app_ty(addr_ty, io_err.clone());
+        let res_addr = result_ty(addr_ty, io_err.clone());
         // `(nbytes, peer_host, peer_port)` from `io::net::udp::recv_from`.
         let recv_from_ty = tuple(vec![int(), string(), int()]);
-        let res_recv_from = result_app_ty(recv_from_ty, io_err);
+        let res_recv_from = result_ty(recv_from_ty, io_err);
         let ty = match kind {
             IoBuiltin::Stdin | IoBuiltin::Stdout | IoBuiltin::Stderr => stream,
             IoBuiltin::Open => Ty::fun(&[string(), string()], res_stream),
@@ -1056,10 +1056,10 @@ impl Checker {
         let str_err = Ty::Con(common::BUILTIN_STRING_ERROR_ENUM.into());
         let ty = match kind {
             StringBuiltin::Format => Ty::fun(&[string()], string()),
-            StringBuiltin::FromBytes => Ty::fun(&[bytes], result_app_ty(string(), str_err)),
+            StringBuiltin::FromBytes => Ty::fun(&[bytes], result_ty(string(), str_err)),
             StringBuiltin::ToBytes => Ty::fun(&[string()], bytes),
             StringBuiltin::SliceBytes => {
-                Ty::fun(&[string(), int(), int()], result_app_ty(string(), str_err))
+                Ty::fun(&[string(), int(), int()], result_ty(string(), str_err))
             }
         };
         Scheme::mono(ty)
@@ -1089,9 +1089,9 @@ impl Checker {
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
         let chan_err = Ty::Con(common::BUILTIN_CHANNEL_ERROR_ENUM.into());
         let lock_err = Ty::Con(common::BUILTIN_LOCK_ERROR_ENUM.into());
-        let res_unit = result_app_ty(unit_ty(), thread_err.clone());
-        let chan_unit = result_app_ty(unit_ty(), chan_err.clone());
-        let lock_unit = result_app_ty(unit_ty(), lock_err.clone());
+        let res_unit = result_ty(unit_ty(), thread_err.clone());
+        let chan_unit = result_ty(unit_ty(), chan_err.clone());
+        let lock_unit = result_ty(unit_ty(), lock_err.clone());
         let fn_ty = |param: Ty, ret: Ty| Ty::Fun(Box::new(param), Box::new(ret));
         // Every handle carries its value type `T` (#1905): what the thread
         // returns, what the channel moves, what the lock guards.
@@ -1104,22 +1104,22 @@ impl Checker {
                 return Scheme::poly(
                     vec![t, a],
                     vec![],
-                    Ty::fun(&[fn_a_t, Ty::Var(a)], result_app_ty(thread_ty(tv), thread_err)),
+                    Ty::fun(&[fn_a_t, Ty::Var(a)], result_ty(thread_ty(tv), thread_err)),
                 );
             }
-            ThreadBuiltin::Join => Ty::fun(&[thread_ty(tv.clone())], result_app_ty(tv, thread_err)),
+            ThreadBuiltin::Join => Ty::fun(&[thread_ty(tv.clone())], result_ty(tv, thread_err)),
             ThreadBuiltin::Detach => Ty::fun(&[thread_ty(tv)], res_unit),
             ThreadBuiltin::Channel => Ty::fun(
                 &[],
-                result_app_ty(tuple(vec![sender_ty(tv.clone()), receiver_ty(tv)]), chan_err),
+                result_ty(tuple(vec![sender_ty(tv.clone()), receiver_ty(tv)]), chan_err),
             ),
             ThreadBuiltin::Send | ThreadBuiltin::TrySend => Ty::fun(&[sender_ty(tv.clone()), tv], chan_unit),
             ThreadBuiltin::Recv | ThreadBuiltin::TryRecv => {
-                Ty::fun(&[receiver_ty(tv.clone())], result_app_ty(tv, chan_err))
+                Ty::fun(&[receiver_ty(tv.clone())], result_ty(tv, chan_err))
             }
             ThreadBuiltin::Close => Ty::fun(&[sender_ty(tv)], chan_unit),
-            ThreadBuiltin::Mutex => Ty::fun(std::slice::from_ref(&tv), result_app_ty(mutex_ty(tv.clone()), lock_err)),
-            ThreadBuiltin::Rwlock => Ty::fun(std::slice::from_ref(&tv), result_app_ty(rwlock_ty(tv.clone()), lock_err)),
+            ThreadBuiltin::Mutex => Ty::fun(std::slice::from_ref(&tv), result_ty(mutex_ty(tv.clone()), lock_err)),
+            ThreadBuiltin::Rwlock => Ty::fun(std::slice::from_ref(&tv), result_ty(rwlock_ty(tv.clone()), lock_err)),
             ThreadBuiltin::WithLock | ThreadBuiltin::WithWrite | ThreadBuiltin::TryWrite => {
                 let r = self.counter.fresh();
                 let callback = fn_ty(tv.clone(), tuple(vec![tv.clone(), Ty::Var(r)]));
@@ -1127,7 +1127,7 @@ impl Checker {
                 return Scheme::poly(
                     vec![t, r],
                     vec![],
-                    Ty::fun(&[lock, callback], result_app_ty(Ty::Var(r), lock_err)),
+                    Ty::fun(&[lock, callback], result_ty(Ty::Var(r), lock_err)),
                 );
             }
             ThreadBuiltin::WithRead | ThreadBuiltin::TryRead => {
@@ -1136,7 +1136,7 @@ impl Checker {
                 return Scheme::poly(
                     vec![t, r],
                     vec![],
-                    Ty::fun(&[rwlock_ty(tv), callback], result_app_ty(Ty::Var(r), lock_err)),
+                    Ty::fun(&[rwlock_ty(tv), callback], result_ty(Ty::Var(r), lock_err)),
                 );
             }
             ThreadBuiltin::Lock | ThreadBuiltin::TryLock | ThreadBuiltin::Unlock => {
@@ -1159,7 +1159,7 @@ impl Checker {
                 Scheme::poly(
                     vec![t],
                     vec![],
-                    Ty::fun(&[root_app_ty(Ty::Var(t))], option_app_ty(Ty::Var(t))),
+                    Ty::fun(&[root_app_ty(Ty::Var(t))], option_ty(Ty::Var(t))),
                 )
             }
             GcBuiltin::Weak => {
@@ -1171,7 +1171,7 @@ impl Checker {
                 Scheme::poly(
                     vec![t],
                     vec![],
-                    Ty::fun(&[weak_app_ty(Ty::Var(t))], option_app_ty(Ty::Var(t))),
+                    Ty::fun(&[weak_app_ty(Ty::Var(t))], option_ty(Ty::Var(t))),
                 )
             }
             GcBuiltin::HeapBytes => Scheme::mono(Ty::fun(&[], int())),
@@ -1188,14 +1188,14 @@ impl Checker {
         let env_err = Ty::Con(BUILTIN_ENV_ERROR_ENUM.into());
 
         let tty_err = Ty::Con(common::BUILTIN_TTY_ERROR_ENUM.into());
-        let res_bool_io = result_app_ty(boolean(), io_err.clone());
-        let res_size_tty = result_app_ty(tuple_ty(vec![int(), int()]), tty_err.clone());
-        let res_read_tty = result_app_ty(option_app_ty(int()), tty_err.clone());
-        let res_unit_tty = result_app_ty(unit_ty(), tty_err);
-        let res_unit_io = result_app_ty(unit_ty(), io_err.clone());
-        let res_string_io = result_app_ty(string(), io_err.clone());
-        let res_strs_io = result_app_ty(vec_app_ty(string()), io_err.clone());
-        let res_meta_io = result_app_ty(
+        let res_bool_io = result_ty(boolean(), io_err.clone());
+        let res_size_tty = result_ty(tuple_ty(vec![int(), int()]), tty_err.clone());
+        let res_read_tty = result_ty(option_ty(int()), tty_err.clone());
+        let res_unit_tty = result_ty(unit_ty(), tty_err);
+        let res_unit_io = result_ty(unit_ty(), io_err.clone());
+        let res_string_io = result_ty(string(), io_err.clone());
+        let res_strs_io = result_ty(vec_app_ty(string()), io_err.clone());
+        let res_meta_io = result_ty(
             record(vec![
                 ("size".into(), int()),
                 ("is_file".into(), boolean()),
@@ -1206,14 +1206,14 @@ impl Checker {
             io_err.clone(),
         );
 
-        let res_string_env = result_app_ty(string(), env_err.clone());
-        let res_strs_env = result_app_ty(vec_app_ty(string()), env_err.clone());
-        let res_unit_env = result_app_ty(unit_ty(), env_err);
+        let res_string_env = result_ty(string(), env_err.clone());
+        let res_strs_env = result_ty(vec_app_ty(string()), env_err.clone());
+        let res_unit_env = result_ty(unit_ty(), env_err);
 
         let ty = match registry {
             common::FFI_READ_INTS_NATIVE => Ty::fun(
                 &[int(), int(), int()],
-                result_app_ty(
+                result_ty(
                     vec_app_ty(int()),
                     Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()),
                 ),
@@ -1292,14 +1292,14 @@ impl Checker {
                     string(),
                     int(),
                 ],
-                result_app_ty(int(), io_err.clone()),
+                result_ty(int(), io_err.clone()),
             ),
-            "process_take_pipe" => Ty::fun(&[int(), int()], option_app_ty(stream_ty())),
-            "process_wait" | "process_pid" => Ty::fun(&[int()], result_app_ty(int(), io_err.clone())),
-            "process_try_wait" => Ty::fun(&[int()], result_app_ty(option_app_ty(int()), io_err.clone())),
+            "process_take_pipe" => Ty::fun(&[int(), int()], option_ty(stream_ty())),
+            "process_wait" | "process_pid" => Ty::fun(&[int()], result_ty(int(), io_err.clone())),
+            "process_try_wait" => Ty::fun(&[int()], result_ty(option_ty(int()), io_err.clone())),
             "process_output" => Ty::fun(
                 &[int()],
-                result_app_ty(tuple_ty(vec![int(), string(), string()]), io_err.clone()),
+                result_ty(tuple_ty(vec![int(), string(), string()]), io_err.clone()),
             ),
             "process_kill" => Ty::fun(&[int()], res_unit_io.clone()),
             "process_signal" => Ty::fun(&[int(), int()], res_unit_io.clone()),
@@ -1324,8 +1324,8 @@ impl Checker {
                 let lock = if registry.starts_with("lock_") { mutex_ty(tv.clone()) } else { rwlock_ty(tv.clone()) };
                 let ty = match registry {
                     "rw_try_read" | "rw_try_write" => Ty::fun(&[lock], boolean()),
-                    "lock_load" | "rw_load" => Ty::fun(&[lock], result_app_ty(tv, lock_err)),
-                    "lock_store" | "rw_store" => Ty::fun(&[lock, tv], result_app_ty(unit_ty(), lock_err)),
+                    "lock_load" | "rw_load" => Ty::fun(&[lock], result_ty(tv, lock_err)),
+                    "lock_store" | "rw_store" => Ty::fun(&[lock, tv], result_ty(unit_ty(), lock_err)),
                     _ => Ty::fun(&[lock], unit_ty()),
                 };
                 return Scheme::poly(vec![t], vec![], ty);
@@ -1420,7 +1420,7 @@ impl Checker {
         use crate::typechecking::ty::thread_ty;
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
         // The handle carries what the function returns (#1905).
-        let res_thread = |t| result_app_ty(thread_ty(Ty::Var(t)), thread_err.clone());
+        let res_thread = |t| result_ty(thread_ty(Ty::Var(t)), thread_err.clone());
         let fn_ty = |param: Ty, ret: Ty| Ty::Fun(Box::new(param), Box::new(ret));
         match arg_tys.len() {
             0 => self.error_with_help(
@@ -2621,8 +2621,8 @@ impl Checker {
             use crate::typechecking::ty::byte;
             let var = self.counter.fresh();
             let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
-            let res_opt_int = result_app_ty(option_app_ty(int()), io_err.clone());
-            let res_int = result_app_ty(int(), io_err);
+            let res_opt_int = result_ty(option_ty(int()), io_err.clone());
+            let res_int = result_ty(int(), io_err);
             let bytes = vec_app_ty(byte());
             self.typeclass_method_schemes.insert(
                 ("Read".to_string(), "read".to_string()),
@@ -2666,7 +2666,7 @@ impl Checker {
                     }],
                     Ty::Fun(
                         Box::new(Ty::Var(i_var)),
-                        Box::new(option_app_ty(Ty::Var(item_var))),
+                        Box::new(option_ty(Ty::Var(item_var))),
                     ),
                 ),
             );
@@ -4803,7 +4803,7 @@ impl Checker {
             self.current_expected = prev_expected;
             // Peel constructor tags so `[Rank::Low, Rank::Mid]` is
             // `[Rank; 2]`, not a stuck `::v0` element type.
-            let t_pruned = crate::typechecking::ty::peel_constructor_refinement(apply_ty_prune(
+            let t_pruned = nominal_enum(apply_ty_prune(
                 &self.subst,
                 &t,
             ));
@@ -4820,7 +4820,7 @@ impl Checker {
                             self.absorb(s);
                             let joined = apply_ty_prune(
                                 &self.subst,
-                                &crate::typechecking::ty::peel_constructor_refinement(prev_pruned.clone()),
+                                &nominal_enum(prev_pruned.clone()),
                             );
                             elem_ty = Some(self.readonly_join(joined, &prev_pruned, &t_pruned));
                         }
@@ -6425,19 +6425,6 @@ impl Checker {
         self.bound_display_calls.insert(None, (range.start, range.end), hint);
     }
 
-    /// Peel `Constructor` / structural `Sum` down to a nominal head so
-    /// `Color::Red == Color::Blue` unifies as `Color` rather than as two
-    /// incompatible constructor refinements.
-    /// A builtin `Option` / `Result` construct keeps its structural `Sum`
-    /// (its payload types), which unifies with `Option<T>` / `Result<T, E>`.
-    fn peel_comparison_ty(ty: &Ty) -> Ty {
-        match ty {
-            Ty::Constructor { owner, .. } => Self::peel_comparison_ty(owner),
-            Ty::Sum { name, .. } if !common::is_poly_builtin_enum(name) => Ty::Con(name.clone()),
-            other => other.clone(),
-        }
-    }
-
     fn infer_comparison(
         &mut self,
         lhs: &Output,
@@ -6447,8 +6434,10 @@ impl Checker {
         class: &str,
         method: &str,
     ) -> Ty {
-        let lt = Self::peel_comparison_ty(&self.infer(lhs));
-        let rt = Self::peel_comparison_ty(&self.infer(rhs));
+        // `Color::Red == Color::Blue` compares as `Color`, not as two
+        // constructor refinements.
+        let lt = nominal_enum(self.infer(lhs));
+        let rt = nominal_enum(self.infer(rhs));
         // `b == "/"`, `b == 48`: a literal next to a `byte` compares as one.
         let (lt, rt) = self.coerce_byte_literal_operands(lhs, rhs, lt, rt);
         let lt = apply_ty_prune(&self.subst, &lt);
@@ -10517,7 +10506,7 @@ impl Checker {
         if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
-        let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
+        let ty = nominal_enum(apply_ty_prune(&self.subst, ty));
         let items: Vec<Ty> = match &ty {
             Ty::Tuple(items) if !items.is_empty() => items.clone(),
             Ty::Record { fields } if !fields.is_empty() => fields.iter().map(|(_, t)| t.clone()).collect(),
@@ -10550,12 +10539,12 @@ impl Checker {
         let items_ok = match class {
             "Show" => items.iter().all(|item| self.is_showable_for_format(item)),
             "Eq" => items.iter().all(|item| {
-                let lookup = show_lookup_ty(&apply_ty_prune(&self.subst, item));
+                let lookup = nominal_enum(apply_ty_prune(&self.subst, item));
                 self.generics.has_instance(class, &lookup)
                     || self.generics.find_generic_instance(class, std::slice::from_ref(&lookup)).is_some()
             }),
             _ => items.iter().all(|item| {
-                let lookup = show_lookup_ty(&apply_ty_prune(&self.subst, item));
+                let lookup = nominal_enum(apply_ty_prune(&self.subst, item));
                 self.generics.find_instance(class, std::slice::from_ref(&lookup)).is_some_and(|inst| inst.context.is_empty())
             }),
         };
@@ -10570,7 +10559,7 @@ impl Checker {
     /// for one, after its tuple items' and its structural `Eq` (a
     /// superclass of `Ord`, #1716).
     fn ensure_structural_tuple_ord(&mut self, ty: &Ty) {
-        let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
+        let ty = nominal_enum(apply_ty_prune(&self.subst, ty));
         let Ty::Tuple(items) = &ty else {
             return;
         };
@@ -10581,7 +10570,7 @@ impl Checker {
             self.ensure_structural_tuple_ord(item);
         }
         let ordered = items.iter().all(|item| {
-            let lookup = Self::operand_instance_lookup_ty(&show_lookup_ty(&apply_ty_prune(&self.subst, item)));
+            let lookup = Self::operand_instance_lookup_ty(&nominal_enum(apply_ty_prune(&self.subst, item)));
             Self::is_numeric_operand_ty(&lookup)
                 || self.generics.has_instance("Ord", &lookup)
                 || self.generics.find_generic_instance("Ord", std::slice::from_ref(&lookup)).is_some()
@@ -10605,7 +10594,7 @@ impl Checker {
     /// (`Length<Vec<a>>`), whose `len` reads the same length whatever the
     /// elements are (#1542). A ground goal keeps its own.
     fn ensure_structural_length(&mut self, ty: &Ty) {
-        let ty = show_lookup_ty(&apply_ty_prune(&self.subst, ty));
+        let ty = nominal_enum(apply_ty_prune(&self.subst, ty));
         let ty = match strip_readonly(&ty) {
             Ty::Array { element, .. } => array((**element).clone()),
             Ty::Con(_) => return,
@@ -11929,8 +11918,8 @@ impl Checker {
             "receiver" => crate::typechecking::ty::receiver_ty(Ty::Var(self.counter.fresh())),
             "mutex" => crate::typechecking::ty::mutex_ty(Ty::Var(self.counter.fresh())),
             "rwlock" => crate::typechecking::ty::rwlock_ty(Ty::Var(self.counter.fresh())),
-            "option" => option_app_ty(Ty::Var(self.counter.fresh())),
-            "result" => result_app_ty(Ty::Var(self.counter.fresh()), Ty::Var(self.counter.fresh())),
+            "option" => option_ty(Ty::Var(self.counter.fresh())),
+            "result" => result_ty(Ty::Var(self.counter.fresh()), Ty::Var(self.counter.fresh())),
             "ioerror" => Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into()),
             "threaderror" => Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into()),
             // A user `class Error` / `enum Error` (any spelling) is its own
@@ -12870,7 +12859,7 @@ impl Checker {
             );
         }
         // dload → Result<int, Error>
-        result_app_ty(int(), Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()))
+        result_ty(int(), Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()))
     }
 
     fn infer_ffi_declare(&mut self, args: &[Output], range: Range<usize>) -> Ty {
@@ -12935,7 +12924,7 @@ impl Checker {
             self.messages.push(m);
         }
         // declare → Result<int, Error> (fn id or typed FFI error)
-        result_app_ty(int(), Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()))
+        result_ty(int(), Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()))
     }
 
     fn qualified_class_field_key(class: &str, field: &str) -> String {
@@ -13510,7 +13499,7 @@ impl Checker {
             self.messages.push(m);
         }
         // invoke → Result<T, Error>
-        result_app_ty(ret_ty, Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()))
+        result_ty(ret_ty, Ty::Con(common::BUILTIN_FFI_ERROR_ENUM.into()))
     }
 
     /// Resolve an FFI type expression to `(tag, aux)` for codegen.
@@ -17435,10 +17424,18 @@ impl Checker {
             }
         }
 
-        // Build the Ty::Sum.
-        let sum_ty = Ty::Sum {
-            name: name_str.clone(),
-            variants: built_variants.clone(),
+        // The type its constructors are owned by: a generic enum's
+        // application over its parameters (the form a construct site and
+        // an annotation give it), else the structural sum.
+        let sum_ty = match self.generics.generic_type_ctors.get(&name_str) {
+            Some(params) if !params.is_empty() => Ty::App(
+                Box::new(Ty::Con(name_str.clone())),
+                params.iter().map(|p| Ty::Con(p.clone())).collect(),
+            ),
+            _ => Ty::Sum {
+                name: name_str.clone(),
+                variants: built_variants.clone(),
+            },
         };
 
         // Register the enum itself as a type.
@@ -17968,10 +17965,9 @@ impl Checker {
 
     /// Fresh payload + owning type for a polymorphic construct site.
     ///
-    /// Builtin Option/Result keep structural `Ty::Sum` owners (bridged
-    /// to `Ty::App` annotations via unify). User generic enums return
-    /// `Ty::App(Con(name), args)` so they unify directly with
-    /// annotations like `Box<int>`.
+    /// The owner is `Ty::App(Con(name), args)`, for `Option` / `Result` as
+    /// for a user generic enum, so it unifies directly with an annotation
+    /// like `Box<int>`.
     fn fresh_poly_construct_payload(
         &mut self,
         enum_name: &str,
@@ -18888,7 +18884,7 @@ impl Checker {
             // A fixed array's structural instance (#1479).
             Ty::Array { element, .. } => self.is_showable_for_format(&element),
             other => {
-                let lookup = show_lookup_ty(&other);
+                let lookup = nominal_enum(other.clone());
                 self.generics.has_instance("Show", &lookup)
                     || self
                         .generics
@@ -20091,7 +20087,7 @@ impl Checker {
     fn gains_readonly_element(&self, expected: &Ty, actual: &Ty) -> bool {
         // An enum construct site (`Option::Some(p)`) is typed as its
         // refined constructor: compare its owner (#1552).
-        let (expected, actual) = (&peel_constructor_refinement(expected.clone()), &peel_constructor_refinement(actual.clone()));
+        let (expected, actual) = (&nominal_enum(expected.clone()), &nominal_enum(actual.clone()));
         let differs = |e: &Ty, a: &Ty| match (e, a) {
             (Ty::Readonly(inner), a) if !matches!(a, Ty::Readonly(_) | Ty::Var(_)) => {
                 self.has_mutable_interior(inner) || matches!(**inner, Ty::Var(_))
@@ -20119,7 +20115,7 @@ impl Checker {
     /// `readonly`: `readonly P` as a plain `P`, or `Vec<readonly P>` as
     /// `Vec<P>` (#1552). `T` converts to `readonly T`, never back.
     fn drops_readonly(&self, expected: &Ty, actual: &Ty) -> bool {
-        let (expected, actual) = (&peel_constructor_refinement(expected.clone()), &peel_constructor_refinement(actual.clone()));
+        let (expected, actual) = (&nominal_enum(expected.clone()), &nominal_enum(actual.clone()));
         match (expected, actual) {
             (Ty::Readonly(_) | Ty::Var(_), _) => false,
             (_, Ty::Readonly(_)) => self.has_mutable_interior(expected),
@@ -20580,7 +20576,7 @@ impl Checker {
     fn class_owner_from_ty(&self, ty: &Ty) -> Option<String> {
         // A constructor expression (`E::A.tag()`) is typed as the variant;
         // its inherent methods are the enum's.
-        let ty = crate::typechecking::ty::peel_constructor_refinement(strip_readonly(ty).clone());
+        let ty = nominal_enum(strip_readonly(ty).clone());
         Self::class_name_of_ty(&ty)
             .filter(|n| self.classes.contains_key(*n))
             .map(|n| n.to_string())

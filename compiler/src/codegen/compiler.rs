@@ -3906,13 +3906,13 @@ impl Compiler {
         // the body reaches whatever this module calls `read` / `write`.
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
         let bytes = coil_ty::vec_app_ty(coil_ty::byte());
-        for (class, method, ok) in [("Read", "read", coil_ty::option_app_ty(int.clone())), ("Write", "write", int.clone())] {
+        for (class, method, ok) in [("Read", "read", coil_ty::option_ty(int.clone())), ("Write", "write", int.clone())] {
             let fqn = Generics::builtin_instance_fqn(class, "Stream", method);
             if self.native_id(method).is_none() {
                 continue;
             }
             let params = [(coil_ty::stream_ty(), true), (bytes.clone(), true)];
-            let ret = coil_ty::result_app_ty(ok, io_err.clone());
+            let ret = coil_ty::result_ty(ok, io_err.clone());
             self.hir_synth_callees.insert(method.to_string(), SynthCallee { host: true, ..SynthCallee::default() });
             self.emit_builtin_entry(&fqn, &params, ret.clone(), false, |b, a| b.call(method, a, ret));
             self.hir_synth_callees.clear();
@@ -4040,7 +4040,7 @@ impl Compiler {
         // boxed layout).
         let int = coil_ty::int();
         let vec = coil_ty::vec_app_ty(int.clone());
-        let opt = coil_ty::option_app_ty(int.clone());
+        let opt = coil_ty::option_ty(int.clone());
         let unit = coil_ty::unit();
         let host = |compiler: &mut Self, name: &str, native: &str, params: &[Ty], ret: &Ty| {
             if compiler.native_id(native).is_none() {
@@ -4157,7 +4157,7 @@ impl Compiler {
             if self.functions.contains_key(&fqn) || self.native_id(native).is_none() {
                 continue;
             }
-            let ret = coil_ty::result_app_ty(ok, io_err.clone());
+            let ret = coil_ty::result_ty(ok, io_err.clone());
             let mut b = Synth::new(&self.checker, &fqn, ret.clone());
             let mut params = vec![b.local("self", coil_ty::stream_ty(), LocalKind::Param)];
             params.extend((0..ints).map(|i| b.local(&format!("arg{i}"), coil_ty::int(), LocalKind::Param)));

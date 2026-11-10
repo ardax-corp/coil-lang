@@ -3464,7 +3464,7 @@ impl Compiler {
     fn hir_method_rest_key(&self, body: &HirBody, args: &[HirId], method: &str) -> Option<String> {
         let recv = *args.first()?;
         let recv_ty = apply_ty_prune(self.checker.subst(), body.expr(recv).ty.as_ref()?);
-        let recv_ty = crate::typechecking::ty::peel_constructor_refinement(recv_ty);
+        let recv_ty = crate::typechecking::ty::nominal_enum(recv_ty);
         let owner = Checker::class_name_of_ty(&recv_ty)?;
         let key = self.context.methods.get(owner)?.get(method)?;
         (self.checker.fn_has_rest(key) && !self.checker.is_overloaded(key)).then(|| key.clone())
@@ -5546,7 +5546,7 @@ impl Compiler {
         }
         let recv_ty = Self::hir_ty(hir, recv).ok_or("method-receiver")?;
         // A constructor receiver (`E::A.tag()`) is typed as its variant.
-        let recv_ty = crate::typechecking::ty::peel_constructor_refinement(apply_ty_prune(self.checker.subst(), recv_ty));
+        let recv_ty = crate::typechecking::ty::nominal_enum(apply_ty_prune(self.checker.subst(), recv_ty));
         let owner = Checker::class_name_of_ty(&recv_ty).ok_or("method-receiver")?;
         // A numeric range's `to_vec` thunk takes the boxed range (the float
         // thunk for a float range).

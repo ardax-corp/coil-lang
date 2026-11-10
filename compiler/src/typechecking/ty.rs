@@ -732,22 +732,6 @@ pub fn never() -> Ty {
     Ty::Never
 }
 
-/// Build `Option<T>` as a type application.
-pub fn option_app_ty(inner: Ty) -> Ty {
-    Ty::App(
-        Box::new(Ty::Con(common::BUILTIN_OPTION_ENUM.into())),
-        vec![inner],
-    )
-}
-
-/// Build `Result<T, E>` as a type application.
-pub fn result_app_ty(ok: Ty, err: Ty) -> Ty {
-    Ty::App(
-        Box::new(Ty::Con(common::BUILTIN_RESULT_ENUM.into())),
-        vec![ok, err],
-    )
-}
-
 /// Build `Root<T>` as a type application.
 pub fn root_app_ty(inner: Ty) -> Ty {
     Ty::App(Box::new(Ty::Con(ROOT.into())), vec![inner])
@@ -806,132 +790,106 @@ pub fn vec_element_ty(ty: &Ty) -> Option<&Ty> {
     }
 }
 
-/// Drop variant-tag refinement, yielding the owning enum type.
-///
-/// Construct sites infer `Ty::Constructor { tag, owner, … }`. Comparisons
-/// already peel to the parent; polymorphic params / mixed-variant joins must
-/// do the same so `min(Rank::Mid, Rank::Low)` unifies as one `T`.
-///
-/// Monomorphic enums collapse to `Ty::Con(name)` (same shape as a `: Rank`
-/// annotation and as derive-Ord instance keys). Builtin `Option`/`Result`
-/// keep their structural `Sum` so payload types are preserved.
-pub fn peel_constructor_refinement(ty: Ty) -> Ty {
-    match ty {
-        Ty::Constructor { owner, .. } => peel_constructor_refinement(*owner),
-        Ty::Sum { name, .. } if !common::is_poly_builtin_enum(&name) => Ty::Con(name),
-        other => other,
-    }
-}
-
-/// `Option<T>`: the same type as [`option_app_ty`].
+/// `Option<T>`: the application `App(Con("Option"), [T])`. That is the one
+/// form an `Option` or `Result` value's type has; a construct site refines
+/// it to a `Constructor` owned by it. The enum's structural `Sum` is never a
+/// value's type (a generic enum's constructors are owned by its
+/// application).
 pub fn option_ty(inner: Ty) -> Ty {
-    option_app_ty(inner)
+    Ty::App(
+        Box::new(Ty::Con(common::BUILTIN_OPTION_ENUM.into())),
+        vec![inner],
+    )
 }
 
-/// `Result<T, E>`: the same type as [`result_app_ty`].
+/// `Result<T, E>`, as [`option_ty`].
 pub fn result_ty(ok: Ty, err: Ty) -> Ty {
-    result_app_ty(ok, err)
+    Ty::App(
+        Box::new(Ty::Con(common::BUILTIN_RESULT_ENUM.into())),
+        vec![ok, err],
+    )
 }
 
-/// Extract `T` from `Option<T>` (Sum or Constructor owner).
+impl Ty {
+    /// `self` without a variant-tag refinement: a `Constructor`'s owner.
+    fn enum_owner(&self) -> &Ty {
+        match self {
+            Ty::Constructor { owner, .. } => owner.enum_owner(),
+            other => other,
+        }
+    }
+
+    /// The arguments of `self` as an application of the builtin enum `name`.
+    fn builtin_enum_args(&self, name: &str) -> Option<&[Ty]> {
+        match self.enum_owner() {
+            Ty::App(head, args) if matches!(head.as_ref(), Ty::Con(n) if n == name) => Some(args),
+            _ => None,
+        }
+    }
+
+    /// `T` of an `Option<T>` (or of one of its variants' constructor types).
+    pub fn as_option(&self) -> Option<&Ty> {
+        self.builtin_enum_args(common::BUILTIN_OPTION_ENUM)?.first()
+    }
+
+    /// `(T, E)` of a `Result<T, E>` (or of one of its variants' constructor
+    /// types).
+    pub fn as_result(&self) -> Option<(&Ty, &Ty)> {
+        match self.builtin_enum_args(common::BUILTIN_RESULT_ENUM)? {
+            [ok, err, ..] => Some((ok, err)),
+            _ => None,
+        }
+    }
+}
+
+/// Extract `T` from `Option<T>`.
 pub fn option_inner(ty: &Ty) -> Option<Ty> {
-    match ty {
-        Ty::App(con, args) if matches!(con.as_ref(), Ty::Con(name) if name == common::BUILTIN_OPTION_ENUM) => {
-            args.first().cloned()
-        }
-        Ty::Sum { name, variants } if name == common::BUILTIN_OPTION_ENUM => {
-            for (vn, payload) in variants {
-                if vn == "Some" {
-                    return payload.field_types().into_iter().next().cloned();
-                }
-            }
-            None
-        }
-        Ty::Constructor { owner, .. } => option_inner(owner),
-        Ty::Con(name) if name == common::BUILTIN_OPTION_ENUM => None,
-        _ => None,
-    }
-}
-
-/// A user enum value's type by its name: a variant's constructor type
-/// (`Dir::Down(3)`) and the structural sum are both `Con("Dir")`, as an
-/// annotation names it. Other types are returned as they are.
-pub fn nominal_enum(ty: Ty) -> Ty {
-    match ty {
-        Ty::Constructor { owner, .. } => nominal_enum(*owner),
-        Ty::Sum { name, .. } if !common::is_builtin_option_enum(&name) && !common::is_builtin_result_enum(&name) => Ty::Con(name),
-        other => other,
-    }
+    ty.as_option().cloned()
 }
 
 /// Extract `(T, E)` from `Result<T, E>`.
 pub fn result_ok_err(ty: &Ty) -> Option<(Ty, Ty)> {
-    match ty {
-        Ty::App(con, args) if matches!(con.as_ref(), Ty::Con(name) if name == common::BUILTIN_RESULT_ENUM) => {
-            match (args.first(), args.get(1)) {
-                (Some(ok), Some(err)) => Some((ok.clone(), err.clone())),
-                _ => None,
-            }
-        }
-        Ty::Sum { name, variants } if name == common::BUILTIN_RESULT_ENUM => {
-            let mut ok = None;
-            let mut err = None;
-            for (vn, payload) in variants {
-                let field = payload.field_types().into_iter().next().cloned();
-                if vn == "Ok" {
-                    ok = field;
-                } else if vn == "Err" {
-                    err = field;
-                }
-            }
-            match (ok, err) {
-                (Some(o), Some(e)) => Some((o, e)),
-                _ => None,
-            }
-        }
-        Ty::Constructor { owner, .. } => result_ok_err(owner),
-        _ => None,
-    }
+    ty.as_result().map(|(ok, err)| (ok.clone(), err.clone()))
 }
 
-/// True when `ty` is (or owns) the built-in `Option` sum.
-/// `Option<T>` / `Result<T, E>` in any of its spellings (a `Sum`, a
-/// variant `Constructor`, the application) as the application, the type
-/// an instance lookup matches (#1479). `None` for any other type.
-pub fn builtin_enum_app(ty: &Ty) -> Option<Ty> {
-    let ty = match ty {
-        Ty::Constructor { owner, .. } => owner.as_ref(),
+/// An enum value's type as an annotation names it: a variant's constructor
+/// type (`Dir::Down(3)`, `Option::Some(1)`) is its owner's, and a user
+/// enum's structural sum is `Con("Dir")`. Other types are returned as they
+/// are.
+///
+/// A polymorphic parameter must not be pinned to one variant tag, so
+/// `min(Rank::Mid, Rank::Low)` unifies as one `T`; comparisons, instance
+/// lookups and derive-`Ord` keys go by the same type.
+pub fn nominal_enum(ty: Ty) -> Ty {
+    match ty {
+        Ty::Constructor { owner, .. } => nominal_enum(*owner),
+        Ty::Sum { name, .. } => Ty::Con(name),
         other => other,
-    };
-    if is_option_ty(ty) {
-        return option_inner(ty).map(option_app_ty);
     }
-    if is_result_ty(ty) {
-        return result_ok_err(ty).map(|(ok, err)| result_app_ty(ok, err));
-    }
-    None
 }
 
+/// `Option<T>` / `Result<T, E>` behind a variant's constructor type as the
+/// application, the type an instance lookup matches (#1479). `None` for any
+/// other type.
+pub fn builtin_enum_app(ty: &Ty) -> Option<Ty> {
+    (ty.as_option().is_some() || ty.as_result().is_some()).then(|| ty.enum_owner().clone())
+}
+
+/// True when `ty` is the built-in `Option`, applied or as its bare
+/// constructor.
 pub fn is_option_ty(ty: &Ty) -> bool {
-    match ty {
-        Ty::Sum { name, .. } | Ty::Con(name) => name == common::BUILTIN_OPTION_ENUM,
-        Ty::App(con, _) => {
-            matches!(con.as_ref(), Ty::Con(name) if name == common::BUILTIN_OPTION_ENUM)
-        }
-        Ty::Constructor { owner, .. } => is_option_ty(owner),
-        _ => false,
+    match ty.enum_owner() {
+        Ty::Con(name) => name == common::BUILTIN_OPTION_ENUM,
+        owner => owner.builtin_enum_args(common::BUILTIN_OPTION_ENUM).is_some(),
     }
 }
 
-/// True when `ty` is (or owns) the built-in `Result` sum.
+/// True when `ty` is the built-in `Result`, applied or as its bare
+/// constructor.
 pub fn is_result_ty(ty: &Ty) -> bool {
-    match ty {
-        Ty::Sum { name, .. } | Ty::Con(name) => name == common::BUILTIN_RESULT_ENUM,
-        Ty::App(con, _) => {
-            matches!(con.as_ref(), Ty::Con(name) if name == common::BUILTIN_RESULT_ENUM)
-        }
-        Ty::Constructor { owner, .. } => is_result_ty(owner),
-        _ => false,
+    match ty.enum_owner() {
+        Ty::Con(name) => name == common::BUILTIN_RESULT_ENUM,
+        owner => owner.builtin_enum_args(common::BUILTIN_RESULT_ENUM).is_some(),
     }
 }
 
