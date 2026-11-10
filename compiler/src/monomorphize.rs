@@ -1411,7 +1411,7 @@ mod tests {
         let cold_method = "class K { pub k: int, } impl K { #[cold] pub fn wrap<T>(T a) -> int { return 1; } } ";
         assert!(hot_of(&format!("#[hot] fn wrap<T>(T a) -> int {{ return 2; }} {cold_method}"), "wrap"));
         // The free function's own hint still marks it.
-        assert!(hot_of(&format!("#[hot] fn wrap<T>(T a) -> int {{ return 2; }} "), "wrap"));
+        assert!(hot_of("#[hot] fn wrap<T>(T a) -> int { return 2; } ", "wrap"));
     }
 
     #[test]
