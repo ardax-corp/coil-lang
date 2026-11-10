@@ -27,8 +27,8 @@ pub mod unify;
 pub mod virtual_modules;
 
 pub use aggregate_arith::{
-    AggregateArithInfo, AggregateArithKind, AggregateOp, LinearAlgebraKind, MatrixCellOp,
-    ScalarSide,
+    AggregateArithInfo, AggregateMode, AggregateOp, AggregateShape, LinearAlgebraKind,
+    MatrixCellOp, ScalarSide,
 };
 #[allow(unused_imports)] // public API for Matrix helpers
 pub use aggregate_arith::{is_matrix_ty, unwrap_matrix_ty, wrap_matrix_ty};

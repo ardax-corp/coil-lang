@@ -528,16 +528,11 @@ pub fn aggregate_src(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> 
 /// The packed `HostInvoke` path: a static
 /// shape of at least 8 elements, for `+ - * /` and negation.
 pub fn aggregate_packed(info: &AggregateArithInfo) -> Option<usize> {
-    use crate::typechecking::{AggregateArithKind as K, AggregateOp};
+    use crate::typechecking::AggregateOp;
     if matches!(info.op, AggregateOp::Mod | AggregateOp::Pow) {
         return None;
     }
-    let len = match info.kind {
-        K::ZipTuple { arity, .. } | K::BroadcastTuple { arity, .. } | K::NegTuple { arity, .. } => arity,
-        K::ZipArray { length, .. } => length,
-        K::BroadcastArray { length: Some(n), .. } | K::NegArray { length: Some(n), .. } => n,
-        K::BroadcastArray { length: None, .. } | K::NegArray { length: None, .. } => return None,
-    };
+    let len = info.kind.shape.static_len()?;
     (8..=u16::MAX as usize).contains(&len).then_some(len)
 }
 

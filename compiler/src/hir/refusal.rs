@@ -324,12 +324,12 @@ impl Walk<'_> {
     /// each element (literal items and stack-array slots read directly),
     /// then `MakeTuple` / `MakeArray`; or the packed `HostInvoke`.
     fn aggregate_arith(&mut self, id: HirId, lhs: HirId, rhs: Option<HirId>) -> Check {
-        use crate::typechecking::{AggregateArithKind as K, ScalarSide};
+        use crate::typechecking::{AggregateMode as M, AggregateShape as S, ScalarSide};
         let info = aggregate_info(self.checker, self.body, id).ok_or("operator-elementwise")?;
         self.word(id)?;
         let operands: Vec<HirId> = std::iter::once(lhs).chain(rhs).collect();
         if aggregate_packed(&info).is_some() {
-            if !matches!(info.kind, K::NegTuple { .. } | K::NegArray { .. }) && rhs.is_none() {
+            if info.kind.mode != M::Neg && rhs.is_none() {
                 return Err("operator-elementwise");
             }
             for &operand in &operands {
@@ -339,10 +339,10 @@ impl Walk<'_> {
             return Ok(());
         }
         let need_rhs = |rhs: Option<HirId>| rhs.ok_or("operator-elementwise");
-        match info.kind {
+        match (info.kind.shape, info.kind.mode) {
             // Tuples, and arrays of dynamic length: every operand to a temp.
-            K::NegTuple { .. } | K::ZipTuple { .. } | K::BroadcastTuple { .. } | K::NegArray { length: None, .. } | K::BroadcastArray { length: None, .. } => {
-                if !matches!(info.kind, K::NegTuple { .. } | K::NegArray { .. }) {
+            (S::Tuple(_) | S::Array(None), _) => {
+                if info.kind.mode != M::Neg {
                     need_rhs(rhs)?;
                 }
                 for &operand in &operands {
@@ -355,7 +355,7 @@ impl Walk<'_> {
                 }
                 Ok(())
             }
-            K::ZipArray { length, .. } => {
+            (S::Array(Some(length)), M::Zip) => {
                 let rhs = need_rhs(rhs)?;
                 self.aggregate_src(lhs)?;
                 self.aggregate_src(rhs)?;
@@ -365,7 +365,7 @@ impl Walk<'_> {
                 }
                 Ok(())
             }
-            K::BroadcastArray { length: Some(n), scalar_on, .. } => {
+            (S::Array(Some(n)), M::Broadcast(scalar_on)) => {
                 let rhs = need_rhs(rhs)?;
                 let (vec, scalar) = match scalar_on {
                     ScalarSide::Right => (lhs, rhs),
@@ -379,7 +379,7 @@ impl Walk<'_> {
                 }
                 Ok(())
             }
-            K::NegArray { length: Some(n), .. } => {
+            (S::Array(Some(n)), M::Neg) => {
                 self.aggregate_src(lhs)?;
                 for i in 0..n {
                     self.aggregate_elem(lhs, i)?;
