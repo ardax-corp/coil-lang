@@ -41,6 +41,12 @@ struct FnFacts {
     /// them pure.
     operands: Vec<(usize, usize)>,
     for_ins: Vec<(usize, usize)>,
+    /// `Owner::name(..)` and `Owner::name`, written like an enum
+    /// constructor (the flag is the form without arguments). The checker
+    /// says which are one; [`settle_constructs`] makes the rest a call of
+    /// `Owner::name` (a static method, a trait's static method, a module's
+    /// function) or a class static. A lone-file walk leaves them pure.
+    constructs: Vec<(String, String, bool)>,
 }
 
 /// Record `f` under `name`. Methods are keyed by bare name, so two impls with
@@ -56,6 +62,7 @@ fn insert_facts(facts: &mut HashMap<String, FnFacts>, name: &str, f: FnFacts) {
     entry.free_writes.extend(f.free_writes);
     entry.operands.extend(f.operands);
     entry.for_ins.extend(f.for_ins);
+    entry.constructs.extend(f.constructs);
 }
 
 /// `static let` names declared anywhere in `ast`.
@@ -121,6 +128,24 @@ fn settle_operators(
         let for_ins = std::mem::take(&mut f.for_ins);
         if operands.into_iter().any(operand_runs) || for_ins.into_iter().any(for_in_runs) {
             f.local.insert(EffectFlags::UNKNOWN | EffectFlags::RESIZE);
+        }
+    }
+}
+
+/// `Owner::name(..)` that is not an enum constructor is a call of
+/// `Owner::name`, and a bare `Owner::name` that is not one reads or writes
+/// a class static (#2407). `is_variant` answers for an owner and a name.
+fn settle_constructs(facts: &mut HashMap<String, FnFacts>, is_variant: &dyn Fn(&str, &str) -> bool) {
+    for f in facts.values_mut() {
+        for (owner, name, bare) in std::mem::take(&mut f.constructs) {
+            if is_variant(&owner, &name) {
+                continue;
+            }
+            if bare {
+                f.local.insert(EffectFlags::HOST | EffectFlags::HEAP_MUT);
+            } else {
+                f.callees.insert(format!("{owner}::{name}"));
+            }
         }
     }
 }
@@ -797,8 +822,9 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         }
         // Constructor payloads hold arbitrary expressions — skipping them hid
         // both impure calls and enum-building self-recursion.
-        Expression::Construct { fields, .. } => match fields {
+        Expression::Construct { enum_name, variant_name, fields } => match fields {
             EnumConstructPayload::Tuple(items) => {
+                facts.constructs.push(((*enum_name).to_string(), (*variant_name).to_string(), false));
                 for item in items {
                     walk_body(item, facts);
                 }
@@ -808,7 +834,9 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
                     walk_body(&f.value, facts);
                 }
             }
-            EnumConstructPayload::Unit => {}
+            EnumConstructPayload::Unit => {
+                facts.constructs.push(((*enum_name).to_string(), (*variant_name).to_string(), true));
+            }
         },
         Expression::Loop {
             contracts: _,
@@ -1007,6 +1035,7 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
             )
         };
         settle_operators(&mut facts, &operand_runs, &for_in_runs);
+        settle_constructs(&mut facts, &|owner, name| checker.tag_for(owner, name).is_some());
         effect_closure_with(&facts, &resolve)
     };
     checker.length_stability = length_stability(
@@ -1439,6 +1468,61 @@ fn main() { return; }
             shout_fx.contains(EffectFlags::IO) || shout_fx.contains(EffectFlags::UNKNOWN),
             "shout should record IO/unknown, got {shout_fx:?}"
         );
+    }
+
+    /// `Owner::name(..)` parses like an enum constructor; one that is not
+    /// is a call, with the effects of what it calls (#2407).
+    #[test]
+    fn construct_shaped_calls_carry_their_effects() {
+        use crate::typechecking::infer::Checker;
+
+        let ast = parse_ast(
+            r#"
+static let CALLS: int = 0;
+enum Shape {
+    Dot,
+    Circle(int),
+}
+class Counter {
+    pub n: int,
+    static count: int = 0,
+}
+impl Counter {
+    pub static fn quiet(int n) -> int { return n + 1; }
+    pub static fn loud(int n) -> int {
+        CALLS++;
+        return n;
+    }
+}
+trait Make<T> {
+    static fn make(int n) -> T {}
+}
+impl Make for Shape {
+    pub static fn make(int n) -> Shape {
+        CALLS++;
+        return Shape::Circle(n);
+    }
+}
+fn variant(int n) -> Shape { return Shape::Circle(n); }
+fn unit_variant() -> Shape { return Shape::Dot; }
+fn some(int n) -> Option<int> { return Option::Some(n); }
+fn inherent(int n) -> int { return Counter::quiet(n); }
+fn inherent_loud(int n) -> int { return Counter::loud(n); }
+fn built(int n) -> Shape { return Shape::make(n); }
+fn made<T: Make>(int n) -> T { return T::make(n); }
+fn reads() -> int { return Counter::count; }
+fn main() { return; }
+"#,
+        );
+        let mut c = Checker::new();
+        let _ = c.check_program(&ast);
+        let side = c.typed_sidecar();
+        for name in ["variant", "unit_variant", "some", "inherent"] {
+            assert!(side.name_is_pure(name), "`{name}` only builds a value or calls a pure method");
+        }
+        for name in ["inherent_loud", "built", "made", "reads"] {
+            assert!(!side.name_is_pure(name), "`{name}` is not pure");
+        }
     }
 
     /// An operator on a class or a type parameter, and a `for … in` over a
