@@ -2587,6 +2587,29 @@ impl Compiler {
         })
     }
 
+    /// Whether an instance with head `head` holds, at `lookup`, an open
+    /// `Option` / `Result` below its top that is a niche word there (a
+    /// class with a field `xs: Vec<Option<T>>`, at `string`): its shared
+    /// methods read that enum as its object, ground code holds the niche
+    /// word (#2446). A dictionary for it holds the per-type clones.
+    fn nested_head(&self, head: &[Ty], lookup: &[Ty]) -> bool {
+        if lookup.iter().any(Ty::has_var) {
+            return false;
+        }
+        let mut vars = HashMap::new();
+        for (h, t) in head.iter().zip(lookup) {
+            Self::bind_scheme_vars(h, t, &mut vars);
+        }
+        let look = crate::layout::nested_open_look(&self.checker);
+        let mut niche = |open: &Ty| {
+            matches!(
+                self.value_layout(&crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(open, &vars))),
+                ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult
+            )
+        };
+        head.iter().any(|h| crate::layout::nested_open_enum(&self.checker, h, true, &look, &mut niche))
+    }
+
     fn plan_instance_dict_steps(
         &mut self,
         out: &mut Vec<DictStep>,
@@ -2649,6 +2672,9 @@ impl Compiler {
         // Per slot: whether its instance is a [`Self::niche_head`] one, with
         // the method's name when it is the instance's own (not a default).
         let mut niche_slots: Vec<Option<Option<String>>> = Vec::new();
+        // Per slot: the method's name when its instance is a
+        // [`Self::nested_head`] one.
+        let mut nested_slots: Vec<Option<String>> = Vec::new();
         let (fqns, diag_range) = {
             // An open goal looks among the generic instances first: a ground
             // one its variables unify with is never its instance.
@@ -2681,6 +2707,7 @@ impl Compiler {
                 let Some(name) = owner.and_then(|inst| inst.method_fqns.get(&method_def.name).cloned()) else {
                     return false;
                 };
+                nested_slots.push(owner.filter(|inst| self.nested_head(&inst.args, lookup)).map(|_| format!("{owner_class}::{}", method_def.name)));
                 niche_slots.push(owner.filter(|inst| self.niche_head(&inst.args, lookup)).map(|_| {
                     (!Self::is_default_method_fqn(owner_class, &method_def.name, &name)).then(|| format!("{owner_class}::{}", method_def.name))
                 }));
@@ -2767,7 +2794,9 @@ impl Compiler {
                     }
                     let takes_object = niche.flatten().map(|method| {
                         format!("its `{method}` takes the value as an enum object, and has no per-type clone that takes the value's own word (coil-lang#2477)")
-                    });
+                    }).or_else(|| nested_slots.get(slot).cloned().flatten().map(|method| {
+                        format!("its `{method}` reads the `Option` / `Result` the value holds as an enum object, and has no per-type clone that reads its own word (coil-lang#2446)")
+                    }));
                     match self.instance_clone_at(&name, lookup, takes_object.is_some()) {
                         Some(clone) => Self::dict_adapter_name(&clone),
                         None => {

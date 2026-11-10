@@ -1052,6 +1052,26 @@ fn let_init_is_element(body: &HirBody, local: LocalId) -> bool {
     })
 }
 
+/// Whether `local` is a `let` of a field of, or a pattern's binding in a
+/// match on, a nested open enum (`layout::nested_open_type`): a generic
+/// body's instance of one was made where its parameters are open, so a
+/// function it holds returns the open enum's object (#2493, #2509).
+fn binds_from_nested(body: &HirBody, checker: &Checker, local: LocalId) -> bool {
+    let nested = |id: HirId| {
+        body.expr(id)
+            .ty
+            .as_ref()
+            .is_some_and(|t| crate::layout::nested_open_type(checker, &apply_ty_prune(checker.subst(), t)))
+    };
+    body.exprs.iter().any(|e| match &e.kind {
+        HirKind::Let { local: l, init: Some(init) } if *l == local => {
+            matches!(body.expr(*init).kind, HirKind::Field { base, .. } if nested(base))
+        }
+        HirKind::Match { scrutinee, arms } => arms.iter().any(|arm| arm.pat.binds(local)) && nested(*scrutinee),
+        _ => false,
+    })
+}
+
 /// Whether `local` is a `for` loop's binding of each element (`for f in fs`).
 fn for_binds_element(body: &HirBody, local: LocalId) -> bool {
     body.exprs
@@ -1127,7 +1147,9 @@ fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Ve
                         || info.kind == LocalKind::Let && let_init_is_lambda(body, local) && assigned.is_empty()
                         // An element of a shared body's `Vec<unit -> Result<T, E>>`:
                         // the closure word stored there (#2153).
-                        || assigned.is_empty() && (let_init_is_element(body, local) || for_binds_element(body, local)),
+                        || assigned.is_empty() && (let_init_is_element(body, local) || for_binds_element(body, local))
+                        // Read from a nested open enum's field or payload (#2493, #2509).
+                        || assigned.is_empty() && binds_from_nested(body, checker, local),
                 )
         })
     {
@@ -1157,13 +1179,25 @@ fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Ve
 /// function, or a generic class's function over its parameters read in a
 /// generic body (`f: fn(T) -> T`, #2485), whose words are plain: each bare
 /// `T` is the one word ground code passes for it, so the closure a ground
-/// instance stored is called as it is. A function holding a parameter below
-/// the top (`fn(T) -> Option<T>`) is no such word: its result would be read
-/// as the open enum's object where a ground closure returns its own layout.
+/// instance stored is called as it is.
+///
+/// A function holding a parameter below the top (`fn(T) -> Option<T>`)
+/// makes its class a nested open enum (`layout::nested_open_enum`): its
+/// methods and every generic over it are clone-only, so the instance a
+/// generic body reads it from was made where the parameter is open, and
+/// the closure returns the open enum's object (#2509).
 fn field_fun(body: &HirBody, checker: &Checker, field: HirId) -> bool {
+    let HirKind::Field { base, .. } = &body.expr(field).kind else {
+        return false;
+    };
+    let nested = body
+        .expr(*base)
+        .ty
+        .as_ref()
+        .is_some_and(|t| crate::layout::nested_open_type(checker, &apply_ty_prune(checker.subst(), t)));
     body.expr(field).ty.as_ref().is_some_and(|t| {
         let t = apply_ty_prune(checker.subst(), t);
-        matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words_in(checker, &t, &mut Vec::new(), false)
+        matches!(strip_readonly(&t), Ty::Fun(..)) && fun_words_in(checker, &t, &mut Vec::new(), nested)
     })
 }
 

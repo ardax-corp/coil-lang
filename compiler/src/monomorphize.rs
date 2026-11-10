@@ -409,7 +409,7 @@ fn collect_generic_functions(
                         .flatten()
                         .chain(checker.fn_return_ty(name))
                         .any(|ty| {
-                            crate::layout::nested_open_enum(&ty, true, &mut |_| true)
+                            crate::layout::nested_open_enum(checker, &ty, true, &crate::layout::nested_open_look(checker), &mut |_| true)
                                 || crate::layout::nested_fn_var_result(&ty, true, &mut |_| true)
                         });
                     sigs.insert(name.to_string(), sig.clone());
@@ -712,8 +712,10 @@ fn candidate_for_call(
     // A type parameter no bare formal names (only inside `Vec<T>` or
     // `Option<T>`, or only in the result): bound by matching the signature
     // against the ground argument and call types.
+    // A `let g = wrap;` alias's signature is `wrap`'s (#2447).
     if !has_rest && subst.iter().any(Option::is_none) {
-        bind_from_signature(fn_name, &mut subst, &fixed_tys, call, checker, ty_of);
+        let name = if sig.alias { sig.fn_name.as_str() } else { fn_name };
+        bind_from_signature(name, &mut subst, &fixed_tys, call, checker, ty_of);
     }
     let subst = subst.into_iter().collect::<Option<Vec<_>>>()?;
     let subst_ids: Vec<TyId> = subst.into_iter().map(|ty| intern.intern(ty)).collect();

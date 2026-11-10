@@ -376,12 +376,16 @@ fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<
     if variants.is_empty() {
         return None;
     }
+    // A nested open enum's instance in a shared body was made where its
+    // parameters are open (its generics are clone-only).
+    let open = args.iter().any(Ty::has_var)
+        && crate::layout::nested_open_type(checker, &Ty::App(Box::new(Ty::Con(name.to_string())), args.to_vec()));
     seen.push(key);
     let ok = variants.iter().all(|(variant, _, _)| {
         generic_enum_payload(checker, name, variant, args).is_some_and(|payload| {
             payload
                 .iter()
-                .all(|field| generic_enum_field(checker, field, seen) && classify_in(checker, field, seen).is_some())
+                .all(|field| generic_enum_field(checker, field, open, seen) && classify_in(checker, field, seen).is_some())
         })
     });
     seen.pop();
@@ -401,10 +405,13 @@ fn generic_user_enum(checker: &Checker, name: &str, args: &[Ty], seen: &mut Vec<
 ///   ([`closed_field`]: a `Vec` or `Option` of such functions).
 ///
 /// A function that holds a parameter below the top (`fn(T) -> Option<T>`)
-/// is taken at a ground instance only: a shared body would read its
-/// result as the open enum's object, a ground closure returns its word.
-fn generic_enum_field(checker: &Checker, field: &Ty, seen: &mut Vec<String>) -> bool {
-    let plain_fun = |ty: &Ty, seen: &mut Vec<String>| matches!(strip_readonly(ty), Ty::Fun(..)) && fun_words(checker, ty, seen);
+/// makes the enum a nested open one (`layout::nested_open_enum`, `open`):
+/// its generics are clone-only, so a shared body's instance was made
+/// where the parameter is open and the closure returns the open enum's
+/// object (#2493).
+fn generic_enum_field(checker: &Checker, field: &Ty, open: bool, seen: &mut Vec<String>) -> bool {
+    let plain_fun =
+        |ty: &Ty, seen: &mut Vec<String>| matches!(strip_readonly(ty), Ty::Fun(..)) && fun_words_in(checker, ty, seen, open);
     // The elements of a `Vec` or array of such functions are one closure
     // word each on both sides, as a generic function's own `Vec<fn(T) ->
     // T>` parameter's are (#2493).

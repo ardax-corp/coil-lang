@@ -1254,6 +1254,20 @@ impl Compiler {
         if self.messages.iter().any(|m| *m.kind() == reporting::MessageKind::ERROR) {
             return;
         }
+        if let Some((callee, at)) = self.nested_split_refusal.take()
+            && reason == "callee-generic"
+        {
+            let mut msg = Message::error(
+                ErrorCode::CodegenError,
+                format!("the compiler cannot lower `{name}` yet (callee-generic): this call of `{callee}` has no per-type clone"),
+                at.0..at.1,
+            );
+            msg.with_help(format!(
+                "`{callee}` holds an `Option` or `Result` of a type parameter inside another value (a `Vec`, an array, a tuple, a field or payload of a generic class or enum), which its shared generic body and this call's types lay out differently, so it runs only as a per-type clone, and this call has none (another module's generic at a type declared after that module, or a call on a polymorphic recursion chain); declare the type in or before the generic's module, or keep the `Option` / `Result` at the top of the parameter or field (coil-lang#2446)"
+            ));
+            self.messages.push(msg);
+            return;
+        }
         let mut message = Message::error(
             ErrorCode::CodegenError,
             format!("the compiler cannot lower `{name}` yet ({reason})"),
@@ -1305,6 +1319,7 @@ impl Compiler {
     fn try_lower_hir_function_in(&mut self, span: &SimpleSpan, dicts: Option<frame::FrameDicts>) -> bool {
         self.hir_refusal = None;
         *self.polyfn_over_application.borrow_mut() = None;
+        *self.nested_split_refusal.borrow_mut() = None;
         // Clones an earlier body planned but never called give back their room.
         self.planned_method_clones.borrow_mut().clear();
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
@@ -4819,6 +4834,7 @@ impl Compiler {
         if let HirKind::Call { args, .. } = &hir.expr(call).kind
             && self.hir_shared_split(hir, call, &lookup, args)
         {
+            *self.nested_split_refusal.borrow_mut() = Some((lookup.clone(), hir.expr(call).span));
             return Err("callee-generic");
         }
         Ok(abi)
@@ -5667,14 +5683,17 @@ impl Compiler {
         if shared || generic {
             self.hir_bare_niche_abi(hir, call, &lookup, 1, &mut abi);
         }
-        // At ground type arguments, the method's clone there.
-        if (shared || generic)
+        // At ground type arguments, the method's clone there. A plain
+        // class's method with type parameters of its own takes its shared
+        // body, but where its signature holds a nested open enum (#2447).
+        if (shared || generic || self.fn_sig_split(&lookup))
             && !forwards
             && let Some(clone) = self.hir_method_clone(hir, call, &lookup, &lookup, &abi)
         {
             return Ok(clone);
         }
         if self.hir_shared_split(hir, call, &lookup, args) {
+            *self.nested_split_refusal.borrow_mut() = Some((lookup.clone(), hir.expr(call).span));
             return Err("callee-generic");
         }
         let mut call = abi;
@@ -7158,8 +7177,10 @@ impl Compiler {
         let ground = |open: &Ty| apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(open, &vars));
         let mut niche = |open: &Ty| self.hir_niche_word(&ground(open));
         let mut unit = |var: &Ty| crate::layout::is_unit(&ground(var));
+        let look = crate::layout::nested_open_look(&self.checker);
         params.iter().chain([&ret]).any(|ty| {
-            crate::layout::nested_open_enum(ty, true, &mut niche) || crate::layout::nested_fn_var_result(ty, true, &mut unit)
+            crate::layout::nested_open_enum(&self.checker, ty, true, &look, &mut niche)
+                || crate::layout::nested_fn_var_result(ty, true, &mut unit)
         })
     }
 
@@ -7174,7 +7195,7 @@ impl Compiler {
             .flatten()
             .chain(self.checker.fn_return_ty(fqn))
             .any(|ty| {
-                crate::layout::nested_open_enum(&ty, true, &mut |_| true)
+                crate::layout::nested_open_enum(&self.checker, &ty, true, &crate::layout::nested_open_look(&self.checker), &mut |_| true)
                     || crate::layout::nested_fn_var_result(&ty, true, &mut |_| true)
             })
     }

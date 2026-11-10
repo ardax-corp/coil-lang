@@ -315,6 +315,10 @@ pub struct Compiler {
     /// `PolyFn` local recording no arity gave more arguments than it
     /// declares; reported as E0127 instead of E0801 (#1569, #1589).
     polyfn_over_application: std::cell::RefCell<Option<(String, (usize, usize))>>,
+    /// The generic (name, call span) a call would reach the shared body of
+    /// with a nested open enum that is a niche word at the call's types
+    /// (`hir_shared_split`, #2446): reported with why and what to write.
+    nested_split_refusal: std::cell::RefCell<Option<(String, (usize, usize))>>,
 
     /// Whole-program names used as function *values* (`Some` after the
     /// pipeline seeds every AST in the compile). `None` means "sidecar
@@ -723,6 +727,7 @@ impl Default for Compiler {
             fn_value_redirect_answers: std::cell::RefCell::new(HashMap::new()),
             generic_fn_value_refusal: std::cell::RefCell::new(None),
             polyfn_over_application: std::cell::RefCell::new(None),
+            nested_split_refusal: std::cell::RefCell::new(None),
             fn_value_escaped_program: None,
             written_names_program: None,
             test_cases: Vec::new(),
