@@ -28,6 +28,7 @@ two-slot call width).
 |------|------|-------|
 | `int`, `float`, `bool`, `byte`, scalar `#[repr]` enum | immediate | |
 | class instance, `string`, `Vec`, record, tuple, payload enum | pointer | |
+| `()` | pointer to the empty tuple object, where a word is stored or passed | no word in a local or a plain result: see below |
 | `Option<T>`, `T` a ground heap type | niche: `0` = `None`, else the pointer | `Layout::NicheOption` |
 | `Result<(), E>`, `E` a ground heap type | niche: `0` = `Ok(())`, else the error pointer | `Layout::NicheUnitResult` |
 | `Result<T, E>`, `T` and `E` ground heap types | niche: pointer = `Ok`, `pointer \| 1` = `Err` | `Layout::NicheResult`; never steals int bits |
@@ -40,6 +41,16 @@ The niche and two-slot families are disjoint: a niche needs heap payloads,
 a pair an immediate one. Values are not tagged; the static type picks the
 decode (a compare with `0` for Option, bit operations for Result). No
 pair- or niche-specific operation exists.
+
+**Unit.** A body that knows a value is `()` keeps no word for it: a `()`
+local has no slot, and a function declared `-> ()` returns nothing a
+caller reads. Where a word is stored or passed, `()` is the empty tuple
+object: an element of a `Vec<()>` or array, a tuple item, a class or record
+field, an enum payload, an argument (so a shared body's bare `T` at
+`T = ()` is that pointer), and the result of a shared body's bare `T`.
+The value runs for its effect first; a read of such a place runs the
+base and yields nothing. So `()` is a type argument like any one-word
+type, in a clone and in a shared body (#2489).
 
 **GC.** A niche word is a pointer root: root marking strips bit 0 before
 `find_object_by_addr`, and `values_eq` compares the stripped words. A

@@ -354,7 +354,9 @@ impl Lower<'_> {
     /// An array element type held as a heap word: a string, class, array,
     /// boxed enum or boxed tuple.
     fn heap_elem(&self, elem: &Ty) -> Option<MirTy> {
+        // A `()` element is the empty tuple object.
         let heap = self.word_ty(elem) == Some(MirTy::HeapRef)
+            || is_unit(elem)
             || matches!(strip_readonly(elem), Ty::Tuple(items) if !items.is_empty())
             || self.cx.boxed_view(elem, None).is_some();
         heap.then_some(MirTy::HeapRef)
@@ -2700,7 +2702,8 @@ impl Lower<'_> {
         match self.value(id)? {
             Val::V(v) => Ok(Some(v)),
             Val::Never => Ok(None),
-            Val::Unit => Err("unit operand".into()),
+            // A `()` is stored and passed as the empty tuple object.
+            Val::Unit => self.unit_object().map(Some),
             Val::Pair(lo, hi) => {
                 let ty = self.expr_ty(id).ok_or("pair operand")?.clone();
                 match self.box_pair_val(&ty, lo, hi)? {
@@ -3162,14 +3165,15 @@ impl Lower<'_> {
         Ok(boxed)
     }
 
-    /// `id`'s word; refuses `()` and `Never` is passed up as `None`. A
+    /// `id`'s word; `Never` is passed up as `None`. A
     /// readonly class kept as a pair is one word as its instance (#1562).
     #[track_caller]
     fn word(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
         match self.value(id)? {
             Val::V(v) => Ok(Some(v)),
             Val::Never => Ok(None),
-            Val::Unit => Err("unit operand".into()),
+            // A `()` is stored and passed as the empty tuple object.
+            Val::Unit => self.unit_object().map(Some),
             Val::Pair(lo, hi) if let Some(ty) = self.expr_ty(id).filter(|t| self.cx.pair_class(t).is_some()).cloned() => {
                 match self.box_pair_val(&ty, lo, hi)? {
                     Val::V(v) => Ok(Some(v)),
@@ -3708,6 +3712,13 @@ impl Lower<'_> {
                 }
                 Ok(Val::Unit)
             }
+            // A `()` field: the record or object for its effects (#1510).
+            HirKind::Field { base, .. } if self.expr_ty(id).is_some_and(is_unit) => {
+                if !self.effect(*base)? {
+                    return Ok(Val::Never);
+                }
+                Ok(Val::Unit)
+            }
             HirKind::Field { base, .. }
                 if self.site(id).field_new
                     && let Some((slot, ty)) = self.heap_field(id)
@@ -3838,13 +3849,6 @@ impl Lower<'_> {
                     return Ok(Val::Never);
                 };
                 self.b.ins_heap_field_store(obj, v, slot).map_err(mir)?;
-                Ok(Val::Unit)
-            }
-            // A record's `()` field: the record for its effects (#1510).
-            HirKind::Field { base, .. } if self.expr_ty(id).is_some_and(is_unit) && self.expr_ty(*base).is_some_and(is_record) => {
-                if !self.effect(*base)? {
-                    return Ok(Val::Never);
-                }
                 Ok(Val::Unit)
             }
             // A record's field: its slot.
@@ -4152,6 +4156,13 @@ impl Lower<'_> {
                 self.b.def_local(lo, a).map_err(mir)?;
                 self.b.def_local(hi, b).map_err(mir)?;
                 Ok(Val::Unit)
+            }
+            // A `()` local holds no word: the value runs for its effect.
+            HirKind::Assign { place, value }
+                if let HirKind::Local(local) = self.hir.expr(*place).kind
+                    && self.unit_local(local) =>
+            {
+                Ok(if self.effect(*value)? { Val::Unit } else { Val::Never })
             }
             HirKind::Assign { place, value } => {
                 if let HirKind::Global { .. } = self.hir.expr(*place).kind {
@@ -5031,7 +5042,7 @@ impl Lower<'_> {
             None if self.word_ty(ty).is_none() && self.cx.boxed_view(ty, None).is_some() => (MirTy::HeapRef, None),
             _ => (self.word_ty(ty).ok_or_else(|| format!("call type {}", ty_kind(ty)))?, None),
         };
-        if site.word_ret && (site.pair_ret || site.coro || unit || ret_hi.is_some()) {
+        if site.word_ret && (site.pair_ret || site.coro || ret_hi.is_some()) {
             return Err("call unbox shape".into());
         }
         let mut words = Vec::with_capacity(args.len());
@@ -5177,6 +5188,11 @@ impl Lower<'_> {
             if let Some(want) = niche {
                 let obj = self.b.ins_word_as(dest, MirTy::HeapRef).map_err(mir)?;
                 return self.unbox_niche(obj, want);
+            }
+            // `T = ()`: the word is the empty tuple object, and a `()` is
+            // nothing to read (#2489).
+            if unit {
+                return Ok(Val::Unit);
             }
             return Ok(Val::V(self.b.ins_word_as(dest, ret).map_err(mir)?));
         }
@@ -7426,6 +7442,8 @@ impl Lower<'_> {
         // Where the item goes: the bound local, or a temp the pattern's
         // parts read.
         let parts: Option<Vec<(HirLocal, MirTy)>> = match pat {
+            // A `()` local has no slot: its item is read and dropped.
+            HirPat::Bind(local) if self.unit_local(*local) => None,
             HirPat::Bind(local) => {
                 if self.local_ty(*local)? != elem {
                     return Err("for in element type".into());
@@ -7494,6 +7512,7 @@ impl Lower<'_> {
         let pinned = matches!(items, Items::Array) && self.cx.pinned_for(id);
         let item = self.b.ins_index(arr, cur, elem, pinned).map_err(mir)?;
         match (pat, parts) {
+            (HirPat::Bind(local), _) if self.unit_local(*local) => {}
             (HirPat::Bind(local), _) => {
                 let x = self.slot(*local)?;
                 self.b.def_local(x, item).map_err(mir)?;

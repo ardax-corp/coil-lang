@@ -11355,6 +11355,14 @@ impl<'a> HirLowerCx<'a> {
         })
     }
 
+    /// A class field's word: [`Self::record_word`], and a `()` field (a
+    /// generic class's `v: T` at `T = ()`) holds the empty tuple object.
+    fn object_word(&self, t: &Ty) -> Option<crate::mir::MirTy> {
+        let checker = &self.c().checker;
+        self.record_word(t)
+            .or_else(|| crate::layout::is_unit(&apply_ty_prune(checker.subst(), t)).then_some(crate::mir::MirTy::HeapRef))
+    }
+
     /// A generic class's field open in a parameter (`head:
     /// Option<Node<T>>`) holds its boxed word; read or written at a ground
     /// type `at` with a niche layout of its own it converts there.
@@ -11412,17 +11420,17 @@ impl<'a> HirLowerCx<'a> {
                 // `T` at the receiver's arguments, not an opaque parameter
                 // word (`Box<Box<E>>`'s `v`, #1553).
                 .and_then(|b| c.hir_param_field_at(b, &fty))
-                .and_then(|at| self.record_word(&at))
-                .or_else(|| self.record_word(&fty))
+                .and_then(|at| self.object_word(&at))
+                .or_else(|| self.object_word(&fty))
                 .or_else(|| {
                     // A generic class's field (`item: T`) at a ground
                     // receiver (`Box<int>`): its slot holds the
                     // boxed-layout word of the field's type there.
                     let base_ty = base_ty?;
                     let at = c.hir_class_ty_args_at(base_ty, &fty).or_else(|| c.hir_clone_self_field_at(base_ty, &fty, ty?))?;
-                    self.record_word(&at)
+                    self.object_word(&at)
                 })
-            && ty.and_then(|t| self.record_word(t)) == Some(w)
+            && ty.and_then(|t| self.object_word(t)) == Some(w)
         {
             return HirFieldWord::Heap { slot: idx, ty: w };
         }
@@ -11883,8 +11891,12 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
                         // A boxed user enum (a case of two or more payload
                         // fields) is one heap word already (#1167).
                         .or_else(|| self.field_word(t).filter(|_| crate::layout::value_layout(checker, t) == ValueLayout::Boxed))
-                        // A heap tuple is its object's word (#1170).
-                        .or_else(|| matches!(apply_ty_prune(checker.subst(), t), Ty::Tuple(ref items) if !items.is_empty()).then_some(crate::mir::MirTy::HeapRef))
+                        // A heap tuple is its object's word (#1170), and a
+                        // `()` the empty tuple object.
+                        .or_else(|| {
+                            let t = apply_ty_prune(checker.subst(), t);
+                            (crate::layout::is_unit(&t) || matches!(t, Ty::Tuple(ref items) if !items.is_empty())).then_some(crate::mir::MirTy::HeapRef)
+                        })
                 };
                 // A generic class's field at the made type's arguments
                 // (`new Box(1)`: `T` is `int`). A field open in a class
