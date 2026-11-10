@@ -687,6 +687,30 @@ fn main() { return; }
     assert!(!args_worth_parallel(&sites, "trib", &[10]));
 }
 
+/// A chain is its operands as written: `a + (b + c)` adds in another
+/// order than `a + b + c`, and `+` traps on overflow, so it is no
+/// three-arm site (the inner sum is not all the function returns).
+#[test]
+fn a_parenthesized_right_operand_is_one_operand() {
+    let sites = sites_of(
+        r#"
+fn trib(int n) -> int {
+    if n <= 2 { return n; }
+    return trib(n - 1) + (trib(n - 2) + trib(n - 3));
+}
+fn left(int n) -> int {
+    if n <= 2 { return n; }
+    return (left(n - 1) + left(n - 2)) + left(n - 3);
+}
+fn main() { return; }
+"#,
+    );
+    let specializes = |name: &str| sites.get(name).is_some_and(|s| !s.guards.contains(&ParGuard::Opaque));
+    assert!(!specializes("trib"), "{:?}", sites.get("trib"));
+    assert!(specializes("left"));
+    assert_eq!(sites["left"].arms.len(), 3);
+}
+
 #[test]
 fn detects_xor_binop_fork() {
     let sites = sites_of(

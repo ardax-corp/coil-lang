@@ -434,3 +434,198 @@ fn a_contract_on_a_forking_function_is_checked() {
     same_as_sequential("fork-ensures", &fib_program("\n    ensures result < 100000\n", fork), "contract violated: ensures result < 100000 in fib");
     same_as_sequential("fork-requires", &fib_program("\n    requires n != 27\n", fork), "contract violated: requires n != 27 in fib");
 }
+
+/// A program around `fib`, the heavy arm of the forks below: `body` holds
+/// the functions under test and `call` is what `main` prints.
+fn fork_program(body: &str, call: &str) -> String {
+    format!(
+        r#"
+use io::{{stdout, write}};
+use string::to_bytes;
+
+fn fib(int n) -> int {{
+    if n <= 2 {{
+        return 1;
+    }}
+    return fib(n - 1) + fib(n - 2);
+}}
+
+// Every leaf overflows.
+fn overflows(int n) -> int {{
+    if n <= 1 {{
+        return (n + 1) * 4611686018427387904 * 2;
+    }}
+    return overflows(n - 1) + overflows(n - 2);
+}}
+
+// Every other leaf divides by zero.
+fn divides(int n) -> int {{
+    if n <= 1 {{
+        return 1 / n;
+    }}
+    return divides(n - 1) + divides(n - 2);
+}}
+{body}
+fn main() {{
+    let r = {call};
+    let _ = write(stdout(), to_bytes(r.show()));
+}}
+"#
+    )
+}
+
+/// An arm of a recursive fork-join that calls another function is a quiet
+/// job, and a failed one makes the worker call the function itself: the
+/// panic reported is the first arm's, as in the sequential program, though
+/// a later arm panics too (#2424).
+#[test]
+fn a_panic_in_a_fork_arm_is_the_one_the_sequential_run_reports() {
+    let both = "\nfn top(int n) -> int {\n    return overflows(n) + divides(n);\n}\n";
+    same_as_sequential("fork-first-arm", &fork_program(both, "top(27)"), "panic: integer overflow at");
+    let later = "\nfn top(int n) -> int {\n    return fib(n) + divides(n);\n}\n";
+    same_as_sequential("fork-later-arm", &fork_program(later, "top(27)"), "panic: division by zero at");
+    let bound = "\nfn top(int n) -> int {\n    let a = overflows(n);\n    let b = divides(n);\n    return a + b;\n}\n";
+    same_as_sequential("fork-let-arms", &fork_program(bound, "top(27)"), "panic: integer overflow at");
+    let three = "\nfn top(int n) -> int {\n    return fib(n) + overflows(n) + divides(n);\n}\n";
+    same_as_sequential("fork-middle-arm", &fork_program(three, "top(27)"), "panic: integer overflow at");
+}
+
+/// The worker runs the function's leading calls of itself on its own
+/// thread: a panic there is the program's, with the function's frames,
+/// while the arms after it are still jobs.
+#[test]
+fn a_panic_in_a_fork_arm_the_worker_runs_itself_is_the_sequential_one() {
+    let own = "\nfn top(int n, int k) -> int {\n    if n <= 1 {\n        return 100 / (n - k) + n;\n    }\n    return top(n - 1, k) + top(n - 2, k);\n}\n";
+    same_as_sequential("fork-self-first", &fork_program(own, "top(30, 1)"), "panic: division by zero at");
+    same_as_sequential("fork-self-second", &fork_program(own, "top(30, 0)"), "panic: division by zero at");
+    // The second arm is still running when the first one panics.
+    let slow = "\nfn slow(int n) -> int {\n    return fib(n + 10) + fib(n + 9);\n}\n\nfn top(int n) -> int {\n    if n <= 20 {\n        return 1 / (n - 20);\n    }\n    return top(n - 1) + slow(n);\n}\n";
+    same_as_sequential("fork-self-then-slow", &fork_program(slow, "top(27)"), "panic: division by zero at");
+    // The other function's arm comes first, so both are jobs.
+    let after = "\nfn top(int n) -> int {\n    if n <= 1 {\n        return 1 / n;\n    }\n    return overflows(n) + top(n - 1);\n}\n";
+    same_as_sequential("fork-self-after", &fork_program(after, "top(27)"), "panic: integer overflow at");
+}
+
+/// The frames of a panic under a fork are the function's: no worker is
+/// named, and the worker's call of an arm counts as the function's.
+#[test]
+fn a_panic_under_a_fork_has_the_frames_of_the_function() {
+    let program = r#"
+fn f(int n) -> int {
+    if n <= 1 {
+        return 4611686018427387904;
+    }
+    return f(n - 1) + f(n - 2);
+}
+
+fn main() {
+    let r = f(25);
+}
+"#;
+    same_as_sequential("fork-frames", program, "  in f at");
+    // The arm's own `requires` fails: reported once, from the function.
+    let contract = "\nfn checked(int n) -> int\n    requires n != 3\n{\n    if n <= 1 {\n        return n;\n    }\n    return checked(n - 1) + checked(n - 2);\n}\n\nfn top(int n) -> int {\n    return fib(n) + checked(n - 20);\n}\n";
+    same_as_sequential("fork-arm-contract", &fork_program(contract, "top(27)"), "contract violated: requires n != 3 in checked");
+}
+
+/// A combine that would overflow is not taken by the worker: the function
+/// runs, and panics where it adds or multiplies.
+#[test]
+fn a_fork_combine_that_overflows_is_reported_as_the_sequential_run_does() {
+    // No call below the top overflows: the sum of its two arms does.
+    let sum = "\nfn top(int n) -> int {\n    if n <= 1 {\n        return 29021831242138;\n    }\n    return top(n - 1) + top(n - 2);\n}\n";
+    same_as_sequential("fork-sum-overflow", &fork_program(sum, "top(27)"), "panic: integer overflow at");
+    same_as_sequential("fork-sum-fits", &fork_program(sum, "top(26)"), "");
+    let product = "\nfn wide(int n) -> int {\n    return fib(n) * 4611686018427387;\n}\n\nfn top(int n) -> int {\n    return wide(n) * wide(n - 1);\n}\n";
+    same_as_sequential("fork-product-overflow", &fork_program(product, "top(27)"), "panic: integer overflow at");
+    let difference = "\nfn low(int n) -> int {\n    return 0 - 9223372036854775807 + n;\n}\n\nfn top(int n) -> int {\n    return low(n) - fib(n);\n}\n";
+    same_as_sequential("fork-difference-overflow", &fork_program(difference, "top(27)"), "panic: integer overflow at");
+}
+
+/// Three arms fold in the order they are written: `(a + b) + c` traps on
+/// overflow where `a + (b + c)` does not, and the other way round; a
+/// float sum rounds by its order.
+#[test]
+fn a_fork_of_three_arms_folds_in_the_order_written() {
+    let helpers = "\nfn high(int n) -> int {\n    return 9223372036854775807 - n;\n}\n\nfn low(int n) -> int {\n    return 0 - fib(n);\n}\n";
+    let overflows = format!("{helpers}\nfn top(int n) -> int {{\n    return fib(n) + high(n) + low(n);\n}}\n");
+    same_as_sequential("fork-left-overflows", &fork_program(&overflows, "top(27)"), "panic: integer overflow at");
+    let fits = format!("{helpers}\nfn top(int n) -> int {{\n    return low(n) + high(n) + fib(n);\n}}\n");
+    same_as_sequential("fork-left-fits", &fork_program(&fits, "top(27)"), "");
+    let floats = r#"
+fn weight(int n) -> float {
+    if n <= 2 {
+        return 0.1;
+    }
+    return weight(n - 1) + weight(n - 2);
+}
+
+fn large(int n) -> float {
+    return weight(n) * 10000000000000000000000.0;
+}
+
+fn small(int n) -> float {
+    return weight(n) / 3.0;
+}
+
+fn minus_large(int n) -> float {
+    return 0.0 - weight(n) * 10000000000000000000000.0;
+}
+
+fn top(int n) -> float {
+    return small(n) + large(n) + minus_large(n);
+}
+"#;
+    same_as_sequential("fork-float-order", &fork_program(floats, "top(27)"), "");
+}
+
+/// A combine that is a call panics as the function's call does, whether
+/// the sequential function inlines that call or makes it, and whether the
+/// arms' results are words or heap values; a function's call of itself is
+/// its last, and has no frame of its own.
+#[test]
+fn a_panic_in_a_fork_combine_call_is_reported_as_the_sequential_run_does() {
+    let scalar = "\nfn none(int n) -> int {\n    return fib(n) - fib(n);\n}\n\nfn ratio(int a, int b) -> int {\n    return a / b;\n}\n\nfn top(int n) -> int {\n    return ratio(fib(n), none(n));\n}\n";
+    same_as_sequential("fork-apply-scalar", &fork_program(scalar, "top(27)"), "panic: division by zero at");
+    // `glue` divides by zero for the top call's first arm alone.
+    let heap = "\nfn glue(string a, string b) -> string {\n    let d = 100 / (a.len() - 46368);\n    return a + b;\n}\n\nfn text(int n) -> string {\n    if n <= 1 {\n        return \"a\";\n    }\n    return glue(text(n - 1), text(n - 2));\n}\n";
+    same_as_sequential("fork-apply-heap", &fork_program(heap, "text(24).len()"), "panic: division by zero at");
+    same_as_sequential("fork-apply-heap-fits", &fork_program(heap, "text(23).len()"), "");
+    // `own(-13, _)` is the top call's combine alone.
+    let own = "\nfn own(int n, int d) -> int {\n    if n <= 1 {\n        return d - 1 + 0 / (n + 13);\n    }\n    return own(own(n - 1, d), own(n - 2, d));\n}\n";
+    same_as_sequential("fork-self-combine", &fork_program(own, "own(27, 1)"), "panic: division by zero at");
+    let tak = "\nfn tak(int x, int y, int z) -> int {\n    if y >= x {\n        return 100 / (z - 7);\n    }\n    return tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y));\n}\n";
+    same_as_sequential("fork-self-arms", &fork_program(tak, "tak(18, 12, 6)"), "panic: division by zero at");
+}
+
+/// Tuple and variant combines, and a difference, print what the
+/// sequential program prints.
+#[test]
+fn a_fork_that_builds_a_value_prints_the_sequential_result() {
+    let built = r#"
+enum Both {
+    Of(int, int),
+}
+
+fn pair(int n) -> (int, int) {
+    return (fib(n), fib(n - 1));
+}
+
+fn both(int n) -> Both {
+    return Both::Of(fib(n), fib(n - 1));
+}
+
+fn difference(int n) -> int {
+    return fib(n) - fib(n + 1);
+}
+
+fn total() -> int {
+    let (first, second) = pair(27);
+    let third = match both(26) {
+        Both::Of(x, y) => x * 1000000 + y,
+    };
+    return first + second + third + difference(27);
+}
+"#;
+    same_as_sequential("fork-built", &fork_program(built, "total()"), "");
+}
