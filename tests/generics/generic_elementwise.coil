@@ -1,5 +1,6 @@
 // A generic numeric body cloned at a tuple or array type does element-wise
 // arithmetic; the shape comes from the clone's operand types.
+// @xfail clone-budget-0 #2513 E0801 (callee-trait): no `Num` dictionary for a tuple or array
 use tests::assert;
 
 fn add<T: Num>(T a, T b) -> T {

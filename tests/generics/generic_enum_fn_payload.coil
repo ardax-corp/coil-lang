@@ -3,6 +3,7 @@
 // function of boxed words in a shared body, one closure word in the enum's
 // object either way. Built, matched, called, stored and kept across a
 // collection, at ground types and through generic functions.
+// @xfail clone-budget-0 #2511 E0801 (callee-generic): a generic class or nested-payload enum result of a shared body
 use tests::assert;
 use gc::collect;
 

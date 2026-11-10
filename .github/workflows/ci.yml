@@ -497,6 +497,16 @@ jobs:
             # Generators and tasks parked on the heap instead of on fibers:
             # what wasm runs, where a failure is harder to read.
             mir-parked) COIL_NO_FIBERS=1 $run -- --engine mir $FLAGS ;;
+            # No per-type clones: every generic call takes its shared body
+            # (dictionaries, boxed words), which the default cells reach
+            # only past the clone budget. A file's own
+            # `// @flags --clone-budget N` still wins. `--cell` names the
+            # run for the `// @xfail clone-budget-0 #issue` header lines:
+            # those files must fail, and one that passes fails the cell.
+            clone-budget-0)
+              for engine in native mir; do
+                $run -- --engine $engine --clone-budget 0 --cell clone-budget-0 $FLAGS
+              done ;;
           esac
 
       # Native code takes every body, and a packaged program builds.
@@ -549,7 +559,7 @@ jobs:
         mode: [release]
         # Native code runs in release only: a debug cell would test the
         # same Cranelift output at a fraction of the speed.
-        variant: [default, O0, leak-smoke, native, mir, mir-opt, mir-parked]
+        variant: [default, O0, leak-smoke, native, mir, mir-opt, mir-parked, clone-budget-0]
     env: *harness-env
     steps: *harness-steps
 

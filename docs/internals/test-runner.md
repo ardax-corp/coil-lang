@@ -273,13 +273,61 @@ when a cell fails or is cut off by its job limit.
 CI builds the binaries once per OS and build (`harness-build-debug`,
 `harness-build-release`, `harness-build-gc-stress`: the GC-stress
 `coil-test` is release only, #2131) and runs every setting (default, `-O 0`,
-leak smoke in debug and release, GC stress in release) as separate `harness`
-cells, side by side. Each group of Linux cells waits only for its own build.
+leak smoke in debug and release, GC stress in release, the
+[configuration cells](#configuration-cells-and-known-failures) in release)
+as separate `harness` cells, side by side. Each group of Linux cells waits only for its own build.
 macOS (`harness-build-macos`, `harness-macos`) and Windows run in CI's second
 stage, after every Linux job is green and, on a pull request, once it is out
 of draft (`.github/workflows/ci.yml` header). The same corpus must pass in both
 modes, so a build-mode difference (optimizer, overflow checks, debug
 assertions) fails one of them.
+
+### Configuration cells and known failures
+
+Some cells run the corpus under a configuration the default run never
+reaches. Each has a name, passed as `coil test --cell NAME`:
+
+| Cell | Flags (after `scripts/test_corpora.py --release --`) | What it reaches |
+|------|-------------------------------------------------------|-----------------|
+| `clone-budget-0` | `--engine native --clone-budget 0 --cell clone-budget-0 …`, then `--engine mir` | shared generic bodies: no per-type clone is made, so every generic call passes dictionaries and boxed words |
+
+```bash
+scripts/test_corpora.py --release -- --engine native --clone-budget 0 --cell clone-budget-0 \
+  --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src
+```
+
+`--clone-budget` is one of the grant and limit flags, so `coil test` passes
+it to every file's compile. A file's own `// @flags --clone-budget N` replaces
+the run's value for that file (capabilities and lists add up; a limit given
+in the header wins).
+
+**Known failures.** A file that fails in a cell for a filed bug says so in
+its header, one line per cell:
+
+```coil
+// @xfail clone-budget-0 #2510 E0801 (callee-arity): a generic rest parameter has no shared-body path
+```
+
+The first word is the cell, and the rest must name an issue (`#N`); a line
+without one fails the file. The line does nothing in a run without
+`--cell`, or with another cell's name. In its cell the file **must fail**
+(not compile, or have a failing case):
+
+| The file | Verdict in its cell |
+|----------|---------------------|
+| fails | not counted as a failure; its passing cases still count. `-v` lists it as `xfail`, the summary says ``N known failures (`// @xfail`)`` and `test_corpora.py` adds `N known` to the corpus line |
+| passes | fails: ``passes, but `// @xfail …` lists it as a known failure: remove that line``. The list can only shrink |
+
+So a cell fails on a new failure and on a fixed one. The verdict is per
+file (`runner::known_failure`, applied in `finish_file`); `--json` carries
+the reason in the file event's `xfail` and the count in the summary's
+`known_failures`. Files under `compile_fail/` ignore the line. A failure
+the runner does not survive (a crash of the process, a case past
+`--wall-timeout`) cannot be listed this way: fix it, or keep the file out
+of the cell until it is.
+
+To list a new failure: file the issue with a minimal repro, then add the
+line to every file that fails for it. `grep -rn '@xfail' tests` is the list.
 
 On four cores the whole corpus takes ~14 s this way against ~31 s for one
 `coil test` process on a release build (2026-10-15).
@@ -415,9 +463,9 @@ render them. `--json` cannot be combined with `--log-json` / `--log-lsp`.
 | `event` | Fields |
 |---------|--------|
 | `start` | `files`, `seed` (`"0x…"`, `null` with `--no-shuffle`), `jobs` |
-| `file` | `file`, `ok`, `passed`, `failed`, `message` (file-level verdict or `null`), `diagnostics` (compiler output or `null`), `cases`: `[{name, ok, timed_out, reason, output}]` (`output` only for failures or with `--show-output`) |
+| `file` | `file`, `ok`, `passed`, `failed`, `message` (file-level verdict or `null`), `xfail` (why it is a known failure of the run's `--cell`, or `null`), `diagnostics` (compiler output or `null`), `cases`: `[{name, ok, timed_out, reason, output}]` (`output` only for failures or with `--show-output`) |
 | `error` | `message` (harness error; the run then exits 1) |
-| `summary` | `ok`, `passed`, `failed`, `total`, `seed`, `coverage`: `null` or `{hit, total, lcov, files: [{file, hit, total}]}` |
+| `summary` | `ok`, `passed`, `failed`, `total`, `known_failures`, `seed`, `coverage`: `null` or `{hit, total, lcov, files: [{file, hit, total}]}` |
 
 Files are reported in start order, as in the text report.
 
@@ -441,7 +489,7 @@ serialized to `.ccoil`, so test-only data never touches the archive format.
 
 | File | Role |
 |------|------|
-| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--wall-timeout`, `--show-output`, `--coverage*`, `--no-doc-tests`, `--doc-tests-only`, `-O`, `--root`, host grants, `--log-*`; `mutate` flags) |
+| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--wall-timeout`, `--show-output`, `--coverage*`, `--no-doc-tests`, `--doc-tests-only`, `--cell`, `-O`, `--root`, host grants, `--log-*`; `mutate` flags) |
 | `coil-test/src/watchdog.rs` | `--wall-timeout`: the cases in flight, the thread that ends a run with a stuck one |
 | `parser/src/doc_examples.rs` | doc example rules: fences, hidden lines, the doc-test program, documented items |
 | `coil-test/src/order.rs` | seeded file / case order |
