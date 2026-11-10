@@ -1,0 +1,46 @@
+// @output 832040 121589417 832040 242982417
+// An auto-par worker belongs to the free function it forks. A static or
+// instance method of the same name is a different function: its calls run
+// its own body, not the free function's worker.
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+class K {
+    pub k: int,
+}
+
+impl K {
+    pub fn grow(int n) -> int {
+        if n < 2 {
+            return n + 2000;
+        }
+        return self.grow(n - 1) + self.grow(n - 2) + 1;
+    }
+
+    pub static fn fib(int n) -> int {
+        if n < 2 {
+            return n + 1000;
+        }
+        return K::fib(n - 1) + K::fib(n - 2) + 1;
+    }
+}
+
+fn fib(int n) -> int {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn grow(int n) -> int {
+    if n < 2 {
+        return n;
+    }
+    return grow(n - 1) + grow(n - 2);
+}
+
+fn main() {
+    // Constant calls: the free functions fork, the methods run their own bodies.
+    let line = format("%i %i %i %i", fib(30), K::fib(25), grow(30), new K(0).grow(25));
+    let _ = write(stdout(), to_bytes(line));
+}

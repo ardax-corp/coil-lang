@@ -3670,11 +3670,13 @@ impl Compiler {
     }
 
     /// Emit one parameterized `__coil_par_{fn}(args…, hop)` AlwaysPar worker.
-    fn emit_par_specializations_for(&mut self, bare_name: &str, table_key: &str) {
-        if !self.par_workers.contains(bare_name) {
+    fn emit_par_specializations_for(&mut self, bare_name: &str, qualified: &str, table_key: &str) {
+        // The worker is of the function that forks, not of a method or
+        // another module's function of the same bare name.
+        if !self.par_workers.contains(qualified) {
             return;
         }
-        let Some(site) = self.par_shapes.get(bare_name).cloned() else {
+        let Some(site) = self.par_shapes.get(bare_name).filter(|s| s.qualified == qualified).cloned() else {
             return;
         };
         if !self.functions.contains_key(table_key) && !self.functions.contains_key(bare_name) {
@@ -5309,7 +5311,6 @@ impl Compiler {
     /// overrides that make it emit (an empty set emits none).
     fn planned_mono_specializations<'compiler>(
         &self,
-        qualified: &str,
         type_params: &[parser::ast::TypeParam<'compiler>],
         source_name: &str,
     ) -> Vec<crate::monomorphize::MonoSpecialization> {
@@ -5320,15 +5321,9 @@ impl Compiler {
             .checker
             .def_id_of(source_name)
             .or_else(|| self.checker.interned_def(&self.namespace, source_name));
-        if let Some(id) = def_id {
-            self.mono_plan.specializations_for_def(id).cloned().collect()
-        } else {
-            self.mono_plan
-                .specializations_for_fn(qualified)
-                .chain(self.mono_plan.specializations_for_fn(source_name))
-                .cloned()
-                .collect()
-        }
+        // The plan is keyed by `DefId`: a function with none has no clones,
+        // whatever its name shares with one that has.
+        def_id.map(|id| self.mono_plan.specializations_for_def(id).cloned().collect()).unwrap_or_default()
     }
 
     fn mono_clone_name(qualified: &str, key: &MonoKey) -> String {
@@ -5345,7 +5340,7 @@ impl Compiler {
         type_params: &[parser::ast::TypeParam<'compiler>],
         source_name: &str,
     ) {
-        for spec in self.planned_mono_specializations(qualified, type_params, source_name) {
+        for spec in self.planned_mono_specializations(type_params, source_name) {
             if self.mono_names.contains_key(&spec.key) || !self.mono_clone_emits(type_params, &spec.key) {
                 continue;
             }
@@ -5367,7 +5362,7 @@ impl Compiler {
         if body.is_none() {
             return;
         }
-        let specializations = self.planned_mono_specializations(qualified, type_params, source_name);
+        let specializations = self.planned_mono_specializations(type_params, source_name);
         if specializations.is_empty() {
             return;
         }
@@ -6275,7 +6270,7 @@ impl Compiler {
             if !inherent_method {
                 self.emit_mono_specializations_for_function(&qualified, type_params, args, Some(body), name, span);
             }
-            self.emit_par_specializations_for(name, &table_key);
+            self.emit_par_specializations_for(name, &qualified, &table_key);
     }
 
     fn do_compile_inner<'compiler>(

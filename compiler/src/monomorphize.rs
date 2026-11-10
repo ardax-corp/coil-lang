@@ -546,6 +546,29 @@ fn mark_hot(ast: &Output, sigs: &mut HashMap<String, GenericFnSig>) {
                 }
             }
         }
+        // A method is no free function: a hint on it must not reach a free
+        // function of the same bare name (#2570). What a hot method calls by
+        // name stays hot, and its body may declare functions.
+        if matches!(node.1.as_ref(), Expression::Implementation { .. } | Expression::TypeClass { .. } | Expression::TypeClassImpl { .. }) {
+            walk_children(node, &mut |child| {
+                let child = match child.1.as_ref() {
+                    Expression::Method(_, inner) => inner,
+                    _ => child,
+                };
+                match child.1.as_ref() {
+                    Expression::Function { attrs, body, .. } => {
+                        if let Some(body) = body {
+                            if attrs.iter().any(|a| a.name == "hot") && !attrs.iter().any(|a| a.name == "cold") {
+                                call_names(body, hot);
+                            }
+                            walk(body, hot, cold);
+                        }
+                    }
+                    _ => walk(child, hot, cold),
+                }
+            });
+            return;
+        }
         walk_children(node, &mut |child| walk(child, hot, cold));
     }
     let (mut hot, mut cold) = (BTreeSet::new(), BTreeSet::new());
@@ -1363,6 +1386,32 @@ mod tests {
         let mut checker = Checker::new();
         let _ = checker.check_program(&ast);
         plan_monomorphization("", &ast, &checker)
+    }
+
+    /// Whether the planner marks the generic function `name` hot.
+    fn hot_of(src: &str, name: &str) -> bool {
+        let ast = Pratt::default().parse(src).expect("parse failed");
+        let mut checker = Checker::new();
+        let _ = checker.check_program(&ast);
+        let mut sigs = HashMap::new();
+        collect_generic_functions("", &ast, &checker, &mut sigs);
+        mark_hot(&ast, &mut sigs);
+        sigs.get(name).unwrap_or_else(|| panic!("no generic fn {name}")).hot
+    }
+
+    #[test]
+    fn a_hot_method_does_not_heat_a_same_named_free_function() {
+        let free = "fn wrap<T>(T a) -> int { return 2; } fn side<T>(T a) -> int { return 3; } ";
+        let hot_method = "class K { pub k: int, } impl K { #[hot] pub fn wrap<T>(T a) -> int { return side(a); } } ";
+        assert!(!hot_of(&format!("{free}{hot_method}"), "wrap"));
+        assert!(!hot_of(&format!("{hot_method}{free}"), "wrap"));
+        // What a hot method calls by name is hot, as a hot function's.
+        assert!(hot_of(&format!("{free}{hot_method}"), "side"));
+        // A cold method does not cool a free function that is hot.
+        let cold_method = "class K { pub k: int, } impl K { #[cold] pub fn wrap<T>(T a) -> int { return 1; } } ";
+        assert!(hot_of(&format!("#[hot] fn wrap<T>(T a) -> int {{ return 2; }} {cold_method}"), "wrap"));
+        // The free function's own hint still marks it.
+        assert!(hot_of("#[hot] fn wrap<T>(T a) -> int { return 2; } ", "wrap"));
     }
 
     #[test]
