@@ -2800,6 +2800,12 @@ impl Cx<'_> {
         if let Some(s) = self.known_named(w, name, def) {
             return s;
         }
+        // A function of the program with no summary (an `extern`, or one
+        // whose module was rejected or is compiled later) is unknown code,
+        // whatever host native shares its name.
+        if self.declared_fn(name, def) {
+            return Summary::of(UNKNOWN);
+        }
         let member = name.rsplit_once("::");
         let (owner, method) = (member.map(|(owner, _)| owner), member.map_or(name, |(_, m)| m));
         if let Some(s) = self.trait_method(owner, method) {
@@ -2814,6 +2820,18 @@ impl Cx<'_> {
             None => 0,
         };
         s
+    }
+
+    /// Whether `name` (with the def its call carries, if any) is a `fn` or
+    /// an `extern` function some module declares.
+    fn declared_fn(&self, name: &str, def: Option<DefId>) -> bool {
+        use crate::typechecking::DefKind;
+        let def = def.or_else(|| {
+            (self.checker.current_module_name() == self.module_path)
+                .then(|| self.checker.def_id_of(name))
+                .flatten()
+        });
+        def.and_then(|d| self.checker.def_interner().info(d)).is_some_and(|info| matches!(info.kind, DefKind::Fn | DefKind::Ffi))
     }
 
     /// [`Self::named`] for a name that is no user function or trait method.
@@ -2843,13 +2861,12 @@ impl Cx<'_> {
         // A user type's static is unknown code here, whatever its short
         // name: `Pool::with_capacity` is not the `with_capacity` native.
         if user_type_member(self.checker, name) {
-            return Summary::of(classify_host_name(&short));
+            return Summary::of(UNKNOWN);
         }
         escape::host_summary(&short, Summary::of(classify_host_name(&short)))
     }
 
-    /// A user function's summary: this module's, an earlier module's, or
-    /// the AST walk's flags for a module compiled without HIR.
+    /// A user function's summary: this module's or an earlier module's.
     fn known_named(&self, w: &Walk<'_>, name: &str, def: Option<DefId>) -> Option<Summary> {
         // A `use`d name has no def on the call; the module's def table has it.
         let def = def.or_else(|| {
@@ -2888,10 +2905,7 @@ impl Cx<'_> {
                 return Some(s);
             }
         }
-        if let Some(fx) = def.and_then(|d| self.checker.program_fn_effects.get(&d)) {
-            return Some(Summary::of(*fx));
-        }
-        self.checker.program_method_effects.get(name).map(|fx| Summary::of(*fx))
+        None
     }
 
     /// The summary of `recv.name(..)` when the receiver is a user class or
@@ -2939,9 +2953,6 @@ impl Cx<'_> {
             for k in [key.as_str(), qualified.as_str(), core.as_str()] {
                 if let Some(&s) = self.program.by_name.get(k) {
                     return Some((s, None));
-                }
-                if let Some(fx) = self.checker.program_method_effects.get(k) {
-                    return Some((Summary::of(*fx), None));
                 }
             }
         }

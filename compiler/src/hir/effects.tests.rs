@@ -1533,3 +1533,28 @@ fn a_later_module_sees_every_overload_of_a_name() {
     assert!(!program.summary_named("f").expect("f").is_pure());
     assert!(!program.summary_named("C::m").expect("C::m").is_pure());
 }
+
+/// A function the program declares is never a host native, whatever its
+/// name: an `extern` has no body to summarise, so its call is unknown code.
+#[test]
+fn an_extern_named_like_a_host_native_is_unknown_code() {
+    let src = "
+extern \"plugin\" {
+    fn math_sin(float x) -> float;
+}
+fn wave(float x) -> float { return math_sin(x); }
+fn plain(float x) -> float { return x * 2.0; }
+";
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    // The library is not there to load; the declaration still stands.
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let program = ProgramEffects::default();
+    let out = ModuleEffects::solve(&module, &checker, "", &program).summaries;
+    let wave = of(&module, &out, "wave");
+    assert!(wave.flags.contains(EffectFlags::UNKNOWN) && !wave.is_steady(), "{wave:?}");
+    assert!(of(&module, &out, "plain").is_pure());
+}
