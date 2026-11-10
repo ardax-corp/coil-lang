@@ -1,0 +1,30 @@
+// @expected E0119 — `Gauge` and `Other` each have an instance for `Both`, so
+// `b.level(1)` names neither: `Gauge::level(b, 1)` does (#2481).
+trait Gauge<T> {
+    fn level(T x, int v) -> int {}
+}
+
+trait Other<T> {
+    fn level(T x, int v) -> int {}
+}
+
+class Both {
+    pub n: int,
+}
+
+impl Gauge for Both {
+    pub fn level(Both x, int v) -> int {
+        return 1000 + v;
+    }
+}
+
+impl Other for Both {
+    pub fn level(Both x, int v) -> int {
+        return 2000 + v;
+    }
+}
+
+fn main() {
+    let b = new Both(0);
+    let n = b.level(1);
+}
