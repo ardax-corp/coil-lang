@@ -168,7 +168,7 @@ impl HirModule {
             let Some(root) = body.root else { continue };
             // The top level holds declarations only; a lambda, a test and
             // a static's initializer run sequentially.
-            if !matches!(body.kind, BodyKind::Function | BodyKind::Method) || self.in_trait(body) {
+            if !matches!(body.kind, BodyKind::Function | BodyKind::Method) {
                 continue;
             }
             let mut ints: IntLocals = body

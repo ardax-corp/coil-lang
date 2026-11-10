@@ -1127,3 +1127,12 @@ fn a_loop_under_if_let_or_while_let_is_a_site() {
     let ends = reach();
     assert!(ends.contains(&103) && ends.contains(&106), "{ends:?}");
 }
+
+/// A trait's method is a body like any other: an instance's, and a
+/// default one.
+#[test]
+fn a_loop_in_a_trait_method_is_a_site() {
+    let ends = reach();
+    assert!(ends.contains(&101) && ends.contains(&102), "{ends:?}");
+    assert_eq!(ends, [101, 102, 103, 104, 105, 106]);
+}
