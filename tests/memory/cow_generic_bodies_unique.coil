@@ -128,3 +128,43 @@ test("an inherent method of a generic class copies before the write") {
     assert!(c.value.n == 4);
     assert!(r.n == 4);
 }
+
+impl Cell<T> {
+    pub fn copy_with(T -> unit f, T x) -> T {
+        let y = x;
+        f(y);
+        return x;
+    }
+}
+
+test("a partial application of a shared method passes its kinds word") {
+    let c = new Cell(new Box(0));
+    let g = c.copy_with(inc);
+    let b = new Box(1);
+    let r = g(b);
+    assert!(b.n == 1);
+    assert!(r.n == 1);
+}
+
+trait Bump<T> {
+    fn bump(T x) {}
+}
+
+impl Bump for Box {
+    fn bump(Box b) {
+        b.n = b.n + 1;
+    }
+}
+
+fn bump_copy<T: Bump>(T x) -> T {
+    let y = x;
+    y.bump();
+    return y;
+}
+
+test("a copy written through a bound's method is its own value") {
+    let b = new Box(1);
+    let c = bump_copy(b);
+    assert!(b.n == 1);
+    assert!(c.n == 2);
+}
