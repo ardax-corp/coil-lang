@@ -1,0 +1,112 @@
+// A recursive function forks only where the fork is all it returns: a
+// fork-join worker stands in for a call of the function, so the rest of
+// an expression the fork sits in, or a statement ahead of it, must not be
+// lost at the levels the worker runs (#2425).
+use tests::assert;
+
+// Read at run time, so no call below is computed while compiling.
+static let depth: int = 27;
+
+fn twice(int x) -> int {
+    return x * 2;
+}
+
+fn known(int n) -> Option<int> {
+    if n == 27 {
+        return Some(5);
+    }
+    return None;
+}
+
+fn plain(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    return plain(n - 1) + plain(n - 2);
+}
+
+// The fork is the left operand of `+ n`.
+fn in_sum(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    return in_sum(n - 1) + in_sum(n - 2) + n;
+}
+
+// The fork is an argument.
+fn in_argument(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    return twice(in_argument(n - 1) + in_argument(n - 2));
+}
+
+// The fork is a `let`'s value.
+fn in_let(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    let both = in_let(n - 1) + in_let(n - 2);
+    return both + 1;
+}
+
+// An `if let` ahead of the fork returns first.
+fn after_if_let(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    if let Some(v) = known(n) {
+        return v;
+    }
+    return after_if_let(n - 1) + after_if_let(n - 2);
+}
+
+// A call with a constant argument is what asks for a function's worker;
+// the calls below it reach the same worker with a value read at run time.
+fn asks() -> int {
+    let a = plain(27);
+    let b = in_sum(27);
+    let c = in_argument(27);
+    let d = in_let(27);
+    let e = after_if_let(27);
+    return a ^ b ^ c ^ d ^ e;
+}
+
+fn plain_at(int n) -> int {
+    return plain(n);
+}
+
+fn in_sum_at(int n) -> int {
+    return in_sum(n);
+}
+
+fn in_argument_at(int n) -> int {
+    return in_argument(n);
+}
+
+fn in_let_at(int n) -> int {
+    return in_let(n);
+}
+
+fn after_if_let_at(int n) -> int {
+    return after_if_let(n);
+}
+
+test("a fork that is all the function returns") {
+    assert!(plain_at(depth) == 196418);
+}
+
+test("a fork inside a larger expression") {
+    assert!(in_sum_at(depth) == 1103453);
+    assert!(in_argument_at(depth) == 111603564544);
+    assert!(in_let_at(depth) == 392835);
+}
+
+test("a statement ahead of a fork") {
+    assert!(after_if_let_at(depth) == 5);
+    assert!(after_if_let_at(depth - 1) == 121393);
+}
+
+test("the same with constant arguments") {
+    assert!(asks() == 196418 ^ 1103453 ^ 111603564544 ^ 392835 ^ 5);
+}

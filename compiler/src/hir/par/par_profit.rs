@@ -629,9 +629,15 @@ fn detect_fork_site(name: &str, body: &HirBody, checker: &Checker, pure_fns: &Ha
         .map(|p| matches!(&body.local(*p).ty, Some(Ty::Con(n)) if n == coil_ty::INT || n == coil_ty::BYTE))
         .collect();
     let ctx = FnCtx { checker, body, fn_name: name, params, param_int_like, pure_fns };
-    let mut scan = Scan { ctx: &ctx, guards: Vec::new(), found: Vec::new(), pure_lets: Vec::new() };
+    let mut scan = Scan { ctx: &ctx, guards: Vec::new(), found: Vec::new(), pure_lets: Vec::new(), whole: true };
     scan.walk(root, false);
-    let found = scan.found;
+    let mut found = scan.found;
+    // A worker runs none of the function's contract checks (#2425).
+    if (0..body.exprs.len()).any(|i| in_contract(body, HirId(i as u32))) {
+        for (_, site) in &mut found {
+            site.guards.push(ParGuard::Opaque);
+        }
+    }
     let clear = |s: &ParForkSite| !s.guards.iter().any(|g| matches!(g, ParGuard::Opaque));
     // Prefer return-path sites whose path conditions are fully evaluable so
     // AlwaysPar clones stay sound; fall back to any clear site, then any site
@@ -655,6 +661,11 @@ struct Scan<'a> {
     /// Pure-call `let`s immediately preceding the current statement in this
     /// block, used to admit `let a = f(…); let b = g(…); return a ⊕ b`.
     pure_lets: Vec<(LocalId, ParArm)>,
+    /// The expression being walked is all the function returns on this
+    /// path: a `return`'s operand or the body's tail, not a part of
+    /// another expression. A worker returns its site's combine, so a fork
+    /// anywhere else is found but never specialized (#2425).
+    whole: bool,
 }
 
 impl Scan<'_> {
@@ -666,15 +677,36 @@ impl Scan<'_> {
         self.guards.truncate(depth);
     }
 
+    /// A fork found at the expression being walked.
+    fn found(&mut self, on_return: bool, mut site: ParForkSite) {
+        if !self.whole {
+            site.guards.push(ParGuard::Opaque);
+        }
+        self.found.push((on_return, site));
+    }
+
+    /// Walk `id` as a part of another expression or statement.
+    fn walk_part(&mut self, id: HirId, on_return: bool) {
+        let whole = std::mem::replace(&mut self.whole, false);
+        self.walk(id, on_return);
+        self.whole = whole;
+    }
+
     /// Statement list: each item may narrow the path condition for its
-    /// successors.
-    fn walk_block(&mut self, items: &[HirId], on_return: bool) {
+    /// successors. `tail` is the item whose value is the list's.
+    fn walk_block(&mut self, items: &[HirId], tail: Option<HirId>, on_return: bool) {
         let ctx = self.ctx;
         let depth = self.guards.len();
+        let whole = self.whole;
         // A nested block must not wipe the enclosing pending lets; only
-        // this block's statements share a trailing-let list.
+        // this block's statements share a trailing-let list. A fork in it
+        // names none of them, so its worker would not run their calls.
         let saved_lets = std::mem::take(&mut self.pure_lets);
+        if !saved_lets.is_empty() {
+            self.guards.push(ParGuard::Opaque);
+        }
         for &item in items {
+            self.whole = whole && tail == Some(item);
             self.walk(item, on_return);
             match diverging_if_negation(item, ctx) {
                 Some(guard) => {
@@ -687,26 +719,35 @@ impl Scan<'_> {
                     self.guards.push(ParGuard::Opaque);
                     self.pure_lets.clear();
                 }
-                None => self.note_pure_let(item),
+                // And one that is no arm is work a fork after it would
+                // skip: it may trap, or not return (#2425).
+                None => {
+                    if !self.note_pure_let(item) {
+                        self.guards.push(ParGuard::Opaque);
+                    }
+                }
             }
         }
+        self.whole = whole;
         self.guards.truncate(depth);
         self.pure_lets = saved_lets;
     }
 
     /// Track trailing `let name = pure_call(…)` so the next combine can name
-    /// those arms. Any other statement drops the pending list: a fork worker
-    /// re-emits only arms + combine, so prefix work would be skipped.
-    fn note_pure_let(&mut self, item: HirId) {
+    /// those arms; whether `item` is one. Any other statement drops the
+    /// pending list: a fork worker re-emits only arms + combine, so prefix
+    /// work would be skipped.
+    fn note_pure_let(&mut self, item: HirId) -> bool {
         let ctx = self.ctx;
         let Some((local, arm)) = let_binding(ctx.body, item).and_then(|(local, init)| Some((local, pure_call_arm(init, ctx)?))) else {
             self.pure_lets.clear();
-            return;
+            return false;
         };
         // A rebound name replaces the binding it shadows.
         let name = &ctx.body.local(local).name;
         self.pure_lets.retain(|(l, _)| ctx.body.local(*l).name != *name);
         self.pure_lets.push((local, arm));
+        true
     }
 
     fn walk(&mut self, id: HirId, on_return: bool) {
@@ -716,13 +757,20 @@ impl Scan<'_> {
         // `(e)` is a fork with the pending lets as its arms, or else a
         // statement list of its own, which sees none of them.
         if let Some(site) = match_fork(self.ctx.peel(id), self.ctx, &self.guards, &self.pure_lets) {
-            self.found.push((on_return, site));
+            self.found(on_return, site);
         }
         let depth = self.guards.len();
         let saved_lets = std::mem::take(&mut self.pure_lets);
         self.walk_written(id, on_return);
         self.guards.truncate(depth);
         self.pure_lets = saved_lets;
+    }
+
+    /// Walk the operand of a `return`: all the function returns there.
+    fn walk_returned(&mut self, value: HirId) {
+        let whole = std::mem::replace(&mut self.whole, true);
+        self.walk(value, true);
+        self.whole = whole;
     }
 
     fn walk_written(&mut self, id: HirId, on_return: bool) {
@@ -734,28 +782,28 @@ impl Scan<'_> {
             return;
         }
         if let Some(site) = match_fork(id, ctx, &self.guards, &self.pure_lets) {
-            self.found.push((on_return, site));
+            self.found(on_return, site);
         }
         if let Some(made) = made_match(body, id) {
             match made {
-                Made::Try(inner) => self.walk(inner, on_return),
+                Made::Try(inner) => self.walk_part(inner, on_return),
                 Made::Coalesce(lhs, rhs) => {
-                    self.walk(lhs, on_return);
-                    self.walk(rhs, on_return);
+                    self.walk_part(lhs, on_return);
+                    self.walk_part(rhs, on_return);
                 }
-                Made::MainReturn(value) => self.walk(value, true),
+                Made::MainReturn(value) => self.walk_returned(value),
                 Made::Other => {}
             }
             return;
         }
         match body.expr(id).kind.clone() {
-            HirKind::Block { .. } => self.walk_block(&ctx.items(id), on_return),
+            HirKind::Block { tail, .. } => self.walk_block(&ctx.items(id), tail, on_return),
             // A `let`'s initializer is a statement list of its own.
-            HirKind::Let { init: Some(init), .. } => self.walk_block(&[init], on_return),
+            HirKind::Let { init: Some(init), .. } => self.walk_block(&[init], None, on_return),
             // Else-if chain: every earlier condition failed for a later arm.
             HirKind::If { cond, then, els } => {
                 let depth = self.guards.len();
-                self.walk(cond, on_return);
+                self.walk_part(cond, on_return);
                 self.walk_guarded(then, on_return, guard_from_cond(cond, ctx, true));
                 if let Some(els) = els {
                     self.guards.push(guard_from_cond(cond, ctx, false));
@@ -765,7 +813,7 @@ impl Scan<'_> {
             }
             HirKind::Return(_) => {
                 if let Some(value) = returned(body, id) {
-                    self.walk(value, true);
+                    self.walk_returned(value);
                 }
             }
             // Arms are scanned independently — a fork never spans two arms.
@@ -773,7 +821,7 @@ impl Scan<'_> {
             // those bodies stay opaque. Irrefutable binding / wildcard arms
             // inherit only the outer path guards (fork-inside-arm is OK).
             HirKind::Match { scrutinee, arms } => {
-                self.walk(scrutinee, on_return);
+                self.walk_part(scrutinee, on_return);
                 for arm in &arms {
                     match arm.pat {
                         HirPat::Wild | HirPat::Bind(_) | HirPat::Int(_) => self.walk(arm.body, on_return),
@@ -784,19 +832,19 @@ impl Scan<'_> {
             HirKind::Loop { body: loop_body } => {
                 // A `while let` is not looked into.
                 if let Some((_, cond, then)) = query::while_parts(body, loop_body) {
-                    self.walk(cond, on_return);
+                    self.walk_part(cond, on_return);
                     self.walk_guarded(then, on_return, ParGuard::Opaque);
                 }
             }
             HirKind::ForIn { iterable, .. } => {
-                self.walk(iterable, on_return);
+                self.walk_part(iterable, on_return);
                 if let Some((_, own)) = query::for_body_parts(body, id) {
                     self.walk_guarded(own, on_return, ParGuard::Opaque);
                 }
             }
             _ => {
                 for operand in operands(body, id) {
-                    self.walk(operand, on_return);
+                    self.walk_part(operand, on_return);
                 }
             }
         }

@@ -369,3 +369,68 @@ fn main() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `fib` with `body` after its base case and `clause` on its signature,
+/// printed at 27: deep enough for a fork worker.
+fn fib_program(clause: &str, body: &str) -> String {
+    format!(
+        r#"
+use io::{{stdout, write}};
+use string::to_bytes;
+
+fn twice(int x) -> int {{
+    return x * 2;
+}}
+
+fn known(int n) -> Option<int> {{
+    if n == 27 {{
+        return Some(5);
+    }}
+    return None;
+}}
+
+fn fib(int n) -> int{clause} {{
+    if n <= 2 {{
+        return 1;
+    }}
+{body}
+}}
+
+fn main() {{
+    let r = fib(27);
+    let _ = write(stdout(), to_bytes(r.show()));
+}}
+"#
+    )
+}
+
+/// A fork worker stands in for a call of its function, so a fork that is
+/// not all the function returns is no site: the rest of the expression
+/// would be dropped at each level the worker runs (#2425).
+#[test]
+fn a_fork_inside_a_larger_expression_keeps_the_rest_of_it() {
+    same_as_sequential("fork-in-sum", &fib_program("", "    return fib(n - 1) + fib(n - 2) + n;"), "");
+    same_as_sequential("fork-in-argument", &fib_program("", "    return twice(fib(n - 1) + fib(n - 2));"), "");
+    same_as_sequential("fork-in-let", &fib_program("", "    let both = fib(n - 1) + fib(n - 2);\n    return both + 1;"), "");
+}
+
+/// Nor is one with a statement ahead of it that the worker would skip: a
+/// division that traps, a loop and its `invariant`, an `if let` that
+/// returns.
+#[test]
+fn a_statement_ahead_of_a_fork_still_runs() {
+    let trap = "    let d = 100 / (n - 27);\n    return fib(n - 1) + fib(n - 2);";
+    same_as_sequential("fork-after-trap", &fib_program("", trap), "panic: division by zero at");
+    let looped = "    let total = 0;\n    for i in 0..3\n        invariant n != 27\n    {\n        total = total + i;\n    }\n    return fib(n - 1) + fib(n - 2);";
+    same_as_sequential("fork-after-loop", &fib_program("", looped), "contract violated: invariant n != 27 in fib");
+    let early = "    if let Some(v) = known(n) {\n        return v;\n    }\n    return fib(n - 1) + fib(n - 2);";
+    same_as_sequential("fork-after-if-let", &fib_program("", early), "");
+}
+
+/// The function's own `requires` and `ensures` are checked at every call.
+#[test]
+fn a_contract_on_a_forking_function_is_checked() {
+    let fork = "    return fib(n - 1) + fib(n - 2);";
+    same_as_sequential("fork-ensures", &fib_program("\n    ensures result < 100000\n", fork), "contract violated: ensures result < 100000 in fib");
+    same_as_sequential("fork-requires", &fib_program("\n    requires n != 27\n", fork), "contract violated: requires n != 27 in fib");
+}

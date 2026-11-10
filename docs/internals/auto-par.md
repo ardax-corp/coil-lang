@@ -141,6 +141,23 @@ full function bodies, including **irrefutable** match arms (`_` / binding);
 constructor-pattern arms stay opaque (AlwaysPar would skip the match). Forks
 never span exclusive alternatives.
 
+A worker stands in for a call of its function and returns the site's
+combine, so a site is only specialized when the fork is all the function
+does on that path ([coil-lang#2425](https://github.com/ardax-corp/coil-lang/issues/2425)):
+
+- the fork is the operand of a `return`, not a part of another expression
+  (`f(n - 1) + f(n - 2) + n`, a call's argument, a `let`'s value);
+- nothing runs ahead of it but the path guards (`if … { return … }`) and its
+  own `let`-bound arms: any other statement may trap, return or not
+  terminate (`let d = 100 / (n - 27);`, a loop, an `if let`, `e?`), and so
+  may a pending `let` arm a fork in a nested block does not name;
+- the function has no contract check compiled in (`requires`, `ensures`, a
+  loop's `invariant`, a class invariant): a worker would run none of them.
+  At `-O2` that is any function with a `requires`; `--contracts off` lifts it.
+
+Any other site is still found (the E0805 hints and `coil dissect --effects`
+name it) and carries `ParGuard::Opaque`, which never specializes.
+
 The walk keeps the reach of the AST walk it replaced, and with it a few
 habits a follow-up may drop. It looks at functions and inherent methods (not
 a trait's methods, tests or lambdas), and into statement lists, `if` chains,
@@ -373,6 +390,9 @@ Still refuses (and why):
 | `a - b - c` as three arms | subtraction is not associative |
 | `a + a` from one let | one value, not two calls |
 | `f(n) + (n - 2)` mixed operand | combine needs every leaf to be a pure call |
+| `f(n - 1) + f(n - 2) + n`, `g(f(n - 1) + f(n - 2))` | the fork is not all the function returns: the worker would drop the rest (#2425) |
+| a statement ahead of the fork that is no guard and no arm | the worker would skip it (#2425) |
+| a function with a contract check compiled in | the worker would not run it (#2425) |
 | `n % 2 == 0` path guard | unevaluable → `Opaque`, never specialize |
 | `acc = acc + k` for a non-int `k` | only int parameters and int locals are worker arguments |
 | `min` / `max` / user operators, float reduce | not proven associative here |
