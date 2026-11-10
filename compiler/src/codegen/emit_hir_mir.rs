@@ -897,13 +897,16 @@ impl Compiler {
         // word out.
         let adapter = elem && raw && !(one_word && raw_fits);
         self.raw_instance_call = raw && !adapter;
-        let Some(target) = self.named_entry_target(&fqn, false).filter(|_| one_word || adapter) else {
+        // A raw method's own entry returns a two-word result as two words,
+        // as the method spelling's call takes it (#2433).
+        let plain = raw && !elem;
+        let Some(target) = self.named_entry_target(&fqn, false).filter(|_| one_word || adapter || plain) else {
             return;
         };
         let site = crate::mir::HirCallSite {
             target,
             pair_args: vec![false; arity],
-            pair_ret: false,
+            pair_ret: plain && !one_word,
             coro: false,
             boxed_ret: false,
             dicts,

@@ -467,7 +467,12 @@ pub fn primitive(ty: &Ty) -> Option<&'static str> {
 /// A class or enum operand of a unary operator, which dispatches to the
 /// type's trait instance (`impl Neg for V`).
 pub(crate) fn user_operand(checker: &Checker, ty: &Ty) -> bool {
-    match strip_readonly(ty) {
+    // A variant built in place (`-Amt::Int(3)`) is typed by its constructor.
+    let ty = match strip_readonly(ty) {
+        Ty::Constructor { owner, .. } => owner.as_ref(),
+        ty => ty,
+    };
+    match ty {
         Ty::Con(name) | Ty::Sum { name, .. } => checker.is_class(name) || checker.enum_variants(name).is_some(),
         Ty::App(head, _) => matches!(head.as_ref(), Ty::Con(name) if checker.is_class(name)),
         _ => false,
