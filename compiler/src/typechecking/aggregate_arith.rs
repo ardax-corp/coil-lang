@@ -219,11 +219,14 @@ pub enum LinearAlgebraKind {
         length: usize,
         left_is_tuple: bool,
         elem_is_float: bool,
+        /// Elements are `byte`: the result wraps modulo 256.
+        elem_is_byte: bool,
     },
     /// Length-3 vectors → length-3 vector (same container kind as left).
     Cross {
         left_is_tuple: bool,
         elem_is_float: bool,
+        elem_is_byte: bool,
     },
     /// Nested static matrices (row-major): `(m×k) × (k×n) → (m×n)`.
     MatMul {
@@ -235,6 +238,7 @@ pub enum LinearAlgebraKind {
         /// Each row is a tuple (vs array).
         row_is_tuple: bool,
         elem_is_float: bool,
+        elem_is_byte: bool,
     },
     /// Element-wise op on equal-shaped `Matrix` values.
     ///
@@ -247,7 +251,7 @@ pub enum LinearAlgebraKind {
         outer_is_tuple: bool,
         row_is_tuple: bool,
         elem_is_float: bool,
-        /// Cells are `byte`. Bitwise results are masked to `0..=255`.
+        /// Cells are `byte`: `+`, `-` and bitwise results wrap to `0..=255`.
         elem_is_byte: bool,
         scalar_on: Option<ScalarSide>,
     },

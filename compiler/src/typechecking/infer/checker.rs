@@ -7931,6 +7931,7 @@ impl Checker {
                     length: ln,
                     left_is_tuple,
                     elem_is_float: elem_is_float(&elem),
+                    elem_is_byte: Self::is_byte_ty(&elem),
                 },
             },
         );
@@ -8013,6 +8014,7 @@ impl Checker {
                 kind: LinearAlgebraKind::Cross {
                     left_is_tuple,
                     elem_is_float: elem_is_float(&elem),
+                    elem_is_byte: Self::is_byte_ty(&elem),
                 },
             },
         );
@@ -8147,6 +8149,7 @@ impl Checker {
                     outer_is_tuple,
                     row_is_tuple,
                     elem_is_float: elem_is_float(&elem),
+                    elem_is_byte: Self::is_byte_ty(&elem),
                 },
             },
         );
@@ -8333,9 +8336,11 @@ impl Checker {
                             outer_is_tuple,
                             row_is_tuple,
                             elem_is_float: elem_is_float(&elem),
+                            elem_is_byte: Self::is_byte_ty(&elem),
                         },
                     },
                 );
+                self.warn_byte_wrap(&elem, "*", &range);
                 let row_ty = if row_is_tuple {
                     Ty::Tuple(vec![elem.clone(); n])
                 } else {
@@ -8416,6 +8421,7 @@ impl Checker {
                         },
                     },
                 );
+                self.warn_byte_wrap(&elem, op, &range);
                 wrap_matrix_ty(ld.clone())
             }
             _ => self.error_with_help(
@@ -8648,6 +8654,7 @@ impl Checker {
                 },
             },
         );
+        self.warn_byte_wrap(&elem, "neg", &range);
         wrap_matrix_ty(data.clone())
     }
 

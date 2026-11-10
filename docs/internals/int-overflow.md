@@ -33,7 +33,13 @@ a tuple of bytes, `Vec<byte>`) wraps each element the same way and gives
 the same warning ([coil-lang#2401](https://github.com/ardax-corp/coil-lang/issues/2401)):
 the MIR lowering masks every element (`Lower::aggregate`, with
 `Lower::byte_pow` for `**`), and the packed kernel masks its results when
-the meta word's byte bit is set (`packed_vec_arith`, bit 28). Later work
+the meta word's byte bit is set (`packed_vec_arith`, bit 28). Linear
+algebra on byte cells does too
+([coil-lang#2403](https://github.com/ardax-corp/coil-lang/issues/2403)):
+`Matrix` `+`, `-`, negation and `*`, `matmul`, `dot` and `cross` wrap each
+result (a `dot` or a product cell wraps its sum once, which is the same
+value as wrapping every step), in the kernels of `packed_la.rs` and in the
+unrolled lowering. Later work
 may prove a range was checked first and turn an unchecked wrap into an
 error.
 
