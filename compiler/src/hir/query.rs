@@ -472,6 +472,7 @@ pub fn aggregate_info(checker: &Checker, body: &HirBody, id: HirId) -> Option<Ag
     // the element of the signature (`T`): the clone's types name the word.
     if let Some(elem) = aggregate_elem(checker, body, id) {
         info.kind.elem_is_float = crate::typechecking::aggregate_arith::elem_is_float(&elem);
+        info.kind.elem_is_byte = crate::typechecking::aggregate_arith::elem_is_byte(&elem);
     }
     Some(info)
 }

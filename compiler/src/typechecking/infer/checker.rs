@@ -7329,7 +7329,9 @@ impl Checker {
             shape,
             mode,
             elem_is_float: elem_is_float(&elem),
+            elem_is_byte: elem_is_byte(&elem),
         };
+        self.warn_byte_wrap(&elem, op, &range);
         let info = AggregateArithInfo { kind, op: agg_op };
         self.aggregate_arith.insert(id, (range.start, range.end), info);
 
@@ -7377,9 +7379,11 @@ impl Checker {
                     shape: AggregateShape::Tuple(elems.len()),
                     mode: AggregateMode::Neg,
                     elem_is_float: elem_is_float(&elem),
+                    elem_is_byte: elem_is_byte(&elem),
                 },
                 op: AggregateOp::Neg,
             };
+            self.warn_byte_wrap(&elem, "neg", &range);
             self.aggregate_arith.insert(id, (range.start, range.end), info);
             return Ty::Tuple(vec![elem; elems.len()]);
         }
@@ -7398,9 +7402,11 @@ impl Checker {
                     shape: AggregateShape::array(*length),
                     mode: AggregateMode::Neg,
                     elem_is_float: elem_is_float(&elem),
+                    elem_is_byte: elem_is_byte(&elem),
                 },
                 op: AggregateOp::Neg,
             };
+            self.warn_byte_wrap(&elem, "neg", &range);
             self.aggregate_arith.insert(id, (range.start, range.end), info);
             return Ty::Array {
                 element: Box::new(elem),

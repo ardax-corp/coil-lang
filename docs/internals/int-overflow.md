@@ -28,8 +28,14 @@ result of `+ - * <<` and unary `-` with `& 255` (`build::wrap_byte`), and
 lowers `**` to a square-and-multiply over the exponent's 8 bits that masks
 every step (`build::byte_pow`), so it never reaches an int overflow. The
 checker warns E0130 (`ByteWrap`) on each of these operators and their
-compound forms. Later work may prove a range was checked first and turn an
-unchecked wrap into an error.
+compound forms. An element-wise operator on `byte` elements (`[byte; N]`,
+a tuple of bytes, `Vec<byte>`) wraps each element the same way and gives
+the same warning ([coil-lang#2401](https://github.com/ardax-corp/coil-lang/issues/2401)):
+the MIR lowering masks every element (`Lower::aggregate`, with
+`Lower::byte_pow` for `**`), and the packed kernel masks its results when
+the meta word's byte bit is set (`packed_vec_arith`, bit 28). Later work
+may prove a range was checked first and turn an unchecked wrap into an
+error.
 
 ## One definition
 

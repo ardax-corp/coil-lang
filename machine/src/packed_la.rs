@@ -550,6 +550,7 @@ pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTr
 /// - bit 25: result is tuple (else array)
 /// - bit 26: broadcast mode (`args[1]` is scalar; ignored for neg)
 /// - bit 27: scalar is on the left (broadcast only; matters for sub/div)
+/// - bit 28: `byte` elements (each result wraps modulo 256)
 pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> {
     if args.len() < 2 {
         return Ok(Value::default());
@@ -561,6 +562,12 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
     let is_tuple = (ops & (1 << 25)) != 0;
     let broadcast = (ops & (1 << 26)) != 0;
     let scalar_left = (ops & (1 << 27)) != 0;
+    // A `byte` operand is in `0..=255`, so no int op here traps before the wrap.
+    let wrap = |o: &mut [i64]| {
+        if (ops & (1 << 28)) != 0 {
+            o.iter_mut().for_each(|v| *v &= 0xFF);
+        }
+    };
 
     if op == 4 {
         // Unary neg: args = [vec, meta]
@@ -589,6 +596,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
             while o.len() < len {
                 o.push(0);
             }
+            wrap(&mut o);
             i64_to_values(&o[..len])
         };
         return Ok(alloc_aggregate(heap, out, is_tuple));
@@ -659,6 +667,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
             while o.len() < len {
                 o.push(0);
             }
+            wrap(&mut o);
             i64_to_values(&o[..len])
         };
         return Ok(alloc_aggregate(heap, out, is_tuple));
@@ -709,6 +718,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
         while o.len() < len {
             o.push(0);
         }
+        wrap(&mut o);
         i64_to_values(&o[..len])
     };
     Ok(alloc_aggregate(heap, out, is_tuple))

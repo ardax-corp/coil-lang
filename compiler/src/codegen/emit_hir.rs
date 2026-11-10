@@ -8836,7 +8836,7 @@ impl Compiler {
     }
 
     /// The meta word of an element-wise operator on the packed kernel
-    /// (`PACKED_VEC_ARITH`): length, op, float, tuple and broadcast side;
+    /// (`PACKED_VEC_ARITH`): length, op, float, tuple, broadcast side and byte;
     /// `None` when the operator does not take the kernel.
     pub(super) fn packed_aggregate_meta(info: &crate::typechecking::AggregateArithInfo) -> Option<u32> {
         use crate::typechecking::{AggregateOp, ScalarSide};
@@ -8852,6 +8852,7 @@ impl Compiler {
         let mut meta = (len as u32) & 0xFFFF | op_code << 16;
         meta |= u32::from(float) << 24 | u32::from(tuple) << 25 | u32::from(scalar_on.is_some()) << 26;
         meta |= u32::from(matches!(scalar_on, Some(ScalarSide::Left))) << 27;
+        meta |= u32::from(info.kind.elem_is_byte) << 28;
         Some(meta)
     }
 

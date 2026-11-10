@@ -37,6 +37,9 @@ major.
   Helpers `coil_native_field` (which read `0` from a wrong object) and
   `coil_native_enum_payload` are gone; `coil_native_product_load` bails.
   MIR section `FORMAT` 16.
+- Host native `packed_vec_arith` (**91**): meta bit 28 says the elements
+  are `byte`, and the kernel wraps each result modulo 256 (#2401). An
+  archive made before this has the bit clear and keeps the int results.
 
 ## Major 7
 
