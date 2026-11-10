@@ -244,9 +244,9 @@ pub struct Compiler {
     /// Parameter types of each reserved structural thunk's raw entry, which
     /// the checker has no signature for.
     structural_thunk_params: HashMap<String, Vec<Ty>>,
-    /// Reserved thunks of the arity-wide tuple instances (`(fqn, arity)`,
-    /// #1479).
-    structural_tuple_thunks: Vec<(String, usize)>,
+    /// Reserved thunks of the structural instances with open items
+    /// (`(fqn, class, method, head)`, #1479, #2554).
+    structural_open_thunks: Vec<(String, String, String, Ty)>,
     /// A compiler-made body being lowered as a bounded instance method:
     /// `(first context slot in its dictionary, context count)`; its frame
     /// takes `__dict0` after the parameters and `__dict1..` from it (#1479).
@@ -715,7 +715,7 @@ impl Default for Compiler {
             structural_thunks: Vec::new(),
             dict_forwarders: HashMap::new(),
             structural_thunk_params: HashMap::new(),
-            structural_tuple_thunks: Vec::new(),
+            structural_open_thunks: Vec::new(),
             synth_entry_dicts: None,
             synth_show_dicts: HashMap::new(),
             synth_plain_dicts: None,

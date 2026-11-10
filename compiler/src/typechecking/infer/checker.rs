@@ -233,6 +233,7 @@ impl Checker {
             mixed_literals: Vec::new(),
             fn_body_depth: 0,
             weak_checks: Default::default(),
+            open_structural_goals: Vec::new(),
             async_depth: 0,
             current_yield_ty: None,
             coro_body: false,
@@ -10647,14 +10648,14 @@ impl Checker {
             Ty::App(head, args) if matches!(class, "Show" | "Eq") && matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE) => args.clone(),
             _ => return,
         };
-        // A tuple with an open item: the instance for its arity, with a
-        // context per item (#1479).
-        if class == "Show" && matches!(&ty, Ty::Tuple(_)) && ty.has_var() {
-            let vars = items.iter().map(|_| self.counter.fresh()).collect();
-            self.generics.register_structural_tuple(class, vars);
+        // A shape with an open item: the shape's instance, with a context
+        // per variable (#1479), which the frame's dictionaries meet inside
+        // a generic body (`Show<Option<T>>` under `T: Show`, #2554).
+        if ty.has_var() {
+            self.ensure_structural_open(class, &ty, class);
             return;
         }
-        if ty.has_var() || self.generics.has_instance(class, &ty) {
+        if self.generics.has_instance(class, &ty) {
             return;
         }
         for item in &items {
@@ -10675,6 +10676,31 @@ impl Checker {
         if items_ok {
             self.generics.register_structural_instance(class, ty);
         }
+    }
+
+    /// The structural instance of `class` for the shape of open `ty`
+    /// ([`Generics::register_structural_open`]): `Show` and `Eq` of a
+    /// tuple, `Option`, `Result`, `Vec` or array, `Hash` of a tuple or
+    /// array, a tuple's order, as their ground instances (`Option` /
+    /// `Result` have a prelude `Hash`; a `Vec` has none), its context over
+    /// `context`.
+    fn ensure_structural_open(&mut self, class: &str, ty: &Ty, context: &str) {
+        let hole = || Ty::Con("_".into());
+        let shape = match ty {
+            Ty::Tuple(items) => Ty::Tuple(items.iter().map(|_| hole()).collect()),
+            Ty::Array { .. } => array(hole()),
+            Ty::App(head, args) if class != "Hash" => Ty::App(head.clone(), args.iter().map(|_| hole()).collect()),
+            _ => return,
+        };
+        if self.generics.has_structural_open(class, &shape) {
+            return;
+        }
+        let head = match shape {
+            Ty::Tuple(items) => Ty::Tuple(items.iter().map(|_| Ty::Var(self.counter.fresh())).collect()),
+            Ty::App(head, args) => Ty::App(head, args.iter().map(|_| Ty::Var(self.counter.fresh())).collect()),
+            _ => array(Ty::Var(self.counter.fresh())),
+        };
+        self.generics.register_structural_open(class, head, context);
     }
 
     /// A ground homogeneous tuple or array whose element has an
@@ -10724,6 +10750,15 @@ impl Checker {
         let Ty::Tuple(items) = &ty else {
             return;
         };
+        // One with an open item: the arity's instances, over its items'
+        // `Ord` (#2554).
+        if !items.is_empty() && ty.has_var() {
+            self.ensure_structural_open("Eq", &ty, "Eq");
+            for class in ["Lt", "Le", "Gt", "Ge", "Ord"] {
+                self.ensure_structural_open(class, &ty, "Ord");
+            }
+            return;
+        }
         if items.is_empty() || ty.has_var() || self.generics.has_instance("Ord", &ty) {
             return;
         }
@@ -10817,6 +10852,13 @@ impl Checker {
             1 => {
                 let (inst, local, fresh_vars) = matches.pop().expect("one match");
                 self.absorb(local);
+                let goal = Constraint {
+                    class: class.to_string(),
+                    args: inst.args.clone(),
+                };
+                if Generics::is_structural_open(&inst) && !self.open_structural_goals.contains(&goal) {
+                    self.open_structural_goals.push(goal);
+                }
                 // Its methods' `weak()` calls on the head's parameters (#1670).
                 self.weak_checks.record_instance(fresh_vars, range);
                 Ok(Some(inst))
@@ -10912,7 +10954,7 @@ impl Checker {
                         })
                         .collect();
                 }
-                if shape || (generic && Generics::is_structural_tuple(&inst)) {
+                if shape || (generic && Generics::is_structural_open(&inst)) {
                     structural.push((inst, local, fresh_vars));
                 } else {
                     matches.push((inst, local, fresh_vars));
@@ -20183,6 +20225,40 @@ impl Checker {
         std::mem::swap(&mut self.synthetic_statics, &mut other.synthetic_statics);
         std::mem::swap(&mut self.static_slot_types, &mut other.static_slot_types);
         std::mem::swap(&mut self.static_tails, &mut other.static_tails);
+    }
+
+    /// Register the ground structural instances a per-type clone needs
+    /// (#2554): its bounds' (`vars` maps the clone's type variables to its
+    /// types), and those of the goals a structural instance with open items
+    /// met in the program ([`Self::open_structural_goals`]) that are ground
+    /// at its types. The checker registers a ground one the first time a
+    /// goal asks for it, and no goal of the source asks at the clone's
+    /// types. Whether one was registered.
+    pub fn ensure_clone_structural_goals(&mut self, bounds: &[Constraint], vars: &HashMap<TyVarId, Ty>) -> bool {
+        let before = self.generics.instances.len();
+        let goals: Vec<Constraint> = bounds.iter().chain(&self.open_structural_goals).cloned().collect();
+        for goal in goals {
+            let args: Vec<Ty> = goal
+                .args
+                .iter()
+                .map(|a| apply_ty_prune(&self.subst, a).subst_vars(&|v| vars.get(&v).cloned()))
+                .collect();
+            if args.iter().all(|a| !a.has_var()) {
+                self.ensure_ground_structural(&goal.class, &args);
+            }
+        }
+        self.generics.instances.len() != before
+    }
+
+    /// Register `class`'s structural instance at ground `args`, as a
+    /// checker goal would (#2554). Whether one was registered.
+    pub fn ensure_ground_structural(&mut self, class: &str, args: &[Ty]) -> bool {
+        let before = self.generics.instances.len();
+        let lookup = self.instance_lookup_args(class, args);
+        if lookup.iter().all(|a| !a.has_var()) {
+            self.ensure_structural_instance(class, &lookup);
+        }
+        self.generics.instances.len() != before
     }
 
     /// Take the ground structural instances `other` registered that this

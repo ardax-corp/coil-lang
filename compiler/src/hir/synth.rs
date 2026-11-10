@@ -411,19 +411,27 @@ pub fn array_show(b: &mut Synth, array: HirId, element: Ty) -> HirId {
     b.block(vec![init_out, init_sep, each], Some(shown), string)
 }
 
+/// The callee of item `i`'s comparison `sym` in [`tuple_order`].
+pub type OrderTarget = dyn Fn(&str, usize) -> String;
+
 /// `Hash::hash` of `value` (#1479, #2380), a tuple or record (`product`,
 /// a record's fields in name order) or an array (`None`; `targets` holds
 /// its element's): `h = ((h & M) * 31) ^ hash(x)` over the items from `0`,
 /// as a derived `Hash` combines fields. `targets` names each item's `hash`
-/// entry (`None`: a `()` item, hashed as `0`).
-pub fn structural_hash(b: &mut Synth, value: HirId, product: Option<&Product>, targets: &[Option<String>]) -> HirId {
+/// entry (`None`: a `()` item, hashed as `0`); with `dict`, each is
+/// called with that local after the item (an open instance's, #2554).
+pub fn structural_hash(b: &mut Synth, value: HirId, product: Option<&Product>, targets: &[Option<String>], dict: Option<LocalId>) -> HirId {
     let int = coil_ty::int();
     let acc = b.local("h", int.clone(), LocalKind::Let);
     let zero = b.int(0);
     let init = b.let_(acc, zero);
     let step = |b: &mut Synth, item: Option<HirId>, target: &Option<String>| {
         let h = match (item, target) {
-            (Some(item), Some(target)) => b.call(target, vec![item], int.clone()),
+            (Some(item), Some(target)) => {
+                let mut args = vec![item];
+                args.extend(dict.map(|d| b.read(d)));
+                b.call(target, args, int.clone())
+            }
             _ => b.int(0),
         };
         let cur = b.read(acc);
@@ -478,7 +486,10 @@ pub fn structural_hash(b: &mut Synth, value: HirId, product: Option<&Product>, t
 /// (`x_i <= y_i && y_i <= x_i`, so a `NaN` item decides `false`); the last
 /// takes the operator itself. Each item compares as the operator does at
 /// its type (a primitive, a string's bytes, its own instance).
-pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str) -> HirId {
+///
+/// With `bound`, item `i`'s `sym` is a call of `bound.1(sym, i)` with the
+/// two items and local `bound.0` (an open instance's dictionary, #2554).
+pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str, bound: Option<(LocalId, &OrderTarget)>) -> HirId {
     let boolean = coil_ty::boolean();
     let (strict, op): (&'static str, &'static str) = match method {
         "lt" => ("<", "<"),
@@ -493,6 +504,10 @@ pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str
     let cmp = |b: &mut Synth, sym: &'static str, i: usize, swap: bool| {
         let (l, r) = if swap { (sides[1][i], sides[0][i]) } else { (sides[0][i], sides[1][i]) };
         let (l, r) = (b.read(l), b.read(r));
+        if let Some((dict, target)) = bound {
+            let d = b.read(dict);
+            return b.call(&target(sym, i), vec![l, r, d], boolean.clone());
+        }
         let op = super::build::resolve_bin(sym, Some(&items[i]), Some(&items[i]));
         b.bin(op, l, r, boolean.clone())
     };
