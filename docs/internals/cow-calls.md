@@ -29,47 +29,51 @@ not share: `Plan::store_result` records the value as stored and leaves
 the share to the caller. Coroutines keep the old rule (they share what
 they hand back), since a resumed frame outlives the call.
 
-A generic body whose result is a bare type parameter (`T`, or `F<A>` over
-a type parameter `F`) leaves more to the caller (#2502). Its shared form
-holds a `T` as an opaque word, which may be a scalar. A share of one is a
-`Cow` on the `I64` word (`mir/from_hir.rs`, `Builtin::Cow`; #2506): the
-runtime's `cow_share` leaves a non-object alone, so a `T` the body stores
-(into a field, a `Vec`, an `Option`, tuple or `Result` it returns) is
-shared. A `unique` of one must be exact, since it replaces the word: the
-body reads it from its `kinds` word (#2506). A shared generic free function
-or inherent method takes that word after its dictionaries, bit `i` set when
-its scheme's type parameter `i` (`Scheme::bounds`, in order) is a type
-`cow_ty` holds copy-on-write at the call; the bits past the mask carry a
-sentinel the entry checks in debug builds and under `COIL_MIR_VERIFY`
-(`codegen/kinds.rs`). A ground call passes a constant; a shared caller
-forwards its own bit for a type parameter and a constant for a type with a
-known head (`Vec<T>` is 1, `Option<T>` 0); a lambda captures the word after
-the dictionaries; a partial application fills it as its last parameter; a
-`PolyFn` value captures it after its dictionaries: the word at the type it
-is read at, or, for a function of one type parameter read where it stays
-open (an argument a `forall` parameter takes, a local bound from it),
-`common::KINDS_FROM_CALL`, which the runtime replaces by the call's last
-word: a call through a `forall` parameter or such a local passes the word
-last (#2506). A function of more type parameters read open captures every
-bit clear (the `forall`'s order need not be its own). A class's `drop`, which
-the runtime calls, takes none. `Lower` emits the unique under a test of the
-bit (`guarded_cow`). A trait method reads its bits from its dictionary,
-which carries a `kinds` word after its methods (the trait's parameters, then
-the instance head's type variables; [dictionary-passing.md](dictionary-passing.md)):
-a default body and a generic-head instance's method read it at entry. A
-trait method with type parameters of its own (`fn visit<W>`) takes their
-word after its own bounds' dictionaries, at every entry of it: the shared
-one, a per-type clone, the `$dict` adapter, a forwarder, a clone's thunk.
-A result it would have
-shared itself, one a call handed back from inside a parameter
-(`return c.get()`), comes back unshared. So when the result is not fresh
-(`shared_ret`), `returns_inner` names every parameter the result may reach
-(`cow::holders_of_result`), and the caller, which knows the type, shares
-the result by the rule below. A parameter that is a bare type parameter
-itself is left out: the body can only hand it back whole (`returns_arg`) or
-pass it to code not known here (`opaque_args`), which the caller already
-answers. A per-type clone still shares the result too: the second share
-sets a flag that is already set.
+### Shared generic bodies: the `kinds` word
+
+A shared generic body holds a value of a type parameter `T` (or `F<A>` over
+a type parameter `F`) as the ground type's word, which may be a scalar or an
+object, so it cannot tell on its own whether a share or a unique applies, and
+a unique replaces the word. It reads that from its `kinds` word (#2506,
+`codegen/kinds.rs`): bit `i` set when type parameter `i` is a type `cow_ty`
+holds copy-on-write at the call (a class instance, a `Vec`, an array; not a
+scalar, `string`, `Option`, tuple, enum or function). `Lower` emits both ops
+on such a word under a test of the bit (`guarded_cow`), so a body pays a
+test and a branch, and the op only where the type is an object, as its
+per-type clone does. A body with no bit for the variable (a cleanup pad, an
+outlined helper) emits no op. The bits past the mask carry a sentinel the
+entry checks in debug builds and under `COIL_MIR_VERIFY`, so an edge that
+does not pass the word fails loudly.
+
+Where the word comes from:
+
+- a shared generic free function or inherent method takes it after its
+  dictionaries, its scheme's type parameters (`Scheme::bounds`) in order;
+  a class's `drop`, which the runtime calls, takes none;
+- a trait method reads it from its dictionary, which carries a `kinds`
+  word after its methods (the trait's parameters, then the instance head's
+  type variables; [dictionary-passing.md](dictionary-passing.md)): a
+  default body and a generic-head instance's method read it at entry. A
+  trait method with type parameters of its own (`fn visit<W>`) takes their
+  word after its own bounds' dictionaries at every entry of it: the shared
+  one, a per-type clone, the `$dict` adapter, a forwarder, a clone's thunk;
+- a lambda captures its body's word after the dictionaries;
+- a `PolyFn` value captures it after its dictionaries: the word at the type
+  it is read at, or, for a function of one type parameter read where it
+  stays open (an argument a `forall` parameter takes, a local bound from
+  it), `common::KINDS_FROM_CALL`, which the runtime replaces by the call's
+  last word; a call through a `forall` parameter or such a local passes it
+  last. A function of more type parameters read open captures every bit
+  clear (the `forall`'s order need not be its own): its ops stay off.
+
+A ground call passes a constant; a shared caller forwards its own bit for a
+type parameter and a constant for a type with a known head (`Vec<T>` is 1,
+`Option<T>` 0); a partial application fills it as its last parameter.
+
+Since the body shares exactly what a clone shares, a result of a bare type
+parameter it hands back from a call (`return c.get()`) is shared there as in
+a clone (#2502). Compiler-made glue (`==`, `Show`, `hash`) plans no op on
+an open word and takes no word.
 
 ## The caller
 

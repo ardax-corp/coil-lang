@@ -93,30 +93,6 @@ fn open_param(checker: &Checker, ty: Option<&Ty>) -> bool {
     ty.is_some_and(|t| matches!(strip_readonly(&crate::typechecking::subst::apply_ty_prune(checker.subst(), t)), Ty::Var(_)))
 }
 
-/// The parameters a result of a bare type parameter (`T`, or `F<A>` over a
-/// type parameter `F`) may come from inside of (#2502): every parameter
-/// that is not itself a bare type parameter, which the body can only hand
-/// back whole (`returns_arg`) or pass to code not known here
-/// (`opaque_args`). The body's shared form holds such a result as an
-/// opaque word, where a share is no op. No parameter for any other result.
-pub(super) fn holders_of_result(checker: &Checker, body: &HirBody) -> u64 {
-    let open = |t: &Ty| match strip_readonly(&crate::typechecking::subst::apply_ty_prune(checker.subst(), t)) {
-        Ty::Var(_) => true,
-        Ty::App(head, _) => matches!(strip_readonly(head), Ty::Var(_)),
-        _ => false,
-    };
-    if body.is_coro || !body.ret.as_ref().is_some_and(open) {
-        return 0;
-    }
-    let mut bits = 0;
-    for (i, &p) in body.params.iter().enumerate().take(64) {
-        if !body.local(p).ty.as_ref().is_some_and(open) {
-            bits |= 1 << i;
-        }
-    }
-    bits
-}
-
 /// What a call does with each argument (bit `i` for argument `i`).
 #[derive(Debug, Clone, Copy, Default)]
 struct ArgUse {

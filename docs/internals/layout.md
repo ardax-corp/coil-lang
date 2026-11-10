@@ -172,6 +172,11 @@ words:
   (`Compiler::stack_slot_ty`, #2581).
 - `hir_method_clone` clones niche types too: the per-type clone is a cost
   decision (speed), never a correctness one.
+- A shared entry takes one more word after its dictionaries, its `kinds`
+  mask: which of its type parameters are copy-on-write objects at the call,
+  which its share and unique ops on a bare `V` test (#2506,
+  [cow-calls.md](cow-calls.md)). A trait dictionary carries one after its
+  methods ([dictionary-passing.md](dictionary-passing.md)).
 
 ### Open enums
 
