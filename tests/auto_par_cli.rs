@@ -90,3 +90,186 @@ fn main() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What a run leaves behind: stdout, stderr and the exit code.
+fn observed(src: &std::path::Path, flags: &[&str], workers: Option<&str>) -> (String, String, Option<i32>) {
+    let mut cmd = Command::new(coil_bin());
+    cmd.args(["--contracts", "all", "--fold-calls", "off"]).args(flags).arg(src);
+    match workers {
+        Some(n) => cmd.env("COIL_MAX_WORKER_THREADS", n),
+        None => cmd.env_remove("COIL_MAX_WORKER_THREADS"),
+    };
+    let out = cmd.output().expect("spawn coil");
+    (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), out.status.code())
+}
+
+/// `program` prints, reports and exits the same with auto-par on as with
+/// it off, on both engines and any worker count; its sequential stderr
+/// holds `stderr` (empty: nothing is reported at all).
+fn same_as_sequential(name: &str, program: &str, stderr: &str) {
+    let dir = std::env::temp_dir().join(format!("coil-auto-par-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join(format!("{name}.coil"));
+    std::fs::write(&src, program).expect("write source");
+    for engine in [&[][..], &["--mir"][..]] {
+        let off = observed(&src, &[engine, &["--auto-par", "off"]].concat(), None);
+        if stderr.is_empty() {
+            assert_eq!(off.1, "", "{name} {engine:?}: the sequential run reports nothing");
+        } else {
+            assert!(off.1.contains(stderr), "{name} {engine:?}: sequential stderr={}", off.1);
+        }
+        for workers in [None, Some("1"), Some("8")] {
+            let on = observed(&src, &[engine, &["--auto-par", "on"]].concat(), workers);
+            assert_eq!(on, off, "{name} {engine:?} with {workers:?} workers: auto-par on, then off");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A panic in a loop's chunks is reported once, by the sequential rerun,
+/// with the frames of the function the loop is in (#2419).
+#[test]
+fn an_overflow_in_every_chunk_is_reported_as_the_sequential_run_does() {
+    let program = r#"
+fn big(int i) -> int {
+    return 4611686018427387904 + i % 3;
+}
+
+fn run() -> int {
+    let total = 0;
+    for i in 0..400000 {
+        total = total + big(i);
+    }
+    return total;
+}
+
+fn main() {
+    let _ = run();
+}
+"#;
+    same_as_sequential("chunks-overflow", program, "panic: integer overflow at");
+}
+
+/// So is one in a function the loop body calls.
+#[test]
+fn an_overflow_under_a_chunk_is_reported_as_the_sequential_run_does() {
+    let program = r#"
+fn big(int i) -> int {
+    return (4611686018427387904 + i % 3) * 2;
+}
+
+fn run() -> int {
+    let total = 0;
+    for i in 0..400000 {
+        total = total + big(i);
+    }
+    return total;
+}
+
+fn main() {
+    let _ = run();
+}
+"#;
+    same_as_sequential("callee-overflow", program, "panic: integer overflow at");
+}
+
+/// No chunk overflows, the running fold does: a sum and a product.
+#[test]
+fn an_overflow_of_the_fold_is_reported_as_the_sequential_run_does() {
+    let sum = r#"
+fn step(int i) -> int {
+    return 30000000000000 + i % 2;
+}
+
+fn run() -> int {
+    let total = 0;
+    for i in 0..400000 {
+        total = total + step(i);
+    }
+    return total;
+}
+
+fn main() {
+    let _ = run();
+}
+"#;
+    same_as_sequential("sum-overflow", sum, "  in run at");
+    let product = r#"
+fn step(int i) -> int {
+    if i % 100000 < 16 {
+        return 2;
+    }
+    return 1;
+}
+
+fn run() -> int {
+    let total = 3;
+    for i in 0..400000 {
+        total = total * step(i);
+    }
+    return total;
+}
+
+fn main() {
+    let _ = run();
+}
+"#;
+    same_as_sequential("product-overflow", product, "  in run at");
+}
+
+/// A contract over values the loop leaves alone fails in every chunk and
+/// is reported once.
+#[test]
+fn a_failing_invariant_is_reported_once() {
+    let program = r#"
+fn sq(int i) -> int {
+    return i * i;
+}
+
+fn run(int k) -> int {
+    let total = 0;
+    for i in 0..400000
+        invariant k > 0
+    {
+        total = total + (sq(i % 7) + k);
+    }
+    return total;
+}
+
+fn main() {
+    let _ = run(0 - 7);
+}
+"#;
+    same_as_sequential("failing-invariant", program, "contract violated: invariant k > 0 in run");
+}
+
+/// One chunk's partial overflows where the running fold does not: the
+/// loop reruns sequentially and nothing is reported.
+#[test]
+fn an_overflow_of_one_chunk_alone_reports_nothing() {
+    let program = r#"
+use io::{stdout, write};
+use string::to_bytes;
+
+fn step(int i) -> int {
+    if i < 100000 {
+        return 0 - 180000000000000;
+    }
+    return 0;
+}
+
+fn run() -> int {
+    let total = 9000000000000000000;
+    for i in 0..400000 {
+        total = total + step(i);
+    }
+    return total;
+}
+
+fn main() {
+    let r = run();
+    let _ = write(stdout(), to_bytes(r.show()));
+}
+"#;
+    same_as_sequential("phantom", program, "");
+}
