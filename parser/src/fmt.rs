@@ -2380,7 +2380,7 @@ impl<'s> Formatter<'s> {
                 self.fmt_output(&args[0]);
             }
             Expression::Call { name, args } => {
-                self.fmt_output(name);
+                self.fmt_callee(name);
                 // A lone block lambda argument opens on the call's line:
                 // `scope(fn (Scope s) {` (#1796), as after a short receiver.
                 if let Some([arg]) = args.as_deref()
@@ -2394,6 +2394,19 @@ impl<'s> Formatter<'s> {
                 }
             }
             other => self.fmt_expression(other),
+        }
+    }
+
+    /// A call's callee. Parens around a field read stay: `(o.f)(x)` calls
+    /// the function the field `f` holds, `o.f(x)` the method `f` (#2472).
+    fn fmt_callee(&mut self, name: &Output<'_>) {
+        let inner = strip_groups(name);
+        if has_group(name) && matches!(inner.1.as_ref(), Expression::Access(..) | Expression::OptionalAccess(..)) {
+            self.push_str("(");
+            self.fmt_output(inner);
+            self.push_str(")");
+        } else {
+            self.fmt_output(name);
         }
     }
 
@@ -3088,6 +3101,19 @@ fn strip_groups<'a, 'e>(mut output: &'a Output<'e>) -> &'a Output<'e> {
             Expression::Group(inner) | Expression::Expr(inner) => output = inner,
             Expression::Fragment(items) if items.len() == 1 => output = &items[0],
             _ => return output,
+        }
+    }
+}
+
+/// Whether `output` is wrapped in parentheses (above what [`strip_groups`]
+/// strips to).
+fn has_group(mut output: &Output<'_>) -> bool {
+    loop {
+        match output.1.as_ref() {
+            Expression::Group(_) => return true,
+            Expression::Expr(inner) => output = inner,
+            Expression::Fragment(items) if items.len() == 1 => output = &items[0],
+            _ => return false,
         }
     }
 }
