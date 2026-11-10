@@ -1,6 +1,6 @@
 # HIR → MIR lowering consolidation (plan)
 
-Status: **proposed** (2026-11-09). Tier D of the 2026-11 cleanup audit. Base: `feature/native` at 20ab4b172.
+Status: **done** (2026-11-10; see [Execution record](#execution-record)). Proposed 2026-11-09. Tier D of the 2026-11 cleanup audit. Base: `feature/native` at 20ab4b172.
 
 Every body goes HIR → MIR in two stages that walk the same HIR:
 
@@ -253,17 +253,52 @@ One PR at a time per lane, merged on green into `feature/native`, rebased before
 
 | Step | Status | PR |
 |---|---|---|
-| D3a | pending | |
-| D3b | pending | |
-| D3c | pending | |
-| D2a | pending | |
-| D2b | pending | |
-| D2c | pending | |
-| D1a | pending | |
-| D1b | pending | |
-| D1c | pending | |
-| D1d | pending | |
-| D4a | pending | |
-| D4b | pending | |
-| D4c | pending | |
-| D4d | pending | |
+| D3a | done | #2365 |
+| D3b | done | #2368 |
+| D3c | done | #2371 |
+| D2a | done | #2372 |
+| D2b | done | #2373 |
+| D2c | done | #2374 |
+| D1a | done | #2366, #2367 |
+| D1b | done | #2369, #2370 |
+| D1c | done | #2375 |
+| D1d | done | #2376, #2377 |
+| D4a | done | #2378 |
+| D4b | done | #2379 |
+| D4c | done | #2381 |
+| D4d | done | #2385 |
+
+## Execution record
+
+Base 20ab4b172, end aaf121ec9 (2026-11-10). Every step merged on local verification: the corpus on native and mir (5527 tests at the start, 5546 at the end), the archive comparison, clippy and fmt.
+
+### Against the success criteria
+
+- **Code: missed.** The target was −3,500 lines or more. The files in scope changed by +3,510 / −3,401 (net +109). The named structures are gone: `HirMirInput`, `HirMirTables`, `HirMirFrame`, `hir_mir_walk`, the emit cursor, phased emit and `context.variables` slot interning. But the per-node work they did moved behind `LowerCx`; it was not deleted.
+- **Behaviour: met.** Archives were byte-identical at every step except these:
+  - D3a: 7 archives differ in body order and string ids, and are canonically equivalent.
+  - D1d: 360 corpus archives differ in string ids and stay deterministic. Spool's archive is 68 bytes smaller.
+  - D4a–D4c: the kept rewrites change.
+- **Run-time perf: met.** Everything is within ±1%. Kept early frees gave one large win: `s2d_inloop_escape` −97%.
+- **Compile time: met.** Spool compiles with 13.7% fewer instructions after D4c (wall −11.8%). Most of that came from building inline candidates once per call site, not from removing re-plans.
+
+### What the plan got wrong
+
+- **D3a, "no ids move".** Deleting phased emit puts bodies in source order where it used to fire.
+- **D1c, "lowering builds the frame from `BodyFrame`".** `BodyFrame` covers only entry words. Which body-local bindings get a slot depends on dispatch decisions in codegen, so `LowerCx::bound_locals` and `dict_params` stay.
+- **D1d, "`emit_hir_mir.rs` is deleted".** It stays, as the per-node site planner behind `LowerCx::site`. The reach set, the reads-dictionaries refusal and the existential packs with their lint stay whole-body.
+- **D4a, "one SROA body and one fold body".** There were 3 and 6, plus two fold shapes that only show at `-O0`.
+- **D4d, "delete the duplicated arms".** Most of the overlap between the two validators is traversal. Only 7 real duplicate checks were deleted, and 5 shape checks moved into `refusal::Walk`.
+
+### Fixed along the way
+
+- D2b: clone probing planned against a leftover frame of unrelated trait signatures.
+- D4b: early_free rewrote an orphaned node that shared operands with a live one. The silent fallback had been hiding this miscompile. early_free fallbacks went from 707 to 0.
+- D4b: a free call that does nothing, once per loop pass, on a match over literals (`option_result` +62% before the fix).
+
+### Left open
+
+- `outlined_plan` / `flush_outlined` and the clone probe plan a body without running `refusal` first.
+- The two validators disagree on lane arrays: `query::stack_arrays` against `plan_hir_local_layouts`.
+- Call resolution still walks the whole body on each inlining round.
+- Unplanned trait-instance clone requests do not count against the clone budget. A debug assert guards this.
