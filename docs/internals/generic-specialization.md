@@ -106,9 +106,11 @@ take the shared body instead (warning E0804):
 - **Polymorphic recursion.** Each clone carries the functions on its
   chain of clones (the clone whose body asked for it, that clone's, …). A
   call to one of them at new types (`f<T>` calling `g<(T, int)>` calling
-  `f<((T, int), int)>`, or `Nest<T>::depth` calling
-  `Nest<Nest<T>>::depth`) would grow without end, so it keeps the shared
-  body. Chains are no longer than the number of generic functions, so
+  `f<((T, int), int)>`, `f<T>` calling `f<Box<T>>`, or `Nest<T>::depth`
+  calling `Nest<Nest<T>>::depth`) would grow without end, so it keeps the
+  shared body. A free function with a declared signature calls itself at
+  that scheme, as any later caller does, so its body may call itself at
+  another type (#2540). Chains are no longer than the number of generic functions, so
   planning terminates. Free functions: `collect_transitive`
   (`monomorphize.rs`); instance and foreign clones: `InstClone::chain`,
   `Compiler::inst_clone_recursive`. A recursive call at types another

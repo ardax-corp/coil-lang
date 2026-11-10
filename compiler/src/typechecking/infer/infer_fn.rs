@@ -389,6 +389,39 @@ impl Checker {
         self.messages.push(msg);
     }
 
+    /// The scheme a generic free function's body calls itself at (#2540).
+    /// With its whole signature declared, the declared scheme, as later
+    /// code calls it: each call instantiates it, so the body may call
+    /// itself at another type (`g(Some(x), n - 1)`), and the call
+    /// discharges the bounds, which a call at the body's own types meets
+    /// with the frame's own dictionaries (forwarded, as for any other
+    /// bounded callee). Without a declared result the body's calls type
+    /// the function (`α`), and its bounds still come with them. A bound
+    /// on a constraint parameter (`T: c`) has no class to forward yet.
+    fn own_call_scheme(
+        &self,
+        alpha: TyVarId,
+        declared: Option<&Ty>,
+        param_vars: &[TyVarId],
+        param_kinds: &[Kind],
+        constraints: &[Constraint],
+        assoc: &[crate::typechecking::ty::AssocProjection],
+    ) -> Scheme {
+        if param_vars.is_empty() || constraints.iter().any(|c| self.constraint_param_kind(&c.class).is_some()) {
+            return Scheme::mono(Ty::Var(alpha));
+        }
+        match declared {
+            Some(ty) if assoc.is_empty() => Scheme::poly_with_kinds_and_assoc(
+                param_vars.to_vec(),
+                param_kinds.to_vec(),
+                constraints.to_vec(),
+                Vec::new(),
+                ty.clone(),
+            ),
+            _ => Scheme { constraints: constraints.to_vec(), ..Scheme::mono(Ty::Var(alpha)) },
+        }
+    }
+
     pub(super) fn infer_function(&mut self, args: InferFunctionArgs<'_>) -> Ty {
         let InferFunctionArgs {
             name,
@@ -575,9 +608,10 @@ impl Checker {
         // A declared signature types the body's own recursive calls up
         // front (#1191): `let r = f(rest); r.push(..)` needs `r`'s type
         // before the post-body unify below would give it.
-        if !is_coro && returns.is_some() {
-            let declared = Self::seal_nullary_fun_ty(fun_ty.clone(), arg_tys.len(), self_ty.is_some());
-            self.unify(&Ty::Var(alpha), &declared, range, "function type");
+        let declared = (!is_coro && returns.is_some())
+            .then(|| Self::seal_nullary_fun_ty(fun_ty.clone(), arg_tys.len(), self_ty.is_some()));
+        if let Some(declared) = &declared {
+            self.unify(&Ty::Var(alpha), declared, range, "function type");
         }
 
         // Result/Option mode from an annotated return type. Bare
@@ -640,8 +674,8 @@ impl Checker {
             if let Some(stub) = self.forward_free_fn_schemes.remove(name) {
                 self.weak_checks.alias(&stub.bounds, &param_vars);
             }
-            self.env
-                .insert_top(name.to_string(), Scheme::mono(Ty::Var(alpha)));
+            let own = self.own_call_scheme(alpha, declared.as_ref(), &param_vars, &param_kinds, &param_constraints, &fn_assoc_projections);
+            self.env.insert_top(name.to_string(), own);
         }
 
         self.push_scope();
