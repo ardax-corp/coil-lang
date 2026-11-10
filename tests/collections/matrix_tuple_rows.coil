@@ -78,7 +78,7 @@ test("in an option, an array, a tuple and a closure") {
 
 test("typeof names the matrix") {
     let a = matrix(((1, 2), (3, 4)));
-    assert!(typeof(a) == "prelude::math::Matrix<((int, int), (int, int))>");
+    assert!(typeof a == "prelude::math::Matrix<((int, int), (int, int))>");
     let b = matrix([[1, 2], [3, 4]]);
-    assert!(typeof(b) == "prelude::math::Matrix<[[int; 2]; 2]>");
+    assert!(typeof b == "prelude::math::Matrix<[[int; 2]; 2]>");
 }
