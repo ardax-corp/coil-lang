@@ -30,9 +30,9 @@ fn a_plain_while_has_no_checks() {
     let m = module("fn f(int n) -> int { let s = 0; let i = 0; while i < n { s = s + i; i = i + 1; } return s; }");
     let f = m.bodies.iter().find(|b| b.name == "f").expect("f");
     let [lp] = loops(f).try_into().expect("one loop");
-    let parts = while_parts(f, lp).expect("a while");
-    assert!(parts.checks.is_empty());
-    assert_eq!(while_shape(f, lp), Some((parts.cond, parts.then)));
+    let (checks, cond, then) = while_parts(f, lp).expect("a while");
+    assert!(checks.is_empty());
+    assert_eq!(while_shape(f, lp), Some((cond, then)));
 }
 
 #[test]
@@ -44,10 +44,10 @@ fn a_while_with_contracts_keeps_its_condition_and_body() {
     let [lp] = loops(f).try_into().expect("one loop");
     // The checks run ahead of the test, so the plain shape does not hold.
     assert_eq!(while_shape(f, lp), None);
-    let parts = while_parts(f, lp).expect("a while under its checks");
-    assert!(!parts.checks.is_empty());
-    assert!(matches!(f.expr(parts.cond).kind, HirKind::Bin { op: crate::hir::BinOp::Lt, .. }));
-    assert!(matches!(f.expr(parts.then).kind, HirKind::Block { .. }));
+    let (checks, cond, then) = while_parts(f, lp).expect("a while under its checks");
+    assert!(!checks.is_empty());
+    assert!(matches!(f.expr(cond).kind, HirKind::Bin { op: crate::hir::BinOp::Lt, .. }));
+    assert!(matches!(f.expr(then).kind, HirKind::Block { .. }));
 }
 
 #[test]

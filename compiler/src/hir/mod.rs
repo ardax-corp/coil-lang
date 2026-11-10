@@ -22,6 +22,7 @@ pub mod effects;
 pub mod enum_sroa;
 pub mod inline;
 pub mod outline;
+pub mod par;
 pub mod classify;
 pub mod query;
 pub mod refusal;
@@ -450,7 +451,7 @@ pub enum LocalKind {
 
 /// Sidecar facts copied onto a node.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HirFlags(u8);
+pub struct HirFlags(u16);
 
 impl HirFlags {
     pub const FRAME_LOCAL: Self = Self(1);
@@ -467,6 +468,9 @@ impl HirFlags {
     /// A `from_bytes` call whose buffer nothing reads again: the string
     /// takes the buffer's bytes (`from_bytes_take`) instead of a copy.
     pub const TAKE: Self = Self(128);
+    /// Built from `if let`. The loop analysis keeps to the loops the AST
+    /// walk it replaced found, which looked under `match` and not here.
+    pub const IF_LET: Self = Self(256);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0

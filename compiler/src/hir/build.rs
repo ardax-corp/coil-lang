@@ -1564,7 +1564,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 self.match_(b, node, scrutinee, &arms)
             }
             E::IfLet { scrutinee, then_arm, else_arm } => {
-                self.match_(b, node, scrutinee, &[then_arm, else_arm])
+                let m = self.match_(b, node, scrutinee, &[then_arm, else_arm]);
+                b.body.exprs[m.0 as usize].flags.insert(HirFlags::IF_LET);
+                m
             }
             E::WhileLet { scrutinee, then_arm, on_miss } => {
                 let m = self.match_(b, node, scrutinee, &[then_arm, on_miss]);

@@ -899,17 +899,10 @@ pub fn while_shape(body: &HirBody, loop_body: HirId) -> Option<(HirId, HirId)> {
     matches!(body.expr(*els).kind, HirKind::Break).then_some((*cond, *then))
 }
 
-/// A `while` loop's parts: the contract checks the builder runs ahead of
-/// each test (`invariant` / `decreases`), the condition and the body.
-pub struct WhileParts<'a> {
-    pub checks: &'a [HirId],
-    pub cond: HirId,
-    pub then: HirId,
-}
-
-/// The parts of the `while` whose `Loop` body is `loop_body`: as
-/// [`while_shape`], and through the contract checks ahead of the test.
-pub fn while_parts(body: &HirBody, loop_body: HirId) -> Option<WhileParts<'_>> {
+/// The parts of the `while` whose `Loop` body is `loop_body`, as
+/// [`while_shape`] and through the contract checks the builder runs ahead
+/// of each test (`invariant` / `decreases`): `(checks, cond, body)`.
+pub fn while_parts(body: &HirBody, loop_body: HirId) -> Option<(&[HirId], HirId, HirId)> {
     let HirKind::Block { stmts, tail: None } = &body.expr(loop_body).kind else {
         return None;
     };
@@ -919,7 +912,7 @@ pub fn while_parts(body: &HirBody, loop_body: HirId) -> Option<WhileParts<'_>> {
     };
     // The builder's own test: only it carries the loop's span and no node.
     let built = body.expr(*test).node.is_none() && body.expr(*test).span == body.expr(loop_body).span;
-    (matches!(body.expr(els).kind, HirKind::Break) && (checks.is_empty() || built)).then_some(WhileParts { checks, cond, then })
+    (matches!(body.expr(els).kind, HirKind::Break) && (checks.is_empty() || built)).then_some((checks, cond, then))
 }
 
 /// The contract checks ahead of `for` loop `id`'s body, and the body as
