@@ -6389,6 +6389,7 @@ impl Compiler {
         self.startup_consts.clear();
         self.fold_bodies.clear();
         let mut cow_mutates = None;
+        let mut hint_effects = HashMap::new();
         // E1: the HIR summaries say which functions are pure and which
         // never change an array's length.
         if let Some(hir) = self.hir_module.as_ref() {
@@ -6398,13 +6399,7 @@ impl Compiler {
             self.messages.extend(fx.readonly_messages());
             self.messages.extend(fx.escape_messages());
             self.messages.extend(fx.region_messages());
-            effects::log_seed_disagreements(
-                hir,
-                module,
-                &fx,
-                self.typed_sidecar.pure_fn_names(),
-                &self.typed_sidecar.length_stability().fns,
-            );
+            effects::log_seed_disagreements(hir, module, &fx, &self.typed_sidecar.length_stability().fns);
             let pure = effects::pure_names(hir, module, &fx.summaries);
             if effects::effects_capture_active() {
                 let explained = (self.auto_par && self.opt_options.auto_par).then(|| {
@@ -6422,6 +6417,7 @@ impl Compiler {
             cow_mutates = Some(summaries.iter().map(|s| s.mutates).collect::<Vec<u64>>());
             self.pure_fns.extend(pure);
             self.steady_fns.extend(effects::steady_names(hir, module, &summaries));
+            hint_effects = effects::impure_short_names(hir, &summaries);
             self.program_effects.record(hir, &self.checker, module, &summaries);
             self.program_effects.record_mutations(mutations);
             // The same from the bodies themselves, for the modules so far.
@@ -6496,7 +6492,7 @@ impl Compiler {
         {
             self.loop_par_sites = hir.loop_par_sites(&self.checker, &self.pure_fns);
             // E0805: the same detector with every user function an arm.
-            for hint in hir.par_escape_hints(&self.checker, self.typed_sidecar.fn_effects()) {
+            for hint in hir.par_escape_hints(&self.checker, &hint_effects) {
                 let mut msg = Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
                 msg.with_help(hint.help());
                 self.par_lock_hints.push(msg);

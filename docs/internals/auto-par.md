@@ -21,9 +21,11 @@ stays sequential.
 ## Purity analysis
 
 After typecheck, [`purity`](../../compiler/src/typechecking/purity.rs) walks
-the AST and records [`EffectFlags`](../../compiler/src/typechecking/purity.rs)
-on the typed sidecar, by bind name. The checker's length proofs
-(`index_facts`) and the E0805 hints read them; codegen does not:
+the AST and works out each function's
+[`EffectFlags`](../../common/src/effects.rs). Only the checker's length
+proofs (`index_facts`) read the result, as the set of functions that cannot
+change an array's length; auto-par, the E0805 hints and codegen read the
+HIR summaries (`hir::effects`). The walk's rules:
 
 - A function is **locally impure** if it uses `panic` / `yield` / FFI / `defer`,
   mutates via index/field assignment, or calls a non-identifier callee.
@@ -56,14 +58,14 @@ return a fresh array are not the same value
 
 Codegen takes its pure and length-stable functions from the HIR summaries
 alone; the AST walk above still feeds the checker's own length proofs
-(`index_facts`), which run before any HIR exists. The HIR set names every
-function and method body by its own name (`f`, `Owner::m`,
-`Trait for Owner::m`, `outer::inner`), and a bare `m` when every body of
-that short name qualifies. To see where the two analyses disagree, run a
-debug build with `COIL_EFFECTS_SEED_DIFF=1`: one stderr line per function
-or method, with the
+(`index_facts`), which run before any HIR exists, and the pipeline's
+"may a `drop` resize" scan of every file. The HIR set names every function
+and method body by its own name (`f`, `Owner::m`, `Trait for Owner::m`),
+local and module-qualified, and a call matches by its whole name. To see
+where the two analyses disagree on length stability, run a debug build with
+`COIL_EFFECTS_SEED_DIFF=1`: one stderr line per function or method, with the
 body's shape (`Function`, `Method`, `TraitImpl`, `Nested`), which side calls
-it pure or length-stable, and what makes it impure in HIR.
+it length-stable, and what it does in HIR.
 
 A `static let` read is `HOST` and a write is `HEAP_MUT` in both analyses:
 a chunk worker reads a copy of the statics taken when it was spawned, and

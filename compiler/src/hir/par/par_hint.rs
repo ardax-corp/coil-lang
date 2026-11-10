@@ -10,7 +10,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
-use common::EffectFlags;
 
 use super::super::{Builtin, Callee, HirBody, HirFlags, HirId, HirKind, HirModule, MakeKind, query};
 use super::loop_par::source_op;
@@ -121,12 +120,11 @@ impl HirModule {
     /// arms. Pure functions that already IPA are skipped. Panic / yield
     /// impurity without a lockable resource is skipped.
     ///
-    /// `effects` are the checker's effect bits for this file's functions, by
-    /// bind name ([`TypedSidecar::fn_effects`]).
-    ///
-    /// [`TypedSidecar::fn_effects`]: crate::typechecking::infer::TypedSidecar::fn_effects
-    pub fn par_escape_hints(&self, checker: &Checker, effects: &HashMap<String, EffectFlags>) -> Vec<ParEscapeHint> {
-        let user_fns: HashSet<String> = effects.keys().cloned().collect();
+    /// `impure` says, for each short name among the module's functions and
+    /// methods, whether a body of that name is impure
+    /// ([`crate::hir::effects::impure_short_names`]).
+    pub fn par_escape_hints(&self, checker: &Checker, impure: &HashMap<String, bool>) -> Vec<ParEscapeHint> {
+        let user_fns: HashSet<String> = impure.keys().cloned().collect();
         if user_fns.is_empty() {
             return Vec::new();
         }
@@ -134,7 +132,7 @@ impl HirModule {
         // A later function of the same bare name replaces an earlier one.
         let bodies: HashMap<&str, &HirBody> = self.fork_bodies().into_iter().map(|b| (bare(&b.name), b)).collect();
         let cx = Cx { module: self, checker, user_fns: &user_fns, bodies: &bodies };
-        let impure = |name: &str| !effects.get(name).copied().unwrap_or_else(EffectFlags::empty).is_pure();
+        let impure = |name: &str| impure.get(name).copied().unwrap_or(false);
 
         let mut out = Vec::new();
         let mut hinted = HashSet::new();

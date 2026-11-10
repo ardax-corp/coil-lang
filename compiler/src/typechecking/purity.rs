@@ -1,8 +1,18 @@
-//! Whole-function purity / effects for auto-par, LICM, and the typed sidecar.
+//! The effect walk over the AST, for the two questions asked before there
+//! is any HIR:
 //!
-//! A function is **pure** when its body has no observable host side effects
-//! (IO / threads / FFI / yield / attach) and only calls other pure user
-//! functions. Unknown callees are conservatively impure.
+//! - which functions can never change an array's length
+//!   ([`record_length_stability`]), for the checker's bounds proofs
+//!   (`index_facts`);
+//! - whether a `fn drop()` anywhere in the compile may
+//!   ([`finalizer_may_resize`]), for the pipeline.
+//!
+//! Everything else that asks about effects (purity, auto-par, `uses {…}`,
+//! copy-on-write, escape) reads the HIR summaries (`hir::effects`).
+//!
+//! The walk still tracks every effect bit, not only `RESIZE`: when a `drop`
+//! may resize, a finalizer can run at any allocation, and only a pure call
+//! is length-stable then.
 
 use std::collections::{HashMap, HashSet};
 
@@ -268,19 +278,6 @@ fn collect_fn_facts(ast: &Output<'_>, cases: &BareCases) -> HashMap<String, FnFa
 pub fn analyze_fn_effects(ast: &Output<'_>, cases: &BareCases) -> HashMap<String, EffectFlags> {
     let facts = collect_fn_facts(ast, cases);
     effect_closure(&facts)
-}
-
-/// Names of user functions with no observable side effects.
-///
-/// Recursion does not matter here: an ordinary helper such as
-/// `fn sq(int i) -> int { i * i }` is in the set.
-#[cfg(test)]
-pub fn analyze_pure_fns(ast: &Output<'_>, cases: &BareCases) -> HashSet<String> {
-    analyze_fn_effects(ast, cases)
-        .into_iter()
-        .filter(|(_, flags)| flags.is_pure())
-        .map(|(name, _)| name)
-        .collect()
 }
 
 /// Whether a `fn drop()` declared in `ast` may change an array's length.
@@ -895,90 +892,67 @@ fn peel<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
     }
 }
 
-/// Fill [`Checker::fn_effects`] / [`Checker::pure_fn_names`] after infer.
-///
-/// Effects are also kept per [`DefId`] for the whole program, so a module
-/// checked later sees an imported function's real effects instead of
-/// treating the call as unknown (modules are checked in dependency order).
-pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) {
-    checker.fn_effects.clear();
-    checker.pure_fn_names.clear();
-    let effects = {
-        let checker = &*checker;
-        let resolve = |name: &str| {
-            if let Some(&fx) = checker.program_method_effects.get(name) {
-                return Some(fx);
-            }
-            let id = checker.def_id_of(name).or_else(|| {
-                let (module, short) = name.rsplit_once("::")?;
-                checker.interned_def(module, short)
-            })?;
-            checker.program_fn_effects.get(&id).copied()
-        };
-        let mut facts = HashMap::new();
-        collect_fns(ast, &mut facts, true, checker.bare_cases());
-        let target = |span: (usize, usize), m: &str| {
-            let owner = checker.class_owner_at_span(span)?;
-            let local = owner
-                .strip_prefix(checker.current_module_name())
-                .and_then(|o| o.strip_prefix("::"))
-                .unwrap_or(&owner);
-            Some(format!("{local}::{m}"))
-        };
-        settle_method_calls(&mut facts, &target);
-        settle_statics(&mut facts, ast);
-        let operand_runs = |span| crate::effects::operator_runs_user_code(checker.ty_at_span(span).as_ref());
-        let for_in_runs = |(start, end)| {
-            use super::infer::ForInKind;
-            !matches!(
-                checker.for_in_info_for_span(start, end).map(|i| &i.kind),
-                Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. })
-            )
-        };
-        settle_operators(&mut facts, &operand_runs, &for_in_runs);
-        settle_constructs(&mut facts, &|owner, name| checker.tag_for(owner, name).is_some(), &|owner, name| {
-            super::index_facts::static_method_call(checker, owner, name)
-        });
-        effect_closure_with(&facts, &resolve)
+/// The effects of this file's functions (keyed `f`) and impl methods
+/// (keyed `Owner::m`), settled with the checker's types and with what the
+/// modules checked before it recorded.
+fn checked_fn_effects(checker: &super::infer::Checker, ast: &Output<'_>) -> HashMap<String, EffectFlags> {
+    let resolve = |name: &str| {
+        if let Some(&fx) = checker.program_method_effects.get(name) {
+            return Some(fx);
+        }
+        let id = checker.def_id_of(name).or_else(|| {
+            let (module, short) = name.rsplit_once("::")?;
+            checker.interned_def(module, short)
+        })?;
+        checker.program_fn_effects.get(&id).copied()
     };
-    checker.length_stability = length_stability(
-        &effects,
-        checker.program_finalizers_resize.unwrap_or(false),
-    );
+    let mut facts = HashMap::new();
+    collect_fns(ast, &mut facts, true, checker.bare_cases());
+    let target = |span: (usize, usize), m: &str| {
+        let owner = checker.class_owner_at_span(span)?;
+        let local = owner
+            .strip_prefix(checker.current_module_name())
+            .and_then(|o| o.strip_prefix("::"))
+            .unwrap_or(&owner);
+        Some(format!("{local}::{m}"))
+    };
+    settle_method_calls(&mut facts, &target);
+    settle_statics(&mut facts, ast);
+    let operand_runs = |span| crate::effects::operator_runs_user_code(checker.ty_at_span(span).as_ref());
+    let for_in_runs = |(start, end)| {
+        use super::infer::ForInKind;
+        !matches!(
+            checker.for_in_info_for_span(start, end).map(|i| &i.kind),
+            Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. })
+        )
+    };
+    settle_operators(&mut facts, &operand_runs, &for_in_runs);
+    settle_constructs(&mut facts, &|owner, name| checker.tag_for(owner, name).is_some(), &|owner, name| {
+        super::index_facts::static_method_call(checker, owner, name)
+    });
+    effect_closure_with(&facts, &resolve)
+}
+
+/// Fill [`Checker::length_stability`] after infer: what the checker's
+/// bounds proofs (`index_facts`) may assume of a call. They run before
+/// there is any HIR, so this walk is their only source.
+///
+/// The effects are also kept for the whole program (per [`DefId`] for a
+/// function, by `module::Owner::m` for a method), so the walk of a module
+/// checked later sees an imported function's effects instead of treating
+/// the call as unknown (modules are checked in dependency order).
+///
+/// [`DefId`]: super::def_id::DefId
+pub fn record_length_stability(checker: &mut super::infer::Checker, ast: &Output<'_>) {
+    let effects = checked_fn_effects(checker, ast);
+    checker.length_stability = length_stability(&effects, checker.program_finalizers_resize.unwrap_or(false));
     let module = checker.current_module_name().to_string();
-    // Impl methods are keyed `Owner::m`. A bare `m` stays listed when every
-    // fn or method of that short name is pure, as before methods had owners.
-    let mut by_short: HashMap<&str, EffectFlags> = HashMap::new();
-    for (name, flags) in &effects {
-        let short = name.rsplit_once("::").map_or(name.as_str(), |(_, s)| s);
-        let e = by_short.entry(short).or_insert(EffectFlags::empty());
-        *e = e.union(*flags);
-    }
-    for (short, flags) in by_short {
-        if flags.is_pure() {
-            checker.pure_fn_names.insert(short.to_string());
-        }
-        checker.fn_effects.insert(short.to_string(), flags);
-    }
-    for (name, flags) in &effects {
+    for (name, flags) in effects {
         if name.contains("::") {
-            let qualified = if module.is_empty() {
-                name.clone()
-            } else {
-                format!("{module}::{name}")
-            };
-            if flags.is_pure() {
-                checker.pure_fn_names.insert(name.clone());
-                checker.pure_fn_names.insert(qualified.clone());
-            }
-            checker.program_method_effects.insert(qualified, *flags);
-            continue;
-        }
-        if flags.is_pure() {
-            checker.pure_fn_names.insert(name.clone());
-        }
-        if let Some(id) = checker.def_id_of(name) {
-            checker.program_fn_effects.insert(id, *flags);
+            let qualified = if module.is_empty() { name } else { format!("{module}::{name}") };
+            checker.program_method_effects.insert(qualified, flags);
+        } else if let Some(id) = checker.def_id_of(&name) {
+            checker.program_fn_effects.insert(id, flags);
         }
     }
 }
@@ -987,6 +961,30 @@ pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) 
 mod tests {
     use super::*;
     use parser::Pratt;
+
+    /// A lone file's pure functions: the ones that stay length-stable when
+    /// a finalizer may resize.
+    fn analyze_pure_fns(ast: &Output<'_>, cases: &BareCases) -> HashSet<String> {
+        length_stability(&analyze_fn_effects(ast, cases), true).fns
+    }
+
+    /// The walk's verdicts for the file a checker checked last, by the
+    /// walk's keys (`f`, `Owner::m`).
+    struct Checked(HashMap<String, EffectFlags>);
+
+    impl Checked {
+        fn of(checker: &crate::typechecking::infer::Checker, ast: &Output<'_>) -> Self {
+            Self(checked_fn_effects(checker, ast))
+        }
+
+        fn name_is_pure(&self, name: &str) -> bool {
+            self.0.get(name).is_some_and(|f| f.is_pure())
+        }
+
+        fn fn_effects(&self) -> &HashMap<String, EffectFlags> {
+            &self.0
+        }
+    }
 
     fn pure_set(src: &str) -> HashSet<String> {
         let owned = src.to_string();
@@ -1107,9 +1105,9 @@ fn main() { return; }
         assert!(!set.contains("speak"), "speak uses IO: {set:?}");
     }
 
-    /// `analyze_pure_fns` keeps the non-recursive helpers that loop IPA needs.
+    /// A helper that does not recurse is pure all the same.
     #[test]
-    fn analyze_pure_fns_keeps_non_recursive_helpers() {
+    fn non_recursive_helpers_are_pure() {
         let ast = parse_ast(
             r#"
 use io::{stdout, write};
@@ -1307,7 +1305,7 @@ fn main() { return; }
     }
 
     #[test]
-    fn sidecar_records_pure_helper_and_host_callee() {
+    fn the_checked_walk_records_a_pure_helper_and_a_host_callee() {
         use crate::typechecking::infer::Checker;
 
         let ast = parse_ast(
@@ -1324,7 +1322,7 @@ fn main() { return; }
         );
         let mut c = Checker::new();
         let _ = c.check_program(&ast);
-        let side = c.typed_sidecar();
+        let side = Checked::of(&c, &ast);
         assert!(side.name_is_pure("add"), "add must stay pure");
         assert!(!side.name_is_pure("shout"), "host write must be impure");
         assert!(side.fn_effects()["add"].is_pure());
@@ -1381,7 +1379,7 @@ fn main() { return; }
         );
         let mut c = Checker::new();
         let _ = c.check_program(&ast);
-        let side = c.typed_sidecar();
+        let side = Checked::of(&c, &ast);
         for name in ["variant", "unit_variant", "some", "inherent"] {
             assert!(side.name_is_pure(name), "`{name}` only builds a value or calls a pure method");
         }
@@ -1432,10 +1430,10 @@ fn main() { return; }
         );
         let mut c = Checker::new();
         let _ = c.check_program(&ast);
-        let side = c.typed_sidecar();
+        let side = Checked::of(&c, &ast);
         for name in ["less", "less_of", "flipped", "summed", "drain", "via"] {
             assert!(!side.name_is_pure(name), "`{name}` runs user code");
-            assert!(!side.length_stability().fns.contains(name), "`{name}` may resize");
+            assert!(!c.typed_sidecar().length_stability().fns.contains(name), "`{name}` may resize");
         }
         for name in ["ints", "strs", "opts", "each"] {
             assert!(side.name_is_pure(name), "`{name}` only uses built-in operators");
@@ -1485,7 +1483,7 @@ fn main() { return; }
 "#,
         );
         let _ = c.check_program(&app);
-        let side = c.typed_sidecar();
+        let side = Checked::of(&c, &app);
         assert!(side.name_is_pure("area"), "pure import keeps the caller pure");
         assert!(side.name_is_pure("qualified"), "qualified call resolves too");
         assert!(!side.name_is_pure("loud"), "impure import stays impure");
@@ -1534,7 +1532,7 @@ fn main() { return; }
         );
         let mut c = Checker::new();
         let _ = c.check_program(&ast);
-        let side = c.typed_sidecar();
+        let side = Checked::of(&c, &ast);
         assert!(side.name_is_pure("Point::norm1"));
         assert!(side.name_is_pure("Point::twice"), "self call resolves");
         assert!(side.name_is_pure("size"), "pure method keeps caller pure");
@@ -1542,18 +1540,6 @@ fn main() { return; }
         assert!(!side.name_is_pure("loud"), "IO method");
         // Same method name on another class: the receiver type decides.
         assert!(!side.name_is_pure("other"));
-        assert!(!side.name_is_pure("norm1"), "bare name is the union");
-    }
-
-    #[test]
-    fn sidecar_mono_stem_matches_pure_name() {
-        let ast = parse_ast("fn sq(int x) -> int { return x * x; } fn main() { return; }");
-        let mut c = crate::typechecking::infer::Checker::new();
-        let _ = c.check_program(&ast);
-        let side = c.typed_sidecar();
-        assert!(side.name_is_pure("sq$mono$1$0"));
-        assert!(side.name_is_pure("util::sq"));
-        assert!(!side.name_is_pure("mod::Type::sq"));
     }
 
     /// `if let` bodies used to be skipped, hiding IO from purity.

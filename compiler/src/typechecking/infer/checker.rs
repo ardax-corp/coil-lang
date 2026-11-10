@@ -125,12 +125,10 @@ impl Checker {
             pin_params: HashSet::new(),
             for_in_pin: HashSet::new(),
             for_in_pin_spans: HashSet::new(),
-            fn_effects: HashMap::new(),
             program_fn_effects: HashMap::new(),
             program_fn_params: HashMap::new(),
             program_typed_rest: HashMap::new(),
             program_method_effects: HashMap::new(),
-            pure_fn_names: HashSet::new(),
             length_stability: Default::default(),
             program_finalizers_resize: None,
             current_module_id,
@@ -1819,8 +1817,6 @@ impl Checker {
         self.pin_params.clear();
         self.for_in_pin.clear();
         self.for_in_pin_spans.clear();
-        self.fn_effects.clear();
-        self.pure_fn_names.clear();
         self.length_stability = Default::default();
         self.current_module_id = self.def_interner.intern_module(&self.current_module);
 
@@ -1911,7 +1907,7 @@ impl Checker {
             self.messages.push(msg);
         }
 
-        crate::typechecking::purity::record_fn_effects(self, ast);
+        crate::typechecking::purity::record_length_stability(self, ast);
         crate::typechecking::index_facts::analyze_index_facts(self, ast);
         crate::typechecking::fn_value_escape::analyze_fn_value_escape(self, ast);
 

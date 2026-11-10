@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::generics::InstanceDef;
 use crate::typechecking::id::NodeId;
-use common::EffectFlags;
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::Ty;
 
@@ -40,10 +39,6 @@ pub struct TypedSidecar {
     pin_params: HashSet<(String, String)>,
     for_in_pin: HashSet<NodeId>,
     for_in_pin_spans: HashSet<(usize, usize)>,
-    /// Effect bits per function bind name (empty = pure); an impl method
-    /// shares its bare name with any same-named `fn`.
-    fn_effects: HashMap<String, EffectFlags>,
-    pure_fn_names: HashSet<String>,
     length_stability: crate::effects::LengthStability,
     /// Names that appear as a function *value* in this module — see
     /// [`crate::typechecking::fn_value_escape`]. Package-wide proof is the
@@ -120,18 +115,8 @@ impl TypedSidecar {
         self.for_in_pin_spans.contains(&(start, end))
     }
 
-    /// The checker's effect bits for this file's functions, by bind name.
-    pub fn fn_effects(&self) -> &HashMap<String, EffectFlags> {
-        &self.fn_effects
-    }
-
-    /// Bind names of proven-pure user functions (LICM / PureCallCtx).
-    pub fn pure_fn_names(&self) -> &HashSet<String> {
-        &self.pure_fn_names
-    }
-
     /// Functions that cannot change any array's length, for the loop length
-    /// proofs (superset of [`Self::pure_fn_names`]).
+    /// proofs.
     pub fn length_stability(&self) -> &crate::effects::LengthStability {
         &self.length_stability
     }
@@ -146,16 +131,6 @@ impl TypedSidecar {
         self.fn_value_escaped.contains(name) || self.fn_value_escaped.contains(short)
     }
 
-    pub fn name_is_pure(&self, name: &str) -> bool {
-        let stem = name.split("$mono$").next().unwrap_or(name);
-        if self.pure_fn_names.contains(stem) {
-            return true;
-        }
-        match stem.rsplit_once("::") {
-            Some((prefix, short)) if !prefix.contains("::") => self.pure_fn_names.contains(short),
-            _ => false,
-        }
-    }
 }
 
 impl Checker {
@@ -204,8 +179,6 @@ impl Checker {
             pin_params: self.pin_params.clone(),
             for_in_pin: self.for_in_pin.clone(),
             for_in_pin_spans: self.for_in_pin_spans.clone(),
-            fn_effects: self.fn_effects.clone(),
-            pure_fn_names: self.pure_fn_names.clone(),
             length_stability: self.length_stability.clone(),
             fn_value_escaped: self.fn_value_escaped.clone(),
         }
