@@ -10540,7 +10540,7 @@ impl Compiler {
 
         if !site.is_dynamic() {
             let bounds = site
-                .chunk_bounds(crate::typechecking::DEFAULT_LOOP_GRAIN)
+                .chunk_bounds(crate::hir::par::DEFAULT_LOOP_GRAIN)
                 .unwrap_or_else(|| vec![site.begin, site.midpoint(), site.end]);
             let chunks: Vec<_> = bounds.windows(2).map(|w| (Bound::Const(w[0]), Bound::Const(w[1]))).collect();
             let whole = (Bound::Const(bounds[0]), Bound::Const(*bounds.last().expect("chunk bounds")));
@@ -10590,7 +10590,7 @@ impl Compiler {
             // Up to the grain: on this thread.
             let small = {
                 let t = b.read(trip);
-                let g = b.int(crate::typechecking::DEFAULT_LOOP_GRAIN.max(1));
+                let g = b.int(crate::hir::par::DEFAULT_LOOP_GRAIN.max(1));
                 b.bin(BinOp::Le, t, g, coil_ty::boolean())
             };
             let here = seq(&mut b, Bound::Local(lo), Bound::Local(hi));
@@ -10743,7 +10743,7 @@ impl Compiler {
         if args.is_empty() || !self.par_shapes.contains_key(short) || self.hir_synth_calls.is_some() {
             return None;
         }
-        let spec = crate::typechecking::par_worker_name(short);
+        let spec = crate::hir::par::par_worker_name(short);
         let &worker = self.functions.get(&spec)?;
         let lits: Option<Vec<i64>> = args
             .iter()
@@ -10754,15 +10754,15 @@ impl Compiler {
             .collect();
         if let Some(vals) = lits {
             let site = &self.par_shapes[short];
-            if !crate::typechecking::guards_hold(&site.guards, &vals)
-                || !crate::typechecking::args_worth_parallel(&self.par_shapes, short, &vals)
+            if !crate::hir::par::guards_hold(&site.guards, &vals)
+                || !crate::hir::par::args_worth_parallel(&self.par_shapes, short, &vals)
             {
                 return None;
             }
             return Some(HirParCall::Spec { worker });
         }
         let [_] = args else { return None };
-        let cutoff = crate::typechecking::unary_dynamic_cutoff(&self.par_shapes, short)?;
+        let cutoff = crate::hir::par::unary_dynamic_cutoff(&self.par_shapes, short)?;
         let &orig = self.functions.get(key).or_else(|| self.functions.get(short))?;
         Some(HirParCall::Dynamic { cutoff, orig, worker })
     }
@@ -10781,7 +10781,7 @@ impl Compiler {
         if self.hir_ret_shape(hir, id, &natural) != Some(false) || natural.words() != 1 {
             return None;
         }
-        let hops = i64::from(crate::typechecking::PAR_SPEC_HOPS as i32);
+        let hops = i64::from(crate::hir::par::PAR_SPEC_HOPS as i32);
         Some(crate::mir::HirParFork { worker, hops, seq })
     }
 

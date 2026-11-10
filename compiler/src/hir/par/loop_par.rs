@@ -1,6 +1,6 @@
 //! Independent Parallel Arms for counted loops (loop IPA).
 //!
-//! The recursive IPA in [`par_profit`](crate::typechecking::par_profit)
+//! The recursive IPA in [`par_profit`](super::par_profit)
 //! treats sibling self-calls as independent arms. A counted loop is the
 //! same idea with the arms spread over an induction range: when the
 //! iterations only communicate through one associative reduction
@@ -25,7 +25,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::super::{BinOp, BodyKind, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, Lit, LocalId, LocalKind, MakeKind, UnOp, query};
 use crate::typechecking::infer::Checker;
-use crate::typechecking::par_profit::DEFAULT_LOOP_GRAIN;
+use super::par_profit::DEFAULT_LOOP_GRAIN;
 use crate::typechecking::ty::{self as coil_ty, Ty};
 
 /// Associative operator folding a loop's per-iteration contributions.

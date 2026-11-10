@@ -1,22 +1,400 @@
-//! Fork-site detection for Independent Parallel Arms (IPA) on HIR.
+//! Static shape + profitability analysis for Independent Parallel Arms (IPA).
 //!
-//! Detection is structural: a fork is an operator, a tuple, a variant or a
-//! call whose operands are two or more independent pure calls, and the path
-//! to it is a list of integer comparisons over the function's parameters.
-//! The walk runs on a module's HIR as built, before any pass, and visits
-//! what the plan can turn into a worker: statement lists, `if` chains,
-//! `match` arms, the operands of arithmetic and comparisons, call and
-//! constructor arguments.
+//! A *fork site* is an expression whose operands are two or more mutually
+//! independent **pure** calls — self-recursion is common but not required:
+//! `f(a) ⊕ f(b)`, n-ary `f(a)+g(b)+h(c)` for associative `+`/`*`/`^`,
+//! let-bound `let a = f(…); let b = g(…); return a ⊕ b`, `h(a) + h(b)`,
+//! `E::V(f(a), f(b))`, `(f(a), f(b))`, the tak-style `f(f(a), f(b), f(c))`,
+//! or `g(f(a), f(b))`. Arms are described structurally ([`ArgForm`]) rather
+//! than by function allowlists. Constant call sites whose fork-tree grain
+//! ([`par_work_grain`]) exceeds [`par_expr_grain_for`] rewrite to one parameterized
+//! fork worker ([`par_worker_name`]) that takes the live args. Grain is the
+//! const-site entry gate (no hot-path skip-threshold). Nested AlwaysPar is a
+//! hop/depth counter on that same worker — not a constellation of frozen arg
+//! clones (COI-366 F1). F2 broadens admission under those same gates (COI-368).
+//!
+//! Detection runs on a module's HIR as built, before any pass
+//! ([`HirModule::par_fork_sites`], [`HirModule::par_worker_fns`]). A site
+//! is keyed by its function's bare name, which is how its arms name their
+//! callees and how the plan finds a call's worker. The walk visits what the
+//! plan can turn into a worker: statement lists, `if` chains, `match` arms,
+//! the operands of arithmetic and comparisons, call and constructor
+//! arguments.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::super::{BodyKind, Builtin, Callee, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, Lit, LocalId, LocalKind, MakeKind, UnOp, query};
 use super::loop_par::{source_op, unwrap_byte};
-use crate::typechecking::par_profit::{
-    ArgForm, CmpOp, ParArm, ParBinOp, ParCombine, ParForkSite, ParGuard, WorkEstimate, guards_hold, unary_dynamic_cutoff,
-};
 use crate::typechecking::infer::Checker;
 use crate::typechecking::ty::{self as coil_ty, Ty};
+
+/// Expression IPA grain floor.
+///
+/// Unit is fork-tree nodes `W`, not fib(n). Default [`DEFAULT_EXPR_GRAIN`]
+/// is `W(fib(20))` for the `n <= 1` recurrence (`Fib(21) - 1`): the spawn
+/// profitability floor previously written as fib-unit 20. Tight sites
+/// (unary const-guard, counted `W`) fork iff `W` is strictly greater.
+/// Loose sites ([`grain_w_is_tight`] is false) use [`DEFAULT_LOOSE_EXPR_GRAIN`].
+pub const DEFAULT_EXPR_GRAIN: i64 = 10_945;
+
+/// Floor for sites whose `W` undercounts sequential work.
+///
+/// `SelfCall` combine re-entry and multi-parameter guards (tak `y >= x`)
+/// leave most recursive calls as sequential leaves that `W` does not count.
+/// Default **8000** admits `tak(18, 12, 6)`
+/// (`W = 8398`) and keeps tight fib-shaped trees on [`DEFAULT_EXPR_GRAIN`].
+pub const DEFAULT_LOOSE_EXPR_GRAIN: i64 = 8_000;
+
+/// Loop IPA grain floor. Unit is trip count of a
+/// counted `[begin, end)` range, not expression `W`. Isolate spawn still
+/// needs tens of trips, not thousands of fib-tree nodes.
+pub const DEFAULT_LOOP_GRAIN: i64 = 20;
+
+/// Per-site expression grain floor, same units as `W`.
+///
+/// Tight recurrences keep [`DEFAULT_EXPR_GRAIN`]. Sites where `W` is a known
+/// undercount use the scaled loose floor so spawn can still pay off.
+pub fn par_expr_grain_for(site: &ParForkSite) -> i64 {
+    let base = DEFAULT_EXPR_GRAIN;
+    if grain_w_is_tight(site) {
+        base
+    } else {
+        loose_expr_grain(base)
+    }
+}
+
+fn loose_expr_grain(base: i64) -> i64 {
+    base.saturating_mul(DEFAULT_LOOSE_EXPR_GRAIN) / DEFAULT_EXPR_GRAIN.max(1)
+}
+
+/// True when `W` tracks sequential work at this site.
+///
+/// A guard that relates two parameters, or a [`ParCombine::SelfCall`] whose
+/// re-entry on joined values is invisible to `W`, leaves most recursive
+/// calls as sequential leaves. Those sites use the loose floor.
+pub fn grain_w_is_tight(site: &ParForkSite) -> bool {
+    if matches!(site.combine, ParCombine::SelfCall) {
+        return false;
+    }
+    if site.guards.iter().any(|g| matches!(g, ParGuard::Opaque)) {
+        return false;
+    }
+    !site.guards.iter().any(guard_compares_distinct_params)
+}
+
+fn guard_compares_distinct_params(g: &ParGuard) -> bool {
+    let ParGuard::Cmp { lhs, rhs, .. } = g else {
+        return false;
+    };
+    match (arg_form_param(lhs), arg_form_param(rhs)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    }
+}
+
+fn arg_form_param(form: &ArgForm) -> Option<usize> {
+    match form {
+        ArgForm::Param(i) => Some(*i),
+        ArgForm::ParamMinus { param, .. } | ArgForm::ParamPlus { param, .. } => Some(*param),
+        ArgForm::Const(_) => None,
+    }
+}
+
+/// Binary op used at a [`ParCombine::BinOp`] fork site.
+///
+/// `Add` / `Mul` / `Xor` are associative (and commutative) on `int`, so a
+/// nested tree of the same op flattens to N arms. `Sub` is not: only a
+/// two-arm site is admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParBinOp {
+    Add,
+    Sub,
+    Mul,
+    Xor,
+}
+
+/// One argument of a self-call arm, expressed in terms of the enclosing
+/// function's parameters so child arg vectors can be derived statically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ArgForm {
+    /// Literal integer.
+    Const(i64),
+    /// Parameter forwarded unchanged (`x`).
+    Param(usize),
+    /// `param - sub` with `sub > 0`; requires an int-like parameter.
+    ParamMinus { param: usize, sub: i64 },
+    /// `param + add` with `add > 0`; requires an int-like parameter.
+    ParamPlus { param: usize, add: i64 },
+}
+
+/// One independent arm of a fork site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParArm {
+    /// Call to a pure function (often self); one [`ArgForm`] per callee parameter.
+    Call { callee: String, args: Vec<ArgForm> },
+}
+
+/// How arm results are recombined once every arm has been joined.
+///
+/// The combine always consumes the arm results positionally and in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParCombine {
+    /// `arm0 ⊕ arm1 [⊕ …]` — two arms for any op; three or more only when
+    /// [`ParBinOp`] is associative (`Add` / `Mul` / `Xor`).
+    BinOp(ParBinOp),
+    /// Rebuild by calling the enclosing fn with the arm results as args (tak-style).
+    SelfCall,
+    /// Call some other pure fn with the arm results as args.
+    ApplyCall { fn_name: String },
+    /// `(arm0, arm1, …)` tuple pack.
+    Tuple,
+    /// `EnumName::Variant(arm0, arm1, …)`.
+    EnumCtor {
+        enum_name: String,
+        variant_name: String,
+    },
+}
+
+/// Integer comparison in a fork-site [`ParGuard`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Lt,
+    Leq,
+    Gt,
+    Geq,
+    Eq,
+    Neq,
+}
+
+/// A condition that must hold for control to reach the fork site.
+///
+/// A specialized clone skips the function's base case entirely, so it may only
+/// be entered at arg vectors that actually reach the fork. [`Self::Opaque`]
+/// stands for any condition the analysis cannot evaluate and never holds, so
+/// unrecognized guards simply disable specialization.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParGuard {
+    Cmp {
+        lhs: ArgForm,
+        op: CmpOp,
+        rhs: ArgForm,
+        /// Whether the comparison must be true or false at the fork site.
+        expect: bool,
+    },
+    Opaque,
+}
+
+/// A pure function's primary parallelizable fork site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParForkSite {
+    pub fn_name: String,
+    /// Declared parameter count of the enclosing function (worker arity, plus hop).
+    pub param_count: usize,
+    /// Independent pure calls (at least two).
+    pub arms: Vec<ParArm>,
+    pub combine: ParCombine,
+    /// Conditions, all of which must hold for the fork site to be reached.
+    pub guards: Vec<ParGuard>,
+}
+
+/// True when every guard holds for a concrete arg vector.
+pub fn guards_hold(guards: &[ParGuard], args: &[i64]) -> bool {
+    guards.iter().all(|g| match g {
+        ParGuard::Opaque => false,
+        ParGuard::Cmp {
+            lhs,
+            op,
+            rhs,
+            expect,
+        } => {
+            let (Some(l), Some(r)) = (eval_arg_form(lhs, args), eval_arg_form(rhs, args)) else {
+                return false;
+            };
+            let holds = match op {
+                CmpOp::Lt => l < r,
+                CmpOp::Leq => l <= r,
+                CmpOp::Gt => l > r,
+                CmpOp::Geq => l >= r,
+                CmpOp::Eq => l == r,
+                CmpOp::Neq => l != r,
+            };
+            holds == *expect
+        }
+    })
+}
+
+// Structural grain (fork-tree nodes W)
+
+/// Recursion depth at which the estimator stops descending and calls it a leaf.
+const WORK_MAX_DEPTH: u32 = 256;
+
+/// Distinct arg vectors the estimator will memoize before giving up.
+const WORK_MEMO_CAP: usize = 1 << 14;
+
+/// Bounded structural estimate of the grain below a fork site.
+///
+/// Counts the fork-site nodes a concrete arg vector reaches through the arms'
+/// [`ArgForm`] transforms, pruning children that miss the site's guards — those
+/// are base cases and do no forkable work. Every imprecision (opaque callees, a
+/// `SelfCall` combine's re-entry on joined values, the caps below) resolves
+/// *downwards*, so the count is a lower bound: unknown structure only refuses.
+/// Compared **directly** to [`par_expr_grain_for`] — no fib-unit inversion.
+struct WorkEstimate<'a> {
+    sites: &'a HashMap<String, ParForkSite>,
+    /// Counting past the floor cannot change the verdict, so totals stop here.
+    cap: i64,
+    memo: HashMap<(&'a str, Vec<i64>), i64>,
+}
+
+impl<'a> WorkEstimate<'a> {
+    fn new(sites: &'a HashMap<String, ParForkSite>) -> Self {
+        Self {
+            sites,
+            cap: DEFAULT_EXPR_GRAIN.saturating_add(1),
+            memo: HashMap::new(),
+        }
+    }
+
+    /// Fork-tree grain below `fn_name(args)`, saturating one node past the
+    /// floor (scores at or below it are exact).
+    #[cfg(test)]
+    fn grain(&mut self, fn_name: &str, args: &[i64]) -> i64 {
+        self.nodes(fn_name, args, 0)
+    }
+
+    fn site_floor(&self, fn_name: &str) -> i64 {
+        self.sites
+            .get(fn_name)
+            .map(par_expr_grain_for)
+            .unwrap_or(DEFAULT_EXPR_GRAIN)
+    }
+
+    fn worth_parallel(&mut self, fn_name: &str, args: &[i64]) -> bool {
+        self.nodes(fn_name, args, 0) > self.site_floor(fn_name)
+    }
+
+    fn nodes(&mut self, fn_name: &str, args: &[i64], depth: u32) -> i64 {
+        let sites = self.sites;
+        let Some(site) = sites.get(fn_name) else {
+            return 0;
+        };
+        // Negative args are base-case territory, and a clone is only entered
+        // where the guards let control reach the fork.
+        if args.len() != site.param_count
+            || args.iter().any(|a| *a < 0)
+            || !guards_hold(&site.guards, args)
+        {
+            return 0;
+        }
+        let key = (site.fn_name.as_str(), args.to_vec());
+        if let Some(&hit) = self.memo.get(&key) {
+            return hit;
+        }
+        if depth >= WORK_MAX_DEPTH || self.memo.len() >= WORK_MEMO_CAP {
+            return 0;
+        }
+        // `Const` arg forms can raise a component, so the arg graph may cycle;
+        // the placeholder makes a re-entrant vector a leaf.
+        self.memo.insert(key.clone(), 0);
+        let mut total: i64 = 1;
+        for arm in &site.arms {
+            let Some(child) = eval_arm_args(arm, args) else {
+                continue;
+            };
+            total = total.saturating_add(self.nodes(arm_callee(arm), &child, depth + 1));
+            if total >= self.cap {
+                total = self.cap;
+                break;
+            }
+        }
+        self.memo.insert(key, total);
+        total
+    }
+}
+
+/// Fork-tree grain below `fn_name(args)`'s fork site (nodes `W`).
+/// Saturates at [`par_expr_grain`] `+ 1`.
+#[cfg(test)]
+pub fn par_work_grain(sites: &HashMap<String, ParForkSite>, fn_name: &str, args: &[i64]) -> i64 {
+    WorkEstimate::new(sites).grain(fn_name, args)
+}
+
+/// True when `fn_name(args)` carries more grain than [`par_expr_grain_for`].
+pub fn args_worth_parallel(
+    sites: &HashMap<String, ParForkSite>,
+    fn_name: &str,
+    args: &[i64],
+) -> bool {
+    WorkEstimate::new(sites).worth_parallel(fn_name, args)
+}
+
+/// Smallest `n` in `0..=48` at which unary `fn_name(n)` clears the grain floor.
+///
+/// Only single-parameter fork sites. The runtime check is `arg >= cutoff`;
+/// multi-arg sites stay on the constant-call rewrite.
+pub fn unary_dynamic_cutoff(sites: &HashMap<String, ParForkSite>, fn_name: &str) -> Option<i64> {
+    let site = sites.get(fn_name)?;
+    if site.param_count != 1 {
+        return None;
+    }
+    if site.guards.iter().any(|g| matches!(g, ParGuard::Opaque)) {
+        return None;
+    }
+    const HI_CAP: i64 = 48;
+    if !args_worth_parallel(sites, fn_name, &[HI_CAP]) {
+        return None;
+    }
+    let mut lo = 0i64;
+    let mut hi = HI_CAP;
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        if args_worth_parallel(sites, fn_name, &[mid]) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Some(hi)
+}
+
+/// Parameterized fork-worker name for `fn_name`.
+///
+/// `fib` → `__coil_par_fib`; one worker per site, not per const-arg vector.
+pub fn par_worker_name(fn_name: &str) -> String {
+    format!("__coil_par_{fn_name}")
+}
+
+/// Concrete child args for `arm` given the enclosing call's `parent_args`.
+pub fn eval_arm_args(arm: &ParArm, parent_args: &[i64]) -> Option<Vec<i64>> {
+    let ParArm::Call { args, .. } = arm;
+    args.iter().map(|f| eval_arg_form(f, parent_args)).collect()
+}
+
+/// Callee bare name for a [`ParArm::Call`].
+pub fn arm_callee(arm: &ParArm) -> &str {
+    let ParArm::Call { callee, .. } = arm;
+    callee
+}
+
+fn eval_arg_form(form: &ArgForm, parent_args: &[i64]) -> Option<i64> {
+    match form {
+        ArgForm::Const(k) => Some(*k),
+        ArgForm::Param(i) => parent_args.get(*i).copied(),
+        ArgForm::ParamMinus { param, sub } => parent_args.get(*param).map(|v| v - sub),
+        ArgForm::ParamPlus { param, add } => {
+            parent_args.get(*param).and_then(|v| v.checked_add(*add))
+        }
+    }
+}
+
+/// Arm-transform hops the parameterized worker may re-enter itself.
+///
+/// Nested AlwaysPar down to the work cutoff used to emit `__coil_par_fib_21…n`.
+/// A small hop count is a counted evidence gate (COI-361 E3 / COI-366 F1):
+/// the const call is the evidence, and the same worker decrements hop rather
+/// than cloning a frozen arg vector. Hop 0 / missed path guards fall through
+/// to the sequential original — not a grain skip-threshold on the hot path.
+pub const PAR_SPEC_HOPS: u32 = 2;
 
 impl HirModule {
     /// The primary fork site of every pure function that has one, by the

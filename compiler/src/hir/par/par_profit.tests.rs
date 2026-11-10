@@ -4,12 +4,10 @@ use super::*;
 use crate::hir::build_module;
 use crate::typechecking::bare_cases::BareCases;
 use crate::typechecking::infer::Checker;
-use crate::typechecking::par_profit::*;
 use crate::typechecking::purity::analyze_pure_fns;
 
 /// A checked module with its HIR and its pure functions.
 struct Lowered {
-    ast: parser::ast::Output<'static>,
     checker: Checker,
     module: HirModule,
     pure: HashSet<String>,
@@ -23,22 +21,16 @@ fn lower(src: &str) -> Lowered {
     let _ = checker.check_program(&ast);
     let sidecar = checker.typed_sidecar();
     let module = build_module(&checker, &sidecar, "", &ast);
-    Lowered { ast, checker, module, pure }
+    Lowered { checker, module, pure }
 }
 
 impl Lowered {
     fn sites(&self) -> HashMap<String, ParForkSite> {
-        let found = self.module.par_fork_sites(&self.checker, &self.pure);
-        // Until the AST walk is gone: the two agree.
-        let cases = BareCases::checked(&self.ast);
-        assert_eq!(found, analyze_par_fork_sites(&self.ast, &self.pure, &cases), "HIR and AST sites differ");
-        found
+        self.module.par_fork_sites(&self.checker, &self.pure)
     }
 
     fn workers(&self, sites: &HashMap<String, ParForkSite>) -> HashSet<String> {
-        let found = self.module.par_worker_fns(&self.checker, sites);
-        assert_eq!(found, collect_par_worker_fns(&self.ast, sites), "HIR and AST workers differ");
-        found
+        self.module.par_worker_fns(&self.checker, sites)
     }
 }
 
