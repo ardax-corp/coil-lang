@@ -554,6 +554,12 @@ pub struct Checker {
     /// enum's registry key, by pattern span (#1352).
     bare_patterns_by_span: HashMap<(usize, usize), String>,
 
+    /// The stub the impl pre-pass registered for each `impl Trait for ..`,
+    /// by module, trait and the impl's span (in source order where a macro
+    /// gives several one span): the instance
+    /// [`Checker::infer_typeclass_impl`] claims for that impl (#2480).
+    impl_stubs: HashMap<(String, String, usize, usize), Vec<usize>>,
+
     /// Bare unit case patterns (`None`, `Red`) of each checked module, by
     /// span: the one record of which bare pattern names are cases rather
     /// than bindings, for passes that walk the AST after the checker (#1394).

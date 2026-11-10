@@ -537,19 +537,14 @@ impl Checker {
         let existing_idx = self.generics.instances.iter().position(|inst| {
             inst.class == class && inst.defined_module == self.current_module && inst.range == range
         });
+        // Else the stub the pre-pass registered for this very impl: not
+        // another impl's of the same trait, whose head this one's would
+        // then replace (#2480).
         let existing_idx = existing_idx.or_else(|| {
-            overlapping.as_ref().and_then(|existing| {
-                if existing.defined_module == self.current_module
-                    && existing.range.start == usize::MAX
-                {
-                    self.generics.instances.iter().position(|inst| {
-                        inst.class == existing.class
-                            && inst.defined_module == existing.defined_module
-                            && inst.range.start == usize::MAX
-                    })
-                } else {
-                    None
-                }
+            let stubs = self.impl_stubs.get(&(self.current_module.clone(), class.to_string(), range.start, range.end))?;
+            stubs.iter().copied().find(|&idx| {
+                let inst = &self.generics.instances[idx];
+                inst.class == class && inst.defined_module == self.current_module && inst.range.start == usize::MAX
             })
         });
         let same_decl = overlapping.as_ref().is_some_and(|existing| {
