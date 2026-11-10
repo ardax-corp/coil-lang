@@ -916,25 +916,65 @@ fn main() {{ return; }}
     ))
 }
 
+/// The run-time tests of each site [`fold_sites`] finds, as written
+/// (`k >= 1`): none for a site whose fold has one sign whatever the
+/// values.
+fn fold_guards(params: &str, start: &str, range: &str, op: &str, term: &str) -> Vec<Vec<String>> {
+    fold_sites(params, start, range, op, term).iter().map(|s| s.guard.iter().map(ToString::to_string).collect()).collect()
+}
+
 /// A chunk folds from the identity, so it cannot see the running sum
 /// leave the `int` range and come back. Terms of one sign cannot bring
 /// it back (#2423).
 #[test]
 fn a_sum_is_a_site_when_its_terms_have_one_sign() {
+    let none: Vec<Vec<String>> = vec![vec![]];
     for term in ["sq(i)", "i", "weight(i)", "abs(i - 50)", "7", "i & 3", "i / 2 + i % 3", "0 - i", "0 - sq(i)", "0", "abs(k)", "sq(k) * i"] {
-        assert_eq!(fold_sites("int n, int k", "5", "0..n", "+", term).len(), 1, "`{term}`");
+        assert_eq!(fold_guards("int n, int k", "5", "0..n", "+", term), none, "`{term}`");
     }
-    for term in ["step(i)", "i - 50", "k", "i * k", "weight(k)", "sq(i) - 1", "0 - weight(i - 3)", "i ^ k"] {
+    // The sign of a capture is fixed for a run of the loop: whichever it
+    // is, every term has it.
+    for term in ["k", "i * k", "weight(k)", "i ^ k", "0 - k * sq(i)"] {
+        assert_eq!(fold_guards("int n, int k", "5", "0..n", "+", term), none, "`{term}`");
+    }
+    for term in ["step(i)", "i - 50", "sq(i) - 1", "0 - weight(i - 3)", "step(i) * k", "i - k * k"] {
         assert!(fold_sites("int n, int k", "5", "0..n", "+", term).is_empty(), "`{term}`");
     }
+}
+
+/// Where no value of a capture or bound signs the fold whatever it is,
+/// a test of it does: the fork-join takes the chunked path only when it
+/// holds, and runs the loop on its own thread otherwise.
+#[test]
+fn a_run_time_test_signs_a_fold_a_capture_decides() {
+    let guards = |params: &str, range: &str, op: &str, term: &str| fold_guards(params, "1", range, op, term);
+    // The index from a start read at run time.
+    assert_eq!(guards("int a, int n", "a..n", "+", "i"), [["a >= 0"]]);
+    assert_eq!(guards("int a, int n", "a..n", "+", "weight(i)"), [["a >= 0"]]);
+    // A product of a capture: `0` and `-1` are not allowed.
+    assert_eq!(guards("int n, int k", "0..n", "*", "k"), [["k >= 1"]]);
+    assert_eq!(guards("int n, int k", "0..n", "*", "k + 1"), [["k >= 0"]]);
+    assert_eq!(guards("int n, int k", "0..n", "*", "i + k"), [["k >= 1"]]);
+    assert_eq!(guards("int n, int k", "0..n", "*", "0 - k"), [["k >= 2"]]);
+    // `abs(k) - 1` is `-1` at `0` and `0` at `1` and `-1`.
+    assert_eq!(guards("int n, int k", "0..n", "*", "abs(k) - 1"), [["k >= 2"]]);
+    // Two captures: each tested.
+    assert_eq!(guards("int n, int j, int k", "0..n", "+", "j * k + i"), [["j >= 0", "k >= 0"]]);
+    // One sign for some values only.
+    assert_eq!(guards("int n, int k", "0..n", "+", "i - k"), [["k <= 0"]]);
+    assert_eq!(guards("int n, int k", "0..n", "+", "k - sq(i)"), [["k <= 0"]]);
+    // A term of both signs for every value of the captures.
+    assert!(guards("int n, int k", "0..n", "+", "step(i) * k").is_empty());
+    assert!(guards("int n, int k", "0..n", "*", "i * k").is_empty());
 }
 
 /// The index of a range that may start below zero has no sign.
 #[test]
 fn the_index_has_the_sign_of_its_range() {
-    assert!(fold_sites("int a, int n", "0", "a..n", "+", "i").is_empty());
-    assert!(fold_sites("int a, int n", "0", "a..n", "+", "weight(i)").is_empty());
-    assert_eq!(fold_sites("int a, int n", "0", "a..n", "+", "sq(i)").len(), 1);
+    // A start read at run time is tested.
+    assert_eq!(fold_guards("int a, int n", "0", "a..n", "+", "i"), [["a >= 0"]]);
+    assert_eq!(fold_guards("int a, int n", "0", "a..n", "+", "weight(i)"), [["a >= 0"]]);
+    assert_eq!(fold_guards("int a, int n", "0", "a..n", "+", "sq(i)"), vec![Vec::<String>::new()]);
     assert_eq!(fold_sites("int n", "0", "3..n", "+", "i - 3").len(), 1);
     assert!(fold_sites("int n", "0", "3..n", "+", "i - 4").is_empty());
     // A `while` reads its index after the step too.
@@ -965,9 +1005,11 @@ fn a_product_is_a_site_when_no_term_is_zero_or_minus_one() {
     for term in ["2", "i + 1", "sq(i) + 1", "0 - 2", "0 - i - 2", "1"] {
         assert_eq!(fold_sites("int n, int k", "1", "0..n", "*", term).len(), 1, "`{term}`");
     }
-    for term in ["i", "0", "0 - 1", "0 - i - 1", "k", "weight(i)", "i - 1", "sq(i)"] {
+    for term in ["i", "0", "0 - 1", "0 - i - 1", "weight(i)", "i - 1", "sq(i)"] {
         assert!(fold_sites("int n, int k", "1", "0..n", "*", term).is_empty(), "`{term}`");
     }
+    // A capture is tested to be `>= 1` at run time.
+    assert_eq!(fold_guards("int n, int k", "1", "0..n", "*", "k"), [["k >= 1"]]);
 }
 
 /// `^` never traps.
@@ -1002,7 +1044,10 @@ fn main() {{ return; }}
     // `k` is not negative where the first arm reads it, and negative in
     // the second.
     assert_eq!(run("if k >= 0 { acc = acc + k; }").len(), 1);
-    assert!(run("if k >= 0 { acc = acc + k; } else { acc = acc + k; }").is_empty());
+    // Both arms fold `k`, whose sign is the same in every iteration.
+    assert_eq!(run("if k >= 0 { acc = acc + k; } else { acc = acc + k; }").len(), 1);
+    // `k` in one arm and `-k` in the other have opposite signs.
+    assert!(run("if i % 2 == 0 { acc = acc + k; } else { acc = acc + (0 - k); }").is_empty());
     assert_eq!(run("if k >= 0 { acc = acc + k; } else { acc = acc + (0 - k); }").len(), 1);
     assert_eq!(run("let d = i - 5; if d > 0 { acc = acc + d; }").len(), 1);
     assert!(run("let d = i - 5; acc = acc + d;").is_empty());
@@ -1012,30 +1057,36 @@ fn main() {{ return; }}
 /// that returns, and a `let` nothing writes again.
 #[test]
 fn a_guard_ahead_of_the_loop_signs_a_capture() {
-    let run = |ahead: &str, term: &str| {
+    // A product of `k`: a site with no run-time test only where `k >= 1`
+    // (or `k <= -2`) is known.
+    let run = |ahead: &str, term: &str| -> Vec<Vec<String>> {
         sites_of(&format!(
             r#"
 fn run(int n, int k) -> int {{
     {ahead}
-    let acc = 0;
+    let acc = 1;
     for i in 0..n {{
-        acc = acc + ({term});
+        acc = acc * ({term});
     }}
     return acc;
 }}
 fn main() {{ return; }}
 "#
         ))
+        .iter()
+        .map(|s| s.guard.iter().map(ToString::to_string).collect())
+        .collect()
     };
-    assert!(run("", "i * k").is_empty());
-    assert_eq!(run("if k < 0 { return 0; }", "i * k").len(), 1);
-    assert_eq!(run("if k < 0 { panic \"k\"; }", "i * k").len(), 1);
-    assert_eq!(run("let w = (k & 7) + 1;", "i * w").len(), 1);
-    assert!(run("let w = (k & 7) - 1;", "i * w").is_empty());
+    let none: Vec<Vec<String>> = vec![vec![]];
+    assert_eq!(run("", "k"), [["k >= 1"]]);
+    assert_eq!(run("if k < 1 { return 0; }", "k"), none);
+    assert_eq!(run("if k < 1 { panic \"k\"; }", "k"), none);
+    assert_eq!(run("let w = (k & 7) + 1;", "w"), none);
+    assert_eq!(run("let w = (k & 7) - 1;", "w"), [["w >= 1"]]);
     // The guard is about a `k` that is written afterwards.
-    assert!(run("if k < 0 { return 0; } k = k - 9;", "i * k").is_empty());
-    // A lambda may write it at any call.
-    assert!(run("if k < 0 { return 0; } let f = fn () { k = 0 - 9; };", "i * k").is_empty());
+    assert_eq!(run("if k < 1 { return 0; } k = k - 9;", "k"), [["k >= 1"]]);
+    // A lambda may write it at any call: no site.
+    assert!(run("if k < 1 { return 0; } let f = fn () { k = 0; };", "k").is_empty());
 }
 
 /// A `for` runs its checks ahead of each iteration, so a clause that

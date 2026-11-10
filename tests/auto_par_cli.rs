@@ -521,6 +521,81 @@ fn a_range_at_the_edge_of_int_runs_as_the_sequential_loop_does() {
     same_as_sequential("edge-for-backwards", &range_program(for_to, fourth, "9223372036854775807, 0 - 9223372036854775807"), "");
 }
 
+/// A loop with a fold of one sign for some values of its captures and
+/// start: `power` is chunked when `base >= 1` and `from` when `lo >= 0`,
+/// each tested once as the loop starts; `scaled` needs no test (`i * k`
+/// has the sign of `k`). `main` prints what each returns for values on
+/// both sides of the test, from one call to the next, then calls `last`.
+fn guarded_program(last: &str) -> String {
+    format!(
+        r#"
+use io::{{stdout, write}};
+use string::to_bytes;
+
+fn power(int base, int e) -> int {{
+    let r = 1;
+    for _ in 0..e {{
+        r = r * base;
+    }}
+    return r;
+}}
+
+fn from(int lo, int hi) -> int {{
+    let acc = 0;
+    for x in lo..hi {{
+        acc = acc + x % 7;
+    }}
+    return acc;
+}}
+
+fn scaled(int n, int k) -> int {{
+    let s = 0;
+    let i = 0;
+    while i < n {{
+        s = s + i * k;
+        i = i + 1;
+    }}
+    return s;
+}}
+
+fn main() {{
+    let out = "";
+    for base in [1, 0 - 1, 2, 0, 3, 0 - 2, 1] {{
+        out = out + power(base, 39).show() + " ";
+    }}
+    for base in [1, 0 - 1, 0, 1, 0 - 1] {{
+        out = out + power(base, 400001).show() + " ";
+    }}
+    for lo in [0 - 1000, 1000, 0 - 400000, 0, 7] {{
+        out = out + from(lo, 400000).show() + " ";
+    }}
+    for k in [3, 0 - 3, 0, 1] {{
+        out = out + scaled(300000, k).show() + " ";
+    }}
+    let _ = write(stdout(), to_bytes(out));
+    let r = {last};
+    let _ = write(stdout(), to_bytes(r.show()));
+}}
+"#
+    )
+}
+
+/// A loop chunked behind a run-time test of its captures prints, reports
+/// and exits as the sequential loop does, whether the test holds or not.
+#[test]
+fn a_fold_signed_by_a_run_time_test_is_the_sequential_one() {
+    let overflow = "panic: integer overflow";
+    same_as_sequential("guard-fits", &guarded_program("power(2, 62)"), "");
+    // The test holds; the product passes `MAX`.
+    same_as_sequential("guard-holds-overflows", &guarded_program("power(2, 63)"), overflow);
+    same_as_sequential("guard-holds-overflows-late", &guarded_program("power(3 * power(1, 400000), 40)"), overflow);
+    // The test fails; the sequential loop overflows.
+    same_as_sequential("guard-fails-overflows", &guarded_program("power(0 - 3, 41)"), overflow);
+    // No test: past `MAX` and past `MIN`.
+    same_as_sequential("unguarded-past-max", &guarded_program("scaled(400000, 100000000000000)"), overflow);
+    same_as_sequential("unguarded-past-min", &guarded_program("scaled(400000, 0 - 100000000000000)"), overflow);
+}
+
 /// An `if let` is read as the `match` it is: a const call in its arm
 /// takes its function's fork worker, and a fork in the arm it takes when
 /// its pattern misses is never a worker's, which could not test that.
