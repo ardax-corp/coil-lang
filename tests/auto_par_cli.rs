@@ -951,3 +951,32 @@ fn main() {
 "#;
     same_as_sequential("declined", program, "");
 }
+
+/// An E0805 hint is advice about the source, not about what auto-par did:
+/// a run prints it with `--auto-par off` too, so the two stderrs match
+/// (#2551).
+#[test]
+fn an_e0805_hint_is_printed_with_auto_par_off_too() {
+    same_as_sequential(
+        "e0805_hint",
+        r#"use io::{stdout, write};
+use string::to_bytes;
+
+fn power(int base, int e) -> int {
+    let r = 1;
+    let i = 0;
+    while i < e {
+        r = r * base;
+        i = i + 1;
+    }
+    return r;
+}
+
+fn main() {
+    let r = power(1, 400) * power(3, 4);
+    let _ = write(stdout(), to_bytes(r.show()));
+}
+"#,
+        "E0805",
+    );
+}

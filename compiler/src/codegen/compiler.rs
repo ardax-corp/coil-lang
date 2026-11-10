@@ -6833,7 +6833,14 @@ impl Compiler {
             && let Some(hir) = self.hir_module.as_ref()
         {
             self.loop_par_sites = hir.loop_par_sites(&self.checker, module, &self.pure_fns);
-            // E0805: the same detector with every user function an arm.
+        }
+        // E0805: the same detector with every user function an arm. The hint
+        // is advice about the source, not about what auto-par did, so
+        // `--auto-par off` reports it too and a run's stderr is the same
+        // either way (#2551).
+        if self.opt_options.auto_par
+            && let Some(hir) = self.hir_module.as_ref()
+        {
             for hint in hir.par_escape_hints(&self.checker, &hint_effects) {
                 let mut msg = Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
                 msg.with_help(hint.help());

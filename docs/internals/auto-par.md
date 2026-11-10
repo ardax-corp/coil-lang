@@ -594,5 +594,7 @@ When the shape is a would-be call bag, compile-time **E0805** info names
 **every** lockable edge on the bag (FD / FFI / mutex / heap object), not only
 `stdout`. The compiler does
 not insert locks or fork on the hint. A covering lock is detected and
-documented; shared steal stays sequential this cut. See
+documented; shared steal stays sequential this cut. The hint describes the
+source, so a run prints it with `--auto-par off` too (stderr is the same
+either way, #2551). See
 [par-lock-hints.md](par-lock-hints.md) (Architect may discard).
