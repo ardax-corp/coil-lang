@@ -8016,7 +8016,9 @@ impl Compiler {
     /// a type parameter `quantified` admits (`Vec<T>`, `[Option<T>; 3]`):
     /// the body reads one word per element, while a ground `Vec` of a
     /// closed two-word type is a lane array ([`HirFnRet::Lanes`], #2592).
-    fn hir_lanes_ret(&self, scheme: &Ty, ground: &Ty, quantified: &dyn Fn(crate::typechecking::ty::TyVarId) -> bool) -> Option<HirFnRet> {
+    /// The same for a dictionary's `$dict` adapter of an instance method
+    /// returning one ([`Compiler::trait_method_lanes_ret`], #2616).
+    pub(super) fn hir_lanes_ret(&self, scheme: &Ty, ground: &Ty, quantified: &dyn Fn(crate::typechecking::ty::TyVarId) -> bool) -> Option<HirFnRet> {
         use crate::typechecking::ty::{ftv_ty, strip_readonly, vec_element_ty};
         let element = match strip_readonly(scheme) {
             Ty::Array { element, .. } => element.as_ref(),

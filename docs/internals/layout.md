@@ -341,6 +341,11 @@ function value (`fn() -> Vec<T>`) is converted the same way by the
 argument's adapter (`HirFnRet::Lanes`); a function below a signature's top
 (`Vec<fn() -> Vec<T>>`) gets no adapter, so such a signature is
 clone-only, as for a `()` result (`layout::nested_fn_var_result`, #2592).
+A ground instance's method that a dictionary calls is converted by its
+`$dict` adapter where the trait's result is a `Vec` or array of its
+parameters or associated types (`fn many(S s) -> Vec<S>` at `Option<int>`,
+`Compiler::trait_method_lanes_ret`, #2616): the adapter returns the trait's
+open type, so its return converts the array.
 The lane ops in turn accept an array of boxed elements (one a generic body
 made, or one converted earlier): `LaneIndex` unboxes the element, and
 `LaneStore` / `LanePush` box the new one. A one-word element op on a lane

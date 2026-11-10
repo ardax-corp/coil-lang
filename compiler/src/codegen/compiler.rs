@@ -1107,6 +1107,34 @@ impl Compiler {
         scheme.bounds.iter().zip(inst_args).any(|(bound, ty)| bound == var && crate::layout::is_unit(ty))
     }
 
+    /// Whether trait method `class::method`'s declared result is a `Vec`
+    /// or array of the trait's parameters (`Vec<S>`, `[Option<S>; 2]`,
+    /// `Vec<Item>`) that instance method `fqn` at `inst_args` returns as a lane array
+    /// (`Vec<Option<int>>`). A dictionary caller (a shared body) reads it
+    /// one word per element, so the method's `$dict` adapter turns it into
+    /// boxed elements, as a function argument's adapter does
+    /// ([`Self::hir_lanes_ret`], #2592, #2616).
+    fn trait_method_lanes_ret(&self, class: &str, method: &str, inst_args: &[Ty], fqn: &str) -> bool {
+        let Some(scheme) = self.checker.typeclass_method_scheme(class, method) else {
+            return false;
+        };
+        let (_, ret) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let mut inst = crate::typechecking::subst::Subst::empty();
+        for (bound, ty) in scheme.bounds.iter().zip(inst_args) {
+            inst.insert(*bound, ty.clone());
+        }
+        // The method's own declared type where the trait's leaves it open
+        // (an associated type's `Vec<Item>`), as for a niche (#2478).
+        let applied = crate::typechecking::subst::apply_ty(&inst, &ret);
+        let ground = match self.checker.fn_return_ty(fqn) {
+            Some(own) if !crate::layout::ty_is_closed(&applied) && crate::layout::ty_is_closed(&own) => own,
+            _ => applied,
+        };
+        // Any variable there, the trait's or an associated type's, is open
+        // to the dictionary's caller.
+        self.hir_lanes_ret(&ret, &ground, &|_| true).is_some()
+    }
+
     fn dict_adapter_name(fqn: &str) -> String {
         format!("{fqn}$dict")
     }
@@ -2163,7 +2191,8 @@ impl Compiler {
         let raw = self.raw_instance_methods.contains(fqn);
         let sig = self.trait_method_boundary_sig(class, method, inst_args, false);
         let unit_ret = self.trait_method_unit_ret(class, method, inst_args);
-        if sig.is_none() && !raw && !unit_ret {
+        let lanes_ret = self.trait_method_lanes_ret(class, method, inst_args, fqn);
+        if sig.is_none() && !raw && !unit_ret && !lanes_ret {
             return;
         }
         let adapter = Self::dict_adapter_name(fqn);
@@ -2187,7 +2216,9 @@ impl Compiler {
         } else {
             Vec::new()
         };
-        let nparams = sig.as_ref().map_or(unbox.len(), |s| s.params.len());
+        // A method planned for its result alone takes the trait's
+        // parameters as they come.
+        let nparams = sig.as_ref().map_or(if raw { unbox.len() } else { open.len() }, |s| s.params.len());
         // The instance's side of an `Option` / `Result` the trait spells
         // through an associated type (`Option<Item>`, which the instance's
         // arguments leave open): the method's own declared type (#2478).
@@ -2196,9 +2227,10 @@ impl Compiler {
             _ => applied,
         };
         let own_params = self.checker.fn_param_tys(fqn).unwrap_or_default();
+        let converted = lanes_ret || sig.as_ref().is_some_and(|s| s.ret.is_some());
         let ret = own_side(
             crate::typechecking::subst::apply_ty(&inst, &open_ret),
-            sig.as_ref().and_then(|s| s.ret).and_then(|_| self.checker.fn_return_ty(fqn)),
+            converted.then(|| self.checker.fn_return_ty(fqn)).flatten(),
         );
         // Its result, boxed back from the layout the method returns it in.
         let ret_from = sig.as_ref().and_then(|s| s.ret).filter(|&l| l != ValueLayout::Boxed);
@@ -2215,7 +2247,9 @@ impl Compiler {
             .two_word_return_kind(fqn)
             .and_then(|_| self.fn_return_ty(fqn))
             .filter(|_| ret_from.is_none() && ret_box.is_none());
-        let body_ret = if ret_from.is_some() || pair_ret.is_some() {
+        // A lane array goes back as the trait's open `Vec`, which a lane
+        // array's return converts (`hir_lane_escapes`).
+        let body_ret = if ret_from.is_some() || pair_ret.is_some() || lanes_ret {
             open_ret
         } else if ret_box.is_some() || unit_ret {
             crate::typechecking::ty::int()
