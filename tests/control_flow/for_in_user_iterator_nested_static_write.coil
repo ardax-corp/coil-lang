@@ -5,6 +5,7 @@
 use tests::assert;
 
 static let HITS: int = 0;
+
 static let CALLS: int = 0;
 
 class Empty {
