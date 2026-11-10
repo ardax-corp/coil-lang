@@ -200,6 +200,11 @@ pub(crate) enum HirFnRet {
     /// parameter: the adapter returns the empty tuple object, the word a
     /// `()` is wherever one is stored or passed (#2498).
     Unit,
+    /// A ground function's lane array (`Vec<Option<int>>`) where the body
+    /// reads a `Vec` or array of a type parameter, one word per element:
+    /// the adapter turns it into boxed elements in place (`LanesToWords`),
+    /// as any lane array is where it reaches a one-word use (#2592).
+    Lanes(crate::mir::MirLaneShape),
 }
 
 /// The shared-body ABI of a call to a bounded generic.
@@ -7370,8 +7375,9 @@ impl Compiler {
     /// body holds that value as its enum object and ground code as the
     /// niche word, inside an object both sides share, which no conversion
     /// at the call reaches (#2441). The same for a function below the top
-    /// whose result is a bare type parameter at `()` (#2498). Such a call
-    /// takes a clone or is refused.
+    /// whose result is a bare type parameter at `()` (#2498), or a `Vec` of
+    /// one that is a lane array there (#2592). Such a call takes a clone or
+    /// is refused.
     fn hir_shared_split(&self, hir: &HirBody, call: HirId, lookup: &str, args: &[HirId]) -> bool {
         let Some((params, ret)) = self.checker.fn_call_sig(lookup, args.len()) else {
             return false;
@@ -7387,7 +7393,12 @@ impl Compiler {
         }
         let ground = |open: &Ty| apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(open, &vars));
         let mut niche = |open: &Ty| self.hir_niche_word(&ground(open));
-        let mut unit = |var: &Ty| crate::layout::is_unit(&ground(var));
+        // A bare variable at `()`, or a `Vec` of one that is a lane array
+        // at the call's types.
+        let mut unit = |r: &Ty| match r {
+            Ty::Var(_) => crate::layout::is_unit(&ground(r)),
+            _ => self.hir_lane_elem(&ground(r)).is_some(),
+        };
         // Another module's class whose methods are all its shared bodies
         // at these types holds its nested enums as they do (#2547).
         let all = crate::layout::nested_open_look(&self.checker);
@@ -7719,6 +7730,8 @@ impl Compiler {
         let quantified = crate::typechecking::ty::ftv_ty(p).iter().any(|v| bounds.contains(v));
         let ret = if !is_fn {
             None
+        } else if let Some(lanes) = self.hir_lanes_ret(p, t, &|v| bounds.contains(&v)) {
+            Some(lanes)
         } else if matches!(p, Ty::Var(v) if bounds.contains(v)) {
             Self::hir_unit_ret(&apply_ty_prune(self.checker.subst(), t))
         } else if quantified {
@@ -7767,6 +7780,9 @@ impl Compiler {
                 }
                 if Self::nullary_fn_ty(param) {
                     arity = 0;
+                }
+                if let Some(ret) = self.hir_lanes_ret(p, &t, &|_| true) {
+                    return Some(HirFnAdapt { unbox: vec![None; arity], ret: Some(ret) });
                 }
                 if matches!(p, Ty::Var(_)) {
                     return Self::hir_unit_ret(&t).map(|ret| HirFnAdapt { unbox: vec![None; arity], ret: Some(ret) });
@@ -7983,6 +7999,23 @@ impl Compiler {
     /// word it gets, which for a `()` is the empty tuple object (#2498).
     fn hir_unit_ret(ground: &Ty) -> Option<HirFnRet> {
         crate::layout::is_unit(ground).then_some(HirFnRet::Unit)
+    }
+
+    /// The lane conversion of a ground function's result `ground` that a
+    /// shared body reads as `scheme`, a `Vec` or array whose element holds
+    /// a type parameter `quantified` admits (`Vec<T>`, `[Option<T>; 3]`):
+    /// the body reads one word per element, while a ground `Vec` of a
+    /// closed two-word type is a lane array ([`HirFnRet::Lanes`], #2592).
+    fn hir_lanes_ret(&self, scheme: &Ty, ground: &Ty, quantified: &dyn Fn(crate::typechecking::ty::TyVarId) -> bool) -> Option<HirFnRet> {
+        use crate::typechecking::ty::{ftv_ty, strip_readonly, vec_element_ty};
+        let element = match strip_readonly(scheme) {
+            Ty::Array { element, .. } => element.as_ref(),
+            t => vec_element_ty(t)?,
+        };
+        if !ftv_ty(element).into_iter().any(quantified) {
+            return None;
+        }
+        self.hir_lane_elem(ground).map(|lane| HirFnRet::Lanes(lane.shape))
     }
 
     /// The values node `id` stores in a generic class's field or a user
@@ -8372,6 +8405,13 @@ impl Compiler {
                 let obj = b.ins_alloc(crate::mir::MirAllocKind::TUPLE, Vec::new()).map_err(err)?;
                 let obj = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, vec![obj]).map_err(err)?;
                 b.ret(Some(obj)).map_err(err)?;
+                return b.finish().map_err(err);
+            }
+            // The array, its elements boxed in place.
+            Some(HirFnRet::Lanes(shape)) => {
+                let r = b.ins_call_indirect(f, args, MirTy::HeapRef).map_err(err)?;
+                let words = b.ins_lanes_to_words(r, shape).map_err(err)?;
+                b.ret(Some(words)).map_err(err)?;
                 return b.finish().map_err(err);
             }
             Some(HirFnRet::Niche(layout)) => layout,
