@@ -183,22 +183,25 @@ impl Product {
         Self { ctor: ProductCtor::Tuple, parts: items.to_vec() }
     }
 
-    /// The pattern that binds each part to a new local `{side}{i}`, and
-    /// those locals.
-    pub fn pat(&self, b: &mut Synth, side: &str) -> (HirPat, Vec<LocalId>) {
-        let locals: Vec<_> = self.parts.iter().enumerate().map(|(i, t)| b.local(&format!("{side}{i}"), t.clone(), LocalKind::Pattern)).collect();
-        let binds = locals.iter().map(|&l| HirPat::Bind(l));
-        let pat = match &self.ctor {
-            ProductCtor::Tuple => HirPat::Tuple(binds.collect()),
-            ProductCtor::Record(names) => HirPat::Record(names.iter().cloned().zip(binds).collect()),
+    /// This product's pattern over one pattern per part.
+    pub fn pat_of(&self, parts: Vec<HirPat>) -> HirPat {
+        match &self.ctor {
+            ProductCtor::Tuple => HirPat::Tuple(parts),
+            ProductCtor::Record(names) => HirPat::Record(names.iter().cloned().zip(parts).collect()),
             ProductCtor::Variant { enum_name, name, tag } => HirPat::Variant {
                 enum_name: enum_name.clone(),
                 variant: name.clone(),
                 tag: *tag,
-                fields: if locals.is_empty() { super::HirPatFields::Unit } else { super::HirPatFields::Tuple(binds.collect()) },
+                fields: if parts.is_empty() { super::HirPatFields::Unit } else { super::HirPatFields::Tuple(parts) },
             },
-        };
-        (pat, locals)
+        }
+    }
+
+    /// The pattern that binds each part to a new local `{side}{i}`, and
+    /// those locals.
+    pub fn pat(&self, b: &mut Synth, side: &str) -> (HirPat, Vec<LocalId>) {
+        let locals: Vec<_> = self.parts.iter().enumerate().map(|(i, t)| b.local(&format!("{side}{i}"), t.clone(), LocalKind::Pattern)).collect();
+        (self.pat_of(locals.iter().map(|&l| HirPat::Bind(l)).collect()), locals)
     }
 
     /// `let <pat> = init` of [`Self::pat`], for a tuple or record.
@@ -342,11 +345,12 @@ pub fn array_show(b: &mut Synth, array: HirId, element: Ty) -> HirId {
     b.block(vec![init_out, init_sep, each], Some(shown), string)
 }
 
-/// `Hash::hash` of a tuple (`items`, one per item) or array (`items` its
-/// element) `value` (#1479): `h = ((h & M) * 31) ^ hash(x)` over the items
-/// from `0`, as a derived `Hash` combines fields. `targets` names each
-/// item's `hash` entry (`None`: a `()` item, hashed as `0`).
-pub fn structural_hash(b: &mut Synth, value: HirId, items: &[Ty], targets: &[Option<String>]) -> HirId {
+/// `Hash::hash` of `value` (#1479, #2380), a tuple or record (`product`,
+/// a record's fields in name order) or an array (`None`; `targets` holds
+/// its element's): `h = ((h & M) * 31) ^ hash(x)` over the items from `0`,
+/// as a derived `Hash` combines fields. `targets` names each item's `hash`
+/// entry (`None`: a `()` item, hashed as `0`).
+pub fn structural_hash(b: &mut Synth, value: HirId, product: Option<&Product>, targets: &[Option<String>]) -> HirId {
     let int = coil_ty::int();
     let acc = b.local("h", int.clone(), LocalKind::Let);
     let zero = b.int(0);
@@ -365,8 +369,8 @@ pub fn structural_hash(b: &mut Synth, value: HirId, items: &[Ty], targets: &[Opt
         b.assign(acc, mixed)
     };
     let mut stmts = vec![init];
-    match b.body.exprs[value.0 as usize].ty.clone() {
-        Some(Ty::Array { element, .. }) => {
+    match (product, b.body.exprs[value.0 as usize].ty.clone()) {
+        (None, Some(Ty::Array { element, .. })) => {
             let x = b.local("x", (*element).clone(), LocalKind::Pattern);
             let v = b.read(x);
             let body = step(b, Some(v), &targets[0]);
@@ -374,7 +378,9 @@ pub fn structural_hash(b: &mut Synth, value: HirId, items: &[Ty], targets: &[Opt
             let kind = Some(crate::typechecking::infer::ForInKind::Array);
             stmts.push(b.push(HirKind::ForIn { pat: HirPat::Bind(x), iterable: value, body, kind }, coil_ty::unit()));
         }
-        _ => {
+        (None, _) => unreachable!("structural hash of a tuple, record or array"),
+        (Some(product), _) => {
+            let items = &product.parts;
             let mut pats = Vec::with_capacity(items.len());
             let mut locals = Vec::with_capacity(items.len());
             for (i, item) in items.iter().enumerate() {
@@ -387,7 +393,7 @@ pub fn structural_hash(b: &mut Synth, value: HirId, items: &[Ty], targets: &[Opt
                     locals.push(Some(l));
                 }
             }
-            stmts.push(b.push(HirKind::LetPat { pat: HirPat::Tuple(pats), init: value }, coil_ty::unit()));
+            stmts.push(b.push(HirKind::LetPat { pat: product.pat_of(pats), init: value }, coil_ty::unit()));
             for (local, target) in locals.into_iter().zip(targets) {
                 let v = local.map(|l| b.read(l));
                 let s = step(b, v, target);
