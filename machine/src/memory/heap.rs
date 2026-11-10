@@ -2584,7 +2584,10 @@ impl Object {
 
     #[inline]
     pub(crate) fn set_shared(&self) {
-        unsafe { &*(self.addr() as *const GcHeader) }.shared.set(true);
+        // SAFETY: a live object's header; the flag is a `Cell<bool>` at
+        // [`COW_SHARED_OFFSET`], which native code's inline share writes the
+        // same way.
+        unsafe { *((self.addr() + COW_SHARED_OFFSET as u64) as *mut u8) = COW_SHARED_SET };
     }
 
     #[must_use]
@@ -2627,10 +2630,10 @@ impl Object {
         let header = unsafe { &*(addr as *const GcHeader) };
         Some(match header.kind.get() {
             1 => Self::String(unsafe { Gc::from_addr(addr) }),
-            2 => Self::Instance(unsafe { Gc::from_addr(addr) }),
+            KIND_INSTANCE => Self::Instance(unsafe { Gc::from_addr(addr) }),
             3 => Self::Enum(unsafe { Gc::from_addr(addr) }),
             4 => Self::Library(unsafe { Gc::from_addr(addr) }),
-            6 => Self::Array(unsafe { Gc::from_addr(addr) }),
+            KIND_ARRAY => Self::Array(unsafe { Gc::from_addr(addr) }),
             7 => Self::Coroutine(unsafe { Gc::from_addr(addr) }),
             9 => Self::Root(unsafe { Gc::from_addr(addr) }),
             10 => Self::Weak(unsafe { Gc::from_addr(addr) }),
@@ -4426,9 +4429,11 @@ pub trait GcSized {
     }
 }
 
-/// [`GcHeader::kind`] of the objects native code allocates inline.
-const KIND_INSTANCE: u8 = 2;
+/// [`GcHeader::kind`] of the objects native code allocates inline, and of
+/// those a share marks (an instance, an array).
+pub const KIND_INSTANCE: u8 = 2;
 const KIND_ENUM: u8 = 3;
+pub const KIND_ARRAY: u8 = 6;
 
 /// [`GcHeader::generation`]: the object lives in a young (nursery) chunk.
 pub(crate) const GEN_YOUNG: u8 = 1;
@@ -4562,6 +4567,23 @@ struct GcHeader {
     #[cfg(any(debug_assertions, feature = "gc-stress"))]
     epoch: Cell<u8>,
 }
+
+
+/// Byte offset of a header's kind byte ([`GcHeader::kind`]): what
+/// [`Object::from_header`] reads, and native code's inline share
+/// (#2506, `coil-native`).
+pub const HEADER_KIND_OFFSET: i32 = std::mem::offset_of!(GcHeader, kind) as i32;
+/// Byte offset of a header's copy-on-write flag ([`GcHeader::shared`]).
+/// A share stores [`COW_SHARED_SET`] there: [`Object::set_shared`], and
+/// native code's inline share of a class instance or an array (#2506).
+pub const COW_SHARED_OFFSET: i32 = std::mem::offset_of!(GcHeader, shared) as i32;
+/// The byte a share stores at [`COW_SHARED_OFFSET`]: `true`.
+pub const COW_SHARED_SET: u8 = 1;
+
+// The flag and the kind are one byte each, so native code reads and writes
+// them as bytes.
+const _: () = assert!(std::mem::size_of::<Cell<bool>>() == 1 && std::mem::size_of::<Cell<u8>>() == 1);
+const _: () = assert!(COW_SHARED_SET == true as u8);
 
 #[repr(C)]
 pub struct GcData<T> {

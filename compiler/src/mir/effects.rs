@@ -135,6 +135,9 @@ impl MirInst {
             Self::GcBarrier { .. } => OpProps { barrier: true, gc_edge: true, ..P },
             Self::ArrayPush { .. } | Self::LanePush { .. } => OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, ..P },
             Self::LanesToWords { .. } => OpProps { barrier: true, gc_edge: true, allocates: true, ..P },
+            // A share sets the object's flag and allocates nothing (native
+            // code does it inline, #2506): no collection there.
+            Self::Cow { unique: false, field: None, .. } => OpProps { barrier: true, effects: Effects::Yes, vector_barrier: true, ..P },
             Self::Format { .. } | Self::Stringify { .. } | Self::Cow { .. } => {
                 OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, vector_barrier: true, ..P }
             }

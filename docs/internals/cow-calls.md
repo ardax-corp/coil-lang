@@ -41,7 +41,9 @@ scalar, `string`, `Option`, tuple, enum or function). `Lower` emits both ops
 on such a word under a test of the bit (`guarded_cow`), so a body pays a
 test and a branch, and the op only where the type is an object, as its
 per-type clone does. A body with no bit for the variable (a cleanup pad, an
-outlined helper) emits no op. The bits past the mask carry a sentinel the
+outlined helper) emits no op. Native code sets a share's flag inline, with no
+call ([native.md](native.md), "Inline share"), so a body whose type is a scalar
+pays the test alone. The bits past the mask carry a sentinel the
 entry checks in debug builds and under `COIL_MIR_VERIFY`, so an edge that
 does not pass the word fails loudly.
 

@@ -251,6 +251,8 @@ pub fn layout_fingerprint() -> u64 {
     ];
     counts.hash(&mut h);
     product_slots().hash(&mut h);
+    // The inline share (#2506).
+    (super::HEADER_KIND_OFFSET, super::COW_SHARED_OFFSET, super::COW_SHARED_SET, super::KIND_ARRAY).hash(&mut h);
     h.finish()
 }
 
