@@ -6332,6 +6332,18 @@ impl Checker {
         self.bound_operator_calls.insert(id, (range.start, range.end), hint);
     }
 
+    /// An element-wise operator whose element is the type variable `var`:
+    /// the element's dictionary call, where `var` has the bound. Without it
+    /// nothing is recorded (an inference variable a later use grounds).
+    fn record_bound_elem(&mut self, id: Option<NodeId>, range: &Range<usize>, var: TyVarId, class: &str, method: &str) {
+        if self.user_dict_index(var, class).is_none() {
+            self.bind_matching_abstract_constraints(Some(var), class);
+        }
+        if self.user_dict_index(var, class).is_some() {
+            self.record_bound_operator(id, range, var, class, method);
+        }
+    }
+
     /// `-a` / `~a` on a type variable goes through its `Neg` / `BitNot`
     /// dictionary in a shared generic body (`T: Num` implies `Neg`); a type
     /// parameter without the bound is an error, as for the binary operators.
@@ -7306,23 +7318,12 @@ impl Checker {
             );
         }
 
-        // Open elem → bind op trait; `%`/`**` skip (no Mod/Pow dicts); concrete int/float via is_numeric_elem.
-        if let Ty::Var(v) = &elem {
-            let (class, method) = match op {
-                "+" => ("Add", "add"),
-                "-" => ("Sub", "sub"),
-                "*" => ("Mul", "mul"),
-                "/" => ("Div", "div"),
-                _ => ("", ""),
-            };
-            if !class.is_empty() {
-                if self.user_dict_index(*v, class).is_none() {
-                    self.bind_matching_abstract_constraints(Some(*v), class);
-                }
-                if self.user_dict_index(*v, class).is_some() {
-                    self.record_bound_operator(id, &range, *v, class, method);
-                }
-            }
+        // An open element goes through the operator's trait in a shared
+        // generic body, one dictionary call per element.
+        if let Ty::Var(v) = &elem
+            && let Some((class, method)) = Generics::operator_trait(op)
+        {
+            self.record_bound_elem(id, &range, *v, class, method);
         }
 
         let kind = AggregateArithKind {
@@ -7384,6 +7385,9 @@ impl Checker {
                 op: AggregateOp::Neg,
             };
             self.warn_byte_wrap(&elem, "neg", &range);
+            if let Ty::Var(v) = &elem {
+                self.record_bound_elem(id, &range, *v, "Neg", "neg");
+            }
             self.aggregate_arith.insert(id, (range.start, range.end), info);
             return Ty::Tuple(vec![elem; elems.len()]);
         }
@@ -7407,6 +7411,9 @@ impl Checker {
                 op: AggregateOp::Neg,
             };
             self.warn_byte_wrap(&elem, "neg", &range);
+            if let Ty::Var(v) = &elem {
+                self.record_bound_elem(id, &range, *v, "Neg", "neg");
+            }
             self.aggregate_arith.insert(id, (range.start, range.end), info);
             return Ty::Array {
                 element: Box::new(elem),
