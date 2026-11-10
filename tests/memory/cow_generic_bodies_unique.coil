@@ -37,7 +37,7 @@ fn inc_vec(Vec<int> v) {
 }
 
 fn bump_int(int x) {
-    let _ = x + 1;
+    let _ = x / 2;
 }
 
 fn apply_copy<T>(T x, T -> unit f) -> T {
