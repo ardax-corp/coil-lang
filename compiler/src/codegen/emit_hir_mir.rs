@@ -1820,24 +1820,18 @@ impl Compiler {
                     return false;
                 }
                 let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
-                self.hir_mir_probe_dicts(|this, steps| {
+                // Its dictionary runs as a program (#2479).
+                self.hir_mir_probe_unplanned(|this, steps| {
                     this.plan_call_instance_dict(steps, ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0);
                 })
             }
         }
     }
 
-    /// Plan a site's dictionaries ([`Self::hir_mir_once`]): whether the
-    /// plan reads a frame dictionary. The plan goes nowhere.
-    fn hir_mir_probe_dicts(&mut self, f: impl FnOnce(&mut Self, &mut Vec<DictStep>)) -> bool {
-        let mut steps = Vec::new();
-        self.hir_mir_once(|this| f(this, &mut steps));
-        self.hir_mir_steps_read_dicts(&steps)
-    }
-
-    /// As [`Self::hir_mir_probe_dicts`], for a site whose plan direct MIR
-    /// runs as a [`crate::mir::HirDictOp`] program: whether it reads a
-    /// frame dictionary no program step stands for.
+    /// Plan a site's dictionaries ([`Self::hir_mir_once`]), which direct
+    /// MIR runs as a [`crate::mir::HirDictOp`] program: whether the plan
+    /// reads a frame dictionary no program step stands for. The plan goes
+    /// nowhere.
     fn hir_mir_probe_unplanned(&mut self, f: impl FnOnce(&mut Self, &mut Vec<DictStep>)) -> bool {
         let mut steps = Vec::new();
         self.hir_mir_once(|this| f(this, &mut steps));
@@ -1951,13 +1945,19 @@ impl Compiler {
         }
         // A non-raw `show` takes the value as its word.
         let word = !raw && Self::ty_to_value_tag(&lookup_ty).is_some();
-        // A dictionary argument: not a plain call. Its code goes nowhere.
-        let dict = self.hir_mir_once(|this| this.plan_call_instance_dict(&mut Vec::new(), ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0));
-        if dict || self.two_word_return_kind(&fqn).is_some() {
+        if self.two_word_return_kind(&fqn).is_some() {
             return None;
         }
+        // The dictionary an entry that takes one is passed (a bounded
+        // generic instance's shared entry, #2479), as a program.
+        let mut steps = Vec::new();
+        self.hir_mir_once(|this| this.plan_call_instance_dict(&mut steps, ("Show", "show", &fqn), std::slice::from_ref(&lookup_ty), 0..0));
+        if steps.is_empty() && self.instance_call_takes_dict("Show", "show", &fqn) {
+            return None;
+        }
+        let dicts = self.hir_mir_dict_program(&steps)?;
         self.raw_instance_call = raw;
-        self.named_entry_target(&fqn, true).map(|target| crate::mir::HirShow::Call { target, word })
+        self.named_entry_target(&fqn, true).map(|target| crate::mir::HirShow::Call { target, word, dicts })
     }
 
     /// Decide, before `root` is emitted, which parallel loops under it move
