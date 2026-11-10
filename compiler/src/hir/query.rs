@@ -899,6 +899,43 @@ pub fn while_shape(body: &HirBody, loop_body: HirId) -> Option<(HirId, HirId)> {
     matches!(body.expr(*els).kind, HirKind::Break).then_some((*cond, *then))
 }
 
+/// The parts of the `while` whose `Loop` body is `loop_body`, as
+/// [`while_shape`] and through the contract checks the builder runs ahead
+/// of each test (`invariant` / `decreases`): `(checks, cond, body)`.
+pub fn while_parts(body: &HirBody, loop_body: HirId) -> Option<(&[HirId], HirId, HirId)> {
+    let HirKind::Block { stmts, tail: None } = &body.expr(loop_body).kind else {
+        return None;
+    };
+    let (test, checks) = stmts.split_last()?;
+    let HirKind::If { cond, then, els: Some(els) } = body.expr(*test).kind else {
+        return None;
+    };
+    // The builder's own test: only it carries the loop's span and no node.
+    let built = body.expr(*test).node.is_none() && body.expr(*test).span == body.expr(loop_body).span;
+    (matches!(body.expr(els).kind, HirKind::Break) && (checks.is_empty() || built)).then_some((checks, cond, then))
+}
+
+/// The contract checks ahead of `for` loop `id`'s body, and the body as
+/// written.
+pub fn for_body_parts(body: &HirBody, id: HirId) -> Option<(&[HirId], HirId)> {
+    let e = body.expr(id);
+    let HirKind::ForIn { body: own, .. } = e.kind else {
+        return None;
+    };
+    // The builder wraps a checked body in a block of its own: the loop's
+    // span, no node, the checks and then the body.
+    let wrap = body.expr(own);
+    if wrap.node.is_none()
+        && wrap.span == e.span
+        && let HirKind::Block { stmts, tail: None } = &wrap.kind
+        && let Some((written, checks)) = stmts.split_last()
+        && !checks.is_empty()
+    {
+        return Some((checks, *written));
+    }
+    Some((&[], own))
+}
+
 /// Payload fields an arm's pattern names, in declaration order: `Some(l)`
 /// for a binding, `None` for `_`. `Err` for a pattern that tests more than
 /// the outer tag.
@@ -1285,3 +1322,7 @@ pub fn stack_select(body: &HirBody, stack: &HashMap<u32, usize>, e: &super::HirE
     };
     !matches!(body.expr(index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i))
 }
+
+#[cfg(test)]
+#[path = "query.tests.rs"]
+mod tests;

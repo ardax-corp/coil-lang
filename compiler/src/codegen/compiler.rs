@@ -3569,7 +3569,7 @@ impl Compiler {
         &self,
         span: SimpleSpan,
         loop_id: Option<crate::typechecking::id::NodeId>,
-    ) -> Option<crate::typechecking::LoopParSite> {
+    ) -> Option<crate::hir::par::LoopParSite> {
         let site = self.loop_par_sites.get(&(span.start, span.end)).cloned()?;
         // Reassociating a float reduction changes results.
         if site.implicit_step
@@ -6410,7 +6410,7 @@ impl Compiler {
             let pure = &self.pure_fns;
             self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure, &bare_cases);
             self.par_workers = crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
-            self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
+            self.loop_par_sites = self.hir_module.as_ref().map(|hir| hir.loop_par_sites(&self.pure_fns)).unwrap_or_default();
             for hint in crate::typechecking::analyze_par_escape_hints(ast, self.typed_sidecar.fn_effects(), &bare_cases) {
                 let mut msg =
                     Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
@@ -6420,7 +6420,7 @@ impl Compiler {
         } else {
             self.par_shapes.clear();
             self.par_workers.clear();
-            self.loop_par_sites = crate::typechecking::LoopParSites::new();
+            self.loop_par_sites = crate::hir::par::LoopParSites::new();
         }
         self.emit_builtin_dict_thunks();
         self.emit_vec_method_thunks();

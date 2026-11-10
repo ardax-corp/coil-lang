@@ -543,7 +543,7 @@ pub(crate) fn auto_par_explanations(
     pure: &HashSet<String>,
     cases: &crate::typechecking::bare_cases::BareCases,
 ) -> Vec<String> {
-    use crate::typechecking::{analyze_loop_par_sites, analyze_par_fork_sites};
+    use crate::typechecking::analyze_par_fork_sites;
     let mut all = pure.clone();
     for body in &module.bodies {
         if matches!(body.kind, BodyKind::Function | BodyKind::Method)
@@ -554,8 +554,8 @@ pub(crate) fn auto_par_explanations(
         }
     }
     let mut out = Vec::new();
-    let actual = analyze_loop_par_sites(ast, pure);
-    let mut blocked: Vec<_> = analyze_loop_par_sites(ast, &all)
+    let actual = module.loop_par_sites(pure);
+    let mut blocked: Vec<_> = module.loop_par_sites(&all)
         .into_iter()
         .filter(|(span, _)| !actual.contains_key(span))
         .collect();

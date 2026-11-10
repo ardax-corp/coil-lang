@@ -237,7 +237,8 @@ When the iterations only communicate through one **associative** reduction, any
 partition of the range folds to the sequential result, so the range splits into
 contiguous chunks that each accumulate a private partial.
 
-[`loop_par`](../../compiler/src/typechecking/loop_par.rs) admits a counted loop
+[`loop_par`](../../compiler/src/hir/par/loop_par.rs) (`HirModule::loop_par_sites`)
+walks the module's HIR as built, before any pass, and admits a counted loop
 only when **every** gate holds:
 
 | Gate | Requirement |
@@ -250,6 +251,10 @@ only when **every** gate holds:
 | Purity | body calls only pure user functions; no index / field / static writes, no `break`, `return` or `yield`. Division and modulo need a non-zero literal divisor |
 | Stride | unit `+ 1`, or a positive constant `i = i + k` |
 | Types | the induction variable and `e` both infer to `int` — float reduction is not associative |
+
+A site is keyed by its loop's source span and names its locals (index,
+accumulator, captures, bounds), so the plan finds it again in a body the HIR
+passes rewrote or inlined into another function.
 
 Ranges are normalized half-open (`i <= K` and `..=` become `end = K + 1`), so a
 split is just a partition of `[begin, end)`. A dynamic int bound (`while i < n`,
@@ -321,6 +326,7 @@ Still refuses (and why):
 | `break` / heap writes in the body | independence unproven |
 | `if` arms that use different folds | one associative operator per loop |
 | array / dict / coro `for` | sendability (C1 leftover), not F2 |
+| a loop in a trait's method (an instance's or a default), under `if let` / `while let`, or bounded by a local `const` | not looked at: the reach of the AST walk the HIR one replaced, kept as it was |
 
 ## Work-stealing reactor
 

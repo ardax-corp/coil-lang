@@ -15,7 +15,6 @@ pub mod id;
 pub mod index_facts;
 pub mod infer;
 pub mod kind;
-pub mod loop_par;
 pub mod par_hint;
 pub mod par_profit;
 pub mod pretty;
@@ -40,8 +39,6 @@ pub use infer::{TestTry, TryInto,
 };
 #[allow(unused_imports)] // public API for kind-aware callers / tests
 pub use kind::Kind;
-#[allow(unused_imports)] // public API re-export
-pub use loop_par::{LoopParSite, LoopParSites, LoopReduceOp, analyze_loop_par_sites};
 #[allow(unused_imports)] // public API re-export
 pub use par_hint::{EscapeKind, NamedEscape, ParEscapeHint, analyze_par_escape_hints};
 pub use par_profit::{
