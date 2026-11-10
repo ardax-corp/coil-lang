@@ -1,0 +1,9 @@
+// @expected E0107 — of two classes named `Dial`, this one's `Gauge::level` writes its field: the method call on a `readonly` value is refused, whatever the other's does (#2468).
+use ro_trait_gauge::Gauge;
+use ro_trait_dial::dial_reads;
+use ro_trait_dial_writer::Dial;
+
+fn main() {
+    let d = readonly new Dial(1);
+    let _ = d.level(2) + dial_reads();
+}

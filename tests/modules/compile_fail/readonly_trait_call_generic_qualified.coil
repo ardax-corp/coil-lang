@@ -1,0 +1,7 @@
+// @expected E0107 — `Peek::poke`'s impl for the generic `Crate<T>` of another module writes its field: the trait-qualified call on a `readonly` value is refused (#2468).
+use ro_trait_store::{Crate, Peek};
+
+fn main() {
+    let c = readonly new Crate("a", 1);
+    let _ = Peek::poke(c, 2);
+}

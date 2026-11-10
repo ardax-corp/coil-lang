@@ -1,0 +1,8 @@
+// @expected E0107 — the impl of `Probe::fill` for `Cell` (a class of another module than the trait's) writes its field: the trait-qualified call on a `readonly` value is refused (#2468).
+use ro_trait_cell::Cell;
+use ro_trait_probe::Probe;
+
+fn main() {
+    let c = readonly new Cell(1);
+    let _ = Probe::fill(c, 2);
+}
