@@ -68,7 +68,14 @@ test("a kept requires runs the method") {
 
 test("an instance method through a bound names the generic body's call") {
     let m = outcome(fn () => show(3, 0));
-    assert!(find_from(m, "contract violated: requires k > 0 (\"positive\") in Area for int::area, called from ", 0) >= 0, m);
+    assert!(
+        find_from(
+            m,
+            "contract violated: requires k > 0 (\"positive\") in Area for int::area, called from ",
+            0,
+        ) >= 0,
+        m,
+    );
     assert!(find_from(m, "requires_blames_caller_through_dict.coil:41:", 0) >= 0, m);
 }
 
