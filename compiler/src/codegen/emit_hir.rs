@@ -3460,10 +3460,25 @@ impl Compiler {
                 }
                 Some(declared) if generic => {
                     let key = |r: HirId| b.expr(r).ty.as_ref().map(|t| crate::monomorphize::mono_key_ty(&apply_ty_prune(self.checker.subst(), t)));
-                    let item = rest
-                        .first()
-                        .and_then(|&r| b.expr(r).ty.as_ref())
-                        .map(|t| crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)).clone());
+                    // An empty pack's element is the callee's `T` as the
+                    // call bound it (#2537): closed, or one of a shared
+                    // body's own type parameters.
+                    let bound = || {
+                        let pack = self.checker.rest_pack_ty_at(call_span.0, call_span.1)?;
+                        // A clone's types are its generic body's at the
+                        // clone's arguments.
+                        let pack = match self.mono_var_tys.last() {
+                            Some(vars) if self.compiling_mono_clone => Self::apply_ty_var_map(&pack, vars),
+                            _ => pack,
+                        };
+                        let elem = crate::typechecking::ty::vec_element_ty(&pack)?;
+                        let elem = crate::typechecking::ty::strip_readonly(elem).clone();
+                        (crate::layout::ty_is_closed(&elem) || (body.is_generic && !self.compiling_mono_clone)).then_some(elem)
+                    };
+                    let item = match rest.first() {
+                        Some(&r) => b.expr(r).ty.as_ref().map(|t| crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)).clone()),
+                        None => bound(),
+                    };
                     let same = |t: &Ty| {
                         let k = crate::monomorphize::mono_key_ty(t);
                         rest.iter().all(|&r| key(r).as_ref() == Some(&k))
