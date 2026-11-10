@@ -1,5 +1,6 @@
 // Rest-only generic with a typeclass constraint needs a call-site dict.
 // @output 1
+// @xfail clone-budget-0 #2510 E0801 (callee-arity): a generic rest parameter has no shared-body path
 use io::{stdout, write};
 use string::{format, to_bytes};
 

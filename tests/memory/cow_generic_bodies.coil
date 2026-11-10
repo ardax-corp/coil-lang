@@ -1,6 +1,7 @@
 // Copy-on-write in generic bodies (coil-lang#2161): a value a generic
 // method returns or stores is shared like the same code over a concrete
 // type, in the per-type clone and in the shared body.
+// @xfail clone-budget-0 #2502 a shared body returns a class value of a type parameter unshared
 use tests::assert;
 
 class Box {

@@ -2,6 +2,7 @@
 // the `requires` blames the caller under the impl's name, the trait's
 // `ensures` and the impl's own `ensures` are both checked.
 // @output ok
+// @xfail clone-budget-0 #2503 a `requires` violation reached through a dictionary has no "called from"
 use io::{stdout, write};
 use string::to_bytes;
 use task::{scope, Scope, TaskError};
