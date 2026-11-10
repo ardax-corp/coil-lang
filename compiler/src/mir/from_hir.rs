@@ -2830,14 +2830,10 @@ impl Lower<'_> {
         let array = !shape.is_tuple();
         let open = called;
         let side = |l: &mut Self, operand: HirId, on: ScalarSide| -> Result<Option<AggSide>, Refusal> {
-            let scalar = scalar_on == Some(on);
-            let Some(src) = l.agg_operand(operand, array && !scalar)? else {
-                return Ok(None);
-            };
-            Ok(Some(match scalar {
-                true => AggSide::Scalar(l.agg_scalar(&src, ty)?),
-                false => AggSide::Elems(src),
-            }))
+            if scalar_on == Some(on) {
+                return Ok(l.agg_scalar(operand, ty)?.map(AggSide::Scalar));
+            }
+            Ok(l.agg_operand(operand, array)?.map(AggSide::Elems))
         };
         let Some(a) = side(self, lhs, ScalarSide::Left)? else {
             return Ok(Val::Never);
@@ -2933,12 +2929,17 @@ impl Lower<'_> {
             M::Broadcast(side) => Some(side),
             M::Neg => None,
         };
-        // Both operands first, in order, as emission's temps.
-        let Some(a) = self.word(lhs)? else {
+        // Both operands first, in order, as emission's temps; a two-word
+        // scalar boxed, as an element is.
+        let operand = |l: &mut Self, id: HirId, on: ScalarSide| match l.pair_tys(id) {
+            Some(_) if scalar_on == Some(on) => l.boxed_word(id),
+            _ => l.word(id),
+        };
+        let Some(a) = operand(self, lhs, ScalarSide::Left)? else {
             return Ok(Val::Never);
         };
         let b = match rhs {
-            Some(r) => match self.word(r)? {
+            Some(r) => match operand(self, r, ScalarSide::Right)? {
                 Some(v) => Some(v),
                 None => return Ok(Val::Never),
             },
@@ -3039,11 +3040,16 @@ impl Lower<'_> {
         Ok(v)
     }
 
-    /// The scalar side of a broadcast: one word of the element's type.
-    fn agg_scalar(&mut self, src: &AggSrc, ty: MirTy) -> Result<ValueId, Refusal> {
-        match src {
-            AggSrc::Word(w) if self.b.value_ty(*w) == ty => Ok(*w),
-            _ => Err("aggregate scalar".into()),
+    /// The scalar side of a broadcast: one word of the element's type, a
+    /// two-word value boxed as an element is.
+    fn agg_scalar(&mut self, operand: HirId, ty: MirTy) -> Result<Option<ValueId>, Refusal> {
+        let word = match self.pair_tys(operand) {
+            Some(_) => self.boxed_word(operand)?,
+            None => self.word(operand)?,
+        };
+        match word {
+            Some(w) if self.b.value_ty(w) != ty => Err("aggregate scalar".into()),
+            word => Ok(word),
         }
     }
 
