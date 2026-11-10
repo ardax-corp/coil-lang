@@ -181,10 +181,22 @@ pub(crate) struct HirFnAdapt {
     /// Per parameter: the type to unbox it as (a bare type parameter the
     /// body passes boxed).
     pub(crate) unbox: Vec<Option<Ty>>,
+    /// How the adapter converts the function's result for the body, if
+    /// it does.
+    pub(crate) ret: Option<HirFnRet>,
+}
+
+/// The result conversion of a [`HirFnAdapt`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum HirFnRet {
     /// The niche layout of the function's result where the body reads it
     /// as an open `Option` / `Result`, its boxed enum object: the adapter
-    /// boxes the word.
-    pub(crate) ret: Option<ValueLayout>,
+    /// boxes the word (#2163).
+    Niche(ValueLayout),
+    /// A ground `-> ()` function where the body reads a bare type
+    /// parameter: the adapter returns the empty tuple object, the word a
+    /// `()` is wherever one is stored or passed (#2498).
+    Unit,
 }
 
 /// The shared-body ABI of a call to a bounded generic.
@@ -7127,7 +7139,9 @@ impl Compiler {
     /// is a niche word at the call's types (`Option<string>`). The shared
     /// body holds that value as its enum object and ground code as the
     /// niche word, inside an object both sides share, which no conversion
-    /// at the call reaches (#2441). Such a call takes a clone or is refused.
+    /// at the call reaches (#2441). The same for a function below the top
+    /// whose result is a bare type parameter at `()` (#2498). Such a call
+    /// takes a clone or is refused.
     fn hir_shared_split(&self, hir: &HirBody, call: HirId, lookup: &str, args: &[HirId]) -> bool {
         let Some((params, ret)) = self.checker.fn_call_sig(lookup, args.len()) else {
             return false;
@@ -7141,8 +7155,12 @@ impl Compiler {
         if let Some(ty) = Self::hir_ty(hir, call) {
             Self::bind_scheme_vars(&ret, &apply_ty_prune(self.checker.subst(), ty), &mut vars);
         }
-        let mut niche = |open: &Ty| self.hir_niche_word(&apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(open, &vars)));
-        params.iter().chain([&ret]).any(|ty| crate::layout::nested_open_enum(ty, true, &mut niche))
+        let ground = |open: &Ty| apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(open, &vars));
+        let mut niche = |open: &Ty| self.hir_niche_word(&ground(open));
+        let mut unit = |var: &Ty| crate::layout::is_unit(&ground(var));
+        params.iter().chain([&ret]).any(|ty| {
+            crate::layout::nested_open_enum(ty, true, &mut niche) || crate::layout::nested_fn_var_result(ty, true, &mut unit)
+        })
     }
 
     /// Whether the signature of generic `fqn` holds an open `Option` /
@@ -7155,7 +7173,10 @@ impl Compiler {
             .into_iter()
             .flatten()
             .chain(self.checker.fn_return_ty(fqn))
-            .any(|ty| crate::layout::nested_open_enum(&ty, true, &mut |_| true))
+            .any(|ty| {
+                crate::layout::nested_open_enum(&ty, true, &mut |_| true)
+                    || crate::layout::nested_fn_var_result(&ty, true, &mut |_| true)
+            })
     }
 
     /// Whether a shared body and ground code hold a value of `ty` as the
@@ -7444,13 +7465,21 @@ impl Compiler {
             unbox.push((bare && !open(&ta) && Self::ty_to_value_tag(&ta).is_some()).then_some(ta));
             (p, t) = (pr, tr);
         }
+        let is_fn = !unbox.is_empty();
+        if Self::nullary_fn_ty(param) {
+            unbox.clear();
+        }
         // A result the body reads as an open `Option` / `Result` (its
         // payload a type parameter) is that enum's object there, so a
         // niche word from a ground function is boxed first (#2163).
         let quantified = crate::typechecking::ty::ftv_ty(p).iter().any(|v| bounds.contains(v));
-        let ret = if quantified && !matches!(p, Ty::Var(_)) && !unbox.is_empty() {
+        let ret = if !is_fn {
+            None
+        } else if matches!(p, Ty::Var(v) if bounds.contains(v)) {
+            Self::hir_unit_ret(&apply_ty_prune(self.checker.subst(), t))
+        } else if quantified {
             let t = apply_ty_prune(self.checker.subst(), t);
-            Some(self.value_layout(&t)).filter(|l| *l != ValueLayout::Boxed && !open(&t))
+            Some(self.value_layout(&t)).filter(|l| *l != ValueLayout::Boxed && !open(&t)).map(HirFnRet::Niche)
         } else {
             None
         };
@@ -7461,7 +7490,8 @@ impl Compiler {
     /// function value needs where the callee's parameter is a function whose
     /// result is an open `Option` / `Result` (`T -> Result<U, E>`), which
     /// the body reads as its enum object, while the argument returns a
-    /// niche word (#2163). `None` where none is needed.
+    /// niche word (#2163); or a bare type parameter, while the argument
+    /// returns `()` ([`HirFnRet::Unit`], #2498). `None` where none is needed.
     pub(super) fn hir_open_ret_adapts(&self, hir: &HirBody, key: &str, args: &[HirId]) -> Vec<Option<HirFnAdapt>> {
         let none = vec![None; args.len()];
         let Some(scheme) = self.checker.env().lookup(key) else {
@@ -7488,12 +7518,18 @@ impl Compiler {
                     p = pr;
                     t = apply_ty_prune(self.checker.subst(), &tr);
                 }
-                if arity == 0 || matches!(p, Ty::Var(_)) || crate::typechecking::ty::ftv_ty(p).is_empty() {
+                if arity == 0 || crate::typechecking::ty::ftv_ty(p).is_empty() {
                     return None;
+                }
+                if Self::nullary_fn_ty(param) {
+                    arity = 0;
+                }
+                if matches!(p, Ty::Var(_)) {
+                    return Self::hir_unit_ret(&t).map(|ret| HirFnAdapt { unbox: vec![None; arity], ret: Some(ret) });
                 }
                 let layout = self.value_layout(&t);
                 (layout != ValueLayout::Boxed && crate::layout::ty_is_closed(&t))
-                    .then(|| HirFnAdapt { unbox: vec![None; arity], ret: Some(layout) })
+                    .then(|| HirFnAdapt { unbox: vec![None; arity], ret: Some(HirFnRet::Niche(layout)) })
             })
             .collect()
     }
@@ -7688,6 +7724,21 @@ impl Compiler {
         self.hir_closure_adapters.insert(adapt.clone(), label);
         self.hir_closure_adapter_tail.push((label, adapt.clone()));
         (label, operand)
+    }
+
+    /// Whether a function value of type `ty` takes no arguments: `fn() -> R`
+    /// is `() -> R`, and its calls pass nothing, so an adapter around it
+    /// takes and passes nothing either.
+    fn nullary_fn_ty(ty: &Ty) -> bool {
+        matches!(crate::typechecking::ty::strip_readonly(ty), Ty::Fun(param, _) if crate::layout::is_unit(param))
+    }
+
+    /// The unit conversion of a ground function's result `ground` that a
+    /// shared body reads as a bare type parameter: a `-> ()` function
+    /// returns nothing a caller reads, and the body stores or passes the
+    /// word it gets, which for a `()` is the empty tuple object (#2498).
+    fn hir_unit_ret(ground: &Ty) -> Option<HirFnRet> {
+        crate::layout::is_unit(ground).then_some(HirFnRet::Unit)
     }
 
     /// The adapter function [`Self::hir_closure_adapter`] reserved `label`
@@ -7908,10 +7959,21 @@ impl Compiler {
             let p = b.add_param(if tag.is_some() { MirTy::HeapRef } else { MirTy::I64 }).map_err(err)?;
             args.push(if tag.is_some() { b.ins_word_as(p, word).map_err(err)? } else { p });
         }
-        let Some(layout) = adapt.ret else {
-            let r = b.ins_call_indirect(f, args, MirTy::I64).map_err(err)?;
-            b.ret(Some(r)).map_err(err)?;
-            return b.finish().map_err(err);
+        let layout = match adapt.ret {
+            None => {
+                let r = b.ins_call_indirect(f, args, MirTy::I64).map_err(err)?;
+                b.ret(Some(r)).map_err(err)?;
+                return b.finish().map_err(err);
+            }
+            // The call for its effect, then the `()` word.
+            Some(HirFnRet::Unit) => {
+                b.ins_call_indirect(f, args, MirTy::I64).map_err(err)?;
+                let obj = b.ins_alloc(crate::mir::MirAllocKind::TUPLE, Vec::new()).map_err(err)?;
+                let obj = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, vec![obj]).map_err(err)?;
+                b.ret(Some(obj)).map_err(err)?;
+                return b.finish().map_err(err);
+            }
+            Some(HirFnRet::Niche(layout)) => layout,
         };
         let word = if layout == ValueLayout::NicheResult { MirTy::NicheRes } else { MirTy::NicheOpt };
         let w = b.ins_call_indirect(f, args, word).map_err(err)?;
