@@ -899,6 +899,30 @@ pub fn while_shape(body: &HirBody, loop_body: HirId) -> Option<(HirId, HirId)> {
     matches!(body.expr(*els).kind, HirKind::Break).then_some((*cond, *then))
 }
 
+/// A `while` loop's parts: the contract checks the builder runs ahead of
+/// each test (`invariant` / `decreases`), the condition and the body.
+pub struct WhileParts<'a> {
+    pub checks: &'a [HirId],
+    pub cond: HirId,
+    pub then: HirId,
+}
+
+/// The parts of the `while` whose `Loop` body is `loop_body`: as
+/// [`while_shape`], and through the contract checks ahead of the test.
+pub fn while_parts(body: &HirBody, loop_body: HirId) -> Option<WhileParts<'_>> {
+    let (cond, then) = while_shape(body, loop_body)?;
+    Some(WhileParts { checks: &[], cond, then })
+}
+
+/// The contract checks ahead of `for` loop `id`'s body, and the body as
+/// written.
+pub fn for_body_parts(body: &HirBody, id: HirId) -> Option<(&[HirId], HirId)> {
+    let HirKind::ForIn { body: own, .. } = body.expr(id).kind else {
+        return None;
+    };
+    Some((&[], own))
+}
+
 /// Payload fields an arm's pattern names, in declaration order: `Some(l)`
 /// for a binding, `None` for `_`. `Err` for a pattern that tests more than
 /// the outer tag.
@@ -1285,3 +1309,7 @@ pub fn stack_select(body: &HirBody, stack: &HashMap<u32, usize>, e: &super::HirE
     };
     !matches!(body.expr(index).kind, HirKind::Lit(Lit::Int(i)) if (0..n as i64).contains(&i))
 }
+
+#[cfg(test)]
+#[path = "query.tests.rs"]
+mod tests;
