@@ -328,6 +328,8 @@ only when **every** gate holds:
 | Purity | body calls only pure user functions; no index / field / static writes, no `break`, `return` or `yield`. Division and modulo need a non-zero literal divisor |
 | Stride | unit `+ 1`, or a positive constant `i = i + k` |
 | Types | the induction variable and `e` both infer to `int` — float reduction is not associative |
+| Sign | `+`: every term proved `>= 0`, or every term proved `<= 0`. `*`: every term proved `>= 1` or `<= -2`. `^`: any term. See [the sign rule](#the-sign-rule) |
+| Range | an inclusive end read at run time (`i <= n`, `a..=n`) is proved below `MAX`, so the fork-join's `n + 1` is in range |
 
 A site is keyed by its loop's source span and names its locals (index,
 accumulator, captures, bounds), so the plan finds it again in a body the HIR
@@ -388,6 +390,83 @@ loop performs too. The fork-join tests each `+` / `*` step before taking it
 `MIN / p` by sign) and reruns the range instead of trapping, so that panic
 too is raised by the loop's body.
 
+A dynamic range's trip count is the fork-join's own arithmetic, which the
+sequential loop never does. `hi - lo` is tested before it is taken, and so
+is its rounding up to whole strides: a range longer than an `int` holds
+runs on the calling thread, as one worker call. (The native engine's
+vector loop has the same subtraction and does not run such a range at all,
+[coil-lang#2522](https://github.com/ardax-corp/coil-lang/issues/2522).)
+
+### The sign rule
+
+A trapping `+` or `*` is not associative: a chunk folds from the identity,
+so it cannot see the running fold leave the `int` range part way through
+the chunk and come back
+([coil-lang#2423](https://github.com/ardax-corp/coil-lang/issues/2423)).
+`total = total + step(i)` from `MAX - 7`, where `step` is `10` for ten
+iterations and `-1` after, panics in the sequential program; each chunk's
+partial fits, and so does the fold of the partials.
+
+A loop is a site only when that cannot happen, which is a fact about the
+terms alone:
+
+- **`+`**, every term `>= 0` (or every term `<= 0`): the running sum only
+  moves one way, so once it is past an end of the range it stays past it,
+  and the whole fold is out of range too.
+- **`*`**, every term `>= 1` or `<= -2`: a value out of range is at least
+  `2^63` in magnitude and is not `-2^63`, and multiplied by such a term it
+  stays so. A `0` brings a product back, and so does a `-1` (`2^63 * -1`
+  is `MIN`), so neither is allowed. Terms that are only proved `>= 0` do
+  not qualify.
+- **`^`** never traps.
+
+Under the rule the checks that were already there are exact. If some
+running value of the sequential fold is out of range, the whole fold is;
+the chunks' partials and the fork-join's fold of them compute that whole
+fold with every step tested, so one of them fails and the range reruns
+sequentially, which panics where the program does. If no running value is
+out of range, a chunk's partial may still be (a product from `1` where the
+loop starts at `0`); that reruns too, and finishes. The chunk worker is
+the plain loop: the rule costs nothing at run time, and needs no trip
+count, so a dynamic range qualifies.
+
+A loop the rule refuses runs sequentially. `coil dissect --effects` names
+it (``loop over `i` in `run` not parallelized: the terms of its `+` fold
+onto `total` are not proved all `>= 0` or all `<= 0```).
+
+The proof is [`hir::par::sign`](../../compiler/src/hir/par/sign.rs)
+(`Signs`): an interval evaluation of the HIR as built. `int` arithmetic
+traps on overflow, so an operator's range is the exact arithmetic on its
+operands' ranges, cut to the `int` range. What it reads:
+
+| Source | Range |
+|---|---|
+| a literal; `x * x` | itself; not negative |
+| `+ - * / % ** & \| ^ << >>`, unary `-` and `!` | by the operator (`%` takes its dividend's sign, a shift count is `0..=63`, `<<` only where no bit is shifted out) |
+| the index | its range: the literal bounds, and for a bound read at run time what is known of that local. A `while` index is also read after its step |
+| a `let` nothing writes again | its initializer's range |
+| a `let` assigned later (in a callee) | the join of every value written to it, widened to a sign after two rounds (`s = s + i * i` from `0` is `>= 0`) |
+| a parameter or capture | anything, unless a condition narrows it |
+| `if c { … }`, `if c { return … }` / `if c { panic … }` ahead, a `match` on literals, a `for` loop's `invariant` | `c` narrows the locals nothing writes (`x < 0`, `x >= k`, `&&`, a failed `\|\|`) |
+| a `byte` value; structural `len()`; a node the checker proved non-negative | `0..=255`; `>= 0`; `>= 0` |
+| a module `const` (not a `static let`); an element of a `readonly` array literal a `const` names | its initializer's range; the join of the elements. A module `const` may also read `0`: one set at startup is a slot, which code run ahead of its initializer sees empty |
+| a call of a function of the module | the range of what its body returns for the ranges of the arguments (`weight(i)` with `i >= 0` for `fn weight(int i) { return i % 7; }`) |
+| anything else (a field, an element of a mutable array, a call through a trait or into another module, a recursive call) | anything |
+
+Unknown means not proved. What it does not prove today, by what stops it
+in the corpus and the examples:
+
+- a term scaled by a parameter of the enclosing function (`s + i * c`,
+  `acc + k`, `r * base`): the sign is the caller's. A guard ahead of the
+  loop settles it (`if c < 0 { return … }`); a run-time test of the
+  captures in the fork-join would too, and is not built;
+- an index from a start read at run time (`for x in lo..hi` with
+  `acc + x % 7`);
+- a term of either sign (`Result::Err(_) => -1`);
+- a value read from an object or a mutable array (`n.v + m.v`, `xs[0]`);
+- a range a function returns (`for x in make_range(n)`);
+- a function that calls itself (`even` / `odd`).
+
 ### A failed attempt reports nothing
 
 A parallel attempt is speculative: what the program prints and how it exits
@@ -419,10 +498,6 @@ One thing is left: a job cannot be cancelled. When an arm panics, the jobs
 still out are waited for, so the program ends later than the sequential
 one, and never if one of those arms does not terminate
 ([coil-lang#2442](https://github.com/ardax-corp/coil-lang/issues/2442)).
-
-A chunk cannot see an overflow the running fold only reaches part way
-through its range
-([coil-lang#2423](https://github.com/ardax-corp/coil-lang/issues/2423)).
 
 Array / dict / coro / user-`Iterator` `for` stays sequential: isolate IPA does not
 send the heap collection (that is C1 shared-heap steal, COI-365).
@@ -459,6 +534,8 @@ Still refuses (and why):
 | `i = i - 1` countdown | the split walks a positive stride |
 | `break` / heap writes in the body | independence unproven |
 | `if` arms that use different folds | one associative operator per loop |
+| a `+` fold whose terms are not proved to have one sign; a `*` fold with a term that may be `0` or `-1` | a chunk cannot see the running fold leave the range and come back (#2423, [the sign rule](#the-sign-rule)) |
+| `i <= n` / `a..=n` where `n` may be `MAX` | the fork-join adds one to the end; the sequential loop does not (#2423) |
 | a `for` under an `invariant` / `decreases` that reads a local the loop writes (the accumulator) | the clause is about the sequential state at that iteration; a chunk's fold starts at the identity (#2412). A clause over values the loop leaves alone is the same test in every chunk and stays, when it reads and calls only what a body may |
 | a `while` under any `invariant` / `decreases` | it runs its checks ahead of every test, the one that ends it too, and once when it runs no trips; no chunk worker does (#2450) |
 | array / dict / coro `for` | sendability (C1 leftover), not F2 |

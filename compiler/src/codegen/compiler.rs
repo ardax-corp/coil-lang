@@ -6630,7 +6630,7 @@ impl Compiler {
         if self.auto_par && self.opt_options.auto_par
             && let Some(hir) = self.hir_module.as_ref()
         {
-            self.loop_par_sites = hir.loop_par_sites(&self.checker, &self.pure_fns);
+            self.loop_par_sites = hir.loop_par_sites(&self.checker, module, &self.pure_fns);
             // E0805: the same detector with every user function an arm.
             for hint in hir.par_escape_hints(&self.checker, &hint_effects) {
                 let mut msg = Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());

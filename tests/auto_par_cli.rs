@@ -370,6 +370,169 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A fold of `step(i)` over `0..400000` from `start`: four chunks of
+/// 100000.
+fn fold_program(start: &str, op: &str, step: &str) -> String {
+    format!(
+        r#"
+use io::{{stdout, write}};
+use string::to_bytes;
+
+fn step(int i) -> int {{
+{step}
+}}
+
+fn run() -> int {{
+    let total = {start};
+    for i in 0..400000 {{
+        total = total {op} step(i);
+    }}
+    return total;
+}}
+
+fn main() {{
+    let r = run();
+    let _ = write(stdout(), to_bytes(r.show()));
+}}
+"#
+    )
+}
+
+/// A chunk folds from the identity, so its partial can stay in range
+/// where the running fold leaves it part way through the chunk and comes
+/// back. A fold whose terms are not proved to have one sign (for a
+/// product: none `0` or `-1`) runs sequentially (#2423).
+#[test]
+fn an_overflow_the_fold_only_reaches_inside_a_chunk_is_reported() {
+    let overflow = "panic: integer overflow at";
+    // Past `MAX` in the first ten iterations, back under it by the end.
+    let rises = "    if i < 10 {\n        return 10;\n    }\n    return 0 - 1;";
+    same_as_sequential("chunk-rises", &fold_program("9223372036854775800", "+", rises), overflow);
+    // Under `MIN` and back.
+    let dips = "    if i < 10 {\n        return 0 - 10;\n    }\n    if i < 30 {\n        return 10;\n    }\n    return 0;";
+    same_as_sequential("chunk-dips", &fold_program("0 - 9223372036854775800", "+", dips), overflow);
+    // In the third chunk alone, for two iterations.
+    let third = "    if i == 250000 {\n        return 900;\n    }\n    if i == 250001 {\n        return 0 - 900;\n    }\n    return 0;";
+    same_as_sequential("chunk-third", &fold_program("9223372036854775000", "+", third), overflow);
+    // A product past `MAX` that a zero brings back.
+    let zeroed = "    if i == 5 {\n        return 2;\n    }\n    if i == 6 {\n        return 0;\n    }\n    return 1;";
+    same_as_sequential("chunk-product-zeroed", &fold_program("4611686018427387904", "*", zeroed), overflow);
+    // `MIN` fits; its negation does not.
+    let negated = "    if i == 300000 {\n        return 2;\n    }\n    if i == 300001 {\n        return 0 - 1;\n    }\n    return 1;";
+    same_as_sequential("chunk-product-negated", &fold_program("0 - 4611686018427387904", "*", negated), overflow);
+}
+
+/// Nothing is reported for a fold that stays in range: one that touches
+/// `MAX` or `MIN` inside a chunk, and a product from zero whose chunks
+/// overflow on their own.
+#[test]
+fn a_fold_that_stays_in_range_inside_its_chunks_reports_nothing() {
+    let touches = "    if i == 250000 {\n        return 807;\n    }\n    if i == 250001 {\n        return 0 - 900;\n    }\n    return 0;";
+    same_as_sequential("chunk-touches-max", &fold_program("9223372036854775000", "+", touches), "");
+    let least = "    if i == 300000 {\n        return 2;\n    }\n    return 1;";
+    same_as_sequential("chunk-product-min", &fold_program("0 - 4611686018427387904", "*", least), "");
+    let flips = "    if i == 300000 {\n        return 0 - 2;\n    }\n    if i == 300007 {\n        return 0;\n    }\n    return 1;";
+    same_as_sequential("chunk-product-flips", &fold_program("4611686018427387904", "*", flips), "");
+    same_as_sequential("chunk-product-from-zero", &fold_program("0", "*", "    return 3;"), "");
+    same_as_sequential("chunk-sum", &fold_program("7", "+", "    return i % 7 - 3;"), "");
+}
+
+/// Folds that stay parallel, whose terms have one sign: the running fold
+/// leaves the range only when the whole fold does, and the fork-join's
+/// own tests see that.
+#[test]
+fn a_fold_of_one_signed_terms_is_the_sequential_one() {
+    let overflow = "panic: integer overflow at";
+    // The sum passes `MAX` in the last chunk and stays past it.
+    let late = "    if i == 250000 {\n        return 900;\n    }\n    return i % 2;";
+    same_as_sequential("signed-sum-overflows", &fold_program("9223372036854575007", "+", late), overflow);
+    same_as_sequential("signed-sum-fits", &fold_program("9223372036854575007", "+", "    return i % 2;"), "");
+    // Downwards, to `MIN` exactly and one past it.
+    let down = "    if i % 100000 == 7 {\n        return 0 - 2;\n    }\n    return 0;";
+    same_as_sequential("signed-sum-to-min", &fold_program("0 - 9223372036854775800", "+", down), "");
+    same_as_sequential("signed-sum-under-min", &fold_program("0 - 9223372036854775801", "+", down), overflow);
+    // A product of terms that are `1` or more, to `MIN` exactly and past it.
+    let doubles = "    if i % 100000 == 9 {\n        return 2;\n    }\n    return 1;";
+    same_as_sequential("signed-product-to-min", &fold_program("0 - 576460752303423488", "*", doubles), "");
+    same_as_sequential("signed-product-past-min", &fold_program("0 - 576460752303423489", "*", doubles), overflow);
+    same_as_sequential("signed-product-past-max", &fold_program("576460752303423488", "*", doubles), overflow);
+    // Terms of `-2` and `1`: the sign turns, the size only grows.
+    let turns = "    if i % 100000 == 9 {\n        return 0 - 2;\n    }\n    return 1;";
+    same_as_sequential("signed-product-turns-to-min", &fold_program("0 - 576460752303423488", "*", turns), "");
+    same_as_sequential("signed-product-turns-past", &fold_program("576460752303423488", "*", turns), overflow);
+}
+
+/// `program` prints, reports and exits the same with auto-par on as with
+/// it off on the MIR interpreter, at any worker count, whatever that is.
+fn on_matches_off(name: &str, program: &str) {
+    let dir = std::env::temp_dir().join(format!("coil-auto-par-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join(format!("{name}.coil"));
+    std::fs::write(&src, program).expect("write source");
+    let off = observed(&src, &["--mir", "--auto-par", "off"], None);
+    for workers in [None, Some("1"), Some("8")] {
+        let on = observed(&src, &["--mir", "--auto-par", "on"], workers);
+        assert_eq!(on, off, "{name} with {workers:?} workers: auto-par on, then off");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A loop of `shape` over `a` to `b`, called with `bounds`, folding
+/// `term(i)` with `^`.
+fn range_program(shape: &str, term: &str, bounds: &str) -> String {
+    format!(
+        r#"
+use io::{{stdout, write}};
+use string::to_bytes;
+
+fn term(int i) -> int {{
+    return {term};
+}}
+
+fn run(int a, int b) -> int {{
+    let total = 0;
+{shape}
+    return total;
+}}
+
+fn main() {{
+    let r = run({bounds});
+    let _ = write(stdout(), to_bytes(r.show()));
+}}
+"#
+    )
+}
+
+/// The fork-join works out a range's trip count, which the sequential
+/// loop never does: a range longer than an `int` holds, or an inclusive
+/// end of `MAX`, runs as the sequential loop does and panics only where
+/// that does (#2423).
+#[test]
+fn a_range_at_the_edge_of_int_runs_as_the_sequential_loop_does() {
+    let for_to = "    for i in a..b {\n        total = total ^ term(i);\n    }";
+    let for_through = "    for i in a..=b {\n        total = total ^ term(i);\n    }";
+    let while_to = "    let i = a;\n    while i < b {\n        total = total ^ term(i);\n        i = i + 1;\n    }";
+    let while_through = "    let i = a;\n    while i <= b {\n        total = total ^ term(i);\n        i = i + 1;\n    }";
+    let by_three = "    let i = a;\n    while i < b {\n        total = total ^ term(i);\n        i = i + 3;\n    }";
+    // Through `MAX`: a `for` ends there, a `while` traps on its step.
+    let top = "9223372036854775707, 9223372036854775807";
+    same_as_sequential("edge-for-through-max", &range_program(for_through, "i % 7", top), "");
+    same_as_sequential("edge-while-through-max", &range_program(while_through, "i % 7", top), "panic: integer overflow at");
+    same_as_sequential("edge-for-to-max", &range_program(for_to, "i % 7", top), "");
+    same_as_sequential("edge-while-to-max", &range_program(while_to, "i % 7", top), "");
+    // From far below zero to far above it: `b - a` is not an `int`. The
+    // fourth iteration divides by zero. On the MIR interpreter only: the
+    // native engine's vector loop does not run such a range, with
+    // auto-par on or off (#2522).
+    let wide = "0 - 9223372036854775807, 9223372036854775807";
+    let fourth = "100 / (i + 9223372036854775804)";
+    on_matches_off("edge-for-wide", &range_program(for_to, fourth, wide));
+    on_matches_off("edge-while-wide", &range_program(while_to, fourth, wide));
+    on_matches_off("edge-stride-wide", &range_program(by_three, "100 / (i + 9223372036854775801)", wide));
+    // A stride whose rounding up would pass `MAX`.
+    on_matches_off("edge-stride-long", &range_program(by_three, "100 / (i - 9)", "0, 9223372036854775806"));
+}
+
 /// `fib` with `body` after its base case and `clause` on its signature,
 /// printed at 27: deep enough for a fork worker.
 fn fib_program(clause: &str, body: &str) -> String {

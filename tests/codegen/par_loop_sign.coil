@@ -1,0 +1,313 @@
+// A chunk of a parallel loop folds from the identity, so it cannot see the
+// running fold leave the `int` range and come back. A loop is split only
+// when the terms of its fold are proved to have one sign (for a product:
+// none `0` or `-1`); any other runs sequentially and panics where the
+// running fold does (#2423). Results are checked against the same fold
+// written with `break`, which always runs sequentially.
+use task::{scope, Scope, TaskError};
+use tests::assert;
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task: its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+static let ZERO: int = 0;
+
+// `x`, as a value no call can be computed from at compile time.
+fn vary(int x) -> int {
+    return x + ZERO;
+}
+
+const WEIGHTS = readonly [3, 1, 4, 1, 5, 9, 2, 6];
+
+fn abs(int x) -> int {
+    if x < 0 {
+        return 0 - x;
+    }
+    return x;
+}
+
+// Over `0..400000` these add up to 1949999.
+fn weight(int i) -> int {
+    return WEIGHTS[i & 7] + i % 3;
+}
+
+// Ten up, then one down for the rest of the range.
+fn rises(int i) -> int {
+    if i < 10 {
+        return 10;
+    }
+    return 0 - 1;
+}
+
+// The term a loop below folds.
+fn term(int kind, int i, int k) -> int {
+    return match kind {
+        0 => weight(i),
+        1 => abs(i - 200000),
+        2 => rises(i),
+        3 => i * k,
+        4 => 0 - weight(i),
+        default => 0,
+    };
+}
+
+// A sum from `start`, written so it is never split.
+fn expected(int kind, int start, int n, int k) -> int {
+    let total = start;
+    let i = 0;
+    while true {
+        if i >= n {
+            break;
+        }
+        total = total + term(kind, i, k);
+        i = i + 1;
+    }
+    return total;
+}
+
+// Terms that are not negative: split.
+fn up(int n) -> int {
+    let total = 7;
+    for i in 0..n {
+        total = total + weight(i);
+    }
+    return total;
+}
+
+// To `MAX` exactly over `0..400000`.
+fn up_to_max(int n) -> int {
+    let total = 9223372036852825808;
+    for i in 0..n {
+        total = total + weight(i);
+    }
+    return total;
+}
+
+fn up_past_max(int n) -> int {
+    let total = 9223372036852825809;
+    for i in 0..n {
+        total = total + weight(i);
+    }
+    return total;
+}
+
+fn distance(int n) -> int {
+    let total = 3;
+    for i in 0..n {
+        total = total + abs(i - 200000);
+    }
+    return total;
+}
+
+// Terms that are not positive: split.
+fn down(int n) -> int {
+    let total = 11;
+    for i in 0..n {
+        total = total + (0 - weight(i));
+    }
+    return total;
+}
+
+// Four terms of `-2^61` over `0..400000`, the rest `0`.
+fn sinking(int i) -> int {
+    if i % 100000 == 9 {
+        return 0 - 2305843009213693952;
+    }
+    return 0;
+}
+
+// To `MIN` exactly over `0..400000`.
+fn down_to_min(int n) -> int {
+    let total = 0;
+    for i in 0..n {
+        total = total + sinking(i);
+    }
+    return total;
+}
+
+// One more, at the last index.
+fn down_past_min(int n) -> int {
+    let total = 0;
+    for i in 0..n {
+        total = total + (sinking(i) - i / 399999);
+    }
+    return total;
+}
+
+// Terms of either sign: sequential. From here the sum passes `MAX` in
+// its first ten terms and is back under it by the end.
+fn mixed_past_max(int n) -> int {
+    let total = 9223372036854775800;
+    for i in 0..n {
+        total = total + rises(i);
+    }
+    return total;
+}
+
+fn mixed(int n) -> int {
+    let total = 9223372036854775000;
+    for i in 0..n {
+        total = total + rises(i);
+    }
+    return total;
+}
+
+// The sign of `k` is the caller's: sequential, unless a guard settles it.
+fn scaled(int n, int k) -> int {
+    let total = 1;
+    for i in 0..n {
+        total = total + i * k;
+    }
+    return total;
+}
+
+fn scaled_up(int n, int k) -> int {
+    if k < 0 {
+        return 0;
+    }
+    let total = 1;
+    for i in 0..n {
+        total = total + i * k;
+    }
+    return total;
+}
+
+// Four terms of `2` over `0..400000`, the rest `1`: split.
+fn doubling(int i) -> int {
+    if i % 100000 == 9 {
+        return 2;
+    }
+    return 1;
+}
+
+fn product(int n) -> int {
+    let total = 3;
+    for i in 0..n {
+        total = total * doubling(i);
+    }
+    return total;
+}
+
+// Terms of `-2`: the sign turns each time and the size only grows.
+// `4 * (-2)^61` is `MIN`.
+fn product_turning(int n) -> int {
+    let total = 4;
+    for i in 0..n {
+        total = total * (0 - 2);
+    }
+    return total;
+}
+
+fn product_past_max(int n) -> int {
+    let total = 576460752303423488;
+    for i in 0..n {
+        total = total * doubling(i);
+    }
+    return total;
+}
+
+fn zeroing(int i) -> int {
+    if i == 5 {
+        return 2;
+    }
+    if i == 6 {
+        return 0;
+    }
+    return 1;
+}
+
+// A term of `0`: sequential. The product passes `MAX` at the sixth term,
+// and the seventh would bring it back.
+fn zeroed(int n) -> int {
+    let total = 4611686018427387904;
+    for i in 0..n {
+        total = total * zeroing(i);
+    }
+    return total;
+}
+
+// `^` never traps: split whatever the terms.
+fn mixed_xor(int n) -> int {
+    let total = 0;
+    for i in 0..n {
+        total = total ^ rises(i);
+    }
+    return total;
+}
+
+test("sums of one-signed terms equal the sequential loop's") {
+    for n in [400000, 399999, 21, 20, 1, 0, 0 - 5] {
+        assert!(up(n) == expected(0, 7, n, 0));
+        assert!(distance(n) == expected(1, 3, n, 0));
+        assert!(down(n) == expected(4, 11, n, 0));
+        assert!(scaled_up(n, 3) == expected(3, 1, n, 3));
+    }
+    assert!(scaled_up(vary(400000), 0 - 3) == 0);
+}
+
+test("sums of terms of either sign equal the sequential loop's") {
+    for n in [400000, 21, 0] {
+        assert!(mixed(n) == expected(2, 9223372036854775000, n, 0));
+        assert!(scaled(n, 3) == expected(3, 1, n, 3));
+        assert!(scaled(n, 0 - 3) == expected(3, 1, n, 0 - 3));
+    }
+}
+
+test("a sum that leaves the range inside a chunk and comes back panics") {
+    let n = vary(400000);
+    assert!(outcome(fn () use (n) => mixed_past_max(n)) == "integer overflow");
+    assert!(mixed(n) == 9223372036854775000 + 100 - 399990);
+}
+
+test("a one-signed sum panics exactly when the whole fold leaves the range") {
+    let n = vary(400000);
+    let least = 0 - 9223372036854775807 - 1;
+    assert!(up_to_max(n) == 9223372036854775807);
+    assert!(outcome(fn () use (n) => up_past_max(n)) == "integer overflow");
+    assert!(down_to_min(n) == least);
+    assert!(outcome(fn () use (n) => down_past_min(n)) == "integer overflow");
+}
+
+test("a product of terms of one or more panics exactly when it leaves the range") {
+    let n = vary(400000);
+    let least = 0 - 9223372036854775807 - 1;
+    assert!(product(n) == 48);
+    assert!(outcome(fn () use (n) => product_past_max(n)) == "integer overflow");
+    assert!(product_turning(vary(60)) == 4611686018427387904);
+    assert!(product_turning(vary(61)) == least);
+    let more = vary(62);
+    assert!(outcome(fn () use (more) => product_turning(more)) == "integer overflow");
+}
+
+test("a product a zero brings back panics where it left the range") {
+    let n = vary(400000);
+    assert!(outcome(fn () use (n) => zeroed(n)) == "integer overflow");
+    assert!(zeroed(vary(5)) == 4611686018427387904);
+}
+
+test("an xor of terms of either sign equals the sequential loop's") {
+    let n = vary(400000);
+    let total = 0;
+    let i = 0;
+    while true {
+        if i >= n {
+            break;
+        }
+        total = total ^ rises(i);
+        i = i + 1;
+    }
+    assert!(mixed_xor(n) == total);
+}
