@@ -421,6 +421,7 @@ fn collect_generic_functions(
                         .any(|ty| {
                             crate::layout::nested_open_enum(checker, &ty, true, &crate::layout::nested_open_look(checker), &mut |_| true)
                                 || crate::layout::nested_fn_var_result(&ty, true, &mut |_| true)
+                                || crate::layout::nested_fn_field(checker, &ty, &crate::layout::nested_open_look(checker))
                         });
                     sigs.insert(name.to_string(), sig.clone());
                     if !module.is_empty() {

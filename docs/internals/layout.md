@@ -228,6 +228,17 @@ its nested enums. That fails where another module fills such a field
 itself (a `pub` one, #2547). In coil-stdlib only `collections::deque::VecDeque`
 (`buf: Vec<Option<T>>`) has the shape; in the prelude, `task::Channel`.
 
+**Functions in fields and payloads** (#2511). A function over a type
+parameter in a user class's field or enum payload (`Slot<T>` with `f:
+fn(T) -> T`, `G<T>` with `F(fn(T) -> T)`) crosses a shared body inside
+the object too: a ground function takes a `float` or `bool` as its own
+MIR type and a two-word value as two words, while one the shared body
+made (`fn (T x) => x`) or adapted (a function argument) takes their
+words. So a signature that holds such a type (`layout::nested_fn_field`,
+the same walk over the declarations) takes a clone for every ground
+call, past the budget, through the same two rules (`GenericFnSig::split`,
+`fn_sig_split`).
+
 Still refused (E0801): an enum payload or field `Option<fn(T) -> T>` (a
 niche word at a ground instance, an enum object in a shared body), and a
 function that holds the parameter below its top in another way

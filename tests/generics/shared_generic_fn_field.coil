@@ -1,0 +1,77 @@
+// A generic signature that holds a function over its parameter in a class
+// field or an enum payload (`Slot<T>` with `f: fn(T) -> T`, `G<T>` with
+// `F(fn(T) -> T)`) takes a clone for every ground call, past the clone
+// budget too (#2511): a ground function takes a `float` or `bool` as its
+// own MIR type and a pair as two words, a function the shared body made or
+// adapted takes their words, and nothing converts it inside the object.
+// @flags --clone-budget 0
+use tests::assert;
+
+class Slot<T> {
+    pub f: fn(T) -> T,
+    pub v: T,
+}
+
+enum G<T> {
+    F(fn(T) -> T),
+    N,
+}
+
+fn half(float x) -> float {
+    return x / 2.0;
+}
+
+fn not(bool b) -> bool {
+    return !b;
+}
+
+fn ident<T>(T v) -> Slot<T> {
+    return new Slot(fn (T x) => x, v);
+}
+
+fn wrap<T>(fn(T) -> T f, T v) -> Slot<T> {
+    return new Slot(f, v);
+}
+
+fn lift<T>(fn(T) -> T f) -> G<T> {
+    return G::F(f);
+}
+
+fn none_of<T>(T _x) -> G<T> {
+    return G::N;
+}
+
+fn run<T>(G<T> g, T x) -> T {
+    return match g {
+        G::F(f) => f(x),
+        G::N => x,
+    };
+}
+
+fn reset<T>(Slot<T> s) {
+    s.f = fn (T x) => x;
+}
+
+test("a class built by a generic function, called by ground code") {
+    assert!((ident(1.5).f)(4.0) == 4.0);
+    assert!((wrap(half, 1.0).f)(4.0) == 2.0);
+    assert!((wrap(not, true).f)(true) == false);
+    let p = ident((1, 2.5));
+    let r = (p.f)((3, 0.5));
+    assert!(r[0] == 3 && r[1] == 0.5);
+    let s = new Slot(half, 2.0);
+    reset(s);
+    assert!((s.f)(8.0) == 8.0);
+}
+
+test("an enum built by a generic function") {
+    assert!(run(lift(half), 3.0) == 1.5);
+    assert!(run(lift(not), false));
+    assert!(run(none_of(2.5), 7.5) == 7.5);
+    let g = lift(half);
+    let n = match g {
+        G::F(f) => f(1.0),
+        G::N => 0.0,
+    };
+    assert!(n == 0.5);
+}
