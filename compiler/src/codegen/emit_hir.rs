@@ -10461,13 +10461,28 @@ impl Compiler {
             for par in std::mem::take(&mut emit.par_tail) {
                 // The site planned as a parallel loop, so its worker and
                 // fork-join both lower to direct MIR.
-                let Some((_, worker)) = Self::hir_par_worker_body(&hir, &par).and_then(|w| self.hir_par_worker_fn(&w))
-                else {
+                let Some(body) = Self::hir_par_worker_body(&hir, &par) else {
                     panic!("internal error: parallel loop worker without direct MIR");
                 };
+                let Some((_, worker)) = self.hir_par_worker_fn(&body) else {
+                    panic!("internal error: parallel loop worker without direct MIR");
+                };
+                // A `+` / `*` fold's chunks run a second worker, which
+                // also follows the least and greatest value its partial
+                // takes (#2423).
+                let tracked = match par.site.op {
+                    crate::hir::par::LoopReduceOp::Xor => None,
+                    _ => {
+                        let body = self.hir_par_tracked_body(&body);
+                        let Some((_, tracked)) = self.hir_par_worker_fn(&body) else {
+                            panic!("internal error: parallel loop chunk worker without direct MIR");
+                        };
+                        Some(tracked)
+                    }
+                };
                 let HirParSite { site, driver, natives, begin, end, .. } = par;
-                if !self.hir_par_driver_fn(&site, &driver, &worker, natives, (begin, end)) {
-                    panic!("internal error: parallel loop driver without direct MIR");
+                if !self.hir_par_driver_fn(&site, &driver, (&worker, tracked.as_deref()), natives, (begin, end)) {
+                    panic!("internal error: parallel loop driver without direct MIR: {:?}", self.hir_refusal);
                 }
             }
         }
@@ -10483,7 +10498,7 @@ impl Compiler {
         &mut self,
         site: &crate::hir::par::LoopParSite,
         driver: &str,
-        worker: &str,
+        (worker, tracked): (&str, Option<&str>),
         (spawn_id, join_id): (usize, usize),
         (begin, end): (bool, bool),
     ) -> bool {
@@ -10491,11 +10506,15 @@ impl Compiler {
         let (Some(spawn), Some(join)) = (name_of(spawn_id), name_of(join_id)) else {
             return false;
         };
-        let hir = self.hir_par_driver_body(site, driver, worker, (spawn, join), (begin, end));
+        let hir = self.hir_par_driver_body(site, driver, (worker, tracked), (spawn, join), (begin, end));
         let words = hir.params.len() as u32;
         let arity = 3 + site.live_captures.len();
         self.fn_arities.insert(driver.to_string(), (words, false));
-        let calls = HashMap::from([(worker.to_string(), (vec![ValueLayout::Boxed; arity], ValueLayout::Boxed))]);
+        let mut calls = HashMap::from([(worker.to_string(), (vec![ValueLayout::Boxed; arity], ValueLayout::Boxed))]);
+        if let Some(tracked) = tracked {
+            let ret = self.value_layout(&Self::par_tracked_ty());
+            calls.insert(tracked.to_string(), (vec![ValueLayout::Boxed; arity], ret));
+        }
         let bind = driver.to_string();
         let lowered = self.lower_synth_hir(&hir, calls, move |c: &mut Self| {
             c.bind_function_entry(bind);
@@ -10518,7 +10537,7 @@ impl Compiler {
         &self,
         site: &crate::hir::par::LoopParSite,
         driver: &str,
-        worker: &str,
+        (worker, tracked): (&str, Option<&str>),
         (spawn, join): (&str, &str),
         (has_begin, has_end): (bool, bool),
     ) -> HirBody {
@@ -10545,10 +10564,13 @@ impl Compiler {
         let end = has_end.then(|| param(&mut b));
 
         let arity = 3 + live.len();
-        let worker_ty = (0..arity).fold(int.clone(), |acc, _| Ty::Fun(Box::new(coil_ty::int()), Box::new(acc)));
+        // What a chunk returns: its partial, or with a tracked worker the
+        // partial with the least and greatest value it took on the way.
+        let chunk_ty = if tracked.is_some() { Self::par_tracked_ty() } else { int.clone() };
+        let worker_ty = (0..arity).fold(chunk_ty.clone(), |acc, _| Ty::Fun(Box::new(coil_ty::int()), Box::new(acc)));
         let thread_err = Ty::Con(common::BUILTIN_THREAD_ERROR_ENUM.into());
-        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(int.clone()), thread_err.clone());
-        let joined_ty = coil_ty::result_ty(int.clone(), thread_err);
+        let spawned_ty = coil_ty::result_ty(coil_ty::thread_ty(chunk_ty.clone()), thread_err.clone());
+        let joined_ty = coil_ty::result_ty(chunk_ty.clone(), thread_err);
         let fold_op = match site.op {
             LoopReduceOp::Add => BinOp::IntAdd,
             LoopReduceOp::Mul => BinOp::IntMul,
@@ -10557,7 +10579,7 @@ impl Compiler {
 
         let mut stmts = Vec::new();
         let f = b.local("__coil_par_fn", worker_ty.clone(), LocalKind::Temp);
-        let global = b.push(HirKind::Global { name: worker.to_string(), def: None }, worker_ty);
+        let global = b.push(HirKind::Global { name: tracked.unwrap_or(worker).to_string(), def: None }, worker_ty);
         stmts.push(b.let_(f, global));
 
         let read = |b: &mut Synth, x: Bound| match x {
@@ -10582,9 +10604,19 @@ impl Compiler {
         // A range of one or more chunks: spawn each, then join and fold.
         let fork = |b: &mut Synth, chunks: &[(Bound, Bound)], whole: (Bound, Bound)| -> HirId {
             let handles: Vec<LocalId> =
-                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(coil_ty::int()), LocalKind::Pattern)).collect();
+                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(chunk_ty.clone()), LocalKind::Pattern)).collect();
             let partials: Vec<LocalId> =
                 (0..chunks.len()).map(|i| b.local(&format!("__coil_par_part{i}"), coil_ty::int(), LocalKind::Pattern)).collect();
+            // A tracked chunk's least and greatest running partial.
+            let extremes: Vec<Option<(LocalId, LocalId)>> = (0..chunks.len())
+                .map(|i| {
+                    tracked.map(|_| {
+                        let least = b.local(&format!("__coil_par_least{i}"), coil_ty::int(), LocalKind::Pattern);
+                        let most = b.local(&format!("__coil_par_most{i}"), coil_ty::int(), LocalKind::Pattern);
+                        (least, most)
+                    })
+                })
+                .collect();
             // Innermost first: the fold, then each join, then each spawn.
             // A step of the fold that would overflow is one the sequential
             // loop takes too, so the whole range runs here instead and
@@ -10592,7 +10624,20 @@ impl Compiler {
             let mut fold = Vec::new();
             let mut value = acc;
             for (j, &p) in partials.iter().enumerate() {
-                if let Some(over) = crate::hir::synth::int_overflows(b, fold_op, value, p) {
+                // The running fold inside the chunk is the fold so far
+                // combined with each value the chunk's partial took: it
+                // leaves the range iff it does at the least or the
+                // greatest of them (`x -> a + x` and `x -> a * x` are
+                // monotone). The partial itself lies between the two.
+                let over = match extremes[j] {
+                    Some((least, most)) => {
+                        let low = crate::hir::synth::int_overflows(b, fold_op, value, least);
+                        let high = crate::hir::synth::int_overflows(b, fold_op, value, most);
+                        low.zip(high).map(|(low, high)| b.push(HirKind::Logic { and: false, lhs: low, rhs: high }, coil_ty::boolean()))
+                    }
+                    None => crate::hir::synth::int_overflows(b, fold_op, value, p),
+                };
+                if let Some(over) = over {
                     let rerun = seq(b, whole.0, whole.1);
                     let rerun = b.block(vec![rerun], None, coil_ty::never());
                     fold.push(b.if_(over, rerun, None, coil_ty::unit()));
@@ -10613,7 +10658,19 @@ impl Compiler {
                 let failed = b.block(failed, None, coil_ty::never());
                 let h = b.read(handles[j]);
                 let joining = b.call(join, vec![h], joined_ty.clone());
-                let (ok, err) = (b.result_pat(true, HirPat::Bind(partials[j])), b.result_pat(false, HirPat::Wild));
+                // A tracked chunk's three values come apart under the join.
+                let part = match extremes[j] {
+                    Some((least, most)) => {
+                        let chunk = b.local(&format!("__coil_par_chunk{j}"), chunk_ty.clone(), LocalKind::Pattern);
+                        let pat = HirPat::Tuple(vec![HirPat::Bind(partials[j]), HirPat::Bind(least), HirPat::Bind(most)]);
+                        let init = b.read(chunk);
+                        let apart = b.push(HirKind::LetPat { pat, init }, coil_ty::unit());
+                        tail = b.block(vec![apart, tail], None, coil_ty::never());
+                        chunk
+                    }
+                    None => partials[j],
+                };
+                let (ok, err) = (b.result_pat(true, HirPat::Bind(part)), b.result_pat(false, HirPat::Wild));
                 tail = b.match_(joining, vec![(ok, tail), (err, failed)], coil_ty::never());
             }
             for i in (0..chunks.len()).rev() {
@@ -10793,6 +10850,85 @@ impl Compiler {
         w.contract_spans.clear();
         w.root = Some(root);
         Some(w)
+    }
+
+    /// What a tracked chunk worker returns: `(partial, least, greatest)`.
+    fn par_tracked_ty() -> Ty {
+        let int = crate::typechecking::ty::int;
+        crate::typechecking::ty::tuple(vec![int(), int(), int()])
+    }
+
+    /// Chunk worker `w` ([`Self::hir_par_worker_body`]) following the
+    /// least and greatest value its accumulator takes, the starting one
+    /// included, and returning them with it: after every assignment to
+    /// the accumulator, `if acc > most { most = acc }` and the same for
+    /// `least` (#2423).
+    fn hir_par_tracked_body(&self, w: &HirBody) -> HirBody {
+        use crate::hir::{HirExpr, HirLocal, LocalKind, MakeKind};
+        let mut w = w.clone();
+        let acc = w.params[2];
+        let int = w.local(acc).ty.clone().expect("the accumulator is an int");
+        let unit = Some(Ty::Con(crate::typechecking::ty::UNIT.into()));
+        let boolean = Some(Ty::Con(crate::typechecking::ty::BOOL.into()));
+        let local = |w: &mut HirBody, name: &str| {
+            w.locals.push(HirLocal { name: name.to_string(), ty: Some(int.clone()), kind: LocalKind::Temp, captured: false, borrow: false });
+            LocalId(w.locals.len() as u32 - 1)
+        };
+        let (least, most) = (local(&mut w, "__coil_par_least"), local(&mut w, "__coil_par_most"));
+        let node = |w: &mut HirBody, kind: HirKind, ty: Option<Ty>, layout: crate::layout::Layout| {
+            w.exprs.push(HirExpr { kind, ty, layout, span: (0, 0), node: None, flags: HirFlags::default() });
+            HirId(w.exprs.len() as u32 - 1)
+        };
+        let word = || crate::layout::Layout::Word;
+        let read = |w: &mut HirBody, l: LocalId| node(w, HirKind::Local(l), Some(int.clone()), word());
+        let root = w.root.expect("worker root");
+        // Every assignment to the accumulator, then the two tests.
+        let mut folds = Vec::new();
+        w.visit_ids(root, &mut |id| {
+            if let HirKind::Assign { place, .. } = w.expr(id).kind
+                && matches!(w.expr(place).kind, HirKind::Local(l) if l == acc)
+            {
+                folds.push(id);
+            }
+        });
+        for id in folds {
+            let assign = w.exprs[id.0 as usize].clone();
+            w.exprs.push(assign);
+            let assign = HirId(w.exprs.len() as u32 - 1);
+            let mut stmts = vec![assign];
+            for (bound, op) in [(most, BinOp::Gt), (least, BinOp::Lt)] {
+                let (a, m) = (read(&mut w, acc), read(&mut w, bound));
+                let cond = node(&mut w, HirKind::Bin { op, lhs: a, rhs: m }, boolean.clone(), word());
+                let (place, value) = (read(&mut w, bound), read(&mut w, acc));
+                let set = node(&mut w, HirKind::Assign { place, value }, unit.clone(), word());
+                let then = node(&mut w, HirKind::Block { stmts: vec![set], tail: None }, unit.clone(), word());
+                stmts.push(node(&mut w, HirKind::If { cond, then, els: None }, unit.clone(), word()));
+            }
+            let span = w.exprs[id.0 as usize].span;
+            w.exprs[id.0 as usize] =
+                HirExpr { kind: HirKind::Block { stmts, tail: None }, ty: unit.clone(), layout: word(), span, node: None, flags: HirFlags::default() };
+        }
+        let HirKind::Block { stmts, .. } = &w.exprs[root.0 as usize].kind else { unreachable!("a worker's root is a block") };
+        let mut stmts = stmts.clone();
+        // `return acc` is the last statement: return the three instead.
+        let ret = stmts.pop().expect("a worker returns");
+        let ty = Self::par_tracked_ty();
+        let layout = crate::layout::of_resolved(&self.checker, &ty);
+        let parts = vec![read(&mut w, acc), read(&mut w, least), read(&mut w, most)];
+        let made = node(&mut w, HirKind::Make { kind: MakeKind::Tuple, args: parts }, Some(ty.clone()), layout.clone());
+        w.exprs[ret.0 as usize].kind = HirKind::Return(Some(made));
+        stmts.push(ret);
+        let mut head = Vec::new();
+        for bound in [least, most] {
+            let init = read(&mut w, acc);
+            head.push(node(&mut w, HirKind::Let { local: bound, init: Some(init) }, unit.clone(), word()));
+        }
+        head.extend(stmts);
+        let HirKind::Block { stmts, .. } = &mut w.exprs[root.0 as usize].kind else { unreachable!("a worker's root is a block") };
+        *stmts = head;
+        w.ret = Some(ty);
+        w.ret_layout = layout;
+        w
     }
 
     /// Emit the chunk worker body `w` as its own function, the way a
