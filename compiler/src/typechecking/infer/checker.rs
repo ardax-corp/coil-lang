@@ -20563,6 +20563,12 @@ impl Checker {
 
     /// User class of the expression at `span` (a method-call receiver), as
     /// its module-qualified key.
+    /// The inferred type of the expression at `span`.
+    pub(crate) fn ty_at_span(&self, span: (usize, usize)) -> Option<Ty> {
+        self.lookup_for_codegen_span(span.0, span.1)
+            .or_else(|| self.lookup_at(*self.node_ids_by_span.get(&span)?))
+    }
+
     pub(crate) fn class_owner_at_span(&self, span: (usize, usize)) -> Option<String> {
         let id = *self.node_ids_by_span.get(&span)?;
         self.class_owner_from_ty(&self.lookup_at(id)?)

@@ -26,6 +26,29 @@ pub struct LengthStability {
     pub alloc_stable: bool,
 }
 
+/// Whether an operator on an operand of type `ty` (`a < b`, `-a`, `a += b`)
+/// can run a user's trait impl. Only the built-in scalars, and tuples,
+/// records, arrays, `Vec`s, `Option`s and `Result`s of them, are known not to: a
+/// class or an enum may have the impl, a type parameter stands for one that
+/// may, and an unknown type is taken as either.
+pub(crate) fn operator_runs_user_code(ty: Option<&crate::typechecking::Ty>) -> bool {
+    use crate::typechecking::Ty;
+    use crate::typechecking::ty::{BOOL, BYTE, FLOAT, INT, STRING, UNIT, strip_readonly};
+    let Some(ty) = ty else { return true };
+    let any = |tys: &[Ty]| tys.iter().any(|t| operator_runs_user_code(Some(t)));
+    match strip_readonly(ty) {
+        Ty::Con(n) => !matches!(n.as_str(), INT | BYTE | FLOAT | STRING | BOOL | UNIT),
+        Ty::Tuple(items) => any(items),
+        Ty::Record { fields } => fields.iter().any(|(_, t)| operator_runs_user_code(Some(t))),
+        Ty::Array { element, .. } => operator_runs_user_code(Some(element)),
+        Ty::App(head, args) => !matches!(head.as_ref(), Ty::Con(n) if matches!(n.as_str(), "Vec" | "Option" | "Result")) || any(args),
+        // `Option::None` in `o == Option::None`: typed as the variant.
+        Ty::Constructor { owner, .. } => operator_runs_user_code(Some(owner)),
+        Ty::Never => false,
+        _ => true,
+    }
+}
+
 /// Effect bits for a host / virtual-module callee (I6), by registry name
 /// (`math_sin`, `fs_exists`) or by the short name a virtual module exports
 /// (`exists`).

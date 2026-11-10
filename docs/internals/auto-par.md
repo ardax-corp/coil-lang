@@ -29,6 +29,12 @@ on the typed sidecar (`DefId` + bind names). Codegen copies those names into
   mutates via index/field assignment, or calls a non-identifier callee.
 - Calls to names that are not user `fn`s (e.g. imported `write_all`, `spawn`,
   `collect`, `attach`) take the matching effect bit (unknown names are impure).
+- An operator on a class, an enum or a type parameter (`a < b`, `-a`,
+  `a += b`) runs the type's trait impl, and a `for … in` over anything but
+  an array, a tuple or a range runs an iterator's `next` or resumes a
+  generator. Both are unknown code that may resize (#2388); the checker's
+  types say which operands are built-in. A body the checker never typed
+  as written (one with an untyped rest parameter) counts as unknown too.
 - Impurity propagates through the user-function call graph (fixed point).
 - Everything that survives is pure, whether or not it calls itself. `$mono$`
   clones of a pure bind stay pure for LICM.
