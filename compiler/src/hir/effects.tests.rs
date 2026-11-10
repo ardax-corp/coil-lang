@@ -177,6 +177,54 @@ fn bump(int x) -> int {{
     assert!(!names.contains("bump"));
 }
 
+/// A contract check that may fail does not make a function impure; a
+/// `panic` it writes itself does, and so does an effect in a clause.
+#[test]
+fn contract_checks_keep_a_function_pure() {
+    let src = "
+static let HITS: int = 0;
+fn bump(int x) -> bool {
+    HITS = HITS + 1;
+    return x > 0;
+}
+fn half(int n) -> int
+    requires n >= 0
+    ensures result <= n
+{
+    return n / 2;
+}
+fn quarter(int n) -> int {
+    return half(half(n));
+}
+fn count(int n) -> int {
+    let i = 0;
+    while i < n
+        invariant i >= 0
+    {
+        i = i + 1;
+    }
+    return i;
+}
+fn strict(int n) -> int {
+    if n < 0 {
+        panic(\"negative\");
+    }
+    return n;
+}
+fn noisy(int n) -> int
+    requires bump(n)
+{
+    return n;
+}";
+    let (m, out) = summaries(src);
+    let names = pure_names(&m, "", &out, &HashSet::new());
+    for name in ["half", "quarter", "count"] {
+        assert!(names.contains(name), "`{name}`: {names:?}");
+    }
+    assert!(!names.contains("strict"), "{names:?}");
+    assert!(!names.contains("noisy"), "{names:?}");
+}
+
 /// A trait impl's method is listed under its own name, and has no vote on
 /// the bare name.
 #[test]
