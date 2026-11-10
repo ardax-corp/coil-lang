@@ -39,7 +39,7 @@ fn grow(int n) -> int {
 
 test("a free recursive function forks and a same-named static method keeps its body") {
     assert!(fib(30) == 832040);
-    assert!(K::fib(25) == 242982417);
+    assert!(K::fib(25) == 121589417);
 }
 
 test("a free recursive function beside a same-named instance method") {

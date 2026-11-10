@@ -3670,11 +3670,13 @@ impl Compiler {
     }
 
     /// Emit one parameterized `__coil_par_{fn}(args…, hop)` AlwaysPar worker.
-    fn emit_par_specializations_for(&mut self, bare_name: &str, table_key: &str) {
-        if !self.par_workers.contains(bare_name) {
+    fn emit_par_specializations_for(&mut self, bare_name: &str, qualified: &str, table_key: &str) {
+        // The worker is of the function that forks, not of a method or
+        // another module's function of the same bare name.
+        if !self.par_workers.contains(qualified) {
             return;
         }
-        let Some(site) = self.par_shapes.get(bare_name).cloned() else {
+        let Some(site) = self.par_shapes.get(bare_name).filter(|s| s.qualified == qualified).cloned() else {
             return;
         };
         if !self.functions.contains_key(table_key) && !self.functions.contains_key(bare_name) {
@@ -6275,7 +6277,7 @@ impl Compiler {
             if !inherent_method {
                 self.emit_mono_specializations_for_function(&qualified, type_params, args, Some(body), name, span);
             }
-            self.emit_par_specializations_for(name, &table_key);
+            self.emit_par_specializations_for(name, &qualified, &table_key);
     }
 
     fn do_compile_inner<'compiler>(

@@ -2528,7 +2528,7 @@ impl Compiler {
                 (self.coroutine_fns.contains(&call.key), "coroutine"),
                 // An auto-parallel callee's call runs its split worker;
                 // with auto-par off it stays a call all the same.
-                (self.fork_fns.contains(Self::par_shape_key(&call.key)), "par"),
+                (self.fork_fns.contains(strip_overload_key(&call.key)), "par"),
             ];
             if core.is_none()
                 && let Some((_, what)) = kind.iter().find(|(hit, _)| *hit)
@@ -11436,7 +11436,8 @@ impl Compiler {
         let short = Self::par_shape_key(key);
         // A fork-join worker calls the sequential functions it forks; a
         // shared generic entry's `kinds` word has no worker edge (#2506).
-        if args.is_empty() || !self.par_shapes.contains_key(short) || self.hir_synth_calls.is_some() || self.kinds_scheme(key).is_some() {
+        let site = self.par_shapes.get(short).filter(|s| s.qualified == strip_overload_key(key));
+        if args.is_empty() || site.is_none() || self.hir_synth_calls.is_some() || self.kinds_scheme(key).is_some() {
             return None;
         }
         let spec = crate::hir::par::par_worker_name(short);

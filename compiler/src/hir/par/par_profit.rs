@@ -190,6 +190,10 @@ pub enum ParGuard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParForkSite {
     pub fn_name: String,
+    /// The function's own name, with its module path or owner
+    /// (`f`, `m::f`, `Owner::m`): what a call's key is matched against, as
+    /// `fn_name` is shared by a method or another module's function.
+    pub qualified: String,
     /// Declared parameter count of the enclosing function (worker arity, plus hop).
     pub param_count: usize,
     /// Independent pure calls (at least two).
@@ -411,8 +415,9 @@ impl HirModule {
             // The set lists a body under its own name (`f`, `Owner::m`,
             // with the module's path), never a method under its bare one.
             if pure_fns.contains(body.name.as_str())
-                && let Some(site) = detect_fork_site(name, body, checker, pure_fns)
+                && let Some(mut site) = detect_fork_site(name, body, checker, pure_fns)
             {
+                site.qualified = body.name.clone();
                 out.insert(name.to_string(), site);
             }
         }
@@ -439,7 +444,7 @@ impl HirModule {
                 continue;
             }
             if set.iter().any(|args| guards_hold(&site.guards, args) && work.worth_parallel(&name, args)) {
-                out.insert(name);
+                out.insert(site.qualified.clone());
             }
         }
         out
@@ -970,6 +975,7 @@ fn match_fork(id: HirId, ctx: &FnCtx<'_>, guards: &[ParGuard], lets: &[(LocalId,
     };
     (arms.len() >= 2).then(|| ParForkSite {
         fn_name: ctx.fn_name.to_string(),
+        qualified: String::new(),
         param_count: ctx.params.len(),
         arms,
         combine,
