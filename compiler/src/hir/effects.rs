@@ -2276,10 +2276,16 @@ impl Cx<'_> {
             HirKind::Global { name, .. } if self.checker.is_mutable_static(name) => {
                 self.note_static(w, id, EffectFlags::HOST, || format!("reads static `{name}`"))
             }
-            // A trait operator runs user code this pass does not resolve.
+            // A trait operator runs user code this pass does not resolve,
+            // unless both operands are built-in: an element-wise `a + b`,
+            // `o == Option::None`, an `int` with a `float`. No user impl
+            // can stand behind those (the orphan rule).
             HirKind::Bin { op: BinOp::Overloaded(op), lhs, rhs } => {
-                self.note(w, id, EffectFlags::UNKNOWN, || format!("uses a trait operator `{op}`"));
-                self.operator_mutates(w, id, op, *lhs, *rhs);
+                let user = |operand: HirId| crate::effects::operator_runs_user_code(body.expr(operand).ty.as_ref());
+                if user(*lhs) || user(*rhs) {
+                    self.note(w, id, EffectFlags::UNKNOWN, || format!("uses a trait operator `{op}`"));
+                    self.operator_mutates(w, id, op, *lhs, *rhs);
+                }
             }
             // As is `-a` or `~a` on anything but a built-in scalar.
             HirKind::Un { op: op @ (UnOp::Neg | UnOp::BitNot), operand }
