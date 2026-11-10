@@ -22,8 +22,8 @@ stays sequential.
 
 After typecheck, [`purity`](../../compiler/src/typechecking/purity.rs) walks
 the AST and records [`EffectFlags`](../../compiler/src/typechecking/purity.rs)
-on the typed sidecar (`DefId` + bind names). Codegen copies those names into
-`PureCallCtx` for LICM / length proofs:
+on the typed sidecar, by bind name. The checker's length proofs
+(`index_facts`) and the E0805 hints read them; codegen does not:
 
 - A function is **locally impure** if it uses `panic` / `yield` / FFI / `defer`,
   mutates via index/field assignment, or calls a non-identifier callee.
@@ -39,9 +39,9 @@ on the typed sidecar (`DefId` + bind names). Codegen copies those names into
 - Everything that survives is pure, whether or not it calls itself. `$mono$`
   clones of a pure bind stay pure for LICM.
 
-With HIR lowering on, codegen also solves effects on the module's HIR
-([`hir::effects`](../../compiler/src/hir/effects.rs), E1) and adds the
-functions it proves pure. A body's summary keeps its own effects apart from
+Codegen solves effects on the module's HIR
+([`hir::effects`](../../compiler/src/hir/effects.rs), E1) and takes its pure
+functions from there. A body's summary keeps its own effects apart from
 the function parameters it calls, and each call site fills those in from
 its arguments, so `map(xs, fn (int x) => x * 2)` is pure while the same call
 with a lambda that writes a static is not. A lambda, a named `fn` or a
@@ -54,11 +54,14 @@ the pure functions whose result is a scalar or `string`: two calls that each
 return a fresh array are not the same value
 ([coil-lang#790](https://github.com/ardax-corp/coil-lang/issues/790)).
 
-The HIR set names every function and method body by its own name (`f`,
-`Owner::m`, `Trait for Owner::m`, `outer::inner`). A bare `m` is listed when
-every function and inherent method of that short name is pure, by HIR or by
-the AST walk. To see where the two analyses disagree, run a debug build with
-`COIL_EFFECTS_SEED_DIFF=1`: one stderr line per function or method, with the
+Codegen takes its pure and length-stable functions from the HIR summaries
+alone; the AST walk above still feeds the checker's own length proofs
+(`index_facts`), which run before any HIR exists. The HIR set names every
+function and method body by its own name (`f`, `Owner::m`,
+`Trait for Owner::m`, `outer::inner`), and a bare `m` when every body of
+that short name qualifies. To see where the two analyses disagree, run a
+debug build with `COIL_EFFECTS_SEED_DIFF=1`: one stderr line per function
+or method, with the
 body's shape (`Function`, `Method`, `TraitImpl`, `Nested`), which side calls
 it pure or length-stable, and what makes it impure in HIR.
 

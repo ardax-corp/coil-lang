@@ -171,7 +171,7 @@ fn bump(int x) -> int {{
 }}"
     );
     let (m, out) = summaries(&src);
-    let names = pure_names(&m, "", &out, &HashSet::new());
+    let names = pure_names(&m, "", &out);
     assert!(names.contains("double"), "{names:?}");
     assert!(!names.contains("map"));
     assert!(!names.contains("bump"));
@@ -217,7 +217,7 @@ fn noisy(int n) -> int
     return n;
 }";
     let (m, out) = summaries(src);
-    let names = pure_names(&m, "", &out, &HashSet::new());
+    let names = pure_names(&m, "", &out);
     for name in ["half", "quarter", "count"] {
         assert!(names.contains(name), "`{name}`: {names:?}");
     }
@@ -245,7 +245,7 @@ fn less(Money a, Money b) -> bool { return a < b; }
 fn less_of<T: Lt>(T a, T b) -> bool { return a < b; }
 fn has(Option<Money> o, Money m) -> bool { return o == Option::Some(m); }";
     let (m, out) = summaries(src);
-    let names = pure_names(&m, "", &out, &HashSet::new());
+    let names = pure_names(&m, "", &out);
     for name in ["sum2", "scaled", "empty", "same"] {
         assert!(names.contains(name), "`{name}`: {names:?}");
     }
@@ -254,8 +254,8 @@ fn has(Option<Money> o, Money m) -> bool { return o == Option::Some(m); }";
     }
 }
 
-/// A trait impl's method is listed under its own name, and has no vote on
-/// the bare name.
+/// A trait impl's method is listed under its own name, and the bare name
+/// is listed only when every body of that short name qualifies.
 #[test]
 fn pure_names_list_trait_impl_methods_by_their_own_name() {
     let src = "
@@ -278,11 +278,14 @@ impl Weigh for P {
     }
 }";
     let (m, out) = summaries(src);
-    let names = pure_names(&m, "", &out, &HashSet::new());
+    let names = pure_names(&m, "", &out);
     assert!(names.contains("Weigh for P::weigh"), "{names:?}");
     assert!(!names.contains("Weigh for P::size"), "{names:?}");
-    assert!(names.contains("P::size") && names.contains("size"), "{names:?}");
-    let steady = steady_names(&m, "", &out, &names);
+    assert!(names.contains("P::size"), "{names:?}");
+    // `Weigh for P::size` is not pure, so a bare `size` is not either.
+    assert!(!names.contains("size"), "{names:?}");
+    assert!(names.contains("weigh"), "{names:?}");
+    let steady = steady_names(&m, "", &out);
     assert!(steady.contains("Weigh for P::weigh") && steady.contains("Weigh for P::size"), "{steady:?}");
 }
 

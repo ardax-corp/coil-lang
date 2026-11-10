@@ -137,7 +137,7 @@ impl Summary {
 
     /// Never changes the length of an array or `Vec`, whatever it is passed.
     pub fn is_steady(self) -> bool {
-        self.latent == 0 && !self.flags.contains(EffectFlags::RESIZE | EffectFlags::UNKNOWN | EffectFlags::YIELD)
+        self.latent == 0 && !self.flags.contains(EffectFlags::RESIZE | EffectFlags::YIELD)
     }
 
     fn of(flags: EffectFlags) -> Self {
@@ -388,18 +388,17 @@ impl ProgramEffects {
 /// Names of `module`'s pure functions and methods, as a callee is looked
 /// up ([`crate::pure_call::name_in`]): each body's own name (`f`,
 /// `Owner::m`, `Trait for Owner::m`, `outer::inner`), with the module path
-/// in front as well for a method. A bare `m` is listed when every function
-/// and inherent method of that short name is pure, here or in `known` (the
-/// AST walk's set).
-pub fn pure_names(module: &HirModule, module_path: &str, summaries: &[Summary], known: &HashSet<String>) -> HashSet<String> {
-    names_where(module, module_path, summaries, known, Summary::is_pure)
+/// in front as well for a method, and a bare `m` when every body of that
+/// short name is pure.
+pub fn pure_names(module: &HirModule, module_path: &str, summaries: &[Summary]) -> HashSet<String> {
+    names_where(module, module_path, summaries, Summary::is_pure)
 }
 
 /// Functions and methods that never change the length of an array or
 /// `Vec` (no append, resize, yield or unknown code), whatever they are
-/// passed. `known` are names already known to qualify.
-pub fn steady_names(module: &HirModule, module_path: &str, summaries: &[Summary], known: &HashSet<String>) -> HashSet<String> {
-    names_where(module, module_path, summaries, known, Summary::is_steady)
+/// passed.
+pub fn steady_names(module: &HirModule, module_path: &str, summaries: &[Summary]) -> HashSet<String> {
+    names_where(module, module_path, summaries, Summary::is_steady)
 }
 
 /// How a function or method body is written: what its names are keyed on.
@@ -433,13 +432,7 @@ fn name_shape(kind: BodyKind, local: &str) -> Option<(NameShape, &str)> {
     Some((shape, short))
 }
 
-fn names_where(
-    module: &HirModule,
-    module_path: &str,
-    summaries: &[Summary],
-    known: &HashSet<String>,
-    ok: impl Fn(Summary) -> bool,
-) -> HashSet<String> {
+fn names_where(module: &HirModule, module_path: &str, summaries: &[Summary], ok: impl Fn(Summary) -> bool) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut by_short: HashMap<&str, bool> = HashMap::new();
     for (body, s) in module.bodies.iter().zip(summaries) {
@@ -451,12 +444,8 @@ fn names_where(
                 out.insert(body.name.clone());
             }
         }
-        // A trait impl's method and a nested function do not vote on the
-        // bare name: the AST walk's verdict on it stands for them.
-        if matches!(shape, NameShape::Function | NameShape::Method) {
-            let all = by_short.entry(short).or_insert(true);
-            *all &= ok(*s) || known.contains(local);
-        }
+        let all = by_short.entry(short).or_insert(true);
+        *all &= ok(*s);
     }
     for (short, good) in by_short {
         if good {
@@ -470,8 +459,8 @@ fn names_where(
 const SEED_DIFF_ENV: &str = "COIL_EFFECTS_SEED_DIFF";
 
 /// Debug builds, with `COIL_EFFECTS_SEED_DIFF` set: one stderr line for each
-/// function and method the checker's AST walk and these summaries disagree
-/// on, with the body's shape and what makes it impure here. `ast_pure` and
+/// function and method the checker's AST walk (which codegen no longer
+/// reads for this) and these summaries disagree on, with the body's shape and what makes it impure here. `ast_pure` and
 /// `ast_steady` are the walk's sets ([`TypedSidecar::pure_fn_names`], the
 /// length-stable names).
 ///
@@ -2276,7 +2265,7 @@ impl Cx<'_> {
             HirKind::Bin { op: BinOp::Overloaded(op), lhs, rhs } => {
                 let user = |operand: HirId| crate::effects::operator_runs_user_code(body.expr(operand).ty.as_ref());
                 if user(*lhs) || user(*rhs) {
-                    self.note(w, id, EffectFlags::UNKNOWN, || format!("uses a trait operator `{op}`"));
+                    self.note(w, id, EffectFlags::UNKNOWN | EffectFlags::RESIZE, || format!("uses a trait operator `{op}`"));
                     self.operator_mutates(w, id, op, *lhs, *rhs);
                 }
             }
@@ -2285,7 +2274,7 @@ impl Cx<'_> {
                 if crate::effects::operator_runs_user_code(body.expr(*operand).ty.as_ref()) =>
             {
                 let sym = if *op == UnOp::Neg { "-" } else { "~" };
-                self.note(w, id, EffectFlags::UNKNOWN, || format!("uses a trait operator `{sym}`"));
+                self.note(w, id, EffectFlags::UNKNOWN | EffectFlags::RESIZE, || format!("uses a trait operator `{sym}`"));
             }
             HirKind::Unsupported(what) => {
                 self.note(w, id, UNKNOWN.bits(), || format!("uses {what}, which this analysis does not model"))
