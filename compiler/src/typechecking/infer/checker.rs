@@ -1583,6 +1583,11 @@ impl Checker {
         self.current_module = module.into();
     }
 
+    /// The module path being checked or compiled (`""` for the entry).
+    pub fn current_module(&self) -> &str {
+        &self.current_module
+    }
+
     /// Run inference over `ast`. Returns the inferred type of the root
     /// expression under the final substitution. Diagnostic messages are
     /// accumulated and can be retrieved with [`take_messages`].

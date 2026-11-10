@@ -69,22 +69,128 @@ pub fn range_heap_type_id(inclusive: bool) -> u32 {
 /// converts them). A function below the top (an element of `Vec<unit ->
 /// Option<T>>`) has no adapter: its parameter and result are nested too
 /// (#2488).
-pub fn nested_open_enum(ty: &Ty, top: bool, split: &mut dyn FnMut(&Ty) -> bool) -> bool {
-    let ty = crate::typechecking::ty::strip_readonly(ty);
-    if !ty.has_var() {
-        return false;
+///
+/// A user class or enum over open arguments is read through its
+/// declaration, its parameters bound to the arguments, for each nominal
+/// type `look` admits (#2446, #2493, #2509): a class's field is a top
+/// (stored in its declared layout, `hir_field_rep`) unless it is a
+/// function, an enum's payload never is. So `W<T>` with a field `xs:
+/// Vec<Option<T>>`, `P<T>` with a payload `fn(T) -> Option<T>`, and a class
+/// holding either, are nested open enums wherever they are named.
+pub fn nested_open_enum(
+    checker: &Checker,
+    ty: &Ty,
+    top: bool,
+    look: &dyn Fn(&str) -> bool,
+    split: &mut dyn FnMut(&Ty) -> bool,
+) -> bool {
+    NestedOpen { checker, look, split, seen: Vec::new() }.ty(ty, top)
+}
+
+/// The nominal types [`nested_open_enum`] reads through in the module the
+/// checker is on: every user enum, and a class that module declares.
+/// Another module's class keeps its nested enums in one layout by that
+/// module's own clone gate: a clone of its method whose body holds an enum
+/// over the class's parameters is a thunk to the shared body there
+/// (`layout_safe`), so the shared bodies make and read every such value.
+/// A `Vec` is no user class.
+pub fn nested_open_look(checker: &Checker) -> impl Fn(&str) -> bool + '_ {
+    move |name: &str| {
+        name != common::BUILTIN_VEC_TYPE
+            && (checker.enum_variants(name).is_some()
+                || name.rsplit_once("::").map_or("", |(module, _)| module) == checker.current_module())
     }
-    let app = crate::typechecking::ty::builtin_enum_app(ty);
-    let ty = app.as_ref().unwrap_or(ty);
-    if !top && app.is_some() && split(ty) {
-        return true;
+}
+
+/// Whether `ty` is a nested open enum for any ground type, in the module
+/// the checker is on ([`nested_open_enum`], [`nested_open_look`]). A bare
+/// generic class name (a method body's `self`) stands for the class over
+/// its own parameters.
+pub fn nested_open_type(checker: &Checker, ty: &Ty) -> bool {
+    let own;
+    let ty = match crate::typechecking::ty::strip_readonly(ty) {
+        Ty::Con(name) if checker.type_ctor_params(name).is_some_and(|p| !p.is_empty()) => {
+            let n = checker.type_ctor_params(name).map_or(0, Vec::len);
+            let vars = (0..n).map(|i| Ty::Var(crate::typechecking::ty::TyVarId(u32::MAX - i as u32))).collect();
+            own = Ty::App(Box::new(Ty::Con(name.clone())), vars);
+            &own
+        }
+        ty => ty,
+    };
+    nested_open_enum(checker, ty, true, &nested_open_look(checker), &mut |_| true)
+}
+
+struct NestedOpen<'a, 'b> {
+    checker: &'a Checker,
+    look: &'a dyn Fn(&str) -> bool,
+    split: &'b mut dyn FnMut(&Ty) -> bool,
+    /// The nominal instances on the walk, against recursive declarations.
+    seen: Vec<String>,
+}
+
+/// How many nominal declarations deep [`nested_open_enum`] reads: a
+/// polymorphically recursive type (`Nest<T>` holding `Nest<Nest<T>>`)
+/// meets new instances without end.
+const NESTED_OPEN_DEPTH: usize = 16;
+
+impl NestedOpen<'_, '_> {
+    fn ty(&mut self, ty: &Ty, top: bool) -> bool {
+        let ty = crate::typechecking::ty::strip_readonly(ty);
+        if !ty.has_var() {
+            return false;
+        }
+        let app = crate::typechecking::ty::builtin_enum_app(ty);
+        let ty = app.as_ref().unwrap_or(ty);
+        if !top && app.is_some() && (self.split)(ty) {
+            return true;
+        }
+        if let Ty::Fun(param, ret) = ty {
+            return self.ty(param, top) || self.ty(ret, top);
+        }
+        let mut found = false;
+        ty.for_each_child(|child| found = found || self.ty(child, false));
+        found || app.is_none() && self.declared(ty)
     }
-    if let Ty::Fun(param, ret) = ty {
-        return nested_open_enum(param, top, split) || nested_open_enum(ret, top, split);
+
+    /// Whether user class or enum instance `ty` holds a nested open enum
+    /// in a field or payload, its parameters bound to `ty`'s arguments.
+    fn declared(&mut self, ty: &Ty) -> bool {
+        let Ty::App(head, args) = ty else {
+            return false;
+        };
+        let Ty::Con(name) = head.as_ref() else {
+            return false;
+        };
+        let key = format!("{ty}");
+        if self.seen.len() >= NESTED_OPEN_DEPTH || self.seen.contains(&key) || !(self.look)(name) {
+            return false;
+        }
+        let Some(params) = self.checker.type_ctor_params(name).cloned() else {
+            return false;
+        };
+        if params.len() != args.len() {
+            return false;
+        }
+        // A class's field is a top unless it is a function; an enum's
+        // payload is below the enum's top.
+        let fields: Vec<(Ty, bool)> = if let Some(variants) = self.checker.enum_variants(name) {
+            variants.into_iter().flat_map(|(_, _, payload)| payload).map(|t| (t, false)).collect()
+        } else if let Some(fields) = self.checker.class_fields(name) {
+            fields
+                .into_iter()
+                .map(|(_, t)| {
+                    let top = !matches!(crate::typechecking::ty::strip_readonly(&t), Ty::Fun(..));
+                    (t, top)
+                })
+                .collect()
+        } else {
+            return false;
+        };
+        self.seen.push(key);
+        let found = fields.iter().any(|(field, top)| self.ty(&super::bind_params(field, &params, args), *top));
+        self.seen.pop();
+        found
     }
-    let mut found = false;
-    ty.for_each_child(|child| found = found || nested_open_enum(child, false, split));
-    found
 }
 
 /// `Some(PairKind::Range { .. })` when `ty` is a numeric `Range` /
