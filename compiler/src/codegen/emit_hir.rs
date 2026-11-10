@@ -7066,11 +7066,15 @@ impl Compiler {
     /// How the items of a shared generic body's result `cur` (an `Option`,
     /// `Result`, user enum or tuple) that hold a bare type parameter's
     /// value the call boxed (`boxed`, by variable, its ground type) are
-    /// unboxed at the call (#1549): the shared body keeps that value boxed
-    /// inside the object. `None` when no item holds one. Refused where an
-    /// item holds it deeper (`Option<(T, int)>`, `Vec<T>`), the variable is
-    /// also nested in a parameter (the body's values of it are then not
-    /// all boxed), or for a ground type no word reads back.
+    /// unboxed at the call (#1549): the shared body keeps that value as
+    /// its word inside the object, and the rebuilt object has the ground
+    /// type's word kinds. `None` when no item holds one, and for a result
+    /// that holds one in arrays, `Vec`s and tuples only (`[T; N]`,
+    /// `Vec<T>`, `(T, [T; 2])`, #2415; [`Self::hir_word_holder`]).
+    /// Refused where the result or a parameter holds one any other way (an
+    /// open `Option<T>` below the result's top is the shared body's enum
+    /// object, not the ground type's word), or for a ground type no word
+    /// reads back.
     fn hir_ret_items(
         &self,
         cur: &Ty,
@@ -7088,22 +7092,44 @@ impl Compiler {
         if receivers > 0 {
             return Ok(None);
         }
-        if params.iter().any(|p| !matches!(p, Ty::Var(_)) && needy(p)) {
+        if params.iter().any(|p| !Self::hir_word_holder(p, boxed)) {
             return Err("callee-generic");
         }
-        self.hir_items_rebuild(cur, vars, boxed)
+        self.hir_items_rebuild(cur, vars, boxed, true)
+    }
+
+    /// Whether a shared body and ground code hold a value of `ty` as the
+    /// same words, for the variables of `boxed` in it: one of them (the
+    /// body's values of a type parameter are the ground type's words, from
+    /// a bare parameter as from an element), or an array, `Vec` or tuple
+    /// of such. A type with none of them is the same on both sides.
+    fn hir_word_holder(ty: &Ty, boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> bool {
+        use crate::typechecking::ty::{ftv_ty, strip_readonly, vec_element_ty};
+        match strip_readonly(ty) {
+            Ty::Var(_) => true,
+            Ty::Tuple(items) => items.iter().all(|t| Self::hir_word_holder(t, boxed)),
+            Ty::Array { element, .. } => Self::hir_word_holder(element, boxed),
+            t => match vec_element_ty(t) {
+                Some(element) => Self::hir_word_holder(element, boxed),
+                None => !ftv_ty(t).iter().any(|v| boxed.contains_key(v)),
+            },
+        }
     }
 
     /// How the object `cur` (a tuple, or an enum the checker declares)
     /// a shared body holds the boxed values of `boxed`'s variables in is
     /// rebuilt in its ground layout (`vars` grounding the rest): each item
     /// a boxed variable's value unboxed, any other kept as its word.
-    /// `None` when no item holds one; refused where one is held deeper.
+    /// `None` when no item holds one. Where one is held deeper, or `cur`
+    /// is no tuple or declared enum: with `deep`, kept as the word it is
+    /// when both sides hold it as the same words
+    /// ([`Self::hir_word_holder`]); else refused.
     fn hir_items_rebuild(
         &self,
         cur: &Ty,
         vars: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
         boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
+        deep: bool,
     ) -> Result<Option<crate::mir::HirRetItems>, &'static str> {
         use crate::mir::{HirRetItem, HirRetItems};
         use crate::typechecking::ty::{ftv_ty, strip_readonly};
@@ -7113,7 +7139,7 @@ impl Compiler {
         // variable, else kept as the word its ground type is.
         let item = |t: &Ty| -> Result<(HirRetItem, u8), &'static str> {
             let unbox = matches!(t, Ty::Var(v) if boxed.contains_key(v));
-            if !unbox && needy(t) {
+            if !unbox && needy(t) && !(deep && Self::hir_word_holder(t, boxed)) {
                 return Err("callee-generic");
             }
             let g = ground(t);
@@ -7140,14 +7166,15 @@ impl Compiler {
             return Ok(Some(HirRetItems::Tuple { items, kinds }));
         }
         let app = crate::typechecking::ty::builtin_enum_app(cur).unwrap_or_else(|| cur.clone());
+        let held = if deep && Self::hir_word_holder(cur, boxed) { Ok(None) } else { Err("callee-generic") };
         let Ty::App(head, args) = strip_readonly(&app) else {
-            return Err("callee-generic");
+            return held;
         };
         let Ty::Con(name) = head.as_ref() else {
-            return Err("callee-generic");
+            return held;
         };
         let (Some(decl), Some(names)) = (self.checker.enum_variants(name), self.checker.type_ctor_params(name)) else {
-            return Err("callee-generic");
+            return held;
         };
         if names.len() != args.len() || self.checker.enum_has_drop(name) {
             return Err("callee-generic");
@@ -7445,7 +7472,7 @@ impl Compiler {
         if params.iter().any(|p| !matches!(p, Ty::Var(_)) && needy(p)) {
             return Err("callee-generic");
         }
-        self.hir_items_rebuild(scheme, &vars, &boxed)?.ok_or("callee-generic")
+        self.hir_items_rebuild(scheme, &vars, &boxed, false)?.ok_or("callee-generic")
     }
 
     /// How one word of a shared body's closure, typed `scheme` in the

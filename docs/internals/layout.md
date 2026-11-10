@@ -88,6 +88,16 @@ words:
   result as the enum object. The call wraps the argument in a fn adapter
   that boxes the word (`HirFnAdapt::ret`, `hir_open_ret_adapts`), a lambda
   literal included.
+- A bare `T` argument is passed as the ground type's word (a `float` as
+  its bits, a two-word value boxed), which is also the word an element of
+  `[T; N]` or `Vec<T>` is. So the body's values of `T` are the same words
+  wherever they come from, and an array, `Vec` or tuple of them it builds
+  is returned as it is, at any depth (`hir_word_holder`, #2415). A tuple
+  or enum result whose own items are bare parameters' values is rebuilt
+  at the call, to give it the ground type's word kinds (`hir_ret_items`,
+  #1549). A call is still refused where `T` is a bare parameter and the
+  result or another parameter holds it any other way (an open
+  `Option<T>` below the top, a function, a class): see "Open enums".
 - `hir_method_clone` clones niche types too: the per-type clone is a cost
   decision (speed), never a correctness one.
 
