@@ -6411,7 +6411,7 @@ impl Compiler {
             self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure, &bare_cases);
             self.par_workers = crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
             self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
-            for hint in crate::typechecking::analyze_par_escape_hints(ast, &bare_cases) {
+            for hint in crate::typechecking::analyze_par_escape_hints(ast, self.typed_sidecar.fn_effects(), &bare_cases) {
                 let mut msg =
                     Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
                 msg.with_help(hint.help());

@@ -10,7 +10,6 @@ use common::EffectFlags;
 use parser::ast::{EnumConstructPayload, Expression, Output};
 
 use super::par_profit::analyze_par_fork_sites;
-use super::purity::analyze_fn_effects;
 
 /// Kind of shared resource a covering userland lock would name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -112,11 +111,16 @@ impl ParEscapeHint {
 /// Uses the same fork-shape detector as F0–F2, but with **all** user `fn`s as
 /// candidate arms. Pure functions that already IPA are skipped. Panic / yield
 /// impurity without a lockable resource is skipped.
+///
+/// `effects` are the checker's effect bits for this file's functions, by
+/// bind name ([`TypedSidecar::fn_effects`]).
+///
+/// [`TypedSidecar::fn_effects`]: super::infer::TypedSidecar::fn_effects
 pub fn analyze_par_escape_hints(
     ast: &Output<'_>,
+    effects: &HashMap<String, EffectFlags>,
     cases: &super::bare_cases::BareCases,
 ) -> Vec<ParEscapeHint> {
-    let effects = analyze_fn_effects(ast, cases);
     let user_fns: HashSet<String> = effects.keys().cloned().collect();
     if user_fns.is_empty() {
         return Vec::new();
@@ -895,7 +899,14 @@ fn peel<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
 mod tests {
     use super::*;
     use crate::typechecking::bare_cases::BareCases;
+    use crate::typechecking::purity::analyze_fn_effects;
     use parser::Pratt;
+
+    /// The hints for a lone file, on the effects of its own functions.
+    fn hints_of(ast: &Output<'_>) -> Vec<ParEscapeHint> {
+        let cases = BareCases::none();
+        analyze_par_escape_hints(ast, &analyze_fn_effects(ast, cases), cases)
+    }
 
     fn parse(src: &'static str) -> parser::ast::Output<'static> {
         let owned = Box::leak(src.to_string().into_boxed_str());
@@ -919,7 +930,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let hints = analyze_par_escape_hints(&ast, BareCases::none());
+        let hints = hints_of(&ast);
         let rec = hints.iter().find(|h| h.fn_name == "rec").expect("rec hint");
         assert!(!rec.covering_lock);
         assert!(
@@ -949,7 +960,7 @@ fn rec(Mutex m, int n) -> int {
 fn main() { return; }
 "#,
         );
-        let hints = analyze_par_escape_hints(&ast, BareCases::none());
+        let hints = hints_of(&ast);
         let rec = hints.iter().find(|h| h.fn_name == "rec").expect("rec hint");
         assert!(rec.covering_lock, "{hints:?}");
         assert!(
@@ -979,7 +990,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast, BareCases::none())
+        let rec = hints_of(&ast)
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1009,7 +1020,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast, BareCases::none())
+        let rec = hints_of(&ast)
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1038,7 +1049,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast, BareCases::none())
+        let rec = hints_of(&ast)
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1076,7 +1087,7 @@ fn rec(Vec<int> a, int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast, BareCases::none())
+        let rec = hints_of(&ast)
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1106,7 +1117,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast, BareCases::none())
+        let rec = hints_of(&ast)
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1176,7 +1187,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let rec = analyze_par_escape_hints(&ast, BareCases::none())
+        let rec = hints_of(&ast)
             .into_iter()
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
@@ -1198,7 +1209,7 @@ fn fib(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let hints = analyze_par_escape_hints(&ast, BareCases::none());
+        let hints = hints_of(&ast);
         assert!(hints.is_empty(), "pure IPA must not hint: {hints:?}");
     }
 
@@ -1213,7 +1224,7 @@ fn rec(int n) -> int {
 fn main() { return; }
 "#,
         );
-        let hints = analyze_par_escape_hints(&ast, BareCases::none());
+        let hints = hints_of(&ast);
         assert!(hints.is_empty(), "panic is not lockable: {hints:?}");
     }
 }
