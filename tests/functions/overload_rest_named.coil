@@ -1,6 +1,5 @@
 // Overloads with a rest parameter or named arguments, named partials, spreads
 // into a partial, and generic rest calls: all lowered by the HIR.
-// @xfail clone-budget-0 #2510 E0801 (callee-arity): a generic rest parameter has no shared-body path
 use tests::assert;
 use string::format;
 

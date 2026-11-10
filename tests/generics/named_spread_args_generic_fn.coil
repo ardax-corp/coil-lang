@@ -1,6 +1,5 @@
 // Named and spread arguments to a generic free function land in their
 // parameters, as for a non-generic one; named ones run in source order (#1680).
-// @xfail clone-budget-0 #2510 E0801 (callee-arity): a generic rest parameter has no shared-body path
 use tests::assert;
 use string::format;
 

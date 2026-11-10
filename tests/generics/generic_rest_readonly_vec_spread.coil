@@ -1,6 +1,5 @@
 // A generic rest pack takes `P` and `readonly P` items together, and a
 // `Vec` spread is the whole pack (#1728).
-// @xfail clone-budget-0 #2510 E0801 (callee-arity): a generic rest parameter has no shared-body path
 use tests::assert;
 
 trait Reset<R> {

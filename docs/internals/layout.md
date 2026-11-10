@@ -110,6 +110,11 @@ words:
   result or another parameter holds it any other way (a function, a
   class). An open `Option<T>` below the top is never shared: see
   "Open enums".
+- A rest parameter `T... xs` is one `Vec<T>` argument: the call packs the
+  rest arguments into it (`hir_call_shapes`), a `...vec` spread is the
+  pack itself, and the shared body takes it as the clone does, a `Vec` of
+  `T` words. A shared body's own call packs its values of `T` the same way
+  (#2510).
 - `hir_method_clone` clones niche types too: the per-type clone is a cost
   decision (speed), never a correctness one.
 
