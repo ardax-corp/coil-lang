@@ -2866,8 +2866,7 @@ impl Cx<'_> {
         escape::host_summary(&short, Summary::of(classify_host_name(&short)))
     }
 
-    /// A user function's summary: this module's, an earlier module's, or
-    /// the AST walk's flags for a module compiled without HIR.
+    /// A user function's summary: this module's or an earlier module's.
     fn known_named(&self, w: &Walk<'_>, name: &str, def: Option<DefId>) -> Option<Summary> {
         // A `use`d name has no def on the call; the module's def table has it.
         let def = def.or_else(|| {
@@ -2906,10 +2905,7 @@ impl Cx<'_> {
                 return Some(s);
             }
         }
-        if let Some(fx) = def.and_then(|d| self.checker.program_fn_effects.get(&d)) {
-            return Some(Summary::of(*fx));
-        }
-        self.checker.program_method_effects.get(name).map(|fx| Summary::of(*fx))
+        None
     }
 
     /// The summary of `recv.name(..)` when the receiver is a user class or
@@ -2957,9 +2953,6 @@ impl Cx<'_> {
             for k in [key.as_str(), qualified.as_str(), core.as_str()] {
                 if let Some(&s) = self.program.by_name.get(k) {
                     return Some((s, None));
-                }
-                if let Some(fx) = self.checker.program_method_effects.get(k) {
-                    return Some((Summary::of(*fx), None));
                 }
             }
         }
