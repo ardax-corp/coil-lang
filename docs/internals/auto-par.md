@@ -160,15 +160,17 @@ does on that path ([coil-lang#2425](https://github.com/ardax-corp/coil-lang/issu
 Any other site is still found (the E0805 hints and `coil dissect --effects`
 name it) and carries `ParGuard::Opaque`, which never specializes.
 
-The walk keeps the reach of the AST walk it replaced, and with it a few
-habits a follow-up may drop. It looks at functions and inherent methods (not
-a trait's methods, tests or lambdas), and into statement lists, `if` chains,
-`match` arms, loops, the operands of `+ - * / % ^` and comparisons, call and
-constructor arguments; not under `if let` / `while let`, `&&` / `||`, an
-index or a field. An arm is a bare call `f(…)`: a path (`m::f`, `C::f`), a
-call through a trait (`Trait::m(x)`) and a variant named without its enum
-are not. Pending `let`-bound arms are not seen from inside parentheses
-(`HirFlags::PAREN`), unless the parenthesized expression is the fork.
+The walk looks at functions and inherent methods (not a trait's methods,
+whose calls never name a worker; not tests or lambdas), and into statement
+lists, `if` chains, `match` arms (an `if let` is one), loops, the operands
+of `+ - * / % ^` and comparisons, call and constructor arguments; not
+under `while let`, `&&` / `||`, an index or a field. A fork in a `match`
+arm at or after a constructor pattern runs only when that pattern matched
+or missed, so it is opaque. An arm is a bare call `f(…)`: a path (`m::f`,
+`C::f`), a call through a trait (`Trait::m(x)`) and a variant named without
+its enum are not. Parentheses change nothing: a group is the expression in
+it. A const call under an `if let` demands its function's worker like one
+anywhere else.
 
 For each demanded constant call whose **fork-tree grain** `W`
 exceeds `DEFAULT_EXPR_GRAIN` (default **10945**), and that still reaches the fork under the
@@ -320,7 +322,7 @@ only when **every** gate holds:
 
 | Gate | Requirement |
 |---|---|
-| Shape | `while i < K` / `i <= K`, or counted `for x in START..END` / `..=` (Q6 literal), or `for x in r` when `r` is a const range local (B5) |
+| Shape | `while i < K` / `i <= K`, or counted `for x in START..END` / `..=` (Q6 literal), or `for x in r` when `r` is a const range local (B5). `K` may be a local `const`; the index may be `_`. In any function or method body, a trait's included, and under `if let` / `while let` |
 | Induction | `while`: exactly one `i = i + 1` / `i += 1` / `i++` on a const-initialized local. `for`: the binding is the IV; the Q6 `+ 1` latch is implicit (no extra step in the body) |
 | Trip count | compile-time `[begin, end)` with iteration count `> DEFAULT_LOOP_GRAIN` (default **20**), or a dynamic int bound checked once at runtime |
 | Reduction | exactly one `acc = acc ⊕ e` / `acc = e ⊕ acc` / `acc ⊕= e` for associative `⊕` (`+` / `*` / `^`) on a const-initialized local. A pure `if` is admitted when every arm uses that same fold |
@@ -539,7 +541,8 @@ Still refuses (and why):
 | a `for` under an `invariant` / `decreases` that reads a local the loop writes (the accumulator) | the clause is about the sequential state at that iteration; a chunk's fold starts at the identity (#2412). A clause over values the loop leaves alone is the same test in every chunk and stays, when it reads and calls only what a body may |
 | a `while` under any `invariant` / `decreases` | it runs its checks ahead of every test, the one that ends it too, and once when it runs no trips; no chunk worker does (#2450) |
 | array / dict / coro `for` | sendability (C1 leftover), not F2 |
-| a loop in a trait's method (an instance's or a default), under `if let` / `while let`, or bounded by a local `const` | not looked at: the reach of the AST walk the HIR one replaced, kept as it was |
+| a fork in a trait's method (an instance's or a default) | a site is keyed by its function's bare name and its worker is reached from a bare call; a trait's method is never called that way |
+| a fork in an arm of an `if let`, or of a `match` at or after a constructor pattern | the arm runs only when the pattern matched or missed, which a worker's guards (comparisons of `int` parameters) cannot test: found, never specialized |
 
 ## Work-stealing reactor
 

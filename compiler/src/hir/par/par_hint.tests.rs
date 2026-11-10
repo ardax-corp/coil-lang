@@ -515,9 +515,9 @@ fn main() { return; }
     );
 }
 
-/// Nothing under `if let` / `while let` / `new`, loops entered.
+/// Nothing under `while let` / `new`; `if let` and loops entered.
 #[test]
-fn if_let_and_new_are_not_entered_and_loops_are() {
+fn new_is_not_entered_and_if_let_and_loops_are() {
     let hints = summary(
         r#"
 use io::{stdout, stderr, write};
@@ -548,6 +548,7 @@ fn main() { return; }
     assert_eq!(
         hints,
         [
+            "rec: `stdout` (FD)",
             "rec2: `stderr` (FD), `stdout` (FD)",
         ]
     );

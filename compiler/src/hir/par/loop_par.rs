@@ -185,15 +185,6 @@ impl HirModule {
         }
         (out, unsigned)
     }
-
-    /// Whether `body` is a trait's method, an instance's or a default, or
-    /// a function declared in one. The AST walk this analysis replaced
-    /// looked at functions and inherent methods only, and it keeps to those.
-    pub(super) fn in_trait(&self, body: &HirBody) -> bool {
-        let path: Vec<&str> = body.name.split("::").collect();
-        path.iter().any(|segment| segment.contains(" for "))
-            || path.windows(2).any(|pair| self.trait_effects.iter().any(|t| t.trait_name == pair[0] && t.method == pair[1]))
-    }
 }
 
 /// What a local is proven to hold at this point: a compile-time int or a
