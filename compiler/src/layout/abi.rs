@@ -72,7 +72,8 @@ pub fn range_heap_type_id(inclusive: bool) -> u32 {
 ///
 /// A user class or enum over open arguments is read through its
 /// declaration, its parameters bound to the arguments, for each nominal
-/// type `look` admits (#2446, #2493, #2509): a class's field is a top
+/// instance `look` admits (its name and arguments; #2446, #2493, #2509,
+/// #2547): a class's field is a top
 /// (stored in its declared layout, `hir_field_rep`) unless it is a
 /// function, an enum's payload never is. So `W<T>` with a field `xs:
 /// Vec<Option<T>>`, `P<T>` with a payload `fn(T) -> Option<T>`, and a class
@@ -81,25 +82,20 @@ pub fn nested_open_enum(
     checker: &Checker,
     ty: &Ty,
     top: bool,
-    look: &dyn Fn(&str) -> bool,
+    look: &dyn Fn(&str, &[Ty]) -> bool,
     split: &mut dyn FnMut(&Ty) -> bool,
 ) -> bool {
     NestedOpen { checker, look, split, seen: Vec::new() }.ty(ty, top)
 }
 
-/// The nominal types [`nested_open_enum`] reads through in the module the
-/// checker is on: every user enum, and a class that module declares.
-/// Another module's class keeps its nested enums in one layout by that
-/// module's own clone gate: a clone of its method whose body holds an enum
-/// over the class's parameters is a thunk to the shared body there
-/// (`layout_safe`), so the shared bodies make and read every such value.
-/// A `Vec` is no user class.
-pub fn nested_open_look(checker: &Checker) -> impl Fn(&str) -> bool + '_ {
-    move |name: &str| {
-        name != common::BUILTIN_VEC_TYPE
-            && (checker.enum_variants(name).is_some()
-                || name.rsplit_once("::").map_or("", |(module, _)| module) == checker.current_module())
-    }
+/// The nominal types [`nested_open_enum`] reads through: every user enum
+/// and class, another module's too (#2547). A clone of another module's
+/// method or function whose signature holds one is compiled from that
+/// module's body, as one of this module's is (`fn_sig_split` in
+/// `codegen`), so a `pub` field this module fills holds the layout the
+/// class's methods read. A `Vec` is no user class.
+pub fn nested_open_look(checker: &Checker) -> impl Fn(&str, &[Ty]) -> bool + '_ {
+    move |name: &str, _: &[Ty]| name != common::BUILTIN_VEC_TYPE && (checker.enum_variants(name).is_some() || checker.is_class(name))
 }
 
 /// Whether `ty` is a nested open enum for any ground type, in the module
@@ -122,7 +118,7 @@ pub fn nested_open_type(checker: &Checker, ty: &Ty) -> bool {
 
 struct NestedOpen<'a, 'b> {
     checker: &'a Checker,
-    look: &'a dyn Fn(&str) -> bool,
+    look: &'a dyn Fn(&str, &[Ty]) -> bool,
     split: &'b mut dyn FnMut(&Ty) -> bool,
     /// The nominal instances on the walk, against recursive declarations.
     seen: Vec<String>,
@@ -162,7 +158,7 @@ impl NestedOpen<'_, '_> {
             return false;
         };
         let key = format!("{ty}");
-        if self.seen.len() >= NESTED_OPEN_DEPTH || self.seen.contains(&key) || !(self.look)(name) {
+        if self.seen.len() >= NESTED_OPEN_DEPTH || self.seen.contains(&key) || !(self.look)(name, args) {
             return false;
         }
         let Some(params) = self.checker.type_ctor_params(name).cloned() else {
@@ -677,15 +673,15 @@ pub fn nested_fn_var_result(ty: &Ty, top: bool, unit: &mut dyn FnMut(&Ty) -> boo
 /// Whether a parameter or result of declared type `ty` holds a function
 /// over a type variable in a user class's field or a user enum's payload,
 /// the type's parameters bound to its arguments (`Slot<T>` with `f: fn(T)
-/// -> T`, `G<T>` with `F(fn(T) -> T)`), for each nominal type `look`
+/// -> T`, `G<T>` with `F(fn(T) -> T)`), for each nominal instance `look`
 /// admits (#2511). Such a function crosses a shared generic body inside the
 /// object: a ground function takes a `float` or `bool` as its own MIR type
 /// and a two-word value as two words, a function the shared body made or
 /// adapted takes their words, and only a function that is itself an
 /// argument gets an adapter at the call. So the signature takes a clone
 /// for every ground call, as a nested open enum does.
-pub fn nested_fn_field(checker: &Checker, ty: &Ty, look: &dyn Fn(&str) -> bool) -> bool {
-    fn walk(checker: &Checker, ty: &Ty, look: &dyn Fn(&str) -> bool, seen: &mut Vec<String>) -> bool {
+pub fn nested_fn_field(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool) -> bool {
+    fn walk(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool, seen: &mut Vec<String>) -> bool {
         let ty = crate::typechecking::ty::strip_readonly(ty);
         if !ty.has_var() {
             return false;
@@ -702,7 +698,7 @@ pub fn nested_fn_field(checker: &Checker, ty: &Ty, look: &dyn Fn(&str) -> bool) 
             return false;
         };
         let key = format!("{ty}");
-        if seen.len() >= NESTED_OPEN_DEPTH || seen.contains(&key) || !look(name) {
+        if seen.len() >= NESTED_OPEN_DEPTH || seen.contains(&key) || !look(name, args) {
             return false;
         }
         let Some(params) = checker.type_ctor_params(name).cloned() else {

@@ -1438,16 +1438,37 @@ impl Compiler {
     /// Whether the clone of `fqn` at `lookup` is compiled from its body, as
     /// [`Self::emit_instance_clones`] decides, rather than as a thunk that
     /// calls the shared entry: another module's method when that module
-    /// knows the types. This program's own clone is taken to lower (its
-    /// HIR module is out while a body plans).
+    /// knows the types and the body keeps the shared layouts, or its
+    /// signature is clone-only (#2547). This program's own clone is taken
+    /// to lower (its HIR module is out while a body plans).
     pub(super) fn inst_clone_has_body(&self, fqn: &str, lookup: &[Ty]) -> bool {
         let Some(src) = self.inst_clone_srcs.get(fqn) else {
             return false;
         };
         src.program == self.program_seq
             || self.module_ctxs.get(&src.program).is_some_and(|ctx| {
-                ctx.knows_tys(lookup) && (ctx.layout_safe(src.span) || self.checker.enum_variants(&src.class).is_some())
+                ctx.knows_tys(lookup)
+                    && (ctx.layout_safe(src.span) || self.checker.enum_variants(&src.class).is_some() || self.fn_sig_split(fqn))
             })
+    }
+
+    /// Whether another module's class `class` at ground `args` is one whose
+    /// methods all run as that module's shared bodies: the module does not
+    /// know those types (`knows_tys`: one declared after it, a tuple), so
+    /// no clone of its methods compiles from its body there. Its values
+    /// then hold every open `Option` / `Result` below a top as the enum's
+    /// object, which the shared bodies agree on, but ground code here,
+    /// which holds the niche word, may not fill or read such a field
+    /// (#2547, `hir_check_shared_field`).
+    pub(super) fn shared_only_class(&self, class: &str, args: &[Ty]) -> bool {
+        if args.is_empty() || args.iter().any(Ty::has_var) || !self.checker.is_class(class) {
+            return false;
+        }
+        let module = class.rsplit_once("::").map_or("", |(module, _)| module);
+        if module == self.checker.current_module() {
+            return false;
+        }
+        !self.module_ctxs.values().any(|ctx| ctx.namespace == module && ctx.knows_tys(args))
     }
 
     /// Whether a new clone of `fqn` would repeat a clone source already on
@@ -1546,9 +1567,13 @@ impl Compiler {
                     // A generic enum's method (`Option::map`) holds no fields
                     // its shared methods read: its clone may give `Option<T>`
                     // its own layout.
+                    // A clone-only signature (a nested open enum, #2547) has
+                    // no use for the shared body either.
                     .is_some_and(|ctx| {
                         ctx.knows_tys(&req.lookup)
-                            && (ctx.layout_safe(src.span) || self.checker.enum_variants(&src.class).is_some())
+                            && (ctx.layout_safe(src.span)
+                                || self.checker.enum_variants(&src.class).is_some()
+                                || self.fn_sig_split(&req.src))
                     })
             {
                 self.foreign_clone_queue.push(req.clone());
@@ -1871,7 +1896,9 @@ impl Compiler {
         for req in queued {
             let src = &self.inst_clone_srcs[&req.src];
             let foreign = src.method_of.is_some()
-                && self.module_ctxs.get(&src.program).is_some_and(|ctx| ctx.knows_tys(&req.lookup) && ctx.layout_safe(src.span));
+                && self.module_ctxs.get(&src.program).is_some_and(|ctx| {
+                    ctx.knows_tys(&req.lookup) && (ctx.layout_safe(src.span) || self.fn_sig_split(&req.src))
+                });
             if foreign {
                 self.foreign_clone_queue.push(req);
             } else {
@@ -2633,10 +2660,16 @@ impl Compiler {
         for (h, t) in head.iter().zip(lookup) {
             Self::bind_scheme_vars(h, t, &mut vars);
         }
-        let look = crate::layout::nested_open_look(&self.checker);
+        let ground = |open: &Ty| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(open, &vars));
+        // Another module's class whose methods are all its shared bodies
+        // at these types holds its nested enums as they do (#2547).
+        let all = crate::layout::nested_open_look(&self.checker);
+        let look = |name: &str, args: &[Ty]| {
+            all(name, args) && !self.shared_only_class(name, &args.iter().map(&ground).collect::<Vec<_>>())
+        };
         let mut niche = |open: &Ty| {
             matches!(
-                self.value_layout(&crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(open, &vars))),
+                self.value_layout(&ground(open)),
                 ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult
             )
         };

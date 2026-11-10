@@ -1286,6 +1286,20 @@ impl Compiler {
             self.messages.push(msg);
             return;
         }
+        if let Some((class, field, at)) = self.shared_field_refusal.take()
+            && reason == "field-shared-layout"
+        {
+            let mut msg = Message::error(
+                ErrorCode::CodegenError,
+                format!("the compiler cannot lower `{name}` yet (field-shared-layout): field `{field}` of `{class}` is laid out by its module's shared generic bodies here"),
+                at.0..at.1,
+            );
+            msg.with_help(format!(
+                "`{class}` is declared in another module, which does not know these type arguments (a type declared after it, a tuple), so its methods run there as shared generic bodies; they hold the `Option` or `Result` of a type parameter inside `{field}` (in a `Vec`, an array, a tuple or a payload) as an object, where this code would hold a one-word niche value; declare the type argument in or before that module, or construct, fill and read the field through the class's own methods (coil-lang#2547)"
+            ));
+            self.messages.push(msg);
+            return;
+        }
         let mut message = Message::error(
             ErrorCode::CodegenError,
             format!("the compiler cannot lower `{name}` yet ({reason})"),
@@ -1339,6 +1353,7 @@ impl Compiler {
         *self.polyfn_over_application.borrow_mut() = None;
         *self.nested_split_refusal.borrow_mut() = None;
         *self.unit_fn_nested_refusal.borrow_mut() = None;
+        *self.shared_field_refusal.borrow_mut() = None;
         // Clones an earlier body planned but never called give back their room.
         self.planned_method_clones.borrow_mut().clear();
         let Some(&index) = self.hir_fns.get(&(span.start, span.end)) else {
@@ -5151,8 +5166,9 @@ impl Compiler {
     /// function of no parameters is typed `unit -> T`, which is none.
     fn hir_mono_param_tys(&self, lookup: &str, argc: usize) -> Option<Vec<Ty>> {
         let params = self.checker.fn_param_tys(lookup)?;
+        // Another module's function records no parameter names here.
         let none = argc == 0
-            && self.checker.fn_param_names(lookup).is_some_and(<[String]>::is_empty)
+            && !self.checker.fn_param_names(lookup).is_some_and(|names| !names.is_empty())
             && matches!(params.as_slice(), [Ty::Con(unit)] if unit == "unit");
         Some(if none { Vec::new() } else { params })
     }
@@ -7213,7 +7229,12 @@ impl Compiler {
         let ground = |open: &Ty| apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(open, &vars));
         let mut niche = |open: &Ty| self.hir_niche_word(&ground(open));
         let mut unit = |var: &Ty| crate::layout::is_unit(&ground(var));
-        let look = crate::layout::nested_open_look(&self.checker);
+        // Another module's class whose methods are all its shared bodies
+        // at these types holds its nested enums as they do (#2547).
+        let all = crate::layout::nested_open_look(&self.checker);
+        let look = |name: &str, args: &[Ty]| {
+            all(name, args) && !self.shared_only_class(name, &args.iter().map(&ground).collect::<Vec<_>>())
+        };
         params.iter().chain([&ret]).any(|ty| {
             crate::layout::nested_open_enum(&self.checker, ty, true, &look, &mut niche)
                 || crate::layout::nested_fn_var_result(ty, true, &mut unit)
@@ -9550,7 +9571,58 @@ impl Compiler {
     }
 
     /// The field-slot words of a planned `new C(args)`.
+    /// Refuse a read or write of field `field` (every field: `None`, a
+    /// construction) of class instance `ty` where another module's shared
+    /// bodies alone lay it out ([`Self::shared_only_class`]) and it holds
+    /// an open `Option` / `Result` below its top that is a niche word at
+    /// the instance's types: those bodies hold that enum as its object,
+    /// this body would hold the niche word (#2547). A field that is a class
+    /// instance is only moved here; its own fields are checked where they
+    /// are read.
+    fn hir_check_shared_field(&self, ty: &Ty, field: Option<&str>, at: (usize, usize)) -> Check {
+        use crate::typechecking::ty::{TyVarId, strip_readonly};
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let Ty::App(head, args) = strip_readonly(&ty) else {
+            return Ok(());
+        };
+        let Ty::Con(class) = head.as_ref() else {
+            return Ok(());
+        };
+        if !self.shared_only_class(class, args) {
+            return Ok(());
+        }
+        let (Some(params), Some(fields)) = (self.checker.type_ctor_params(class), self.checker.class_fields(class)) else {
+            return Ok(());
+        };
+        let open: Vec<Ty> = (0..params.len()).map(|i| Ty::Var(TyVarId(u32::MAX - i as u32))).collect();
+        let vars: HashMap<TyVarId, Ty> = open
+            .iter()
+            .zip(args.iter())
+            .filter_map(|(o, a)| match o {
+                Ty::Var(v) => Some((*v, a.clone())),
+                _ => None,
+            })
+            .collect();
+        let look = |name: &str, _: &[Ty]| self.checker.enum_variants(name).is_some();
+        let mut niche = |o: &Ty| self.hir_niche_word(&Self::apply_ty_var_map(o, &vars));
+        let found = fields.iter().find(|(name, fty)| {
+            field.is_none_or(|f| f == name) && {
+                let fty = crate::layout::bind_params(fty, params, &open);
+                let top = !matches!(strip_readonly(&fty), Ty::Fun(..));
+                crate::layout::nested_open_enum(&self.checker, &fty, top, &look, &mut niche)
+            }
+        });
+        let Some((name, _)) = found else {
+            return Ok(());
+        };
+        *self.shared_field_refusal.borrow_mut() = Some((ty.to_string(), name.clone(), at));
+        Err("field-shared-layout")
+    }
+
     fn hir_check_new_args(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Check {
+        if let Some(ty) = Self::hir_ty(hir, id) {
+            self.hir_check_shared_field(ty, None, hir.expr(id).span)?;
+        }
         let (_, tys) = self.hir_new_layout(hir, id).ok_or("class-layout")?;
         let HirKind::Make { args, .. } = &hir.expr(id).kind else {
             unreachable!()
@@ -9740,6 +9812,9 @@ impl Compiler {
             }
             HirKind::Field { base, name } => {
                 let (_, fty) = self.hir_field(hir, *base, name).ok_or("field-slot")?;
+                if let Some(ty) = Self::hir_ty(hir, *base) {
+                    self.hir_check_shared_field(ty, Some(name), hir.expr(id).span)?;
+                }
                 let layout = Self::hir_ty(hir, id).map(|ty| self.value_layout(ty));
                 // A slot of a generic class's field holds the open type's
                 // layout (an `Option<T>` boxed); read at a ground receiver
@@ -10140,6 +10215,9 @@ impl Compiler {
                 }
                 HirKind::Field { base, name } => {
                     let (_, fty) = self.hir_field(hir, *base, name).ok_or("field-slot")?;
+                    if let Some(ty) = Self::hir_ty(hir, *base) {
+                        self.hir_check_shared_field(ty, Some(name), hir.expr(*place).span)?;
+                    }
                     self.hir_check_value(hir, emit, *value, &Rep::Word(self.value_layout(&fty)))?;
                     let base_rep = self.hir_natural(hir, emit, *base).ok_or("value-shape")?;
                     self.hir_check_value(hir, emit, *base, &base_rep)
