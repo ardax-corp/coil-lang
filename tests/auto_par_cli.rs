@@ -462,21 +462,6 @@ fn a_fold_of_one_signed_terms_is_the_sequential_one() {
     same_as_sequential("signed-product-turns-past", &fold_program("576460752303423488", "*", turns), overflow);
 }
 
-/// `program` prints, reports and exits the same with auto-par on as with
-/// it off on the MIR interpreter, at any worker count, whatever that is.
-fn on_matches_off(name: &str, program: &str) {
-    let dir = std::env::temp_dir().join(format!("coil-auto-par-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    let src = dir.join(format!("{name}.coil"));
-    std::fs::write(&src, program).expect("write source");
-    let off = observed(&src, &["--mir", "--auto-par", "off"], None);
-    for workers in [None, Some("1"), Some("8")] {
-        let on = observed(&src, &["--mir", "--auto-par", "on"], workers);
-        assert_eq!(on, off, "{name} with {workers:?} workers: auto-par on, then off");
-    }
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// A loop of `shape` over `a` to `b`, called with `bounds`, folding
 /// `term(i)` with `^`.
 fn range_program(shape: &str, term: &str, bounds: &str) -> String {
@@ -521,16 +506,19 @@ fn a_range_at_the_edge_of_int_runs_as_the_sequential_loop_does() {
     same_as_sequential("edge-for-to-max", &range_program(for_to, "i % 7", top), "");
     same_as_sequential("edge-while-to-max", &range_program(while_to, "i % 7", top), "");
     // From far below zero to far above it: `b - a` is not an `int`. The
-    // fourth iteration divides by zero. On the MIR interpreter only: the
-    // native engine's vector loop does not run such a range, with
-    // auto-par on or off (#2522).
+    // fourth iteration divides by zero, also in the native engine's
+    // vector loop (#2522).
     let wide = "0 - 9223372036854775807, 9223372036854775807";
     let fourth = "100 / (i + 9223372036854775804)";
-    on_matches_off("edge-for-wide", &range_program(for_to, fourth, wide));
-    on_matches_off("edge-while-wide", &range_program(while_to, fourth, wide));
-    on_matches_off("edge-stride-wide", &range_program(by_three, "100 / (i + 9223372036854775801)", wide));
+    let by_zero = "panic: division by zero";
+    same_as_sequential("edge-for-wide", &range_program(for_to, fourth, wide), by_zero);
+    same_as_sequential("edge-while-wide", &range_program(while_to, fourth, wide), by_zero);
+    same_as_sequential("edge-stride-wide", &range_program(by_three, "100 / (i + 9223372036854775801)", wide), by_zero);
     // A stride whose rounding up would pass `MAX`.
-    on_matches_off("edge-stride-long", &range_program(by_three, "100 / (i - 9)", "0, 9223372036854775806"));
+    same_as_sequential("edge-stride-long", &range_program(by_three, "100 / (i - 9)", "0, 9223372036854775806"), by_zero);
+    // A range that ends below its start by more than an `int` holds
+    // runs no iteration.
+    same_as_sequential("edge-for-backwards", &range_program(for_to, fourth, "9223372036854775807, 0 - 9223372036854775807"), "");
 }
 
 /// An `if let` is read as the `match` it is: a const call in its arm
