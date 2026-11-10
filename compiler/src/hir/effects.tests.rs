@@ -1481,3 +1481,55 @@ impl Handle {
 }"
     ));
 }
+
+const OVERLOADS: &str = "
+static let HITS: int = 0;
+fn f(int a, int b) -> int {
+    HITS = HITS + 1;
+    return a + b;
+}
+fn f(int a) -> int { return a + 1; }
+fn one(int a) -> int { return f(a); }
+fn two(int a) -> int { return f(a, a); }
+class C {
+    pub n: int,
+}
+impl C {
+    pub fn m(int a, int b) -> int {
+        HITS = HITS + 1;
+        return a + b;
+    }
+    pub fn m(int a) -> int { return a + self.n; }
+}
+fn mone(C c) -> int { return c.m(1); }
+fn mtwo(C c) -> int { return c.m(1, 2); }
+";
+
+/// A call of an overloaded function costs what the overload it names
+/// does, whichever is declared last (#2426).
+#[test]
+fn a_call_takes_the_effects_of_the_overload_it_names() {
+    let (m, out) = summaries(OVERLOADS);
+    assert!(of(&m, &out, "one").is_pure());
+    assert!(!of(&m, &out, "two").is_pure());
+    // A method call does not say which body it runs: either may.
+    assert!(!of(&m, &out, "mone").is_pure());
+    assert!(!of(&m, &out, "mtwo").is_pure());
+}
+
+#[test]
+fn an_overloaded_name_is_pure_when_every_overload_is() {
+    let (m, out) = summaries(OVERLOADS);
+    let names = pure_names(&m, "", &out);
+    assert!(!names.contains("f") && !names.contains("C::m") && !names.contains("m"), "{names:?}");
+    assert!(names.contains("one") && !names.contains("two"), "{names:?}");
+}
+
+#[test]
+fn a_later_module_sees_every_overload_of_a_name() {
+    let (m, out) = summaries(OVERLOADS);
+    let mut program = ProgramEffects::default();
+    program.record(&m, &Checker::new(), "", &out);
+    assert!(!program.summary_named("f").expect("f").is_pure());
+    assert!(!program.summary_named("C::m").expect("C::m").is_pure());
+}
