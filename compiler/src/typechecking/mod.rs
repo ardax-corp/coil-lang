@@ -37,7 +37,6 @@ pub use infer::{TestTry, TryInto,
 };
 #[allow(unused_imports)] // public API for kind-aware callers / tests
 pub use kind::Kind;
-pub use purity::analyze_recursive_fns;
 #[allow(unused_imports)] // public API re-export
 pub use ty::{ScalarBacking, Ty};
 #[allow(unused_imports)] // public API for Vec helpers / codegen
