@@ -1258,10 +1258,8 @@ fn is_string(ty: &Ty) -> bool {
 
 /// Where an element-wise operand's elements come from.
 enum AggSrc {
-    /// Literal items, each read as reached.
-    Items(Vec<HirId>),
-    /// Stack array slots `base..base + n`.
-    Slots(u32, usize),
+    /// Literal items or stack array slots, read when the operand runs.
+    Elems(Vec<ValueId>),
     Pair(ValueId, ValueId),
     Word(ValueId),
 }
@@ -2789,39 +2787,35 @@ impl Lower<'_> {
         let Some(n) = shape.static_len() else {
             return self.aggregate_dynamic(lhs, rhs, mode, ty, apply);
         };
-        // A static shape. An array's elements are read where they are (its
-        // literal items as they are reached), a tuple is a value first. A
-        // broadcast array runs before its scalar, whichever side that is on.
+        // A static shape: the operands run left to right. An array's
+        // elements are read where they are (its literal items in order, with
+        // no array made), a tuple is a value first.
         let array = !shape.is_tuple();
-        let is_scalar = |side| scalar_on == Some(side);
-        let mut order = vec![(lhs, is_scalar(ScalarSide::Left), 0)];
-        order.extend(rhs.map(|r| (r, is_scalar(ScalarSide::Right), 1)));
-        if array && is_scalar(ScalarSide::Left) {
-            order.reverse();
-        }
-        let mut srcs = [None, None];
-        for (operand, scalar, side) in order {
-            let Some(src) = self.agg_operand(operand, array && !scalar)? else {
-                return Ok(Val::Never);
+        let side = |l: &mut Self, operand: HirId, on: ScalarSide| -> Result<Option<AggSide>, Refusal> {
+            let scalar = scalar_on == Some(on);
+            let Some(src) = l.agg_operand(operand, array && !scalar)? else {
+                return Ok(None);
             };
-            srcs[side] = Some(match scalar {
-                true => AggSide::Scalar(self.agg_scalar(&src)?),
+            Ok(Some(match scalar {
+                true => AggSide::Scalar(l.agg_scalar(&src)?),
                 false => AggSide::Elems(src),
-            });
-        }
-        let [Some(a), b] = srcs else {
-            return Err("aggregate operands".into());
+            }))
+        };
+        let Some(a) = side(self, lhs, ScalarSide::Left)? else {
+            return Ok(Val::Never);
+        };
+        let b = match rhs {
+            Some(r) => match side(self, r, ScalarSide::Right)? {
+                Some(b) => Some(b),
+                None => return Ok(Val::Never),
+            },
+            None => None,
         };
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
-            let Some(x) = self.agg_side(&a, i, ty)? else {
-                return Ok(Val::Never);
-            };
+            let x = self.agg_side(&a, i, ty)?;
             let y = match &b {
-                Some(b) => match self.agg_side(b, i, ty)? {
-                    Some(y) => Some(y),
-                    None => return Ok(Val::Never),
-                },
+                Some(b) => Some(self.agg_side(b, i, ty)?),
                 None => None,
             };
             out.push(apply(self, x, y)?);
@@ -2909,15 +2903,25 @@ impl Lower<'_> {
     }
 
     /// How an aggregate operand's elements are read: literal array items
-    /// (only when `items`, read as reached), stack array slots, a pair, or
-    /// a heap word (a scalar for a broadcast's other side).
+    /// and stack array slots (only when `items`) as values, read here in
+    /// order; a pair; or a heap word (a scalar for a broadcast's other side).
     fn agg_operand(&mut self, id: HirId, items: bool) -> Result<Option<AggSrc>, Refusal> {
         if items && let Some(src) = query::aggregate_src(self.hir, &self.stack_lens(id), id) {
             match src {
-                query::AggregateSrc::Items(items) => return Ok(Some(AggSrc::Items(items))),
+                query::AggregateSrc::Items(items) => {
+                    let mut elems = Vec::with_capacity(items.len());
+                    for item in items {
+                        let Some(v) = self.word(item)? else {
+                            return Ok(None);
+                        };
+                        elems.push(v);
+                    }
+                    return Ok(Some(AggSrc::Elems(elems)));
+                }
                 query::AggregateSrc::Slots(local) if self.boxed(id).is_none() => {
-                    let (base, n, _) = self.stack(local.0).expect("stack array");
-                    return Ok(Some(AggSrc::Slots(base, n)));
+                    let (base, n, ty) = self.stack(local.0).expect("stack array");
+                    let slots = (0..n as u32).map(|i| self.b.use_local(LocalId(base + i), ty).map_err(mir));
+                    return Ok(Some(AggSrc::Elems(slots.collect::<Result<_, _>>()?)));
                 }
                 _ => {}
             }
@@ -2929,15 +2933,9 @@ impl Lower<'_> {
     }
 
     /// Element `i` of an aggregate operand, of word type `ty`.
-    fn agg_elem(&mut self, src: &AggSrc, i: usize, ty: MirTy) -> Result<Option<ValueId>, Refusal> {
+    fn agg_elem(&mut self, src: &AggSrc, i: usize, ty: MirTy) -> Result<ValueId, Refusal> {
         let v = match src {
-            AggSrc::Items(items) => {
-                let Some(v) = self.word(*items.get(i).ok_or("aggregate item")?)? else {
-                    return Ok(None);
-                };
-                v
-            }
-            AggSrc::Slots(base, n) if i < *n => self.b.use_local(LocalId(base + i as u32), ty).map_err(mir)?,
+            AggSrc::Elems(elems) => *elems.get(i).ok_or("aggregate item")?,
             AggSrc::Pair(a, b) => match i {
                 0 => *a,
                 1 => *b,
@@ -2952,7 +2950,7 @@ impl Lower<'_> {
         if self.b.value_ty(v) != ty {
             return Err("aggregate item type".into());
         }
-        Ok(Some(v))
+        Ok(v)
     }
 
     /// The scalar side of a broadcast.
@@ -2964,9 +2962,9 @@ impl Lower<'_> {
     }
 
     /// What one side of an element-wise operator gives element `i`.
-    fn agg_side(&mut self, side: &AggSide, i: usize, ty: MirTy) -> Result<Option<ValueId>, Refusal> {
+    fn agg_side(&mut self, side: &AggSide, i: usize, ty: MirTy) -> Result<ValueId, Refusal> {
         match side {
-            AggSide::Scalar(v) => Ok(Some(*v)),
+            AggSide::Scalar(v) => Ok(*v),
             AggSide::Elems(src) => self.agg_elem(src, i, ty),
         }
     }

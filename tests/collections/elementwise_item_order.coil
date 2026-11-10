@@ -1,0 +1,100 @@
+// An element-wise operator runs its operands left to right, and each item
+// of an array literal operand once: a call item, a call on the scalar
+// side of a broadcast, and a call that returns the array.
+use tests::assert;
+
+class Log {
+    pub seen: Vec<int>,
+}
+
+impl Log {
+    pub fn mark(int id, int value) -> int {
+        self.seen.push(id);
+        return value;
+    }
+
+    pub fn floats(int id, float value) -> float {
+        self.seen.push(id);
+        return value;
+    }
+
+    pub fn array(int id) -> [int; 3] {
+        self.seen.push(id);
+        return [1, 2, 3];
+    }
+
+    pub fn order() -> int {
+        let n = 0;
+        for id in self.seen {
+            n = n * 10 + id;
+        }
+        return n;
+    }
+}
+
+fn log() -> Log {
+    return new Log(Vec::new());
+}
+
+test("a call item in a zip operand") {
+    let l = log();
+    let a = [10, 20, 30];
+    let r = [1, 2, l.mark(1, 3)] + a;
+    assert!(r[0] == 11 && r[1] == 22 && r[2] == 33);
+    assert!(l.order() == 1);
+    let s = a - [l.mark(2, 1), 2, 3];
+    assert!(s[0] == 9 && s[1] == 18 && s[2] == 27);
+    assert!(l.order() == 12);
+}
+
+test("call items on both sides run left to right") {
+    let l = log();
+    let r = [l.mark(1, 1), l.mark(2, 2)] * [l.mark(3, 3), l.mark(4, 4)];
+    assert!(r[0] == 3 && r[1] == 8);
+    assert!(l.order() == 1234);
+}
+
+test("a call item in a broadcast operand") {
+    let l = log();
+    let k = 2;
+    let r = [1, l.mark(1, 5), 3] * k;
+    assert!(r[0] == 2 && r[1] == 10 && r[2] == 6);
+    let s = k - [l.mark(2, 1), 2, 3];
+    assert!(s[0] == 1 && s[1] == 0 && s[2] == -1);
+    assert!(l.order() == 12);
+}
+
+test("a broadcast runs its scalar in source order") {
+    let l = log();
+    let r = [1, l.mark(1, 2), 3] * l.mark(2, 10);
+    assert!(r[0] == 10 && r[1] == 20 && r[2] == 30);
+    let s = l.mark(3, 10) - [1, l.mark(4, 2), 3];
+    assert!(s[0] == 9 && s[1] == 8 && s[2] == 7);
+    assert!(l.order() == 1234);
+}
+
+test("a scalar call before an array call") {
+    let l = log();
+    let r = l.mark(1, 10) - l.array(2);
+    assert!(r[0] == 9 && r[1] == 8 && r[2] == 7);
+    let s = l.array(3) - l.mark(4, 1);
+    assert!(s[0] == 0 && s[1] == 1 && s[2] == 2);
+    assert!(l.order() == 1234);
+}
+
+test("a call item in a negation and in a float array") {
+    let l = log();
+    let n = -[1, l.mark(1, 2), 3];
+    assert!(n[0] == -1 && n[1] == -2 && n[2] == -3);
+    let f = [1.5, l.floats(2, 2.5)] + [l.floats(3, 0.5), 1.0];
+    assert!(f[0] == 2.0 && f[1] == 3.5);
+    assert!(l.order() == 123);
+}
+
+test("a stack array zipped with call items") {
+    let l = log();
+    let xs = [1, 2, 3];
+    let r = xs + [l.mark(1, 10), l.mark(2, 20), l.mark(3, 30)];
+    assert!(r[0] == 11 && r[1] == 22 && r[2] == 33);
+    assert!(l.order() == 123);
+}
