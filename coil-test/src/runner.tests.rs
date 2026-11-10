@@ -728,3 +728,27 @@ fn a_known_failure_must_fail_in_its_cell() {
     assert_eq!((plain.known_failures, plain.failed), (0, 1), "only fails.coil's raise");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// `// @skip <cell> <why>` keeps a file out of its cell: not compiled, not
+/// counted, and run as usual elsewhere.
+#[test]
+fn a_skip_line_keeps_a_file_out_of_its_cell() {
+    assert_eq!(skipped_in("// @skip auto-par prints timings\n", "auto-par"), Ok(Some("prints timings".to_string())));
+    assert_eq!(skipped_in("// @skip auto-par prints timings\n", "mir-verify"), Ok(None));
+    assert!(skipped_in("// @skip auto-par\n", "auto-par").unwrap_err().contains("gives no reason"));
+
+    let root = unique_tmp("skip_cell");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("broken.coil"), "// @skip slow #1 does not compile there\ntest(\"no\") {\n  let x: int = \"s\";\n}\n").unwrap();
+    std::fs::write(root.join("fine.coil"), "test(\"ok\") {}\n").unwrap();
+    std::fs::write(root.join("bare.coil"), "// @skip slow\ntest(\"ok\") {}\n").unwrap();
+
+    let in_cell = TestOptions { cell: Some("slow".to_string()), ..options(&root, false) };
+    let result = run_test_suite(ReportConfig::default(), &in_cell).expect("suite runs");
+    assert_eq!((result.passed, result.failed, result.skipped), (1, 1, 1), "fine passes, bare has no reason, broken is skipped");
+    assert!(result.failures.join("\n").contains("gives no reason"));
+
+    let plain = run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
+    assert_eq!((plain.passed, plain.failed, plain.skipped), (2, 1, 0), "broken.coil does not compile");
+    let _ = std::fs::remove_dir_all(&root);
+}

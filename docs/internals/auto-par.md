@@ -555,7 +555,7 @@ there is no 1 ms poll. Idle workers park on the same `sleep_cvar` until `notify`
 | Switch | Effect |
 |--------|--------|
 | `COIL_MAX_WORKER_THREADS` | Pool size (1..=512). Default `available_parallelism` (min 2). `.cargo/config.toml` sets this to `1` (`force = false`) for cargo test runs. Export a higher value to profile parallelism. |
-| `--auto-par on\|off` | `off` compiles no auto fork-join (default `on`). |
+| `--auto-par on\|off` | `off` compiles no auto fork-join (default `on`). A program prints, reports and exits the same either way: `scripts/auto_par_diff.py` checks that on every program with a `main` ([test-runner](test-runner.md#configuration-cells-and-known-failures)). |
 | `COIL_PAR_STATS` | Unit tests of `machine` only: `1` / `true` / `on` / `yes` prints reactor steal/idle/join counters on shutdown (see [auto-par-branch-misses.md](auto-par-branch-misses.md)). Other builds never count. |
 
 Shared-heap spawn is always on. An argument outside the whitelist falls back to isolate `PortableValue` spawn.

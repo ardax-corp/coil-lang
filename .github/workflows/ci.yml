@@ -495,7 +495,7 @@ jobs:
             # failure here and not in `mir` is a pass's.
             # With the MIR verifier on after every pass (see `mir-verify`):
             # it costs about 1% and names the pass.
-            mir-opt) for level in 1 2 3 s g; do COIL_MIR_VERIFY=1 $run -- --engine mir -O $level $FLAGS; done ;;
+            mir-opt) for level in 1 2 3 s g; do COIL_MIR_VERIFY=1 $run -- --engine mir -O $level --cell mir-verify $FLAGS; done ;;
             # Generators and tasks parked on the heap instead of on fibers:
             # what wasm runs, where a failure is harder to read.
             mir-parked) COIL_NO_FIBERS=1 $run -- --engine mir $FLAGS ;;
@@ -510,11 +510,20 @@ jobs:
             # builds run otherwise: a pass that breaks SSA is a hang or a
             # wrong value in a release build (#2422). A violation panics,
             # naming the pass, the function and the file, and ends that
-            # corpus's process. `mir-opt` runs the other levels this way.
+            # corpus's process, so a file with a filed violation is kept out
+            # with `// @skip mir-verify #issue`. `mir-opt` runs the other
+            # levels this way.
             mir-verify)
               for engine in native mir; do
-                COIL_MIR_VERIFY=1 $run -- --engine $engine $FLAGS
+                COIL_MIR_VERIFY=1 $run -- --engine $engine --cell mir-verify $FLAGS
               done ;;
+            # Every program with a `main` (corpus, examples, perf benches)
+            # as its own process with `--auto-par on` and `--auto-par off`,
+            # on 8 workers and both engines: stdout, stderr and the exit
+            # code must be the same. `// @skip auto-par <why>` keeps out a
+            # program whose output depends on time or scheduling, and
+            # `// @xfail auto-par #issue` lists a known difference.
+            auto-par) python3 scripts/auto_par_diff.py --bin harness-bin -- $FLAGS ;;
             clone-budget-0)
               for engine in native mir; do
                 $run -- --engine $engine --clone-budget 0 --cell clone-budget-0 $FLAGS
@@ -571,7 +580,7 @@ jobs:
         mode: [release]
         # Native code runs in release only: a debug cell would test the
         # same Cranelift output at a fraction of the speed.
-        variant: [default, O0, leak-smoke, native, mir, mir-opt, mir-parked, mir-verify, clone-budget-0]
+        variant: [default, O0, leak-smoke, native, mir, mir-opt, mir-parked, mir-verify, clone-budget-0, auto-par]
     env: *harness-env
     steps: *harness-steps
 

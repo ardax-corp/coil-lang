@@ -317,6 +317,31 @@ pub fn known_failure(src: &str, cell: &str) -> Result<Option<String>, String> {
     Ok(None)
 }
 
+/// Why a file is not run in the configuration `cell` names: the text after
+/// the name on its `// @skip <cell> <why>` header line (a failure the runner
+/// does not survive there, or output that the cell cannot compare).
+/// `Ok(None)` when no line names `cell`; `Err` when the line gives no reason.
+pub fn skipped_in(src: &str, cell: &str) -> Result<Option<String>, String> {
+    for line in test_headers::values(src, "skip") {
+        let (name, why) = line.trim().split_once(char::is_whitespace).unwrap_or((line.trim(), ""));
+        if name != cell {
+            continue;
+        }
+        if why.trim().is_empty() {
+            return Err(format!("`// @skip {cell}` gives no reason: write `// @skip {cell} <why>`"));
+        }
+        return Ok(Some(why.trim().to_string()));
+    }
+    Ok(None)
+}
+
+/// [`skipped_in`] for `path` in this run's `--cell`.
+fn cell_skip(options: &TestOptions, path: &Path) -> Option<Result<String, String>> {
+    let cell = options.cell.as_deref()?;
+    let src = std::fs::read_to_string(path).ok()?;
+    skipped_in(&src, cell).transpose()
+}
+
 /// The stdout a `fn main()`-only file declares on the `// @output` line of
 /// its leading comment header, unescaped (`\n`, `\t`, `\e`, `\\`), as
 /// `examples/` document theirs. `None` when there is no such line.
@@ -404,6 +429,8 @@ pub struct SuiteResult {
     pub quiet_diagnostics: usize,
     /// Files that failed as their `// @xfail` line for this `--cell` says.
     pub known_failures: usize,
+    /// Files their `// @skip` line keeps out of this `--cell`.
+    pub skipped: usize,
 }
 
 /// One case's verdict, as `coil mutate` needs it from the baseline run.
@@ -661,7 +688,11 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
     // A known failure of this `--cell` (`// @xfail`): the file must fail.
     // Its failing cases are not counted, and a file that passes fails, so
     // the line goes when its issue is fixed.
-    let known = run.options.cell.as_deref().filter(|_| !is_compile_fail(&file.path)).and_then(|cell| {
+    let skipped = matches!(cell_skip(run.options, &file.path), Some(Ok(_)));
+    if skipped {
+        result.skipped += 1;
+    }
+    let known = run.options.cell.as_deref().filter(|_| !skipped && !is_compile_fail(&file.path)).and_then(|cell| {
         let src = std::fs::read_to_string(&file.path).unwrap_or_default();
         known_failure(&src, cell).map(|why| why.map(|why| (cell, why))).transpose()
     });
@@ -1152,6 +1183,22 @@ fn project_sources(options: &TestOptions, found: &[PathBuf]) -> Vec<PathBuf> {
 /// doc examples.
 fn start_file(run: &Run<'_>, dispatch: Dispatch, target: &Target) -> PendingFile {
     let path = target.path.as_path();
+    // `// @skip <cell>`: nothing of the file runs in this cell.
+    match cell_skip(run.options, path) {
+        Some(Ok(_)) => {
+            return PendingFile {
+                path: path.to_path_buf(),
+                display: path.display().to_string(),
+                diagnostics: Captured::default(),
+                verdict: None,
+                cases: Vec::new(),
+                lines: None,
+                expected_output: None,
+            };
+        }
+        Some(Err(why)) => return PendingFile::decided(path, Captured::default(), (false, Some(why))),
+        None => {}
+    }
     let mut file = if target.compile {
         compile_and_start(run, dispatch, path)
     } else {
@@ -1526,6 +1573,7 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
         result.failures.extend(more.failures);
         result.quiet_diagnostics += more.quiet_diagnostics;
         result.known_failures += more.known_failures;
+        result.skipped += more.skipped;
     }
     reactor.shutdown();
     result.coverage = coverage.map(|c| c.into_inner().unwrap_or_else(|e| e.into_inner()));
@@ -1675,6 +1723,7 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
         failures,
         quiet_diagnostics,
         known_failures,
+        skipped,
         ..
     } = match run_test_suite(config.clone(), &options) {
         Ok(result) => result,
@@ -1700,10 +1749,13 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
             );
         }
         eprintln!();
-        let known = match known_failures {
+        let mut known = match known_failures {
             0 => String::new(),
             n => format!(" {n} known failure{} (`// @xfail`);", if n == 1 { "" } else { "s" }),
         };
+        if skipped != 0 {
+            known.push_str(&format!(" {skipped} skipped (`// @skip`);"));
+        }
         eprintln!(
             "test result: {}. {passed} passed; {failed} failed; {} total;{known} finished in {:.2}s",
             if failed == 0 { "ok" } else { "FAILED" },
@@ -1762,6 +1814,7 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
             .num("failed", failed)
             .num("total", passed + failed)
             .num("known_failures", known_failures)
+            .num("skipped", skipped)
             .opt_str("seed", seed_of(options.order).as_deref())
             .raw("coverage", &coverage_event)
             .emit();
