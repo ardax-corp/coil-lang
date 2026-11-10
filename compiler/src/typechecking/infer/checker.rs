@@ -7247,125 +7247,49 @@ impl Checker {
         let right = classify_arith(&apply_ty_prune(&self.subst, &rp));
 
         // Resolve shapes.
-        let resolved: Result<(ArithShape, ZipMode), String> = match (&left, &right) {
+        let resolved: Result<(Ty, AggregateShape, AggregateMode), String> = match (&left, &right) {
             (
-                ArithShape::Tuple {
-                    elem: e1,
-                    arity: n1,
-                },
-                ArithShape::Tuple {
-                    elem: e2,
-                    arity: n2,
-                },
-            ) => {
-                if n1 != n2 {
-                    Err(format!(
-                        "cannot zip tuples of length {} and {} with `{}`",
-                        n1, n2, op
-                    ))
-                } else {
-                    let _ = self.unify(e1, e2, &range, &format!("element types of `{}`", op));
-                    let elem = apply_ty_prune(&self.subst, e1);
-                    Ok((ArithShape::Tuple { elem, arity: *n1 }, ZipMode::Zip))
+                ArithShape::Aggregate { elem: e1, shape: s1 },
+                ArithShape::Aggregate { elem: e2, shape: s2 },
+            ) => match (s1, s2) {
+                (AggregateShape::Tuple(n1), AggregateShape::Tuple(n2))
+                | (AggregateShape::Array(Some(n1)), AggregateShape::Array(Some(n2))) => {
+                    if n1 != n2 {
+                        Err(format!(
+                            "cannot zip {} of length {} and {} with `{}`",
+                            if s1.is_tuple() { "tuples" } else { "arrays" },
+                            n1,
+                            n2,
+                            op
+                        ))
+                    } else {
+                        let _ = self.unify(e1, e2, &range, &format!("element types of `{}`", op));
+                        Ok((apply_ty_prune(&self.subst, e1), *s1, AggregateMode::Zip))
+                    }
                 }
-            }
-            (
-                ArithShape::Array {
-                    elem: e1,
-                    length: ArrayLength::Static(n1),
-                },
-                ArithShape::Array {
-                    elem: e2,
-                    length: ArrayLength::Static(n2),
-                },
-            ) => {
-                if n1 != n2 {
-                    Err(format!(
-                        "cannot zip arrays of length {} and {} with `{}`",
-                        n1, n2, op
-                    ))
-                } else {
-                    let _ = self.unify(e1, e2, &range, &format!("element types of `{}`", op));
-                    let elem = apply_ty_prune(&self.subst, e1);
-                    Ok((
-                        ArithShape::Array {
-                            elem,
-                            length: ArrayLength::Static(*n1),
-                        },
-                        ZipMode::Zip,
-                    ))
-                }
-            }
-            (
-                ArithShape::Array {
-                    length: ArrayLength::Dynamic,
-                    ..
-                },
-                ArithShape::Array { .. },
-            )
-            | (
-                ArithShape::Array { .. },
-                ArithShape::Array {
-                    length: ArrayLength::Dynamic,
-                    ..
-                },
-            ) => Err(format!(
-                "cannot zip dynamic-length arrays with `{}`; use fixed-length `[T; N]` or broadcast a scalar",
-                op
-            )),
-            (ArithShape::Tuple { elem, arity }, ArithShape::Scalar(s)) => {
+                (AggregateShape::Array(_), AggregateShape::Array(_)) => Err(format!(
+                    "cannot zip dynamic-length arrays with `{}`; use fixed-length `[T; N]` or broadcast a scalar",
+                    op
+                )),
+                _ => Err(format!(
+                    "cannot apply `{}` between a tuple and an array",
+                    op
+                )),
+            },
+            (ArithShape::Aggregate { elem, shape }, ArithShape::Scalar(s)) => {
                 let _ = self.unify(elem, s, &range, &format!("operands of `{}`", op));
-                let elem = apply_ty_prune(&self.subst, elem);
-                Ok((
-                    ArithShape::Tuple {
-                        elem,
-                        arity: *arity,
-                    },
-                    ZipMode::BroadcastRight,
-                ))
+                let mode = AggregateMode::Broadcast(ScalarSide::Right);
+                Ok((apply_ty_prune(&self.subst, elem), *shape, mode))
             }
-            (ArithShape::Scalar(s), ArithShape::Tuple { elem, arity }) => {
+            (ArithShape::Scalar(s), ArithShape::Aggregate { elem, shape }) => {
                 let _ = self.unify(s, elem, &range, &format!("operands of `{}`", op));
-                let elem = apply_ty_prune(&self.subst, elem);
-                Ok((
-                    ArithShape::Tuple {
-                        elem,
-                        arity: *arity,
-                    },
-                    ZipMode::BroadcastLeft,
-                ))
+                let mode = AggregateMode::Broadcast(ScalarSide::Left);
+                Ok((apply_ty_prune(&self.subst, elem), *shape, mode))
             }
-            (ArithShape::Array { elem, length }, ArithShape::Scalar(s)) => {
-                let _ = self.unify(elem, s, &range, &format!("operands of `{}`", op));
-                let elem = apply_ty_prune(&self.subst, elem);
-                Ok((
-                    ArithShape::Array {
-                        elem,
-                        length: *length,
-                    },
-                    ZipMode::BroadcastRight,
-                ))
-            }
-            (ArithShape::Scalar(s), ArithShape::Array { elem, length }) => {
-                let _ = self.unify(s, elem, &range, &format!("operands of `{}`", op));
-                let elem = apply_ty_prune(&self.subst, elem);
-                Ok((
-                    ArithShape::Array {
-                        elem,
-                        length: *length,
-                    },
-                    ZipMode::BroadcastLeft,
-                ))
-            }
-            (ArithShape::Tuple { .. }, ArithShape::Array { .. })
-            | (ArithShape::Array { .. }, ArithShape::Tuple { .. }) => Err(format!(
-                "cannot apply `{}` between a tuple and an array",
-                op
-            )),
             _ => Err(format!("cannot apply `{}` to these operand shapes", op)),
         };
 
-        let (result_shape, mode) = match resolved {
+        let (elem, shape, mode) = match resolved {
             Ok(v) => v,
             Err(msg) => {
                 return self.error_with_help(
@@ -7380,10 +7304,6 @@ impl Checker {
             }
         };
 
-        let elem = match &result_shape {
-            ArithShape::Tuple { elem, .. } | ArithShape::Array { elem, .. } => elem.clone(),
-            ArithShape::Scalar(e) => e.clone(),
-        };
         let elem = apply_ty_prune(&self.subst, &elem);
         if !is_numeric_elem(&elem) {
             return self.error_with_help(
@@ -7416,70 +7336,15 @@ impl Checker {
             }
         }
 
-        let float = elem_is_float(&elem);
-        let kind = match (&result_shape, mode) {
-            (ArithShape::Tuple { arity, .. }, ZipMode::Zip) => AggregateArithKind::ZipTuple {
-                arity: *arity,
-                elem_is_float: float,
-            },
-            (
-                ArithShape::Array {
-                    length: ArrayLength::Static(n),
-                    ..
-                },
-                ZipMode::Zip,
-            ) => AggregateArithKind::ZipArray {
-                length: *n,
-                elem_is_float: float,
-            },
-            (ArithShape::Tuple { arity, .. }, ZipMode::BroadcastRight) => {
-                AggregateArithKind::BroadcastTuple {
-                    arity: *arity,
-                    scalar_on: ScalarSide::Right,
-                    elem_is_float: float,
-                }
-            }
-            (ArithShape::Tuple { arity, .. }, ZipMode::BroadcastLeft) => {
-                AggregateArithKind::BroadcastTuple {
-                    arity: *arity,
-                    scalar_on: ScalarSide::Left,
-                    elem_is_float: float,
-                }
-            }
-            (ArithShape::Array { length, .. }, ZipMode::BroadcastRight) => {
-                AggregateArithKind::BroadcastArray {
-                    length: match length {
-                        ArrayLength::Static(n) => Some(*n),
-                        ArrayLength::Dynamic => None,
-                    },
-                    scalar_on: ScalarSide::Right,
-                    elem_is_float: float,
-                }
-            }
-            (ArithShape::Array { length, .. }, ZipMode::BroadcastLeft) => {
-                AggregateArithKind::BroadcastArray {
-                    length: match length {
-                        ArrayLength::Static(n) => Some(*n),
-                        ArrayLength::Dynamic => None,
-                    },
-                    scalar_on: ScalarSide::Left,
-                    elem_is_float: float,
-                }
-            }
-            _ => {
-                return self.error_with_help(
-                    ErrorCode::GenericTypeError,
-                    format!("internal error resolving aggregate `{}`", op),
-                    range,
-                    None,
-                );
-            }
+        let kind = AggregateArithKind {
+            shape,
+            mode,
+            elem_is_float: elem_is_float(&elem),
         };
-
         let info = AggregateArithInfo { kind, op: agg_op };
         self.aggregate_arith.insert(id, (range.start, range.end), info);
 
-        result_ty_for(&result_shape)
+        result_ty_for(shape, elem)
     }
 
     fn infer_aggregate_neg(&mut self, inner: Ty, id: Option<NodeId>, range: Range<usize>) -> Ty {
@@ -7519,8 +7384,9 @@ impl Checker {
                 );
             }
             let info = AggregateArithInfo {
-                kind: AggregateArithKind::NegTuple {
-                    arity: elems.len(),
+                kind: AggregateArithKind {
+                    shape: AggregateShape::Tuple(elems.len()),
+                    mode: AggregateMode::Neg,
                     elem_is_float: elem_is_float(&elem),
                 },
                 op: AggregateOp::Neg,
@@ -7539,11 +7405,9 @@ impl Checker {
                 );
             }
             let info = AggregateArithInfo {
-                kind: AggregateArithKind::NegArray {
-                    length: match length {
-                        ArrayLength::Static(n) => Some(*n),
-                        ArrayLength::Dynamic => None,
-                    },
+                kind: AggregateArithKind {
+                    shape: AggregateShape::array(*length),
+                    mode: AggregateMode::Neg,
                     elem_is_float: elem_is_float(&elem),
                 },
                 op: AggregateOp::Neg,

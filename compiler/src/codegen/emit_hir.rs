@@ -8837,7 +8837,7 @@ impl Compiler {
     /// (`PACKED_VEC_ARITH`): length, op, float, tuple and broadcast side;
     /// `None` when the operator does not take the kernel.
     pub(super) fn packed_aggregate_meta(info: &crate::typechecking::AggregateArithInfo) -> Option<u32> {
-        use crate::typechecking::{AggregateArithKind as K, AggregateOp, ScalarSide};
+        use crate::typechecking::{AggregateOp, ScalarSide};
         let len = query::aggregate_packed(info)?;
         let op_code: u32 = match info.op {
             AggregateOp::Add => 0,
@@ -8846,16 +8846,7 @@ impl Compiler {
             AggregateOp::Div => 3,
             _ => 4,
         };
-        let (tuple, float, scalar_on) = match info.kind {
-            K::ZipTuple { elem_is_float, .. } | K::NegTuple { elem_is_float, .. } => (true, elem_is_float, None),
-            K::BroadcastTuple {
-                elem_is_float, scalar_on, ..
-            } => (true, elem_is_float, Some(scalar_on)),
-            K::BroadcastArray {
-                elem_is_float, scalar_on, ..
-            } => (false, elem_is_float, Some(scalar_on)),
-            K::ZipArray { elem_is_float, .. } | K::NegArray { elem_is_float, .. } => (false, elem_is_float, None),
-        };
+        let (tuple, float, scalar_on) = (info.kind.shape.is_tuple(), info.kind.elem_is_float, info.kind.mode.scalar_on());
         let mut meta = (len as u32) & 0xFFFF | op_code << 16;
         meta |= u32::from(float) << 24 | u32::from(tuple) << 25 | u32::from(scalar_on.is_some()) << 26;
         meta |= u32::from(matches!(scalar_on, Some(ScalarSide::Left))) << 27;
