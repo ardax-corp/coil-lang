@@ -1080,7 +1080,7 @@ fn let_init_is_element(body: &HirBody, local: LocalId) -> bool {
 }
 
 /// Whether `local` is a `let` of a field of, or a pattern's binding in a
-/// match on, a nested open enum (`layout::nested_open_type`): a generic
+/// `let` or a match on, a nested open enum (`layout::nested_open_type`): a generic
 /// body's instance of one was made where its parameters are open, so a
 /// function it holds returns the open enum's object (#2493, #2509).
 fn binds_from_nested(body: &HirBody, checker: &Checker, local: LocalId) -> bool {
@@ -1094,6 +1094,8 @@ fn binds_from_nested(body: &HirBody, checker: &Checker, local: LocalId) -> bool 
         HirKind::Let { local: l, init: Some(init) } if *l == local => {
             matches!(body.expr(*init).kind, HirKind::Field { base, .. } if nested(base))
         }
+        // `let (f, _) = p;` of a nested open value (#2493).
+        HirKind::LetPat { pat, init } => pat.binds(local) && nested(*init),
         HirKind::Match { scrutinee, arms } => arms.iter().any(|arm| arm.pat.binds(local)) && nested(*scrutinee),
         _ => false,
     })

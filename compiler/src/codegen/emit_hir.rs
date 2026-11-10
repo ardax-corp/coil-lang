@@ -11567,13 +11567,14 @@ fn ground_fun(ty: &Ty) -> bool {
     let ground = |t: &Ty| crate::layout::ty_is_closed(t) || ground_fun(t);
     match crate::typechecking::ty::strip_readonly(ty) {
         Ty::Fun(param, ret) => ground(param) && ground(ret),
-        // A `Vec`, array or tuple of ground functions holds their closure
-        // words (`Vec<unit -> string>`, #2136).
-        t @ Ty::App(..) if crate::typechecking::ty::vec_element_ty(t).is_some() => {
-            crate::typechecking::ty::vec_element_ty(t).is_some_and(ground_fun)
-        }
+        // A `Vec`, array, tuple, `Option` or other type applied to ground
+        // functions holds their closure words (`Vec<unit -> string>`,
+        // #2136; `Option<fn(int) -> int>`, #2493).
+        Ty::App(head, args) if matches!(head.as_ref(), Ty::Con(_)) => args.iter().all(ground) && args.iter().any(ground_fun),
         Ty::Array { element, .. } => ground_fun(element),
         Ty::Tuple(items) => items.iter().all(ground) && items.iter().any(ground_fun),
+        // A variant's constructor type (`Some(inc)`) is its enum's.
+        Ty::Constructor { owner, .. } => ground_fun(owner),
         _ => false,
     }
 }
