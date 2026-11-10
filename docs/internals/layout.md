@@ -279,7 +279,8 @@ alike is one predicate, `classify::fun_words_in`: each parameter and
 the result is `()` or a plain word (`plain_word`), which is
 
 - a closed one-word type or closed enum, a bare `T`, a generic class's
-  instance over type parameters (`Cell<T>`, `Vec<T>`), or a function;
+  instance over type parameters (`Cell<T>`, `Vec<T>`) or a fixed array
+  over them (`[T; 3]`, the same heap array, #2615), or a function;
 - a tuple of plain words (`fn(T) -> (T, T)`): the tuple object, whose
   items are each one word, never a pair at a word position;
 - an `Option` / `Result` of such functions and words (`Option<fn(T) ->
