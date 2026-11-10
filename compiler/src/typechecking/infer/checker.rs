@@ -10618,7 +10618,8 @@ impl Checker {
         if !matches!(class, "Show" | "Eq" | "Hash") {
             return;
         }
-        let ty = nominal_enum(apply_ty_prune(&self.subst, ty));
+        // A `Matrix<D>` in it is its data (#2466).
+        let ty = crate::typechecking::aggregate_arith::erase_matrix_ty(&nominal_enum(apply_ty_prune(&self.subst, ty)));
         let items: Vec<Ty> = match &ty {
             Ty::Tuple(items) if !items.is_empty() => items.clone(),
             Ty::Record { fields } if !fields.is_empty() => fields.iter().map(|(_, t)| t.clone()).collect(),
@@ -10790,6 +10791,8 @@ impl Checker {
         class: &str,
         wanted: &[Ty],
     ) -> Vec<(InstanceDef, Subst, FreshVars)> {
+        let erased = self.matrix_data_goal(class, wanted);
+        let wanted = erased.as_deref().unwrap_or(wanted);
         self.ensure_structural_instance(class, wanted);
         let wanted_lookup = self.instance_lookup_args(class, wanted);
         let candidates: Vec<_> = self
@@ -11724,6 +11727,25 @@ impl Checker {
     /// For constructor-kinded class parameters, look up instances by
     /// constructor head (`Option`, `Result`), not by applied types
     /// (`Option<int>`, `Result<int, string>`).
+    /// A `Show`, `Eq` or `Hash` goal that names a `Matrix<D>`, as the goal on
+    /// its data: a matrix is its data `D` at run time, and it shows,
+    /// compares and hashes as `D` does wherever `D` has the instance (#2466).
+    /// So `Show<Matrix<[[int; 2]; 2]>>` is `Show<[[int; 2]; 2]>`, at any
+    /// depth of the goal (`Show<(Matrix<D>, int)>`), and the instance a call
+    /// records is the data's, which is what code generation's types name.
+    /// The `==` operator on two matrices is not a goal: it stays
+    /// element-wise.
+    fn matrix_data_goal(&self, class: &str, wanted: &[Ty]) -> Option<Vec<Ty>> {
+        if !matches!(class, "Show" | "Eq" | "Hash") {
+            return None;
+        }
+        let resolved: Vec<Ty> = wanted.iter().map(|ty| apply_ty_prune(&self.subst, ty)).collect();
+        match Generics::matrix_data_args(class, &resolved) {
+            std::borrow::Cow::Owned(data) => Some(data),
+            std::borrow::Cow::Borrowed(_) => None,
+        }
+    }
+
     fn instance_lookup_args(&self, class: &str, args: &[Ty]) -> Vec<Ty> {
         if let Some(class_def) = self.generics.typeclass(class) {
             args.iter()
@@ -19069,6 +19091,8 @@ impl Checker {
 
     fn is_showable_for_format(&self, ty: &Ty) -> bool {
         let resolved = apply_ty_prune(&self.subst, ty);
+        // A `Matrix<D>` shows as its data (#2466).
+        let resolved = crate::typechecking::aggregate_arith::erase_matrix_ty(&resolved);
         match resolved {
             Ty::Var(_) => false,
             Ty::Tuple(items) => items.iter().all(|item| self.is_showable_for_format(item)),
