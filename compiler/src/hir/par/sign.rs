@@ -21,6 +21,11 @@
 //! for the ranges of the call's arguments. Anything else is the whole
 //! range of its type: unknown means not proved. A call of a function
 //! already being worked out (a recursive one) is unknown.
+//!
+//! A sign that depends on values the loop never writes (a capture it
+//! scales by, a start read at run time) is proved for narrowed ranges of
+//! them, which the fork-join then tests as the loop starts
+//! ([`super::loop_par::SignTest`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};

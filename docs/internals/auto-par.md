@@ -330,7 +330,7 @@ only when **every** gate holds:
 | Purity | body calls only pure user functions; no index / field / static writes, no `break`, `return` or `yield`. Division and modulo need a non-zero literal divisor |
 | Stride | unit `+ 1`, or a positive constant `i = i + k` |
 | Types | the induction variable and `e` both infer to `int` — float reduction is not associative |
-| Sign | `+`: every term proved `>= 0`, or every term proved `<= 0`. `*`: every term proved `>= 1` or `<= -2`. `^`: any term. See [the sign rule](#the-sign-rule) |
+| Sign | `+`: every term proved `>= 0`, or every term proved `<= 0`. `*`: every term proved `>= 1` or `<= -2`. `^`: any term. Proved for every value, or under a test of the captures and bounds the fork-join makes as the loop starts. See [the sign rule](#the-sign-rule) |
 | Range | an inclusive end read at run time (`i <= n`, `a..=n`) is proved below `MAX`, so the fork-join's `n + 1` is in range |
 
 A site is keyed by its loop's source span and names its locals (index,
@@ -449,7 +449,7 @@ operands' ranges, cut to the `int` range. What it reads:
 | the index | its range: the literal bounds, and for a bound read at run time what is known of that local. A `while` index is also read after its step |
 | a `let` nothing writes again | its initializer's range |
 | a `let` assigned later (in a callee) | the join of every value written to it, widened to a sign after two rounds (`s = s + i * i` from `0` is `>= 0`) |
-| a parameter or capture | anything, unless a condition narrows it |
+| a parameter or capture | anything, unless a condition or [a test](#a-test-of-the-captures) narrows it |
 | `if c { … }`, `if c { return … }` / `if c { panic … }` ahead, a `match` on literals, a `for` loop's `invariant` | `c` narrows the locals nothing writes (`x < 0`, `x >= k`, `&&`, a failed `\|\|`) |
 | a `byte` value; structural `len()`; a node the checker proved non-negative | `0..=255`; `>= 0`; `>= 0` |
 | a module `const` (not a `static let`); an element of a `readonly` array literal a `const` names | its initializer's range; the join of the elements. A module `const` may also read `0`: one set at startup is a slot, which code run ahead of its initializer sees empty |
@@ -459,16 +459,44 @@ operands' ranges, cut to the `int` range. What it reads:
 Unknown means not proved. What it does not prove today, by what stops it
 in the corpus and the examples:
 
-- a term scaled by a parameter of the enclosing function (`s + i * c`,
-  `acc + k`, `r * base`): the sign is the caller's. A guard ahead of the
-  loop settles it (`if c < 0 { return … }`); a run-time test of the
-  captures in the fork-join would too, and is not built;
-- an index from a start read at run time (`for x in lo..hi` with
-  `acc + x % 7`);
-- a term of either sign (`Result::Err(_) => -1`);
+- a term of either sign whatever the captures (`Result::Err(_) => -1`,
+  `i - 50`), or one whose sign depends on the captures in a way the
+  tests above do not express (`i - lo` from `lo`: the analysis does not
+  relate two values);
 - a value read from an object or a mutable array (`n.v + m.v`, `xs[0]`);
 - a range a function returns (`for x in make_range(n)`);
 - a function that calls itself (`even` / `odd`).
+
+#### A test of the captures
+
+The sign is often the caller's: `s + i * c` with `c` a parameter,
+`r * base`, an index from a start read at run time (`for x in lo..hi`
+with `acc + x % 7`). Nothing in the loop writes those values (the
+captures, the bounds, a `while` index's start), so they are the same in
+every iteration of a run, and the proof can be made for each of their
+values. `Scan::sign_guard` (`hir/par/loop_par.rs`) narrows each one, the
+bounds first and then the captures by name (at most 4), and evaluates the
+fold again with `Signs`:
+
+1. A split of one of them, `v >= t` against `v <= t - 1` for `t` in
+   `0, 1, -1`, where both halves sign the fold (each its own way): every
+   run has one sign. No test: `i * c` with `i >= 0` has the sign of `c`.
+2. Else one test of one of them, `v >= k` (`k` in `0, 1, 2`) or `v <= k`
+   (`0, -1, -2`), weakest first: `base >= 1` for `r * base` (`0` and `-1`
+   are not product terms), `lo >= 0` for `x % 7` from `lo`.
+3. Else the same test of all of them, then without each one the others
+   do without: `j >= 0` and `k >= 0` for `j * k + i`.
+
+A test no value passes is never taken, and at most 48 narrowings are
+evaluated per loop. The site carries the tests (`LoopParSite::guard`).
+The fork-join makes them once, ahead of everything else (for a dynamic
+range, once `lo` and `hi` are read): when one fails, the whole range runs
+on the calling thread as one worker call, the same path as a failed
+spawn, so the loop prints, panics and returns as the sequential one. One
+compare per test per entry to the loop, none per iteration. `coil
+dissect --effects` names such a loop (``loop over `_` in `power`
+parallel only when `base >= 1`: otherwise the terms of its `*` fold onto
+`r` may be `0` or `-1```).
 
 ### A failed attempt reports nothing
 
@@ -537,7 +565,7 @@ Still refuses (and why):
 | `i = i - 1` countdown | the split walks a positive stride |
 | `break` / heap writes in the body | independence unproven |
 | `if` arms that use different folds | one associative operator per loop |
-| a `+` fold whose terms are not proved to have one sign; a `*` fold with a term that may be `0` or `-1` | a chunk cannot see the running fold leave the range and come back (#2423, [the sign rule](#the-sign-rule)) |
+| a `+` fold whose terms are not proved to have one sign; a `*` fold with a term that may be `0` or `-1`, also under [a test of the captures](#a-test-of-the-captures) | a chunk cannot see the running fold leave the range and come back (#2423, [the sign rule](#the-sign-rule)) |
 | `i <= n` / `a..=n` where `n` may be `MAX` | the fork-join adds one to the end; the sequential loop does not (#2423) |
 | a `for` under an `invariant` / `decreases` that reads a local the loop writes (the accumulator) | the clause is about the sequential state at that iteration; a chunk's fold starts at the identity (#2412). A clause over values the loop leaves alone is the same test in every chunk and stays, when it reads and calls only what a body may |
 | a `while` under any `invariant` / `decreases` | it runs its checks ahead of every test, the one that ends it too, and once when it runs no trips; no chunk worker does (#2450) |

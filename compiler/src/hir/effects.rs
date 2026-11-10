@@ -727,6 +727,24 @@ pub(crate) fn auto_par_explanations(module: &HirModule, module_path: &str, fx: &
             site.index, owner.name, site.acc
         ));
     }
+    // A fold signed by a run-time test of its captures.
+    let mut guarded: Vec<_> = actual.iter().filter(|(_, site)| !site.guard.is_empty()).collect();
+    guarded.sort_by_key(|(span, _)| **span);
+    for (&span, site) in guarded {
+        let Some(owner) = owner_of(span) else { continue };
+        let tests: Vec<String> = site.guard.iter().map(|t| format!("`{t}`")).collect();
+        let (op, signs) = match site.op {
+            crate::hir::par::LoopReduceOp::Mul => ("*", "may be `0` or `-1`"),
+            _ => ("+", "may have both signs"),
+        };
+        out.push(format!(
+            "loop over `{}` in `{}` parallel only when {}: otherwise the terms of its `{op}` fold onto `{}` {signs}",
+            site.index,
+            owner.name,
+            tests.join(" and "),
+            site.acc
+        ));
+    }
     for ((start, end), site) in blocked {
         let Some(owner) = owner_of((start, end)) else { continue };
         let reasons = impure_callees(fx, owner, (start, end), pure);

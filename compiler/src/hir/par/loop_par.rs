@@ -28,7 +28,7 @@
 //! chunking gains nothing; a site it cannot build is a bug on one side,
 //! which the corpus test reports (`compiler/tests/hir_corpus.rs`).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::super::{BinOp, BodyKind, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, Lit, LocalId, LocalKind, MakeKind, UnOp, query};
 use crate::typechecking::infer::Checker;
@@ -85,6 +85,27 @@ pub struct LoopParSite {
     pub end_local: Option<String>,
     /// Added to a runtime end (`1` for `i <= n` / `..=`). Const ends bake this in.
     pub end_bias: i64,
+    /// The tests of loop-invariant locals under which the fold's terms
+    /// have one sign ([`SignTest`]), all of which must hold; the
+    /// fork-join makes them once, as the loop starts, and runs the loop on
+    /// its own thread when one fails. Empty: the terms have one sign
+    /// whatever the values.
+    pub guard: Vec<SignTest>,
+}
+
+/// `local >= bound` (`at_least`) or `local <= bound`, of a live capture or
+/// a bound read at run time ([`LoopParSite::guard`]), by its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignTest {
+    pub local: String,
+    pub at_least: bool,
+    pub bound: i64,
+}
+
+impl std::fmt::Display for SignTest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {} {}", self.local, if self.at_least { ">=" } else { "<=" }, self.bound)
+    }
 }
 
 /// Upper bound on chunks for one counted loop. The joiner runs the first.
@@ -238,7 +259,8 @@ struct LoopScan<'a> {
     consts: &'a ConstLocals,
     ints: &'a IntLocals,
     captures: BTreeSet<(String, i64)>,
-    live: BTreeSet<String>,
+    /// The live captures, by name.
+    live: BTreeMap<String, LocalId>,
 }
 
 /// One admissible statement of a loop-IPA body.
@@ -473,7 +495,7 @@ impl Scan<'_> {
         if !matches!(consts.get(&acc), Some(ConstVal::Int(_))) {
             return None;
         }
-        let mut scan = LoopScan { index, acc, consts, ints, captures: BTreeSet::new(), live: BTreeSet::new() };
+        let mut scan = LoopScan { index, acc, consts, ints, captures: BTreeSet::new(), live: BTreeMap::new() };
         if !self.forms_independent(&forms, &mut HashSet::new(), &mut scan) {
             return None;
         }
@@ -511,21 +533,32 @@ impl Scan<'_> {
                 return None;
             }
         }
-        // Every value the body reads the index at. A `while` body may
-        // read it after its step too.
-        let first = match begin_local {
-            Some(l) => ints.get(&l).copied().flatten().map(|r| r.lo),
-            None => Some(begin),
+        // Every value the body reads the index at, for what `ints` holds
+        // of the bounds. A `while` body may read it after its step too.
+        let over = |ints: &IntLocals| {
+            let first = match begin_local {
+                Some(l) => ints.get(&l).copied().flatten().map(|r| r.lo),
+                None => Some(begin),
+            };
+            let last = match end_local {
+                Some(l) => ints.get(&l).copied().flatten().map(|r| r.hi as i128 + end_bias as i128 - 1),
+                None => Some(end as i128 - 1),
+            };
+            match (first, last) {
+                (Some(first), Some(last)) => Interval::cut(first as i128, last + if implicit_step { 0 } else { stride as i128 }),
+                _ => None,
+            }
         };
-        let last = match end_local {
-            Some(l) => ints.get(&l).copied().flatten().map(|r| r.hi as i128 + end_bias as i128 - 1),
-            None => Some(end as i128 - 1),
-        };
-        let over = match (first, last) {
-            (Some(first), Some(last)) => Interval::cut(first as i128, last + if implicit_step { 0 } else { stride as i128 }),
-            _ => None,
-        };
-        let signed = self.one_signed(&forms, &checks, (index, over), consts, ints);
+        // The fork-join reads these at the loop's start, and the loop
+        // writes none of them.
+        let mut invariants: Vec<LocalId> = Vec::new();
+        for l in [begin_local, end_local].into_iter().flatten().chain(live.values().copied()) {
+            if !invariants.contains(&l) {
+                invariants.push(l);
+            }
+        }
+        let guard = self.sign_guard(&invariants, ints, &|ints| self.one_signed(&forms, &checks, (index, over(ints)), consts, ints));
+        let signed = guard.is_some();
         let name = |l: LocalId| self.name(l).to_string();
         let site = LoopParSite {
             index: name(index),
@@ -535,13 +568,95 @@ impl Scan<'_> {
             op,
             implicit_step,
             captures: captures.into_iter().collect(),
-            live_captures: live.into_iter().collect(),
+            live_captures: live.into_keys().collect(),
             stride,
             begin_local: begin_local.map(name),
             end_local: end_local.map(name),
             end_bias,
+            guard: guard
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(l, at_least, bound)| SignTest { local: name(l), at_least, bound })
+                .collect(),
         };
         Some((site, signed))
+    }
+
+    /// The tests of loop-invariant `vars` under which `signed` holds of
+    /// `ints` narrowed by them: none when it holds as `ints` stand, or for
+    /// both halves of a split of one of them (the values do not change
+    /// while the loop runs, so in a run one half holds); else the first of
+    /// one test of one of them, then of each of them alike, cut to the
+    /// tests it needs. `None` when nothing tried signs it.
+    ///
+    /// A test is `v >= k` or `v <= k` for a small `k`: what the fork-join
+    /// can make once, as the loop starts. A test no value passes is never
+    /// taken.
+    fn sign_guard(&self, vars: &[LocalId], ints: &IntLocals, signed: &dyn Fn(&IntLocals) -> bool) -> Option<Vec<(LocalId, bool, i64)>> {
+        if signed(ints) {
+            return Some(Vec::new());
+        }
+        let vars = &vars[..vars.len().min(GUARD_VARS)];
+        let mut tries = GUARD_TRIES;
+        let mut seen: HashMap<Vec<(LocalId, bool, i64)>, bool> = HashMap::new();
+        let mut under = |tests: &[(LocalId, bool, i64)]| -> bool {
+            if let Some(&known) = seen.get(tests) {
+                return known;
+            }
+            if tries == 0 {
+                return false;
+            }
+            tries -= 1;
+            let mut env = ints.clone();
+            let mut held = true;
+            for &(l, at_least, k) in tests {
+                let half = if at_least { Interval { lo: k, hi: i64::MAX } } else { Interval { lo: i64::MIN, hi: k } };
+                match env.get(&l).copied().flatten().and_then(|r| r.meet(half)) {
+                    Some(r) => {
+                        env.insert(l, Some(r));
+                    }
+                    None => held = false,
+                }
+            }
+            let ok = held && signed(&env);
+            seen.insert(tests.to_vec(), ok);
+            ok
+        };
+        for &v in vars {
+            for t in GUARD_SPLITS {
+                if under(&[(v, true, t)]) && under(&[(v, false, t - 1)]) {
+                    return Some(Vec::new());
+                }
+            }
+        }
+        for &v in vars {
+            for (at_least, k) in GUARD_TESTS {
+                if under(&[(v, at_least, k)]) {
+                    return Some(vec![(v, at_least, k)]);
+                }
+            }
+        }
+        if vars.len() > 1 {
+            for (at_least, k) in GUARD_TESTS {
+                let mut tests: Vec<_> = vars.iter().map(|&v| (v, at_least, k)).collect();
+                if !under(&tests) {
+                    continue;
+                }
+                // Drop each test the others do without.
+                let mut i = 0;
+                while i < tests.len() {
+                    let mut fewer = tests.clone();
+                    fewer.remove(i);
+                    if !fewer.is_empty() && under(&fewer) {
+                        tests = fewer;
+                    } else {
+                        i += 1;
+                    }
+                }
+                return Some(tests);
+            }
+        }
+        None
     }
 
     /// Whether the running fold of a loop with these `forms` leaves the
@@ -703,7 +818,7 @@ impl Scan<'_> {
                     }
                     // A live capture is an `int` word of the worker's.
                     _ if scan.ints.contains_key(l) && self.is_int(*l) => {
-                        scan.live.insert(self.name(*l).to_string());
+                        scan.live.insert(self.name(*l).to_string(), *l);
                         true
                     }
                     _ => false,
@@ -903,6 +1018,23 @@ pub(super) fn assigned_in(module: &HirModule, body: &HirBody, id: HirId, out: &m
         _ => {}
     });
 }
+
+/// The loop-invariant locals [`Scan::sign_guard`] tests, at most: the
+/// bounds first, then the live captures by name.
+const GUARD_VARS: usize = 4;
+
+/// Narrowed ranges [`Scan::sign_guard`] evaluates a loop's fold for, at
+/// most.
+const GUARD_TRIES: usize = 48;
+
+/// The splits [`Scan::sign_guard`] tries: `v >= t` against `v <= t - 1`.
+const GUARD_SPLITS: [i64; 3] = [0, 1, -1];
+
+/// The tests [`Scan::sign_guard`] tries, weakest first: `(at_least, k)`.
+/// The sign rule's edges are among them (`>= 0` / `<= 0` for a sum,
+/// `>= 1` / `<= -2` for a product), and `2` for a term one below its
+/// capture.
+const GUARD_TESTS: [(bool, i64); 6] = [(true, 0), (true, 1), (true, 2), (false, 0), (false, -1), (false, -2)];
 
 /// What the terms of a loop's fold allow ([`Scan::one_signed`]).
 struct FoldSigns {
