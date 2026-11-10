@@ -8959,7 +8959,13 @@ impl Compiler {
             _ => crate::typechecking::generics::Generics::operator_trait(sym)?,
         };
         let ty = Self::hir_ty(hir, lhs).or_else(|| Self::hir_ty(hir, rhs))?;
-        if let Some(op) = self.hir_instance_operator(ty, class, method) {
+        // A scalar-backed enum next to a value of its backing type or of
+        // another enum is its backing word, as the checker typed it
+        // (`Bit::One * 2` is an `int`): its instance takes two of its own
+        // values, or itself and an `int` count for a shift.
+        let scalar_enum = |id: HirId| Self::hir_ty(hir, id).and_then(|t| self.hir_enum_name(t)).filter(|name| self.checker.is_scalar_enum(name));
+        let backing = !matches!(sym, "<<" | ">>") && scalar_enum(lhs).is_some_and(|name| scalar_enum(rhs) != Some(name));
+        if !backing && let Some(op) = self.hir_instance_operator(ty, class, method) {
             return Some(op);
         }
         // An aggregate holding a user `Eq` compares through its glue (#1629).
@@ -8975,7 +8981,7 @@ impl Compiler {
         {
             return Some(HirOp::Glue(glue));
         }
-        match self.concrete_operator_target_ty(ty, class, method) {
+        match self.concrete_operator_target_ty(ty, class, method).filter(|_| !backing) {
             Some(_) => None,
             None => match sym {
                 "==" | "!=" => Some(HirOp::Prim),

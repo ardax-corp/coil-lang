@@ -1,0 +1,325 @@
+// A user operator instance on a scalar-backed enum is the operator of two of
+// its values (coil-lang#2452): `Bit * Bit` calls `impl Mul for Bit` and is a
+// `Bit`, as `a.mul(b)` and a `T: Mul` body are. Without an instance of the
+// operator's trait, and next to a value of the backing type or of another
+// enum, the operands are their backing words as before.
+use tests::assert;
+
+#[repr(int)]
+enum Bit {
+    Zero = 0,
+    One = 1,
+}
+
+// No instance at all.
+#[repr(int)]
+enum Other {
+    A = 5,
+    B = 7,
+}
+
+// `Add` and `Lt` only.
+#[repr(int)]
+enum Rank {
+    Low = 1,
+    High = 10,
+}
+
+#[repr(string)]
+enum Tone {
+    Hi = "hi",
+    Lo = "lo",
+}
+
+#[repr(float)]
+enum Ratio {
+    Half = 0.5,
+    Full = 1.0,
+}
+
+// `Eq` only: any two are equal.
+#[repr(int)]
+enum Flag {
+    Off = 0,
+    On = 1,
+}
+
+class Gate {
+    pub a: Bit,
+    pub b: Bit,
+}
+
+fn flip(Bit a) -> Bit {
+    return match a {
+        Bit::Zero => Bit::One,
+        Bit::One => Bit::Zero,
+    };
+}
+
+// Each differs from the backing `int` operator on some pair below.
+impl Add for Bit {
+    pub fn add(Bit a, Bit b) -> Bit {
+        return match a {
+            Bit::Zero => b,
+            Bit::One => flip(b),
+        };
+    }
+}
+
+impl Sub for Bit {
+    pub fn sub(Bit a, Bit b) -> Bit {
+        return a;
+    }
+}
+
+impl Mul for Bit {
+    pub fn mul(Bit a, Bit b) -> Bit {
+        return match a {
+            Bit::Zero => Bit::Zero,
+            Bit::One => b,
+        };
+    }
+}
+
+impl Div for Bit {
+    pub fn div(Bit a, Bit b) -> Bit {
+        return b;
+    }
+}
+
+impl Rem for Bit {
+    pub fn rem(Bit a, Bit b) -> Bit {
+        return a;
+    }
+}
+
+impl Pow for Bit {
+    pub fn pow(Bit a, Bit b) -> Bit {
+        return b;
+    }
+}
+
+impl Shl for Bit {
+    pub fn shl(Bit a, int n) -> Bit {
+        return flip(a);
+    }
+}
+
+impl Shr for Bit {
+    pub fn shr(Bit a, int n) -> Bit {
+        return a;
+    }
+}
+
+impl BitAnd for Bit {
+    pub fn bitand(Bit a, Bit b) -> Bit {
+        return flip(a);
+    }
+}
+
+impl BitOr for Bit {
+    pub fn bitor(Bit a, Bit b) -> Bit {
+        return flip(a);
+    }
+}
+
+impl BitXor for Bit {
+    pub fn bitxor(Bit a, Bit b) -> Bit {
+        return a;
+    }
+}
+
+impl Neg for Bit {
+    pub fn neg(Bit a) -> Bit {
+        return flip(a);
+    }
+}
+
+impl BitNot for Bit {
+    pub fn bitnot(Bit a) -> Bit {
+        return a;
+    }
+}
+
+impl Add for Rank {
+    pub fn add(Rank a, Rank b) -> Rank {
+        return Rank::High;
+    }
+}
+
+// The reverse of the backing order.
+impl Lt for Rank {
+    pub fn lt(Rank a, Rank b) -> bool {
+        return match a {
+            Rank::High => match b {
+                Rank::Low => true,
+                Rank::High => false,
+            },
+            Rank::Low => false,
+        };
+    }
+}
+
+impl Eq for Flag {
+    pub fn eq(Flag a, Flag b) -> bool {
+        return true;
+    }
+}
+
+impl Add for Tone {
+    pub fn add(Tone a, Tone b) -> Tone {
+        return b;
+    }
+}
+
+impl Mul for Ratio {
+    pub fn mul(Ratio a, Ratio b) -> Ratio {
+        return Ratio::Full;
+    }
+}
+
+fn times<T: Mul>(T a, T b) -> T {
+    return a * b;
+}
+
+fn plus<T: Add>(T a, T b) -> T {
+    return a + b;
+}
+
+fn square(Bit a) -> Bit {
+    return a * a;
+}
+
+fn is_one(Bit a) -> bool {
+    return a == Bit::One;
+}
+
+fn word(int n) -> int {
+    return n;
+}
+
+test("every binary operator trait") {
+    let o = Bit::One;
+    let z = Bit::Zero;
+    let add: Bit = o + o;
+    let sub: Bit = o - o;
+    let mul: Bit = o * z;
+    let div: Bit = z / o;
+    let rem: Bit = o % o;
+    let pow: Bit = z ** o;
+    // A shift takes the enum and an `int` count.
+    let shl: Bit = o << 1;
+    let shr: Bit = o >> 1;
+    let and: Bit = o & o;
+    let or: Bit = z | z;
+    let xor: Bit = o ^ o;
+    assert!(add == Bit::Zero && sub == Bit::One && mul == Bit::Zero && div == Bit::One);
+    assert!(rem == Bit::One && pow == Bit::One && shl == Bit::Zero && shr == Bit::One);
+    assert!(and == Bit::Zero && or == Bit::One && xor == Bit::One);
+    // On the cases themselves.
+    let c: Bit = Bit::One + Bit::One;
+    assert!(c == Bit::Zero && is_one(Bit::One * Bit::One) && is_one(Bit::Zero / Bit::One));
+    let k = 2;
+    assert!(is_one(Bit::Zero << k) && is_one(Bit::One >> k) && is_one(z << o));
+}
+
+test("the unary operator traits") {
+    let o = Bit::One;
+    let n: Bit = -o;
+    let t: Bit = ~o;
+    assert!(n == Bit::Zero && t == Bit::One);
+    assert!(is_one(-Bit::Zero) && is_one(~Bit::One));
+    assert!(is_one(-(o + o)) && is_one(-o + o));
+}
+
+test("the operator is the call the method spelling makes") {
+    let o = Bit::One;
+    let z = Bit::Zero;
+    assert!((o * z) == o.mul(z) && (o + o) == o.add(o) && (z / o) == z.div(o));
+    assert!((o * o) == Mul::mul(o, o) && (o * o) == times(o, o) && (o + o) == plus(o, o));
+    assert!(is_one(square(o)) && !is_one(square(z)));
+}
+
+test("nested operands, compound assignment and a loop") {
+    let o = Bit::One;
+    let z = Bit::Zero;
+    let n: Bit = (o * o) + (z / o) + o;
+    assert!(n == Bit::One);
+    let acc = Bit::Zero;
+    let i = 0;
+    while i < 5 {
+        acc = acc + o;
+        i += 1;
+    }
+    assert!(acc == Bit::One);
+    acc *= z;
+    assert!(acc == Bit::Zero);
+    acc += o;
+    assert!(acc == Bit::One);
+    let g = new Gate(o, z);
+    let f: Bit = g.a * g.b + g.a;
+    assert!(f == Bit::One);
+    let picked = match o + o {
+        Bit::Zero => 10,
+        Bit::One => 20,
+    };
+    assert!(picked == 10);
+    let bits: Vec<Bit> = [o, z, o];
+    let sum = Bit::Zero;
+    for b in bits {
+        sum = sum + b;
+    }
+    assert!(sum == Bit::Zero);
+}
+
+test("string and float backings") {
+    let t: Tone = Tone::Hi + Tone::Lo;
+    assert!(t == Tone::Lo && plus(Tone::Lo, Tone::Hi) == Tone::Hi);
+    let r: Ratio = Ratio::Half * Ratio::Half;
+    assert!(r == Ratio::Full && times(Ratio::Half, Ratio::Half) == Ratio::Full);
+}
+
+test("ordering and equality instances") {
+    let lo = Rank::Low;
+    let hi = Rank::High;
+    assert!(hi < lo && !(lo < hi) && !(lo < lo));
+    let s: Rank = lo + lo;
+    assert!(s == Rank::High);
+    let on = Flag::On;
+    let off = Flag::Off;
+    assert!(on == off && Flag::On == Flag::Off);
+    // Against the backing type they compare as backing words.
+    assert!(lo < 5 && !(hi < 5) && 5 < hi && !(5 < lo));
+    assert!(on == 1 && !(on == 0) && on != 0 && 0 == off && !(1 == off));
+}
+
+test("without an instance the operands are their backing words") {
+    // Another operator of an enum that has some.
+    let m: int = Rank::Low * Rank::High;
+    let d: int = Rank::High - Rank::Low;
+    assert!(m == 10 && d == 9);
+    // An enum that has none.
+    let s: int = Other::A + Other::B;
+    assert!(s == 12 && Other::B * Other::B == 49);
+    let f: float = Ratio::Half + Ratio::Half;
+    assert!(f == 1.0);
+}
+
+test("next to its backing type or another enum it is the backing word") {
+    let o = Bit::One;
+    let a: int = o * 2;
+    let b: int = 2 * o;
+    let c: int = o + 41;
+    let k = 3;
+    let d: int = k * o + o * k;
+    assert!(a == 2 && b == 2 && c == 42 && d == 6);
+    let e: int = o * Other::B;
+    let f: int = Other::A + o;
+    assert!(e == 7 && f == 6);
+    assert!(word(o) == 1 && word(o * 2) == 2);
+    // The instance on both sides, the backing word outside.
+    let g: int = (o + o) + 5;
+    assert!(g == 5);
+    let h: float = Ratio::Half * 4.0;
+    assert!(h == 2.0);
+}

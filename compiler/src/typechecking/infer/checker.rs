@@ -6733,9 +6733,16 @@ impl Checker {
 
         let lp = apply_ty_prune(&self.subst, &lt);
         let rp = apply_ty_prune(&self.subst, &rt);
-        if let Some(backing) = self.arith_scalar_enum_backing(&lp, &rp) {
+        // Two values of a scalar-backed enum are their backing words, unless
+        // the enum has the operator's instance: then that is the operator.
+        let user = self.scalar_enum_operator_instance(&lp, &rp, op);
+        if !user && let Some(backing) = self.arith_scalar_enum_backing(&lp, &rp) {
             return backing;
         }
+        // The operands are the enum, not the cases they were built as; an
+        // enum as the count of a user shift is its `int`.
+        let (lt, rt) = if user { (nominal_enum(lp.clone()), nominal_enum(rp.clone())) } else { (lt, rt) };
+        let rt = if user && matches!(op, "<<" | ">>") { self.scalar_backing_ty_of(&rt).unwrap_or(rt) } else { rt };
         // Nominal `Matrix`, `*` is matmul (Mul), `+`/`-` are element-wise.
         // Must run before aggregate zip so nested-array data inside Matrix
         // is not treated as Hadamard product.
@@ -19097,6 +19104,27 @@ impl Checker {
             (None, Some(b)) if matches!((lp, rp), (Ty::Con(_), _)) && lp == &b => Some(b),
             _ => None,
         }
+    }
+
+    /// True when `l op r` on a scalar-backed enum is its own operator: the
+    /// enum has an instance of the operator's trait and both operands are
+    /// that enum, the types the instance takes (`mul(Bit, Bit)`). A shift
+    /// takes the enum and an `int` count, so only its left operand counts.
+    /// Next to a value of the backing type (`Bit::One * 2`) or of another
+    /// enum the operands stay their backing words.
+    fn scalar_enum_operator_instance(&self, lp: &Ty, rp: &Ty, op: &str) -> bool {
+        let Some((class, _)) = Generics::operator_trait(op) else {
+            return false;
+        };
+        let scalar_enum = |ty: &Ty| Self::enum_name_of_resolved(ty).filter(|name| self.scalar_value_ty(name).is_some());
+        let Some(name) = scalar_enum(lp) else {
+            return false;
+        };
+        if !matches!(op, "<<" | ">>") && scalar_enum(rp).as_ref() != Some(&name) {
+            return false;
+        }
+        let lookup = Self::operand_instance_lookup_ty(lp);
+        self.generics.find_instance(class, std::slice::from_ref(&lookup)).is_some()
     }
 
     fn cmp_scalar_enum_with_backing(&self, lt: &Ty, rt: &Ty) -> bool {
