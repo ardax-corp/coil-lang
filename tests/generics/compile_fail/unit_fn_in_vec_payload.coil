@@ -1,0 +1,24 @@
+// @expected E0801 — a generic enum's methods run their shared body, which
+// reads a `T` the functions in its `Vec<fn() -> T>` payload return as the
+// word they return. A ground `-> ()` function returns the word `0`, not the
+// empty tuple object a `()` is where it is stored, and no adapter reaches a
+// function inside a `Vec` (#2541). Building the variant at `T = ()` is
+// refused, not given a wrong value.
+enum Steps<T> {
+    Many(Vec<fn() -> T>),
+}
+
+impl Steps<T> {
+    pub fn first() -> Option<T> {
+        return match self {
+            Steps::Many(fs) => Some(fs[0]()),
+        };
+    }
+}
+
+fn unit() -> () {}
+
+fn main() {
+    let fs: Vec<fn() -> ()> = [unit];
+    let _ = Steps::Many(fs).first() == Some(());
+}
