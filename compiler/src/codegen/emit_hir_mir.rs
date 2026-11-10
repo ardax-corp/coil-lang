@@ -516,6 +516,28 @@ impl Compiler {
             // `while false { .. }` is dropped.
             HirKind::Loop { body }
                 if query::while_shape(hir, *body).is_some_and(|(cond, _)| matches!(hir.expr(cond).kind, HirKind::Lit(Lit::Bool(false)))) => {}
+            // An element-wise operator a clone runs at a user type: the
+            // type's instance method, called once per element.
+            HirKind::Bin { .. } | HirKind::Un { .. }
+                if let Some(HirOp::Aggregate(info)) = emit.plan.ops.get(&id.0)
+                    && let Some(elem) = query::aggregate_elem(&self.checker, hir, id).filter(|elem| !classify::is_scalar(elem)) =>
+            {
+                use crate::typechecking::AggregateOp as A;
+                let ((class, method), arity) = match info.op {
+                    A::Add => (("Add", "add"), 2),
+                    A::Sub => (("Sub", "sub"), 2),
+                    A::Mul => (("Mul", "mul"), 2),
+                    A::Div => (("Div", "div"), 2),
+                    A::Mod => (("Rem", "rem"), 2),
+                    A::Pow => (("Pow", "pow"), 2),
+                    A::Neg => (("Neg", "neg"), 1),
+                };
+                if let Some(HirOp::Call { lookup, fqn, class, method }) = self.hir_instance_operator(&elem, class, method) {
+                    let mut call = crate::mir::HirSite::default();
+                    self.hir_mir_op_call_tys(hir, id, &vec![Some(elem); arity], (class, method, fqn), lookup, &mut call);
+                    t.elem_call = call.call.map(|site| (site, true)).or(call.op_call.map(|op| (op.site, false)));
+                }
+            }
             // An element-wise operator on the packed kernel: its operands
             // boxed, then the meta word. The kernel takes primitive words
             // only: a type parameter's elements (a shared generic body) or
@@ -820,6 +842,21 @@ impl Compiler {
         hir: &HirBody,
         id: HirId,
         operands: &[HirId],
+        target: (&str, &str, String),
+        lookup: Ty,
+        t: &mut crate::mir::HirSite,
+    ) {
+        let operands: Vec<Option<Ty>> = operands.iter().map(|&o| Self::hir_ty(hir, o).cloned()).collect();
+        self.hir_mir_op_call_tys(hir, id, &operands, target, lookup, t);
+    }
+
+    /// [`Self::hir_mir_op_call`] by the operands' types: an element-wise
+    /// operator calls the instance on elements, which are no HIR node.
+    fn hir_mir_op_call_tys(
+        &mut self,
+        hir: &HirBody,
+        id: HirId,
+        operands: &[Option<Ty>],
         (class, method, fqn): (&str, &str, String),
         lookup: Ty,
         t: &mut crate::mir::HirSite,
@@ -869,7 +906,7 @@ impl Compiler {
                 layout == ValueLayout::Boxed
                     || (Self::is_eq_glue(&fqn) && declared.and_then(|p| p.get(i)).is_some_and(|t| self.value_layout(t) == layout))
             };
-            if operands.iter().enumerate().all(|(i, &o)| Self::hir_ty(hir, o).is_some_and(|t| fits(i, self.value_layout(t)))) {
+            if operands.iter().enumerate().all(|(i, o)| o.as_ref().is_some_and(|t| fits(i, self.value_layout(t)))) {
                 t.call = Some(site);
             }
         } else if arity == 2 && Self::ty_to_value_tag(&lookup).is_some() {

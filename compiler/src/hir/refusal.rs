@@ -308,12 +308,10 @@ impl Walk<'_> {
     }
 
     /// An element or broadcast scalar of an element-wise op: a primitive
-    /// word, or a type parameter (its clone names the word).
+    /// word, a type parameter (the dictionary's operand) or a clone's
+    /// user type (its instance's operand), each one word.
     fn elem(&self, id: HirId) -> Check {
-        match self.ty(id).map(strip_readonly) {
-            Some(Ty::Var(_)) => self.word(id),
-            _ => self.scalar(id),
-        }
+        self.scalar(id).or_else(|_| self.word(id))
     }
 
     /// A value a local, argument or payload can hold.

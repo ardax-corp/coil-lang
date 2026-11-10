@@ -12,7 +12,9 @@ Three changes take the dictionary cost away for ground calls.
 An element-wise operator whose element is a type parameter (`[T; N] + [T; N]`,
 `-Vec<T>`, `(T, T) * T`, #2398) follows the same split. A clone names the
 element's word and lowers primitive ops or the packed kernel
-(`query::aggregate_info`). The shared body calls the bound's dictionary
+(`query::aggregate_info`); at a user type it calls the type's instance
+method once per element (`Lower::inst_elem`, #2414; one-word classes, the
+rest is #2418). The shared body calls the bound's dictionary
 method once per element (`Lower::bound_elem`), whatever the length: the
 packed kernels take primitive words only, so `emit_hir_mir` plans one only
 for a ground `int` / `float` / `byte` element.
