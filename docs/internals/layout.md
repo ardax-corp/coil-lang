@@ -152,6 +152,10 @@ words:
   the callee's `T` as the call bound it: `None` next to `Some(1)` is an
   `Option<int>`, and an empty pack takes it from the fixed arguments or
   the expected type (`Checker::rest_pack_ty_at`, #2537).
+- An array literal of such values (`let v: Vec<T> = [x];`, `[(x, 1)]`) is
+  the array object, never a stack array: a slot holds one word of a
+  known kind, and a `T` word's kind is not known in the body
+  (`Compiler::stack_slot_ty`, #2581).
 - `hir_method_clone` clones niche types too: the per-type clone is a cost
   decision (speed), never a correctness one.
 
