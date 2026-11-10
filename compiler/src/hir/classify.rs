@@ -215,6 +215,7 @@ pub(super) fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, o
 fn params_closed(ty: &Ty) -> bool {
     match strip_readonly(ty) {
         Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
+        Ty::Sum { name, variants } if crate::layout::is_user_sum(name) => crate::layout::user_sum_closed(variants, params_closed),
         t => t.all_children(params_closed),
     }
 }
@@ -288,7 +289,7 @@ fn object_class(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option
 /// A class field type the lowering stores as one known word: closed, an
 /// existential, a monomorphic function, or a `Vec` / `Option` / `Result`
 /// of those (`Vec<Comp>`, `Option<fn() -> string>`, #1988, #1991).
-fn closed_field(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
+pub(super) fn closed_field(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
     if crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, seen) {
         return true;
     }
@@ -339,9 +340,7 @@ fn user_enum(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option<Va
     }
     seen.push(name.to_string());
     let ok = variants.iter().all(|(_, _, payload)| {
-        payload.iter().all(|field| {
-            crate::layout::ty_is_closed(field) && classify_in(checker, field, seen).is_some()
-        })
+        payload.iter().all(|field| closed_field(checker, field, seen) && classify_in(checker, field, seen).is_some())
     });
     seen.pop();
     ok.then_some(ValueClass::Enum)

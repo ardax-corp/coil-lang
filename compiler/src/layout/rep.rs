@@ -421,15 +421,33 @@ pub fn niche_heap_only(checker: &Checker, ty: &Ty) -> bool {
 
 /// No unresolved type variables anywhere in `ty`. A function or a
 /// rank-n type is never closed, nor an existential; an application's head
-/// is not looked at.
+/// is not looked at. A user enum is closed with a function in a payload
+/// too, when the function's type is ([`user_sum_closed`]).
 pub fn ty_is_closed(ty: &Ty) -> bool {
     match strip_readonly(ty) {
         Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
+        Ty::Sum { name, variants } if is_user_sum(name) => user_sum_closed(variants, ty_is_closed),
         // A `thread` handle is one host word whatever it carries (#1905).
         t @ Ty::App(..) if crate::typechecking::ty::opaque_handle_name(t).is_some() => true,
         Ty::App(_, args) => args.iter().all(ty_is_closed),
         t => t.all_children(ty_is_closed),
     }
+}
+
+/// A user enum's structural type, not the prelude's `Option` / `Result`
+/// (whose payload is laid out in the value's own words).
+pub fn is_user_sum(name: &str) -> bool {
+    !common::is_builtin_option_enum(name) && !common::is_builtin_result_enum(name)
+}
+
+/// Whether every payload field of a user enum's `variants` is `closed`, or
+/// a function type with no type variable: the payload is a field of the
+/// enum's object, one closure word there, and says nothing of the enum
+/// value's own word (#2460).
+pub fn user_sum_closed(variants: &[(String, crate::typechecking::ty::EnumVariantPayloadTy)], closed: fn(&Ty) -> bool) -> bool {
+    variants.iter().all(|(_, payload)| {
+        payload.field_types().into_iter().all(|f| closed(f) || (matches!(strip_readonly(f), Ty::Fun(..)) && !f.has_free_var()))
+    })
 }
 
 /// `ty` with each named type parameter in `params` replaced by the matching

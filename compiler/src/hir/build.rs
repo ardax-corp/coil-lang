@@ -3108,7 +3108,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             .enum_variants(enum_name)
             .and_then(|vars| vars.into_iter().find(|(n, _, _)| n == variant))
             .map(|(_, _, payload)| payload)
-            .filter(|payload| payload.iter().all(layout::ty_is_closed))
+            .filter(|payload| payload.iter().all(|t| super::classify::closed_field(self.checker, t, &mut Vec::new())))
             .unwrap_or_default()
     }
 
