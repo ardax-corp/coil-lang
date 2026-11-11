@@ -31,7 +31,16 @@ impl H {
 }
 
 fn main() {
-    let s = new Store(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let s = new Store(
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
     let k = 0;
     while k < 16 {
         s.a.push(k);
