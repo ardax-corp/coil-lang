@@ -1458,7 +1458,10 @@ fn opaque_moves_only(hir: &HirBody, cx: &dyn LowerCx, sites: &Sites) -> Result<(
             // whether the word is an object (#2161).
             HirKind::Builtin { op: Builtin::Cow { .. }, .. } => false,
             HirKind::Builtin { args, .. } => args.iter().any(var),
-            HirKind::Named { value, .. } | HirKind::Yield { value, .. } => var(value),
+            // A `yield` hands the word as it is to the resumer, which reads
+            // it in the ground type's word (#2673).
+            HirKind::Yield { .. } => false,
+            HirKind::Named { value, .. } => var(value),
             HirKind::Append { base, value } => var(base) || var(value),
             // A store moves the word as it is, into a local, a field or a
             // type variable's array slot (`xs[i] = v` on a `Vec<T>`, stored

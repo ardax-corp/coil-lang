@@ -5488,6 +5488,10 @@ impl Compiler {
             }
             let name = Self::mono_clone_name(qualified, &spec.key);
             self.reserve_function_entry(name.clone());
+            // A generic generator's clone is a generator too.
+            if self.coroutine_fns.contains(qualified) {
+                self.coroutine_fns.insert(name.clone());
+            }
             self.mono_names.insert(spec.key, name);
         }
     }
@@ -5522,6 +5526,9 @@ impl Compiler {
 
             let mono_name = Self::mono_clone_name(qualified, &specialization.key);
             let (clone_offset, _) = self.bind_function_entry(mono_name.clone());
+            if self.coroutine_fns.contains(qualified) {
+                self.coroutine_fns.insert(mono_name.clone());
+            }
             self.mono_offsets
                 .insert(specialization.key.clone(), clone_offset);
             self.mono_names
