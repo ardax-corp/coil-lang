@@ -363,6 +363,25 @@ Design (copying nursery, decided 2026-10-27):
   b_coll (+13% and +10% instructions). With 64 both configurations miss
   almost never.
 
+### Remembered arrays (#2687)
+
+A large old array written between two minors stays in the remembered set,
+and a minor walks all of it: once to reach young objects, once more to
+rewrite the precise words naming the ones it copied. A stdlib `HashMap`'s
+value vector is such an array. The plan
+(card-marked old arrays and a one-pass minor) lands in steps; the benches
+are `examples/perf/gc_map_update.coil` (100k keys, 10M updates) and
+`examples/perf/gc_old_vec_store.coil` (a 1M-element `Vec<int>` stored into
+in a loop that allocates).
+
+- **Census.** A `coil-test` built with `--features gc-stats` prints one
+  line per minor: `gc-stats minor: remembered=… remembered_words=…
+  rewrite_words=… (remembered …) fixups=… cards=dirty/total copied=…
+  pinned=… dead=…`. The word counts are slots walked; `pinned` counts the
+  survivors held in place. On `gc_old_vec_store` each of its 551 minors
+  walks the 1M-word vector twice (`remembered_words` and the remembered
+  share of `rewrite_words` are both 550M in total).
+
 ### Measured (step 4)
 
 `COIL_NURSERY=0` against `=1`, early freeing on in both, median of 7 runs,

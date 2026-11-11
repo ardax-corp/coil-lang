@@ -81,10 +81,13 @@ release window (see [heap-identity.md](heap-identity.md)). RSS drops after a
 peak without moving anything: `examples/perf/gc_shrink.coil` goes from ~96 MB
 to ~40 MB resident while it keeps running. Run it with a `coil-test` built
 with `--features gc-stats` (`cargo build --release -p coil-test --features
-gc-stats`, then `target/release/coil-test examples/perf/gc_shrink.coil`)
-for a per-mark census (RSS, mapped / released slab, live bytes, reclaim by
+gc-stats`, then `target/release/coil-test --show-output <dir>` on a
+directory holding `gc_shrink.coil`; the runner takes a test root, not a
+file) for a per-mark census (RSS, mapped / released slab, live bytes, reclaim by
 unmap vs compaction, precise vs ambiguous roots and interior references) —
-the numbers in [gc-evacuation.md](gc-evacuation.md).
+the numbers in [gc-evacuation.md](gc-evacuation.md). The same build
+prints a line per minor collection
+([escape-memory.md](escape-memory.md#remembered-arrays-2687)).
 
 ## Clean arrays
 

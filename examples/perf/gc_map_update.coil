@@ -1,0 +1,33 @@
+// GC remembered set (#2687): a stdlib `HashMap` of 100k keys with heap
+// values, then millions of updates that replace a value with a new one. The
+// map's value vector is old and large, and every update stores a young
+// object into it, so each minor collection finds it in the remembered set.
+// What a minor costs here is how much of that vector it scans and rewrites.
+// Needs the stdlib root (`--root .deps/coil-stdlib/src`).
+use io::sync::print;
+use string::format;
+use collections::map::HashMap;
+
+class Node {
+    pub v: int,
+}
+
+fn main() {
+    let keys = 100000;
+    let updates = 10000000;
+    let m: HashMap<int, Node> = HashMap::new();
+    let i = 0;
+    while i < updates {
+        m.insert(i % keys, new Node(i));
+        i = i + 1;
+    }
+    let s = 0;
+    i = 0;
+    while i < keys {
+        if let Option::Some(x) = m.get(i) {
+            s = s + x.v;
+        }
+        i = i + 1;
+    }
+    let _ = print(format("%i %i", m.len(), s));
+}

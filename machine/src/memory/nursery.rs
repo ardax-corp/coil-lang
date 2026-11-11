@@ -25,6 +25,45 @@ pub struct MinorPlan {
     remembered: Vec<u64>,
     /// `(chunk, first slot, end, slot size)` of every young chunk in use.
     spans: Vec<(usize, u64, u64, u64)>,
+    #[cfg(feature = "gc-stats")]
+    census: MinorCensus,
+}
+
+/// `gc-stats`: what one minor collection scanned and did, printed when it
+/// finishes (`gc-stats minor: ...`).
+#[cfg(feature = "gc-stats")]
+#[derive(Default)]
+struct MinorCensus {
+    /// Objects the remembered set named.
+    remembered: usize,
+    /// Slot words the reach pass walked in them.
+    remembered_words: usize,
+    /// Slot words the rewrite pass walked: in the copies, the pinned
+    /// survivors and the remembered objects, and in the last alone.
+    rewrite_words: usize,
+    rewrite_remembered_words: usize,
+    /// Slots the rewrite pass forwarded one by one, without a walk.
+    fixups: usize,
+    /// Dirty cards over cards of the remembered arrays scanned by card.
+    dirty_cards: usize,
+    cards: usize,
+}
+
+#[cfg(feature = "gc-stats")]
+impl MinorCensus {
+    fn line(&self, copied: usize, pinned: usize, dead: usize) -> String {
+        format!(
+            "gc-stats minor: remembered={} remembered_words={} rewrite_words={} (remembered {}) fixups={} \
+             cards={}/{} copied={copied} pinned={pinned} dead={dead}",
+            self.remembered,
+            self.remembered_words,
+            self.rewrite_words,
+            self.rewrite_remembered_words,
+            self.fixups,
+            self.dirty_cards,
+            self.cards,
+        )
+    }
 }
 
 impl MinorPlan {
@@ -231,6 +270,8 @@ impl Heap {
         debug_assert_eq!(self.gc_phase, GcPhase::Idle, "minor collections run between cycles");
         let spans = self.slab.young_spans();
         let remembered = self.take_remembered();
+        #[cfg(feature = "gc-stats")]
+        let mut census = MinorCensus { remembered: remembered.len(), ..MinorCensus::default() };
         let mut gray: Vec<Object> = Vec::new();
         let reach = |heap: &Heap, gray: &mut Vec<Object>, addr: u64, precise: bool| {
             if let Some(obj) = heap.young_object(addr) {
@@ -264,6 +305,10 @@ impl Heap {
                 continue;
             };
             let at = gray.len();
+            #[cfg(feature = "gc-stats")]
+            {
+                census.remembered_words += obj.slot_words(self);
+            }
             match obj {
                 // FFI code may hold a rooted object's address.
                 Object::Root(r) => {
@@ -338,6 +383,10 @@ impl Heap {
         if !fwd.is_empty() {
             for &to in fwd.values() {
                 if let Some(obj) = unsafe { Object::from_header(to) } {
+                    #[cfg(feature = "gc-stats")]
+                    {
+                        census.rewrite_words += obj.slot_words(self);
+                    }
                     obj.rewrite_precise_refs(self, &fwd);
                 }
             }
@@ -347,18 +396,34 @@ impl Heap {
                         && obj.is_marked()
                         && !fwd.contains_key(&addr)
                     {
+                        #[cfg(feature = "gc-stats")]
+                        {
+                            census.rewrite_words += obj.slot_words(self);
+                        }
                         obj.rewrite_precise_refs(self, &fwd);
                     }
                 }
             }
             for &addr in &remembered {
                 if let Some(obj) = self.find_object_by_addr(addr) {
+                    #[cfg(feature = "gc-stats")]
+                    {
+                        let n = obj.slot_words(self);
+                        census.rewrite_words += n;
+                        census.rewrite_remembered_words += n;
+                    }
                     obj.rewrite_precise_refs(self, &fwd);
                 }
             }
             self.forward_side_lists(&fwd);
         }
-        MinorPlan { fwd, remembered, spans }
+        MinorPlan {
+            fwd,
+            remembered,
+            spans,
+            #[cfg(feature = "gc-stats")]
+            census,
+        }
     }
 
     /// Copy `obj`, a young survivor, to an old slot unless something
@@ -391,7 +456,13 @@ impl Heap {
     /// chunks with pinned survivors in the nursery and reset the rest.
     /// Returns how many objects moved.
     pub fn minor_finish(&mut self, plan: MinorPlan) -> usize {
-        let MinorPlan { fwd, remembered, spans } = plan;
+        let MinorPlan {
+            fwd,
+            remembered,
+            spans,
+            #[cfg(feature = "gc-stats")]
+            census,
+        } = plan;
         let mut held = Vec::new();
         let (mut kept, mut dead) = (0, 0);
         for (chunk, first, end, size) in spans {
@@ -444,6 +515,8 @@ impl Heap {
                 obj.set_generation(obj.generation() & (GEN_YOUNG | GEN_HELD) | GEN_UNLOGGED);
             }
         }
+        #[cfg(feature = "gc-stats")]
+        eprintln!("{}", census.line(fwd.len(), kept, dead));
         // Held objects count as old: only a major frees them.
         self.counts.young_bytes = 0;
         self.note_survival(fwd.len() + kept, fwd.len() + kept + dead);
@@ -788,6 +861,31 @@ mod tests {
         let new_head = a.as_ref().iter().next().expect("element").bits();
         assert_ne!(new_head, head, "the precise element was rewritten");
         assert_eq!(walk(&heap, new_head), before);
+    }
+
+    /// The `gc-stats` census of a minor counts what the remembered set made
+    /// it scan and rewrite.
+    #[cfg(feature = "gc-stats")]
+    #[test]
+    fn the_minor_census_counts_remembered_words() {
+        let mut heap = nursery_heap();
+        let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(0i64); 8]), Object::Array);
+        let mut roots = [arr.addr()];
+        minor(&mut heap, &[], &mut roots);
+        let Some(Object::Array(mut old)) = heap.find_object_by_addr(roots[0]) else {
+            panic!("array survived")
+        };
+        old.as_mut().set_elem_kind(common::WORD_POINTER);
+        let head = cons_list(&mut heap, 3);
+        unsafe { old.as_mut().set_unchecked(0, Value::from(head)) };
+        let plan = heap.minor_plan(&[], &[]);
+        let c = &plan.census;
+        assert_eq!((c.remembered, c.remembered_words), (1, 8));
+        assert_eq!(c.rewrite_remembered_words, 8, "the remembered array is walked again to rewrite it");
+        let line = c.line(plan.fwd.len(), 0, 0);
+        assert!(line.starts_with("gc-stats minor: remembered=1 remembered_words=8 "), "{line}");
+        assert!(line.contains(" copied=3 "), "{line}");
+        heap.minor_finish(plan);
     }
 
     #[test]
