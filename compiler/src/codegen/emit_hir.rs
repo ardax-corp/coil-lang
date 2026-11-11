@@ -5380,9 +5380,6 @@ impl Compiler {
         }
         let spec = self.hir_mono_spec(hir, call, &key, lookup).ok_or("callee-generic")?;
         let mono = self.mono_names.get(&spec.key).ok_or("callee-generic")?.clone();
-        if self.coroutine_fns.contains(&key) || self.coroutine_fns.contains(lookup) {
-            return Err("callee-generic");
-        }
         // A closed two-word result (`-> Option<int>`) comes back as its
         // pair, as from the shared body.
         let pair = self.mono_clone_pair(lookup);
@@ -7392,7 +7389,14 @@ impl Compiler {
                 boxed_vars.insert(*v, ty.clone());
             }
         }
-        let ret_items = self.hir_ret_items(cur, &params, &vars, &boxed_vars, receivers);
+        // A generator's result is its handle, one opaque word: what it
+        // yields is the words the body holds, which a resume reads as the
+        // ground type's, as a ground generator's yield (#2673).
+        let ret_items = if self.coroutine_fns.contains(lookup) {
+            Ok(None)
+        } else {
+            self.hir_ret_items(cur, &params, &vars, &boxed_vars, receivers)
+        };
         Ok(HirGeneric {
             lookup: lookup.to_string(),
             boxed,
