@@ -4622,10 +4622,14 @@ impl<'pratt> Pratt<'pratt> {
     }
 }
 
-/// Most brackets (`(`, `[`, `{`) a source may nest: twice what the checker
-/// takes (`ExpressionNestingTooDeep` past 2000 levels), well below where a
-/// release build's stack would end.
-pub const PARSE_NESTING_LIMIT: usize = 4000;
+/// Most brackets (`(`, `[`, `{`) a source may nest. Native: twice what the
+/// checker takes (`ExpressionNestingTooDeep` past 2000 levels), well below
+/// where a release build's stack would end. wasm (#2655): the compiler runs
+/// on the host's call stack, which `common::deep_stack` cannot grow, and
+/// the parser alone used it up at about 600 levels of `-( … )` and 900 of
+/// `( … )` (Node 22's default stack, release `coil.wasm`); 400 leaves a
+/// margin of 1.5 for every shape measured (`docs/internals/limitations.md`).
+pub const PARSE_NESTING_LIMIT: usize = if cfg!(target_family = "wasm") { 400 } else { 4000 };
 
 /// The byte offset of the first bracket of `input` nested past `limit`,
 /// outside string literals and comments.

@@ -56,7 +56,10 @@ pub(super) mod weak_check;
 /// `E` `ExpressionNestingTooDeep`. A chain of binary operators counts as
 /// one level ([`Checker::infer_operator_tree`]); see
 /// docs/internals/limitations.md.
-const INFER_RECURSION_LIMIT: u32 = 2000;
+/// On wasm the stack cannot grow (`common::deep_stack` does nothing there):
+/// the checker reached 2000 levels of nested blocks on Node's default stack,
+/// but its frames differ by node kind, so it stops at half (#2655).
+const INFER_RECURSION_LIMIT: u32 = if cfg!(target_family = "wasm") { 1000 } else { 2000 };
 
 /// What [`Checker::enter_node`] saved for [`Checker::exit_node`].
 struct EnteredNode {
