@@ -1,0 +1,82 @@
+// A native store view taken right after a minor collection, while no young
+// object exists, stays live when the next allocation starts the nursery
+// again: the stores through it must still be remembered (#2702).
+use tests::assert;
+
+class Node {
+    pub v: int,
+}
+
+// Big enough that a few hundred rounds fill the nursery.
+class Junk {
+    pub a: int,
+    pub b: int,
+    pub c: int,
+    pub d: int,
+    pub e: int,
+    pub f: int,
+    pub g: int,
+    pub h: int,
+    pub i: int,
+    pub j: int,
+    pub k: int,
+    pub l: int,
+    pub m: int,
+    pub n: int,
+    pub o: int,
+    pub p: int,
+}
+
+class Holder {
+    pub vals: Vec<Node>,
+}
+
+// When the caller's allocations filled the nursery, a minor runs at this
+// entry. The field load then takes the vector's store view, and the first
+// allocation starts the nursery again while the view is live.
+#[inline(never)]
+fn fill(Holder h, int from) {
+    let a = mut h.vals;
+    a[0] = new Node(from);
+    a[1] = new Node(from + 1);
+}
+
+test("stores through a view taken while the nursery was empty are remembered") {
+    let n = 4000;
+    let hs: Vec<Holder> = Vec::new();
+    let j = 0;
+    while j < n {
+        let vals: Vec<Node> = Vec::new();
+        vals.push(new Node(0));
+        vals.push(new Node(1));
+        hs.push(new Holder(vals));
+        j = j + 1;
+    }
+    let ring: Vec<Junk> = Vec::new();
+    j = 0;
+    while j < 8 {
+        ring.push(new Junk(j, j, j, j, j, j, j, j, j, j, j, j, j, j, j, j));
+        j = j + 1;
+    }
+    let bad = 0;
+    let i = 0;
+    while i < 3 * n {
+        // Each holder is visited again only after a few minors.
+        let h = mut hs[i % n];
+        if i >= n && (h.vals[0].v != i - n || h.vals[1].v != i - n + 1) {
+            bad = bad + 1;
+        }
+        // Straight-line allocations: no safepoint until `fill`'s entry.
+        ring[0] = new Junk(i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+        ring[1] = new Junk(i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+        ring[2] = new Junk(i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+        ring[3] = new Junk(i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+        ring[4] = new Junk(i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+        ring[5] = new Junk(i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+        ring[6] = new Junk(i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+        ring[7] = new Junk(i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i);
+        fill(h, i);
+        i = i + 1;
+    }
+    assert!(bad == 0, "every holder keeps what the last visit stored");
+}

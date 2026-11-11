@@ -888,6 +888,39 @@ mod tests {
         heap.minor_finish(plan);
     }
 
+    /// #2687 risk 2: native code takes a store view right after a minor,
+    /// while no young object exists, so the barrier logs the array as quiet.
+    /// The next allocation starts the nursery again and re-arms the array,
+    /// but the view stays live (an allocation drops no views), so the view
+    /// then stores a young object in place. The minor must still find it.
+    #[test]
+    fn a_store_view_taken_while_the_heap_is_quiet_survives_a_nursery_restart() {
+        let mut heap = nursery_heap();
+        let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(0i64); 4]), Object::Array);
+        let Object::Array(mut gc) = arr else { unreachable!() };
+        gc.as_mut().set_elem_kind(common::WORD_POINTER);
+        let mut roots = [arr.addr()];
+        minor(&mut heap, &[], &mut roots);
+        let old = roots[0];
+        assert!(!heap.has_young_in_use(), "the minor left the nursery empty");
+        let mut view = [0u64; 2];
+        let state = unsafe { crate::native::coil_native_view(old, 1, view.as_mut_ptr()) };
+        assert_eq!(state, 1, "a word array is viewed in place");
+        // The nursery starts again with this allocation; the view is live.
+        let head = cons_list(&mut heap, 20);
+        let before = walk(&heap, head);
+        assert!(heap.has_young_in_use());
+        unsafe { (view[0] as *mut Value).add(1).write(Value::from(head)) };
+        // Only the array names the list.
+        minor(&mut heap, &[old], &mut []);
+        let Some(Object::Array(a)) = heap.find_object_by_addr(old) else {
+            panic!("array stays")
+        };
+        let new_head = a.as_ref().get(1).expect("element").bits();
+        assert_ne!(new_head, head, "the precise element was rewritten");
+        assert_eq!(walk(&heap, new_head), before);
+    }
+
     #[test]
     fn promote_young_keeps_every_young_object_in_place() {
         let mut heap = nursery_heap();
