@@ -3,7 +3,7 @@ use super::*;
 use parser::Pratt;
 
 #[test]
-fn codegen_depth_guard_panics_with_expected_diagnostic_past_limit() {
+fn codegen_depth_guard_reports_the_limit_without_unwinding() {
     // See the analogous typechecker test (infer_depth_guard_...) for why
     // this seeds the counter directly rather than compiling a literally
     // deep AST: dropping a deep Box<Expression> chain overflows the
@@ -15,15 +15,14 @@ fn codegen_depth_guard_panics_with_expected_diagnostic_past_limit() {
         codegen_depth: super::CODEGEN_RECURSION_LIMIT,
         ..Default::default()
     };
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compiler.do_compile(&ast)));
-    assert!(result.is_err(), "expected the recursion-limit panic");
+    compiler.do_compile(&ast);
+    assert!(compiler.codegen_too_deep, "the walk stops at the limit");
     assert!(
         compiler
             .messages
             .iter()
             .any(|m| m.code() == Some(ErrorCode::ExpressionNestingTooDeep)),
-        "expected an ExpressionNestingTooDeep diagnostic to be recorded before panicking"
+        "expected an ExpressionNestingTooDeep diagnostic"
     );
 }
 

@@ -6254,8 +6254,10 @@ impl Compiler {
     }
 
     fn do_compile<'compiler>(&mut self, ast: &(SimpleSpan, Box<Expression<'compiler>>)) {
-        self.codegen_depth += 1;
-        if self.codegen_depth > super::CODEGEN_RECURSION_LIMIT {
+        if self.codegen_too_deep {
+            return;
+        }
+        if self.codegen_depth >= super::CODEGEN_RECURSION_LIMIT {
             self.messages.push(Message::error(
                 ErrorCode::ExpressionNestingTooDeep,
                 format!(
@@ -6264,8 +6266,10 @@ impl Compiler {
                 ),
                 ast.0.into_range(),
             ));
-            std::panic::panic_any(super::CodegenRecursionLimitExceeded);
+            self.codegen_too_deep = true;
+            return;
         }
+        self.codegen_depth += 1;
         self.do_compile_inner(ast);
         self.codegen_depth -= 1;
     }
@@ -8079,11 +8083,7 @@ impl Compiler {
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
         prepared: bool,
     ) -> bool {
-        let mut ok = false;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ok = self.check_module_hir(module, ast, prepared);
-        }));
-        Self::rethrow_unless_recursion_limit(result);
+        let ok = self.check_module_hir(module, ast, prepared);
         if ok {
             self.queue_early_foreign_clones();
         }
@@ -8096,20 +8096,7 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ){
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.lower_module_bodies(module, ast);
-        }));
-        Self::rethrow_unless_recursion_limit(result);
-    }
-
-    /// Only our own recursion-limit signal is swallowed (its message is
-    /// already recorded in `do_compile`); any other panic is a real bug.
-    fn rethrow_unless_recursion_limit(result: std::thread::Result<()>) {
-        if let Err(payload) = result
-            && payload.downcast_ref::<super::CodegenRecursionLimitExceeded>().is_none()
-        {
-            std::panic::resume_unwind(payload);
-        }
+        self.lower_module_bodies(module, ast);
     }
 
     fn compile_module_inner<'compiler>(
@@ -8118,18 +8105,7 @@ impl Compiler {
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
         prepared: bool,
     ){
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.check_and_lower_module(module, ast, prepared);
-        }));
-        if let Err(payload) = result
-            && payload
-                .downcast_ref::<super::CodegenRecursionLimitExceeded>()
-                .is_none()
-        {
-            // Only swallow our own recursion-limit signal (message already
-            // recorded in `do_compile`), any other panic is a real bug.
-            std::panic::resume_unwind(payload);
-        }
+        self.check_and_lower_module(module, ast, prepared);
     }
 
     /// `const`s to compute at compile time, in setup order, with their

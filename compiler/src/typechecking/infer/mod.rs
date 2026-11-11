@@ -338,6 +338,10 @@ pub struct Checker {
     /// against a fixed limit so a pathologically nested expression gets a
     /// clean diagnostic instead of a stack overflow.
     infer_depth: u32,
+    /// Set when [`infer`](Self::infer) passed its depth limit: how many
+    /// messages there were with its diagnostic. Every later `infer` returns
+    /// at once, and `check_program` drops what the rest of the walk said.
+    too_deep: Option<usize>,
 
     /// Span-indexed inferred types for codegen ([`lookup_at`](Self::lookup_at)).
     cache: std::collections::HashMap<NodeId, Ty>,

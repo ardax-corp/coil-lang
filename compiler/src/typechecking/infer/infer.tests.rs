@@ -499,7 +499,7 @@ fn register_native_object_type() {
 }
 
 #[test]
-fn infer_depth_guard_panics_with_expected_diagnostic_past_limit() {
+fn infer_depth_guard_reports_the_limit_without_unwinding() {
     // Exercise the guard directly (not via a literal deeply-nested AST):
     // recursing 2000+ levels via `+` also overflows the stack while
     // dropping the parsed AST itself (a well-known Box<T> recursive-Drop
@@ -514,14 +514,15 @@ fn infer_depth_guard_panics_with_expected_diagnostic_past_limit() {
         .parse("1;")
         .expect("trivial literal parses");
     c.infer_depth = INFER_RECURSION_LIMIT;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.infer(&ast)));
-    assert!(result.is_err(), "expected the recursion-limit panic");
+    let _ = c.infer(&ast);
     assert!(
         c.messages()
             .iter()
             .any(|m| m.code() == Some(ErrorCode::ExpressionNestingTooDeep)),
-        "expected an ExpressionNestingTooDeep diagnostic to be recorded before panicking"
+        "expected an ExpressionNestingTooDeep diagnostic"
     );
+    assert!(c.too_deep.is_some(), "the walk stops at the limit");
+    assert_eq!(c.infer_depth, INFER_RECURSION_LIMIT, "the limit's level is not entered");
 }
 
 #[test]
