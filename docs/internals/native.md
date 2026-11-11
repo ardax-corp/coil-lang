@@ -403,13 +403,24 @@ In-place stores are compiled only into release builds without `gc-stress`
 
 | Operation | Native |
 |---|---|
-| int `+ - *` | `sadd/ssub/smul_overflow`, panic on overflow |
+| int `+ - *` | `sadd/ssub/smul_overflow`, panic on overflow; a plain `iadd` / `isub` for a step `in_range_steps` keeps in range |
 | int `/` | panic on `b == 0` and `MIN / -1`; `sdiv` |
 | int `%` | panic on `b == 0`; `x % -1` is `0`; `srem` |
 | `<< >>` | panic unless `0 <= b < 64`; `ishl` / `sshr` |
 | float `% **` | Rust `%` / `powf` through a helper |
 | float `!=` | true when unordered (Rust `!=`), `==` / `<` ordered |
 | `float as int` | `fcvt_to_sint_sat` (Rust `as`: saturating, NaN is 0) |
+
+`mir::in_range_steps` (`compiler/src/mir/int_range.rs`) lists the int steps
+that cannot overflow: `x + c` or `x - c`, with `c` a constant, where a branch
+edge bounds `x` on the side the step moves toward. `x < y` bounds `x` by
+`y - 1`, or by `int` max - 1 when `y` is not a constant. `x <= y` bounds it
+by `y`, or by `int` max. A step by `c` is safe when the bound plus `c` is
+still an `int`, so `i + 1` under `while i < n` never needs the check. The
+fact holds in the blocks the edge's target dominates, where the target has
+that edge as its only way in. Native code adds these steps with no
+`sadd_overflow` and no bail branch (#2127). The MIR interpreter keeps its
+checked add.
 
 ## AOT `coil package`
 

@@ -59,6 +59,8 @@ pub use inst::{BlockId, MirUnaryOp, Terminator};
 pub use inst::LocalId;
 pub mod archive;
 mod frame_words;
+mod int_range;
+pub use int_range::in_range_steps;
 mod native_alloc;
 pub use native_alloc::{AllocCall, alloc_call};
 mod native_capture;
