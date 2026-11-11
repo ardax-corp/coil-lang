@@ -84,6 +84,43 @@ impl Shown for Option<U: Show> {
 impl Framed for Option<U: Show> {
 }
 
+// Three levels: the superclass's entry dictionary carries its own
+// superclass's entry dictionary in turn.
+trait Twice<T> {
+    fn one(T x) -> string {}
+
+    fn two(T x) -> string {
+        return x.one() + x.one();
+    }
+}
+
+trait Mid<T: Twice> {
+    fn mid(T x) -> string {
+        return "m" + x.two();
+    }
+}
+
+trait Top<T: Mid> {
+    fn top(T x) -> string {
+        return "t" + x.mid() + x.two();
+    }
+}
+
+impl Twice for Option<U> {
+    fn one(Option<U> o) -> string {
+        return match o {
+            Some(_) => "s",
+            None => "n",
+        };
+    }
+}
+
+impl Mid for Option<U> {
+}
+
+impl Top for Option<U> {
+}
+
 class Point {
     pub x: int,
 }
@@ -118,4 +155,11 @@ test("a bounded superclass instance's context") {
     assert!(a.frame() == "[x|x!]");
     assert!(n.frame() == "[-|-!]");
     assert!(i.frame() == "[4|4!]");
+}
+
+test("a superclass's entry dictionary carries its own superclass's") {
+    let a: Option<string> = Some("x");
+    let b: Option<string> = None;
+    assert!(a.top() == "tmssss");
+    assert!(b.top() == "tmnnnn");
 }
