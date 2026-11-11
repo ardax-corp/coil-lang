@@ -5853,13 +5853,7 @@ impl Lower<'_> {
         // A two-word value comes back boxed, as the adapter's one-word ABI
         // returns it: the word, unboxed where a pair is read.
         let boxed_pair = self.pair_tys(id).is_some();
-        // Any pair `unbox_word` reads back: an enum, a product tuple
-        // (#1859), a range or a readonly class pair.
-        let unboxable = self.cx.boxed_view(ty, None).is_some()
-            || matches!(strip_readonly(ty), Ty::Tuple(items) if items.len() == 2)
-            || crate::layout::two_word_range_kind(ty).is_some()
-            || self.cx.pair_class(ty).is_some();
-        if boxed_pair && !unboxable {
+        if boxed_pair && !self.pair_unboxable(ty) {
             return Err("bound call pair".into());
         }
         let unit = is_unit(ty);
@@ -5904,21 +5898,36 @@ impl Lower<'_> {
         Ok(if unit { Val::Unit } else { Val::V(dest) })
     }
 
+    /// Any pair [`Self::unbox_word`] reads back from its box: an enum, a
+    /// product tuple (#1859), a range or a readonly class pair.
+    fn pair_unboxable(&self, ty: &Ty) -> bool {
+        self.cx.boxed_view(ty, None).is_some()
+            || matches!(strip_readonly(ty), Ty::Tuple(items) if items.len() == 2)
+            || crate::layout::two_word_range_kind(ty).is_some()
+            || self.cx.pair_class(ty).is_some()
+    }
+
     /// A trait method on a bare-class existential pack, as HIR emission's
     /// `HirBuiltin::Existential`: the pack's boxed value, the further
     /// arguments' words, the pack's dictionary, then the code pointer in
-    /// the method's slot through `CallIndirect`.
+    /// the method's slot through `CallIndirect`. The slot holds what a
+    /// bound's dictionary does (a raw method's `$dict` adapter), so a
+    /// two-word result comes back boxed, as from [`Self::bound_call`], and
+    /// a heap tuple or boxed enum as its object (#2684).
     fn existential_call(&mut self, id: HirId, args: &[HirId], slot: u32) -> Result<Val, Refusal> {
         self.raw_host = false;
-        if self.pair_tys(id).is_some() {
+        let ty = self.expr_ty(id).ok_or("call type")?;
+        let boxed_pair = self.pair_tys(id).is_some();
+        if boxed_pair && !self.pair_unboxable(ty) {
             return Err("existential call pair".into());
         }
-        let ty = self.expr_ty(id).ok_or("call type")?;
         let unit = is_unit(ty);
         let ret = if unit {
             MirTy::I64
+        } else if boxed_pair {
+            MirTy::HeapRef
         } else {
-            self.word_ty(ty).ok_or_else(|| format!("existential call type {}", ty_kind(ty)))?
+            self.word_or_object(ty).ok_or_else(|| format!("existential call type {}", ty_kind(ty)))?
         };
         let (&recv, rest) = args.split_first().ok_or("existential call arity")?;
         let Some(pack) = self.word(recv)? else {
