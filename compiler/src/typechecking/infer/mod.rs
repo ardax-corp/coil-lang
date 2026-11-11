@@ -356,6 +356,9 @@ pub struct Checker {
     /// Span of a generic function's name passed to a `forall` parameter →
     /// that parameter's type at the call (#2621).
     rank_n_args: HashMap<(usize, usize), Ty>,
+    /// Bounds of `forall` arguments on open variables, checked at the end
+    /// of their call (#2639).
+    rank_n_deferred: Vec<(Constraint, Range<usize>)>,
 
     /// Variable types for codegen when infer cache is misaligned in function bodies.
     codegen_var_types: std::collections::HashMap<String, Ty>,

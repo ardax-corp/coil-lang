@@ -174,6 +174,7 @@ impl Checker {
             static_decl_frames: HashMap::new(),
             node_ids_by_span: HashMap::new(),
             rank_n_args: HashMap::new(),
+            rank_n_deferred: Vec::new(),
             codegen_var_types: std::collections::HashMap::new(),
             polyfn_binding_spans: std::collections::HashSet::new(),
             codegen_var_types_scopes: Vec::new(),
@@ -9050,6 +9051,7 @@ impl Checker {
             }
         }
         let extern_call = name.is_some_and(|n| self.extern_fns.contains(n));
+        let deferred = self.rank_n_deferred.len();
         for (i, arg) in arg_tys.iter().enumerate() {
             let mut pending_constraints = Vec::new();
             loop {
@@ -9154,6 +9156,18 @@ impl Checker {
                         );
                     }
                 }
+            }
+        }
+        // A `forall` argument's bounds on variables the call's arguments
+        // bind: covered by an instance or the enclosing body's bound.
+        for (needed, at) in self.rank_n_deferred.split_off(deferred) {
+            let needed = Constraint { class: needed.class, args: needed.args.iter().map(|a| apply_ty_prune(&self.subst, a)).collect() };
+            if !self.constraint_is_covered(&needed) {
+                self.messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!("Cannot satisfy constraint `{}`", self.instance_signature(&needed.class, &needed.args)),
+                    at,
+                ));
             }
         }
         current
@@ -10197,10 +10211,13 @@ impl Checker {
         {
             self.absorb(s);
             let skolem_free = |t: &Ty| !t.to_string().contains("$forall");
-            for v in ftv_ty(&candidate) {
+            // Or to the call's own variables (the enclosing body's type
+            // parameter a later argument binds them to, #2639).
+            let own = ftv_ty(&candidate);
+            for &v in &own {
                 let bound = apply_ty_prune(&local, &Ty::Var(v));
                 if bound != Ty::Var(v)
-                    && ftv_ty(&bound).is_empty()
+                    && ftv_ty(&bound).iter().all(|u| !own.contains(u))
                     && skolem_free(&bound)
                     && let Ok(s) = unify_with(&self.subst, &Ty::Var(v), &bound)
                 {
@@ -10210,10 +10227,13 @@ impl Checker {
         }
 
         for constraint in candidate_constraints {
+            // Through the argument's own unifier, then the program's: a
+            // bound the `forall` signature puts on the enclosing body's own
+            // type parameter is that parameter's (#2639).
             let resolved_args: Vec<Ty> = constraint
                 .args
                 .iter()
-                .map(|a| apply_ty_prune(&local, a))
+                .map(|a| apply_ty_prune(&self.subst, &apply_ty_prune(&local, a)))
                 .collect();
             let all_skolems = resolved_args
                 .iter()
@@ -10245,18 +10265,11 @@ impl Checker {
                     class: constraint.class.clone(),
                     args: resolved_args,
                 };
-                if !self.constraint_is_covered(&needed) {
-                    self.messages.push(Message::error(
-                        ErrorCode::GenericTypeError,
-                        format!(
-                            "Cannot satisfy constraint `{}`",
-                            self.instance_signature(&needed.class, &needed.args)
-                        ),
-                        arg_expr
-                            .map(|arg| arg.0.into_range())
-                            .unwrap_or_else(|| range.clone()),
-                    ));
-                }
+                // Checked once the call's other arguments are unified: one
+                // may bind the variable to the enclosing body's own type
+                // parameter (#2639).
+                let at = arg_expr.map(|arg| arg.0.into_range()).unwrap_or_else(|| range.clone());
+                self.rank_n_deferred.push((needed, at));
                 let _ = all_open;
             } else {
                 let lookup = self.instance_lookup_args(&constraint.class, &resolved_args);
