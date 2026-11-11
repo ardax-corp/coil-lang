@@ -304,3 +304,37 @@ fn main() {
         &["check", "run", "main"],
     );
 }
+
+/// Partial inlining: the panicking arm is cut out of `check` into a cold
+/// helper and the rest of `check` is spliced into `run`. The helper's
+/// frame is `check`'s.
+#[test]
+fn a_panic_in_a_cold_arm_cut_out_of_an_inlined_callee_has_its_frame() {
+    same_trace_everywhere(
+        "cold",
+        "use io::{stdout, write};
+use string::to_bytes;
+
+fn check(int i) -> int {
+    if i == 3 {
+        let k = i * 7 + 1;
+        panic(\"bad \" + k.show());
+    }
+    return i * 2;
+}
+
+fn run(int n) -> int {
+    let s = 0;
+    for i in 0..n {
+        s = s + check(i);
+    }
+    return s;
+}
+
+fn main() {
+    let _ = write(stdout(), to_bytes(run(5).show()));
+}
+",
+        &["check", "run", "main"],
+    );
+}
