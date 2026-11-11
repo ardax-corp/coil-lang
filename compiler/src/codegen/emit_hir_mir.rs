@@ -494,10 +494,11 @@ impl Compiler {
                     // dictionaries.
                     let params = self.polyfn_params(name);
                     // Its shared entry's `kinds` word, captured after the
-                    // dictionaries (#2506): every bit clear, so a type
-                    // parameter's copy-on-write ops stay off, as before.
+                    // dictionaries (#2506), with the bits a call through
+                    // the `forall` parameter it is passed to gives (#2621).
                     let escape = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-                    let kinds = self.polyfn_kinds_slot(name, escape.as_ref());
+                    let expected = self.checker.rank_n_arg_at(e.span.0, e.span.1);
+                    let kinds = self.polyfn_kinds_slot(name, escape.as_ref(), expected.as_ref());
                     let value = if let Some(kinds) = kinds.clone().filter(|_| self.checker.dict_arity_for(name) == 0) {
                         let kind = crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) };
                         Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: kinds })
@@ -1508,15 +1509,20 @@ impl Compiler {
             Some(Err(_)) => return,
         };
         let word_ret = unbox && call_ty.as_ref().and_then(Self::ty_to_value_tag).is_some();
-        // The callee's `kinds` word after the dictionaries (#2506): in the
-        // function's order for a local bound from it, in the `forall`'s for a
-        // parameter, which a value read there takes in the same order.
+        // The bits of the value's type variables after the dictionaries
+        // (#2506, #2621): the function's own type for a local bound from
+        // it, the `forall`'s for a parameter. The value maps them to its
+        // entry's `kinds` word.
         let mut dicts = dicts;
         match &source {
-            Some(source) => dicts.extend(self.kinds_ops(source, &arg_tys, call_ty.as_ref()).unwrap_or_default()),
+            Some(source) => {
+                if let Some(scheme) = self.kinds_scheme(source) {
+                    dicts.extend(self.value_kinds_ops(&scheme.bounds, &scheme.ty, &arg_tys, call_ty.as_ref()));
+                }
+            }
             None => {
                 if let Some(Ty::Forall { bounds, body, .. }) = Self::hir_forall_param_ty(hir, &self.checker, f) {
-                    dicts.extend(self.kinds_ops_for(&bounds, &body, &arg_tys, call_ty.as_ref()));
+                    dicts.extend(self.value_kinds_ops(&bounds, &body, &arg_tys, call_ty.as_ref()));
                 }
             }
         }

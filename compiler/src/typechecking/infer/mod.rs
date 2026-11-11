@@ -353,6 +353,9 @@ pub struct Checker {
     static_decl_frames: HashMap<String, usize>,
     /// Span → NodeId so post-infer coercions can retarget `cache` (B2 sidecar).
     node_ids_by_span: HashMap<(usize, usize), NodeId>,
+    /// Span of a generic function's name passed to a `forall` parameter →
+    /// that parameter's type at the call (#2621).
+    rank_n_args: HashMap<(usize, usize), Ty>,
 
     /// Variable types for codegen when infer cache is misaligned in function bodies.
     codegen_var_types: std::collections::HashMap<String, Ty>,
