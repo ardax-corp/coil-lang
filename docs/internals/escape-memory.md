@@ -348,7 +348,13 @@ Design (copying nursery, decided 2026-10-27):
   object into a *quiet* set instead of the remembered set and stops
   firing for it, and the set's objects are re-armed when the nursery
   starts again. Without it gc_rebuild remembered every pretenured node
-  (900k entries per minor).
+  (900k entries per minor). A quiet object carries `GEN_QUIET` until
+  then. Native code's store view of an array is the one write path that
+  outlives its barrier (stores through it are in place), and the
+  allocation that starts the nursery again drops no view. So a store view
+  of a quiet array remembers it at once (`GcData::note_store_view`), or
+  the young objects stored through the view after the restart would go
+  unseen (#2702).
 - **Major collections** stay mark-and-sweep. A minor collection runs first,
   so the major mark sees an empty nursery, and the sweep skips young
   chunks.
