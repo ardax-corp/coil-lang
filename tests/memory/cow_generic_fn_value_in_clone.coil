@@ -6,6 +6,9 @@
 // shared body, whose `kinds` bit for `U` comes from where the value is made
 // (coil-lang#2506, #2621): the copy is made unique before the write, so the
 // original keeps its state at a class type and an `int` passes through.
+// A local bound from the function, and a `forall` parameter, called at the
+// body's own type parameter pass the body's dictionary and bit for it
+// (coil-lang#2652).
 use tests::assert;
 
 class Box {
@@ -113,6 +116,47 @@ fn chain<S: Bump>(S x) -> int {
     return by_name(x);
 }
 
+fn local_value<T: Bump>(T x) -> int {
+    let f = peek;
+    return f(x) * 1000 + x.val();
+}
+
+fn local_annotated<T: Bump>(T x) -> int {
+    let f: T -> int = peek;
+    return f(x) * 1000 + x.val();
+}
+
+fn local_result<T: Bump>(T x) -> int {
+    let f = bumped;
+    let r = f(x);
+    return x.val() * 1000 + r.val();
+}
+
+fn local_in_lambda<T: Bump>(T x) -> int {
+    let h = fn (T y) {
+        let g = peek;
+        g(y)
+    };
+    return h(x) * 1000 + x.val();
+}
+
+fn run_own<V: Bump>(forall U: Bump. U -> int g, V x) -> int {
+    return g(x);
+}
+
+fn run_own_result<V: Bump>(forall U: Bump. U -> U g, V x) -> int {
+    let r = g(x);
+    return x.val() * 1000 + r.val();
+}
+
+fn forall_own<T: Bump>(T x) -> int {
+    return run_own(peek, x) * 1000 + x.val();
+}
+
+fn forall_own_result<T: Bump>(T x) -> int {
+    return run_own_result(bumped, x);
+}
+
 test("by name to a function-typed parameter") {
     let b = new Box(1);
     assert!(by_name(b) == 102001);
@@ -170,4 +214,30 @@ test("from a generic caller forwarding its own bit") {
     assert!(chain(b) == 102001);
     assert!(b.n == 1);
     assert!(chain(7) == 707007);
+}
+
+test("a local bound from the function, called at the body's type parameter") {
+    let b = new Box(1);
+    assert!(local_value(b) == 102001);
+    assert!(local_annotated(b) == 102001);
+    assert!(local_result(b) == 1002);
+    assert!(local_in_lambda(b) == 102001);
+    assert!(b.n == 1);
+    assert!(local_value(7) == 707007);
+    assert!(local_annotated(7) == 707007);
+    assert!(local_result(7) == 7007);
+    assert!(local_in_lambda(7) == 707007);
+}
+
+test("a forall parameter called at the body's type parameter") {
+    let b = new Box(1);
+    assert!(run_own(peek, b) == 102);
+    assert!(run_own_result(bumped, b) == 1002);
+    assert!(forall_own(b) == 102001);
+    assert!(forall_own_result(b) == 1002);
+    assert!(b.n == 1);
+    assert!(run_own(peek, 7) == 707);
+    assert!(run_own_result(bumped, 7) == 7007);
+    assert!(forall_own(7) == 707007);
+    assert!(forall_own_result(7) == 7007);
 }
