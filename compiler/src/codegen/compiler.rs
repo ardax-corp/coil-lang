@@ -1606,6 +1606,9 @@ impl Compiler {
     /// or the method is in another program, a thunk calling the shared
     /// entry; then its `$dict` adapter.
     fn emit_instance_clones(&mut self, children: &[Output<'_>]) {
+        // This program's method nodes by fqn, made the first time a clone
+        // of one of them is emitted.
+        let mut method_fns = None;
         while let Some(req) = self.inst_clone_queue.pop_front() {
             let src = self.inst_clone_srcs[&req.src].clone();
             // Another module's method: compiled later under that module's
@@ -1634,7 +1637,7 @@ impl Compiler {
             }
             let vars = self.inst_clone_vars(&src.head, &req.lookup).unwrap_or_default();
             let method = (src.program == self.program_seq && src.compiled)
-                .then(|| self.find_impl_method_fn(children, &req.src))
+                .then(|| method_fns.get_or_insert_with(|| self.impl_method_fns(children)).get(req.src.as_str()).copied())
                 .flatten()
                 .filter(|_| self.inst_clone_ground(src.span, &vars));
             match method {
@@ -1738,54 +1741,59 @@ impl Compiler {
 
     /// The `Function` node of the `impl` method of this program whose
     /// fqn is `fqn`.
-    fn find_impl_method_fn<'a, 'b>(&self, children: &'b [Output<'a>], fqn: &str) -> Option<(&'b Output<'a>, &'b [Output<'a>])> {
-        children.iter().find_map(|child| {
-            // A free generic function ([`Self::note_fn_clone_src`]).
-            if let Expression::Function { name, .. } = child.1.as_ref() {
-                let qualified = if self.namespace.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{}::{}", self.namespace, name)
-                };
-                return (qualified == fqn).then_some((child, &[][..]));
-            }
-            if let Expression::TypeClass { name, methods, .. } = child.1.as_ref() {
-                return methods.iter().find_map(|m| match m.1.as_ref() {
-                    Expression::Function { name: method, .. }
-                        if crate::typechecking::generics::Generics::default_method_fqn(name, method) == fqn =>
-                    {
-                        Some((m, &[][..]))
+    /// The `Function` node of each `impl` method, trait default method
+    /// and free function of this program, with its `impl` head's AST
+    /// arguments, by fqn; the first in `children`'s order for an fqn
+    /// declared twice.
+    #[allow(clippy::type_complexity)]
+    fn impl_method_fns<'a, 'b>(&self, children: &'b [Output<'a>]) -> HashMap<String, (&'b Output<'a>, &'b [Output<'a>])> {
+        let mut fns = HashMap::new();
+        let mut add = |fqn: String, found: (&'b Output<'a>, &'b [Output<'a>])| {
+            fns.entry(fqn).or_insert(found);
+        };
+        for child in children {
+            match child.1.as_ref() {
+                // A free generic function ([`Self::note_fn_clone_src`]).
+                Expression::Function { name, .. } => {
+                    let qualified = if self.namespace.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{}::{}", self.namespace, name)
+                    };
+                    add(qualified, (child, &[][..]));
+                }
+                Expression::TypeClass { name, methods, .. } => {
+                    for m in methods {
+                        if let Expression::Function { name: method, .. } = m.1.as_ref() {
+                            add(crate::typechecking::generics::Generics::default_method_fqn(name, method), (m, &[][..]));
+                        }
                     }
-                    _ => None,
-                });
+                }
+                Expression::Implementation { owner, methods, .. } => {
+                    let owner = self.resolve_class_ident(owner);
+                    for m in methods {
+                        if let (Some(name), Some(f)) = (Self::impl_method_name(m), Self::impl_method_fn(m)) {
+                            add(format!("{owner}::{name}"), (f, &[][..]));
+                        }
+                    }
+                }
+                Expression::TypeClassImpl { class, args, methods, .. } => {
+                    let class = self.checker.impl_trait_key(class);
+                    let ty_part = args
+                        .iter()
+                        .map(|arg| self.codegen_instance_head_ty(arg).to_string())
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    for m in methods {
+                        if let (Some(name), Some(f)) = (Self::impl_method_name(m), Self::impl_method_fn(m)) {
+                            add(format!("{class}__{ty_part}__{name}"), (f, args.as_slice()));
+                        }
+                    }
+                }
+                _ => {}
             }
-            if let Expression::Implementation { owner, methods, .. } = child.1.as_ref() {
-                let owner = self.resolve_class_ident(owner);
-                return methods.iter().find_map(|m| {
-                    let name = Self::impl_method_name(m)?;
-                    (format!("{owner}::{name}") == fqn)
-                        .then(|| Self::impl_method_fn(m))
-                        .flatten()
-                        .map(|f| (f, &[][..]))
-                });
-            }
-            let Expression::TypeClassImpl { class, args, methods, .. } = child.1.as_ref() else {
-                return None;
-            };
-            let class = self.checker.impl_trait_key(class);
-            let ty_part = args
-                .iter()
-                .map(|arg| self.codegen_instance_head_ty(arg).to_string())
-                .collect::<Vec<_>>()
-                .join("_");
-            methods.iter().find_map(|m| {
-                let name = Self::impl_method_name(m)?;
-                (format!("{class}__{ty_part}__{name}") == fqn)
-                    .then(|| Self::impl_method_fn(m))
-                    .flatten()
-                    .map(|f| (f, args.as_slice()))
-            })
-        })
+        }
+        fns
     }
 
     /// `name ↦ type` for each type parameter the AST head spells (`T` in
