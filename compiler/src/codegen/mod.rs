@@ -220,6 +220,10 @@ pub struct Compiler {
     bodies: BodyTable,
 
     functions: HashMap<String, usize>,
+    /// For each `name#…` key of [`Self::functions`] and each `#` in it, the
+    /// part before that `#`: how many keys start with it and the `#`.
+    /// Kept by [`Compiler::insert_function`] / [`Compiler::remove_function`].
+    fn_key_prefixes: HashMap<String, usize>,
     /// Entry labels for names in [`Self::functions`] (step-3 binds).
     fn_entry_labels: HashMap<String, IlLabel>,
     /// `Show` thunks of the builtin error enums: reserved up front, emitted
@@ -723,6 +727,7 @@ impl Default for Compiler {
             debug_locs: Vec::new(),
             inline_scopes: Default::default(),
             functions: HashMap::with_capacity(32),
+            fn_key_prefixes: HashMap::new(),
             fn_entry_labels: HashMap::with_capacity(32),
             builtin_show_thunks: Vec::new(),
             builtin_show_used: HashSet::new(),

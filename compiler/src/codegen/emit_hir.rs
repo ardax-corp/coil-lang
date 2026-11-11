@@ -6113,8 +6113,7 @@ impl Compiler {
             });
         }
         // An overload-keyed entry would be picked over the bare thunk.
-        let keyed = format!("{key}#");
-        if self.functions.keys().any(|k| k.starts_with(&keyed))
+        if self.has_fn_key_under(&key)
             || self.two_word_return_kind(&key).is_some()
             || !(self.functions.contains_key(&key) || self.fn_entry_labels.contains_key(&key))
         {

@@ -483,6 +483,35 @@ impl Compiler {
         self.functions.get(name).copied()
     }
 
+    /// Register function `name` at `offset` in [`Self::functions`].
+    fn insert_function(&mut self, name: String, offset: usize) {
+        if !self.functions.contains_key(&name) {
+            for (at, _) in name.match_indices('#') {
+                *self.fn_key_prefixes.entry(name[..at].to_string()).or_default() += 1;
+            }
+        }
+        self.functions.insert(name, offset);
+    }
+
+    /// Drop function `name` from [`Self::functions`].
+    fn remove_function(&mut self, name: &str) {
+        if self.functions.remove(name).is_some() {
+            for (at, _) in name.match_indices('#') {
+                if let Some(n) = self.fn_key_prefixes.get_mut(&name[..at]) {
+                    *n -= 1;
+                    if *n == 0 {
+                        self.fn_key_prefixes.remove(&name[..at]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether a key of [`Self::functions`] is `key` followed by `#`.
+    fn has_fn_key_under(&self, key: &str) -> bool {
+        self.fn_key_prefixes.contains_key(key)
+    }
+
     /// Bind a fresh entry label at the current PC and register `name`.
     fn bind_function_entry(&mut self, name: String) -> (usize, IlLabel) {
         let offset = self.bodies.position();
@@ -492,7 +521,7 @@ impl Compiler {
         } else {
             self.bodies.bind_fresh_entry()
         };
-        self.functions.insert(name.clone(), offset);
+        self.insert_function(name.clone(), offset);
         if self.keep_fns_in.is_some() {
             let file = self.intern_source_file();
             self.fn_source_files.insert(name.clone(), file);
@@ -3855,7 +3884,7 @@ impl Compiler {
 
         // The worker's own entry (its `MakeFn` and nested calls) while it
         // plans; bound once it does.
-        self.functions.insert(worker_name.clone(), self.bodies.position());
+        self.insert_function(worker_name.clone(), self.bodies.position());
         self.fn_arities.insert(worker_name.clone(), (n as u32 + 1, false));
         let prev_fn_table_key = self.current_function_table_key.replace(worker_name.clone());
         let calls = HashMap::from([(worker_name.clone(), (vec![ValueLayout::Boxed; n + 1], ValueLayout::Boxed))]);
@@ -3870,7 +3899,7 @@ impl Compiler {
             self.attach_hir_mir();
             self.flush_hir_par_tail();
         } else {
-            self.functions.remove(&worker_name);
+            self.remove_function(&worker_name);
             self.fn_arities.remove(&worker_name);
         }
         self.current_function_table_key = prev_fn_table_key;
@@ -7850,7 +7879,10 @@ impl Compiler {
                 roots.extend(self.test_body_names());
             }
             let live = self.reachable_bodies(roots);
-            self.functions.retain(|name, _| live.contains_key(name));
+            let dead: Vec<String> = self.functions.keys().filter(|name| !live.contains_key(*name)).cloned().collect();
+            for name in &dead {
+                self.remove_function(name);
+            }
             let functions = &self.functions;
             self.fn_entry_labels.retain(|name, _| functions.contains_key(name));
             self.fn_debug_locals.retain(|name, _| functions.contains_key(name));
