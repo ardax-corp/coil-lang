@@ -418,6 +418,87 @@ fn main() {
     assert!(boxes.iter().any(|b| b.func == "add_opt$value"), "{boxes:?}");
 }
 
+/// An inherent instance method's two-word result goes back to its direct
+/// calls as two words, as a free function's does (#2333): no box.
+#[test]
+fn box_capture_method_pair_result_has_no_boxes() {
+    let src = r#"
+class Bag {
+    pub base: int,
+}
+impl Bag {
+    #[inline(never)]
+    pub fn at(int k) -> Option<int> {
+        if k < 0 {
+            return None;
+        }
+        return Some(self.base + k);
+    }
+    #[inline(never)]
+    pub fn split(int k) -> (int, int) {
+        return (self.base, k);
+    }
+}
+fn main() {
+    let b = new Bag(1);
+    let (x, y) = b.split(2);
+    let _ = x + y + match b.at(3) {
+        Some(v) => v,
+        None => 0,
+    };
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| ["Bag::at", "Bag::split", "main"].contains(&b.func.as_str())).collect();
+    assert!(mine.is_empty(), "{mine:?}");
+}
+
+/// A partial application of such a method targets its one-word adapter,
+/// as a free function's does: only the adapter boxes.
+#[test]
+fn box_capture_partial_of_pair_method_boxes_only_in_its_adapter() {
+    let src = r#"
+class Bag {
+    pub base: int,
+}
+impl Bag {
+    #[inline(never)]
+    pub fn at(int k) -> Option<int> {
+        return Some(self.base + k);
+    }
+}
+#[inline(never)]
+fn through(int -> Option<int> f, int x) -> int {
+    return match f(x) {
+        Some(v) => v,
+        None => -1,
+    };
+}
+fn main() {
+    let b = new Bag(1);
+    let p = b.at();
+    let _ = through(p, 2) + match b.at(3) {
+        Some(v) => v,
+        None => 0,
+    };
+}
+"#;
+    let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
+    pipeline.set_runs_mir();
+    compiler::start_box_capture();
+    pipeline.compile_src(src).expect("compiles");
+    let boxes = compiler::take_box_capture();
+    let mine: Vec<_> = boxes.iter().filter(|b| ["Bag::at", "through", "main"].contains(&b.func.as_str())).collect();
+    assert!(mine.is_empty(), "{mine:?}");
+    assert!(boxes.iter().any(|b| b.func == "Bag::at$value"), "{boxes:?}");
+}
+
 /// A named function used as a value keeps its two-word result when bodies
 /// emitted before it (a derived `Show`, a caller) ask how it returns.
 #[test]

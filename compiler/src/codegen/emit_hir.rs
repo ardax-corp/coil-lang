@@ -5104,9 +5104,9 @@ impl Compiler {
             return Err("callee-partial");
         }
         // A two-word result: the closure calls the function's one-word
-        // adapter, whose twin the function is.
+        // adapter, whose twin the function is (a method's too, #2333).
         let value = self.two_word_return_kind(lookup).is_some();
-        if value && (method || key != lookup || !self.fn_value_redirects(key)) {
+        if value && (key != lookup || !self.fn_value_redirects(key)) {
             return Err("callee-partial");
         }
         let entry = *self.functions.get(key).ok_or("callee-partial")?;
@@ -5501,11 +5501,10 @@ impl Compiler {
         if src.method_of.as_ref().is_some_and(|m| m.free) && src.program == self.program_seq && self.inst_clone_fallback.is_none() {
             return None;
         }
-        if shared.pair.is_some()
-            || shared.instance.is_some()
-            || shared.generic.as_ref().is_some_and(|g| !g.forwarded.is_empty())
-            || self.coroutine_fns.contains(key)
-        {
+        // A clone is a cost decision, whatever the result's convention: a
+        // two-word result comes back from the clone in two words as from
+        // the shared entry (#2333).
+        if shared.instance.is_some() || shared.generic.as_ref().is_some_and(|g| !g.forwarded.is_empty()) || self.coroutine_fns.contains(key) {
             return None;
         }
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
@@ -11173,11 +11172,22 @@ impl Compiler {
         use crate::hir::LocalKind;
         use crate::hir::synth::Synth;
         // A function of no parameters is typed `unit -> R`: called with none.
-        let argc = self.fn_arities.get(name).map_or(0, |&(fixed, _)| fixed as usize);
+        // A method takes its receiver first (#2333).
+        let receiver = self.checker.has_receiver(name);
+        let argc = self.fn_arities.get(name).map_or(0, |&(fixed, _)| fixed as usize) + usize::from(receiver);
         let Some((params, ret)) = self.checker.fn_call_sig(name, argc) else {
             self.bind_function_entry(adapter.to_string());
             self.missing_call_target(name, 0..0);
             return;
+        };
+        // A method's call is planned here: its receiver and parameters as
+        // one word each (a partial application's are), its result the pair.
+        let calls = if receiver {
+            let pair = self.two_word_return_kind(name);
+            self.hir_synth_callees.insert(name.to_string(), compiler::SynthCallee { pair, ..compiler::SynthCallee::default() });
+            HashMap::from([(name.to_string(), (params.iter().map(|t| self.value_layout(t)).collect(), self.value_layout(&ret)))])
+        } else {
+            HashMap::new()
         };
         let mut b = Synth::new(&self.checker, adapter, ret.clone());
         let args = params
@@ -11194,7 +11204,8 @@ impl Compiler {
         let hir = b.finish(root);
         let prev = self.compiling_two_word_enum.take();
         self.pin_two_word_return_kind(adapter, None);
-        self.emit_synth_fn(adapter, &hir, HashMap::new());
+        self.emit_synth_fn(adapter, &hir, calls);
+        self.hir_synth_callees.remove(name);
         self.compiling_two_word_enum = prev;
         if let (Some(&entry), Some(&twin)) = (self.fn_entry_labels.get(adapter), self.fn_entry_labels.get(name)) {
             self.bodies.set_pair_twin(entry, twin);
