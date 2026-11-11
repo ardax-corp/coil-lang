@@ -643,17 +643,17 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     .map(|a| a.1.to_string())
                     .unwrap_or_default();
                 let span = node.0.into_range();
-                let instances = &self.checker.generics().instances;
+                let generics = self.checker.generics();
                 // A package trait's instances are keyed by its path.
                 let class = self.checker.impl_trait_key(class);
-                let instance = instances
-                    .iter()
-                    .find(|inst| inst.class == *class && inst.range == span)
+                let instance = generics
+                    .class_instances(&class)
+                    .map(|(_, inst)| inst)
+                    .find(|inst| inst.range == span)
                     .or_else(|| {
                         // Derive-generated impls carry a synthetic span.
-                        let mut by_head = instances.iter().filter(|inst| {
-                            inst.class == *class
-                                && inst.args.first().is_some_and(|a| head_name(a) == head_str(&owner))
+                        let mut by_head = generics.class_instances(&class).map(|(_, inst)| inst).filter(|inst| {
+                            inst.args.first().is_some_and(|a| head_name(a) == head_str(&owner))
                         });
                         let first = by_head.next();
                         if by_head.next().is_some() { None } else { first }

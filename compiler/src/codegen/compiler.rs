@@ -1169,7 +1169,7 @@ impl Compiler {
             && self
                 .checker
                 .generics()
-                .instances
+                .instances()
                 .iter()
                 .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
                 .is_some_and(|inst| !inst.args.iter().any(Ty::has_var))
@@ -1183,7 +1183,7 @@ impl Compiler {
     /// [`Self::instance_method_raw`] of instance method `fqn`, from its
     /// instance's class, method name and head.
     fn instance_method_fqn_raw(&self, fqn: &str) -> bool {
-        let Some((class, method, args)) = self.checker.generics().instances.iter().find_map(|inst| {
+        let Some((class, method, args)) = self.checker.generics().instances().iter().find_map(|inst| {
             let (method, _) = inst.method_fqns.iter().find(|(_, f)| *f == fqn)?;
             Some((inst.class.clone(), method.clone(), inst.args.clone()))
         }) else {
@@ -1210,7 +1210,7 @@ impl Compiler {
         let Some(instance) = self
             .checker
             .generics()
-            .instances
+            .instances()
             .iter()
             .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
         else {
@@ -1646,7 +1646,7 @@ impl Compiler {
                     let context = self
                         .checker
                         .generics()
-                        .instances
+                        .instances()
                         .iter()
                         .find(|inst| inst.method_fqns.values().any(|f| *f == req.src))
                         .map(|inst| inst.context.clone())
@@ -2197,7 +2197,7 @@ impl Compiler {
         let head = self
             .checker
             .generics()
-            .instances
+            .instances()
             .iter()
             .find(|inst| inst.class == class && inst.method_fqns.get(method).is_some_and(|f| f == fqn))
             .filter(|inst| inst.args.len() == inst_args.len() && inst.args.iter().any(Ty::has_var))
@@ -3242,7 +3242,7 @@ impl Compiler {
             if let Some(inst) = self
                 .checker
                 .generics()
-                .instances
+                .instances()
                 .iter()
                 .find(|inst| !inst.context.is_empty() && inst.method_fqns.values().any(|f| f == name))
             {
@@ -3436,7 +3436,7 @@ impl Compiler {
     fn instance_context_len(&self, fqn: &str) -> usize {
         self.checker
             .generics()
-            .instances
+            .instances()
             .iter()
             .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
             .map_or(0, |inst| inst.context.len())

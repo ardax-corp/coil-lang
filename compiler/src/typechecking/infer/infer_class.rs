@@ -536,24 +536,26 @@ impl Checker {
             .generics
             .find_overlapping_instance(class, &arg_tys)
             .cloned();
-        let existing_idx = self.generics.instances.iter().position(|inst| {
-            inst.class == class && inst.defined_module == self.current_module && inst.range == range
-        });
+        let existing_idx = self
+            .generics
+            .class_instances(class)
+            .find(|(_, inst)| inst.defined_module == self.current_module && inst.range == range)
+            .map(|(idx, _)| idx);
         // Else the stub the pre-pass registered for this very impl: not
         // another impl's of the same trait, whose head this one's would
         // then replace (#2480).
         let existing_idx = existing_idx.or_else(|| {
             let stubs = self.impl_stubs.get(&(self.current_module.clone(), class.to_string(), range.start, range.end))?;
             stubs.iter().copied().find(|&idx| {
-                let inst = &self.generics.instances[idx];
+                let inst = &self.generics.instances()[idx];
                 inst.class == class && inst.defined_module == self.current_module && inst.range.start == usize::MAX
             })
         });
         let same_decl = overlapping.as_ref().is_some_and(|existing| {
             existing_idx.is_some_and(|idx| {
-                self.generics.instances[idx].defined_module == existing.defined_module
-                    && (self.generics.instances[idx].range == existing.range
-                        || self.generics.instances[idx].range.start == usize::MAX)
+                let inst = &self.generics.instances()[idx];
+                inst.defined_module == existing.defined_module
+                    && (inst.range == existing.range || inst.range.start == usize::MAX)
             })
         });
         if let Some(existing) = overlapping.as_ref()
@@ -616,7 +618,7 @@ impl Checker {
         let stub_idx = if let Some(idx) = existing_idx {
             Some(idx)
         } else if class_def.is_some() && !orphaned && overlapping.is_none() {
-            self.generics.instances.push(InstanceDef {
+            Some(self.generics.push_instance(InstanceDef {
                 class: class.to_string(),
                 defined_module: self.current_module.clone(),
                 range: range.clone(),
@@ -624,8 +626,7 @@ impl Checker {
                 method_fqns: stub_fqns,
                 assoc_tys: HashMap::new(),
                 context: context.clone(),
-            });
-            Some(self.generics.instances.len() - 1)
+            }))
         } else {
             None
         };
@@ -764,9 +765,9 @@ impl Checker {
                             ty: resolved,
                         };
                         if let Some(idx) = stub_idx {
-                            self.generics.instances[idx]
-                                .assoc_tys
-                                .insert(aname.to_string(), value.clone());
+                            self.generics.update_instance(idx, |inst| {
+                                inst.assoc_tys.insert(aname.to_string(), value.clone());
+                            });
                         }
                         assoc_tys.insert(aname.to_string(), value);
                     }
@@ -1031,17 +1032,17 @@ impl Checker {
         // the stub in place when invalid instead.
         if let Some(idx) = stub_idx {
             if invalid_instance {
-                self.generics.instances[idx].method_fqns.clear();
-                self.generics.instances[idx].assoc_tys.clear();
-                self.generics.instances[idx].args.clear();
-                self.generics.instances[idx].class.clear();
+                self.generics.update_instance(idx, |inst| {
+                    inst.method_fqns.clear();
+                    inst.assoc_tys.clear();
+                    inst.args.clear();
+                    inst.class.clear();
+                });
             } else {
-                self.generics.instances[idx].method_fqns = method_fqns;
-                self.generics.instances[idx].assoc_tys = assoc_tys;
                 // A goal met before this body was checked freshened the
                 // earlier registration's head variables (#1670).
                 let (mut was, mut now) = (Vec::new(), Vec::new());
-                for a in &self.generics.instances[idx].args {
+                for a in &self.generics.instances()[idx].args {
                     a.collect_vars(&mut was);
                 }
                 for a in &arg_tys {
@@ -1050,12 +1051,16 @@ impl Checker {
                 if was.len() == now.len() {
                     self.weak_checks.alias(&was, &now);
                 }
-                self.generics.instances[idx].args = arg_tys.clone();
-                self.generics.instances[idx].range = range.clone();
-                self.generics.instances[idx].context = context.clone();
+                self.generics.update_instance(idx, |inst| {
+                    inst.method_fqns = method_fqns;
+                    inst.assoc_tys = assoc_tys;
+                    inst.args = arg_tys.clone();
+                    inst.range = range.clone();
+                    inst.context = context.clone();
+                });
             }
         } else if !invalid_instance {
-            self.generics.instances.push(InstanceDef {
+            self.generics.push_instance(InstanceDef {
                 class: class.to_string(),
                 defined_module: self.current_module.clone(),
                 range: range.clone(),

@@ -135,7 +135,7 @@ fn into_primitive_fqn(from: &str, to: &str) -> String {
 }
 
 fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
-    checker.generics().instances.iter().any(|instance| {
+    checker.generics().instances().iter().any(|instance| {
         instance
             .method_fqns
             .values()

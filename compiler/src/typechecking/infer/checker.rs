@@ -11091,10 +11091,8 @@ impl Checker {
                 Ty::App(head, args) if args.len() == 1 => Ty::App(head.clone(), vec![Ty::Var(self.counter.fresh())]),
                 _ => return,
             };
-            let registered = self.generics.instances.iter().any(|inst| {
-                inst.class == "Length"
-                    && Generics::is_structural_shape(inst)
-                    && Generics::instances_unify("Length", std::slice::from_ref(&ty), inst)
+            let registered = self.generics.instance_candidates("Length", Some(&ty)).any(|(_, inst)| {
+                Generics::is_structural_shape(inst) && Generics::instances_unify("Length", std::slice::from_ref(&ty), inst)
             });
             if !registered {
                 self.generics.register_structural_instance("Length", shape);
@@ -11158,11 +11156,14 @@ impl Checker {
         let wanted = erased.as_deref().unwrap_or(wanted);
         self.ensure_structural_instance(class, wanted);
         let wanted_lookup = self.instance_lookup_args(class, wanted);
+        // Only those whose head can unify with the goal's (the goal's head
+        // as the substitution has it).
+        let first = wanted_lookup.first().map(|ty| apply_ty_prune(&self.subst, ty));
         let candidates: Vec<_> = self
             .generics
-            .instances
-            .iter()
-            .filter(|inst| inst.class == class && inst.args.len() == wanted_lookup.len())
+            .instance_candidates(class, first.as_ref())
+            .map(|(_, inst)| inst)
+            .filter(|inst| inst.args.len() == wanted_lookup.len())
             .cloned()
             .collect();
         let mut matches: Vec<(InstanceDef, Subst, FreshVars)> = Vec::new();
@@ -12742,10 +12743,7 @@ impl Checker {
             };
             self.validate_assoc_projection_args(owner, &decl, args, range);
             let mut found: Option<Ty> = None;
-            for inst in &self.generics.instances {
-                if inst.class != owner {
-                    continue;
-                }
+            for (_, inst) in self.generics.class_instances(owner) {
                 if let Some(value) = inst.assoc_tys.get(assoc) {
                     let ty = self.instantiate_assoc_value(value, args);
                     if found.is_some() {
@@ -15769,7 +15767,7 @@ impl Checker {
                 .impl_stubs
                 .get(&stub_key)
                 .and_then(|stubs| stubs.get(nth).copied())
-                .filter(|&idx| self.generics.instances[idx].range.start == usize::MAX);
+                .filter(|&idx| self.generics.instances()[idx].range.start == usize::MAX);
             let head_params: Vec<(String, TyVarId)> = Self::instance_head_params(args, type_params)
                 .into_iter()
                 .map(|n| (n.to_string(), self.counter.fresh()))
@@ -15850,10 +15848,10 @@ impl Checker {
                 context,
             };
             match earlier {
-                Some(idx) => self.generics.instances[idx] = stub,
+                Some(idx) => self.generics.replace_instance(idx, stub),
                 None => {
-                    self.impl_stubs.entry(stub_key).or_default().push(self.generics.instances.len());
-                    self.generics.instances.push(stub);
+                    let idx = self.generics.push_instance(stub);
+                    self.impl_stubs.entry(stub_key).or_default().push(idx);
                 }
             }
         }
@@ -20566,7 +20564,7 @@ impl Checker {
     /// goal asks for it, and no goal of the source asks at the clone's
     /// types. Whether one was registered.
     pub fn ensure_clone_structural_goals(&mut self, bounds: &[Constraint], vars: &HashMap<TyVarId, Ty>) -> bool {
-        let before = self.generics.instances.len();
+        let before = self.generics.instances().len();
         let goals: Vec<Constraint> = bounds.iter().chain(&self.open_structural_goals).cloned().collect();
         for goal in goals {
             let args: Vec<Ty> = goal
@@ -20578,18 +20576,18 @@ impl Checker {
                 self.ensure_ground_structural(&goal.class, &args);
             }
         }
-        self.generics.instances.len() != before
+        self.generics.instances().len() != before
     }
 
     /// Register `class`'s structural instance at ground `args`, as a
     /// checker goal would (#2554). Whether one was registered.
     pub fn ensure_ground_structural(&mut self, class: &str, args: &[Ty]) -> bool {
-        let before = self.generics.instances.len();
+        let before = self.generics.instances().len();
         let lookup = self.instance_lookup_args(class, args);
         if lookup.iter().all(|a| !a.has_var()) {
             self.ensure_structural_instance(class, &lookup);
         }
-        self.generics.instances.len() != before
+        self.generics.instances().len() != before
     }
 
     /// Take the ground structural instances `other` registered that this

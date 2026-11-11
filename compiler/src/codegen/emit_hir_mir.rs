@@ -804,7 +804,7 @@ impl Compiler {
     /// `fqn` on a receiver of type `ty`, as a program: none unless the
     /// entry takes one (#2506). `None` when it takes one this cannot build.
     fn hir_iter_dicts(&mut self, fqn: &str, ty: &Ty) -> Option<Vec<crate::mir::HirDictOp>> {
-        let (class, method) = self.checker.generics().instances.iter().find_map(|inst| {
+        let (class, method) = self.checker.generics().instances().iter().find_map(|inst| {
             let (method, _) = inst.method_fqns.iter().find(|(_, f)| *f == fqn)?;
             Some((inst.class.clone(), method.clone()))
         })?;
@@ -823,7 +823,7 @@ impl Compiler {
     /// `iterable`: its declared result `declared`, its instance head's
     /// variables bound from `iterable`.
     fn hir_iter_ty_at(&self, fqn: &str, iterable: &Ty, declared: &Ty) -> Option<Ty> {
-        let head = self.checker.generics().instances.iter().find(|inst| inst.method_fqns.values().any(|f| f == fqn))?.args.clone();
+        let head = self.checker.generics().instances().iter().find(|inst| inst.method_fqns.values().any(|f| f == fqn))?.args.clone();
         let mut vars = HashMap::new();
         for h in &head {
             Self::bind_scheme_vars(h, iterable, &mut vars);
