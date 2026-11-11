@@ -270,6 +270,9 @@ impl Heap {
         debug_assert_eq!(self.gc_phase, GcPhase::Idle, "minor collections run between cycles");
         let spans = self.slab.young_spans();
         let remembered = self.take_remembered();
+        if self.heap_checks {
+            self.check_barrier(&remembered);
+        }
         #[cfg(feature = "gc-stats")]
         let mut census = MinorCensus { remembered: remembered.len(), ..MinorCensus::default() };
         let mut gray: Vec<Object> = Vec::new();
@@ -423,6 +426,34 @@ impl Heap {
             spans,
             #[cfg(feature = "gc-stats")]
             census,
+        }
+    }
+
+    /// The missed-barrier check ([`super::heap::heap_checks_on`]): at the
+    /// top of a minor, an old or held object the remembered set does not
+    /// name must not name a young object. Every write that could store
+    /// one goes through the barrier, which records the object; one that
+    /// did not is a store the minor would never see, so the young object
+    /// would be freed or moved under it. Panics naming the holder.
+    #[cold]
+    #[inline(never)]
+    fn check_barrier(&self, remembered: &[u64]) {
+        for obj in self.live_objects() {
+            let g = obj.generation();
+            if !barriered(g) || remembered.binary_search(&obj.addr()).is_ok() {
+                continue;
+            }
+            obj.for_each_reference(self, &mut |addr, precise| {
+                if let Some(young) = self.young_object(addr) {
+                    panic!(
+                        "missed write barrier: {} at {:#x} (generation {g:#x}) is not remembered but names {} at {addr:#x}, which is young, through a{} word",
+                        obj.kind_name(),
+                        obj.addr(),
+                        young.kind_name(),
+                        if precise { " precise" } else { "n ambiguous" },
+                    );
+                }
+            });
         }
     }
 
@@ -888,7 +919,36 @@ mod tests {
         heap.minor_finish(plan);
     }
 
-    /// #2687 risk 2: native code takes a store view right after a minor,
+    /// An old pointer array that survived a minor, with the barrier armed.
+    fn old_pointer_array(heap: &mut Heap, len: usize) -> u64 {
+        let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(0i64); len]), Object::Array);
+        let Object::Array(mut gc) = arr else { unreachable!() };
+        gc.as_mut().set_elem_kind(common::WORD_POINTER);
+        let mut roots = [arr.addr()];
+        minor(heap, &[], &mut roots);
+        assert_eq!(heap.find_object_by_addr(roots[0]).expect("old array").generation(), GEN_UNLOGGED);
+        roots[0]
+    }
+
+    /// A store that skips the barrier leaves an old object naming a young
+    /// one the remembered set does not know: the check at the top of the
+    /// next minor names the holder.
+    #[test]
+    #[should_panic(expected = "missed write barrier: a pointer-kind array")]
+    fn the_barrier_check_finds_a_store_that_skipped_the_barrier() {
+        let mut heap = nursery_heap();
+        heap.heap_checks = true;
+        let old = old_pointer_array(&mut heap, 4);
+        let head = cons_list(&mut heap, 5);
+        let Some(Object::Array(gc)) = heap.find_object_by_addr(old) else { unreachable!() };
+        // Native code's in-place store, through a view taken for loads.
+        let (ptr, len) = gc.as_ref().words_view_for_load().expect("word array");
+        assert_eq!(len, 4);
+        unsafe { ptr.add(2).write(Value::from(head)) };
+        minor(&mut heap, &[], &mut []);
+    }
+
+    /// #2687 risk 2 (#2702): native code takes a store view right after a minor,
     /// while no young object exists, so the barrier logs the array as quiet.
     /// The next allocation starts the nursery again and re-arms the array,
     /// but the view stays live (an allocation drops no views), so the view
@@ -896,12 +956,8 @@ mod tests {
     #[test]
     fn a_store_view_taken_while_the_heap_is_quiet_survives_a_nursery_restart() {
         let mut heap = nursery_heap();
-        let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(0i64); 4]), Object::Array);
-        let Object::Array(mut gc) = arr else { unreachable!() };
-        gc.as_mut().set_elem_kind(common::WORD_POINTER);
-        let mut roots = [arr.addr()];
-        minor(&mut heap, &[], &mut roots);
-        let old = roots[0];
+        heap.heap_checks = true;
+        let old = old_pointer_array(&mut heap, 4);
         assert!(!heap.has_young_in_use(), "the minor left the nursery empty");
         let mut view = [0u64; 2];
         let state = unsafe { crate::native::coil_native_view(old, 1, view.as_mut_ptr()) };
