@@ -1924,6 +1924,8 @@ impl Compiler {
     /// order.
     pub fn emit_foreign_clones(&mut self, asts: &[(usize, &Output<'_>)]) {
         let mut waits: HashMap<String, usize> = HashMap::new();
+        // Each clone's callees, resolved once.
+        let mut calls: HashMap<String, Vec<String>> = HashMap::new();
         while !self.foreign_clone_queue.is_empty() {
             let queue = std::mem::take(&mut self.foreign_clone_queue);
             let mut by_program: Vec<((usize, bool), Vec<InstClone>)> = Vec::new();
@@ -1963,7 +1965,15 @@ impl Compiler {
                     let mut now = Vec::with_capacity(check.len());
                     for req in check {
                         let waited = waits.get(&req.name).copied().unwrap_or(0);
-                        let callees = if waited < MAX_CLONE_WAITS { self.hir_clone_callees(&req) } else { Vec::new() };
+                        let callees: Vec<String> = if waited < MAX_CLONE_WAITS {
+                            if !calls.contains_key(&req.name) {
+                                let found = self.hir_clone_callees(&req);
+                                calls.insert(req.name.clone(), found);
+                            }
+                            calls[&req.name].iter().filter(|key| !self.functions.contains_key(*key)).cloned().collect()
+                        } else {
+                            Vec::new()
+                        };
                         if callees.is_empty() {
                             now.push(req);
                             continue;

@@ -313,6 +313,11 @@ enum HirBuiltin {
     FfiDyn(crate::typechecking::FfiBuiltin),
 }
 
+/// How many levels of this module's clone sources a clone's body is
+/// looked through for a call of another module's
+/// ([`Compiler::hir_calls_foreign_clone_src`]).
+const CLONE_CALL_DEPTH: usize = 3;
+
 /// A planned anonymous `fn`: its body lowers in a frame of its own, with
 /// the captures in the first slots, then the parameters.
 struct HirLambda {
@@ -5739,12 +5744,63 @@ impl Compiler {
         self.hir_module = Some(module);
     }
 
-    /// The inherent method clones the body of clone `req` would call that
-    /// are not emitted yet (#2219): its method's HIR in the module being
+    /// Whether `body`, of the module being compiled, may call a clone of
+    /// another module's method or function, directly or through this
+    /// module's clone sources (`depth` levels of them): only then may a
+    /// clone of it wait for the clones it calls
+    /// ([`Compiler::emit_foreign_clones`]). A call is of a clone source
+    /// ([`Compiler::inst_clone_srcs`]) when it names a method of a class
+    /// that has one by that name, or a function one's name ends in; any
+    /// method of a receiver whose class is not known may be.
+    fn hir_calls_foreign_clone_src(&self, module: &crate::hir::HirModule, body: &HirBody, depth: usize) -> bool {
+        let reaches = |key: &str| match self.inst_clone_srcs.get(key) {
+            None => false,
+            Some(src) if src.program != self.program_seq => true,
+            Some(src) => {
+                depth > 0
+                    && self
+                        .hir_fns
+                        .get(&src.span)
+                        .and_then(|&i| module.bodies.get(i))
+                        .is_some_and(|b| b.name != body.name && self.hir_calls_foreign_clone_src(module, b, depth - 1))
+            }
+        };
+        let method = |class: &str, name: &str| {
+            let fqn = self.checker.resolve_class_key(class).unwrap_or_else(|| class.to_string());
+            reaches(&format!("{fqn}::{name}"))
+        };
+        body.exprs.iter().any(|e| match &e.kind {
+            HirKind::Call { callee: Callee::Method { name }, args } => {
+                let recv = args.first().and_then(|&r| Self::hir_ty(body, r)).map(|t| apply_ty_prune(self.checker.subst(), t));
+                match recv.as_ref().map(crate::typechecking::ty::strip_readonly) {
+                    Some(Ty::Con(class)) => method(class, name),
+                    Some(Ty::App(head, _)) => match head.as_ref() {
+                        Ty::Con(class) => method(class, name),
+                        _ => true,
+                    },
+                    Some(Ty::Var(_)) | None => true,
+                    Some(_) => false,
+                }
+            }
+            HirKind::Call { callee: Callee::Named { name, .. }, .. } => {
+                let tail = format!("::{name}");
+                self.inst_clone_srcs.keys().filter(|k| *k == name || k.ends_with(&tail)).any(|k| reaches(k))
+            }
+            HirKind::Call { callee: Callee::Resolved(_), .. } => true,
+            _ => false,
+        })
+    }
+
+    /// The inherent method clones the body of clone `req` would call
+    /// (#2219): its method's HIR in the module being
     /// compiled at `req`'s types, its calls resolved once. Resolving only
     /// fills `method_clone_plans`, as [`Self::hir_plan_bodies_for_clones`]
     /// does. Empty when the body is not here or does not resolve.
     pub(super) fn hir_clone_callees(&mut self, req: &super::InstClone) -> Vec<String> {
+        // With nothing spliced across modules, nothing is gained by waiting.
+        if !self.inline_cost.inline_across_modules || !self.opt_options.hir_inline || self.debugger_attached {
+            return Vec::new();
+        }
         let Some(src) = self.inst_clone_srcs.get(&req.src).cloned() else {
             return Vec::new();
         };
@@ -5762,7 +5818,7 @@ impl Compiler {
         };
         let body = self.hir_instance(&module.bodies[index], &vars);
         let mut callees = Vec::new();
-        if body.root.is_some() && refusal::refusal(&body, &self.checker).is_none() {
+        if body.root.is_some() && self.hir_calls_foreign_clone_src(&module, &body, CLONE_CALL_DEPTH) && refusal::refusal(&body, &self.checker).is_none() {
             // The context `emit_instance_clones` compiles the clone in: its
             // type parameters' names at `req`'s types, an inherent method
             // in its class's namespace.
@@ -5796,7 +5852,7 @@ impl Compiler {
                     .calls
                     .values()
                     .map(|call| call.key.clone())
-                    .filter(|key| *key != req.name && plans.contains_key(key) && !self.functions.contains_key(key))
+                    .filter(|key| *key != req.name && plans.contains_key(key))
                     .collect();
             }
             self.hir_body_frame = outer;
