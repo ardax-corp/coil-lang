@@ -387,6 +387,14 @@ in a loop that allocates).
   survivors held in place. On `gc_old_vec_store` each of its 551 minors
   walks the 1M-word vector twice (`remembered_words` and the remembered
   share of `rewrite_words` are both 550M in total).
+- **Missed-barrier check.** In debug builds, under `gc-stress` and in any
+  run with `COIL_MIR_VERIFY` set (`heap_checks_on`, read once per heap),
+  each minor first walks the live objects: an old or held object the
+  remembered set does not name must not name a young one, or a store
+  skipped the barrier and the minor would free or move the object under
+  it. It panics naming the holder's kind and address, the young object's
+  and whether the word is precise. A plain release build tests one bool
+  per minor. Its first find was #2702 (the quiet store view above).
 
 ### Measured (step 4)
 

@@ -39,6 +39,18 @@ pub const GC_SWEEP_QUANTUM: usize = 128;
 /// Slots one steal-epoch mutator takes per size class under the epoch lock.
 const EPOCH_BATCH: usize = 64;
 
+/// Whether the collector checks its own invariants as it goes (the
+/// missed-barrier check at the top of each minor, #2687): `gc-stress` and
+/// debug builds, and any run with `COIL_MIR_VERIFY` set. A heap reads it
+/// once, when it is made.
+pub(crate) fn heap_checks_on() -> bool {
+    if cfg!(any(feature = "gc-stress", debug_assertions)) {
+        return true;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("COIL_MIR_VERIFY").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
 /// One size class's untaken slots: `(slot size, align)` and the slots.
 type BatchClass = ((u32, u32), Vec<NonNull<u8>>);
 
@@ -314,6 +326,8 @@ pub struct Heap {
     /// Held nursery chunks that ask for a major cycle
     /// ([`Self::held_over_budget`]).
     held_budget: usize,
+    /// [`heap_checks_on`], read once.
+    pub(super) heap_checks: bool,
     /// Bytes still to allocate old after a minor collection most of the
     /// nursery survived ([`Self::note_survival`]).
     pretenure_bytes: usize,
@@ -387,6 +401,7 @@ impl Default for Heap {
             nursery_chunks: NURSERY_CHUNKS,
             held_after_major: 0,
             held_budget: NURSERY_CHUNKS,
+            heap_checks: heap_checks_on(),
             pretenure_bytes: 0,
             pretenure_streak: 0,
             region_depth: 0,
@@ -2673,6 +2688,29 @@ impl Object {
             Self::Receiver(_) => 16,
             Self::Mutex(_) => 17,
             Self::RwLock(_) => 18,
+        }
+    }
+
+    /// What a collector check names an object by.
+    pub(crate) fn kind_name(self) -> &'static str {
+        match self {
+            Self::String(_) => "a string",
+            Self::Instance(_) => "an instance",
+            Self::Enum(e) if e.as_ref().is_tuple() => "a tuple",
+            Self::Enum(_) => "an enum",
+            Self::Library(_) => "a library",
+            Self::Array(a) if a.as_ref().elem_kind() == common::WORD_POINTER => "a pointer-kind array",
+            Self::Array(_) => "an array",
+            Self::Coroutine(_) => "a coroutine",
+            Self::Root(_) => "a root",
+            Self::Weak(_) => "a weak",
+            Self::Fn(_) => "a closure",
+            Self::Stream(_) => "a stream",
+            Self::Thread(_) => "a thread",
+            Self::Sender(_) => "a sender",
+            Self::Receiver(_) => "a receiver",
+            Self::Mutex(_) => "a mutex",
+            Self::RwLock(_) => "a rwlock",
         }
     }
 
