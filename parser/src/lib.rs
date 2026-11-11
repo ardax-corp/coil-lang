@@ -2287,6 +2287,8 @@ impl<'pratt> Pratt<'pratt> {
     /// then ends in `;` (a statement) or before `}` (the block's value):
     /// parsing it as a statement and then again as the value took time
     /// exponential in the nesting of value blocks (#2643).
+    // Two `impl Parser` types: an alias cannot name them.
+    #[allow(clippy::type_complexity)]
     fn statement_parsers<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
