@@ -308,6 +308,12 @@ pub struct Heap {
     epoch_born: Vec<u64>,
     /// Nursery chunks in use that ask for a minor collection.
     nursery_chunks: usize,
+    /// Held nursery chunks the last major cycle found live
+    /// ([`Self::set_held_after_major`]).
+    held_after_major: usize,
+    /// Held nursery chunks that ask for a major cycle
+    /// ([`Self::held_over_budget`]).
+    held_budget: usize,
     /// Bytes still to allocate old after a minor collection most of the
     /// nursery survived ([`Self::note_survival`]).
     pretenure_bytes: usize,
@@ -379,6 +385,8 @@ impl Default for Heap {
             nursery: false,
             epoch_born: Vec::new(),
             nursery_chunks: NURSERY_CHUNKS,
+            held_after_major: 0,
+            held_budget: NURSERY_CHUNKS,
             pretenure_bytes: 0,
             pretenure_streak: 0,
             region_depth: 0,
@@ -1555,8 +1563,35 @@ impl Heap {
         self.gc_phase == GcPhase::Idle
             && (cfg!(feature = "gc-stress")
                 || self.counts.alloc_bytes.saturating_sub(self.counts.young_bytes) > limit
-                || self.slab.held_chunks() >= self.nursery_chunks
+                || self.held_over_budget()
                 || self.slab.young_chunks_in_use() >= self.nursery_chunks)
+    }
+
+    /// Enough nursery chunks are held for pinned survivors to ask for a
+    /// major cycle, the only one that frees them: a nursery's worth more
+    /// than the last major kept, and at least twice that. A budget from
+    /// what the last major found live is what keeps the work linear (#2350):
+    /// a growing set of pinned survivors (a map's values, which a generic
+    /// body's vector names ambiguously) left every safepoint over a fixed
+    /// budget, and each started a major that marked the whole heap again.
+    /// Like the byte threshold's growth factor, it also bounds the held
+    /// chunks to about twice the live ones.
+    #[inline]
+    fn held_over_budget(&self) -> bool {
+        self.slab.held_chunks() >= self.held_budget
+    }
+
+    /// A major cycle (or a promotion) left `held` nursery chunks held.
+    pub(super) fn set_held_after_major(&mut self, held: usize) {
+        self.held_after_major = held;
+        self.sync_held_budget();
+    }
+
+    /// Recompute [`Self::held_budget`]. Native code checks
+    /// [`Self::should_collect`] on every allocation, so the budget is kept
+    /// rather than computed there.
+    fn sync_held_budget(&mut self) {
+        self.held_budget = self.held_after_major + self.nursery_chunks.max(self.held_after_major);
     }
 
     /// The nursery is full: run a minor collection.
@@ -1605,6 +1640,7 @@ impl Heap {
         }
         self.region_saved_chunks = self.nursery_chunks;
         self.nursery_chunks = self.nursery_chunks.max(REGION_CHUNKS);
+        self.sync_held_budget();
         self.pretenure_bytes = 0;
         self.sync_inline_gate();
         self.pretenure_streak = 0;
@@ -1622,6 +1658,7 @@ impl Heap {
             return false;
         }
         self.nursery_chunks = self.region_saved_chunks;
+        self.sync_held_budget();
         true
     }
 
@@ -1635,7 +1672,7 @@ impl Heap {
         };
         cfg!(feature = "gc-stress")
             || self.counts.alloc_bytes.saturating_sub(self.counts.young_bytes) > limit
-            || self.slab.held_chunks() >= self.nursery_chunks
+            || self.held_over_budget()
     }
 
     /// Allocate instances, enums, boxes, tuples, arrays and closures in the
@@ -1666,6 +1703,7 @@ impl Heap {
     pub fn set_gc_threshold_for_test(&mut self, bytes: usize) {
         self.gc_next_threshold = bytes;
         self.nursery_chunks = 1;
+        self.sync_held_budget();
     }
 
     /// Count an array's storage change (see [`ObjArray::take_resize`]).

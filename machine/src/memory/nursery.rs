@@ -162,6 +162,7 @@ impl Heap {
             }
         }
         self.slab.unhold(&empty);
+        self.set_held_after_major(self.slab.held_chunks());
         for (_, first, end, size) in self.slab.young_spans() {
             for addr in slots(first, end, size) {
                 // SAFETY: a slot start in a mapped chunk holds a header.
@@ -203,6 +204,8 @@ impl Heap {
         }
         self.counts.young_bytes = 0;
         self.slab.finish_young(&promoted, &[], free);
+        // Held chunks were promoted with the rest: none is held now.
+        self.set_held_after_major(0);
     }
 
     /// Free the nursery's objects: only the heap's own immortals stay. A
