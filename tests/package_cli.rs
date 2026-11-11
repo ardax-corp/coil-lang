@@ -1024,3 +1024,62 @@ mod linked {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+/// A packaged program's backtrace has the frame of a callee inlined into
+/// its caller (#2578), AOT and with the JIT runner.
+#[test]
+fn package_backtrace_has_inlined_frames() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil")
+        .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let embed = build_matching_coil_embed(Path::new(&bin));
+    let dir = std::env::temp_dir().join(format!("coil_pack_inline_frames_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("lanetrap.coil");
+    std::fs::write(
+        &entry,
+        "use io::{stdout, write};
+use string::to_bytes;
+
+fn boom(int i) -> int {
+    return 100 / (i - 1000);
+}
+
+fn run(int a, int b) -> int {
+    let total = 0;
+    for i in a..b {
+        total = total ^ boom(i);
+    }
+    return total;
+}
+
+fn main() {
+    let r = run(0, 5000);
+    let _ = write(stdout(), to_bytes(r.show()));
+}
+",
+    )
+    .unwrap();
+    for aot in [true, false] {
+        let out = dir.join(format!("lanetrap_{aot}{}", std::env::consts::EXE_SUFFIX));
+        let mut package = Command::new(&bin);
+        package.args(["package", "-O", "2", "--fold-calls", "off", "--auto-par", "off"]);
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            package.arg("--root").arg(root);
+        }
+        if !aot {
+            package.arg("--no-aot");
+        }
+        package.arg(&entry).arg("-o").arg(&out).arg("--runner").arg(&embed);
+        assert!(package.status().expect("spawn coil package").success(), "package aot={aot} failed");
+        let run = run_command_with_timeout(Command::new(&out), 30);
+        assert!(!run.status.success(), "aot={aot}: expected a panic");
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let frames: Vec<&str> = stderr.lines().filter(|l| l.starts_with("  in ")).collect();
+        assert_eq!(frames.len(), 3, "aot={aot}: {stderr}");
+        assert!(frames[0].starts_with("  in boom at ") && frames[0].ends_with("lanetrap.coil:5:11"), "aot={aot}: {stderr}");
+        assert!(frames[1].starts_with("  in run at ") && frames[1].ends_with("lanetrap.coil:11:24"), "aot={aot}: {stderr}");
+        assert!(frames[2].starts_with("  in main at ") && frames[2].ends_with("lanetrap.coil:17:12"), "aot={aot}: {stderr}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
