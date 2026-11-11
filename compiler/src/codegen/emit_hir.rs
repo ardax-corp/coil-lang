@@ -8509,20 +8509,25 @@ impl Compiler {
     }
 
     /// An open structural `Show` thunk's argument (#1479, #2554): a tuple
-    /// whose open items each have the thunk's dictionary, or one such item
-    /// (an `Option`'s payload, an array's element).
+    /// or record whose open items each have the thunk's dictionary, or one
+    /// such item (an `Option`'s payload, an array's element).
     fn synth_shows_items(&self, ty: &Ty) -> bool {
-        let item = |t: &Ty| matches!(t, Ty::Var(v) if self.synth_show_dicts.contains_key(v));
+        let item = |t: &Ty| crate::layout::ty_is_closed(t) || matches!(t, Ty::Var(v) if self.synth_show_dicts.contains_key(v));
         !self.synth_show_dicts.is_empty()
-            && (item(ty) || matches!(ty, Ty::Tuple(items) if items.iter().all(|t| crate::layout::ty_is_closed(t) || item(t))))
+            && match ty {
+                Ty::Var(_) => item(ty),
+                Ty::Tuple(items) => items.iter().all(item),
+                Ty::Record { fields } => fields.iter().all(|(_, t)| item(t)),
+                _ => false,
+            }
     }
 
     /// An open type whose `Show` is a bounded generic instance
     /// (`Show for Tree<T: Show>` inside its own body), or a shape's
-    /// instance with open items (`(T, int)`, #2554, #2614): the instance's
-    /// shared `show` with the frame's dictionaries.
+    /// instance with open items (`(T, int)`, `{ a: T }`, #2554, #2614,
+    /// #2631): the instance's shared `show` with the frame's dictionaries.
     fn hir_generic_show(&self, ty: &Ty) -> bool {
-        if matches!(ty, Ty::Var(_) | Ty::Record { .. }) {
+        if matches!(ty, Ty::Var(_)) {
             return false;
         }
         let lookup = Self::show_lookup_ty_for_instance(ty);

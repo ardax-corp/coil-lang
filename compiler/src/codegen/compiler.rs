@@ -2644,6 +2644,14 @@ impl Compiler {
                     Self::bind_scheme_vars(p, c, map);
                 }
             }
+            // A record's fields by name (an open record shape's head, #2631).
+            (Ty::Record { fields: f1 }, Ty::Record { fields: f2 }) if f1.len() == f2.len() => {
+                for (name, p) in f1 {
+                    if let Some((_, c)) = f2.iter().find(|(n, _)| n == name) {
+                        Self::bind_scheme_vars(p, c, map);
+                    }
+                }
+            }
             // Rest packs are `[T]` / `[T; N]`, bind `T` from the element.
             (Ty::Array { element: e1, .. }, Ty::Array { element: e2, .. }) => {
                 Self::bind_scheme_vars(e1, e2, map);
@@ -7417,7 +7425,7 @@ impl Compiler {
     /// part through its own dictionary, which the instance dictionary
     /// (`__dict0`) holds after its methods: the entry reads them into
     /// `__dict1..` as a bounded instance method's does. `show` is
-    /// `format("%v", t)` over a tuple, an `Option` / `Result`'s variant
+    /// `format("%v", t)` over a tuple or record, an `Option` / `Result`'s variant
     /// and payload, an array's or `Vec`'s elements; `eq` / `ne` is `==` /
     /// `!=`, which compares a variable's part through its dictionary
     /// (open glue, #1642).
@@ -7444,7 +7452,7 @@ impl Compiler {
             })
             .collect();
         let value = match (class, method, &head) {
-            ("Show", "show", Ty::Tuple(_)) => {
+            ("Show", "show", Ty::Tuple(_) | Ty::Record { .. }) => {
                 let fmt = b.str("%v");
                 b.call("format", vec![fmt, values[0]], ret.clone())
             }
@@ -7484,17 +7492,23 @@ impl Compiler {
     }
 
     /// The `hash` thunk `fqn` of the structural `Hash` instance for an
-    /// open tuple or array `head` (#2554): the items' hashes combined as a
-    /// ground tuple's or array's thunk combines them, item `i`'s through
+    /// open tuple, record or array `head` (#2554, #2631): the items' hashes
+    /// combined as a ground one's thunk combines them (a record's fields in
+    /// name order, its head's variable order), item `i`'s through
     /// the instance dictionary's context `i`, which the thunk takes as a
     /// plain parameter and calls as a dictionary forwarder calls (#2476).
     fn emit_structural_open_hash(&mut self, fqn: &str, head: Ty, contexts: usize) {
         use crate::hir::LocalKind;
         use crate::hir::synth::{Product, Synth};
         let (product, items) = match &head {
-            Ty::Tuple(items) => (Some(Product::tuple(items)), items.clone()),
             Ty::Array { element, .. } => (None, vec![(**element).clone()]),
-            _ => return,
+            _ => match Product::of(&head) {
+                Some(product) => {
+                    let parts = product.parts.clone();
+                    (Some(product), parts)
+                }
+                None => return,
+            },
         };
         if items.len() != contexts {
             return;
@@ -7659,17 +7673,16 @@ impl Compiler {
     /// combines fields, a record's in name order, each through the item
     /// type's own ground instance (a `()` item hashes to `0`).
     fn emit_structural_hash(&mut self, name: &str, ty: &Ty, retype: bool) {
-        use crate::hir::synth::{Product, ProductCtor};
+        use crate::hir::synth::Product;
         let (product, items): (Option<Product>, Vec<Ty>) = match ty {
-            Ty::Tuple(items) => (Some(Product::tuple(items)), items.clone()),
-            Ty::Record { fields } => {
-                let mut fields = fields.clone();
-                fields.sort_by(|a, b| a.0.cmp(&b.0));
-                let (names, parts): (Vec<_>, Vec<_>) = fields.into_iter().unzip();
-                (Some(Product { ctor: ProductCtor::Record(names), parts: parts.clone() }), parts)
-            }
             Ty::Array { element, .. } => (None, vec![(**element).clone()]),
-            _ => return,
+            _ => match Product::of(ty) {
+                Some(product) => {
+                    let parts = product.parts.clone();
+                    (Some(product), parts)
+                }
+                None => return,
+            },
         };
         let mut calls = HashMap::new();
         let mut targets = Vec::with_capacity(items.len());
