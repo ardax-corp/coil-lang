@@ -1,0 +1,127 @@
+// A static method's argument under copy-on-write (#2222): a call of
+// `Type::m(..)` sees what the method does with each argument, as a free
+// function's call does. One that only stores its argument in a new object
+// copies nothing; wherever the argument's place and the stored or returned
+// value are both written later, they stay separate values. (The method's
+// own write reaches the argument: a parameter a body writes is the
+// caller's place.)
+use tests::assert;
+use gc::collect;
+
+class S {
+    pub a: Vec<int>,
+    pub b: Vec<int>,
+}
+
+class H {
+    pub s: S,
+    pub i: int,
+}
+
+impl H {
+    pub static fn wrap(S s, int i) -> H {
+        return new H(s, i);
+    }
+
+    pub static fn wrap_mut(S s, int i) -> H {
+        s.a.push(i);
+        return new H(s, i);
+    }
+
+    pub static fn same(S s) -> S {
+        return s;
+    }
+
+    pub static fn bump(S s) -> S {
+        s.b.push(1);
+        return s;
+    }
+
+    pub static fn first(S s) -> Vec<int> {
+        return s.a;
+    }
+
+    pub fn rewrap(int i) -> H {
+        return H::wrap(self.s, i);
+    }
+}
+
+fn fresh() -> S {
+    let s = new S(Vec::new(), Vec::new());
+    s.a.push(1);
+    return s;
+}
+
+test("a stored argument only read copies nothing and keeps its value") {
+    let s = fresh();
+    let t = 0;
+    let i = 0;
+    while i < 100 {
+        let h = H::wrap(s, i);
+        t = t + h.i + h.s.a[0];
+        i = i + 1;
+    }
+    collect();
+    assert!(t == 5050 && s.a.len() == 1);
+}
+
+test("a write through the new object is not seen through the argument") {
+    let s = fresh();
+    let h = H::wrap(s, 1);
+    h.s.a.push(2);
+    assert!(s.a.len() == 1);
+    assert!(h.s.a.len() == 2 && h.s.a[1] == 2);
+    let i = 0;
+    while i < 3 {
+        let g = H::wrap(s, i);
+        g.s.b.push(i);
+        assert!(g.s.b.len() == 1 && s.b.len() == 0);
+        i = i + 1;
+    }
+}
+
+test("a write through the argument is not seen through the new object") {
+    let s = fresh();
+    let h = H::wrap(s, 1);
+    s.a.push(3);
+    collect();
+    assert!(h.s.a.len() == 1 && s.a.len() == 2);
+}
+
+test("an argument the method writes and stores") {
+    let s = fresh();
+    let h = H::wrap_mut(s, 5);
+    assert!(s.a.len() == 2 && s.a[1] == 5);
+    assert!(h.s.a.len() == 2);
+    s.a.push(6);
+    h.s.b.push(7);
+    assert!(h.s.a.len() == 2 && s.a.len() == 3);
+    assert!(s.b.len() == 0 && h.s.b.len() == 1);
+}
+
+test("a returned argument and the result are separate") {
+    let s = fresh();
+    let r = H::same(s);
+    r.a.push(2);
+    assert!(s.a.len() == 1);
+    s.b.push(3);
+    assert!(r.b.len() == 0);
+    let w = H::bump(s);
+    assert!(s.b.len() == 2);
+    w.a.push(4);
+    assert!(s.a.len() == 1 && w.a.len() == 2 && w.b.len() == 2);
+}
+
+test("a field the method returns is separate from the argument") {
+    let s = fresh();
+    let v = H::first(s);
+    v.push(8);
+    assert!(s.a.len() == 1 && v.len() == 2);
+}
+
+test("a static call from a method stores the receiver's field") {
+    let h = H::wrap(fresh(), 0);
+    let g = h.rewrap(1);
+    g.s.a.push(9);
+    assert!(h.s.a.len() == 1 && g.s.a.len() == 2 && g.i == 1);
+}

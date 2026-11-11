@@ -1,0 +1,48 @@
+// CPU: copy-on-write across a static method that stores its argument in
+// a new object (#2222): `H::wrap(store, i)` keeps `store` in the `H` it
+// returns and nothing writes either, so no call copies the store.
+use io::sync::print;
+use string::format;
+
+class Store {
+    pub a: Vec<int>,
+    pub b: Vec<int>,
+    pub c: Vec<int>,
+    pub d: Vec<int>,
+    pub e: Vec<int>,
+    pub f: Vec<int>,
+    pub g: Vec<int>,
+    pub h: Vec<int>,
+}
+
+class H {
+    pub store: Store,
+    pub i: int,
+}
+
+impl H {
+    pub static fn wrap(Store store, int i) -> H {
+        return new H(store, i);
+    }
+
+    pub fn get() -> int {
+        return self.store.a[self.i % self.store.a.len()];
+    }
+}
+
+fn main() {
+    let s = new Store(Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let k = 0;
+    while k < 16 {
+        s.a.push(k);
+        k = k + 1;
+    }
+    let t = 0;
+    let i = 0;
+    while i < 200000 {
+        let h = H::wrap(s, i);
+        t = t + h.get() + h.i;
+        i = i + 1;
+    }
+    let _ = print(format("%i\n", t));
+}
