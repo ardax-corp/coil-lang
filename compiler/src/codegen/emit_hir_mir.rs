@@ -484,57 +484,32 @@ impl Compiler {
                     let captures = lam.body.captures.iter().map(|&(outer, _)| outer).collect();
                     // Then the body's `kinds` word (#2506).
                     let dicts = lam.dicts.iter().map(|&(_, slot)| crate::mir::HirDictOp::Load(slot)).chain(lam.kinds.as_ref().map(|_| crate::mir::HirDictOp::KindsOwn)).collect();
-                    t.fn_value = Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, pairs, dicts },
-                    );
+                    // A local bound from a generic function goes in as its
+                    // value made at the lambda's type of it (#2658).
+                    let body = lam.body.clone();
+                    let remade = self
+                        .hir_lambda_polyfn_captures(hir, emit, &body)
+                        .into_iter()
+                        .filter_map(|(i, name, ty)| Some((i, self.hir_mir_polyfn_value(&name, ty.as_ref(), None)?)))
+                        .collect();
+                    t.fn_value = Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, pairs, dicts, remade });
                 }
             }
             // A generic function's `MakePolyFn`, or with bounds its
             // `MakePolyFnCapture` over the dictionaries
             // `plan_polyfn_escape_dicts` plans.
             HirKind::Global { .. } | HirKind::Local(_) if let Some(name) = emit.plan.polyfns.get(&id.0) => {
-                if let Some(target) = self.functions.get(name).and_then(|&entry| self.bodies.entry_label_for_offset(entry)) {
-                    // Its declared parameters, so a call through the value
-                    // given more hands the rest to its result (#1589): a
-                    // curried one's value is `MakePolyFnCapture` of no
-                    // dictionaries.
-                    let params = self.polyfn_params(name);
-                    // Its shared entry's `kinds` word, captured after the
-                    // dictionaries (#2506), with the bits a call through
-                    // the `forall` parameter it is passed to gives (#2621).
-                    let escape = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-                    let expected = self.checker.rank_n_arg_at(e.span.0, e.span.1);
-                    let kinds = self.polyfn_kinds_slot(name, escape.as_ref(), expected.as_ref());
-                    let value = if let Some(kinds) = kinds.clone().filter(|_| self.checker.dict_arity_for(name) == 0) {
-                        let kind = crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) };
-                        Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: kinds })
-                    } else if self.checker.dict_arity_for(name) == 0 {
-                        let kind = match params {
-                            Some(params) => crate::mir::MirAllocKind::PolyFnCapture { target, params },
-                            None => crate::mir::MirAllocKind::PolyFn { target },
-                        };
-                        Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() })
-                    } else {
-                        let (name, ty) = (name.clone(), Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t)));
-                        let steps = self.hir_mir_once(|this| {
-                            let mut steps = Vec::new();
-                            this.plan_polyfn_escape_dicts(&mut steps, &name, ty.as_ref(), expected.as_ref());
-                            steps
-                        });
-                        self.hir_mir_dict_program(&steps).map(|mut dicts| {
-                            dicts.extend(kinds.into_iter().flatten());
-                            crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, captures: Vec::new(), pairs: Vec::new(), dicts }
-                        })
-                    };
-                    if let Some(value) = value {
-                        t.fn_value = Some(value);
-                    }
+                let escape = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                let expected = self.checker.rank_n_arg_at(e.span.0, e.span.1);
+                if let Some(value) = self.hir_mir_polyfn_value(&name.clone(), escape.as_ref(), expected.as_ref()) {
+                    t.fn_value = Some(value);
                 }
             }
             HirKind::Global { .. } if let Some((entry, arity, rest, name)) = emit.plan.fn_refs.get(&id.0).cloned() => {
                 if let Some(target) = self.bodies.entry_label_for_offset(entry) {
                     let target = self.fn_value_target(&name, target);
                     let operand = make_fn_operand(0, 0, arity, rest);
-                    t.fn_value = Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new() });
+                    t.fn_value = Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new(), remade: Vec::new() });
                 }
             }
             HirKind::Global { .. } => {
@@ -720,7 +695,7 @@ impl Compiler {
                         None => Some(Vec::new()),
                     };
                     if let Some(dicts) = dicts {
-                        t.fn_value = Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts });
+                        t.fn_value = Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts, remade: Vec::new() });
                     }
                 }
             }
@@ -1463,6 +1438,95 @@ impl Compiler {
         Some((words, arg_tys))
     }
 
+    /// Generic function `name`'s value read at type `escape`: its
+    /// `MakePolyFn`, or with bounds its `MakePolyFnCapture` over the
+    /// dictionaries `plan_polyfn_escape_dicts` plans, for the `forall`
+    /// parameter `expected` it is passed to when it is.
+    fn hir_mir_polyfn_value(&mut self, name: &str, escape: Option<&Ty>, expected: Option<&Ty>) -> Option<crate::mir::HirFnValue> {
+        let target = self.functions.get(name).and_then(|&entry| self.bodies.entry_label_for_offset(entry))?;
+        // Its declared parameters, so a call through the value given more
+        // hands the rest to its result (#1589): a curried one's value is
+        // `MakePolyFnCapture` of no dictionaries.
+        let params = self.polyfn_params(name);
+        // Its shared entry's `kinds` word, captured after the dictionaries
+        // (#2506), with the bits a call through the `forall` parameter it
+        // is passed to gives (#2621).
+        let kinds = self.polyfn_kinds_slot(name, escape, expected);
+        let value = |kind, dicts| crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts, remade: Vec::new() };
+        if self.checker.dict_arity_for(name) == 0 {
+            return Some(match (kinds, params) {
+                (Some(kinds), _) => value(crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, kinds),
+                (None, Some(params)) => value(crate::mir::MirAllocKind::PolyFnCapture { target, params }, Vec::new()),
+                (None, None) => value(crate::mir::MirAllocKind::PolyFn { target }, Vec::new()),
+            });
+        }
+        let steps = self.hir_mir_once(|this| {
+            let mut steps = Vec::new();
+            this.plan_polyfn_escape_dicts(&mut steps, name, escape, expected);
+            steps
+        });
+        self.hir_mir_dict_program(&steps).map(|mut dicts| {
+            dicts.extend(kinds.into_iter().flatten());
+            value(crate::mir::MirAllocKind::PolyFnCapture { target, params: params.unwrap_or(0) }, dicts)
+        })
+    }
+
+    /// For each capture of lambda `lam` that is a local bound from a
+    /// generic function: its index and that function, whose value the
+    /// lambda captures made at the type the lambda holds it at (#2658).
+    /// Inside the lambda it is a plain closure.
+    fn hir_lambda_polyfn_captures(&self, hir: &HirBody, emit: &HirEmit, lam: &HirBody) -> Vec<(usize, String, Option<Ty>)> {
+        lam.captures
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &(outer, inner))| {
+                let name = self.hir_polyfn_local_source(hir, emit, outer)?;
+                Some((i, name, self.hir_capture_read_ty(lam, inner).ok().flatten()))
+            })
+            .collect()
+    }
+
+    /// The one type lambda `lam` reads capture `inner` at (its local's own
+    /// type may be the generic function's, open), `Err` when it reads it
+    /// at several.
+    pub(super) fn hir_capture_read_ty(&self, lam: &HirBody, inner: crate::hir::LocalId) -> Result<Option<Ty>, ()> {
+        let prune = |t: &Option<Ty>| t.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
+        let reads_inner = |id: HirId| matches!(lam.expr(id).kind, HirKind::Local(l) if l == inner);
+        let callees: HashSet<u32> = lam
+            .exprs
+            .iter()
+            .filter_map(|e| match &e.kind {
+                HirKind::Call { callee: Callee::Value(f), .. } if reads_inner(*f) => Some(f.0),
+                _ => None,
+            })
+            .collect();
+        let mut at: Option<Ty> = None;
+        for (i, e) in lam.exprs.iter().enumerate() {
+            // A call reads it at its arguments' and result's types; the
+            // callee keeps the local's own.
+            let ty = match &e.kind {
+                HirKind::Call { callee: Callee::Value(f), args } if reads_inner(*f) => {
+                    let Some(mut ty) = prune(&e.ty) else { continue };
+                    for &a in args.iter().rev() {
+                        let Some(a) = prune(&lam.expr(a).ty) else { return Err(()) };
+                        ty = Ty::Fun(Box::new(a), Box::new(ty));
+                    }
+                    Some(ty)
+                }
+                HirKind::Local(l) if *l == inner && !callees.contains(&(i as u32)) => prune(&e.ty),
+                _ => None,
+            };
+            if let Some(ty) = ty {
+                match &at {
+                    Some(seen) if *seen != ty => return Err(()),
+                    Some(_) => {}
+                    None => at = Some(ty),
+                }
+            }
+        }
+        Ok(at.or_else(|| lam.local(inner).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t))))
+    }
+
     /// Call `id` through `PolyFn` local `f`: which arguments go as their
     /// words, the call site's dictionaries and whether the result comes
     /// back as its word.
@@ -1887,7 +1951,14 @@ impl Compiler {
             },
             // A closure's captured dictionaries (#1526).
             HirKind::Lambda { .. } if let Some(lam) = emit.plan.lambdas.get(&id.0) => {
+                let body = lam.body.clone();
                 lam.dicts.iter().any(|&(_, slot)| !self.hir_mir_dict_param(slot))
+                    // A captured `PolyFn` local's value, made here (#2658).
+                    || self.hir_lambda_polyfn_captures(hir, emit, &body).into_iter().any(|(_, name, ty)| {
+                        self.hir_mir_probe_unplanned(|this, steps| {
+                            this.plan_polyfn_escape_dicts(steps, &name, ty.as_ref(), None);
+                        })
+                    })
             }
             // A `PolyFn` value's escape dictionaries.
             HirKind::Global { .. } | HirKind::Local(_) if let Some(name) = emit.plan.polyfns.get(&id.0) => {

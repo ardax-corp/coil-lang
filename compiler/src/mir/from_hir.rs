@@ -266,6 +266,10 @@ pub struct HirFnValue {
     /// two-slot local's), not one.
     pub pairs: Vec<bool>,
     pub dicts: Vec<HirDictOp>,
+    /// Captures taken as a function value made here instead of their
+    /// local's word: a local bound from a generic function, made at the
+    /// type the lambda holds it at (#2658).
+    pub remade: Vec<(usize, HirFnValue)>,
 }
 
 /// A call through a `PolyFn` local as HIR emission made it: each argument
@@ -5678,8 +5682,25 @@ impl Lower<'_> {
         if self.expr_ty(id).and_then(|t| self.word_ty(t)) != Some(MirTy::HeapRef) {
             return Err("function value type".into());
         }
+        let h = self.alloc_fn_value(f)?;
+        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
+    }
+
+    /// The allocation of function value `f`: its captures' words, then its
+    /// dictionaries.
+    fn alloc_fn_value(&mut self, f: &HirFnValue) -> Result<ValueId, Refusal> {
+        // The captures made here first, before any other word is read.
+        let mut remade = HashMap::new();
+        for (at, value) in &f.remade {
+            let h = self.alloc_fn_value(value)?;
+            remade.insert(*at, self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?);
+        }
         let mut words = Vec::with_capacity(f.captures.len());
         for (i, &local) in f.captures.iter().enumerate() {
+            if let Some(&h) = remade.get(&i) {
+                words.push(h);
+                continue;
+            }
             if f.pairs.get(i).copied().unwrap_or(false) {
                 let (lo, hi, lo_ty, hi_ty) = self.pair_local(local).ok_or("pair capture")?;
                 words.push(self.b.use_local(lo, lo_ty).map_err(mir)?);
@@ -5689,8 +5710,7 @@ impl Lower<'_> {
             words.push(self.local_word(local)?);
         }
         words.extend(self.dict_values(&f.dicts)?);
-        let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
-        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
+        self.b.ins_alloc(f.kind, words).map_err(mir)
     }
 
     /// A partial application `f(args)`, as HIR emission builds it: each
