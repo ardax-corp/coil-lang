@@ -131,3 +131,51 @@ fn nested_value_ifs_and_fn_types_parse() {
     let mixed = parse_main(&format!("let f = fn () {{ {} }};", nest("1", |s, i| if i % 2 == 0 { format!("if a > {i} {{ {s} }} else {{ 2 }}") } else { format!("let x = {s}; x") })));
     assert!(mixed.contains("Lambda {"));
 }
+
+/// Parse `main` with `body` as its statements, the diagnostic's code if
+/// it fails. Runs on a big stack: a debug build's frames are large.
+fn parse_code(body: &str) -> Option<reporting::ErrorCode> {
+    let src = format!("fn main() {{\n    let a = 1;\n    {body}\n}}\n");
+    std::thread::Builder::new()
+        .stack_size(1 << 30)
+        .spawn(move || Pratt::default().parse(&src).err().and_then(|m| m.code()))
+        .unwrap()
+        .join()
+        .unwrap()
+}
+
+/// Forms that nest without a bracket count toward the limit too (#2700): on
+/// wasm they ran the host stack out in the parser before any limit
+/// reported. Each form parses just under the limit and is `E0125` just over.
+#[test]
+fn nesting_without_brackets_is_counted() {
+    use reporting::ErrorCode::ExpressionNestingTooDeep as TooDeep;
+    let limit = crate::PARSE_NESTING_LIMIT;
+    // `fn main() {` is one level of the limit.
+    let forms: Vec<(&str, Box<dyn Fn(usize) -> String>)> = vec![
+        ("negate", Box::new(|n| format!("let r = {}a;", "- ".repeat(n)))),
+        ("not", Box::new(|n| format!("let r = {}a;", "!".repeat(n)))),
+        ("readonly", Box::new(|n| format!("let r = {}a;", "readonly ".repeat(n)))),
+        ("mixed prefixes", Box::new(|n| format!("let r = {}a;", "-!~ ".repeat(n / 3)))),
+        ("short lambdas", Box::new(|n| format!("let r = {}a;", "fn (int x) => ".repeat(n)))),
+        ("lambdas in a call", Box::new(|n| format!("let r = f({}a);", "fn (int x) => ".repeat(n - 1)))),
+    ];
+    for (name, form) in &forms {
+        assert_eq!(parse_code(&form(limit - 2)), None, "{name} under the limit");
+        assert_eq!(parse_code(&form(limit + 3)), Some(TooDeep), "{name} over the limit");
+    }
+}
+
+/// The arms of a `match` and a long list of `fn` items are no nesting.
+#[test]
+fn many_lambdas_and_arms_side_by_side_are_no_nesting() {
+    let limit = crate::PARSE_NESTING_LIMIT;
+    let arms = "1 => { 1 },\n".repeat(limit + 10);
+    assert_eq!(parse_code(&format!("let r = match a {{ {arms} _ => {{ 0 }} }};")), None);
+    let lambdas = "let f = fn (int x) => x;\n".repeat(limit + 10);
+    assert_eq!(parse_code(&lambdas), None);
+    let args = "fn (int x) => x, ".repeat(limit + 10);
+    assert_eq!(parse_code(&format!("let r = f({args} 1);")), None);
+    let signs = "a - -a + !a, ".repeat(limit + 10);
+    assert_eq!(parse_code(&format!("let r = f({signs} 1);")), None);
+}
