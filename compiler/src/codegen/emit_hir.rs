@@ -6796,7 +6796,7 @@ impl Compiler {
                 let ty = Self::hir_ty(hir, arg).ok_or("callee-signature")?;
                 if specs.get(i) == Some(&'v') {
                     let ty = apply_ty_prune(self.checker.subst(), ty);
-                    // A tuple or record shows field by field.
+                    // A record shows field by field.
                     if !crate::layout::ty_is_closed(&ty)
                         && self.hir_bound_show(hir, arg).is_none()
                         && !self.hir_generic_show(&ty)
@@ -8500,10 +8500,11 @@ impl Compiler {
     }
 
     /// An open type whose `Show` is a bounded generic instance
-    /// (`Show for Tree<T: Show>` inside its own body): the instance's
+    /// (`Show for Tree<T: Show>` inside its own body), or a shape's
+    /// instance with open items (`(T, int)`, #2554, #2614): the instance's
     /// shared `show` with the frame's dictionaries.
     fn hir_generic_show(&self, ty: &Ty) -> bool {
-        if matches!(ty, Ty::Var(_) | Ty::Tuple(_) | Ty::Record { .. }) {
+        if matches!(ty, Ty::Var(_) | Ty::Record { .. }) {
             return false;
         }
         let lookup = Self::show_lookup_ty_for_instance(ty);
