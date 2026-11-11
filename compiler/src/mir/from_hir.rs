@@ -353,7 +353,9 @@ impl Lower<'_> {
         // only, rather than of every array around it: each level's checks
         // walk the whole type, so a value `d` arrays deep took `O(d^2)` per
         // node (#2657).
-        if let Some(inner) = array_elem(ty).filter(|e| array_elem(e).is_some()) {
+        if matches!(strip_readonly(ty), Ty::Array { .. } | Ty::App(..))
+            && let Some(inner) = array_elem(ty).filter(|e| array_elem(e).is_some())
+        {
             let mut innermost = inner;
             while let Some(e) = array_elem(innermost).filter(|e| array_elem(e).is_some()) {
                 innermost = e;

@@ -37,12 +37,34 @@ pub fn classify(checker: &Checker, ty: &Ty) -> Option<ValueClass> {
     // walk of the whole item: kept per node of `ty` while it is classified,
     // so a value `d` levels deep is classified in `O(d)`, not `O(d^2)`
     // (#2657).
-    let mut nodes = std::collections::HashSet::new();
-    collect_nodes(&ty, &mut nodes);
-    CLOSED.with(|c| c.borrow_mut().push((nodes, std::collections::HashMap::new())));
+    // Only an aggregate asks it level by level.
+    let aggregate = matches!(strip_readonly(&ty), Ty::Tuple(_) | Ty::Array { .. } | Ty::Record { .. }) || coil_ty::vec_element_ty(&ty).is_some();
+    if !aggregate {
+        return classify_in(checker, &ty, &mut Vec::new());
+    }
+    // The node table is made the first time `params_closed` is asked.
+    CLOSED.with(|c| c.borrow_mut().push(ClosedMemo { root: &ty as *const Ty, nodes: None, closed: std::collections::HashMap::new() }));
+    let was = MEMO_ON.with(|m| m.replace(true));
     let class = classify_in(checker, &ty, &mut Vec::new());
+    MEMO_ON.with(|m| m.set(was));
     CLOSED.with(|c| c.borrow_mut().pop());
     class
+}
+
+/// Types of more nodes than this keep [`params_closed`] per node.
+const MEMO_NODES: usize = 64;
+
+/// `ty` has more than `n` nodes (counted no further than that).
+fn larger_than(ty: &Ty, n: usize) -> bool {
+    fn count(ty: &Ty, left: &mut usize) -> bool {
+        if *left == 0 {
+            return true;
+        }
+        *left -= 1;
+        ty.any_child(|c| count(c, left))
+    }
+    let mut left = n;
+    count(ty, &mut left)
 }
 
 thread_local! {
@@ -50,8 +72,17 @@ thread_local! {
     /// type it classifies, and [`params_closed`] of those asked so far.
     /// Only those nodes are kept: they live as long as the call, while a
     /// type a helper builds may be freed and its address reused.
-    static CLOSED: std::cell::RefCell<Vec<(std::collections::HashSet<usize>, std::collections::HashMap<usize, bool>)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    static CLOSED: std::cell::RefCell<Vec<ClosedMemo>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// `CLOSED` is not empty: checked first, as most calls are outside one.
+    static MEMO_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// One [`classify`]'s table: its type, that type's node addresses (made
+/// when first needed) and [`params_closed`] of those asked so far.
+struct ClosedMemo {
+    root: *const Ty,
+    nodes: Option<std::collections::HashSet<usize>>,
+    closed: std::collections::HashMap<usize, bool>,
 }
 
 fn collect_nodes(ty: &Ty, nodes: &mut std::collections::HashSet<usize>) {
@@ -277,15 +308,34 @@ fn plain_word(checker: &Checker, t: &Ty, seen: &mut Vec<String>, open_enum: bool
 /// each parameter is one boxed word, and [`crate::layout::of`] gives a type
 /// open in one its shared layout.
 fn params_closed(ty: &Ty) -> bool {
+    if !MEMO_ON.with(std::cell::Cell::get) {
+        return params_closed_of(ty);
+    }
     let key = ty as *const Ty as usize;
-    let known = CLOSED.with(|c| c.borrow().last().and_then(|(nodes, memo)| if nodes.contains(&key) { Some(memo.get(&key).copied()) } else { None }));
+    let known = CLOSED.with(|c| {
+        let mut stack = c.borrow_mut();
+        let memo = stack.last_mut()?;
+        let nodes = memo.nodes.get_or_insert_with(|| {
+            let mut nodes = std::collections::HashSet::new();
+            // SAFETY: `root` is the type `classify` holds for as long as
+            // its entry is on the stack, and nothing changes it.
+            let root = unsafe { &*memo.root };
+            // A small type is walked as it is: the table costs more than
+            // it saves.
+            if larger_than(root, MEMO_NODES) {
+                collect_nodes(root, &mut nodes);
+            }
+            nodes
+        });
+        nodes.contains(&key).then(|| memo.closed.get(&key).copied())
+    });
     match known {
         Some(Some(closed)) => closed,
         Some(None) => {
             let closed = params_closed_of(ty);
             CLOSED.with(|c| {
-                if let Some((_, memo)) = c.borrow_mut().last_mut() {
-                    memo.insert(key, closed);
+                if let Some(memo) = c.borrow_mut().last_mut() {
+                    memo.closed.insert(key, closed);
                 }
             });
             closed
