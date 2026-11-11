@@ -169,6 +169,11 @@ test("yields of T, consumed by for in") {
         sum = sum + a * b;
     }
     assert!(sum == 50);
+    let units = 0;
+    for u in each(Vec::from([(), ()])) {
+        units = units + 1;
+    }
+    assert!(units == 2);
 }
 
 test("yields of Option<T>, resumed by hand") {
@@ -281,6 +286,11 @@ test("a bare T parameter, done after the last resume") {
     assert!(resume t);
     let ns = repeat(Option::Some("n"), 1);
     assert!((resume ns) == Option::Some("n"));
+    let un = repeat((), 2);
+    assert!((resume un) == ());
+    resume un;
+    resume un;
+    assert!(done(un));
     let m = repeat(Option::Some(3), 3);
     assert!(drain(m) == Vec::from([Option::Some(3), Option::Some(3), Option::Some(3)]));
 }
