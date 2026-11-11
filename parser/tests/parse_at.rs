@@ -38,10 +38,19 @@ fn parse_at_matches_padded_parse_on_the_corpus() {
     }
     files.sort();
     assert!(files.len() > 100, "corpus not found under {}", repo.display());
-    for file in &files {
-        let text = std::fs::read_to_string(file).unwrap();
-        check(&text, &file.display().to_string());
-    }
+    // `syntax/compile_fail/nesting_past_the_checker_limit.coil` nests 1100
+    // levels: a debug build's parser needs more than a test thread's 2 MiB.
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(move || {
+            for file in &files {
+                let text = std::fs::read_to_string(file).unwrap();
+                check(&text, &file.display().to_string());
+            }
+        })
+        .expect("spawn")
+        .join()
+        .unwrap();
 }
 
 #[test]
