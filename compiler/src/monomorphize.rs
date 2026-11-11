@@ -55,6 +55,11 @@ impl TyInterner {
     pub fn get(&self, id: TyId) -> Option<&Ty> {
         self.tys.get(id.0 as usize)
     }
+
+    /// The id `ty` was interned under, if it was.
+    fn id_of(&self, ty: &Ty) -> Option<TyId> {
+        self.ids.get(&mono_key_ty(ty)).copied()
+    }
 }
 
 /// The type a mono key names for `ty`: an enum value's type as its applied
@@ -113,7 +118,9 @@ pub enum MonoCapReason {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MonoPlan {
     pub intern: TyInterner,
-    pub specializations: Vec<MonoSpecialization>,
+    /// In plan order; set once, with [`Self::index`] built from it.
+    specializations: Vec<MonoSpecialization>,
+    index: MonoIndex,
     pub retargets: Vec<MonoRetarget>,
     pub escaped_generic_fns: BTreeSet<String>,
     pub cap_hits: Vec<MonoCapHit>,
@@ -122,9 +129,38 @@ pub struct MonoPlan {
     pub keyed_values: Vec<(String, parser::SimpleSpan)>,
 }
 
+/// [`MonoPlan::specializations`] positions by what lookups ask for, each
+/// list ascending; a map to one position keeps the first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MonoIndex {
+    by_fn: HashMap<String, Vec<usize>>,
+    by_def: HashMap<DefId, Vec<usize>>,
+    by_subst: HashMap<(String, Vec<TyId>), usize>,
+    by_args: HashMap<(String, Vec<TyId>), usize>,
+}
+
+impl MonoIndex {
+    fn of(specializations: &[MonoSpecialization]) -> Self {
+        let mut index = Self::default();
+        for (i, spec) in specializations.iter().enumerate() {
+            index.by_fn.entry(spec.fn_name.clone()).or_default().push(i);
+            index.by_def.entry(spec.key.def_id).or_default().push(i);
+            index.by_subst.entry((spec.fn_name.clone(), spec.key.subst.clone())).or_insert(i);
+            index.by_args.entry((spec.fn_name.clone(), spec.arg_types.clone())).or_insert(i);
+        }
+        index
+    }
+}
+
 impl MonoPlan {
     pub fn is_empty(&self) -> bool {
         self.specializations.is_empty()
+    }
+
+    /// The spec at `index[key]`, the key's types interned.
+    fn spec_at(&self, index: &HashMap<(String, Vec<TyId>), usize>, fn_name: &str, tys: &[Ty]) -> Option<&MonoSpecialization> {
+        let ids = tys.iter().map(|ty| self.intern.id_of(ty)).collect::<Option<Vec<_>>>()?;
+        index.get(&(fn_name.to_string(), ids)).map(|&i| &self.specializations[i])
     }
 
     /// Intern lookup used by monomorphize tests; codegen uses `intern.get`.
@@ -138,40 +174,26 @@ impl MonoPlan {
         fn_name: &str,
         arg_types: &[Ty],
     ) -> Option<&MonoSpecialization> {
-        self.specializations.iter().find(|spec| {
-            spec.fn_name == fn_name
-                && spec.arg_types.len() == arg_types.len()
-                && spec
-                    .arg_types
-                    .iter()
-                    .zip(arg_types)
-                    .all(|(id, ty)| self.intern.get(*id) == Some(&mono_key_ty(ty)))
-        })
+        self.spec_at(&self.index.by_args, fn_name, arg_types)
     }
 
     /// The specialization of `fn_name` at type arguments `subst` (one per
     /// type parameter, in declaration order).
     pub fn specialization_for_subst(&self, fn_name: &str, subst: &[Ty]) -> Option<&MonoSpecialization> {
-        self.specializations.iter().find(|spec| {
-            spec.fn_name == fn_name
-                && spec.key.subst.len() == subst.len()
-                && spec.key.subst.iter().zip(subst).all(|(id, ty)| self.intern.get(*id) == Some(&mono_key_ty(ty)))
-        })
+        self.spec_at(&self.index.by_subst, fn_name, subst)
     }
 
     pub fn specializations_for_fn<'a>(
         &'a self,
         fn_name: &'a str,
     ) -> impl Iterator<Item = &'a MonoSpecialization> + 'a {
-        self.specializations
-            .iter()
-            .filter(move |spec| spec.fn_name == fn_name)
+        let list = self.index.by_fn.get(fn_name).map_or(&[][..], Vec::as_slice);
+        list.iter().map(|&i| &self.specializations[i])
     }
 
     pub fn specializations_for_def(&self, def_id: DefId) -> impl Iterator<Item = &MonoSpecialization> {
-        self.specializations
-            .iter()
-            .filter(move |spec| spec.key.def_id == def_id)
+        let list = self.index.by_def.get(&def_id).map_or(&[][..], Vec::as_slice);
+        list.iter().map(|&i| &self.specializations[i])
     }
 }
 
@@ -247,6 +269,7 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
     collect_keyed_values(ast, &sigs, false, &mut keyed_values);
     MonoPlan {
         intern,
+        index: MonoIndex::of(&specializations),
         specializations,
         retargets,
         escaped_generic_fns: escaped,
