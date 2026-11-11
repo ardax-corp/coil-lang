@@ -389,6 +389,8 @@ struct ClassInstances {
     ground: HashMap<Ty, Vec<usize>>,
     /// Those of `ground`, by head.
     ground_by_head: HashMap<HeadKey, Vec<usize>>,
+    /// By the span of their `impl` ([`InstanceDef::range`]).
+    by_range: HashMap<(usize, usize), Vec<usize>>,
 }
 
 /// Where an instance argument (or a goal's) files in a [`ClassInstances`].
@@ -434,6 +436,7 @@ impl InstanceIndex {
     fn add(&mut self, idx: usize, inst: &InstanceDef) {
         let class = self.by_class.entry(inst.class.clone()).or_default();
         insert_sorted(&mut class.all, idx);
+        insert_sorted(class.by_range.entry((inst.range.start, inst.range.end)).or_default(), idx);
         match slot_of(inst.args.first()) {
             Slot::Open => insert_sorted(&mut class.open, idx),
             Slot::Head(head) => insert_sorted(class.by_head.entry(head).or_default(), idx),
@@ -450,6 +453,9 @@ impl InstanceIndex {
     fn remove(&mut self, idx: usize, inst: &InstanceDef) {
         if let Some(class) = self.by_class.get_mut(&inst.class) {
             remove_sorted(&mut class.all, idx);
+            if let Some(list) = class.by_range.get_mut(&(inst.range.start, inst.range.end)) {
+                remove_sorted(list, idx);
+            }
             let from = |lists: &mut HashMap<_, Vec<usize>>, key| {
                 if let Some(list) = lists.get_mut(&key) {
                     remove_sorted(list, idx);
@@ -603,6 +609,22 @@ impl Generics {
     pub fn class_instances<'a>(&'a self, class: &str) -> impl Iterator<Item = (usize, &'a InstanceDef)> + 'a {
         let all = self.index.by_class.get(class).map_or(&[][..], |c| c.all.as_slice());
         all.iter().map(|&idx| (idx, &self.instances[idx]))
+    }
+
+    /// The instances of `class` whose `impl` spans `range` (in any module),
+    /// in declaration order.
+    pub fn class_instances_at<'a>(
+        &'a self,
+        class: &str,
+        range: &Range<usize>,
+    ) -> impl Iterator<Item = (usize, &'a InstanceDef)> + 'a {
+        let at = self
+            .index
+            .by_class
+            .get(class)
+            .and_then(|c| c.by_range.get(&(range.start, range.end)))
+            .map_or(&[][..], Vec::as_slice);
+        at.iter().map(|&idx| (idx, &self.instances[idx]))
     }
 
     /// The instances of `class` whose first argument could unify with
@@ -1418,5 +1440,36 @@ mod tests {
         assert_eq!(positions(&generics, Some(&tup(vec![int(), sum_e]))), vec![open, e, ti]);
         assert_eq!(positions(&generics, Some(&tup(vec![Ty::Var(TyVarId(9)), string()]))), vec![open, is, e, ti]);
         assert_eq!(positions(&generics, Some(&tup(vec![int(), int(), int()]))), vec![open]);
+    }
+
+    /// The instances of a trait by the span of their `impl`, in
+    /// declaration order, follow an instance whose span changes in place.
+    #[test]
+    fn class_instances_at_follows_spans() {
+        let mut generics = Generics::new();
+        generics.clear_instances();
+        let at = |range: Range<usize>, arg: &str| InstanceDef {
+            range,
+            ..show_instance(Ty::Con(arg.into()), &format!("Show__{arg}__show"))
+        };
+        let a = generics.push_instance(at(10..20, "A"));
+        let b = generics.push_instance(at(30..40, "B"));
+        let other = generics.push_instance(InstanceDef {
+            defined_module: "other".to_string(),
+            ..at(10..20, "C")
+        });
+        let spans = |g: &Generics, class: &str, range: Range<usize>| {
+            g.class_instances_at(class, &range).map(|(i, _)| i).collect::<Vec<_>>()
+        };
+        assert_eq!(spans(&generics, "Show", 10..20), vec![a, other]);
+        assert_eq!(spans(&generics, "Show", 30..40), vec![b]);
+        assert!(spans(&generics, "Show", 10..21).is_empty());
+        assert!(spans(&generics, "Eq", 10..20).is_empty());
+
+        // A stub (`usize::MAX..usize::MAX`) claimed by its `impl`.
+        let stub = generics.push_instance(at(usize::MAX..usize::MAX, "D"));
+        generics.update_instance(stub, |inst| inst.range = 50..60);
+        assert!(spans(&generics, "Show", usize::MAX..usize::MAX).is_empty());
+        assert_eq!(spans(&generics, "Show", 50..60), vec![stub]);
     }
 }

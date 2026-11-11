@@ -691,9 +691,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 // A package trait's instances are keyed by its path.
                 let class = self.checker.impl_trait_key(class);
                 let instance = generics
-                    .class_instances(class)
+                    .class_instances_at(class, &span)
                     .map(|(_, inst)| inst)
-                    .find(|inst| inst.range == span)
+                    .next()
                     .or_else(|| {
                         // Derive-generated impls carry a synthetic span.
                         let mut by_head = generics.class_instances(class).map(|(_, inst)| inst).filter(|inst| {

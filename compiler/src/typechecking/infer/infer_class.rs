@@ -538,8 +538,8 @@ impl Checker {
             .cloned();
         let existing_idx = self
             .generics
-            .class_instances(class)
-            .find(|(_, inst)| inst.defined_module == self.current_module && inst.range == range)
+            .class_instances_at(class, &range)
+            .find(|(_, inst)| inst.defined_module == self.current_module)
             .map(|(idx, _)| idx);
         // Else the stub the pre-pass registered for this very impl: not
         // another impl's of the same trait, whose head this one's would
