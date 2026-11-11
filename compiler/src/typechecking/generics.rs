@@ -1066,12 +1066,14 @@ impl Generics {
     }
 
     /// `(class, head, method, method fqn)` of each method of each instance
-    /// [`Self::register_structural_open`] registered.
+    /// [`Self::register_structural_open`] registered, an instance's methods
+    /// by name: codegen reserves their entries in this order (#2675).
     pub fn structural_opens(&self) -> impl Iterator<Item = (&str, &Ty, &str, &str)> {
-        self.instances
-            .iter()
-            .filter(|inst| Self::is_structural_open(inst))
-            .flat_map(|inst| inst.method_fqns.iter().map(move |(m, f)| (inst.class.as_str(), &inst.args[0], m.as_str(), f.as_str())))
+        self.instances.iter().filter(|inst| Self::is_structural_open(inst)).flat_map(|inst| {
+            let mut methods: Vec<(&String, &String)> = inst.method_fqns.iter().collect();
+            methods.sort();
+            methods.into_iter().map(move |(m, f)| (inst.class.as_str(), &inst.args[0], m.as_str(), f.as_str()))
+        })
     }
 
     /// Whether `class` has the structural instance for the shape of `head`
