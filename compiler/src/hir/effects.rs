@@ -353,7 +353,9 @@ impl ProgramEffects {
     /// `mutates` is the body's own summary bits: the parameters it writes
     /// in place for its caller.
     pub fn cow_rewrite(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, mutates: u64) -> (Option<HirBody>, Vec<reporting::Message>) {
-        let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
+        // The rewrite may analyse a body it made (loop views): each call is
+        // read in the body that holds it.
+        let lookup = |b: &HirBody, callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, b, callee, args);
         cow::rewrite(checker, module, body, &lookup, mutates)
     }
 

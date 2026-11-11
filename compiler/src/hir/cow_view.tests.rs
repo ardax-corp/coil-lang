@@ -58,9 +58,25 @@ fn a_nested_path_write_makes_nothing_unique_in_its_loop() {
             b = b + 1;
         }
     }";
-    // The outer loop makes `blocks[b]` and its `insts` unique once per
-    // block, for the inner loop's view.
-    assert_eq!(uniques_in_loops(src), vec![2, 0]);
+    // The outer loop makes `blocks`, `blocks[b]` and its `insts` unique
+    // once per block, for the inner loop's view. Its own write through
+    // `blocks` is in the inner loop, which may run no iteration: no view.
+    assert_eq!(uniques_in_loops(src), vec![3, 0]);
+    let src = "fn f(Func f) {
+        let b = 0;
+        while b < f.blocks.len() {
+            let i = 0;
+            while i < f.blocks[b].insts.len() {
+                f.blocks[b].insts[i] = f.blocks[b].insts[i] * 2;
+                i = i + 1;
+            }
+            f.blocks[b].insts.push(7);
+            b = b + 1;
+        }
+    }";
+    // With a write in every outer iteration, `blocks` is made unique once
+    // per call: two in the outer loop for the inner view, two for `push`.
+    assert_eq!(uniques_in_loops(src), vec![4, 0]);
     let src = "fn f(Func f, int b) {
         for i in 0..f.blocks[b].insts.len() {
             f.blocks[b].insts[i] += 1;
@@ -128,15 +144,51 @@ fn a_parameter_root_keeps_its_uniques_across_a_call_that_touches_a_static() {
 
 #[test]
 fn a_path_whose_index_the_loop_may_not_reach_is_not_read_ahead() {
-    // `blocks[b]` may be out of bounds where the loop never reads it.
+    // `blocks[b]` may be out of bounds: the loop's test does not read it.
     let src = "fn f(Func f, int b, int n) {
         let i = 0;
         while i < n {
-            if i > 2 {
-                f.blocks[b].insts[0] = i;
-            }
+            f.blocks[b].insts[0] = i;
             i = i + 1;
         }
     }";
     assert!(uniques_in_loops(src)[0] >= 2);
+}
+
+#[test]
+fn a_write_that_may_not_run_in_an_iteration_keeps_its_uniques() {
+    // A view would make the path unique where the loop never writes it.
+    let branch = "fn f(Func f) {
+        for i in 0..f.blocks[0].insts.len() {
+            if f.blocks[0].insts[i] < 0 {
+                f.blocks[0].insts[i] = 0;
+            }
+        }
+    }";
+    let right_of_and = "fn f(Func f) {
+        for i in 0..f.blocks[0].insts.len() {
+            let _ = i > 3 && f.blocks[0].insts.pop() > 0;
+        }
+    }";
+    let after_continue = "fn f(Func f) {
+        let i = 0;
+        while i < f.blocks[0].insts.len() {
+            i = i + 1;
+            if f.blocks[0].insts[i - 1] >= 0 {
+                continue;
+            }
+            f.blocks[0].insts[i - 1] = 0;
+        }
+    }";
+    let after_try = "fn get(int i) -> Option<int> { if i > 2 { return Option::None; } return Option::Some(i); }
+    fn f(Func f) -> Option<int> {
+        for i in 0..f.blocks[0].insts.len() {
+            let v = get(i)?;
+            f.blocks[0].insts[i] = v;
+        }
+        return Option::Some(0);
+    }";
+    for src in [branch, right_of_and, after_continue, after_try] {
+        assert!(uniques_in_loops(src)[0] >= 2, "{src}");
+    }
 }
