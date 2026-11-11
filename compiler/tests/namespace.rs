@@ -1320,3 +1320,127 @@ fn main() {
         });
     }
 }
+
+/// The callees of `caller` among `compiled`'s bodies, by name.
+fn callees<'a>(compiled: &'a Compiled, caller: &str) -> Vec<&'a str> {
+    compiled
+        .insts(caller)
+        .filter_map(|i| match i {
+            MirInst::Call { target, .. } => compiled.bodies.iter().find(|b| b.entry == Some(*target)),
+            _ => None,
+        })
+        .map(|b| b.name.as_str())
+        .collect()
+}
+
+/// A foreign clone compiles after the foreign clones it calls, so it
+/// splices them: `Drive<string>::run`, cloned from one module, keeps no
+/// call to `Cell<string>::bump`, cloned from another, in its loop (#2219).
+#[test]
+fn foreign_clone_splices_the_foreign_clone_it_calls() {
+    let files = [
+        (
+            "src/cell.coil",
+            r#"
+class Cell<T> {
+    pub v: T,
+    total: int,
+}
+
+impl Cell<T> {
+    pub fn bump(int k) -> int {
+        self.total = self.total + k;
+        return self.total;
+    }
+}
+
+fn cell<T>(T v) -> Cell<T> {
+    return new Cell(v, 0);
+}
+"#,
+        ),
+        (
+            "src/drive.coil",
+            r#"
+use cell::Cell;
+
+class Drive<T> {
+    pub cell: Cell<T>,
+}
+
+impl Drive<T> {
+    pub fn run(int n) -> int {
+        let s = 0;
+        let i = 0;
+        while i < n {
+            s = s + self.cell.bump(i % 7);
+            i = i + 1;
+        }
+        return s;
+    }
+}
+"#,
+        ),
+        (
+            "src/main.coil",
+            r#"
+use cell::cell;
+use drive::Drive;
+
+fn main() {
+    let d = new Drive(cell("x"));
+    if d.run(100) != 14750 {
+        panic "sum";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("foreign_clone_callee", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        let called = callees(&compiled, "drive::Drive::run$inst$string");
+        assert!(!called.iter().any(|c| c.starts_with("cell::Cell::bump")), "`run`'s clone keeps a call to `bump`'s: {called:?}");
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}
+
+/// The stdlib `HashMap::insert` clone splices the lookup it calls, whose
+/// kept body has a folded guard return before dead code (#2219).
+#[test]
+fn stdlib_map_insert_clone_splices_its_lookup() {
+    let files = [(
+        "src/main.coil",
+        r#"
+use collections::map::{HashMap};
+
+fn main() {
+    let counts: HashMap<string, int> = HashMap::new();
+    let words = ["a", "b", "a", "c", "b", "a", "d", "e"];
+    let i = 0;
+    while i < 80 {
+        let w = words[i % 8];
+        counts.insert(w, counts.get_or(w, 0) + 1);
+        i = i + 1;
+    }
+    if counts.get_or("a", 0) != 30 {
+        panic "count";
+    }
+}
+"#,
+    )];
+    let (root, entry) = build_project("stdlib_map_insert_lookup", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        let called = callees(&compiled, "collections::map::HashMap::insert$inst$string_int");
+        assert!(
+            !called.contains(&"collections::index::KeyIndex::find_hashed$inst$string"),
+            "`insert`'s clone keeps a call to `find_hashed`'s: {called:?}"
+        );
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}

@@ -703,6 +703,13 @@ pub struct Compiler {
     /// form and every type closed and qualified: callees any module's
     /// typed inlining may splice ([`Compiler::hir_resolved_clone_body`]).
     hir_resolved_clones: HashMap<String, crate::hir::HirBody>,
+    /// Set while a clone's body is rewritten for [`Self::hir_resolved_clones`]:
+    /// no kept body is spliced into it, so a caller weighs and splices each
+    /// clone of a chain on its own (#2219, #2248).
+    hir_kept_splice_off: std::cell::Cell<bool>,
+    /// Whether the rewrite of the body being compiled offered a kept body
+    /// to splice ([`Self::hir_kept_splice_off`] then makes its own).
+    hir_kept_offered: std::cell::Cell<bool>,
     /// The source file of each of [`Self::hir_portable`] and
     /// [`Self::hir_resolved_clones`], by key: a splice of one keeps its
     /// nodes' places in it (#2666).
@@ -889,6 +896,8 @@ impl Default for Compiler {
             outlined_planned: HashSet::new(),
             hir_portable: HashMap::new(),
             hir_resolved_clones: HashMap::new(),
+            hir_kept_splice_off: std::cell::Cell::new(false),
+            hir_kept_offered: std::cell::Cell::new(false),
             hir_splice_files: HashMap::new(),
             module_outer_namespace: None,
             resolved_plans: std::cell::RefCell::new(Vec::new()),

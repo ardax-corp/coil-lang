@@ -1,0 +1,21 @@
+// A generic class whose small method another module's generic class calls
+// in its loop (`examples/perf/foreign_clone_callee.coil`, #2219).
+
+/// A value with a running total.
+class Cell<T> {
+    pub v: T,
+    total: int,
+}
+
+impl Cell<T> {
+    /// Add `k` to the total; the new total.
+    pub fn bump(int k) -> int {
+        self.total = self.total + k;
+        return self.total;
+    }
+}
+
+/// A cell holding `v`, its total 0.
+fn cell<T>(T v) -> Cell<T> {
+    return new Cell(v, 0);
+}

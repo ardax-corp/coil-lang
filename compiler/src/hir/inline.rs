@@ -171,6 +171,24 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
     })
 }
 
+/// `body` with one exit, as another module splices it: as it is when it
+/// has one, else its guard returns folded ([`single_exit`]); code after a
+/// statement that always exits (a folded `if true { return a; }`) dropped
+/// first when they do not fold with it. `None` when they still do not.
+pub fn one_exit(mut body: HirBody) -> Option<HirBody> {
+    if inlinable(&body, usize::MAX).err() != Some("return") {
+        return Some(body);
+    }
+    if let Some(folded) = single_exit(&body) {
+        return Some(folded);
+    }
+    blank_unreachable(&mut body);
+    match inlinable(&body, usize::MAX) {
+        Err("return") => single_exit(&body),
+        _ => Some(body),
+    }
+}
+
 /// `callee` with its guard returns folded into `if` values, so it has a
 /// single exit [`inlinable`] can splice: `if c { ..; return a; } rest`
 /// becomes `if c { ..; a } else { rest }`, and a last `if` whose branches

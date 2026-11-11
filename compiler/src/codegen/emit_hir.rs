@@ -313,6 +313,11 @@ enum HirBuiltin {
     FfiDyn(crate::typechecking::FfiBuiltin),
 }
 
+/// How many levels of this module's clone sources a clone's body is
+/// looked through for a call of another module's
+/// ([`Compiler::hir_calls_foreign_clone_src`]).
+const CLONE_CALL_DEPTH: usize = 3;
+
 /// A planned anonymous `fn`: its body lowers in a frame of its own, with
 /// the captures in the first slots, then the parameters.
 struct HirLambda {
@@ -924,10 +929,7 @@ impl Compiler {
             l.ty = close(&l.ty)?;
         }
         out.ret = close(&out.ret)?;
-        let out = match inline::inlinable(&out, usize::MAX) {
-            Err("return") => inline::single_exit(&out)?,
-            _ => out,
-        };
+        let out = inline::one_exit(out)?;
         Some(out)
     }
 
@@ -1041,10 +1043,7 @@ impl Compiler {
             o.ty = ty(&l.ty);
         }
         out.ret = ty(&body.ret);
-        let out = match inline::inlinable(&out, usize::MAX) {
-            Err("return") => inline::single_exit(&out)?,
-            _ => out,
-        };
+        let out = inline::one_exit(out)?;
         let key = match self.checker.overload_decl_at(body.span.0, body.span.1) {
             Some((id, fixed, rest)) if self.checker.is_overloaded(&body.name) => overload_fn_key(&body.name, fixed, rest, id),
             _ => body.name.clone(),
@@ -1508,6 +1507,8 @@ impl Compiler {
         // made again with less in it ([`HirPasses`]), each time counted.
         let ground_was = self.hir_ground_splice.replace(false);
         let mut rewrite = None;
+        // The body other modules splice, when it is not the one compiled.
+        let mut kept: Option<Option<HirBody>> = None;
         if let Ok(emit) = &base {
             // Each step starts with the clone budget as the base plan left
             // it: what a rewrite that is thrown away planned takes no room.
@@ -1515,10 +1516,18 @@ impl Compiler {
             let mut level = Some(HirPasses::Once);
             while let Some(passes) = level {
                 self.hir_ground_splice.set(false);
+                self.hir_kept_offered.set(false);
                 self.planned_method_clones.borrow_mut().clone_from(&room);
                 match self.hir_rewrite(&module, hir, emit, passes) {
                     Ok(done) => {
                         rewrite = done;
+                        // A clone that splices kept bodies of the clones it
+                        // calls keeps one rewritten without them: a caller
+                        // weighs it alone and splices its callees itself,
+                        // as when it compiled before them (#2219, #2248).
+                        if self.compiling_mono_clone && self.hir_kept_offered.get() {
+                            kept = Some(self.hir_kept_rewrite(&module, hir, emit, passes, &room));
+                        }
                         break;
                     }
                     Err(failed) => {
@@ -1568,7 +1577,10 @@ impl Compiler {
         if self.compiling_mono_clone
             && let Ok((emit, before)) = &plan
             && let Some(key) = self.current_function_table_key.clone()
-            && let Some(body) = self.hir_resolved_clone_body(hir, before.as_ref().unwrap_or(emit))
+            && let Some(body) = match kept {
+                Some(kept) => kept,
+                None => self.hir_resolved_clone_body(hir, before.as_ref().unwrap_or(emit)),
+            }
         {
             self.note_splice_file(&key);
             self.hir_resolved_clones.insert(key, body);
@@ -2211,7 +2223,8 @@ impl Compiler {
                 resolved = None;
             }
         }
-        let frees = passes.frees() && self.opt_options.early_free && quiet;
+        // A body kept for splicing is the one before its frees.
+        let frees = passes.frees() && self.opt_options.early_free && quiet && !self.hir_kept_splice_off.get();
         if body.is_none() && !frees {
             return Ok(None);
         }
@@ -2273,6 +2286,43 @@ impl Compiler {
             .and_then(|mut emit| self.plan_hir_lambdas(module, last, &mut emit).map(|()| emit))
             .map_err(|why| fail(why, freed.is_some()))?;
         Ok(Some(HirRewrite { body, freed, emit, before, spliced }))
+    }
+
+    /// [`Self::hir_rewrite`] of clone `hir` for other modules to splice
+    /// ([`Self::hir_resolved_clones`]), from the clone budget `room` the
+    /// base plan left: with no kept body spliced into it and no frees.
+    /// `hir` as `base` planned it when that rewrite does not plan. The
+    /// clones and helpers it calls are made, as the compiled body's are.
+    fn hir_kept_rewrite(
+        &mut self,
+        module: &crate::hir::HirModule,
+        hir: &HirBody,
+        base: &HirEmit,
+        passes: HirPasses,
+        room: &HashSet<(String, Vec<Ty>)>,
+    ) -> Option<HirBody> {
+        use crate::hir::Callee;
+        let held = self.planned_method_clones.replace(room.clone());
+        let ground = self.hir_ground_splice.replace(false);
+        self.hir_kept_splice_off.set(true);
+        let alone = self.hir_rewrite(module, hir, base, passes);
+        self.hir_kept_splice_off.set(false);
+        self.hir_ground_splice.set(ground);
+        let planned = self.planned_method_clones.replace(held);
+        let kept = match alone {
+            Ok(Some(HirRewrite { body: Some(body), emit, .. })) => {
+                self.planned_method_clones.borrow_mut().extend(planned);
+                self.queue_outlined(&body);
+                self.hir_resolved_clone_body(&body, &emit)
+            }
+            _ => self.hir_resolved_clone_body(hir, base),
+        }?;
+        for e in &kept.exprs {
+            if let HirKind::Call { callee: Callee::Resolved(r), .. } = &e.kind {
+                self.hir_request_method_clone(&r.key);
+            }
+        }
+        Some(kept)
     }
 
     /// Resolve or plan a rewritten body with the clone budget free of what
@@ -2519,7 +2569,9 @@ impl Compiler {
             // A method or mono clone kept with its calls resolved
             // ([`Self::hir_resolved_clone_body`]), from any module: its
             // nodes take the call's span, under the cross-module budget.
+            // A body kept for splicing splices none ([`Self::hir_kept_splice_off`]).
             if self.inline_cost.inline_across_modules
+                && !self.hir_kept_splice_off.get()
                 && let Some(callee) = self.hir_resolved_clones.get(&call.key)
             {
                 let HirKind::Call { args, .. } = &hir.expr(id).kind else {
@@ -2553,6 +2605,7 @@ impl Compiler {
                 }
                 let (callee, shape) = fit(id, callee, true, true)?;
                 let shape = shape.with_foreign(true).with_file(self.hir_splice_files.get(&call.key).copied()).with_frame(&call.key);
+                self.hir_kept_offered.set(true);
                 return Ok((callee, shape));
             }
             let core = core_insts.get(&id.0);
@@ -2859,7 +2912,9 @@ impl Compiler {
             }
             found
         };
-        for (span, name, reason) in refused_inline.into_inner() {
+        // The body kept for splicing reports nothing the compiled one does not.
+        let refused = if self.hir_kept_splice_off.get() { Vec::new() } else { refused_inline.into_inner() };
+        for (span, name, reason) in refused {
             self.note_inline_refused(span, name, reason);
         }
         match found? {
@@ -5687,6 +5742,136 @@ impl Compiler {
         }
         self.planning_for_clones = false;
         self.hir_module = Some(module);
+    }
+
+    /// Whether `body`, of the module being compiled, may call a clone of
+    /// another module's method or function, directly or through this
+    /// module's clone sources (`depth` levels of them): only then may a
+    /// clone of it wait for the clones it calls
+    /// ([`Compiler::emit_foreign_clones`]). A call is of a clone source
+    /// ([`Compiler::inst_clone_srcs`]) when it names a method of a class
+    /// that has one by that name, or a function one's name ends in; any
+    /// method of a receiver whose class is not known may be.
+    fn hir_calls_foreign_clone_src(&self, module: &crate::hir::HirModule, body: &HirBody, depth: usize) -> bool {
+        let reaches = |key: &str| match self.inst_clone_srcs.get(key) {
+            None => false,
+            Some(src) if src.program != self.program_seq => true,
+            Some(src) => {
+                depth > 0
+                    && self
+                        .hir_fns
+                        .get(&src.span)
+                        .and_then(|&i| module.bodies.get(i))
+                        .is_some_and(|b| b.name != body.name && self.hir_calls_foreign_clone_src(module, b, depth - 1))
+            }
+        };
+        let method = |class: &str, name: &str| {
+            let fqn = self.checker.resolve_class_key(class).unwrap_or_else(|| class.to_string());
+            reaches(&format!("{fqn}::{name}"))
+        };
+        body.exprs.iter().any(|e| match &e.kind {
+            HirKind::Call { callee: Callee::Method { name }, args } => {
+                let recv = args.first().and_then(|&r| Self::hir_ty(body, r)).map(|t| apply_ty_prune(self.checker.subst(), t));
+                match recv.as_ref().map(crate::typechecking::ty::strip_readonly) {
+                    Some(Ty::Con(class)) => method(class, name),
+                    Some(Ty::App(head, _)) => match head.as_ref() {
+                        Ty::Con(class) => method(class, name),
+                        _ => true,
+                    },
+                    Some(Ty::Var(_)) | None => true,
+                    Some(_) => false,
+                }
+            }
+            HirKind::Call { callee: Callee::Named { name, .. }, .. } => {
+                let tail = format!("::{name}");
+                self.inst_clone_srcs.keys().filter(|k| *k == name || k.ends_with(&tail)).any(|k| reaches(k))
+            }
+            HirKind::Call { callee: Callee::Resolved(_), .. } => true,
+            _ => false,
+        })
+    }
+
+    /// The inherent method clones the body of clone `req` would call
+    /// (#2219): its method's HIR in the module being
+    /// compiled at `req`'s types, its calls resolved once. Resolving only
+    /// fills `method_clone_plans`, as [`Self::hir_plan_bodies_for_clones`]
+    /// does. Empty when the body is not here or does not resolve.
+    pub(super) fn hir_clone_callees(&mut self, req: &super::InstClone) -> Vec<String> {
+        // With nothing spliced across modules, nothing is gained by waiting.
+        if !self.inline_cost.inline_across_modules || !self.opt_options.hir_inline || self.debugger_attached {
+            return Vec::new();
+        }
+        let Some(src) = self.inst_clone_srcs.get(&req.src).cloned() else {
+            return Vec::new();
+        };
+        if src.program != self.program_seq || !src.compiled || src.own_bounds > 0 {
+            return Vec::new();
+        }
+        let Some(vars) = self.inst_clone_vars(&src.head, &req.lookup) else {
+            return Vec::new();
+        };
+        let Some(&index) = self.hir_fns.get(&src.span) else {
+            return Vec::new();
+        };
+        let Some(module) = self.hir_module.take() else {
+            return Vec::new();
+        };
+        let body = self.hir_instance(&module.bodies[index], &vars);
+        let mut callees = Vec::new();
+        if body.root.is_some() && self.hir_calls_foreign_clone_src(&module, &body, CLONE_CALL_DEPTH) && refusal::refusal(&body, &self.checker).is_none() {
+            // The context `emit_instance_clones` compiles the clone in: its
+            // type parameters' names at `req`'s types, an inherent method
+            // in its class's namespace.
+            let mut names = HashMap::new();
+            for (name, want) in src.trait_params.iter().flatten().zip(&req.lookup) {
+                names.insert(name.clone(), want.clone());
+            }
+            if let Some(m) = &src.method_of {
+                for (name, want) in m.names.iter().zip(&req.lookup) {
+                    names.insert(name.clone(), want.clone());
+                }
+            }
+            let inherent = src.method_of.as_ref().map(|m| {
+                (
+                    std::mem::replace(&mut self.compiling_method, !m.is_static),
+                    std::mem::replace(&mut self.namespace, src.class.clone()),
+                    self.current_function_qualified.replace(req.src.clone()),
+                )
+            });
+            let prev_mono = std::mem::replace(&mut self.compiling_mono_clone, true);
+            self.mono_codegen_var_types.push(HashMap::new());
+            self.mono_type_param_tys.push(names);
+            self.mono_var_tys.push(vars);
+            self.planning_for_clones = true;
+            let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(&body));
+            let ret = Rep::Word(body.ret.as_ref().map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
+            if let Ok(emit) = self.hir_resolve(&body, ret) {
+                let plans = self.method_clone_plans.borrow();
+                callees = emit
+                    .plan
+                    .calls
+                    .values()
+                    .map(|call| call.key.clone())
+                    .filter(|key| *key != req.name && plans.contains_key(key))
+                    .collect();
+            }
+            self.hir_body_frame = outer;
+            self.planning_for_clones = false;
+            self.mono_var_tys.pop();
+            self.mono_type_param_tys.pop();
+            self.mono_codegen_var_types.pop();
+            self.compiling_mono_clone = prev_mono;
+            if let Some((method, namespace, qualified)) = inherent {
+                self.compiling_method = method;
+                self.namespace = namespace;
+                self.current_function_qualified = qualified;
+            }
+        }
+        self.hir_module = Some(module);
+        // The calls are a map: their keys in one order.
+        callees.sort_unstable();
+        callees.dedup();
+        callees
     }
 
     fn hir_request_method_clone(&mut self, key: &str) {
