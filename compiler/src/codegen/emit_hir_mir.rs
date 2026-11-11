@@ -486,9 +486,9 @@ impl Compiler {
                     let dicts = lam.dicts.iter().map(|&(_, slot)| crate::mir::HirDictOp::Load(slot)).chain(lam.kinds.as_ref().map(|_| crate::mir::HirDictOp::KindsOwn)).collect();
                     // A local bound from a generic function goes in as its
                     // value made at the lambda's type of it (#2658).
-                    let body = lam.body.clone();
-                    let remade = self
-                        .hir_lambda_polyfn_captures(hir, emit, &body)
+                    let remade = lam
+                        .polyfn_captures
+                        .clone()
                         .into_iter()
                         .filter_map(|(i, name, ty)| Some((i, self.hir_mir_polyfn_value(&name, ty.as_ref(), None)?)))
                         .collect();
@@ -1471,25 +1471,12 @@ impl Compiler {
         })
     }
 
-    /// For each capture of lambda `lam` that is a local bound from a
-    /// generic function: its index and that function, whose value the
-    /// lambda captures made at the type the lambda holds it at (#2658).
-    /// Inside the lambda it is a plain closure.
-    fn hir_lambda_polyfn_captures(&self, hir: &HirBody, emit: &HirEmit, lam: &HirBody) -> Vec<(usize, String, Option<Ty>)> {
-        lam.captures
-            .iter()
-            .enumerate()
-            .filter_map(|(i, &(outer, inner))| {
-                let name = self.hir_polyfn_local_source(hir, emit, outer)?;
-                Some((i, name, self.hir_capture_read_ty(lam, inner).ok().flatten()))
-            })
-            .collect()
-    }
-
-    /// The one type lambda `lam` reads capture `inner` at (its local's own
-    /// type may be the generic function's, open), `Err` when it reads it
-    /// at several.
-    pub(super) fn hir_capture_read_ty(&self, lam: &HirBody, inner: crate::hir::LocalId) -> Result<Option<Ty>, ()> {
+    /// The one type body `lam` reads its capture `inner` at, and the
+    /// lambdas inside it (`plan` its plan) that capture it in turn: a call
+    /// reads it at its arguments' and result's types (the callee keeps the
+    /// local's own type, the generic function's, open). `None` with no
+    /// read, `Err` when it is read at several.
+    pub(super) fn hir_capture_reads(&self, lam: &HirBody, plan: Option<&HirEmit>, inner: crate::hir::LocalId) -> Result<Option<Ty>, ()> {
         let prune = |t: &Option<Ty>| t.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t));
         let reads_inner = |id: HirId| matches!(lam.expr(id).kind, HirKind::Local(l) if l == inner);
         let callees: HashSet<u32> = lam
@@ -1501,9 +1488,15 @@ impl Compiler {
             })
             .collect();
         let mut at: Option<Ty> = None;
+        let mut meet = |ty: Ty| match &at {
+            Some(seen) if *seen != ty => Err(()),
+            Some(_) => Ok(()),
+            None => {
+                at = Some(ty);
+                Ok(())
+            }
+        };
         for (i, e) in lam.exprs.iter().enumerate() {
-            // A call reads it at its arguments' and result's types; the
-            // callee keeps the local's own.
             let ty = match &e.kind {
                 HirKind::Call { callee: Callee::Value(f), args } if reads_inner(*f) => {
                     let Some(mut ty) = prune(&e.ty) else { continue };
@@ -1517,14 +1510,19 @@ impl Compiler {
                 _ => None,
             };
             if let Some(ty) = ty {
-                match &at {
-                    Some(seen) if *seen != ty => return Err(()),
-                    Some(_) => {}
-                    None => at = Some(ty),
+                meet(ty)?;
+            }
+        }
+        for child in plan.into_iter().flat_map(|p| p.plan.lambdas.values()) {
+            for &(outer, captured) in &child.body.captures {
+                if outer == inner
+                    && let Some(ty) = self.hir_capture_reads(&child.body, child.emit.as_ref(), captured)?
+                {
+                    meet(ty)?;
                 }
             }
         }
-        Ok(at.or_else(|| lam.local(inner).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t))))
+        Ok(at)
     }
 
     /// Call `id` through `PolyFn` local `f`: which arguments go as their
@@ -1951,10 +1949,10 @@ impl Compiler {
             },
             // A closure's captured dictionaries (#1526).
             HirKind::Lambda { .. } if let Some(lam) = emit.plan.lambdas.get(&id.0) => {
-                let body = lam.body.clone();
+                let captures = lam.polyfn_captures.clone();
                 lam.dicts.iter().any(|&(_, slot)| !self.hir_mir_dict_param(slot))
                     // A captured `PolyFn` local's value, made here (#2658).
-                    || self.hir_lambda_polyfn_captures(hir, emit, &body).into_iter().any(|(_, name, ty)| {
+                    || captures.into_iter().any(|(_, name, ty)| {
                         self.hir_mir_probe_unplanned(|this, steps| {
                             this.plan_polyfn_escape_dicts(steps, &name, ty.as_ref(), None);
                         })
