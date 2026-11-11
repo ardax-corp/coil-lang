@@ -114,3 +114,20 @@ fn nesting_past_the_limit_is_a_diagnostic() {
     let quoted = format!("fn main() {{ let s = \"{}\"; /* {} */ }}\n// {}\n", "(".repeat(5000), "[".repeat(5000), "{".repeat(5000));
     assert!(Pratt::default().parse(&quoted).is_ok());
 }
+
+/// A value `if` nested in a value `if`'s branch, and unnamed and named
+/// parameters of nested `fn` types: each was parsed both ways at every
+/// level (#2654).
+#[test]
+fn nested_value_ifs_and_fn_types_parse() {
+    let ifs = parse_main(&format!("let r = {};", nest("a", |s, i| format!("if a > {i} {{ {s} }} else {{ 0 }}"))));
+    assert_eq!(count(&ifs, "Branch("), 2 * DEPTH);
+    assert_eq!(count(&ifs, " If(["), DEPTH);
+    let unnamed = parse_main(&format!("let r: {} = a;", nest("int", |s, _| format!("fn({s}) -> int"))));
+    assert_eq!(count(&unnamed, "TypeFn {"), DEPTH);
+    let named = parse_main(&format!("let r: {} = a;", nest("int", |s, i| format!("fn({s} p{i}) -> int"))));
+    assert_eq!(count(&named, "name: \"p"), DEPTH);
+    // A statement `if` around one whose branch is a value block.
+    let mixed = parse_main(&format!("let f = fn () {{ {} }};", nest("1", |s, i| if i % 2 == 0 { format!("if a > {i} {{ {s} }} else {{ 2 }}") } else { format!("let x = {s}; x") })));
+    assert!(mixed.contains("Lambda {"));
+}
