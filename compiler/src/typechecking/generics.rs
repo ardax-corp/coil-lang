@@ -700,10 +700,7 @@ impl Generics {
     /// one that a clone compiled in an earlier module's context needs (#2354).
     pub fn adopt_structural_instances(&mut self, other: &Generics) {
         for inst in &other.instances {
-            let structural = inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE && inst.context.is_empty();
-            if structural
-                && inst.args.iter().all(|a| super::ty::ftv_ty(a).is_empty())
-                && self.find_instance(&inst.class, &inst.args).is_none()
+            if Self::is_structural_ground(inst) && self.find_instance(&inst.class, &inst.args).is_none()
             {
                 self.instances.push(inst.clone());
             }
@@ -779,6 +776,15 @@ impl Generics {
     /// ([`Self::register_structural_open`]).
     pub fn is_structural_open(inst: &InstanceDef) -> bool {
         inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE && !inst.context.is_empty() && inst.args.len() == 1
+    }
+
+    /// Whether `inst` is a ground structural instance
+    /// ([`Self::register_structural_instance`] at a type with no variable).
+    pub fn is_structural_ground(inst: &InstanceDef) -> bool {
+        inst.range == (0..0)
+            && inst.defined_module == PRELUDE_OPS_MODULE
+            && inst.context.is_empty()
+            && inst.args.iter().all(|a| super::ty::ftv_ty(a).is_empty())
     }
 
     /// Whether `inst` is a structural instance for a shape with open

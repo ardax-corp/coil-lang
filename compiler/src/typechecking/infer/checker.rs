@@ -16,7 +16,7 @@ use crate::typechecking::generics::{
 use crate::typechecking::id::{self, IdTable, NodeId};
 use crate::typechecking::kind::Kind;
 use crate::typechecking::subst::{Subst, apply_ty, apply_ty_prune};
-use crate::typechecking::ty::{ArrayLength, array, array_fixed, nominal_enum, tuple as tuple_ty};
+use crate::typechecking::ty::{ArrayLength, array, array_fixed, nominal_enum, nominal_enum_deep, tuple as tuple_ty};
 use crate::typechecking::ty::{AssocProjection, BOOL, BYTE, Constraint, FLOAT, INT, STRING, Scheme, UNIT};
 use crate::typechecking::ty::{
     EnumVariantPayloadTy, RANGE, RANGE_INCLUSIVE, Ty, TyVarId, boolean, float, ftv_ty, int,
@@ -11037,6 +11037,22 @@ impl Checker {
         if matches.is_empty() {
             matches = structural;
         }
+        // One shape's ground structural instances are one instance: each
+        // goal registers its own type's, and `(Some(3), 1)`'s item is the
+        // variant's constructor type where an annotated tuple's is
+        // `Option<int>` (#2607). The first registered stands for them.
+        let mut shapes: Vec<Vec<Ty>> = Vec::new();
+        matches.retain(|(inst, ..)| {
+            if !Generics::is_structural_ground(inst) {
+                return true;
+            }
+            let shape: Vec<Ty> = inst.args.iter().map(nominal_enum_deep).collect();
+            let first = !shapes.contains(&shape);
+            if first {
+                shapes.push(shape);
+            }
+            first
+        });
         matches
     }
 
