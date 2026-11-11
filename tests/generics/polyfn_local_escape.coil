@@ -1,0 +1,274 @@
+// A local bound from a generic function with a bound (`let f = peek;`)
+// that leaves the place it was made for: returned, stored in a class
+// field, a `Vec`, an array, a tuple, a record or an `Option`, captured by a
+// lambda, passed to a function-typed parameter, sent on a channel, yielded
+// or copied to another local. Each is the function's value made again at
+// the type it goes at, with its dictionaries and `kinds` word, as the
+// function's name there would be (coil-lang#2658): the callee's copy is its
+// own, so the original keeps its state. Made in a ground body and in a
+// generic one (its per-type clone, or the shared body past the clone
+// budget). A `Vec`, array or tuple of `T -> int` at `int` is in
+// polyfn_local_escape_aggregate.coil.
+use tests::assert;
+use task::{Channel, channel};
+
+class Box {
+    pub n: int,
+}
+
+trait Bump<T> {
+    fn bump(T x) {}
+    fn val(T x) -> int {}
+}
+
+impl Bump for Box {
+    fn bump(Box b) {
+        b.n = b.n + 1;
+    }
+
+    fn val(Box b) -> int {
+        return b.n;
+    }
+}
+
+impl Bump for int {
+    fn bump(int x) {}
+
+    fn val(int x) -> int {
+        return x;
+    }
+}
+
+// The original's value * 100 + the written copy's.
+fn peek<U: Bump>(U x) -> int {
+    let y = x;
+    y.bump();
+    return x.val() * 100 + y.val();
+}
+
+class Holder<T> {
+    pub f: T -> int,
+}
+
+fn apply<T>(T -> int g, T x) -> int {
+    return g(x);
+}
+
+fn returned(int k) -> int -> int {
+    let f = peek;
+    return f;
+}
+
+fn returned_at<T: Bump>(T x) -> T -> int {
+    let f = peek;
+    return f;
+}
+
+fn in_field<T: Bump>(T x) -> Holder<T> {
+    let f = peek;
+    return new Holder(f);
+}
+
+fn in_vec(Box x) -> Vec<Box -> int> {
+    let f = peek;
+    let v: Vec<Box -> int> = Vec::new();
+    v.push(f);
+    return v;
+}
+
+fn in_vec_at<T: Bump>(T x) -> Vec<T -> int> {
+    let f = peek;
+    let v: Vec<T -> int> = Vec::new();
+    v.push(f);
+    return v;
+}
+
+fn in_array(int x) -> [int -> int; 1] {
+    let f = peek;
+    return [f];
+}
+
+fn in_array_at<T: Bump>(T x) -> [T -> int; 1] {
+    let f = peek;
+    return [f];
+}
+
+fn in_tuple(Box x) -> (Box -> int, int) {
+    let f = peek;
+    return (f, 1);
+}
+
+fn in_tuple_at<T: Bump>(T x) -> (T -> int, int) {
+    let f = peek;
+    return (f, 1);
+}
+
+fn in_record<T: Bump>(T x) -> T -> int {
+    let f = peek;
+    let r = { g: f };
+    return r.g;
+}
+
+fn in_option<T: Bump>(T x) -> Option<T -> int> {
+    let f = peek;
+    return Some(f);
+}
+
+fn in_lambda<T: Bump>(T x) -> T -> int {
+    let f = peek;
+    return fn (T y) use (f) => f(y);
+}
+
+fn lambda_returns<T: Bump>(T x) -> T -> int {
+    let f = peek;
+    let h = fn () use (f) => f;
+    return h();
+}
+
+fn passed<T: Bump>(T x) -> int {
+    let f = peek;
+    return apply(f, x);
+}
+
+fn sent<T: Bump>(T x) -> T -> int {
+    let f = peek;
+    let c: Channel<T -> int> = channel(1);
+    let _ = c.try_send(f);
+    return match c.try_recv() {
+        Ok(g) => g,
+        Err(_) => f,
+    };
+}
+
+gen fn yielded(Box x) {
+    let f = peek;
+    yield f;
+}
+
+gen fn yielded_int(int x) {
+    let f = peek;
+    yield f;
+}
+
+fn copied<T: Bump>(T x) -> T -> int {
+    let f = peek;
+    let g = f;
+    return g;
+}
+
+test("returned") {
+    let b = new Box(1);
+    let g = returned(1);
+    assert!(g(7) == 707);
+    let gb = returned_at(b);
+    assert!(gb(b) == 102);
+    let gi = returned_at(7);
+    assert!(gi(7) == 707);
+    assert!(b.n == 1);
+}
+
+test("stored in a class field") {
+    let b = new Box(1);
+    let h = in_field(b);
+    let g = h.f;
+    assert!(g(b) == 102);
+    let hi = in_field(7);
+    let gi = hi.f;
+    assert!(gi(7) == 707);
+    assert!(b.n == 1);
+}
+
+test("stored in a Vec, an array and a tuple") {
+    let b = new Box(1);
+    let v = in_vec(b);
+    let g = v[0];
+    assert!(g(b) == 102);
+    let va = in_vec_at(b);
+    let ga = va[0];
+    assert!(ga(b) == 102);
+    let a = in_array(7);
+    let h = a[0];
+    assert!(h(7) == 707);
+    let aa = in_array_at(b);
+    let ha = aa[0];
+    assert!(ha(b) == 102);
+    let (k, _) = in_tuple(b);
+    assert!(k(b) == 102);
+    let (ka, _) = in_tuple_at(b);
+    assert!(ka(b) == 102);
+    assert!(b.n == 1);
+}
+
+test("stored in a record and an Option") {
+    let b = new Box(1);
+    let g = in_record(b);
+    assert!(g(b) == 102);
+    let gi = in_record(7);
+    assert!(gi(7) == 707);
+    let o = in_option(b);
+    let r = match o {
+        Some(h) => h(b),
+        None => -1,
+    };
+    assert!(r == 102);
+    let oi = in_option(7);
+    let ri = match oi {
+        Some(h) => h(7),
+        None => -1,
+    };
+    assert!(ri == 707);
+    assert!(b.n == 1);
+}
+
+test("captured by a lambda") {
+    let b = new Box(1);
+    let g = in_lambda(b);
+    assert!(g(b) == 102);
+    let gi = in_lambda(7);
+    assert!(gi(7) == 707);
+    let h = lambda_returns(b);
+    assert!(h(b) == 102);
+    let hi = lambda_returns(7);
+    assert!(hi(7) == 707);
+    assert!(b.n == 1);
+}
+
+test("passed to a function-typed parameter") {
+    let b = new Box(1);
+    assert!(passed(b) == 102);
+    assert!(passed(7) == 707);
+    assert!(b.n == 1);
+}
+
+test("sent on a channel") {
+    let b = new Box(1);
+    let g = sent(b);
+    assert!(g(b) == 102);
+    let gi = sent(7);
+    assert!(gi(7) == 707);
+    assert!(b.n == 1);
+}
+
+test("yielded") {
+    let b = new Box(1);
+    let r = 0;
+    for g in yielded(b) {
+        r = g(b);
+    }
+    assert!(r == 102);
+    let ri = 0;
+    for g in yielded_int(7) {
+        ri = g(7);
+    }
+    assert!(ri == 707);
+    assert!(b.n == 1);
+}
+
+test("copied to another local") {
+    let b = new Box(1);
+    let g = copied(b);
+    assert!(g(b) == 102);
+    let gi = copied(7);
+    assert!(gi(7) == 707);
+    assert!(b.n == 1);
+}

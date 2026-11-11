@@ -4069,6 +4069,13 @@ impl Compiler {
             }
             let ret_ty = lam.ret.as_ref().ok_or("lambda-ret")?;
             let ret = Rep::Word(self.value_layout(ret_ty));
+            // A captured local bound from a generic function is the
+            // function's value made at the one type the lambda reads it at
+            // (#2658); read at several, the closure would need the call's
+            // dictionaries.
+            if lam.captures.iter().any(|&(outer, inner)| self.hir_polyfn_local_source(hir, emit, outer).is_some() && self.hir_capture_read_ty(lam, inner).is_err()) {
+                return Err("polyfn-capture");
+            }
             if let Some(reason) = refusal::refusal(lam, &self.checker) {
                 return Err(reason);
             }
@@ -4430,17 +4437,45 @@ impl Compiler {
                 emit.plan.calls.insert(i as u32, call);
             }
         }
-        // A local bound from a generic function, passed to a `forall`
-        // parameter: the function's value made for that `forall`, as its
-        // name there would be (#2637).
-        let relays: Vec<(u32, String)> = (0..hir.exprs.len() as u32)
-            .filter(|&i| {
-                let e = hir.expr(HirId(i));
-                matches!(e.kind, HirKind::Local(_)) && self.checker.rank_n_arg_at(e.span.0, e.span.1).is_some()
+        // A local bound from a generic function, read as a value (not
+        // called): the function's value made at the type it is read at, as
+        // its name there would be, for a `forall` parameter it is passed to
+        // (#2637) or wherever it goes (returned, stored, passed, sent; a
+        // copy `let g = f` in turn, #2658). The value the `let` made serves
+        // the calls through the local, which pass its dictionaries.
+        // A local assigned again holds another value, which is no
+        // function's to make.
+        let callees: HashSet<u32> = hir
+            .exprs
+            .iter()
+            .filter_map(|e| match &e.kind {
+                HirKind::Call { callee: Callee::Value(f), .. } => Some(f.0),
+                _ => None,
             })
-            .filter_map(|i| Some((i, self.hir_polyfn_source(hir, &emit, HirId(i))?)))
             .collect();
-        emit.plan.polyfns.extend(relays);
+        let assigned: HashSet<LocalId> = hir
+            .exprs
+            .iter()
+            .filter_map(|e| match &e.kind {
+                HirKind::Assign { place, .. } => match hir.expr(*place).kind {
+                    HirKind::Local(l) => Some(l),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        loop {
+            let relays: Vec<(u32, String)> = (0..hir.exprs.len() as u32)
+                .filter(|i| {
+                    !callees.contains(i) && !emit.plan.polyfns.contains_key(i) && matches!(hir.expr(HirId(*i)).kind, HirKind::Local(l) if !assigned.contains(&l))
+                })
+                .filter_map(|i| Some((i, self.hir_polyfn_source(hir, &emit, HirId(i))?)))
+                .collect();
+            if relays.is_empty() {
+                break;
+            }
+            emit.plan.polyfns.extend(relays);
+        }
         Ok(emit)
     }
 
@@ -9245,6 +9280,11 @@ impl Compiler {
         let HirKind::Local(local) = hir.expr(f).kind else {
             return None;
         };
+        self.hir_polyfn_local_source(hir, emit, local)
+    }
+
+    /// The generic function `PolyFn` local `local` was bound from.
+    fn hir_polyfn_local_source(&self, hir: &HirBody, emit: &HirEmit, local: LocalId) -> Option<String> {
         hir.exprs.iter().find_map(|e| match &e.kind {
             HirKind::Let { local: l, init: Some(init) } if *l == local => emit.plan.polyfns.get(&init.0).cloned(),
             _ => None,
