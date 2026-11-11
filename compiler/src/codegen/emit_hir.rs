@@ -5873,14 +5873,19 @@ impl Compiler {
         if concrete.iter().any(Ty::has_free_var) {
             return None;
         }
-        let ground = self
-            .checker
+        let ground = self.ground_structural_fqn(class, &concrete, method)?;
+        Some((concrete, ground))
+    }
+
+    /// `method` of `class`'s ground structural instance at `concrete` (a
+    /// shape's, no context), where its entry exists.
+    pub(super) fn ground_structural_fqn(&self, class: &str, concrete: &[Ty], method: &str) -> Option<String> {
+        self.checker
             .generics()
-            .find_instance(class, &concrete)
+            .find_instance(class, concrete)
             .filter(|inst| inst.context.is_empty())
             .and_then(|inst| inst.method_fqns.get(method).cloned())
-            .filter(|f| self.functions.contains_key(f) || self.fn_entry_labels.contains_key(f))?;
-        Some((concrete, ground))
+            .filter(|f| self.functions.contains_key(f) || self.fn_entry_labels.contains_key(f))
     }
 
     fn resolve_hir_instance_method(
