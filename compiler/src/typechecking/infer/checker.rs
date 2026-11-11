@@ -227,6 +227,7 @@ impl Checker {
             impl_owner: None,
             enums: BTreeMap::new(),
             enum_tags: BTreeMap::new(),
+            enum_tag_leaves: HashMap::new(),
             enum_payloads: BTreeMap::new(),
             enum_arities: BTreeMap::new(),
             enum_scalar: BTreeMap::new(),
@@ -815,7 +816,7 @@ impl Checker {
             tag_map.insert(vn.clone(), i as u32);
         }
         self.enums.insert(name.clone(), variant_names);
-        self.enum_tags.insert(name.clone(), tag_map);
+        self.insert_enum_tags(name.clone(), tag_map);
         self.enum_payloads.insert(name.clone(), payloads);
         self.enum_arities.insert(name, arities);
     }
@@ -863,7 +864,7 @@ impl Checker {
                 .collect::<BTreeMap<_, _>>();
             let name = name.to_string();
             self.enums.insert(name.clone(), variant_names);
-            self.enum_tags.insert(name.clone(), tag_map);
+            self.insert_enum_tags(name.clone(), tag_map);
             self.enum_payloads.insert(name.clone(), payloads);
             self.enum_arities.insert(name, arities);
         }
@@ -887,7 +888,7 @@ impl Checker {
             tag_map.insert(vn.clone(), i as u32);
         }
         self.enums.insert(name.clone(), variant_names);
-        self.enum_tags.insert(name.clone(), tag_map);
+        self.insert_enum_tags(name.clone(), tag_map);
         self.enum_payloads.insert(name.clone(), payloads);
         self.enum_arities.insert(name, arities);
     }
@@ -905,7 +906,7 @@ impl Checker {
             tag_map.insert(vn.clone(), i as u32);
         }
         self.enums.insert(name.clone(), variant_names);
-        self.enum_tags.insert(name.clone(), tag_map);
+        self.insert_enum_tags(name.clone(), tag_map);
         self.enum_payloads.insert(name.clone(), payloads);
         self.enum_arities.insert(name, arities);
     }
@@ -933,7 +934,7 @@ impl Checker {
             tag_map.insert(vn.clone(), i as u32);
         }
         self.enums.insert(name.clone(), variant_names);
-        self.enum_tags.insert(name.clone(), tag_map);
+        self.insert_enum_tags(name.clone(), tag_map);
         self.enum_payloads.insert(name.clone(), payloads);
         self.enum_arities.insert(name, vec![0, 1]);
     }
@@ -971,7 +972,7 @@ impl Checker {
                 tag_map.insert(vn.clone(), i as u32);
             }
             self.enums.insert(name.clone(), variant_names);
-            self.enum_tags.insert(name.clone(), tag_map);
+            self.insert_enum_tags(name.clone(), tag_map);
             self.enum_payloads.insert(name.clone(), payloads);
             self.enum_arities.insert(name, arities);
         }
@@ -995,7 +996,7 @@ impl Checker {
             tag_map.insert(vn.clone(), i as u32);
         }
         self.enums.insert(name.clone(), variant_names);
-        self.enum_tags.insert(name.clone(), tag_map);
+        self.insert_enum_tags(name.clone(), tag_map);
         self.enum_payloads.insert(name.clone(), payloads);
         self.enum_arities.insert(name, arities);
     }
@@ -1016,7 +1017,7 @@ impl Checker {
         let mut tag_map = BTreeMap::new();
         tag_map.insert(BUILTIN_FFI_ERROR_VARIANT.to_string(), 0u32);
         self.enums.insert(name.clone(), variant_names);
-        self.enum_tags.insert(name.clone(), tag_map);
+        self.insert_enum_tags(name.clone(), tag_map);
         self.enum_payloads.insert(name.clone(), payloads);
         self.enum_arities.insert(name, arities);
     }
@@ -17561,7 +17562,7 @@ impl Checker {
                     // drop the compiler registration so the user enum can
                     // take over.
                     self.enums.remove(&name_str);
-                    self.enum_tags.remove(&name_str);
+                    self.remove_enum_tags(&name_str);
                     self.enum_payloads.remove(&name_str);
                     self.enum_arities.remove(&name_str);
                     self.enum_scalar.remove(&name_str);
@@ -17635,7 +17636,7 @@ impl Checker {
                 };
 
                 self.enums.insert(name_str.clone(), variant_names);
-                self.enum_tags.insert(name_str.clone(), tag_map);
+                self.insert_enum_tags(name_str.clone(), tag_map);
                 self.enum_payloads.insert(name_str.clone(), payloads);
                 self.enum_arities.insert(name_str.clone(), arities);
                 self.finish_scalar_enum(
@@ -20273,14 +20274,29 @@ impl Checker {
         if name.contains("::") {
             return None;
         }
-        let suffix = format!("::{name}");
-        let mut hits: Vec<String> = self
-            .enum_tags
-            .keys()
-            .filter(|k| k.ends_with(&suffix))
-            .cloned()
-            .collect();
-        if hits.len() == 1 { hits.pop() } else { None }
+        // The one key `…::name`, if one.
+        match self.enum_tag_leaves.get(name) {
+            Some(keys) if keys.len() == 1 => keys.first().cloned(),
+            _ => None,
+        }
+    }
+
+    /// Register enum `name`'s variant tags.
+    fn insert_enum_tags(&mut self, name: String, tags: BTreeMap<String, u32>) {
+        if let Some((_, leaf)) = name.rsplit_once("::") {
+            self.enum_tag_leaves.entry(leaf.to_string()).or_default().insert(name.clone());
+        }
+        self.enum_tags.insert(name, tags);
+    }
+
+    /// Drop enum `name`'s variant tags.
+    fn remove_enum_tags(&mut self, name: &str) {
+        if let Some((_, leaf)) = name.rsplit_once("::")
+            && let Some(keys) = self.enum_tag_leaves.get_mut(leaf)
+        {
+            keys.remove(name);
+        }
+        self.enum_tags.remove(name);
     }
 
     /// `Option` / `Result`: the core prelude's lang enums, keyed bare.
