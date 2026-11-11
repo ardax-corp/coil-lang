@@ -38,6 +38,42 @@ drain mark + sweep so `gc::collect()` still reclaims in one call (`gc_churn`).
 Objects do not move during mark or sweep. Evacuation runs between cycles
 ([gc-evacuation.md](gc-evacuation.md)).
 
+## Pacing
+
+A safepoint with the collector idle starts a major cycle when one of two
+budgets is spent (`Heap::should_collect_old`):
+
+- **Old bytes.** Old-space bytes pass `gc_next_threshold`, which the end
+  of each sweep sets to what the mark kept times the growth factor (2, or
+  4 while most of the heap survives), never under 1 MiB.
+- **Held chunks.** Nursery chunks held for pinned survivors
+  ([escape-memory.md](escape-memory.md), step 4) reach
+  `held_budget`: the held chunks the last major found live plus a
+  nursery's worth or that many again, whichever is more
+  (`Heap::set_held_after_major`). Only a major frees a held object, so
+  stale pins (a dead frame word) still get their chunks back after a
+  nursery's worth.
+
+Both budgets grow with what the last major kept, so the marking a run
+does is linear in what it allocates, and each bounds its part of the heap
+to about twice the live part. A fixed held budget broke this (#2350): a
+stdlib `HashMap`'s values sit in a `Vec<V>` that a shared generic body
+made (no per-type clone), so its elements are words of unknown kind and
+every minor pinned every value. A generic `Bag<V>` at `--clone-budget 0`
+does the same.
+Once 32 chunks were held and live, every safepoint started a major that
+marked the whole map again. Filling a `HashMap<int, Node>` (release,
+`instructions:u`, best of 3, peak RSS):
+
+| entries | majors | before | after |
+|---|---|---|---|
+| 100,000 | 235 → 2 | 6.37 G, 310 ms, 25 MB | 0.48 G, 37 ms, 27 MB |
+| 400,000 | 678 → 3 | 42.4 G, 2374 ms, 63 MB | 2.01 G, 118 ms, 70 MB |
+| 1,600,000 | 1081 → 4 | 176.3 G, 10393 ms, 210 MB | 8.06 G, 425 ms, 230 MB |
+
+Instructions now grow as N^1.02. `examples/perf/gc_map_fill.coil` is
+the bench.
+
 ## Memory return
 
 After a sweep cycle the slab gives back pages of chunks idle for a whole
