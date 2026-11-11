@@ -3458,6 +3458,9 @@ impl Lower<'_> {
                 }
                 Ok(Val::V(self.b.ins_const(c).map_err(mir)?))
             }
+            // A generic function's value made where a local bound from it
+            // is passed to a `forall` parameter (#2637).
+            HirKind::Local(_) if let Some(f) = self.site(id).fn_value.as_ref() => self.fn_value(id, &f.clone()),
             HirKind::Local(local) if let Some((lo, hi, lo_ty, hi_ty)) = self.pair_local(*local) => Ok(Val::Pair(
                 self.b.use_local(lo, lo_ty).map_err(mir)?,
                 self.b.use_local(hi, hi_ty).map_err(mir)?,

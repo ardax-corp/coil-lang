@@ -80,9 +80,12 @@ Where the word comes from:
   variables and has bit `from`, and passes no word for it. A type and one
   that renames it into another declared order list their variables in the
   same order, so a value passed on to a `forall` of another order keeps
-  its bits. Passed on to a less general `forall` (fewer variables), the
-  count differs and the bits stay clear (#2637). A function value read at a
-  ground type captures no such word.
+  its bits. A local bound from a generic function and passed to a
+  `forall` parameter is the function's value made there for that `forall`,
+  as its name would be (#2637). A `forall` parameter passed on to a
+  `forall` that is not its own type renamed (a less general one) is refused
+  (E0801 `forall-relay`): the value cannot read that type's order (#2637). A
+  function value read at a ground type captures no such word.
 
 A ground call passes a constant; a shared caller forwards its own bit for a
 type parameter and a constant for a type with a known head (`Vec<T>` is 1,

@@ -4430,7 +4430,47 @@ impl Compiler {
                 emit.plan.calls.insert(i as u32, call);
             }
         }
+        // A local bound from a generic function, passed to a `forall`
+        // parameter: the function's value made for that `forall`, as its
+        // name there would be (#2637).
+        let relays: Vec<(u32, String)> = (0..hir.exprs.len() as u32)
+            .filter(|&i| {
+                let e = hir.expr(HirId(i));
+                matches!(e.kind, HirKind::Local(_)) && self.checker.rank_n_arg_at(e.span.0, e.span.1).is_some()
+            })
+            .filter_map(|i| Some((i, self.hir_polyfn_source(hir, &emit, HirId(i))?)))
+            .collect();
+        emit.plan.polyfns.extend(relays);
         Ok(emit)
+    }
+
+    /// Whether `id`, a `forall` parameter (or a local of a `forall` type),
+    /// is passed to a `forall` parameter its calls cannot serve (#2637):
+    /// one whose type is not its own with the variables renamed, so the
+    /// `kinds` bits and dictionaries a call through it passes are not in
+    /// the order the value reads them.
+    fn hir_forall_relay_refused(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> bool {
+        let e = hir.expr(id);
+        if emit.plan.polyfns.contains_key(&id.0) {
+            return false;
+        }
+        let Some(Ty::Forall { bounds: to_bounds, constraints: to_cons, body: to_body }) = self.checker.rank_n_arg_at(e.span.0, e.span.1).map(|t| crate::typechecking::ty::strip_readonly(&t).clone()) else {
+            return false;
+        };
+        let Some(Ty::Forall { bounds, constraints, body }) = Self::hir_forall_param_ty(hir, &self.checker, id) else {
+            return false;
+        };
+        let (from, to) = (kinds::value_kinds_order(&bounds, &body), kinds::value_kinds_order(&to_bounds, &to_body));
+        if from.len() != to.len() {
+            return true;
+        }
+        let rename: HashMap<_, _> = from.iter().copied().zip(to.iter().map(|&v| Ty::Var(v))).collect();
+        let renamed = |t: &Ty| t.subst_vars(&|v| rename.get(&v).cloned());
+        let cons = |bounds: &[_], body: &Ty, cs: &[crate::typechecking::ty::Constraint]| kinds::value_constraint_order(bounds, body, cs);
+        let (mine, theirs) = (cons(&bounds, &body, &constraints), cons(&to_bounds, &to_body, &to_cons));
+        renamed(&body) != *to_body
+            || mine.len() != theirs.len()
+            || mine.iter().zip(&theirs).any(|(m, t)| m.class != t.class || m.args.iter().map(renamed).ne(t.args.iter().cloned()))
     }
 
     /// `emit` with `hir`'s tail calls marked, once every value edge is
@@ -9989,6 +10029,7 @@ impl Compiler {
 
     fn hir_check_value_level(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Check {
         match &hir.expr(id).kind {
+            HirKind::Local(_) if self.hir_forall_relay_refused(hir, emit, id) => return Err("forall-relay"),
             HirKind::Lit(_) | HirKind::Local(_) | HirKind::Global { .. } | HirKind::Lambda { .. } => {}
             // A pair local has no one word to step.
             HirKind::Assign { place, .. } if hir.expr(id).flags.contains(HirFlags::ADJUST) => {
