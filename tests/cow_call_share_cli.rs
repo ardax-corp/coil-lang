@@ -194,3 +194,38 @@ fn main() {{
     let n = copies("generic", &src);
     assert!(n < 4, "{n} copies for {N} calls");
 }
+
+#[test]
+fn a_static_method_storing_its_argument_copies_nothing() {
+    let src = format!(
+        "
+class S {{
+    pub a: Vec<int>,
+    pub b: Vec<int>,
+}}
+class H {{
+    pub s: S,
+    pub i: int,
+}}
+impl H {{
+    pub static fn wrap(S s, int i) -> H {{
+        return new H(s, i);
+    }}
+}}
+fn main() {{
+    let s = new S(Vec::new(), Vec::new());
+    s.a.push(1);
+    let t = 0;
+    let i = 0;
+    while i < {N} {{
+        let h = H::wrap(s, i);
+        t = t + h.s.a[0];
+        i = i + 1;
+    }}
+    if t != {N} {{ panic \"wrong sum\"; }}
+}}
+"
+    );
+    let n = copies("static", &src);
+    assert!(n < 4, "{n} copies for {N} calls");
+}

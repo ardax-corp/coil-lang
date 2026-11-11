@@ -387,7 +387,16 @@ impl ProgramEffects {
         let current = checker.current_module_name() == module_path;
         let def = def.or_else(|| current.then(|| checker.def_id_of(name)).flatten());
         if let Some(def) = def {
-            return self.fns.get(&def).copied();
+            if let Some(&s) = self.fns.get(&def) {
+                return Some(s);
+            }
+            // `fns` holds functions only: a static method's def (`H::wrap`)
+            // is found by its body's name below, as the solver finds it
+            // (`Cx::known_named`). A function with no summary is unknown.
+            use crate::typechecking::DefKind;
+            if checker.def_interner().info(def).is_some_and(|info| matches!(info.kind, DefKind::Fn | DefKind::Ffi)) {
+                return None;
+            }
         }
         if let Some(&s) = self.by_name.get(name).or_else(|| self.by_name.get(format!("{module_path}::{name}").as_str())) {
             return Some(s);

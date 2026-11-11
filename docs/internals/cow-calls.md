@@ -20,7 +20,12 @@ docs under `language/memory`. View classes are covered in
 
 Code that is not known (`ArgUse` `unknown`: a function value, a trait
 call through a dictionary) counts as returning and writing every
-argument, with `inner` set for every argument.
+argument, with `inner` set for every argument. The rewrite reads a
+call's summary as the solver does (`ProgramEffects::call_summary`): a
+function by its def, a static method (`H::wrap(s, i)`), whose def names
+no function summary, by its body's name (#2222). Before #2222 such a call
+was unknown, so its argument was made unique before every call and its
+result shared, a copy per call once the argument was shared.
 
 ## The callee
 
