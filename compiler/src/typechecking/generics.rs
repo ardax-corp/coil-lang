@@ -342,14 +342,70 @@ fn head_key(ty: &Ty) -> Option<HeadKey> {
     })
 }
 
+/// `ty` with what [`unify_with`] does not tell apart erased, when it has
+/// no variable, `never` or `forall` in it: two such types unify only if
+/// their keys are equal. A `Sum` is its name (`Con`), `readonly T` is `T`,
+/// a constructor its owner, `()` is `unit`, an array has no length and a
+/// record's fields are in name order.
+fn ground_key(ty: &Ty) -> Option<Ty> {
+    let all = |tys: &[Ty]| tys.iter().map(ground_key).collect::<Option<Vec<_>>>();
+    Some(match ty {
+        Ty::Var(_) | Ty::Never | Ty::Forall { .. } => return None,
+        Ty::Readonly(inner) => return ground_key(inner),
+        Ty::Constructor { owner, .. } => return ground_key(owner),
+        Ty::Con(name) | Ty::Sum { name, .. } => Ty::Con(name.clone()),
+        Ty::Tuple(items) if items.is_empty() => Ty::Con(super::ty::UNIT.into()),
+        Ty::Tuple(items) => Ty::Tuple(all(items)?),
+        Ty::Fun(a, b) => Ty::Fun(Box::new(ground_key(a)?), Box::new(ground_key(b)?)),
+        Ty::App(head, args) => Ty::App(Box::new(ground_key(head)?), all(args)?),
+        Ty::Array { element, .. } => Ty::Array {
+            element: Box::new(ground_key(element)?),
+            length: super::ty::ArrayLength::Dynamic,
+        },
+        Ty::Record { fields } => {
+            let mut fields = fields
+                .iter()
+                .map(|(name, ty)| Some((name.clone(), ground_key(ty)?)))
+                .collect::<Option<Vec<_>>>()?;
+            fields.sort_by(|a, b| a.0.cmp(&b.0));
+            Ty::Record { fields }
+        }
+        Ty::Existential { class } => Ty::Existential { class: class.clone() },
+    })
+}
+
 /// One class's instances, by position in [`Generics::instances`], each
-/// list ascending.
+/// list ascending. An instance is in `all` and in one of `open`,
+/// `by_head` or `ground` (and then `ground_by_head`), by its first
+/// argument.
 #[derive(Clone, Debug, Default)]
 struct ClassInstances {
     all: Vec<usize>,
-    /// Instances whose first argument's head is open (or with no argument).
+    /// The first argument's head is open (or there is no argument).
     open: Vec<usize>,
+    /// The head is known and the argument has no [`ground_key`].
     by_head: HashMap<HeadKey, Vec<usize>>,
+    /// The argument has a [`ground_key`]: by that key.
+    ground: HashMap<Ty, Vec<usize>>,
+    /// Those of `ground`, by head.
+    ground_by_head: HashMap<HeadKey, Vec<usize>>,
+}
+
+/// Where an instance argument (or a goal's) files in a [`ClassInstances`].
+enum Slot {
+    Open,
+    Head(HeadKey),
+    Ground(HeadKey, Ty),
+}
+
+fn slot_of(first: Option<&Ty>) -> Slot {
+    match first.and_then(|ty| Some((ty, head_key(ty)?))) {
+        None => Slot::Open,
+        Some((ty, head)) => match ground_key(ty) {
+            Some(key) => Slot::Ground(head, key),
+            None => Slot::Head(head),
+        },
+    }
 }
 
 /// Indexes over [`Generics::instances`], kept in step with it by every
@@ -378,9 +434,13 @@ impl InstanceIndex {
     fn add(&mut self, idx: usize, inst: &InstanceDef) {
         let class = self.by_class.entry(inst.class.clone()).or_default();
         insert_sorted(&mut class.all, idx);
-        match inst.args.first().and_then(head_key) {
-            Some(key) => insert_sorted(class.by_head.entry(key).or_default(), idx),
-            None => insert_sorted(&mut class.open, idx),
+        match slot_of(inst.args.first()) {
+            Slot::Open => insert_sorted(&mut class.open, idx),
+            Slot::Head(head) => insert_sorted(class.by_head.entry(head).or_default(), idx),
+            Slot::Ground(head, key) => {
+                insert_sorted(class.ground_by_head.entry(head).or_default(), idx);
+                insert_sorted(class.ground.entry(key).or_default(), idx);
+            }
         }
         for fqn in inst.method_fqns.values() {
             insert_sorted(self.by_method.entry(fqn.clone()).or_default(), idx);
@@ -390,13 +450,20 @@ impl InstanceIndex {
     fn remove(&mut self, idx: usize, inst: &InstanceDef) {
         if let Some(class) = self.by_class.get_mut(&inst.class) {
             remove_sorted(&mut class.all, idx);
-            match inst.args.first().and_then(head_key) {
-                Some(key) => {
-                    if let Some(list) = class.by_head.get_mut(&key) {
+            let from = |lists: &mut HashMap<_, Vec<usize>>, key| {
+                if let Some(list) = lists.get_mut(&key) {
+                    remove_sorted(list, idx);
+                }
+            };
+            match slot_of(inst.args.first()) {
+                Slot::Open => remove_sorted(&mut class.open, idx),
+                Slot::Head(head) => from(&mut class.by_head, head),
+                Slot::Ground(head, key) => {
+                    from(&mut class.ground_by_head, head);
+                    if let Some(list) = class.ground.get_mut(&key) {
                         remove_sorted(list, idx);
                     }
                 }
-                None => remove_sorted(&mut class.open, idx),
             }
         }
         for fqn in inst.method_fqns.values() {
@@ -407,23 +474,16 @@ impl InstanceIndex {
     }
 }
 
-/// Positions from two ascending, disjoint lists, in ascending order.
+/// Positions from ascending, disjoint lists, in ascending order.
 struct MergedPositions<'a> {
-    a: &'a [usize],
-    b: &'a [usize],
+    lists: [&'a [usize]; 3],
 }
 
 impl Iterator for MergedPositions<'_> {
     type Item = usize;
 
     fn next(&mut self) -> Option<usize> {
-        let take_a = match (self.a.first(), self.b.first()) {
-            (Some(x), Some(y)) => x < y,
-            (Some(_), None) => true,
-            (None, Some(_)) => false,
-            (None, None) => return None,
-        };
-        let list = if take_a { &mut self.a } else { &mut self.b };
+        let list = self.lists.iter_mut().filter(|l| !l.is_empty()).min_by_key(|l| l[0])?;
         let (&first, rest) = list.split_first()?;
         *list = rest;
         Some(first)
@@ -546,22 +606,26 @@ impl Generics {
     }
 
     /// The instances of `class` whose first argument could unify with
-    /// `first` ([`head_key`]), in declaration order: those under its head
-    /// and those with an open head. Every instance of `class` when `first`
+    /// `first`, in declaration order: those with an open head, the others
+    /// under its [`head_key`] and, for a goal with a [`ground_key`], only
+    /// the ground ones at that key. Every instance of `class` when `first`
     /// is open or absent. A superset of the instances that unify.
     pub fn instance_candidates<'a>(
         &'a self,
         class: &str,
         first: Option<&Ty>,
     ) -> impl Iterator<Item = (usize, &'a InstanceDef)> + 'a {
-        let merged = match (self.index.by_class.get(class), first.and_then(head_key)) {
-            (None, _) => MergedPositions { a: &[], b: &[] },
-            (Some(c), None) => MergedPositions { a: &c.all, b: &[] },
-            (Some(c), Some(key)) => MergedPositions {
-                a: c.by_head.get(&key).map_or(&[][..], Vec::as_slice),
-                b: &c.open,
-            },
+        fn get<'a, K: std::hash::Hash + Eq>(lists: &'a HashMap<K, Vec<usize>>, key: &K) -> &'a [usize] {
+            lists.get(key).map_or(&[], Vec::as_slice)
+        }
+        let lists = match (self.index.by_class.get(class), slot_of(first)) {
+            (None, _) => [&[][..]; 3],
+            (Some(c), Slot::Open) => [&c.all[..], &[], &[]],
+            // A ground goal meets a ground instance only at its own key.
+            (Some(c), Slot::Ground(head, key)) => [&c.open, get(&c.by_head, &head), get(&c.ground, &key)],
+            (Some(c), Slot::Head(head)) => [&c.open, get(&c.by_head, &head), get(&c.ground_by_head, &head)],
         };
+        let merged = MergedPositions { lists };
         merged.map(|idx| (idx, &self.instances[idx]))
     }
 
@@ -1339,5 +1403,18 @@ mod tests {
         assert!(generics.instance_of_method("Show__A__show").is_none());
         assert_eq!(generics.instance_of_method("Show__C__show").map(|i| &i.args), Some(&vec![Ty::Con("C".into())]));
         assert_eq!(generics.class_instances("Show").map(|(i, _)| i).collect::<Vec<_>>(), vec![a, open, opt, b]);
+
+        // Ground tuples: a ground goal meets only its own key's (a `Sum`
+        // goal item is its name), an open one every tuple of the arity.
+        let tup = |items: Vec<Ty>| Ty::Tuple(items);
+        let named = |n: &str| Ty::Con(n.into());
+        let is = generics.push_instance(show_instance(tup(vec![int(), string()]), "Show__(int, string)__show"));
+        let e = generics.push_instance(show_instance(tup(vec![int(), named("E")]), "Show__(int, E)__show"));
+        let ti = generics.push_instance(show_instance(tup(vec![Ty::Var(TyVarId(8)), int()]), "Show__(T, int)__show"));
+        let sum_e = Ty::Sum { name: "E".into(), variants: Vec::new() };
+        assert_eq!(positions(&generics, Some(&tup(vec![int(), string()]))), vec![open, is, ti]);
+        assert_eq!(positions(&generics, Some(&tup(vec![int(), sum_e]))), vec![open, e, ti]);
+        assert_eq!(positions(&generics, Some(&tup(vec![Ty::Var(TyVarId(9)), string()]))), vec![open, is, e, ti]);
+        assert_eq!(positions(&generics, Some(&tup(vec![int(), int(), int()]))), vec![open]);
     }
 }
