@@ -177,6 +177,13 @@ words:
   (`Compiler::stack_slot_ty`, #2581).
 - `hir_method_clone` clones niche types too: the per-type clone is a cost
   decision (speed), never a correctness one.
+- A generic generator (`gen fn f<T>`, a generic class's `gen fn` method)
+  follows the same rules (#2673): its per-type clone is a generator too
+  (`coroutine_fns` holds the clone's name), and past the budget the call
+  makes the shared body's coroutine with its dictionaries and `kinds`
+  word. A `yield` moves the body's word of `T` as it is, and a `resume`
+  reads it as the ground type's word, the one a ground generator yields
+  (a two-word value boxed), so the handle needs no rebuild at the call.
 - A shared entry takes one more word after its dictionaries, its `kinds`
   mask: which of its type parameters are copy-on-write objects at the call,
   which its share and unique ops on a bare `V` test (#2506,
