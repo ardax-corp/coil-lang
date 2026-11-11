@@ -10,13 +10,13 @@
 
 use rkyv::{Archive, Deserialize, Serialize};
 
-use crate::debug::{DebugLine, DebugLoc, ProgramDebug};
+use crate::debug::{DebugLine, ProgramDebug, SpanLoc};
 
 /// Archive ABI major. Bump (and reset minor to 0) on incompatible layout/opcode changes.
 pub const ARCHIVE_MAJOR: u16 = 8;
 
 /// Archive minor. Bump on an additive change to the format.
-pub const ARCHIVE_MINOR: u16 = 0;
+pub const ARCHIVE_MINOR: u16 = 1;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -319,8 +319,9 @@ pub struct ArchivedProgram {
     pub strings: Vec<String>,
     /// Paths in stable order (project-relative when compiled from disk).
     pub source_files: Vec<String>,
-    /// Each location the bodies use, sorted.
-    pub debug_locs: Vec<DebugLoc>,
+    /// Each location the bodies use, sorted (the spans: the inline scopes
+    /// are in the MIR section, `common::section_inline_scopes`).
+    pub debug_locs: Vec<SpanLoc>,
     /// Line and column of each of [`Self::debug_locs`].
     pub debug_lines: Vec<DebugLine>,
     /// Function names by entry, for panic backtraces.
@@ -351,9 +352,10 @@ impl ArchivedProgram {
     pub fn debug_bundle(&self) -> ProgramDebug {
         ProgramDebug {
             source_files: self.source_files.clone(),
-            debug_locs: self.debug_locs.clone(),
+            debug_locs: self.debug_locs.iter().map(|&l| l.into()).collect(),
             fn_symbols: self.fn_symbols.clone(),
             debug_lines: self.debug_lines.clone(),
+            inline_scopes: crate::section_inline_scopes(&self.native_mir),
         }
     }
 
@@ -362,7 +364,7 @@ impl ArchivedProgram {
         let debug = debug.with_level(level);
         self.source_files = debug.source_files;
         self.fn_symbols = debug.fn_symbols;
-        self.debug_locs = debug.debug_locs;
+        self.debug_locs = debug.debug_locs.into_iter().map(SpanLoc::from).collect();
         self.debug_lines = debug.debug_lines;
     }
 }

@@ -419,7 +419,7 @@ fn clones_of_another_modules_methods_compile_the_same_every_time() {
         let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).expect("compiles");
         let debug = pipeline.program_debug_full();
         let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
-        compiler::native_mir::archive::encode(&compiled.bodies, &pcs)
+        compiler::native_mir::archive::encode(&compiled.bodies, &pcs, &[])
     };
     let first = archive();
     for _ in 0..4 {

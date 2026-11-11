@@ -173,6 +173,8 @@ pub struct HirBody {
     /// `mut e` that borrows nothing (E0150): outside a `let` / `for`
     /// binding (`None`), or binding a scalar, which is copied (its type).
     pub stray_muts: Vec<(Span, Option<String>)>,
+    /// The callees inlining spliced in ([`HirExpr::scope`]).
+    pub inline_scopes: Vec<HirInlineScope>,
 }
 
 impl HirBody {
@@ -310,7 +312,7 @@ impl HirBody {
 
     /// Append a node the compiler made: one word, no AST node, no flags.
     pub fn push_new(&mut self, kind: HirKind, ty: Option<Ty>, span: Span) -> HirId {
-        self.push(HirExpr { kind, ty, layout: Layout::Word, span, node: None, flags: HirFlags::default() })
+        self.push(HirExpr { kind, ty, layout: Layout::Word, span, node: None, flags: HirFlags::default(), scope: 0 })
     }
 
     /// A fresh compiler temp named `name`.
@@ -498,6 +500,26 @@ pub struct HirExpr {
     /// The AST node this was built from; `None` for desugaring temps.
     pub node: Option<NodeId>,
     pub flags: HirFlags,
+    /// `0`: code of the body itself. `k`: inlining spliced it in from the
+    /// callee [`HirBody::inline_scopes`]`[k - 1]` names (#2578).
+    pub scope: u32,
+}
+
+/// A callee inlining spliced into a body ([`HirExpr::scope`]): its name,
+/// the call it replaced and the scope that call was in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirInlineScope {
+    pub callee: String,
+    /// The call's span, in the body's file.
+    pub call: Span,
+    /// The call's own [`HirExpr::scope`].
+    pub call_scope: u32,
+    /// Where the callee's result is computed: its `return` statement (the
+    /// spliced result is lowered inside the caller's statement, with no
+    /// statement of its own).
+    pub ret: Span,
+    /// The spliced nodes have the call's span (another module's callee).
+    pub at_call: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

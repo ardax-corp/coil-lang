@@ -381,11 +381,7 @@ mod tests {
     }
 
     fn loc(file: u32, start: u32) -> DebugLoc {
-        DebugLoc {
-            file,
-            start_byte: start,
-            end_byte: start + 1,
-        }
+        DebugLoc::span(file, start, start + 1)
     }
 
     #[test]
@@ -426,6 +422,7 @@ mod tests {
                 },
             ],
             debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
         };
         let mut cov = Coverage::new(cwd.clone(), false);
         let prog = cov.register_program(&debug, &test_fn_ranges(&debug, [1]));
@@ -469,6 +466,7 @@ mod tests {
                 },
             ],
             debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
         };
         let mut cov = Coverage::new(cwd.clone(), true);
         let exclude = test_fn_ranges(&debug, [2]);

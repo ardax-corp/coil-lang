@@ -655,6 +655,11 @@ pub trait LowerCx {
     fn coro_close_native(&self) -> Option<u16>;
     /// Source file of the body, for statement locations.
     fn file(&self) -> Option<u32>;
+    /// The program's id ([`DebugLoc::scope`]) of inline scope `scope`.
+    fn inline_scope(&self, scope: common::InlineScope) -> u32 {
+        let _ = scope;
+        0
+    }
     /// A debugger reads the body's locals from their frame words.
     fn debugger(&self) -> bool;
     /// A coverage compile: each source line keeps the code it emits.
@@ -1161,6 +1166,8 @@ struct Lower<'a> {
     preset: HashMap<u32, Val>,
     /// The `x++` lowered as a plain store (its value read separately).
     adjust_store: Option<HirId>,
+    /// The program's id of each of the body's inline scopes, once asked.
+    scopes: Vec<Option<u32>>,
 }
 
 impl<'a> Lower<'a> {
@@ -1209,6 +1216,7 @@ impl<'a> Lower<'a> {
             kinds_load: None,
             preset: HashMap::new(),
             adjust_store: None,
+            scopes: vec![None; hir.inline_scopes.len()],
         }
     }
 }
@@ -3306,7 +3314,28 @@ impl Lower<'_> {
     /// Lower `id` for its effect.
     fn effect(&mut self, id: HirId) -> Result<bool, Refusal> {
         // Walks recurse through here once per level of the tree.
-        common::deep_stack(|| self.effect_level(id))
+        common::deep_stack(|| self.in_scope(id, |l| l.effect_level(id)))
+    }
+
+    /// `f` lowering node `id`, located in `id`'s inline scope when it is not
+    /// the one of the code around it: an inlined callee's result, lowered
+    /// inside the caller's statement, is at the callee's `return` (#2578).
+    fn in_scope<T>(&mut self, id: HirId, f: impl FnOnce(&mut Self) -> Result<T, Refusal>) -> Result<T, Refusal> {
+        let k = self.hir.expr(id).scope;
+        let outer = self.b.pending_loc;
+        let Some(file) = self.cx.file().filter(|_| k != 0 && outer.is_known()) else { return f(self) };
+        let scope = self.program_scope(file, k);
+        if scope == outer.scope {
+            return f(self);
+        }
+        let (start, end) = self.hir.inline_scopes[k as usize - 1].ret;
+        if (start, end) != crate::hir::synth::SPAN {
+            let (start, end) = crate::variadic::written_span(start, end);
+            self.b.pending_loc = DebugLoc { file, start_byte: start as u32, end_byte: end.max(start + 1) as u32, scope };
+        }
+        let out = f(self);
+        self.b.pending_loc = outer;
+        out
     }
 
     fn effect_level(&mut self, id: HirId) -> Result<bool, Refusal> {
@@ -3378,7 +3407,7 @@ impl Lower<'_> {
     /// HIR emission packs it.
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
         // Walks recurse through here once per level of the tree.
-        common::deep_stack(|| self.value_level(id))
+        common::deep_stack(|| self.in_scope(id, |l| l.value_level(id)))
     }
 
     fn value_level(&mut self, id: HirId) -> Result<Val, Refusal> {
@@ -5092,6 +5121,24 @@ impl Lower<'_> {
         }
     }
 
+    /// The program's id of the body's inline scope `k` (`0`: none): the
+    /// scope's call is located in the scope that call was in.
+    fn program_scope(&mut self, file: u32, k: u32) -> u32 {
+        let Some(i) = (k as usize).checked_sub(1) else { return 0 };
+        if let Some(Some(id)) = self.scopes.get(i) {
+            return *id;
+        }
+        let Some(s) = self.hir.inline_scopes.get(i) else { return 0 };
+        let (callee, (start, end), call_scope, at_call) = (s.callee.clone(), s.call, s.call_scope, s.at_call);
+        // Made before the scopes spliced into it: the chain ends.
+        let parent = if call_scope < k { self.program_scope(file, call_scope) } else { 0 };
+        let (start, end) = crate::variadic::written_span(start, end);
+        let call = DebugLoc { file, start_byte: start as u32, end_byte: end.max(start + 1) as u32, scope: parent };
+        let id = self.cx.inline_scope(common::InlineScope { callee, call, at_call });
+        self.scopes[i] = Some(id);
+        id
+    }
+
     /// `f` with the source location of statement `id`.
     fn at_stmt<T>(&mut self, id: HirId, f: impl FnOnce(&mut Self) -> Result<T, Refusal>) -> Result<T, Refusal> {
         let outer = self.b.pending_loc;
@@ -5103,10 +5150,12 @@ impl Lower<'_> {
             (crate::attrs::is_fresh_span(start) && self.host_call(id).is_none()) || (start, end) == crate::hir::synth::SPAN;
         if let Some(file) = self.cx.file().filter(|_| !placeless) {
             let (start, end) = crate::variadic::written_span(start, end);
+            let scope = self.program_scope(file, self.hir.expr(id).scope);
             self.b.pending_loc = DebugLoc {
                 file,
                 start_byte: start as u32,
                 end_byte: end.max(start + 1) as u32,
+                scope,
             };
         }
         let out = f(self);

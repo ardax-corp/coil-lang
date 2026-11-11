@@ -322,15 +322,15 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         };
         words("coil_aot_entry_count", (count as u64).to_le_bytes().to_vec())?;
         words("coil_aot_package_len", (package.len() as u64).to_le_bytes().to_vec())?;
-        let mut site_words = Vec::with_capacity(sites.len() * 16 + 16);
+        let mut site_words = Vec::with_capacity(sites.len() * 20 + 20);
         for site in &sites {
-            for w in [site.body_id, site.loc.file, site.loc.start_byte, site.loc.end_byte] {
+            for w in [site.body_id, site.loc.file, site.loc.start_byte, site.loc.end_byte, site.loc.scope] {
                 site_words.extend_from_slice(&w.to_le_bytes());
             }
         }
         let site_count = sites.len() as u64;
         if site_words.is_empty() {
-            site_words.resize(16, 0);
+            site_words.resize(20, 0);
         }
         words("coil_aot_sites", site_words)?;
         words("coil_aot_site_count", site_count.to_le_bytes().to_vec())?;

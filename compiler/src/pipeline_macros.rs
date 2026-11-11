@@ -2288,5 +2288,5 @@ fn program_mir(e: &crate::macros::CompiledExpansion) -> Vec<u8> {
         return Vec::new();
     }
     let pcs: HashMap<String, u32> = e.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
-    crate::mir::archive::encode(&e.mir, &pcs)
+    crate::mir::archive::encode(&e.mir, &pcs, &e.program_debug.inline_scopes)
 }

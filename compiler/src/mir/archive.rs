@@ -12,8 +12,9 @@
 //! that way (`coil_mir_interp::prepare`). Sets and maps are written sorted,
 //! so the same MIR gives the same bytes.
 //!
-//! Layout (little-endian): the magic `CNMIR`, a format byte, then the
-//! bodies. Each body is its name, entry ids (`u32::MAX`: none),
+//! Layout (little-endian): the magic `CNMIR`, a format byte, the inline
+//! scope table its op locations name (`common::write_inline_scopes`, from
+//! format 17), then the bodies. Each body is its name, entry ids (`u32::MAX`: none),
 //! entry label, then the function. Labels are the compile's own `Label`
 //! numbers; a call names its callee by label.
 
@@ -29,16 +30,31 @@ use crate::mir::{
     BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
 };
 
-const MAGIC: &[u8; 5] = b"CNMIR";
-/// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u8 = 16;
+const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
+/// Bump when the layout changes. A reader takes this format and
+/// [`FORMAT_UNSCOPED`], and refuses any other.
+const FORMAT: u8 = common::MIR_SECTION_SCOPES_FORMAT;
+/// The format before inline scopes: no scope table, no scope in a location
+/// (each is `0`). Archives of minor 0 of major 8 have it.
+const FORMAT_UNSCOPED: u8 = 16;
 const NO_PC: u32 = u32::MAX;
 
-/// The section for `bodies`, each with its entry from `body_ids`.
-pub fn encode(bodies: &[NativeBody], body_ids: &HashMap<String, u32>) -> Vec<u8> {
-    let mut w = Writer(Vec::new());
+/// The section for `bodies`, each with its entry from `body_ids`, and the
+/// inline scopes their locations name.
+pub fn encode(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[common::InlineScope]) -> Vec<u8> {
+    encode_as(bodies, body_ids, scopes, FORMAT)
+}
+
+/// [`encode`] in `format`: [`FORMAT_UNSCOPED`] drops the scopes, as a
+/// section of an older archive has none.
+fn encode_as(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[common::InlineScope], format: u8) -> Vec<u8> {
+    let scoped = format != FORMAT_UNSCOPED;
+    let mut w = Writer(Vec::new(), scoped);
     w.0.extend_from_slice(MAGIC);
-    w.u8(FORMAT);
+    w.u8(format);
+    if scoped {
+        common::write_inline_scopes(&mut w.0, scopes);
+    }
     w.u32(bodies.len() as u32);
     for body in bodies {
         w.str(&body.name);
@@ -52,13 +68,17 @@ pub fn encode(bodies: &[NativeBody], body_ids: &HashMap<String, u32>) -> Vec<u8>
 
 /// The bodies of a section and their body ids.
 pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), String> {
-    let mut r = Reader { b: bytes, i: 0 };
+    let mut r = Reader { b: bytes, i: 0, scoped: false };
     if r.take(MAGIC.len())? != MAGIC {
         return Err("not a native MIR section".into());
     }
     let format = r.u8()?;
-    if format != FORMAT {
-        return Err(format!("native MIR format {format}, this coil reads {FORMAT}"));
+    if format != FORMAT && format != FORMAT_UNSCOPED {
+        return Err(format!("native MIR format {format}, this coil reads {FORMAT_UNSCOPED} and {FORMAT}"));
+    }
+    r.scoped = format == FORMAT;
+    if r.scoped {
+        common::read_inline_scopes(r.b, &mut r.i).ok_or("native MIR section has a bad inline scope table")?;
     }
     let n = r.u32()?;
     let mut bodies = Vec::new();
@@ -184,7 +204,8 @@ const T_MATCH: u8 = 4;
 /// No result type ([`Writer::opt_ty`]), or a return without that word.
 const NONE: u8 = 0xff;
 
-struct Writer(Vec<u8>);
+/// The bytes, and whether a location has its scope word.
+struct Writer(Vec<u8>, bool);
 
 impl Writer {
     fn u8(&mut self, x: u8) {
@@ -205,14 +226,23 @@ impl Writer {
         self.u32(l.start_byte);
         self.u32(l.end_byte);
     }
-    /// A map keyed by a `u32` id, sorted.
+    /// A map keyed by a `u32` id, sorted; then (from format 17) the keys
+    /// whose location is in an inline scope, with the scope.
     fn locs(&mut self, locs: impl Iterator<Item = (u32, DebugLoc)>) {
         let mut locs: Vec<_> = locs.collect();
         locs.sort_unstable_by_key(|&(k, _)| k);
         self.u32(locs.len() as u32);
-        for (k, l) in locs {
+        for &(k, l) in &locs {
             self.u32(k);
             self.loc(l);
+        }
+        if self.1 {
+            let scoped: Vec<(u32, u32)> = locs.iter().filter(|(_, l)| l.scope != 0).map(|&(k, l)| (k, l.scope)).collect();
+            self.u32(scoped.len() as u32);
+            for (k, scope) in scoped {
+                self.u32(k);
+                self.u32(scope);
+            }
         }
     }
     fn locals(&mut self, locals: impl ExactSizeIterator<Item = LocalId>) {
@@ -845,6 +875,8 @@ fn vec_stores(w: &mut Writer, stores: &[(ValueId, ValueId, u8, VecExpr)]) {
 struct Reader<'a> {
     b: &'a [u8],
     i: usize,
+    /// The section's locations have a scope word (format 17 on).
+    scoped: bool,
 }
 
 impl<'a> Reader<'a> {
@@ -878,11 +910,20 @@ impl<'a> Reader<'a> {
         String::from_utf8(self.take(n)?.to_vec()).map_err(|_| "native MIR name is not UTF-8".into())
     }
     fn loc(&mut self) -> Result<DebugLoc, String> {
-        Ok(DebugLoc { file: self.u32()?, start_byte: self.u32()?, end_byte: self.u32()? })
+        Ok(DebugLoc::span(self.u32()?, self.u32()?, self.u32()?))
     }
     fn locs(&mut self) -> Result<Vec<(u32, DebugLoc)>, String> {
         let n = self.len()?;
-        (0..n).map(|_| Ok((self.u32()?, self.loc()?))).collect()
+        let mut locs = (0..n).map(|_| Ok((self.u32()?, self.loc()?))).collect::<Result<Vec<_>, String>>()?;
+        if self.scoped {
+            for _ in 0..self.len()? {
+                let (k, scope) = (self.u32()?, self.u32()?);
+                // Keys are written sorted.
+                let at = locs.binary_search_by_key(&k, |&(key, _)| key).map_err(|_| "native MIR section scopes an unknown location")?;
+                locs[at].1.scope = scope;
+            }
+        }
+        Ok(locs)
     }
     fn locals(&mut self) -> Result<Vec<LocalId>, String> {
         let n = self.len()?;
@@ -1223,7 +1264,7 @@ mod tests {
         f.params = vec![ValueId(0)];
         f.ret_ty = Some(MirTy::I64);
         f.ret_layout = MirLayout::TwoSlot;
-        let loc = DebugLoc { file: 1, start_byte: 2, end_byte: 3 };
+        let loc = DebugLoc { file: 1, start_byte: 2, end_byte: 3, scope: 1 };
         let mut b = MirBlock::new(BlockId(0));
         b.insts.push(MirInst::Probe { dest: ValueId(1), id: 7 });
         b.insts.push(MirInst::GcBarrier { dest: ValueId(2), kind: MirGcKind::Safepoint, roots: vec![ValueId(0)] });
@@ -1252,7 +1293,31 @@ mod tests {
     }
 
     fn bytes(b: &NativeBody) -> Vec<u8> {
-        encode(std::slice::from_ref(b), &HashMap::from([(b.name.clone(), 42)]))
+        encode(std::slice::from_ref(b), &HashMap::from([(b.name.clone(), 42)]), &scopes())
+    }
+
+    fn scopes() -> Vec<common::InlineScope> {
+        vec![common::InlineScope { callee: "g".into(), call: DebugLoc { file: 1, start_byte: 8, end_byte: 9, scope: 0 }, at_call: false }]
+    }
+
+    #[test]
+    fn the_inline_scopes_come_back() {
+        let bytes = bytes(&body());
+        assert_eq!(common::section_inline_scopes(&bytes), scopes());
+        let (back, _) = decode(&bytes).expect("decode");
+        assert_eq!(back[0].mir.op_loc(ValueId(2)).scope, 1);
+    }
+
+    /// A section of an archive before inline scopes (format 16) reads, with
+    /// no scope table and no location in a scope.
+    #[test]
+    fn a_section_without_scopes_reads() {
+        let b = body();
+        let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), FORMAT_UNSCOPED);
+        assert!(common::section_inline_scopes(&old).is_empty());
+        let (back, pcs) = decode(&old).expect("decode format 16");
+        assert_eq!(pcs.get("f"), Some(&42));
+        assert_eq!(back[0].mir.op_loc(ValueId(2)), DebugLoc { scope: 0, ..b.mir.op_loc(ValueId(2)) });
     }
 
     #[test]

@@ -43,8 +43,10 @@ fn payload_bytes(pipeline: &mut Pipeline, program: &ArchivedProgram) -> Vec<u8> 
 #[cfg(not(target_family = "wasm"))]
 fn add_native_mir(pipeline: &mut Pipeline, program: &mut ArchivedProgram, bodies: &[compiler::native_mir::NativeBody]) {
     let pcs = pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    // The inline scopes the `-g` level keeps.
+    let scopes = pipeline.program_debug().inline_scopes;
     match coil_native::jit(bodies, &pcs) {
-        Ok(jitted) if jitted.refused.is_empty() => program.native_mir = coil_native::section::encode(bodies, &pcs),
+        Ok(jitted) if jitted.refused.is_empty() => program.native_mir = coil_native::section::encode(bodies, &pcs, &scopes),
         Ok(jitted) => refused_exit(&jitted.refused),
         Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("native code for the package failed ({e})")),
     }

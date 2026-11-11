@@ -61,6 +61,7 @@ fn stage_level(body: &HirBody, target: HirId) -> Option<HirBody> {
         span,
         node: None,
         flags: HirFlags::default(),
+        scope: moved.scope,
     });
     let e = &mut b.exprs[target.0 as usize];
     e.kind = HirKind::Local(temp);

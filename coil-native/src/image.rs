@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::{FuncMaps, NativeProgram};
 
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 const MAGIC: &[u8; 8] = b"COILCODE";
 const DIGEST: usize = 32;
 
@@ -229,6 +229,7 @@ pub(crate) fn encode(parts: Parts<'_>) -> Option<Vec<u8>> {
         w.u32(s.loc.file);
         w.u32(s.loc.start_byte);
         w.u32(s.loc.end_byte);
+        w.u32(s.loc.scope);
     }
     w.len(parts.compiled.len());
     parts.compiled.iter().for_each(|name| w.bytes(name.as_bytes()));
@@ -292,8 +293,8 @@ pub fn load(image: &[u8]) -> Result<NativeProgram, String> {
     let mut sites = Vec::new();
     for _ in 0..r.len()? {
         let body_id = r.u32()?;
-        let (file, start_byte, end_byte) = (r.u32()?, r.u32()?, r.u32()?);
-        sites.push(NativeSite { body_id, loc: common::DebugLoc { file, start_byte, end_byte } });
+        let (file, start_byte, end_byte, scope) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+        sites.push(NativeSite { body_id, loc: common::DebugLoc { file, start_byte, end_byte, scope } });
     }
     let compiled = (0..r.len()?).map(|_| r.text()).collect::<Result<Vec<_>, _>>()?;
     Ok(NativeProgram { entries, compiled, refused: Vec::new(), sites, image: None, keep: crate::Code::keep(module, mapped) })

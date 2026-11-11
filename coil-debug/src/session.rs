@@ -1517,13 +1517,10 @@ mod tests {
             debug_locs: vec![DebugLoc::unknown(); 4],
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
         };
         let ret_off = text.find("return").unwrap() as u32;
-        debug.debug_locs[2] = DebugLoc {
-            file: 0,
-            start_byte: ret_off,
-            end_byte: ret_off + 6,
-        };
+        debug.debug_locs[2] = DebugLoc::span(0, ret_off, ret_off + 6);
         let idx = LineIndex::build(&debug, None);
         let base = Path::new(&path).file_name().unwrap().to_str().unwrap();
         let pcs = idx.pcs_for_line(Some(base), 2, &path);
@@ -1542,13 +1539,10 @@ mod tests {
             debug_locs: vec![DebugLoc::unknown(); 5],
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
         };
         let ret_off = text.find("return").unwrap() as u32;
-        debug.debug_locs[3] = DebugLoc {
-            file: 0,
-            start_byte: ret_off,
-            end_byte: ret_off + 6,
-        };
+        debug.debug_locs[3] = DebugLoc::span(0, ret_off, ret_off + 6);
         let idx = LineIndex::build(&debug, None);
         let pcs = idx.pcs_for_line(Some(&path), 2, &path);
         assert!(pcs.contains(&3), "pcs={pcs:?}");
