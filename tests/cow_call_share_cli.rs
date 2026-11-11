@@ -229,3 +229,107 @@ fn main() {{
     let n = copies("static", &src);
     assert!(n < 4, "{n} copies for {N} calls");
 }
+
+/// A program that calls `fix` on a grid it still holds, 200 times (#2351).
+fn grid_program(fix: &str) -> String {
+    format!(
+        "
+class Row {{
+    pub cells: Vec<int>,
+}}
+class Grid {{
+    pub rows: Vec<Row>,
+}}
+enum Sign {{
+    Neg,
+    Pos,
+}}
+fn sign(int x) -> Sign {{
+    if x < 0 {{ return Sign::Neg; }}
+    return Sign::Pos;
+}}
+fn grid(int n) -> Grid {{
+    let g = new Grid(Vec::new());
+    let i = 0;
+    while i < n {{
+        let xs: Vec<int> = Vec::new();
+        let j = 0;
+        while j < n {{
+            xs.push(i + j);
+            j = j + 1;
+        }}
+        g.rows.push(new Row(xs));
+        i = i + 1;
+    }}
+    return g;
+}}
+{fix}
+fn main() {{
+    let g = grid(10);
+    let t = 0;
+    let k = 0;
+    while k < 200 {{
+        let h = fix(g);
+        t = t + h.rows[k % 10].cells[k % 10];
+        k = k + 1;
+    }}
+    if g.rows[1].cells[1] != 2 || t != 1800 {{ panic \"wrong value\"; }}
+}}
+"
+    )
+}
+
+#[test]
+fn a_loop_whose_write_does_not_run_copies_what_one_with_no_write_does() {
+    // Loop views (#2351) make a path unique ahead of a loop only where
+    // the loop would have: a write in a loop that does not run copies no
+    // more than the same write where no loop is (the write makes `g` the
+    // caller's place, which the caller makes unique for each call).
+    let reads = "fn fix(Grid g) -> Grid {
+    if g.rows.len() > 1000 { g.rows[0].cells[0] = 0; }
+    return g;
+}";
+    let branch = "fn fix(Grid g) -> Grid {
+    for i in 0..g.rows.len() {
+        for j in 0..g.rows[i].cells.len() {
+            if g.rows[i].cells[j] < 0 { g.rows[i].cells[j] = 0; }
+        }
+    }
+    return g;
+}";
+    let arm = "fn fix(Grid g) -> Grid {
+    for i in 0..g.rows.len() {
+        for j in 0..g.rows[i].cells.len() {
+            match sign(g.rows[i].cells[j]) {
+                Sign::Neg => { g.rows[i].cells[j] = 0; },
+                Sign::Pos => {},
+            }
+        }
+    }
+    return g;
+}";
+    let after_continue = "fn fix(Grid g) -> Grid {
+    for i in 0..g.rows.len() {
+        let j = 0;
+        while j < g.rows[i].cells.len() {
+            j = j + 1;
+            if g.rows[i].cells[j - 1] >= 0 { continue; }
+            g.rows[i].cells[j - 1] = 0;
+        }
+    }
+    return g;
+}";
+    let no_trip = "fn fix(Grid g) -> Grid {
+    for i in 0..g.rows.len() {
+        for j in 0..g.rows[i].cells.len() - 10 {
+            g.rows[i].cells[j] = 0;
+        }
+    }
+    return g;
+}";
+    let base = copies("grid_no_loop", &grid_program(reads));
+    for (name, fix) in [("grid_branch", branch), ("grid_arm", arm), ("grid_continue", after_continue), ("grid_no_trip", no_trip)] {
+        let n = copies(name, &grid_program(fix));
+        assert_eq!(n, base, "{name}: {n} copies, {base} with no loop");
+    }
+}
