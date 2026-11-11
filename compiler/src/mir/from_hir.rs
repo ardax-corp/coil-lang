@@ -3301,6 +3301,11 @@ impl Lower<'_> {
 
     /// Lower `id` for its effect.
     fn effect(&mut self, id: HirId) -> Result<bool, Refusal> {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.effect_level(id))
+    }
+
+    fn effect_level(&mut self, id: HirId) -> Result<bool, Refusal> {
         // A statement `yield` leaves nothing: a send lands only where a
         // receiving `yield` takes it.
         if let HirKind::Yield { value, from } = self.hir.expr(id).kind {
@@ -3368,6 +3373,11 @@ impl Lower<'_> {
     /// Lower `id` for its value, packed as a bare-class existential where
     /// HIR emission packs it.
     fn value(&mut self, id: HirId) -> Result<Val, Refusal> {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.value_level(id))
+    }
+
+    fn value_level(&mut self, id: HirId) -> Result<Val, Refusal> {
         let mut val = self.value_unpacked(id)?;
         // A `-> ()` function stored where a shared body reads its result
         // as a type parameter: wrapped to return the empty tuple object.
