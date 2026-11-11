@@ -18,7 +18,8 @@
 //! A parameter a body writes through is the caller's place (an inferred
 //! `inout`, from the effects summary's `mutates`): the caller makes the
 //! argument unique and writes it back before the call, so the callee writes
-//! it in place, and stores of the parameter itself copy it eagerly. Class
+//! it in place, and stores of the parameter itself copy it eagerly. A
+//! coroutine's parameters are its own values: it writes them on `resume`. Class
 //! instances whose type has a `drop` are identities the runtime never copies; a
 //! `readonly class` is never written, so it needs neither op.
 //!
@@ -760,11 +761,14 @@ impl Plan {
         let cow_local = |l: LocalId| cow_ty(checker, body.local(l).ty.as_ref());
         // Parameters written in place for the caller: never copied as a
         // whole here, so sharing one copies it eagerly instead.
+        // A coroutine's frame outlives the call that starts it (#2662): its
+        // writes run on `resume`, after the caller has its value back, so
+        // a parameter is its own value, made unique where it is written.
         let inout: HashSet<LocalId> = body
             .params
             .iter()
             .enumerate()
-            .filter(|(i, l)| *i < 64 && mutates & (1 << i) != 0 && !f.reassigned.contains(l) && !f.captured.contains(l))
+            .filter(|(i, l)| !body.is_coro && *i < 64 && mutates & (1 << i) != 0 && !f.reassigned.contains(l) && !f.captured.contains(l))
             .map(|(_, l)| *l)
             .chain(body.locals.iter().enumerate().filter(|(_, x)| x.borrow).map(|(i, _)| LocalId(i as u32)))
             .collect();

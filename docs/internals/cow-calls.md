@@ -32,7 +32,10 @@ result shared, a copy per call once the argument was shared.
 A `return` of a parameter, or of a parameter's field or element, does
 not share: `Plan::store_result` records the value as stored and leaves
 the share to the caller. Coroutines keep the old rule (they share what
-they hand back), since a resumed frame outlives the call.
+they hand back), since a resumed frame outlives the call. For the same
+reason a coroutine's parameter is never the caller's place (#2662): its
+writes run on `resume`, after the caller has its value back, so the body
+makes the parameter unique where it writes it, as a local.
 
 ### Shared generic bodies: the `kinds` word
 
