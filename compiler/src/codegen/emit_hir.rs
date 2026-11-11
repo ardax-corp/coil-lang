@@ -526,6 +526,16 @@ impl Compiler {
                 }
             }
         }
+        self.hir_fn_by_last.clear();
+        for (name, &index) in &self.hir_fn_names {
+            if let Some(index) = index {
+                let last = name.rsplit("::").next().unwrap_or(name);
+                self.hir_fn_by_last.entry(last.to_string()).or_default().push(index);
+            }
+        }
+        for indexes in self.hir_fn_by_last.values_mut() {
+            indexes.sort_unstable();
+        }
 
         self.note_cold_fns(&hir);
         self.note_hot_fns(&hir);
@@ -2621,11 +2631,9 @@ impl Compiler {
             let reaches_back = |n: &String| {
                 *n == me
                     || self
-                        .hir_fn_names
-                        .iter()
-                        .filter(|(k, _)| last(k) == *n)
-                        .filter_map(|(_, i)| *i)
-                        .any(|i| named(&module.bodies[i]).contains(&me))
+                        .hir_fn_by_last
+                        .get(n)
+                        .is_some_and(|indexes| indexes.iter().any(|&i| named(&module.bodies[i]).contains(&me)))
             };
             if calls.iter().any(reaches_back) {
                 return Err("recursive".to_string());

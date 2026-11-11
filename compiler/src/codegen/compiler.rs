@@ -1991,6 +1991,7 @@ impl Compiler {
             typed_sidecar: self.typed_sidecar.clone(),
             hir_fns: self.hir_fns.clone(),
             hir_fn_names: self.hir_fn_names.clone(),
+            hir_fn_by_last: self.hir_fn_by_last.clone(),
             hir_module: self.hir_module.take(),
             const_env_stack: self.const_env_stack.clone(),
             static_const_values: self.static_const_values.clone(),
@@ -2027,6 +2028,7 @@ impl Compiler {
         std::mem::swap(&mut self.typed_sidecar, &mut ctx.typed_sidecar);
         std::mem::swap(&mut self.hir_fns, &mut ctx.hir_fns);
         std::mem::swap(&mut self.hir_fn_names, &mut ctx.hir_fn_names);
+        std::mem::swap(&mut self.hir_fn_by_last, &mut ctx.hir_fn_by_last);
         std::mem::swap(&mut self.hir_module, &mut ctx.hir_module);
         std::mem::swap(&mut self.const_env_stack, &mut ctx.const_env_stack);
         std::mem::swap(&mut self.static_const_values, &mut ctx.static_const_values);

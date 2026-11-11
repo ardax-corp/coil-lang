@@ -656,6 +656,9 @@ pub struct Compiler {
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
+    /// The `Some` body indexes of [`Self::hir_fn_names`] by the last
+    /// `::` segment of their name, ascending.
+    hir_fn_by_last: HashMap<String, Vec<usize>>,
     /// The table keys of the free functions and inherent methods whose
     /// shared entry takes a `kinds` word (#2506), reserved before any body
     /// is emitted ([`Compiler::kinds_scheme`]).
@@ -862,6 +865,7 @@ impl Default for Compiler {
             residue_lint: std::cell::Cell::new(false),
             residue: std::cell::RefCell::new((HashSet::new(), Vec::new())),
             hir_fn_names: HashMap::new(),
+            hir_fn_by_last: HashMap::new(),
             kinds_keys: HashSet::new(),
             kinds_labels: HashMap::new(),
             pending_own_kinds: None,
@@ -939,6 +943,7 @@ pub(crate) struct ModuleCtx {
     typed_sidecar: crate::typechecking::TypedSidecar,
     hir_fns: HashMap<(usize, usize), usize>,
     hir_fn_names: HashMap<String, Option<usize>>,
+    hir_fn_by_last: HashMap<String, Vec<usize>>,
     hir_module: Option<crate::hir::HirModule>,
     const_env_stack: Vec<HashMap<String, ConstValue>>,
     static_const_values: HashMap<String, ConstValue>,
