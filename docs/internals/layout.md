@@ -144,7 +144,10 @@ words:
   user enum or class whose payloads or fields, at its arguments, are
   such holders (`List<T>` with `Cons(T, List<T>)`, #2512; `Box<T>` with
   `v: T`, #2511): a payload item is one word whatever its type, a field
-  typed by a class parameter is one word in every instance, and an item
+  typed by a class parameter is one word in every instance, a field whose
+  top is an open `Option` / `Result` (`r: Result<T, string>`) is the enum
+  object in its declared layout on both sides, holding the words of its
+  arguments (`hir_field_rep`), and an item
   the body wrote has the unknown word kind, which the collector resolves
   (a class's row keeps its generic fields unknown). A tuple or enum
   result whose own items are bare parameters' values is rebuilt at the

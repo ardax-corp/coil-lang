@@ -7480,8 +7480,11 @@ impl Compiler {
     /// every instance, of the unknown kind in the class's row (#2511). A
     /// recursive payload (`Cons(T, List<T>)`) is the instance being asked
     /// about. `Option` and `Result` are open enums, the shared body's
-    /// objects ("Open enums" in layout.md), and an enum with `drop` is
-    /// refused.
+    /// objects ("Open enums" in layout.md), so they are no holders, except
+    /// at a class field's top: a field is stored in its declared layout,
+    /// the enum object, on both sides (`hir_field_rep`), and that object's
+    /// payloads are the words of its arguments (`r: Result<T, string>`).
+    /// An enum with `drop` is refused.
     fn hir_nominal_words(&self, ty: &Ty, boxed: &HashMap<crate::typechecking::ty::TyVarId, Ty>, seen: &mut Vec<Ty>) -> bool {
         use crate::typechecking::ty::{is_option_ty, is_result_ty, subst_ty_params};
         let Ty::App(head, args) = ty else {
@@ -7496,10 +7499,12 @@ impl Compiler {
         let Some(names) = self.checker.type_ctor_params(name) else {
             return false;
         };
-        let items: Vec<Ty> = match (self.checker.enum_variants(name), self.checker.class_fields(name)) {
+        // A class field is a top, so an open `Option` / `Result` there is
+        // the enum object on both sides (`hir_field_rep`).
+        let (items, field): (Vec<Ty>, bool) = match (self.checker.enum_variants(name), self.checker.class_fields(name)) {
             (Some(_), _) if self.checker.enum_has_drop(name) => return false,
-            (Some(decl), _) => decl.into_iter().flat_map(|(_, _, payload)| payload).collect(),
-            (None, Some(fields)) => fields.into_iter().map(|(_, ty)| ty).collect(),
+            (Some(decl), _) => (decl.into_iter().flat_map(|(_, _, payload)| payload).collect(), false),
+            (None, Some(fields)) => (fields.into_iter().map(|(_, ty)| ty).collect(), true),
             (None, None) => return false,
         };
         if names.len() != args.len() {
@@ -7515,7 +7520,20 @@ impl Compiler {
         }
         let map: HashMap<String, Ty> = names.iter().cloned().zip(args.iter().cloned()).collect();
         seen.push(ty.clone());
-        let words = items.iter().all(|p| !Self::ty_opaque(p) && self.hir_word_holder_in(&subst_ty_params(p, &map), boxed, seen));
+        let words = items.iter().all(|p| {
+            let t = subst_ty_params(p, &map);
+            if Self::ty_opaque(p) {
+                return false;
+            }
+            if self.hir_word_holder_in(&t, boxed, seen) {
+                return true;
+            }
+            field
+                && crate::typechecking::ty::builtin_enum_app(&t).is_some_and(|app| match crate::typechecking::ty::strip_readonly(&app) {
+                    Ty::App(_, args) => args.iter().all(|a| self.hir_word_holder_in(a, boxed, seen)),
+                    _ => false,
+                })
+        });
         seen.pop();
         words
     }

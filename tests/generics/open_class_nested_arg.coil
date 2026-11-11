@@ -2,7 +2,6 @@
 // inside a type argument, `Vec<U>` at `U = Slot<T>` (coil-lang#2149):
 // both shared bodies agree on the element, and trait calls on the
 // element still dispatch.
-// @xfail clone-budget-0 #2511 E0801 (callee-generic): a generic class or nested-payload enum result of a shared body
 use tests::assert;
 
 class Slot<T> {
