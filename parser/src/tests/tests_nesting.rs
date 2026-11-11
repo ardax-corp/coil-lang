@@ -13,6 +13,9 @@ fn nest(base: &str, f: impl Fn(&str, usize) -> String) -> String {
     (0..DEPTH).fold(base.to_string(), |s, i| f(&s, i))
 }
 
+/// A nesting shape: its name, and its source at a depth.
+type Form = (&'static str, Box<dyn Fn(usize) -> String>);
+
 /// Parse `body` as the statements of `main`; the tree's Debug form.
 fn parse_main(body: &str) -> String {
     let src = format!("fn main() {{\n    let a = 1;\n    {body}\n}}\n");
@@ -152,7 +155,7 @@ fn nesting_without_brackets_is_counted() {
     use reporting::ErrorCode::ExpressionNestingTooDeep as TooDeep;
     let limit = crate::PARSE_NESTING_LIMIT;
     // `fn main() {` is one level of the limit.
-    let forms: Vec<(&str, Box<dyn Fn(usize) -> String>)> = vec![
+    let forms: Vec<Form> = vec![
         ("negate", Box::new(|n| format!("let r = {}a;", "- ".repeat(n)))),
         ("not", Box::new(|n| format!("let r = {}a;", "!".repeat(n)))),
         ("readonly", Box::new(|n| format!("let r = {}a;", "readonly ".repeat(n)))),
@@ -178,4 +181,30 @@ fn many_lambdas_and_arms_side_by_side_are_no_nesting() {
     assert_eq!(parse_code(&format!("let r = f({args} 1);")), None);
     let signs = "a - -a + !a, ".repeat(limit + 10);
     assert_eq!(parse_code(&format!("let r = f({signs} 1);")), None);
+}
+
+/// The other chains the parser takes by recursion: right-associative
+/// operators, type arrows and `else if`. One chain is counted, a long
+/// sequence of them is not.
+#[test]
+fn chains_are_counted() {
+    use reporting::ErrorCode::ExpressionNestingTooDeep as TooDeep;
+    let limit = crate::PARSE_NESTING_LIMIT;
+    let forms: Vec<Form> = vec![
+        ("assignments", Box::new(|n| format!("let b = 1; {}b;", "a = ".repeat(n)))),
+        ("powers", Box::new(|n| format!("let r = {}a;", "a ** ".repeat(n)))),
+        ("type arrows", Box::new(|n| format!("let r: {}int = a;", "int -> ".repeat(n)))),
+        ("else ifs", Box::new(|n| format!("if a > 0 {{ }} {}else {{ }}", "else if a > 1 { } ".repeat(n)))),
+        ("value else ifs", Box::new(|n| format!("let r = if a > 0 {{ 1 }} {}else {{ 2 }};", "else if a > 1 { 1 } ".repeat(n)))),
+    ];
+    for (name, form) in &forms {
+        assert_eq!(parse_code(&form(limit - 2)), None, "{name} under the limit");
+        assert_eq!(parse_code(&form(limit + 3)), Some(TooDeep), "{name} over the limit");
+    }
+    // Many separate chains and statements are no nesting.
+    let many = "let x = a ** a; let t: int -> int = a; a = a = a; if a > 0 { } else if a > 1 { }\n".repeat(limit);
+    assert_eq!(parse_code(&many), None);
+    let fns = "fn f(int x) -> int { return x; }\n".repeat(limit);
+    let src = format!("{fns}fn main() {{ }}\n");
+    assert_eq!(Pratt::default().parse(&src).err().and_then(|m| m.code()), None);
 }

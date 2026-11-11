@@ -119,8 +119,9 @@ jobs:
           cargo build -p coil-fmt
           ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests
           # `grep -L` exits 1 when it lists nothing; only coil-fmt's status counts.
+          # E0001 and E0208 files are not valid source; E0125 ones nest past what the parser takes, so coil-fmt cannot read them either.
           find tests -path '*/compile_fail/*.coil' -print0 \
-            | { xargs -0 grep -LZE '^// @expected .*E0(001|208)\b' || true; } \
+            | { xargs -0 grep -LZE '^// @expected .*E0(001|125|208)\b' || true; } \
             | xargs -0 ./target/debug/coil-fmt --check
           # Empty once every known-wrong cell is fixed, and git keeps no empty dirs.
           if [ -d scripts/rep_matrix_known_wrong ]; then
