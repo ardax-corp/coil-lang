@@ -4566,10 +4566,14 @@ impl<'pratt> Pratt<'pratt> {
         // Each level of nesting is frames of the parser and of every pass
         // that walks the tree: far past what any program the checker
         // accepts can nest, it stops here, before the stack does (#2655).
-        if let Some(at) = nesting_past(input, PARSE_NESTING_LIMIT) {
+        if let Some((at, kind)) = nesting_past(input, PARSE_NESTING_LIMIT) {
+            let what = match kind {
+                NestingKind::Brackets => "brackets",
+                NestingKind::Levels => "levels of brackets, lambdas, prefix operators and chains",
+            };
             let mut message = Message::error(
                 ErrorCode::ExpressionNestingTooDeep,
-                format!("expression nested too deeply (over {PARSE_NESTING_LIMIT} brackets) for the parser"),
+                format!("expression nested too deeply (over {PARSE_NESTING_LIMIT} {what}) for the parser"),
                 shift(at..at + 1),
             );
             message.with_help("split the expression into smaller named bindings".to_string());
@@ -4631,13 +4635,62 @@ impl<'pratt> Pratt<'pratt> {
 /// margin of 1.5 for every shape measured (`docs/internals/limitations.md`).
 pub const PARSE_NESTING_LIMIT: usize = if cfg!(target_family = "wasm") { 400 } else { 4000 };
 
-/// The byte offset of the first bracket of `input` nested past `limit`,
-/// outside string literals and comments.
-fn nesting_past(input: &str, limit: usize) -> Option<usize> {
+/// What `nesting_past` counted when it passed the limit.
+#[derive(Debug, PartialEq, Eq)]
+enum NestingKind {
+    /// Open brackets alone.
+    Brackets,
+    /// Brackets together with the forms below.
+    Levels,
+}
+
+/// What is open at one bracket level of `nesting_past`, besides brackets:
+/// constructs the parser enters by recursion with no bracket (#2700).
+#[derive(Default)]
+struct Open {
+    /// Short lambdas `fn (…) => body`: the `=>` stays open until the `;`, `,`
+    /// or closing bracket that ends the body.
+    lambdas: usize,
+    /// Right-associative chains: type arrows `A -> B -> C`, `**` and `=`.
+    /// Closed by `;`, `,` and `{`.
+    chain: usize,
+    /// The `else if`s of one `if` chain (each `else` parses the next `if`
+    /// under it).
+    elifs: usize,
+    /// An `fn` seen with no `=>`, `{`, `;` or `,` since.
+    fn_seen: bool,
+    /// The word before was `else`.
+    after_else: bool,
+}
+
+impl Open {
+    fn count(&self) -> usize {
+        self.lambdas + self.chain + self.elifs
+    }
+}
+
+/// The byte offset of the first token of `input` that nests past `limit`,
+/// outside string literals and comments, and what it counted. Levels are
+/// the open brackets (`(`, `[`, `{`) plus the constructs of [`Open`], and a
+/// run of prefix operators (`- - x`, `!!x`, `readonly mut x`) while it lasts.
+/// A binary `-` or `+` before a prefix one counts too, which is
+/// conservative, as is a `=>` that is no lambda's: only one after an `fn`
+/// of the same level counts, so the arms of a `match` do not add up.
+fn nesting_past(input: &str, limit: usize) -> Option<(usize, NestingKind)> {
     let b = input.as_bytes();
-    let (mut i, mut depth) = (0, 0usize);
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let mut i = 0;
+    let mut levels: Vec<Open> = vec![Open::default()];
+    // Brackets open, and the sum of `Open::count` over the levels.
+    let (mut brackets, mut extra, mut run) = (0usize, 0usize, 0usize);
+    let past = |brackets: usize, extra: usize, run: usize| brackets + extra + run > limit;
     while i < b.len() {
-        match b[i] {
+        let c = b[i];
+        let top = levels.len() - 1;
+        if !matches!(c, b' ' | b'\t' | b'\n' | b'\r' | b'+' | b'-' | b'!' | b'~' | b'/' | b'a'..=b'z' | b'A'..=b'Z' | b'_') {
+            run = 0;
+        }
+        match c {
             b'"' => {
                 i += 1;
                 while i < b.len() && b[i] != b'"' {
@@ -4648,6 +4701,7 @@ fn nesting_past(input: &str, limit: usize) -> Option<usize> {
                 while i < b.len() && b[i] != b'\n' {
                     i += 1;
                 }
+                continue;
             }
             b'/' if b.get(i + 1) == Some(&b'*') => {
                 let mut open = 0usize;
@@ -4667,13 +4721,104 @@ fn nesting_past(input: &str, limit: usize) -> Option<usize> {
                 }
                 continue;
             }
+            b'/' => run = 0,
             b'(' | b'[' | b'{' => {
-                depth += 1;
-                if depth > limit {
-                    return Some(i);
+                brackets += 1;
+                if brackets > limit {
+                    return Some((i, NestingKind::Brackets));
+                }
+                if past(brackets, extra, run) {
+                    return Some((i, NestingKind::Levels));
+                }
+                levels[top].after_else = false;
+                if c == b'{' {
+                    extra -= levels[top].chain;
+                    levels[top].chain = 0;
+                    levels[top].fn_seen = false;
+                }
+                levels.push(Open::default());
+            }
+            b')' | b']' | b'}' => {
+                if levels.len() > 1 {
+                    extra -= levels.pop().map_or(0, |l| l.count());
+                    brackets -= 1;
                 }
             }
-            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            b';' | b',' => {
+                extra -= levels[top].count();
+                levels[top] = Open::default();
+            }
+            b'=' if b.get(i + 1) == Some(&b'>') => {
+                if levels[top].fn_seen {
+                    levels[top].fn_seen = false;
+                    levels[top].lambdas += 1;
+                    extra += 1;
+                    if past(brackets, extra, 0) {
+                        return Some((i, NestingKind::Levels));
+                    }
+                }
+                i += 1;
+            }
+            // `==`, and `<=`, `>=`, `!=` and the compound assignments, which
+            // reach here with their first character already passed.
+            b'=' if b.get(i + 1) == Some(&b'=') => i += 1,
+            b'=' if i > 0 && matches!(b[i - 1], b'<' | b'>' | b'!' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^') => {}
+            b'=' | b'*' if c == b'=' || b.get(i + 1) == Some(&b'*') => {
+                levels[top].chain += 1;
+                extra += 1;
+                if c == b'*' {
+                    i += 1;
+                }
+                if past(brackets, extra, 0) {
+                    return Some((i, NestingKind::Levels));
+                }
+            }
+            b'-' if b.get(i + 1) == Some(&b'>') => {
+                levels[top].chain += 1;
+                extra += 1;
+                i += 1;
+                if past(brackets, extra, 0) {
+                    return Some((i, NestingKind::Levels));
+                }
+            }
+            b'!' if b.get(i + 1) == Some(&b'=') => i += 1,
+            b'+' | b'-' | b'!' | b'~' => {
+                run += 1;
+                if past(brackets, extra, run) {
+                    return Some((i, NestingKind::Levels));
+                }
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = i;
+                while i < b.len() && is_word(b[i]) {
+                    i += 1;
+                }
+                let after_else = std::mem::take(&mut levels[top].after_else);
+                match &input[start..i] {
+                    "fn" => levels[top].fn_seen = true,
+                    "else" => levels[top].after_else = true,
+                    "if" if after_else => {
+                        levels[top].elifs += 1;
+                        extra += 1;
+                        if past(brackets, extra, 0) {
+                            return Some((start, NestingKind::Levels));
+                        }
+                    }
+                    // A new chain.
+                    "if" => {
+                        extra -= levels[top].elifs;
+                        levels[top].elifs = 0;
+                    }
+                    "readonly" | "mut" | "comptime" | "typeof" => {
+                        run += 1;
+                        if past(brackets, extra, run) {
+                            return Some((start, NestingKind::Levels));
+                        }
+                    }
+                    _ => run = 0,
+                }
+                continue;
+            }
             _ => {}
         }
         i += 1;
