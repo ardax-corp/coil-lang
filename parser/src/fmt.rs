@@ -780,6 +780,11 @@ impl<'s> Formatter<'s> {
     }
 
     fn fmt_expression(&mut self, expr: &Expression<'_>) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.fmt_expression_level(expr))
+    }
+
+    fn fmt_expression_level(&mut self, expr: &Expression<'_>) {
         match expr {
             Expression::Integer(n) => self.push_str(&n.to_string()),
             // Display never uses an exponent, which Coil cannot parse
