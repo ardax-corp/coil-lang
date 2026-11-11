@@ -72,7 +72,7 @@ Where the word comes from:
   local passes, last, one bit per type variable of the type it sees (the
   `forall`'s, or the function's own), in order of first appearance in that
   type, and their count at bit 56 (`common::KINDS_CALL_COUNT_SHIFT`); bit 63
-  is clear, so it is no entry's word. Where the value is made, the checker
+  is clear, so it is no entry's word. A call made at the calling body's own type parameter forwards that body's bit for it (#2652). Where the value is made, the checker
   has recorded the `forall` type it is passed to (`rank_n_arg_at`), and
   each open type parameter captures a `common::kinds_from_call(n, to, from)`
   word after the `kinds` word: `machine::apply` (both engines; native code
