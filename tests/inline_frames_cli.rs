@@ -338,3 +338,40 @@ fn main() {
         &["check", "run", "main"],
     );
 }
+
+/// Another module's callee: its spliced code has the call's location, so
+/// its frame has no line, and the caller's is at the call.
+#[test]
+fn an_inlined_callee_of_another_module_has_its_frame() {
+    let dir = scratch("module");
+    std::fs::write(dir.join("helper.coil"), "fn boom(int i) -> int {\n    return 100 / (i - 1000);\n}\n").expect("write helper");
+    let file = dir.join("main.coil");
+    std::fs::write(&file, LANETRAP.replace("use string::to_bytes;\n", "use string::to_bytes;\nuse helper::boom;\n").replace("fn boom(int i) -> int {\n    return 100 / (i - 1000);\n}\n\n", "")).expect("write main");
+    let run = |opt: &str, mir: bool| {
+        let mut cmd = coil();
+        cmd.args(["-O", opt, "--fold-calls", "off", "--auto-par", "off", "--no-build-cache", "--root"]).arg(&dir);
+        if mir {
+            cmd.arg("--mir");
+        }
+        let out = with_roots(&mut cmd).arg(&file).output().expect("spawn coil");
+        report(&out.stderr).replace(&format!("{}/", dir.display()), "")
+    };
+    assert_eq!(
+        run("0", false),
+        "panic: division by zero at helper.coil:2:11
+  in helper::boom at helper.coil:2:11
+  in run at main.coil:8:24
+  in main at main.coil:14:12"
+    );
+    for mir in [false, true] {
+        assert_eq!(
+            run("2", mir),
+            "panic: division by zero at main.coil:8:24
+  in helper::boom
+  in run at main.coil:8:24
+  in main at main.coil:14:12",
+            "mir={mir}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
