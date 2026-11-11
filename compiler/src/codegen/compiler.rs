@@ -1914,18 +1914,28 @@ impl Compiler {
     /// was compiled in ([`ModuleCtx`]): in its own layouts, with no boxing
     /// or dictionaries, as a clone in its own module is. A clone whose
     /// module's AST is missing is the thunk calling the shared body.
+    ///
+    /// A clone compiles after the clones its body calls (#2219), so their
+    /// resolved bodies are there for it to inline: before a clone
+    /// compiles, its calls are resolved once ([`Self::hir_clone_callees`]),
+    /// the clones it calls that are not emitted yet are requested, and it
+    /// waits behind them. A clone waits at most [`MAX_CLONE_WAITS`] times,
+    /// so a cycle compiles as it did; waiting clones go last, in queue
+    /// order.
     pub fn emit_foreign_clones(&mut self, asts: &[(usize, &Output<'_>)]) {
+        let mut waits: HashMap<String, usize> = HashMap::new();
         while !self.foreign_clone_queue.is_empty() {
             let queue = std::mem::take(&mut self.foreign_clone_queue);
-            let mut by_program: Vec<(usize, Vec<InstClone>)> = Vec::new();
-            for req in queue {
-                let seq = self.inst_clone_srcs[&req.src].program;
-                match by_program.iter_mut().find(|(s, _)| *s == seq) {
+            let mut by_program: Vec<((usize, bool), Vec<InstClone>)> = Vec::new();
+            let (ready, waiting): (Vec<_>, Vec<_>) = queue.into_iter().partition(|req| !waits.contains_key(&req.name));
+            for (req, waited) in ready.into_iter().map(|r| (r, false)).chain(waiting.into_iter().map(|r| (r, true))) {
+                let key = (self.inst_clone_srcs[&req.src].program, waited);
+                match by_program.iter_mut().find(|(k, _)| *k == key) {
                     Some((_, reqs)) => reqs.push(req),
-                    None => by_program.push((seq, vec![req])),
+                    None => by_program.push((key, vec![req])),
                 }
             }
-            for (seq, reqs) in by_program {
+            for ((seq, _), reqs) in by_program {
                 let children = asts.iter().find(|(s, _)| *s == seq).and_then(|(_, ast)| match ast.1.as_ref() {
                     Expression::Program(children) => Some(children),
                     _ => None,
@@ -1942,8 +1952,34 @@ impl Compiler {
                 self.swap_module_ctx(&mut ctx, true);
                 // The clones queued for the module being compiled wait: their
                 // types may be ones `seq` does not know.
-                let waiting = std::mem::replace(&mut self.inst_clone_queue, reqs.into());
+                let waiting = std::mem::take(&mut self.inst_clone_queue);
+                // Each clone the clones of `reqs` call goes first, checked
+                // the same way, the deepest first; a caller whose callees are
+                // not all here waits for the next pass.
+                let mut layers: Vec<Vec<InstClone>> = Vec::new();
+                let mut later = Vec::new();
+                let mut check = reqs;
+                while !check.is_empty() {
+                    let mut now = Vec::with_capacity(check.len());
+                    for req in check {
+                        let waited = waits.get(&req.name).copied().unwrap_or(0);
+                        let callees = if waited < MAX_CLONE_WAITS { self.hir_clone_callees(&req) } else { Vec::new() };
+                        if callees.is_empty() {
+                            now.push(req);
+                            continue;
+                        }
+                        for key in &callees {
+                            self.hir_request_method_clone_pub(key);
+                        }
+                        waits.insert(req.name.clone(), waited + 1);
+                        later.push(req);
+                    }
+                    layers.push(now);
+                    check = std::mem::take(&mut self.inst_clone_queue).into();
+                }
+                self.inst_clone_queue = layers.into_iter().rev().flatten().collect();
                 self.emit_instance_clones(children);
+                self.foreign_clone_queue.extend(later);
                 self.inst_clone_queue = waiting;
                 self.swap_module_ctx(&mut ctx, false);
                 self.residue_lint.set(lint);
@@ -8239,6 +8275,11 @@ impl Compiler {
 /// Method clones of hot methods a program may make past `--clone-budget`
 /// (entry labels reserved for them at program start).
 const HOT_CLONE_ROOM: usize = 256;
+
+/// How many times a foreign clone waits for the clones it calls
+/// ([`Compiler::emit_foreign_clones`]): enough for a short chain of
+/// clones calling clones, and a cycle still ends.
+const MAX_CLONE_WAITS: usize = 4;
 
 const STARTUP_HANDLE_NATIVES: [&str; 5] = ["stdout", "stderr", "stdin", "dload", "declare"];
 

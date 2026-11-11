@@ -5689,6 +5689,85 @@ impl Compiler {
         self.hir_module = Some(module);
     }
 
+    /// The inherent method clones the body of clone `req` would call that
+    /// are not emitted yet (#2219): its method's HIR in the module being
+    /// compiled at `req`'s types, its calls resolved once. Resolving only
+    /// fills `method_clone_plans`, as [`Self::hir_plan_bodies_for_clones`]
+    /// does. Empty when the body is not here or does not resolve.
+    pub(super) fn hir_clone_callees(&mut self, req: &super::InstClone) -> Vec<String> {
+        let Some(src) = self.inst_clone_srcs.get(&req.src).cloned() else {
+            return Vec::new();
+        };
+        if src.program != self.program_seq || !src.compiled || src.own_bounds > 0 {
+            return Vec::new();
+        }
+        let Some(vars) = self.inst_clone_vars(&src.head, &req.lookup) else {
+            return Vec::new();
+        };
+        let Some(&index) = self.hir_fns.get(&src.span) else {
+            return Vec::new();
+        };
+        let Some(module) = self.hir_module.take() else {
+            return Vec::new();
+        };
+        let body = self.hir_instance(&module.bodies[index], &vars);
+        let mut callees = Vec::new();
+        if body.root.is_some() && refusal::refusal(&body, &self.checker).is_none() {
+            // The context `emit_instance_clones` compiles the clone in: its
+            // type parameters' names at `req`'s types, an inherent method
+            // in its class's namespace.
+            let mut names = HashMap::new();
+            for (name, want) in src.trait_params.iter().flatten().zip(&req.lookup) {
+                names.insert(name.clone(), want.clone());
+            }
+            if let Some(m) = &src.method_of {
+                for (name, want) in m.names.iter().zip(&req.lookup) {
+                    names.insert(name.clone(), want.clone());
+                }
+            }
+            let inherent = src.method_of.as_ref().map(|m| {
+                (
+                    std::mem::replace(&mut self.compiling_method, !m.is_static),
+                    std::mem::replace(&mut self.namespace, src.class.clone()),
+                    self.current_function_qualified.replace(req.src.clone()),
+                )
+            });
+            let prev_mono = std::mem::replace(&mut self.compiling_mono_clone, true);
+            self.mono_codegen_var_types.push(HashMap::new());
+            self.mono_type_param_tys.push(names);
+            self.mono_var_tys.push(vars);
+            self.planning_for_clones = true;
+            let outer = self.hir_body_frame.replace(frame::BodyFrame::plain(&body));
+            let ret = Rep::Word(body.ret.as_ref().map_or(ValueLayout::Boxed, |t| self.value_layout(t)));
+            if let Ok(emit) = self.hir_resolve(&body, ret) {
+                let plans = self.method_clone_plans.borrow();
+                callees = emit
+                    .plan
+                    .calls
+                    .values()
+                    .map(|call| call.key.clone())
+                    .filter(|key| *key != req.name && plans.contains_key(key) && !self.functions.contains_key(key))
+                    .collect();
+            }
+            self.hir_body_frame = outer;
+            self.planning_for_clones = false;
+            self.mono_var_tys.pop();
+            self.mono_type_param_tys.pop();
+            self.mono_codegen_var_types.pop();
+            self.compiling_mono_clone = prev_mono;
+            if let Some((method, namespace, qualified)) = inherent {
+                self.compiling_method = method;
+                self.namespace = namespace;
+                self.current_function_qualified = qualified;
+            }
+        }
+        self.hir_module = Some(module);
+        // The calls are a map: their keys in one order.
+        callees.sort_unstable();
+        callees.dedup();
+        callees
+    }
+
     fn hir_request_method_clone(&mut self, key: &str) {
         let Some(plan) = self.method_clone_plans.borrow().get(key).cloned() else {
             return;
