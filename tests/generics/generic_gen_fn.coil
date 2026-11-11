@@ -269,7 +269,7 @@ test("a bare T parameter, done after the last resume") {
     let ns = repeat(Option::Some("n"), 1);
     assert!((resume ns) == Option::Some("n"));
     let m = repeat(Option::Some(3), 3);
-    assert!(format("%v", drain(m)) == "[Some(3), Some(3), Some(3)]");
+    assert!(drain(m) == Vec::from([Option::Some(3), Option::Some(3), Option::Some(3)]));
 }
 
 test("a generic generator passed as a value") {
