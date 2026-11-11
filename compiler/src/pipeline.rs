@@ -2202,6 +2202,27 @@ impl Pipeline {
         if self.generated_ranges.is_empty() {
             return;
         }
+        // The generated ranges by the 4 KiB pages of bytes they cover, each
+        // list in `generated_ranges` order: a byte's page lists every
+        // range that holds it.
+        const PAGE: u32 = 12;
+        let mut by_page: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, g) in self.generated_ranges.iter().enumerate() {
+            if g.range.is_empty() {
+                continue;
+            }
+            for page in (g.range.start >> PAGE)..=((g.range.end - 1) >> PAGE) {
+                by_page.entry(page).or_default().push(i);
+            }
+        }
+        let holding = |byte: usize| {
+            by_page
+                .get(&(byte >> PAGE))
+                .into_iter()
+                .flatten()
+                .map(|&i| &self.generated_ranges[i])
+                .filter(move |g| g.range.contains(&byte))
+        };
         for loc in &mut debug.debug_locs {
             if !loc.is_known() {
                 continue;
@@ -2214,11 +2235,10 @@ impl Pipeline {
             // written; the rest to the macro's site.
             loop {
                 let byte = range.start;
-                let Some(g) = self.generated_ranges.iter().find(|g| {
-                    g.range.contains(&byte) && source_file_matches_generated(stored, &g.file)
-                }).or_else(|| {
-                    self.generated_ranges.iter().find(|g| g.range.contains(&byte))
-                }) else {
+                let Some(g) = holding(byte)
+                    .find(|g| source_file_matches_generated(stored, &g.file))
+                    .or_else(|| holding(byte).next())
+                else {
                     break;
                 };
                 if let Some(r) = g.translate(&range) {
