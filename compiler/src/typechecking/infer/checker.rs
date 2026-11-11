@@ -10742,15 +10742,21 @@ impl Checker {
     }
 
     /// The structural instance of `class` for the shape of open `ty`
-    /// ([`Generics::register_structural_open`]): `Show` and `Eq` of a
-    /// tuple, `Option`, `Result`, `Vec` or array, `Hash` of a tuple or
-    /// array, a tuple's order, as their ground instances (`Option` /
-    /// `Result` have a prelude `Hash`; a `Vec` has none), its context over
-    /// `context`.
+    /// ([`Generics::register_structural_open`]): `Show`, `Eq` and `Hash`
+    /// of a tuple, record or array, `Show` and `Eq` of an `Option`,
+    /// `Result` or `Vec`, a tuple's order, as their ground instances
+    /// (`Option` / `Result` have a prelude `Hash`; a `Vec` has none), its
+    /// context over `context`. A record's head has its fields in name
+    /// order, the order its thunks take them in.
     fn ensure_structural_open(&mut self, class: &str, ty: &Ty, context: &str) {
         let hole = || Ty::Con("_".into());
         let shape = match ty {
             Ty::Tuple(items) => Ty::Tuple(items.iter().map(|_| hole()).collect()),
+            Ty::Record { fields } => {
+                let mut names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                names.sort();
+                Ty::Record { fields: names.into_iter().map(|n| (n, hole())).collect() }
+            }
             Ty::Array { .. } => array(hole()),
             Ty::App(head, args) if class != "Hash" => Ty::App(head.clone(), args.iter().map(|_| hole()).collect()),
             _ => return,
@@ -10760,6 +10766,9 @@ impl Checker {
         }
         let head = match shape {
             Ty::Tuple(items) => Ty::Tuple(items.iter().map(|_| Ty::Var(self.counter.fresh())).collect()),
+            Ty::Record { fields } => Ty::Record {
+                fields: fields.into_iter().map(|(n, _)| (n, Ty::Var(self.counter.fresh()))).collect(),
+            },
             Ty::App(head, args) => Ty::App(head, args.iter().map(|_| Ty::Var(self.counter.fresh())).collect()),
             _ => array(Ty::Var(self.counter.fresh())),
         };

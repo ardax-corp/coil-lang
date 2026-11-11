@@ -183,6 +183,24 @@ impl Product {
         Self { ctor: ProductCtor::Tuple, parts: items.to_vec() }
     }
 
+    /// A record's product, its fields in name order (the order a ground
+    /// record's and an open one's structural thunks take them in).
+    pub fn record(fields: &[(String, Ty)]) -> Self {
+        let mut fields = fields.to_vec();
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
+        let (names, parts) = fields.into_iter().unzip();
+        Self { ctor: ProductCtor::Record(names), parts }
+    }
+
+    /// A tuple's or record's product.
+    pub fn of(ty: &Ty) -> Option<Self> {
+        match ty {
+            Ty::Tuple(items) => Some(Self::tuple(items)),
+            Ty::Record { fields } => Some(Self::record(fields)),
+            _ => None,
+        }
+    }
+
     /// This product's pattern over one pattern per part.
     pub fn pat_of(&self, parts: Vec<HirPat>) -> HirPat {
         match &self.ctor {

@@ -2064,9 +2064,10 @@ impl Compiler {
     /// niche value (no boxing, conversion or dictionary). It interns the strings
     /// emission does.
     fn hir_show_ty(&mut self, ty: &Ty) -> Option<crate::mir::HirShow> {
-        // A tuple with an item open in the body's type parameters shows
-        // through the shape's instance with open items, as its `.show()`
-        // does (#2614); a tuple thunk's items have their own dictionaries.
+        // A tuple or record with an item open in the body's type
+        // parameters shows through the shape's instance with open items, as
+        // its `.show()` does (#2614, #2631); a thunk's items have their own
+        // dictionaries.
         let open = crate::typechecking::ty::ftv_ty(ty).iter().any(|v| !self.synth_show_dicts.contains_key(v));
         match ty {
             Ty::Tuple(items) if !open => {
@@ -2074,7 +2075,7 @@ impl Compiler {
                 let fmt = self.intern_string(unescape_coil_string(&Self::tuple_show_format(parts.len())));
                 return Some(crate::mir::HirShow::Product { fmt, parts, tuple: true });
             }
-            Ty::Record { fields } => {
+            Ty::Record { fields } if !open => {
                 // In slot order: the fields sorted by name.
                 let mut fields = fields.clone();
                 fields.sort_by(|a, b| a.0.cmp(&b.0));

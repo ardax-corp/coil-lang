@@ -726,10 +726,11 @@ impl Generics {
     }
 
     /// The structural instances with open items: `Show` of a tuple,
-    /// `Option`, `Result`, `Vec` or array, `Eq` of those, `Hash` of a
-    /// tuple or array, a tuple's `Lt` .. `Ge` / `Ord` (#1479, #2554). Head
-    /// `head` is the shape over fresh variables (`(a, b)`, `Option<a>`,
-    /// `[a]`, which a fixed array matches), context `context<a>`, .. (one
+    /// record, `Option`, `Result`, `Vec` or array, `Eq` of those, `Hash` of
+    /// a tuple, record or array, a tuple's `Lt` .. `Ge` / `Ord` (#1479,
+    /// #2554, #2631). Head `head` is the shape over fresh variables
+    /// (`(a, b)`, `{ x: a, y: b }` in name order, `Option<a>`, `[a]`,
+    /// which a fixed array matches), context `context<a>`, .. (one
     /// dictionary per variable, in the head's order; `context` is `class`,
     /// or `Ord` for an order, whose items compare with `<` and `<=`), so
     /// a goal on the shape at a type parameter (`Show<Option<T>>`) meets
