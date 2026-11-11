@@ -180,8 +180,11 @@ impl Pipeline {
             let cached = self.ast_cache.get(file);
             // Includes earlier rounds' generated code (its spans point past the file).
             let report = cached.map(|c| c.report_source()).unwrap_or_default();
-            // Calls looked up by span, one walk for the whole round.
+            // Calls looked up by span, and the file's `use` items, one walk
+            // each for the whole round: nothing is spliced until every job
+            // is resolved.
             let calls = cached.and_then(|c| c.ast()).map(index_calls).unwrap_or_default();
+            let uses = cached.and_then(|c| c.ast()).map(top_level_uses).unwrap_or_default();
             for p in pending {
                 if p.kind == MacroKind::Comptime {
                     if self.macro_stack.contains(file) {
@@ -212,7 +215,7 @@ impl Pipeline {
                     continue;
                 }
                 let call = calls.get(&p.target).copied();
-                match self.resolve_macro(file, &p, call) {
+                match self.resolve_macro(file, &uses, &p, call) {
                     Ok((provider, decl, provider_module)) => {
                         if &provider == file {
                             errors.push(Message::error(
@@ -259,7 +262,7 @@ impl Pipeline {
                         }
                     }
                     Err(None) => {
-                        let candidates = self.import_candidates(file, &p.name);
+                        let candidates = self.import_candidates(&uses, &p.name);
                         // The provider does not parse: that is why nothing
                         // declares the macro, and the use site says so, as
                         // it does for a provider that does not typecheck.
@@ -449,15 +452,17 @@ impl Pipeline {
     ///
     /// `Err(None)`: nothing in scope provides it.
     #[allow(clippy::type_complexity)]
+    /// `uses` is `file`'s [`top_level_uses`].
     fn resolve_macro(
         &self,
         file: &Path,
+        uses: &[UseItem],
         p: &PendingMacro,
         call: Option<&Output<'_>>,
     ) -> Result<(PathBuf, MacroDecl, String), Option<Message>> {
-        let Some(ast) = self.ast_cache.get(file).and_then(|c| c.ast()) else {
+        if self.ast_cache.get(file).and_then(|c| c.ast()).is_none() {
             return Err(None);
-        };
+        }
         // A function-style macro may be overloaded by arity: the call's
         // argument count picks the declaration.
         let argc = match call.map(|c| c.1.as_ref()) {
@@ -480,18 +485,18 @@ impl Pipeline {
                 .map(|(file, _)| file)
                 .or_else(|| resolve_use_in_roots(&self.roots, &self.project_root, path, name))
         };
-        // Declarations of `p` that the top-level `use` items of `ast` import,
+        // Declarations of `p` that the top-level `use` items `uses` import,
         // one per providing module.
-        let imported = |ast: &Output<'_>| -> Result<Vec<(PathBuf, MacroDecl)>, Message> {
+        let imported = |uses: &[UseItem]| -> Result<Vec<(PathBuf, MacroDecl)>, Message> {
             let mut found: Vec<(PathBuf, MacroDecl)> = Vec::new();
-            for (path, name, alias) in top_level_uses(ast) {
-                let visible = alias.as_deref().unwrap_or(&name);
+            for (path, name, alias) in uses {
+                let visible = alias.as_deref().unwrap_or(name);
                 let (candidate, item) = if name == "*" {
                     let mut segs = path.clone();
                     let Some(last) = segs.pop() else { continue };
                     (resolve(&segs, &last), p.name.clone())
-                } else if visible == p.name {
-                    (resolve(&path, &name), name.clone())
+                } else if *visible == p.name {
+                    (resolve(path, name), name.clone())
                 } else {
                     continue;
                 };
@@ -504,7 +509,7 @@ impl Pipeline {
             }
             Ok(found)
         };
-        let mut found = imported(ast).map_err(Some)?;
+        let mut found = imported(uses).map_err(Some)?;
         // Macro output may use its provider's other macros without an import,
         // and the macros the provider itself imports (#1407).
         if found.is_empty()
@@ -513,7 +518,7 @@ impl Pipeline {
             if let Some(decl) = pick(provider, &p.name).map_err(Some)? {
                 found.push((provider.clone(), decl));
             } else if let Some(provider_ast) = self.ast_cache.get(provider).and_then(|c| c.ast()) {
-                found = imported(provider_ast).map_err(Some)?;
+                found = imported(&top_level_uses(provider_ast)).map_err(Some)?;
             }
         }
         // Built-in derives come from the embedded `derive` module. It is not
@@ -554,25 +559,22 @@ impl Pipeline {
         }
     }
 
-    /// Modules `file`'s `use` items would take a macro `name` from.
-    fn import_candidates(&self, file: &Path, name: &str) -> Vec<PathBuf> {
-        let Some(ast) = self.ast_cache.get(file).and_then(|c| c.ast()) else {
-            return Vec::new();
-        };
+    /// Modules the `use` items `uses` (a file's [`top_level_uses`]) would
+    /// take a macro `name` from.
+    fn import_candidates(&self, uses: &[UseItem], name: &str) -> Vec<PathBuf> {
         let resolve = |path: &[String], item: &str| {
             crate::macros::embedded_use(path, item)
                 .map(|(file, _)| file)
                 .or_else(|| resolve_use_in_roots(&self.roots, &self.project_root, path, item))
         };
-        top_level_uses(ast)
-            .into_iter()
+        uses.iter()
             .filter_map(|(path, item, alias)| {
                 if item == "*" {
                     let mut segs = path.clone();
                     let last = segs.pop()?;
                     resolve(&segs, &last)
-                } else if alias.as_deref().unwrap_or(&item) == name {
-                    resolve(&path, &item)
+                } else if alias.as_deref().unwrap_or(item) == name {
+                    resolve(path, item)
                 } else {
                     None
                 }
@@ -1821,9 +1823,12 @@ fn encode_call(call: Option<&Output<'_>>, source: &str, p: &PendingMacro, decl: 
     Ok(wire.finish())
 }
 
+/// A top-level `use`: `(path, name, alias)`.
+type UseItem = (Vec<String>, String, Option<String>);
+
 /// `(path, name, alias)` of every top-level `use`.
-fn top_level_uses(ast: &Output<'_>) -> Vec<(Vec<String>, String, Option<String>)> {
-    fn walk(node: &Output<'_>, out: &mut Vec<(Vec<String>, String, Option<String>)>) {
+fn top_level_uses(ast: &Output<'_>) -> Vec<UseItem> {
+    fn walk(node: &Output<'_>, out: &mut Vec<UseItem>) {
         match node.1.as_ref() {
             Expression::Use { path, name, alias } => out.push((path.clone(), name.clone(), alias.clone())),
             Expression::Program(items) | Expression::Fragment(items) => {
