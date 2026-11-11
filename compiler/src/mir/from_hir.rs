@@ -6188,7 +6188,8 @@ impl Lower<'_> {
         let dest_ty = match pair {
             _ if unit => MirTy::I64,
             Some(_) => MirTy::HeapRef,
-            None => self.word_ty(&ty).ok_or("resume type")?,
+            // A heap tuple or boxed enum moves as its object (#2680).
+            None => self.word_or_object(&ty).ok_or("resume type")?,
         };
         let send = match value {
             Some(v) => match self.word_or_boxed(v)? {
@@ -6220,7 +6221,7 @@ impl Lower<'_> {
         } else if self.pair_tys(id).is_some() {
             Some(MirTy::HeapRef)
         } else {
-            Some(self.word_ty(&ty).ok_or("yield type")?)
+            Some(self.word_or_object(&ty).ok_or("yield type")?)
         };
         let Some(v) = self.word_or_boxed(value)? else {
             return Ok(Val::Never);
