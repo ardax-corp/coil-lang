@@ -10053,8 +10053,8 @@ impl Compiler {
                 callee: Callee::Value(f),
                 args,
             } => {
-                // A `PolyFn` call: no dictionary forwarded from a generic
-                // frame, and no type parameter nested in the callee's
+                // A `PolyFn` call: a goal it forwards is a frame
+                // dictionary, and no type parameter is nested in the callee's
                 // signature (its shared body would box `T` inside the
                 // `Option` or tuple it returns: E0127, #916). An enum result
                 // is the call's word, or its object (#1515). A closure
@@ -10075,14 +10075,22 @@ impl Compiler {
                         *self.polyfn_over_application.borrow_mut() = Some((source, e.span));
                         return Err("polyfn-over-application");
                     }
-                    let forwarded = self.forwarded_dicts_hint(e.node, e.span.0, e.span.1).is_some_and(|d| !d.is_empty());
+                    // A goal on the body's own type parameter is built from
+                    // the body's bound, as a direct call forwards it (#2652).
+                    let mut forwarded = self.forwarded_dicts_hint(e.node, e.span.0, e.span.1).unwrap_or_default();
+                    if self.hir_clone_drops_forwarded(&forwarded) {
+                        forwarded.clear();
+                    }
                     let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                    // A shared body holds a result of its own type
+                    // parameter as the word the value's body returns.
+                    let open = |t: &Ty| !self.compiling_mono_clone && matches!(crate::typechecking::ty::strip_readonly(t), Ty::Var(_));
                     let closure = self.hir_polyfn_ret_adapt(hir, emit, id, *f, args.len());
-                    if forwarded
+                    if forwarded.iter().any(|&i| !self.hir_frame_dict(i))
                         || self.hir_polyfn_nested(hir, emit, *f)
                         || closure.as_ref().is_some_and(Result::is_err)
                         || closure.is_none()
-                            && ty.as_ref().is_none_or(|t| !crate::layout::ty_is_closed(t) && !self.hir_open_enum_word(t))
+                            && ty.as_ref().is_none_or(|t| !crate::layout::ty_is_closed(t) && !self.hir_open_enum_word(t) && !open(t))
                     {
                         return Err("callee-value");
                     }

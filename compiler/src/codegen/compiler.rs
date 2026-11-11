@@ -3537,13 +3537,15 @@ impl Compiler {
         let Some(scheme) = self.checker.env().lookup(fn_name).cloned() else {
             return 0;
         };
-        self.plan_dicts_for_signature(out, &scheme.ty, &scheme.constraints, arg_tys, ret_ty)
+        self.plan_dicts_for_signature(out, &scheme.ty, &scheme.constraints, arg_tys, ret_ty, false)
     }
 
     /// The dictionaries a call through a function value passes: its type
     /// `fun_ty` over `binders` (a `forall` parameter's, or the generic
     /// function's a local is bound from), its `constraints` in
-    /// [`kinds::value_constraint_order`] (#2636).
+    /// [`kinds::value_constraint_order`] (#2636). Each is built by its
+    /// goal, a bare type parameter of the calling body's from that body's
+    /// bound (#2652): the call has no forwarded dictionaries.
     pub(super) fn plan_value_call_dicts(
         &mut self,
         out: &mut Vec<DictStep>,
@@ -3552,12 +3554,14 @@ impl Compiler {
         ret_ty: Option<&crate::typechecking::Ty>,
     ) -> usize {
         let constraints = kinds::value_constraint_order(binders, fun_ty, constraints);
-        self.plan_dicts_for_signature(out, fun_ty, &constraints, arg_tys, ret_ty)
+        self.plan_dicts_for_signature(out, fun_ty, &constraints, arg_tys, ret_ty, true)
     }
 
     /// The instance dictionaries for `constraints` at a call of a function
     /// typed `fun_ty` on `arg_tys` (and returning `ret_ty`): a generic's
     /// scheme, or a `forall T: Show. T -> string` parameter's body (#1188).
+    /// A goal on a bare type parameter is forwarded by a direct call, and
+    /// built from the frame `by_goal`.
     fn plan_dicts_for_signature(
         &mut self,
         out: &mut Vec<DictStep>,
@@ -3565,6 +3569,7 @@ impl Compiler {
         constraints: &[crate::typechecking::ty::Constraint],
         arg_tys: &[crate::typechecking::Ty],
         ret_ty: Option<&crate::typechecking::Ty>,
+        by_goal: bool,
     ) -> usize {
         use crate::typechecking::Ty;
 
@@ -3604,8 +3609,11 @@ impl Compiler {
             else {
                 // A goal open inside a type (`Show<(int, T)>`) is built here
                 // from the frame's dictionaries (#1479); a bare type
-                // parameter's is forwarded.
-                if let Some(lookup) = self.open_structural_lookup(constraint, &var_to_ty)
+                // parameter's is forwarded, or built from its bound.
+                let lookup = self.open_structural_lookup(constraint, &var_to_ty).or_else(|| {
+                    by_goal.then(|| constraint.args.iter().map(|a| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &a.subst_vars(&|v| var_to_ty.get(&v).cloned()))).collect())
+                });
+                if let Some(lookup) = lookup
                     && self.plan_instance_dict(out, &constraint.class, &lookup)
                 {
                     dict_count += 1;
