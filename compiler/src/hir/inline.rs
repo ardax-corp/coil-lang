@@ -34,6 +34,12 @@ pub struct Shape {
     heap_locals: Vec<LocalId>,
     /// The callee is another module's: its nodes take the call's span.
     foreign: bool,
+    /// A foreign callee's source file: its nodes keep their own place in
+    /// it ([`super::HirExpr::src`]).
+    file: Option<u32>,
+    /// The callee's frame name when it is not the body's: a clone's entry
+    /// (`f$inst$int`), as a call of it shows.
+    frame: Option<String>,
     /// In a loop, `heap_locals` keep their value until the next trip
     /// rebinds them, as the loop's own locals do (nothing observes when
     /// those values die), and are not cleared.
@@ -52,6 +58,16 @@ impl Shape {
 
     pub fn with_foreign(mut self, foreign: bool) -> Self {
         self.foreign = foreign;
+        self
+    }
+
+    pub fn with_file(mut self, file: Option<u32>) -> Self {
+        self.file = file;
+        self
+    }
+
+    pub fn with_frame(mut self, frame: &str) -> Self {
+        self.frame = Some(frame.to_string());
         self
     }
 
@@ -148,6 +164,8 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
         heap_result: false,
         heap_locals: Vec::new(),
         foreign: false,
+        file: None,
+        frame: None,
         looping,
         loop_inert: false,
     })
@@ -806,16 +824,21 @@ impl Inliner<'_> {
         // The spliced nodes are in a scope of their own, at the call (#2578);
         // the callee's own scopes nest in it.
         let call_scope = self.body.expr(call).scope;
+        // A foreign callee's place is known only with its file.
+        let file = shape.file.filter(|_| shape.foreign);
+        let at_call = shape.foreign && file.is_none();
         let ret = match shape.ret.or(shape.result) {
-            Some(r) if !shape.foreign => callee.expr(r).span,
+            Some(r) if !at_call => callee.expr(r).src.unwrap_or(callee.expr(r).span),
             _ => span,
         };
-        self.body.inline_scopes.push(HirInlineScope { callee: callee.name.clone(), call: span, call_scope, ret, at_call: shape.foreign });
+        self.body.inline_scopes.push(HirInlineScope { callee: shape.frame.clone().unwrap_or_else(|| callee.name.clone()), call: span, call_scope, ret, at_call, file });
         let here = self.body.inline_scopes.len() as u32;
         let soff = here;
         for inner in &callee.inline_scopes {
             let call_scope = if inner.call_scope == 0 { here } else { inner.call_scope + soff };
-            self.body.inline_scopes.push(HirInlineScope { call_scope, ..inner.clone() });
+            // Its call is in the callee's code, so in the callee's file.
+            let file = inner.file.or(file);
+            self.body.inline_scopes.push(HirInlineScope { call_scope, file, ..inner.clone() });
         }
         let scope_of = |k: u32| if k == 0 { here } else { k + soff };
         let param_of = |l: LocalId| callee.params.iter().position(|&p| p == l);
@@ -827,8 +850,8 @@ impl Inliner<'_> {
                 },
                 k => remap(k, off, loff),
             };
-            let (span, node) = if shape.foreign { (span, None) } else { (e.span, e.node) };
-            self.body.exprs.push(HirExpr { kind, span, node, scope: scope_of(e.scope), ..e.clone() });
+            let (span, node, src) = if shape.foreign { (span, None, Some(e.src.unwrap_or(e.span))) } else { (e.span, e.node, e.src) };
+            self.body.exprs.push(HirExpr { kind, span, node, src, scope: scope_of(e.scope), ..e.clone() });
         }
         // A substituted parameter has no slot of its own.
         let substituted = |l: &LocalId| param_of(*l).is_some_and(|k| subst[k].is_some());

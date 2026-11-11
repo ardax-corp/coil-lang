@@ -312,7 +312,7 @@ impl HirBody {
 
     /// Append a node the compiler made: one word, no AST node, no flags.
     pub fn push_new(&mut self, kind: HirKind, ty: Option<Ty>, span: Span) -> HirId {
-        self.push(HirExpr { kind, ty, layout: Layout::Word, span, node: None, flags: HirFlags::default(), scope: 0 })
+        self.push(HirExpr { kind, ty, layout: Layout::Word, span, node: None, flags: HirFlags::default(), scope: 0, src: None })
     }
 
     /// A fresh compiler temp named `name`.
@@ -503,6 +503,11 @@ pub struct HirExpr {
     /// `0`: code of the body itself. `k`: inlining spliced it in from the
     /// callee [`HirBody::inline_scopes`]`[k - 1]` names (#2578).
     pub scope: u32,
+    /// Where the node is in the source when `span` is not that place: a
+    /// node of another module's callee spliced in takes the call's span,
+    /// which the planner's facts are keyed by, and keeps its own here,
+    /// in its scope's file ([`HirInlineScope::file`], #2666).
+    pub src: Option<Span>,
 }
 
 /// A callee inlining spliced into a body ([`HirExpr::scope`]): its name,
@@ -520,6 +525,9 @@ pub struct HirInlineScope {
     pub ret: Span,
     /// The spliced nodes have the call's span (another module's callee).
     pub at_call: bool,
+    /// The file of the callee's code when it is not the caller's: another
+    /// module's (its nodes' [`HirExpr::src`] are in it).
+    pub file: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -3332,6 +3332,7 @@ impl Lower<'_> {
             return f(self);
         }
         let (start, end) = self.hir.inline_scopes[k as usize - 1].ret;
+        let file = self.scope_file(file, k);
         if (start, end) != crate::hir::synth::SPAN {
             let (start, end) = crate::variadic::written_span(start, end);
             self.b.pending_loc = DebugLoc { file, start_byte: start as u32, end_byte: end.max(start + 1) as u32, scope };
@@ -5134,7 +5135,10 @@ impl Lower<'_> {
         let Some(s) = self.hir.inline_scopes.get(i) else { return 0 };
         let (callee, (start, end), call_scope, at_call) = (s.callee.clone(), s.call, s.call_scope, s.at_call);
         // Made before the scopes spliced into it: the chain ends.
-        let parent = if call_scope < k { self.program_scope(file, call_scope) } else { 0 };
+        let call_scope = if call_scope < k { call_scope } else { 0 };
+        let parent = self.program_scope(file, call_scope);
+        // The call is in the code of the scope it was in.
+        let file = self.scope_file(file, call_scope);
         let (start, end) = crate::variadic::written_span(start, end);
         let call = DebugLoc { file, start_byte: start as u32, end_byte: end.max(start + 1) as u32, scope: parent };
         let id = self.cx.inline_scope(common::InlineScope { callee, call, at_call });
@@ -5142,10 +5146,33 @@ impl Lower<'_> {
         id
     }
 
+    /// The file the code of the body's inline scope `k` is in: the body's
+    /// (`file`), or another module's callee's (#2666).
+    fn scope_file(&self, file: u32, k: u32) -> u32 {
+        let mut k = k;
+        while let Some(s) = (k as usize).checked_sub(1).and_then(|i| self.hir.inline_scopes.get(i)) {
+            if let Some(f) = s.file {
+                return f;
+            }
+            if s.call_scope >= k {
+                break;
+            }
+            k = s.call_scope;
+        }
+        file
+    }
+
+    /// Where node `id` is in the source: its own span, or the one a
+    /// foreign callee's spliced node keeps.
+    fn src_span(&self, id: HirId) -> crate::hir::Span {
+        let e = self.hir.expr(id);
+        e.src.unwrap_or(e.span)
+    }
+
     /// `f` with the source location of statement `id`.
     fn at_stmt<T>(&mut self, id: HirId, f: impl FnOnce(&mut Self) -> Result<T, Refusal>) -> Result<T, Refusal> {
         let outer = self.b.pending_loc;
-        let (start, end) = self.hir.expr(id).span;
+        let (start, end) = self.src_span(id);
         // Generated code without a place of its own has the enclosing one,
         // but for a host call: the capability check finds it by its own span.
         // A compiler-made node ([`crate::hir::synth::SPAN`]) has none either.
@@ -5153,7 +5180,9 @@ impl Lower<'_> {
             (crate::attrs::is_fresh_span(start) && self.host_call(id).is_none()) || (start, end) == crate::hir::synth::SPAN;
         if let Some(file) = self.cx.file().filter(|_| !placeless) {
             let (start, end) = crate::variadic::written_span(start, end);
-            let scope = self.program_scope(file, self.hir.expr(id).scope);
+            let k = self.hir.expr(id).scope;
+            let scope = self.program_scope(file, k);
+            let file = self.scope_file(file, k);
             self.b.pending_loc = DebugLoc {
                 file,
                 start_byte: start as u32,

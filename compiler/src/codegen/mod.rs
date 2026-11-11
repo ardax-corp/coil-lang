@@ -703,6 +703,10 @@ pub struct Compiler {
     /// form and every type closed and qualified: callees any module's
     /// typed inlining may splice ([`Compiler::hir_resolved_clone_body`]).
     hir_resolved_clones: HashMap<String, crate::hir::HirBody>,
+    /// The source file of each of [`Self::hir_portable`] and
+    /// [`Self::hir_resolved_clones`], by key: a splice of one keeps its
+    /// nodes' places in it (#2666).
+    hir_splice_files: HashMap<String, u32>,
     /// The namespace to restore once the module being compiled ends,
     /// between [`Compiler::check_module_hir`] and
     /// [`Compiler::lower_module_bodies`].
@@ -885,6 +889,7 @@ impl Default for Compiler {
             outlined_planned: HashSet::new(),
             hir_portable: HashMap::new(),
             hir_resolved_clones: HashMap::new(),
+            hir_splice_files: HashMap::new(),
             module_outer_namespace: None,
             resolved_plans: std::cell::RefCell::new(Vec::new()),
             hir_core_methods: HashMap::new(),

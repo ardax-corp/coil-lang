@@ -62,8 +62,15 @@ then the function the code is in at the call of the outermost scope
 
 - **Another module's callee** (a portable body, a resolved method or mono clone
   from any module): its spliced nodes take the call's span, since the planner's
-  facts for them are keyed by it. The scope is `at_call`: the callee's frame has no
-  line (`in helper::boom`), the caller's is at the call.
+  facts for them are keyed by it, and keep their own in `HirExpr::src` (#2666). The
+  scope records the callee's file (`HirInlineScope::file`, from
+  `Compiler::hir_splice_files`, noted when the body was kept for splicing), and
+  lowering locates the scope's nodes in that file (`Lower::scope_file`): an op's
+  `DebugLoc::file` is the callee module's entry in `source_files`, as any other, so
+  the archive needs nothing beyond the scope table. A clone's frame is named by its
+  entry (`helper::pick$inst$int`), as a call of it shows. Only when the file is not
+  known (a prelude instance) is the scope `at_call`: the callee's frame has no line,
+  the caller's is at the call. A foreign callee's cold helper keeps the call's span.
 - **Cold helpers** of partial inlining (`hir::outline`, `{function}$cold{k}`) are cut
   from a callee before it is spliced: the helper's frame shows as the function's,
   and the frame of the scope that called it (the same activation) is not repeated.
