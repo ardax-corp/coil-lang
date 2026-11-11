@@ -387,6 +387,18 @@ in a loop that allocates).
   survivors held in place. On `gc_old_vec_store` each of its 551 minors
   walks the 1M-word vector twice (`remembered_words` and the remembered
   share of `rewrite_words` are both 550M in total).
+- **Fix-up list (step 2).** The reach pass over a remembered array
+  notes the address of every precise slot that names a young object
+  (`reach_array_slots`), and after the copy only those slots are
+  forwarded. The array is not walked a second time. A slot whose object
+  an ambiguous word pinned later has nothing to forward, which is why
+  the pass cannot forward as it scans. Unknown-kind words are tested
+  against the slab's bounds before a chunk lookup. Other remembered kinds
+  keep `rewrite_precise_refs`. Remembered-array rewrite words went to 0
+  (`gc_old_vec_store`: 550M → 0, `gc_map_fill`: 1.82M → 10).
+  Instructions: `gc_old_vec_store` −21.4%, `vec_node` (400k) −12.3%,
+  `Bag<V>` at `--clone-budget 0` −8.4%, `gc_map_fill` −3.9%,
+  `HashMap<int, Node>` (400k) −2.9%; flagships unchanged.
 - **Missed-barrier check.** In debug builds, under `gc-stress` and in any
   run with `COIL_MIR_VERIFY` set (`heap_checks_on`, read once per heap),
   each minor first walks the live objects: an old or held object the

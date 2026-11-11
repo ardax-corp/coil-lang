@@ -826,6 +826,13 @@ impl Slab {
         self.chunks.may_contain(addr)
     }
 
+    /// `[lo, hi)` of every chunk address, for a scan that tests many
+    /// words while no chunk is mapped ([`Self::may_contain`] per word
+    /// reloads them).
+    pub fn bounds(&self) -> (u64, u64) {
+        (self.chunks.lo.load(Ordering::Acquire), self.chunks.hi.load(Ordering::Acquire))
+    }
+
     /// `(chunk index, slot size, slots in that chunk)` for a slot address.
     #[cfg(feature = "gc-stats")]
     pub fn slot_meta(&self, addr: u64) -> Option<(usize, usize, usize)> {
