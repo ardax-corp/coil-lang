@@ -325,6 +325,7 @@ impl BodyBuilder {
             node,
             flags: HirFlags::default(),
             scope: 0,
+            src: None,
         });
         id
     }

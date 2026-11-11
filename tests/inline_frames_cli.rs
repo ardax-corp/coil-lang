@@ -339,39 +339,80 @@ fn main() {
     );
 }
 
-/// Another module's callee: its spliced code has the call's location, so
-/// its frame has no line, and the caller's is at the call.
+/// Another module's callees: a function, a generic function's clone and
+/// a generic class's method clone. Their spliced code takes the call's span
+/// for the planner, and keeps its own place, in its own file, for the
+/// report (#2666): every level prints the `-O0` report.
 #[test]
-fn an_inlined_callee_of_another_module_has_its_frame() {
+fn inlined_callees_of_another_module_have_their_lines() {
     let dir = scratch("module");
-    std::fs::write(dir.join("helper.coil"), "fn boom(int i) -> int {\n    return 100 / (i - 1000);\n}\n").expect("write helper");
-    let file = dir.join("main.coil");
-    std::fs::write(&file, LANETRAP.replace("use string::to_bytes;\n", "use string::to_bytes;\nuse helper::boom;\n").replace("fn boom(int i) -> int {\n    return 100 / (i - 1000);\n}\n\n", "")).expect("write main");
-    let run = |opt: &str, mir: bool| {
+    std::fs::write(
+        dir.join("helper.coil"),
+        "fn boom(int i) -> int {
+    return 100 / (i - 1000);
+}
+
+fn pick<T>(Vec<T> v, int i) -> T {
+    return v[i];
+}
+
+class Cell<T> {
+    pub items: Vec<T>,
+}
+
+impl Cell<T> {
+    pub fn get(int i) -> T {
+        return self.items[i];
+    }
+}
+",
+    )
+    .expect("write helper");
+    let main = |body: &str| {
+        format!(
+            "use io::{{stdout, write}};
+use string::to_bytes;
+use helper::{{boom, pick, Cell}};
+
+fn run(Vec<int> v, Cell<int> c, int n) -> int {{
+    let total = 0;
+    for i in 0..n {{
+        total = total ^ {body};
+    }}
+    return total;
+}}
+
+fn main() {{
+    let c = new Cell(items: [1, 2]);
+    let v: Vec<int> = [1, 2, 3];
+    let _ = write(stdout(), to_bytes(run(v, c, 5000).show()));
+}}
+"
+        )
+    };
+    let run = |file: &Path, opt: &str, mir: bool| {
         let mut cmd = coil();
         cmd.args(["-O", opt, "--fold-calls", "off", "--auto-par", "off", "--no-build-cache", "--root"]).arg(&dir);
         if mir {
             cmd.arg("--mir");
         }
-        let out = with_roots(&mut cmd).arg(&file).output().expect("spawn coil");
+        let out = with_roots(&mut cmd).arg(file).output().expect("spawn coil");
         report(&out.stderr).replace(&format!("{}/", dir.display()), "")
     };
-    assert_eq!(
-        run("0", false),
-        "panic: division by zero at helper.coil:2:11
-  in helper::boom at helper.coil:2:11
-  in run at main.coil:8:24
-  in main at main.coil:14:12"
-    );
-    for mir in [false, true] {
-        assert_eq!(
-            run("2", mir),
-            "panic: division by zero at main.coil:8:24
-  in helper::boom
-  in run at main.coil:8:24
-  in main at main.coil:14:12",
-            "mir={mir}"
-        );
+    for (name, body, callee) in [
+        ("function", "boom(i)", "in helper::boom at helper.coil:2:11"),
+        ("clone", "pick(v, i)", "in helper::pick$inst$int at helper.coil:6:4"),
+        ("method", "c.get(i)", "in helper::Cell::get$inst$int at helper.coil:15:8"),
+    ] {
+        let file = dir.join(format!("{name}.coil"));
+        std::fs::write(&file, main(body)).expect("write main");
+        let want = run(&file, "0", false);
+        assert_eq!(want.lines().nth(1), Some(format!("  {callee}").as_str()), "{name} -O0:\n{want}");
+        for opt in ["1", "2", "3"] {
+            for mir in [false, true] {
+                assert_eq!(run(&file, opt, mir), want, "{name} -O{opt} mir={mir}");
+            }
+        }
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

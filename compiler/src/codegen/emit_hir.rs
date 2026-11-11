@@ -960,6 +960,15 @@ impl Compiler {
         })
     }
 
+    /// Record the file of the body compiled now as that of the splice body
+    /// `key` (the file its own code is located in).
+    fn note_splice_file(&mut self, key: &str) {
+        let loc = self.loc_from_span(SimpleSpan::from(0..1));
+        if loc.is_known() {
+            self.hir_splice_files.insert(key.to_string(), loc.file);
+        }
+    }
+
     fn hir_portable_body(&self, body: &HirBody) -> Option<(String, HirBody)> {
         use crate::hir::{BodyKind, inline};
         if body.kind != BodyKind::Function || body.is_generic || body.is_coro || !body.captures.is_empty() || body.result_mode {
@@ -1561,6 +1570,7 @@ impl Compiler {
             && let Some(key) = self.current_function_table_key.clone()
             && let Some(body) = self.hir_resolved_clone_body(hir, before.as_ref().unwrap_or(emit))
         {
+            self.note_splice_file(&key);
             self.hir_resolved_clones.insert(key, body);
         }
         // Another module may splice this body, as inlined here.
@@ -1568,6 +1578,7 @@ impl Compiler {
             && plan.is_ok()
             && let Some((key, portable)) = self.hir_portable_body(hir)
         {
+            self.note_splice_file(&key);
             self.hir_portable.insert(key, portable);
         }
         let plan = plan.map(|(emit, _)| emit);
@@ -2541,7 +2552,8 @@ impl Compiler {
                     return Err(format!("resolved `{}`", call.key));
                 }
                 let (callee, shape) = fit(id, callee, true, true)?;
-                return Ok((callee, shape.with_foreign(true)));
+                let shape = shape.with_foreign(true).with_file(self.hir_splice_files.get(&call.key).copied()).with_frame(&call.key);
+                return Ok((callee, shape));
             }
             let core = core_insts.get(&id.0);
             let kind = [
@@ -2596,7 +2608,7 @@ impl Compiler {
                         // The stricter cross-module budget weighs every node
                         // (a read too) and a call as 25.
                         let (callee, shape) = fit(id, callee, true, true)?;
-                        return Ok((callee, shape.with_foreign(true)));
+                        return Ok((callee, shape.with_foreign(true).with_file(self.hir_splice_files.get(&call.key).copied())));
                     }
                     let index = self.hir_fn_body(&call.key).ok_or("ambiguous")?;
                     folded.get(&index).unwrap_or(&module.bodies[index])
@@ -3758,6 +3770,7 @@ impl Compiler {
             node: None,
             flags: Default::default(),
             scope: 0,
+            src: None,
         });
         id
     }
@@ -11623,7 +11636,7 @@ impl Compiler {
         }
         let unit = Some(Ty::Con(crate::typechecking::ty::UNIT.into()));
         let node = |w: &mut HirBody, kind: HirKind, ty: Option<Ty>| {
-            w.exprs.push(HirExpr { kind, ty, layout: crate::layout::Layout::Word, span: (0, 0), node: None, flags: HirFlags::default(), scope: 0 });
+            w.exprs.push(HirExpr { kind, ty, layout: crate::layout::Layout::Word, span: (0, 0), node: None, flags: HirFlags::default(), scope: 0, src: None });
             HirId(w.exprs.len() as u32 - 1)
         };
         let mut stmts = Vec::new();
@@ -11662,7 +11675,7 @@ impl Compiler {
         }
         for (e, live) in w.exprs.iter_mut().zip(live) {
             if !live {
-                *e = HirExpr { kind: HirKind::Lit(Lit::Unit), ty: None, layout: crate::layout::Layout::Word, span: e.span, node: None, flags: HirFlags::default(), scope: e.scope };
+                *e = HirExpr { kind: HirKind::Lit(Lit::Unit), ty: None, layout: crate::layout::Layout::Word, span: e.span, node: None, flags: HirFlags::default(), scope: e.scope, src: e.src };
             }
         }
         w.name = format!("{}$par", hir.name);

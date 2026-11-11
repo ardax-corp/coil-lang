@@ -79,6 +79,7 @@ impl<'a> Synth<'a> {
             node: None,
             flags: HirFlags::default(),
             scope: 0,
+            src: None,
         });
         id
     }
