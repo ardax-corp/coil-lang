@@ -50,7 +50,7 @@ fn several_v<T: Show, U: Show>(T x, U y) -> string {
 }
 
 fn agree<T: Show>(T x) -> bool {
-    let r = { z: x, m: [x], a: 2 };
+    let r = { z: x, m: Some(x), a: 2 };
     return format("%v", r) == r.show();
 }
 
