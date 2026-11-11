@@ -331,7 +331,9 @@ Design (copying nursery, decided 2026-10-27):
   remembered set, so a pinned 1M-element array costs nothing per minor
   (#2255). Only a major cycle frees held objects (its mark sees every
   young object). The chunk is reused once a major empties it; enough held
-  chunks ask for a major. (Promoting such a chunk to the old space
+  chunks ask for a major: a nursery's worth more than the last major
+  found live, and at least twice that (#2350; pacing in
+  [gc-incremental.md](gc-incremental.md#pacing)). (Promoting such a chunk to the old space
   instead left a 64 KiB chunk per stale stack word: result_heap_churn
   grew from 11 to 69 MB over 30M iterations.)
 - **Early frees** of young objects (step 2) put the slot on a per-class

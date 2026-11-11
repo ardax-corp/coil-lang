@@ -162,6 +162,7 @@ impl Heap {
             }
         }
         self.slab.unhold(&empty);
+        self.set_held_after_major(self.slab.held_chunks());
         for (_, first, end, size) in self.slab.young_spans() {
             for addr in slots(first, end, size) {
                 // SAFETY: a slot start in a mapped chunk holds a header.
@@ -203,6 +204,8 @@ impl Heap {
         }
         self.counts.young_bytes = 0;
         self.slab.finish_young(&promoted, &[], free);
+        // Held chunks were promoted with the rest: none is held now.
+        self.set_held_after_major(0);
     }
 
     /// Free the nursery's objects: only the heap's own immortals stay. A
@@ -653,6 +656,54 @@ mod tests {
         while !heap.mark_quantum(usize::MAX) {}
         unsafe { heap.sweep() };
         assert_eq!(walk(&heap, head), before);
+    }
+
+    /// Held chunks a major finds live do not ask for the next major
+    /// (#2350). A map's values sit in a `Vec<V>` a shared generic body
+    /// made, whose words are of unknown kind, so every minor pins and holds
+    /// its survivors. Once a nursery's worth of chunks was held and still live,
+    /// every safepoint started a major that marked the whole heap again.
+    /// The held-chunk budget grows with what the last major kept.
+    #[test]
+    fn held_chunks_a_major_keeps_do_not_ask_for_the_next_major() {
+        let mut heap = nursery_heap();
+        let major = |heap: &mut Heap, roots: &[u64]| {
+            heap.begin_mark(roots);
+            while !heap.mark_quantum(usize::MAX) {}
+            unsafe { heap.sweep() };
+        };
+        // Each minor pins one list head and holds its chunk.
+        let mut pins = Vec::new();
+        while heap.slab.held_chunks() < heap.nursery_chunks {
+            pins.push(cons_list(&mut heap, 20));
+            minor(&mut heap, &pins, &mut []);
+        }
+        let held = heap.slab.held_chunks();
+        assert!(heap.should_collect_old(), "a nursery's worth of held chunks asks for a major");
+        major(&mut heap, &pins);
+        assert_eq!(heap.slab.held_chunks(), held, "the major keeps every pinned head");
+        assert!(!heap.should_collect_old(), "live held chunks do not ask for another major");
+        // The budget doubles: holding as many chunks again asks for one.
+        while heap.slab.held_chunks() < 2 * held - 1 {
+            pins.push(cons_list(&mut heap, 20));
+            minor(&mut heap, &pins, &mut []);
+            assert!(!heap.should_collect_old(), "under the held budget");
+        }
+        pins.push(cons_list(&mut heap, 20));
+        minor(&mut heap, &pins, &mut []);
+        assert!(heap.should_collect_old(), "twice what the last major kept asks for a major");
+        // Once they die, a major frees them and the budget falls back.
+        major(&mut heap, &[]);
+        assert_eq!(heap.slab.held_chunks(), 0);
+        pins.clear();
+        while heap.slab.held_chunks() < heap.nursery_chunks - 1 {
+            pins.push(cons_list(&mut heap, 20));
+            minor(&mut heap, &pins, &mut []);
+        }
+        assert!(!heap.should_collect_old());
+        pins.push(cons_list(&mut heap, 20));
+        minor(&mut heap, &pins, &mut []);
+        assert!(heap.should_collect_old(), "a nursery's worth of new held chunks asks for a major again");
     }
 
     #[test]
