@@ -3729,15 +3729,15 @@ impl Compiler {
                 out.push(DictStep::Kinds(common::dict_from_call(j)));
                 continue;
             }
-            if let Some(slot) = self.frame_dict(dict_index) {
-                out.push(DictStep::Load(slot));
-                continue;
-            }
-
+            // The goal at the type the value is read at: ground, or over
+            // the making body's own type parameters (its bound's
+            // dictionary, or the clone's types), #2639.
             let synthesized = scheme.as_ref().and_then(|s| {
                 let constraint = s.constraints.get(dict_index)?;
-                let lookup =
-                    Self::resolve_constraint_lookup(constraint, &var_to_ty, &self.checker)?;
+                let lookup = Self::resolve_constraint_lookup(constraint, &var_to_ty, &self.checker).unwrap_or_else(|| {
+                    let subst = self.checker.subst();
+                    constraint.args.iter().map(|a| crate::typechecking::subst::apply_ty_prune(subst, &a.subst_vars(&|v| var_to_ty.get(&v).cloned()))).collect()
+                });
                 self.plan_instance_dict(out, &constraint.class, &lookup)
                     .then_some(())
             });
