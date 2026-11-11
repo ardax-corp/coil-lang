@@ -60,10 +60,15 @@ major.
   trait method with type parameters of its own takes their `kinds` word
   after its own bounds' dictionaries. Layout and convention only: `FORMAT`
   stays 16.
-- A `MakePolyFnCapture` word `1` (`common::KINDS_FROM_CALL`) is a `kinds`
-  slot the call fills with its last dictionary word (`machine::apply`); a
-  call through a `PolyFn` passes the callee's `kinds` word after its
-  dictionaries (#2506). `FORMAT` stays 16.
+- A call through a `PolyFn` passes, after its dictionaries, one bit per
+  type variable of the type it sees, in order of first appearance, and
+  their count at bit 56 (`common::KINDS_CALL_COUNT_SHIFT`). A
+  `MakePolyFnCapture` word after the `kinds` word with bit 62 set and bit
+  63 clear (`common::kinds_from_call`) sets one bit of that `kinds` word
+  from the call's (`machine::apply`) and is no argument (#2506, #2621; it
+  replaces #2602's word `1`, `KINDS_FROM_CALL`). A shared generic entry
+  takes at most 63 type parameters, so its `kinds` word has bit 63 set.
+  `FORMAT` stays 16.
 
 ## Major 7
 
