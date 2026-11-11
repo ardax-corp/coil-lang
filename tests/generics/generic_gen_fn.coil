@@ -189,6 +189,8 @@ test("yields of Option<T>, resumed by hand") {
     assert!((resume m) == Option::Some((1, 2)));
     assert!((resume m) == Option::None);
     assert!((resume m) == Option::Some((5, 6)));
+    let n = maybe(Vec::from([Option::Some(9)]));
+    assert!((resume n) == Option::Some(Option::Some(9)));
 }
 
 test("yields of (T, int)") {
@@ -222,6 +224,17 @@ test("yields of (T, int)") {
         }
     }
     assert!(somes == 1);
+    let g2 = indexed(Vec::from(["a", "b"]));
+    let (s0, i0) = resume g2;
+    let (s1, i1) = resume g2;
+    assert!(s0 == "a" && i0 == 0 && s1 == "b" && i1 == 1);
+    let h = indexed(Vec::from([new Pt(3), new Pt(4)]));
+    resume h;
+    let (p, j) = resume h;
+    assert!(p.x == 4 && j == 1);
+    let k = indexed(Vec::from([Option::Some(2), Option::None]));
+    let (o, _) = resume k;
+    assert!(o == Option::Some(2));
 }
 
 test("yields of Vec<T>") {
@@ -302,6 +315,9 @@ test("a generic class's generator method") {
         let (a, i) = pair;
         assert!(a == (1, 2) && i == 10);
     }
+    let tg = t.tagged(10);
+    let (a, i) = resume tg;
+    assert!(a == (1, 2) && i == 10);
     let total = 0;
     for pair in b.tagged(100) {
         let (x, j) = pair;
