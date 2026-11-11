@@ -4506,6 +4506,12 @@ pub(crate) const GEN_PINNED: u8 = 4;
 /// object (#2255).
 pub(crate) const GEN_HELD: u8 = 8;
 
+/// [`GcHeader::generation`]: an old object the barrier logged as quiet
+/// ([`QUIET`]), whose barrier the nursery's restart turns back on
+/// ([`relog_quiet`]). A store view of it must remember it at once instead
+/// ([`GcData::note_store_view`]).
+pub(crate) const GEN_QUIET: u8 = 16;
+
 /// Generation bits of an object the write barrier covers: an old one or a
 /// held one.
 #[inline]
@@ -4549,10 +4555,7 @@ pub(super) fn relog_all(slab: &super::slab::Slab) {
     let mut cur = super::slab::SlotCursor::default();
     while let Some(addr) = slab.next_slot(&mut cur) {
         // SAFETY: `next_slot` yields slot starts in mapped chunks.
-        let header = unsafe { &*(addr as *const GcHeader) };
-        if header.kind.get() != 0 && barriered(header.generation.get()) {
-            header.generation.set(header.generation.get() | GEN_UNLOGGED);
-        }
+        relog(unsafe { &*(addr as *const GcHeader) });
     }
 }
 
@@ -4567,13 +4570,19 @@ pub(super) fn relog_quiet(slab: &super::slab::Slab) {
             // SAFETY: a slot start in a mapped chunk holds a header; a
             // freed or re-carved slot reads as free or as another old
             // object, and an extra log bit only costs one more record.
-            let header = unsafe { &*(addr as *const GcHeader) };
-            if header.kind.get() != 0 && barriered(header.generation.get()) {
-                header.generation.set(header.generation.get() | GEN_UNLOGGED);
-            }
+            relog(unsafe { &*(addr as *const GcHeader) });
             false
         });
     });
+}
+
+/// The nursery starts again: an old object written while it was empty is
+/// logged again on its next write.
+fn relog(header: &GcHeader) {
+    let g = header.generation.get();
+    if header.kind.get() != 0 && barriered(g) {
+        header.generation.set(g & !GEN_QUIET | GEN_UNLOGGED);
+    }
 }
 
 /// A heap on this thread started (`true`) or stopped using nursery chunks.
@@ -4585,9 +4594,9 @@ pub(super) fn note_young_heap(on: bool) {
 #[cold]
 #[inline(never)]
 fn remember_written(header: &GcHeader) {
-    header.generation.set(header.generation.get() & !GEN_UNLOGGED);
     let addr = header as *const GcHeader as u64;
     if YOUNG_HEAPS.with(Cell::get) == 0 {
+        header.generation.set(header.generation.get() & !GEN_UNLOGGED | GEN_QUIET);
         QUIET.with_borrow_mut(|q| {
             q.push(addr);
             if q.len() >= QUIET_CAP {
@@ -4597,6 +4606,14 @@ fn remember_written(header: &GcHeader) {
         });
         return;
     }
+    header.generation.set(header.generation.get() & !GEN_UNLOGGED);
+    REMEMBERED.with_borrow_mut(|r| r.push(addr));
+}
+
+/// Slow path of [`GcData::note_store_view`].
+#[cold]
+#[inline(never)]
+fn remember_viewed(addr: u64) {
     REMEMBERED.with_borrow_mut(|r| r.push(addr));
 }
 
@@ -4713,6 +4730,24 @@ impl<T> AsMut<T> for GcData<T> {
             remember_written(&self.header);
         }
         &mut self.data
+    }
+}
+
+impl GcData<ObjArray> {
+    /// Native code took a store view of this array, after
+    /// [`AsMut::as_mut`] ran its barrier: stores through the view skip the
+    /// barrier until native code drops it. An array the barrier logged as
+    /// quiet is remembered now. Its barrier would come back on when the
+    /// nursery starts again, which an allocation does with the view still
+    /// live, and the young objects stored through the view would go
+    /// unseen (#2702).
+    #[inline]
+    pub(crate) fn note_store_view(&self) {
+        let g = self.header.generation.get();
+        if unlikely(g & GEN_QUIET != 0) {
+            self.header.generation.set(g & !GEN_QUIET);
+            remember_viewed(self as *const Self as u64);
+        }
     }
 }
 
