@@ -76,6 +76,15 @@ major.
   word still takes the call's dictionary at its own index. `FORMAT` stays
   16.
 
+Minor 1 (#2578) adds inline scopes, additively: MIR section `FORMAT` 17 writes
+the scope table (`common::write_inline_scopes`: per scope the callee's name, the
+call's file, start, end and scope, and an `at_call` byte) right after the format
+byte, and after each location map of a body the keys whose location is in a scope,
+with the scope (`DebugLoc::scope`, see [debug-info.md](debug-info.md)). The reader
+takes format 16 too (no scopes). `debug_locs` is stored as `SpanLoc`, the same
+three words as before. Outside the archive, the code image (`FORMAT` 3) and an AOT
+object's site table (five words per site) carry the scope as well.
+
 ## Major 7
 
 Major 7 minor 0 came with the deletion of the bytecode VM (step 8 of
