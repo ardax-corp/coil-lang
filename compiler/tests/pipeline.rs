@@ -4510,6 +4510,10 @@ fn compile_is_deterministic_for_multi_module_programs() {
         "tests/traits/trait_method_bound_dispatch.coil",
         "tests/contracts/contract_failure_messages.coil",
         "tests/representation/drop_enum__hashmap_entry.coil",
+        // Open structural instances, whose thunks take labels per method
+        // (#2675).
+        "tests/generics/open_structural_goal.coil",
+        "tests/traits/own_bound_open_structural.coil",
     ];
     for program in programs {
         let path = workspace_root.join(program);
