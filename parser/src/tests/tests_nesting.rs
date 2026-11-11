@@ -122,8 +122,7 @@ fn nesting_past_the_limit_is_a_diagnostic() {
 fn nested_value_ifs_and_fn_types_parse() {
     let ifs = parse_main(&format!("let r = {};", nest("a", |s, i| format!("if a > {i} {{ {s} }} else {{ 0 }}"))));
     assert_eq!(count(&ifs, "Branch("), 2 * DEPTH);
-    // The innermost `if` ends in a value, so every `if` around it is one.
-    assert_eq!(count(&ifs, "Expr((") - count(&ifs, "Expr((") + 1, 1);
+    assert_eq!(count(&ifs, " If(["), DEPTH);
     let unnamed = parse_main(&format!("let r: {} = a;", nest("int", |s, _| format!("fn({s}) -> int"))));
     assert_eq!(count(&unnamed, "TypeFn {"), DEPTH);
     let named = parse_main(&format!("let r: {} = a;", nest("int", |s, i| format!("fn({s} p{i}) -> int"))));

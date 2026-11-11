@@ -64,6 +64,170 @@ enum BodyItem<'p> {
     Value(Output<'p>),
 }
 
+/// An `if` parsed once, before it is known whether it is a statement or a
+/// value (#2654): both forms are built from it.
+struct IfTree<'p> {
+    /// The whole `if … else …`.
+    span: SimpleSpan,
+    head: IfHead<'p>,
+    then: IfBody<'p>,
+    els: Option<IfElse<'p>>,
+}
+
+enum IfHead<'p> {
+    Bool(Output<'p>),
+    Let(PatternOutput<'p>, Output<'p>),
+}
+
+/// A branch's `{ … }`: its span with and without the braces, and its items
+/// (statements not wrapped in [`Expression::Statement`]) with theirs.
+struct IfBody<'p> {
+    outer: SimpleSpan,
+    inner: SimpleSpan,
+    items: Vec<(BodyItem<'p>, SimpleSpan)>,
+}
+
+enum IfElse<'p> {
+    Block(IfBody<'p>),
+    If(Box<IfTree<'p>>),
+}
+
+impl<'p> IfTree<'p> {
+    /// The statement parser takes the `if` at all: its first branch ends in
+    /// no value. (When a later branch does, it takes the `if` without its
+    /// `else` part, and what follows fails; [`Pratt::if_`] does that.)
+    fn starts_statement(&self) -> bool {
+        self.then.is_statements()
+    }
+
+    /// The `if` is a statement: no branch ends in a value.
+    fn is_statement(&self) -> bool {
+        self.then.is_statements()
+            && match &self.els {
+                None => true,
+                Some(IfElse::Block(b)) => b.is_statements(),
+                Some(IfElse::If(t)) => t.is_statement(),
+            }
+    }
+
+    /// The statement `if`, as [`Pratt::if_`] builds it (bodies are blocks
+    /// of statements spanning the inside of their braces).
+    fn statement(self) -> Output<'p> {
+        let span = self.span;
+        let else_output = self.els.map(|e| match e {
+            IfElse::Block(b) => b.statements(),
+            IfElse::If(t) => t.statement(),
+        });
+        match self.head {
+            IfHead::Let(pattern, scrutinee) => if_let_node(span, pattern, scrutinee, self.then.statements(), else_output),
+            IfHead::Bool(cond) => {
+                let mut branches: Vec<Output> = vec![(span, Box::new(Expression::Branch(Some(cond), self.then.statements())))];
+                if let Some(else_output) = else_output {
+                    match else_output.1.as_ref() {
+                        Expression::If(more_branches) => branches.extend(more_branches.iter().cloned()),
+                        _ => branches.push((span, Box::new(Expression::Branch(None, else_output)))),
+                    }
+                }
+                (span, Box::new(Expression::If(branches)))
+            }
+        }
+    }
+
+    /// The `if` as a value, as the expression parser built it before #2654 (bodies are value
+    /// blocks spanning their braces), wrapped in [`Expression::Expr`].
+    fn value(self) -> Output<'p> {
+        let span = self.span;
+        let else_output = self.els.map(|e| match e {
+            IfElse::Block(b) => b.value_block(),
+            IfElse::If(t) => t.value(),
+        });
+        let node = match self.head {
+            IfHead::Let(pattern, scrutinee) => if_let_node(span, pattern, scrutinee, self.then.value_block(), else_output),
+            IfHead::Bool(cond) => {
+                let mut branches: Vec<Output> = vec![(span, Box::new(Expression::Branch(Some(cond), self.then.value_block())))];
+                if let Some(else_output) = else_output {
+                    // An `else if` chain is one flat `If`, as a statement's.
+                    if let Expression::Expr(inner) = else_output.1.as_ref()
+                        && let Expression::If(more) = inner.1.as_ref()
+                    {
+                        branches.extend(more.iter().cloned());
+                    } else {
+                        branches.push((span, Box::new(Expression::Branch(None, else_output))));
+                    }
+                }
+                (span, Box::new(Expression::If(branches)))
+            }
+        };
+        (span, Box::new(Expression::Expr(node)))
+    }
+}
+
+/// An `if let` node; a missing `else` is an empty block spanning the `if let`.
+fn if_let_node<'p>(span: SimpleSpan, pattern: PatternOutput<'p>, scrutinee: Output<'p>, then_body: Output<'p>, else_output: Option<Output<'p>>) -> Output<'p> {
+    let else_body = else_output.unwrap_or_else(|| (span, Box::new(Expression::Block(Vec::new()))));
+    (
+        span,
+        Box::new(Expression::IfLet {
+            scrutinee,
+            then_arm: MatchArm { pattern, body: then_body },
+            else_arm: MatchArm { pattern: (span, Pattern::Default), body: else_body },
+        }),
+    )
+}
+
+impl<'p> IfBody<'p> {
+    fn is_statements(&self) -> bool {
+        self.items.iter().all(|(item, _)| matches!(item, BodyItem::Statement(_)))
+    }
+
+    /// A block of statements ([`Pratt::block`]).
+    fn statements(self) -> Output<'p> {
+        let statements = self
+            .items
+            .into_iter()
+            .map(|(item, _)| match item {
+                BodyItem::Statement(s) | BodyItem::Value(s) => s,
+            })
+            .collect();
+        (self.inner, Box::new(Expression::Block(statements)))
+    }
+
+    /// A value block ([`Pratt::brace_body`] over wrapped items).
+    fn value_block(self) -> Output<'p> {
+        let items = self.items.into_iter().map(|(item, span)| match item {
+            BodyItem::Statement(s) => BodyItem::Statement((span, Box::new(Expression::Statement(s)))),
+            value => value,
+        });
+        value_block(self.outer, items)
+    }
+}
+
+/// The value block of `items` spanning `span`: its statements and the value
+/// before its `}`; a final `match` statement with no `;` is the value.
+fn value_block<'p>(span: SimpleSpan, items: impl IntoIterator<Item = BodyItem<'p>>) -> Output<'p> {
+    let mut statements = Vec::new();
+    let mut trailing = None;
+    for item in items {
+        match item {
+            BodyItem::Statement(s) => statements.push(s),
+            // Only before `}`, so only the last.
+            BodyItem::Value(v) => trailing = Some(v),
+        }
+    }
+    // `{ …; match x { … } }`: a final `match` with no `;` is the
+    // body's value, as in any value block.
+    if trailing.is_none()
+        && let Some(tail) = statements.last().and_then(bare_statement_match)
+    {
+        let tail = tail.clone();
+        statements.pop();
+        statements.push(tail);
+        return (span, Box::new(Expression::Block(statements)));
+    }
+    statements.extend(trailing);
+    (span, Box::new(Expression::Block(statements)))
+}
+
 /// The `match` of a `match … { … }` statement written without `;` (its
 /// `ExprStatement` has exactly the match's span; the `;` form extends past it).
 fn bare_statement_match<'a, 'p>(stmt: &'a Output<'p>) -> Option<&'a Output<'p>> {
@@ -532,6 +696,80 @@ impl<'pratt> Pratt<'pratt> {
                     }),
                 )
             });
+        // Each parameter's type parsed once (#2654): trying the named list,
+        // whose parameters try their type as `T... rest` and then as
+        // `T name`, and then the unnamed one parsed each type three times,
+        // so `fn(fn(fn(int) -> int) -> int) -> int` took time exponential in
+        // its depth. Here the token after the first parameter's type picks
+        // the list, and every later parameter is read as that list reads
+        // it. A list that is not well formed is then read by those two
+        // parsers as before, for their diagnostics.
+        let name = || text::ident().padded_by(trivia());
+        let named_tail = choice((
+            op!("...").ignore_then(name()).map(|n| (n, true)),
+            name().map(|n| (n, false)),
+        ));
+        let argument = |(docs, ty, (name, is_rest)): (Vec<&'pratt str>, Option<Output<'pratt>>, (&'pratt str, bool)), span| {
+            (span, Box::new(Expression::Argument { docs, ty, name, is_rest }))
+        };
+        let named_param = self
+            .docs_prefix()
+            .then(choice((
+                op!("...").ignore_then(name()).map(|n| (None, (n, true))),
+                ty_parser.clone().then(named_tail.clone()).map(|(ty, n)| (Some(ty), n)),
+            )))
+            .map_with(move |(docs, (ty, n)), e| argument((docs, ty, n), e.span()));
+        let more = |p| op!(',').ignore_then(p).repeated().collect::<Vec<_>>().then_ignore(op!(',').or_not());
+        let named_more = more(named_param.boxed());
+        let unnamed_more = more(unnamed_arg.clone().boxed());
+        // The token after the first parameter's type picks the list, and
+        // the rest of it is read as that list reads it. Each part notes
+        // where it ends: the first parameter's span ends there.
+        let params = self
+            .docs_prefix()
+            .then(choice((
+                op!("...")
+                    .ignore_then(name())
+                    .map_with(|n, e| (n, e.span().end))
+                    .then(named_more.clone())
+                    .map(|((n, end), more)| (None, (n, true), end, Ok(more))),
+                ty_parser
+                    .clone()
+                    .map_with(|ty, e| (ty, e.span().end))
+                    .then(choice((
+                        named_tail
+                            .map_with(|n, e| (Some(n), e.span().end))
+                            .then(named_more)
+                            .map(|((n, end), more)| (n, end, Ok(more))),
+                        choice((op!(','), op!(')')))
+                            .rewind()
+                            .ignore_then(unnamed_more)
+                            .map(|more| (None, 0, Err(more))),
+                    )))
+                    .map(|((ty, ty_end), (n, n_end, rest))| match n {
+                        Some(n) => (Some(ty), n, n_end, rest),
+                        None => (Some(ty), ("", false), ty_end, rest),
+                    }),
+            )))
+            .map_with(|(docs, part), e| (docs, part, e.span().start));
+        let once = params
+            .map_with(|params, e| (params, e.span()))
+            .delimited_by(op!("("), op!(")"))
+            .try_map(move |((docs, part, start), inside), span| {
+                let (ty, n, end, rest) = part;
+                let at = SimpleSpan::from(start..end);
+                let args: Vec<Output<'pratt>> = match rest {
+                    Ok(more) => std::iter::once(argument((docs, ty, n), at)).chain(more).collect(),
+                    Err(more) if docs.is_empty() => std::iter::once((
+                        at,
+                        Box::new(Expression::Argument { docs, ty, name: "", is_rest: false }),
+                    ))
+                    .chain(more)
+                    .collect(),
+                    Err(_) => return Err(Rich::custom(span, "an unnamed parameter with a doc comment")),
+                };
+                Ok((inside, Box::new(Expression::Fragment(args))))
+            });
         let named = self.arg_list_typed(ty_parser);
         let unnamed = unnamed_arg
             .separated_by(op!(','))
@@ -539,7 +777,7 @@ impl<'pratt> Pratt<'pratt> {
             .collect::<Vec<_>>()
             .map_with(output!(Fragment))
             .delimited_by(op!("("), op!(")"));
-        named.or(unnamed).labelled("parameter list")
+        choice((once, named, unnamed)).labelled("parameter list")
     }
 
     /// One type parameter: `T`, `T: Num + Eq`, `F: * -> *`, or
@@ -611,15 +849,16 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         recursive(|expr| {
-            // Value-block items (`match` arms, `if` branches, lambda bodies).
-            let stmt = self.statement_parsers(expr.clone()).1;
+            // Value-block items (`match` arms, `if` branches, lambda bodies)
+            // and the `if` expression.
+            let (stmt, if_value) = self.value_statement_parsers(expr.clone());
             let atom = choice((
                 // `match` and `if` are keyword atoms — registered before
                 // `self.ident()` so the identifier parser refuses
                 // to match them.
                 choice((
                     self.match_expr(expr.clone(), stmt.clone()),
-                    self.if_expr(stmt.clone(), expr.clone()),
+                    if_value,
                 )),
                 // `done` stays a keyword builtin. `dload` / `declare` /
                 // `invoke` are ordinary calls resolved via `use ffi::{…}`.
@@ -997,29 +1236,7 @@ impl<'pratt> Pratt<'pratt> {
         item.repeated()
             .collect::<Vec<_>>()
             .delimited_by(op!("{"), op!("}"))
-            .map_with(|items, e| {
-                let mut statements = Vec::with_capacity(items.len());
-                let mut trailing = None;
-                for item in items {
-                    match item {
-                        BodyItem::Statement(s) => statements.push(s),
-                        // Only before `}`, so only the last.
-                        BodyItem::Value(v) => trailing = Some(v),
-                    }
-                }
-                // `{ …; match x { … } }`: a final `match` with no `;` is the
-                // body's value, as in any value block.
-                if trailing.is_none()
-                    && let Some(tail) = statements.last().and_then(bare_statement_match)
-                {
-                    let tail = tail.clone();
-                    statements.pop();
-                    statements.push(tail);
-                    return (e.span(), Box::new(Expression::Block(statements)));
-                }
-                statements.extend(trailing);
-                (e.span(), Box::new(Expression::Block(statements)))
-            })
+            .map_with(|items, e| value_block(e.span(), items))
     }
 
     fn arg_list_typed<T>(
@@ -1957,10 +2174,14 @@ impl<'pratt> Pratt<'pratt> {
         E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
+        P: Parser<'pratt, &'pratt str, PatternOutput<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
     >(
         &self,
         stmt: S,
         expr: E,
+        pattern: P,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         // `recursive` enables `else if` / `else if let` to call back.
@@ -1974,7 +2195,7 @@ impl<'pratt> Pratt<'pratt> {
 
             let if_let = keyword!("if")
                 .ignore_then(keyword!("let"))
-                .ignore_then(self.pattern())
+                .ignore_then(pattern.clone())
                 .then_ignore(op!("="))
                 .then(expr.clone().labelled("condition"))
                 .then(self.block(stmt.clone()).labelled("block `{ ... }`"))
@@ -2023,92 +2244,6 @@ impl<'pratt> Pratt<'pratt> {
                 });
 
             choice((if_let, if_bool))
-        })
-    }
-
-    /// `if c { a } else { b }` (and `else if` / `if let`) as an expression.
-    ///
-    /// Branch bodies are value blocks, as a `match` arm's: statements, then
-    /// an optional trailing expression that is the branch's value. The node
-    /// comes back wrapped in [`Expression::Expr`]: that marks an `if` whose
-    /// value is used (a statement `if` is never wrapped), so the checker
-    /// requires its `else` (E0137). `else` is optional here so a missing
-    /// one is that type error, not a parse error; a missing `if let` else
-    /// is an empty block spanning the whole `if let`, as the statement
-    /// parser builds it.
-    fn if_expr<
-        S: Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>>
-            + Clone
-            + 'pratt,
-        E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
-            + Clone
-            + 'pratt,
-    >(
-        &self,
-        stmt: S,
-        expr: E,
-    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
-    {
-        // `recursive` enables `else if` / `else if let` to call back.
-        recursive(|if_expr| {
-            let body = self
-                .brace_body(stmt.clone())
-                .labelled("block `{ ... }`");
-            let else_tail = keyword!("else")
-                .ignore_then(choice((body.clone(), if_expr.clone())))
-                .or_not();
-
-            let if_let = keyword!("if")
-                .ignore_then(keyword!("let"))
-                .ignore_then(self.pattern())
-                .then_ignore(op!("="))
-                .then(expr.clone().labelled("condition"))
-                .then(body.clone())
-                .then(else_tail.clone())
-                .map_with(|(((pattern, scrutinee), then_body), else_clause), e| {
-                    let else_body = else_clause
-                        .unwrap_or_else(|| (e.span(), Box::new(Expression::Block(Vec::new()))));
-                    (
-                        e.span(),
-                        Box::new(Expression::IfLet {
-                            scrutinee,
-                            then_arm: MatchArm {
-                                pattern,
-                                body: then_body,
-                            },
-                            else_arm: MatchArm {
-                                pattern: (e.span(), Pattern::Default),
-                                body: else_body,
-                            },
-                        }),
-                    )
-                });
-
-            let if_bool = keyword!("if")
-                .ignore_then(expr.clone().labelled("condition"))
-                .then(body)
-                .then(else_tail)
-                .map_with(|((cond, body), else_clause), e| {
-                    let then_branch: Output =
-                        (e.span(), Box::new(Expression::Branch(Some(cond), body)));
-                    let mut branches: Vec<Output> = vec![then_branch];
-                    if let Some(else_output) = else_clause {
-                        // An `else if` chain is one flat `If`, as a statement's.
-                        if let Expression::Expr(inner) = else_output.1.as_ref()
-                            && let Expression::If(more) = inner.1.as_ref()
-                        {
-                            branches.extend(more.iter().cloned());
-                        } else {
-                            branches.push((
-                                e.span(),
-                                Box::new(Expression::Branch(None, else_output)),
-                            ));
-                        }
-                    }
-                    (e.span(), Box::new(Expression::If(branches)))
-                });
-
-            choice((if_let, if_bool)).map_with(|node, e| (e.span(), Box::new(Expression::Expr(node))))
         })
     }
 
@@ -2306,45 +2441,321 @@ impl<'pratt> Pratt<'pratt> {
             // Nested statements (loop and `if` bodies) are not wrapped.
             let stmt = self.statement_of(core.clone(), expr.clone());
             let item = self.body_item(core, expr.clone(), false);
-            choice((
-                self.break_(),
-                self.continue_(),
-                self.for_(stmt.clone(), expr.clone()),
-                self.c_style_for_removed(),
-                self.while_(stmt.clone(), expr.clone()),
-                self.if_(stmt.clone(), expr.clone()),
-                self.block(stmt.clone()),
-                self.type_alias(),
-                self.variable(expr.clone()).then_ignore(op!(';')),
-                self.constant(expr.clone()).then_ignore(op!(';')),
-                // Statement keywords before `expr_statement`: otherwise
-                // `return -1;` parses as `Sub(Identifier("return"), 1)`.
-                self.return_(expr.clone()).then_ignore(op!(';')),
-                self.raise_(expr.clone()).then_ignore(op!(';')),
-                self.panic_(expr.clone()).then_ignore(op!(';')),
-                self.yield_expr_(expr.clone()).then_ignore(op!(';')),
-                // `defer { … }` before `expr_statement` so `defer` is not
-                // parsed as a bare identifier call / expression.
-                self.defer(stmt.clone()),
-                // A `match` at statement start ends at its `}` like `if`, so
-                // it needs no `;`. `.` / `?` continue an expression
-                // (`match x { … }.len();`) and `match … {};` is an ordinary
-                // `expr_statement`. The statement keeps the match's own span:
-                // `brace_body` uses that to turn a trailing one into the
-                // body's value.
-                self.match_expr(expr.clone(), item.clone())
-                    .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
-                    .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
-                // A `region { … }` statement ends at its `}` too.
-                self.region_block(item)
-                    .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
-                    .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
-            ))
+            self.core_forms(stmt.clone(), expr.clone(), item, self.if_(stmt, expr.clone(), self.pattern()))
         });
         (
             self.statement_of(core.clone(), expr.clone()).map_with(output!(Statement)),
             self.body_item(core, expr, true),
         )
+    }
+
+    /// The statement forms over `stmt` (nested statements), `expr` and
+    /// `item` (a value block's item, for `match` and `region`), with
+    /// `if_form` for an `if`.
+    fn core_forms<
+        S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        B: Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        F: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        stmt: S,
+        expr: T,
+        item: B,
+        if_form: F,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        choice((
+            self.break_(),
+            self.continue_(),
+            self.for_(stmt.clone(), expr.clone()),
+            self.c_style_for_removed(),
+            self.while_(stmt.clone(), expr.clone()),
+            if_form,
+            self.block(stmt.clone()),
+            self.type_alias(),
+            self.variable(expr.clone()).then_ignore(op!(';')),
+            self.constant(expr.clone()).then_ignore(op!(';')),
+            // Statement keywords before `expr_statement`: otherwise
+            // `return -1;` parses as `Sub(Identifier("return"), 1)`.
+            self.return_(expr.clone()).then_ignore(op!(';')),
+            self.raise_(expr.clone()).then_ignore(op!(';')),
+            self.panic_(expr.clone()).then_ignore(op!(';')),
+            self.yield_expr_(expr.clone()).then_ignore(op!(';')),
+            // `defer { … }` before `expr_statement` so `defer` is not
+            // parsed as a bare identifier call / expression.
+            self.defer(stmt.clone()),
+            // A `match` at statement start ends at its `}` like `if`, so
+            // it needs no `;`. `.` / `?` continue an expression
+            // (`match x { … }.len();`) and `match … {};` is an ordinary
+            // `expr_statement`. The statement keeps the match's own span:
+            // `brace_body` uses that to turn a trailing one into the
+            // body's value.
+            self.match_expr(expr.clone(), item.clone())
+                .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
+                .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
+            // A `region { … }` statement ends at its `}` too.
+            self.region_block(item)
+                .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
+                .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
+        ))
+    }
+
+    /// The statement parsers of a value context (the expression parser's
+    /// own: `match` arms, lambda bodies, `if` branches), with each `if`
+    /// parsed once (#2654): a value block's item parser (statements wrapped
+    /// in [`Expression::Statement`]) and the `if` expression atom.
+    ///
+    /// [`Self::if_`] tried an `if` as a statement and then, when a branch
+    /// ended in a value, an expression parser parsed it again as a value; each
+    /// parsed the `if`s inside both ways again, so a value `if` nested in a
+    /// value `if` took time exponential in the depth. Here
+    /// [`Self::statement_if`] parses the `if` once into an [`IfTree`], and
+    /// the statement or the value is built from it, as those two parsers
+    /// built them.
+    // Two `impl Parser` types: an alias cannot name them.
+    #[allow(clippy::type_complexity)]
+    fn value_statement_parsers<
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        expr: T,
+    ) -> (
+        impl Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt,
+        impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt,
+    ) {
+        // One pattern parser for every `if let` here.
+        let pattern = self.pattern();
+        let core = recursive(|core| {
+            let stmt = self.statement_of(core.clone(), expr.clone());
+            let ifs = self.statement_if(core.clone(), expr.clone(), pattern.clone());
+            let item = self.if_item(ifs.clone()).or(self.item_forms(core, expr.clone())).map(|(item, _)| item);
+            // As a statement only: a value `if` is an expression statement.
+            let if_form = ifs.try_map(|tree, span| {
+                if tree.is_statement() {
+                    Ok(tree.statement())
+                } else {
+                    Err(Rich::custom(span, "an `if` with a value"))
+                }
+            });
+            // A statement `if` whose later branch ends in a value is taken
+            // without that part, as before: the statement parser does it.
+            let if_form = if_form.or(self.if_(stmt.clone(), expr.clone(), pattern.clone()));
+            self.core_forms(stmt, expr.clone(), item, if_form)
+        });
+        let ifs = self.statement_if(core.clone(), expr.clone(), pattern.clone());
+        let item = self.if_item(ifs.clone()).or(self.item_forms(core.clone(), expr.clone())).map(|(item, span)| match item {
+            BodyItem::Statement(s) => BodyItem::Statement((span, Box::new(Expression::Statement(s)))),
+            value => value,
+        });
+        (item, self.value_if(core, expr, ifs, pattern).map(IfTree::value))
+    }
+
+    /// An `if` parsed once ([`IfTree`]) over the statement forms `core`, as
+    /// the statement parser reads one ([`Self::if_`]): a statement in a
+    /// branch, which may end in a value, expects `;` (and so names only `;`
+    /// when it fails). The `if`s inside are read the same way.
+    fn statement_if<
+        C: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        P: Parser<'pratt, &'pratt str, PatternOutput<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        core: C,
+        expr: T,
+        pattern: P,
+    ) -> impl Parser<'pratt, &'pratt str, IfTree<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        recursive(|ifs| {
+            let item = self.if_item(ifs.clone()).or(self.statement_item_forms(core, expr.clone()));
+            self.if_tree(expr, item, ifs, pattern)
+        })
+    }
+
+    /// The same `if` as the expression parser read one: a branch's
+    /// statement may also end before the `}` (and so names `;` or `}`).
+    /// Used where an `if` is an expression; an `if` inside is first read
+    /// as a statement (`statement_if`), as there.
+    fn value_if<
+        C: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        U: Parser<'pratt, &'pratt str, IfTree<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        P: Parser<'pratt, &'pratt str, PatternOutput<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        core: C,
+        expr: T,
+        statement_if: U,
+        pattern: P,
+    ) -> impl Parser<'pratt, &'pratt str, IfTree<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        recursive(|ifs| {
+            let item = self.if_item(statement_if).or(self.item_forms(core, expr.clone()));
+            self.if_tree(expr, item, ifs, pattern)
+        })
+    }
+
+    /// `if` (or `if let`) with branches of `item`s, `else if` by `ifs`.
+    fn if_tree<
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        B: Parser<'pratt, &'pratt str, (BodyItem<'pratt>, SimpleSpan), extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        U: Parser<'pratt, &'pratt str, IfTree<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        P: Parser<'pratt, &'pratt str, PatternOutput<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        expr: T,
+        item: B,
+        ifs: U,
+        pattern: P,
+    ) -> impl Parser<'pratt, &'pratt str, IfTree<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        let body = op!("{")
+            .ignore_then(item.repeated().collect::<Vec<_>>().map_with(|items, e| (items, e.span())))
+            .then_ignore(op!("}"))
+            .map_with(|(items, inner), e| IfBody { outer: e.span(), inner, items })
+            .labelled("block `{ ... }`");
+        let else_tail = keyword!("else")
+            .ignore_then(choice((body.clone().map(IfElse::Block), ifs.map(|t| IfElse::If(Box::new(t))))))
+            .or_not();
+        let if_let = keyword!("if")
+            .ignore_then(keyword!("let"))
+            .ignore_then(pattern)
+            .then_ignore(op!("="))
+            .then(expr.clone().labelled("condition"))
+            .then(body.clone())
+            .then(else_tail.clone())
+            .map_with(|(((pattern, scrutinee), then), els), e| IfTree { span: e.span(), head: IfHead::Let(pattern, scrutinee), then, els });
+        let if_bool = keyword!("if")
+            .ignore_then(expr.labelled("condition"))
+            .then(body)
+            .then(else_tail)
+            .map_with(|((cond, then), els), e| IfTree { span: e.span(), head: IfHead::Bool(cond), then, els });
+        choice((if_let, if_bool))
+    }
+
+    /// A value block's item that is an `if` ([`Self::statement_if`]), with
+    /// its span: a statement `if`; a value `if` and `;` (an expression
+    /// statement); or a value `if` before the block's `}` (its value). Any
+    /// other `if` fails here and is parsed as an expression, so a value
+    /// `if` an operator follows (`if c { 1 } else { 2 } + 3`) and a
+    /// statement `if` a stray `;` follows are as before.
+    fn if_item<
+        U: Parser<'pratt, &'pratt str, IfTree<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        ifs: U,
+    ) -> impl Parser<'pratt, &'pratt str, (BodyItem<'pratt>, SimpleSpan), extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        // What follows, looked at with no expectation left behind when it
+        // is not there (`not()`): a statement `if` expects nothing after
+        // it, so a failure there must name only what the next item could
+        // be. (When it is there, it is consumed or the block's `}`.)
+        let semi = op!(';').not().to(false).or(op!(';').to(true));
+        let close = op!('}').not().to(false).or(op!('}').rewind().to(true));
+        ifs.then(semi)
+            .then(close)
+            .try_map(|((tree, semi), close), span| match (tree.starts_statement(), tree.is_statement(), semi, close) {
+                (true, true, false, _) => Ok((BodyItem::Statement(tree.statement()), span)),
+                (false, _, true, _) => Ok((
+                    BodyItem::Statement((span, Box::new(Expression::ExprStatement(tree.value())))),
+                    span,
+                )),
+                (false, _, false, true) => Ok((BodyItem::Value(tree.value()), span)),
+                _ => Err(Rich::custom(span, "an `if` an operator or `;` follows")),
+            })
+    }
+
+    /// [`Self::item_forms`] as a statement block reads its items
+    /// ([`Self::block`]): an expression that ends in no `;` names only
+    /// `;`. One before the `}` is still taken as the value (a branch of a
+    /// value `if`); that it is there is looked at with nothing named.
+    fn statement_item_forms<
+        C: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        core: C,
+        expr: T,
+    ) -> impl Parser<'pratt, &'pratt str, (BodyItem<'pratt>, SimpleSpan), extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        // `}` ahead, with nothing left behind when it is not.
+        let close = op!('}').not().to(false).or(empty().to(true));
+        choice((
+            core.map_with(|s, e| (BodyItem::Statement(s), e.span())),
+            expr.then(op!(';').or_not()).then(close).try_map(|((value, semi), close), span| match (semi, close) {
+                (Some(_), _) => Ok((BodyItem::Statement((span, Box::new(Expression::ExprStatement(value)))), span)),
+                (None, true) => Ok((BodyItem::Value(value), span)),
+                (None, false) => Err(Rich::custom(span, "a statement with no `;`")),
+            }),
+            self.orphan_doc_comment().map_with(|s, e| (BodyItem::Statement(s), e.span())),
+        ))
+    }
+
+    /// A value block's item over the statement forms `core`, not wrapped,
+    /// with its span: a statement, `e;`, the value `e }`, or an orphan doc
+    /// comment ([`Self::body_item`]).
+    fn item_forms<
+        C: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        core: C,
+        expr: T,
+    ) -> impl Parser<'pratt, &'pratt str, (BodyItem<'pratt>, SimpleSpan), extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        choice((
+            core.map_with(|s, e| (BodyItem::Statement(s), e.span())),
+            expr.then(choice((op!(';').to(true), op!('}').rewind().to(false)))).map_with(|(value, semi), e| {
+                if semi {
+                    (BodyItem::Statement((e.span(), Box::new(Expression::ExprStatement(value)))), e.span())
+                } else {
+                    (BodyItem::Value(value), e.span())
+                }
+            }),
+            self.orphan_doc_comment().map_with(|s, e| (BodyItem::Statement(s), e.span())),
+        ))
     }
 
     /// A statement: one of the `core` forms, `e;`, or an orphan doc comment.
