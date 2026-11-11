@@ -356,6 +356,17 @@ fn walk_tree(
     env: &mut Env,
     calls: &mut Vec<CallSite>,
 ) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| walk_tree_level(checker, ast, pure, env, calls))
+}
+
+fn walk_tree_level(
+    checker: &mut Checker,
+    ast: &Output<'_>,
+    pure: &HashSet<String>,
+    env: &mut Env,
+    calls: &mut Vec<CallSite>,
+) {
     match ast.1.as_ref() {
         // `let x = v` parses as `[Variable(x, type), v]`: `x` takes `v`.
         Expression::Fragment(items)
@@ -1147,6 +1158,11 @@ fn mark_callee_indices(checker: &mut Checker, body: &Output<'_>, arr: &str, idx:
 }
 
 fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| visit_children(ast, f));
+}
+
+fn visit_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
     match ast.1.as_ref() {
         Expression::Program(items)
         | Expression::Block(items)

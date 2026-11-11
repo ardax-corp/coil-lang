@@ -142,6 +142,11 @@ fn walk(
 }
 
 fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| visit_children(ast, f));
+}
+
+fn visit_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
     match ast.1.as_ref() {
         Expression::Program(items)
         | Expression::Block(items)
