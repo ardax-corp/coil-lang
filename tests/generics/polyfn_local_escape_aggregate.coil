@@ -1,8 +1,8 @@
 // A local bound from a generic function with a bound, stored in a `Vec`,
 // an array or a tuple by a generic body at `int` (coil-lang#2658; the
-// others are in polyfn_local_escape.coil). Past the clone budget the
-// caller of such a generic is refused (coil-lang#2664).
-// @xfail clone-budget-0 #2664
+// others are in polyfn_local_escape.coil). Such a generic is clone-only,
+// so a ground call takes its clone past the clone budget too
+// (coil-lang#2664).
 use tests::assert;
 
 trait Bump<T> {

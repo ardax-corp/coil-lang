@@ -7507,7 +7507,8 @@ impl Compiler {
     }
 
     /// Whether the signature of generic `fqn` holds an open `Option` /
-    /// `Result` below the top of a parameter or of the result: its ground
+    /// `Result` below the top of a parameter or of the result, or a
+    /// function over a type parameter below the result's top: its ground
     /// calls take a clone past the clone budget, as a hot method's do
     /// ([`Self::hir_shared_split`]).
     pub(super) fn fn_sig_split(&self, fqn: &str) -> bool {
@@ -7521,6 +7522,7 @@ impl Compiler {
                     || crate::layout::nested_fn_var_result(&ty, true, &mut |_| true)
                     || crate::layout::nested_fn_field(&self.checker, &ty, &crate::layout::nested_open_look(&self.checker))
             })
+            || self.checker.fn_return_ty(fqn).is_some_and(|ty| crate::layout::nested_fn_in_result(&ty, true))
     }
 
     /// Whether a shared body and ground code hold a value of `ty` as the
