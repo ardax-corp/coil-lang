@@ -916,6 +916,11 @@ pub struct HirSite {
     /// A `new C(args).f` read whose object is never built: each argument
     /// runs in order and `f`'s word is the value.
     pub field_new: bool,
+    /// `Vec::new()` / `Vec::with_capacity(n)` of a bare type parameter in a
+    /// shared generic body: the entry of its twin that stamps the array with
+    /// pointer elements, called instead where the body's `kinds` bit says
+    /// the parameter is an object type (#2687).
+    pub vec_twin: Option<Label>,
 }
 
 /// The values the body converts where it makes them ([`LowerCx::packs`]):
@@ -5338,7 +5343,13 @@ impl Lower<'_> {
             ret: if site.word_ret { MirTy::HeapRef } else { ret },
             ret_hi,
         };
-        let (dest, dest_hi) = self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?;
+        let (dest, dest_hi) = match self.vec_twin_bit(id) {
+            Some((twin, bit)) if ret == MirTy::HeapRef && ret_hi.is_none() && !site.word_ret && !self.cx.tail_call(id) => {
+                let target = site.target;
+                (self.vec_ctor_call(id, target, twin, words, &abi, bit)?, None)
+            }
+            _ => self.at_expr(id, |l| l.b.ins_call(site.target, words, &abi).map_err(mir))?,
+        };
         // A planned tail call: its callee may take this frame when the
         // call's result is what the body returns.
         if self.cx.tail_call(id) && !site.word_ret && niche.is_none() && site.ret_items.is_none() {
@@ -6893,9 +6904,79 @@ impl Lower<'_> {
         }
         // Stamped as HIR emission stamps it: packed bytes / bools, pointer
         // elements.
-        let stamp = self.expr_ty(id).and_then(array_elem).map_or(0, |e| self.cx.array_stamp(e));
+        let elem = self.expr_ty(id).and_then(array_elem).cloned();
+        let stamp = elem.as_ref().map_or(0, |e| self.cx.array_stamp(e));
+        if stamp == 0
+            && let Some(bit) = elem.as_ref().and_then(|e| self.kinds_elem_bit(e))
+        {
+            return Ok(Val::V(self.kinds_stamped_array(items, bit)?));
+        }
         let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, stamp).map_err(mir)?;
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?))
+    }
+
+    /// For an array whose element type is a bare type parameter of a
+    /// shared generic body: that parameter's bit of the body's `kinds`
+    /// word, with the word (#2687). A set bit says the parameter is a
+    /// copy-on-write object type (a class instance, a `Vec`, an array),
+    /// whose words are object addresses, as a per-type clone's array of
+    /// it is stamped. A clear bit says nothing (a `string`, an enum, or a
+    /// scalar, or a body reached through a `forall` value with no bit for
+    /// it): the array stays unstamped. `None` where the body has no bit.
+    fn kinds_elem_bit(&self, elem: &Ty) -> Option<(ValueId, u32)> {
+        if !matches!(strip_readonly(elem), Ty::Var(_)) {
+            return None;
+        }
+        self.kinds_bit(elem)
+    }
+
+    /// A `Vec` constructor call's pointer-stamped twin ([`HirSite::vec_twin`])
+    /// and the `kinds` bit that picks it.
+    fn vec_twin_bit(&self, id: HirId) -> Option<(Label, (ValueId, u32))> {
+        let twin = self.site(id).vec_twin?;
+        let elem = self.expr_ty(id).and_then(array_elem)?.clone();
+        Some((twin, self.kinds_elem_bit(&elem)?))
+    }
+
+    /// `target(words)`, or its twin `twin` where the `kinds` bit is set.
+    fn vec_ctor_call(&mut self, id: HirId, target: Label, twin: Label, words: Vec<ValueId>, abi: &CallAbi, (kinds, bit): (ValueId, u32)) -> Result<ValueId, Refusal> {
+        let m = self.b.ins_const(MirConst::I64((1u64 << bit) as i64)).map_err(mir)?;
+        let set = self.b.ins_binop(MirBinOp::BitAnd, kinds, m).map_err(mir)?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let object = self.b.ins_cmp(MirCmpOp::Ne, set, zero).map_err(mir)?;
+        let (stamped, plain, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.branch(object, stamped, plain).map_err(mir)?;
+        let mut arms = Vec::with_capacity(2);
+        for (block, callee) in [(stamped, twin), (plain, target)] {
+            self.switch(block);
+            let (v, _) = self.at_expr(id, |l| l.b.ins_call(callee, words.clone(), abi).map_err(mir))?;
+            arms.push((self.cur, v));
+            self.jump(join)?;
+        }
+        self.switch(join);
+        self.b.ins_stack_phi(arms).map_err(mir)
+    }
+
+    /// Array `items` of a type parameter whose `kinds` bit is `bit`:
+    /// stamped with pointer elements where the bit is set, unstamped where
+    /// it is clear. The array word is the safepoint's.
+    fn kinds_stamped_array(&mut self, items: Vec<ValueId>, (kinds, bit): (ValueId, u32)) -> Result<ValueId, Refusal> {
+        let m = self.b.ins_const(MirConst::I64((1u64 << bit) as i64)).map_err(mir)?;
+        let set = self.b.ins_binop(MirBinOp::BitAnd, kinds, m).map_err(mir)?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let object = self.b.ins_cmp(MirCmpOp::Ne, set, zero).map_err(mir)?;
+        let (stamped, plain, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.branch(object, stamped, plain).map_err(mir)?;
+        let mut arms = Vec::with_capacity(2);
+        for (block, stamp) in [(stamped, common::WORD_POINTER), (plain, 0)] {
+            self.switch(block);
+            let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items.clone(), stamp).map_err(mir)?;
+            let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
+            arms.push((self.cur, arr));
+            self.jump(join)?;
+        }
+        self.switch(join);
+        self.b.ins_stack_phi(arms).map_err(mir)
     }
 
     /// A local `const` table of literals (#1561): built into static `slot`

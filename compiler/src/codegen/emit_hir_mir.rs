@@ -1396,7 +1396,29 @@ impl Compiler {
                     ret_items: Self::hir_mir_ret_items(call),
                 },
             );
+            t.vec_twin = self.hir_open_vec_twin(hir, id, &call.key);
         }
+    }
+
+    /// `Vec::new()` / `Vec::with_capacity(n)` of a bare type parameter (a
+    /// shared generic body's): the entry of the twin that stamps the array
+    /// with pointer elements, which lowering calls where the body's `kinds`
+    /// bit for the parameter is set (#2687).
+    fn hir_open_vec_twin(&mut self, hir: &HirBody, id: HirId, key: &str) -> Option<crate::bodies::Label> {
+        let name = key.strip_prefix(common::BUILTIN_VEC_TYPE)?.strip_prefix("::")?;
+        if !matches!(name, "new" | "with_capacity") {
+            return None;
+        }
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        let elem = crate::layout::vec_elem_ty(&self.checker, &ty)?;
+        if !matches!(crate::typechecking::ty::strip_readonly(&elem), Ty::Var(_)) {
+            return None;
+        }
+        let twin = Self::stamped_vec_ctor_name(name, common::WORD_POINTER)?;
+        if !self.functions.contains_key(&twin) && !self.fn_entry_labels.contains_key(&twin) {
+            return None;
+        }
+        self.named_entry_target(&twin, true)
     }
 
     /// The arguments of a call through `PolyFn` local `f` (bound from
