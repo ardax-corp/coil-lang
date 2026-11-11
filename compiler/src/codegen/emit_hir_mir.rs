@@ -2096,6 +2096,19 @@ impl Compiler {
         else {
             return (!niche).then_some(crate::mir::HirShow::Stringify);
         };
+        // A shape's instance with open items met at ground types (a
+        // per-type clone's `%v` of a `Vec<T>`): the shape's ground instance,
+        // registered now if no goal asked for it, which the dictionary
+        // planned at these types is (#2613), as a clone's `.show()` takes.
+        let fqn = match self.checker.generics().is_structural_open_fqn(&fqn) && !lookup_ty.has_free_var() {
+            true => {
+                if self.checker.ensure_ground_structural("Show", std::slice::from_ref(&lookup_ty)) {
+                    self.reserve_structural_thunks();
+                }
+                self.ground_structural_fqn("Show", std::slice::from_ref(&lookup_ty), "show").unwrap_or(fqn)
+            }
+            false => fqn,
+        };
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
         let raw = self.raw_instance_methods.contains(&fqn);
         if niche && !raw {
