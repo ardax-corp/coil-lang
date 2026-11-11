@@ -57,6 +57,13 @@ enum Precedence {
     Primary,
 }
 
+/// One item of a value block: a statement, or the expression before its
+/// closing `}` that is the block's value.
+enum BodyItem<'p> {
+    Statement(Output<'p>),
+    Value(Output<'p>),
+}
+
 /// The `match` of a `match … { … }` statement written without `;` (its
 /// `ExprStatement` has exactly the match's span; the `;` form extends past it).
 fn bare_statement_match<'a, 'p>(stmt: &'a Output<'p>) -> Option<&'a Output<'p>> {
@@ -389,7 +396,7 @@ impl<'pratt> Pratt<'pratt> {
                 Some(n) => (e.span(), Box::new(Expression::Array(vec![elem, n]))),
                 None => (e.span(), Box::new(Expression::Array(vec![elem]))),
             });
-        let tuple_type = self.tuple_atom(type_ann.clone());
+        let paren_type = self.paren_type(type_ann.clone());
         let named_type = text::ident()
             .padded_by(trivia())
             .then(
@@ -453,14 +460,9 @@ impl<'pratt> Pratt<'pratt> {
                     }),
                 )
             });
-        // `(T)` groups a type, so `(int -> int) -> int` and
-        // `(fn(int) -> int) f` read as written. Tried after `tuple_type`,
-        // which needs a comma (or `()`).
-        let group_type = type_ann.clone().delimited_by(op!('('), op!(')'));
         choice((
             array_type,
-            tuple_type,
-            group_type,
+            paren_type,
             forall_type,
             projection_type,
             named_type,
@@ -609,7 +611,8 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         recursive(|expr| {
-            let stmt = self.statement_with_expr(expr.clone());
+            // Value-block items (`match` arms, `if` branches, lambda bodies).
+            let stmt = self.statement_parsers(expr.clone()).1;
             let atom = choice((
                 // `match` and `if` are keyword atoms — registered before
                 // `self.ident()` so the identifier parser refuses
@@ -631,10 +634,8 @@ impl<'pratt> Pratt<'pratt> {
                 keyword!("panic")
                     .ignore_then(expr.clone())
                     .map_with(|inner, e| (e.span(), Box::new(Expression::Panic(inner)))),
-                // `(a, b, c)` — tuple atom. MUST come before
-                // `self.call(...)` (which expects a leading
-                // ident) AND before `self.ident()`.
-                self.tuple_atom(expr.clone()),
+                // `()`, `(e)`, `(e,)`, `(a, b, c)`: tuples and groups.
+                self.paren_atom(expr.clone()),
                 // `[a, b, c]` — array atom.
                 self.array_atom(expr.clone()),
                 self.dict_atom(expr.clone()),
@@ -679,17 +680,17 @@ impl<'pratt> Pratt<'pratt> {
                 // `comptime { … }` in an expression: a block computed while
                 // compiling (`comptime e` with any other operand is a prefix).
                 keyword!("comptime")
-                    .ignore_then(self.brace_body(stmt.clone(), expr.clone()))
+                    .ignore_then(self.brace_body(stmt.clone()))
                     .map_with(|body, e| (e.span(), Box::new(Expression::ComptimeBlock(body)))),
                 // Contextual `region { … }`; any other `region` is a name.
-                self.region_block(stmt.clone(), expr.clone()),
+                self.region_block(stmt.clone()),
                 // Anonymous `fn (…)` before `ident` so `fn` stays a keyword.
                 self.lambda_atom(expr.clone(), stmt),
                 self.ident(),
             ));
 
             
-            choice((atom, self.group(expr.clone()))).pratt((
+            atom.pratt((
                 // No postfix `!` here — it would conflict with `!=`
                 // (which should be parsed as a single infix operator).
                 // Prefix `!` is logical NOT; prefix `~` is bitwise NOT on integers.
@@ -964,23 +965,6 @@ impl<'pratt> Pratt<'pratt> {
         .map_with(output!(Expr))
     }
 
-    fn group<
-        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
-            + Clone
-            + 'pratt,
-    >(
-        &self,
-        expr: T,
-    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
-    {
-        expr.repeated()
-            .at_least(0)
-            .collect()
-            .map_with(output!(Fragment))
-            .delimited_by(op!('('), op!(')'))
-            .map_with(output!(Group))
-    }
-
     fn block<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -999,24 +983,30 @@ impl<'pratt> Pratt<'pratt> {
 
     /// Expression-valued brace body: statements followed by an optional bare
     /// trailing expression. Used by match arms and long-form lambdas.
+    ///
+    /// `item` is a value block's item parser from [`Self::statement_parsers`].
     fn brace_body<
-        S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
-            + Clone
-            + 'pratt,
-        E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+        S: Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
     >(
         &self,
-        stmt: S,
-        expr: E,
+        item: S,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        stmt.repeated()
+        item.repeated()
             .collect::<Vec<_>>()
-            .then(expr.or_not())
             .delimited_by(op!("{"), op!("}"))
-            .map_with(|(mut statements, trailing), e| {
+            .map_with(|items, e| {
+                let mut statements = Vec::with_capacity(items.len());
+                let mut trailing = None;
+                for item in items {
+                    match item {
+                        BodyItem::Statement(s) => statements.push(s),
+                        // Only before `}`, so only the last.
+                        BodyItem::Value(v) => trailing = Some(v),
+                    }
+                }
                 // `{ …; match x { … } }`: a final `match` with no `;` is the
                 // body's value, as in any value block.
                 if trailing.is_none()
@@ -1157,7 +1147,7 @@ impl<'pratt> Pratt<'pratt> {
         E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
-        S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+        S: Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
     >(
@@ -1186,7 +1176,7 @@ impl<'pratt> Pratt<'pratt> {
 
         let short_body = op!("=>").ignore_then(expr.clone());
         // Use only handles built inside the surrounding `recursive(|expr| …)`.
-        let long_body = self.brace_body(stmt, expr);
+        let long_body = self.brace_body(stmt);
 
         keyword!("fn")
             .ignore_then(self.arg_list())
@@ -1605,23 +1595,19 @@ impl<'pratt> Pratt<'pratt> {
     /// `region { … }`: a block whose first item is [`Expression::RegionMark`].
     /// `region` is contextual: followed by anything but `{` it is a name.
     fn region_block<
-        S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
-            + Clone
-            + 'pratt,
-        E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+        S: Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
     >(
         &self,
         stmt: S,
-        expr: E,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         text::ident()
             .filter(|w: &&str| *w == "region")
             .map_with(|_, e| e.span())
             .padded_by(trivia())
-            .then(self.brace_body(stmt, expr))
+            .then(self.brace_body(stmt))
             .map_with(|(kw, (span, body)), e| {
                 let mut body = *body;
                 if let Expression::Block(items) = &mut body {
@@ -2051,7 +2037,7 @@ impl<'pratt> Pratt<'pratt> {
     /// is an empty block spanning the whole `if let`, as the statement
     /// parser builds it.
     fn if_expr<
-        S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+        S: Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
         E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
@@ -2066,7 +2052,7 @@ impl<'pratt> Pratt<'pratt> {
         // `recursive` enables `else if` / `else if let` to call back.
         recursive(|if_expr| {
             let body = self
-                .brace_body(stmt.clone(), expr.clone())
+                .brace_body(stmt.clone())
                 .labelled("block `{ ... }`");
             let else_tail = keyword!("else")
                 .ignore_then(choice((body.clone(), if_expr.clone())))
@@ -2288,7 +2274,36 @@ impl<'pratt> Pratt<'pratt> {
         expr: T,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        recursive(|stmt| {
+        self.statement_parsers(expr).0
+    }
+
+    /// The statement parser over `expr` (each statement wrapped in
+    /// [`Expression::Statement`]) and the item parser of a value block
+    /// ([`Self::brace_body`]) with the same statements.
+    ///
+    /// A statement is one of the `core` forms, an expression statement
+    /// `e;`, or an orphan doc comment. A value block's item tries the same
+    /// in the same order, except that the expression is parsed once and
+    /// then ends in `;` (a statement) or before `}` (the block's value):
+    /// parsing it as a statement and then again as the value took time
+    /// exponential in the nesting of value blocks (#2643).
+    fn statement_parsers<
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        expr: T,
+    ) -> (
+        impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt,
+        impl Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt,
+    ) {
+        // Inside `recursive` the handle is weak: a strong one would make
+        // the grammar a reference cycle that is never freed.
+        let core = recursive(|core| {
+            // Nested statements (loop and `if` bodies) are not wrapped.
+            let stmt = self.statement_of(core.clone(), expr.clone());
+            let item = self.body_item(core, expr.clone(), false);
             choice((
                 self.break_(),
                 self.continue_(),
@@ -2315,18 +2330,75 @@ impl<'pratt> Pratt<'pratt> {
                 // `expr_statement`. The statement keeps the match's own span:
                 // `brace_body` uses that to turn a trailing one into the
                 // body's value.
-                self.match_expr(expr.clone(), stmt.clone())
+                self.match_expr(expr.clone(), item.clone())
                     .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
                     .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
                 // A `region { … }` statement ends at its `}` too.
-                self.region_block(stmt.clone(), expr.clone())
+                self.region_block(item)
                     .then_ignore(choice((op!("."), op!("?"), op!(";"))).not())
                     .map(|m| (m.0, Box::new(Expression::ExprStatement(m)))),
-                self.expr_statement(expr.clone()),
-                self.orphan_doc_comment(),
             ))
-        })
-        .map_with(output!(Statement))
+        });
+        (
+            self.statement_of(core.clone(), expr.clone()).map_with(output!(Statement)),
+            self.body_item(core, expr, true),
+        )
+    }
+
+    /// A statement: one of the `core` forms, `e;`, or an orphan doc comment.
+    fn statement_of<
+        C: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        core: C,
+        expr: T,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        choice((core, self.expr_statement(expr), self.orphan_doc_comment()))
+    }
+
+    /// One item of a value block over the statement forms `core`: a
+    /// statement (wrapped in [`Expression::Statement`] when `wrap`), or the
+    /// expression before the block's `}`. See [`Self::statement_parsers`].
+    fn body_item<
+        C: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    >(
+        &self,
+        core: C,
+        expr: T,
+        wrap: bool,
+    ) -> impl Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        let statement = move |s: Output<'pratt>, span: SimpleSpan| {
+            BodyItem::Statement(if wrap {
+                (span, Box::new(Expression::Statement(s)))
+            } else {
+                s
+            })
+        };
+        choice((
+            core.map_with(move |s, e| statement(s, e.span())),
+            // `e;` as `expr_statement` parses it, or the value `e }`.
+            expr.then(choice((op!(';').to(true), op!('}').rewind().to(false))))
+                .map_with(move |(value, semi), e| {
+                    if semi {
+                        statement((e.span(), Box::new(Expression::ExprStatement(value))), e.span())
+                    } else {
+                        BodyItem::Value(value)
+                    }
+                }),
+            self.orphan_doc_comment().map_with(move |s, e| statement(s, e.span())),
+        ))
     }
 
     fn declaration(
@@ -3334,21 +3406,34 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, LetPattern<'pratt>, extra::Err<Rich<'pratt, char>>>
            + Clone
            + 'pratt {
-        let inner = self.let_pattern();
         // Require a comma (or trailing comma) so `(a)` is not a
         // 1-tuple — same rule as tuple literals.
-        let tuple_multi = inner
+        Self::let_tuple_of(self.let_pattern())
+    }
+
+    /// `(p, …)` with at least one comma: `(p,)` or `(p, q, …)`. The first
+    /// pattern is parsed once whatever follows it (#2643).
+    fn let_tuple_of<P>(
+        pattern: P,
+    ) -> impl Parser<'pratt, &'pratt str, LetPattern<'pratt>, extra::Err<Rich<'pratt, char>>>
+           + Clone
+           + 'pratt
+    where
+        P: Parser<'pratt, &'pratt str, LetPattern<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    {
+        pattern
             .clone()
-            .separated_by(op!(','))
-            .at_least(2)
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(op!('('), op!(')'));
-        let tuple_trailing = inner
             .then_ignore(op!(','))
-            .map(|p| vec![p])
-            .delimited_by(op!('('), op!(')'));
-        choice((tuple_multi, tuple_trailing)).map(LetPattern::Tuple)
+            .then(
+                pattern
+                    .separated_by(op!(','))
+                    .allow_trailing()
+                    .collect::<Vec<_>>(),
+            )
+            .delimited_by(op!('('), op!(')'))
+            .map(|(first, more)| LetPattern::Tuple(std::iter::once(first).chain(more).collect()))
     }
 
     fn let_record_pattern(
@@ -3405,19 +3490,7 @@ impl<'pratt> Pratt<'pratt> {
                     LetPattern::Record(fields)
                 });
 
-            let tuple_multi = pattern_parser
-                .clone()
-                .separated_by(op!(','))
-                .at_least(2)
-                .allow_trailing()
-                .collect::<Vec<_>>()
-                .delimited_by(op!('('), op!(')'));
-            let tuple_trailing = pattern_parser
-                .clone()
-                .then_ignore(op!(','))
-                .map(|p| vec![p])
-                .delimited_by(op!('('), op!(')'));
-            let tuple = choice((tuple_multi, tuple_trailing)).map(LetPattern::Tuple);
+            let tuple = Self::let_tuple_of(pattern_parser.clone());
 
             choice((
                 wildcard_underscore().padded_by(trivia()).to(LetPattern::Wildcard),
@@ -3482,8 +3555,15 @@ impl<'pratt> Pratt<'pratt> {
             .delimited_by(op!('('), op!(')'))
     }
 
-    /// Tuple literal. Requires a comma inside the parens — `(1)` is a group, `(1,)` is a 1-tuple.
-    fn tuple_atom<
+    /// `( … )` in an expression: the empty tuple `()` (zero-arity FFI
+    /// declare/invoke), a group `(e)`, a one-element tuple `(e,)` or a tuple
+    /// `(a, b, …)`. A tuple needs a comma, so `(1)` stays a group.
+    ///
+    /// The first element is parsed once and the token after it picks the
+    /// form: `,` a tuple, anything else a group (#2643). Trying each form in
+    /// turn re-parsed the inside once per form, so nested parentheses took
+    /// time exponential in their depth.
+    fn paren_atom<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
@@ -3492,31 +3572,75 @@ impl<'pratt> Pratt<'pratt> {
         expr: T,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        // A tuple is:
-        //   - `()` (empty — used by zero-arity FFI declare/invoke),
-        //   - `at_least(2)` items separated by commas, or
-        //   - exactly 1 item with a trailing comma.
-        // Non-empty forms still require a comma so `(1)` stays a group.
         use chumsky::Parser;
-        let empty = op!('(')
-            .ignore_then(op!(')'))
-            .to(Vec::new())
-            .labelled("empty tuple");
-        let two_or_more = expr
+        // The elements after the first one's comma, if it is a tuple; the
+        // group's other expressions (`(f x)`) otherwise.
+        let tuple_rest = op!(',').ignore_then(
+            expr.clone()
+                .separated_by(op!(','))
+                .allow_trailing()
+                .collect::<Vec<_>>(),
+        );
+        let inside = expr
             .clone()
-            .separated_by(op!(','))
-            .allow_trailing()
-            .at_least(2)
-            .collect::<Vec<_>>()
-            .delimited_by(op!('('), op!(')'));
-        let one_with_trailing = expr
-            .clone()
-            .then_ignore(op!(','))
-            .map(|e| vec![e])
-            .delimited_by(op!('('), op!(')'))
-            .labelled("single-element tuple");
-        choice((empty, two_or_more, one_with_trailing))
-            .map_with(|items, e| (e.span(), Box::new(Expression::Tuple(items))))
+            .then(choice((
+                tuple_rest.map(Ok),
+                expr.repeated().collect::<Vec<_>>().map(Err),
+            )))
+            .map_with(|(first, rest), e| match rest {
+                Ok(more) => Ok(std::iter::once(first).chain(more).collect::<Vec<_>>()),
+                Err(more) => Err((
+                    e.span(),
+                    Box::new(Expression::Fragment(std::iter::once(first).chain(more).collect())),
+                )),
+            });
+        op!('(')
+            .ignore_then(choice((
+                op!(')').map(|_| Ok(Vec::new())),
+                inside.then_ignore(op!(')')),
+            )))
+            .map_with(|form, e| match form {
+                Ok(items) => (e.span(), Box::new(Expression::Tuple(items))),
+                Err(group) => (e.span(), Box::new(Expression::Group(group))),
+            })
+            .labelled("tuple")
+    }
+
+    /// `( … )` in a type: the unit type `()`, a group `(T)` (so
+    /// `(int -> int) -> int` reads as written), a one-element tuple `(T,)` or
+    /// a tuple `(A, B, …)`. As [`Self::paren_atom`], the first type is
+    /// parsed once and the token after it picks the form (#2643).
+    fn paren_type<T>(
+        &self,
+        type_ann: T,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    where
+        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+            + Clone
+            + 'pratt,
+    {
+        use chumsky::Parser;
+        let tuple_rest = op!(',').ignore_then(
+            type_ann
+                .clone()
+                .separated_by(op!(','))
+                .allow_trailing()
+                .collect::<Vec<_>>(),
+        );
+        op!('(')
+            .ignore_then(choice((
+                op!(')').map(|_| None),
+                type_ann.then(tuple_rest.or_not()).then_ignore(op!(')')).map(Some),
+            )))
+            .map_with(|form, e| match form {
+                None => (e.span(), Box::new(Expression::Tuple(Vec::new()))),
+                // A group is the type inside, with its own span.
+                Some((ty, None)) => ty,
+                Some((first, Some(more))) => (
+                    e.span(),
+                    Box::new(Expression::Tuple(std::iter::once(first).chain(more).collect())),
+                ),
+            })
             .labelled("tuple")
     }
 
@@ -3707,7 +3831,7 @@ impl<'pratt> Pratt<'pratt> {
         E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
-        S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+        S: Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
     >(
@@ -3745,7 +3869,7 @@ impl<'pratt> Pratt<'pratt> {
         E: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
-        S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
+        S: Parser<'pratt, &'pratt str, BodyItem<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
             + 'pratt,
     >(
@@ -3756,7 +3880,7 @@ impl<'pratt> Pratt<'pratt> {
            + Clone
            + 'pratt {
         // Use only handles built inside the surrounding `recursive(|expr| …)`.
-        let brace_body = self.brace_body(stmt, expr.clone());
+        let brace_body = self.brace_body(stmt);
 
         self.pattern()
             .then_ignore(op!("=>"))
@@ -4166,8 +4290,6 @@ const EXPRESSION_LABELS: &[&str] = &[
     "lambda",
     "string",
     "tuple",
-    "empty tuple",
-    "single-element tuple",
     "done builtin",
     "new",
     "panic",
