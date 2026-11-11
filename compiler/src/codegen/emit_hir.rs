@@ -7152,13 +7152,15 @@ impl Compiler {
         // boxed words.
         // A shared generic body (no dictionaries to forward) passes its own
         // bare type parameters the same way (#915), a method's own ones
-        // (`fn third<W>(W w)` in an impl) included (#1467).
+        // (`fn third<W>(W w)` in an impl) included (#1467), and so does a
+        // generic class's method its class's (`impl C<T>`, whose scheme
+        // quantifies `T`, #2633).
         let shared = !self.compiling_mono_clone
             && (hir.is_generic
-                || self
-                    .current_function_table_key
-                    .as_deref()
-                    .is_some_and(|k| self.checker.is_generic_fn(strip_overload_key(k))));
+                || self.current_function_table_key.as_deref().is_some_and(|k| {
+                    let k = strip_overload_key(k);
+                    self.checker.is_generic_fn(k) || self.checker.env().lookup(k).is_some_and(|s| !s.bounds.is_empty())
+                }));
         let open = |ty: &Ty| (shared || !forwarded.is_empty()) && matches!(ty, Ty::Var(_));
         // A tuple with an open item, in a shared body, is one boxed object
         // whose dictionary the call builds (#1479).
