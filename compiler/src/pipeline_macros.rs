@@ -1895,7 +1895,10 @@ fn is_default_display_impl(node: &Output<'_>, type_name: &str) -> bool {
     match node.1.as_ref() {
         Expression::TypeClassImpl { class, args, .. } if is_synthetic(node.0) => {
             *class == "Show"
-                && args.first().is_some_and(|a| a.1.to_string() == type_name)
+                && args.first().is_some_and(|a| match a.1.as_ref() {
+                    Expression::Type(name) => *name == type_name,
+                    head => head.to_string() == type_name,
+                })
         }
         _ => false,
     }
@@ -1904,14 +1907,12 @@ fn is_default_display_impl(node: &Output<'_>, type_name: &str) -> bool {
 /// A derive that writes `impl Show for T` replaces the compiler's type-name
 /// default for `T`.
 fn drop_default_display_impls(children: &mut Vec<Output<'_>>, type_name: &str, generated: &[Output<'_>]) {
-    let heads = impl_heads(generated);
-    children.retain(|c| {
-        !(is_default_display_impl(c, type_name)
-            && heads.iter().any(|(class, head)| {
-                head == type_name
-                    && matches!(c.1.as_ref(), Expression::TypeClassImpl { class: c2, .. } if c2 == class)
-            }))
-    });
+    // A default is a `Show` impl: only a generated `Show` for the type
+    // replaces it, and most derives write none.
+    if !impl_heads(generated).iter().any(|(class, head)| class == "Show" && head == type_name) {
+        return;
+    }
+    children.retain(|c| !is_default_display_impl(c, type_name));
 }
 
 /// Per derived type: helpers its derives own, attributes its members use, site.

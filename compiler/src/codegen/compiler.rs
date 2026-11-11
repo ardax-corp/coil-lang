@@ -483,6 +483,35 @@ impl Compiler {
         self.functions.get(name).copied()
     }
 
+    /// Register function `name` at `offset` in [`Self::functions`].
+    fn insert_function(&mut self, name: String, offset: usize) {
+        if !self.functions.contains_key(&name) {
+            for (at, _) in name.match_indices('#') {
+                *self.fn_key_prefixes.entry(name[..at].to_string()).or_default() += 1;
+            }
+        }
+        self.functions.insert(name, offset);
+    }
+
+    /// Drop function `name` from [`Self::functions`].
+    fn remove_function(&mut self, name: &str) {
+        if self.functions.remove(name).is_some() {
+            for (at, _) in name.match_indices('#') {
+                if let Some(n) = self.fn_key_prefixes.get_mut(&name[..at]) {
+                    *n -= 1;
+                    if *n == 0 {
+                        self.fn_key_prefixes.remove(&name[..at]);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether a key of [`Self::functions`] is `key` followed by `#`.
+    fn has_fn_key_under(&self, key: &str) -> bool {
+        self.fn_key_prefixes.contains_key(key)
+    }
+
     /// Bind a fresh entry label at the current PC and register `name`.
     fn bind_function_entry(&mut self, name: String) -> (usize, IlLabel) {
         let offset = self.bodies.position();
@@ -492,7 +521,7 @@ impl Compiler {
         } else {
             self.bodies.bind_fresh_entry()
         };
-        self.functions.insert(name.clone(), offset);
+        self.insert_function(name.clone(), offset);
         if self.keep_fns_in.is_some() {
             let file = self.intern_source_file();
             self.fn_source_files.insert(name.clone(), file);
@@ -1169,9 +1198,7 @@ impl Compiler {
             && self
                 .checker
                 .generics()
-                .instances
-                .iter()
-                .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+                .instance_of_method(fqn)
                 .is_some_and(|inst| !inst.args.iter().any(Ty::has_var))
             && !self.instance_call_takes_dict(class, method, fqn)
             && self
@@ -1183,7 +1210,7 @@ impl Compiler {
     /// [`Self::instance_method_raw`] of instance method `fqn`, from its
     /// instance's class, method name and head.
     fn instance_method_fqn_raw(&self, fqn: &str) -> bool {
-        let Some((class, method, args)) = self.checker.generics().instances.iter().find_map(|inst| {
+        let Some((class, method, args)) = self.checker.generics().instances_of_method(fqn).find_map(|inst| {
             let (method, _) = inst.method_fqns.iter().find(|(_, f)| *f == fqn)?;
             Some((inst.class.clone(), method.clone(), inst.args.clone()))
         }) else {
@@ -1210,9 +1237,7 @@ impl Compiler {
         let Some(instance) = self
             .checker
             .generics()
-            .instances
-            .iter()
-            .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+            .instance_of_method(fqn)
         else {
             return;
         };
@@ -1610,6 +1635,9 @@ impl Compiler {
     /// or the method is in another program, a thunk calling the shared
     /// entry; then its `$dict` adapter.
     fn emit_instance_clones(&mut self, children: &[Output<'_>]) {
+        // This program's method nodes by fqn, made the first time a clone
+        // of one of them is emitted.
+        let mut method_fns = None;
         while let Some(req) = self.inst_clone_queue.pop_front() {
             let src = self.inst_clone_srcs[&req.src].clone();
             // Another module's method: compiled later under that module's
@@ -1638,7 +1666,7 @@ impl Compiler {
             }
             let vars = self.inst_clone_vars(&src.head, &req.lookup).unwrap_or_default();
             let method = (src.program == self.program_seq && src.compiled)
-                .then(|| self.find_impl_method_fn(children, &req.src))
+                .then(|| method_fns.get_or_insert_with(|| self.impl_method_fns(children)).get(req.src.as_str()).copied())
                 .flatten()
                 .filter(|_| self.inst_clone_ground(src.span, &vars));
             match method {
@@ -1646,9 +1674,7 @@ impl Compiler {
                     let context = self
                         .checker
                         .generics()
-                        .instances
-                        .iter()
-                        .find(|inst| inst.method_fqns.values().any(|f| *f == req.src))
+                        .instance_of_method(&req.src)
                         .map(|inst| inst.context.clone())
                         .unwrap_or_default();
                     self.ensure_clone_structural(&context, &vars);
@@ -1744,54 +1770,59 @@ impl Compiler {
 
     /// The `Function` node of the `impl` method of this program whose
     /// fqn is `fqn`.
-    fn find_impl_method_fn<'a, 'b>(&self, children: &'b [Output<'a>], fqn: &str) -> Option<(&'b Output<'a>, &'b [Output<'a>])> {
-        children.iter().find_map(|child| {
-            // A free generic function ([`Self::note_fn_clone_src`]).
-            if let Expression::Function { name, .. } = child.1.as_ref() {
-                let qualified = if self.namespace.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{}::{}", self.namespace, name)
-                };
-                return (qualified == fqn).then_some((child, &[][..]));
-            }
-            if let Expression::TypeClass { name, methods, .. } = child.1.as_ref() {
-                return methods.iter().find_map(|m| match m.1.as_ref() {
-                    Expression::Function { name: method, .. }
-                        if crate::typechecking::generics::Generics::default_method_fqn(name, method) == fqn =>
-                    {
-                        Some((m, &[][..]))
+    /// The `Function` node of each `impl` method, trait default method
+    /// and free function of this program, with its `impl` head's AST
+    /// arguments, by fqn; the first in `children`'s order for an fqn
+    /// declared twice.
+    #[allow(clippy::type_complexity)]
+    fn impl_method_fns<'a, 'b>(&self, children: &'b [Output<'a>]) -> HashMap<String, (&'b Output<'a>, &'b [Output<'a>])> {
+        let mut fns = HashMap::new();
+        let mut add = |fqn: String, found: (&'b Output<'a>, &'b [Output<'a>])| {
+            fns.entry(fqn).or_insert(found);
+        };
+        for child in children {
+            match child.1.as_ref() {
+                // A free generic function ([`Self::note_fn_clone_src`]).
+                Expression::Function { name, .. } => {
+                    let qualified = if self.namespace.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{}::{}", self.namespace, name)
+                    };
+                    add(qualified, (child, &[][..]));
+                }
+                Expression::TypeClass { name, methods, .. } => {
+                    for m in methods {
+                        if let Expression::Function { name: method, .. } = m.1.as_ref() {
+                            add(crate::typechecking::generics::Generics::default_method_fqn(name, method), (m, &[][..]));
+                        }
                     }
-                    _ => None,
-                });
+                }
+                Expression::Implementation { owner, methods, .. } => {
+                    let owner = self.resolve_class_ident(owner);
+                    for m in methods {
+                        if let (Some(name), Some(f)) = (Self::impl_method_name(m), Self::impl_method_fn(m)) {
+                            add(format!("{owner}::{name}"), (f, &[][..]));
+                        }
+                    }
+                }
+                Expression::TypeClassImpl { class, args, methods, .. } => {
+                    let class = self.checker.impl_trait_key(class);
+                    let ty_part = args
+                        .iter()
+                        .map(|arg| self.codegen_instance_head_ty(arg).to_string())
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    for m in methods {
+                        if let (Some(name), Some(f)) = (Self::impl_method_name(m), Self::impl_method_fn(m)) {
+                            add(format!("{class}__{ty_part}__{name}"), (f, args.as_slice()));
+                        }
+                    }
+                }
+                _ => {}
             }
-            if let Expression::Implementation { owner, methods, .. } = child.1.as_ref() {
-                let owner = self.resolve_class_ident(owner);
-                return methods.iter().find_map(|m| {
-                    let name = Self::impl_method_name(m)?;
-                    (format!("{owner}::{name}") == fqn)
-                        .then(|| Self::impl_method_fn(m))
-                        .flatten()
-                        .map(|f| (f, &[][..]))
-                });
-            }
-            let Expression::TypeClassImpl { class, args, methods, .. } = child.1.as_ref() else {
-                return None;
-            };
-            let class = self.checker.impl_trait_key(class);
-            let ty_part = args
-                .iter()
-                .map(|arg| self.codegen_instance_head_ty(arg).to_string())
-                .collect::<Vec<_>>()
-                .join("_");
-            methods.iter().find_map(|m| {
-                let name = Self::impl_method_name(m)?;
-                (format!("{class}__{ty_part}__{name}") == fqn)
-                    .then(|| Self::impl_method_fn(m))
-                    .flatten()
-                    .map(|f| (f, args.as_slice()))
-            })
-        })
+        }
+        fns
     }
 
     /// `name ↦ type` for each type parameter the AST head spells (`T` in
@@ -1997,6 +2028,7 @@ impl Compiler {
             typed_sidecar: self.typed_sidecar.clone(),
             hir_fns: self.hir_fns.clone(),
             hir_fn_names: self.hir_fn_names.clone(),
+            hir_fn_by_last: self.hir_fn_by_last.clone(),
             hir_module: self.hir_module.take(),
             const_env_stack: self.const_env_stack.clone(),
             static_const_values: self.static_const_values.clone(),
@@ -2033,6 +2065,7 @@ impl Compiler {
         std::mem::swap(&mut self.typed_sidecar, &mut ctx.typed_sidecar);
         std::mem::swap(&mut self.hir_fns, &mut ctx.hir_fns);
         std::mem::swap(&mut self.hir_fn_names, &mut ctx.hir_fn_names);
+        std::mem::swap(&mut self.hir_fn_by_last, &mut ctx.hir_fn_by_last);
         std::mem::swap(&mut self.hir_module, &mut ctx.hir_module);
         std::mem::swap(&mut self.const_env_stack, &mut ctx.const_env_stack);
         std::mem::swap(&mut self.static_const_values, &mut ctx.static_const_values);
@@ -2197,8 +2230,7 @@ impl Compiler {
         let head = self
             .checker
             .generics()
-            .instances
-            .iter()
+            .instances_of_method(fqn)
             .find(|inst| inst.class == class && inst.method_fqns.get(method).is_some_and(|f| f == fqn))
             .filter(|inst| inst.args.len() == inst_args.len() && inst.args.iter().any(Ty::has_var))
             .map(|inst| inst.args.clone());
@@ -3242,9 +3274,8 @@ impl Compiler {
             if let Some(inst) = self
                 .checker
                 .generics()
-                .instances
-                .iter()
-                .find(|inst| !inst.context.is_empty() && inst.method_fqns.values().any(|f| f == name))
+                .instances_of_method(name)
+                .find(|inst| !inst.context.is_empty())
             {
                 if same(&inst.class, &inst.args) {
                     return slot_of(0).map(OpenDictGoal::Slot);
@@ -3436,9 +3467,7 @@ impl Compiler {
     fn instance_context_len(&self, fqn: &str) -> usize {
         self.checker
             .generics()
-            .instances
-            .iter()
-            .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+            .instance_of_method(fqn)
             .map_or(0, |inst| inst.context.len())
     }
 
@@ -3855,7 +3884,7 @@ impl Compiler {
 
         // The worker's own entry (its `MakeFn` and nested calls) while it
         // plans; bound once it does.
-        self.functions.insert(worker_name.clone(), self.bodies.position());
+        self.insert_function(worker_name.clone(), self.bodies.position());
         self.fn_arities.insert(worker_name.clone(), (n as u32 + 1, false));
         let prev_fn_table_key = self.current_function_table_key.replace(worker_name.clone());
         let calls = HashMap::from([(worker_name.clone(), (vec![ValueLayout::Boxed; n + 1], ValueLayout::Boxed))]);
@@ -3870,7 +3899,7 @@ impl Compiler {
             self.attach_hir_mir();
             self.flush_hir_par_tail();
         } else {
-            self.functions.remove(&worker_name);
+            self.remove_function(&worker_name);
             self.fn_arities.remove(&worker_name);
         }
         self.current_function_table_key = prev_fn_table_key;
@@ -7850,7 +7879,10 @@ impl Compiler {
                 roots.extend(self.test_body_names());
             }
             let live = self.reachable_bodies(roots);
-            self.functions.retain(|name, _| live.contains_key(name));
+            let dead: Vec<String> = self.functions.keys().filter(|name| !live.contains_key(*name)).cloned().collect();
+            for name in &dead {
+                self.remove_function(name);
+            }
             let functions = &self.functions;
             self.fn_entry_labels.retain(|name, _| functions.contains_key(name));
             self.fn_debug_locals.retain(|name, _| functions.contains_key(name));

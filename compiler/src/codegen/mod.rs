@@ -135,12 +135,7 @@ fn into_primitive_fqn(from: &str, to: &str) -> String {
 }
 
 fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
-    checker.generics().instances.iter().any(|instance| {
-        instance
-            .method_fqns
-            .values()
-            .any(|method_fqn| method_fqn == name)
-    })
+    checker.generics().instance_of_method(name).is_some()
 }
 
 /// Code table key for an overload: `name#2.0` or `name#rest1.0`.
@@ -225,6 +220,10 @@ pub struct Compiler {
     bodies: BodyTable,
 
     functions: HashMap<String, usize>,
+    /// For each `name#…` key of [`Self::functions`] and each `#` in it, the
+    /// part before that `#`: how many keys start with it and the `#`.
+    /// Kept by [`Compiler::insert_function`] / [`Compiler::remove_function`].
+    fn_key_prefixes: HashMap<String, usize>,
     /// Entry labels for names in [`Self::functions`] (step-3 binds).
     fn_entry_labels: HashMap<String, IlLabel>,
     /// `Show` thunks of the builtin error enums: reserved up front, emitted
@@ -661,6 +660,9 @@ pub struct Compiler {
     /// Function and method body index in [`Self::hir_module`] by name
     /// (`None` when two bodies share it).
     hir_fn_names: HashMap<String, Option<usize>>,
+    /// The `Some` body indexes of [`Self::hir_fn_names`] by the last
+    /// `::` segment of their name, ascending.
+    hir_fn_by_last: HashMap<String, Vec<usize>>,
     /// The table keys of the free functions and inherent methods whose
     /// shared entry takes a `kinds` word (#2506), reserved before any body
     /// is emitted ([`Compiler::kinds_scheme`]).
@@ -725,6 +727,7 @@ impl Default for Compiler {
             debug_locs: Vec::new(),
             inline_scopes: Default::default(),
             functions: HashMap::with_capacity(32),
+            fn_key_prefixes: HashMap::new(),
             fn_entry_labels: HashMap::with_capacity(32),
             builtin_show_thunks: Vec::new(),
             builtin_show_used: HashSet::new(),
@@ -867,6 +870,7 @@ impl Default for Compiler {
             residue_lint: std::cell::Cell::new(false),
             residue: std::cell::RefCell::new((HashSet::new(), Vec::new())),
             hir_fn_names: HashMap::new(),
+            hir_fn_by_last: HashMap::new(),
             kinds_keys: HashSet::new(),
             kinds_labels: HashMap::new(),
             pending_own_kinds: None,
@@ -944,6 +948,7 @@ pub(crate) struct ModuleCtx {
     typed_sidecar: crate::typechecking::TypedSidecar,
     hir_fns: HashMap<(usize, usize), usize>,
     hir_fn_names: HashMap<String, Option<usize>>,
+    hir_fn_by_last: HashMap<String, Vec<usize>>,
     hir_module: Option<crate::hir::HirModule>,
     const_env_stack: Vec<HashMap<String, ConstValue>>,
     static_const_values: HashMap<String, ConstValue>,

@@ -24,7 +24,7 @@ pub struct IsolateProgram {
 pub struct Isolate {
     rt: Runtime,
     constants: Arc<Vec<u64>>,
-    debug: ProgramDebug,
+    debug: Arc<ProgramDebug>,
     native: Arc<NativeCode>,
     panicked: bool,
 }
@@ -36,7 +36,7 @@ impl Isolate {
         rt.program_string_cache = vec![Value::default(); program.strings.len()];
         rt.program_strings = program.strings;
         rt.native = Some(Box::new(NativeTable::new(Arc::clone(&program.native))));
-        Self { rt, constants: program.constants, debug: program.debug, native: program.native, panicked: false }
+        Self { rt, constants: program.constants, debug: Arc::new(program.debug), native: program.native, panicked: false }
     }
 
     pub fn register_native(&mut self, native: Arc<dyn crate::ffi::NativeFn>) {
@@ -123,7 +123,7 @@ impl Isolate {
             main: None,
             constants: Arc::clone(&self.constants),
             native: Arc::clone(&self.native),
-            debug: self.debug.clone(),
+            debug: Arc::clone(&self.debug),
             thread_program: None,
             shared_print: None,
         };

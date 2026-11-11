@@ -1514,8 +1514,8 @@ fn builtin_option_type_app_builds_ty_app() {
 #[test]
 fn ambiguous_instance_discharge_reports_error() {
     let mut c = Checker::new();
-    c.generics.instances.clear();
-    c.generics.instances.push(InstanceDef {
+    c.generics.clear_instances();
+    c.generics.push_instance(InstanceDef {
         class: "Choice".to_string(),
         defined_module: "a".to_string(),
         range: 0..1,
@@ -1524,7 +1524,7 @@ fn ambiguous_instance_discharge_reports_error() {
         assoc_tys: HashMap::new(),
         context: Vec::new(),
     });
-    c.generics.instances.push(InstanceDef {
+    c.generics.push_instance(InstanceDef {
         class: "Choice".to_string(),
         defined_module: "b".to_string(),
         range: 1..2,

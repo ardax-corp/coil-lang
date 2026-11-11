@@ -6,7 +6,7 @@
 //! [`Checker`] owns the substitution, accumulates diagnostics with error
 //! recovery, and caches inferred types keyed by pre-walk [`NodeId`]s.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
 use parser::ast::{Expression, Output, Visibility};
@@ -551,6 +551,10 @@ pub struct Checker {
     // BTreeMap indexes variant name → tag.
     enums: BTreeMap<String, Vec<String>>,
     enum_tags: BTreeMap<String, BTreeMap<String, u32>>,
+    /// The module-qualified keys of [`Self::enum_tags`] by their last
+    /// `::` segment (`m::E` under `E`), kept in step by
+    /// [`Checker::insert_enum_tags`] and [`Checker::remove_enum_tags`].
+    enum_tag_leaves: HashMap<String, BTreeSet<String>>,
     enum_payloads: BTreeMap<String, Vec<EnumVariantPayloadTy>>,
     enum_arities: BTreeMap<String, Vec<usize>>,
     /// Present only for scalar-backed enums (unboxed Int/Float/String/Bool).
