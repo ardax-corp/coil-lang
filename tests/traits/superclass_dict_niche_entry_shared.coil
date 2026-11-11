@@ -1,0 +1,121 @@
+// A subclass instance with a generic head over `Option` / `Result` at a
+// type with a niche (`Option<string>`, one word), called directly past the
+// clone budget: the call converts the value to the enum object and passes
+// the entry's own dictionary, which holds the shared entries
+// (coil-lang#2477). A superclass method in it that reads its own
+// instance's dictionary (a default body its sibling, a generic-head
+// instance's method its `kinds` word or its context) is reached through a
+// forwarder to the superclass's entry dictionary, which holds that
+// superclass's shared entries, so they get the enum object too
+// (coil-lang#2476).
+// @flags --clone-budget 0
+use tests::assert;
+
+trait Named<T> {
+    fn name(T x) -> string {}
+
+    fn loud(T x) -> string {
+        return x.name() + "!";
+    }
+}
+
+trait Tagged<T: Named> {
+    fn tag(T x) -> string {}
+
+    fn both(T x) -> string {
+        return x.tag() + " " + x.loud();
+    }
+}
+
+impl Named for Option<U> {
+    fn name(Option<U> o) -> string {
+        return match o {
+            Some(_) => "some",
+            None => "none",
+        };
+    }
+}
+
+impl Tagged for Option<U> {
+    fn tag(Option<U> o) -> string {
+        return "t";
+    }
+}
+
+impl Named for Result<A, B> {
+    fn name(Result<A, B> r) -> string {
+        return match r {
+            Ok(_) => "ok",
+            Err(_) => "err",
+        };
+    }
+}
+
+impl Tagged for Result<A, B> {
+    fn tag(Result<A, B> r) -> string {
+        return "r";
+    }
+}
+
+// A bounded superclass instance: its method reads its context.
+trait Shown<T> {
+    fn shown(T x) -> string {}
+
+    fn shout(T x) -> string {
+        return x.shown() + "!";
+    }
+}
+
+trait Framed<T: Shown> {
+    fn frame(T x) -> string {
+        return "[" + x.shown() + "|" + x.shout() + "]";
+    }
+}
+
+impl Shown for Option<U: Show> {
+    fn shown(Option<U> o) -> string {
+        return match o {
+            Some(v) => v.show(),
+            None => "-",
+        };
+    }
+}
+
+impl Framed for Option<U: Show> {
+}
+
+class Point {
+    pub x: int,
+}
+
+test("a default body's superclass default at a niche Option") {
+    let a: Option<string> = Some("x");
+    let b: Option<string> = None;
+    assert!(a.both() == "t some!");
+    assert!(b.both() == "t none!");
+}
+
+test("the same at a class payload and an int payload") {
+    let p: Option<Point> = Some(new Point(1));
+    let q: Option<Point> = None;
+    let i: Option<int> = Some(3);
+    assert!(p.both() == "t some!");
+    assert!(q.both() == "t none!");
+    assert!(i.both() == "t some!");
+}
+
+test("a Result head") {
+    let r: Result<string, string> = Ok("v");
+    let e: Result<string, string> = Err("w");
+    assert!(r.both() == "r ok!");
+    assert!(e.both() == "r err!");
+}
+
+test("a bounded superclass instance's context") {
+    let a: Option<string> = Some("x");
+    let n: Option<string> = None;
+    let i: Option<int> = Some(4);
+    assert!(a.frame() == "[x|x!]");
+    assert!(n.frame() == "[-|-!]");
+    assert!(i.frame() == "[4|4!]");
+}
