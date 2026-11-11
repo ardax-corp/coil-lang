@@ -1081,6 +1081,14 @@ fn walk_children<F>(node: &Output, f: &mut F)
 where
     F: FnMut(&Output),
 {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| visit_children(node, f));
+}
+
+fn visit_children<F>(node: &Output, f: &mut F)
+where
+    F: FnMut(&Output),
+{
     match node.1.as_ref() {
         Expression::Program(items)
         | Expression::Block(items)

@@ -184,6 +184,11 @@ pub fn single_exit(callee: &HirBody) -> Option<HirBody> {
 /// The value of running `stmts` then `tail` up to the function's exit, as
 /// one expression; `folded` counts the `return`s it absorbed.
 fn fold_exit(b: &mut HirBody, stmts: &[HirId], tail: Option<HirId>, folded: &mut usize) -> Option<HirId> {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| fold_exit_level(b, stmts, tail, folded))
+}
+
+fn fold_exit_level(b: &mut HirBody, stmts: &[HirId], tail: Option<HirId>, folded: &mut usize) -> Option<HirId> {
     let span = b.expr(b.root?).span;
     // A tail `if` folds like a last statement.
     if let Some(t) = tail
@@ -413,6 +418,17 @@ impl Inliner<'_> {
     /// and the callee has no result).
     fn statement<'a>(
         &mut self,
+        s: HirId,
+        callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
+        growth: usize,
+        out: &mut Vec<HirId>,
+    ) -> Option<HirId> {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.statement_level(s, callee_of, growth, out))
+    }
+
+    fn statement_level<'a>(
+        &mut self,
         mut s: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
         growth: usize,
@@ -515,6 +531,17 @@ impl Inliner<'_> {
         found: &mut Option<(HirId, &'a HirBody, Shape)>,
         spills: &mut Vec<HirId>,
     ) -> Result<(), ()> {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.search_level(e, callee_of, found, spills))
+    }
+
+    fn search_level<'a>(
+        &self,
+        e: HirId,
+        callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
+        found: &mut Option<(HirId, &'a HirBody, Shape)>,
+        spills: &mut Vec<HirId>,
+    ) -> Result<(), ()> {
         let b = &self.body;
         let seq = |ids: &[HirId], found: &mut Option<_>, spills: &mut Vec<HirId>| -> Result<(), ()> {
             for &a in ids {
@@ -595,6 +622,16 @@ impl Inliner<'_> {
     /// expression (a rule from the stack IL, whose `let`s needed an empty
     /// operand stack; MIR lowering takes a binding inside any operand).
     fn in_place_site<'a>(
+        &self,
+        s: HirId,
+        callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
+        zero: bool,
+    ) -> Option<(HirId, &'a HirBody, Shape)> {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.in_place_site_level(s, callee_of, zero))
+    }
+
+    fn in_place_site_level<'a>(
         &self,
         s: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,

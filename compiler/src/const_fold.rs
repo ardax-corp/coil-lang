@@ -23,6 +23,14 @@ pub fn eval_expr<'a>(
     ast: &(SimpleSpan, Box<Expression<'a>>),
     env: &HashMap<String, ConstValue>,
 ) -> Option<ConstValue> {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| eval_expr_level(ast, env))
+}
+
+fn eval_expr_level<'a>(
+    ast: &(SimpleSpan, Box<Expression<'a>>),
+    env: &HashMap<String, ConstValue>,
+) -> Option<ConstValue> {
     match ast.1.as_ref() {
         Expression::Integer(n) => Some(ConstValue::Int(*n)),
         Expression::Float(n) => Some(ConstValue::Float(*n)),

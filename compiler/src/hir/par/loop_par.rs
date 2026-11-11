@@ -317,6 +317,11 @@ impl Scan<'_> {
     }
 
     fn walk(&mut self, id: HirId, consts: &mut ConstLocals, ints: &mut IntLocals) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.walk_level(id, consts, ints))
+    }
+
+    fn walk_level(&mut self, id: HirId, consts: &mut ConstLocals, ints: &mut IntLocals) {
         let body = self.body;
         let e = body.expr(id);
         match &e.kind {
@@ -795,6 +800,11 @@ impl Scan<'_> {
     /// Const ints are immediates in the worker; other int locals are extra
     /// arguments.
     fn independent(&self, id: HirId, locals: &HashSet<LocalId>, scan: &mut LoopScan<'_>) -> bool {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.independent_level(id, locals, scan))
+    }
+
+    fn independent_level(&self, id: HirId, locals: &HashSet<LocalId>, scan: &mut LoopScan<'_>) -> bool {
         let body = self.body;
         match &body.expr(id).kind {
             HirKind::Lit(Lit::Int(_)) => true,

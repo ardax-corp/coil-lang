@@ -257,6 +257,11 @@ fn drop_unread(body: &mut HirBody, root: HirId, hits: &mut usize) {
 /// Fold under `id`, then `id` itself; `based`: it is the base a field or
 /// index read takes its value from.
 fn post(body: &mut HirBody, id: HirId, hits: &mut usize, based: bool) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| post_level(body, id, hits, based))
+}
+
+fn post_level(body: &mut HirBody, id: HirId, hits: &mut usize, based: bool) {
     let base = match body.expr(id).kind {
         HirKind::Field { base, .. } | HirKind::Index { base, .. } => Some(base),
         _ => None,

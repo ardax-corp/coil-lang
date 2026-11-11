@@ -280,6 +280,11 @@ impl<'a> Cx<'a> {
     }
 
     fn walk_escapes(&self, body: &'a HirBody, id: HirId, out: &mut BTreeSet<NamedEscape>, callees: &mut Vec<String>) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.walk_escapes_level(body, id, out, callees))
+    }
+
+    fn walk_escapes_level(&self, body: &'a HirBody, id: HirId, out: &mut BTreeSet<NamedEscape>, callees: &mut Vec<String>) {
         let Some(parts) = self.parts(body, id) else { return };
         let heap = |place: HirId, out: &mut BTreeSet<NamedEscape>| {
             if let HirKind::Index { base, .. } | HirKind::Field { base, .. } = &body.expr(place).kind

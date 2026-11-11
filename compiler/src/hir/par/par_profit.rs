@@ -780,6 +780,11 @@ impl Scan<'_> {
     }
 
     fn walk(&mut self, id: HirId, on_return: bool) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.walk_level(id, on_return))
+    }
+
+    fn walk_level(&mut self, id: HirId, on_return: bool) {
         let ctx = self.ctx;
         let body = ctx.body;
         let id = ctx.peel(id);
@@ -873,6 +878,11 @@ fn diverging_if_negation(item: HirId, ctx: &FnCtx<'_>) -> Option<ParGuard> {
 /// Covers the same nodes as [`Scan::walk`]; anything else is a leaf
 /// expression that cannot hold a `return`.
 fn contains_return(ctx: &FnCtx<'_>, id: HirId) -> bool {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| contains_return_level(ctx, id))
+}
+
+fn contains_return_level(ctx: &FnCtx<'_>, id: HirId) -> bool {
     let body = ctx.body;
     let id = ctx.peel(id);
     if written_return(body, id) {
@@ -990,15 +1000,18 @@ fn match_fork(id: HirId, ctx: &FnCtx<'_>, guards: &[ParGuard], lets: &[(LocalId,
 /// does not. A right operand that is itself such a chain stays one
 /// operand, which is no arm.
 fn flatten_assoc(id: HirId, op: ParBinOp, ctx: &FnCtx<'_>, out: &mut Vec<HirId>) {
-    let id = unwrap_byte(ctx.body, id);
     let same = |found: &str| matches!((op, found), (ParBinOp::Add, "+") | (ParBinOp::Mul, "*") | (ParBinOp::Xor, "^"));
-    match *ctx.kind(id) {
-        HirKind::Bin { op: found, lhs, rhs } if same(source_op(found)) => {
-            flatten_assoc(lhs, op, ctx, out);
-            out.push(unwrap_byte(ctx.body, rhs));
-        }
-        _ => out.push(id),
+    // Down the left spine, then its right operands back up.
+    let mut rights = Vec::new();
+    let mut id = unwrap_byte(ctx.body, id);
+    while let HirKind::Bin { op: found, lhs, rhs } = *ctx.kind(id)
+        && same(source_op(found))
+    {
+        rights.push(unwrap_byte(ctx.body, rhs));
+        id = unwrap_byte(ctx.body, lhs);
     }
+    out.push(id);
+    out.extend(rights.into_iter().rev());
 }
 
 /// Every operand must be an independent pure call (or a let bound to one):
@@ -1085,6 +1098,11 @@ struct ConstCalls<'a> {
 
 impl ConstCalls<'_> {
     fn collect(&self, body: &HirBody, id: HirId, work: &mut WorkEstimate<'_>, out: &mut HashMap<String, BTreeSet<Vec<i64>>>) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.collect_level(body, id, work, out))
+    }
+
+    fn collect_level(&self, body: &HirBody, id: HirId, work: &mut WorkEstimate<'_>, out: &mut HashMap<String, BTreeSet<Vec<i64>>>) {
         let id = unwrap_byte(body, id);
         let e = body.expr(id);
         // A contract's checks are not looked into.

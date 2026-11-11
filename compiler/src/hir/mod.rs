@@ -258,24 +258,34 @@ impl HirBody {
 
     /// Every node of `id`'s subtree, `id` first.
     pub fn visit(&self, id: HirId, f: &mut impl FnMut(&HirExpr)) {
-        f(self.expr(id));
-        for k in self.children(id) {
-            self.visit(k, f);
-        }
+        self.visit_ids(id, &mut |k| f(self.expr(k)));
     }
 
-    /// Every id of `id`'s subtree, `id` first.
+    /// Every id of `id`'s subtree in pre-order, `id` first. A loop, not a
+    /// recursion: a chain of thousands of operators is that deep.
     pub fn visit_ids(&self, id: HirId, f: &mut impl FnMut(HirId)) {
-        f(id);
-        for k in self.children(id) {
-            self.visit_ids(k, f);
-        }
+        let _ = self.any_visiting(id, &|_| false, f);
     }
 
     /// Whether some node of `id`'s subtree, `id` included, satisfies
-    /// `pred`; stops at the first that does.
+    /// `pred`, in pre-order; stops at the first that does.
     pub fn any(&self, id: HirId, pred: &impl Fn(HirId) -> bool) -> bool {
-        pred(id) || self.children(id).any(|k| self.any(k, pred))
+        self.any_visiting(id, pred, &mut |_| {})
+    }
+
+    /// [`Self::any`], calling `seen` on each node before `pred`.
+    fn any_visiting(&self, id: HirId, pred: &impl Fn(HirId) -> bool, seen: &mut impl FnMut(HirId)) -> bool {
+        let mut work = vec![id];
+        while let Some(at) = work.pop() {
+            seen(at);
+            if pred(at) {
+                return true;
+            }
+            let first = work.len();
+            work.extend(self.children(at));
+            work[first..].reverse();
+        }
+        false
     }
 
     /// Each node's parent, by id (`None` for a root and for an unreached

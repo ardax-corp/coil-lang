@@ -16,6 +16,11 @@ use crate::typechecking::ty;
 /// or after an operand with an effect, where moving it would change what
 /// runs first.
 pub fn stage(body: &HirBody, target: HirId) -> Option<HirBody> {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| stage_level(body, target))
+}
+
+fn stage_level(body: &HirBody, target: HirId) -> Option<HirBody> {
     if let Some(staged) = stage_place_indices(body, target) {
         return Some(staged);
     }
@@ -334,6 +339,11 @@ fn counterpart(body: &HirBody, place: HirId, other: HirId, at: HirId) -> Option<
 
 /// A fresh copy of the subtree at `id`.
 fn copy_tree(b: &mut HirBody, id: HirId) -> HirId {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| copy_tree_level(b, id))
+}
+
+fn copy_tree_level(b: &mut HirBody, id: HirId) -> HirId {
     let mut e = b.expr(id).clone();
     e.kind = match e.kind {
         HirKind::Field { base, name } => HirKind::Field { base: copy_tree(b, base), name },
@@ -377,6 +387,11 @@ fn root_of(body: &HirBody, s: HirId) -> Option<HirId> {
 /// whose operands do not all run, unconditionally, first; `Err(Some(op))`
 /// when `target` is an operand after `op`, an earlier one with an effect.
 fn reaches(body: &HirBody, e: HirId, target: HirId) -> Result<bool, Option<HirId>> {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| reaches_level(body, e, target))
+}
+
+fn reaches_level(body: &HirBody, e: HirId, target: HirId) -> Result<bool, Option<HirId>> {
     if e == target {
         return Ok(true);
     }

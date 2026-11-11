@@ -1242,6 +1242,10 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     fn expr(&mut self, b: &mut BodyBuilder, node: &Output<'_>) -> HirId {
+        common::deep_stack(|| self.expr_inner(b, node))
+    }
+
+    fn expr_inner(&mut self, b: &mut BodyBuilder, node: &Output<'_>) -> HirId {
         use Expression as E;
         match node.1.as_ref() {
             E::Integer(n) => self.emit_ty(b, node, HirKind::Lit(Lit::Int(*n)), self.ty_of(node).or(Some(coil_ty::int()))),

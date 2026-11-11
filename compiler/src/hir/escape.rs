@@ -351,6 +351,11 @@ impl<'c, 'a> Escape<'c, 'a> {
 
     /// What the value of `id` may reach.
     pub(super) fn src(&mut self, id: HirId) -> Src {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.src_level(id))
+    }
+
+    fn src_level(&mut self, id: HirId) -> Src {
         let body = self.body;
         let e = body.expr(id);
         if no_heap(e.ty.as_ref()) {

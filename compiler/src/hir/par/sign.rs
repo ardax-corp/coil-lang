@@ -497,6 +497,11 @@ impl<'a, 'm> Eval<'a, 'm> {
     /// Evaluate `id`: its value's range, with every write and `return`
     /// under it noted, and `env` holding what its `let`s bind.
     fn run(&mut self, id: HirId, env: &mut Env) -> Range {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.run_level(id, env))
+    }
+
+    fn run_level(&mut self, id: HirId, env: &mut Env) -> Range {
         let body = self.body;
         let e = body.expr(id);
         let typed = Some(of_type(e.ty.as_ref()));
