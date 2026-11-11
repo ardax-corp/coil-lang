@@ -135,12 +135,7 @@ fn into_primitive_fqn(from: &str, to: &str) -> String {
 }
 
 fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
-    checker.generics().instances().iter().any(|instance| {
-        instance
-            .method_fqns
-            .values()
-            .any(|method_fqn| method_fqn == name)
-    })
+    checker.generics().instance_of_method(name).is_some()
 }
 
 /// Code table key for an overload: `name#2.0` or `name#rest1.0`.

@@ -430,7 +430,7 @@ impl Compiler {
         let generics = self.checker.generics();
         let class = match fqn.split_once("__default__") {
             Some((class, _)) => class.to_string(),
-            None => generics.instances().iter().find(|i| i.method_fqns.values().any(|f| f == fqn))?.class.clone(),
+            None => generics.instance_of_method(fqn)?.class.clone(),
         };
         let class = class.as_str();
         let class_def = generics.typeclass(class)?;
@@ -441,7 +441,7 @@ impl Compiler {
             let bits = scheme.bounds.iter().take(n_trait).enumerate().map(|(i, &v)| (v, i as u32)).collect();
             return Some((index, n_trait as u32, bits));
         }
-        let inst = generics.instances().iter().find(|i| i.class == class && i.method_fqns.values().any(|f| f == fqn))?;
+        let inst = generics.instances_of_method(fqn).find(|i| i.class == class)?;
         let mut order = Vec::new();
         for h in &inst.args {
             h.collect_vars(&mut order);
@@ -459,7 +459,7 @@ impl Compiler {
     /// no dictionary, only the own `kinds` word (#2506).
     pub(super) fn trait_entry_shared(&self, fqn: &str) -> bool {
         fqn.split_once("__default__").is_some_and(|(_, m)| !m.contains('$'))
-            || self.checker.generics().instances().iter().any(|i| i.method_fqns.values().any(|f| f == fqn))
+            || self.checker.generics().instance_of_method(fqn).is_some()
     }
 
     /// Whether instance method `fqn` reads its dictionary's `kinds` word:
@@ -467,9 +467,7 @@ impl Compiler {
     pub(super) fn instance_reads_kinds(&self, fqn: &str) -> bool {
         let generics = self.checker.generics();
         generics
-            .instances()
-            .iter()
-            .find(|i| i.method_fqns.values().any(|f| f == fqn))
+            .instance_of_method(fqn)
             .is_some_and(|i| i.args.iter().any(Ty::has_var))
             && !self.raw_instance_methods.contains(fqn)
     }

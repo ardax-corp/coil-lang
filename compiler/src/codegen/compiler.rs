@@ -1169,9 +1169,7 @@ impl Compiler {
             && self
                 .checker
                 .generics()
-                .instances()
-                .iter()
-                .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+                .instance_of_method(fqn)
                 .is_some_and(|inst| !inst.args.iter().any(Ty::has_var))
             && !self.instance_call_takes_dict(class, method, fqn)
             && self
@@ -1183,7 +1181,7 @@ impl Compiler {
     /// [`Self::instance_method_raw`] of instance method `fqn`, from its
     /// instance's class, method name and head.
     fn instance_method_fqn_raw(&self, fqn: &str) -> bool {
-        let Some((class, method, args)) = self.checker.generics().instances().iter().find_map(|inst| {
+        let Some((class, method, args)) = self.checker.generics().instances_of_method(fqn).find_map(|inst| {
             let (method, _) = inst.method_fqns.iter().find(|(_, f)| *f == fqn)?;
             Some((inst.class.clone(), method.clone(), inst.args.clone()))
         }) else {
@@ -1210,9 +1208,7 @@ impl Compiler {
         let Some(instance) = self
             .checker
             .generics()
-            .instances()
-            .iter()
-            .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+            .instance_of_method(fqn)
         else {
             return;
         };
@@ -1646,9 +1642,7 @@ impl Compiler {
                     let context = self
                         .checker
                         .generics()
-                        .instances()
-                        .iter()
-                        .find(|inst| inst.method_fqns.values().any(|f| *f == req.src))
+                        .instance_of_method(&req.src)
                         .map(|inst| inst.context.clone())
                         .unwrap_or_default();
                     self.ensure_clone_structural(&context, &vars);
@@ -2197,8 +2191,7 @@ impl Compiler {
         let head = self
             .checker
             .generics()
-            .instances()
-            .iter()
+            .instances_of_method(fqn)
             .find(|inst| inst.class == class && inst.method_fqns.get(method).is_some_and(|f| f == fqn))
             .filter(|inst| inst.args.len() == inst_args.len() && inst.args.iter().any(Ty::has_var))
             .map(|inst| inst.args.clone());
@@ -3242,9 +3235,8 @@ impl Compiler {
             if let Some(inst) = self
                 .checker
                 .generics()
-                .instances()
-                .iter()
-                .find(|inst| !inst.context.is_empty() && inst.method_fqns.values().any(|f| f == name))
+                .instances_of_method(name)
+                .find(|inst| !inst.context.is_empty())
             {
                 if same(&inst.class, &inst.args) {
                     return slot_of(0).map(OpenDictGoal::Slot);
@@ -3436,9 +3428,7 @@ impl Compiler {
     fn instance_context_len(&self, fqn: &str) -> usize {
         self.checker
             .generics()
-            .instances()
-            .iter()
-            .find(|inst| inst.method_fqns.values().any(|f| f == fqn))
+            .instance_of_method(fqn)
             .map_or(0, |inst| inst.context.len())
     }
 
