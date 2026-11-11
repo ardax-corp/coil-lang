@@ -24,7 +24,12 @@ use crate::typechecking::ty::{Ty, strip_readonly};
 /// The view class `ty` is an instance of, when it is one.
 fn view_of(checker: &Checker, ty: Option<&Ty>) -> Option<String> {
     let ty = crate::typechecking::subst::apply_ty_prune(checker.subst(), ty?);
-    let name = match strip_readonly(&ty) {
+    view_of_resolved(checker, &ty)
+}
+
+/// [`view_of`] of a type the substitution is already applied to.
+fn view_of_resolved(checker: &Checker, ty: &Ty) -> Option<String> {
+    let name = match strip_readonly(ty) {
         Ty::Con(n) => n.clone(),
         Ty::App(head, _) => match head.as_ref() {
             Ty::Con(n) => n.clone(),
@@ -39,13 +44,18 @@ fn view_of(checker: &Checker, ty: Option<&Ty>) -> Option<String> {
 /// A view type held inside `ty` (not `ty` itself): a type argument, an
 /// array element or a tuple slot.
 fn nested_view(checker: &Checker, ty: &Ty) -> Option<String> {
+    // The substitution once, not again at every level (#2657).
+    nested_view_resolved(checker, &crate::typechecking::subst::apply_ty_prune(checker.subst(), ty))
+}
+
+fn nested_view_resolved(checker: &Checker, ty: &Ty) -> Option<String> {
     let inner: Vec<&Ty> = match strip_readonly(ty) {
         Ty::App(_, args) => args.iter().collect(),
         Ty::Array { element, .. } => vec![element.as_ref()],
         Ty::Tuple(items) => items.iter().collect(),
         _ => return None,
     };
-    inner.into_iter().find_map(|t| view_of(checker, Some(t)).or_else(|| nested_view(checker, t)))
+    inner.into_iter().find_map(|t| view_of_resolved(checker, t).or_else(|| nested_view_resolved(checker, t)))
 }
 
 fn short(key: &str) -> &str {

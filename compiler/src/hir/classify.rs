@@ -33,7 +33,32 @@ pub fn is_word(class: ValueClass) -> bool {
 /// The class of `ty`, or `None` when the lowering does not handle it.
 pub fn classify(checker: &Checker, ty: &Ty) -> Option<ValueClass> {
     let ty = apply_ty_prune(checker.subst(), ty);
-    classify_in(checker, &ty, &mut Vec::new())
+    // Each level of an aggregate asks whether its items are closed, a
+    // walk of the whole item: kept per node of `ty` while it is classified,
+    // so a value `d` levels deep is classified in `O(d)`, not `O(d^2)`
+    // (#2657).
+    let mut nodes = std::collections::HashSet::new();
+    collect_nodes(&ty, &mut nodes);
+    CLOSED.with(|c| c.borrow_mut().push((nodes, std::collections::HashMap::new())));
+    let class = classify_in(checker, &ty, &mut Vec::new());
+    CLOSED.with(|c| c.borrow_mut().pop());
+    class
+}
+
+thread_local! {
+    /// For each [`classify`] in progress: the addresses of the nodes of the
+    /// type it classifies, and [`params_closed`] of those asked so far.
+    /// Only those nodes are kept: they live as long as the call, while a
+    /// type a helper builds may be freed and its address reused.
+    static CLOSED: std::cell::RefCell<Vec<(std::collections::HashSet<usize>, std::collections::HashMap<usize, bool>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn collect_nodes(ty: &Ty, nodes: &mut std::collections::HashSet<usize>) {
+    common::deep_stack(|| {
+        nodes.insert(ty as *const Ty as usize);
+        ty.for_each_child(|c| collect_nodes(c, nodes));
+    })
 }
 
 fn classify_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> Option<ValueClass> {
@@ -252,6 +277,24 @@ fn plain_word(checker: &Checker, t: &Ty, seen: &mut Vec<String>, open_enum: bool
 /// each parameter is one boxed word, and [`crate::layout::of`] gives a type
 /// open in one its shared layout.
 fn params_closed(ty: &Ty) -> bool {
+    let key = ty as *const Ty as usize;
+    let known = CLOSED.with(|c| c.borrow().last().and_then(|(nodes, memo)| if nodes.contains(&key) { Some(memo.get(&key).copied()) } else { None }));
+    match known {
+        Some(Some(closed)) => closed,
+        Some(None) => {
+            let closed = params_closed_of(ty);
+            CLOSED.with(|c| {
+                if let Some((_, memo)) = c.borrow_mut().last_mut() {
+                    memo.insert(key, closed);
+                }
+            });
+            closed
+        }
+        None => params_closed_of(ty),
+    }
+}
+
+fn params_closed_of(ty: &Ty) -> bool {
     match strip_readonly(ty) {
         Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
         Ty::Sum { name, variants } if crate::layout::is_user_sum(name) => crate::layout::user_sum_closed(variants, params_closed),

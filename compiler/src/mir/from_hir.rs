@@ -348,6 +348,20 @@ impl Lower<'_> {
         if let Some(data) = crate::typechecking::aggregate_arith::unwrap_matrix_ty(strip_readonly(ty)) {
             return self.word_ty(data);
         }
+        // An array of arrays is a heap word when its innermost array is:
+        // no class, enum or niche is an array. Asked of the innermost one
+        // only, rather than of every array around it: each level's checks
+        // walk the whole type, so a value `d` arrays deep took `O(d^2)` per
+        // node (#2657).
+        if let Some(inner) = array_elem(ty).filter(|e| array_elem(e).is_some()) {
+            let mut innermost = inner;
+            while let Some(e) = array_elem(innermost).filter(|e| array_elem(e).is_some()) {
+                innermost = e;
+            }
+            if self.word_ty(innermost) == Some(MirTy::HeapRef) {
+                return Some(MirTy::HeapRef);
+            }
+        }
         word(ty)
             .or_else(|| (self.cx.is_class(ty) || opaque_heap(ty) || is_gc_handle(ty)).then_some(MirTy::HeapRef))
             .or_else(|| self.cx.scalar_enum(ty))
