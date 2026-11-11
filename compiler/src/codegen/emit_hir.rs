@@ -317,6 +317,10 @@ enum HirBuiltin {
 /// the captures in the first slots, then the parameters.
 struct HirLambda {
     body: HirBody,
+    /// Each capture that is a local bound from a generic function: its
+    /// index, that function, and the one type the lambda and the lambdas
+    /// inside it read it at, at which its value is made (#2658, #2671).
+    polyfn_captures: Vec<(usize, String, Option<Ty>)>,
     /// Its body's plan, until the first `MakeFn` of it hands the body to
     /// [`Compiler::flush_hir_lambdas`].
     emit: Option<HirEmit>,
@@ -4079,13 +4083,6 @@ impl Compiler {
             }
             let ret_ty = lam.ret.as_ref().ok_or("lambda-ret")?;
             let ret = Rep::Word(self.value_layout(ret_ty));
-            // A captured local bound from a generic function is the
-            // function's value made at the one type the lambda reads it at
-            // (#2658); read at several, the closure would need the call's
-            // dictionaries.
-            if lam.captures.iter().any(|&(outer, inner)| self.hir_polyfn_local_source(hir, emit, outer).is_some() && self.hir_capture_read_ty(lam, inner).is_err()) {
-                return Err("polyfn-capture");
-            }
             if let Some(reason) = refusal::refusal(lam, &self.checker) {
                 return Err(reason);
             }
@@ -4150,7 +4147,19 @@ impl Compiler {
             // ([`Self::hir_label_lambdas`]).
             let twin = plans.next().zip(twin_kind).map(|(p, k)| (p, UNLABELLED, k));
             let label = UNLABELLED;
-            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), emit: Some(plan), label, dicts, kinds, owner, twin, pair_captures }));
+            // A captured local bound from a generic function is the
+            // function's value made at the one type the lambda, and the
+            // lambdas it relays it to, read it at (#2658, #2671); read at
+            // several, the closure would need the call's dictionaries.
+            let mut polyfn_captures = Vec::new();
+            for (k, &(outer, inner)) in lam.captures.iter().enumerate() {
+                if let Some(name) = self.hir_polyfn_local_source(hir, emit, outer) {
+                    let ty = self.hir_capture_reads(lam, Some(&plan), inner).map_err(|()| "polyfn-capture")?;
+                    let ty = ty.or_else(|| lam.local(inner).ty.as_ref().map(|t| apply_ty_prune(self.checker.subst(), t)));
+                    polyfn_captures.push((k, name, ty));
+                }
+            }
+            emit.plan.lambdas.insert(i as u32, Box::new(HirLambda { body: lam.clone(), polyfn_captures, emit: Some(plan), label, dicts, kinds, owner, twin, pair_captures }));
         }
         Ok(())
     }

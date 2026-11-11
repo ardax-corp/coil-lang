@@ -78,10 +78,53 @@ pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: 
             }
         }
     }
+    relay_capture_types(&mut module);
     if module_path.is_empty() {
         proved_bounds(&mut module);
     }
     module
+}
+
+/// Type each lambda's capture that has no type of its own from the local
+/// it captures, enclosing lambdas first. A capture is typed by its reads,
+/// or, one the lambda only calls, by the local it captures when the
+/// lambda is built; a lambda that only relays a capture to a lambda inside
+/// it has none yet then, so that inner capture stays untyped until its
+/// enclosing lambda's capture is typed (#2671).
+fn relay_capture_types(module: &mut HirModule) {
+    let edges: Vec<(usize, usize)> = module
+        .bodies
+        .iter()
+        .enumerate()
+        .flat_map(|(parent, body)| {
+            body.exprs.iter().filter_map(move |e| match e.kind {
+                HirKind::Lambda { body } => Some((parent, body)),
+                _ => None,
+            })
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for &(parent, child) in &edges {
+            for (outer, inner) in module.bodies[child].captures.clone() {
+                if module.bodies[child].local(inner).ty.is_some() {
+                    continue;
+                }
+                let Some(ty) = module.bodies[parent].local(outer).ty.clone() else { continue };
+                let body = &mut module.bodies[child];
+                for e in &mut body.exprs {
+                    if matches!(e.kind, HirKind::Local(l) if l == inner) && e.ty.is_none() {
+                        e.ty = Some(ty.clone());
+                    }
+                }
+                body.locals[inner.0 as usize].ty = Some(ty);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// Mark the `Vec` and array indexes `coil verify` proved in bounds, when it

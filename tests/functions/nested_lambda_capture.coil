@@ -1,10 +1,11 @@
 // A lambda inside a lambda captures what the enclosing lambda captured, two
 // and three levels deep: an `int`, a `string`, a class object (shared with
-// `use (mut x)`), a function's name, a lambda, a
-// local bound from a generic function, a function parameter and a value of
-// a generic body's type parameter. A function value the middle lambda only
-// relays, which the inner one only calls, has the outer local's type
-// (coil-lang#2671).
+// `use (mut x)`), a function's name, a lambda, a local bound from a
+// generic function, a function parameter and a value of a generic body's
+// type parameter. A function value the middle lambda only relays, which
+// the inner one only calls, has the outer local's type, and a local bound
+// from a generic function is made at the type the innermost lambda reads
+// it at (coil-lang#2671).
 use tests::assert;
 
 class Box {
@@ -90,6 +91,27 @@ fn generic_value() -> int -> int {
     return h(0);
 }
 
+fn generic_value_three() -> int -> int {
+    let f = twice;
+    let h = fn (int y) use (f) {
+        let mid = fn (int w) use (f) {
+            let inner = fn (int z) use (f) => f(z);
+            inner
+        };
+        mid(y)
+    };
+    return h(0);
+}
+
+fn generic_value_at<T: Val>(T k) -> unit -> int {
+    let f = twice;
+    let h = fn (int y) use (f, k) {
+        let inner = fn () use (f, k) => f(k);
+        inner
+    };
+    return h(0);
+}
+
 fn parameter(int -> int f) -> int -> int {
     let h = fn (int y) use (f) {
         let inner = fn (int z) use (f) => f(z) + 1;
@@ -125,6 +147,12 @@ test("function values the middle lambda only relays") {
 test("a local bound from a generic function") {
     let g = generic_value();
     assert!(g(7) == 14);
+    let t = generic_value_three();
+    assert!(t(7) == 14);
+    let i = generic_value_at(4);
+    assert!(i() == 8);
+    let b = generic_value_at(new Box(5));
+    assert!(b() == 10);
 }
 
 test("a generic body's type parameter and a function over it") {
