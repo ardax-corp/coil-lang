@@ -4378,3 +4378,6 @@ mod tests_macros;
 #[cfg(test)]
 #[path = "tests/tests_fn_types.rs"]
 mod tests_fn_types;
+#[cfg(test)]
+#[path = "tests/tests_nesting.rs"]
+mod tests_nesting;
