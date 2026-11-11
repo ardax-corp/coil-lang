@@ -137,7 +137,9 @@ words:
   that boxes the word (`HirFnAdapt::ret`, `hir_open_ret_adapts`), a lambda
   literal included.
 - A bare `T` argument is passed as the ground type's word (a `float` as
-  its bits, a two-word value boxed), which is also the word an element of
+  its bits, a two-word value boxed), by a shared generic body to a generic
+  call too, a generic class's method over its class's `T` included
+  (`impl C<T>`, #2633), which is also the word an element of
   `[T; N]` or `Vec<T>` is. So the body's values of `T` are the same words
   wherever they come from, and an array, `Vec` or tuple of them it builds
   is returned as it is, at any depth (`hir_word_holder`, #2415). So is a
