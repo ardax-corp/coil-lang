@@ -261,7 +261,7 @@ fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, sites: &mu
 /// must be what went in. Running that copy tests the format on a whole
 /// corpus.
 fn through_archive(bodies: Vec<NativeBody>, body_ids: &HashMap<String, u32>) -> Vec<NativeBody> {
-    let bytes = compiler::native_mir::archive::encode(&bodies, body_ids);
+    let bytes = compiler::native_mir::archive::encode(&bodies, body_ids, &[]);
     let (back, pcs) = compiler::native_mir::archive::decode(&bytes).expect("the archive format reads what it wrote");
     assert_eq!(back.len(), bodies.len(), "bodies through the archive format");
     for (a, b) in bodies.iter().zip(&back) {

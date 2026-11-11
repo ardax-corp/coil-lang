@@ -204,6 +204,7 @@ fn cut(body: &HirBody, out: &mut HirBody, arm: HirId, name: &str) -> Option<(Hel
         span: body.expr(arm).span,
         node: None,
         flags: HirFlags::default(),
+        scope: body.expr(arm).scope,
     };
     let push = |b: &mut HirBody, e: HirExpr| {
         let id = HirId(b.exprs.len() as u32);

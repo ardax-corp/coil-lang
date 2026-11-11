@@ -19,7 +19,7 @@ mod tests {
         let mut refused = body();
         refused.mir.emit_refusal = Some("no native code");
         let pcs = HashMap::from([("f".to_string(), 4u32)]);
-        let why = crate::install_section(&encode(&[refused], &pcs)).expect_err("a refused body");
+        let why = crate::install_section(&encode(&[refused], &pcs, &[])).expect_err("a refused body");
         assert!(why.contains("`f` cannot compile to native code"), "{why}");
         let why = crate::install_section(&[]).expect_err("no section");
         assert!(why.contains("no native MIR"), "{why}");
@@ -44,7 +44,7 @@ mod tests {
     #[test]
     fn section_round_trips_and_runs() {
         let pcs = HashMap::from([("f".to_string(), 42u32)]);
-        let bytes = encode(&[body()], &pcs);
+        let bytes = encode(&[body()], &pcs, &[]);
         let (bodies, back_pcs) = decode(&bytes).expect("decode");
         assert_eq!(back_pcs, pcs);
         assert_eq!(bodies.len(), 1);
@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn corrupt_sections_are_refused() {
-        let bytes = encode(&[body()], &HashMap::new());
+        let bytes = encode(&[body()], &HashMap::new(), &[]);
         assert!(decode(&bytes[..bytes.len() - 1]).is_err());
         assert!(decode(b"CNMIR\x02").is_err());
         assert!(decode(b"nope").is_err());

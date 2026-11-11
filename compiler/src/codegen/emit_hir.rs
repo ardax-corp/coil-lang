@@ -647,7 +647,7 @@ impl Compiler {
             _ => false,
         };
         let diverging = |name: &str| self.is_cold_fn(name);
-        let name = |k: usize| format!("{}$cold{k}", callee.name);
+        let name = |k: usize| format!("{}{}{k}", callee.name, common::COLD_HELPER_SEP);
         let (body, helpers) = crate::hir::outline::outline(callee, &cold_call, &diverging, &name)?;
         let mut made = Vec::new();
         for mut h in helpers {
@@ -3745,6 +3745,7 @@ impl Compiler {
             span,
             node: None,
             flags: Default::default(),
+            scope: 0,
         });
         id
     }
@@ -3970,6 +3971,7 @@ impl Compiler {
             aliased_fn_values: body.aliased_fn_values.clone(),
             fn_key_sites: Vec::new(),
             stray_muts: Vec::new(),
+            inline_scopes: body.inline_scopes.clone(),
         }
     }
 
@@ -11599,7 +11601,7 @@ impl Compiler {
         }
         let unit = Some(Ty::Con(crate::typechecking::ty::UNIT.into()));
         let node = |w: &mut HirBody, kind: HirKind, ty: Option<Ty>| {
-            w.exprs.push(HirExpr { kind, ty, layout: crate::layout::Layout::Word, span: (0, 0), node: None, flags: HirFlags::default() });
+            w.exprs.push(HirExpr { kind, ty, layout: crate::layout::Layout::Word, span: (0, 0), node: None, flags: HirFlags::default(), scope: 0 });
             HirId(w.exprs.len() as u32 - 1)
         };
         let mut stmts = Vec::new();
@@ -11638,7 +11640,7 @@ impl Compiler {
         }
         for (e, live) in w.exprs.iter_mut().zip(live) {
             if !live {
-                *e = HirExpr { kind: HirKind::Lit(Lit::Unit), ty: None, layout: crate::layout::Layout::Word, span: e.span, node: None, flags: HirFlags::default() };
+                *e = HirExpr { kind: HirKind::Lit(Lit::Unit), ty: None, layout: crate::layout::Layout::Word, span: e.span, node: None, flags: HirFlags::default(), scope: e.scope };
             }
         }
         w.name = format!("{}$par", hir.name);
@@ -12437,6 +12439,10 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
 
     fn file(&self) -> Option<u32> {
         self.file
+    }
+
+    fn inline_scope(&self, scope: common::InlineScope) -> u32 {
+        self.c().intern_inline_scope(scope)
     }
 
     fn debugger(&self) -> bool {

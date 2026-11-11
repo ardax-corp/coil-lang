@@ -15,7 +15,7 @@
 //! runs in place as a block value. Calls inside inlined code inline in the
 //! next round (`Compiler::hir_inline_round`).
 
-use super::{Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, HirPatFields, LocalId, LocalKind};
+use super::{Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirInlineScope, HirKind, HirLocal, HirPat, HirPatFields, LocalId, LocalKind};
 use super::{BinOp, BodyKind, Builtin, Lit};
 use crate::typechecking::ty;
 
@@ -803,6 +803,21 @@ impl Inliner<'_> {
                 borrow: false,
             });
         }
+        // The spliced nodes are in a scope of their own, at the call (#2578);
+        // the callee's own scopes nest in it.
+        let call_scope = self.body.expr(call).scope;
+        let ret = match shape.ret.or(shape.result) {
+            Some(r) if !shape.foreign => callee.expr(r).span,
+            _ => span,
+        };
+        self.body.inline_scopes.push(HirInlineScope { callee: callee.name.clone(), call: span, call_scope, ret, at_call: shape.foreign });
+        let here = self.body.inline_scopes.len() as u32;
+        let soff = here;
+        for inner in &callee.inline_scopes {
+            let call_scope = if inner.call_scope == 0 { here } else { inner.call_scope + soff };
+            self.body.inline_scopes.push(HirInlineScope { call_scope, ..inner.clone() });
+        }
+        let scope_of = |k: u32| if k == 0 { here } else { k + soff };
         let param_of = |l: LocalId| callee.params.iter().position(|&p| p == l);
         for e in &callee.exprs {
             let kind = match &e.kind {
@@ -813,7 +828,7 @@ impl Inliner<'_> {
                 k => remap(k, off, loff),
             };
             let (span, node) = if shape.foreign { (span, None) } else { (e.span, e.node) };
-            self.body.exprs.push(HirExpr { kind, span, node, ..e.clone() });
+            self.body.exprs.push(HirExpr { kind, span, node, scope: scope_of(e.scope), ..e.clone() });
         }
         // A substituted parameter has no slot of its own.
         let substituted = |l: &LocalId| param_of(*l).is_some_and(|k| subst[k].is_some());
@@ -829,7 +844,9 @@ impl Inliner<'_> {
                 self.tombstone(a);
             } else {
                 let local = LocalId(p.0 + loff);
-                hoisted.push(self.body.push_new(HirKind::Let { local, init: Some(a) }, Some(ty::unit()), span));
+                let bind = self.body.push_new(HirKind::Let { local, init: Some(a) }, Some(ty::unit()), span);
+                self.body.exprs[bind.0 as usize].scope = call_scope;
+                hoisted.push(bind);
             }
         }
         hoisted.extend(shape.stmts.iter().map(|s| HirId(s.0 + off)));
@@ -859,7 +876,9 @@ impl Inliner<'_> {
                             captured: false,
                             borrow: false,
                         });
-                        out.push(self.body.push_new(HirKind::Let { local, init: Some(r) }, Some(ty::unit()), span));
+                        let bind = self.body.push_new(HirKind::Let { local, init: Some(r) }, Some(ty::unit()), span);
+                        self.body.exprs[bind.0 as usize].scope = call_scope;
+                        out.push(bind);
                         self.body.exprs[call.0 as usize].kind = HirKind::Local(local);
                     }
                     None => self.body.exprs[call.0 as usize].kind = HirKind::Lit(Lit::Unit),

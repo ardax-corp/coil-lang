@@ -148,7 +148,7 @@ fn run_through_archive(compiled: Compiled, pipeline: &Pipeline) -> Run {
     use compiler::native_mir::archive;
     use rkyv::rancor::Error;
 
-    let program = pipeline.archive(compiled.constants, |_| archive::encode(&compiled.bodies, &body_ids(pipeline)));
+    let program = pipeline.archive(compiled.constants, |_| archive::encode(&compiled.bodies, &body_ids(pipeline), &[]));
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let loaded = decode_archived_program(bytes.as_slice()).expect("decode");
     let (bodies, pcs) = archive::decode(&loaded.native_mir).expect("decode the MIR section");
@@ -4476,7 +4476,7 @@ fn compile_is_deterministic_for_many_drop_classes() {
     let compile = || {
         let mut pipeline = test_pipeline();
         let compiled = compile(&mut pipeline, &src).expect("drop classes compile");
-        compiler::native_mir::archive::encode(&compiled.bodies, &body_ids(&pipeline))
+        compiler::native_mir::archive::encode(&compiled.bodies, &body_ids(&pipeline), &[])
     };
     let first = compile();
     for _ in 0..4 {
@@ -4516,7 +4516,7 @@ fn compile_is_deterministic_for_multi_module_programs() {
         let archive = || {
             let mut pipeline = test_pipeline();
             let compiled = compile_file(&mut pipeline, path.to_str().expect("utf-8 path")).unwrap_or_else(|_| panic!("{program} failed to compile"));
-            let program = pipeline.archive(compiled.constants, |_| archive::encode(&compiled.bodies, &body_ids(&pipeline)));
+            let program = pipeline.archive(compiled.constants, |_| archive::encode(&compiled.bodies, &body_ids(&pipeline), &[]));
             rkyv::to_bytes::<rkyv::rancor::Error>(&program).expect("serialize").to_vec()
         };
         let first = archive();

@@ -20,9 +20,44 @@ impl Locator<'_> {
 
     /// `path:line:col` of a native panic site.
     pub(crate) fn native_site_location(&self, site: crate::native::NativeSite) -> Option<String> {
-        let (file, line) = self.debug.line_of(site.loc)?;
+        self.location(site.loc)
+    }
+
+    /// `path:line:col` of `loc`.
+    fn location(&self, loc: common::DebugLoc) -> Option<String> {
+        let (file, line) = self.debug.line_of(loc)?;
         let path = self.debug.source_files.get(file as usize)?;
         Some(format!("{path}:{}:{}", line.line, line.column))
+    }
+
+    /// The frames of a function `name` at `loc`, innermost first: one per
+    /// inline scope `loc` is in (the callee inlining spliced in, at its
+    /// line), then `name` at the call that scope replaced (#2578). A cold
+    /// helper partial inlining cut out of a function shows as that
+    /// function; `cold` is the function the frame inside this one was
+    /// such a helper of, which this frame's innermost one then is too (the
+    /// helper's call), and is not shown again. Returns what `cold` is for
+    /// the next frame.
+    fn frames_at<'n>(&self, name: &'n str, loc: Option<common::DebugLoc>, cold: Option<&str>, lines: &mut Vec<String>) -> Option<&'n str> {
+        let line = |name: &str, loc: Option<String>| match loc {
+            Some(loc) => format!("  in {name} at {loc}"),
+            None => format!("  in {name}"),
+        };
+        let shown = common::cold_helper_of(name);
+        let own = shown.unwrap_or(name);
+        let (inlined, at) = match loc {
+            Some(loc) => self.debug.inline_frames(loc),
+            None => (Vec::new(), common::DebugLoc::unknown()),
+        };
+        let mut frames: Vec<(&str, Option<common::DebugLoc>)> = inlined;
+        frames.push((own, loc.map(|_| at)));
+        if cold.is_some_and(|c| frames.first().is_some_and(|(f, _)| *f == c)) {
+            frames.remove(0);
+        }
+        for (f, at) in frames {
+            lines.push(line(f, at.and_then(|l| self.location(l))));
+        }
+        shown
     }
 
     /// The backtrace of native `sites`, innermost first: `  in name at
@@ -37,25 +72,23 @@ impl Locator<'_> {
     /// frame under it); where it calls the function in its own place (no
     /// location) it is no frame.
     pub(crate) fn backtrace(&self, code: &crate::native::NativeCode, sites: impl IntoIterator<Item = u32>) -> Vec<String> {
-        let line = |name: &str, loc: Option<String>| match loc {
-            Some(loc) => format!("  in {name} at {loc}"),
-            None => format!("  in {name}"),
-        };
         let mut lines = Vec::new();
         // The innermost chunk worker frame, until its loop's function.
-        let mut in_loop: Option<(&str, Option<String>)> = None;
+        let mut in_loop: Option<(&str, Option<common::DebugLoc>)> = None;
         // The function of the last frame printed.
         let mut under: Option<&str> = None;
+        // The function the last frame printed was a cold helper of.
+        let mut cold: Option<&str> = None;
         for s in sites {
             let Some(site) = code.site(s) else { continue };
             let name = self.fn_symbol_at(site.body_id as usize).unwrap_or("<unknown>");
             if name == common::NATIVE_START_NAME {
                 continue;
             }
-            let loc = self.native_site_location(site);
+            let loc = self.location(site.loc).map(|_| site.loc);
             if let Some(stands_for) = common::par_fork_fn(name) {
                 if loc.is_some() {
-                    lines.push(line(under.unwrap_or(stands_for), loc));
+                    cold = self.frames_at(under.unwrap_or(stands_for), loc, cold, &mut lines);
                 }
                 continue;
             }
@@ -66,13 +99,15 @@ impl Locator<'_> {
                 }
                 None => {
                     let loc = in_loop.take().map_or(loc, |(_, inner)| inner);
-                    lines.push(line(name, loc));
+                    cold = self.frames_at(name, loc, cold, &mut lines);
                     under = Some(name);
                 }
             }
         }
         // A worker with no caller in the trace: a chunk's own job.
-        lines.extend(in_loop.map(|(name, loc)| line(name, loc)));
+        if let Some((name, loc)) = in_loop {
+            self.frames_at(name, loc, cold, &mut lines);
+        }
         lines
     }
 }

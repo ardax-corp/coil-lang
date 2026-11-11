@@ -49,6 +49,7 @@ impl<'a> Synth<'a> {
                 aliased_fn_values: Vec::new(),
                 fn_key_sites: Vec::new(),
                 stray_muts: Vec::new(),
+                inline_scopes: Vec::new(),
             },
         }
     }
@@ -77,6 +78,7 @@ impl<'a> Synth<'a> {
             span: SPAN,
             node: None,
             flags: HirFlags::default(),
+            scope: 0,
         });
         id
     }

@@ -505,6 +505,9 @@ pub struct Compiler {
     source_file_list: Vec<String>,
     /// One [`DebugLoc`] per code slot (grows with [`Self::code`]).
     debug_locs: Vec<DebugLoc>,
+    /// The inline scopes lowering met, in the order it met them, and each
+    /// one's id ([`Compiler::intern_inline_scope`]).
+    inline_scopes: std::cell::RefCell<(Vec<common::InlineScope>, HashMap<common::InlineScope, u32>)>,
     /// Host calls that need a capability (`open`, `env::exit`, …), by the
     /// [`DebugLoc`] on their `HostInvoke` op. Checked against the grants
     /// for the calls reachable from `main` / tests
@@ -720,6 +723,7 @@ impl Default for Compiler {
             namespace: String::default(),
             bodies,
             debug_locs: Vec::new(),
+            inline_scopes: Default::default(),
             functions: HashMap::with_capacity(32),
             fn_entry_labels: HashMap::with_capacity(32),
             builtin_show_thunks: Vec::new(),

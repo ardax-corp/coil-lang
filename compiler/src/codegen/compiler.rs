@@ -242,11 +242,26 @@ impl Compiler {
             return DebugLoc::unknown();
         }
         let (start, end) = crate::variadic::written_span(span.start, span.end);
-        DebugLoc {
-            file,
-            start_byte: start as u32,
-            end_byte: end.max(start + 1) as u32,
+        DebugLoc::span(file, start as u32, end.max(start + 1) as u32)
+    }
+
+    /// The id ([`DebugLoc::scope`]) of inline scope `scope`, the same for the
+    /// same scope.
+    pub(crate) fn intern_inline_scope(&self, scope: common::InlineScope) -> u32 {
+        let mut table = self.inline_scopes.borrow_mut();
+        let (list, ids) = &mut *table;
+        if let Some(&id) = ids.get(&scope) {
+            return id;
         }
+        list.push(scope.clone());
+        let id = list.len() as u32;
+        ids.insert(scope, id);
+        id
+    }
+
+    /// The inline scopes the bodies' locations name, by id - 1.
+    pub fn inline_scopes(&self) -> Vec<common::InlineScope> {
+        self.inline_scopes.borrow().0.clone()
     }
 
     fn intern_source_file(&mut self) -> u32 {
@@ -7846,8 +7861,19 @@ impl Compiler {
         }
 
         // A panic site names a location: each one the bodies use, once.
-        let mut locs: Vec<DebugLoc> =
-            self.bodies.funcs().iter().filter_map(|f| f.mir.as_deref()).flat_map(|m| m.value_locs.values().chain(m.op_locs.values()).chain(m.term_locs.values())).copied().filter(|l| l.is_known()).collect();
+        // An inline scope's call is a location the report shows too. The
+        // table is of spans: a line does not depend on the scope.
+        let calls: Vec<DebugLoc> = self.inline_scopes.borrow().0.iter().map(|s| s.call).collect();
+        let mut locs: Vec<DebugLoc> = self
+            .bodies
+            .funcs()
+            .iter()
+            .filter_map(|f| f.mir.as_deref())
+            .flat_map(|m| m.value_locs.values().chain(m.op_locs.values()).chain(m.term_locs.values()))
+            .chain(&calls)
+            .map(|l| l.unscoped())
+            .filter(|l| l.is_known())
+            .collect();
         locs.sort_unstable_by_key(|l| (l.file, l.start_byte, l.end_byte));
         locs.dedup();
         self.debug_locs = locs;

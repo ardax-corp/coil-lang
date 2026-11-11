@@ -2112,8 +2112,14 @@ impl Pipeline {
     /// debug tables at [`Self::debug_level`]. `native_mir` makes the MIR
     /// section from the full debug tables (body ids by name); empty for
     /// none.
+    /// The program as an archive, with the native MIR section
+    /// `native_mir` makes from the debug tables (it encodes their
+    /// `inline_scopes`, which the `-g` level keeps or drops as the rest).
     pub fn archive(&self, constants: Vec<u64>, native_mir: impl FnOnce(&ProgramDebug) -> Vec<u8>) -> common::ArchivedProgram {
-        let debug = self.program_debug_full();
+        let mut debug = self.program_debug_full();
+        if self.debug_level() == common::DebugLevel::None {
+            debug.inline_scopes.clear();
+        }
         let mut program = common::ArchivedProgram {
             version: common::ARCHIVE_VERSION,
             static_slot_count: self.static_slot_count(),
@@ -2171,6 +2177,7 @@ impl Pipeline {
             debug_locs: self.compiler_lazy().debug_locs().to_vec(),
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
             debug_lines: Vec::new(),
+            inline_scopes: self.compiler_lazy().inline_scopes(),
         };
         // A panic site looks its location up as the MIR has it, so the
         // table stays keyed by that; its lines are the remapped ones.

@@ -707,8 +707,9 @@ pub struct AotEntry {
 }
 
 /// Install the code an AOT object linked into this executable defines,
-/// for the next run: `n` entries and `n_sites` sites, each four words
-/// (`body_id`, then the location's file, start and end byte).
+/// for the next run: `n` entries and `n_sites` sites, each five words
+/// (`body_id`, then the location's file, start and end byte and inline
+/// scope).
 /// `complete`: the object compiled every body of the program. `layout`:
 /// the [`layout_fingerprint`] of the compiler that made the object; an
 /// object made against other object layouts is refused (`Err`), since its
@@ -721,9 +722,9 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
     if layout != layout_fingerprint() {
         return Err("this executable's native code was compiled against another build of the runtime (object layouts differ); package it again".to_string());
     }
-    // SAFETY: the object defines `n` entries and `4 * n_sites` words.
+    // SAFETY: the object defines `n` entries and `5 * n_sites` words.
     let entries = unsafe { std::slice::from_raw_parts(entries, n) };
-    let words = unsafe { std::slice::from_raw_parts(sites, n_sites * 4) };
+    let words = unsafe { std::slice::from_raw_parts(sites, n_sites * 5) };
     let entries = entries
         .iter()
         .map(|e| NativeEntry {
@@ -740,10 +741,10 @@ pub unsafe fn install_aot(entries: *const AotEntry, n: usize, sites: *const u32,
         })
         .collect();
     let sites = words
-        .as_chunks::<4>()
+        .as_chunks::<5>()
         .0
         .iter()
-        .map(|w| NativeSite { body_id: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3] } })
+        .map(|w| NativeSite { body_id: w[0], loc: common::DebugLoc { file: w[1], start_byte: w[2], end_byte: w[3], scope: w[4] } })
         .collect();
     install_for_next_run(entries, sites, complete);
     Ok(())

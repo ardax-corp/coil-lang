@@ -165,7 +165,7 @@ fn archive_bytes(pipeline: &mut Pipeline, constants: Vec<u64>, bodies: &[compile
         if bodies.is_empty() {
             Vec::new()
         } else {
-            compiler::native_mir::archive::encode(bodies, &body_ids(full))
+            compiler::native_mir::archive::encode(bodies, &body_ids(full), &full.inline_scopes)
         }
     });
 
@@ -468,7 +468,7 @@ fn interprets() -> bool {
 fn install_native(bodies: Vec<compiler::native_mir::NativeBody>, debug: &common::ProgramDebug) {
     let pcs = body_ids(debug);
     #[cfg(not(target_family = "wasm"))]
-    let key = code_cache_on().then(|| code_cache::key(&compiler::native_mir::archive::encode(&bodies, &pcs))).flatten();
+    let key = code_cache_on().then(|| code_cache::key(&compiler::native_mir::archive::encode(&bodies, &pcs, &[]))).flatten();
     #[cfg(target_family = "wasm")]
     let key: Option<String> = None;
     if !install_cached_code(key.as_deref()) {
@@ -1072,6 +1072,7 @@ mod tests {
             debug_locs: vec![],
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
         };
         let a = arch.to_str().unwrap();
         assert!(!recorded_sources_newer(a, &debug), "fresh archive");
@@ -1098,6 +1099,7 @@ mod tests {
             debug_locs: vec![],
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
         };
         assert!(
             archive_is_stale(entry.to_str().unwrap(), arch.to_str().unwrap(), &debug),
@@ -1119,6 +1121,7 @@ mod tests {
             debug_locs: vec![],
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
         };
         // Entry not newer than archive → fresh via the empty-list branch.
         assert!(!archive_is_stale(
@@ -1157,6 +1160,7 @@ mod tests {
             debug_locs: vec![],
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
         };
         assert!(archive_is_stale(
             entry.to_str().unwrap(),
@@ -1181,6 +1185,7 @@ mod tests {
             debug_locs: vec![],
             fn_symbols: Vec::new(),
             debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
         };
         // Running b.coil against an archive built from a.coil must rebuild.
         assert!(archive_is_stale(
