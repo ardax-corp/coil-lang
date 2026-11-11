@@ -1,0 +1,11 @@
+// @expected E0119 — `%v` on a record holding an unbounded `T` needs `T: Show`,
+// as the record's `.show()` does (#2631).
+use string::format;
+
+fn bad<T>(T x) -> string {
+    return format("%v", { a: x });
+}
+
+fn main() {
+    let s = bad(1);
+}
