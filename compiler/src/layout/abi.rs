@@ -685,6 +685,27 @@ pub fn nested_fn_var_result(ty: &Ty, top: bool, unit: &mut dyn FnMut(&Ty) -> boo
     found
 }
 
+/// Whether result type `ty` holds a function over a type variable below its
+/// top (`Vec<T -> int>`, `(T -> int, int)`, `[T -> string; 1]`; a returned
+/// function's own parameters and result are tops too). The shared body
+/// makes that function, and only a function that is itself a top gets an
+/// adapter, so the call cannot rebuild the result in its ground layout:
+/// the signature takes a clone for every ground call, as one whose such
+/// function returns a bare type variable does ([`nested_fn_var_result`],
+/// #2664).
+pub fn nested_fn_in_result(ty: &Ty, top: bool) -> bool {
+    let ty = crate::typechecking::ty::strip_readonly(ty);
+    if !ty.has_var() {
+        return false;
+    }
+    if let Ty::Fun(param, ret) = ty {
+        return !top || nested_fn_in_result(param, top) || nested_fn_in_result(ret, top);
+    }
+    let mut found = false;
+    ty.for_each_child(|child| found = found || nested_fn_in_result(child, false));
+    found
+}
+
 /// Whether a parameter or result of declared type `ty` holds a function
 /// over a type variable in a user class's field or a user enum's payload,
 /// at any depth of the slot (`f: fn(T) -> T`, `fs: Vec<fn() -> T>`, a
