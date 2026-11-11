@@ -2932,9 +2932,11 @@ impl Compiler {
         // A superclass method that reads its dictionary takes its clone
         // at a ground goal past the budget too; with no clone (an open
         // goal, a method on its own clone chain) it is reached through a
-        // forwarder (#2476).
+        // forwarder (#2476), as it is from a niche-head entry's own.
         let mut unbuilt = None;
         let mut forwarded: Vec<usize> = Vec::new();
+        // The superclasses whose entry dictionary this one carries.
+        let mut entry_supers: HashSet<String> = HashSet::new();
         let fqns: Vec<String> = if open {
             forwarded.extend(super_reads.iter().map(|(slot, ..)| *slot));
             fqns
@@ -2946,13 +2948,12 @@ impl Compiler {
                     let niche = niche_slots.get(slot).cloned().flatten();
                     if entry && niche.is_some() {
                         // The entry's own dictionary holds its shared
-                        // entries, which take the value as an enum object;
-                        // the superclass's dictionary a forwarder would go
-                        // to holds the clones, which take its own word.
-                        if let Some((_, owner, method)) = reads {
-                            unbuilt.get_or_insert(format!(
-                                "its `{owner}::{method}` reads its own instance's dictionary, which holds the methods that take the value's own word, not the enum object the entry holds (coil-lang#2476)"
-                            ));
+                        // entries, which take the value as an enum object:
+                        // a forwarder goes to the superclass's entry
+                        // dictionary, which holds its shared entries too.
+                        if let Some((_, owner, _)) = reads {
+                            forwarded.push(slot);
+                            entry_supers.insert(owner.clone());
                         }
                         return name;
                     }
@@ -3013,11 +3014,15 @@ impl Compiler {
         // The instance is found and its methods planned: a context goal it
         // cannot build is a compile error (a context-less dictionary would
         // be read past at run time, #1580), reported once at the innermost
-        // goal that fails.
-        let supers = supers.iter().map(|s| (s.to_string(), lookup.to_vec()));
-        for (ctx_class, ctx_args) in context.iter().cloned().chain(supers).collect::<Vec<_>>() {
+        // goal that fails. A niche entry's forwarder goes to its
+        // superclass's entry dictionary; a context dictionary serves the
+        // instance's bound calls.
+        let ctx_dicts = context.iter().map(|(c, args)| (c.clone(), args.clone(), false));
+        let supers = supers.iter().map(|s| (s.to_string(), lookup.to_vec(), entry_supers.contains(*s)));
+        for (ctx_class, ctx_args, as_entry) in ctx_dicts.chain(supers).collect::<Vec<_>>() {
             let reported = self.messages.len();
-            if !self.plan_instance_dict(out, &ctx_class, &ctx_args) {
+            let planned = if as_entry { self.plan_entry_dict(out, &ctx_class, &ctx_args) } else { self.plan_instance_dict(out, &ctx_class, &ctx_args) };
+            if !planned {
                 if self.messages.len() == reported {
                     self.missing_context_dict(&ctx_class, &ctx_args, diag_range.clone());
                 }
@@ -3394,10 +3399,9 @@ impl Compiler {
     }
 
     /// Report that the dictionary for `class<lookup>` is not built, for
-    /// `why`: a method it would hold cannot be called through it (a
-    /// superclass method that reads its own instance's dictionary, #2476;
-    /// a shared entry that takes an enum object where the dictionary's
-    /// callers pass the niche word, #2477).
+    /// `why`: a method it would hold cannot be called through it (a shared
+    /// entry that takes an enum object where the dictionary's callers pass
+    /// the niche word, #2477), or its head is too wide for its `kinds` word.
     fn dict_unbuilt(&mut self, class: &str, lookup: &[Ty], why: &str, range: std::ops::Range<usize>) {
         let goal = lookup
             .iter()
