@@ -91,7 +91,9 @@ pub(crate) struct DriverProgram {
     pub(crate) main: Option<u32>,
     pub(crate) constants: Arc<Vec<u64>>,
     pub(crate) native: Arc<NativeCode>,
-    pub(crate) debug: ProgramDebug,
+    /// Shared, so a driver per call ([`crate::Isolate::call`]) does not
+    /// copy the program's tables.
+    pub(crate) debug: Arc<ProgramDebug>,
     /// What a thread it spawns runs (`None`: it spawns none).
     pub(crate) thread_program: Option<Arc<crate::thread::ThreadProgram>>,
     /// Where spawned threads print (the test harness's capture).

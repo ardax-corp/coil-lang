@@ -59,7 +59,7 @@ pub fn run_natively(program: Arc<ThreadProgram>, start: NativeStart) -> Option<b
         main: program.main,
         constants: Arc::clone(&program.constants),
         native,
-        debug: program.debug.clone(),
+        debug: Arc::new(program.debug.clone()),
         thread_program: Some(Arc::clone(&program)),
         shared_print,
     };

@@ -138,7 +138,7 @@ fn run_on(rt: &mut Runtime, job: Job) {
             main: program.main,
             constants: Arc::clone(&program.constants),
             native,
-            debug: program.debug.clone(),
+            debug: Arc::new(program.debug.clone()),
             thread_program: Some(Arc::clone(&program)),
             shared_print: shared_print.clone(),
         };
