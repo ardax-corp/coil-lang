@@ -13316,20 +13316,32 @@ impl Checker {
     /// `fn_name`'s declared result: [`Self::fn_return_ty`] peels every
     /// arrow, so a function returning a function value reports that value's
     /// result; this peels only the declared parameters (one, `unit`, for a
-    /// function of none). Without recorded names, the full peel.
+    /// function of none). An inherent instance method's scheme takes its
+    /// receiver first, which its names leave out (#2333). Without recorded
+    /// names, the full peel.
     pub fn fn_declared_return_ty(&self, fn_name: &str) -> Option<Ty> {
         let Some(n) = self.fn_param_names(fn_name).map(<[String]>::len) else {
             return self.fn_return_ty(fn_name);
         };
         let scheme = self.lookup_fn_scheme(fn_name)?;
         let mut ty = apply_ty_prune(&self.subst, &scheme.ty);
-        for _ in 0..n.max(1) {
+        let peel = if self.has_receiver(fn_name) { n + 1 } else { n.max(1) };
+        for _ in 0..peel {
             let Ty::Fun(_, next) = ty else {
                 break;
             };
             ty = *next;
         }
         Some(ty)
+    }
+
+    /// Whether `fn_name` (`Owner::m`, an overload's key too) is an inherent
+    /// method that takes `self`: not a `static fn`.
+    pub fn has_receiver(&self, fn_name: &str) -> bool {
+        let lookup = fn_name.rfind('#').map_or(fn_name, |i| &fn_name[..i]);
+        lookup
+            .rsplit_once("::")
+            .is_some_and(|(owner, method)| self.has_method(owner, method) && !self.is_static_method(owner, method))
     }
 
     /// Resolved parameter types in declaration order (curried `Fun` peel).
