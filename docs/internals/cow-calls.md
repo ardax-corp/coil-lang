@@ -141,6 +141,8 @@ through a copy of a type parameter's value, the `kinds` word),
 `tests/memory/cow_generic_forall_values.coil` (through a `forall` value),
 `tests/memory/cow_generic_forall_order.coil` (the same over several type
 parameters in any order),
+`tests/memory/cow_generic_fn_value_in_clone.coil` (a value made in a
+per-type clone or a shared body at its own type parameter),
 `tests/memory/cow_returned_param_names.coil` and
 `tests/memory/cow_returned_field.coil` (soundness). Benches:
 `examples/perf/cow_call_reassign.coil`, `cow_call_field.coil`,
