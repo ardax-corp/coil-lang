@@ -63,6 +63,8 @@ pub(crate) fn apply(heap: &mut Heap, raw: Value, args: &[Value], dicts: usize, c
                     }
                     continue;
                 }
+                // A dictionary the call passes (#2636).
+                Some(Member::Value(v)) if let Some(j) = common::dict_from_call_parts(v.bits()) => app_dicts.get(j as usize).copied().unwrap_or_default(),
                 Some(Member::Value(v)) => *v,
                 Some(Member::Object(o)) => Value::from(o.addr()),
                 None => app_dicts.get(k).copied().unwrap_or_default(),

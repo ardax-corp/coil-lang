@@ -155,6 +155,26 @@ pub const fn kinds_from_call_parts(word: u64) -> Option<(u32, u32, u32)> {
     Some(((word >> 12) as u32 & 0x3F, (word >> 6) as u32 & 0x3F, word as u32 & 0x3F))
 }
 
+/// The tag of a [`dict_from_call`] word: bits 61 and 62 set, bit 63 clear.
+const DICT_FROM_CALL_TAG: u64 = 3 << 61;
+
+/// A generic function value's captured dictionary slot (`MakePolyFnCapture`)
+/// the call fills (#2636): the call's dictionary `j`. A call through a
+/// function value of an open type passes its type's constraints'
+/// dictionaries in the order its `kinds` bits follow, so the value names
+/// the one each of its function's constraints is.
+pub const fn dict_from_call(j: u32) -> u64 {
+    DICT_FROM_CALL_TAG | j as u64
+}
+
+/// `j` of a [`dict_from_call`] word.
+pub const fn dict_from_call_parts(word: u64) -> Option<u32> {
+    if word & !0xFFFF != DICT_FROM_CALL_TAG {
+        return None;
+    }
+    Some(word as u32 & 0xFFFF)
+}
+
 /// The tag of a product object: an enum object with no variant, which is
 /// how the runtime keeps a tuple (and `()`, its empty one). No enum has
 /// this many variants.
