@@ -1,0 +1,283 @@
+// Writes through a nested path in a loop (`f.blocks[b].insts[i] = …`,
+// #2351) under copy-on-write: each object on the path stays its own value
+// while another name holds it, wherever the loop shares it, replaces part
+// of the path, calls code that writes it, or runs a generator in between.
+use tests::assert;
+use gc::collect;
+
+class Block {
+    pub insts: Vec<int>,
+    pub tag: int,
+}
+
+class Func {
+    pub blocks: Vec<Block>,
+}
+
+class Grid<T> {
+    pub rows: Vec<Row<T>>,
+}
+
+class Row<T> {
+    pub cells: Vec<T>,
+}
+
+fn block(int n, int base) -> Block {
+    let xs: Vec<int> = Vec::new();
+    let i = 0;
+    while i < n {
+        xs.push(base + i);
+        i = i + 1;
+    }
+    return new Block(xs, base);
+}
+
+fn func(int blocks, int n) -> Func {
+    let f = new Func(Vec::new());
+    let b = 0;
+    while b < blocks {
+        f.blocks.push(block(n, b * 100));
+        b = b + 1;
+    }
+    return f;
+}
+
+fn double_all(Func f) {
+    let b = 0;
+    while b < f.blocks.len() {
+        let i = 0;
+        while i < f.blocks[b].insts.len() {
+            f.blocks[b].insts[i] = f.blocks[b].insts[i] * 2;
+            i = i + 1;
+        }
+        f.blocks[b].insts.push(-1);
+        b = b + 1;
+    }
+}
+
+fn sum(Vec<int> xs) -> int {
+    let t = 0;
+    for x in xs {
+        t = t + x;
+    }
+    return t;
+}
+
+fn bump(Vec<int> xs, int i) {
+    xs[i] = xs[i] + 1000;
+}
+
+fn swap_in(Block b) {
+    b.insts = Vec::from([7, 7, 7, 7]);
+}
+
+test("a nested path write in a loop writes each element once") {
+    let f = func(3, 4);
+    double_all(f);
+    assert!(f.blocks[0].insts == Vec::from([0, 2, 4, 6, -1]));
+    assert!(f.blocks[2].insts == Vec::from([400, 402, 404, 406, -1]));
+    for i in 0..f.blocks[1].insts.len() {
+        f.blocks[1].insts[i] += 1;
+    }
+    assert!(f.blocks[1].insts == Vec::from([201, 203, 205, 207, 0]));
+}
+
+test("the object behind the path is shared before the loop") {
+    let f = func(2, 4);
+    let whole = f;
+    let blk = f.blocks[1];
+    let xs = f.blocks[0].insts;
+    double_all(f);
+    collect();
+    assert!(whole.blocks[0].insts == Vec::from([0, 1, 2, 3]));
+    assert!(blk.insts == Vec::from([100, 101, 102, 103]));
+    assert!(xs == Vec::from([0, 1, 2, 3]));
+    assert!(f.blocks[1].insts == Vec::from([200, 202, 204, 206, -1]));
+}
+
+test("the loop shares the written object or a part of its path") {
+    let f = func(2, 5);
+    let snap: Vec<int> = Vec::new();
+    let held: Vec<Block> = Vec::new();
+    let i = 0;
+    while i < f.blocks[0].insts.len() {
+        if i == 2 {
+            snap = f.blocks[0].insts;
+            held.push(f.blocks[0]);
+        }
+        f.blocks[0].insts[i] = -i;
+        i = i + 1;
+    }
+    collect();
+    assert!(f.blocks[0].insts == Vec::from([0, -1, -2, -3, -4]));
+    assert!(snap == Vec::from([0, -1, 2, 3, 4]));
+    assert!(held[0].insts == Vec::from([0, -1, 2, 3, 4]));
+}
+
+test("the loop replaces part of the path") {
+    let f = func(3, 4);
+    let old = f.blocks[1];
+    let i = 0;
+    while i < f.blocks[1].insts.len() {
+        if i == 2 {
+            f.blocks[1] = block(6, 50);
+        }
+        f.blocks[1].insts[i] = 0;
+        i = i + 1;
+    }
+    assert!(f.blocks[1].insts == Vec::from([50, 51, 0, 0, 0, 0]));
+    assert!(old.insts == Vec::from([100, 101, 102, 103]));
+
+    let g = func(2, 3);
+    let first = g.blocks;
+    let j = 0;
+    while j < g.blocks[0].insts.len() {
+        if j == 1 {
+            g.blocks = Vec::from([block(3, 9), block(3, 90)]);
+        }
+        g.blocks[0].insts[j] = -1;
+        j = j + 1;
+    }
+    assert!(g.blocks[0].insts == Vec::from([9, -1, -1]));
+    assert!(first[0].insts == Vec::from([0, 1, 2]));
+
+    let h = func(3, 2);
+    let b = 0;
+    let k = 0;
+    while k < h.blocks[b].insts.len() {
+        h.blocks[b].insts[k] = 1;
+        if k == 1 && b < 2 {
+            b = b + 1;
+            k = 0;
+        } else {
+            k = k + 1;
+        }
+    }
+    assert!(
+        h.blocks[0].insts == Vec::from([1, 1]) &&
+        h.blocks[1].insts == Vec::from([1, 1]) &&
+        h.blocks[2].insts == Vec::from([1, 1]),
+    );
+
+    let p = func(2, 3);
+    let q = 0;
+    while q < p.blocks[0].insts.len() {
+        p.blocks[0].insts[q] = 8;
+        if q == 0 {
+            p.blocks.remove(0);
+        }
+        q = q + 1;
+    }
+    assert!(p.blocks.len() == 1 && p.blocks[0].insts == Vec::from([100, 8, 8]));
+}
+
+test("a call in the loop writes the path or part of it") {
+    let f = func(2, 4);
+    let keep = f.blocks[0].insts;
+    let i = 0;
+    while i < f.blocks[0].insts.len() {
+        bump(f.blocks[0].insts, i);
+        f.blocks[0].insts[i] = f.blocks[0].insts[i] + 1;
+        i = i + 1;
+    }
+    assert!(f.blocks[0].insts == Vec::from([1001, 1002, 1003, 1004]));
+    assert!(keep == Vec::from([0, 1, 2, 3]));
+
+    let g = func(2, 4);
+    let j = 0;
+    while j < g.blocks[1].insts.len() {
+        g.blocks[1].insts[j] = j;
+        if j == 1 {
+            swap_in(g.blocks[1]);
+        }
+        j = j + 1;
+    }
+    assert!(g.blocks[1].insts == Vec::from([7, 7, 2, 3]));
+
+    let h = func(1, 3);
+    let seen = h.blocks[0];
+    let poke = fn (Block b) {
+        b.tag = sum(b.insts);
+    };
+    let k = 0;
+    while k < h.blocks[0].insts.len() {
+        h.blocks[0].insts[k] = 10;
+        poke(h.blocks[0]);
+        k = k + 1;
+    }
+    assert!(h.blocks[0].insts == Vec::from([10, 10, 10]) && seen.insts == Vec::from([0, 1, 2]));
+}
+
+gen fn walk(Vec<int> xs) {
+    for x in xs {
+        yield x;
+    }
+}
+
+gen fn fill(int n, int v) {
+    let f = func(1, n);
+    let i = 0;
+    while i < f.blocks[0].insts.len() {
+        f.blocks[0].insts[i] = v;
+        yield sum(f.blocks[0].insts);
+        i = i + 1;
+    }
+}
+
+test("a generator runs between the writes") {
+    let f = func(1, 4);
+    let g = walk(f.blocks[0].insts);
+    let got: Vec<int> = Vec::new();
+    let i = 0;
+    while i < f.blocks[0].insts.len() {
+        f.blocks[0].insts[i] = 50;
+        got.push(resume g);
+        i = i + 1;
+    }
+    assert!(got == Vec::from([0, 1, 2, 3]));
+    assert!(f.blocks[0].insts == Vec::from([50, 50, 50, 50]));
+    let later = walk(f.blocks[0].insts);
+    let j = 0;
+    while j < f.blocks[0].insts.len() {
+        f.blocks[0].insts[j] = j;
+        j = j + 1;
+    }
+    let x0 = resume later;
+    let x1 = resume later;
+    assert!(x0 == 50 && x1 == 50);
+    assert!(f.blocks[0].insts == Vec::from([0, 1, 2, 3]));
+
+    let sums: Vec<int> = Vec::new();
+    for t in fill(3, 4) {
+        sums.push(t);
+    }
+    assert!(sums == Vec::from([7, 10, 12]));
+}
+
+fn set_cells<T>(Grid<T> g, int r, T v) {
+    let i = 0;
+    while i < g.rows[r].cells.len() {
+        g.rows[r].cells[i] = v;
+        i = i + 1;
+    }
+}
+
+test("a generic body writes a nested path in a loop") {
+    let a = new Grid(Vec::from([new Row(Vec::from([1, 2, 3])), new Row(Vec::from([4, 5]))]));
+    let copy = a;
+    set_cells(a, 1, 9);
+    assert!(a.rows[1].cells == Vec::from([9, 9]) && copy.rows[1].cells == Vec::from([4, 5]));
+    let s = new Grid(Vec::from([new Row(Vec::from(["x", "y"]))]));
+    let row = s.rows[0];
+    set_cells(s, 0, "z");
+    assert!(s.rows[0].cells == Vec::from(["z", "z"]) && row.cells == Vec::from(["x", "y"]));
+    let n = new Grid(Vec::from([new Row(Vec::from([Vec::from([1]), Vec::from([2])]))]));
+    let inner = n.rows[0].cells[0];
+    set_cells(n, 0, Vec::from([3, 4]));
+    n.rows[0].cells[1].push(5);
+    assert!(
+        n.rows[0].cells[0] == Vec::from([3, 4]) &&
+        n.rows[0].cells[1] == Vec::from([3, 4, 5]) &&
+        inner == Vec::from([1]),
+    );
+}

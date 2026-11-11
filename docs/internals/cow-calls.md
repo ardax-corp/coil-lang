@@ -133,6 +133,34 @@ an operator operand.
 - A generic trait call whose result the caller then writes copies once
   per call (the result is shared because the dictionary call is opaque).
 
+## Loop views
+
+A write through a nested path, `f.blocks[b].insts[i] = v`, makes each
+object on the path unique before it runs. In a loop that is a `unique` per
+level on every iteration, and the calls keep MIR from hoisting the path's
+loads (#2351: 17x the loop through a `let xs = mut f.blocks[b].insts`
+view). `hir/cow_view.rs` binds such a path once before the loop, as that
+`let … = mut` would, when nothing in the loop can change which objects the
+path names or give one of them a second name: the root and indexes are
+locals the loop does not assign and nothing captures; no write in the loop
+changes an object above the path's last one (a store into another field
+is fine) or goes through another name that may reach it; nothing in the
+loop shares an object on the path, and calls only read the objects above
+the last one; no `yield`, `resume`, closure or `defer`; a root the body
+does not own (a parameter, which may be a `static` in the caller) meets
+only calls that touch no `static` and switch no task. Evaluating the path
+early must not fail where the loop would not: its last index step is read
+first on entry (the `while` test, the `for` iterable), after nothing but
+locals and literals. The path is then made unique once per loop entry,
+even when the loop runs no write. A round views the outermost loops; the
+next round sees the inner loops with the views as roots, so the issue's
+pass makes `f.blocks` unique once per call and `blocks[b].insts` once per
+block. The rewrite runs again on the viewed body and keeps a view only if
+that draws no new diagnostic (E0149 checks it as a written borrow) and
+shares no view. Tests: `tests/memory/cow_loop_path_writes.coil` (values),
+`hir/cow_view.tests.rs` (which loops get one). Bench:
+`examples/perf/cow_nested_path_loop.coil`.
+
 Tests: `tests/cow_call_share_cli.rs` (copy counts),
 `tests/memory/cow_generic_bodies_shared.coil` (a type parameter result of
 a shared body), `tests/memory/cow_generic_bodies_unique.coil` (a write

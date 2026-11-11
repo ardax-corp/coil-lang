@@ -160,17 +160,39 @@ struct Facts<'b> {
 /// The body with its copy-on-write ops, when it needs any, and warnings
 /// for writes that copy or are dropped.
 pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, mutates: u64) -> (Option<HirBody>, Vec<Message>) {
-    let Some(root) = body.root else { return (None, Vec::new()) };
-    let facts = Facts::new(checker, module, body, lookup, root);
-    let mut plan = Plan::new(checker, body, &facts, mutates);
+    if body.root.is_none() {
+        return (None, Vec::new());
+    }
+    let analyse = |b: &HirBody| {
+        let facts = Facts::new(checker, module, b, lookup, b.root.expect("a body with a root"));
+        let plan = Plan::new(checker, b, &facts, mutates);
+        let next = view::round(checker, b, &facts, &plan, lookup);
+        (plan, next)
+    };
+    let (mut plan, mut next) = analyse(body);
+    // Loop views ([`view`]): a view stands only if the rewrite of the
+    // viewed body draws no diagnostic the body did not and shares no view.
+    let mut viewed: Option<HirBody> = None;
+    let notes = plan.notes.len();
+    for _ in 0..view::ROUNDS {
+        let Some(b) = next.take() else { break };
+        let (p, n) = analyse(&b);
+        if p.notes.len() != notes || view::shares_view(&p, &b, body.locals.len()) {
+            break;
+        }
+        (plan, next, viewed) = (p, n, Some(b));
+    }
     let notes = std::mem::take(&mut plan.notes);
     if plan.is_empty() {
-        return (None, notes);
+        return (viewed, notes);
     }
-    let mut out = body.clone();
+    let mut out = viewed.unwrap_or_else(|| body.clone());
     plan.apply(&mut out, checker);
     (Some(out), notes)
 }
+
+#[path = "cow_view.rs"]
+mod view;
 
 /// How a place reads in a message: `a`, `a.b`, `a[…]`.
 fn place_text(body: &HirBody, v: HirId) -> Option<String> {

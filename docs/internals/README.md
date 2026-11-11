@@ -18,7 +18,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [MIR language islands](mir-islands.md) | Historical: COI-292 I0–I8 ladder that grew MIR coverage before every body went through MIR (M4/M5, 2026-10) |
 | [Int overflow](int-overflow.md) | Int `+ - * / % **` and negation give the exact result or panic; where the engines, folds, optimizations, auto-par, SIMD and packed kernels keep that |
 | [Locality and loop optimizations](locality.md) | `feature/locality`: vectorize nested and mixed loops, field scalar promotion, mod/ref summaries, array-order GC copying, prefetch, loop interchange; semantics rules and probe numbers |
-| [Copy-on-write across calls](cow-calls.md) | who shares an argument or result at a call: summary bits `returns_arg` / `returns_inner`, moves into a call (`v = f(v)`, `self.f = g(self.f)`), lazy share for opaque callees (#2206) |
+| [Copy-on-write across calls](cow-calls.md) | who shares an argument or result at a call: summary bits `returns_arg` / `returns_inner`, moves into a call (`v = f(v)`, `self.f = g(self.f)`), lazy share for opaque callees (#2206); loop views of nested write paths (#2351) |
 | [View classes](view-classes.md) | `view class` and `mut` fields: borrows a class can hold under copy-on-write; E0149 / E0150 / E0151 rules, COW handling, spliced views at zero cost |
 | [Escape facts and early freeing](escape-memory.md) | `feature/escape-memory`: escape summaries across calls, freeing at scope end, static uniqueness, nursery; the GC stays as backstop |
 | [Language quirks](language-quirks.md) | Locked Q1–Q9 (2026-09-10): `[T; N]` box-once, class field-SROA, grow type error, defined `i % N`, panic vs raise, roadmap Q6–Q9 |
