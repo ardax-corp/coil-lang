@@ -645,27 +645,43 @@ pub(crate) fn plain(body: &HirBody, id: HirId) -> bool {
 /// branch) when `b` reads only locals, literals and fields with no trap and
 /// no effect. Anything else short-circuits.
 pub fn logic_eager(body: &HirBody, rhs: HirId) -> bool {
-    match &body.expr(rhs).kind {
-        HirKind::Lit(_) | HirKind::Local(_) => true,
-        // `x / k` and `x % k` trap only on a zero divisor, or `MIN / -1`.
-        HirKind::Bin {
-            op: BinOp::IntDiv | BinOp::IntRem,
-            lhs,
-            rhs,
-        } => matches!(body.expr(*rhs).kind, HirKind::Lit(Lit::Int(k)) if k != 0 && k != -1) && logic_eager(body, *lhs),
-        // Other int arithmetic can overflow: `x != MAX && x + 1 > y` must
-        // not compute `x + 1`.
-        HirKind::Bin { op, lhs, rhs: r } => {
-            !super::op_may_trap(body, rhs)
-                && !matches!(op, BinOp::StrConcat | BinOp::Overloaded(_))
-                && logic_eager(body, *lhs)
-                && logic_eager(body, *r)
+    // Every node of `rhs` must be eager: a worklist, since a chain of
+    // `&&` is as deep as it is long.
+    let mut work = vec![rhs];
+    while let Some(id) = work.pop() {
+        match &body.expr(id).kind {
+            HirKind::Lit(_) | HirKind::Local(_) => {}
+            // `x / k` and `x % k` trap only on a zero divisor, or `MIN / -1`.
+            HirKind::Bin {
+                op: BinOp::IntDiv | BinOp::IntRem,
+                lhs,
+                rhs,
+            } => {
+                if !matches!(body.expr(*rhs).kind, HirKind::Lit(Lit::Int(k)) if k != 0 && k != -1) {
+                    return false;
+                }
+                work.push(*lhs);
+            }
+            // Other int arithmetic can overflow: `x != MAX && x + 1 > y` must
+            // not compute `x + 1`.
+            HirKind::Bin { op, lhs, rhs } => {
+                if super::op_may_trap(body, id) || matches!(op, BinOp::StrConcat | BinOp::Overloaded(_)) {
+                    return false;
+                }
+                work.extend([*rhs, *lhs]);
+            }
+            HirKind::Logic { lhs, rhs, .. } => work.extend([*rhs, *lhs]),
+            HirKind::Un { operand, .. } => {
+                if super::op_may_trap(body, id) {
+                    return false;
+                }
+                work.push(*operand);
+            }
+            HirKind::Field { base, .. } => work.push(*base),
+            _ => return false,
         }
-        HirKind::Logic { lhs, rhs, .. } => logic_eager(body, *lhs) && logic_eager(body, *rhs),
-        HirKind::Un { operand, .. } => !super::op_may_trap(body, rhs) && logic_eager(body, *operand),
-        HirKind::Field { base, .. } => logic_eager(body, *base),
-        _ => false,
     }
+    true
 }
 
 /// An index that is safe to evaluate twice (a compound assignment builds

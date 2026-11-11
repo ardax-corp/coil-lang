@@ -52,10 +52,19 @@ pub(super) mod variadic;
 #[path = "weak_check.rs"]
 pub(super) mod weak_check;
 
-/// Max native recursion depth for [`Checker::infer`]. Chosen well under what
-/// a debug-build stack of a few MiB can hold even with `infer_inner`'s
-/// current per-call frame size, see docs/internals/limitations.md.
+/// Max nesting depth of [`Checker::infer`]: past it an expression is
+/// `E` `ExpressionNestingTooDeep`. A chain of binary operators counts as
+/// one level ([`Checker::infer_operator_tree`]); see
+/// docs/internals/limitations.md.
 const INFER_RECURSION_LIMIT: u32 = 2000;
+
+/// What [`Checker::enter_node`] saved for [`Checker::exit_node`].
+struct EnteredNode {
+    id: NodeId,
+    outer_range: Range<usize>,
+    outer: Option<Ty>,
+    prev_here: Option<Ty>,
+}
 
 /// What [`Checker::ground_trait_methods_for_receiver`] finds for a method
 /// name and a receiver type.
@@ -2485,6 +2494,20 @@ impl Checker {
             std::panic::panic_any(RecursionLimitExceeded);
         }
 
+        let entered = self.enter_node(expr);
+        // A rule nests whatever its operands nest (parentheses, calls,
+        // blocks). A debug build's `infer_inner` frame alone is tens of KiB,
+        // so the thread's stack holds a few hundred levels: past it the rest
+        // runs on a new segment, and the depth limit above is what bounds it.
+        let ty = common::deep_stack(|| self.infer_inner(expr, Some(entered.id)));
+        self.exit_node(expr, entered, &ty);
+        self.infer_depth -= 1;
+        ty
+    }
+
+    /// What [`Self::infer`] sets up for one node before its rule runs: the
+    /// node's id and the expected type its rule sees.
+    fn enter_node(&mut self, expr: &Output) -> EnteredNode {
         // Key facts by the node's own id; the pre-order counter drifts when a
         // rule skips or revisits children (see `IdTable::walk_id`).
         // Synthetic nodes (a spread's per-item `Index`) consume pre-order
@@ -2507,16 +2530,157 @@ impl Checker {
         if !Self::forwards_expected(expr) {
             self.current_expected = None;
         }
-        let ty = self.infer_inner(expr, Some(id));
-        self.weak_checks.range = outer_range;
-        self.current_expected = outer;
-        self.expected_here = prev_here;
-        self.cache.insert(id, ty.clone());
+        EnteredNode {
+            id,
+            outer_range,
+            outer,
+            prev_here,
+        }
+    }
+
+    /// Undo [`Self::enter_node`] once the node's rule gave it `ty`, and
+    /// record that type.
+    fn exit_node(&mut self, expr: &Output, entered: EnteredNode, ty: &Ty) {
+        self.weak_checks.range = entered.outer_range;
+        self.current_expected = entered.outer;
+        self.expected_here = entered.prev_here;
+        self.cache.insert(entered.id, ty.clone());
         self.codegen_types_by_span
             .entry((expr.0.start, expr.0.end))
             .or_insert_with(|| ty.clone());
-        self.infer_depth -= 1;
-        ty
+    }
+
+    /// The two operands of a binary operator node (`+`, `&&`, `<`, ...).
+    fn operator_operands<'o, 'e>(expr: &'o Output<'e>) -> Option<(&'o Output<'e>, &'o Output<'e>)> {
+        match expr.1.as_ref() {
+            Expression::Add(l, r)
+            | Expression::Sub(l, r)
+            | Expression::Mul(l, r)
+            | Expression::Div(l, r)
+            | Expression::Mod(l, r)
+            | Expression::Pow(l, r)
+            | Expression::Shl(l, r)
+            | Expression::Shr(l, r)
+            | Expression::Xor(l, r)
+            | Expression::BitAnd(l, r)
+            | Expression::BitOr(l, r)
+            | Expression::And(l, r)
+            | Expression::Or(l, r)
+            | Expression::Eq(l, r)
+            | Expression::Neq(l, r)
+            | Expression::Le(l, r)
+            | Expression::Gt(l, r)
+            | Expression::Leq(l, r)
+            | Expression::Geq(l, r) => Some((l, r)),
+            _ => None,
+        }
+    }
+
+    /// A binary operator node `root` (already entered by [`Self::infer`],
+    /// as `root_id`) and every operator node directly below it, on a stack
+    /// of their own instead of one native call chain per operator: a chain
+    /// of thousands of terms (`a + b + ...`, `p && q && ...`) costs no
+    /// more native stack than one operator. Each node is entered, its
+    /// operands are inferred left then right, and its rule runs, in the
+    /// order [`Self::infer`]'s recursion would take.
+    fn infer_operator_tree(&mut self, root: &Output, root_id: Option<NodeId>) -> Ty {
+        struct Pending<'o, 'e> {
+            node: &'o Output<'e>,
+            id: Option<NodeId>,
+            /// `None` for `root`, which [`Checker::infer`] exits.
+            entered: Option<EnteredNode>,
+            /// The left operand's type, once inferred.
+            lt: Option<Ty>,
+        }
+        let mut stack = vec![Pending {
+            node: root,
+            id: root_id,
+            entered: None,
+            lt: None,
+        }];
+        loop {
+            // The top node's left operand: descend into an operator, infer
+            // anything else.
+            let top = stack.last().expect("an operator is pending");
+            let (lhs, _) = Self::operator_operands(top.node).expect("only operators are pending");
+            let mut ty = if Self::operator_operands(lhs).is_some() {
+                let entered = self.enter_node(lhs);
+                stack.push(Pending {
+                    node: lhs,
+                    id: Some(entered.id),
+                    entered: Some(entered),
+                    lt: None,
+                });
+                continue;
+            } else {
+                self.infer(lhs)
+            };
+            // `ty` is the value of the top node's next operand.
+            loop {
+                let top = stack.last_mut().expect("an operator is pending");
+                if top.lt.is_none() {
+                    top.lt = Some(ty);
+                    let (_, rhs) = Self::operator_operands(top.node).expect("only operators are pending");
+                    if Self::operator_operands(rhs).is_some() {
+                        let entered = self.enter_node(rhs);
+                        stack.push(Pending {
+                            node: rhs,
+                            id: Some(entered.id),
+                            entered: Some(entered),
+                            lt: None,
+                        });
+                        break;
+                    }
+                    ty = self.infer(rhs);
+                    continue;
+                }
+                let done = stack.pop().expect("an operator is pending");
+                let lt = done.lt.expect("the left operand is inferred");
+                let out = self.operator_rule(done.node, lt, ty, done.id);
+                let Some(entered) = done.entered else {
+                    return out;
+                };
+                self.exit_node(done.node, entered, &out);
+                ty = out;
+            }
+        }
+    }
+
+    /// The typing rule of binary operator `expr` whose operands have types
+    /// `lt` and `rt`.
+    fn operator_rule(&mut self, expr: &Output, lt: Ty, rt: Ty, id: Option<NodeId>) -> Ty {
+        let range = expr.0.into_range();
+        let (lhs, rhs) = Self::operator_operands(expr).expect("an operator");
+        let (l, r) = ((lhs, lt), (rhs, rt));
+        match expr.1.as_ref() {
+            Expression::Add(..) => self.infer_arith(l, r, id, range, "+"),
+            Expression::Sub(..) => self.infer_arith(l, r, id, range, "-"),
+            Expression::Mul(..) => self.infer_arith(l, r, id, range, "*"),
+            Expression::Div(..) => self.infer_arith(l, r, id, range, "/"),
+            Expression::Mod(..) => self.infer_arith(l, r, id, range, "%"),
+            Expression::Pow(..) => self.infer_arith(l, r, id, range, "**"),
+            Expression::Shl(..) => self.infer_arith(l, r, id, range, "<<"),
+            Expression::Shr(..) => self.infer_arith(l, r, id, range, ">>"),
+            Expression::Xor(..) => self.infer_arith(l, r, id, range, "^"),
+            Expression::BitAnd(..) => self.infer_arith(l, r, id, range, "&"),
+            Expression::BitOr(..) => self.infer_arith(l, r, id, range, "|"),
+            Expression::And(..) | Expression::Or(..) => {
+                let ((lhs, lt), (rhs, rt)) = (l, r);
+                // A `bool`-backed enum is its `bool` here (#2463).
+                let lt = self.scalar_enum_as_backing(lt);
+                let rt = self.scalar_enum_as_backing(rt);
+                self.unify(&boolean(), &lt, &lhs.0.into_range(), "left of logical");
+                self.unify(&boolean(), &rt, &rhs.0.into_range(), "right of logical");
+                boolean()
+            }
+            Expression::Eq(..) => self.infer_comparison(l, r, id, range, "Eq", "eq"),
+            Expression::Neq(..) => self.infer_comparison(l, r, id, range, "Eq", "ne"),
+            Expression::Le(..) => self.infer_comparison(l, r, id, range, "Lt", "lt"),
+            Expression::Gt(..) => self.infer_comparison(l, r, id, range, "Gt", "gt"),
+            Expression::Leq(..) => self.infer_comparison(l, r, id, range, "Le", "le"),
+            Expression::Geq(..) => self.infer_comparison(l, r, id, range, "Ge", "ge"),
+            _ => unreachable!("operator_operands matched an operator"),
+        }
     }
 
     /// Nodes whose value is a child's value (or, for arithmetic, whose
@@ -2939,35 +3103,25 @@ impl Checker {
                 end,
                 inclusive,
             } => self.infer_range(start, end, *inclusive, range),
-            Expression::Add(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "+"),
-            Expression::Sub(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "-"),
-            Expression::Mul(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "*"),
-            Expression::Div(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "/"),
-            Expression::Mod(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "%"),
-            Expression::Pow(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "**"),
-            Expression::Shl(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "<<"),
-            Expression::Shr(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, ">>"),
-            Expression::Xor(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "^"),
-            Expression::BitAnd(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "&"),
-            Expression::BitOr(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "|"),
-
-            Expression::And(lhs, rhs) | Expression::Or(lhs, rhs) => {
-                let lt = self.infer(lhs);
-                let rt = self.infer(rhs);
-                // A `bool`-backed enum is its `bool` here (#2463).
-                let lt = self.scalar_enum_as_backing(lt);
-                let rt = self.scalar_enum_as_backing(rt);
-                self.unify(&boolean(), &lt, &lhs.0.into_range(), "left of logical");
-                self.unify(&boolean(), &rt, &rhs.0.into_range(), "right of logical");
-                boolean()
-            }
-
-            Expression::Eq(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Eq", "eq"),
-            Expression::Neq(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Eq", "ne"),
-            Expression::Le(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Lt", "lt"),
-            Expression::Gt(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Gt", "gt"),
-            Expression::Leq(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Le", "le"),
-            Expression::Geq(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Ge", "ge"),
+            Expression::Add(..)
+            | Expression::Sub(..)
+            | Expression::Mul(..)
+            | Expression::Div(..)
+            | Expression::Mod(..)
+            | Expression::Pow(..)
+            | Expression::Shl(..)
+            | Expression::Shr(..)
+            | Expression::Xor(..)
+            | Expression::BitAnd(..)
+            | Expression::BitOr(..)
+            | Expression::And(..)
+            | Expression::Or(..)
+            | Expression::Eq(..)
+            | Expression::Neq(..)
+            | Expression::Le(..)
+            | Expression::Gt(..)
+            | Expression::Leq(..)
+            | Expression::Geq(..) => self.infer_operator_tree(expr, id),
 
             Expression::Negate(e) => {
                 let inner = self.infer(e);
@@ -6538,8 +6692,8 @@ impl Checker {
 
     fn infer_comparison(
         &mut self,
-        lhs: &Output,
-        rhs: &Output,
+        (lhs, lt): (&Output, Ty),
+        (rhs, rt): (&Output, Ty),
         id: Option<NodeId>,
         range: Range<usize>,
         class: &str,
@@ -6547,8 +6701,8 @@ impl Checker {
     ) -> Ty {
         // `Color::Red == Color::Blue` compares as `Color`, not as two
         // constructor refinements.
-        let lt = nominal_enum(self.infer(lhs));
-        let rt = nominal_enum(self.infer(rhs));
+        let lt = nominal_enum(lt);
+        let rt = nominal_enum(rt);
         // `b == "/"`, `b == 48`: a literal next to a `byte` compares as one.
         let (lt, rt) = self.coerce_byte_literal_operands(lhs, rhs, lt, rt);
         let lt = apply_ty_prune(&self.subst, &lt);
@@ -6801,14 +6955,12 @@ impl Checker {
 
     fn infer_arith(
         &mut self,
-        lhs: &Output,
-        rhs: &Output,
+        (lhs, lt): (&Output, Ty),
+        (rhs, rt): (&Output, Ty),
         id: Option<NodeId>,
         range: Range<usize>,
         op: &str,
     ) -> Ty {
-        let lt = self.infer(lhs);
-        let rt = self.infer(rhs);
         // A shift count is an `int` whatever `x` is, so only the other
         // operators take a literal as a `byte` (#2093).
         let (lt, rt) = if matches!(op, "<<" | ">>") {
@@ -7151,17 +7303,28 @@ impl Checker {
 
     /// The value of an integer literal, possibly under casts and `+ - * ** <<`.
     fn const_int(expr: &Output) -> Option<i64> {
-        let expr = Self::peel_literal_expr(expr);
-        match expr.1.as_ref() {
-            Expression::Integer(n) => Some(*n),
-            Expression::Cast(value, _) => Self::const_int(value),
-            Expression::Add(l, r) => Self::const_int_op("+", Self::const_int(l)?, Self::const_int(r)?),
-            Expression::Sub(l, r) => Self::const_int_op("-", Self::const_int(l)?, Self::const_int(r)?),
-            Expression::Mul(l, r) => Self::const_int_op("*", Self::const_int(l)?, Self::const_int(r)?),
-            Expression::Pow(l, r) => Self::const_int_op("**", Self::const_int(l)?, Self::const_int(r)?),
-            Expression::Shl(l, r) => Self::const_int_op("<<", Self::const_int(l)?, Self::const_int(r)?),
-            _ => None,
-        }
+        // Down the left spine, each right operand first: `a + b + ... + 1`
+        // is not constant at its last `b`, with no walk of the rest.
+        let mut steps = Vec::new();
+        let mut at = Self::peel_literal_expr(expr);
+        let first = loop {
+            let (op, l, r) = match at.1.as_ref() {
+                Expression::Integer(n) => break *n,
+                Expression::Cast(value, _) => {
+                    at = Self::peel_literal_expr(value);
+                    continue;
+                }
+                Expression::Add(l, r) => ("+", l, r),
+                Expression::Sub(l, r) => ("-", l, r),
+                Expression::Mul(l, r) => ("*", l, r),
+                Expression::Pow(l, r) => ("**", l, r),
+                Expression::Shl(l, r) => ("<<", l, r),
+                _ => return None,
+            };
+            steps.push((op, Self::const_int(r)?));
+            at = Self::peel_literal_expr(l);
+        };
+        steps.into_iter().rev().try_fold(first, |l, (op, r)| Self::const_int_op(op, l, r))
     }
 
     fn const_int_op(op: &str, l: i64, r: i64) -> Option<i64> {
@@ -13644,13 +13807,13 @@ impl Checker {
         &mut self,
         fn_name: &str,
         param_names: &[String],
-        arg_exprs: &[Output],
+        arg_exprs: &[&Output],
         local_class_scopes: &[HashMap<String, String>],
     ) {
         if arg_exprs.len() != param_names.len() {
             return;
         }
-        for (param, arg) in param_names.iter().zip(arg_exprs.iter()) {
+        for (param, &arg) in param_names.iter().zip(arg_exprs.iter()) {
             let Some((ret, variadic, nfixed)) =
                 self.ffi_invoke_fn_id_metadata_prescan(arg, local_class_scopes)
             else {
@@ -16452,13 +16615,13 @@ impl Checker {
             }
             Expression::Call { name, args } => {
                 if let Expression::Identifier(fn_name) = name.1.as_ref() {
-                    let arg_exprs: Vec<Output> = args
+                    let arg_exprs: Vec<&Output> = args
                         .as_deref()
                         .unwrap_or(&[])
                         .iter()
                         .map(|arg| match arg.1.as_ref() {
-                            Expression::NamedArg(_, value) => value.clone(),
-                            _ => arg.clone(),
+                            Expression::NamedArg(_, value) => value,
+                            _ => arg,
                         })
                         .collect();
                     if let Some(param_names) = self.fn_param_names.get(*fn_name).cloned() {
@@ -17248,6 +17411,11 @@ impl Checker {
     }
 
     fn pre_register_enums_walk(&mut self, node: &Output, errors: &mut Vec<Message>) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.pre_register_enums_walk_level(node, errors))
+    }
+
+    fn pre_register_enums_walk_level(&mut self, node: &Output, errors: &mut Vec<Message>) {
         use parser::ast::EnumVariantPayload;
         match node.1.as_ref() {
             Expression::TypeAlias { ty, .. } => {

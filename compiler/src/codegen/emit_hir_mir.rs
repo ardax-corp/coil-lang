@@ -188,6 +188,11 @@ impl Compiler {
     /// `value`: whether emission wants `id`'s value, not
     /// only its effect.
     fn hir_mir_bound(&self, hir: &HirBody, emit: &HirEmit, id: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.hir_mir_bound_level(hir, emit, id, value, defer, bound))
+    }
+
+    fn hir_mir_bound_level(&self, hir: &HirBody, emit: &HirEmit, id: HirId, value: bool, defer: bool, bound: &mut HashSet<u32>) {
         if emit.plan.par_loops.contains_key(&id.0) {
             return;
         }
@@ -2149,6 +2154,11 @@ impl Compiler {
     }
 
     fn hir_plan_par_walk(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, bound: &mut HashSet<u32>) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.hir_plan_par_walk_level(hir, emit, id, bound))
+    }
+
+    fn hir_plan_par_walk_level(&mut self, hir: &HirBody, emit: &mut HirEmit, id: HirId, bound: &mut HashSet<u32>) {
         let bind_pat = |pat: &HirPat, bound: &mut HashSet<u32>| {
             pat.for_each_bind(&mut |l| {
                 bound.insert(l.0);

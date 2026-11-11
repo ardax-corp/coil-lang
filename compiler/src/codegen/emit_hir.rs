@@ -8928,6 +8928,11 @@ impl Compiler {
     /// whatever its consumer wants (constructors, `match`, `if`, blocks,
     /// jumps).
     fn hir_natural(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<Rep> {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.hir_natural_level(hir, emit, id))
+    }
+
+    fn hir_natural_level(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Option<Rep> {
         match &hir.expr(id).kind {
             HirKind::Global { .. } if emit.plan.statics.contains_key(&id.0) => Some(Rep::Word(
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
@@ -9978,6 +9983,11 @@ impl Compiler {
     // statics it names resolved.
 
     fn hir_check_value(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Check {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.hir_check_value_level(hir, emit, id, want))
+    }
+
+    fn hir_check_value_level(&self, hir: &HirBody, emit: &HirEmit, id: HirId, want: &Rep) -> Check {
         match &hir.expr(id).kind {
             HirKind::Lit(_) | HirKind::Local(_) | HirKind::Global { .. } | HirKind::Lambda { .. } => {}
             // A pair local has no one word to step.
@@ -10431,6 +10441,11 @@ impl Compiler {
     }
 
     fn hir_check_effect(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Check {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.hir_check_effect_level(hir, emit, id))
+    }
+
+    fn hir_check_effect_level(&self, hir: &HirBody, emit: &HirEmit, id: HirId) -> Check {
         match &hir.expr(id).kind {
             HirKind::Clear(_) => Ok(()),
             // An early free reads a one-word object reference.

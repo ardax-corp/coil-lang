@@ -2334,6 +2334,11 @@ impl Cx<'_> {
     }
 
     fn expr(&self, w: &mut Walk<'_>, id: HirId) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.expr_level(w, id))
+    }
+
+    fn expr_level(&self, w: &mut Walk<'_>, id: HirId) {
         let body = &self.module.bodies[w.index];
         let e = body.expr(id);
         match &e.kind {

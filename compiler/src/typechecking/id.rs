@@ -113,6 +113,11 @@ pub fn pre_walk(node: &Output, table: &mut IdTable) {
 
 /// Call `visit` on each direct child expression of `node`, in pre-order.
 pub fn walk_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Output<'s>)) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| visit_children(node, visit));
+}
+
+fn visit_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Output<'s>)) {
     use parser::ast::Expression;
     match node.1.as_ref() {
         Expression::Noop(_)

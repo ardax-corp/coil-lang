@@ -79,6 +79,11 @@ impl Walk<'_> {
 /// anonymous `fn`s in it (E0801), with whether it is a `break`.
 pub fn stray_jumps(module: &super::HirModule, body: &HirBody) -> Vec<(HirId, bool)> {
     fn walk(module: &super::HirModule, body: &HirBody, id: HirId, loops: u32, out: &mut Vec<(HirId, bool)>) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| walk_level(module, body, id, loops, out))
+    }
+
+    fn walk_level(module: &super::HirModule, body: &HirBody, id: HirId, loops: u32, out: &mut Vec<(HirId, bool)>) {
         match &body.expr(id).kind {
             HirKind::Break | HirKind::Continue if loops == 0 => {
                 out.push((id, matches!(body.expr(id).kind, HirKind::Break)));
@@ -129,6 +134,11 @@ pub fn unassigned_reads(module: &super::HirModule, body: &HirBody) -> Vec<HirId>
         /// The locals still unassigned after `id`; `None` when it never
         /// completes (a `return`, `break` or `continue` on every path).
         fn flow(&mut self, id: HirId, s: Set) -> Option<Set> {
+            // Walks recurse through here once per level of the tree.
+            common::deep_stack(|| self.flow_level(id, s))
+        }
+
+        fn flow_level(&mut self, id: HirId, s: Set) -> Option<Set> {
             let join = |a: Option<Set>, b: Option<Set>| match (a, b) {
                 (Some(a), Some(b)) => Some(a.union(&b).copied().collect()),
                 (a, b) => a.or(b),
@@ -581,6 +591,11 @@ impl Walk<'_> {
 
     /// `id` for its value.
     fn value(&mut self, id: HirId) -> Check {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.value_level(id))
+    }
+
+    fn value_level(&mut self, id: HirId) -> Check {
         let body = self.body;
         match &body.expr(id).kind {
             HirKind::Lit(Lit::Int(_) | Lit::Float(_) | Lit::Bool(_)) => self.scalar(id),
@@ -1055,6 +1070,11 @@ impl Walk<'_> {
 
     /// `id` for its effect.
     fn effect(&mut self, id: HirId) -> Check {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.effect_level(id))
+    }
+
+    fn effect_level(&mut self, id: HirId) -> Check {
         let body = self.body;
         match &body.expr(id).kind {
             HirKind::Block { stmts, tail } => {

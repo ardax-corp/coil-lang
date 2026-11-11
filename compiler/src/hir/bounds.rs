@@ -76,6 +76,11 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
     /// Prove the loops under `id`, which runs with `facts` holding
     /// throughout.
     fn walk(&mut self, id: HirId, facts: &Facts) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.walk_level(id, facts))
+    }
+
+    fn walk_level(&mut self, id: HirId, facts: &Facts) {
         let HirKind::Block { stmts, tail } = &self.body.expr(id).kind else {
             for k in self.body.children(id) {
                 self.walk(k, facts);

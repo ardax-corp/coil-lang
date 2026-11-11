@@ -431,6 +431,11 @@ fn method_fn<'n, 's>(m: &'n Output<'s>) -> Option<(&'s str, &'n Output<'s>, &'n 
 }
 
 fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, cases: &BareCases) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| collect_nested_fns_level(ast, facts, cases))
+}
+
+fn collect_nested_fns_level(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, cases: &BareCases) {
     match ast.1.as_ref() {
         Expression::Program(items)
         | Expression::Block(items)
@@ -581,6 +586,11 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>, ca
 }
 
 fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| walk_body_level(ast, facts))
+}
+
+fn walk_body_level(ast: &Output<'_>, facts: &mut FnFacts) {
     match ast.1.as_ref() {
         Expression::Program(items)
         | Expression::Block(items)
@@ -839,6 +849,11 @@ fn fresh_lets(ast: &Output<'_>, out: &mut HashSet<String>) {
 /// Mark every name in `fresh` that `ast` uses other than through `x[i]`,
 /// `x.f`, a write through one, or `return x`.
 fn private_uses(ast: &Output<'_>, fresh: &HashSet<String>, escaped: &mut HashSet<String>) {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| private_uses_level(ast, fresh, escaped))
+}
+
+fn private_uses_level(ast: &Output<'_>, fresh: &HashSet<String>, escaped: &mut HashSet<String>) {
     let base_name = |e: &Output<'_>| match peel(e).1.as_ref() {
         Expression::Identifier(n) if fresh.contains(*n) => Some((*n).to_string()),
         _ => None,
