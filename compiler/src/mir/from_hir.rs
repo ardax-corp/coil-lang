@@ -6452,10 +6452,11 @@ impl Lower<'_> {
         let HirKind::Bin { lhs: read, .. } = self.hir.expr(value).kind else {
             return Err("adjust place".into());
         };
+        // `xs[0].v++` and `g[r][0]++` read their base twice, as `+=` does
+        // (#1978, #2661).
         let repeatable = match self.hir.expr(place).kind {
-            // `xs[0].v++` reads its base twice, as `xs[0].v += 1` does (#1978).
             HirKind::Field { base, .. } => query::read_base(self.hir, base),
-            HirKind::Index { base, index, .. } => query::pure_base(self.hir, base) && query::pure_index(self.hir, index),
+            HirKind::Index { base, index, .. } => query::read_base(self.hir, base) && query::pure_index(self.hir, index),
             _ => false,
         };
         if !repeatable {
