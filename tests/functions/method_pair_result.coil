@@ -2,8 +2,8 @@
 // `Result`, a two-item tuple, a two-slot enum or readonly class) reaches
 // every caller with its value: a direct call, a static method, a generic
 // class's method (its clone and its shared body), a partial application, a
-// trait method called directly and through a bound, a shared generic body,
-// recursion and `?` (#2333).
+// trait method called directly, through a bound and an existential, a
+// shared generic body, recursion and `?` (#2333).
 use tests::assert;
 use string::format;
 
@@ -282,11 +282,13 @@ test("a partial application of a method") {
     assert!(b.at(2) == Option::Some(12));
 }
 
-test("a trait method directly and through a bound") {
+test("a trait method directly, through a bound and an existential") {
     let b = new Bag(2);
     assert!(b.peek(1) == Option::Some(4));
     assert!(Peek::peek(b, -9) == Option::None);
     assert!(peek_twice(b) == 4 + 100);
+    let p: Peek = b;
+    assert!(p.peek(0) == Option::Some(3));
 }
 
 test("from a shared generic body") {
