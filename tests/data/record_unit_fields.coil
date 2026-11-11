@@ -17,7 +17,11 @@ fn unit_vec() -> int {
 }
 
 fn unit_option(bool some) -> bool {
-    let o: Option<()> = if some { Some(()) } else { None };
+    let o: Option<()> = if some {
+        Some(())
+    } else {
+        None
+    };
     let r = { a: 1, o: o };
     return r.o.is_some();
 }
