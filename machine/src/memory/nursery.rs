@@ -15,7 +15,7 @@ use common::Value;
 
 use super::compact::{forward, AddrMap};
 use super::{
-    barriered, GcHeader, GcPhase, GcSized, Heap, Member, Object, GEN_HELD, GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, QUIET,
+    barriered, ObjArray, GcHeader, GcPhase, GcSized, Heap, Member, Object, GEN_HELD, GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, QUIET,
     REMEMBERED,
 };
 
@@ -303,6 +303,7 @@ impl Heap {
         // order. Marking pushes only what it newly marks, so an array's
         // share of `gray` is its new elements in order.
         let mut by_index: Vec<Object> = Vec::new();
+        let mut fixups: Vec<*mut Value> = Vec::new();
         for &addr in &remembered {
             let Some(obj) = self.find_object_by_addr(addr) else {
                 continue;
@@ -323,6 +324,10 @@ impl Heap {
                         reach(self, &mut gray, target, false);
                     }
                 }
+                // One walk of an array: the precise slots that name a young
+                // object are noted, and only they are rewritten after the
+                // copy.
+                Object::Array(a) => self.reach_array_slots(a, &mut gray, &mut fixups),
                 _ => obj.for_each_reference(self, &mut |a, p| reach(self, &mut gray, a, p)),
             }
             if matches!(obj, Object::Array(_)) {
@@ -408,7 +413,9 @@ impl Heap {
                 }
             }
             for &addr in &remembered {
-                if let Some(obj) = self.find_object_by_addr(addr) {
+                if let Some(obj) = self.find_object_by_addr(addr)
+                    && !matches!(obj, Object::Array(_))
+                {
                     #[cfg(feature = "gc-stats")]
                     {
                         let n = obj.slot_words(self);
@@ -418,7 +425,22 @@ impl Heap {
                     obj.rewrite_precise_refs(self, &fwd);
                 }
             }
+            // A slot whose young object was pinned after it was noted
+            // (an ambiguous word found it later) has nothing to forward.
+            for &slot in &fixups {
+                // SAFETY: a word of a remembered array's storage, which no
+                // step of a minor grows, shrinks or moves.
+                unsafe {
+                    if let Some(to) = forward(&fwd, *slot) {
+                        *slot = to;
+                    }
+                }
+            }
             self.forward_side_lists(&fwd);
+        }
+        #[cfg(feature = "gc-stats")]
+        {
+            census.fixups = fixups.len();
         }
         MinorPlan {
             fwd,
@@ -427,6 +449,69 @@ impl Heap {
             #[cfg(feature = "gc-stats")]
             census,
         }
+    }
+
+    /// Reach the young objects a remembered array names, as
+    /// [`Object::for_each_reference`] would find them, and note the address
+    /// of every precise slot that names one in `fixups`: the minor then
+    /// forwards those slots alone instead of walking the array again.
+    fn reach_array_slots(&self, gc: super::Gc<ObjArray>, gray: &mut Vec<Object>, fixups: &mut Vec<*mut Value>) {
+        // SAFETY: a live array; nothing else borrows its payload during a
+        // minor. Not `payload_mut`: a rewrite is no write the barrier logs.
+        let a = unsafe { &mut (*gc.as_ptr().cast_mut()).data };
+        if !a.may_hold_refs() {
+            return;
+        }
+        let (k, mask, kind) = (a.lanes(), a.tag_mask, a.elem_kind());
+        if k == 1 && kind == common::WORD_SCALAR {
+            return;
+        }
+        let Some(words) = a.gc_words_mut() else {
+            return;
+        };
+        let bounds = self.slab.bounds();
+        let n = words.len();
+        let base = words.as_mut_ptr();
+        if k == 1 {
+            let precise = kind == common::WORD_POINTER;
+            for i in 0..n {
+                // SAFETY: `i < n`.
+                self.reach_slot(unsafe { base.add(i) }, precise, bounds, gray, fixups);
+            }
+        } else {
+            for i in (0..n).step_by(k) {
+                // SAFETY: `i + 1 < n` for a whole element of `k >= 2` words.
+                let tag = unsafe { *base.add(i + 1) }.bits();
+                if tag < 64 && mask >> tag & 1 == 1 {
+                    self.reach_slot(unsafe { base.add(i) }, true, bounds, gray, fixups);
+                }
+            }
+        }
+    }
+
+    /// [`Self::reach_array_slots`] for one word at `slot`.
+    #[inline(always)]
+    fn reach_slot(&self, slot: *mut Value, precise: bool, (lo, hi): (u64, u64), gray: &mut Vec<Object>, fixups: &mut Vec<*mut Value>) {
+        // SAFETY: a word of the array's storage.
+        let addr = unsafe { *slot }.heap_addr();
+        // Most words of an unknown-kind array are ints: the slab's bounds
+        // turn them down before a chunk lookup.
+        if addr < lo || addr >= hi {
+            return;
+        }
+        let Some(obj) = self.find_object_by_addr(addr) else {
+            return;
+        };
+        let g = obj.generation();
+        if g & (GEN_YOUNG | GEN_HELD) != GEN_YOUNG {
+            return;
+        }
+        if precise {
+            fixups.push(slot);
+        } else if g & GEN_PINNED == 0 {
+            obj.set_generation(g | GEN_PINNED);
+        }
+        obj.mark(gray);
     }
 
     /// The missed-barrier check ([`super::heap::heap_checks_on`]): at the
@@ -928,6 +1013,40 @@ mod tests {
         minor(heap, &[], &mut roots);
         assert_eq!(heap.find_object_by_addr(roots[0]).expect("old array").generation(), GEN_UNLOGGED);
         roots[0]
+    }
+
+    /// A remembered array's precise slots are noted as the minor reaches
+    /// them and forwarded alone after the copy: a young element moves and
+    /// its slot follows, one an ambiguous root pins stays where it is, and
+    /// a null slot is left alone.
+    #[test]
+    fn a_remembered_arrays_young_pinned_and_null_elements_after_a_minor() {
+        let mut heap = nursery_heap();
+        heap.heap_checks = true;
+        let old = old_pointer_array(&mut heap, 4);
+        let moved = cons_list(&mut heap, 10);
+        let pinned = cons_list(&mut heap, 5);
+        let other = cons_list(&mut heap, 3);
+        let (moved_list, pinned_list, other_list) = (walk(&heap, moved), walk(&heap, pinned), walk(&heap, other));
+        let Some(Object::Array(mut gc)) = heap.find_object_by_addr(old) else { unreachable!() };
+        unsafe {
+            gc.as_mut().set_unchecked(0, Value::from(moved));
+            gc.as_mut().set_unchecked(1, Value::from(pinned));
+            gc.as_mut().set_unchecked(3, Value::from(other));
+        }
+        let plan = heap.minor_plan(&[pinned], &[]);
+        let copied = plan.fwd.len();
+        heap.minor_finish(plan);
+        assert_eq!(copied, 10 + 4 + 3, "all but the pinned head move");
+        let a = gc.as_ref();
+        let slot = |i: usize| a.get(i).expect("element").bits();
+        assert_ne!(slot(0), moved, "a moved element's slot names the copy");
+        assert_eq!(walk(&heap, slot(0)), moved_list);
+        assert_eq!(slot(1), pinned, "a pinned element stays where it is");
+        assert_eq!(walk(&heap, slot(1)), pinned_list);
+        assert_eq!(slot(2), 0, "a null slot stays null");
+        assert_ne!(slot(3), other);
+        assert_eq!(walk(&heap, slot(3)), other_list);
     }
 
     /// A store that skips the barrier leaves an old object naming a young
