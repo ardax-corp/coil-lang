@@ -36,6 +36,20 @@ const REGION_CHUNKS: usize = 1024;
 /// Unmarked objects considered at one alloc safepoint during lazy sweep.
 pub const GC_SWEEP_QUANTUM: usize = 128;
 
+/// Whether marking checks every word of a known kind against what it
+/// holds (a pointer word must be `0` or an object, a scalar word no
+/// object): `gc-stress` and debug builds, and a run with `COIL_MIR_VERIFY`
+/// set, which also checks the arrays a shared generic body stamps from its
+/// `kinds` word (#2687). A word that contradicts its kind panics, naming
+/// the object kind that holds it.
+pub(crate) fn kinds_check_on() -> bool {
+    if cfg!(any(feature = "gc-stress", debug_assertions)) {
+        return true;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("COIL_MIR_VERIFY").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
 /// Slots one steal-epoch mutator takes per size class under the epoch lock.
 const EPOCH_BATCH: usize = 64;
 
@@ -311,6 +325,8 @@ pub struct Heap {
     /// Held nursery chunks the last major cycle found live
     /// ([`Self::set_held_after_major`]).
     held_after_major: usize,
+    /// [`kinds_check_on`], read once.
+    kinds_check: bool,
     /// Held nursery chunks that ask for a major cycle
     /// ([`Self::held_over_budget`]).
     held_budget: usize,
@@ -386,6 +402,7 @@ impl Default for Heap {
             epoch_born: Vec::new(),
             nursery_chunks: NURSERY_CHUNKS,
             held_after_major: 0,
+            kinds_check: kinds_check_on(),
             held_budget: NURSERY_CHUNKS,
             pretenure_bytes: 0,
             pretenure_streak: 0,
@@ -2051,16 +2068,16 @@ impl Heap {
             .map_or(&[][..], |row| &row[..])
     }
 
-    /// `gc-stress`: a word's declared kind must match what it holds.
-    #[cfg(feature = "gc-stress")]
+    /// [`kinds_check_on`]: a word's declared kind must match what it holds.
+    #[cold]
     fn verify_kinded_word(&self, what: &str, index: usize, kind: u8, v: Value) {
         let addr = v.heap_addr();
         let resolves = addr != 0 && self.find_object_by_addr(addr).is_some();
         if kind == common::WORD_SCALAR && resolves {
-            panic!("gc-stress: scalar word {index} of {what} holds a heap reference");
+            panic!("word kind check: scalar word {index} of {what} holds a heap reference ({:#x})", v.bits());
         }
         if kind == common::WORD_POINTER && addr != 0 && !resolves && !self.early_freed_slot(addr) {
-            panic!("gc-stress: pointer word {index} of {what} holds a non-object");
+            panic!("word kind check: pointer word {index} of {what} holds a non-object ({:#x})", v.bits());
         }
     }
 
@@ -2474,18 +2491,29 @@ impl Object {
     /// next mark skips it until a write.
     #[inline]
     pub fn mark_references(&self, heap: &Heap, grey_objects: &mut Vec<Self>) {
-        struct Marker<'a> {
+        // Coroutine words are not checked.
+        if heap.kinds_check && !matches!(self, Self::Coroutine(_)) {
+            self.mark_references_as::<true>(heap, grey_objects);
+        } else {
+            self.mark_references_as::<false>(heap, grey_objects);
+        }
+    }
+
+    /// [`Self::mark_references`], checking each kinded word when `CHECK`
+    /// ([`kinds_check_on`]); the unchecked mark pays nothing per word.
+    #[inline(always)]
+    fn mark_references_as<const CHECK: bool>(&self, heap: &Heap, grey_objects: &mut Vec<Self>) {
+        struct Marker<'a, const CHECK: bool> {
             heap: &'a Heap,
             grey: &'a mut Vec<Object>,
             any: bool,
-            #[cfg(feature = "gc-stress")]
-            check: Option<(String, usize)>,
+            check: (String, usize),
         }
-        impl SlotVisitor for Marker<'_> {
+        impl<const CHECK: bool> SlotVisitor for Marker<'_, CHECK> {
             #[inline(always)]
             fn word(&mut self, &v: &Value, kind: u8) {
-                #[cfg(feature = "gc-stress")]
-                if let Some((what, i)) = &mut self.check {
+                if CHECK {
+                    let (what, i) = &mut self.check;
                     if kind != common::WORD_UNKNOWN {
                         self.heap.verify_kinded_word(what, *i, kind, v);
                     }
@@ -2508,13 +2536,11 @@ impl Object {
                 Object::mark_member(self.heap, m, self.grey);
             }
         }
-        let mut marker = Marker {
+        let mut marker = Marker::<CHECK> {
             heap,
             grey: grey_objects,
             any: false,
-            // Coroutine words are not checked.
-            #[cfg(feature = "gc-stress")]
-            check: (!matches!(self, Self::Coroutine(_))).then(|| (self.slot_owner(), 0)),
+            check: (if CHECK { self.slot_owner() } else { String::new() }, 0),
         };
         self.visit_slots(heap, &mut marker);
         // Clear flag: scanned clean at this mark, unwritten since.
@@ -2526,12 +2552,13 @@ impl Object {
         }
     }
 
-    /// What a gc-stress check names the slots of `self` by.
-    #[cfg(feature = "gc-stress")]
+    /// What a word kind check names the slots of `self` by.
     fn slot_owner(&self) -> String {
         match self {
             Self::Instance(i) => format!("class {}", i.as_ref().type_id),
             Self::Array(a) if a.as_ref().lanes() > 1 => "a lane array's pointer lane".into(),
+            // Stamped by its type at a ground site, or from a shared
+            // generic body's `kinds` bit (#2687).
             Self::Array(_) => "a pointer-kind array".into(),
             _ => "an enum payload / tuple".into(),
         }
