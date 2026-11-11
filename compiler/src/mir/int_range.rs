@@ -25,8 +25,8 @@ struct Fact {
     bound: i64,
 }
 
-/// The `iadd` / `isub` dests of `f` (`int`, one constant operand) that
-/// cannot overflow.
+/// The `iadd` / `isub` dests of `f` (`int`, one non-zero constant
+/// operand) that cannot overflow.
 pub fn in_range_steps(f: &MirFunc) -> HashSet<ValueId> {
     let mut consts: HashMap<ValueId, i64> = HashMap::new();
     let mut cmps: HashMap<ValueId, (MirCmpOp, ValueId, ValueId)> = HashMap::new();
@@ -56,7 +56,8 @@ pub fn in_range_steps(f: &MirFunc) -> HashSet<ValueId> {
                 MirBinOp::Sub => consts.get(rhs).and_then(|&c| c.checked_neg()).map(|c| (*lhs, c)),
                 _ => None,
             };
-            if let Some((var, c)) = step {
+            // `x + 0` is instcombine's.
+            if let Some((var, c)) = step.filter(|&(_, c)| c != 0) {
                 steps.push((b.id, *dest, var, c));
             }
         }
@@ -107,12 +108,9 @@ pub fn in_range_steps(f: &MirFunc) -> HashSet<ValueId> {
     steps
         .into_iter()
         .filter(|&(at, _, var, c)| {
-            c == 0
-                || facts.get(&var).is_some_and(|fs| {
-                    fs.iter().any(|fact| {
-                        fact.upper == (c > 0) && fact.bound.checked_add(c).is_some() && dom.dominates(fact.from, at)
-                    })
-                })
+            facts.get(&var).is_some_and(|fs| {
+                fs.iter().any(|fact| fact.upper == (c > 0) && fact.bound.checked_add(c).is_some() && dom.dominates(fact.from, at))
+            })
         })
         .map(|(_, dest, _, _)| dest)
         .collect()
