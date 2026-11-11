@@ -12040,8 +12040,8 @@ impl<'a> HirLowerCx<'a> {
             // (#1507).
             .or_else(|| (matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == "ptr") && !self.is_class(t)).then_some(crate::mir::MirTy::I64))
             // An array or `Vec` of heap words (strings, objects, arrays,
-            // tuples, enums) is its heap object, as one of scalars is
-            // (#2427).
+            // tuples, `()`, enums) is its heap object, as one of scalars
+            // is (#2427, #2640).
             .or_else(|| {
                 let t = apply_ty_prune(checker.subst(), t);
                 let elem = match crate::typechecking::ty::strip_readonly(&t) {
@@ -12049,7 +12049,8 @@ impl<'a> HirLowerCx<'a> {
                     t => crate::typechecking::ty::vec_element_ty(t)?,
                 };
                 (self.field_word(elem).is_some()
-                    || matches!(crate::typechecking::ty::strip_readonly(elem), Ty::Tuple(items) if !items.is_empty()))
+                    || matches!(crate::typechecking::ty::strip_readonly(elem), Ty::Tuple(items) if !items.is_empty())
+                    || crate::layout::is_unit(elem))
                 .then_some(crate::mir::MirTy::HeapRef)
             })
     }
