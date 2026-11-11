@@ -47,10 +47,22 @@ pub(crate) fn apply(heap: &mut Heap, raw: Value, args: &[Value], dicts: usize, c
         let arity = base.arity as usize;
         let take = if arity > 0 && values.len() > arity { arity } else { values.len() };
         let mut call = values[..take].to_vec();
+        // The call's word of its type's variables, last (#2621): it counts
+        // for a value made at a type of as many variables.
+        let given = app_dicts.last().map_or(0, |w| w.bits());
+        let count = (given >> 63 == 0).then_some((given >> common::KINDS_CALL_COUNT_SHIFT) as u32 & 0x3F);
         for (k, slot) in captured.iter().enumerate() {
             call.push(match slot {
-                // A `kinds` word the call passes last (#2506).
-                Some(Member::Value(v)) if v.bits() == common::KINDS_FROM_CALL => app_dicts.last().copied().unwrap_or_default(),
+                // A bit of the `kinds` word before it, from the call's.
+                Some(Member::Value(v)) if let Some((n, to, from)) = common::kinds_from_call_parts(v.bits()) => {
+                    if count == Some(n)
+                        && given >> from & 1 == 1
+                        && let Some(word) = call.last_mut()
+                    {
+                        *word = Value::from(word.bits() | 1 << to);
+                    }
+                    continue;
+                }
                 Some(Member::Value(v)) => *v,
                 Some(Member::Object(o)) => Value::from(o.addr()),
                 None => app_dicts.get(k).copied().unwrap_or_default(),

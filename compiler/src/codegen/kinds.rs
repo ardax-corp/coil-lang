@@ -22,8 +22,9 @@ use crate::typechecking::ty::{strip_readonly, Scheme, TyVarId};
 /// The bits a `kinds` word carries past its mask.
 pub(crate) const SENTINEL: u64 = 0xC0DE_5A3C_A5C3_3C5A;
 
-/// The most type parameters a shared generic entry may have: one bit each.
-pub(crate) const MAX_PARAMS: usize = 64;
+/// The most type parameters a shared generic entry may have: one bit each,
+/// below the sentinel's top bit, so every `kinds` word has bit 63 set.
+pub(crate) const MAX_PARAMS: usize = 63;
 
 /// The bits of a dictionary's `kinds` word: its trait's parameters, then
 /// its instance head's type variables. The sentinel is above them for every
@@ -210,15 +211,7 @@ impl Compiler {
     /// The bit a call passes for a type parameter at `ty`.
     fn kinds_bit(&self, ty: &Ty, frame: Option<&frame::FrameKinds>) -> Bit {
         let ty = apply_ty_prune(self.checker.subst(), ty);
-        let var = match strip_readonly(&ty) {
-            Ty::Var(v) => Some(*v),
-            Ty::App(head, _) => match strip_readonly(head) {
-                Ty::Var(v) => Some(*v),
-                _ => None,
-            },
-            _ => None,
-        };
-        match var {
+        match head_var(&ty) {
             // A variable the caller has no bit for: no op, as before.
             Some(v) => frame.and_then(|f| f.bit(v)).map_or(Bit::Const(false), Bit::From),
             None => Bit::Const(crate::hir::effects::cow::cow_ty(&self.checker, Some(&ty))),
@@ -275,30 +268,59 @@ impl Compiler {
         std::iter::once(HirDictOp::Kinds(word)).chain(from).collect()
     }
 
+    /// The word a call through a function value of type `body`, its type
+    /// variables `binders`, on arguments of `arg_tys` returning `ret_ty`
+    /// passes last (#2621): a bit for each of [`value_kinds_order`]'s, then
+    /// their count ([`common::KINDS_CALL_COUNT_SHIFT`]), as ops.
+    pub(super) fn value_kinds_ops(&self, binders: &[TyVarId], body: &Ty, arg_tys: &[Ty], ret_ty: Option<&Ty>) -> Vec<HirDictOp> {
+        let order = value_kinds_order(binders, body);
+        let mut ops = self.kinds_ops_for(&order, body, arg_tys, ret_ty);
+        if let Some(HirDictOp::Kinds(word)) = ops.first_mut() {
+            *word = (*word & !sentinel(order.len() as u32)) | (order.len() as u64) << common::KINDS_CALL_COUNT_SHIFT;
+        }
+        ops
+    }
+
     /// The `kinds` slot a `PolyFn` value of generic function `name` read at
-    /// type `ty` captures, after its dictionaries (#2506). A value of one
-    /// type parameter left open there (an argument a `forall` parameter
-    /// takes, a local bound from the function) has the call fill it
-    /// ([`common::KINDS_FROM_CALL`]): such a call passes the word last, in
-    /// that parameter's order. Any other has the word at `ty`, every bit of
-    /// a variable the body has none for clear.
-    pub(super) fn polyfn_kinds_slot(&self, name: &str, ty: Option<&Ty>) -> Option<Vec<HirDictOp>> {
+    /// type `ty` captures, after its dictionaries (#2506): the word at
+    /// `ty`, then, for each type parameter `ty` leaves open (the body has no
+    /// bit for it), a [`common::kinds_from_call`] word that sets its bit
+    /// from the call's. The call passes its word in the order of the type
+    /// it sees ([`Self::value_kinds_ops`]): the `forall` parameter
+    /// `expected` the value is passed to, else the function's own (a local
+    /// bound from it).
+    pub(super) fn polyfn_kinds_slot(&self, name: &str, ty: Option<&Ty>, expected: Option<&Ty>) -> Option<Vec<HirDictOp>> {
         let scheme = self.kinds_scheme(name)?;
         let frame = self.hir_body_frame.as_ref().and_then(|f| f.kinds.as_ref());
         let ty = ty.map(|t| apply_ty_prune(self.checker.subst(), t));
-        let mut free = Vec::new();
-        if let Some(t) = &ty {
-            t.collect_vars(&mut free);
-        }
-        let open = !free.is_empty() && free.iter().all(|v| frame.is_none_or(|f| f.bit(*v).is_none()));
-        if scheme.bounds.len() == 1 && open {
-            return Some(vec![HirDictOp::Kinds(common::KINDS_FROM_CALL)]);
-        }
-        let mut vars = HashMap::new();
+        let (binders, body) = match expected.map(strip_readonly) {
+            Some(Ty::Forall { bounds, body, .. }) => (bounds.clone(), body.as_ref().clone()),
+            _ => (scheme.bounds.clone(), scheme.ty.clone()),
+        };
+        let order = value_kinds_order(&binders, &body);
+        let (mut vars, mut seen) = (HashMap::new(), HashMap::new());
         if let Some(t) = &ty {
             Self::bind_scheme_vars(&scheme.ty, t, &mut vars);
+            Self::bind_scheme_vars(t, &body, &mut seen);
         }
-        Some(self.kinds_ops_bound(&scheme.bounds, &vars))
+        let mut from_call = Vec::new();
+        for (i, v) in scheme.bounds.iter().enumerate().take(MAX_PARAMS) {
+            let Some(Ty::Var(u)) = vars.get(v).map(strip_readonly) else { continue };
+            if frame.is_some_and(|f| f.bit(*u).is_some()) {
+                continue;
+            }
+            // Open here: its type at the call.
+            let at = seen.get(u).cloned().unwrap_or(Ty::Var(*u));
+            match head_var(&at).and_then(|b| order.iter().position(|&o| o == b)) {
+                Some(j) => from_call.push(HirDictOp::Kinds(common::kinds_from_call(order.len() as u32, i as u32, j as u32))),
+                None => {
+                    vars.insert(*v, at);
+                }
+            }
+        }
+        let mut ops = self.kinds_ops_bound(&scheme.bounds, &vars);
+        ops.extend(from_call);
+        Some(ops)
     }
 
     /// [`Self::kinds_ops`] of call `id` in `hir` of `key`, its argument and
@@ -410,5 +432,30 @@ impl Compiler {
             .find(|i| i.method_fqns.values().any(|f| f == fqn))
             .is_some_and(|i| i.args.iter().any(Ty::has_var))
             && !self.raw_instance_methods.contains(fqn)
+    }
+}
+
+/// The type variables of a function value's type `body` among `binders`
+/// that a call through the value passes a bit for, in that order: their
+/// order of first appearance, so a type and one it renames into another
+/// declared order agree (#2621). At most
+/// [`common::KINDS_CALL_COUNT_SHIFT`].
+pub(super) fn value_kinds_order(binders: &[TyVarId], body: &Ty) -> Vec<TyVarId> {
+    let mut order = Vec::new();
+    body.collect_vars(&mut order);
+    order.retain(|v| binders.contains(v));
+    order.truncate(common::KINDS_CALL_COUNT_SHIFT as usize);
+    order
+}
+
+/// The type variable `ty` is, or the head of its application is.
+fn head_var(ty: &Ty) -> Option<TyVarId> {
+    match strip_readonly(ty) {
+        Ty::Var(v) => Some(*v),
+        Ty::App(head, _) => match strip_readonly(head) {
+            Ty::Var(v) => Some(*v),
+            _ => None,
+        },
+        _ => None,
     }
 }

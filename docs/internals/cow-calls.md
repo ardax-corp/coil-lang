@@ -66,12 +66,23 @@ Where the word comes from:
   one, a per-type clone, the `$dict` adapter, a forwarder, a clone's thunk;
 - a lambda captures its body's word after the dictionaries;
 - a `PolyFn` value captures it after its dictionaries: the word at the type
-  it is read at, or, for a function of one type parameter read where it
-  stays open (an argument a `forall` parameter takes, a local bound from
-  it), `common::KINDS_FROM_CALL`, which the runtime replaces by the call's
-  last word; a call through a `forall` parameter or such a local passes it
-  last. A function of more type parameters read open captures every bit
-  clear (the `forall`'s order need not be its own): its ops stay off (#2621).
+  it is read at. A type parameter left open there (the value is an argument
+  a `forall` parameter takes, or a local bound from the function) gets its
+  bit from each call (#2621). A call through a `forall` parameter or such a
+  local passes, last, one bit per type variable of the type it sees (the
+  `forall`'s, or the function's own), in order of first appearance in that
+  type, and their count at bit 56 (`common::KINDS_CALL_COUNT_SHIFT`); bit 63
+  is clear, so it is no entry's word. Where the value is made, the checker
+  has recorded the `forall` type it is passed to (`rank_n_arg_at`), and
+  each open type parameter captures a `common::kinds_from_call(n, to, from)`
+  word after the `kinds` word: `machine::apply` (both engines; native code
+  calls a `PolyFn` through it) sets bit `to` when the call's word counts `n`
+  variables and has bit `from`, and passes no word for it. A type and one
+  that renames it into another declared order list their variables in the
+  same order, so a value passed on to a `forall` of another order keeps
+  its bits. Passed on to a less general `forall` (fewer variables), the
+  count differs and the bits stay clear (#2637). A function value read at a
+  ground type captures no such word.
 
 A ground call passes a constant; a shared caller forwards its own bit for a
 type parameter and a constant for a type with a known head (`Vec<T>` is 1,
@@ -125,6 +136,8 @@ a shared body), `tests/memory/cow_generic_bodies_unique.coil` (a write
 through a copy of a type parameter's value, the `kinds` word),
 `tests/memory/cow_generic_trait_methods.coil` (the same in trait methods),
 `tests/memory/cow_generic_forall_values.coil` (through a `forall` value),
+`tests/memory/cow_generic_forall_order.coil` (the same over several type
+parameters in any order),
 `tests/memory/cow_returned_param_names.coil` and
 `tests/memory/cow_returned_field.coil` (soundness). Benches:
 `examples/perf/cow_call_reassign.coil`, `cow_call_field.coil`,

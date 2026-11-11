@@ -128,11 +128,32 @@ impl<'a> ClassSlotKinds<'a> {
     }
 }
 
-/// A generic function value's captured `kinds` slot (`MakePolyFnCapture`)
-/// that the call fills (#2506): the call's last dictionary word, which a
-/// call through a `forall` value, or a local bound from the function,
-/// passes. No `kinds` word is this small: its high bits are a sentinel.
-pub const KINDS_FROM_CALL: u64 = 1;
+/// A call through a function value of an open type (a `forall` parameter,
+/// a local bound from a generic function) passes, as its last dictionary
+/// word, one bit per type variable of that type in order of first
+/// appearance, and their count at this bit. Bit 63 is clear: an entry's
+/// own `kinds` word has its top bit set (its sentinel).
+pub const KINDS_CALL_COUNT_SHIFT: u32 = 56;
+
+/// The tag of a [`kinds_from_call`] word: bit 62 set, bit 63 clear, so it
+/// is neither an entry's `kinds` word nor a heap address.
+const KINDS_FROM_CALL_TAG: u64 = 1 << 62;
+
+/// A generic function value's captured word (`MakePolyFnCapture`) after
+/// its `kinds` word (#2506, #2621): set bit `to` of that word when the
+/// call's word has bit `from` and counts `n` type variables. The runtime
+/// (`machine::apply`) applies it and passes no word for it.
+pub const fn kinds_from_call(n: u32, to: u32, from: u32) -> u64 {
+    KINDS_FROM_CALL_TAG | (n as u64) << 12 | (to as u64) << 6 | from as u64
+}
+
+/// `(n, to, from)` of a [`kinds_from_call`] word.
+pub const fn kinds_from_call_parts(word: u64) -> Option<(u32, u32, u32)> {
+    if word & !0x3_FFFF != KINDS_FROM_CALL_TAG {
+        return None;
+    }
+    Some(((word >> 12) as u32 & 0x3F, (word >> 6) as u32 & 0x3F, word as u32 & 0x3F))
+}
 
 /// The tag of a product object: an enum object with no variant, which is
 /// how the runtime keeps a tuple (and `()`, its empty one). No enum has

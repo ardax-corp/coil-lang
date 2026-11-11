@@ -173,6 +173,7 @@ impl Checker {
             ident_binding_frames: HashMap::new(),
             static_decl_frames: HashMap::new(),
             node_ids_by_span: HashMap::new(),
+            rank_n_args: HashMap::new(),
             codegen_var_types: std::collections::HashMap::new(),
             polyfn_binding_spans: std::collections::HashSet::new(),
             codegen_var_types_scopes: Vec::new(),
@@ -1704,6 +1705,7 @@ impl Checker {
         self.codegen_types_by_span.clear();
         self.ident_binding_frames.clear();
         self.node_ids_by_span.clear();
+        self.rank_n_args.clear();
         self.codegen_var_types.clear();
         self.polyfn_binding_spans.clear();
         self.codegen_var_types_scopes.clear();
@@ -6106,6 +6108,12 @@ impl Checker {
         self.selected_overloads.insert(id, (range.start, range.end), triple);
     }
 
+    /// The `forall` parameter type a generic function's name at span
+    /// `start..end` is passed to (#2621).
+    pub fn rank_n_arg_at(&self, start: usize, end: usize) -> Option<Ty> {
+        self.rank_n_args.get(&(start, end)).map(|t| apply_ty_prune(&self.subst, t))
+    }
+
     /// Look up the inferred type of a node by [`NodeId`].
     pub fn lookup_at(&self, id: NodeId) -> Option<Ty> {
         self.cache.get(&id).map(|t| apply_ty_prune(&self.subst, t))
@@ -10172,6 +10180,13 @@ impl Checker {
                 return;
             }
         };
+        // A generic function's value: its calls through this parameter pass
+        // its `kinds` bits in this type's order (#2621).
+        if let Some(arg) = arg_expr.filter(|a| identifier_name(a).is_some()) {
+            for node in [arg, unwrap_expr_wrappers(arg)] {
+                self.rank_n_args.insert((node.0.start, node.0.end), expected.clone());
+            }
+        }
         // The argument's own type variables that the `forall` signature
         // grounds (`B` at `[int; 3]` in `forall T: Show. T -> [int; 3] -> int`)
         // are bound at the argument too, so the `PolyFn` value captures
