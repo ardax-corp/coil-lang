@@ -24,7 +24,7 @@ use std::sync::Arc;
 use compiler::native_mir::{
     AllocCall, BlockId, Label, MirAllocKind, alloc_call, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp,
     NativeBody, Terminator, ValueId, allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pair_words, pointer_words, scalar,
-    ty_of, root_handles, used_params, word_kind,
+    ty_of, root_handles, used_params, word_kind, in_range_steps,
 };
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::isa::CallConv;
@@ -1876,6 +1876,9 @@ struct Lower<'a> {
     /// Words of pairs that may carry an object ([`pair_words`]): rooted
     /// ambiguously.
     pair_words: Vec<ValueId>,
+    /// `int` steps a dominating compare keeps in range
+    /// ([`in_range_steps`]): a plain add, with no overflow check.
+    in_range: HashSet<ValueId>,
     /// The heap words the op being lowered hands the runtime. The runtime
     /// holds its own copy of them, and a word past its last use is in no
     /// stack map: rooted ambiguously, so the object stays where it is. A
@@ -2066,6 +2069,7 @@ impl<'a> Lower<'a> {
             root_handles: Vec::new(),
             keep_slot: None,
             pair_words: Vec::new(),
+            in_range: HashSet::new(),
             op_words: Vec::new(),
             calls_slot: None,
             defer,
@@ -2679,6 +2683,7 @@ impl<'a> Lower<'a> {
         self.ptr_words = pointer_words(f);
         self.root_handles = root_handles(f);
         self.pair_words = pair_words(f, &self.ptr_words);
+        self.in_range = in_range_steps(f);
         for blk in &f.blocks {
             for inst in &blk.insts {
                 let read: Vec<ValueId> = match inst {
@@ -2924,7 +2929,12 @@ impl<'a> Lower<'a> {
             MirInst::Bin { dest, op, ty, lhs, rhs } => {
                 let a = self.get(f, *lhs);
                 let c = self.get(f, *rhs);
-                let x = if *ty == MirTy::F64 { self.fbin(*op, a, c)? } else { self.ibin(*op, a, c)? };
+                let x = match op {
+                    MirBinOp::Add if *ty == MirTy::I64 && self.in_range.contains(dest) => self.b.ins().iadd(a, c),
+                    MirBinOp::Sub if *ty == MirTy::I64 && self.in_range.contains(dest) => self.b.ins().isub(a, c),
+                    _ if *ty == MirTy::F64 => self.fbin(*op, a, c)?,
+                    _ => self.ibin(*op, a, c)?,
+                };
                 self.set(f, *dest, x);
             }
             MirInst::Cmp { dest, op, ty, lhs, rhs } => {
