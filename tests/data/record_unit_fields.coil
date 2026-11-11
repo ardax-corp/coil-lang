@@ -1,0 +1,77 @@
+// A record field holding `()` or a value built over it (`[()]`, `Vec<()>`,
+// `Option<()>`) is stored as a tuple item holding it is (#2640); so is a
+// class field of `[(); 2]`.
+use tests::assert;
+
+fn unit_array() -> int {
+    let r = { m: [()], a: 2 };
+    return r.a + r.m.len();
+}
+
+fn unit_vec() -> int {
+    let v: Vec<()> = Vec::new();
+    v.push(());
+    v.push(());
+    let r = { m: v, a: 3 };
+    return r.a + r.m.len();
+}
+
+fn unit_option(bool some) -> bool {
+    let o: Option<()> = if some { Some(()) } else { None };
+    let r = { a: 1, o: o };
+    return r.o.is_some();
+}
+
+fn unit_field() -> int {
+    let r = { u: (), a: 4 };
+    let _ = r.u;
+    return r.a;
+}
+
+fn nested() -> int {
+    let r = { inner: { m: [(), ()], b: 5 }, a: 1 };
+    return r.a + r.inner.b + r.inner.m.len();
+}
+
+fn nested_array() -> int {
+    let r = { m: [[()], [()]], a: 1 };
+    return r.a + r.m[1].len();
+}
+
+class Units {
+    pub m: [(); 2],
+    pub a: int,
+}
+
+#[inline(never)]
+fn units() -> Units {
+    return new Units([(), ()], 6);
+}
+
+fn at_param<T>(T x) -> int {
+    let r = { z: x, m: [x], a: 2 };
+    return r.a + r.m.len();
+}
+
+test("a record field of `[()]` or `Vec<()>`") {
+    assert!(unit_array() == 3);
+    assert!(unit_vec() == 5);
+}
+
+test("a class field of `[(); 2]`") {
+    let u = units();
+    assert!(u.a + u.m.len() == 8);
+}
+
+test("a record field of `Option<()>` or `()`") {
+    assert!(unit_option(true));
+    assert!(!unit_option(false));
+    assert!(unit_field() == 4);
+}
+
+test("a nested record and a record over a type parameter at `()`") {
+    assert!(nested() == 8);
+    assert!(nested_array() == 2);
+    assert!(at_param(()) == 3);
+    assert!(at_param(7) == 3);
+}
