@@ -19104,6 +19104,34 @@ impl Checker {
         }
     }
 
+    /// Whether `ty` holds type variables, each one of the enclosing
+    /// bodies' type parameters (not a variable inference may still pin).
+    fn open_in_type_params(&self, ty: &Ty) -> bool {
+        let ty = apply_ty_prune(&self.subst, ty);
+        let vars = crate::typechecking::ty::ftv_ty(&ty);
+        !vars.is_empty()
+            && vars.iter().all(|v| {
+                self.type_params_in_scope
+                    .iter()
+                    .any(|frame| frame.values().any(|&p| apply_ty_prune(&self.subst, &Ty::Var(p)) == Ty::Var(*v)))
+            })
+    }
+
+    /// Discharge `Show<ty>` as a method call's goal is: the instance it
+    /// meets, whose context goals must hold in turn (a bound on each type
+    /// parameter, reported otherwise). False when no instance matches.
+    fn discharge_show_goal(&mut self, ty: &Ty, range: &Range<usize>) -> bool {
+        let lookup = nominal_enum(apply_ty_prune(&self.subst, ty));
+        match self.find_unique_instance("Show", std::slice::from_ref(&lookup), range) {
+            Ok(Some(instance)) => {
+                self.check_instance_context(&instance, range, 0);
+                true
+            }
+            Ok(None) => false,
+            Err(()) => true,
+        }
+    }
+
     /// Validate one format argument against its `%X` specifier.
     fn check_format_arg(
         &mut self,
@@ -19141,6 +19169,15 @@ impl Checker {
                 }
                 other => {
                     self.ensure_structural_instance("Show", std::slice::from_ref(other));
+                    // A shape open in the body's type parameters (`(T, int)`,
+                    // `Vec<T>`): the goal `Show<(T, int)>` its `.show()`
+                    // discharges, so both accept the same types (#2614). The
+                    // shape's open instance it meets is recorded, which gives a
+                    // per-type clone of the body the shape's ground instance
+                    // at its types (#2613).
+                    if self.open_in_type_params(other) && self.discharge_show_goal(other, arg_range) {
+                        return;
+                    }
                     if !self.is_showable_for_format(other) {
                         let mut msg = Message::error(
                             ErrorCode::FormatSpecifierMismatch,
