@@ -4542,6 +4542,9 @@ impl Lower<'_> {
         // A destructuring pattern reads its parts from each yielded tuple's
         // box (#2317).
         let (ty, item) = match pat {
+            // A `()` comes as the empty tuple object, which nothing binds
+            // (#2679).
+            HirPat::Bind(local) if self.unit_local(*local) => (MirTy::HeapRef, None),
             HirPat::Bind(local) => (self.local_ty(*local)?, None),
             HirPat::Tuple(_) => {
                 let item = match self.expr_ty(iterable).map(strip_readonly) {
@@ -4569,7 +4572,9 @@ impl Lower<'_> {
         self.jump(head)?;
         self.switch(head);
         let x = self.b.ins_resume_coro(h, None, ty).map_err(mir)?;
-        if let HirPat::Bind(local) = pat {
+        if let HirPat::Bind(local) = pat
+            && !self.unit_local(*local)
+        {
             self.bind(*local, x)?;
         }
         let done = self.b.ins_done_coro(h).map_err(mir)?;

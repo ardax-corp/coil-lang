@@ -946,17 +946,17 @@ impl Walk<'_> {
             }
             // `yield v` / `yield from h`: the operand, then `YieldCoro` /
             // `YieldFromCoro`; its value is the word the next resume sends.
+            // A `()` moves as the empty tuple object and receives nothing
+            // (#2679).
             HirKind::Yield { value, .. } => {
-                self.word(id)?;
-                self.word(*value)?;
-                self.value(*value)
+                self.read(id)?;
+                self.stored(*value)
             }
             // `resume h [with v]`: the sent value, the handle, `ResumeCoro`.
             HirKind::Resume { handle, value } => {
-                self.word(id)?;
+                self.read(id)?;
                 if let Some(v) = value {
-                    self.word(*v)?;
-                    self.value(*v)?;
+                    self.stored(*v)?;
                 }
                 self.word(*handle)?;
                 self.value(*handle)
@@ -1394,18 +1394,14 @@ impl Walk<'_> {
             // pushes a word, which is dropped.
             HirKind::Resume { handle, value } if is_unit_value(body, self.checker, id) => {
                 if let Some(v) = value {
-                    self.word(*v)?;
-                    self.value(*v)?;
+                    self.stored(*v)?;
                 }
                 self.word(*handle)?;
                 self.value(*handle)
             }
             // A statement `yield` leaves nothing: a send lands only where a
             // receiving `yield` takes it.
-            HirKind::Yield { value, .. } => {
-                self.word(*value)?;
-                self.value(*value)
-            }
+            HirKind::Yield { value, .. } => self.stored(*value),
             // A `()` statement (a unit `match` arm, a nested item) does nothing.
             _ if is_unit_make(body, id) || matches!(body.expr(id).kind, HirKind::Lit(Lit::Unit)) => Ok(()),
             // A bare value as a body's root: an anonymous `fn`'s `=> e`
