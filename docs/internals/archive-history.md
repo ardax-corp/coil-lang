@@ -69,6 +69,12 @@ major.
   replaces #2602's word `1`, `KINDS_FROM_CALL`). A shared generic entry
   takes at most 63 type parameters, so its `kinds` word has bit 63 set.
   `FORMAT` stays 16.
+- A call through a `PolyFn` passes its constraints' dictionaries in the
+  order of the type it sees (`kinds::value_constraint_order`), and a
+  `MakePolyFnCapture` dictionary word with bits 61 and 62 set, bit 63 clear
+  (`common::dict_from_call(j)`) is the call's dictionary `j` (#2636). A `0`
+  word still takes the call's dictionary at its own index. `FORMAT` stays
+  16.
 
 ## Major 7
 

@@ -17,7 +17,7 @@
 use super::*;
 use crate::mir::HirDictOp;
 use crate::typechecking::subst::apply_ty_prune;
-use crate::typechecking::ty::{strip_readonly, Scheme, TyVarId};
+use crate::typechecking::ty::{strip_readonly, Constraint, Scheme, TyVarId};
 
 /// The bits a `kinds` word carries past its mask.
 pub(crate) const SENTINEL: u64 = 0xC0DE_5A3C_A5C3_3C5A;
@@ -323,6 +323,46 @@ impl Compiler {
         Some(ops)
     }
 
+    /// For each constraint of generic function `name`, its value read at
+    /// type `ty`: the index of the dictionary a call through the value
+    /// passes for it, in [`value_constraint_order`] of the type the call
+    /// sees (the `forall` parameter `expected`, else the function's own),
+    /// when the constraint's types are open there (#2636). `None` for one
+    /// the value captures: ground, or over the making body's own variables.
+    pub(super) fn polyfn_call_dicts(&self, name: &str, ty: Option<&Ty>, expected: Option<&Ty>) -> Vec<Option<u32>> {
+        let Some(scheme) = self.checker.env().lookup(name) else {
+            return Vec::new();
+        };
+        let frame = self.hir_body_frame.as_ref().and_then(|f| f.kinds.as_ref());
+        let ty = ty.map(|t| apply_ty_prune(self.checker.subst(), t));
+        let (binders, body, constraints) = match expected.map(strip_readonly) {
+            Some(Ty::Forall { bounds, constraints, body }) => (bounds, body.as_ref(), constraints),
+            _ => (&scheme.bounds, &scheme.ty, &scheme.constraints),
+        };
+        let order = value_constraint_order(binders, body, constraints);
+        let (mut vars, mut seen) = (HashMap::new(), HashMap::new());
+        if let Some(t) = &ty {
+            Self::bind_scheme_vars(&scheme.ty, t, &mut vars);
+            Self::bind_scheme_vars(t, body, &mut seen);
+        }
+        scheme
+            .constraints
+            .iter()
+            .map(|c| {
+                let args: Vec<Ty> = c.args.iter().map(|a| a.subst_vars(&|v| vars.get(&v).cloned())).collect();
+                let mut free = Vec::new();
+                for a in &args {
+                    a.collect_vars(&mut free);
+                }
+                if free.is_empty() || free.iter().any(|u| frame.is_some_and(|f| f.bit(*u).is_some())) {
+                    return None;
+                }
+                let at: Vec<Ty> = args.iter().map(|a| a.subst_vars(&|v| seen.get(&v).cloned())).collect();
+                order.iter().position(|o| o.class == c.class && o.args == at).map(|j| j as u32)
+            })
+            .collect()
+    }
+
     /// [`Self::kinds_ops`] of call `id` in `hir` of `key`, its argument and
     /// result types read from the call.
     pub(super) fn hir_kinds_ops(&self, hir: &crate::hir::HirBody, id: crate::hir::HirId, key: &str, args: &[crate::hir::HirId]) -> Option<Vec<HirDictOp>> {
@@ -458,4 +498,23 @@ fn head_var(ty: &Ty) -> Option<TyVarId> {
         },
         _ => None,
     }
+}
+
+/// `constraints` of a function value's type `body` over `binders`, in the
+/// order a call through the value passes their dictionaries (#2636): by
+/// the places of their type variables in [`value_kinds_order`], then by
+/// class, so a type and one that renames it, whatever order either lists
+/// its constraints in, agree.
+pub(super) fn value_constraint_order(binders: &[TyVarId], body: &Ty, constraints: &[Constraint]) -> Vec<Constraint> {
+    let order = value_kinds_order(binders, body);
+    let mut sorted = constraints.to_vec();
+    sorted.sort_by_cached_key(|c| {
+        let mut vars = Vec::new();
+        for a in &c.args {
+            a.collect_vars(&mut vars);
+        }
+        let places: Vec<usize> = vars.iter().map(|v| order.iter().position(|o| o == v).unwrap_or(usize::MAX)).collect();
+        (places, c.class.clone())
+    });
+    sorted
 }

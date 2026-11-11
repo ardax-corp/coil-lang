@@ -517,7 +517,7 @@ impl Compiler {
                         let (name, ty) = (name.clone(), Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t)));
                         let steps = self.hir_mir_once(|this| {
                             let mut steps = Vec::new();
-                            this.plan_polyfn_escape_dicts(&mut steps, &name, ty.as_ref());
+                            this.plan_polyfn_escape_dicts(&mut steps, &name, ty.as_ref(), expected.as_ref());
                             steps
                         });
                         self.hir_mir_dict_program(&steps).map(|mut dicts| {
@@ -1472,12 +1472,16 @@ impl Compiler {
             return;
         };
         let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
-        // The call site's dictionaries, as emission pushes them.
+        // The call site's dictionaries, as emission pushes them, in the
+        // order of the value's type (#2636).
         let dicts = match &source {
             Some(source) => {
+                let Some(scheme) = self.checker.env().lookup(source).cloned() else {
+                    return;
+                };
                 let steps = self.hir_mir_once(|this| {
                     let mut steps = Vec::new();
-                    this.plan_call_site_dicts(&mut steps, source, &arg_tys, call_ty.as_ref());
+                    this.plan_value_call_dicts(&mut steps, (&scheme.bounds, &scheme.ty, &scheme.constraints), &arg_tys, call_ty.as_ref());
                     steps
                 });
                 let Some(dicts) = self.hir_mir_dict_program(&steps) else {
@@ -1488,10 +1492,10 @@ impl Compiler {
             // A `forall T: Show. …` parameter: its own constraints at the
             // call's types (#1188).
             None => match Self::hir_forall_param_ty(hir, &self.checker, f) {
-                Some(Ty::Forall { constraints, body, .. }) if !constraints.is_empty() => {
+                Some(Ty::Forall { bounds, constraints, body }) if !constraints.is_empty() => {
                     let steps = self.hir_mir_once(|this| {
                         let mut steps = Vec::new();
-                        this.plan_dicts_for_signature(&mut steps, &body, &constraints, &arg_tys, call_ty.as_ref());
+                        this.plan_value_call_dicts(&mut steps, (&bounds, &body, &constraints), &arg_tys, call_ty.as_ref());
                         steps
                     });
                     let Some(dicts) = self.hir_mir_dict_program(&steps) else {
@@ -1881,8 +1885,9 @@ impl Compiler {
             // A `PolyFn` value's escape dictionaries.
             HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
                 let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                let expected = self.checker.rank_n_arg_at(e.span.0, e.span.1);
                 self.hir_mir_probe_unplanned(|this, steps| {
-                    this.plan_polyfn_escape_dicts(steps, name, ty.as_ref());
+                    this.plan_polyfn_escape_dicts(steps, name, ty.as_ref(), expected.as_ref());
                 })
             }
             // A call through a `PolyFn` local: the call site's dictionaries
@@ -1893,8 +1898,11 @@ impl Compiler {
                 };
                 let arg_tys: Vec<Ty> = args.iter().filter_map(|&a| Self::hir_ty(hir, a)).map(|t| apply_ty_prune(self.checker.subst(), t)).collect();
                 let call_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                let Some(scheme) = self.checker.env().lookup(&source).cloned() else {
+                    return false;
+                };
                 self.hir_mir_probe_unplanned(|this, steps| {
-                    this.plan_call_site_dicts(steps, &source, &arg_tys, call_ty.as_ref());
+                    this.plan_value_call_dicts(steps, (&scheme.bounds, &scheme.ty, &scheme.constraints), &arg_tys, call_ty.as_ref());
                 })
             }
             HirKind::Call { args, .. } if !emit.plan.lens.contains_key(&id.0) && let Some(call) = emit.plan.calls.get(&id.0) => {

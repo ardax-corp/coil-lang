@@ -3536,6 +3536,21 @@ impl Compiler {
         self.plan_dicts_for_signature(out, &scheme.ty, &scheme.constraints, arg_tys, ret_ty)
     }
 
+    /// The dictionaries a call through a function value passes: its type
+    /// `fun_ty` over `binders` (a `forall` parameter's, or the generic
+    /// function's a local is bound from), its `constraints` in
+    /// [`kinds::value_constraint_order`] (#2636).
+    pub(super) fn plan_value_call_dicts(
+        &mut self,
+        out: &mut Vec<DictStep>,
+        (binders, fun_ty, constraints): (&[crate::typechecking::ty::TyVarId], &crate::typechecking::Ty, &[crate::typechecking::ty::Constraint]),
+        arg_tys: &[crate::typechecking::Ty],
+        ret_ty: Option<&crate::typechecking::Ty>,
+    ) -> usize {
+        let constraints = kinds::value_constraint_order(binders, fun_ty, constraints);
+        self.plan_dicts_for_signature(out, fun_ty, &constraints, arg_tys, ret_ty)
+    }
+
     /// The instance dictionaries for `constraints` at a call of a function
     /// typed `fun_ty` on `arg_tys` (and returning `ret_ty`): a generic's
     /// scheme, or a `forall T: Show. T -> string` parameter's body (#1188).
@@ -3678,6 +3693,8 @@ impl Compiler {
     /// generic function escapes into a `PolyFn` value.
     ///
     /// Slot fill order per constraint index:
+    /// 0. a constraint open where the value is read: the call's dictionary
+    ///    for it (`common::dict_from_call`, #2636)
     /// 1. in-scope `__dictN` (open bound forwarded from the enclosing frame)
     /// 2. concrete instance synthesis when constraint args are ground
     /// 3. null sentinel (`CONST 0` → `None` in `MakePolyFnCapture`) when
@@ -3690,11 +3707,13 @@ impl Compiler {
         out: &mut Vec<DictStep>,
         fn_name: &str,
         escape_ty: Option<&crate::typechecking::Ty>,
+        expected: Option<&crate::typechecking::Ty>,
     ) -> usize {
         let dict_arity = self.checker.dict_arity_for(fn_name);
         if dict_arity == 0 {
             return 0;
         }
+        let from_call = self.polyfn_call_dicts(fn_name, escape_ty, expected);
 
         let scheme = self.checker.env().lookup(fn_name).cloned();
         let mut var_to_ty: HashMap<crate::typechecking::ty::TyVarId, crate::typechecking::Ty> =
@@ -3706,6 +3725,10 @@ impl Compiler {
         }
 
         for dict_index in 0..dict_arity {
+            if let Some(&Some(j)) = from_call.get(dict_index) {
+                out.push(DictStep::Kinds(common::dict_from_call(j)));
+                continue;
+            }
             if let Some(slot) = self.frame_dict(dict_index) {
                 out.push(DictStep::Load(slot));
                 continue;
