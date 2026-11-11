@@ -5,16 +5,16 @@
 use tests::assert;
 
 trait Name<T> {
-    fn name(T x) -> string;
+    fn name(T x) -> string {}
 }
 
 trait Tag<T> {
-    fn tag(T x) -> string;
+    fn tag(T x) -> string {}
 }
 
 // A trait with a superclass.
 trait Loud<T: Name> {
-    fn loud(T x) -> string;
+    fn loud(T x) -> string {}
 }
 
 impl Name for int {
