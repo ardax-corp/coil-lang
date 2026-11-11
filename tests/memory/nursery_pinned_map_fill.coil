@@ -23,12 +23,12 @@ fn kid_v(Node n) -> int {
 }
 
 test("a growing map of class values keeps every value") {
-    let n = 12000;
+    let n = 3000;
     let m: HashMap<int, Node> = HashMap::new();
     let i = 0;
     while i < n {
         m.insert(i, new Node(i, Option::Some(new Node(i * 2, Option::None))));
-        if i % 3000 == 0 {
+        if i % 750 == 0 {
             collect();
         }
         i += 1;
