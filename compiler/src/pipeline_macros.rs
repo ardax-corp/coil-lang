@@ -328,9 +328,11 @@ impl Pipeline {
         // Calls in expression / statement position are replaced in one walk
         // per file once every output is parsed.
         let mut replacements: HashMap<PathBuf, CallReplacements> = HashMap::new();
+        // A file's derive outputs go in together, before its other splices.
+        let mut derives: HashMap<PathBuf, Vec<StagedDerive>> = HashMap::new();
         for (job, result) in jobs.iter().zip(results) {
             let msgs = match result {
-                Ok(text) => self.splice(job, &text, &mut replacements),
+                Ok(text) => self.splice(job, &text, &mut replacements, &mut derives),
                 Err(err) => {
                     let err = match &job.block {
                         Some(block) => self.block_positions(&job.file, block, &err),
@@ -346,6 +348,10 @@ impl Pipeline {
             if let Some(cached) = self.ast_cache.get_mut(&job.file) {
                 cached.push_expand_messages(msgs);
             }
+        }
+        let staged: Vec<PathBuf> = derives.keys().cloned().collect();
+        for file in staged {
+            self.flush_derives(&file, &mut derives);
         }
         for (file, mut calls) in replacements {
             if let Some(ast) = self.ast_cache.get_mut(&file).and_then(|c| c.ast_mut()) {
@@ -1278,14 +1284,25 @@ impl Pipeline {
     }
 
     /// Parse one macro's output and put it into the file's AST (a call in
-    /// expression or statement position: into `replacements`).
-    fn splice(&mut self, job: &Job, text: &str, replacements: &mut HashMap<PathBuf, CallReplacements>) -> Vec<Message> {
+    /// expression or statement position: into `replacements`; a derive's
+    /// items: into `derives`, which go in before the file's next other
+    /// splice, [`Self::flush_derives`]).
+    fn splice(
+        &mut self,
+        job: &Job,
+        text: &str,
+        replacements: &mut HashMap<PathBuf, CallReplacements>,
+        derives: &mut HashMap<PathBuf, Vec<StagedDerive>>,
+    ) -> Vec<Message> {
         if matches!(job.pending.position, CallPosition::Expr | CallPosition::Stmt) {
             return self.splice_call(job, text, replacements);
         }
         let mut messages = Vec::new();
         let module = self.namespace_for(&job.file);
         let is_method = job.pending.owner.is_some();
+        if is_method || job.decl.kind != MacroKind::Derive {
+            self.flush_derives(&job.file, derives);
+        }
         let snippet = if is_method {
             format!("impl __coil_owner {{\n{text}\n}}")
         } else {
@@ -1361,25 +1378,12 @@ impl Pipeline {
                 }
             }
             (None, MacroKind::Derive) => {
-                let Some(at) = children.iter().position(|c| c.0 == job.pending.target) else {
-                    return messages;
-                };
-                let type_name = decl_name(&children[at]).map(str::to_string);
-                if let Some(type_name) = &type_name {
-                    drop_default_display_impls(children, type_name, &items);
-                }
-                let at = children
-                    .iter()
-                    .position(|c| c.0 == job.pending.target)
-                    .expect("target still present");
-                // After this type's earlier derive outputs, so impls keep
-                // the order the derives are listed in.
-                let done = self.derived_items.entry((job.file.clone(), job.pending.target)).or_insert(0);
-                let start = at + 1 + *done;
-                *done += items.len();
-                for (k, item) in items.into_iter().enumerate() {
-                    children.insert(start + k, item);
-                }
+                let shows = impl_heads(&items).into_iter().filter(|(class, _)| class == "Show").map(|(_, head)| head).collect();
+                derives.entry(job.file.clone()).or_default().push(StagedDerive {
+                    target: job.pending.target,
+                    items,
+                    shows,
+                });
             }
             (None, MacroKind::Function) => {
                 // `name!(…);` at the top level: its items replace the statement.
@@ -1415,6 +1419,18 @@ impl Pipeline {
             }
         }
         messages
+    }
+
+    /// Put the derive outputs staged for `file` into its items
+    /// ([`splice_derives`]).
+    fn flush_derives(&mut self, file: &Path, derives: &mut HashMap<PathBuf, Vec<StagedDerive>>) {
+        let Some(staged) = derives.remove(file).filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let Some(Expression::Program(children)) = self.ast_cache.get_mut(file).and_then(|c| c.ast_mut()).map(|ast| ast.1.as_mut()) else {
+            return;
+        };
+        splice_derives(children, staged, file, &mut self.derived_items);
     }
 
     /// Splice a call's output in expression or statement position. The
@@ -1909,15 +1925,115 @@ fn is_default_display_impl(node: &Output<'_>, type_name: &str) -> bool {
     }
 }
 
-/// A derive that writes `impl Show for T` replaces the compiler's type-name
-/// default for `T`.
-fn drop_default_display_impls(children: &mut Vec<Output<'_>>, type_name: &str, generated: &[Output<'_>]) {
-    // A default is a `Show` impl: only a generated `Show` for the type
-    // replaces it, and most derives write none.
-    if !impl_heads(generated).iter().any(|(class, head)| class == "Show" && head == type_name) {
+/// The type a compiler-made type-name `impl Show` is for
+/// ([`is_default_display_impl`]).
+fn default_display_type(node: &Output<'_>) -> Option<String> {
+    match node.1.as_ref() {
+        Expression::TypeClassImpl { class, args, .. } if is_synthetic(node.0) && *class == "Show" => args.first().map(|a| match a.1.as_ref() {
+            Expression::Type(name) => name.to_string(),
+            head => head.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// One derive's output for a file, staged until it goes into the file's
+/// items ([`splice_derives`]).
+struct StagedDerive {
+    /// The derived type's node.
+    target: parser::SimpleSpan,
+    items: Vec<Output<'static>>,
+    /// The types its `impl Show for T` items are for.
+    shows: Vec<String>,
+}
+
+/// Put a file's staged derive outputs into its items, in staging order:
+/// each derive's items after its type and that type's earlier derive
+/// outputs (`derived`, by file and type), so impls keep the order the
+/// derives are listed in. A derive that writes `impl Show for T` replaces
+/// the compiler's type-name default for `T`. In one pass over the items
+/// when that gives what splicing them one at a time gives, which is when
+/// no default it drops and no other type sits among a type's earlier
+/// outputs; else one at a time (#2690).
+fn splice_derives(children: &mut Vec<Output<'static>>, staged: Vec<StagedDerive>, file: &Path, derived: &mut HashMap<(PathBuf, parser::SimpleSpan), usize>) {
+    let n = children.len();
+    let mut index: HashMap<parser::SimpleSpan, usize> = HashMap::with_capacity(n);
+    for (i, c) in children.iter().enumerate() {
+        index.entry(c.0).or_insert(i);
+    }
+    // Each target's place, and where its outputs go: after its earlier ones.
+    let mut at: HashMap<parser::SimpleSpan, (usize, usize)> = HashMap::new();
+    let mut earlier = vec![false; n];
+    let mut dropped: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut whole = true;
+    for job in &staged {
+        let Some(&pos) = index.get(&job.target) else {
+            continue;
+        };
+        if let Some(name) = decl_name(&children[pos])
+            && job.shows.iter().any(|s| s == name)
+        {
+            dropped.insert(name.to_string());
+        }
+        if let std::collections::hash_map::Entry::Vacant(slot) = at.entry(job.target) {
+            let ins = pos + 1 + derived.get(&(file.to_path_buf(), job.target)).copied().unwrap_or(0);
+            whole &= ins <= n;
+            earlier[pos + 1..ins.min(n)].iter_mut().for_each(|e| *e = true);
+            slot.insert((pos, ins));
+        }
+    }
+    let mut places = std::collections::HashSet::new();
+    whole &= at.values().all(|&(pos, ins)| !earlier[pos] && places.insert(ins));
+    let drop: Vec<bool> = children.iter().map(|c| default_display_type(c).is_some_and(|t| dropped.contains(&t))).collect();
+    whole &= drop.iter().zip(&earlier).all(|(d, e)| !(*d && *e));
+    whole &= !staged.iter().flat_map(|j| &j.items).any(|i| default_display_type(i).is_some_and(|t| dropped.contains(&t)));
+    if !whole {
+        for job in staged {
+            splice_derive(children, job, file, derived);
+        }
         return;
     }
-    children.retain(|c| !is_default_display_impl(c, type_name));
+    let mut groups: HashMap<usize, Vec<Output<'static>>> = HashMap::new();
+    let mut added = 0;
+    for job in staged {
+        let Some(&(_, ins)) = at.get(&job.target) else {
+            continue;
+        };
+        *derived.entry((file.to_path_buf(), job.target)).or_insert(0) += job.items.len();
+        added += job.items.len();
+        groups.entry(ins).or_default().extend(job.items);
+    }
+    let old = std::mem::replace(children, Vec::with_capacity(n + added));
+    for (i, (c, d)) in old.into_iter().zip(drop).enumerate() {
+        if let Some(g) = groups.remove(&i) {
+            children.extend(g);
+        }
+        if !d {
+            children.push(c);
+        }
+    }
+    if let Some(g) = groups.remove(&n) {
+        children.extend(g);
+    }
+}
+
+/// [`splice_derives`] for one derive.
+fn splice_derive(children: &mut Vec<Output<'static>>, job: StagedDerive, file: &Path, derived: &mut HashMap<(PathBuf, parser::SimpleSpan), usize>) {
+    let Some(at) = children.iter().position(|c| c.0 == job.target) else {
+        return;
+    };
+    if let Some(type_name) = decl_name(&children[at]).map(str::to_string)
+        && job.shows.contains(&type_name)
+    {
+        children.retain(|c| !is_default_display_impl(c, &type_name));
+    }
+    let at = children.iter().position(|c| c.0 == job.target).expect("target still present");
+    let done = derived.entry((file.to_path_buf(), job.target)).or_insert(0);
+    let start = at + 1 + *done;
+    *done += job.items.len();
+    for (k, item) in job.items.into_iter().enumerate() {
+        children.insert(start + k, item);
+    }
 }
 
 /// Per derived type: helpers its derives own, attributes its members use, site.
