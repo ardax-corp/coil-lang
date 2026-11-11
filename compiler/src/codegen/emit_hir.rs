@@ -1508,6 +1508,8 @@ impl Compiler {
         // made again with less in it ([`HirPasses`]), each time counted.
         let ground_was = self.hir_ground_splice.replace(false);
         let mut rewrite = None;
+        // The body other modules splice, when it is not the one compiled.
+        let mut kept: Option<Option<HirBody>> = None;
         if let Ok(emit) = &base {
             // Each step starts with the clone budget as the base plan left
             // it: what a rewrite that is thrown away planned takes no room.
@@ -1515,10 +1517,18 @@ impl Compiler {
             let mut level = Some(HirPasses::Once);
             while let Some(passes) = level {
                 self.hir_ground_splice.set(false);
+                self.hir_kept_offered.set(false);
                 self.planned_method_clones.borrow_mut().clone_from(&room);
                 match self.hir_rewrite(&module, hir, emit, passes) {
                     Ok(done) => {
                         rewrite = done;
+                        // A clone that splices kept bodies of the clones it
+                        // calls keeps one rewritten without them: a caller
+                        // weighs it alone and splices its callees itself,
+                        // as when it compiled before them (#2219, #2248).
+                        if self.compiling_mono_clone && self.hir_kept_offered.get() {
+                            kept = Some(self.hir_kept_rewrite(&module, hir, emit, passes, &room));
+                        }
                         break;
                     }
                     Err(failed) => {
@@ -1568,7 +1578,10 @@ impl Compiler {
         if self.compiling_mono_clone
             && let Ok((emit, before)) = &plan
             && let Some(key) = self.current_function_table_key.clone()
-            && let Some(body) = self.hir_resolved_clone_body(hir, before.as_ref().unwrap_or(emit))
+            && let Some(body) = match kept {
+                Some(kept) => kept,
+                None => self.hir_resolved_clone_body(hir, before.as_ref().unwrap_or(emit)),
+            }
         {
             self.note_splice_file(&key);
             self.hir_resolved_clones.insert(key, body);
@@ -2211,7 +2224,8 @@ impl Compiler {
                 resolved = None;
             }
         }
-        let frees = passes.frees() && self.opt_options.early_free && quiet;
+        // A body kept for splicing is the one before its frees.
+        let frees = passes.frees() && self.opt_options.early_free && quiet && !self.hir_kept_splice_off.get();
         if body.is_none() && !frees {
             return Ok(None);
         }
@@ -2273,6 +2287,43 @@ impl Compiler {
             .and_then(|mut emit| self.plan_hir_lambdas(module, last, &mut emit).map(|()| emit))
             .map_err(|why| fail(why, freed.is_some()))?;
         Ok(Some(HirRewrite { body, freed, emit, before, spliced }))
+    }
+
+    /// [`Self::hir_rewrite`] of clone `hir` for other modules to splice
+    /// ([`Self::hir_resolved_clones`]), from the clone budget `room` the
+    /// base plan left: with no kept body spliced into it and no frees.
+    /// `hir` as `base` planned it when that rewrite does not plan. The
+    /// clones and helpers it calls are made, as the compiled body's are.
+    fn hir_kept_rewrite(
+        &mut self,
+        module: &crate::hir::HirModule,
+        hir: &HirBody,
+        base: &HirEmit,
+        passes: HirPasses,
+        room: &HashSet<(String, Vec<Ty>)>,
+    ) -> Option<HirBody> {
+        use crate::hir::Callee;
+        let held = self.planned_method_clones.replace(room.clone());
+        let ground = self.hir_ground_splice.replace(false);
+        self.hir_kept_splice_off.set(true);
+        let alone = self.hir_rewrite(module, hir, base, passes);
+        self.hir_kept_splice_off.set(false);
+        self.hir_ground_splice.set(ground);
+        let planned = self.planned_method_clones.replace(held);
+        let kept = match alone {
+            Ok(Some(HirRewrite { body: Some(body), emit, .. })) => {
+                self.planned_method_clones.borrow_mut().extend(planned);
+                self.queue_outlined(&body);
+                self.hir_resolved_clone_body(&body, &emit)
+            }
+            _ => self.hir_resolved_clone_body(hir, base),
+        }?;
+        for e in &kept.exprs {
+            if let HirKind::Call { callee: Callee::Resolved(r), .. } = &e.kind {
+                self.hir_request_method_clone(&r.key);
+            }
+        }
+        Some(kept)
     }
 
     /// Resolve or plan a rewritten body with the clone budget free of what
@@ -2519,7 +2570,9 @@ impl Compiler {
             // A method or mono clone kept with its calls resolved
             // ([`Self::hir_resolved_clone_body`]), from any module: its
             // nodes take the call's span, under the cross-module budget.
+            // A body kept for splicing splices none ([`Self::hir_kept_splice_off`]).
             if self.inline_cost.inline_across_modules
+                && !self.hir_kept_splice_off.get()
                 && let Some(callee) = self.hir_resolved_clones.get(&call.key)
             {
                 let HirKind::Call { args, .. } = &hir.expr(id).kind else {
@@ -2553,6 +2606,7 @@ impl Compiler {
                 }
                 let (callee, shape) = fit(id, callee, true, true)?;
                 let shape = shape.with_foreign(true).with_file(self.hir_splice_files.get(&call.key).copied()).with_frame(&call.key);
+                self.hir_kept_offered.set(true);
                 return Ok((callee, shape));
             }
             let core = core_insts.get(&id.0);
@@ -2859,7 +2913,9 @@ impl Compiler {
             }
             found
         };
-        for (span, name, reason) in refused_inline.into_inner() {
+        // The body kept for splicing reports nothing the compiled one does not.
+        let refused = if self.hir_kept_splice_off.get() { Vec::new() } else { refused_inline.into_inner() };
+        for (span, name, reason) in refused {
             self.note_inline_refused(span, name, reason);
         }
         match found? {
