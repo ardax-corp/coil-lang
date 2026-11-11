@@ -924,10 +924,7 @@ impl Compiler {
             l.ty = close(&l.ty)?;
         }
         out.ret = close(&out.ret)?;
-        let out = match inline::inlinable(&out, usize::MAX) {
-            Err("return") => inline::single_exit(&out)?,
-            _ => out,
-        };
+        let out = inline::one_exit(out)?;
         Some(out)
     }
 
@@ -1041,10 +1038,7 @@ impl Compiler {
             o.ty = ty(&l.ty);
         }
         out.ret = ty(&body.ret);
-        let out = match inline::inlinable(&out, usize::MAX) {
-            Err("return") => inline::single_exit(&out)?,
-            _ => out,
-        };
+        let out = inline::one_exit(out)?;
         let key = match self.checker.overload_decl_at(body.span.0, body.span.1) {
             Some((id, fixed, rest)) if self.checker.is_overloaded(&body.name) => overload_fn_key(&body.name, fixed, rest, id),
             _ => body.name.clone(),
