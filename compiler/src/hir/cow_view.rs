@@ -8,8 +8,21 @@
 //! the path unique once per loop entry, and the loop writes the view in
 //! place.
 //!
+//! The view adds no copy: a write through the path runs on every
+//! iteration that completes, so the first one would have made the path
+//! unique where the view does, and the view sits behind the loop's own
+//! first test (`if test { let v = mut path; while test { … } }`, a range
+//! `for`'s bounds), so a loop that runs no iteration makes nothing unique.
+//!
 //! The path `r.s1…sk` qualifies in loop `L` when:
 //!
+//! - `L` is a `while` loop whose test, or a range `for` whose bounds, read
+//!   only locals, literals, fields, elements, operators and `len()`, so
+//!   evaluating them once more ahead of `L` changes nothing;
+//! - a write through the path runs on every iteration that completes: not
+//!   under a branch, a `match` arm, the right of `&&` / `||` or a nested
+//!   loop, and after nothing that may `break`, `continue` or `return`
+//!   (`?` included);
 //! - its root `r` and every index in it are locals `L` does not assign and
 //!   nothing captures (or literals);
 //! - no write in `L` changes an object above the path's last one (other
@@ -32,8 +45,8 @@
 
 use std::collections::HashSet;
 
-use super::{borrow_field, cow_ty, host_short, named_value, owned, pack_site, Before, CallLookup, Facts, Plan, Write};
-use crate::hir::{Callee, HirBody, HirId, HirKind, HirLocal, IndexKind, Lit, LocalId, LocalKind};
+use super::{borrow_field, cow_ty, host_short, named_value, owned, pack_site, CallLookup, Facts, Plan, Write};
+use crate::hir::{BinOp, Callee, HirBody, HirId, HirKind, HirLocal, IndexKind, Lit, LocalId, LocalKind, MakeKind};
 use crate::typechecking::infer::Checker;
 use crate::typechecking::ty::{self as ty, strip_readonly, Ty};
 use common::EffectFlags;
@@ -139,6 +152,15 @@ struct View {
     root: LocalId,
     steps: Vec<Step>,
     node: HirId,
+    guard: Guard,
+}
+
+/// What decides whether a loop runs its first iteration: a `while`
+/// loop's test, or a range `for`'s bounds.
+#[derive(Clone, Copy)]
+enum Guard {
+    Test(HirId),
+    Range { start: HirId, end: HirId, inclusive: bool },
 }
 
 /// One round: the body with a view bound before each outermost loop that
@@ -166,9 +188,16 @@ pub(super) fn round(checker: &Checker, body: &HirBody, f: &Facts<'_>, plan: &Pla
         return None;
     }
     let mut out = body.clone();
-    let mut before = Before::default();
     for v in &views {
         let init = super::dup(&mut out, v.node);
+        let guard = match v.guard {
+            Guard::Test(cond) => copy(&mut out, cond),
+            Guard::Range { start, end, inclusive } => {
+                let (lhs, rhs) = (copy(&mut out, start), copy(&mut out, end));
+                let op = if inclusive { BinOp::Le } else { BinOp::Lt };
+                out.push_new(HirKind::Bin { op, lhs, rhs }, Some(ty::boolean()), body.expr(v.lp).span)
+            }
+        };
         let e = body.expr(v.node);
         let (ty, span) = (e.ty.clone(), e.span);
         let local = LocalId(out.locals.len() as u32);
@@ -185,11 +214,35 @@ pub(super) fn round(checker: &Checker, body: &HirBody, f: &Facts<'_>, plan: &Pla
             x.node = None;
             x.flags = Default::default();
         }
+        // `if guard { let view = mut path; loop }`: a loop that runs no
+        // iteration makes nothing unique, as before.
         let stmt = out.push_new(HirKind::Let { local, init: Some(init) }, Some(ty::unit()), span);
-        before.add(f.statement_of(v.lp), stmt);
+        let lp = super::relocate(&mut out, v.lp);
+        let lp_span = out.expr(lp).span;
+        let then = out.push_new(HirKind::Block { stmts: vec![stmt, lp], tail: None }, Some(ty::unit()), lp_span);
+        let x = &mut out.exprs[v.lp.0 as usize];
+        x.kind = HirKind::If { cond: guard, then, els: None };
+        x.ty = Some(ty::unit());
+        x.node = None;
+        x.flags = Default::default();
     }
-    before.apply(&mut out);
     Some(out)
+}
+
+/// A copy of [`Cx::pure`] code `id` with new nodes.
+fn copy(out: &mut HirBody, id: HirId) -> HirId {
+    let mut e = out.expr(id).clone();
+    e.kind = match e.kind {
+        HirKind::Field { base, name } => HirKind::Field { base: copy(out, base), name },
+        HirKind::Index { base, index, kind } => HirKind::Index { base: copy(out, base), index: copy(out, index), kind },
+        HirKind::Bin { op, lhs, rhs } => HirKind::Bin { op, lhs: copy(out, lhs), rhs: copy(out, rhs) },
+        HirKind::Logic { and, lhs, rhs } => HirKind::Logic { and, lhs: copy(out, lhs), rhs: copy(out, rhs) },
+        HirKind::Un { op, operand } => HirKind::Un { op, operand: copy(out, operand) },
+        HirKind::Cast { value } => HirKind::Cast { value: copy(out, value) },
+        HirKind::Call { callee, args } => HirKind::Call { callee, args: args.into_iter().map(|a| copy(out, a)).collect() },
+        k => k,
+    };
+    out.push(e)
 }
 
 /// Whether `plan` shares a view this module bound (a local past the
@@ -227,6 +280,7 @@ impl Cx<'_, '_> {
         if body.any(lp, &|id| matches!(body.expr(id).kind, HirKind::Yield { .. } | HirKind::Resume { .. } | HirKind::Lambda { .. } | HirKind::Defer { .. })) {
             return None;
         }
+        let guard = self.guard(lp)?;
         let writes: Vec<Write> = f.writes.iter().filter(|w| f.contains(lp, w.at)).copied().collect();
         for w in &writes {
             let p = place(body, w.path);
@@ -245,7 +299,7 @@ impl Cx<'_, '_> {
                     continue;
                 }
                 if self.fits(lp, r, steps, &writes) {
-                    return Some(View { lp, root: r, steps: steps.to_vec(), node });
+                    return Some(View { lp, root: r, steps: steps.to_vec(), node, guard });
                 }
             }
         }
@@ -256,6 +310,15 @@ impl Cx<'_, '_> {
         let (body, f) = (self.body, self.f);
         let k = steps.len();
         if !self.steady(lp, r) || steps.iter().any(|s| matches!(s, Step::Elem(Some(Key::Local(i))) if !self.steady(lp, *i))) {
+            return false;
+        }
+        // The loop makes the path unique on every iteration it completes,
+        // so the view copies only what the first iteration would.
+        let through = |w: &&Write| {
+            let p = place(body, w.path);
+            matches!(body.expr(p.root).kind, HirKind::Local(x) if x == r) && p.steps.len() >= k && p.steps[..k] == *steps
+        };
+        if !writes.iter().filter(through).any(|w| self.every_iteration(lp, w.at)) {
             return false;
         }
         let foreign = self.foreign(r);
@@ -459,6 +522,92 @@ impl Cx<'_, '_> {
             return common::HOST_NATIVES.iter().find(|n| n.name == short).is_some_and(|n| !switches(n.effects));
         }
         summary.is_some_and(|s| !s.statics && !switches(s.flags))
+    }
+
+    /// Whether `at` runs on every iteration of `lp` that completes: not
+    /// under a branch, a `match` arm, the right of `&&` / `||` or a nested
+    /// loop, and nothing that runs before it in the iteration may leave it.
+    /// A `while` loop's body is the `then` of a test whose `else` is
+    /// `break`.
+    fn every_iteration(&self, lp: HirId, at: HirId) -> bool {
+        let (body, f) = (self.body, self.f);
+        let mut child = at;
+        while let Some(&p) = f.parent.get(&child) {
+            if p == lp {
+                return true;
+            }
+            let on_path = match &body.expr(p).kind {
+                HirKind::If { cond, then, els } => {
+                    *cond == child || *then == child && els.is_some_and(|e| matches!(body.expr(e).kind, HirKind::Break))
+                }
+                HirKind::Match { scrutinee, .. } => *scrutinee == child,
+                HirKind::Logic { lhs, .. } => *lhs == child,
+                HirKind::ForIn { iterable, .. } => *iterable == child,
+                HirKind::Loop { .. } | HirKind::Defer { .. } => false,
+                _ => true,
+            };
+            if !on_path || body.children(p).take_while(|&c| c != child).any(|c| self.exits(c)) {
+                return false;
+            }
+            child = p;
+        }
+        false
+    }
+
+    /// Whether `n` may leave the iteration it runs in: a `return`, or a
+    /// `break` / `continue` of no loop inside `n`.
+    fn exits(&self, n: HirId) -> bool {
+        let body = self.body;
+        let mut work = vec![(n, false)];
+        while let Some((at, inner)) = work.pop() {
+            let kind = &body.expr(at).kind;
+            if matches!(kind, HirKind::Return(_)) || !inner && matches!(kind, HirKind::Break | HirKind::Continue) {
+                return true;
+            }
+            let inner = inner || matches!(kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
+            work.extend(body.children(at).map(|c| (c, inner)));
+        }
+        false
+    }
+
+    /// The test that decides `lp`'s first iteration, when evaluating it
+    /// once more ahead of the loop changes nothing: a `while` test or a
+    /// range's bounds made of locals, literals, fields, elements,
+    /// operators and `len()`.
+    fn guard(&self, lp: HirId) -> Option<Guard> {
+        let body = self.body;
+        match &body.expr(lp).kind {
+            HirKind::Loop { body: b } => {
+                let HirKind::Block { stmts, tail } = &body.expr(*b).kind else { return None };
+                let first = stmts.first().copied().or(*tail)?;
+                let HirKind::If { cond, els: Some(e), .. } = &body.expr(first).kind else { return None };
+                (matches!(body.expr(*e).kind, HirKind::Break) && self.pure(*cond)).then_some(Guard::Test(*cond))
+            }
+            HirKind::ForIn { iterable, .. } => match &body.expr(*iterable).kind {
+                HirKind::Make { kind: MakeKind::Range { inclusive }, args } if args.len() == 2 && args.iter().all(|&a| self.pure(a)) => {
+                    Some(Guard::Range { start: args[0], end: args[1], inclusive: *inclusive })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether `n` reads only and runs no code: [`Self::guard`]'s parts.
+    fn pure(&self, n: HirId) -> bool {
+        let body = self.body;
+        match &body.expr(n).kind {
+            HirKind::Local(_) | HirKind::Lit(_) => true,
+            HirKind::Field { base: x, .. } | HirKind::Un { operand: x, .. } | HirKind::Cast { value: x } => self.pure(*x),
+            HirKind::Index { base, index, kind: IndexKind::Array } => self.pure(*base) && self.pure(*index),
+            HirKind::Bin { op, lhs, rhs } => !matches!(op, BinOp::Overloaded(_) | BinOp::StrConcat) && self.pure(*lhs) && self.pure(*rhs),
+            HirKind::Logic { lhs, rhs, .. } => self.pure(*lhs) && self.pure(*rhs),
+            HirKind::Call { callee: Callee::Method { name }, args } if name == "len" && args.len() == 1 => {
+                let ty = body.expr(args[0]).ty.as_ref();
+                (super::is_vec(ty) || matches!(ty.map(strip_readonly), Some(Ty::Array { .. }))) && self.pure(args[0])
+            }
+            _ => false,
+        }
     }
 
     /// Whether `lp`'s entry reads the place `r.need` before it runs

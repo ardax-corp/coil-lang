@@ -281,3 +281,52 @@ test("a generic body writes a nested path in a loop") {
         inner == Vec::from([1]),
     );
 }
+
+class Cells {
+    pub cells: Vec<int>,
+}
+
+class Table {
+    pub rows: Vec<Cells>,
+}
+
+fn clamp(Table g) -> Table {
+    for i in 0..g.rows.len() {
+        for j in 0..g.rows[i].cells.len() {
+            if g.rows[i].cells[j] < 0 {
+                g.rows[i].cells[j] = 0;
+            }
+        }
+    }
+    return g;
+}
+
+fn clear_none(Table g) -> Table {
+    for i in 0..g.rows.len() {
+        for j in 0..g.rows[i].cells.len() - 3 {
+            g.rows[i].cells[j] = 0;
+        }
+    }
+    return g;
+}
+
+test("a loop whose write runs on some iterations or none keeps both values") {
+    let g = new Table(
+        Vec::from([new Cells(Vec::from([1, -2, 3])), new Cells(Vec::from([4, 5, 6]))]),
+    );
+    let held = g;
+    let k = 0;
+    while k < 3 {
+        // `clamp` writes its parameter: the caller's `g` (not `held`).
+        let h = clamp(g);
+        assert!(h.rows[0].cells == Vec::from([1, 0, 3]) && h.rows[1].cells == Vec::from([4, 5, 6]));
+        assert!(
+            g.rows[0].cells == Vec::from([1, 0, 3]) && held.rows[0].cells == Vec::from([1, -2, 3]),
+        );
+        let e = clear_none(g);
+        assert!(e.rows[1].cells == Vec::from([4, 5, 6]) && g.rows[1].cells == Vec::from([4, 5, 6]));
+        k = k + 1;
+    }
+    let solo = clamp(new Table(Vec::from([new Cells(Vec::from([-1]))])));
+    assert!(solo.rows[0].cells == Vec::from([0]));
+}

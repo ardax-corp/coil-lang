@@ -157,16 +157,20 @@ struct Facts<'b> {
     borrow_args: HashSet<HirId>,
 }
 
+/// What a call in a body may do: [`CallLookup`] for the body given.
+pub(super) type BodyLookup<'c> = dyn Fn(&HirBody, &Callee, &[HirId]) -> Option<Summary> + 'c;
+
 /// The body with its copy-on-write ops, when it needs any, and warnings
 /// for writes that copy or are dropped.
-pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, mutates: u64) -> (Option<HirBody>, Vec<Message>) {
+pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &BodyLookup<'_>, mutates: u64) -> (Option<HirBody>, Vec<Message>) {
     if body.root.is_none() {
         return (None, Vec::new());
     }
     let analyse = |b: &HirBody| {
-        let facts = Facts::new(checker, module, b, lookup, b.root.expect("a body with a root"));
+        let lookup = |callee: &Callee, args: &[HirId]| lookup(b, callee, args);
+        let facts = Facts::new(checker, module, b, &lookup, b.root.expect("a body with a root"));
         let plan = Plan::new(checker, b, &facts, mutates);
-        let next = view::round(checker, b, &facts, &plan, lookup);
+        let next = view::round(checker, b, &facts, &plan, &lookup);
         (plan, next)
     };
     let (mut plan, mut next) = analyse(body);

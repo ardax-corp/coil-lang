@@ -152,15 +152,31 @@ does not own (a parameter, which may be a `static` in the caller) meets
 only calls that touch no `static` and switch no task. Evaluating the path
 early must not fail where the loop would not: its last index step is read
 first on entry (the `while` test, the `for` iterable), after nothing but
-locals and literals. The path is then made unique once per loop entry,
-even when the loop runs no write. A round views the outermost loops; the
-next round sees the inner loops with the views as roots, so the issue's
-pass makes `f.blocks` unique once per call and `blocks[b].insts` once per
-block. The rewrite runs again on the viewed body and keeps a view only if
-that draws no new diagnostic (E0149 checks it as a written borrow) and
-shares no view. Tests: `tests/memory/cow_loop_path_writes.coil` (values),
-`hir/cow_view.tests.rs` (which loops get one). Bench:
-`examples/perf/cow_nested_path_loop.coil`.
+locals and literals.
+
+A view makes no copy the loop would not: a write through the path must run
+on every iteration that completes (not under an `if`, a `match` arm, the
+right of `&&` / `||`, `?` or a nested loop, nor after a `break`,
+`continue` or `return` that may run first), so the first iteration would
+have made the path unique there; and the view sits behind a copy of the
+loop's first test, `if test { let v = mut path; while test { … } }` (for a
+range `for`, `start < end`), so a loop that runs no iteration makes
+nothing unique. Only a `while` loop whose test, or a range `for` whose
+bounds, read nothing but locals, literals, fields, elements, operators and
+`len()` qualifies, since the test runs once more. A write in a nested loop
+does not count for the outer loop (the inner one may run no iteration):
+the inner loop makes its own view from the original root.
+
+A round views the outermost loops; the next round sees the inner loops
+with the views as roots, so the issue's pass, which also pushes to
+`blocks[b].insts` on each outer iteration, makes `f.blocks` unique once
+per call and `blocks[b].insts` once per block. The rewrite runs again on
+the viewed body and keeps a view only if that draws no new diagnostic
+(E0149 checks it as a written borrow) and shares no view. Tests:
+`tests/memory/cow_loop_path_writes.coil` (values),
+`hir/cow_view.tests.rs` (which loops get one), `tests/cow_call_share_cli.rs`
+`a_loop_whose_write_does_not_run_copies_what_one_with_no_write_does`.
+Bench: `examples/perf/cow_nested_path_loop.coil`.
 
 Tests: `tests/cow_call_share_cli.rs` (copy counts),
 `tests/memory/cow_generic_bodies_shared.coil` (a type parameter result of
