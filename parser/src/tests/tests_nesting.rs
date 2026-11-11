@@ -104,3 +104,13 @@ fn nested_let_tuple_patterns_parse() {
     let tree = parse_main(&format!("let {} = a;", nest("x", |s, _| format!("({s},)"))));
     assert_eq!(count(&tree, "Tuple("), DEPTH);
 }
+
+#[test]
+fn nesting_past_the_limit_is_a_diagnostic() {
+    let deep = |n: usize| format!("fn main() {{ let r = {}1{}; }}", "(".repeat(n), ")".repeat(n));
+    let err = Pratt::default().parse(&deep(crate::PARSE_NESTING_LIMIT + 1)).expect_err("too deep");
+    assert_eq!(err.code(), Some(reporting::ErrorCode::ExpressionNestingTooDeep));
+    // Brackets in a string or a comment are no nesting.
+    let quoted = format!("fn main() {{ let s = \"{}\"; /* {} */ }}\n// {}\n", "(".repeat(5000), "[".repeat(5000), "{".repeat(5000));
+    assert!(Pratt::default().parse(&quoted).is_ok());
+}

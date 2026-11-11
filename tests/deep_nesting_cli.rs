@@ -125,3 +125,22 @@ fn parentheses_past_the_nesting_limit_are_a_diagnostic() {
     assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
     assert!(stderr.contains("expression nested too deeply"), "stderr:\n{stderr}");
 }
+
+/// Brackets past the parser's limit (4000) are a diagnostic of the same
+/// code, before any pass walks the tree: 20,000 overflowed the stack
+/// (#2655).
+#[test]
+fn brackets_past_the_parser_limit_are_a_diagnostic() {
+    for (open, close) in [("(", ")"), ("[", "]")] {
+        let depth = 20_000;
+        let src = format!(
+            "fn main() {{\n    let a = 1;\n    let r = {}a{};\n}}\n",
+            open.repeat(depth),
+            close.repeat(depth)
+        );
+        let out = run("too_deep_to_parse", &src, false);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "stderr:\n{stderr}");
+        assert!(stderr.contains("E0125") && stderr.contains("for the parser"), "stderr:\n{stderr}");
+    }
+}
