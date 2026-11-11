@@ -1,0 +1,94 @@
+// A counter stepped under its loop test runs up to the `int` limits: `i + 1`
+// under `i < n` and `i - 1` under `i > n` never trap, while a wider step or
+// an inclusive test that passes the limit still traps with `integer overflow`
+// (#2127).
+use tests::assert;
+use task::{scope, Scope, TaskError};
+
+fn max() -> int {
+    return 9223372036854775807;
+}
+
+fn min() -> int {
+    return -max() - 1;
+}
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task: its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+fn up_below(int from, int n, int step) -> int {
+    let i = from;
+    while i < n {
+        i = i + step;
+    }
+    return i;
+}
+
+fn up_to(int from, int n) -> int {
+    let i = from;
+    while i <= n {
+        i = i + 1;
+    }
+    return i;
+}
+
+fn down_above(int from, int n, int step) -> int {
+    let i = from;
+    while i > n {
+        i = i - step;
+    }
+    return i;
+}
+
+fn down_until(int from, int n) -> int {
+    let i = from;
+    while true {
+        if i <= n {
+            return i;
+        }
+        i = i - 1;
+    }
+    return i;
+}
+
+// `i + 1` on the edge where `i < n`, and on the other edge, where `i` may
+// be anything.
+fn step_either_way(int i, int n) -> int {
+    if i < n {
+        return i + 1;
+    }
+    return i + 1;
+}
+
+test("a counter below its bound steps up to int max") {
+    assert!(up_below(max() - 3, max(), 1) == max());
+    assert!(up_below(0, 10, 1) == 10);
+    assert!(down_above(min() + 3, min(), 1) == min());
+    assert!(down_until(min() + 3, min()) == min());
+}
+
+test("a step past the limit still traps") {
+    assert!(outcome(fn () => up_below(max() - 3, max(), 2)) == "integer overflow");
+    assert!(outcome(fn () => up_to(max() - 3, max())) == "integer overflow");
+    assert!(outcome(fn () => down_above(min() + 3, min(), 2)) == "integer overflow");
+    assert!(outcome(fn () => up_below(max() - 3, max(), 3)) == "ok");
+}
+
+test("only the guarded step is unchecked") {
+    assert!(step_either_way(1, 5) == 2);
+    assert!(step_either_way(max() - 1, max()) == max());
+    assert!(outcome(fn () => step_either_way(max(), 0)) == "integer overflow");
+}

@@ -1,0 +1,19 @@
+// Hit bench for #2127: `i + 1` under `while i < n` cannot overflow (`i`
+// is below an `int`), so native code adds without the overflow check.
+// The shift-xor mix keeps the loop scalar (no vecloop).
+use io::sync::print;
+use string::format;
+
+fn mix(int n) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s = ((s << 5) ^ (s >> 3)) ^ i;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn main() {
+    let _ = print(format("%i", mix(100000000)));
+}
