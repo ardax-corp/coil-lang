@@ -4152,6 +4152,18 @@ impl<'pratt> Pratt<'pratt> {
     /// whitespace, without the padding (macro output, coil-lang#1398).
     pub fn parse_at(&self, input: &'pratt str, offset: usize) -> Result<Output<'pratt>, Message> {
         let shift = |r: std::ops::Range<usize>| r.start + offset..r.end + offset;
+        // Each level of nesting is frames of the parser and of every pass
+        // that walks the tree: far past what any program the checker
+        // accepts can nest, it stops here, before the stack does (#2655).
+        if let Some(at) = nesting_past(input, PARSE_NESTING_LIMIT) {
+            let mut message = Message::error(
+                ErrorCode::ExpressionNestingTooDeep,
+                format!("expression nested too deeply (over {PARSE_NESTING_LIMIT} brackets) for the parser"),
+                shift(at..at + 1),
+            );
+            message.with_help("split the expression into smaller named bindings".to_string());
+            return Err(message);
+        }
         match trivia()
             .ignore_then(self.declaration().repeated().collect().map_with(output!(Program)))
             .then_ignore(trivia())
@@ -4197,6 +4209,61 @@ impl<'pratt> Pratt<'pratt> {
             }
         }
     }
+}
+
+/// Most brackets (`(`, `[`, `{`) a source may nest: twice what the checker
+/// takes (`ExpressionNestingTooDeep` past 2000 levels), well below where a
+/// release build's stack would end.
+pub const PARSE_NESTING_LIMIT: usize = 4000;
+
+/// The byte offset of the first bracket of `input` nested past `limit`,
+/// outside string literals and comments.
+fn nesting_past(input: &str, limit: usize) -> Option<usize> {
+    let b = input.as_bytes();
+    let (mut i, mut depth) = (0, 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                let mut open = 0usize;
+                while i < b.len() {
+                    if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+                        open += 1;
+                        i += 2;
+                    } else if b[i] == b'*' && b.get(i + 1) == Some(&b'/') {
+                        open -= 1;
+                        i += 2;
+                        if open == 0 {
+                            break;
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                if depth > limit {
+                    return Some(i);
+                }
+            }
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Item keywords that `pub` may be written before by mistake.

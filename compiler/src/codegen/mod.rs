@@ -26,11 +26,6 @@ use reporting::Message;
 /// docs/internals/limitations.md.
 const CODEGEN_RECURSION_LIMIT: u32 = 2000;
 
-/// Private unwind payload for `do_compile`'s recursion-limit panic. Caught in
-/// [`Compiler::compile_module`]; never lets user input abort the process the
-/// way a genuine native stack overflow does.
-struct CodegenRecursionLimitExceeded;
-
 /// Map FFI type expressions to runtime `(tag, aux)` for declare/invoke codegen.
 fn ffi_type_tag_from_output(checker: &Checker, expr: &Output) -> Option<(u32, u32)> {
     checker.ffi_type_tag_from_output(expr)
@@ -343,6 +338,9 @@ pub struct Compiler {
     /// guarded against a fixed limit, see the analogous `infer_depth` on
     /// the typechecker's `Checker`.
     codegen_depth: u32,
+    /// `do_compile` passed its depth limit (reported once): every later call
+    /// returns at once. No unwind: a release build aborts on a panic (#2655).
+    codegen_too_deep: bool,
 
 
 
@@ -755,6 +753,7 @@ impl Default for Compiler {
             string_indices: HashMap::default(),
             coroutine_fns: std::collections::HashSet::new(),
             codegen_depth: 0,
+            codegen_too_deep: false,
             compiling_method: false,
             inherent_method_decl: false,
             compiling_mono_clone: false,

@@ -77,11 +77,6 @@ enum GroundMethod {
     None,
 }
 
-/// Private unwind payload for [`Checker::infer`]'s recursion-limit panic.
-/// Caught in [`Checker::check_program`]; never lets user input abort the
-/// process the way a genuine native stack overflow does.
-struct RecursionLimitExceeded;
-
 /// Result of resolving a bare constructor name (`Some`, `Ok`, `Red`).
 enum BareCtor {
     Unique(String),
@@ -168,6 +163,7 @@ impl Checker {
             next_id_idx: 0,
             in_ensures: false,
             infer_depth: 0,
+            too_deep: None,
             cache: std::collections::HashMap::new(),
             codegen_types_by_span: HashMap::new(),
             ident_binding_frames: HashMap::new(),
@@ -1703,6 +1699,7 @@ impl Checker {
         self.ids = IdTable::new();
         self.next_id_idx = 0;
         self.infer_depth = 0;
+        self.too_deep = None;
         self.cache.clear();
         self.codegen_types_by_span.clear();
         self.ident_binding_frames.clear();
@@ -1910,21 +1907,16 @@ impl Checker {
         // naming one is keyed as the real pass keys it.
         self.pre_register_typeclass_impls(ast);
 
-        let ty = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.infer(ast))) {
-            Ok(ty) => ty,
-            Err(payload) => {
-                // Only swallow our own recursion-limit signal (message
-                // already recorded in `infer`), any other panic is a real
-                // bug and must keep crashing loudly.
-                if payload.downcast_ref::<RecursionLimitExceeded>().is_none() {
-                    std::panic::resume_unwind(payload);
-                }
-                // The AST wasn't fully walked: NodeId / exhaustiveness state
-                // is inconsistent, so skip the post-passes below and bail
-                // out with the error already on `self.messages`.
-                return Ty::Var(self.counter.fresh());
-            }
-        };
+        let ty = self.infer(ast);
+        if let Some(kept) = self.too_deep {
+            // The walk stopped at the depth limit (a release build aborts on
+            // a panic, so this is no unwind, #2655): the rest of it saw
+            // unknown types, and NodeId / exhaustiveness state is
+            // inconsistent. Keep the messages up to the limit's, skip the
+            // post-passes.
+            self.messages.truncate(kept);
+            return Ty::Var(self.counter.fresh());
+        }
         // Frame stays open; see doc-comment above.
         self.check_mixed_literals(0);
         self.run_pending_exhaustiveness();
@@ -2485,8 +2477,10 @@ impl Checker {
     }
 
     fn infer(&mut self, expr: &Output) -> Ty {
-        self.infer_depth += 1;
-        if self.infer_depth > INFER_RECURSION_LIMIT {
+        if self.too_deep.is_some() {
+            return Ty::Var(self.counter.fresh());
+        }
+        if self.infer_depth >= INFER_RECURSION_LIMIT {
             let _ = self.error_with_help(
                 ErrorCode::ExpressionNestingTooDeep,
                 format!(
@@ -2495,8 +2489,10 @@ impl Checker {
                 expr.0.into_range(),
                 Some("split the expression into smaller named bindings".to_string()),
             );
-            std::panic::panic_any(RecursionLimitExceeded);
+            self.too_deep = Some(self.messages.len());
+            return Ty::Var(self.counter.fresh());
         }
+        self.infer_depth += 1;
 
         let entered = self.enter_node(expr);
         // A rule nests whatever its operands nest (parentheses, calls,
@@ -16588,6 +16584,15 @@ impl Checker {
     }
 
     fn pre_pass_ffi_invoke_param_flow_walk(
+        &mut self,
+        node: &Output,
+        local_class_scopes: &mut Vec<HashMap<String, String>>,
+    ) {
+        // Once per level of the tree, before the checker's depth limit.
+        common::deep_stack(|| self.pre_pass_ffi_invoke_param_flow_node(node, local_class_scopes))
+    }
+
+    fn pre_pass_ffi_invoke_param_flow_node(
         &mut self,
         node: &Output,
         local_class_scopes: &mut Vec<HashMap<String, String>>,
