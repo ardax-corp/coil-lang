@@ -395,9 +395,11 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   `f$value`, a one-word adapter that boxes the result, whose `pair_twin`
   is the function itself. That covers free functions of any module (the
   adapter is reserved once per compile, in whichever module first takes
-  the value, so every module's direct calls and values agree) and static
-  methods; a partial application's closure (`f(a)`) targets the adapter
-  as well, so a call through it that reads two words enters the function.
+  the value, so every module's direct calls and values agree), static
+  methods and inherent instance methods; a partial application's closure
+  (`f(a)`, `recv.m()`) targets the adapter as well, so a call through it
+  that reads two words enters the function. A method's adapter takes its
+  receiver first, as the method does (#2333).
   Not redirected: overloads (the adapter is typed by name, not by
   candidate), generic functions (their value is the shared body's
   `PolyFn`), functions with a rest parameter, coroutines and host
@@ -408,9 +410,14 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   the context (see "Host calls"). A raw trait
   instance method (a ground instance with no context, not a default body)
   returns its pair to direct calls; its `$dict` adapter, which
-  dictionaries hold, boxes it. Other instance methods return one word
-  unless their definition pins the pair (`Iterator::next`,
-  `IntoIterator::into_iter`). Overloaded and generic functions and trait
+  dictionaries hold, boxes it. Other trait instance methods return one
+  word unless their definition pins the pair (`Iterator::next`,
+  `IntoIterator::into_iter`). An inherent method, static or with `self`,
+  a generic class's (its per-type clone and its shared entry alike), is
+  a ground callee like a free function: a closed two-word result comes
+  back in two words to its direct calls (`fn_declared_return_ty` peels
+  the receiver its scheme takes first, #2333). Whether a call takes the
+  method's clone does not depend on that (`hir_method_clone`). Overloaded and generic functions and trait
   instance methods keep one-word parameters (a numeric range's two words
   excepted). A free function's or inherent method's two-word parameter,
   an arity-2 immediate tuple or two-field readonly class included, is two
