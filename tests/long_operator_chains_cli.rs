@@ -63,9 +63,9 @@ fn program() -> (String, String) {
     add("all", "bool", all, "true".to_string());
     let any = chain((0..N).map(|i| format!("a == {}", i + 2)), " || ");
     add("any", "bool", format!("{any} || b >= 2"), "true".to_string());
-    // A right-nested chain in parentheses. The parser takes time
-    // exponential in their depth (#2643), so it stays shallow.
-    let depth = 8;
+    // A right-nested chain in parentheses (the parser took time
+    // exponential in their depth, #2643).
+    let depth = 500;
     let nested = format!("{}a{}", "a + (".repeat(depth - 1), ")".repeat(depth - 1));
     add("nested", "int", nested, depth.to_string());
 
