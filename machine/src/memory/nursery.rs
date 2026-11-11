@@ -659,9 +659,9 @@ mod tests {
     }
 
     /// Held chunks a major finds live do not ask for the next major
-    /// (#2350). A map's values sit in a generic body's `Vec<V>`, which names
-    /// each one through an ambiguous word, so every minor pins and holds its
-    /// survivors. Once a nursery's worth of chunks was held and still live,
+    /// (#2350). A map's values sit in a `Vec<V>` a shared generic body
+    /// made, whose words are of unknown kind, so every minor pins and holds
+    /// its survivors. Once a nursery's worth of chunks was held and still live,
     /// every safepoint started a major that marked the whole heap again.
     /// The held-chunk budget grows with what the last major kept.
     #[test]

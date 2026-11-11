@@ -1,5 +1,5 @@
-// A map's values sit in a generic body's vector, which names each one
-// through an ambiguous word: a minor collection pins every young value and
+// A map's values sit in a vector a shared generic body made, whose words
+// are of unknown kind: a minor collection pins every young value and
 // holds its chunk until a major cycle. A map that grows across many
 // collections keeps every value and what it holds (#2350).
 use tests::assert;

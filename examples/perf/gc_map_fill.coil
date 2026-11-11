@@ -1,9 +1,10 @@
 // GC pacing (#2350): fill a stdlib `HashMap` with class instances, then read
-// them back. The map's value vector is a generic body's `Vec<V>`, so a minor
-// collection finds every young `Node` through an ambiguous word and pins it:
-// each nursery's chunks are held until a major cycle. The live set only
-// grows, so a major that keeps every held chunk must not ask for the next
-// one at once. Needs the stdlib root (`--root .deps/coil-stdlib/src`).
+// them back. The map's value vector is a `Vec<V>` a shared generic body
+// made, whose words are of unknown kind, so a minor collection finds every
+// young `Node` through an ambiguous word and pins it: each nursery's chunks
+// are held until a major cycle. The live set only grows, so a major that
+// keeps every held chunk must not ask for the next one at once. Needs the
+// stdlib root (`--root .deps/coil-stdlib/src`).
 use io::sync::print;
 use string::format;
 use collections::map::HashMap;

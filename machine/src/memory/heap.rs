@@ -1571,8 +1571,9 @@ impl Heap {
     /// major cycle, the only one that frees them: a nursery's worth more
     /// than the last major kept, and at least twice that. A budget from
     /// what the last major found live is what keeps the work linear (#2350):
-    /// a growing set of pinned survivors (a map's values, which a generic
-    /// body's vector names ambiguously) left every safepoint over a fixed
+    /// a growing set of pinned survivors (a map's values, in a vector a
+    /// shared generic body made, whose words are of unknown kind) left
+    /// every safepoint over a fixed
     /// budget, and each started a major that marked the whole heap again.
     /// Like the byte threshold's growth factor, it also bounds the held
     /// chunks to about twice the live ones.
