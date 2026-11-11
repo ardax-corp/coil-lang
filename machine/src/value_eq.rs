@@ -10,11 +10,14 @@
 //! Heap-heap Result `Err` (`pointer | 1`) never equals an `Ok`; two `Err`s
 //! compare their payloads.
 //!
-//! Cyclic graphs use a bijection of addresses already assumed equal: revisiting
-//! `a` must pair with the same `b` (and vice versa). A 1-cycle is therefore not
-//! equal to a 2-cycle.
+//! Cyclic graphs use a bijection of the addresses on the walk's current
+//! path: a back edge from `a` must reach the `b` it is paired with there
+//! (and vice versa), so a 1-cycle is not equal to a 2-cycle. An object
+//! reached again off the path (shared, not cyclic: `[t, t]` holding one
+//! tuple twice) is compared again, so it equals two equal copies (#2681);
+//! a pair already found equal is not walked twice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common::Value;
 
@@ -25,9 +28,18 @@ pub fn values_eq(heap: &Heap, a: Value, b: Value) -> bool {
     if let Some(eq) = flat_eq(heap, a, b) {
         return eq;
     }
-    let mut fwd = HashMap::new();
-    let mut rev = HashMap::new();
-    values_eq_rec(heap, a, b, &mut fwd, &mut rev)
+    values_eq_rec(heap, a, b, &mut Walk::default())
+}
+
+/// [`values_eq_rec`]'s state: the pairs on the current path, both ways,
+/// and the pairs found equal. Every comparison is a conjunction, so a
+/// pair found equal under a path pair's assumption stays equal: were the
+/// assumption wrong, the whole answer is `false`.
+#[derive(Default)]
+struct Walk {
+    fwd: HashMap<u64, u64>,
+    rev: HashMap<u64, u64>,
+    equal: HashSet<(u64, u64)>,
 }
 
 /// Answer without the cycle maps when no address can be visited twice:
@@ -61,13 +73,7 @@ fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
     }
 }
 
-fn values_eq_rec(
-    heap: &Heap,
-    a: Value,
-    b: Value,
-    fwd: &mut HashMap<u64, u64>,
-    rev: &mut HashMap<u64, u64>,
-) -> bool {
+fn values_eq_rec(heap: &Heap, a: Value, b: Value, walk: &mut Walk) -> bool {
     if a.bits() == b.bits() {
         return true;
     }
@@ -83,41 +89,48 @@ fn values_eq_rec(
         return false;
     }
     if (aa & 1) != 0 {
-        return values_eq_rec(heap, Value::from(aa & !1), Value::from(bb & !1), fwd, rev);
+        return values_eq_rec(heap, Value::from(aa & !1), Value::from(bb & !1), walk);
     }
-    if let Some(&mapped) = fwd.get(&aa) {
+    if let Some(&mapped) = walk.fwd.get(&aa) {
         return mapped == bb;
     }
-    if let Some(&mapped) = rev.get(&bb) {
+    if let Some(&mapped) = walk.rev.get(&bb) {
         return mapped == aa;
     }
-    fwd.insert(aa, bb);
-    rev.insert(bb, aa);
+    if walk.equal.contains(&(aa, bb)) {
+        return true;
+    }
     let Some(oa) = heap.find_object_by_addr(aa) else {
         return false;
     };
     let Some(ob) = heap.find_object_by_addr(bb) else {
         return false;
     };
-    match (&oa, &ob) {
+    walk.fwd.insert(aa, bb);
+    walk.rev.insert(bb, aa);
+    let eq = match (&oa, &ob) {
         (Object::Array(ga), Object::Array(gb)) => {
             let (ea, eb) = (ga.as_ref(), gb.as_ref());
             if ea.len() != eb.len() {
-                return false;
+                false
+            } else if let (Some(x), Some(y)) = (ea.bytes(), eb.bytes()) {
+                x == y
+            } else {
+                ea.iter().zip(eb.iter()).all(|(x, y)| values_eq_rec(heap, x, y, walk))
             }
-            if let (Some(x), Some(y)) = (ea.bytes(), eb.bytes()) {
-                return x == y;
-            }
-            ea.iter()
-                .zip(eb.iter())
-                .all(|(x, y)| values_eq_rec(heap, x, y, fwd, rev))
         }
         (Object::String(ga), Object::String(gb)) => ga.as_ref().data == gb.as_ref().data,
         _ => match product_slots(&oa, &ob) {
-            Some((sa, sb)) => sa.iter().zip(sb).all(|(x, y)| values_eq_rec(heap, *x, *y, fwd, rev)),
+            Some((sa, sb)) => sa.iter().zip(sb).all(|(x, y)| values_eq_rec(heap, *x, *y, walk)),
             None => false,
         },
+    };
+    walk.fwd.remove(&aa);
+    walk.rev.remove(&bb);
+    if eq {
+        walk.equal.insert((aa, bb));
     }
+    eq
 }
 
 /// The slots of two products of one shape: enum objects of one tag
@@ -319,6 +332,23 @@ mod tests {
             Value::from(oa.addr()),
             Value::from(ob.addr())
         ));
+    }
+
+    /// One object held twice equals two equal copies: sharing is not a
+    /// cycle (#2681).
+    #[test]
+    fn shared_element_eq_two_copies() {
+        let mut heap = Heap::default();
+        let (inner, _) = heap.alloc(ObjArray::new(vec![Value::from(7_i64)]), Object::Array);
+        let (c1, _) = heap.alloc(ObjArray::new(vec![Value::from(7_i64)]), Object::Array);
+        let (c2, _) = heap.alloc(ObjArray::new(vec![Value::from(7_i64)]), Object::Array);
+        let shared = Value::from(inner.addr());
+        let (oa, _) = heap.alloc(ObjArray::new(vec![shared, shared]), Object::Array);
+        let (ob, _) = heap.alloc(ObjArray::new(vec![Value::from(c1.addr()), Value::from(c2.addr())]), Object::Array);
+        assert!(values_eq(&heap, Value::from(oa.addr()), Value::from(ob.addr())));
+        assert!(values_eq(&heap, Value::from(ob.addr()), Value::from(oa.addr())));
+        set_array_elem(&heap, c2.addr(), 0, Value::from(8_i64));
+        assert!(!values_eq(&heap, Value::from(oa.addr()), Value::from(ob.addr())));
     }
 
     #[test]
