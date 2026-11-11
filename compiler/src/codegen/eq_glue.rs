@@ -193,7 +193,18 @@ impl Compiler {
     /// some part, at any depth, has a user `Eq` instance, or it is an
     /// array, `Vec`, tuple or record with a `float` leaf ([`float_leaf`]).
     fn eq_glue_needed(&self, ty: &Ty, visiting: &mut Vec<Ty>) -> bool {
-        if !crate::layout::ty_is_closed(ty) || visiting.contains(ty) {
+        self.eq_glue_needed_in(ty, visiting, false)
+    }
+
+    /// [`Self::eq_glue_needed`]; `closed`: `ty` is a part of a closed
+    /// tuple, array, `Vec` or record, so closed too. Only a named type can
+    /// lead back to itself, so only those are kept in `visiting`: asking a
+    /// structural part again whether it is closed and whether it is being
+    /// visited compared whole types at every level, `O(d^3)` for a value
+    /// `d` levels deep (#2657).
+    fn eq_glue_needed_in(&self, ty: &Ty, visiting: &mut Vec<Ty>, closed: bool) -> bool {
+        let structural = matches!(ty, Ty::Tuple(_) | Ty::Array { .. } | Ty::Record { .. }) || coil_ty::vec_element_ty(ty).is_some();
+        if !(closed || crate::layout::ty_is_closed(ty)) || !structural && visiting.contains(ty) {
             return false;
         }
         let Some(shape) = self.eq_glue_shape(ty) else {
@@ -205,9 +216,13 @@ impl Compiler {
         if float_leaf(&shape) && !matches!(crate::layout::two_word_kind(&self.checker, ty), Some(crate::layout::PairKind::Product)) {
             return true;
         }
-        visiting.push(ty.clone());
-        let needed = shape.parts().into_iter().any(|p| self.eq_user_instance(p) || self.eq_glue_needed(p, visiting));
-        visiting.pop();
+        if !structural {
+            visiting.push(ty.clone());
+        }
+        let needed = shape.parts().into_iter().any(|p| self.eq_user_instance(p) || self.eq_glue_needed_in(p, visiting, structural));
+        if !structural {
+            visiting.pop();
+        }
         needed
     }
 

@@ -5442,7 +5442,7 @@ impl Checker {
                 // Named arguments match the picked overload's parameters.
                 let (tys, ordered_exprs) = match &candidate {
                     Some(c) => self.infer_and_reorder_call_args_with_candidate(&fqn, c, method_args, &range),
-                    None => self.infer_and_reorder_call_args(&fqn, method_args, &range),
+                    None => { let (t, e) = self.infer_and_reorder_call_args(&fqn, method_args, &range); (t, e.into_owned()) }
                 };
                 arg_tys.extend(tys);
                 // Align exprs with `[self, …args]` for coerce_or_unify
@@ -5531,7 +5531,7 @@ impl Checker {
                 let (tys, ordered_exprs) =
                     self.infer_and_reorder_call_args(&fqn, method_args, &range);
                 arg_tys.extend(tys);
-                arg_exprs.extend(ordered_exprs);
+                arg_exprs.extend(ordered_exprs.iter().cloned());
             } else if let Some(a) = args {
                 for arg in a {
                     arg_tys.push(self.infer(arg));
@@ -15102,7 +15102,13 @@ impl Checker {
 
     /// Expand `...expr` spread nodes in a call argument list using inferred
     /// tuple/array types. Returns a flat argument list for arity checking.
-    pub fn flatten_spread_call_args<'a>(&mut self, args: &[Output<'a>]) -> Vec<Output<'a>> {
+    pub fn flatten_spread_call_args<'a, 'b>(&mut self, args: &'b [Output<'a>]) -> std::borrow::Cow<'b, [Output<'a>]> {
+        // With no spread the arguments are the call's own: copying each one
+        // (its whole tree) at every level made nested calls quadratic in
+        // their depth (#2657).
+        if !args.iter().any(|a| matches!(a.1.as_ref(), Expression::Spread(_))) {
+            return std::borrow::Cow::Borrowed(args);
+        }
         let mut out = Vec::new();
         for (k, arg) in args.iter().enumerate() {
             if let Expression::Spread(inner) = arg.1.as_ref() {
@@ -15169,7 +15175,7 @@ impl Checker {
                 out.push(arg.clone());
             }
         }
-        out
+        std::borrow::Cow::Owned(out)
     }
 
     fn synthetic_index<'a>(&mut self, base: &Output<'a>, idx: i64) -> Output<'a> {
@@ -15259,26 +15265,22 @@ impl Checker {
         fn_name: &str,
         args: &'a [Output<'a>],
         range: &Range<usize>,
-    ) -> (Vec<Ty>, Vec<Output<'a>>) {
+    ) -> (Vec<Ty>, std::borrow::Cow<'a, [Output<'a>]>) {
         let has_rest = self.fn_has_rest(fn_name);
         self.vec_rest_spread =
             has_rest && !self.fn_tuple_rest.get(fn_name).copied().unwrap_or(false);
-        let flat_args: Vec<Output<'a>> = self.flatten_spread_call_args(args);
+        let flat_args = self.flatten_spread_call_args(args);
         self.vec_rest_spread = false;
-        let args = flat_args.as_slice();
+        let args: &[Output<'a>] = &flat_args;
         let has_named = args
             .iter()
             .any(|a| matches!(a.1.as_ref(), Expression::NamedArg(..)));
 
         if !has_named && !has_rest {
-            let mut tys = Vec::with_capacity(args.len());
-            let mut exprs = Vec::with_capacity(args.len());
-            for arg in args {
-                tys.push(self.infer_call_arg(arg));
-                exprs.push(arg.clone());
-            }
-            self.maybe_record_ffi_param_invoke_flow_for_call(fn_name, &exprs);
-            return (tys, exprs);
+            let tys = args.iter().map(|arg| self.infer_call_arg(arg)).collect();
+            self.maybe_record_ffi_param_invoke_flow_for_call(fn_name, args);
+            // The arguments as written: no copy of their trees (#2657).
+            return (tys, flat_args);
         }
 
         let Some(param_names) = self
@@ -15311,7 +15313,7 @@ impl Checker {
                     _ => arg.clone(),
                 });
             }
-            return (tys, exprs);
+            return (tys, std::borrow::Cow::Owned(exprs));
         };
 
         let fixed_count = if has_rest {
@@ -15520,7 +15522,7 @@ impl Checker {
                     _ => arg.clone(),
                 });
             }
-            return (tys, exprs);
+            return (tys, std::borrow::Cow::Owned(exprs));
         }
         let mut tys = Vec::with_capacity(fixed_count + usize::from(pack_rest));
         let mut exprs = Vec::with_capacity(fixed_count + usize::from(pack_rest));
@@ -15649,7 +15651,7 @@ impl Checker {
         if has_named || has_rest {
             self.maybe_record_ffi_param_invoke_flow_for_call(fn_name, &exprs);
         }
-        (tys, exprs)
+        (tys, std::borrow::Cow::Owned(exprs))
     }
 
     /// Like [`infer_and_reorder_call_args`] but uses `candidate`'s
@@ -15689,7 +15691,7 @@ impl Checker {
                 self.fn_has_rest.remove(fn_name);
             }
         }
-        result
+        (result.0, result.1.into_owned())
     }
 
     //  Enums and pattern matching
@@ -21502,7 +21504,7 @@ impl Checker {
             EnumConstructPayload::Tuple(args) => {
                 if self.fn_has_rest(&fqn) || self.fn_param_names.contains_key(&fqn) {
                     let (tys, exprs) = self.infer_and_reorder_call_args(&fqn, args, &range);
-                    arg_exprs = Some(exprs);
+                    arg_exprs = Some(exprs.into_owned());
                     tys
                 } else {
                     arg_exprs = Some(args.clone());
@@ -21933,7 +21935,7 @@ impl Checker {
         arg_tys.extend(rest.iter().map(|arg| self.infer_call_arg(arg)));
         let mut exprs = Vec::with_capacity(1 + rest.len());
         exprs.push(recv.clone());
-        exprs.extend(rest);
+        exprs.extend(rest.iter().cloned());
         match self.resolve_trait_method_call(None, method, &arg_tys, &exprs, true, id, &range) {
             Some((class, result)) => {
                 let declared = self.trait_readonly_params(&class, method) & 1 != 0;

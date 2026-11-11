@@ -392,7 +392,7 @@ impl Checker {
         tys.extend(arg_tys);
         let mut exprs = Vec::with_capacity(1 + ordered_args.len());
         exprs.push(recv.clone());
-        exprs.extend(ordered_args);
+        exprs.extend(ordered_args.iter().cloned());
         let result = self.apply_function(Some(&instance), &fun_ty, &tys, Some(&exprs), id, range.clone());
         if !constraints.is_empty() {
             self.discharge_constraints(id, &constraints, &range);

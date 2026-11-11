@@ -144,3 +144,31 @@ fn brackets_past_the_parser_limit_are_a_diagnostic() {
         assert!(stderr.contains("E0125") && stderr.contains("for the parser"), "stderr:\n{stderr}");
     }
 }
+
+/// Values whose types nest 400 deep, and 1500 nested calls: their compile
+/// time was cubic in the depth (each level re-walked the whole type, and
+/// each call copied its argument's tree), #2657. The test's running time is
+/// the guard.
+#[test]
+fn deeply_nested_values_compile() {
+    let depth = 400;
+    let calls = (0..1500).fold("a".to_string(), |s, _| format!("id({s})"));
+    let src = format!(
+        "use io::sync::println;\n\nfn id(int x) -> int {{\n    return x;\n}}\n\nfn main() {{\n    let a = 1;\n    \
+         let arrays = {}a{};\n    let _ = println(arrays.len().show());\n    \
+         let tuples = {};\n    let (_, k) = tuples;\n    let _ = println(k.show());\n    \
+         let ones = {};\n    let _ = ones;\n    \
+         let records = {};\n    let _ = println((records == records).show());\n    \
+         let _ = println({calls}.show());\n}}\n",
+        "[".repeat(depth),
+        "]".repeat(depth),
+        nest(depth, "a", |s, i| format!("({s}, {i})")),
+        nest(depth, "a", |s, _| format!("({s},)")),
+        nest(depth, "a", |s, _| format!("{{x: {s}}}")),
+    );
+    for mir in [false, true] {
+        let out = run(if mir { "values_mir" } else { "values" }, &src, mir);
+        assert!(out.status.success(), "mir={mir}: {}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "1\n399\ntrue\n1\n", "mir={mir}");
+    }
+}
