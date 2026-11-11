@@ -2449,6 +2449,24 @@ impl Object {
         walk_slots!(self, heap, f, as_ref, as_slice, gc_words, iter)
     }
 
+    /// `gc-stats`: how many slots [`Self::visit_slots`] walks.
+    #[cfg(feature = "gc-stats")]
+    pub(crate) fn slot_words(&self, heap: &Heap) -> usize {
+        struct Count(usize);
+        impl SlotVisitor for Count {
+            fn word(&mut self, _: &Value, _: u8) {
+                self.0 += 1;
+            }
+
+            fn member(&mut self, _: &Member) {
+                self.0 += 1;
+            }
+        }
+        let mut count = Count(0);
+        self.visit_slots(heap, &mut count);
+        count.0
+    }
+
     /// [`Self::visit_slots`] with the slots writable, for a moving
     /// collector. Takes each payload as a write does ([`Gc::payload_mut`]).
     pub(crate) fn visit_slots_mut(&self, heap: &Heap, f: &mut impl SlotVisitorMut) {
