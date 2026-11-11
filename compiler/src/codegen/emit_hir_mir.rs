@@ -491,7 +491,7 @@ impl Compiler {
             // A generic function's `MakePolyFn`, or with bounds its
             // `MakePolyFnCapture` over the dictionaries
             // `plan_polyfn_escape_dicts` plans.
-            HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
+            HirKind::Global { .. } | HirKind::Local(_) if let Some(name) = emit.plan.polyfns.get(&id.0) => {
                 if let Some(target) = self.functions.get(name).and_then(|&entry| self.bodies.entry_label_for_offset(entry)) {
                     // Its declared parameters, so a call through the value
                     // given more hands the rest to its result (#1589): a
@@ -1890,7 +1890,7 @@ impl Compiler {
                 lam.dicts.iter().any(|&(_, slot)| !self.hir_mir_dict_param(slot))
             }
             // A `PolyFn` value's escape dictionaries.
-            HirKind::Global { .. } if let Some(name) = emit.plan.polyfns.get(&id.0) => {
+            HirKind::Global { .. } | HirKind::Local(_) if let Some(name) = emit.plan.polyfns.get(&id.0) => {
                 let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
                 let expected = self.checker.rank_n_arg_at(e.span.0, e.span.1);
                 self.hir_mir_probe_unplanned(|this, steps| {
