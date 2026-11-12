@@ -1486,23 +1486,22 @@ pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return 0;
     };
-    let (view, state) = if for_store != 0 {
-        let view = gc.as_mut().words_view(true);
+    let view = if for_store != 0 {
+        let view = gc.as_mut().words_view_for_store();
         gc.note_store_view();
-        // An array with a card table takes its stores through the runtime,
-        // which marks the cards.
-        (view, if gc.as_ref().has_cards() { crate::memory::VIEW_TRACKED } else { crate::memory::VIEW_PLAIN })
+        view
     } else {
-        (gc.as_ref().words_view_for_load(), crate::memory::VIEW_PLAIN)
+        gc.as_ref().words_view_for_load().map(|(p, n)| (p, n, std::ptr::null_mut()))
     };
     match view {
-        Some((ptr, len)) => {
+        Some((ptr, len, cards)) => {
             unsafe {
                 out.write(ptr as u64);
                 out.add(1).write(len as u64);
-                out.add(2).write(if state == crate::memory::VIEW_TRACKED { gc.as_ref().card_bytes() as u64 } else { 0 });
+                out.add(2).write(cards as u64);
             }
-            state
+            // An array with a card table: native code marks each store's card.
+            if cards.is_null() { crate::memory::VIEW_PLAIN } else { crate::memory::VIEW_TRACKED }
         }
         None => 0,
     }

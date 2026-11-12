@@ -310,7 +310,7 @@ impl Heap {
             };
             let at = gray.len();
             #[cfg(feature = "gc-stats")]
-            {
+            if !matches!(obj, Object::Array(_)) {
                 census.remembered_words += obj.slot_words(self);
             }
             match obj {
@@ -328,11 +328,12 @@ impl Heap {
                 // object are noted, and only they are rewritten after the
                 // copy.
                 Object::Array(a) => {
-                    let (_dirty, _cards) = self.reach_array_slots(a, &mut gray, &mut fixups);
+                    let (_dirty, _cards, _words) = self.reach_array_slots(a, &mut gray, &mut fixups);
                     #[cfg(feature = "gc-stats")]
                     {
                         census.dirty_cards += _dirty;
                         census.cards += _cards;
+                        census.remembered_words += if _words == usize::MAX { obj.slot_words(self) } else { _words };
                     }
                 }
                 _ => obj.for_each_reference(self, &mut |a, p| reach(self, &mut gray, a, p)),
@@ -466,23 +467,24 @@ impl Heap {
     /// A word array with a card table ([`super::CardTable`]) is scanned
     /// only on its dirty cards, which the scan clears: after the minor
     /// nothing young is left for a clean card to hide. Returns `(dirty
-    /// cards, cards)` of a card scan.
-    fn reach_array_slots(&self, gc: super::Gc<ObjArray>, gray: &mut Vec<Object>, fixups: &mut Vec<*mut Value>) -> (usize, usize) {
+    /// cards, cards, words scanned)` of a card scan, and `usize::MAX`
+    /// words for any other walk (the whole array).
+    fn reach_array_slots(&self, gc: super::Gc<ObjArray>, gray: &mut Vec<Object>, fixups: &mut Vec<*mut Value>) -> (usize, usize, usize) {
         // SAFETY: a live array; nothing else borrows its payload during a
         // minor. Not `payload_mut`: a rewrite is no write the barrier logs.
         let a = unsafe { &mut (*gc.as_ptr().cast_mut()).data };
         if !a.may_hold_refs() {
-            return (0, 0);
+            return (0, 0, usize::MAX);
         }
         let (k, mask, kind) = (a.lanes(), a.tag_mask, a.elem_kind());
         if k == 1 && kind == common::WORD_SCALAR {
-            return (0, 0);
+            return (0, 0, usize::MAX);
         }
         let bounds = self.slab.bounds();
         if k == 1 {
             let precise = kind == common::WORD_POINTER;
             let Some((words, cards)) = a.words_and_cards_mut() else {
-                return (0, 0);
+                return (0, 0, usize::MAX);
             };
             let n = words.len();
             let base = words.as_mut_ptr();
@@ -500,11 +502,12 @@ impl Heap {
                         t.all = false;
                         t.cards.fill(0);
                     }
-                    return (0, 0);
+                    return (0, 0, usize::MAX);
                 }
             };
             let total = t.cards.len();
             let mut dirty = 0;
+            let mut words = 0;
             let size = 1usize << super::CARD_SHIFT;
             // Eight cards at a time: most of a large array is clean.
             for (at, group) in t.cards.chunks_mut(8).enumerate() {
@@ -519,14 +522,16 @@ impl Heap {
                     dirty += 1;
                     let lo = (at * 8 + j) * size;
                     if lo < n {
-                        scan(lo, (lo + size).min(n));
+                        let hi = (lo + size).min(n);
+                        words += hi - lo;
+                        scan(lo, hi);
                     }
                 }
             }
-            return (dirty, total);
+            return (dirty, total, words);
         }
         let Some(words) = a.gc_words_mut() else {
-            return (0, 0);
+            return (0, 0, usize::MAX);
         };
         let n = words.len();
         let base = words.as_mut_ptr();
@@ -539,7 +544,7 @@ impl Heap {
                 }
             }
         }
-        (0, 0)
+        (0, 0, usize::MAX)
     }
 
     /// [`Self::reach_array_slots`] for one word at `slot`.
