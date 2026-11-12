@@ -421,10 +421,11 @@ fn object_class(checker: &Checker, name: &str, seen: &mut Vec<String>) -> Option
 }
 
 /// A class field type the lowering stores as one known word: closed, an
-/// existential, a monomorphic function, or a `Vec` / `Option` / `Result`
-/// of those (`Vec<Comp>`, `Option<fn() -> string>`, #1988, #1991).
+/// existential, a monomorphic function, a `forall` function (one `PolyFn`
+/// word, #2725), or a `Vec` / `Option` / `Result` of those (`Vec<Comp>`,
+/// `Option<fn() -> string>`, #1988, #1991).
 pub(super) fn closed_field(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
-    if crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, seen) {
+    if crate::layout::ty_is_closed(ty) || is_existential(ty) || mono_fun(checker, ty, seen) || matches!(strip_readonly(ty), Ty::Forall { .. }) {
         return true;
     }
     match strip_readonly(ty) {
