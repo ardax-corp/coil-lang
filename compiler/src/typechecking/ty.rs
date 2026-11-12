@@ -70,6 +70,14 @@ impl ArrayLength {
     pub fn is_static(&self) -> bool {
         matches!(self, ArrayLength::Static(_))
     }
+
+    /// A length of `n` items: that static length, or a dynamic one.
+    pub fn is_static_len(&self, n: usize) -> bool {
+        match self {
+            ArrayLength::Static(m) => *m == n,
+            ArrayLength::Dynamic => true,
+        }
+    }
 }
 
 /// Variant payload shape: unit, tuple, or record fields.
