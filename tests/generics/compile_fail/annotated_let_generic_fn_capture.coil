@@ -1,0 +1,10 @@
+// @expected E0102 — a lambda capturing `g`, annotated `fn(int) -> (int, int)`, calls it as that type: `g("x")` passes a `string` where it takes an `int` (#2760).
+fn twice<T>(T x) -> (T, T) {
+    return (x, x);
+}
+
+fn main() {
+    let g: fn(int) -> (int, int) = twice;
+    let k = fn () use (g) => g("x");
+    let _ = k();
+}
