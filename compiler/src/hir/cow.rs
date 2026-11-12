@@ -1611,10 +1611,18 @@ impl Plan {
             }
         }
         before.apply(out);
-        // Pattern-bound and captured locals: a share statement.
+        // Pattern-bound and captured locals: a share statement. A `let`
+        // pattern binding more than one shares each after it (#2744).
+        let mut let_pats: HashSet<HirId> = HashSet::new();
         for &(binder, l) in &self.share_after {
             let span = span_of(out, binder);
             let stmt = share_local(out, l, span);
+            if let_pats.contains(&binder) {
+                if let HirKind::Block { stmts, .. } = &mut out.exprs[binder.0 as usize].kind {
+                    stmts.push(stmt);
+                }
+                continue;
+            }
             match out.expr(binder).kind.clone() {
                 HirKind::ForIn { pat, iterable, body: b, kind } => {
                     let inner = relocate(out, b);
@@ -1623,6 +1631,7 @@ impl Plan {
                     let _ = (pat, iterable, kind);
                 }
                 HirKind::LetPat { .. } => {
+                    let_pats.insert(binder);
                     let inner = relocate(out, binder);
                     let x = &mut out.exprs[binder.0 as usize];
                     x.kind = HirKind::Block { stmts: vec![inner, stmt], tail: None };
