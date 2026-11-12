@@ -9609,14 +9609,23 @@ impl Compiler {
             return None;
         }
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        let (params, ret) = self.ground_value_sig(&resolved, &ty)?;
+        Some((resolved, params, ret))
+    }
+
+    /// Generic function `name` read as a value at function type `ty`: the
+    /// ground parameter and result types of its call there, when `ty` is
+    /// ground (a function of no parameters is typed `unit -> R` and takes
+    /// none; a rest parameter has no such call).
+    pub(super) fn ground_value_sig(&self, name: &str, ty: &Ty) -> Option<(Vec<Ty>, Ty)> {
         if ty.has_var() {
             return None;
         }
-        let &(arity, false) = self.fn_arities.get(&resolved)? else {
+        let &(arity, false) = self.fn_arities.get(name)? else {
             return None;
         };
         let mut params = Vec::with_capacity(arity as usize);
-        let mut ret = crate::typechecking::ty::strip_readonly(&ty).clone();
+        let mut ret = crate::typechecking::ty::strip_readonly(ty).clone();
         for _ in 0..arity.max(1) {
             let Ty::Fun(param, next) = ret else {
                 return None;
@@ -9627,7 +9636,7 @@ impl Compiler {
         if arity == 0 {
             params.clear();
         }
-        Some((resolved, params, ret))
+        Some((params, ret))
     }
 
     /// `name` when it is a generic `gen fn` whose receive type is open in
@@ -11558,7 +11567,7 @@ impl Compiler {
             || !self.hir_closure_adapter_tail.is_empty()
             || !self.hir_unpair_tail.is_empty()
             || !self.hir_value_adapter_tail.is_empty()
-            || !self.hir_coro_value_tail.is_empty()
+            || !self.hir_generic_value_tail.is_empty()
         {
             for lam in std::mem::take(&mut self.hir_lambda_tail) {
                 self.hir_lambda_fn(lam);
@@ -11566,8 +11575,8 @@ impl Compiler {
             for (name, adapter) in std::mem::take(&mut self.hir_value_adapter_tail) {
                 self.fn_value_adapter_fn(&name, &adapter);
             }
-            for (adapter, name, params, ret) in std::mem::take(&mut self.hir_coro_value_tail) {
-                self.coro_value_adapter_fn(&adapter, &name, &params, &ret);
+            for (adapter, name, params, ret) in std::mem::take(&mut self.hir_generic_value_tail) {
+                self.generic_value_adapter_fn(&adapter, &name, &params, &ret);
             }
             for (name, ty, label) in std::mem::take(&mut self.hir_unpair_tail) {
                 self.hir_unpair_fn(name, ty, label);
@@ -11603,15 +11612,20 @@ impl Compiler {
         self.fn_entry_labels[&adapter]
     }
 
-    /// The entry of a generic `gen fn` `name`'s value at ground parameter
+    /// The entry of generic function `name`'s value at ground parameter
     /// types `params` (result `ret`): an adapter calling `name` at them,
-    /// reserved now and emitted after the body (#2747).
-    pub(super) fn coro_value_target(&mut self, name: &str, params: &[Ty], ret: &Ty) -> IlLabel {
+    /// reserved now and emitted after the body. Its call is a direct ground
+    /// call: of the clone at those types where one is planned, else of the
+    /// shared body, its arguments and result converted as any such call's
+    /// are; for a `gen fn` it makes the coroutine (#2747). So the value
+    /// takes and returns the ground words code that knows only its type
+    /// passes and reads (#2755).
+    pub(super) fn generic_value_target(&mut self, name: &str, params: &[Ty], ret: &Ty) -> IlLabel {
         let fn_ty = params.iter().rev().fold(ret.clone(), |acc, p| Ty::Fun(Box::new(p.clone()), Box::new(acc)));
         let adapter = format!("{name}$value<{fn_ty}>");
         if !self.fn_entry_labels.contains_key(&adapter) {
             self.reserve_function_entry(adapter.clone());
-            self.hir_coro_value_tail.push((adapter.clone(), name.to_string(), params.to_vec(), ret.clone()));
+            self.hir_generic_value_tail.push((adapter.clone(), name.to_string(), params.to_vec(), ret.clone()));
         }
         self.fn_entry_labels[&adapter]
     }
@@ -11666,10 +11680,11 @@ impl Compiler {
         }
     }
 
-    /// [`Self::coro_value_target`]'s adapter: `name` called with its
-    /// parameters, which makes the coroutine of `name`'s clone at their
-    /// types (or of its shared body, where no clone is planned).
-    fn coro_value_adapter_fn(&mut self, adapter: &str, name: &str, params: &[Ty], ret: &Ty) {
+    /// [`Self::generic_value_target`]'s adapter: `name` called with its
+    /// parameters, a call of `name`'s clone at their types (or of its
+    /// shared body, where no clone is planned). An instance method's first
+    /// parameter is its receiver: the call is `recv.m(..)`.
+    fn generic_value_adapter_fn(&mut self, adapter: &str, name: &str, params: &[Ty], ret: &Ty) {
         use crate::hir::LocalKind;
         use crate::hir::synth::Synth;
         let mut b = Synth::new(&self.checker, adapter, ret.clone());
@@ -11681,7 +11696,12 @@ impl Compiler {
                 b.read(local)
             })
             .collect();
-        let value = b.call(name, args, ret.clone());
+        let value = match name.rsplit_once("::") {
+            Some((_, method)) if self.checker.has_receiver(name) => {
+                b.push(HirKind::Call { callee: Callee::Method { name: method.to_string() }, args }, ret.clone())
+            }
+            _ => b.call(name, args, ret.clone()),
+        };
         let r = b.ret(value);
         let root = b.block(vec![r], None, crate::typechecking::ty::never());
         let hir = b.finish(root);

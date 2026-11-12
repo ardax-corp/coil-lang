@@ -589,10 +589,10 @@ pub struct Compiler {
     /// [`Compiler::fn_value_target`]) still to emit: the function's name
     /// and the adapter's.
     hir_value_adapter_tail: Vec<(String, String)>,
-    /// A generic `gen fn`'s value at ground types (#2747,
-    /// [`Compiler::coro_value_target`]) still to emit: the adapter's name,
-    /// the generator's, and the adapter's parameter and result types.
-    hir_coro_value_tail: Vec<(String, String, Vec<crate::typechecking::Ty>, crate::typechecking::Ty)>,
+    /// A generic function's value at ground types (#2747, #2755,
+    /// [`Compiler::generic_value_target`]) still to emit: the adapter's name,
+    /// the function's, and the adapter's parameter and result types.
+    hir_generic_value_tail: Vec<(String, String, Vec<crate::typechecking::Ty>, crate::typechecking::Ty)>,
     /// A generic `gen fn`'s `PolyFn` trampoline
     /// ([`Compiler::coro_trampoline_target`]) still to emit, once the
     /// module's bodies are: its name and the generator's shared entry.
@@ -866,7 +866,7 @@ impl Default for Compiler {
             hir_unpairs: HashMap::new(),
             hir_unpair_tail: Vec::new(),
             hir_value_adapter_tail: Vec::new(),
-            hir_coro_value_tail: Vec::new(),
+            hir_generic_value_tail: Vec::new(),
             coro_trampolines: Vec::new(),
             open_coroutine_callers: HashSet::new(),
             hir_fn_adapters: HashMap::new(),

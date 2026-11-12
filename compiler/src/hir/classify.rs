@@ -251,6 +251,25 @@ pub(super) fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, o
     }
 }
 
+/// Whether a function declared with parameters `params` and result `ret`
+/// over type parameters takes and returns, through its shared body, the
+/// words ground code passes and reads at every instance: each is `()` or a
+/// plain word ([`plain_word`]). Its `PolyFn` is then called by code that
+/// knows only a ground instance of its type; else its value at that type is
+/// its adapter there (#2755).
+pub fn plain_sig(checker: &Checker, params: &[Ty], ret: &Ty) -> bool {
+    let word = |t: &Ty| crate::layout::is_unit(strip_readonly(t)) || plain_word(checker, t, &mut Vec::new(), false);
+    params.iter().all(word) && word(ret)
+}
+
+/// [`plain_sig`] of generic function (or method) `name`'s declaration.
+pub fn plain_generic_fn(checker: &Checker, name: &str) -> bool {
+    match (checker.fn_param_tys(name), checker.fn_return_ty(name)) {
+        (Some(params), Some(ret)) => plain_sig(checker, &params, &apply_ty_prune(checker.subst(), &ret)),
+        _ => false,
+    }
+}
+
 /// A word a shared body and ground code hold alike for every instance of
 /// its type parameters ([`fun_words_in`]'s parameters and result):
 ///
