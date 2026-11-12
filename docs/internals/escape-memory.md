@@ -399,13 +399,42 @@ in a loop that allocates).
   Instructions: `gc_old_vec_store` −21.4%, `vec_node` (400k) −12.3%,
   `Bag<V>` at `--clone-budget 0` −8.4%, `gc_map_fill` −3.9%,
   `HashMap<int, Node>` (400k) −2.9%; flagships unchanged.
+- **Card tables (steps 3 and 4).** A minor that finds a large word array
+  (`CARD_MIN_WORDS` = 1024 elements or more) remembered scans it whole and
+  gives it a clean `CardTable`: one byte per `1 << CARD_SHIFT` = 8 elements,
+  plus an all-dirty flag. Every write marks what it writes: `set` /
+  `store_indexed` / `push` the element; extend, fill, insert, remove, drain
+  and rotate their range; raw word access (`words_mut`) the whole table. Later
+  minors scan only the dirty cards and clear them. The table is attached at a
+  minor and never in the barrier, because a minor's safepoint has dropped
+  every native view, so no plain store view of the array is live when it
+  gets a table. A store view taken after that is `VIEW_TRACKED`, and native
+  code marks the card of each store inline
+  ([native.md](native.md)). Lane arrays have no table. A copy is a new
+  object without one. The major mark ignores cards. Sweep frees the table
+  with the payload, and evacuation moves it with the slot. The table lives
+  in `ArrayData::Words`, and a lane array's stride moved to `ObjArray`, so
+  the slot stays 64 bytes (const assert).
+  - **Sweep.** `CARD_MIN_WORDS` ∈ {256, 1024, 4096} × `CARD_SHIFT` ∈ {3, 4, 6}
+    on `gc_map_update`, `gc_map_fill`, the 4M-update program and
+    `gc_old_vec_store`. The threshold changed nothing beyond noise (the
+    arrays are tiny or huge). Shift 3 was cheapest on map updates (19.007 G
+    against 19.068 G at 4 and 19.065 G at 6), and 6 on the sparse store loop
+    (9.57 G against 9.89 G at 4 and 10.31 G at 3). Shift 3 was chosen: the
+    map update is the case the design is for.
+  - **Write-path cost.** The first version moved `ArrayData` to 40 bytes,
+    and `push` / `words_mut` stopped inlining; that cost up to 7.6% on
+    `gc_int_vec` and 3.6% on the #2350 map programs. Both are fixed: the
+    stride moved out of the variant, and one match does the write and the mark.
 - **Missed-barrier check.** In debug builds, under `gc-stress` and in any
   run with `COIL_MIR_VERIFY` set (`heap_checks_on`, read once per heap),
   each minor first walks the live objects: an old or held object the
   remembered set does not name must not name a young one, or a store
   skipped the barrier and the minor would free or move the object under
   it. It panics naming the holder's kind and address, the young object's
-  and whether the word is precise. A plain release build tests one bool
+  and whether the word is precise. A remembered array with a card table
+  must not name a young object in a clean card (`missed card mark`, naming
+  the element). A plain release build tests one bool
   per minor. Its first find was #2702 (the quiet store view above).
 
 ### Measured (step 4)

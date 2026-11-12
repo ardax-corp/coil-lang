@@ -120,6 +120,15 @@ into a word array never moves its storage; a push may, and another value may nam
 the same array, so after an `ArrayPush` every view reads through the helpers until
 its value is defined again. A vector loop drops the views too.
 
+A store view has a state (`machine::VIEW_PLAIN` = 1, `VIEW_TRACKED` = 2) and,
+for a tracked one, a third word: the card bytes of an old array with a card table
+([escape-memory.md](escape-memory.md#remembered-arrays-2687)). A plain view stores
+in place (`ok == 1`). A tracked view stores in place too, and also writes `1` at
+`cards + (index >> CARD_SHIFT)`: three instructions more, on the block a plain
+store skips to. Loads take either state (`ok != 0`). The states and the card
+constants are part of `layout_fingerprint`, so AOT code built for another
+protocol is refused.
+
 `Cow`, `Alloc` and `ArrayPush` call `coil_native_cow`, `_cow_field`, `_alloc` and
 `_array_push`. More ops follow the same pattern:
 
