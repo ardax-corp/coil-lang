@@ -333,10 +333,16 @@ Where the word `0` is itself a value of a type with no zero (`Result<(), E>`'s
 fn's no-value completion returns it, a `resume` without `with` and a `for` send it
 where the receive type is such a type, and the read compares with it. A
 `bool`-backed enum with both variants leaves no word free and reads `0` as `false`'s
-variant. A shared generic body (past the clone budget) moves a bare `T` word as it
-is: its no-value completion is the `0` the reader at the ground type decides on as
-above, but an unsent binding `yield` it relays, and a `Result<(), E>` or
-number-backed enum it completes with, read the `0` word as the value (#2738).
+variant. A shared generic body cannot tell a value nobody produced from a word of
+its bare `T` (the word `0` is an `int`'s value), nor make `T`'s zero, nor knows the
+word that stands for no value at `Result<(), E>` (#2738). So a free generic
+generator whose yield or receive type is open in its type parameters
+(`layout::open_coroutine`), and a generic function calling one by name, are
+clone-only in the mono plan (`mark_open_coroutines`, as a keyed function is): every
+ground call takes its per-type clone, past the clone budget too. A call at open
+types (polymorphic recursion) still takes the shared body, which moves the word as
+it is; so does a generic `gen fn` method, and a free one called from a method's
+per-type clone, which take no clone of a generator at any flag (#2748).
 
 A generator body with `defer`s compiles (`NativeEntry::cleanup`, `AotEntry` byte
 `cleanup`). A close resumes the fiber with `GEN_CLOSING` set; `coil_native_yield` sees
