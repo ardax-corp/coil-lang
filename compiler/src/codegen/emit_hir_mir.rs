@@ -1494,13 +1494,15 @@ impl Compiler {
             && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
             && let Some(target) = target
         {
-            if call.generic.is_some() {
-                for (&arg, &param) in args.iter().zip(&call.params) {
-                    if !self.hir_arg_passes(hir, emit, arg, param)
-                        && let Some(layout) = self.hir_niche_arg(hir, emit, arg, param)
-                    {
-                        t.niche_args.push((arg.0, layout));
-                    }
+            // A niche word the callee takes as its enum object: a generic's
+            // shared entry, and a static method's with type parameters of
+            // its own or its generic class's (`Option<T> x`), whose call has
+            // no generic ABI (#2758).
+            for (&arg, &param) in args.iter().zip(&call.params) {
+                if !self.hir_arg_passes(hir, emit, arg, param)
+                    && let Some(layout) = self.hir_niche_arg(hir, emit, arg, param)
+                {
+                    t.niche_args.push((arg.0, layout));
                 }
             }
             let adapt = self.hir_mir_adapters(hir, call, args);

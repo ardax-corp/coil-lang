@@ -5155,9 +5155,11 @@ impl Compiler {
         }
         // `C::f(..)` at ground type arguments: the static method's clone. A
         // static generator with type parameters of its own takes one too
-        // (#2748): its shared body cannot make a value nobody produced.
+        // (#2748): its shared body cannot make a value nobody produced. So
+        // does a signature holding a nested open enum
+        // (`Option<Option<T>>`), as an instance method's does (#2758).
         let own_coro = self.coroutine_fns.contains(&clone_key) && self.hir_own_type_params(&lookup);
-        if (shared || generic || own_coro)
+        if (shared || generic || own_coro || self.fn_sig_split(&lookup))
             && !forwards
             && let Some(clone) = self.hir_method_clone(hir, call, &clone_key, &lookup, &abi)
         {
