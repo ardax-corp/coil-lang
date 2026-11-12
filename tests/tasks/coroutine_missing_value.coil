@@ -1,0 +1,407 @@
+// The value nobody produced: the `resume` that completes a generator whose
+// body ends without `return e`, and a binding `yield` resumed without
+// `with` (a `for` sends nothing). Where the type has a zero it is that
+// zero, in the type's own layout; where it has none, a statement reads
+// nothing, and a read panics naming the type (coil-lang#2717).
+use tests::assert;
+use string::format;
+use text::Searchable;
+use task::{scope, Scope, TaskError};
+
+#[derive(Show)]
+class Pt {
+    pub a: int,
+}
+
+#[derive(Show)]
+enum Duo {
+    L(int),
+    R(string),
+}
+
+#[derive(Show)]
+enum Level {
+    Low = 0,
+    High = 2,
+}
+
+gen fn one_int(int x) {
+    yield x;
+}
+
+gen fn one_float(float x) {
+    yield x;
+}
+
+gen fn one_bool(bool x) {
+    yield x;
+}
+
+gen fn one_str(string x) {
+    yield x;
+}
+
+gen fn one_unit() {
+    yield ();
+}
+
+gen fn one_opt(Option<int> x) {
+    yield x;
+}
+
+gen fn one_opt_str(Option<string> x) {
+    yield x;
+}
+
+gen fn one_opt_opt(Option<Option<int>> x) {
+    yield x;
+}
+
+gen fn one_vec(Vec<int> x) {
+    yield x;
+}
+
+gen fn one_pair((int, int) x) {
+    yield x;
+}
+
+gen fn one_mixed((string, int) x) {
+    yield x;
+}
+
+gen fn one_arr([int; 2] x) {
+    yield x;
+}
+
+gen fn one_rec() {
+    yield { name: "x", n: 3 };
+}
+
+gen fn one_pt(Pt x) {
+    yield x;
+}
+
+gen fn one_res(Result<int, string> x) {
+    yield x;
+}
+
+gen fn one_res_unit() -> coroutine<Result<(), string>, ()> {
+    yield Result::Ok(());
+}
+
+gen fn one_duo(Duo x) {
+    yield x;
+}
+
+gen fn one_level(Level x) {
+    yield x;
+}
+
+gen fn one_held((Pt, int) x) {
+    yield x;
+}
+
+gen fn stop_early(Result<int, string> x, bool stop) {
+    yield x;
+    if stop {
+        return;
+    }
+    yield x;
+}
+
+gen fn echo_str(string x) -> coroutine<string, string> {
+    let got = yield x;
+    yield got;
+}
+
+gen fn echo_opt(Option<int> x) -> coroutine<Option<int>, Option<int>> {
+    let got = yield x;
+    yield got;
+}
+
+gen fn echo_pair((int, int) x) -> coroutine<(int, int), (int, int)> {
+    let got = yield x;
+    yield got;
+}
+
+gen fn echo_pt(Pt x) -> coroutine<Pt, Pt> {
+    let got = yield x;
+    yield got;
+}
+
+gen fn echo_res_unit(Result<(), string> x) -> coroutine<Result<(), string>, Result<(), string>> {
+    let got = yield x;
+    yield got;
+}
+
+gen fn tail_yield(Pt x) -> coroutine<Pt, Pt> {
+    yield x;
+    yield x;
+}
+
+gen fn generic_one<T>(T x) {
+    yield x;
+}
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task: its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+fn show<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+test("numbers, bool, () and a niche None are their zero word") {
+    let h = one_int(3);
+    let _ = resume h;
+    assert!((resume h) == 0);
+    let f = one_float(2.5);
+    let _ = resume f;
+    assert!((resume f) == 0.0);
+    let b = one_bool(true);
+    let _ = resume b;
+    assert!(!(resume b));
+    let u = one_unit();
+    let _ = resume u;
+    let v = resume u;
+    assert!(show(v) == "()");
+    let o = one_opt_str(Option::Some("s"));
+    let _ = resume o;
+    assert!(show(resume o) == "None");
+}
+
+test("a string, Vec, two-word value and product read as their zero") {
+    let s = one_str("s");
+    let _ = resume s;
+    let z = resume s;
+    assert!(z == "" && z.len() == 0);
+    let o = one_opt(Option::Some(3));
+    let _ = resume o;
+    assert!(show(resume o) == "None");
+    let oo = one_opt_opt(Option::Some(Option::Some(1)));
+    let _ = resume oo;
+    assert!(show(resume oo) == "None");
+    let v = one_vec(Vec::from([1, 2]));
+    let _ = resume v;
+    let e = resume v;
+    assert!(e.len() == 0);
+    let p = one_pair((1, 2));
+    let _ = resume p;
+    let (a, c) = resume p;
+    assert!(a == 0 && c == 0);
+    let m = one_mixed(("a", 1));
+    let _ = resume m;
+    assert!(show(resume m) == "(, 0)");
+    let r = one_arr([1, 2]);
+    let _ = resume r;
+    assert!(show(resume r) == "[0, 0]");
+    let d = one_rec();
+    let _ = resume d;
+    let rec = resume d;
+    assert!(rec.name == "" && rec.n == 0);
+}
+
+test("the hand-written loop at int, string, Option<int> and (int, int)") {
+    let seen = Vec::new();
+    let h = one_int(4);
+    while true {
+        let v = resume h;
+        if done(h) {
+            seen.push(show(v));
+            break;
+        }
+        seen.push(show(v));
+    }
+    let s = one_str("w");
+    while true {
+        let v = resume s;
+        if done(s) {
+            seen.push("[" + v + "]");
+            break;
+        }
+        seen.push(v);
+    }
+    let o = one_opt(Option::Some(5));
+    while true {
+        let v = resume o;
+        if done(o) {
+            seen.push(show(v));
+            break;
+        }
+        seen.push(show(v));
+    }
+    let p = one_pair((6, 7));
+    while true {
+        let v = resume p;
+        if done(p) {
+            seen.push(show(v));
+            break;
+        }
+        seen.push(show(v));
+    }
+    assert!(seen.len() == 8);
+    assert!(seen[0] == "4" && seen[1] == "0" && seen[2] == "w" && seen[3] == "[]");
+    assert!(
+        seen[4] == "Some(5)" && seen[5] == "None" && seen[6] == "(6, 7)" && seen[7] == "(0, 0)",
+    );
+}
+
+test("a completing resume read nowhere does not panic, at any type") {
+    let o = one_opt(Option::Some(1));
+    resume o;
+    resume o;
+    let p = one_pair((1, 2));
+    resume p;
+    resume p;
+    let c = one_pt(new Pt(1));
+    resume c;
+    resume c;
+    let d = one_duo(Duo::R("r"));
+    resume d;
+    resume d;
+    assert!(done(o) && done(p) && done(c) && done(d));
+}
+
+test("a for over a receiving generator gives the binding yield the zero") {
+    let seen = Vec::new();
+    for v in echo_str("e") {
+        seen.push("[" + v + "]");
+    }
+    for v in echo_opt(Option::Some(3)) {
+        seen.push(show(v));
+    }
+    for v in echo_pair((1, 2)) {
+        seen.push(show(v));
+    }
+    assert!(seen.len() == 6);
+    assert!(seen[0] == "[e]" && seen[1] == "[]" && seen[2] == "Some(3)" && seen[3] == "None");
+    assert!(seen[4] == "(1, 2)" && seen[5] == "(0, 0)");
+}
+
+test("an unbound yield in a receiving generator reads nothing") {
+    let n = 0;
+    for v in tail_yield(new Pt(2)) {
+        n = n + v.a;
+    }
+    assert!(n == 4);
+}
+
+test("a sent value is the binding yield's, a zero word included") {
+    let h = echo_opt(Option::Some(1));
+    let _ = resume h;
+    assert!(show(resume h with Option::None) == "None");
+    let k = echo_res_unit(Result::Ok(()));
+    let _ = resume k;
+    assert!(show(resume k with Result::Ok(())) == "Ok(())");
+}
+
+test("a generic generator's clone reads its type's zero") {
+    let s = generic_one("g");
+    let _ = resume s;
+    assert!((resume s) == "");
+    let o = generic_one(Option::Some(2));
+    let _ = resume o;
+    assert!(show(resume o) == "None");
+    let p = generic_one((3, 4));
+    let _ = resume p;
+    assert!(show(resume p) == "(0, 0)");
+}
+
+fn read_pt() -> int {
+    let h = one_pt(new Pt(1));
+    let _ = resume h;
+    let v = resume h;
+    return v.a;
+}
+
+fn read_res() -> int {
+    let h = stop_early(Result::Ok(3), true);
+    let _ = resume h;
+    let v = resume h;
+    return match v {
+        Result::Ok(n) => n,
+        Result::Err(_) => 0,
+    };
+}
+
+fn read_res_unit() -> int {
+    let h = one_res_unit();
+    let _ = resume h;
+    let v = resume h;
+    return if v.is_ok() {
+        1
+    } else {
+        2
+    };
+}
+
+fn read_level() -> int {
+    let h = one_level(Level::High);
+    let _ = resume h;
+    let v = resume h;
+    return show(v).len();
+}
+
+fn read_held() -> int {
+    let h = one_held((new Pt(1), 2));
+    let _ = resume h;
+    let (p, n) = resume h;
+    return p.a + n;
+}
+
+fn read_generic_pt() -> int {
+    let h = generic_one(new Pt(1));
+    let _ = resume h;
+    let v = resume h;
+    return v.a;
+}
+
+fn send_none_pt() -> int {
+    let n = 0;
+    for v in echo_pt(new Pt(1)) {
+        n = n + v.a;
+    }
+    return n;
+}
+
+fn send_none_res_unit() -> int {
+    let n = 0;
+    for v in echo_res_unit(Result::Ok(())) {
+        n = n + 1;
+    }
+    return n;
+}
+
+test("a completing resume read at a type with no zero panics") {
+    let m = outcome(fn () => read_pt());
+    assert!(m.contains("the generator finished without a value of Pt"), m);
+    let m = outcome(fn () => read_res());
+    assert!(m.contains("the generator finished without a value of Result<int, string>"), m);
+    let m = outcome(fn () => read_res_unit());
+    assert!(m.contains("the generator finished without a value of Result<"), m);
+    let m = outcome(fn () => read_level());
+    assert!(m.contains("the generator finished without a value of Level"), m);
+    let m = outcome(fn () => read_held());
+    assert!(m.contains("the generator finished without a value of (Pt, int)"), m);
+    let m = outcome(fn () => read_generic_pt());
+    assert!(m.contains("the generator finished without a value of Pt"), m);
+}
+
+test("an unsent binding yield at a type with no zero panics") {
+    let m = outcome(fn () => send_none_pt());
+    assert!(m.contains("resumed without a value of Pt"), m);
+    let m = outcome(fn () => send_none_res_unit());
+    assert!(m.contains("resumed without a value of Result<"), m);
+}
