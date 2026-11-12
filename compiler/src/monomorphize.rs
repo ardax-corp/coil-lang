@@ -536,6 +536,24 @@ fn call_names(node: &Output, out: &mut BTreeSet<String>) {
     walk_children(node, &mut |child| call_names(child, out));
 }
 
+/// [`call_names`], with each method called on `self` (`self.m(..)`) as
+/// `Owner::m` (`owner` the `impl`'s class key): what a method body calls by
+/// name.
+pub(crate) fn method_call_names(node: &Output, owner: &str, out: &mut BTreeSet<String>) {
+    if let Expression::Call { name, .. } = node.1.as_ref() {
+        match name.1.as_ref() {
+            Expression::Identifier(n) => {
+                out.insert((*n).to_string());
+            }
+            Expression::Access(recv, method) if matches!(peel(recv).1.as_ref(), Expression::Identifier("self")) => {
+                out.insert(format!("{owner}::{method}"));
+            }
+            _ => {}
+        }
+    }
+    walk_children(node, &mut |child| method_call_names(child, owner, out));
+}
+
 /// The generic functions in `seed`, and those calling one of them by name,
 /// directly or through another.
 fn callers_of(sigs: &HashMap<String, GenericFnSig>, mut seed: BTreeSet<String>) -> BTreeSet<String> {

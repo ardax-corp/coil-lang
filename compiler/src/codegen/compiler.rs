@@ -560,6 +560,57 @@ impl Compiler {
         }
     }
 
+    /// The generic functions and methods of this program whose shared body
+    /// would call a generator over its type parameters
+    /// ([`crate::layout::open_coroutine`]) at open types, by name or on
+    /// `self`, directly or through another: their ground calls take a clone
+    /// past the clone budget ([`Self::fn_sig_split`]), as the mono plan
+    /// does for free functions (#2738, #2748).
+    fn note_open_coroutine_callers(&mut self, children: &[Output]) {
+        use std::collections::BTreeSet;
+        let mut calls: Vec<(String, BTreeSet<String>)> = Vec::new();
+        for child in children {
+            match child.1.as_ref() {
+                Expression::Function { name, body: Some(body), .. } => {
+                    let qualified = if self.namespace.is_empty() { name.to_string() } else { format!("{}::{}", self.namespace, name) };
+                    let mut out = BTreeSet::new();
+                    crate::monomorphize::method_call_names(body, "", &mut out);
+                    calls.push((qualified, out));
+                }
+                Expression::Implementation { owner, methods, .. } => {
+                    let owner_key = self.resolve_class_ident(owner);
+                    for method in methods {
+                        if let (Some(name), Some(f)) = (Self::impl_method_name(method), Self::impl_method_fn(method))
+                            && let Expression::Function { body: Some(body), .. } = f.1.as_ref()
+                        {
+                            let mut out = BTreeSet::new();
+                            crate::monomorphize::method_call_names(body, &owner_key, &mut out);
+                            calls.push((format!("{owner_key}::{name}"), out));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let open = |c: &Self, name: &str| {
+            c.coroutine_fns.contains(name)
+                && c.checker.fn_return_ty(name).is_some_and(|ty| crate::layout::open_coroutine(&crate::typechecking::subst::apply_ty_prune(c.checker.subst(), &ty)))
+        };
+        let mut marked: HashSet<String> = calls.iter().map(|(name, _)| name.clone()).filter(|name| open(self, name)).collect();
+        loop {
+            let more: Vec<String> = calls
+                .iter()
+                .filter(|(name, callees)| !marked.contains(name) && callees.iter().any(|c| marked.contains(c) || open(self, c) || open(self, &self.resolve_free_fn(c))))
+                .map(|(name, _)| name.clone())
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            marked.extend(more);
+        }
+        self.open_coroutine_callers.extend(marked);
+    }
+
     /// A `gen fn` with a body, bare or wrapped in an `impl` method.
     fn is_coro_with_body(method: &Output) -> bool {
         match method.1.as_ref() {
@@ -807,7 +858,10 @@ impl Compiler {
         // An inherent method clone (`Acc::add$inst$..`): ground, never a
         // function value, its types the plan's.
         if let Some(plan) = self.method_clone_plans.borrow().get(name) {
-            return Some((crate::layout::CalleeFacts::default(), plan.param_tys().to_vec()));
+            // A generator's clone takes each argument as one word, as its
+            // `MakeCoro` passes them.
+            let facts = crate::layout::CalleeFacts { coroutine: self.coroutine_fns.contains(&plan.src), ..crate::layout::CalleeFacts::default() };
+            return Some((facts, plan.param_tys().to_vec()));
         }
         let lookup = strip_overload_key(name);
         let params = self
@@ -1318,10 +1372,11 @@ impl Compiler {
         let Expression::Method(_, f) = method.1.as_ref() else {
             return;
         };
+        // A generator's clone too: its body at the clone's types, a
+        // generator (#2748).
         let Expression::Function {
             name,
             type_params,
-            is_coro: false,
             is_static,
             body: Some(_),
             args,
@@ -1369,7 +1424,6 @@ impl Compiler {
         let Expression::Function {
             name,
             type_params,
-            is_coro: false,
             args,
             ..
         } = function.1.as_ref()
@@ -1493,6 +1547,10 @@ impl Compiler {
             self.fn_entry_labels.entry(entry).or_insert(label);
         }
         self.planned_method_clones.borrow_mut().remove(&key);
+        // A generator's clone is a generator too (#2748).
+        if self.coroutine_fns.contains(fqn) {
+            self.coroutine_fns.insert(name.clone());
+        }
         if inherent {
             self.inst_clones.insert(key, name.clone());
             self.inst_clone_queue.push_back(InstClone {
@@ -5196,7 +5254,8 @@ impl Compiler {
 
     fn compute_two_word_return_kind(&self, name: &str) -> Option<PairKind> {
         if let Some(plan) = self.method_clone_plans.borrow().get(name) {
-            return crate::layout::convention_ret(&self.checker, &crate::layout::CalleeFacts::default(), plan.ret_ty());
+            let facts = crate::layout::CalleeFacts { coroutine: self.coroutine_fns.contains(&plan.src), ..crate::layout::CalleeFacts::default() };
+            return crate::layout::convention_ret(&self.checker, &facts, plan.ret_ty());
         }
         let lookup = strip_overload_key(name);
         // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed
@@ -5206,7 +5265,7 @@ impl Compiler {
         // a definition site pinned a pair
         // (`pin_trait_method_pair_return`: Iterator / IntoIterator).
         let facts = crate::layout::CalleeFacts {
-            coroutine: self.coroutine_fns.contains(name),
+            coroutine: self.is_coro_key(name),
             // A value of it, or a partial application, targets its
             // one-word adapter instead.
             escaped: (self.is_fn_value_escaped(name) || self.is_under_applied(name)) && !self.fn_value_redirects(name),
@@ -6487,6 +6546,7 @@ impl Compiler {
                 self.program_seq += 1;
                 self.register_frozen_tables(children);
                 self.reserve_program_callable_entries(children);
+                self.note_open_coroutine_callers(children);
                 self.reserve_inst_clone_labels();
                 for child in children {
                     self.do_compile(child);

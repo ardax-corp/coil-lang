@@ -2608,7 +2608,7 @@ impl Compiler {
                     || call.builtin.is_some()
                     || call.generic.is_some()
                     || !call.own_dicts.is_empty()
-                    || self.coroutine_fns.contains(&call.key)
+                    || self.is_coro_key(&call.key)
                 {
                     return Err(format!("resolved `{}`", call.key));
                 }
@@ -2624,7 +2624,7 @@ impl Compiler {
                 (call.generic.is_some(), "generic"),
                 (call.instance.as_ref().is_some_and(|i| i.args.iter().any(Ty::has_var)), "instance"),
                 (!call.own_dicts.is_empty(), "own-bounds"),
-                (self.coroutine_fns.contains(&call.key), "coroutine"),
+                (self.is_coro_key(&call.key), "coroutine"),
                 // An auto-parallel callee's call runs its split worker;
                 // with auto-par off it stays a call all the same.
                 (self.fork_fns.contains(strip_overload_key(&call.key)), "par"),
@@ -3887,6 +3887,12 @@ impl Compiler {
     fn hir_method_clone_body(&self, module: &crate::hir::HirModule, key: &str) -> Option<HirBody> {
         let plans = self.method_clone_plans.borrow();
         let plan = plans.get(key)?;
+        // A generator runs on its coroutine; a body calling one over its
+        // type parameters calls its clone from the method's clone, which a
+        // copy spliced into a ground caller would not find (#2748).
+        if self.coroutine_fns.contains(&plan.src) || self.open_coroutine_callers.contains(&plan.src) {
+            return None;
+        }
         let src = self.inst_clone_srcs.get(&plan.src).filter(|s| s.program == self.program_seq && s.method_of.is_some())?;
         let index = *self.hir_fns.get(&src.span)?;
         let generic = module.bodies.get(index)?;
@@ -4454,6 +4460,16 @@ impl Compiler {
                     emit.plan.coro_values.insert(i as u32, value);
                     continue;
                 }
+                // A generic generator whose receive type is open, read at
+                // open types (a `forall` argument): its shared body cannot
+                // tell a value nobody sent from a word, and no clone serves
+                // the read (#2748). E0127, rather than a word handed on.
+                if !hir.aliased_fn_values.contains(&HirId(i as u32))
+                    && let Some(open) = self.hir_open_receive_generator(name)
+                {
+                    *self.generic_fn_value_refusal.borrow_mut() = Some((open, expr.span));
+                    return Err("generic-fn-value");
+                }
                 let poly = self.hir_global_polyfn(hir, HirId(i as u32), name).ok_or("global")?;
                 emit.plan.polyfns.insert(i as u32, poly);
                 continue;
@@ -4634,7 +4650,7 @@ impl Compiler {
                     && call.builtin.is_none()
                     && call.generic.is_none()
                     && Self::hir_call_rep(call) == emit.plan.ret
-                    && !self.coroutine_fns.contains(&call.key)
+                    && !self.is_coro_key(&call.key)
                     && self.hir_tail_call_ok(&call.key)
             })
         };
@@ -5137,8 +5153,11 @@ impl Compiler {
         if shared || generic || self.hir_own_type_params(&lookup) {
             self.hir_bare_niche_abi(hir, call, &lookup, 0, &mut abi);
         }
-        // `C::f(..)` at ground type arguments: the static method's clone.
-        if (shared || generic)
+        // `C::f(..)` at ground type arguments: the static method's clone. A
+        // static generator with type parameters of its own takes one too
+        // (#2748): its shared body cannot make a value nobody produced.
+        let own_coro = self.coroutine_fns.contains(&clone_key) && self.hir_own_type_params(&lookup);
+        if (shared || generic || own_coro)
             && !forwards
             && let Some(clone) = self.hir_method_clone(hir, call, &clone_key, &lookup, &abi)
         {
@@ -5593,9 +5612,13 @@ impl Compiler {
         // A clone is a cost decision, whatever the result's convention: a
         // two-word result comes back from the clone in two words as from
         // the shared entry (#2333).
-        if shared.instance.is_some() || shared.generic.as_ref().is_some_and(|g| !g.forwarded.is_empty()) || self.coroutine_fns.contains(key) {
+        if shared.instance.is_some() || shared.generic.as_ref().is_some_and(|g| !g.forwarded.is_empty()) {
             return None;
         }
+        // A generator's clone is its body at the clone's types, called by
+        // `MakeCoro`; a thunk calling the shared entry would hand back the
+        // shared body's coroutine (#2748).
+        let coro = self.coroutine_fns.contains(key);
         let HirKind::Call { args, .. } = &hir.expr(call).kind else {
             return None;
         };
@@ -5706,7 +5729,7 @@ impl Compiler {
         }
         // A thunk clone calls the shared body, which a call holding a
         // nested open enum as a niche word cannot take.
-        if !self.inst_clone_has_body(key, &lookup_tys) && self.hir_shared_split(hir, call, lookup, args) {
+        if !self.inst_clone_has_body(key, &lookup_tys) && (coro || self.hir_shared_split(hir, call, lookup, args)) {
             return None;
         }
         if !self.method_clone_room(key, &lookup_tys) {
@@ -7794,11 +7817,20 @@ impl Compiler {
         })
     }
 
+    /// Whether `key` is a generator's entry: a `gen fn`, its clone, or an
+    /// inherent method clone planned of one, whose call is `MakeCoro`.
+    pub(super) fn is_coro_key(&self, key: &str) -> bool {
+        self.coroutine_fns.contains(key) || self.method_clone_plans.borrow().get(key).is_some_and(|plan| self.coroutine_fns.contains(&plan.src))
+    }
+
     /// Whether the signature of generic `fqn` holds an open `Option` /
     /// `Result` below the top of a parameter or of the result, or a
     /// function over a type parameter below the result's top: its ground
     /// calls take a clone past the clone budget, as a hot method's do
-    /// ([`Self::hir_shared_split`]).
+    /// ([`Self::hir_shared_split`]). So does a generator over its type
+    /// parameters ([`crate::layout::open_coroutine`]), and a function or
+    /// method calling one ([`Self::note_open_coroutine_callers`]): its
+    /// shared body cannot make a value nobody produced (#2738, #2748).
     pub(super) fn fn_sig_split(&self, fqn: &str) -> bool {
         self.checker
             .fn_param_tys(fqn)
@@ -7811,6 +7843,9 @@ impl Compiler {
                     || crate::layout::nested_fn_field(&self.checker, &ty, &crate::layout::nested_open_look(&self.checker))
             })
             || self.checker.fn_return_ty(fqn).is_some_and(|ty| crate::layout::nested_fn_in_result(&ty, true))
+            || self.open_coroutine_callers.contains(fqn)
+            || (self.coroutine_fns.contains(fqn)
+                && self.checker.fn_return_ty(fqn).is_some_and(|ty| crate::layout::open_coroutine(&apply_ty_prune(self.checker.subst(), &ty))))
     }
 
     /// Whether a shared body and ground code hold a value of `ty` as the
@@ -9593,6 +9628,23 @@ impl Compiler {
             params.clear();
         }
         Some((resolved, params, ret))
+    }
+
+    /// `name` when it is a generic `gen fn` whose receive type is open in
+    /// its type parameters (`coroutine<T, T>`): its `PolyFn` would run the
+    /// shared body, which reads a binding `yield` resumed without a value
+    /// as a word of `T` (#2748).
+    fn hir_open_receive_generator(&self, name: &str) -> Option<String> {
+        if name.contains("::") {
+            return None;
+        }
+        let resolved = self.resolve_free_fn(name);
+        if !self.coroutine_fns.contains(&resolved) || !self.checker.is_generic_fn(&resolved) {
+            return None;
+        }
+        let ret = apply_ty_prune(self.checker.subst(), &self.checker.fn_return_ty(&resolved)?);
+        let (_, send) = crate::typechecking::infer::Checker::coroutine_parts(crate::typechecking::ty::strip_readonly(&ret))?;
+        send.has_var().then(|| name.to_string())
     }
 
     /// A generic function already emitted, read where a `PolyFn` is
