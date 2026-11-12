@@ -3223,15 +3223,95 @@ impl From<&str> for ObjString {
 /// reference) unpacks the array to `Words` first, so the packing is a pure
 /// space optimisation and never depends on the static element type.
 enum ArrayData {
-    Words(Vec<Value>),
+    /// One word per element, and the card table of a large old array
+    /// ([`CardTable`]).
+    Words(Vec<Value>, Option<Box<CardTable>>),
     Bytes(Vec<u8>),
     /// `k` words per element, element `i` at `words[i * k..][..k]`: a
     /// `Vec` of a two-word type (`Option<int>`, `(int, float)`) keeps
     /// both words in place (`MakeArrayK` stamps it from the element
     /// layout). One-word reads and writes refuse it: only the lane API
     /// below and code that knows the stride touch it.
-    Lanes { words: Vec<Value>, k: usize },
+    /// `k` is [`ObjArray::stride`]: kept out of the variant so that
+    /// [`Self::Words`]'s card table fits in the same size.
+    Lanes { words: Vec<Value> },
 }
+
+/// Elements per card of a [`CardTable`]: `1 << CARD_SHIFT`. Eight: a sweep
+/// of {8, 16, 64} found 8 cheapest on map updates (most cards dirty) and 64
+/// on a sparse store loop (#2687).
+pub const CARD_SHIFT: u32 = 3;
+/// Elements a remembered word array has when a minor gives it a
+/// [`CardTable`]; a smaller one is scanned whole.
+pub const CARD_MIN_WORDS: usize = 1024;
+
+/// Which parts of a large old word array were written since the last minor
+/// collection (#2687): one byte per card of `1 << CARD_SHIFT` elements,
+/// non-zero when a write may have stored a reference there, so a minor
+/// that finds the array remembered scans only those elements. `all` covers
+/// a write that names no index (raw word access). A minor gives a
+/// remembered array its table ([`ObjArray::attach_cards`]) and clears
+/// what it scanned. A minor's safepoint drops every native view, so no
+/// plain view taken before the table exists outlives it, and every store
+/// view taken after it is [`VIEW_TRACKED`]: native code marks the card of
+/// each element it stores in place.
+pub(crate) struct CardTable {
+    pub(crate) all: bool,
+    pub(crate) cards: Vec<u8>,
+}
+
+impl CardTable {
+    fn new(capacity: usize) -> Self {
+        Self { all: false, cards: vec![0; Self::cards_for(capacity)] }
+    }
+
+    /// Cards that cover `n` elements.
+    #[inline]
+    pub(crate) fn cards_for(n: usize) -> usize {
+        n.div_ceil(1 << CARD_SHIFT)
+    }
+
+    #[inline(always)]
+    fn mark(&mut self, i: usize) {
+        match self.cards.get_mut(i >> CARD_SHIFT) {
+            Some(c) => *c = 1,
+            None => self.grow_mark(i, i + 1),
+        }
+    }
+
+    /// Mark the cards of elements `lo..hi`.
+    fn mark_range(&mut self, lo: usize, hi: usize) {
+        if lo >= hi {
+            return;
+        }
+        let (a, b) = (lo >> CARD_SHIFT, (hi - 1) >> CARD_SHIFT);
+        if b >= self.cards.len() {
+            self.grow_mark(lo, hi);
+            return;
+        }
+        self.cards[a..=b].fill(1);
+    }
+
+    /// The array grew past the cards: cover twice as many, then mark.
+    #[cold]
+    #[inline(never)]
+    fn grow_mark(&mut self, lo: usize, hi: usize) {
+        let need = Self::cards_for(hi).max(2 * self.cards.len());
+        self.cards.resize(need, 0);
+        self.mark_range(lo, hi);
+    }
+
+    /// Bytes the table takes, for heap accounting.
+    fn bytes(&self) -> usize {
+        mem::size_of::<Self>() + self.cards.capacity()
+    }
+}
+
+/// `coil_native_view`'s states (`0`: no view): `VIEW_PLAIN` loads and stores
+/// in place; `VIEW_TRACKED` does too, and each store also marks its
+/// element's card in the array's table, whose bytes the view carries.
+pub const VIEW_PLAIN: u64 = 1;
+pub const VIEW_TRACKED: u64 = 2;
 
 /// The word stored as one byte, when it fits.
 #[inline(always)]
@@ -3299,6 +3379,8 @@ pub struct ObjArray {
     /// treats them as precise references. `WORD_BYTE` packs the storage
     /// instead of being kept.
     elem_kind: u8,
+    /// Words per element: `k` of a lane array, `1` otherwise.
+    stride: u8,
     /// A lane array's pointer tags: element lane 1 is a tag, and lane 0
     /// is a heap reference exactly when bit `tag` is set (`0` for a
     /// product of scalars). Unused by other storage.
@@ -3310,15 +3392,21 @@ pub struct ObjArray {
     accounted: usize,
 }
 
+// The card table fits where the slot had room (#2687): a word array's
+// table sits in its variant, and a lane array's stride left its variant.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(mem::size_of::<GcData<ObjArray>>() == 64);
+
 impl ObjArray {
     /// Conservative: any element may be a reference.
     pub fn new(elements: Vec<Value>) -> Self {
         let may_hold_refs = !elements.is_empty();
         Self {
             accounted: elements.capacity() * mem::size_of::<Value>(),
-            data: ArrayData::Words(elements),
+            data: ArrayData::Words(elements, None),
             may_hold_refs,
             elem_kind: common::WORD_UNKNOWN,
+            stride: 1,
             tag_mask: 0,
         }
     }
@@ -3328,9 +3416,10 @@ impl ObjArray {
         let may_hold_refs = elements.iter().any(|v| heap.may_be_ref(*v));
         Self {
             accounted: elements.capacity() * mem::size_of::<Value>(),
-            data: ArrayData::Words(elements),
+            data: ArrayData::Words(elements, None),
             may_hold_refs,
             elem_kind: common::WORD_UNKNOWN,
+            stride: 1,
             tag_mask: 0,
         }
     }
@@ -3338,9 +3427,10 @@ impl ObjArray {
     pub fn with_capacity(n: usize) -> Self {
         Self {
             accounted: n * mem::size_of::<Value>(),
-            data: ArrayData::Words(Vec::with_capacity(n)),
+            data: ArrayData::Words(Vec::with_capacity(n), None),
             may_hold_refs: false,
             elem_kind: common::WORD_UNKNOWN,
+            stride: 1,
             tag_mask: 0,
         }
     }
@@ -3352,6 +3442,7 @@ impl ObjArray {
             data: ArrayData::Bytes(bytes),
             may_hold_refs: false,
             elem_kind: common::WORD_UNKNOWN,
+            stride: 1,
             tag_mask: 0,
         }
     }
@@ -3362,9 +3453,10 @@ impl ObjArray {
         assert!(k >= 2, "a lane array has two or more words per element");
         Self {
             accounted: n * k * mem::size_of::<Value>(),
-            data: ArrayData::Lanes { words: Vec::with_capacity(n * k), k },
+            data: ArrayData::Lanes { words: Vec::with_capacity(n * k) },
             may_hold_refs: tag_mask != 0,
             elem_kind: common::WORD_UNKNOWN,
+            stride: Self::stride_of(k),
             tag_mask,
         }
     }
@@ -3375,10 +3467,16 @@ impl ObjArray {
         Self {
             accounted: words.capacity() * mem::size_of::<Value>(),
             may_hold_refs: tag_mask != 0 && !words.is_empty(),
-            data: ArrayData::Lanes { words, k },
+            data: ArrayData::Lanes { words },
             elem_kind: common::WORD_UNKNOWN,
+            stride: Self::stride_of(k),
             tag_mask,
         }
+    }
+
+    /// A lane array's `k` as [`Self::stride`].
+    fn stride_of(k: usize) -> u8 {
+        u8::try_from(k).expect("a lane array has at most 255 words per element")
     }
 
     /// Turn a lane array into one word per element in place: `boxes` holds
@@ -3388,7 +3486,8 @@ impl ObjArray {
     pub fn lanes_into_words(&mut self, boxes: Vec<Value>) {
         debug_assert_eq!(boxes.len(), self.len(), "a box per element");
         self.may_hold_refs = !boxes.is_empty();
-        self.data = ArrayData::Words(boxes);
+        self.data = ArrayData::Words(boxes, None);
+        self.stride = 1;
         self.elem_kind = common::WORD_POINTER;
         self.tag_mask = 0;
     }
@@ -3397,7 +3496,7 @@ impl ObjArray {
     #[inline]
     pub fn lanes(&self) -> usize {
         match &self.data {
-            ArrayData::Lanes { k, .. } => *k,
+            ArrayData::Lanes { .. } => usize::from(self.stride),
             _ => 1,
         }
     }
@@ -3420,8 +3519,9 @@ impl ObjArray {
     /// Element `i`'s words in a lane array.
     #[inline]
     pub fn get_lanes(&self, i: usize) -> Option<&[Value]> {
+        let k = &usize::from(self.stride);
         match &self.data {
-            ArrayData::Lanes { words, k } => words.get(i * k..(i + 1) * k),
+            ArrayData::Lanes { words } => words.get(i * k..(i + 1) * k),
             _ => None,
         }
     }
@@ -3429,8 +3529,9 @@ impl ObjArray {
     /// Overwrite element `i` of a lane array (`false` out of range).
     #[inline]
     pub fn set_lanes(&mut self, i: usize, lanes: &[Value]) -> bool {
+        let k = &usize::from(self.stride);
         let mask = self.tag_mask;
-        let ArrayData::Lanes { words, k } = &mut self.data else {
+        let ArrayData::Lanes { words } = &mut self.data else {
             panic!("set_lanes on an array of one-word elements");
         };
         let Some(slot) = words.get_mut(i * *k..(i + 1) * *k) else {
@@ -3446,8 +3547,9 @@ impl ObjArray {
     /// Append one element to a lane array.
     #[inline]
     pub fn push_lanes(&mut self, lanes: &[Value]) {
+        let k = &usize::from(self.stride);
         let mask = self.tag_mask;
-        let ArrayData::Lanes { words, k } = &mut self.data else {
+        let ArrayData::Lanes { words } = &mut self.data else {
             panic!("push_lanes on an array of one-word elements");
         };
         debug_assert_eq!(lanes.len(), *k);
@@ -3460,7 +3562,8 @@ impl ObjArray {
     /// Remove the last element of a lane array into `out`.
     #[inline]
     pub fn pop_lanes(&mut self, out: &mut [Value]) -> bool {
-        let ArrayData::Lanes { words, k } = &mut self.data else {
+        let k = &usize::from(self.stride);
+        let ArrayData::Lanes { words } = &mut self.data else {
             panic!("pop_lanes on an array of one-word elements");
         };
         if words.len() < *k {
@@ -3474,8 +3577,9 @@ impl ObjArray {
 
     /// Insert one element at `i` of a lane array (caller checks `i <= len`).
     pub fn insert_lanes(&mut self, i: usize, lanes: &[Value]) {
+        let k = &usize::from(self.stride);
         let mask = self.tag_mask;
-        let ArrayData::Lanes { words, k } = &mut self.data else {
+        let ArrayData::Lanes { words } = &mut self.data else {
             panic!("insert_lanes on an array of one-word elements");
         };
         let at = i * *k;
@@ -3487,7 +3591,8 @@ impl ObjArray {
 
     /// Remove element `i` of a lane array into `out` (caller checks `i < len`).
     pub fn remove_lanes(&mut self, i: usize, out: &mut [Value]) {
-        let ArrayData::Lanes { words, k } = &mut self.data else {
+        let k = &usize::from(self.stride);
+        let ArrayData::Lanes { words } = &mut self.data else {
             panic!("remove_lanes on an array of one-word elements");
         };
         let at = i * *k;
@@ -3499,10 +3604,11 @@ impl ObjArray {
     /// array's element kind, or a lane array's per lane (lane 0 a pointer
     /// or a scalar by the element's tag, the rest scalars).
     pub(crate) fn kinded_words(&self) -> impl Iterator<Item = (Value, u8)> + '_ {
+        let k = &usize::from(self.stride);
         let (words, k, kind): (&[Value], usize, u8) = match &self.data {
-            ArrayData::Words(w) => (w, 1, self.elem_kind),
+            ArrayData::Words(w, ..) => (w, 1, self.elem_kind),
             ArrayData::Bytes(_) => (&[], 1, common::WORD_SCALAR),
-            ArrayData::Lanes { words, k } => (words, *k, common::WORD_SCALAR),
+            ArrayData::Lanes { words } => (words, *k, common::WORD_SCALAR),
         };
         let mask = self.tag_mask;
         words.iter().enumerate().map(move |(i, &v)| {
@@ -3547,7 +3653,7 @@ impl ObjArray {
 
     /// Switch to byte storage when every element fits; otherwise no-op.
     pub fn pack(&mut self) {
-        let ArrayData::Words(words) = &self.data else {
+        let ArrayData::Words(words, ..) = &self.data else {
             return;
         };
         let mut bytes = Vec::with_capacity(words.capacity());
@@ -3568,7 +3674,7 @@ impl ObjArray {
         if let ArrayData::Bytes(bytes) = &self.data {
             let mut words = Vec::with_capacity(bytes.capacity());
             words.extend(bytes.iter().map(|b| word_of(*b)));
-            self.data = ArrayData::Words(words);
+            self.data = ArrayData::Words(words, None);
         }
     }
 
@@ -3579,7 +3685,7 @@ impl ObjArray {
             self.unpack();
         }
         match &mut self.data {
-            ArrayData::Words(w) => w,
+            ArrayData::Words(w, ..) => w,
             ArrayData::Bytes(_) => unreachable!(),
             ArrayData::Lanes { .. } => lane_misuse(),
         }
@@ -3589,7 +3695,7 @@ impl ObjArray {
     #[inline]
     pub fn words(&self) -> Option<&[Value]> {
         match &self.data {
-            ArrayData::Words(w) => Some(w),
+            ArrayData::Words(w, ..) => Some(w),
             ArrayData::Bytes(_) | ArrayData::Lanes { .. } => None,
         }
     }
@@ -3598,7 +3704,7 @@ impl ObjArray {
     #[inline]
     pub fn bytes(&self) -> Option<&[u8]> {
         match &self.data {
-            ArrayData::Words(_) | ArrayData::Lanes { .. } => None,
+            ArrayData::Words(..) | ArrayData::Lanes { .. } => None,
             ArrayData::Bytes(b) => Some(b),
         }
     }
@@ -3607,7 +3713,7 @@ impl ObjArray {
     #[inline]
     pub fn bytes_mut(&mut self) -> Option<&mut Vec<u8>> {
         match &mut self.data {
-            ArrayData::Words(_) | ArrayData::Lanes { .. } => None,
+            ArrayData::Words(..) | ArrayData::Lanes { .. } => None,
             ArrayData::Bytes(b) => Some(b),
         }
     }
@@ -3616,7 +3722,7 @@ impl ObjArray {
     #[inline]
     pub fn iter(&self) -> ArrayIter<'_> {
         match &self.data {
-            ArrayData::Words(w) => ArrayIter::Words(w.iter().copied()),
+            ArrayData::Words(w, ..) => ArrayIter::Words(w.iter().copied()),
             ArrayData::Bytes(b) => ArrayIter::Bytes(b.iter()),
             ArrayData::Lanes { .. } => lane_misuse(),
         }
@@ -3626,10 +3732,11 @@ impl ObjArray {
     /// with the same element kind (the same words, so a pointer kind still
     /// holds).
     pub fn copy(&self) -> Self {
+        let k = &usize::from(self.stride);
         let mut copy = match &self.data {
-            ArrayData::Words(w) => Self::new(w.clone()),
+            ArrayData::Words(w, ..) => Self::new(w.clone()),
             ArrayData::Bytes(b) => Self::from_bytes(b.clone()),
-            ArrayData::Lanes { words, k } => Self::from_lanes(words.clone(), *k, self.tag_mask),
+            ArrayData::Lanes { words } => Self::from_lanes(words.clone(), *k, self.tag_mask),
         };
         copy.elem_kind = self.elem_kind;
         copy
@@ -3638,7 +3745,7 @@ impl ObjArray {
     /// Copy of the elements as words.
     pub fn to_vec(&self) -> Vec<Value> {
         match &self.data {
-            ArrayData::Words(w) => w.clone(),
+            ArrayData::Words(w, ..) => w.clone(),
             ArrayData::Bytes(b) => b.iter().map(|b| word_of(*b)).collect(),
             ArrayData::Lanes { .. } => lane_misuse(),
         }
@@ -3647,7 +3754,7 @@ impl ObjArray {
     /// Copy of elements `start..end` as words (caller checks bounds).
     pub fn slice_to_vec(&self, start: usize, end: usize) -> Vec<Value> {
         match &self.data {
-            ArrayData::Words(w) => w[start..end].to_vec(),
+            ArrayData::Words(w, ..) => w[start..end].to_vec(),
             ArrayData::Bytes(b) => b[start..end].iter().map(|b| word_of(*b)).collect(),
             ArrayData::Lanes { .. } => lane_misuse(),
         }
@@ -3657,7 +3764,7 @@ impl ObjArray {
     #[inline]
     pub fn get(&self, i: usize) -> Option<Value> {
         match &self.data {
-            ArrayData::Words(w) => w.get(i).copied(),
+            ArrayData::Words(w, ..) => w.get(i).copied(),
             ArrayData::Bytes(b) => b.get(i).map(|b| word_of(*b)),
             ArrayData::Lanes { .. } => lane_misuse(),
         }
@@ -3668,7 +3775,7 @@ impl ObjArray {
     #[inline(always)]
     pub fn read_indexed(&self, index: i64, unchecked: bool) -> Option<Value> {
         match &self.data {
-            ArrayData::Words(w) => read_indexed_in(w, index, unchecked),
+            ArrayData::Words(w, ..) => read_indexed_in(w, index, unchecked),
             ArrayData::Bytes(b) => read_indexed_in(b, index, unchecked).map(word_of),
             ArrayData::Lanes { .. } => lane_misuse(),
         }
@@ -3677,9 +3784,9 @@ impl ObjArray {
     #[inline]
     pub fn len(&self) -> usize {
         match &self.data {
-            ArrayData::Words(w) => w.len(),
+            ArrayData::Words(w, ..) => w.len(),
             ArrayData::Bytes(b) => b.len(),
-            ArrayData::Lanes { words, k } => words.len() / *k,
+            ArrayData::Lanes { words } => words.len() / usize::from(self.stride),
         }
     }
 
@@ -3692,9 +3799,9 @@ impl ObjArray {
     #[inline]
     pub fn capacity(&self) -> usize {
         match &self.data {
-            ArrayData::Words(w) => w.capacity(),
+            ArrayData::Words(w, ..) => w.capacity(),
             ArrayData::Bytes(b) => b.capacity(),
-            ArrayData::Lanes { words, k } => words.capacity() / *k,
+            ArrayData::Lanes { words } => words.capacity() / usize::from(self.stride),
         }
     }
 
@@ -3703,7 +3810,8 @@ impl ObjArray {
     #[inline]
     pub fn storage_bytes(&self) -> usize {
         match &self.data {
-            ArrayData::Words(w) | ArrayData::Lanes { words: w, .. } => w.capacity() * mem::size_of::<Value>(),
+            ArrayData::Words(w, cards) => w.capacity() * mem::size_of::<Value>() + cards.as_ref().map_or(0, |t| t.bytes()),
+            ArrayData::Lanes { words: w, .. } => w.capacity() * mem::size_of::<Value>(),
             ArrayData::Bytes(b) => b.capacity(),
         }
     }
@@ -3731,17 +3839,19 @@ impl ObjArray {
     /// shared-heap worker may view an array from before its epoch.
     pub(crate) fn words_view_for_load(&self) -> Option<(*mut Value, usize)> {
         match &self.data {
-            ArrayData::Words(w) => Some((w.as_ptr().cast_mut(), w.len())),
+            ArrayData::Words(w, ..) => Some((w.as_ptr().cast_mut(), w.len())),
             ArrayData::Bytes(_) | ArrayData::Lanes { .. } => None,
         }
     }
 
-    pub(crate) fn words_view(&mut self, for_store: bool) -> Option<(*mut Value, usize)> {
-        if for_store {
-            self.note();
-        }
+    /// The words in place for native code's stores, marked as a runtime
+    /// store would, with the first card byte of the array's card table
+    /// (null without one).
+    #[inline]
+    pub(crate) fn words_view_for_store(&mut self) -> Option<(*mut Value, usize, *mut u8)> {
+        self.note();
         match &mut self.data {
-            ArrayData::Words(w) => Some((w.as_mut_ptr(), w.len())),
+            ArrayData::Words(w, cards) => Some((w.as_mut_ptr(), w.len(), cards.as_mut().map_or(std::ptr::null_mut(), |t| t.cards.as_mut_ptr()))),
             ArrayData::Bytes(_) | ArrayData::Lanes { .. } => None,
         }
     }
@@ -3751,7 +3861,7 @@ impl ObjArray {
     /// the object ([`Self::words_view_for_load`]).
     pub(crate) fn lanes_view_for_load(&self) -> Option<(*mut Value, usize)> {
         match &self.data {
-            ArrayData::Lanes { words, k: 2 } => Some((words.as_ptr().cast_mut(), words.len() / 2)),
+            ArrayData::Lanes { words } if self.stride == 2 => Some((words.as_ptr().cast_mut(), words.len() / 2)),
             _ => None,
         }
     }
@@ -3775,6 +3885,53 @@ impl ObjArray {
         }
     }
 
+    /// [`Self::note`] for a write of elements `lo..hi`.
+    #[inline]
+    fn note_range(&mut self, lo: usize, hi: usize) {
+        self.note();
+        if let ArrayData::Words(_, Some(t)) = &mut self.data {
+            t.mark_range(lo, hi);
+        }
+    }
+
+    /// Whether the array has a card table: native code's stores into it
+    /// mark cards ([`VIEW_TRACKED`]).
+    #[inline]
+    #[cfg(test)]
+    pub(crate) fn has_cards(&self) -> bool {
+        matches!(self.data, ArrayData::Words(_, Some(_)))
+    }
+
+    /// A minor found this array remembered and scanned it whole: give a
+    /// large one a clean card table. Returns whether it did.
+    pub(crate) fn attach_cards(&mut self) -> bool {
+        match &mut self.data {
+            ArrayData::Words(w, cards @ None) if w.len() >= CARD_MIN_WORDS => {
+                *cards = Some(Box::new(CardTable::new(w.capacity())));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The words and the card table, for a minor's card scan.
+    #[inline]
+    pub(crate) fn words_and_cards_mut(&mut self) -> Option<(&mut [Value], Option<&mut CardTable>)> {
+        match &mut self.data {
+            ArrayData::Words(w, cards) => Some((w, cards.as_deref_mut())),
+            _ => None,
+        }
+    }
+
+    /// The card table, for the missed-barrier check.
+    #[inline]
+    pub(crate) fn cards(&self) -> Option<&CardTable> {
+        match &self.data {
+            ArrayData::Words(_, cards) => cards.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Store a numeric SIMD lane (never a reference) without classifying.
     ///
     /// # Safety
@@ -3790,8 +3947,25 @@ impl ObjArray {
         unsafe { *self.words_vec().get_unchecked_mut(i) = v };
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn push(&mut self, v: Value) {
+        if let ArrayData::Words(w, cards) = &mut self.data {
+            if !self.may_hold_refs {
+                self.may_hold_refs = true;
+            }
+            if let Some(t) = cards {
+                t.mark(w.len());
+            }
+            w.push(v);
+        } else {
+            self.push_packed(v);
+        }
+    }
+
+    /// [`Self::push`] onto byte storage (unpacking makes word storage with
+    /// no card table).
+    #[inline(never)]
+    fn push_packed(&mut self, v: Value) {
         if let ArrayData::Bytes(b) = &mut self.data
             && let Some(byte) = byte_of(v)
         {
@@ -3805,14 +3979,22 @@ impl ObjArray {
     /// Overwrite element `i` (caller checks bounds).
     #[inline]
     pub fn set(&mut self, i: usize, v: Value) {
-        if let ArrayData::Bytes(b) = &mut self.data
-            && let Some(byte) = byte_of(v)
-        {
-            b[i] = byte;
-            return;
+        match &mut self.data {
+            ArrayData::Words(w, cards) => {
+                if !self.may_hold_refs {
+                    self.may_hold_refs = true;
+                }
+                if let Some(t) = cards {
+                    t.mark(i);
+                }
+                w[i] = v;
+            }
+            ArrayData::Bytes(b) if let Some(byte) = byte_of(v) => b[i] = byte,
+            _ => {
+                self.note();
+                self.words_vec()[i] = v;
+            }
         }
-        self.note();
-        self.words_vec()[i] = v;
     }
 
     /// Unchecked [`Self::set`]; `i < len` is the caller's proof.
@@ -3821,14 +4003,22 @@ impl ObjArray {
     /// `i` must be in bounds.
     #[inline]
     pub unsafe fn set_unchecked(&mut self, i: usize, v: Value) {
-        if let ArrayData::Bytes(b) = &mut self.data
-            && let Some(byte) = byte_of(v)
-        {
-            unsafe { *b.get_unchecked_mut(i) = byte };
-            return;
+        match &mut self.data {
+            ArrayData::Words(w, cards) => {
+                if !self.may_hold_refs {
+                    self.may_hold_refs = true;
+                }
+                if let Some(t) = cards {
+                    t.mark(i);
+                }
+                unsafe { *w.get_unchecked_mut(i) = v };
+            }
+            ArrayData::Bytes(b) if let Some(byte) = byte_of(v) => unsafe { *b.get_unchecked_mut(i) = byte },
+            _ => {
+                self.note();
+                unsafe { *self.words_vec().get_unchecked_mut(i) = v };
+            }
         }
-        self.note();
-        unsafe { *self.words_vec().get_unchecked_mut(i) = v };
     }
 
     /// `elements[index] = value` with the runtime's bounds rules: `unchecked` is a
@@ -3844,15 +4034,21 @@ impl ObjArray {
             return false;
         }
         match &mut self.data {
-            ArrayData::Words(elements) => {
+            ArrayData::Words(elements, cards) => {
                 unsafe {
                     *elements.get_unchecked_mut(idx) = value;
                 }
-                self.note();
+                if !self.may_hold_refs {
+                    self.may_hold_refs = true;
+                }
+                if let Some(t) = cards {
+                    t.mark(idx);
+                }
             }
             ArrayData::Bytes(b) => match byte_of(value) {
                 Some(byte) => unsafe { *b.get_unchecked_mut(idx) = byte },
                 None => {
+                    // Unpacking makes word storage with no card table.
                     self.note();
                     unsafe { *self.words_vec().get_unchecked_mut(idx) = value };
                 }
@@ -3866,7 +4062,7 @@ impl ObjArray {
     #[inline]
     pub fn pop(&mut self) -> Option<Value> {
         match &mut self.data {
-            ArrayData::Words(w) => w.pop(),
+            ArrayData::Words(w, ..) => w.pop(),
             ArrayData::Bytes(b) => b.pop().map(word_of),
             ArrayData::Lanes { .. } => lane_misuse(),
         }
@@ -3880,14 +4076,19 @@ impl ObjArray {
             b.insert(i, byte);
             return;
         }
-        self.note();
+        let len = self.len();
+        self.note_range(i, len + 1);
         self.words_vec().insert(i, v);
     }
 
     /// Remove element `i` (caller checks `i < len`).
     pub fn remove(&mut self, i: usize) -> Value {
+        // The elements after `i` move down a card boundary.
+        if let ArrayData::Words(w, Some(t)) = &mut self.data {
+            t.mark_range(i, w.len());
+        }
         match &mut self.data {
-            ArrayData::Words(w) => w.remove(i),
+            ArrayData::Words(w, ..) => w.remove(i),
             ArrayData::Bytes(b) => word_of(b.remove(i)),
             ArrayData::Lanes { .. } => lane_misuse(),
         }
@@ -3896,31 +4097,39 @@ impl ObjArray {
     /// Drop elements `from..to`, the ones after them moving down (the
     /// range cut to the length).
     pub fn drain_range(&mut self, from: usize, to: usize) {
+        let k = &usize::from(self.stride);
         let to = to.min(self.len());
         let from = from.min(to);
+        if let ArrayData::Words(w, Some(t)) = &mut self.data {
+            t.mark_range(from, w.len());
+        }
         match &mut self.data {
-            ArrayData::Words(w) => drop(w.drain(from..to)),
+            ArrayData::Words(w, ..) => drop(w.drain(from..to)),
             ArrayData::Bytes(b) => drop(b.drain(from..to)),
-            ArrayData::Lanes { words, k } => drop(words.drain(from * *k..to * *k)),
+            ArrayData::Lanes { words } => drop(words.drain(from * *k..to * *k)),
         }
     }
 
     /// Move the last element to `i`, elements `i..` moving up one (nothing
     /// when `i` is not below the length).
     pub fn rotate_last_to(&mut self, i: usize) {
+        let k = &usize::from(self.stride);
         if i >= self.len() {
             return;
         }
+        if let ArrayData::Words(w, Some(t)) = &mut self.data {
+            t.mark_range(i, w.len());
+        }
         match &mut self.data {
-            ArrayData::Words(w) => w[i..].rotate_right(1),
+            ArrayData::Words(w, ..) => w[i..].rotate_right(1),
             ArrayData::Bytes(b) => b[i..].rotate_right(1),
-            ArrayData::Lanes { words, k } => words[i * *k..].rotate_right(*k),
+            ArrayData::Lanes { words } => words[i * *k..].rotate_right(*k),
         }
     }
 
     pub fn clear(&mut self) {
         match &mut self.data {
-            ArrayData::Words(w) | ArrayData::Lanes { words: w, .. } => w.clear(),
+            ArrayData::Words(w, ..) | ArrayData::Lanes { words: w, .. } => w.clear(),
             ArrayData::Bytes(b) => b.clear(),
         }
     }
@@ -3930,13 +4139,15 @@ impl ObjArray {
     pub fn extend_from(&mut self, src: &Self, lo: usize, hi: usize) {
         match (&mut self.data, &src.data) {
             (ArrayData::Bytes(out), ArrayData::Bytes(inp)) => out.extend_from_slice(&inp[lo..hi]),
-            (ArrayData::Words(out), ArrayData::Words(inp)) => {
+            (ArrayData::Words(out, ..), ArrayData::Words(inp, ..)) => {
+                let at = out.len();
                 out.extend_from_slice(&inp[lo..hi]);
                 if src.may_hold_refs {
-                    self.note();
+                    self.note_range(at, at + (hi - lo));
                 }
             }
-            (ArrayData::Lanes { words: out, k }, ArrayData::Lanes { words: inp, k: kin }) if k == kin => {
+            (ArrayData::Lanes { words: out }, ArrayData::Lanes { words: inp }) if self.stride == src.stride => {
+                let k = &usize::from(self.stride);
                 out.extend_from_slice(&inp[lo * *k..hi * *k]);
                 if src.may_hold_refs {
                     self.note();
@@ -3956,7 +4167,7 @@ impl ObjArray {
     pub fn extend_bytes(&mut self, bytes: &[u8]) {
         match &mut self.data {
             ArrayData::Bytes(out) => out.extend_from_slice(bytes),
-            ArrayData::Words(out) => out.extend(bytes.iter().map(|&b| Value::from(i64::from(b)))),
+            ArrayData::Words(out, ..) => out.extend(bytes.iter().map(|&b| Value::from(i64::from(b)))),
             ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
@@ -3969,16 +4180,18 @@ impl ObjArray {
             b.resize(b.len() + n, byte);
             return;
         }
-        self.note();
+        let len = self.len();
+        self.note_range(len, len + n);
         let w = self.words_vec();
         w.resize(w.len() + n, v);
     }
 
     pub fn reserve(&mut self, extra: usize) {
+        let k = &usize::from(self.stride);
         match &mut self.data {
-            ArrayData::Words(w) => w.reserve(extra),
+            ArrayData::Words(w, ..) => w.reserve(extra),
             ArrayData::Bytes(b) => b.reserve(extra),
-            ArrayData::Lanes { words, k } => words.reserve(extra * *k),
+            ArrayData::Lanes { words } => words.reserve(extra * *k),
         }
     }
 
@@ -3987,7 +4200,7 @@ impl ObjArray {
     /// ([`Self::restore_bytes`] puts them back); `None` for word storage.
     pub fn take_bytes(&mut self) -> Option<Vec<u8>> {
         match &mut self.data {
-            ArrayData::Words(_) | ArrayData::Lanes { .. } => None,
+            ArrayData::Words(..) | ArrayData::Lanes { .. } => None,
             ArrayData::Bytes(b) => Some(std::mem::take(b)),
         }
     }
@@ -3999,7 +4212,7 @@ impl ObjArray {
 
     pub fn to_byte_vec(&self) -> Vec<u8> {
         match &self.data {
-            ArrayData::Words(w) => w.iter().map(|v| v.as_int() as u8).collect(),
+            ArrayData::Words(w, ..) => w.iter().map(|v| v.as_int() as u8).collect(),
             ArrayData::Bytes(b) => b.clone(),
             ArrayData::Lanes { .. } => lane_misuse(),
         }
@@ -4011,7 +4224,7 @@ impl ObjArray {
         let n = bytes.len().min(self.len().saturating_sub(at));
         match &mut self.data {
             ArrayData::Bytes(b) => b[at..at + n].copy_from_slice(&bytes[..n]),
-            ArrayData::Words(w) => {
+            ArrayData::Words(w, ..) => {
                 for (slot, &b) in w[at..at + n].iter_mut().zip(bytes) {
                     *slot = word_of(b);
                 }
@@ -4032,10 +4245,22 @@ impl ObjArray {
     /// Raw word access for writes the classifier does not see. Unpacks a
     /// byte array and marks the array as possibly holding references
     /// (always safe).
-    #[inline]
+    #[inline(always)]
     pub fn words_mut(&mut self) -> &mut Vec<Value> {
         self.may_hold_refs = true;
-        self.words_vec()
+        if let ArrayData::Bytes(_) = self.data {
+            self.unpack();
+        }
+        match &mut self.data {
+            ArrayData::Words(w, cards) => {
+                if let Some(t) = cards {
+                    t.all = true;
+                }
+                w
+            }
+            ArrayData::Bytes(_) => unreachable!(),
+            ArrayData::Lanes { .. } => lane_misuse(),
+        }
     }
 
     /// Word elements for the collector's in-place fixups (compaction); no
@@ -4043,14 +4268,14 @@ impl ObjArray {
     #[inline]
     pub(crate) fn gc_words(&self) -> Option<&[Value]> {
         match &self.data {
-            ArrayData::Words(w) | ArrayData::Lanes { words: w, .. } => Some(w),
+            ArrayData::Words(w, ..) | ArrayData::Lanes { words: w, .. } => Some(w),
             ArrayData::Bytes(_) => None,
         }
     }
 
     pub(crate) fn gc_words_mut(&mut self) -> Option<&mut [Value]> {
         match &mut self.data {
-            ArrayData::Words(w) | ArrayData::Lanes { words: w, .. } => Some(w),
+            ArrayData::Words(w, ..) | ArrayData::Lanes { words: w, .. } => Some(w),
             ArrayData::Bytes(_) => None,
         }
     }
