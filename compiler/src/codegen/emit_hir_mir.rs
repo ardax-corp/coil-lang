@@ -505,6 +505,12 @@ impl Compiler {
                     t.fn_value = Some(value);
                 }
             }
+            // A generic `gen fn`'s value at ground types: its adapter (#2747).
+            HirKind::Global { .. } if let Some((name, params, ret)) = emit.plan.coro_values.get(&id.0).cloned() => {
+                let target = self.coro_value_target(&name, &params, &ret);
+                let operand = make_fn_operand(0, 0, params.len() as u32, false);
+                t.fn_value = Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new(), remade: Vec::new() });
+            }
             HirKind::Global { .. } if let Some((entry, arity, rest, name)) = emit.plan.fn_refs.get(&id.0).cloned() => {
                 if let Some(target) = self.bodies.entry_label_for_offset(entry) {
                     let target = self.fn_value_target(&name, target);
@@ -1545,6 +1551,9 @@ impl Compiler {
     /// parameter `expected` it is passed to when it is.
     fn hir_mir_polyfn_value(&mut self, name: &str, escape: Option<&Ty>, expected: Option<&Ty>) -> Option<crate::mir::HirFnValue> {
         let target = self.functions.get(name).and_then(|&entry| self.bodies.entry_label_for_offset(entry))?;
+        // A generic `gen fn`'s shared body runs only on its coroutine: the
+        // value enters a trampoline making it from the same words (#2747).
+        let target = if self.coroutine_fns.contains(name) { self.coro_trampoline_target(name, target) } else { target };
         // Its declared parameters, so a call through the value given more
         // hands the rest to its result (#1589): a curried one's value is
         // `MakePolyFnCapture` of no dictionaries.

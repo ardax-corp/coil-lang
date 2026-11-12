@@ -390,6 +390,10 @@ struct HirPlan {
     /// Each generic function read as a `PolyFn` value, by node: its
     /// resolved name (`MakePolyFn` / `MakePolyFnCapture`).
     polyfns: HashMap<u32, String>,
+    /// Each generic `gen fn` read as a value at ground types, by node: its
+    /// name and the read's parameter and result types, for the adapter
+    /// that makes its clone's coroutine (#2747).
+    coro_values: HashMap<u32, (String, Vec<Ty>, Ty)>,
     /// Each anonymous `fn`, by node: its body and that body's plan.
     lambdas: HashMap<u32, Box<HirLambda>>,
     /// Each `static let` read or write, by node: its static slot.
@@ -784,6 +788,7 @@ impl Compiler {
             || !plan.ops.is_empty()
             || !plan.fn_refs.is_empty()
             || !plan.polyfns.is_empty()
+            || !plan.coro_values.is_empty()
             || body.exprs.iter().any(|e| matches!(e.kind, HirKind::Lambda { .. }))
             || !plan.statics.is_empty()
             || !plan.consts.is_empty()
@@ -4378,6 +4383,7 @@ impl Compiler {
                 consts: HashMap::new(),
                 fn_refs: HashMap::new(),
                 polyfns: HashMap::new(),
+                coro_values: HashMap::new(),
                 lambdas: HashMap::new(),
                 statics: HashMap::new(),
                 lens: HashMap::new(),
@@ -4442,6 +4448,10 @@ impl Compiler {
                 }
                 if let Some(fn_ref) = self.hir_global_fn(hir, HirId(i as u32), name) {
                     emit.plan.fn_refs.insert(i as u32, fn_ref);
+                    continue;
+                }
+                if let Some(value) = self.hir_global_coro_value(hir, HirId(i as u32), name) {
+                    emit.plan.coro_values.insert(i as u32, value);
                     continue;
                 }
                 let poly = self.hir_global_polyfn(hir, HirId(i as u32), name).ok_or("global")?;
@@ -5173,15 +5183,19 @@ impl Compiler {
             || mask.count_ones() as usize != args.len()
             || (total < 32 && mask >> total != 0)
             || self.checker.is_generic_fn(lookup)
-            || self.coroutine_fns.contains(key)
             || self.callee_has_unboxed_range_params(lookup)
         {
             return Err("callee-partial");
         }
         // A two-word result: the closure calls the function's one-word
-        // adapter, whose twin the function is (a method's too, #2333).
-        let value = self.two_word_return_kind(lookup).is_some();
-        if value && (key != lookup || !self.fn_value_redirects(key)) {
+        // adapter, whose twin the function is (a method's too, #2333). A
+        // `gen fn`'s closure calls the adapter making its coroutine (#2747).
+        let coro = self.coroutine_fns.contains(key);
+        if coro && key != lookup {
+            return Err("callee-partial");
+        }
+        let value = coro || self.two_word_return_kind(lookup).is_some();
+        if value && !coro && (key != lookup || !self.fn_value_redirects(key)) {
             return Err("callee-partial");
         }
         let entry = *self.functions.get(key).ok_or("callee-partial")?;
@@ -9544,6 +9558,43 @@ impl Compiler {
         self.messages.push(msg);
     }
 
+    /// A generic `gen fn` read as a value at ground types (#2747): its name
+    /// and the read's parameter and result types. A call through the value
+    /// enters an adapter calling it at those types, so the call is a
+    /// `MakeCoro` of its clone there, as a direct call's is; the shared
+    /// body run as a plain function would yield outside a fiber.
+    fn hir_global_coro_value(&self, hir: &HirBody, id: HirId, name: &str) -> Option<(String, Vec<Ty>, Ty)> {
+        let method = self.hir_static_method_value(hir, id, name);
+        if name.contains("::") && method.is_none() {
+            return None;
+        }
+        let shared = method.as_ref().is_some_and(|&(_, shared)| shared);
+        let resolved = method.map_or_else(|| self.resolve_free_fn(name), |(key, _)| key);
+        if !self.coroutine_fns.contains(&resolved) || !(shared || self.checker.is_generic_fn(&resolved)) || self.checker.is_overloaded(&resolved) {
+            return None;
+        }
+        let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        if ty.has_var() {
+            return None;
+        }
+        let &(arity, false) = self.fn_arities.get(&resolved)? else {
+            return None;
+        };
+        let mut params = Vec::with_capacity(arity as usize);
+        let mut ret = crate::typechecking::ty::strip_readonly(&ty).clone();
+        for _ in 0..arity.max(1) {
+            let Ty::Fun(param, next) = ret else {
+                return None;
+            };
+            params.push(*param);
+            ret = *next;
+        }
+        if arity == 0 {
+            params.clear();
+        }
+        Some((resolved, params, ret))
+    }
+
     /// A generic function already emitted, read where a `PolyFn` is
     /// expected (`MakePolyFn`).
     fn hir_global_polyfn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<String> {
@@ -9716,6 +9767,15 @@ impl Compiler {
         // A returned closure takes its own adapter (#1589).
         if matches!(crate::typechecking::ty::strip_readonly(&ret), Ty::Var(_) | Ty::Fun(..)) || !open(&ret) {
             return Ok(None);
+        }
+        // A coroutine is its handle word whatever it yields: the shared
+        // body yields each value as the word the caller holds for its type
+        // (#2747).
+        if crate::typechecking::infer::Checker::coroutine_parts(crate::typechecking::ty::strip_readonly(&ret)).is_some()
+            && params.len() == args.len()
+            && params.iter().all(|p| matches!(crate::typechecking::ty::strip_readonly(p), Ty::Var(_)) || !open(p))
+        {
+            return Ok(Some((false, None)));
         }
         if params.len() != args.len() || params.iter().any(|p| !matches!(crate::typechecking::ty::strip_readonly(p), Ty::Var(_)) && open(p)) {
             return Err("callee-value");
@@ -11446,12 +11506,16 @@ impl Compiler {
             || !self.hir_closure_adapter_tail.is_empty()
             || !self.hir_unpair_tail.is_empty()
             || !self.hir_value_adapter_tail.is_empty()
+            || !self.hir_coro_value_tail.is_empty()
         {
             for lam in std::mem::take(&mut self.hir_lambda_tail) {
                 self.hir_lambda_fn(lam);
             }
             for (name, adapter) in std::mem::take(&mut self.hir_value_adapter_tail) {
                 self.fn_value_adapter_fn(&name, &adapter);
+            }
+            for (adapter, name, params, ret) in std::mem::take(&mut self.hir_coro_value_tail) {
+                self.coro_value_adapter_fn(&adapter, &name, &params, &ret);
             }
             for (name, ty, label) in std::mem::take(&mut self.hir_unpair_tail) {
                 self.hir_unpair_fn(name, ty, label);
@@ -11470,12 +11534,13 @@ impl Compiler {
     }
 
     /// The entry a value of named function `name` targets: the function
-    /// itself, or, when it returns two words to its direct calls
-    /// ([`Compiler::fn_value_redirects`]), its one-word adapter `name$value`
-    /// (reserved now, emitted after the body), whose two-word twin is the
-    /// function.
+    /// itself, or its adapter `name$value` (reserved now, emitted after the
+    /// body): when it returns two words to its direct calls
+    /// ([`Compiler::fn_value_redirects`]), the one-word adapter whose
+    /// two-word twin is the function; for a `gen fn`, the adapter that makes
+    /// its coroutine (`MakeCoro`) as a direct call does (#2747).
     pub(super) fn fn_value_target(&mut self, name: &str, label: IlLabel) -> IlLabel {
-        if !self.fn_value_redirects(name) || self.two_word_return_kind(name).is_none() {
+        if !self.fn_value_adapts(name) {
             return label;
         }
         let adapter = format!("{name}$value");
@@ -11486,9 +11551,105 @@ impl Compiler {
         self.fn_entry_labels[&adapter]
     }
 
+    /// The entry of a generic `gen fn` `name`'s value at ground parameter
+    /// types `params` (result `ret`): an adapter calling `name` at them,
+    /// reserved now and emitted after the body (#2747).
+    pub(super) fn coro_value_target(&mut self, name: &str, params: &[Ty], ret: &Ty) -> IlLabel {
+        let fn_ty = params.iter().rev().fold(ret.clone(), |acc, p| Ty::Fun(Box::new(p.clone()), Box::new(acc)));
+        let adapter = format!("{name}$value<{fn_ty}>");
+        if !self.fn_entry_labels.contains_key(&adapter) {
+            self.reserve_function_entry(adapter.clone());
+            self.hir_coro_value_tail.push((adapter.clone(), name.to_string(), params.to_vec(), ret.clone()));
+        }
+        self.fn_entry_labels[&adapter]
+    }
+
+    /// The entry a generic `gen fn` `name`'s `PolyFn` value (a `forall`
+    /// argument, a read at open types) targets: a trampoline taking the
+    /// shared body's words (its parameters, dictionaries and `kinds` word)
+    /// and making its coroutine at `target` from them (#2747). Emitted once
+    /// the module's bodies are ([`Self::emit_coro_trampolines`]).
+    pub(super) fn coro_trampoline_target(&mut self, name: &str, target: IlLabel) -> IlLabel {
+        let key = format!("{name}$coro");
+        if !self.fn_entry_labels.contains_key(&key) {
+            self.reserve_function_entry(key.clone());
+            self.coro_trampolines.push((key.clone(), target));
+        }
+        self.fn_entry_labels[&key]
+    }
+
+    /// [`Self::coro_trampoline_target`]'s bodies: each takes its target's
+    /// parameters as they are and returns `MakeCoro` of them.
+    pub(crate) fn emit_coro_trampolines(&mut self) {
+        for (key, target) in std::mem::take(&mut self.coro_trampolines) {
+            let params: Option<Vec<crate::mir::MirTy>> = self
+                .bodies
+                .funcs()
+                .iter()
+                .rev()
+                .find(|b| b.entry == Some(target))
+                .and_then(|b| b.mir.as_ref())
+                .map(|m| m.params.iter().map(|p| m.types[p.0 as usize]).collect());
+            let label = self.fn_entry_labels[&key];
+            self.bind_function_entry(key.clone());
+            self.bodies.advance();
+            self.bodies.record(key.clone(), Some(label));
+            let Some(params) = params else {
+                self.bodies.set_last_mir_why(format!("coroutine trampoline: no MIR for `{key}`'s generator"));
+                continue;
+            };
+            let built = (|| {
+                use crate::mir::MirTy;
+                let mut b = crate::mir::MirBuilder::new(key.clone());
+                b.set_ret_ty(MirTy::HeapRef);
+                let args = params.iter().map(|&ty| b.add_param(ty)).collect::<Result<Vec<_>, _>>()?;
+                let h = b.ins_alloc(crate::mir::MirAllocKind::Coro { target }, args)?;
+                b.ret(Some(h))?;
+                b.finish()
+            })();
+            match built {
+                Ok(func) => self.bodies.set_last_mir(func),
+                Err(e) => self.bodies.set_last_mir_why(format!("coroutine trampoline: {e}")),
+            }
+        }
+    }
+
+    /// [`Self::coro_value_target`]'s adapter: `name` called with its
+    /// parameters, which makes the coroutine of `name`'s clone at their
+    /// types (or of its shared body, where no clone is planned).
+    fn coro_value_adapter_fn(&mut self, adapter: &str, name: &str, params: &[Ty], ret: &Ty) {
+        use crate::hir::LocalKind;
+        use crate::hir::synth::Synth;
+        let mut b = Synth::new(&self.checker, adapter, ret.clone());
+        let args = params
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| {
+                let local = b.local(&format!("arg{i}"), ty.clone(), LocalKind::Param);
+                b.read(local)
+            })
+            .collect();
+        let value = b.call(name, args, ret.clone());
+        let r = b.ret(value);
+        let root = b.block(vec![r], None, crate::typechecking::ty::never());
+        let hir = b.finish(root);
+        let prev = self.compiling_two_word_enum.take();
+        self.pin_two_word_return_kind(adapter, None);
+        self.emit_synth_fn(adapter, &hir, HashMap::new());
+        self.compiling_two_word_enum = prev;
+        self.fn_arities.insert(adapter.to_string(), (params.len() as u32, false));
+    }
+
+    /// Whether a value of named function `name` enters its `$value` adapter
+    /// ([`Self::fn_value_target`]): it returns two words to its direct calls,
+    /// or it is a `gen fn`, whose body runs only on its coroutine.
+    pub(super) fn fn_value_adapts(&self, name: &str) -> bool {
+        self.coroutine_fns.contains(name) || (self.fn_value_redirects(name) && self.two_word_return_kind(name).is_some())
+    }
+
     /// The entry a partial application of the function at `entry` targets
     /// ([`HirBuiltin::Partial`]): the function's own `label`, or with
-    /// `value`, its one-word adapter ([`Self::fn_value_target`]).
+    /// `value`, its adapter ([`Self::fn_value_target`]).
     pub(super) fn partial_value_target(&mut self, entry: usize, label: IlLabel, value: bool) -> Option<IlLabel> {
         if !value {
             return Some(label);
@@ -11498,7 +11659,7 @@ impl Compiler {
         let name = self
             .functions
             .iter()
-            .filter(|&(n, &e)| e == entry && self.fn_value_redirects(n) && self.two_word_return_kind(n).is_some())
+            .filter(|&(n, &e)| e == entry && self.fn_value_adapts(n))
             .map(|(n, _)| n)
             .min()?
             .clone();
@@ -11507,7 +11668,8 @@ impl Compiler {
 
     /// [`Self::fn_value_target`]'s adapter: its parameters passed on to
     /// `name` as they come, its two-word result boxed to the one word a
-    /// function value returns; `name` is its twin.
+    /// function value returns, `name` its twin; or a `gen fn`'s call, which
+    /// makes its coroutine.
     fn fn_value_adapter_fn(&mut self, name: &str, adapter: &str) {
         use crate::hir::LocalKind;
         use crate::hir::synth::Synth;
@@ -11547,7 +11709,9 @@ impl Compiler {
         self.emit_synth_fn(adapter, &hir, calls);
         self.hir_synth_callees.remove(name);
         self.compiling_two_word_enum = prev;
-        if let (Some(&entry), Some(&twin)) = (self.fn_entry_labels.get(adapter), self.fn_entry_labels.get(name)) {
+        if self.two_word_return_kind(name).is_some()
+            && let (Some(&entry), Some(&twin)) = (self.fn_entry_labels.get(adapter), self.fn_entry_labels.get(name))
+        {
             self.bodies.set_pair_twin(entry, twin);
         }
         if let Some(&arity) = self.fn_arities.get(name) {

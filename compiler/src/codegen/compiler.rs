@@ -7303,6 +7303,7 @@ impl Compiler {
         }
 
         self.do_compile(ast);
+        self.emit_coro_trampolines();
         self.namespace = ns.to_string();
         for (name, text) in std::mem::take(&mut self.fold_bodies) {
             let qualified = self.qualify_static_fqn(&name);
