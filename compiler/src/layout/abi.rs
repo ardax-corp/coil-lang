@@ -706,6 +706,17 @@ pub fn nested_fn_in_result(ty: &Ty, top: bool) -> bool {
     found
 }
 
+/// Whether result type `ty` is a `coroutine<Y, S>` whose yield or receive
+/// type is open in the signature's type variables. That generator's shared
+/// body cannot tell a value nobody produced (an unsent binding `yield`, a
+/// completion with no value) from a word of a bare `T`, nor make the type's
+/// zero (#2738, `native.md`, "A value nobody produced"): every ground call
+/// takes its per-type clone, which decides by the type.
+pub fn open_coroutine(ty: &Ty) -> bool {
+    crate::typechecking::infer::Checker::coroutine_parts(crate::typechecking::ty::strip_readonly(ty))
+        .is_some_and(|(y, s)| y.has_var() || s.has_var())
+}
+
 /// Whether a parameter or result of declared type `ty` holds a function
 /// over a type variable in a user class's field or a user enum's payload,
 /// at any depth of the slot (`f: fn(T) -> T`, `fs: Vec<fn() -> T>`, a
