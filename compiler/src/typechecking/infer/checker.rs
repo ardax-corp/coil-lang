@@ -132,6 +132,7 @@ impl Checker {
             import_locals: HashMap::new(),
             imported_enum_keys: HashMap::new(),
             module_class_names: HashMap::new(),
+            module_trait_names: Default::default(),
             def_interner,
             schemes_by_def: HashMap::new(),
             local_defs: HashMap::new(),
@@ -12650,6 +12651,10 @@ impl Checker {
                         format!("Typeclass `{}` cannot be used as a bare value type", name),
                         range.unwrap_or(0..0),
                     ));
+                } else if self.module_trait_names.contains(name) {
+                    // A trait of this file not registered yet (an enum
+                    // payload is parsed before the main walk, #2744).
+                    return Ty::Existential { class: name.to_string() };
                 } else if let Some(range) = range {
                     self.unknown_type_names.push((name.to_string(), range));
                 }
@@ -16180,23 +16185,30 @@ impl Checker {
     /// (`A(E, E)`, `Cons(T, L<T>)`) is parsed before that enum is registered
     /// (#2039).
     fn collect_module_class_names(&mut self, ast: &Output) {
-        fn walk(node: &Output, out: &mut HashMap<String, usize>) {
+        fn walk(node: &Output, out: &mut HashMap<String, usize>, traits: &mut std::collections::HashSet<String>) {
             match Checker::pre_pass_unwrap_stmt(node).1.as_ref() {
                 Expression::Class { name, type_params, .. }
                 | Expression::EnumDecl { name, type_params, .. } => {
                     out.insert(name.to_string(), type_params.len());
                 }
+                Expression::TypeClass { name, type_params, .. }
+                    if type_params.len() == 1 && Kind::from(type_params[0].kind.clone()) == Kind::Type =>
+                {
+                    traits.insert(name.to_string());
+                }
                 Expression::Program(children) | Expression::Fragment(children) => {
                     for child in children {
-                        walk(child, out);
+                        walk(child, out, traits);
                     }
                 }
                 _ => {}
             }
         }
         let mut names = HashMap::new();
-        walk(ast, &mut names);
+        let mut traits = std::collections::HashSet::new();
+        walk(ast, &mut names, &mut traits);
         self.module_class_names = names;
+        self.module_trait_names = traits;
     }
 
     /// Record this module's `readonly class` keys before any body is

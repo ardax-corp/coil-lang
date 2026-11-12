@@ -1,0 +1,173 @@
+// An existential is a value like any other in a tuple, array, record,
+// `Option`, class field and enum payload, as a source and as a
+// destructuring target (`let (a, b) = …`, `match`, `for (a, b) in`), and
+// each place holds its own copy: a write through one is not seen through
+// another (coil-lang#2744, #2715).
+use tests::assert;
+
+trait Tr<S> {
+    fn get(S s) -> int {}
+    fn put(S s, int v) {}
+}
+
+class A {
+    pub n: int,
+}
+
+impl Tr for A {
+    pub fn get(A a) -> int {
+        return a.n;
+    }
+    pub fn put(A a, int v) {
+        a.n = v;
+    }
+}
+
+class Held {
+    pub e: Tr,
+    pub k: int,
+}
+
+enum Bag {
+    One(Tr),
+    Two(Tr, Tr),
+    Empty,
+}
+
+fn total(Bag b) -> int {
+    return match b {
+        Bag::One(e) => e.get(),
+        Bag::Two(a, c) => a.get() * 10 + c.get(),
+        Bag::Empty => 0,
+    };
+}
+
+test("a tuple of two existentials destructured") {
+    let p: Tr = new A(1);
+    let q: Tr = new A(2);
+    let u: (Tr, Tr) = (p, q);
+    let (x, y) = u;
+    assert!(x.get() * 10 + y.get() == 12);
+    x.put(7);
+    let (z, _) = u;
+    assert!(x.get() == 7 && z.get() == 1 && p.get() == 1);
+}
+
+test("one binding of the two used") {
+    let p: Tr = new A(1);
+    let q: Tr = new A(2);
+    let u: (Tr, Tr) = (p, q);
+    let (x, y) = u;
+    assert!(x.get() == 1);
+}
+
+test("an existential local in a tuple is a copy") {
+    let p: Tr = new A(1);
+    let u: (int, Tr) = (0, p);
+    p.put(5);
+    let (_, x) = u;
+    x.put(7);
+    let (n, z) = u;
+    assert!(p.get() == 5 && x.get() == 7 && z.get() == 1 && n == 0);
+    let w: (Tr, int, Tr) = (p, 3, z);
+    let (a, k, b) = w;
+    assert!(a.get() == 5 && k == 3 && b.get() == 1);
+}
+
+test("in a fixed array") {
+    let p: Tr = new A(1);
+    let a: [Tr; 2] = [p, new A(2)];
+    p.put(5);
+    let x = a[0];
+    x.put(9);
+    assert!(p.get() == 5 && a[0].get() == 1 && a[1].get() == 2 && x.get() == 9);
+}
+
+test("in a Vec, and a Vec of tuples taken apart by for") {
+    let p: Tr = new A(1);
+    let v: Vec<Tr> = Vec::new();
+    v.push(p);
+    p.put(5);
+    let x = v[0];
+    x.put(9);
+    assert!(p.get() == 5 && v[0].get() == 1 && x.get() == 9);
+    let w: Vec<(Tr, int)> = Vec::new();
+    w.push((p, 2));
+    w.push((x, 3));
+    p.put(6);
+    let n = 0;
+    for (e, k) in w {
+        n = n * 100 + e.get() * 10 + k;
+    }
+    assert!(n == 5293);
+}
+
+test("a fixed array of existential pairs taken apart by for") {
+    let p: Tr = new A(1);
+    let q: Tr = new A(2);
+    let v: [(Tr, Tr); 2] = [(p, q), (q, p)];
+    let n = 0;
+    for (a, b) in v {
+        n = n * 10 + a.get() * 2 + b.get();
+    }
+    assert!(n == 45);
+}
+
+test("in a record") {
+    let p: Tr = new A(1);
+    let r = { a: p, b: 2 };
+    p.put(5);
+    let x = r.a;
+    x.put(9);
+    let { a, b } = r;
+    assert!(p.get() == 5 && r.a.get() == 1 && x.get() == 9 && a.get() + b == 3);
+}
+
+test("in an Option, matched") {
+    let p: Tr = new A(1);
+    let o: Option<Tr> = Option::Some(p);
+    p.put(5);
+    let n = match o {
+        Option::Some(e) => e.get(),
+        Option::None => 0,
+    };
+    assert!(p.get() == 5 && n == 1);
+    let t: Option<(Tr, int)> = Option::Some((p, 2));
+    p.put(6);
+    let m = match t {
+        Option::Some(pair) => {
+            let (e, k) = pair;
+            e.get() + k
+        },
+        Option::None => 0,
+    };
+    assert!(m == 7);
+}
+
+test("in a class field") {
+    let p: Tr = new A(1);
+    let h = new Held(p, 2);
+    p.put(5);
+    let x = h.e;
+    x.put(9);
+    assert!(p.get() == 5 && h.e.get() == 1 && x.get() == 9 && h.k == 2);
+}
+
+test("in an enum payload, matched") {
+    let p: Tr = new A(1);
+    let q: Tr = new A(2);
+    let b = Bag::Two(p, q);
+    let c = Bag::One(p);
+    p.put(5);
+    assert!(total(b) == 12 && total(c) == 1 && total(Bag::Empty) == 0);
+    assert!(p.get() == 5);
+}
+
+test("a tuple of class values destructured twice keeps each binding's copy") {
+    let t = (new A(1), new A(2));
+    let (a, b) = t;
+    a.n = 5;
+    b.n = 6;
+    let (c, d) = t;
+    assert!(a.n == 5 && b.n == 6 && c.n == 1 && d.n == 2);
+}

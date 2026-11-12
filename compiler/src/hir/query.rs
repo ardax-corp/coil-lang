@@ -422,6 +422,9 @@ pub(super) fn reassigned(body: &HirBody, local: LocalId) -> bool {
 /// [`sroa_class`] that is only a field base, or one [`class_boxes`] boxes.
 pub fn sroa_local(body: &HirBody, checker: &Checker, boxed: &std::collections::HashSet<u32>, local: LocalId, init: HirId) -> bool {
     !body.local(local).captured
+        // A local of a bare trait type holds its init's pack, which no
+        // field slot does (#2744).
+        && !body.local(local).ty.as_ref().is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(&apply_ty_prune(checker.subst(), t)), Ty::Existential { .. }))
         && sroa_class(body, checker, init).is_some()
         && (only_field_base(body, local) || boxed.contains(&local.0))
 }

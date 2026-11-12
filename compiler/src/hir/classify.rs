@@ -358,7 +358,7 @@ fn params_closed_of(ty: &Ty) -> bool {
 fn aggregate<'t>(checker: &Checker, mut items: impl Iterator<Item = &'t Ty>, unit: bool, seen: &mut Vec<String>) -> Option<ValueClass> {
     items
         .all(|t| {
-            (params_closed(t) || is_existential(t) || mono_fun(checker, t, seen) || open_fun(checker, t, seen) || fun_holder(checker, t, false, seen))
+            (params_closed(t) || holds_packs(t) || mono_fun(checker, t, seen) || open_fun(checker, t, seen) || fun_holder(checker, t, false, seen))
                 && classify_in(checker, t, seen).is_none_or(|class| is_word(class) || unit && class == ValueClass::Unit)
         })
         .then_some(ValueClass::Aggregate)
@@ -395,7 +395,21 @@ pub fn is_generic_class(checker: &Checker, name: &str) -> bool {
 /// `Option<fn(T) -> T>`: no niche, the boxed object in every instance
 /// ([`plain_word`], #2493, #2571).
 fn payload_closed(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
-    params_closed(ty) || is_existential(ty) || fun_words(checker, ty, seen)
+    params_closed(ty) || holds_packs(ty) || fun_words(checker, ty, seen)
+}
+
+/// Closed but for existentials, at the top or as items of a tuple, record
+/// or fixed array (`(Tr, int)`): each existential is its one pack word
+/// wherever it is held, so the product is laid out as a closed one
+/// (#2744).
+fn holds_packs(ty: &Ty) -> bool {
+    match strip_readonly(ty) {
+        Ty::Existential { .. } => true,
+        Ty::Tuple(items) => items.iter().all(holds_packs),
+        Ty::Record { fields } => fields.iter().all(|(_, f)| holds_packs(f)),
+        Ty::Array { element, .. } => holds_packs(element),
+        t => params_closed(t),
+    }
 }
 
 /// A user class the lowering builds and reads: not generic, with every
