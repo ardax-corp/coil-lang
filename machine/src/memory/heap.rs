@@ -3237,8 +3237,10 @@ enum ArrayData {
     Lanes { words: Vec<Value> },
 }
 
-/// Elements per card of a [`CardTable`]: `1 << CARD_SHIFT`.
-pub const CARD_SHIFT: u32 = 4;
+/// Elements per card of a [`CardTable`]: `1 << CARD_SHIFT`. Eight: a sweep
+/// of {8, 16, 64} found 8 cheapest on map updates (most cards dirty) and 64
+/// on a sparse store loop (#2687).
+pub const CARD_SHIFT: u32 = 3;
 /// Elements a remembered word array has when a minor gives it a
 /// [`CardTable`]; a smaller one is scanned whole.
 pub const CARD_MIN_WORDS: usize = 1024;

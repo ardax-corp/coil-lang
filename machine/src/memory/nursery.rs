@@ -1181,6 +1181,16 @@ mod tests {
         assert_eq!(dirty(gc), Vec::<usize>::new(), "the minor cleared the cards it scanned");
     }
 
+    /// Card of element `i`.
+    fn card(i: usize) -> usize {
+        i >> super::super::CARD_SHIFT
+    }
+
+    /// Cards of elements `lo..hi`.
+    fn cards_of(lo: usize, hi: usize) -> Vec<usize> {
+        (card(lo)..=card(hi - 1)).collect()
+    }
+
     /// `CARD_MIN_WORDS` elements: the smallest array a minor tracks.
     const TRACKED: usize = super::super::CARD_MIN_WORDS;
 
@@ -1207,7 +1217,7 @@ mod tests {
         gc.as_mut().set(40, Value::from(a));
         unsafe { gc.as_mut().set_unchecked(500, Value::from(b)) };
         assert!(gc.as_mut().store_indexed(1023, Value::from(c), false));
-        assert_eq!(dirty(gc), vec![40 >> 4, 500 >> 4, 1023 >> 4]);
+        assert_eq!(dirty(gc), vec![card(40), card(500), card(1023)]);
         minor(&mut heap, &[], &mut []);
         assert_eq!(walk(&heap, gc.as_ref().get(40).unwrap().bits()), la);
         assert_eq!(walk(&heap, gc.as_ref().get(500).unwrap().bits()), lb);
@@ -1228,7 +1238,7 @@ mod tests {
             gc.as_mut().push(Value::from(l));
         }
         assert!(gc.as_ref().cards().unwrap().cards.len() > cards, "the table grew with the array");
-        assert_eq!(dirty(gc).first(), Some(&(TRACKED >> 4)), "the cards below the old length stay clean");
+        assert_eq!(dirty(gc).first(), Some(&card(TRACKED)), "the cards below the old length stay clean");
         minor(&mut heap, &[], &mut []);
         for (k, list) in lists.iter().enumerate() {
             assert_eq!(&walk(&heap, gc.as_ref().get(TRACKED + k).unwrap().bits()), list);
@@ -1245,12 +1255,12 @@ mod tests {
         let (src, _) = heap.alloc(ObjArray::new(vec![Value::from(l); 20]), Object::Array);
         let Object::Array(src) = src else { unreachable!() };
         gc.as_mut().extend_from(src.as_ref(), 0, 20);
-        assert_eq!(dirty(gc), vec![TRACKED >> 4, (TRACKED + 19) >> 4]);
+        assert_eq!(dirty(gc), cards_of(TRACKED, TRACKED + 20));
         survives(&mut heap, gc, TRACKED + 19, &list);
         let l = cons_list(&mut heap, 7);
         let list = walk(&heap, l);
         gc.as_mut().fill_push(Value::from(l), 3);
-        assert_eq!(dirty(gc), vec![(TRACKED + 20) >> 4], "elements 20..23 past the old end share a card");
+        assert_eq!(dirty(gc), cards_of(TRACKED + 20, TRACKED + 23));
         survives(&mut heap, gc, TRACKED + 22, &list);
     }
 
@@ -1273,25 +1283,25 @@ mod tests {
         let y = fresh(&mut heap, &mut gc);
         let yl = walk(&heap, y);
         gc.as_mut().remove(5);
-        assert!(dirty(gc).contains(&(999 >> 4)));
+        assert!(dirty(gc).contains(&card(999)));
         survives(&mut heap, gc, 999, &yl);
         // insert(0): 1000 moves to 1001.
         let y = fresh(&mut heap, &mut gc);
         let yl = walk(&heap, y);
         gc.as_mut().insert(0, Value::from(0i64));
-        assert!(dirty(gc).contains(&(1001 >> 4)));
+        assert!(dirty(gc).contains(&card(1001)));
         survives(&mut heap, gc, 1001, &yl);
         // drain_range(0, 10): 1000 moves to 990.
         let y = fresh(&mut heap, &mut gc);
         let yl = walk(&heap, y);
         gc.as_mut().drain_range(0, 10);
-        assert!(dirty(gc).contains(&(990 >> 4)));
+        assert!(dirty(gc).contains(&card(990)));
         survives(&mut heap, gc, 990, &yl);
         // rotate_last_to(1000): 1000 moves to 1001.
         let y = fresh(&mut heap, &mut gc);
         let yl = walk(&heap, y);
         gc.as_mut().rotate_last_to(1000);
-        assert!(dirty(gc).contains(&(1001 >> 4)));
+        assert!(dirty(gc).contains(&card(1001)));
         survives(&mut heap, gc, 1001, &yl);
     }
 
