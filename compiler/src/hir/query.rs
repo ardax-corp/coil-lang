@@ -1042,6 +1042,9 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         // variable nothing pinned (`fn () => Ok(2)`'s error type, #1520):
         // it is `MakeFn`'s plain closure word.
         LocalKind::Let if let Some(source) = let_init_local(body, local) => polyfn_callee(body, checker, source),
+        // A local of a `forall` type is one whatever it was read from (a
+        // `forall` field, #2725).
+        LocalKind::Let if matches!(strip_readonly(t), Ty::Forall { .. }) && !let_init_is_lambda(body, local) => true,
         LocalKind::Let => {
             poly_fun(t) && !let_init_is_lambda(body, local) && !let_init_is_element(body, local) && !let_init_is_field(body, local)
                 || matches!(strip_readonly(t), Ty::Fun(..))

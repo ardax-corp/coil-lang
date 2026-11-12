@@ -1,0 +1,79 @@
+// A class field of a `forall` type takes a generic function as a `forall`
+// parameter does: the value is made at the field's type, in `new` and in a
+// field store, and a read of the field is that `forall` value
+// (coil-lang#2725).
+use tests::assert;
+use string::format;
+
+fn id<T>(T x) -> T {
+    return x;
+}
+
+fn keep<T>(T x) -> T {
+    let y = x;
+    return y;
+}
+
+fn shown<T: Show>(T x) -> string {
+    return x.show() + "!";
+}
+
+class Holder {
+    pub g: forall T. T -> T,
+}
+
+class Shower {
+    pub s: forall T: Show. T -> string,
+    pub n: int,
+}
+
+class Gen<U> {
+    pub f: forall T. T -> T,
+    pub u: U,
+}
+
+fn both(forall T. T -> T g) -> string {
+    return format("%v %v", g(1), g("s"));
+}
+
+fn collected() -> string {
+    let h = new Holder(id);
+    let junk = Vec::new();
+    for i in 0..2000 {
+        junk.push(format("%i", i));
+    }
+    let f: forall T. T -> T = h.g;
+    return format("%v %v", f(junk.len()), f("kept"));
+}
+
+test("a generic function stored in a forall field, read and called") {
+    let h = new Holder(id);
+    let f: forall T. T -> T = h.g;
+    assert!(f(1) == 1 && f("s") == "s" && f(true));
+    assert!(both(h.g) == "1 s");
+}
+
+test("a field store makes the value at the field's type") {
+    let h = new Holder(id);
+    h.g = keep;
+    let f: forall T. T -> T = h.g;
+    let o: Option<string> = Option::Some("o");
+    assert!(format("%v %v", f(2.5), f(o)) == "2.5 Some(o)");
+}
+
+test("a bounded forall field passes its dictionaries") {
+    let s = new Shower(shown, 3);
+    let k: forall T: Show. T -> string = s.s;
+    let o: Option<int> = Option::Some(2);
+    assert!(k(1) == "1!" && k("w") == "w!" && k(o) == "Some(2)!" && s.n == 3);
+}
+
+test("a generic class's forall field") {
+    let g = new Gen(id, "u");
+    let k: forall T. T -> T = g.f;
+    assert!(k(4) == 4 && k("t") == "t" && g.u == "u");
+}
+
+test("the field's value survives a collection") {
+    assert!(collected() == "2000 kept");
+}

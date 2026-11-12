@@ -3096,6 +3096,13 @@ impl Checker {
                 }
                 let val_ty = self.infer(value);
                 let target_ty = self.infer_mutable_lvalue(name, range.clone());
+                // A `forall` field or local takes a value as a `forall`
+                // parameter does (#2725).
+                let target_ty = apply_ty_prune(&self.subst, &target_ty);
+                if matches!(strip_readonly(&target_ty), Ty::Forall { .. }) {
+                    self.check_rank_n_argument(strip_readonly(&target_ty), &val_ty, Some(value), &value.0.into_range());
+                    return apply_ty_prune(&self.subst, &val_ty);
+                }
                 self.coerce_or_unify(&target_ty, &val_ty, Some(value), &range, "assignment");
                 self.maybe_record_ffi_declare_for_field_assignment(name, value);
                 apply_ty_prune(&self.subst, &val_ty)
@@ -4537,6 +4544,13 @@ impl Checker {
                         self.check_borrow_arg(&class_name, &name, arg);
                     }
                     let aty = self.infer(arg);
+                    // A `forall` field takes a value as a `forall`
+                    // parameter does: made at that type (#2725).
+                    if matches!(strip_readonly(&apply_ty_prune(&self.subst, fty)), Ty::Forall { .. }) {
+                        let fty = apply_ty_prune(&self.subst, fty);
+                        self.check_rank_n_argument(strip_readonly(&fty), &aty, Some(arg), &arg.0.into_range());
+                        continue;
+                    }
                     // Coerce like a function argument (#1079): an array
                     // literal builds a `Vec<T>` field.
                     self.coerce_or_unify(
@@ -4622,7 +4636,12 @@ impl Checker {
                 Some(k) => {
                     filled[k] = true;
                     self.check_borrow_arg(class_name, names[k], value);
-                    self.coerce_or_unify(&field_tys[k], &aty, Some(value), &value.0.into_range(), "constructor argument");
+                    let fty = apply_ty_prune(&self.subst, &field_tys[k]);
+                    if matches!(strip_readonly(&fty), Ty::Forall { .. }) {
+                        self.check_rank_n_argument(strip_readonly(&fty), &aty, Some(value), &value.0.into_range());
+                    } else {
+                        self.coerce_or_unify(&field_tys[k], &aty, Some(value), &value.0.into_range(), "constructor argument");
+                    }
                 }
                 None if !matches!(arg.1.as_ref(), Expression::NamedArg(..)) => {
                     let _ = self.error_with_help(
