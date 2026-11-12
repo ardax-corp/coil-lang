@@ -6980,12 +6980,21 @@ impl Compiler {
         if hint.arity != args.len() || args.is_empty() {
             return Err("callee-trait");
         }
-        // Further arguments pass one word each in their own layouts (an
-        // enum's may differ at the instance, so it is refused).
+        // Further arguments pass one word each in their own layouts, as
+        // the slot's `$dict` adapter takes them: a closed enum's is the
+        // same at every instance, its niche word or its object (a two-word
+        // one boxed), and a `()` is the empty tuple object (#2718). An
+        // open enum's may differ at the instance, so it is refused.
         let mut params = vec![ValueLayout::Boxed];
         for &arg in &args[1..] {
             let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg).ok_or("callee-signature")?);
             match classify::classify(&self.checker, &ty) {
+                Some(ValueClass::Unit) => params.push(ValueLayout::Boxed),
+                Some(ValueClass::Enum) if crate::layout::ty_is_closed(&ty) => params.push(if crate::layout::of(&self.checker, &ty).words() == 1 {
+                    self.value_layout(&ty)
+                } else {
+                    ValueLayout::Boxed
+                }),
                 Some(ValueClass::Enum) | None => return Err("callee-trait"),
                 Some(class) if classify::is_word(class) => params.push(self.value_layout(&ty)),
                 Some(_) => return Err("callee-trait"),
