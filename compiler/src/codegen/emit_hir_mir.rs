@@ -1329,7 +1329,7 @@ impl Compiler {
                     None => dicts = None,
                 }
             }
-            let coro = self.coroutine_fns.contains(&key);
+            let coro = self.is_coro_key(&key);
             self.hir_request_method_clone(&key);
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
@@ -1450,7 +1450,7 @@ impl Compiler {
             return;
         }
         let tail = emit.plan.tail_calls.contains(&id.0);
-        let coro = !tail && self.coroutine_fns.contains(&call.key);
+        let coro = !tail && self.is_coro_key(&call.key);
         // A compiler-made body's call as it planned it: the dictionaries
         // it passes, and a raw method's own entry.
         let synth = self.hir_synth_calls.is_some().then(|| self.hir_synth_callees.get(&call.key).cloned()).flatten();

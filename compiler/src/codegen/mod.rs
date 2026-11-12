@@ -597,6 +597,9 @@ pub struct Compiler {
     /// ([`Compiler::coro_trampoline_target`]) still to emit, once the
     /// module's bodies are: its name and the generator's shared entry.
     coro_trampolines: Vec<(String, crate::bodies::Label)>,
+    /// Generic functions and methods calling a generator over its type
+    /// parameters ([`Compiler::note_open_coroutine_callers`]): clone-only.
+    open_coroutine_callers: HashSet<String>,
     /// Closure adapters ([`Compiler::hir_fn_adapter`]) by unboxed tags,
     /// and those still to emit after the current body.
     hir_fn_adapters: HashMap<(Vec<Option<u32>>, Option<compiler::emit_hir::HirFnRet>), crate::bodies::Label>,
@@ -865,6 +868,7 @@ impl Default for Compiler {
             hir_value_adapter_tail: Vec::new(),
             hir_coro_value_tail: Vec::new(),
             coro_trampolines: Vec::new(),
+            open_coroutine_callers: HashSet::new(),
             hir_fn_adapters: HashMap::new(),
             hir_adapter_tail: Vec::new(),
             hir_closure_adapters: HashMap::new(),
