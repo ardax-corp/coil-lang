@@ -44,7 +44,7 @@ pub const DEFAULT_CASE_WALL_TIMEOUT: u64 = 600;
 #[derive(Parser, Debug)]
 #[command(
     name = "coil-test",
-    about = "Compile and run every test under [PATH] (default: ./tests)",
+    about = "Compile and run the tests of each PATH, a `.coil` file or a directory of them (default: ./tests)",
     disable_help_subcommand = true,
     after_help = "Files under a `compile_fail/` directory must be rejected by the compiler\n\
 with an error code their header declares (`// @expected E0209 — why`).\n\
@@ -124,9 +124,9 @@ struct TestCli {
     /// (`// @xfail NAME #issue`) must fail, and fails the run if it passes
     #[arg(long, value_name = "NAME")]
     cell: Option<String>,
-    /// Test root (default: ./tests)
+    /// Test files and directories (default: ./tests)
     #[arg(value_name = "PATH")]
-    path: Option<String>,
+    paths: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -239,7 +239,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
         no_shuffle: cli.no_shuffle,
         jobs: cli.jobs,
         json: cli.json,
-        path: cli.path,
+        paths: cli.paths,
         fail_fast: cli.fail_fast,
         show_output: cli.show_output,
         verbose: cli.verbose,
@@ -283,7 +283,7 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         no_shuffle: cli.no_shuffle,
         jobs: cli.jobs,
         json: cli.json,
-        path: cli.path,
+        paths: cli.path.into_iter().collect(),
         fail_fast: false,
         show_output: false,
         verbose: cli.verbose,
@@ -335,7 +335,7 @@ struct RunParts {
     no_shuffle: bool,
     jobs: Option<usize>,
     json: bool,
-    path: Option<String>,
+    paths: Vec<String>,
     fail_fast: bool,
     show_output: bool,
     verbose: bool,
@@ -364,7 +364,11 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
     Ok((
         config,
         Box::new(TestOptions {
-            root: PathBuf::from(parts.path.unwrap_or_else(|| TESTS_DIR.to_string())),
+            paths: if parts.paths.is_empty() {
+                vec![PathBuf::from(TESTS_DIR)]
+            } else {
+                parts.paths.iter().map(PathBuf::from).collect()
+            },
             fail_fast: parts.fail_fast,
             order,
             jobs: parts.jobs.unwrap_or_else(default_jobs),
@@ -488,7 +492,7 @@ mod tests {
     #[test]
     fn defaults_to_tests_dir_standard_opt_and_deny_all() {
         let (_, o) = run(&[]);
-        assert_eq!(o.root, PathBuf::from(TESTS_DIR));
+        assert_eq!(o.paths, vec![PathBuf::from(TESTS_DIR)]);
         assert!(!o.fail_fast);
         assert_eq!(o.opt_level, OptLevel::Standard);
         assert_eq!(o.grants, HostGrants::deny_all());
@@ -509,7 +513,7 @@ mod tests {
             "plugin",
             "--ffi-search-path=native",
         ]);
-        assert_eq!(o.root, PathBuf::from("./suite"));
+        assert_eq!(o.paths, vec![PathBuf::from("./suite")]);
         assert!(o.fail_fast);
         assert_eq!(o.opt_level, OptLevel::None);
         assert_eq!(
@@ -597,18 +601,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_flags_extra_paths_and_missing_values() {
+    fn rejects_unknown_flags_and_missing_values() {
         for bad in [
             &["-o", "x"][..],
             &["--include-tests"],
             &["--opt-stats"],
-            &["a", "b"],
             &["--root"],
             &["-O", "fast"],
             &["--allow-dload"],
         ] {
             assert!(parse_args(&argv(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn takes_several_paths() {
+        let Ok(Parsed::Run(_, o)) = parse_args(&argv(&["a.coil", "b"])) else {
+            panic!("parse");
+        };
+        assert_eq!(o.paths, vec![PathBuf::from("a.coil"), PathBuf::from("b")]);
     }
 
     #[test]
@@ -652,7 +663,7 @@ mod tests {
         assert!(m.json);
         assert_eq!(m.test.order, Order::Shuffled(7));
         assert_eq!(m.test.jobs, 2);
-        assert_eq!(m.test.root, PathBuf::from("spec"));
+        assert_eq!(m.test.paths, vec![PathBuf::from("spec")]);
         assert!(m.test.coverage.is_none());
         match &m.isolation {
             Isolation::Child { args, wall, .. } => {
@@ -665,7 +676,7 @@ mod tests {
         let d = mutate(&[]);
         assert_eq!(d.operators, Operator::ALL);
         assert_eq!(d.timeout_factor, DEFAULT_TIMEOUT_FACTOR);
-        assert_eq!(d.test.root, PathBuf::from(TESTS_DIR));
+        assert_eq!(d.test.paths, vec![PathBuf::from(TESTS_DIR)]);
     }
 
     #[test]

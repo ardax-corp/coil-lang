@@ -235,12 +235,12 @@ pub fn run_mutate(config: ReportConfig, options: &MutateOptions) -> Result<Mutat
         }
     }
 
-    let test_root = canonical(&options.test.root);
+    let test_roots: Vec<PathBuf> = options.test.root_dirs().iter().map(|r| canonical(r)).collect();
     let mut targets = Vec::new();
     let mut planned = Vec::new();
     for (abs, display, lines) in coverage.files() {
         let selected = if options.files.is_empty() {
-            !abs.starts_with(&test_root)
+            !test_roots.iter().any(|r| abs.starts_with(r))
         } else {
             options.files.iter().any(|g| glob_match(g, display))
         };
