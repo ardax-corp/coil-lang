@@ -19731,6 +19731,13 @@ impl Checker {
         self.scalar_value_ty(&name)
     }
 
+    /// Every variant's backing word when `ty` is a scalar-backed enum.
+    pub(crate) fn scalar_backings_of(&self, ty: &Ty) -> Option<&[crate::typechecking::ty::ScalarBacking]> {
+        let resolved = apply_ty_prune(&self.subst, ty);
+        let name = Self::enum_name_of_resolved(&resolved)?;
+        self.enum_scalar.get(&self.registry_enum_key(&name)).map(Vec::as_slice)
+    }
+
     /// `Status` in an `int` (etc.) position: one-way coerce to the backing word.
     fn coerce_scalar_enum_to_backing(&self, expected: &Ty, actual: &Ty) -> Option<Ty> {
         let backing = self.scalar_backing_ty_of(actual)?;

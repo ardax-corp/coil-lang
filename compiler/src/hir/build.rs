@@ -1192,7 +1192,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     fn implicit_ok_return(&self, b: &mut BodyBuilder, root: HirId) {
-        if !b.body.result_mode {
+        // A gen fn falling off its end completes with no value, as a bare
+        // `return;` there does (#2717).
+        if !b.body.result_mode || b.body.is_coro {
             return;
         }
         let Some((ok, _)) = b.body.ret.as_ref().and_then(result_ok_err) else {
@@ -1649,12 +1651,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     .node_id(node)
                     .and_then(|id| self.sidecar.ty(id).cloned().or_else(|| self.checker.lookup_at(id)))
                     .or_else(|| self.ty_of(node));
-                self.emit_ty(b, node, HirKind::Yield { value, from }, ty)
+                let zero = if from { None } else { ty.as_ref().and_then(|t| self.zero_value(b, t)) };
+                self.emit_ty(b, node, HirKind::Yield { value, from, zero }, ty)
             }
             E::Resume(handle, value) => {
                 let handle = self.expr(b, handle);
                 let value = value.as_ref().map(|v| self.expr(b, v));
-                self.emit(b, node, HirKind::Resume { handle, value })
+                let zero = self.ty_of(node).and_then(|t| self.zero_value(b, &t));
+                self.emit(b, node, HirKind::Resume { handle, value, zero })
             }
 
             E::TypeOf(inner) => self.builtin(b, node, Builtin::TypeOf, std::slice::from_ref(inner)),
@@ -2559,6 +2563,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         )
     }
 
+    /// The zero of `ty` where it is an object (#2717): see
+    /// [`super::synth::zero_value`].
+    fn zero_value(&self, b: &mut BodyBuilder, ty: &Ty) -> Option<HirId> {
+        let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
+        super::synth::zero_value(self.checker, &mut b.body.exprs, &ty)
+    }
+
     fn synth_variant(&self, b: &mut BodyBuilder, span: Span, enum_name: &str, variant: &str, args: Vec<HirId>, ty: Option<Ty>) -> HirId {
         let tag = self.checker.tag_for(enum_name, variant);
         self.synth(
@@ -2676,7 +2687,11 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
 
     fn return_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, value: &Output<'_>) -> HirId {
         let is_unit = matches!(peel(value).1.as_ref(), Expression::Noop(_));
+        // A gen fn's bare `return;` (the parser's `()`) completes it with no
+        // value, whatever its yield type (#2717): nothing to wrap in `Ok`.
+        let bare_coro = b.body.is_coro && (is_unit || matches!(peel(value).1.as_ref(), Expression::Tuple(items) if items.is_empty()));
         let wrap = b.body.result_mode
+            && !bare_coro
             && !is_result_construct(value, b.ok_is_result)
             && !self.checker.returns_whole_result(value.0.start, value.0.end)
             && miss_ret(b).as_ref().and_then(result_ok_err).is_some();
@@ -2693,7 +2708,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         // is Ok-wrapped as well: the final value is the yielded `Result`.
         let wrap = wrap
             || (b.body.is_coro
-                && !is_unit
+                && !bare_coro
                 && miss_ret(b).as_ref().and_then(result_ok_err).is_some()
                 && self
                     .ty_at(b, v)

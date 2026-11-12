@@ -716,9 +716,99 @@ impl Compiler {
                 let idx = self.intern_string("index out of bounds");
                 t.string = Some(idx);
             }
+            // A read of the value nobody produced, at a type with no zero,
+            // panics with the type's name (#2717).
+            HirKind::Resume { .. } | HirKind::Yield { from: false, .. } => {
+                let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                t.missing = ty.as_ref().and_then(|t| self.hir_missing_word(t));
+                if let Some(name) = ty.as_ref().and_then(|t| self.hir_missing_value_type(t)) {
+                    let msg = if matches!(e.kind, HirKind::Resume { .. }) {
+                        format!("the generator finished without a value of {name}")
+                    } else {
+                        format!("resumed without a value of {name}")
+                    };
+                    t.string = Some(self.intern_string(msg));
+                }
+                if let HirKind::Resume { handle, value: None, .. } = e.kind {
+                    t.missing_send = self.hir_coro_send_ty(hir, handle).and_then(|s| self.hir_missing_word(&s));
+                }
+            }
+            // A gen fn's bare `return;` (no value, or the `()` make it
+            // carries) completes it with no value.
+            HirKind::Return(v) if hir.is_coro && v.is_none_or(|v| query::is_unit_make(hir, v)) => {
+                t.missing = self.hir_coro_yield_ty(hir).and_then(|y| self.hir_missing_word(&y));
+            }
             _ => {}
         }
+        // A gen fn's body falling off its end completes it with no value.
+        if hir.is_coro && hir.root == Some(id) {
+            t.missing = self.hir_coro_yield_ty(hir).and_then(|y| self.hir_missing_word(&y));
+        }
         site
+    }
+
+    /// The name of `id`'s type (a `resume` or binding `yield`) where it has
+    /// no zero and the word `0` is no value of it, so a `0` read there is
+    /// the value nobody produced ([`crate::layout::Zero::None`], #2717).
+    /// A `Result<(), E>` (`0` is `Ok(())`) and a number- or `bool`-backed
+    /// scalar enum hold any word, and are left as they are.
+    fn hir_missing_value_type(&self, ty: &Ty) -> Option<String> {
+        if crate::layout::zero_of(&self.checker, ty) != crate::layout::Zero::None {
+            return None;
+        }
+        let any_word = self.value_layout(ty) == ValueLayout::NicheUnitResult
+            || self.checker.scalar_backing_ty_of(ty).is_some_and(|b| classify::primitive(&b).is_some());
+        (!any_word || self.hir_missing_word(ty).is_some()).then(|| crate::typechecking::pretty::format_ty_for_diag(self.checker.subst(), ty))
+    }
+
+    /// The word standing for a generator's value nobody produced at `ty`,
+    /// where `ty` has no zero and the word `0` is a value of it: `1` for a
+    /// `Result<(), E>` (no error pointer is odd), a backing no variant of a
+    /// number- or `bool`-backed scalar enum has (#2717). `None` elsewhere
+    /// (the word `0` stands for it), and for a `bool`-backed enum with both
+    /// variants, which leaves no word free.
+    fn hir_missing_word(&self, ty: &Ty) -> Option<i64> {
+        use crate::typechecking::ty::ScalarBacking as B;
+        if crate::layout::zero_of(&self.checker, ty) != crate::layout::Zero::None {
+            return None;
+        }
+        if self.value_layout(ty) == ValueLayout::NicheUnitResult {
+            return Some(1);
+        }
+        let backings = self.checker.scalar_backings_of(ty)?;
+        let used: HashSet<i64> = backings
+            .iter()
+            .filter_map(|b| match b {
+                B::Int(n) => Some(*n),
+                B::Float(bits) => Some(*bits as i64),
+                B::Bool(v) => Some(i64::from(*v)),
+                B::String(_) => None,
+            })
+            .collect();
+        let candidates: Vec<i64> = match backings.first()? {
+            B::Int(_) => (0..4).map(|k| i64::MIN + k).collect(),
+            // Quiet NaNs with a payload no literal spells.
+            B::Float(_) => (0..4).map(|k| (0x7ff8_c011_0000_0001_u64 + k) as i64).collect(),
+            B::Bool(_) => vec![0, 1],
+            B::String(_) => return None,
+        };
+        candidates.into_iter().find(|c| !used.contains(c))
+    }
+
+    /// The send type `S` of the `coroutine<Y, S>` handle `id` is.
+    fn hir_coro_send_ty(&self, hir: &HirBody, id: HirId) -> Option<Ty> {
+        match crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?)) {
+            Ty::App(head, args) if args.len() == 2 && matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") => Some(args[1].clone()),
+            _ => None,
+        }
+    }
+
+    /// A gen fn body's yield type: its `coroutine<Y, S>`'s `Y`.
+    fn hir_coro_yield_ty(&self, hir: &HirBody) -> Option<Ty> {
+        match crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), hir.ret.as_ref()?)) {
+            Ty::App(head, args) if args.len() == 2 && matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") => Some(args[0].clone()),
+            _ => None,
+        }
     }
 
     /// An FFI call's opcode and operands for `HirBuiltin::Ffi` /
@@ -832,6 +922,10 @@ impl Compiler {
     }
 
     fn hir_mir_for_in(&mut self, hir: &HirBody, pat: &HirPat, iterable: HirId, kind: &ForInKind, t: &mut crate::mir::HirSite) {
+        if matches!(kind, ForInKind::Coroutine) {
+            t.missing_send = self.hir_coro_send_ty(hir, iterable).and_then(|s| self.hir_missing_word(&s));
+            return;
+        }
         let ForInKind::Custom { into_iter_fqn, next_fqn, counted } = kind else {
             return;
         };

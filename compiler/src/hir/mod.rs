@@ -216,8 +216,11 @@ impl HirBody {
             | HirKind::Spread(a)
             | HirKind::LetPat { init: a, .. }
             | HirKind::Loop { body: a }
-            | HirKind::Defer { body: a, .. }
-            | HirKind::Yield { value: a, .. } => c.head = [Some(*a), None],
+            | HirKind::Defer { body: a, .. } => c.head = [Some(*a), None],
+            HirKind::Yield { value: a, zero, .. } => {
+                c.head = [Some(*a), None];
+                c.tail = *zero;
+            }
             HirKind::Index { base: a, index: b, .. }
             | HirKind::Bin { lhs: a, rhs: b, .. }
             | HirKind::Logic { lhs: a, rhs: b, .. }
@@ -245,7 +248,10 @@ impl HirBody {
                 c.head = [Some(*scrutinee), None];
                 c.arms = arms;
             }
-            HirKind::Resume { handle, value } => c.head = [Some(*handle), *value],
+            HirKind::Resume { handle, value, zero } => {
+                c.head = [Some(*handle), *value];
+                c.tail = *zero;
+            }
             HirKind::Lit(_)
             | HirKind::Local(_)
             | HirKind::Global { .. }
@@ -769,8 +775,13 @@ pub enum HirKind {
     Match { scrutinee: HirId, arms: Vec<HirArm> },
     /// A lambda: the index of its body in [`HirModule::bodies`].
     Lambda { body: usize },
-    Yield { value: HirId, from: bool },
-    Resume { handle: HirId, value: Option<HirId> },
+    /// `zero`: the zero of the value a binding `yield` receives, made
+    /// where it is resumed without `with` and the type's zero is an object
+    /// ([`crate::layout::Zero::Built`], #2717).
+    Yield { value: HirId, from: bool, zero: Option<HirId> },
+    /// `zero`: the zero of the value, made where the `resume` completes a
+    /// body that ended without `return e` and the type's zero is an object.
+    Resume { handle: HirId, value: Option<HirId>, zero: Option<HirId> },
     /// `defer use (captures) { body }`: the body runs as a thunk whose
     /// frame holds the captures (`None`: a name that did not resolve).
     Defer { captures: Vec<Option<LocalId>>, body: HirId },

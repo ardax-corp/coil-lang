@@ -948,15 +948,21 @@ impl Walk<'_> {
             // `YieldFromCoro`; its value is the word the next resume sends.
             // A `()` moves as the empty tuple object and receives nothing
             // (#2679).
-            HirKind::Yield { value, .. } => {
+            HirKind::Yield { value, zero, .. } => {
                 self.read(id)?;
+                if let Some(z) = zero {
+                    self.stored(*z)?;
+                }
                 self.stored(*value)
             }
             // `resume h [with v]`: the sent value, the handle, `ResumeCoro`.
-            HirKind::Resume { handle, value } => {
+            HirKind::Resume { handle, value, zero } => {
                 self.read(id)?;
                 if let Some(v) = value {
                     self.stored(*v)?;
+                }
+                if let Some(z) = zero {
+                    self.stored(*z)?;
                 }
                 self.word(*handle)?;
                 self.value(*handle)
@@ -1392,7 +1398,7 @@ impl Walk<'_> {
             HirKind::Local(local) if is_unit_local(body, self.checker, *local) => Ok(()),
             // A statement `resume` of a `()` coroutine: `ResumeCoro` still
             // pushes a word, which is dropped.
-            HirKind::Resume { handle, value } if is_unit_value(body, self.checker, id) => {
+            HirKind::Resume { handle, value, .. } if is_unit_value(body, self.checker, id) => {
                 if let Some(v) = value {
                     self.stored(*v)?;
                 }

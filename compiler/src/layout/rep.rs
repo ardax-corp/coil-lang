@@ -661,3 +661,61 @@ mod word_tests {
 #[cfg(test)]
 #[path = "rep.tests.rs"]
 mod tests;
+
+/// What a generator hands out for a value nobody produced: the completing
+/// `resume` of a body that ends without `return e`, and a binding `yield`
+/// resumed without `with` (#2717). Both read the word `0`; the type decides
+/// what that is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zero {
+    /// The type's zero is the word `0`: a number, `byte`, `bool`, `()`, a
+    /// niche `Option`'s `None`.
+    Word,
+    /// The type's zero is an object made where the `0` is read (`""`, an
+    /// empty `Vec`, a boxed `None`, a tuple, record or fixed array of
+    /// zeros); `0` is no value of the type.
+    Built,
+    /// No zero: a class, `Result`, an enum other than `Option`, a function,
+    /// an existential, a range, or a product holding one. A value read there
+    /// panics.
+    None,
+    /// A type variable (a shared generic body): its word moves as it is.
+    Open,
+}
+
+/// The structural zero of `ty`, as [`Zero`] classes it.
+pub fn zero_of(checker: &Checker, ty: &Ty) -> Zero {
+    let ty = strip_readonly(ty);
+    if !ty_is_closed(ty) {
+        return Zero::Open;
+    }
+    if is_immediate(ty) || is_unit(ty) {
+        return Zero::Word;
+    }
+    let items = |tys: &mut dyn Iterator<Item = &Ty>| {
+        let mut out = Zero::Built;
+        for t in tys {
+            match zero_of(checker, t) {
+                Zero::None => return Zero::None,
+                Zero::Open => out = Zero::Open,
+                Zero::Word | Zero::Built => {}
+            }
+        }
+        out
+    };
+    match ty {
+        Ty::Con(n) if n == crate::typechecking::ty::STRING => Zero::Built,
+        _ if crate::typechecking::ty::vec_element_ty(ty).is_some() => Zero::Built,
+        _ if is_option_ty(ty) => match of_resolved(checker, ty) {
+            Layout::NicheOption => Zero::Word,
+            _ => Zero::Built,
+        },
+        Ty::Tuple(tys) => items(&mut tys.iter()),
+        Ty::Record { fields } => items(&mut fields.iter().map(|(_, t)| t)),
+        Ty::Array {
+            element,
+            length: crate::typechecking::ty::ArrayLength::Static(_),
+        } => items(&mut std::iter::once(element.as_ref())),
+        _ => Zero::None,
+    }
+}
