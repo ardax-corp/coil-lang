@@ -14,7 +14,7 @@ fn unique_tmp(label: &str) -> PathBuf {
 
 fn options(root: &Path, fail_fast: bool) -> TestOptions {
     TestOptions {
-        root: root.to_path_buf(),
+        paths: vec![root.to_path_buf()],
         fail_fast,
         order: Order::Sorted,
         jobs: 2,
@@ -42,11 +42,11 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
 #[test]
 fn collect_test_files_errors_and_discovers_nested() {
     let missing = unique_tmp("no_tests");
-    assert!(collect_test_files(&missing).is_err());
+    assert!(collect_test_files(&[missing.clone()]).is_err());
 
     let empty = unique_tmp("empty_tests");
     std::fs::create_dir_all(&empty).unwrap();
-    assert!(collect_test_files(&empty).is_err());
+    assert!(collect_test_files(&[empty.clone()]).is_err());
 
     let root = unique_tmp("nested_tests");
     let nested = root.join("more");
@@ -54,7 +54,7 @@ fn collect_test_files_errors_and_discovers_nested() {
     std::fs::write(root.join("b.coil"), b"fn main() {}").unwrap();
     std::fs::write(nested.join("a.coil"), b"fn main() {}").unwrap();
     std::fs::write(root.join("ignore.txt"), b"x").unwrap();
-    let files = collect_test_files(&root).expect("files");
+    let files = collect_test_files(&[root.clone()]).expect("files");
     assert_eq!(files.len(), 2);
     assert!(files[0].ends_with("a.coil") || files[0].ends_with("b.coil"));
     // Sorted lexicographically by full path.

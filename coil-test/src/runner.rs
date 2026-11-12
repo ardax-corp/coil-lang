@@ -40,8 +40,9 @@ pub enum Report {
 /// What to run and how to compile it.
 #[derive(Debug, Clone)]
 pub struct TestOptions {
-    /// Test root (a directory walked for `.coil` files).
-    pub root: PathBuf,
+    /// What to run: directories walked for `.coil` files, and `.coil`
+    /// files, each run as when its directory is (#2731).
+    pub paths: Vec<PathBuf>,
     /// Stop after the first failed case.
     pub fail_fast: bool,
     /// File and case order (`--seed` / `--no-shuffle`).
@@ -221,10 +222,7 @@ pub(crate) fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
 }
 
 /// Every `.coil` file under `dir`, recursively, sorted by full path.
-pub fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    if !dir.is_dir() {
-        return Err(format!("tests directory `{}` not found", dir.display()));
-    }
+pub fn collect_test_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         let entries = std::fs::read_dir(dir)
@@ -240,15 +238,52 @@ pub fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
         }
         Ok(())
     }
-    walk(dir, &mut files)?;
-    files.sort();
-    if files.is_empty() {
-        return Err(format!(
-            "no `.coil` test files found under `{}`",
-            dir.display()
-        ));
+    for path in paths {
+        if path.is_dir() {
+            let before = files.len();
+            walk(path, &mut files)?;
+            if files.len() == before {
+                return Err(format!("no `.coil` test files found under `{}`", path.display()));
+            }
+        } else if path.is_file() && common::ext::is_source_path(path) {
+            files.push(path.clone());
+        } else if path.exists() {
+            return Err(format!("test path `{}` is neither a directory nor a `.coil` file", path.display()));
+        } else {
+            return Err(format!("test path `{}` not found", path.display()));
+        }
     }
+    files.sort();
+    // A file named twice, or under a directory also named, runs once.
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|f| seen.insert(canonical(f)));
     Ok(files)
+}
+
+impl TestOptions {
+    /// The test root of each path: a directory itself, a file's directory,
+    /// so a file runs as when its directory is.
+    pub(crate) fn root_dirs(&self) -> Vec<PathBuf> {
+        self.paths
+            .iter()
+            .map(|p| match p.parent() {
+                Some(dir) if !p.is_dir() => if dir.as_os_str().is_empty() { PathBuf::from(".") } else { dir.to_path_buf() },
+                _ => p.clone(),
+            })
+            .collect()
+    }
+
+    /// The deepest test root holding `path` (the first one when none does).
+    fn root_of(&self, path: &Path) -> PathBuf {
+        let file = canonical(path);
+        let dirs = self.root_dirs();
+        dirs.iter()
+            .filter(|d| file.starts_with(canonical(d)))
+            .max_by_key(|d| canonical(d).components().count())
+            .or(dirs.first())
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 /// Negative syntax / type tests live under any path segment named `compile_fail`.
@@ -1008,7 +1043,7 @@ pub(crate) fn compile_test_file(
             lock(&sources.docs).extend(found.into_iter().filter(|f| has_examples(f)));
         }
     }
-    options.order.order_cases(&options.root, path, &mut cases);
+    options.order.order_cases(&options.root_of(path), path, &mut cases);
     let _ = pipeline.finish_reporting();
 
     if expect_compile_fail {
@@ -1164,18 +1199,19 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// True when `path` is not under the test root: a project source compiled
 /// for its contract tests.
 fn is_contract_source(options: &TestOptions, path: &Path) -> bool {
-    !canonical(path).starts_with(canonical(&options.root))
+    let file = canonical(path);
+    !options.root_dirs().iter().any(|r| file.starts_with(canonical(r)))
 }
 
 /// The files of `found` that are project sources: under the current
 /// directory, outside the test root and `.deps/`.
 fn project_sources(options: &TestOptions, found: &[PathBuf]) -> Vec<PathBuf> {
     let Ok(cwd) = std::env::current_dir().map(|d| canonical(&d)) else { return Vec::new() };
-    let root = canonical(&options.root);
+    let roots: Vec<PathBuf> = options.root_dirs().iter().map(|r| canonical(r)).collect();
     found
         .iter()
         .map(|f| canonical(f))
-        .filter(|f| f.is_file() && f.starts_with(&cwd) && !f.starts_with(&root))
+        .filter(|f| f.is_file() && f.starts_with(&cwd) && !roots.iter().any(|r| f.starts_with(r)))
         .filter(|f| !f.strip_prefix(&cwd).is_ok_and(|rel| rel.components().any(|c| c.as_os_str() == ".deps")))
         .map(|f| f.strip_prefix(&cwd).map(Path::to_path_buf).unwrap_or(f))
         .collect()
@@ -1390,7 +1426,7 @@ fn doc_cases(run: &Run<'_>, dispatch: Dispatch, path: &Path, report_parse_error:
             found.push((name, line, example.mode, example.program()));
         }
     }
-    run.options.order.order_cases(&run.options.root, path, &mut found);
+    run.options.order.order_cases(&run.options.root_of(path), path, &mut found);
     found
         .into_iter()
         .map(|(name, line, mode, program)| start_doc_case(run, dispatch, path, name, line, mode, program))
@@ -1471,7 +1507,8 @@ fn start_doc_case(
 fn module_path(options: &TestOptions, path: &Path) -> String {
     let file = canonical(path);
     let cwd = std::env::current_dir().unwrap_or_default();
-    let mut roots = vec![options.root.clone(), cwd.join("src")];
+    let mut roots = options.root_dirs();
+    roots.push(cwd.join("src"));
     roots.extend(options.extra_roots.iter().map(|r| cwd.join(r)));
     let rel = roots
         .iter()
@@ -1487,11 +1524,11 @@ fn module_path(options: &TestOptions, path: &Path) -> String {
         .join("::")
 }
 
-/// Run the harness over `options.root` without exiting.
+/// Run the harness over `options.paths` without exiting.
 pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<SuiteResult, String> {
     // Every case runs in this process: `env::exit` ends its case, not the run (#1401).
     machine::env::trap_exit(true);
-    let mut files = collect_test_files(&options.root)?;
+    let mut files = collect_test_files(&options.paths)?;
     options.order.order_files(&mut files);
     let jobs = options.jobs.max(1);
     match options.report {
