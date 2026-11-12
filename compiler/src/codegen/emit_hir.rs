@@ -7743,6 +7743,13 @@ impl Compiler {
         let Some((params, ret)) = self.checker.fn_call_sig(lookup, args.len()) else {
             return false;
         };
+        self.hir_sig_split(hir, call, args, &params, &ret)
+    }
+
+    /// [`Self::hir_shared_split`] of a signature `params -> ret` called at
+    /// `call`'s types.
+    fn hir_sig_split(&self, hir: &HirBody, call: HirId, args: &[HirId], params: &[Ty], ret: &Ty) -> bool {
+        let ret = ret.clone();
         let mut vars = HashMap::new();
         for (param, &arg) in params.iter().zip(args) {
             if let Some(ty) = Self::hir_ty(hir, arg) {
@@ -9656,6 +9663,72 @@ impl Compiler {
             .any(|t| !matches!(t, Ty::Var(_)) && !crate::typechecking::ty::ftv_ty(t).is_empty())
     }
 
+    /// How a call through `forall` parameter `f` reads a result that holds
+    /// the value's type parameters (`forall T. T -> Option<T>`, `T -> (T,
+    /// T)`, `A -> B -> (B, A)`, #2723): the shared body returns it in its
+    /// own layout, which the call converts to its types' as a direct call
+    /// of a shared generic does (`HirCallSite::boxed_ret`, `ret_items`): an
+    /// open `Option` / `Result` at a niche type from its enum object, and
+    /// the items of a tuple or enum holding a bare parameter's value
+    /// rebuilt. `Ok(None)` when the result is a bare type parameter or
+    /// closed (the call's own paths), and `Err` where the shared body's
+    /// words cannot be read at the call: a parameter that is not a bare
+    /// type parameter or closed, an open enum below the result's top that
+    /// is a niche word there (#2441).
+    pub(super) fn hir_forall_ret_conv(
+        &self,
+        hir: &HirBody,
+        call: HirId,
+        f: HirId,
+        args: &[HirId],
+    ) -> Result<Option<(bool, Option<crate::mir::HirRetItems>)>, &'static str> {
+        let Some(Ty::Forall { body, .. }) = Self::hir_forall_param_ty(hir, &self.checker, f) else {
+            return Ok(None);
+        };
+        let mut params = Vec::new();
+        let mut ret = *body;
+        while params.len() < args.len()
+            && let Ty::Fun(p, r) = ret
+        {
+            params.push(*p);
+            ret = *r;
+        }
+        let open = |t: &Ty| !crate::typechecking::ty::ftv_ty(t).is_empty();
+        // A returned closure takes its own adapter (#1589).
+        if matches!(crate::typechecking::ty::strip_readonly(&ret), Ty::Var(_) | Ty::Fun(..)) || !open(&ret) {
+            return Ok(None);
+        }
+        if params.len() != args.len() || params.iter().any(|p| !matches!(crate::typechecking::ty::strip_readonly(p), Ty::Var(_)) && open(p)) {
+            return Err("callee-value");
+        }
+        if self.hir_sig_split(hir, call, args, &params, &ret) {
+            return Err("callee-value");
+        }
+        let mut vars = HashMap::new();
+        for (param, &arg) in params.iter().zip(args) {
+            let ty = Self::hir_ty(hir, arg).ok_or("callee-value")?;
+            Self::bind_scheme_vars(param, &apply_ty_prune(self.checker.subst(), ty), &mut vars);
+        }
+        let call_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call).ok_or("callee-value")?);
+        Self::bind_scheme_vars(&ret, &call_ty, &mut vars);
+        if crate::typechecking::ty::ftv_ty(&ret).iter().any(|v| !vars.contains_key(v)) || !crate::layout::ty_is_closed(&call_ty) {
+            return Err("callee-value");
+        }
+        // An open `Option` / `Result` the body returns as its enum object,
+        // at a niche type here.
+        let niche = self.generic_enum_layout(&ret).is_some() && self.hir_niche_word(&call_ty);
+        if niche {
+            return Ok(Some((true, None)));
+        }
+        let boxed: HashMap<_, _> = vars
+            .iter()
+            .filter(|(_, ty)| Self::ty_to_value_tag(ty).is_some() && !self.hir_object_word(ty))
+            .map(|(v, ty)| (*v, ty.clone()))
+            .collect();
+        let items = self.hir_ret_items(&ret, &params, &vars, &boxed, 0)?;
+        Ok(Some((false, items)))
+    }
+
     /// Whether a `PolyFn` local's own type returns a bare type parameter
     /// (boxed at run time).
     fn hir_polyfn_returns_var(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> bool {
@@ -10404,8 +10477,12 @@ impl Compiler {
                     // parameter as the word the value's body returns.
                     let open = |t: &Ty| !self.compiling_mono_clone && matches!(crate::typechecking::ty::strip_readonly(t), Ty::Var(_));
                     let closure = self.hir_polyfn_ret_adapt(hir, emit, id, *f, args.len());
+                    // A `forall` parameter's result that holds its type
+                    // parameters converts from the shared body's layout
+                    // (#2723); other nesting is refused.
+                    let converts = self.hir_polyfn_source(hir, emit, *f).is_none() && matches!(self.hir_forall_ret_conv(hir, id, *f, args), Ok(Some(_)));
                     if forwarded.iter().any(|&i| !self.hir_frame_dict(i))
-                        || self.hir_polyfn_nested(hir, emit, *f)
+                        || (self.hir_polyfn_nested(hir, emit, *f) && !converts)
                         || closure.as_ref().is_some_and(Result::is_err)
                         || closure.is_none()
                             && ty.as_ref().is_none_or(|t| !crate::layout::ty_is_closed(t) && !self.hir_open_enum_word(t) && !open(t))

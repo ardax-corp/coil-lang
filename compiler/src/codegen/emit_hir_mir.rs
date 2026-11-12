@@ -1698,7 +1698,17 @@ impl Compiler {
                 }
             }
         }
-        t.poly_call = Some(crate::mir::HirPolyCall { words, dicts, word_ret, ret_adapt });
+        // A `forall` parameter's result holding its type parameters, read
+        // from the shared body's layout (#2723).
+        let (boxed_ret, ret_items) = match source {
+            None => match self.hir_forall_ret_conv(hir, id, f, args) {
+                Ok(Some(conv)) => conv,
+                Ok(None) => (false, None),
+                Err(_) => return,
+            },
+            Some(_) => (false, None),
+        };
+        t.poly_call = Some(crate::mir::HirPolyCall { words, dicts, word_ret, ret_adapt, boxed_ret, ret_items });
     }
 
     /// Whether each of a `PolyFn` call's `n` parameters is a bare type
