@@ -1,0 +1,20 @@
+// @expected E0127 — a generic generator whose receive type is open, passed
+// to a `forall` parameter, would run its shared body, which cannot tell a
+// binding `yield` resumed without a value from a word of `T`; no per-type
+// clone serves the read (#2748).
+gen fn echo<T>(T x) -> coroutine<T, T> {
+    let r = yield x;
+    yield r;
+}
+
+fn twice(forall T. T -> coroutine<T, T> mk) -> int {
+    let n = 0;
+    for _ in mk(1) {
+        n = n + 1;
+    }
+    return n;
+}
+
+fn main() {
+    let _ = twice(echo);
+}
