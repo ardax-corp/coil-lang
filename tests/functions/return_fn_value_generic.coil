@@ -1,0 +1,33 @@
+// A generic function returning a function over its type parameter whose
+// own signature holds an open `Option` (`fn(Option<T>) -> T`), at one and
+// two levels of nesting, at heap and immediate types (coil-lang#2759).
+// @xfail clone-budget-0 #2766 the shared body's returned closure is refused at a ground call
+use tests::assert;
+
+#[derive(Show, Eq)]
+class Pt {
+    pub a: int,
+}
+
+fn or_else<T>(T d) -> fn(Option<T>) -> T {
+    return fn (Option<T> o) use (d) => o ?? d;
+}
+
+fn nest<T>(T d) -> fn() -> fn(Option<T>) -> T {
+    return fn () use (d) => or_else(d);
+}
+
+test("a returned function over the type parameter's Option") {
+    assert!(or_else("d")(Option::None) == "d");
+    assert!(or_else("d")(Option::Some("s")) == "s");
+    assert!(or_else(new Pt(2))(Option::Some(new Pt(3))).a == 3);
+    assert!(or_else(4)(Option::None) == 4);
+}
+
+test("two levels") {
+    assert!(nest("n")()(Option::None) == "n");
+    assert!(nest(7)()(Option::Some(8)) == 8);
+    let f = nest(new Pt(1));
+    let g = f();
+    assert!(g(Option::None).a == 1);
+}
