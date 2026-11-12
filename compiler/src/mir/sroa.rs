@@ -91,12 +91,8 @@ pub fn sroa(func: &mut MirFunc) -> usize {
     for block in &mut func.blocks {
         let before = block.insts.len();
         block.insts.retain(|inst| {
-            if matches!(inst, MirInst::Alloc { .. } | MirInst::GcBarrier { .. })
-                && !used.contains(&inst.dest())
-            {
-                return false;
-            }
-            true
+            !matches!(inst, MirInst::Alloc { .. } | MirInst::GcBarrier { .. })
+                || used.contains(&inst.dest())
         });
         removed += before - block.insts.len();
     }
