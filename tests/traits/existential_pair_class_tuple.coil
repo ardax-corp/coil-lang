@@ -1,0 +1,43 @@
+// A bare-trait existential packing a two-field `readonly class` (a pair
+// class, #1562) is the pack's one word wherever the local goes: into a
+// tuple and out again, into a `Vec`, through a parameter. HIR's readonly
+// scalar replacement leaves such a local alone, since a whole use rebuilt
+// as the class is no longer the pack (coil-lang#2721).
+use tests::assert;
+
+trait Sum<S> {
+    fn get(S s) -> int {}
+}
+
+readonly class P2 {
+    pub a: int,
+    pub b: int,
+}
+
+impl Sum for P2 {
+    pub fn get(P2 p) -> int {
+        return p.a * 10 + p.b;
+    }
+}
+
+fn first((Sum, int) t) -> int {
+    let (s, k) = t;
+    return s.get() + k;
+}
+
+test("through a tuple") {
+    let a: Sum = new P2(1, 2);
+    let t = (a, 1);
+    let (e, _) = t;
+    assert!(e.get() == 12);
+    assert!(t[0].get() == 12);
+    assert!(first(t) == 13);
+}
+
+test("through a Vec and a copy") {
+    let a: Sum = new P2(3, 4);
+    let xs: Vec<Sum> = Vec::new();
+    xs.push(a);
+    let b = a;
+    assert!(xs[0].get() == 34 && b.get() == 34 && a.get() == 34);
+}
