@@ -55,6 +55,11 @@ pub fn scalarize(body: &HirBody, fields: impl Fn(&str) -> Option<Vec<(String, Ty
         if l.captured || !matches!(l.kind, LocalKind::Let | LocalKind::Temp) || !made.contains(&local) {
             continue;
         }
+        // A local of a bare trait type holds the `new` packed (#2721): a
+        // whole use rebuilt as the class would no longer be the pack.
+        if l.ty.as_ref().is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Existential { .. })) {
+            continue;
+        }
         let Some((class, decl)) = candidate(body, &parent, local, &fields) else {
             continue;
         };
