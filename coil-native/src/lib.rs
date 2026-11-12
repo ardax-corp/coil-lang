@@ -1902,6 +1902,10 @@ struct Lower<'a> {
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
     views: HashMap<ValueId, (Variable, Variable, Variable)>,
+    /// The card bytes of the arrays this body stores into, for a store
+    /// through a tracked view (`machine::VIEW_TRACKED`): the third word
+    /// `coil_native_view` writes.
+    view_cards: HashMap<ValueId, Variable>,
     /// Strings this body reads `s[i]` of: `(known, pointer, length)` of
     /// their bytes, filled at the first read after the string value is
     /// defined or the views were dropped (`machine::native::coil_native_str_view`;
@@ -1923,7 +1927,8 @@ struct Lower<'a> {
     stored: HashSet<ValueId>,
     /// `GcBarrier` dest -> the object it names ([`barrier_pairs`]).
     barriers: HashMap<ValueId, ValueId>,
-    /// Two words `coil_native_view` writes to.
+    /// The words `coil_native_view` (three) and the lane and string views
+    /// (two) write to.
     view_slot: cranelift_codegen::ir::StackSlot,
     by_label: &'a HashMap<Label, usize>,
     plan: &'a Plan,
@@ -2002,7 +2007,7 @@ impl<'a> Lower<'a> {
         let pad_refs = ids.pad.iter().map(|(&i, &id)| (i, module.declare_func_in_func(id, func))).collect();
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            16,
+            24,
             3,
         ));
         let ret = func.signature.returns[0].value_type;
@@ -2081,6 +2086,7 @@ impl<'a> Lower<'a> {
             cur_loc: None,
             cur_site: None,
             views: HashMap::new(),
+            view_cards: HashMap::new(),
             str_views: HashMap::new(),
             lane_views: HashMap::new(),
             live: None,
@@ -2724,6 +2730,10 @@ impl<'a> Lower<'a> {
                     MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } => *array,
                     MirInst::StoreIndex { array, .. } => {
                         self.stored.insert(*array);
+                        if !self.view_cards.contains_key(array) {
+                            let v = self.b.declare_var(types::I64);
+                            self.view_cards.insert(*array, v);
+                        }
                         *array
                     }
                     _ => continue,
@@ -3342,13 +3352,33 @@ impl<'a> Lower<'a> {
                 let i = self.get(f, *index);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
-                let (fast, slow, join) = self.in_view(*array, i, false);
+                let (fast, slow, join) = self.in_view_as(*array, i, false, true);
                 // In place.
                 self.b.switch_to_block(fast);
                 let at = self.element(*array, i);
                 self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
                 self.b.ins().jump(join, &[]);
+                // A tracked view (an array with a card table): in place
+                // too, and the element's card marked.
                 self.b.switch_to_block(slow);
+                let (ok, _, len) = self.views[array];
+                let ok = self.b.use_var(ok);
+                let len = self.b.use_var(len);
+                let tracked = self.b.ins().icmp_imm_s(IntCC::Equal, ok, machine::VIEW_TRACKED as i64);
+                let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+                let both = self.b.ins().band(tracked, inb);
+                let (marked, helper) = (self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(both, marked, &[], helper, &[]);
+                self.b.switch_to_block(marked);
+                let at = self.element(*array, i);
+                self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                let cards = self.b.use_var(self.view_cards[array]);
+                let card = self.b.ins().ushr_imm_u(i, i64::from(machine::CARD_SHIFT));
+                let card_at = self.b.ins().iadd(cards, card);
+                let one = self.b.ins().iconst(types::I8, 1);
+                self.b.ins().store(MemFlagsData::trusted(), one, card_at, 0);
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(helper);
                 self.call_checked(self.store_index, &[self.ctx, a, i, v]);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
@@ -3967,6 +3997,10 @@ impl<'a> Lower<'a> {
         self.b.def_var(ok, r);
         self.b.def_var(ptr, p);
         self.b.def_var(len, n);
+        if let Some(&cards) = self.view_cards.get(&v) {
+            let c = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 16);
+            self.b.def_var(cards, c);
+        }
     }
 
     /// Fill `v`'s lane view right after `v` is defined, when the body
@@ -4248,11 +4282,22 @@ impl<'a> Lower<'a> {
     /// Branch on whether `array[i]` is in its view: `(in view, otherwise,
     /// join)`. The join block takes one word when the caller passes one.
     fn in_view(&mut self, array: ValueId, i: cranelift_codegen::ir::Value, word: bool) -> (Block, Block, Block) {
+        self.in_view_as(array, i, word, false)
+    }
+
+    /// [`Self::in_view`]; a `store` is in place only through a plain view
+    /// (`machine::VIEW_PLAIN`): a tracked one's stores go through
+    /// the runtime, which marks the array's card table.
+    fn in_view_as(&mut self, array: ValueId, i: cranelift_codegen::ir::Value, word: bool, store: bool) -> (Block, Block, Block) {
         let (ok, _, len) = self.views[&array];
         let ok = self.b.use_var(ok);
         let len = self.b.use_var(len);
         let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
-        let has = self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0);
+        let has = if store {
+            self.b.ins().icmp_imm_s(IntCC::Equal, ok, machine::VIEW_PLAIN as i64)
+        } else {
+            self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0)
+        };
         let c = self.b.ins().band(inb, has);
         let fast = self.b.create_block();
         let slow = self.b.create_block();
