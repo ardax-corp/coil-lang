@@ -695,17 +695,20 @@ fn collect_candidates(
         return;
     }
 
-    // A generic generator read as a value at ground types (#2747): the
-    // value's adapter calls its clone at those types, planned here as a
-    // call's is, past the clone budget as an alias's call is.
+    // A generic function read as a value at ground types whose value is its
+    // adapter there (a generator, #2747; one whose shared body's words are
+    // not the ground ones, #2755): the adapter calls it at those types, so
+    // its clone there is planned here as a call's is. A generator's past
+    // the clone budget as an alias's call is; another's where a call's
+    // would be.
     if let Expression::Identifier(fn_name) = node.1.as_ref()
-        && let Some(sig) = sigs.get(*fn_name).filter(|sig| sig.coro && !sig.alias)
+        && let Some(sig) = sigs.get(*fn_name).filter(|sig| if sig.coro { !sig.alias } else { !crate::hir::classify::plain_generic_fn(checker, fn_name) })
         && let Some(specialization) = candidate_for_value(fn_name, sig, node, checker, ty_of, intern)
     {
         out.push(MonoCandidate {
             span: node.0,
             specialization,
-            value: true,
+            value: sig.coro || sig.alias || sig.keyed || sig.hot || sig.split,
             recursive: false,
         });
         return;

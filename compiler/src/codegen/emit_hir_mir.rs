@@ -490,26 +490,40 @@ impl Compiler {
                         .polyfn_captures
                         .clone()
                         .into_iter()
-                        .filter_map(|(i, name, ty)| Some((i, self.hir_mir_polyfn_value(&name, ty.as_ref(), None)?)))
+                        .filter_map(|(i, name, ty)| Some((i, self.hir_mir_generic_fn_value(&name, ty.as_ref(), None)?)))
                         .collect();
                     t.fn_value = Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures, pairs, dicts, remade });
                 }
             }
-            // A generic function's `MakePolyFn`, or with bounds its
+            // A generic function's value: at a ground type its adapter there
+            // (#2755), else its `MakePolyFn`, or with bounds its
             // `MakePolyFnCapture` over the dictionaries
-            // `plan_polyfn_escape_dicts` plans.
+            // `plan_polyfn_escape_dicts` plans. The init of a `let` whose
+            // local is a `PolyFn` callee (`query::polyfn_callee`) stays the
+            // `PolyFn` the calls through it are planned against; the local's
+            // other reads are made again (#2658).
             HirKind::Global { .. } | HirKind::Local(_) if let Some(name) = emit.plan.polyfns.get(&id.0) => {
                 let escape = Self::hir_ty(hir, id).map(|t| polyfn_escape_ty(apply_ty_prune(self.checker.subst(), t)));
                 let expected = self.checker.rank_n_arg_at(e.span.0, e.span.1);
-                if let Some(value) = self.hir_mir_polyfn_value(&name.clone(), escape.as_ref(), expected.as_ref()) {
+                let init = hir.exprs.iter().any(|e| match e.kind {
+                    HirKind::Let { local, init: Some(init) } if init == id => {
+                        hir.local(local).ty.as_ref().is_some_and(|t| classify::poly_fun(&apply_ty_prune(self.checker.subst(), t)))
+                    }
+                    _ => false,
+                });
+                let name = name.clone();
+                let value = if init {
+                    self.hir_mir_polyfn_value(&name, escape.as_ref(), expected.as_ref())
+                } else {
+                    self.hir_mir_generic_fn_value(&name, escape.as_ref(), expected.as_ref())
+                };
+                if let Some(value) = value {
                     t.fn_value = Some(value);
                 }
             }
             // A generic `gen fn`'s value at ground types: its adapter (#2747).
             HirKind::Global { .. } if let Some((name, params, ret)) = emit.plan.coro_values.get(&id.0).cloned() => {
-                let target = self.coro_value_target(&name, &params, &ret);
-                let operand = make_fn_operand(0, 0, params.len() as u32, false);
-                t.fn_value = Some(crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new(), remade: Vec::new() });
+                t.fn_value = Some(self.hir_mir_ground_value(&name, &params, &ret));
             }
             HirKind::Global { .. } if let Some((entry, arity, rest, name)) = emit.plan.fn_refs.get(&id.0).cloned() => {
                 if let Some(target) = self.bodies.entry_label_for_offset(entry) {
@@ -701,14 +715,19 @@ impl Compiler {
                     && let Some(target) = self.partial_value_target(entry, label, value)
                 {
                     let kind = crate::mir::MirAllocKind::Fn { target, operand: *operand, mask: *mask };
-                    // A shared generic entry's `kinds` word, its last filled
-                    // parameter (#2506).
-                    let dicts = match self.kinds_key_at(label).map(str::to_string) {
-                        Some(key) => self.hir_kinds_ops_partial(hir, id, &key, *mask, args),
-                        None => Some(Vec::new()),
+                    // A shared generic entry's partial at ground types: the
+                    // adapter calling it at them (#2755), as its name's value.
+                    let key = self.kinds_key_at(label).map(str::to_string);
+                    let ground = key.as_deref().and_then(|key| self.hir_mir_ground_partial(hir, id, key, *mask, args));
+                    // Else a shared generic entry's `kinds` word, its last
+                    // filled parameter (#2506).
+                    let value = match (ground, key) {
+                        (Some(value), _) => Some(value),
+                        (None, Some(key)) => self.hir_kinds_ops_partial(hir, id, &key, *mask, args).map(|dicts| crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts, remade: Vec::new() }),
+                        (None, None) => Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new(), remade: Vec::new() }),
                     };
-                    if let Some(dicts) = dicts {
-                        t.fn_value = Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts, remade: Vec::new() });
+                    if value.is_some() {
+                        t.fn_value = value;
                     }
                 }
             }
@@ -1543,6 +1562,62 @@ impl Compiler {
             arg_tys.push(ty);
         }
         Some((words, arg_tys))
+    }
+
+    /// Generic function `name`'s value read at type `escape`, for the
+    /// `forall` parameter `expected` it is passed to when it is. At a ground
+    /// function type (no `forall`), code that knows only that type calls
+    /// it: where its shared body's words are not that type's
+    /// ([`classify::plain_sig`]), the value is its adapter at those types
+    /// ([`Self::generic_value_target`]), which passes and returns their
+    /// ground words (#2755). Otherwise its [`Self::hir_mir_polyfn_value`].
+    fn hir_mir_generic_fn_value(&mut self, name: &str, escape: Option<&Ty>, expected: Option<&Ty>) -> Option<crate::mir::HirFnValue> {
+        if expected.is_none()
+            && !classify::plain_generic_fn(&self.checker, name)
+            && let Some((params, ret)) = escape.and_then(|ty| self.ground_value_sig(name, ty))
+        {
+            return Some(self.hir_mir_ground_value(name, &params, &ret));
+        }
+        self.hir_mir_polyfn_value(name, escape, expected)
+    }
+
+    /// A partial application `id` of shared generic entry `key` (`mask` its
+    /// filled parameters, the last one its `kinds` word) whose filled
+    /// arguments `args` are a prefix and whose types are ground: `MakeFn`
+    /// of `key`'s adapter at those types over the arguments.
+    fn hir_mir_ground_partial(&mut self, hir: &HirBody, id: HirId, key: &str, mask: u32, args: &[HirId]) -> Option<crate::mir::HirFnValue> {
+        let total = 31 - (mask.leading_zeros() as usize).min(31);
+        let filled = args.len();
+        if mask != (1 << total) | ((1 << filled) - 1) || classify::plain_generic_fn(&self.checker, key) {
+            return None;
+        }
+        let mut params = Vec::with_capacity(total);
+        for &arg in args {
+            params.push(apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, arg)?));
+        }
+        let mut ret = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
+        for _ in filled..total {
+            let Ty::Fun(param, next) = crate::typechecking::ty::strip_readonly(&ret).clone() else {
+                return None;
+            };
+            params.push(*param);
+            ret = *next;
+        }
+        if ret.has_var() || params.iter().any(Ty::has_var) {
+            return None;
+        }
+        let target = self.generic_value_target(key, &params, &ret);
+        let operand = make_fn_operand(0, filled as u32, total as u32, false);
+        let kind = crate::mir::MirAllocKind::Fn { target, operand, mask: (1 << filled) - 1 };
+        Some(crate::mir::HirFnValue { kind, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new(), remade: Vec::new() })
+    }
+
+    /// The `MakeFn` of generic function `name`'s adapter at ground
+    /// parameter types `params` and result `ret`.
+    fn hir_mir_ground_value(&mut self, name: &str, params: &[Ty], ret: &Ty) -> crate::mir::HirFnValue {
+        let target = self.generic_value_target(name, params, ret);
+        let operand = make_fn_operand(0, 0, params.len() as u32, false);
+        crate::mir::HirFnValue { kind: crate::mir::MirAllocKind::Fn { target, operand, mask: 0 }, captures: Vec::new(), pairs: Vec::new(), dicts: Vec::new(), remade: Vec::new() }
     }
 
     /// Generic function `name`'s value read at type `escape`: its
