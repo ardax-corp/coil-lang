@@ -1464,11 +1464,16 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let args = fields.iter().map(|f| self.expr(b, &f.value)).collect();
                 self.emit(b, node, HirKind::Make { kind: MakeKind::Record(names), args })
             }
-            // `m::F(args)` / `C::f(args)` of a `const` or `static` function
-            // value: a call of the value it reads (#1705).
-            E::Construct { enum_name, variant_name, fields: EnumConstructPayload::Tuple(items) }
+            // `m::F(args)` / `C::f(args)` / `C::f()` of a `const` or
+            // `static` function value: a call of the value it reads (#1705,
+            // #2752).
+            E::Construct { enum_name, variant_name, fields: fields @ (EnumConstructPayload::Tuple(_) | EnumConstructPayload::Empty) }
                 if self.checker.qualified_value_call_at(node.0.start, node.0.end).is_some() =>
             {
+                let items = match fields {
+                    EnumConstructPayload::Tuple(items) => items.as_slice(),
+                    _ => &[],
+                };
                 self.qualified_value_call(b, node, enum_name, variant_name, items)
             }
             // A bare `C::f` naming a static method: its function value, a
@@ -1493,13 +1498,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 };
                 self.qualified_trait_call(b, node, args)
             }
-            // `C::f(args)` on a class is a static method call (`C::f` and
-            // `C::f()` name a static field first, as in codegen).
+            // `C::f(args)` / `C::f()` on a class is a static method call (a
+            // bare `C::f` names a static field first, as in codegen).
             E::Construct {
                 enum_name,
                 variant_name,
                 fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Empty | EnumConstructPayload::Tuple(_)),
-            } if self.static_call(enum_name, variant_name, !matches!(fields, EnumConstructPayload::Tuple(_)), node) => {
+            } if self.static_call(enum_name, variant_name, matches!(fields, EnumConstructPayload::Unit), node) => {
                 let id = self.node_id(node);
                 let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
                 let def = id.and_then(|i| self.sidecar.def_id(i));
@@ -1522,7 +1527,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Construct {
                 enum_name,
                 variant_name,
-                fields: EnumConstructPayload::Unit | EnumConstructPayload::Empty,
+                fields: EnumConstructPayload::Unit,
             } if self.class_static(enum_name, variant_name) => {
                 let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
                 self.global(b, node, format!("{enum_name}::{variant_name}"), def)
@@ -2355,6 +2360,15 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 );
                 let call = self.split_over_application(b, call, &[&format!("{owner}::{member}"), member]);
                 self.after(b, span_of(node), stmts, call)
+            }
+            // `recv.f(args)` of a field holding a function, with no method
+            // `f`: a call of the field's value, as `(recv.f)(args)` is
+            // (#2752).
+            E::Access(..) if let Some(ty) = self.checker.field_value_call_at(node.0.start, node.0.end).cloned() => {
+                let callee = self.expr(b, name);
+                b.body.exprs[callee.0 as usize].ty = Some(ty);
+                let args = self.exprs(b, args);
+                self.emit(b, node, HirKind::Call { callee: Callee::Value(callee), args })
             }
             // `recv.method(args)`. A parenthesized `(recv.field)(args)` is
             // not one: it calls the function the field holds, as the checker
