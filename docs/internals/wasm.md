@@ -46,4 +46,4 @@ needs something wasm lacks says so in its header and is skipped there:
 // @needs sockets
 ```
 
-Known features: `sockets`, `symlinks`, `ffi`, `processes`, and `unix` (Unix-only behaviour such as signals; false on Windows and wasm). An unknown name fails the file.
+Known features: `sockets`, `symlinks`, `ffi`, `processes`, `unix` (Unix-only behaviour such as signals; false on Windows and wasm), and `wasm` (a file about the wasm build's own limits, such as its operator-chain limit; it runs only there). An unknown name fails the file.
