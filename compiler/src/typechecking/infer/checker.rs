@@ -4037,7 +4037,14 @@ impl Checker {
                 let declared = ty.as_ref().map(|t| self.parse_type_name(t));
                 let init_ty = self.infer(init);
                 let slot_ty = if let Some(d) = declared {
-                    self.coerce_or_unify(&d, &init_ty, Some(init), &range, "static initializer");
+                    // A `forall` static takes its value as a `forall`
+                    // parameter does: made at that type (#2762).
+                    if matches!(strip_readonly(&apply_ty_prune(&self.subst, &d)), Ty::Forall { .. }) {
+                        let d = apply_ty_prune(&self.subst, &d);
+                        self.check_rank_n_argument(strip_readonly(&d), &init_ty, Some(init), &range);
+                    } else {
+                        self.coerce_or_unify(&d, &init_ty, Some(init), &range, "static initializer");
+                    }
                     apply_ty_prune(&self.subst, &d)
                 } else {
                     apply_ty_prune(&self.subst, &init_ty)
@@ -14518,13 +14525,20 @@ impl Checker {
                     self.register_static_slot(fqn, false, ty.clone(), field.0.into_range());
                     if let Some(init_expr) = init {
                         let init_ty = self.infer(init_expr);
-                        self.coerce_or_unify(
-                            &ty,
-                            &init_ty,
-                            Some(init_expr),
-                            &field.0.into_range(),
-                            "static field initializer",
-                        );
+                        // A `forall` static takes its value as a `forall`
+                        // field does (#2725, #2762).
+                        let fty = apply_ty_prune(&self.subst, &ty);
+                        if matches!(strip_readonly(&fty), Ty::Forall { .. }) {
+                            self.check_rank_n_argument(strip_readonly(&fty), &init_ty, Some(init_expr), &field.0.into_range());
+                        } else {
+                            self.coerce_or_unify(
+                                &ty,
+                                &init_ty,
+                                Some(init_expr),
+                                &field.0.into_range(),
+                                "static field initializer",
+                            );
+                        }
                     }
                     continue;
                 }
@@ -19853,7 +19867,7 @@ impl Checker {
             Some(ty) => apply_ty_prune(&self.subst, ty),
             None => apply_ty_prune(&self.subst, self.module_consts.get(&format!("{owner}::{member}"))?),
         };
-        if !matches!(strip_readonly(&callee_ty), Ty::Fun(..)) {
+        if !matches!(strip_readonly(&callee_ty), Ty::Fun(..) | Ty::Forall { .. }) {
             return None;
         }
         self.qualified_value_calls_by_span
