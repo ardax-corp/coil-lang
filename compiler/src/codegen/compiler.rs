@@ -5331,14 +5331,17 @@ impl Compiler {
             && matches!(method, "fd" | "attach" | "park")
     }
 
-    /// Return type of the function whose body is being compiled.
+    /// Return type of the function whose body is being compiled: its
+    /// declared result, a returned function's parameters not flattened onto
+    /// its own (`fn get() -> fn(string) -> Option<string>` returns one
+    /// closure word, not an `Option`, #2759).
     fn compiling_fn_return_ty(&self) -> Option<crate::typechecking::Ty> {
         let qualified = self.current_function_qualified.as_deref();
         let table_key = self.current_function_table_key.as_deref();
         if let Some(name) = qualified
             && let Some(ty) = self
                 .checker
-                .fn_return_ty(name)
+                .fn_declared_return_ty(name)
                 .or_else(|| self.fn_return_ty(name))
             {
                 return Some(ty);
@@ -5346,7 +5349,7 @@ impl Compiler {
         if let Some(name) = table_key
             && let Some(ty) = self
                 .checker
-                .fn_return_ty(name)
+                .fn_declared_return_ty(name)
                 .or_else(|| self.fn_return_ty(name))
             {
                 return Some(ty);
@@ -5364,11 +5367,11 @@ impl Compiler {
         if let Some((module, bare)) = name.rsplit_once("::") {
             self.checker
                 .interned_def(module, bare)
-                .and_then(|id| self.checker.fn_return_ty(&self.fqn_of_def(id)))
+                .and_then(|id| self.checker.fn_declared_return_ty(&self.fqn_of_def(id)))
         } else {
             self.checker
                 .def_id_of(name)
-                .and_then(|id| self.checker.fn_return_ty(&self.fqn_of_def(id)))
+                .and_then(|id| self.checker.fn_declared_return_ty(&self.fqn_of_def(id)))
         }
     }
 
