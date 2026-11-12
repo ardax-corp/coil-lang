@@ -9757,12 +9757,10 @@ impl Compiler {
         (curried || self.checker.dict_arity_for(name) > 0).then_some(arity)
     }
 
-    /// A `PolyFn` local's own type when it is a `forall` (a rank-n parameter).
+    /// A `PolyFn` callee's own type when it is a `forall` (a rank-n
+    /// parameter, or a `forall` field read in place, #2762).
     fn hir_forall_param_ty(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> Option<Ty> {
-        let HirKind::Local(local) = hir.expr(f).kind else {
-            return None;
-        };
-        let ty = apply_ty_prune(checker.subst(), hir.local(local).ty.as_ref()?);
+        let ty = query::polyfn_callee_ty(hir, checker, f)?;
         let ty = crate::typechecking::ty::strip_readonly(&ty).clone();
         matches!(ty, Ty::Forall { .. }).then_some(ty)
     }
@@ -9775,13 +9773,9 @@ impl Compiler {
         if let Some(source) = self.hir_polyfn_source(hir, emit, f) {
             return self.checker.generic_fn_value_nested(&source);
         }
-        let HirKind::Local(local) = hir.expr(f).kind else {
+        let Some(mut ty) = query::polyfn_callee_ty(hir, &self.checker, f) else {
             return false;
         };
-        let Some(ty) = hir.local(local).ty.as_ref() else {
-            return false;
-        };
-        let mut ty = apply_ty_prune(self.checker.subst(), ty);
         while let Ty::Forall { body, .. } = ty {
             ty = *body;
         }
@@ -9874,13 +9868,9 @@ impl Compiler {
     /// Whether a `PolyFn` local's own type returns a bare type parameter
     /// (boxed at run time).
     fn hir_polyfn_returns_var(hir: &HirBody, checker: &crate::typechecking::infer::Checker, f: HirId) -> bool {
-        let HirKind::Local(local) = hir.expr(f).kind else {
+        let Some(mut result) = query::polyfn_callee_ty(hir, checker, f) else {
             return false;
         };
-        let Some(ty) = hir.local(local).ty.as_ref() else {
-            return false;
-        };
-        let mut result = apply_ty_prune(checker.subst(), ty);
         while let Ty::Forall { body, .. } = result {
             result = *body;
         }
