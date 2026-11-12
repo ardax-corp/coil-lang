@@ -1,0 +1,140 @@
+// `==`, `!=` and the order operators on two bare-trait existentials go
+// through the packed values' instance, the trait's superclass's (`trait
+// Te<S: Ord>`); values of two different types are never equal (#2740).
+use tests::assert;
+use text::Searchable;
+use task::{scope, Scope, TaskError};
+
+trait Te<S: Ord + Hash> {
+    fn got(S s) -> int {}
+}
+
+trait Teq<S: Eq> {
+    fn tag(S s) -> int {}
+}
+
+#[derive(Eq, Ord, Hash)]
+class A {
+    pub n: int,
+}
+
+#[derive(Eq, Ord, Hash)]
+class B {
+    pub n: int,
+}
+
+#[derive(Eq)]
+class Box<T> {
+    pub v: T,
+}
+
+impl Te for A {
+    pub fn got(A a) -> int {
+        return a.n;
+    }
+}
+
+impl Te for B {
+    pub fn got(B b) -> int {
+        return b.n;
+    }
+}
+
+impl Te for int {
+    pub fn got(int x) -> int {
+        return x;
+    }
+}
+
+impl Teq for A {
+    pub fn tag(A a) -> int {
+        return a.n;
+    }
+}
+
+impl Teq for Box<T: Eq> {
+    pub fn tag(Box<T> b) -> int {
+        return 0;
+    }
+}
+
+fn pack_a(int n) -> Te {
+    return new A(n);
+}
+
+fn pack_int(int n) -> Te {
+    return n;
+}
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+fn order_across() -> int {
+    let a: Te = new A(1);
+    let b: Te = new B(1);
+    return if a < b {
+        1
+    } else {
+        2
+    };
+}
+
+test("equal values packed apart compare equal") {
+    let x: Te = new A(1);
+    let y: Te = new A(1);
+    let z: Te = new A(2);
+    assert!(x == y && !(x != y));
+    assert!(x != z && !(x == z));
+    assert!(pack_a(3) == pack_a(3));
+    let a: Te = new A(4);
+    assert!(a == pack_a(4));
+    let i: Te = 5;
+    let j: Te = 5;
+    assert!(i == j && i != pack_int(6) && pack_int(5) == i);
+}
+
+test("the order operators through an Ord superclass") {
+    let x: Te = new A(1);
+    let y: Te = new A(2);
+    assert!(x < y && x <= y && y > x && y >= x);
+    assert!(!(y < x) && x <= pack_a(1) && x >= pack_a(1));
+}
+
+test("values of two types are never equal") {
+    let a: Te = new A(1);
+    let b: Te = new B(1);
+    let n: Te = 1;
+    assert!(a != b && !(a == b) && a != n);
+}
+
+test("an Eq superclass alone, at a generic instance too") {
+    let x: Teq = new A(7);
+    let y: Teq = new A(7);
+    let p: Teq = new Box(1);
+    let q: Teq = new Box(1);
+    let r: Teq = new Box(2);
+    assert!(x == y && p == q && p != r && x != p);
+}
+
+test("a hash through a Hash superclass") {
+    let x: Te = new A(1);
+    let y: Te = new A(1);
+    assert!(x.hash() == y.hash());
+}
+
+test("an order between two types panics") {
+    let m = outcome(fn () => order_across());
+    assert!(m.contains("`<` on `Te` values of different types"), m);
+}
