@@ -10,6 +10,7 @@ the same flags with the same output.
 cargo build              # coil + coil-test (+ other helpers)
 coil test                # ./tests
 coil test tests/patterns --fail-fast -O0
+coil test tests/tasks/gen_fn_method.coil tests/patterns   # files and directories
 coil test --root examples/src --root .deps/coil-stdlib/src
 coil-test --help         # same flags as `coil test --help`
 ```
@@ -27,6 +28,12 @@ lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 `coil-embed` runs archives only and does not link it.
 
 ## What it runs
+
+Each `PATH` is a directory, walked for `.coil` files, or a `.coil` file
+(several may be given; a file named twice, or under a named directory, runs
+once). A file runs as when its directory is: its headers, its cells' `@xfail`
+and `@skip` lines and the module roots are the same, and its directory is
+its test root (doc-test names, project sources, case order) (#2731).
 
 | Path | Expectation |
 |------|-------------|
