@@ -504,6 +504,10 @@ enum HirOp {
     Aggregate(crate::typechecking::AggregateArithInfo),
     /// A matrix / vector operator the checker recorded as linear algebra.
     LinAlg(crate::typechecking::aggregate_arith::LinearAlgebraInfo),
+    /// `==` .. `>=` on two trait objects: the method in dictionary slot
+    /// `slot` of the left pack's dictionary, a superclass's (`trait Tr<S:
+    /// Eq>`), when both packs hold the same instance's values.
+    Existential { slot: u32 },
 }
 
 type Check = Result<(), &'static str>;
@@ -9846,6 +9850,13 @@ impl Compiler {
             || self.checker.aggregate_arith_for_span(start, end).is_some()
         {
             return Err("operator-aggregate");
+        }
+        // Two trait objects: their packed values' instance, through the
+        // dictionary (#2740).
+        if Self::hir_ty(hir, lhs).is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), t)), Ty::Existential { .. }))
+            && let Some(hint) = self.existential_method_hint(node.node, start, end)
+        {
+            return Ok(HirOp::Existential { slot: hint.method_slot as u32 });
         }
         // `==` on a type variable in an open glue body: its dictionary's
         // `eq` (#1642).

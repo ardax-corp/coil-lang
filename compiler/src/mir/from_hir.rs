@@ -3589,6 +3589,9 @@ impl Lower<'_> {
             HirKind::Bin { lhs, rhs, .. } if self.site(id).call.is_some() => self.call(id, &[*lhs, *rhs]),
             HirKind::Un { operand, .. } if self.site(id).call.is_some() => self.call(id, &[*operand]),
             HirKind::Bin { lhs, rhs, .. } if let Some(call) = self.site(id).op_call.as_ref() => self.op_call(id, *lhs, *rhs, &call.clone()),
+            HirKind::Bin { op: BinOp::Overloaded(sym), lhs, rhs } if let Some(&slot) = self.site(id).existential_call.as_ref() => {
+                self.existential_cmp(id, sym, *lhs, *rhs, slot)
+            }
             HirKind::Bin { op: BinOp::Overloaded(sym), lhs, rhs } if self.site(id).op_prim => self.op_prim(id, sym, *lhs, *rhs),
             HirKind::Bin { op, lhs, rhs } => self.bin(id, *op, *lhs, *rhs),
             HirKind::Call { args, .. } if let Some(f) = self.site(id).fn_value.as_ref() => self.partial(id, &f.clone(), args),
@@ -6071,6 +6074,49 @@ impl Lower<'_> {
         let callee = self.b.ins_tuple_item(dict, slot, MirTy::I64).map_err(mir)?;
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect(callee, words, ret).map_err(mir))?;
         Ok(if unit { Val::Unit } else { Val::V(dest) })
+    }
+
+    /// `lhs sym rhs` on two trait objects (#2740): their values compare
+    /// through the left pack's dictionary slot `slot` (a superclass's
+    /// `eq` .. `ge`) when both packs hold one instance's values, the same
+    /// dictionary. Values of two instances are never equal (`==` false, `!=`
+    /// true); an order between them panics with the site's message.
+    fn existential_cmp(&mut self, id: HirId, sym: &str, lhs: HirId, rhs: HirId, slot: u32) -> Result<Val, Refusal> {
+        self.raw_host = false;
+        let (Some(l), Some(r)) = (self.word(lhs)?, self.word(rhs)?) else {
+            return Ok(Val::Never);
+        };
+        if self.b.value_ty(l) != MirTy::HeapRef || self.b.value_ty(r) != MirTy::HeapRef {
+            return Err("existential pack word".into());
+        }
+        let (lv, ld) = (self.b.ins_tuple_item(l, 0, MirTy::HeapRef).map_err(mir)?, self.b.ins_tuple_item(l, 1, MirTy::HeapRef).map_err(mir)?);
+        let (rv, rd) = (self.b.ins_tuple_item(r, 0, MirTy::HeapRef).map_err(mir)?, self.b.ins_tuple_item(r, 1, MirTy::HeapRef).map_err(mir)?);
+        let li = self.b.ins_cast(MirCastKind::Word, MirTy::I64, ld).map_err(mir)?;
+        let ri = self.b.ins_cast(MirCastKind::Word, MirTy::I64, rd).map_err(mir)?;
+        let same = self.b.ins_cmp(MirCmpOp::Eq, li, ri).map_err(mir)?;
+        let out = self.temp();
+        let (call, other, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.branch(same, call, other).map_err(mir)?;
+        self.switch(call);
+        let callee = self.b.ins_tuple_item(ld, slot, MirTy::I64).map_err(mir)?;
+        let v = self.at_expr(id, |l| l.b.ins_call_indirect(callee, vec![lv, rv, ld], MirTy::Bool).map_err(mir))?;
+        self.b.def_local(out, v).map_err(mir)?;
+        self.jump(join)?;
+        self.switch(other);
+        match sym {
+            "==" | "!=" => {
+                let v = self.b.ins_const(MirConst::Bool(sym == "!=")).map_err(mir)?;
+                self.b.def_local(out, v).map_err(mir)?;
+                self.jump(join)?;
+            }
+            _ => {
+                let msg = self.site(id).string.ok_or("existential order message")?;
+                let text = self.at_expr(id, |l| l.b.ins_string(msg).map_err(mir))?;
+                self.at_expr(id, |l| l.b.panic(text).map_err(mir))?;
+            }
+        }
+        self.switch(join);
+        Ok(Val::V(self.b.use_local(out, MirTy::Bool).map_err(mir)?))
     }
 
     /// `f(args)` through a function value: each argument's one word (a
