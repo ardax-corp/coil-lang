@@ -3394,6 +3394,7 @@ pub struct ObjArray {
 
 // The card table fits where the slot had room (#2687): a word array's
 // table sits in its variant, and a lane array's stride left its variant.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(mem::size_of::<GcData<ObjArray>>() == 64);
 
 impl ObjArray {
