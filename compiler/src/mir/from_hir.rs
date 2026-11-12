@@ -653,6 +653,10 @@ pub trait LowerCx {
     fn site(&self, id: HirId) -> HirSite;
     /// The values the body packs as a bare-class existential.
     fn packs(&self) -> &HirPacks;
+    /// Where the `kinds` word sits in a dictionary of trait `class`
+    /// (after its methods, superclasses' included): bit 0 says whether the
+    /// instance's type is a copy-on-write object (#2506, #2715).
+    fn dict_kinds_index(&self, class: &str) -> Option<u32>;
     /// The `vec_from_array` native that copies fixed array local `value`
     /// as a `let` or assignment binds it to another local.
     fn array_copy(&self, value: HirId) -> Option<u16>;
@@ -3707,6 +3711,10 @@ impl Lower<'_> {
                 if self.b.value_ty(v) != MirTy::HeapRef || open {
                     return Ok(Val::V(v));
                 }
+                if let Some(Ty::Existential { class }) = self.expr_ty(*inner).map(strip_readonly) {
+                    let class = class.clone();
+                    return self.existential_cow(id, v, *unique, &class);
+                }
                 let out = self.at_expr(id, |l| l.b.ins_cow(v, *unique).map_err(mir))?;
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?))
             }
@@ -5926,6 +5934,52 @@ impl Lower<'_> {
             || matches!(strip_readonly(ty), Ty::Tuple(items) if items.len() == 2)
             || crate::layout::two_word_range_kind(ty).is_some()
             || self.cx.pair_class(ty).is_some()
+    }
+
+    /// Copy-on-write of a bare-class existential `pack` of trait `class`,
+    /// its `[boxed value, dictionary]` tuple (#2715). A method of the
+    /// trait, called through the pack's slot, writes the boxed value, so
+    /// the ops are the value's, where the dictionary's `kinds` word says it
+    /// is a copy-on-write object (a scalar packs as its raw word): a share
+    /// marks it, and a unique that copies it gives the place a pack of the
+    /// copy (a tuple is immutable, and no copy-on-write object of its own).
+    fn existential_cow(&mut self, id: HirId, pack: ValueId, unique: bool, class: &str) -> Result<Val, Refusal> {
+        let index = self.cx.dict_kinds_index(class).ok_or("existential kinds word")?;
+        let dict = self.b.ins_tuple_item(pack, 1, MirTy::HeapRef).map_err(mir)?;
+        let kinds = self.b.ins_tuple_item(dict, index, MirTy::I64).map_err(mir)?;
+        let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+        let bit = self.b.ins_binop(MirBinOp::BitAnd, kinds, one).map_err(mir)?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        let object = self.b.ins_cmp(MirCmpOp::Ne, bit, zero).map_err(mir)?;
+        let (op, skip, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.branch(object, op, skip).map_err(mir)?;
+        self.switch(op);
+        let value = self.b.ins_tuple_item(pack, 0, MirTy::HeapRef).map_err(mir)?;
+        let out = self.at_expr(id, |l| l.b.ins_cow(value, unique).map_err(mir))?;
+        let out = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+        if !unique {
+            self.jump(join)?;
+            self.switch(skip);
+            self.jump(join)?;
+            self.switch(join);
+            return Ok(Val::V(pack));
+        }
+        // The copy is another object: the words differ (the op never collects).
+        let (now, was) = (self.b.ins_word_as(out, MirTy::I64).map_err(mir)?, self.b.ins_word_as(value, MirTy::I64).map_err(mir)?);
+        let same = self.b.ins_cmp(MirCmpOp::Eq, now, was).map_err(mir)?;
+        let (copied, kept) = (self.b.create_block(), self.b.create_block());
+        self.b.branch(same, kept, copied).map_err(mir)?;
+        self.switch(kept);
+        self.jump(join)?;
+        self.switch(copied);
+        let fresh = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::TUPLE, vec![out, dict]).map_err(mir))?;
+        let fresh = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![fresh]).map_err(mir)?;
+        let copied_from = self.cur;
+        self.jump(join)?;
+        self.switch(skip);
+        self.jump(join)?;
+        self.switch(join);
+        Ok(Val::V(self.b.ins_stack_phi(vec![(kept, pack), (copied_from, fresh), (skip, pack)]).map_err(mir)?))
     }
 
     /// A trait method on a bare-class existential pack, as HIR emission's
