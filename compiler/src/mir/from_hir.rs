@@ -5898,9 +5898,11 @@ impl Lower<'_> {
                 .or_else(|| self.cx.boxed_view(ty, None).map(|_| MirTy::HeapRef))
                 .ok_or_else(|| format!("bound call type {}", ty_kind(ty)))?
         };
+        // Each argument's one word, a two-word value boxed, as the
+        // adapter's one-word ABI takes it (#2718).
         let mut words = Vec::with_capacity(args.len() + 1);
         for &arg in args {
-            let Some(v) = self.word(arg)? else {
+            let Some(v) = self.word_or_boxed(arg)? else {
                 return Ok(Val::Never);
             };
             words.push(v);
@@ -6011,9 +6013,11 @@ impl Lower<'_> {
         if self.b.value_ty(pack) != MirTy::HeapRef {
             return Err("existential pack word".into());
         }
+        // Each further argument's one word, a two-word value boxed, as
+        // the slot's `$dict` adapter takes it (#2718).
         let mut rest_words = Vec::with_capacity(rest.len());
         for &arg in rest {
-            let Some(v) = self.word(arg)? else {
+            let Some(v) = self.word_or_boxed(arg)? else {
                 return Ok(Val::Never);
             };
             rest_words.push(v);
