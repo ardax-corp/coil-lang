@@ -306,6 +306,38 @@ writes the words back, sends its word, and native code reloads after the yield
 site. `yield from h` in a native body is a loop of resume, done check and yield, the
 sends passed through. Two-word returns are refused.
 
+### A value nobody produced (#2717)
+
+Two places read a value no one gave: the `resume` that completes a body ending
+without `return e` (falling off its end, a bare `return;`, in a `Result` yield type
+too), and a binding `yield` resumed without `with` (a `for` sends nothing). Both
+read the word `0`, and the MIR lowering (`Lower::missing_value`) decides what that
+is by the type (`layout::zero_of`), the same on every engine:
+
+- a type with a **zero** (numbers, `byte`, `bool`, `()`, `string`, `Option`, `Vec`,
+  and tuples, records and fixed arrays of such) reads its zero: the `0` word itself
+  where that is the zero (`0`, `0.0`, `false`, a niche `None`), else the zero
+  object, built from literal nodes the `Resume` / `Yield` holds (`zero`, made by
+  `hir::synth::zero_value`, at a generic generator's per-type clone in
+  `hir_instance`);
+- a type with **no zero** (a class, `Result`, an enum other than `Option`, a
+  function, an existential, a range, a product holding one) panics, `the generator
+  finished without a value of T` / `resumed without a value of T`, at the read;
+- a **statement** (`resume h;`, an unbound `yield e;`, a block's tail lowered for
+  its effect) reads nothing: no zero, no panic, no pair unpacked; a `for` binds its
+  variable only once the generator is known to have yielded.
+
+Where the word `0` is itself a value of a type with no zero (`Result<(), E>`'s
+`Ok(())`, a scalar enum backed by `0`), another word stands for no value
+(`HirSite::missing`, `hir_missing_word`: `1`, or a backing no variant has): a gen
+fn's no-value completion returns it, a `resume` without `with` and a `for` send it
+where the receive type is such a type, and the read compares with it. A
+`bool`-backed enum with both variants leaves no word free and reads `0` as `false`'s
+variant. A shared generic body (past the clone budget) moves a bare `T` word as it
+is: its no-value completion is the `0` the reader at the ground type decides on as
+above, but an unsent binding `yield` it relays, and a `Result<(), E>` or
+number-backed enum it completes with, read the `0` word as the value (#2738).
+
 A generator body with `defer`s compiles (`NativeEntry::cleanup`, `AotEntry` byte
 `cleanup`). A close resumes the fiber with `GEN_CLOSING` set; `coil_native_yield` sees
 it and unwinds with `TRAP_CLOSE`, the frames hand their pads over as for a panic, and
