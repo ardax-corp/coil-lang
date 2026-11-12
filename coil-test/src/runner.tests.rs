@@ -69,6 +69,7 @@ fn needs_header_names_platform_features() {
     // Native targets have every feature a file can name.
     assert_eq!(missing_platform_feature("// @needs sockets symlinks\n// @needs ffi processes\nfn main() {}\n"), Ok(()));
     assert_eq!(missing_platform_feature("// @needs unix\nfn main() {}\n").is_ok(), cfg!(unix));
+    assert_eq!(missing_platform_feature("// @needs wasm\nfn main() {}\n").is_ok(), cfg!(target_family = "wasm"));
     let err = missing_platform_feature("// @needs gpu\nfn main() {}\n").unwrap_err();
     assert!(err.starts_with("unknown `// @needs` feature `gpu`"), "{err}");
 }

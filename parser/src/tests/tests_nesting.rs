@@ -208,3 +208,39 @@ fn chains_are_counted() {
     let src = format!("{fns}fn main() {{ }}\n");
     assert_eq!(Pratt::default().parse(&src).err().and_then(|m| m.code()), None);
 }
+
+/// The binary operators and `as` casts of one expression, summed over its
+/// open brackets, against a limit of their own (#2704): on wasm the passes
+/// after the parser walk a chain one level per operator and cannot grow
+/// their stack. Natively the limit is off.
+#[test]
+fn operator_chains_are_counted() {
+    use crate::{NestingKind::Operators, nesting_past};
+    let ops = |src: &str, limit: usize| nesting_past(src, usize::MAX, limit).map(|(_, kind)| kind);
+    let main = |body: String| format!("fn main() {{\n    let a = 1;\n    {body}\n}}\n");
+    let chain = |op: &str, n: usize| main(format!("let r = {};", vec!["a"; n + 1].join(op)));
+    for op in [" + ", " - ", " * ", " / ", " % ", " && ", " || ", " == ", " != ", " < ", " <= ", " > ", " >= ", " << ", " >> ", " & ", " | ", " ^ ", " ?? "] {
+        assert_eq!(ops(&chain(op, 50), 50), None, "{op:?} at the limit");
+        assert_eq!(ops(&chain(op, 51), 50), Some(Operators), "{op:?} past the limit");
+    }
+    let casts = |n: usize| main(format!("let r = a{};", " as int".repeat(n)));
+    assert_eq!(ops(&casts(50), 50), None);
+    assert_eq!(ops(&casts(51), 50), Some(Operators));
+    // Summed over the brackets open around a chain: `a + (a + (a + ...))`.
+    let nested = main(format!("let r = {}a{};", "a + (".repeat(30), ")".repeat(30)));
+    assert_eq!(ops(&nested, 29), Some(Operators));
+    assert_eq!(ops(&nested, 30), None);
+    // Statements, items, call arguments, blocks and `if` statements one
+    // after another are no chain; nor are operators in strings or comments.
+    let statements = main("let b = a + a * a;\n    ".repeat(200));
+    assert_eq!(ops(&statements, 5), None);
+    let args = main(format!("let r = f({}a);", "a + a, ".repeat(200)));
+    assert_eq!(ops(&args, 5), None);
+    let ifs = main("if a == 1 { a = a + 1; }\n    ".repeat(200));
+    assert_eq!(ops(&ifs, 5), None);
+    let quoted = main(format!("let s = \"{}\"; // {}", "+".repeat(500), "&& ".repeat(500)));
+    assert_eq!(ops(&quoted, 5), None);
+    // Natively there is no limit: a 5,000-term chain parses.
+    assert_eq!(crate::OPERATOR_CHAIN_LIMIT, if cfg!(target_family = "wasm") { 700 } else { usize::MAX });
+    assert_eq!(parse_code(&format!("let r = {};", vec!["a"; 5000].join(" + "))), None);
+}

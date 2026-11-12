@@ -287,6 +287,8 @@ pub fn missing_platform_feature(src: &str) -> Result<(), String> {
             // behaviour only Unix has (signals, Unix paths).
             "sockets" | "symlinks" | "ffi" | "processes" => !cfg!(target_family = "wasm"),
             "unix" => cfg!(unix),
+            // A file about the wasm build's own limits (its fixed stack).
+            "wasm" => cfg!(target_family = "wasm"),
             other => return Err(format!("unknown `// @needs` feature `{other}`")),
         };
         if !has {

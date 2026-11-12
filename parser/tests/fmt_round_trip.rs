@@ -122,6 +122,11 @@ fn hy_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// file that does not parse, so there is nothing to format.
 fn check_file(name: &str, path: &Path) -> Result<bool, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{name}: read: {e}"))?;
+    // A program about the wasm build's limits (5,000-term operator chains,
+    // #2704): its AST's derived `Debug` alone runs a debug build's stack out.
+    if src.lines().take_while(|l| l.starts_with("//")).any(|l| l.trim() == "// @needs wasm") {
+        return Ok(false);
+    }
     let compile_fail = path.components().any(|c| c.as_os_str() == "compile_fail");
     let once = match format_source(&src) {
         Ok(once) => once,

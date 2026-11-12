@@ -4566,16 +4566,19 @@ impl<'pratt> Pratt<'pratt> {
         // Each level of nesting is frames of the parser and of every pass
         // that walks the tree: far past what any program the checker
         // accepts can nest, it stops here, before the stack does (#2655).
-        if let Some((at, kind)) = nesting_past(input, PARSE_NESTING_LIMIT) {
-            let what = match kind {
-                NestingKind::Brackets => "brackets",
-                NestingKind::Levels => "levels of brackets, lambdas, prefix operators and chains",
+        if let Some((at, kind)) = nesting_past(input, PARSE_NESTING_LIMIT, OPERATOR_CHAIN_LIMIT) {
+            let title = match kind {
+                NestingKind::Brackets => {
+                    format!("expression nested too deeply (over {PARSE_NESTING_LIMIT} brackets) for the parser")
+                }
+                NestingKind::Levels => format!(
+                    "expression nested too deeply (over {PARSE_NESTING_LIMIT} levels of brackets, lambdas, prefix operators and chains) for the parser"
+                ),
+                NestingKind::Operators => format!(
+                    "expression nested too deeply (over {OPERATOR_CHAIN_LIMIT} chained operators) for this target"
+                ),
             };
-            let mut message = Message::error(
-                ErrorCode::ExpressionNestingTooDeep,
-                format!("expression nested too deeply (over {PARSE_NESTING_LIMIT} {what}) for the parser"),
-                shift(at..at + 1),
-            );
+            let mut message = Message::error(ErrorCode::ExpressionNestingTooDeep, title, shift(at..at + 1));
             message.with_help("split the expression into smaller named bindings".to_string());
             return Err(message);
         }
@@ -4635,6 +4638,18 @@ impl<'pratt> Pratt<'pratt> {
 /// margin of 1.5 for every shape measured (`docs/internals/limitations.md`).
 pub const PARSE_NESTING_LIMIT: usize = if cfg!(target_family = "wasm") { 400 } else { 4000 };
 
+/// Most binary operators and `as` casts one expression may chain, summed
+/// over the brackets open around it (#2704). The passes after the parser
+/// walk a chain `a + b + ...` one level per operator; natively each grows
+/// its stack (`common::deep_stack`, #2638), so there is no limit. On wasm
+/// the stack cannot grow. Release `coil.wasm` on Node's default stack ran
+/// out at 1150 terms of `a + a + ...` and 1175 of `p == p == ...` (MIR
+/// lowering), 1230 of `p && p && ...` or `p || p || ...` (the parser, which
+/// nests them to the right) and about 2300 of `s + s + ...` or
+/// `a as int as int ...` (the AST walks before the checker). 700 leaves a
+/// margin of 1.6 below the first (`docs/internals/limitations.md`).
+pub const OPERATOR_CHAIN_LIMIT: usize = if cfg!(target_family = "wasm") { 700 } else { usize::MAX };
+
 /// What `nesting_past` counted when it passed the limit.
 #[derive(Debug, PartialEq, Eq)]
 enum NestingKind {
@@ -4642,6 +4657,8 @@ enum NestingKind {
     Brackets,
     /// Brackets together with the forms below.
     Levels,
+    /// Binary operators and `as` casts ([`OPERATOR_CHAIN_LIMIT`]).
+    Operators,
 }
 
 /// What is open at one bracket level of `nesting_past`, besides brackets:
@@ -4661,6 +4678,10 @@ struct Open {
     fn_seen: bool,
     /// The word before was `else`.
     after_else: bool,
+    /// Binary operators and `as` casts since the level's last `;`, `,` or
+    /// `{`: an upper bound on how deep the operator nodes of its expression
+    /// nest (a prefix `-` or `+` counts too).
+    ops: usize,
 }
 
 impl Open {
@@ -4676,7 +4697,9 @@ impl Open {
 /// A binary `-` or `+` before a prefix one counts too, which is
 /// conservative, as is a `=>` that is no lambda's: only one after an `fn`
 /// of the same level counts, so the arms of a `match` do not add up.
-fn nesting_past(input: &str, limit: usize) -> Option<(usize, NestingKind)> {
+/// Binary operators and `as` casts ([`Open::ops`]) are summed over the open
+/// levels and checked against `ops_limit` on their own.
+fn nesting_past(input: &str, limit: usize, ops_limit: usize) -> Option<(usize, NestingKind)> {
     let b = input.as_bytes();
     let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
     let mut i = 0;
@@ -4684,6 +4707,16 @@ fn nesting_past(input: &str, limit: usize) -> Option<(usize, NestingKind)> {
     // Brackets open, and the sum of `Open::count` over the levels.
     let (mut brackets, mut extra, mut run) = (0usize, 0usize, 0usize);
     let past = |brackets: usize, extra: usize, run: usize| brackets + extra + run > limit;
+    // The sum of `Open::ops` over the levels.
+    let mut ops = 0usize;
+    // One more operator at the top level: past `ops_limit`?
+    macro_rules! op {
+        ($top:expr) => {{
+            levels[$top].ops += 1;
+            ops += 1;
+            ops > ops_limit
+        }};
+    }
     while i < b.len() {
         let c = b[i];
         let top = levels.len() - 1;
@@ -4721,7 +4754,12 @@ fn nesting_past(input: &str, limit: usize) -> Option<(usize, NestingKind)> {
                 }
                 continue;
             }
-            b'/' => run = 0,
+            b'/' => {
+                run = 0;
+                if b.get(i + 1) != Some(&b'=') && op!(top) {
+                    return Some((i, NestingKind::Operators));
+                }
+            }
             b'(' | b'[' | b'{' => {
                 brackets += 1;
                 if brackets > limit {
@@ -4735,17 +4773,21 @@ fn nesting_past(input: &str, limit: usize) -> Option<(usize, NestingKind)> {
                     extra -= levels[top].chain;
                     levels[top].chain = 0;
                     levels[top].fn_seen = false;
+                    ops -= std::mem::take(&mut levels[top].ops);
                 }
                 levels.push(Open::default());
             }
             b')' | b']' | b'}' => {
                 if levels.len() > 1 {
-                    extra -= levels.pop().map_or(0, |l| l.count());
+                    let closed = levels.pop().unwrap_or_default();
+                    extra -= closed.count();
+                    ops -= closed.ops;
                     brackets -= 1;
                 }
             }
             b';' | b',' => {
                 extra -= levels[top].count();
+                ops -= levels[top].ops;
                 levels[top] = Open::default();
             }
             b'=' if b.get(i + 1) == Some(&b'>') => {
@@ -4761,7 +4803,12 @@ fn nesting_past(input: &str, limit: usize) -> Option<(usize, NestingKind)> {
             }
             // `==`, and `<=`, `>=`, `!=` and the compound assignments, which
             // reach here with their first character already passed.
-            b'=' if b.get(i + 1) == Some(&b'=') => i += 1,
+            b'=' if b.get(i + 1) == Some(&b'=') => {
+                i += 1;
+                if op!(top) {
+                    return Some((i, NestingKind::Operators));
+                }
+            }
             b'=' if i > 0 && matches!(b[i - 1], b'<' | b'>' | b'!' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^') => {}
             b'=' | b'*' if c == b'=' || b.get(i + 1) == Some(&b'*') => {
                 levels[top].chain += 1;
@@ -4781,11 +4828,30 @@ fn nesting_past(input: &str, limit: usize) -> Option<(usize, NestingKind)> {
                     return Some((i, NestingKind::Levels));
                 }
             }
-            b'!' if b.get(i + 1) == Some(&b'=') => i += 1,
+            b'!' if b.get(i + 1) == Some(&b'=') => {
+                i += 1;
+                if op!(top) {
+                    return Some((i, NestingKind::Operators));
+                }
+            }
             b'+' | b'-' | b'!' | b'~' => {
                 run += 1;
                 if past(brackets, extra, run) {
                     return Some((i, NestingKind::Levels));
+                }
+                if matches!(c, b'+' | b'-') && op!(top) {
+                    return Some((i, NestingKind::Operators));
+                }
+            }
+            // `<` `>` `<<` `>>` `<=` `>=` (the `=` passes above), `&` `&&`
+            // `|` `||` `^` `*` `%` and `??`: a `<` of type arguments counts too.
+            b'?' if b.get(i + 1) != Some(&b'?') => {}
+            b'<' | b'>' | b'&' | b'|' | b'^' | b'*' | b'%' | b'?' => {
+                if matches!(c, b'<' | b'>' | b'&' | b'|' | b'?') && b.get(i + 1) == Some(&c) {
+                    i += 1;
+                }
+                if op!(top) {
+                    return Some((i, NestingKind::Operators));
                 }
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
@@ -4813,6 +4879,12 @@ fn nesting_past(input: &str, limit: usize) -> Option<(usize, NestingKind)> {
                         run += 1;
                         if past(brackets, extra, run) {
                             return Some((start, NestingKind::Levels));
+                        }
+                    }
+                    "as" => {
+                        run = 0;
+                        if op!(top) {
+                            return Some((start, NestingKind::Operators));
                         }
                     }
                     _ => run = 0,
