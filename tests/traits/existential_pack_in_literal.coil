@@ -1,0 +1,63 @@
+// A class value is packed into a bare-trait existential as an item of a
+// tuple literal and as an element of `Vec::from([..])`, as at a `let`, an
+// argument or a field: packing is type-directed, so each item of the
+// literal takes its expected item type (coil-lang#2726).
+use tests::assert;
+
+trait Tr<S> {
+    fn get(S s) -> int {}
+}
+
+class A {
+    pub n: int,
+}
+
+class B {
+    pub m: int,
+}
+
+impl Tr for A {
+    pub fn get(A a) -> int {
+        return a.n;
+    }
+}
+
+impl Tr for B {
+    pub fn get(B b) -> int {
+        return b.m * 10;
+    }
+}
+
+fn take((Tr, int) t) -> int {
+    let (e, n) = t;
+    return e.get() + n;
+}
+
+fn make(int k) -> (Tr, int) {
+    return (new B(k), k);
+}
+
+test("a tuple literal at a type holding a trait object") {
+    let t: (Tr, int) = (new A(3), 1);
+    let (e, n) = t;
+    assert!(e.get() == 3 && n == 1);
+}
+
+test("a tuple literal as an argument and as a result") {
+    assert!(take((new A(8), 1)) == 9);
+    let (m, k) = make(2);
+    assert!(m.get() == 20 && k == 2);
+}
+
+test("Vec::from of a literal at Vec<Tr>") {
+    let v: Vec<Tr> = Vec::from([new A(2)]);
+    let w: Vec<Tr> = Vec::from([new A(4), new B(5)]);
+    assert!(v.len() == 1 && v[0].get() == 2);
+    assert!(w.len() == 2 && w[0].get() == 4 && w[1].get() == 50);
+}
+
+test("array literals at Vec<Tr> and [Tr; N] as before") {
+    let w: Vec<Tr> = [new A(4), new A(5)];
+    let f: [Tr; 2] = [new A(6), new B(7)];
+    assert!(w[1].get() == 5 && f[0].get() == 6 && f[1].get() == 70);
+}

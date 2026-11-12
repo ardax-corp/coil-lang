@@ -9557,7 +9557,9 @@ impl Checker {
     /// `None` leaves it to plain unification.
     fn coerce_construct_payload(&mut self, expected: &Ty, node: &Output, context: &str) -> Option<Ty> {
         let Ty::App(_, targs) = expected else { return None };
-        if !targs.iter().any(|t| matches!(strip_readonly(t), Ty::Existential { .. })) {
+        // A trait object at any depth of a payload (`Option<(Tr, int)>`,
+        // #2726).
+        if !targs.iter().any(has_existential) {
             return None;
         }
         let Expression::Construct {
@@ -9585,6 +9587,82 @@ impl Checker {
         self.absorb(s);
         for ((arg, slot), arg_ty) in args.iter().zip(&slots).zip(arg_tys) {
             let _ = self.coerce_or_unify(slot, &arg_ty, Some(arg), &arg.0.into_range(), context);
+        }
+        let ty = apply_ty_prune(&self.subst, expected);
+        self.retarget_node_ty(node.0.start, node.0.end, ty.clone());
+        Some(ty)
+    }
+
+    /// A tuple or array literal where a type with a trait object among its
+    /// items is expected (`(Tr, int)`, `Vec<Tr>`, `[Tr; 2]`): each item is
+    /// coerced to its expected item type, so a class value packs as it does
+    /// at a `let` of the trait's type (#2726). `None` for any other shape.
+    fn coerce_literal_items(&mut self, expected: &Ty, node: &Output, context: &str) -> Option<Ty> {
+        if !has_existential(expected) {
+            return None;
+        }
+        let item_ty = |this: &Self, item: &Output| {
+            this.ids
+                .id_of_output(item)
+                .and_then(|id| this.cache.get(&id).cloned())
+                .or_else(|| this.node_ids_by_span.get(&(item.0.start, item.0.end)).and_then(|id| this.cache.get(id).cloned()))
+        };
+        // `Vec::from([..])` (parsed as `Vec`'s construct): the literal is the
+        // `Vec`'s, its items the expected element type's.
+        if let Expression::Construct {
+            enum_name: "Vec",
+            variant_name: "from",
+            fields: parser::ast::EnumConstructPayload::Tuple(args),
+        } = node.1.as_ref()
+            && let [arg] = args.as_slice()
+            && let Some(element) = vec_element_ty(strip_readonly(expected))
+            && let lit = unwrap_expr_wrappers(arg)
+            && let Expression::Array(items) = lit.1.as_ref()
+            && !items.is_empty()
+        {
+            let element = element.clone();
+            let tys: Vec<Ty> = items.iter().map(|i| item_ty(self, i)).collect::<Option<_>>()?;
+            for (item, ty) in items.iter().zip(tys) {
+                let _ = self.coerce_or_unify(&element, &ty, Some(item), &item.0.into_range(), context);
+            }
+            let array = Ty::Array { element: Box::new(apply_ty_prune(&self.subst, &element)), length: ArrayLength::Static(items.len()) };
+            self.retarget_node_ty(lit.0.start, lit.0.end, array);
+            let range = lit.0.into_range();
+            self.mixed_literals.retain(|m| m.range != range);
+            let ty = apply_ty_prune(&self.subst, expected);
+            self.retarget_node_ty(node.0.start, node.0.end, ty.clone());
+            return Some(ty);
+        }
+        let slots: Vec<Ty> = match (strip_readonly(expected), node.1.as_ref()) {
+            (Ty::Tuple(tys), Expression::Tuple(items)) if tys.len() == items.len() => tys.clone(),
+            // An element that is itself a trait object packs through the
+            // literal's own deferred element (#1853).
+            (exp, Expression::Array(items))
+                if !items.is_empty()
+                    && !matches!(exp, Ty::Array { element, .. } if matches!(strip_readonly(element), Ty::Existential { .. }))
+                    && !vec_element_ty(exp).is_some_and(|e| matches!(strip_readonly(e), Ty::Existential { .. })) =>
+            {
+                let elem = match exp {
+                    Ty::Array { element, length } if length.is_static_len(items.len()) => element.as_ref().clone(),
+                    _ => vec_element_ty(exp)?.clone(),
+                };
+                vec![elem; items.len()]
+            }
+            _ => return None,
+        };
+        let items: &[Output] = match node.1.as_ref() {
+            Expression::Tuple(items) | Expression::Array(items) => items,
+            _ => return None,
+        };
+        let tys: Vec<Ty> = items.iter().map(|i| item_ty(self, i)).collect::<Option<_>>()?;
+        for ((item, slot), ty) in items.iter().zip(&slots).zip(tys) {
+            let _ = self.coerce_or_unify(slot, &ty, Some(item), &item.0.into_range(), context);
+        }
+        // Items of differing types the literal deferred are each coerced
+        // now: no element mismatch is left to report.
+        if matches!(node.1.as_ref(), Expression::Array(_)) {
+            let range = node.0.into_range();
+            self.mixed_literals.retain(|lit| lit.range != range);
         }
         let ty = apply_ty_prune(&self.subst, expected);
         self.retarget_node_ty(node.0.start, node.0.end, ty.clone());
@@ -9623,6 +9701,11 @@ impl Checker {
         }
         if let Some(expr) = expr
             && let Some(ty) = self.coerce_construct_payload(&expected, unwrap_expr_wrappers(expr), context)
+        {
+            return ty;
+        }
+        if let Some(expr) = expr
+            && let Some(ty) = self.coerce_literal_items(&expected, unwrap_expr_wrappers(expr), context)
         {
             return ty;
         }
@@ -22559,4 +22642,9 @@ fn ty_names_param(ty: &Ty, params: &[String]) -> bool {
         Ty::Con(name) => params.contains(name),
         _ => false,
     })
+}
+
+/// Whether `ty` holds a bare-trait existential at any depth.
+fn has_existential(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Existential { .. }) || ty.any_child(has_existential)
 }
