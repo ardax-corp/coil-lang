@@ -1033,7 +1033,8 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     // parameter of a shared generic body is a plain closure).
     let ty = info.ty.as_ref().map(|t| apply_ty_prune(checker.subst(), t));
     ty.as_ref().is_some_and(|t| match info.kind {
-        LocalKind::Param => matches!(strip_readonly(t), Ty::Forall { .. }),
+        // A lambda's capture of one is one in the lambda (#2724).
+        LocalKind::Param | LocalKind::Capture => matches!(strip_readonly(t), Ty::Forall { .. }),
         // A generic function's returned function the checker saw open at
         // the binding is a `PolyFn` too (`let f = capture_show(0)`),
         // whatever the local settles to (`maybe_record_polyfn_binding`).
