@@ -230,6 +230,9 @@ struct GenericFnSig {
     /// ([`crate::layout::open_coroutine`]), or a function calling one by
     /// name: its shared body cannot make a value nobody produced (#2738).
     split: bool,
+    /// A `gen fn`: a read of it as a value at ground types makes its
+    /// coroutine through an adapter calling its clone (#2747).
+    coro: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -427,6 +430,7 @@ fn collect_generic_functions(
             type_params,
             args,
             body,
+            is_coro,
             ..
         } => {
             if !type_params.is_empty()
@@ -440,6 +444,7 @@ fn collect_generic_functions(
                     }
                     sig.def_id = def_id;
                     sig.fn_name = (*name).to_string();
+                    sig.coro = *is_coro && body.is_some();
                     sig.split = checker
                         .fn_param_tys(name)
                         .into_iter()
@@ -517,6 +522,7 @@ fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> Gene
         keyed: false,
         hot: false,
         split: false,
+        coro: false,
     }
 }
 
@@ -671,9 +677,75 @@ fn collect_candidates(
         return;
     }
 
+    // A generic generator read as a value at ground types (#2747): the
+    // value's adapter calls its clone at those types, planned here as a
+    // call's is, past the clone budget as an alias's call is.
+    if let Expression::Identifier(fn_name) = node.1.as_ref()
+        && let Some(sig) = sigs.get(*fn_name).filter(|sig| sig.coro && !sig.alias)
+        && let Some(specialization) = candidate_for_value(fn_name, sig, node, checker, ty_of, intern)
+    {
+        out.push(MonoCandidate {
+            span: node.0,
+            specialization,
+            value: true,
+            recursive: false,
+        });
+        return;
+    }
+
     walk_children(node, &mut |child| {
         collect_candidates(child, checker, ty_of, sigs, intern, out)
     });
+}
+
+/// The clone a read of generic `fn_name` as a value at the ground function
+/// type of `node` takes: its type arguments bound from that type's
+/// parameters and result.
+fn candidate_for_value(
+    fn_name: &str,
+    sig: &GenericFnSig,
+    node: &Output,
+    checker: &Checker,
+    ty_of: &dyn Fn(&Output) -> Option<Ty>,
+    intern: &mut TyInterner,
+) -> Option<MonoSpecialization> {
+    if sig.type_params.is_empty() || sig.param_is_rest.iter().any(|&r| r) {
+        return None;
+    }
+    let mut read = mono_key_ty(&ty_of(node)?);
+    let arity = sig.param_type_params.len();
+    let mut arg_types = Vec::with_capacity(arity);
+    for _ in 0..arity.max(1) {
+        let Ty::Fun(param, ret) = read else {
+            return None;
+        };
+        arg_types.push(*param);
+        read = *ret;
+    }
+    if arity == 0 {
+        arg_types.clear();
+    }
+    let vars = checker.fn_type_param_vars(fn_name, sig.type_params.len())?;
+    let (params, ret) = checker.fn_call_sig(fn_name, arity)?;
+    if params.len() != arg_types.len() {
+        return None;
+    }
+    let mut map = HashMap::new();
+    for (param, ty) in params.iter().zip(&arg_types) {
+        crate::Compiler::bind_scheme_vars(param, ty, &mut map);
+    }
+    crate::Compiler::bind_scheme_vars(&ret, &read, &mut map);
+    let subst = vars.iter().map(|v| map.get(v).and_then(type_arg)).collect::<Option<Vec<_>>>()?;
+    let subst_ids: Vec<TyId> = subst.into_iter().map(|ty| intern.intern(ty)).collect();
+    let arg_ids: Vec<TyId> = arg_types.into_iter().map(|ty| intern.intern(ty)).collect();
+    Some(MonoSpecialization {
+        key: MonoKey {
+            def_id: sig.def_id,
+            subst: subst_ids,
+        },
+        fn_name: if sig.fn_name.is_empty() { fn_name.to_string() } else { sig.fn_name.clone() },
+        arg_types: arg_ids,
+    })
 }
 
 /// `let g = wrap;` for a generic `wrap` with a type parameter nested in its
