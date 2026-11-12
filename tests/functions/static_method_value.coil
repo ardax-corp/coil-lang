@@ -184,9 +184,8 @@ test("an enum's static method's value, and its unit variant") {
     assert!(radius(Shape::Dot()) == 0);
 }
 
-test("a static field reads without and with parentheses") {
+test("a static field reads without parentheses") {
     assert!(Src::count == 3);
-    assert!(Src::count() == 3);
     let none: Option<int> = Option::None();
     assert!(none == Option::None);
 }

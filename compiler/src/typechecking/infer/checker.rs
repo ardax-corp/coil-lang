@@ -234,6 +234,7 @@ impl Checker {
             bare_constructs_by_span: HashMap::new(),
             qualified_trait_calls_by_span: HashMap::new(),
             qualified_value_calls_by_span: HashMap::new(),
+            field_value_calls_by_span: HashMap::new(),
             static_method_values_by_span: HashMap::new(),
             bare_patterns_by_span: HashMap::new(),
             impl_stubs: HashMap::new(),
@@ -1768,6 +1769,7 @@ impl Checker {
         self.bare_constructs_by_span.clear();
         self.qualified_trait_calls_by_span.clear();
         self.qualified_value_calls_by_span.clear();
+        self.field_value_calls_by_span.clear();
         self.static_method_values_by_span.clear();
         self.bare_patterns_by_span.clear();
         self.c_structs.clear();
@@ -5576,8 +5578,21 @@ impl Checker {
 
         // A ground trait method on a concrete receiver (or several traits'
         // with an instance for it, which the call reports).
-        if !matches!(self.ground_trait_methods_for_receiver(method, &recv_ty), GroundMethod::None) {
+        let ground = self.ground_trait_methods_for_receiver(method, &recv_ty);
+        // A field `f` and no method `f` of the receiver's (a trait's `f`
+        // the receiver has no instance of is none): `o.f(args)` calls the
+        // field's value, as `(o.f)(args)` does (#2752).
+        let field = class_owner.as_ref().and_then(|owner| self.declared_class_field_ty(owner, method)).is_some();
+        let trait_method = match &ground {
+            GroundMethod::None => false,
+            GroundMethod::One(class, scheme) => !field || self.trait_has_instance_for_receiver(&class.clone(), &scheme.clone(), &resolved),
+            GroundMethod::Several(_) => true,
+        };
+        if trait_method {
             return self.infer_method_trait_call(recv, &recv_ty, method, method_args, id, range);
+        }
+        if field {
+            return self.infer_field_value_call(&resolved, method, method_args, id, range);
         }
 
         if let Some(owner) = class_owner {
@@ -5600,6 +5615,31 @@ impl Checker {
                 "method calls require a class instance receiver".to_string()
             }),
         )
+    }
+
+    /// `o.f(args)` of instance field `f` of the class `recv` (resolved) is:
+    /// a call of the function the field holds, or E0104 for a field of
+    /// another type (#2752).
+    fn infer_field_value_call(&mut self, recv: &Ty, field: &str, args: &[Output], id: Option<NodeId>, range: Range<usize>) -> Ty {
+        let ty = self.access_field_of(recv, field, range.clone());
+        let ty = if matches!(recv, Ty::Readonly(_)) || self.is_readonly_class_ty(recv) { self.readonly_view(ty) } else { ty };
+        let callee_ty = apply_ty_prune(&self.subst, &ty);
+        let flat_args = self.flatten_spread_call_args(args);
+        if !matches!(strip_readonly(&callee_ty), Ty::Fun(..) | Ty::Forall { .. }) {
+            for arg in flat_args.iter() {
+                let _ = self.infer_call_arg(arg);
+            }
+            let shown = self.diag_ty(&callee_ty);
+            return self.error_with_help(
+                ErrorCode::NotAFunction,
+                format!("field `{field}` has type `{shown}`, not a function type"),
+                range,
+                Some(format!("read it as `.{field}` without arguments")),
+            );
+        }
+        self.field_value_calls_by_span.insert((range.start, range.end), callee_ty.clone());
+        let arg_tys: Vec<Ty> = flat_args.iter().map(|arg| self.infer_call_arg(arg)).collect();
+        self.apply_function(None, &callee_ty, &arg_tys, Some(args), id, range)
     }
 
     /// `e` of a `__data(e)` call.
@@ -18395,19 +18435,27 @@ impl Checker {
             Some(t) => t.clone(),
             None => {
                 let static_fqn = self.class_member_fqn(enum_name, variant_name);
-                // Bare / `()` form: a static field first; then a static
-                // method's value (bare) or its call (`Counter::fresh()`).
-                if matches!(fields, EnumConstructPayload::Unit | EnumConstructPayload::Empty)
+                // Bare form: a static field first; then a static method's
+                // value. `C::f()` / `C::f(args)` of a static field or
+                // another module's `const` holding a function calls it
+                // (#1705, #2752); of one holding no function it is E0104
+                // below, as for any value that is not a function.
+                if matches!(fields, EnumConstructPayload::Unit)
                     && let Some(ty) = self.static_slot_types.get(&static_fqn).cloned() {
                         return apply_ty_prune(&self.subst, &ty);
                     }
                 // `module::NAME` of another module's `const`.
-                if matches!(fields, EnumConstructPayload::Unit | EnumConstructPayload::Empty)
+                if matches!(fields, EnumConstructPayload::Unit)
                     && let Some(ty) = self.module_consts.get(&format!("{enum_name}::{variant_name}")).cloned()
                 {
                     return ty;
                 }
-                if let EnumConstructPayload::Tuple(args) = fields
+                let value_args = match fields {
+                    EnumConstructPayload::Tuple(args) => Some(args.as_slice()),
+                    EnumConstructPayload::Empty => Some(&[][..]),
+                    _ => None,
+                };
+                if let Some(args) = value_args
                     && let Some(ty) = self.try_infer_qualified_value_call(enum_name, variant_name, args, call_id, range.clone())
                 {
                     return ty;
@@ -18467,9 +18515,10 @@ impl Checker {
                         )),
                     );
                 }
-                // `K::n(1)` of a class static or module const that holds no
-                // function (#1726): the function-typed one is called above.
-                if !matches!(fields, EnumConstructPayload::Unit | EnumConstructPayload::Empty)
+                // `K::n(1)` / `K::n()` of a class static or module const that
+                // holds no function (#1726, #2752): the function-typed one is
+                // called above.
+                if !matches!(fields, EnumConstructPayload::Unit)
                     && let Some(ty) = self
                         .static_slot_types
                         .get(&static_fqn)
@@ -19766,6 +19815,12 @@ impl Checker {
         self.qualified_value_calls_by_span.get(&(start, end))
     }
 
+    /// The field's type of `o.f(args)` at this span when it calls the
+    /// function instance field `f` holds (#2752).
+    pub fn field_value_call_at(&self, start: usize, end: usize) -> Option<&Ty> {
+        self.field_value_calls_by_span.get(&(start, end))
+    }
+
     /// The key (`Owner::m`) of the static method a bare `Owner::m` at this
     /// span names as a function value (#2746).
     pub fn static_method_value_at(&self, start: usize, end: usize) -> Option<&str> {
@@ -19774,7 +19829,8 @@ impl Checker {
 
     /// `owner::member(args)` naming a `const` or `static` of function type
     /// (another module's, or a class static field): a call of its value
-    /// (#1705), as `let f = owner::member; f(args)` is.
+    /// (#1705), as `let f = owner::member; f(args)` is; `args` may be none
+    /// (`owner::member()`, #2752). A method of the name wins.
     fn try_infer_qualified_value_call(
         &mut self,
         owner: &str,
@@ -19783,6 +19839,9 @@ impl Checker {
         call_id: Option<NodeId>,
         range: Range<usize>,
     ) -> Option<Ty> {
+        if self.has_method(owner, member) {
+            return None;
+        }
         let fqn = self.class_member_fqn(owner, member);
         let callee_ty = match self.static_slot_types.get(&fqn) {
             Some(ty) => apply_ty_prune(&self.subst, ty),
