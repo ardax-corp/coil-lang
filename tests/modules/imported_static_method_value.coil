@@ -1,0 +1,23 @@
+// Another module's static method named as a function value (#2746): a
+// ground class's (`Path::from`) and a generic class's (`Bag::new`).
+use tests::assert;
+use coi404_path::Path;
+use tally_bag::Bag;
+
+fn wrap(string -> Path mk, string s) -> string {
+    return mk(s).as_str();
+}
+
+test("an imported class's static method as a value") {
+    let mk = Path::from;
+    assert!(mk("a/b").as_str() == "a/b");
+    assert!(wrap(Path::from, "c") == "c");
+}
+
+test("an imported generic class's static method as a value") {
+    let fresh = Bag::new;
+    let b: Bag<string> = fresh();
+    b.put("x");
+    b.put("x");
+    assert!(b.count("x") == 2);
+}
