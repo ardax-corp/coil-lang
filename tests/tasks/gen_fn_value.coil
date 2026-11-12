@@ -1,0 +1,161 @@
+// A `gen fn` named as a function value: calling the value makes the
+// coroutine as calling the name does (`MakeCoro`), whatever road the value
+// takes; the shared body run as a plain function would yield outside its
+// fiber (#2747). A generic one's value at ground types makes its per-type
+// clone's coroutine; through a `forall` parameter, its shared body's.
+use tests::assert;
+use string::format;
+
+gen fn count(int n) {
+    yield n;
+    yield n + 1;
+}
+
+gen fn span(int a, int b) {
+    let i = a;
+    while i < b {
+        yield i;
+        i = i + 1;
+    }
+}
+
+gen fn echo_s(string s) -> coroutine<string, string> {
+    let r = yield s;
+    yield r;
+}
+
+gen fn echo<T>(T x) -> coroutine<T, T> {
+    let r = yield x;
+    yield r;
+}
+
+gen fn rep<T>(T x, int n) -> coroutine<T> {
+    let i = 0;
+    while i < n {
+        yield x;
+        i = i + 1;
+    }
+}
+
+class Holder {
+    pub mk: int -> coroutine<int>,
+}
+
+class Words {
+    pub mk: string -> coroutine<string, string>,
+}
+
+class Src {
+    pub base: int,
+}
+
+impl Src {
+    pub gen static fn up(int n) {
+        yield n;
+        yield n * 10;
+    }
+
+    pub gen fn from(int k) {
+        yield self.base + k;
+        yield self.base + k + 1;
+    }
+}
+
+fn sum(coroutine<int> c) -> int {
+    let t = 0;
+    for v in c {
+        t = t + v;
+    }
+    return t;
+}
+
+fn sum_with(int -> coroutine<int> mk, int n) -> int {
+    return sum(mk(n));
+}
+
+fn joined(string -> coroutine<string, string> mk) -> string {
+    let out = "";
+    for v in mk("w") {
+        out = out + "[" + v + "]";
+    }
+    return out;
+}
+
+fn made() -> int -> coroutine<int> {
+    return count;
+}
+
+fn counted(forall T. T -> int -> coroutine<T> mk) -> int {
+    let n = 0;
+    for _ in mk(1, 2) {
+        n = n + 1;
+    }
+    for _ in mk("s", 3) {
+        n = n + 1;
+    }
+    return n;
+}
+
+test("a gen fn's value through a local, a parameter, a field and a return") {
+    let mk = count;
+    assert!(sum(mk(3)) == 7);
+    assert!(sum_with(count, 5) == 11);
+    let h = new Holder(count);
+    assert!(sum((h.mk)(1)) == 3);
+    assert!(sum(made()(2)) == 5);
+    let fs: Vec<int -> coroutine<int>> = [count, made()];
+    assert!(sum(fs[1](10)) == 21);
+}
+
+test("a gen fn's value resumed by hand") {
+    let mk = count;
+    let c = mk(4);
+    let a = resume c;
+    let b = resume c;
+    assert!(a == 4 && b == 5);
+}
+
+test("a lambda returning a gen fn's call, and one capturing its value") {
+    let lam = fn (int n) => count(n);
+    assert!(sum(lam(7)) == 15);
+    let mk = count;
+    let cap = fn (int n) use (mk) => mk(n + 1);
+    assert!(sum(cap(1)) == 5);
+}
+
+test("a gen fn partially applied") {
+    let from2 = span(2);
+    assert!(sum(from2(5)) == 9);
+    assert!(sum_with(span(1), 4) == 6);
+}
+
+test("a gen fn with a receive type through a function-typed parameter") {
+    assert!(joined(echo_s) == "[w][]");
+}
+
+test("gen methods' values: a static one, and a partial of an instance one") {
+    let u = Src::up;
+    assert!(sum(u(2)) == 22);
+    let s = new Src(100);
+    let m = s.from();
+    assert!(sum(m(1)) == 203);
+}
+
+test("a generic gen fn's value at ground types takes its clone") {
+    assert!(joined(echo) == "[w][]");
+    let w = new Words(echo);
+    assert!(joined(w.mk) == "[w][]");
+    let lam = fn (string s) => echo(s);
+    assert!(joined(lam) == "[w][]");
+    let e = echo;
+    let seen: Vec<string> = [];
+    for v in e(Option::Some(3)) {
+        seen.push(format("%v", v));
+    }
+    assert!(seen.len() == 2);
+    assert!(seen[0] == "Some(3)" && seen[1] == "None");
+}
+
+test("a generic gen fn's value through a forall parameter") {
+    assert!(counted(rep) == 5);
+}
