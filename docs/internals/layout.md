@@ -126,7 +126,10 @@ words:
 
 - `hir_bare_niche_abi` (`codegen/emit_hir.rs`) gives a declared bare `V`
   parameter or return the niche layout when its ground argument is a niche
-  type, so the call site passes the word unchanged.
+  type, so the call site passes the word unchanged. A method's own type
+  parameter is such a `V` too, bounded or not, static or with `self`, and
+  so is a trait instance method's own one at a ground call
+  (`hir_ground_words`, #2716).
 - A bare `V` field, `Vec<V>` element or `HashMap` value read from ground
   code is the niche word (`hir_field_rep`'s bare-niche case).
 - Dictionary, closure and `PolyFn` adapters pass a niche word as itself.

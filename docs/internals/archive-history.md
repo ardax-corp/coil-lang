@@ -75,6 +75,12 @@ major.
   (`common::dict_from_call(j)`) is the call's dictionary `j` (#2636). A `0`
   word still takes the call's dictionary at its own index. `FORMAT` stays
   16.
+- A method's own bare type parameter (`fn m<U>(U x) -> U` on a plain
+  class, unbounded, static or with `self`, and a trait instance method's
+  own) takes and returns a niche `Option` / `Result` as its niche word, as
+  a free generic function's does; the call no longer boxes it to the enum
+  object (#2716). Convention only, inside one compilation: `FORMAT` stays
+  16.
 
 Minor 1 (#2578) adds inline scopes, additively: MIR section `FORMAT` 17 writes
 the scope table (`common::write_inline_scopes`: per scope the callee's name, the
