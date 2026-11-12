@@ -2066,16 +2066,18 @@ impl Heap {
             .map_or(&[][..], |row| &row[..])
     }
 
-    /// `gc-stress`: a word's declared kind must match what it holds.
-    #[cfg(feature = "gc-stress")]
-    fn verify_kinded_word(&self, what: &str, index: usize, kind: u8, v: Value) {
+    /// A word's declared kind must match what it holds: the mark under
+    /// `gc-stress`, and the minor's checks ([`heap_checks_on`], which cover
+    /// a shared generic body's arrays stamped from its `kinds` word, #2687).
+    #[cold]
+    pub(super) fn verify_kinded_word(&self, what: &str, index: usize, kind: u8, v: Value) {
         let addr = v.heap_addr();
         let resolves = addr != 0 && self.find_object_by_addr(addr).is_some();
         if kind == common::WORD_SCALAR && resolves {
-            panic!("gc-stress: scalar word {index} of {what} holds a heap reference");
+            panic!("word kind check: scalar word {index} of {what} holds a heap reference ({:#x})", v.bits());
         }
         if kind == common::WORD_POINTER && addr != 0 && !resolves && !self.early_freed_slot(addr) {
-            panic!("gc-stress: pointer word {index} of {what} holds a non-object");
+            panic!("word kind check: pointer word {index} of {what} holds a non-object ({:#x})", v.bits());
         }
     }
 
@@ -2559,9 +2561,8 @@ impl Object {
         }
     }
 
-    /// What a gc-stress check names the slots of `self` by.
-    #[cfg(feature = "gc-stress")]
-    fn slot_owner(&self) -> String {
+    /// What a word kind check names the slots of `self` by.
+    pub(super) fn slot_owner(&self) -> String {
         match self {
             Self::Instance(i) => format!("class {}", i.as_ref().type_id),
             Self::Array(a) if a.as_ref().lanes() > 1 => "a lane array's pointer lane".into(),

@@ -582,6 +582,7 @@ impl Heap {
     #[inline(never)]
     fn check_barrier(&self, remembered: &[u64]) {
         for obj in self.live_objects() {
+            self.check_word_kinds(obj);
             let g = obj.generation();
             if !barriered(g) {
                 continue;
@@ -604,6 +605,40 @@ impl Heap {
                 }
             });
         }
+    }
+
+    /// Every word of `obj` of a known kind holds what the kind says
+    /// ([`Heap::verify_kinded_word`]): a pointer-kind array's words are
+    /// `0` or objects, which a minor relies on to copy what they name.
+    /// Coroutine words are not checked.
+    fn check_word_kinds(&self, obj: Object) {
+        struct Check<'a> {
+            heap: &'a Heap,
+            what: Option<String>,
+            obj: Object,
+            i: usize,
+        }
+        impl super::SlotVisitor for Check<'_> {
+            fn word(&mut self, &v: &Value, kind: u8) {
+                if kind != common::WORD_UNKNOWN {
+                    let addr = v.heap_addr();
+                    let resolves = addr != 0 && self.heap.find_object_by_addr(addr).is_some();
+                    let wrong = (kind == common::WORD_SCALAR && resolves)
+                        || (kind == common::WORD_POINTER && addr != 0 && !resolves);
+                    if wrong {
+                        let what = self.what.get_or_insert_with(|| self.obj.slot_owner());
+                        self.heap.verify_kinded_word(what, self.i, kind, v);
+                    }
+                }
+                self.i += 1;
+            }
+
+            fn member(&mut self, _: &Member) {}
+        }
+        if matches!(obj, Object::Coroutine(_)) {
+            return;
+        }
+        obj.visit_slots(self, &mut Check { heap: self, what: None, obj, i: 0 });
     }
 
     /// A remembered array with a card table ([`super::CardTable`]) is
@@ -1372,6 +1407,21 @@ mod tests {
         // ...and a store in place, as a plain view would make it.
         let (ptr, _) = gc.as_ref().words_view_for_load().expect("word array");
         unsafe { ptr.add(300).write(Value::from(l)) };
+        minor(&mut heap, &[], &mut []);
+    }
+
+    /// A pointer-kind array (stamped at a ground site, or from a shared
+    /// body's `kinds` bit) whose word is no object: the checked minor
+    /// names the holder.
+    #[test]
+    #[should_panic(expected = "word kind check: pointer word 1 of a pointer-kind array holds a non-object")]
+    fn the_word_kind_check_finds_a_pointer_word_that_is_no_object() {
+        let mut heap = nursery_heap();
+        heap.heap_checks = true;
+        let old = old_pointer_array(&mut heap, 4);
+        let Some(Object::Array(mut gc)) = heap.find_object_by_addr(old) else { unreachable!() };
+        gc.as_mut().set(1, Value::from(0x1000i64));
+        let _ = cons_list(&mut heap, 1);
         minor(&mut heap, &[], &mut []);
     }
 
