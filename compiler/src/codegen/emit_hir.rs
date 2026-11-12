@@ -12804,6 +12804,12 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         self.opaque_vars
     }
 
+    fn dict_kinds_index(&self, class: &str) -> Option<u32> {
+        let c = self.c();
+        let generics = c.checker.generics();
+        Some(generics.typeclass(class)?.flattened_methods(generics).len() as u32)
+    }
+
     fn stack(&self, local: u32) -> Option<(usize, crate::mir::MirTy)> {
         self.try_stack(local).ok().flatten()
     }
