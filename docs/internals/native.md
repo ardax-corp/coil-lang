@@ -256,7 +256,8 @@ per-type clone; the mono plan clones a generator for each such read
 `PolyFn` (a `forall` argument) targets `name$coro` (`coro_trampoline_target`), MIR that
 takes the shared body's words as they are (parameters, dictionaries, `kinds` word) and
 returns `Alloc Coro` of them; that shared body has the limits of "A value nobody
-produced" below.
+produced" below, so a generator whose receive type is open is refused there (E0127,
+#2748).
 
 ### Vec natives written out as MIR
 
@@ -352,10 +353,21 @@ word that stands for no value at `Result<(), E>` (#2738). So a free generic
 generator whose yield or receive type is open in its type parameters
 (`layout::open_coroutine`), and a generic function calling one by name, are
 clone-only in the mono plan (`mark_open_coroutines`, as a keyed function is): every
-ground call takes its per-type clone, past the clone budget too. A call at open
-types (polymorphic recursion) still takes the shared body, which moves the word as
-it is; so does a generic `gen fn` method, and a free one called from a method's
-per-type clone, which take no clone of a generator at any flag (#2748).
+ground call takes its per-type clone, past the clone budget too. Methods do the same
+through their inherent clones (#2748): a generic `gen fn` method (of a generic
+class, with type parameters of its own, a static one) and a generator called from a
+method's per-type clone are clone sources (`note_method_clone_src`,
+`note_fn_clone_src`), `fn_sig_split` makes them, and a generic method or function
+calling one by name or on `self` (`note_open_coroutine_callers`), clone-only, and
+`hir_method_clone` takes a generator's clone only where it compiles from its body (a
+thunk calling the shared entry would make the shared body's coroutine). The clone
+is a generator (`is_coro_key`: its call is `MakeCoro`, never a tail call, its
+arguments one word each), and neither it nor a method calling such a generator is
+spliced into its caller (`hir_method_clone_body`). A generic generator whose receive
+type is open, passed as a `PolyFn` (a `forall` argument), is E0127: no clone serves
+that read and its shared body would hand an unsent binding `yield`'s word on. A
+call at open types (polymorphic recursion, which the checker does not type for a
+generator today) would still take the shared body, which moves the word as it is.
 
 A generator body with `defer`s compiles (`NativeEntry::cleanup`, `AotEntry` byte
 `cleanup`). A close resumes the fiber with `GEN_CLOSING` set; `coil_native_yield` sees
