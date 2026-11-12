@@ -5105,7 +5105,7 @@ impl Compiler {
             };
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 0)?));
         }
-        if shared || generic {
+        if shared || generic || self.hir_own_type_params(&lookup) {
             self.hir_bare_niche_abi(hir, call, &lookup, 0, &mut abi);
         }
         // `C::f(..)` at ground type arguments: the static method's clone.
@@ -6120,7 +6120,7 @@ impl Compiler {
         if generic {
             abi.generic = Some(Box::new(self.hir_generic_abi(hir, call, &lookup, args, 1)?));
         }
-        if shared || generic {
+        if shared || generic || self.hir_own_type_params(&lookup) {
             self.hir_bare_niche_abi(hir, call, &lookup, 1, &mut abi);
         }
         // At ground type arguments, the method's clone there. A plain
@@ -6816,25 +6816,6 @@ impl Compiler {
         // call's types, which direct MIR calls instead, takes the niche
         // word (#1579). An open result is the shared entry's enum object
         // too (`fn id(T x) -> T` at `Option<T>`, #1595).
-        let own_niche = |id: HirId, declared: Option<Ty>| {
-            let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
-            let layout = self.value_layout(ty);
-            let declared = declared.ok_or("callee-trait")?;
-            if !(layout.is_niche_option() || layout.is_niche_result() || layout.is_niche_unit_result()) {
-                return Err("callee-trait");
-            }
-            if Ty::has_var(&declared) {
-                return if self.value_layout(&declared) == ValueLayout::Boxed {
-                    Ok(ValueLayout::Boxed)
-                } else {
-                    Err("callee-trait")
-                };
-            }
-            if self.value_layout(&declared) != layout {
-                return Err("callee-trait");
-            }
-            Ok(layout)
-        };
         // A structural thunk (#1479) has no checker signature: its own. A
         // default body has none either: it is the trait's open signature
         // (`fn two(T x)` takes the enum object, #1609).
@@ -6848,6 +6829,38 @@ impl Compiler {
             .fn_param_tys(fqn)
             .or_else(|| self.structural_thunk_params.get(fqn).cloned())
             .or_else(|| default_sig().map(|(params, _)| params));
+        // A bare type parameter of the method's own (one its receiver's
+        // declared type does not name: `fn wrap<U>(Src s, U x)`) takes the
+        // niche word itself, as a free generic function's does (#2716).
+        let own_var = |declared: &Ty| match crate::typechecking::ty::strip_readonly(declared) {
+            Ty::Var(v) => declared_params
+                .as_ref()
+                .and_then(|p| p.first())
+                .is_some_and(|recv| !crate::typechecking::ty::ftv_ty(recv).contains(v)),
+            _ => false,
+        };
+        let own_niche = |id: HirId, declared: Option<Ty>| {
+            let ty = Self::hir_ty(hir, id).ok_or("callee-signature")?;
+            let layout = self.value_layout(ty);
+            let declared = declared.ok_or("callee-trait")?;
+            if !(layout.is_niche_option() || layout.is_niche_result() || layout.is_niche_unit_result()) {
+                return Err("callee-trait");
+            }
+            if own_var(&declared) {
+                return Ok(layout);
+            }
+            if Ty::has_var(&declared) {
+                return if self.value_layout(&declared) == ValueLayout::Boxed {
+                    Ok(ValueLayout::Boxed)
+                } else {
+                    Err("callee-trait")
+                };
+            }
+            if self.value_layout(&declared) != layout {
+                return Err("callee-trait");
+            }
+            Ok(layout)
+        };
         let params = args
             .iter()
             .enumerate()
@@ -7367,6 +7380,14 @@ impl Compiler {
             mono_of: None,
             own_dicts: Vec::new(),
         })
+    }
+
+    /// Whether `lookup`'s scheme quantifies type parameters: a method's of
+    /// its own (`fn m<U>(U x)` on a plain class, unbounded, so not a
+    /// dictionary-passing generic) takes a bare `U` as a free generic
+    /// function does (#2716).
+    fn hir_own_type_params(&self, lookup: &str) -> bool {
+        self.checker.env().lookup(lookup).is_some_and(|s| !s.bounds.is_empty())
     }
 
     /// A shared body's bare type parameter holds rep(ground T): a niche
