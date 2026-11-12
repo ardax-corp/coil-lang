@@ -5893,10 +5893,10 @@ impl Lower<'_> {
             MirTy::HeapRef
         } else {
             // An enum of no pair or niche layout comes back as its boxed
-            // object (an open `Result<T, E>`, the instance's shared layout).
-            self.word_ty(ty)
-                .or_else(|| self.cx.boxed_view(ty, None).map(|_| MirTy::HeapRef))
-                .ok_or_else(|| format!("bound call type {}", ty_kind(ty)))?
+            // object (an open `Result<T, E>`, the instance's shared layout),
+            // a heap tuple as its object (#2720), as from an existential's
+            // slot.
+            self.word_or_object(ty).ok_or_else(|| format!("bound call type {}", ty_kind(ty)))?
         };
         // Each argument's one word, a two-word value boxed, as the
         // adapter's one-word ABI takes it (#2718).
