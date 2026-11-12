@@ -82,6 +82,21 @@ class K {
     pub static tick: fn() -> int = bump,
 }
 
+class Named {
+    pub static h: fn() -> int = seven,
+    pub static c: int = 3,
+}
+
+impl Named {
+    pub static fn h() -> int {
+        return 100;
+    }
+
+    pub static fn c() -> int {
+        return 200;
+    }
+}
+
 class Ticker {
     pub next: fn() -> int,
 }
@@ -119,6 +134,12 @@ test("a method of the field's name wins") {
     let b = new Both(inc);
     assert!(b.f(1) == 101);
     assert!((b.f)(1) == 2);
+}
+
+test("a static method of the static field's name wins") {
+    assert!(Named::h() == 100);
+    assert!(Named::c() == 200);
+    assert!(Named::c == 3);
 }
 
 test("a class static of function type called directly") {
