@@ -21827,6 +21827,20 @@ impl Checker {
             && let Some((owner, method_slot, scheme)) = self.existential_method_candidate(object, method)
             && only.is_none_or(|class| class == owner)
         {
+            // The pack's slot holds one shared entry, which a generic
+            // method's own type parameters would need dictionaries and a
+            // `kinds` word for at each call: refused, not a run-time
+            // mismatch of words (#2722).
+            let trait_params = self.generics.typeclass(&owner).map_or(0, |c| c.type_params.len());
+            if scheme.bounds.len() > trait_params {
+                let ty = self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    format!("`{method}` has type parameters of its own, so it cannot be called on a `{object}` trait object"),
+                    range.clone(),
+                    Some(format!("take the value as a generic `T: {object}` parameter, whose calls are made at each type")),
+                );
+                return Some((owner, ty));
+            }
             let hint = ExistentialMethodCall {
                 method_slot,
                 arity: arg_tys.len(),

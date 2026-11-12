@@ -1,0 +1,22 @@
+// @expected E0119 — a trait method with type parameters of its own called through a bare-trait existential (#2722).
+trait Tr<S> {
+    fn get(S s) -> int {}
+    fn conv<U>(S s, U u) -> U {
+        return u;
+    }
+}
+
+class A {
+    pub n: int,
+}
+
+impl Tr for A {
+    pub fn get(A a) -> int {
+        return a.n;
+    }
+}
+
+fn main() {
+    let e: Tr = new A(3);
+    let n = e.conv(4);
+}
