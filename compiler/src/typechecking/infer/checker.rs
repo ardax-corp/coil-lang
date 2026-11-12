@@ -6734,6 +6734,32 @@ impl Checker {
         }
         let unified = self.unify(&lt, &rt, &range, "comparison operands");
         let pruned = apply_ty_prune(&self.subst, &unified);
+        // A trait object compares through its packed value's instance, from
+        // the trait's superclass (`trait Tr<S: Eq>`); without one it has no
+        // `Eq`, as a type parameter without the bound has none.
+        if let Ty::Existential { class: object } = strip_readonly(&pruned) {
+            let object = object.clone();
+            match self.existential_method_candidate(&object, method) {
+                Some((_, method_slot, _)) => {
+                    let hint = ExistentialMethodCall { method_slot, arity: 2, has_receiver: true };
+                    self.existential_method_calls.insert(id, (range.start, range.end), hint);
+                }
+                None if class == "Eq" => {
+                    let op = if method == "ne" { "!=" } else { "==" };
+                    self.messages.push({
+                        let mut m = Message::error(
+                            ErrorCode::GenericTypeError,
+                            format!("Cannot compare `{object}` trait objects with `{op}`: `{object}` has no `Eq` superclass"),
+                            range,
+                        );
+                        m.with_help(format!("declare `Eq` (or `Ord`) on the trait's parameter (`trait {object}<S: Eq>`) to compare the values it packs"));
+                        m
+                    });
+                }
+                None => self.check_ground_ordering_operands(&pruned, class, method, &range),
+            }
+            return boolean();
+        }
         if class != "Eq" && !matches!(&pruned, Ty::Var(_)) {
             self.check_ground_ordering_operands(&pruned, class, method, &range);
         }

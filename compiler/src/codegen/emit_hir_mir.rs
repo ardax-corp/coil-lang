@@ -592,7 +592,7 @@ impl Compiler {
                 }
             }
             HirKind::Bin {
-                op: BinOp::Overloaded(_),
+                op: BinOp::Overloaded(sym),
                 lhs,
                 rhs,
             } => match emit.plan.ops.get(&id.0) {
@@ -604,6 +604,13 @@ impl Compiler {
                     self.hir_mir_op_call(hir, id, &[*lhs, *rhs], (class, method, fqn), lookup, t);
                 }
                 Some(HirOp::Glue(glue)) => self.hir_mir_glue_call(glue, t),
+                Some(&HirOp::Existential { slot }) => {
+                    t.existential_call = Some(slot);
+                    if !matches!(*sym, "==" | "!=") {
+                        let name = Self::hir_ty(hir, *lhs).map_or_else(String::new, |t| crate::typechecking::pretty::format_ty_for_diag(self.checker.subst(), t));
+                        t.string = Some(self.intern_string(format!("`{sym}` on `{name}` values of different types")));
+                    }
+                }
                 _ => {}
             },
             // A negated literal is its constant.
