@@ -44,3 +44,7 @@ A shared body with `T: Ordered` may need `Equal<T>` (the context of `Equal<Cell<
 a forwarder per method of the superclass, then `D` itself. `Eq` from an `Ord` or `Num` bound is built the same way (`VarEqDict::Project`, `eq_glue.rs`): `(eq, ne, D)`.
 
 Tests: `tests/traits/superclass_dict_methods.coil`, `superclass_dict_open_goal.coil` and their `_shared` twins.
+
+## Comparing trait objects (#2740)
+
+A bare-trait existential is a pack `(value, dictionary)`. `==` / `!=` on two of them need an `Eq` the trait gives its values, a superclass of its parameter (`trait Tr<S: Eq>`, or `Ord`): without one it is E0119, as on a type parameter without the bound. With one, the checker records the slot of `eq` .. `ge` in the trait's flattened methods (`ExistentialMethodCall`), the planner makes it `HirOp::Existential`, and MIR (`Lower::existential_cmp`) calls that slot of the left pack's dictionary on the two packed values when both packs hold the same dictionary, that is the same instance's values. Packs of two instances are never equal (`==` false, `!=` true), and an order between them panics (`` `<` on `Tr` values of different types ``). The test is the dictionary's identity: two packs of one type made where the dictionary is not the same object (an open goal's dictionary, built at each use; another worker's interned static) compare unequal.
