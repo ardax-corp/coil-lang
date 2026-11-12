@@ -6515,7 +6515,13 @@ impl Checker {
                             if is_yield_expression(next) {
                                 self.yield_receives_used = true;
                             }
-                            if let Expression::Identifier(source) =
+                            // A polymorphic `let` of a generic function's
+                            // name keeps its scheme, unannotated or annotated
+                            // `forall`. A ground annotation fixes the local's
+                            // type: the init is the function at that type
+                            // (#2760).
+                            if (ty_opt.is_none() || matches!(var_ty, Ty::Forall { .. }))
+                                && let Expression::Identifier(source) =
                                 unwrap_expr_wrappers(next).1.as_ref()
                                 && let Some(source_scheme) = self.env.lookup(source).cloned()
                                 && !source_scheme.bounds.is_empty()
