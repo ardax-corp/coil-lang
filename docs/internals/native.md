@@ -250,8 +250,9 @@ A `gen fn`'s body runs only on its coroutine, so a value of one never names the 
 does. A ground generator's value (its name, a partial application, a static method's
 value) targets its `name$value` adapter (`Compiler::fn_value_target`), a function
 calling it, whose call is the `MakeCoro`. A generic one read at ground types targets
-`name$value<T>` (`coro_value_target`), which calls it at those types and so takes its
-per-type clone; the mono plan clones a generator for each such read
+`name$value<T>` (`generic_value_target`, the adapter any generic function's value at a
+ground type whose shared body holds other words gets, #2755), which calls it at those
+types and so takes its per-type clone; the mono plan clones a generator for each such read
 (`candidate_for_value`, past the clone budget, as a call through an alias). Its
 `PolyFn` (a `forall` argument) targets `name$coro` (`coro_trampoline_target`), MIR that
 takes the shared body's words as they are (parameters, dictionaries, `kinds` word) and

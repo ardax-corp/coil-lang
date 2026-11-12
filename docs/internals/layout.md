@@ -133,6 +133,27 @@ words:
 - A bare `V` field, `Vec<V>` element or `HashMap` value read from ground
   code is the niche word (`hir_field_rep`'s bare-niche case).
 - Dictionary, closure and `PolyFn` adapters pass a niche word as itself.
+- A generic function's value read at a ground function type (passed to a
+  parameter of that type, bound to a local and passed on, stored in a
+  field or a `Vec`, returned, captured) is called by code that knows only
+  that type, with that type's words. Its `PolyFn` (the shared body) takes
+  and returns those words only when every parameter and the result is
+  `()` or a plain word (`classify::plain_sig`, "Plain words" below); a
+  function with an open `Option` / `Result` in its signature
+  (`T -> Option<T>`, `Result<T, E> -> T`, `T -> Option<Option<T>>`) reads
+  and returns the enum object there. So such a value is the function's
+  adapter at the read's types, `name$value<A -> R>`
+  (`Compiler::generic_value_target`, #2755): a ground function whose body
+  is the direct call `name(a)` at those types, so it takes the per-type
+  clone where one is planned (the mono plan plans one for each such read
+  as for a call, `candidate_for_value`) and otherwise the shared body with
+  the call's own conversions (`niche_args`, `boxed_ret`, `ret_items`). A
+  partial application of a generic method of that shape (`m.take()`, a
+  generic class's `c.put()`) is the same adapter over its receiver
+  (`hir_mir_ground_partial`). A `forall` argument is still the `PolyFn`,
+  whose calls convert as "A generic function's value" in
+  [dictionary-passing.md](dictionary-passing.md) says; so is the init of a
+  `let` whose local stays polymorphic, which its calls go through.
 - A ground function passed where the shared body takes a function whose
   result is an open `Option` / `Result` (`T -> Result<U, E>` in
   `Result::and_then`) returns its niche word, but the body reads that
