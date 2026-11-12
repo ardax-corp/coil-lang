@@ -1,0 +1,150 @@
+// A call on a field of function type calls the function the field holds
+// (coil-lang#2752): `o.f(x)` and `o.seven()` on an instance field, as
+// `(o.f)(x)` does, and `K::h()` / `K::f(x)` on a class `static`, as
+// `let g = K::h; g()` does; `m::F()` on another module's `const` or
+// `static` the same. A method of the same name wins over the field. A
+// field that holds no function is not callable (compile_fail/
+// call_non_function_field.coil, call_non_function_class_static_unit.coil).
+use tests::assert;
+use qualified_fn_value_provider;
+
+fn inc(int x) -> int {
+    return x + 1;
+}
+
+fn seven() -> int {
+    return 7;
+}
+
+fn pair(int x) -> (int, int) {
+    return (x, x + 1);
+}
+
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+
+class Op {
+    pub f: fn(int) -> int,
+    pub seven: fn() -> int,
+    pub add: fn(int, int) -> int,
+    pub half: fn(int) -> Option<int>,
+    pub pair: fn(int) -> (int, int),
+}
+
+readonly class Frozen {
+    pub f: fn(int) -> int,
+}
+
+class Slot<T> {
+    pub f: fn(T) -> T,
+    pub v: T,
+}
+
+impl Slot<T> {
+    pub fn run() -> T {
+        return self.f(self.v);
+    }
+}
+
+class Both {
+    pub f: fn(int) -> int,
+}
+
+impl Both {
+    pub fn f(int x) -> int {
+        return x + 100;
+    }
+}
+
+class Inner {
+    pub f: fn(int) -> int,
+}
+
+class Outer {
+    pub b: Inner,
+}
+
+static let CALLS: int = 0;
+
+fn bump() -> int {
+    CALLS = CALLS + 1;
+    return CALLS;
+}
+
+class K {
+    pub n: int,
+    pub static h: fn() -> int = seven,
+    pub static f: fn(int) -> int = inc,
+    pub static tick: fn() -> int = bump,
+}
+
+class Ticker {
+    pub next: fn() -> int,
+}
+
+fn make() -> Op {
+    return new Op(inc, seven, fn (int a, int b) => a * b, half, pair);
+}
+
+test("an instance field of function type called directly") {
+    let o = make();
+    assert!(o.f(1) == 2);
+    assert!(o.seven() == 7);
+    assert!(o.add(3, 4) == 12);
+    assert!(o.half(8) == Some(4));
+    assert!(o.half(3) == None);
+    let (a, b) = o.pair(5);
+    assert!(a == 5 && b == 6);
+    assert!(o.f(1) == (o.f)(1));
+    assert!(make().f(9) == 10);
+    let fr = new Frozen(inc);
+    assert!(fr.f(4) == 5);
+    let w = new Outer(new Inner(inc));
+    assert!(w.b.f(2) == 3);
+}
+
+test("a generic class's function field called directly") {
+    let s = new Slot(fn (string x) => x + "!", "a");
+    assert!(s.f("b") == "b!");
+    assert!(s.run() == "a!");
+    let n = new Slot(inc, 4);
+    assert!(n.run() == 5);
+}
+
+test("a method of the field's name wins") {
+    let b = new Both(inc);
+    assert!(b.f(1) == 101);
+    assert!((b.f)(1) == 2);
+}
+
+test("a class static of function type called directly") {
+    assert!(K::h() == 7);
+    assert!(K::f(3) == 4);
+    let g = K::h;
+    assert!(g() == K::h());
+    K::h = fn () => 8;
+    assert!(K::h() == 8);
+    assert!(qualified_fn_value_provider::Ops::zero() == 0);
+}
+
+test("another module's const and static of function type called directly") {
+    assert!(qualified_fn_value_provider::SEVEN() == 7);
+    assert!(qualified_fn_value_provider::NOW() == 7);
+}
+
+test("a field's function with effects runs at every call") {
+    let t = new Ticker(bump);
+    let s = 0;
+    let i = 0;
+    while i < 3 {
+        s += t.next();
+        s += K::tick();
+        i += 1;
+    }
+    assert!(CALLS == 6);
+    assert!(s == 21);
+}

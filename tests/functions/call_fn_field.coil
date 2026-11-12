@@ -1,7 +1,7 @@
 // `(o.f)(x)` calls the function a field holds (#2472): a parenthesized field
 // read used as a callee is an indirect call of the field's value. `o.f(x)`
-// is the method call it always was: with a method `f` it runs the method,
-// with only a field `f` it is E0101 (compile_fail/call_fn_field_as_method).
+// with a method `f` runs the method; with only a field `f` it calls the
+// field's function too (call_fn_field_direct.coil, #2752).
 use tests::assert;
 use gc::collect;
 

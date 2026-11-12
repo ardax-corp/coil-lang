@@ -1,0 +1,6 @@
+// @expected E0104 — `m::LIMIT()` calls another module's `const` that is an `int`, not a function: `m::LIMIT` reads it (#2752).
+use qualified_fn_value_provider;
+
+fn main() {
+    let _ = qualified_fn_value_provider::LIMIT();
+}
