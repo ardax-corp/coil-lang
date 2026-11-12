@@ -236,6 +236,11 @@ pub struct Checker {
     /// a forward reference to one is the module's own `m::Name` before the
     /// class itself is registered (#1980, #1983).
     module_class_names: HashMap<String, usize>,
+    /// Every top-level trait of the current file with one type parameter
+    /// of kind `Type`, collected with [`Self::module_class_names`]: an enum
+    /// payload, parsed before traits are registered, names one as its
+    /// bare-class existential (#2744).
+    module_trait_names: std::collections::HashSet<String>,
     /// Local names bound by disk-module `use` (e.g. `io::sync::write_all`).
     /// Like virtual imports and module-visible named `fn`s, these are
     /// file-level globals — not lambda/defer captures — and must be rebound
