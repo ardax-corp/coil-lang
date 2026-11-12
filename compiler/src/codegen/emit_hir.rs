@@ -9516,13 +9516,16 @@ impl Compiler {
 
     /// The key of the static method a bare `C::f` read names, its function
     /// value (#2746), resolved as a call `C::f(..)` resolves it; and whether
-    /// `C` is a generic class, whose methods share one body.
+    /// it is generic (its own type parameters, or `C`'s): its one shared
+    /// body, which takes a `kinds` word.
     fn hir_static_method_value(&self, hir: &HirBody, id: HirId, name: &str) -> Option<(String, bool)> {
         let (start, end) = hir.expr(id).span;
         self.checker.static_method_value_at(start, end)?;
         let (owner, member) = name.rsplit_once("::")?;
-        let shared = self.checker.has_impl(owner) && classify::is_generic_class(&self.checker, owner);
-        Some((self.class_member_fqn(owner, member), shared))
+        let key = self.class_member_fqn(owner, member);
+        let generic = (self.checker.has_impl(owner) && classify::is_generic_class(&self.checker, owner))
+            || self.checker.env().lookup(&key).is_some_and(|s| !s.bounds.is_empty());
+        Some((key, generic))
     }
 
     /// E0127: a generic function with a type parameter nested in its
@@ -9549,8 +9552,8 @@ impl Compiler {
             return None;
         }
         let expr = hir.expr(id);
-        // A generic class's static method is generic over the class's type
-        // parameters: its one shared body, as a call of it takes.
+        // A generic static method (of a generic class too): its one shared
+        // body, as a call of it takes.
         let shared = method.as_ref().is_some_and(|&(_, shared)| shared);
         let resolved = method.map_or_else(|| self.resolve_free_fn(name), |(key, _)| key);
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
