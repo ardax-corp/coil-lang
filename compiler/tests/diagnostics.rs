@@ -225,6 +225,25 @@ fn access_unknown_field_lists_known_fields_in_help() {
 }
 
 #[test]
+fn uncalled_static_method_value_hints_its_call() {
+    // A bare `Counter::fresh` is the static method's value (#2746): where
+    // its result was expected, the mismatch's help says to call it.
+    let src = "class Counter { pub n: int, } \
+               impl Counter { pub static fn fresh() -> Counter { return new Counter(0); } } \
+               fn main() { let c: Counter = Counter::fresh; }";
+    let ast = Pratt::default().parse(src).expect("parse failed");
+    let mut c = Checker::new();
+    let _ty = c.check_program(&ast);
+    let msgs = c.take_messages();
+    let mismatch = msgs
+        .iter()
+        .find(|m| m.code() == Some(ErrorCode::TypeMismatch))
+        .unwrap_or_else(|| panic!("expected a type mismatch, got {:?}", msgs.iter().map(|m| m.message()).collect::<Vec<_>>()));
+    let help = mismatch.help().as_ref().expect("expected a help hint");
+    assert!(help.contains("add `()` to call it"), "got help: {help:?}");
+}
+
+#[test]
 fn shallow_const_on_array_emits_warning() {
     let msgs = check_messages(r#"fn main() { const a = [1, 2, 3]; }"#);
     assert!(

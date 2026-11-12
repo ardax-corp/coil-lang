@@ -9476,11 +9476,12 @@ impl Compiler {
     /// value, for `MakeFn` (`None` for a later function: it has no entry
     /// offset yet).
     fn hir_global_fn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<(usize, u32, bool, String)> {
-        if name.contains("::") {
+        let method = self.hir_static_method_value(hir, id, name);
+        if name.contains("::") && method.as_ref().is_none_or(|&(_, shared)| shared) {
             return None;
         }
         let expr = hir.expr(id);
-        let mut resolved = self.resolve_free_fn(name);
+        let mut resolved = method.map_or_else(|| self.resolve_free_fn(name), |(key, _)| key);
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
         // An overloaded name the checker resolved by the expected function
         // type (`let g: int -> string = show;`): that candidate's entry.
@@ -9513,6 +9514,17 @@ impl Compiler {
         Some((entry, arity, rest, resolved))
     }
 
+    /// The key of the static method a bare `C::f` read names, its function
+    /// value (#2746), resolved as a call `C::f(..)` resolves it; and whether
+    /// `C` is a generic class, whose methods share one body.
+    fn hir_static_method_value(&self, hir: &HirBody, id: HirId, name: &str) -> Option<(String, bool)> {
+        let (start, end) = hir.expr(id).span;
+        self.checker.static_method_value_at(start, end)?;
+        let (owner, member) = name.rsplit_once("::")?;
+        let shared = self.checker.has_impl(owner) && classify::is_generic_class(&self.checker, owner);
+        Some((self.class_member_fqn(owner, member), shared))
+    }
+
     /// E0127: a generic function with a type parameter nested in its
     /// signature, read as a value where no mono clone can stand in for it
     /// (its type stays open, or the value is copied on): its shared body
@@ -9532,16 +9544,20 @@ impl Compiler {
     /// A generic function already emitted, read where a `PolyFn` is
     /// expected (`MakePolyFn`).
     fn hir_global_polyfn(&self, hir: &HirBody, id: HirId, name: &str) -> Option<String> {
-        if name.contains("::") {
+        let method = self.hir_static_method_value(hir, id, name);
+        if name.contains("::") && method.is_none() {
             return None;
         }
         let expr = hir.expr(id);
-        let resolved = self.resolve_free_fn(name);
+        // A generic class's static method is generic over the class's type
+        // parameters: its one shared body, as a call of it takes.
+        let shared = method.as_ref().is_some_and(|&(_, shared)| shared);
+        let resolved = method.map_or_else(|| self.resolve_free_fn(name), |(key, _)| key);
         let ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, id)?);
         // Any generic function escapes as a `PolyFn`, whatever type the
         // read is instantiated at.
         if !matches!(crate::typechecking::ty::strip_readonly(&ty), Ty::Fun(..) | Ty::Forall { .. })
-            || !self.checker.is_generic_fn(&resolved)
+            || !(shared || self.checker.is_generic_fn(&resolved))
             || self.checker.is_overloaded(&resolved)
             || self.frame_binds(name)
             || self.checker.bare_construct_at(expr.span.0, expr.span.1).is_some()

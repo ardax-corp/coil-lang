@@ -1351,7 +1351,7 @@ where
             }
         }
         Expression::Construct { fields, .. } => match fields {
-            parser::ast::EnumConstructPayload::Unit => {}
+            parser::ast::EnumConstructPayload::Unit | parser::ast::EnumConstructPayload::Empty => {}
             parser::ast::EnumConstructPayload::Tuple(items) => {
                 for item in items {
                     f(item);

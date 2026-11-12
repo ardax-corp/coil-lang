@@ -598,9 +598,9 @@ fn walk_tree_level(
             }
         }
         Expression::Construct { enum_name, variant_name, fields } => match fields {
-            // `Owner::name()` and `Owner::name` parse the same: a call when
-            // `name` is a static method.
-            EnumConstructPayload::Unit => {
+            // `Owner::name()` is a call when `name` is a static method, and
+            // its bare value counts as one (#2746).
+            EnumConstructPayload::Unit | EnumConstructPayload::Empty => {
                 if static_method_call(checker, enum_name, variant_name) && !pure.contains(&format!("{enum_name}::{variant_name}")) {
                     env.poison_all();
                 }

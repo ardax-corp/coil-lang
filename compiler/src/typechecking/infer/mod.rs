@@ -577,6 +577,9 @@ pub struct Checker {
     /// `m::F(args)` / `C::f(args)` calling the function value of a
     /// `const` or `static` (#1705): span → the callee's type.
     qualified_value_calls_by_span: HashMap<(usize, usize), Ty>,
+    /// A bare `C::f` naming static method `f` (#2746): its function
+    /// value, as a free function's name is. Span → the method's key.
+    static_method_values_by_span: HashMap<(usize, usize), String>,
 
     /// Bare constructor patterns (`Some(v)`, `None`, `Red`) resolved to their
     /// enum's registry key, by pattern span (#1352).

@@ -1471,10 +1471,20 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             {
                 self.qualified_value_call(b, node, enum_name, variant_name, items)
             }
+            // A bare `C::f` naming a static method: its function value, a
+            // read of the function as a free function's name is (#2746).
+            E::Construct {
+                enum_name,
+                variant_name,
+                fields: EnumConstructPayload::Unit,
+            } if self.checker.static_method_value_at(node.0.start, node.0.end).is_some() => {
+                let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
+                self.global(b, node, format!("{enum_name}::{variant_name}"), def)
+            }
             // `Trait::m(args)`: the call the checker resolved within
             // `Trait`, under the name `qualified_trait_call_at` gives it.
             E::Construct {
-                fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Tuple(_)),
+                fields: fields @ (EnumConstructPayload::Empty | EnumConstructPayload::Tuple(_)),
                 ..
             } if self.checker.qualified_trait_call_at(node.0.start, node.0.end).is_some() => {
                 let args = match fields {
@@ -1483,13 +1493,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 };
                 self.qualified_trait_call(b, node, args)
             }
-            // `C::f(args)` on a class is a static method call (a bare
-            // `C::f` names a static field first, as in codegen).
+            // `C::f(args)` on a class is a static method call (`C::f` and
+            // `C::f()` name a static field first, as in codegen).
             E::Construct {
                 enum_name,
                 variant_name,
-                fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Tuple(_)),
-            } if self.static_call(enum_name, variant_name, matches!(fields, EnumConstructPayload::Unit), node) => {
+                fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Empty | EnumConstructPayload::Tuple(_)),
+            } if self.static_call(enum_name, variant_name, !matches!(fields, EnumConstructPayload::Tuple(_)), node) => {
                 let id = self.node_id(node);
                 let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
                 let def = id.and_then(|i| self.sidecar.def_id(i));
@@ -1512,14 +1522,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Construct {
                 enum_name,
                 variant_name,
-                fields: EnumConstructPayload::Unit,
+                fields: EnumConstructPayload::Unit | EnumConstructPayload::Empty,
             } if self.class_static(enum_name, variant_name) => {
                 let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
                 self.global(b, node, format!("{enum_name}::{variant_name}"), def)
             }
             E::Construct { enum_name, variant_name, fields } => {
                 let (args, names) = match fields {
-                    EnumConstructPayload::Unit => (Vec::new(), None),
+                    EnumConstructPayload::Unit | EnumConstructPayload::Empty => (Vec::new(), None),
                     EnumConstructPayload::Tuple(items) => (self.exprs(b, items), None),
                     EnumConstructPayload::Record(fields) => {
                         let src: Vec<HirId> = fields.iter().map(|f| self.expr(b, &f.value)).collect();
