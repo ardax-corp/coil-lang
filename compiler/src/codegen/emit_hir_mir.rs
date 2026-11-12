@@ -499,7 +499,7 @@ impl Compiler {
             // `MakePolyFnCapture` over the dictionaries
             // `plan_polyfn_escape_dicts` plans.
             HirKind::Global { .. } | HirKind::Local(_) if let Some(name) = emit.plan.polyfns.get(&id.0) => {
-                let escape = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                let escape = Self::hir_ty(hir, id).map(|t| polyfn_escape_ty(apply_ty_prune(self.checker.subst(), t)));
                 let expected = self.checker.rank_n_arg_at(e.span.0, e.span.1);
                 if let Some(value) = self.hir_mir_polyfn_value(&name.clone(), escape.as_ref(), expected.as_ref()) {
                     t.fn_value = Some(value);
@@ -1960,7 +1960,7 @@ impl Compiler {
             }
             // A `PolyFn` value's escape dictionaries.
             HirKind::Global { .. } | HirKind::Local(_) if let Some(name) = emit.plan.polyfns.get(&id.0) => {
-                let ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t));
+                let ty = Self::hir_ty(hir, id).map(|t| polyfn_escape_ty(apply_ty_prune(self.checker.subst(), t)));
                 let expected = self.checker.rank_n_arg_at(e.span.0, e.span.1);
                 self.hir_mir_probe_unplanned(|this, steps| {
                     this.plan_polyfn_escape_dicts(steps, name, ty.as_ref(), expected.as_ref());
@@ -2346,5 +2346,20 @@ impl Compiler {
         };
         emit.plan.par_loops.insert(id.0, planned);
         true
+    }
+}
+
+/// The type a `PolyFn` value is made at, read from the expression it is
+/// made for: a `forall` type's body over its own variables. A local bound
+/// from a generic function that HIR inlining put where a `forall`
+/// parameter was (`fn relay(forall T: Eq. T -> T -> bool g) { run(g); }`
+/// inlined into its caller) has that parameter's `forall` type; the value's
+/// scheme binds against the body, so a call's dictionaries and `kinds`
+/// bits are found in the order the `forall` it is passed to gives them
+/// (#2637's renaming rule), not left unresolved.
+fn polyfn_escape_ty(ty: Ty) -> Ty {
+    match crate::typechecking::ty::strip_readonly(&ty) {
+        Ty::Forall { body, .. } => body.as_ref().clone(),
+        _ => ty,
     }
 }

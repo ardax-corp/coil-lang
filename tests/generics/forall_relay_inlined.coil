@@ -1,0 +1,113 @@
+// A generic function passed to a `forall` parameter that passes it on to
+// another `forall` parameter of the same type: once HIR inlining puts the
+// relaying body into its caller, the value made again for the second
+// `forall` reads its dictionaries and `kinds` bits from the call, as the
+// value passed straight to it does (coil-lang#2714).
+use tests::assert;
+
+class Pt {
+    pub a: int,
+}
+
+impl Eq for Pt {
+    fn eq(Pt x, Pt y) -> bool {
+        return x.a == y.a;
+    }
+}
+
+enum Duo {
+    L(int),
+    R(string),
+}
+
+impl Show for Duo {
+    fn show(Duo d) -> string {
+        return match d {
+            Duo::L(n) => n.show(),
+            Duo::R(s) => s,
+        };
+    }
+}
+
+trait Bump<T> {
+    fn bump(T x) {}
+}
+
+impl Bump for Vec<T> {
+    fn bump(Vec<T> v) {
+        let _ = v.pop();
+    }
+}
+
+impl Bump for int {
+    fn bump(int x) {}
+}
+
+fn same<T: Eq>(T a, T b) -> bool {
+    return a == b;
+}
+
+fn run_eq(forall T: Eq. T -> T -> bool g) -> string {
+    return g(new Pt(1), new Pt(1)).show() + " " + g(new Pt(1), new Pt(2)).show() + " " +
+           g(1, 1).show();
+}
+
+fn relay_eq(forall T: Eq. T -> T -> bool g) -> string {
+    return run_eq(g);
+}
+
+// Two constraints, on two type parameters.
+fn shown_if<A: Eq, B: Show>(B b, A x, A y) -> string {
+    if x == y {
+        return b.show();
+    }
+    return "ne";
+}
+
+fn run_two(forall A: Eq, B: Show. B -> A -> A -> string g) -> string {
+    return g(1, new Pt(3), new Pt(3)) + " " + g("s", 2, 2) + " " + g(Duo::R("d"), 1, 1) + " " +
+           g(Duo::L(4), 1, 2);
+}
+
+fn relay_two(forall A: Eq, B: Show. B -> A -> A -> string g) -> string {
+    return run_two(g);
+}
+
+// A copy written in the callee: the caller's value keeps its items.
+fn bumped<T: Bump>(T x) -> T {
+    let y = x;
+    y.bump();
+    return x;
+}
+
+fn run_bump(forall T: Bump. T -> T g, Vec<int> w) -> int {
+    let r = g(w);
+    return r.len() * 10 + w.len();
+}
+
+fn relay_bump(forall T: Bump. T -> T g, Vec<int> w) -> int {
+    return run_bump(g, w);
+}
+
+test("an Eq bound through a relay") {
+    let direct = run_eq(same);
+    let relayed = relay_eq(same);
+    assert!(direct == "true false true", direct);
+    assert!(relayed == "true false true", relayed);
+}
+
+test("two bounds through a relay") {
+    let direct = run_two(shown_if);
+    let relayed = relay_two(shown_if);
+    assert!(direct == "1 s d ne", direct);
+    assert!(relayed == "1 s d ne", relayed);
+}
+
+test("a copy written through a relay leaves the caller's Vec") {
+    let w = Vec::from([1, 2]);
+    let direct = run_bump(bumped, w);
+    let relayed = relay_bump(bumped, w);
+    assert!(direct == 22);
+    assert!(relayed == 22);
+    assert!(w == Vec::from([1, 2]));
+}
