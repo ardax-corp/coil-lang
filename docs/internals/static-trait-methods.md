@@ -73,11 +73,17 @@ A bare `m(args)` is not a trait call. When no free fn, local, builtin or virtual
 
 A call is written with parentheses; a bare `Owner::m` is never a call. The parser keeps the two apart: `Owner::m` is `EnumConstructPayload::Unit`, `Owner::m()` is `EnumConstructPayload::Empty` (`coil fmt` prints each as written). A paren-less `Owner::x` resolves in this order:
 
-1. a static field or `const` (`Counter::count`, `module::NAME`): read it. `Owner::x()` reads it too, as before.
+1. a static field or `const` (`Counter::count`, `module::NAME`): read it. `Owner::x()` is a call, never a read (#2752): of the function a static field or `const` of function type holds (`K::h()`, `m::F()`, as `K::f(x)` is, #1705), else E0104 (`NotAFunction`).
 2. a unit variant (`Shape::Dot`): construct it (`Shape::Dot()` as well).
 3. an inherent static method (`Src::inc`, a generic `Src::sid<U>`, a generic class's `Bx::make`, an enum's `Shape::ring`): its function value, as a free function's name is. `infer_construct` records the span in `static_method_value_at` and types it as the method's instantiated scheme. HIR lowers it to `HirKind::Global { name: "Owner::m" }`, the node a free function's name is, and codegen takes the free-function road: `hir_global_fn` (a ground method: `MakeFn` of its entry or its `$value` adapter) or `hir_global_polyfn` (a method with its own type parameters, or any static method of a generic class, whose one shared body takes a `kinds` word: `PolyFn` / `PolyFnCapture`, `hir_mir_polyfn_value`). The escape walk (`fn_value_escape`) poisons a bare lowercase `Owner::m` as it does a `QualifiedAccess`, so the method's parameters keep the one-word ABI a value call passes.
 
-A name that is both a static field and a static method reads the field in both spellings (no error), as before #2746.
+A name that is both a static field and a static method reads the field bare and calls the method with parentheses: a method of the name wins over a field's function (`try_infer_qualified_value_call`).
+
+### A call on a field of function type (#2752)
+
+One rule for instance and static fields: a call on a field that holds a function calls that function, unless the owner has a method of the name, which wins. `o.f(x)` / `o.seven()` with no method `f` / `seven` on `o`'s class (a trait method whose trait has no instance for the receiver is none) calls the field's function, as `(o.f)(x)` does (#2472): `infer_method_call_expr` types it through `infer_field_value_call`, which records the field's type at the call's span (`field_value_call_at`), and HIR lowers it to `Call { callee: Value(Field { .. }) }`, the node `(o.f)(x)` is. `K::h()`, `K::f(x)` and `m::F()` call a static field's or another module's `const`'s function (`qualified_value_call_at`, `HirBuild::qualified_value_call`). A field, static or `const` of another type called is E0104 (`o.n(1)`, `K::n()`, `m::LIMIT()`); a bare `K::n` / `m::LIMIT` reads it.
+
+Tests: `tests/functions/call_fn_field_direct.coil`, `tests/functions/call_fn_field.coil`, `tests/functions/qualified_fn_value_call.coil`, `tests/functions/compile_fail/call_non_function_*.coil`.
 
 A trait's method has no function value of its own: a bare `T::m`, `Point::from_val` or `Trait::m` is E0119 ("names a trait method, which has no function value"), with the call or a lambda in the help. A zero-argument static method's value where its result was expected is the ordinary E0102, its help `add () to call it` (`Checker::uncalled_fn_of`).
 
