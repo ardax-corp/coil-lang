@@ -226,6 +226,9 @@ struct GenericFnSig {
     /// `docs/internals/layout.md`, "Open enums"). The same for a function
     /// below the top whose result is a bare type parameter
     /// (`Vec<unit -> T>`), which no adapter reaches at `T = ()` (#2498).
+    /// And for a generator over its type parameters
+    /// ([`crate::layout::open_coroutine`]), or a function calling one by
+    /// name: its shared body cannot make a value nobody produced (#2738).
     split: bool,
 }
 
@@ -258,6 +261,7 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
     collect_generic_fn_aliases(ast, checker, &mut sigs);
     mark_keyed(checker, &mut sigs);
     mark_hot(ast, &mut sigs);
+    mark_open_coroutines(checker, &mut sigs);
 
     let mut candidates = Vec::new();
     collect_candidates(ast, checker, &|e| ground_ty(checker, e), &sigs, &mut intern, &mut candidates);
@@ -526,31 +530,53 @@ fn call_names(node: &Output, out: &mut BTreeSet<String>) {
     walk_children(node, &mut |child| call_names(child, out));
 }
 
+/// The generic functions in `seed`, and those calling one of them by name,
+/// directly or through another.
+fn callers_of(sigs: &HashMap<String, GenericFnSig>, mut seed: BTreeSet<String>) -> BTreeSet<String> {
+    loop {
+        let more: Vec<String> = sigs
+            .iter()
+            .filter(|(name, sig)| !seed.contains(*name) && sig.calls.iter().any(|c| seed.contains(c)))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if more.is_empty() {
+            return seed;
+        }
+        seed.extend(more);
+    }
+}
+
 /// Mark the generic functions that call `symbol::fn_key()`, directly or
 /// through another keyed generic function.
 fn mark_keyed(checker: &Checker, sigs: &mut HashMap<String, GenericFnSig>) {
     let fn_key = checker
         .prelude_fn_in_scope("fn_key")
         .is_some_and(|k| k == crate::typechecking::PreludeFn::FnKey);
-    let mut keyed: BTreeSet<String> = sigs
+    let seed = sigs
         .iter()
         .filter(|(_, sig)| fn_key && sig.calls.contains("fn_key"))
         .map(|(name, _)| name.clone())
         .collect();
-    loop {
-        let more: Vec<String> = sigs
-            .iter()
-            .filter(|(name, sig)| !keyed.contains(*name) && sig.calls.iter().any(|c| keyed.contains(c)))
-            .map(|(name, _)| name.clone())
-            .collect();
-        if more.is_empty() {
-            break;
-        }
-        keyed.extend(more);
-    }
-    for name in keyed {
+    for name in callers_of(sigs, seed) {
         if let Some(sig) = sigs.get_mut(&name) {
             sig.keyed = true;
+        }
+    }
+}
+
+/// Mark clone-only ([`GenericFnSig::split`]) the generic generators over
+/// their type parameters, and the generic functions calling one by name: a
+/// shared body there would make the value nobody produced from a word
+/// (#2738).
+fn mark_open_coroutines(checker: &Checker, sigs: &mut HashMap<String, GenericFnSig>) {
+    let seed = sigs
+        .keys()
+        .filter(|name| checker.fn_return_ty(name).is_some_and(|ty| crate::layout::open_coroutine(&apply_ty_prune(checker.subst(), &ty))))
+        .cloned()
+        .collect();
+    for name in callers_of(sigs, seed) {
+        if let Some(sig) = sigs.get_mut(&name) {
+            sig.split = true;
         }
     }
 }
