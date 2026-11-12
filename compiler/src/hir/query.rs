@@ -1025,9 +1025,14 @@ pub fn arm_fields(body: &HirBody, pat: &HirPat) -> Result<Vec<Option<super::Loca
     }
 }
 
-/// A never-reassigned parameter or `let` local holding a `PolyFn`: its
-/// calls box each argument and may pass dictionaries.
+/// A never-reassigned parameter or `let` local holding a `PolyFn`, or a
+/// field or `static` of a `forall` type read in place (`(h.g)(x)`,
+/// `h.g(x)`, `K::g(x)`, #2762): its calls box each argument and may pass
+/// dictionaries.
 pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
+    if let HirKind::Field { .. } | HirKind::Global { .. } = body.expr(f).kind {
+        return forall_read(body, checker, f);
+    }
     let HirKind::Local(local) = body.expr(f).kind else {
         return false;
     };
@@ -1065,6 +1070,24 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
         && !body.exprs.iter().any(|e| {
             matches!(&e.kind, HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(l) if l == local))
         })
+}
+
+/// Whether `f` (a field or `static` read) is of a `forall` type: the one
+/// `PolyFn` word it holds (`classify::closed_field`, #2725).
+fn forall_read(body: &HirBody, checker: &Checker, f: HirId) -> bool {
+    body.expr(f).ty.as_ref().is_some_and(|t| matches!(strip_readonly(&apply_ty_prune(checker.subst(), t)), Ty::Forall { .. }))
+}
+
+/// The own type of `PolyFn` callee `f`, a local's or a `forall` field's or
+/// `static`'s read, un-instantiated (a `forall` parameter's or field's
+/// `Forall`).
+pub fn polyfn_callee_ty(body: &HirBody, checker: &Checker, f: HirId) -> Option<Ty> {
+    let ty = match body.expr(f).kind {
+        HirKind::Local(local) => body.local(local).ty.as_ref()?,
+        HirKind::Field { .. } | HirKind::Global { .. } if forall_read(body, checker, f) => body.expr(f).ty.as_ref()?,
+        _ => return None,
+    };
+    Some(apply_ty_prune(checker.subst(), ty))
 }
 
 /// A `let` bound to a closure literal (`let f = fn () => ..`).

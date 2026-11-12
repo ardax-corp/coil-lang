@@ -1804,10 +1804,7 @@ impl Compiler {
         let params = match source {
             Some(source) => self.checker.fn_param_tys(source)?,
             None => {
-                let HirKind::Local(local) = hir.expr(f).kind else {
-                    return None;
-                };
-                let mut ty = apply_ty_prune(self.checker.subst(), hir.local(local).ty.as_ref()?);
+                let mut ty = query::polyfn_callee_ty(hir, &self.checker, f)?;
                 while let Ty::Forall { body, .. } = ty {
                     ty = *body;
                 }
