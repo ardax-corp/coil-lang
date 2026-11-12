@@ -31,12 +31,15 @@ fn run(cwd: &Path, extra: &[&str], paths: &[&Path]) -> (String, Option<i32>) {
     (all, out.status.code())
 }
 
-/// A test root `dir` of: `a.coil` (two cases, one using its sibling module
-/// `helper`), `b.coil` (one case), `helper.coil` (no cases), `nested/c.coil`
-/// (one case), `known.coil` (a known failure of cell `slow`) and
-/// `compile_fail/bad.coil` (must fail with E0102).
+/// A project `dir` of: a module root `lib/` holding `helper`, and the test
+/// root `t/` of `a.coil` (two cases, one using `helper`), `b.coil` (one
+/// case), `nested/c.coil` (one case), `known.coil` (a known failure of cell
+/// `slow`) and `compile_fail/bad.coil` (must fail with E0102).
 fn tree(label: &str) -> PathBuf {
-    let dir = unique_tmp(label);
+    let root = unique_tmp(label);
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::write(root.join("lib/helper.coil"), "fn twice(int x) -> int {\n    return x * 2;\n}\n").unwrap();
+    let dir = root.join("t");
     std::fs::create_dir_all(dir.join("nested")).unwrap();
     std::fs::create_dir_all(dir.join("compile_fail")).unwrap();
     std::fs::write(
@@ -44,7 +47,6 @@ fn tree(label: &str) -> PathBuf {
         "use helper;\n\ntest(\"a one\") {\n    if helper::twice(2) != 4 { raise \"twice\"; }\n}\n\ntest(\"a two\") {}\n",
     )
     .unwrap();
-    std::fs::write(dir.join("helper.coil"), "pub fn twice(int x) -> int {\n    return x * 2;\n}\n").unwrap();
     std::fs::write(dir.join("b.coil"), "test(\"b one\") {}\n").unwrap();
     std::fs::write(dir.join("nested/c.coil"), "test(\"c one\") {}\n").unwrap();
     std::fs::write(dir.join("known.coil"), "// @xfail slow #1 raises there\ntest(\"no\") {\n    raise \"no\";\n}\n").unwrap();
@@ -53,19 +55,19 @@ fn tree(label: &str) -> PathBuf {
         "// @expected E0102\nfn main() {\n    let x: int = \"s\";\n}\n",
     )
     .unwrap();
-    dir
+    root
 }
 
 #[test]
 fn a_file_runs_only_its_own_cases_on_each_engine() {
     let dir = tree("one");
     for engine in ["native", "mir"] {
-        let (all, code) = run(&dir, &["--engine", engine], &[Path::new("a.coil")]);
+        let (all, code) = run(&dir, &["--engine", engine, "--root", "lib"], &[Path::new("t/a.coil")]);
         assert!(all.contains("running 1 file"), "{engine}: {all}");
-        assert!(all.contains("test result: ok. 2 passed; 0 failed; 2 total"), "{engine}: its sibling module resolves: {all}");
+        assert!(all.contains("test result: ok. 2 passed; 0 failed; 2 total"), "{engine}: its module resolves: {all}");
         assert_eq!(code, Some(0), "{engine}: {all}");
     }
-    let (all, code) = run(&dir, &[], &[&dir.join("nested/c.coil")]);
+    let (all, code) = run(&dir, &[], &[&dir.join("t/nested/c.coil")]);
     assert!(all.contains("test result: ok. 1 passed; 0 failed; 1 total"), "an absolute path: {all}");
     assert_eq!(code, Some(0), "{all}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -74,13 +76,13 @@ fn a_file_runs_only_its_own_cases_on_each_engine() {
 #[test]
 fn a_file_keeps_its_headers() {
     let dir = tree("headers");
-    let (all, code) = run(&dir, &["--cell", "slow"], &[Path::new("known.coil")]);
+    let (all, code) = run(&dir, &["--cell", "slow"], &[Path::new("t/known.coil")]);
     assert!(all.contains("1 known failure"), "its @xfail line holds in its cell: {all}");
     assert_eq!(code, Some(0), "{all}");
-    let (all, code) = run(&dir, &[], &[Path::new("known.coil")]);
+    let (all, code) = run(&dir, &[], &[Path::new("t/known.coil")]);
     assert!(all.contains("test result: FAILED"), "outside the cell it fails: {all}");
     assert_eq!(code, Some(1), "{all}");
-    let (all, code) = run(&dir, &[], &[Path::new("compile_fail/bad.coil")]);
+    let (all, code) = run(&dir, &[], &[Path::new("t/compile_fail/bad.coil")]);
     assert!(all.contains("test result: ok. 1 passed"), "a compile_fail file must not compile: {all}");
     assert_eq!(code, Some(0), "{all}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -89,16 +91,16 @@ fn a_file_keeps_its_headers() {
 #[test]
 fn several_files_and_directories_run_together() {
     let dir = tree("many");
-    let (all, code) = run(&dir, &[], &[Path::new("a.coil"), Path::new("b.coil")]);
+    let (all, code) = run(&dir, &["--root", "lib"], &[Path::new("t/a.coil"), Path::new("t/b.coil")]);
     assert!(all.contains("running 2 files"), "{all}");
     assert!(all.contains("test result: ok. 3 passed; 0 failed; 3 total"), "{all}");
     assert_eq!(code, Some(0), "{all}");
-    let (all, code) = run(&dir, &[], &[Path::new("b.coil"), Path::new("nested")]);
+    let (all, code) = run(&dir, &[], &[Path::new("t/b.coil"), Path::new("t/nested")]);
     assert!(all.contains("running 2 files"), "{all}");
     assert!(all.contains("test result: ok. 2 passed; 0 failed; 2 total"), "{all}");
     assert_eq!(code, Some(0), "{all}");
     // A file named twice, or inside a directory also named, runs once.
-    let (all, _) = run(&dir, &[], &[Path::new("nested/c.coil"), Path::new("nested")]);
+    let (all, _) = run(&dir, &[], &[Path::new("t/nested/c.coil"), Path::new("t/nested")]);
     assert!(all.contains("running 1 file"), "{all}");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -106,11 +108,11 @@ fn several_files_and_directories_run_together() {
 #[test]
 fn a_path_that_is_neither_is_refused() {
     let dir = tree("bad");
-    std::fs::write(dir.join("notes.txt"), "not a test\n").unwrap();
-    let (all, code) = run(&dir, &[], &[Path::new("notes.txt")]);
+    std::fs::write(dir.join("t/notes.txt"), "not a test\n").unwrap();
+    let (all, code) = run(&dir, &[], &[Path::new("t/notes.txt")]);
     assert!(all.contains("E0900") && all.contains("notes.txt"), "{all}");
     assert_eq!(code, Some(1), "{all}");
-    let (all, code) = run(&dir, &[], &[Path::new("missing.coil")]);
+    let (all, code) = run(&dir, &[], &[Path::new("t/missing.coil")]);
     assert!(all.contains("E0900") && all.contains("missing.coil"), "{all}");
     assert_eq!(code, Some(1), "{all}");
     let _ = std::fs::remove_dir_all(&dir);
