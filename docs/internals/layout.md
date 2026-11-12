@@ -130,6 +130,14 @@ words:
   parameter is such a `V` too, bounded or not, static or with `self`, and
   so is a trait instance method's own one at a ground call
   (`hir_ground_words`, #2716).
+- A parameter declared an open `Option` / `Result` (`Option<T> x`) is the
+  enum object in the shared body, whoever declares it: a free generic
+  function, a method with type parameters of its own (static or with
+  `self`, bounded or not) or a generic class's method. A niche word
+  argument goes boxed to it (`HirSite::niche_args`), a call's ABI generic
+  or not (#2758); a signature holding a nested open enum
+  (`Option<Option<T>>`) takes the per-type clone, a static method's as an
+  instance method's (`fn_sig_split`).
 - A bare `V` field, `Vec<V>` element or `HashMap` value read from ground
   code is the niche word (`hir_field_rep`'s bare-niche case).
 - Dictionary, closure and `PolyFn` adapters pass a niche word as itself.
