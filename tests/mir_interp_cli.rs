@@ -75,6 +75,30 @@ fn a_panic_and_its_backtrace_match_the_raw_output() {
 }
 
 #[test]
+fn a_generator_value_nobody_produced_panics_alike() {
+    // The completing resume of a body with no `return e`, read at a class,
+    // and a binding `yield` a `for` resumes without `with` (coil-lang#2717).
+    let finished = "class Pt { pub a: int }\n\
+         gen fn one(Pt x) { yield x; }\n\
+         #[inline(never)]\nfn read() -> int { let h = one(new Pt(1)); let _ = resume h; let v = resume h; return v.a; }\n\
+         fn main() { let _ = read(); }\n";
+    let unsent = "class Pt { pub a: int }\n\
+         gen fn echo(Pt x) -> coroutine<Pt, Pt> { let got = yield x; yield got; }\n\
+         #[inline(never)]\nfn total() -> int { let n = 0; for p in echo(new Pt(2)) { n = n + p.a; } return n; }\n\
+         fn main() { let _ = total(); }\n";
+    for (name, src, msg, at) in [
+        ("missing_finished", finished, "the generator finished without a value of Pt", "missing_finished.coil:4:"),
+        ("missing_unsent", unsent, "resumed without a value of Pt", "missing_unsent.coil:2:"),
+    ] {
+        let out = same_as_raw(name, src);
+        let stderr = program_stderr(&out);
+        assert_eq!(out.status.code(), Some(1), "{name} stderr: {stderr}");
+        assert!(stderr.contains(msg), "{name} stderr: {stderr}");
+        assert!(stderr.contains(at), "{name} stderr: {stderr}");
+    }
+}
+
+#[test]
 fn only_the_levels_with_loop_passes_vectorize_on_the_interpreter() {
     // The point of the raw run: no MIR pass has touched it. From `-O 2` the
     // interpreter runs the loop as the vector op native code gets.

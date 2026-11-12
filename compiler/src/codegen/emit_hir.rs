@@ -4011,6 +4011,21 @@ impl Compiler {
                 exprs[i].kind = HirKind::Bin { op, lhs, rhs };
             }
         }
+        // A `resume` or binding `yield` over a type parameter reads, at the
+        // instance's type, the zero it has there for a value nobody
+        // produced (#2717).
+        for i in 0..exprs.len() {
+            let ty = match &exprs[i].kind {
+                HirKind::Resume { zero: None, .. } | HirKind::Yield { from: false, zero: None, .. } => exprs[i].ty.clone(),
+                _ => None,
+            };
+            if let Some(z) = ty.filter(crate::layout::ty_is_closed).and_then(|t| crate::hir::synth::zero_value(&self.checker, &mut exprs, &t)) {
+                match &mut exprs[i].kind {
+                    HirKind::Resume { zero, .. } | HirKind::Yield { zero, .. } => *zero = Some(z),
+                    _ => {}
+                }
+            }
+        }
         // `symbol::fn_key()`: the key of this instance, its types in the
         // order of the body's type variables.
         if !body.fn_key_sites.is_empty() {
@@ -10393,14 +10408,16 @@ impl Compiler {
             }
             // The yielded word moves in its type's layout (a niche word as
             // it is, a pair boxed), as `Resume` and a `for` take it back.
-            HirKind::Yield { value, .. } => {
-                let want = Self::hir_ty(hir, *value).map_or(BOXED, |t| Rep::Word(self.value_layout(t)));
-                self.hir_check_value(hir, emit, *value, &want)?;
+            HirKind::Yield { value, zero, .. } => {
+                for v in std::iter::once(value).chain(zero) {
+                    let want = Self::hir_ty(hir, *v).map_or(BOXED, |t| Rep::Word(self.value_layout(t)));
+                    self.hir_check_value(hir, emit, *v, &want)?;
+                }
             }
             // The yielded and sent words move in their types' layouts (a
-            // niche word as it is, a pair boxed).
-            HirKind::Resume { handle, value } => {
-                if let Some(v) = value {
+            // niche word as it is, a pair boxed), and so does a zero.
+            HirKind::Resume { handle, value, zero } => {
+                for v in value.iter().chain(zero) {
                     let want = Self::hir_ty(hir, *v).map_or(BOXED, |t| Rep::Word(self.value_layout(t)));
                     self.hir_check_value(hir, emit, *v, &want)?;
                 }

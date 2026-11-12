@@ -1109,13 +1109,15 @@ pub(crate) fn map_ids(kind: &HirKind, hf: &dyn Fn(HirId) -> HirId, lf: &dyn Fn(L
                 .collect(),
         },
         HirKind::Lambda { body } => HirKind::Lambda { body: *body },
-        HirKind::Yield { value, from } => HirKind::Yield {
+        HirKind::Yield { value, from, zero } => HirKind::Yield {
             value: h(value),
             from: *from,
+            zero: zero.as_ref().map(h),
         },
-        HirKind::Resume { handle, value } => HirKind::Resume {
+        HirKind::Resume { handle, value, zero } => HirKind::Resume {
             handle: h(handle),
             value: value.as_ref().map(h),
+            zero: zero.as_ref().map(h),
         },
         HirKind::Defer { captures, body } => HirKind::Defer {
             captures: captures.iter().map(|c| c.as_ref().map(l)).collect(),

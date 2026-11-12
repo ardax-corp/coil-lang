@@ -875,6 +875,15 @@ pub struct HirSite {
     /// String table index of a `string` literal, a `const` global folded
     /// to a string, a `typeof` name or a string index's panic message.
     pub string: Option<u32>,
+    /// A generator's value nobody produced, at a type the word `0` is a
+    /// value of (`Result<(), E>`, a number-backed scalar enum, #2717): the
+    /// word standing for it. A `resume` or binding `yield` compares the word
+    /// it reads with it; a gen fn's `return;` (and its body's end) returns
+    /// it.
+    pub missing: Option<i64>,
+    /// The word a `resume` without `with`, or a `for` over a generator,
+    /// sends where its receive type is such a type.
+    pub missing_send: Option<i64>,
     /// A `format` call with only word arguments, or string `+` (as
     /// `"%s%s"`): the format string's index.
     pub format: Option<u32>,
@@ -1119,6 +1128,9 @@ struct Lower<'a> {
     /// Statement `match`es not yet lowered (one `effect` lowers, or the
     /// tail of a block whose value is dropped): nothing reads their value.
     stmt_matches: HashSet<HirId>,
+    /// `resume`s and binding `yield`s whose value nothing reads (a block's
+    /// tail, an `if` arm, lowered for its effect): no zero, no panic (#2717).
+    unread: HashSet<HirId>,
     /// The arm bodies of statement `match`es: each one's value is dropped
     /// where the arm ends, as HIR emission did, so arms leaving different
     /// shapes (a word beside a block that falls through with nothing) need
@@ -1214,6 +1226,7 @@ impl<'a> Lower<'a> {
             aliases: HashMap::new(),
             ret_tail: false,
             stmt_matches: HashSet::new(),
+            unread: HashSet::new(),
             discard_arms: HashSet::new(),
             arm_tys: HashMap::new(),
             next_temp: TEMP_BASE,
@@ -1728,7 +1741,7 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
         // nothing) and falling off its end returns `0` as its last
         // resume's word, as HIR emission's epilogue.
         if lower.effect(root)? {
-            lower.ret_zero()?;
+            lower.ret_missing(root)?;
         }
     } else {
         match lower.value(root)? {
@@ -3365,8 +3378,13 @@ impl Lower<'_> {
     fn effect_level(&mut self, id: HirId) -> Result<bool, Refusal> {
         // A statement `yield` leaves nothing: a send lands only where a
         // receiving `yield` takes it.
-        if let HirKind::Yield { value, from } = self.hir.expr(id).kind {
+        if let HirKind::Yield { value, from, .. } = self.hir.expr(id).kind {
             return Ok(!matches!(self.yield_(id, value, from, false)?, Val::Never));
+        }
+        // A statement `resume` reads nothing: no zero, no panic, no pair
+        // unpacked from the completing resume's word (#2717).
+        if let HirKind::Resume { handle, value, .. } = self.hir.expr(id).kind {
+            return Ok(!matches!(self.resume(id, handle, value, false)?, Val::Never));
         }
         // A call's two-word result nobody reads stays the boxed word it
         // comes back as: no unboxing to a pair just to drop it. A host's
@@ -3384,8 +3402,20 @@ impl Lower<'_> {
         while let HirKind::Block { tail: Some(t), .. } = self.hir.expr(id).kind {
             id = t;
         }
-        if matches!(self.hir.expr(id).kind, HirKind::Match { .. }) {
-            self.stmt_matches.insert(id);
+        match self.hir.expr(id).kind {
+            HirKind::Match { .. } => {
+                self.stmt_matches.insert(id);
+            }
+            HirKind::Resume { .. } | HirKind::Yield { .. } => {
+                self.unread.insert(id);
+            }
+            HirKind::If { then, els, .. } => {
+                self.drop_value(then);
+                if let Some(e) = els {
+                    self.drop_value(e);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -3574,8 +3604,14 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let Some(bound) = self.site(id).bound_call.as_ref() => self.bound_call(id, args, bound),
             HirKind::Call { args, .. } if let Some(&slot) = self.site(id).existential_call.as_ref() => self.existential_call(id, args, slot),
             HirKind::Call { args, .. } => self.call(id, args),
-            HirKind::Resume { handle, value } => self.resume(id, *handle, *value),
-            HirKind::Yield { value, from } => self.yield_(id, *value, *from, true),
+            HirKind::Resume { handle, value, .. } => {
+                let read = !self.unread.remove(&id);
+                self.resume(id, *handle, *value, read)
+            }
+            HirKind::Yield { value, from, .. } => {
+                let read = !self.unread.remove(&id);
+                self.yield_(id, *value, *from, read)
+            }
             // Arm the flag; the end of the block, or a `return`, `break`
             // or `continue` leaving it, runs the body if armed.
             HirKind::Defer { body, .. } => {
@@ -4277,7 +4313,7 @@ impl Lower<'_> {
                 iterable,
                 body,
                 kind: Some(ForInKind::Coroutine),
-            } => self.for_coroutine(pat, *iterable, *body),
+            } => self.for_coroutine(id, pat, *iterable, *body),
             HirKind::Match { scrutinee, arms } => {
                 if self.stmt_matches.remove(&id) && !returned {
                     self.discard_arms.extend(arms.iter().map(|a| a.body));
@@ -4458,7 +4494,7 @@ impl Lower<'_> {
                         if !self.effect(*v)? {
                             return Ok(Val::Never);
                         }
-                        self.ret_zero()?;
+                        self.ret_missing(id)?;
                     }
                     Some(v) => {
                         self.ret_tail = true;
@@ -4467,7 +4503,7 @@ impl Lower<'_> {
                             val => self.ret(val)?,
                         }
                     }
-                    None if self.ret_pair.is_none() => self.ret_zero()?,
+                    None if self.ret_pair.is_none() => self.ret_missing(id)?,
                     None => return Err("return value".into()),
                 }
                 Ok(Val::Never)
@@ -4562,7 +4598,7 @@ impl Lower<'_> {
     /// matches).
     /// `for x in h` over a coroutine, as HIR emission's: resume into `x`,
     /// stop once the handle is done (its completion value is never bound).
-    fn for_coroutine(&mut self, pat: &HirPat, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
+    fn for_coroutine(&mut self, id: HirId, pat: &HirPat, iterable: HirId, body: HirId) -> Result<Val, Refusal> {
         // A destructuring pattern reads its parts from each yielded tuple's
         // box (#2317).
         let (ty, item) = match pat {
@@ -4595,15 +4631,18 @@ impl Lower<'_> {
         let exit = self.b.create_block();
         self.jump(head)?;
         self.switch(head);
-        let x = self.b.ins_resume_coro(h, None, ty).map_err(mir)?;
+        let send = self.missing_send(id)?;
+        let x = self.b.ins_resume_coro(h, send, ty).map_err(mir)?;
+        let done = self.b.ins_done_coro(h).map_err(mir)?;
+        self.b.branch(done, exit, body_b).map_err(mir)?;
+        self.switch(body_b);
+        // Bound once the generator is known to have yielded: the completing
+        // resume's word is no value of the type (#2717).
         if let HirPat::Bind(local) = pat
             && !self.unit_local(*local)
         {
             self.bind(*local, x)?;
         }
-        let done = self.b.ins_done_coro(h).map_err(mir)?;
-        self.b.branch(done, exit, body_b).map_err(mir)?;
-        self.switch(body_b);
         // The parts read only once the generator is known to have yielded.
         if let Some(item) = &item {
             self.bind_tuple_item(pat, x, Some(item))?;
@@ -6267,8 +6306,9 @@ impl Lower<'_> {
     }
 
     /// `resume h` / `resume h with v`: the coroutine runs to its next
-    /// `yield`, whose word is the value.
-    fn resume(&mut self, id: HirId, handle: HirId, value: Option<HirId>) -> Result<Val, Refusal> {
+    /// `yield`, whose word is the value. Read (`read`), a `0` word is the
+    /// value nobody produced ([`Self::missing_value`]).
+    fn resume(&mut self, id: HirId, handle: HirId, value: Option<HirId>, read: bool) -> Result<Val, Refusal> {
         let ty = self.expr_ty(id).ok_or("resume type")?.clone();
         let unit = is_unit(&ty);
         // A two-word value moves through the coroutine boxed.
@@ -6284,12 +6324,18 @@ impl Lower<'_> {
                 Some(w) => Some(w),
                 None => return Ok(Val::Never),
             },
-            None => None,
+            None => self.missing_send(id)?,
         };
         let Some(h) = self.word(handle)? else {
             return Ok(Val::Never);
         };
         let out = self.b.ins_resume_coro(h, send, dest_ty).map_err(mir)?;
+        if !read {
+            return Ok(Val::Unit);
+        }
+        let Some(out) = self.missing_value(id, out)? else {
+            return Ok(Val::Never);
+        };
         match pair {
             _ if unit => Ok(Val::Unit),
             Some((lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
@@ -6318,10 +6364,77 @@ impl Lower<'_> {
         if !receive {
             return Ok(Val::Unit);
         }
+        let Some(out) = self.missing_value(id, out)? else {
+            return Ok(Val::Never);
+        };
         match self.pair_tys(id) {
             Some((lo_ty, hi_ty)) => self.unbox_word(&ty, out, lo_ty, hi_ty),
             None => Ok(Val::V(out)),
         }
+    }
+
+    /// What a `resume` without `with` or a `for` (`id`) sends: nothing, or
+    /// the word standing for no value at a receive type `0` is a value of.
+    fn missing_send(&mut self, id: HirId) -> Result<Option<ValueId>, Refusal> {
+        match self.site(id).missing_send {
+            Some(word) => Ok(Some(self.b.ins_const(MirConst::I64(word)).map_err(mir)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// A gen fn's completion with no value (`return;`, its body's end): the
+    /// word `0`, or the one its site plans for a yield type `0` is a value
+    /// of (#2717).
+    fn ret_missing(&mut self, id: HirId) -> Result<(), Refusal> {
+        let Some(word) = self.site(id).missing.filter(|_| self.hir.is_coro) else {
+            return self.ret_zero();
+        };
+        let ty = self.b.func().ret_ty.ok_or("return value")?;
+        let w = self.b.ins_const(MirConst::I64(word)).map_err(mir)?;
+        let w = self.fit(w, ty)?;
+        self.ret_word(w)
+    }
+
+    /// The word `w` a `resume` or binding `yield` (`id`) read, where a `0`
+    /// is the value nobody produced (#2717): the type's zero (its `zero`
+    /// node, an object) in its place, or, for a type with no zero, the panic
+    /// the site's message names. A zero that is the word `0` itself, and a
+    /// type variable's word, stay as they are.
+    fn missing_value(&mut self, id: HirId, w: ValueId) -> Result<Option<ValueId>, Refusal> {
+        let zero = match self.hir.expr(id).kind {
+            HirKind::Resume { zero, .. } | HirKind::Yield { zero, .. } => zero,
+            _ => None,
+        };
+        let msg = self.site(id).string;
+        if zero.is_none() && msg.is_none() {
+            return Ok(Some(w));
+        }
+        let ty = self.b.value_ty(w);
+        let bits = if ty == MirTy::I64 { w } else { self.b.ins_cast(MirCastKind::Word, MirTy::I64, w).map_err(mir)? };
+        let none = self.b.ins_const(MirConst::I64(self.site(id).missing.unwrap_or(0))).map_err(mir)?;
+        let missing = self.b.ins_cmp(MirCmpOp::Eq, bits, none).map_err(mir)?;
+        let (fill, join) = (self.b.create_block(), self.b.create_block());
+        let Some(zero) = zero else {
+            let msg = msg.ok_or("missing value message")?;
+            self.b.branch(missing, fill, join).map_err(mir)?;
+            self.switch(fill);
+            let text = self.at_expr(id, |l| l.b.ins_string(msg).map_err(mir))?;
+            self.at_expr(id, |l| l.b.panic(text).map_err(mir))?;
+            self.switch(join);
+            return Ok(Some(w));
+        };
+        let t = self.temp();
+        self.b.def_local(t, w).map_err(mir)?;
+        self.b.branch(missing, fill, join).map_err(mir)?;
+        self.switch(fill);
+        let Some(z) = self.word_or_boxed(zero)? else {
+            return Err("missing value zero".into());
+        };
+        let z = self.fit(z, ty)?;
+        self.b.def_local(t, z).map_err(mir)?;
+        self.jump(join)?;
+        self.switch(join);
+        Ok(Some(self.b.use_local(t, ty).map_err(mir)?))
     }
 
     /// HIR `Clear` of `local` past its last use, as HIR emission's zero

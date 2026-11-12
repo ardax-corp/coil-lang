@@ -9,7 +9,7 @@
 //! locations it would derive from it.
 
 use crate::layout;
-use super::{BinOp, Builtin, Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, Lit, LocalId, LocalKind};
+use super::{BinOp, Builtin, Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, Lit, LocalId, LocalKind, MakeKind};
 use crate::typechecking::infer::Checker;
 use crate::typechecking::ty::{self as coil_ty, Ty};
 
@@ -549,4 +549,62 @@ pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str
         acc = b.push(HirKind::Logic { and: false, lhs: before, rhs: rest }, boolean.clone());
     }
     b.block(vec![la, lc], Some(acc), boolean)
+}
+
+/// The zero of `ty` as literal nodes appended to `exprs`, where the zero is
+/// an object ([`layout::Zero::Built`]): what a `resume` or a binding
+/// `yield` reads for a value nobody produced (#2717). `None` where the zero
+/// is the word `0` or there is none.
+pub fn zero_value(checker: &Checker, exprs: &mut Vec<HirExpr>, ty: &Ty) -> Option<HirId> {
+    let ty = coil_ty::nominal_enum_deep(ty);
+    (layout::zero_of(checker, &ty) == layout::Zero::Built).then(|| zero_tree(checker, exprs, &ty))
+}
+
+/// The zero of `ty`, which has one ([`layout::zero_of`]).
+fn zero_tree(checker: &Checker, exprs: &mut Vec<HirExpr>, ty: &Ty) -> HirId {
+    let kind = match coil_ty::strip_readonly(ty) {
+        t if layout::is_unit(t) => HirKind::Lit(Lit::Unit),
+        Ty::Con(n) if n == coil_ty::FLOAT => HirKind::Lit(Lit::Float(0.0)),
+        Ty::Con(n) if n == coil_ty::BOOL => HirKind::Lit(Lit::Bool(false)),
+        Ty::Con(n) if n == coil_ty::STRING => HirKind::Lit(Lit::Str(String::new())),
+        Ty::Con(_) => HirKind::Lit(Lit::Int(0)),
+        t if coil_ty::is_option_ty(t) => HirKind::Make {
+            kind: MakeKind::Variant {
+                enum_name: common::BUILTIN_OPTION_ENUM.to_string(),
+                variant: "None".to_string(),
+                tag: checker.tag_for(common::BUILTIN_OPTION_ENUM, "None"),
+                fields: None,
+            },
+            args: Vec::new(),
+        },
+        Ty::Tuple(items) => HirKind::Make {
+            kind: MakeKind::Tuple,
+            args: items.iter().map(|t| zero_tree(checker, exprs, t)).collect(),
+        },
+        Ty::Record { fields } => HirKind::Make {
+            kind: MakeKind::Record(fields.iter().map(|(n, _)| n.clone()).collect()),
+            args: fields.iter().map(|(_, t)| zero_tree(checker, exprs, t)).collect(),
+        },
+        Ty::Array {
+            element,
+            length: coil_ty::ArrayLength::Static(n),
+        } => HirKind::Make {
+            kind: MakeKind::Array,
+            args: (0..*n).map(|_| zero_tree(checker, exprs, element)).collect(),
+        },
+        // A `Vec`: the empty one.
+        _ => HirKind::Make { kind: MakeKind::Array, args: Vec::new() },
+    };
+    let id = HirId(exprs.len() as u32);
+    exprs.push(HirExpr {
+        kind,
+        layout: layout::of_resolved(checker, ty),
+        ty: Some(ty.clone()),
+        span: SPAN,
+        node: None,
+        flags: HirFlags::default(),
+        scope: 0,
+        src: None,
+    });
+    id
 }
