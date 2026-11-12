@@ -450,7 +450,11 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   a generic class's (its per-type clone and its shared entry alike), is
   a ground callee like a free function: a closed two-word result comes
   back in two words to its direct calls (`fn_declared_return_ty` peels
-  the receiver its scheme takes first, #2333). Whether a call takes the
+  the receiver its scheme takes first, #2333). A function whose result is
+  a function returns one closure word, whatever that function's own result
+  is (`fn get() -> fn(string) -> Option<string>`): its body's return layout
+  is its declared result's, not the curried peel's (`fn_return_ty` reads
+  the returned function's result, #2759). Whether a call takes the
   method's clone does not depend on that (`hir_method_clone`). Overloaded and generic functions and trait
   instance methods keep one-word parameters (a numeric range's two words
   excepted). A free function's or inherent method's two-word parameter,
