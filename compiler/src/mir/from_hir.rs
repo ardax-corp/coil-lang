@@ -284,6 +284,13 @@ pub struct HirPolyCall {
     /// The closure result's adapter from the shared body's boxed ABI, as
     /// [`HirCallSite::ret_adapt`] (#1589).
     pub ret_adapt: Option<(Label, u32)>,
+    /// A `forall` parameter's result holding its type parameters, read
+    /// from the shared body's layout (#2723): an open `Option` / `Result`
+    /// at a niche type comes back as its enum object, as
+    /// [`HirCallSite::boxed_ret`]; a tuple or enum holding a bare
+    /// parameter's value is rebuilt, as [`HirCallSite::ret_items`].
+    pub boxed_ret: bool,
+    pub ret_items: Option<HirRetItems>,
 }
 
 /// A user operator HIR emission lowered to its trait instance method's
@@ -6228,8 +6235,25 @@ impl Lower<'_> {
         if self.b.value_ty(callee) != MirTy::HeapRef {
             return Err("call value callee".into());
         }
-        let ret = if p.word_ret { MirTy::HeapRef } else { word };
+        let ret = if p.word_ret || p.boxed_ret { MirTy::HeapRef } else { word };
         let dest = self.at_expr(id, |l| l.b.ins_call_indirect_dicts(callee, words, dicts, ret).map_err(mir))?;
+        // An open `Option` / `Result` at a niche type: its enum object to
+        // the niche word (#2723).
+        if p.boxed_ret {
+            if p.word_ret || p.ret_adapt.is_some() {
+                return Err("call result niche".into());
+            }
+            return self.unbox_niche(dest, word);
+        }
+        // The shared body's tuple or enum, rebuilt at the call's types.
+        let dest = match &p.ret_items {
+            Some(items) if !p.word_ret && p.ret_adapt.is_none() && ret == MirTy::HeapRef => match self.at_expr(id, |l| l.unbox_ret_items(dest, items))? {
+                Val::V(v) => v,
+                _ => return Err("call result items".into()),
+            },
+            Some(_) => return Err("call result items".into()),
+            None => dest,
+        };
         // A bare type parameter's result comes back as its word.
         let dest = if p.word_ret { self.b.ins_word_as(dest, word).map_err(mir)? } else { dest };
         if let Some((target, operand)) = p.ret_adapt {
