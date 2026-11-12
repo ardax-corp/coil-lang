@@ -48,7 +48,8 @@ fn same<T: Eq>(T a, T b) -> bool {
 }
 
 fn run_eq(forall T: Eq. T -> T -> bool g) -> string {
-    return g(new Pt(1), new Pt(1)).show() + " " + g(new Pt(1), new Pt(2)).show() + " " + g(1, 1).show();
+    return g(new Pt(1), new Pt(1)).show() + " " + g(new Pt(1), new Pt(2)).show() + " " +
+           g(1, 1).show();
 }
 
 fn relay_eq(forall T: Eq. T -> T -> bool g) -> string {
@@ -64,7 +65,8 @@ fn shown_if<A: Eq, B: Show>(B b, A x, A y) -> string {
 }
 
 fn run_two(forall A: Eq, B: Show. B -> A -> A -> string g) -> string {
-    return g(1, new Pt(3), new Pt(3)) + " " + g("s", 2, 2) + " " + g(Duo::R("d"), 1, 1) + " " + g(Duo::L(4), 1, 2);
+    return g(1, new Pt(3), new Pt(3)) + " " + g("s", 2, 2) + " " + g(Duo::R("d"), 1, 1) + " " +
+           g(Duo::L(4), 1, 2);
 }
 
 fn relay_two(forall A: Eq, B: Show. B -> A -> A -> string g) -> string {
