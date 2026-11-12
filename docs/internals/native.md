@@ -245,6 +245,19 @@ way. `Alloc` of a function value (`Fn`, `PolyFn`, `PolyFnCapture`) builds the `O
 in `coil_native_alloc`; the body it names counts as a callee. `ObjFn` keeps a function
 value's arity in 8 bits, so calling a function value of 256 or more parameters panics.
 
+A `gen fn`'s body runs only on its coroutine, so a value of one never names the body
+(#2747): the call through it must make the coroutine as a direct call's `MakeCoro`
+does. A ground generator's value (its name, a partial application, a static method's
+value) targets its `name$value` adapter (`Compiler::fn_value_target`), a function
+calling it, whose call is the `MakeCoro`. A generic one read at ground types targets
+`name$value<T>` (`coro_value_target`), which calls it at those types and so takes its
+per-type clone; the mono plan clones a generator for each such read
+(`candidate_for_value`, past the clone budget, as a call through an alias). Its
+`PolyFn` (a `forall` argument) targets `name$coro` (`coro_trampoline_target`), MIR that
+takes the shared body's words as they are (parameters, dictionaries, `kinds` word) and
+returns `Alloc Coro` of them; that shared body has the limits of "A value nobody
+produced" below.
+
 ### Vec natives written out as MIR
 
 `vec_insert` and `vec_remove` return an `Option` or move elements of any type. In a
