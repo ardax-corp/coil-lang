@@ -234,6 +234,7 @@ impl Checker {
             bare_constructs_by_span: HashMap::new(),
             qualified_trait_calls_by_span: HashMap::new(),
             qualified_value_calls_by_span: HashMap::new(),
+            static_method_values_by_span: HashMap::new(),
             bare_patterns_by_span: HashMap::new(),
             impl_stubs: HashMap::new(),
             bare_cases_by_module: HashMap::new(),
@@ -1767,6 +1768,7 @@ impl Checker {
         self.bare_constructs_by_span.clear();
         self.qualified_trait_calls_by_span.clear();
         self.qualified_value_calls_by_span.clear();
+        self.static_method_values_by_span.clear();
         self.bare_patterns_by_span.clear();
         self.c_structs.clear();
         self.callback_sigs.clear();
@@ -10503,11 +10505,18 @@ impl Checker {
             Err(UnifyError::Mismatch { left, right }) => {
                 let [left_s, right_s] =
                     <[String; 2]>::try_from(self.diag_tys(&[&left, &right])).expect("two types");
+                // A function of no arguments where its result was expected:
+                // a bare `C::f` names the method's value (#2746).
+                let help = if self.uncalled_fn_of(t1, t2) {
+                    "this is a function of no arguments: add `()` to call it".to_string()
+                } else {
+                    format!("while checking `{}`", ctx)
+                };
                 self.error_with_help(
                     ErrorCode::TypeMismatch,
                     format!("Type mismatch: expected `{}`, found `{}`", left_s, right_s),
                     range.clone(),
-                    Some(format!("while checking `{}`", ctx)),
+                    Some(help),
                 )
             }
             Err(UnifyError::Occurs { var, ty }) => {
@@ -10524,6 +10533,16 @@ impl Checker {
                 )
             }
         }
+    }
+
+    /// Whether `found` is a function of no arguments (`unit -> R`) whose
+    /// result `R` is the `expected` type: its call was meant.
+    fn uncalled_fn_of(&self, expected: &Ty, found: &Ty) -> bool {
+        let found = apply_ty_prune(&self.subst, found);
+        let Ty::Fun(param, ret) = strip_readonly(&found) else {
+            return false;
+        };
+        matches!(param.as_ref(), Ty::Con(n) if n == UNIT) && unify_with(&self.subst, expected, ret).is_ok()
     }
 
     /// Record an error message and return a fresh variable.
@@ -18376,14 +18395,14 @@ impl Checker {
             Some(t) => t.clone(),
             None => {
                 let static_fqn = self.class_member_fqn(enum_name, variant_name);
-                // Bare / `()` Unit form: prefer static field, then 0-arg
-                // static method (`Counter::fresh()`).
-                if matches!(fields, EnumConstructPayload::Unit)
+                // Bare / `()` form: a static field first; then a static
+                // method's value (bare) or its call (`Counter::fresh()`).
+                if matches!(fields, EnumConstructPayload::Unit | EnumConstructPayload::Empty)
                     && let Some(ty) = self.static_slot_types.get(&static_fqn).cloned() {
                         return apply_ty_prune(&self.subst, &ty);
                     }
                 // `module::NAME` of another module's `const`.
-                if matches!(fields, EnumConstructPayload::Unit)
+                if matches!(fields, EnumConstructPayload::Unit | EnumConstructPayload::Empty)
                     && let Some(ty) = self.module_consts.get(&format!("{enum_name}::{variant_name}")).cloned()
                 {
                     return ty;
@@ -18396,7 +18415,8 @@ impl Checker {
                 // `Trait::method(args)`: the free `method(args)` limited to `Trait`.
                 if let Some(class) = self.qualified_call_trait(enum_name) {
                     return match fields {
-                        EnumConstructPayload::Unit => {
+                        EnumConstructPayload::Unit => self.trait_method_value_error(enum_name, variant_name, range),
+                        EnumConstructPayload::Empty => {
                             self.infer_qualified_trait_call(&class, enum_name, variant_name, &[], call_id, range)
                         }
                         EnumConstructPayload::Tuple(args) => {
@@ -18449,7 +18469,7 @@ impl Checker {
                 }
                 // `K::n(1)` of a class static or module const that holds no
                 // function (#1726): the function-typed one is called above.
-                if !matches!(fields, EnumConstructPayload::Unit)
+                if !matches!(fields, EnumConstructPayload::Unit | EnumConstructPayload::Empty)
                     && let Some(ty) = self
                         .static_slot_types
                         .get(&static_fqn)
@@ -18550,7 +18570,7 @@ impl Checker {
 
         // Shape vs arity: record shapes defer to field-by-field checks.
         let (shape_matches, same_shape_with_wrong_arity) = match (&expected_payload, fields) {
-            (EnumVariantPayloadTy::Unit, EnumConstructPayload::Unit) => (true, false),
+            (EnumVariantPayloadTy::Unit, EnumConstructPayload::Unit | EnumConstructPayload::Empty) => (true, false),
             (EnumVariantPayloadTy::Tuple(_), EnumConstructPayload::Tuple(args)) => {
                 let want = expected_payload.field_count();
                 (args.len() == want, args.len() != want)
@@ -18569,7 +18589,7 @@ impl Checker {
                         variant_str,
                         expected_payload.field_count(),
                         match fields {
-                            EnumConstructPayload::Unit => 0,
+                            EnumConstructPayload::Unit | EnumConstructPayload::Empty => 0,
                             EnumConstructPayload::Tuple(args) => args.len(),
                             EnumConstructPayload::Record(parts) => parts.len(),
                         },
@@ -18578,7 +18598,7 @@ impl Checker {
                 );
             }
             let call_shape = match fields {
-                EnumConstructPayload::Unit => "unit",
+                EnumConstructPayload::Unit | EnumConstructPayload::Empty => "unit",
                 EnumConstructPayload::Tuple(_) => "tuple",
                 EnumConstructPayload::Record(_) => "record",
             };
@@ -18615,7 +18635,7 @@ impl Checker {
 
         // Field-by-field type check.
         match fields {
-            EnumConstructPayload::Unit => {}
+            EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
             EnumConstructPayload::Tuple(args) => {
                 let expected_tys = expected_payload.field_types();
                 for (arg, expected_ty) in args.iter().zip(expected_tys.iter()) {
@@ -19744,6 +19764,12 @@ impl Checker {
     /// calls a `const` or `static` function value (#1705).
     pub fn qualified_value_call_at(&self, start: usize, end: usize) -> Option<&Ty> {
         self.qualified_value_calls_by_span.get(&(start, end))
+    }
+
+    /// The key (`Owner::m`) of the static method a bare `Owner::m` at this
+    /// span names as a function value (#2746).
+    pub fn static_method_value_at(&self, start: usize, end: usize) -> Option<&str> {
+        self.static_method_values_by_span.get(&(start, end)).map(String::as_str)
     }
 
     /// `owner::member(args)` naming a `const` or `static` of function type
@@ -21627,6 +21653,14 @@ impl Checker {
         let fqn = format!("{}::{}", owner, method);
         // A static method's `... xs` template calls its instance (#1754).
         if self.is_variadic_template(&fqn) {
+            if matches!(fields, EnumConstructPayload::Unit) {
+                return Some(self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    format!("`{fqn}` packs its `... xs` per call, so it has no function value"),
+                    range,
+                    Some(format!("call it (`{fqn}(...)`), or wrap the call in a lambda")),
+                ));
+            }
             let args = match fields {
                 EnumConstructPayload::Tuple(args) => args.as_slice(),
                 _ => &[],
@@ -21645,9 +21679,17 @@ impl Checker {
         // Named-arg / rest reorder when the call uses a tuple payload. The
         // argument expressions go to `apply_function` too, so an array
         // literal builds a `Vec` parameter as in a free call (#1992).
+        // A bare `C::f` is the method's function value, as a free
+        // function's name is (#2746); a call is written with parentheses.
+        // Its bounds' dictionaries are made where the value is, as for a
+        // free generic function's value.
+        if matches!(fields, EnumConstructPayload::Unit) {
+            self.static_method_values_by_span.insert((range.start, range.end), fqn);
+            return Some(fun_ty);
+        }
         let mut arg_exprs: Option<Vec<Output>> = None;
         let arg_tys = match fields {
-            EnumConstructPayload::Unit => Vec::new(),
+            EnumConstructPayload::Unit | EnumConstructPayload::Empty => Vec::new(),
             EnumConstructPayload::Tuple(args) => {
                 if self.fn_has_rest(&fqn) || self.fn_param_names.contains_key(&fqn) {
                     let (tys, exprs) = self.infer_and_reorder_call_args(&fqn, args, &range);
@@ -21685,6 +21727,18 @@ impl Checker {
             self.pin_assoc_after_discharge("", &constraints, Some(&scheme), &mapping, &range);
         }
         Some(result)
+    }
+
+    /// A bare `Trait::m` / `T::m` / `Owner::m` naming a trait's method: a
+    /// call is written with parentheses, and a trait method has no
+    /// function value of its own (#2746).
+    fn trait_method_value_error(&mut self, owner: &str, method: &str, range: Range<usize>) -> Ty {
+        self.error_with_help(
+            ErrorCode::GenericTypeError,
+            format!("`{owner}::{method}` names a trait method, which has no function value"),
+            range,
+            Some(format!("call it with parentheses (`{owner}::{method}(...)`), or wrap the call in a lambda")),
+        )
     }
 
     /// Concrete owner of `Owner::method(..)` for a static trait method: a
@@ -21842,7 +21896,8 @@ impl Checker {
             self.unify(&param, &owner_ty, &range, "static trait method owner");
         }
         let arg_tys: Vec<Ty> = match fields {
-            EnumConstructPayload::Unit => Vec::new(),
+            EnumConstructPayload::Unit => return Some(self.trait_method_value_error(owner, method, range)),
+            EnumConstructPayload::Empty => Vec::new(),
             EnumConstructPayload::Tuple(args) => {
                 args.iter().map(|a| self.infer_call_arg(a)).collect()
             }
@@ -22306,7 +22361,7 @@ impl Checker {
     ) -> Vec<&'a Output<'a>> {
         use parser::ast::EnumConstructPayload;
         match fields {
-            EnumConstructPayload::Unit => Vec::new(),
+            EnumConstructPayload::Unit | EnumConstructPayload::Empty => Vec::new(),
             EnumConstructPayload::Tuple(args) => args.iter().collect(),
             EnumConstructPayload::Record(parts) => parts.iter().map(|p| &p.value).collect(),
         }

@@ -25,7 +25,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [`if` expression](if-expression.md) | #1877: `if … else …` / `if let … else …` as a value; primary precedence like `match`; E0137 for a missing `else`; reuses the `If` / `Match` HIR |
 | [Q6 iterator protocol](q6-iterator-protocol.md) | Counted desugar for `for` (array / literal range / B5 locals / C2 param+returned Range / C2b heap-field + user `Iterator::next` + dict + coro) |
 | [Q9 format / string](q9-format-string.md) | I4 reopen: SSA form of `STRING` / `PRINT` / `FORMAT` / `STRINGIFY`; R2 bytes HostInvoke; R3 maps; R4 unicode leftover |
-| [Static trait methods](static-trait-methods.md) | #524: `static fn` in traits, `Owner::m` / `T::m` calls, return-type-directed bound resolution, per-field `#[derive(Default)]` |
+| [Static trait methods](static-trait-methods.md) | #524: `static fn` in traits, `Owner::m` / `T::m` calls, a bare `Owner::m` as a static method's value (#2746), return-type-directed bound resolution, per-field `#[derive(Default)]` |
 | [Generic instances](generic-instances.md) | #550 / #551 / #552: `impl Trait for Box<T>` and `Box<T: Bound>`, instance contexts, context dictionaries, open-goal dictionary resolution, derives on generic types |
 | [Per-type clones](generic-specialization.md) | #1417 / #1419: ground dictionaries built once into statics; per-type clones of other modules' generic methods and free functions (`ModuleCtx`); allocation numbers |
 | [Userland text search](userland-text-search.md) | `split` / `find_all` / `replace_all` in Coil at near-native speed: per-step profile and measurements (feature/userland-loop) |

@@ -462,7 +462,7 @@ fn visit_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Output
             }
         },
         Expression::Construct { fields, .. } => match fields {
-            EnumConstructPayload::Unit => {}
+            EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
             EnumConstructPayload::Tuple(args) => {
                 for arg in args {
                     visit(arg);

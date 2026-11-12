@@ -30,7 +30,8 @@ pub fn analyze_fn_value_escape(checker: &mut Checker, ast: &Output<'_>) {
 
 /// Union names that appear as a function *value* in `ast` into `into`.
 ///
-/// Walks bare identifiers, [`Expression::QualifiedAccess`], and method
+/// Walks bare identifiers, [`Expression::QualifiedAccess`], a bare
+/// `Owner::m` [`Expression::Construct`], and method
 /// names on [`Expression::Access`] / [`Expression::OptionalAccess`] when
 /// those nodes are not the `name` of a [`Expression::Call`]. `use` aliases
 /// (`use m::{f as g}`) map a poisoned local back to the imported stem/FQN.
@@ -124,8 +125,15 @@ fn walk(
                 }
             }
         }
-        Expression::Construct { fields, .. } => match fields {
-            EnumConstructPayload::Unit => {}
+        Expression::Construct { enum_name, variant_name, fields } => match fields {
+            // A bare `C::f` is static method `f`'s value (#2746). A unit
+            // variant (`E::V`) is none; a static field's name poisons as a
+            // `QualifiedAccess` one does.
+            EnumConstructPayload::Unit if variant_name.starts_with(|c: char| c.is_ascii_lowercase()) => {
+                poison(into, aliases, variant_name);
+                poison(into, aliases, &format!("{enum_name}::{variant_name}"));
+            }
+            EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
             EnumConstructPayload::Tuple(args) => {
                 for a in args {
                     walk(a, false, into, aliases);

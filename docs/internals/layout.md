@@ -402,7 +402,9 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   methods and inherent instance methods; a partial application's closure
   (`f(a)`, `recv.m()`) targets the adapter as well, so a call through it
   that reads two words enters the function. A method's adapter takes its
-  receiver first, as the method does (#2333).
+  receiver first, as the method does (#2333). A static method's value
+  (a bare `Owner::m`, #2746) is poisoned by the walk and targets the
+  adapter as a free function's name does.
   Not redirected: overloads (the adapter is typed by name, not by
   candidate), generic functions (their value is the shared body's
   `PolyFn`), functions with a rest parameter, coroutines and host

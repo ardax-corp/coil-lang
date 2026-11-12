@@ -1,0 +1,23 @@
+// @expected E0119 — a bare `T::make` names a trait's static method, which
+// has no function value: a call is written with parentheses (#2746).
+trait Make<T> {
+    static fn make() -> T {}
+}
+
+class P {
+    pub n: int,
+}
+
+impl Make for P {
+    pub static fn make() -> P {
+        return new P(1);
+    }
+}
+
+fn fresh<T: Make>() -> T {
+    return T::make;
+}
+
+fn main() {
+    let p: P = fresh();
+}

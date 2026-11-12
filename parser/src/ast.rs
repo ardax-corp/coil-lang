@@ -1093,8 +1093,12 @@ pub struct PatternField<'expr> {
 /// Payload shape for a qualified constructor application.
 #[derive(Clone, PartialEq, Debug)]
 pub enum EnumConstructPayload<'expr> {
-    /// `Foo` (no fields — bare qualified enum value).
+    /// `Foo` (no fields — bare qualified enum value). Of a static
+    /// method, its function value (#2746).
     Unit,
+    /// `Foo()`: empty parentheses. A unit variant or a static field reads
+    /// as [`Self::Unit`]; a static method is called with no arguments.
+    Empty,
     /// `Foo(arg1, arg2, ...)`.
     Tuple(Vec<Output<'expr>>),
     /// `Foo { name: expr, ... }` — fields may appear in any order.
@@ -1928,6 +1932,7 @@ impl<'a> Display for Expression<'a> {
                 write!(f, "{}::{}", enum_name, variant_name)?;
                 match fields {
                     EnumConstructPayload::Unit => Ok(()),
+                    EnumConstructPayload::Empty => write!(f, "()"),
                     EnumConstructPayload::Tuple(args) => {
                         write!(
                             f,
@@ -2450,7 +2455,7 @@ impl<'expr> Expression<'expr> {
                 }
             }
             E::Construct { fields, .. } => match fields {
-                EnumConstructPayload::Unit => {}
+                EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
                 EnumConstructPayload::Tuple(items) => items.iter().for_each(f),
                 EnumConstructPayload::Record(fields) => {
                     fields.iter().for_each(|field| f(&field.value))
@@ -2697,7 +2702,7 @@ impl<'expr> Expression<'expr> {
                 }
             }
             E::Construct { fields, .. } => match fields {
-                EnumConstructPayload::Unit => {}
+                EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
                 EnumConstructPayload::Tuple(items) => items.iter_mut().for_each(f),
                 EnumConstructPayload::Record(fields) => {
                     fields.iter_mut().for_each(|field| f(&mut field.value))

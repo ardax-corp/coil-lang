@@ -143,8 +143,8 @@ fn settle_operators(
 }
 
 /// `Owner::name(..)` that is not an enum constructor is a call of
-/// `Owner::name`, and so is `Owner::name()` when `name` is a static method
-/// (`is_call`; the parser reads it as the bare `Owner::name`). Any other
+/// `Owner::name`, and so are `Owner::name()` and the bare `Owner::name`
+/// (its value, #2746) when `name` is a static method (`is_call`). Any other
 /// bare `Owner::name` that is no constructor reads or writes a class static
 /// (#2407). `is_variant` answers for an owner and a name.
 fn settle_constructs(facts: &mut HashMap<String, FnFacts>, is_variant: &dyn Fn(&str, &str) -> bool, is_call: &dyn Fn(&str, &str) -> bool) {
@@ -540,7 +540,7 @@ fn collect_nested_fns_level(ast: &Output<'_>, facts: &mut HashMap<String, FnFact
                     collect_nested_fns(&f.value, facts, cases);
                 }
             }
-            EnumConstructPayload::Unit => {}
+            EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
         },
         Expression::Loop {
             contracts: _,
@@ -744,7 +744,9 @@ fn walk_body_level(ast: &Output<'_>, facts: &mut FnFacts) {
                     walk_body(&f.value, facts);
                 }
             }
-            EnumConstructPayload::Unit => {
+            // A static method's value (bare) counts as its call: the
+            // value is called somewhere.
+            EnumConstructPayload::Unit | EnumConstructPayload::Empty => {
                 facts.constructs.push(((*enum_name).to_string(), (*variant_name).to_string(), true));
             }
         },

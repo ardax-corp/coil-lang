@@ -4148,13 +4148,13 @@ impl<'pratt> Pratt<'pratt> {
             })
             .labelled("record payload");
 
-        // Tuple payload: `(arg1, arg2, ...)` — `None` means Unit.
-        // Empty parens `()` are also treated as Unit (so users can
-        // write `Option::None()` instead of `Option::None`).
+        // Tuple payload: `(arg1, arg2, ...)`. Empty parens `()` are their
+        // own shape: a static method's call, where the bare name is its
+        // value (#2746); a unit variant (`Option::None()`) or a static
+        // field reads the same either way.
         let tuple_payload = self.params(expr.clone()).map(|opt| match opt {
-            Some(args) if args.is_empty() => EnumConstructPayload::Unit,
-            Some(args) => EnumConstructPayload::Tuple(args),
-            None => EnumConstructPayload::Unit,
+            Some(args) if !args.is_empty() => EnumConstructPayload::Tuple(args),
+            _ => EnumConstructPayload::Empty,
         });
 
         // Shape selector: tuple or record. Both are optional
@@ -4205,7 +4205,7 @@ impl<'pratt> Pratt<'pratt> {
                             }),
                         ),
                         // `m::f()`: empty parens are still a call.
-                        Some(EnumConstructPayload::Unit) => (
+                        Some(EnumConstructPayload::Unit | EnumConstructPayload::Empty) => (
                             e.span(),
                             Box::new(Expression::Call { name, args: None }),
                         ),
