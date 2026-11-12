@@ -327,7 +327,14 @@ impl Heap {
                 // One walk of an array: the precise slots that name a young
                 // object are noted, and only they are rewritten after the
                 // copy.
-                Object::Array(a) => self.reach_array_slots(a, &mut gray, &mut fixups),
+                Object::Array(a) => {
+                    let (_dirty, _cards) = self.reach_array_slots(a, &mut gray, &mut fixups);
+                    #[cfg(feature = "gc-stats")]
+                    {
+                        census.dirty_cards += _dirty;
+                        census.cards += _cards;
+                    }
+                }
                 _ => obj.for_each_reference(self, &mut |a, p| reach(self, &mut gray, a, p)),
             }
             if matches!(obj, Object::Array(_)) {
@@ -455,30 +462,75 @@ impl Heap {
     /// [`Object::for_each_reference`] would find them, and note the address
     /// of every precise slot that names one in `fixups`: the minor then
     /// forwards those slots alone instead of walking the array again.
-    fn reach_array_slots(&self, gc: super::Gc<ObjArray>, gray: &mut Vec<Object>, fixups: &mut Vec<*mut Value>) {
+    ///
+    /// A word array with a card table ([`super::CardTable`]) is scanned
+    /// only on its dirty cards, which the scan clears: after the minor
+    /// nothing young is left for a clean card to hide. Returns `(dirty
+    /// cards, cards)` of a card scan.
+    fn reach_array_slots(&self, gc: super::Gc<ObjArray>, gray: &mut Vec<Object>, fixups: &mut Vec<*mut Value>) -> (usize, usize) {
         // SAFETY: a live array; nothing else borrows its payload during a
         // minor. Not `payload_mut`: a rewrite is no write the barrier logs.
         let a = unsafe { &mut (*gc.as_ptr().cast_mut()).data };
         if !a.may_hold_refs() {
-            return;
+            return (0, 0);
         }
         let (k, mask, kind) = (a.lanes(), a.tag_mask, a.elem_kind());
         if k == 1 && kind == common::WORD_SCALAR {
-            return;
+            return (0, 0);
         }
-        let Some(words) = a.gc_words_mut() else {
-            return;
-        };
         let bounds = self.slab.bounds();
-        let n = words.len();
-        let base = words.as_mut_ptr();
         if k == 1 {
             let precise = kind == common::WORD_POINTER;
-            for i in 0..n {
-                // SAFETY: `i < n`.
-                self.reach_slot(unsafe { base.add(i) }, precise, bounds, gray, fixups);
+            let Some((words, cards)) = a.words_and_cards_mut() else {
+                return (0, 0);
+            };
+            let n = words.len();
+            let base = words.as_mut_ptr();
+            let mut scan = |lo: usize, hi: usize| {
+                for i in lo..hi {
+                    // SAFETY: `i < hi <= n`.
+                    self.reach_slot(unsafe { base.add(i) }, precise, bounds, gray, fixups);
+                }
+            };
+            let t = match cards {
+                Some(t) if !t.all => t,
+                cards => {
+                    scan(0, n);
+                    if let Some(t) = cards {
+                        t.all = false;
+                        t.cards.fill(0);
+                    }
+                    return (0, 0);
+                }
+            };
+            let total = t.cards.len();
+            let mut dirty = 0;
+            let size = 1usize << super::CARD_SHIFT;
+            // Eight cards at a time: most of a large array is clean.
+            for (at, group) in t.cards.chunks_mut(8).enumerate() {
+                if group.iter().all(|&c| c == 0) {
+                    continue;
+                }
+                for (j, c) in group.iter_mut().enumerate() {
+                    if *c == 0 {
+                        continue;
+                    }
+                    *c = 0;
+                    dirty += 1;
+                    let lo = (at * 8 + j) * size;
+                    if lo < n {
+                        scan(lo, (lo + size).min(n));
+                    }
+                }
             }
-        } else {
+            return (dirty, total);
+        }
+        let Some(words) = a.gc_words_mut() else {
+            return (0, 0);
+        };
+        let n = words.len();
+        let base = words.as_mut_ptr();
+        {
             for i in (0..n).step_by(k) {
                 // SAFETY: `i + 1 < n` for a whole element of `k >= 2` words.
                 let tag = unsafe { *base.add(i + 1) }.bits();
@@ -487,6 +539,7 @@ impl Heap {
                 }
             }
         }
+        (0, 0)
     }
 
     /// [`Self::reach_array_slots`] for one word at `slot`.
@@ -525,7 +578,13 @@ impl Heap {
     fn check_barrier(&self, remembered: &[u64]) {
         for obj in self.live_objects() {
             let g = obj.generation();
-            if !barriered(g) || remembered.binary_search(&obj.addr()).is_ok() {
+            if !barriered(g) {
+                continue;
+            }
+            if remembered.binary_search(&obj.addr()).is_ok() {
+                if let Object::Array(a) = obj {
+                    self.check_cards(a.as_ref(), obj.addr());
+                }
                 continue;
             }
             obj.for_each_reference(self, &mut |addr, precise| {
@@ -539,6 +598,32 @@ impl Heap {
                     );
                 }
             });
+        }
+    }
+
+    /// A remembered array with a card table ([`super::CardTable`]) is
+    /// scanned on its dirty cards only: a young object in a clean card is
+    /// a write that did not mark its card. Panics naming the array and
+    /// the element.
+    fn check_cards(&self, a: &ObjArray, at: u64) {
+        let (Some(t), Some(words)) = (a.cards(), a.words()) else {
+            return;
+        };
+        if t.all || !a.may_hold_refs() {
+            return;
+        }
+        for (i, w) in words.iter().enumerate() {
+            let card = t.cards.get(i >> super::CARD_SHIFT).copied().unwrap_or(0);
+            if card == 0
+                && let Some(young) = self.young_object(w.heap_addr())
+            {
+                panic!(
+                    "missed card mark: element {i} of {} at {at:#x} names {} at {:#x}, which is young, in a clean card",
+                    Object::Array(unsafe { super::Gc::from_addr(at) }).kind_name(),
+                    young.kind_name(),
+                    young.addr(),
+                );
+            }
         }
     }
 
@@ -629,6 +714,15 @@ impl Heap {
                 && barriered(obj.generation())
             {
                 obj.set_generation(obj.generation() & (GEN_YOUNG | GEN_HELD) | GEN_UNLOGGED);
+                // A large array this minor scanned whole gets a card table:
+                // the next one scans only what was written meanwhile.
+                if let Object::Array(gc) = obj {
+                    // SAFETY: as in `reach_array_slots`.
+                    let arr = unsafe { &mut (*gc.as_ptr().cast_mut()).data };
+                    if arr.attach_cards() {
+                        self.account_array(arr);
+                    }
+                }
             }
         }
         #[cfg(feature = "gc-stats")]
@@ -1049,6 +1143,223 @@ mod tests {
         assert_eq!(walk(&heap, slot(3)), other_list);
     }
 
+    /// An old pointer array of `len` nulls with a clean card table: a
+    /// minor scanned it whole as remembered and attached one.
+    fn tracked_array(heap: &mut Heap, len: usize) -> (u64, super::super::Gc<ObjArray>) {
+        let old = old_pointer_array(heap, len);
+        let Some(Object::Array(mut gc)) = heap.find_object_by_addr(old) else { unreachable!() };
+        assert!(!gc.as_ref().has_cards(), "a new old array has no table");
+        // A young object first, or the write is logged as quiet.
+        let _ = cons_list(heap, 1);
+        gc.as_mut().set(0, Value::from(0i64));
+        minor(heap, &[], &mut []);
+        assert!(gc.as_ref().has_cards(), "a remembered large array gets a table");
+        assert!(gc.as_ref().cards().is_some_and(|t| !t.all && t.cards.iter().all(|&c| c == 0)));
+        (old, gc)
+    }
+
+    /// The dirty cards of `gc`'s table.
+    fn dirty(gc: super::super::Gc<ObjArray>) -> Vec<usize> {
+        let t = gc.as_ref().cards().expect("table");
+        if t.all {
+            return vec![usize::MAX];
+        }
+        t.cards.iter().enumerate().filter(|(_, c)| **c != 0).map(|(j, _)| j).collect()
+    }
+
+    /// Run a minor with the checks on, and check that the young list the
+    /// array holds at `at` came through it.
+    fn survives(heap: &mut Heap, gc: super::super::Gc<ObjArray>, at: usize, list: &[i64]) {
+        minor(heap, &[], &mut []);
+        let head = gc.as_ref().get(at).expect("element").bits();
+        assert_eq!(walk(heap, head), list);
+        assert_eq!(dirty(gc), Vec::<usize>::new(), "the minor cleared the cards it scanned");
+    }
+
+    /// `CARD_MIN_WORDS` elements: the smallest array a minor tracks.
+    const TRACKED: usize = super::super::CARD_MIN_WORDS;
+
+    #[test]
+    fn a_small_remembered_array_gets_no_card_table() {
+        let mut heap = nursery_heap();
+        let old = old_pointer_array(&mut heap, TRACKED - 1);
+        let Some(Object::Array(mut gc)) = heap.find_object_by_addr(old) else { unreachable!() };
+        let _ = cons_list(&mut heap, 1);
+        gc.as_mut().set(0, Value::from(0i64));
+        minor(&mut heap, &[], &mut []);
+        assert!(!gc.as_ref().has_cards());
+    }
+
+    #[test]
+    fn set_and_store_indexed_mark_one_card() {
+        let mut heap = nursery_heap();
+        heap.heap_checks = true;
+        let (_, mut gc) = tracked_array(&mut heap, TRACKED);
+        let a = cons_list(&mut heap, 3);
+        let b = cons_list(&mut heap, 4);
+        let c = cons_list(&mut heap, 5);
+        let (la, lb, lc) = (walk(&heap, a), walk(&heap, b), walk(&heap, c));
+        gc.as_mut().set(40, Value::from(a));
+        unsafe { gc.as_mut().set_unchecked(500, Value::from(b)) };
+        assert!(gc.as_mut().store_indexed(1023, Value::from(c), false));
+        assert_eq!(dirty(gc), vec![40 >> 4, 500 >> 4, 1023 >> 4]);
+        minor(&mut heap, &[], &mut []);
+        assert_eq!(walk(&heap, gc.as_ref().get(40).unwrap().bits()), la);
+        assert_eq!(walk(&heap, gc.as_ref().get(500).unwrap().bits()), lb);
+        assert_eq!(walk(&heap, gc.as_ref().get(1023).unwrap().bits()), lc);
+    }
+
+    #[test]
+    fn a_push_marks_the_tail_card_and_grows_the_table() {
+        let mut heap = nursery_heap();
+        heap.heap_checks = true;
+        let (_, mut gc) = tracked_array(&mut heap, TRACKED);
+        let cards = gc.as_ref().cards().unwrap().cards.len();
+        let mut lists = Vec::new();
+        // Past the capacity the table covered.
+        for _ in 0..TRACKED + 40 {
+            let l = cons_list(&mut heap, 2);
+            lists.push(walk(&heap, l));
+            gc.as_mut().push(Value::from(l));
+        }
+        assert!(gc.as_ref().cards().unwrap().cards.len() > cards, "the table grew with the array");
+        assert_eq!(dirty(gc).first(), Some(&(TRACKED >> 4)), "the cards below the old length stay clean");
+        minor(&mut heap, &[], &mut []);
+        for (k, list) in lists.iter().enumerate() {
+            assert_eq!(&walk(&heap, gc.as_ref().get(TRACKED + k).unwrap().bits()), list);
+        }
+    }
+
+    #[test]
+    fn extend_and_fill_mark_the_cards_they_write() {
+        let mut heap = nursery_heap();
+        heap.heap_checks = true;
+        let (_, mut gc) = tracked_array(&mut heap, TRACKED);
+        let l = cons_list(&mut heap, 6);
+        let list = walk(&heap, l);
+        let (src, _) = heap.alloc(ObjArray::new(vec![Value::from(l); 20]), Object::Array);
+        let Object::Array(src) = src else { unreachable!() };
+        gc.as_mut().extend_from(src.as_ref(), 0, 20);
+        assert_eq!(dirty(gc), vec![TRACKED >> 4, (TRACKED + 19) >> 4]);
+        survives(&mut heap, gc, TRACKED + 19, &list);
+        let l = cons_list(&mut heap, 7);
+        let list = walk(&heap, l);
+        gc.as_mut().fill_push(Value::from(l), 3);
+        assert_eq!(dirty(gc), vec![(TRACKED + 20) >> 4], "elements 20..23 past the old end share a card");
+        survives(&mut heap, gc, TRACKED + 22, &list);
+    }
+
+    #[test]
+    fn insert_remove_drain_and_rotate_mark_the_elements_they_move() {
+        let mut heap = nursery_heap();
+        heap.heap_checks = true;
+        let (_, mut gc) = tracked_array(&mut heap, TRACKED);
+        // Each shift below moves a young list stored at 1000 across a card
+        // boundary.
+        let fresh = |heap: &mut Heap, gc: &mut super::super::Gc<ObjArray>| {
+            let y = cons_list(heap, 4);
+            gc.as_mut().set(1000, Value::from(y));
+            // Clear the card the set marked, as if a minor had run but
+            // the young list stayed: only the shift's own marks remain.
+            gc.as_mut().words_and_cards_mut().unwrap().1.unwrap().cards.fill(0);
+            y
+        };
+        // remove(5): 1000 moves to 999.
+        let y = fresh(&mut heap, &mut gc);
+        let yl = walk(&heap, y);
+        gc.as_mut().remove(5);
+        assert!(dirty(gc).contains(&(999 >> 4)));
+        survives(&mut heap, gc, 999, &yl);
+        // insert(0): 1000 moves to 1001.
+        let y = fresh(&mut heap, &mut gc);
+        let yl = walk(&heap, y);
+        gc.as_mut().insert(0, Value::from(0i64));
+        assert!(dirty(gc).contains(&(1001 >> 4)));
+        survives(&mut heap, gc, 1001, &yl);
+        // drain_range(0, 10): 1000 moves to 990.
+        let y = fresh(&mut heap, &mut gc);
+        let yl = walk(&heap, y);
+        gc.as_mut().drain_range(0, 10);
+        assert!(dirty(gc).contains(&(990 >> 4)));
+        survives(&mut heap, gc, 990, &yl);
+        // rotate_last_to(1000): 1000 moves to 1001.
+        let y = fresh(&mut heap, &mut gc);
+        let yl = walk(&heap, y);
+        gc.as_mut().rotate_last_to(1000);
+        assert!(dirty(gc).contains(&(1001 >> 4)));
+        survives(&mut heap, gc, 1001, &yl);
+    }
+
+    #[test]
+    fn raw_word_access_dirties_the_whole_table() {
+        let mut heap = nursery_heap();
+        heap.heap_checks = true;
+        let (_, mut gc) = tracked_array(&mut heap, TRACKED);
+        let l = cons_list(&mut heap, 5);
+        let list = walk(&heap, l);
+        gc.as_mut().words_mut()[700] = Value::from(l);
+        assert_eq!(dirty(gc), vec![usize::MAX], "all dirty");
+        survives(&mut heap, gc, 700, &list);
+        assert!(!gc.as_ref().cards().unwrap().all, "the minor cleared it");
+    }
+
+    #[test]
+    fn pop_clear_and_reserve_mark_nothing_and_a_copy_has_no_table() {
+        let mut heap = nursery_heap();
+        let (_, mut gc) = tracked_array(&mut heap, TRACKED);
+        gc.as_mut().pop();
+        gc.as_mut().reserve(100);
+        assert_eq!(dirty(gc), Vec::<usize>::new());
+        assert!(!gc.as_ref().copy().has_cards(), "a copy is a new object");
+        gc.as_mut().clear();
+        assert_eq!(dirty(gc), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_lane_array_is_never_tracked() {
+        let mut heap = nursery_heap();
+        let words: Vec<Value> = (0..2 * TRACKED as i64).map(|i| Value::from(i & 1)).collect();
+        let (arr, _) = heap.alloc(ObjArray::from_lanes(words, 2, 0b10), Object::Array);
+        let mut roots = [arr.addr()];
+        minor(&mut heap, &[], &mut roots);
+        let Some(Object::Array(mut gc)) = heap.find_object_by_addr(roots[0]) else { unreachable!() };
+        let _ = cons_list(&mut heap, 1);
+        gc.as_mut().set_lanes(0, &[Value::from(0i64), Value::from(0i64)]);
+        minor(&mut heap, &[], &mut []);
+        assert!(!gc.as_ref().has_cards());
+    }
+
+    /// Native code's store view of a tracked array keeps loads in place
+    /// and sends stores through the runtime, which marks the card.
+    #[test]
+    fn a_store_view_of_a_tracked_array_is_tracked() {
+        let mut heap = nursery_heap();
+        let (old, _) = tracked_array(&mut heap, TRACKED);
+        let mut view = [0u64; 3];
+        assert_eq!(unsafe { crate::native::coil_native_view(old, 1, view.as_mut_ptr()) }, super::super::VIEW_TRACKED);
+        assert_eq!(unsafe { crate::native::coil_native_view(old, 0, view.as_mut_ptr()) }, super::super::VIEW_PLAIN);
+        assert_eq!(view[1], TRACKED as u64);
+        let small = old_pointer_array(&mut heap, 4);
+        assert_eq!(unsafe { crate::native::coil_native_view(small, 1, view.as_mut_ptr()) }, super::super::VIEW_PLAIN);
+    }
+
+    /// A store into a tracked array that skips its card leaves a young
+    /// object in a clean card: the check names the array and the element.
+    #[test]
+    #[should_panic(expected = "missed card mark: element 300 of a pointer-kind array")]
+    fn the_barrier_check_finds_a_store_that_skipped_its_card() {
+        let mut heap = nursery_heap();
+        heap.heap_checks = true;
+        let (_, mut gc) = tracked_array(&mut heap, TRACKED);
+        let l = cons_list(&mut heap, 2);
+        // Remembered through a marked store elsewhere...
+        gc.as_mut().set(10, Value::from(0i64));
+        // ...and a store in place, as a plain view would make it.
+        let (ptr, _) = gc.as_ref().words_view_for_load().expect("word array");
+        unsafe { ptr.add(300).write(Value::from(l)) };
+        minor(&mut heap, &[], &mut []);
+    }
+
     /// A store that skips the barrier leaves an old object naming a young
     /// one the remembered set does not know: the check at the top of the
     /// next minor names the holder.
@@ -1078,7 +1389,7 @@ mod tests {
         heap.heap_checks = true;
         let old = old_pointer_array(&mut heap, 4);
         assert!(!heap.has_young_in_use(), "the minor left the nursery empty");
-        let mut view = [0u64; 2];
+        let mut view = [0u64; 3];
         let state = unsafe { crate::native::coil_native_view(old, 1, view.as_mut_ptr()) };
         assert_eq!(state, 1, "a word array is viewed in place");
         // The nursery starts again with this allocation; the view is live.
