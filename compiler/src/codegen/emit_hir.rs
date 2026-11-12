@@ -4770,6 +4770,14 @@ impl Compiler {
             if deferred.contains(&local.0) {
                 continue;
             }
+            // Nor when its init packs as a bare-trait existential, whose
+            // local may still carry the init's type: `let s: Named =
+            // Pick::Num(3)` holds the pack's one word (#2322), and so does
+            // each assignment of it, packed in turn (#2719).
+            let e = hir.expr(init);
+            if e.node.is_some_and(|n| self.checker.existential_pack_at(n).is_some()) || self.checker.existential_pack_for_span(e.span.0, e.span.1).is_some() {
+                continue;
+            }
             // An assigned local takes two slots only by the catch-all below
             // (each `=` writes both), and never when an assignment is also
             // a value (`ADJUST`).
@@ -4785,13 +4793,6 @@ impl Compiler {
             // is a pair: `let s: Sum = mk_r(2)` packs a readonly pair class
             // into a trait object (#1562).
             if hir.local(local).ty.as_ref().is_some_and(|t| self.hir_mir_pair_tys(t).is_none()) {
-                continue;
-            }
-            // Nor when its init packs as a bare-trait existential, whose
-            // local may still carry the init's type: `let s: Named =
-            // Pick::Num(3)` holds the pack's one word (#2322).
-            let e = hir.expr(init);
-            if e.node.is_some_and(|n| self.checker.existential_pack_at(n).is_some()) || self.checker.existential_pack_for_span(e.span.0, e.span.1).is_some() {
                 continue;
             }
             if let Some(Rep::Pair(kind)) = emit.plan.calls.get(&init.0).map(Self::hir_call_rep) {
