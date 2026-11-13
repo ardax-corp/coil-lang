@@ -160,7 +160,9 @@ fn counted(body: &HirBody, s: HirId, before: &[HirId]) -> Option<Found> {
         BinOp::Le => k.checked_sub(start)?.checked_add(1)?,
         _ => return None,
     };
-    if !(1..=MAX_TRIPS).contains(&trips) || !plain(body, then, i) {
+    // The copies drop the last trip's bump for `i = start + trips`: past
+    // `int` max (`i <= K`, `K` max) that bump traps, so the loop stays (#2793).
+    if !(1..=MAX_TRIPS).contains(&trips) || start.checked_add(trips).is_none() || !plain(body, then, i) {
         return None;
     }
     let mut size = 0;
