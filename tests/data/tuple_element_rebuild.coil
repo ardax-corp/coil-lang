@@ -1,0 +1,45 @@
+// A tuple cannot be changed in place, nor through one of its elements
+// (#2791): bind the element, change it and build a new tuple. The element
+// is a value, so the change shows in the new tuple and nowhere else.
+use tests::assert;
+
+class C {
+    pub x: int,
+    pub v: Vec<int>,
+}
+
+fn bump(C c) {
+    c.x += 1;
+}
+
+test("a shared element") {
+    let c = new C(1, [0]);
+    let t = (c, 0);
+    let e = t[0];
+    e.x = 9;
+    t = (e, t[1]);
+    assert!(c.x == 1 && t[0].x == 9);
+}
+
+test("a fresh element") {
+    let t = (new C(1, [0]), 7);
+    let e = t[0];
+    e.x += 4;
+    e.v.push(5);
+    t = (e, t[1]);
+    assert!(t[0].x == 5 && t[0].v.len() == 2 && t[1] == 7);
+}
+
+test("through a mutating call") {
+    let c = new C(1, [0]);
+    let t = (0, c);
+    let e = t[1];
+    bump(e);
+    t = (t[0], e);
+    assert!(c.x == 1 && t[1].x == 2);
+}
+
+test("reading an element is unaffected") {
+    let t = (new C(3, [1, 2]), 0);
+    assert!(t[0].x == 3 && t[0].v[1] == 2 && t[0].v.len() == 2);
+}

@@ -1,0 +1,14 @@
+// @expected E0107 — passing a tuple element to a function that writes its
+// parameter changes the tuple, and a tuple cannot be changed in place (#2791).
+class C {
+    pub x: int,
+}
+
+fn bump(C c) {
+    c.x += 1;
+}
+
+fn main() {
+    let t = (new C(1), 0);
+    bump(t[0]);
+}

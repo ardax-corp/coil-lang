@@ -1,0 +1,14 @@
+// @expected E0107 — a store through a tuple a class field holds changes the
+// tuple, and a tuple cannot be changed in place (#2791).
+class C {
+    pub x: int,
+}
+
+class H {
+    pub t: (C, int),
+}
+
+fn main() {
+    let h = new H((new C(1), 0));
+    h.t[0].x = 5;
+}
