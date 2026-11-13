@@ -2104,7 +2104,7 @@ fn walked_write(body: &HirBody, f: &Facts<'_>, w: Write, holding: &HashSet<HirId
 /// iterable's root that leads to it, below it or to an object holding it
 /// (a store into another field of a holder does not), a call that may
 /// write one of those (code not known here counts), or any write through
-/// a borrow of the root. Over a `static`, a write to it or a call that may
+/// a borrow of the root other than the loop's own `for mut` binding. Over a `static`, a write to it or a call that may
 /// write a `static`.
 fn array_walk_written(body: &HirBody, f: &Facts<'_>, id: HirId) -> bool {
     let HirKind::ForIn { iterable, body: lbody, kind: Some(ForInKind::Array), .. } = &body.expr(id).kind else { return false };
@@ -2120,7 +2120,10 @@ fn array_walk_written(body: &HirBody, f: &Facts<'_>, id: HirId) -> bool {
                 if x == r {
                     prefix_of(&steps, &ip) || prefix_of(&ip, &steps)
                 } else {
-                    body.local(x).borrow && aliases(f, body, x, r)
+                    // The loop's own `for mut` binding writes the element it
+                    // is bound to, which the walk has already read.
+                    let own = f.bound.get(&x).is_some_and(|&(_, binder)| binder == id);
+                    !own && body.local(x).borrow && aliases(f, body, x, r)
                 }
             })
     })
