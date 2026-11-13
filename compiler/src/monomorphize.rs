@@ -455,7 +455,7 @@ fn collect_generic_functions(
                                 || crate::layout::nested_fn_var_result(&ty, true, &mut |_| true)
                                 || crate::layout::nested_fn_field(checker, &ty, &crate::layout::nested_open_look(checker))
                         })
-                        || checker.fn_return_ty(name).is_some_and(|ty| crate::layout::nested_fn_in_result(checker, &ty, true));
+                        || checker.fn_declared_return_ty(name).is_some_and(|ty| crate::layout::nested_fn_in_result(checker, &ty, true));
                     sigs.insert(name.to_string(), sig.clone());
                     if !module.is_empty() {
                         sigs.insert(format!("{module}::{name}"), sig);
