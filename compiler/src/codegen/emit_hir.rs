@@ -4024,6 +4024,20 @@ impl Compiler {
                 }
                 let op = crate::hir::build::resolve_bin(sym, exprs[lhs.0 as usize].ty.as_ref(), exprs[rhs.0 as usize].ty.as_ref());
                 exprs[i].kind = HirKind::Bin { op, lhs, rhs };
+                // A `byte` `<<` keeps the low 8 bits, as the builder's
+                // `wrap_byte` makes a ground one do (#2778): the shift moves
+                // to a node of its own, and this one masks it.
+                let byte = exprs[i].ty.as_ref().is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Con(n) if n == crate::typechecking::ty::BYTE));
+                if byte && op == BinOp::Shl {
+                    let shift = crate::hir::HirId(exprs.len() as u32);
+                    exprs.push(exprs[i].clone());
+                    let mask = crate::hir::HirId(exprs.len() as u32);
+                    let mut lit = crate::hir::HirExpr { kind: HirKind::Lit(crate::hir::Lit::Int(255)), ..exprs[i].clone() };
+                    lit.node = None;
+                    exprs.push(lit);
+                    exprs[i].kind = HirKind::Bin { op: BinOp::BitAnd, lhs: shift, rhs: mask };
+                    exprs[i].node = None;
+                }
             }
         }
         // A `resume` or binding `yield` over a type parameter reads, at the
