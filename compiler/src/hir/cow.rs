@@ -1193,21 +1193,29 @@ impl Plan {
         // loop takes a share of it at its start, so the first write copies
         // it once, and the body's writes to it keep their unique on a fresh
         // local too. A parameter written in place for the caller is never
-        // tested before a write: the loop walks an eager copy of it. After
+        // tested before a write: the loop walks an eager copy of it, over a
+        // `Vec` or an array or through an iterator, which would otherwise
+        // hold the object the body writes in place (#2826; a walk that keeps
+        // its iterable stores it, which copies it already). After
         // `fresh_locals`: past the loop its other holder is dead.
         let mut holding = HashSet::new();
         for i in 0..body.exprs.len() {
             let id = HirId(i as u32);
-            if f.order[i] == u32::MAX || !array_walk_written(body, f, id) {
+            if f.order[i] == u32::MAX || !walk_written(body, f, id) {
                 continue;
             }
-            let HirKind::ForIn { iterable, .. } = body.expr(id).kind else { continue };
+            let HirKind::ForIn { iterable, kind, .. } = &body.expr(id).kind else { continue };
+            let iterable = *iterable;
+            let eager = matches!(body.expr(iterable).kind, HirKind::Local(l) if inout.contains(&l));
             if !cow(iterable) {
                 continue;
             }
-            let eager = matches!(body.expr(iterable).kind, HirKind::Local(l) if inout.contains(&l));
-            plan.share.push((iterable, eager));
-            holding.insert(id);
+            if matches!(kind, Some(ForInKind::Array)) {
+                plan.share.push((iterable, eager));
+                holding.insert(id);
+            } else if eager && !f.kept_walks.contains(&id) {
+                plan.share.push((iterable, true));
+            }
         }
 
         // Writes: make each path unique top-down.
@@ -2099,15 +2107,18 @@ fn walked_write(body: &HirBody, f: &Facts<'_>, w: Write, holding: &HashSet<HirId
     false
 }
 
-/// Whether the body of the `for` over a `Vec` or an array at `id` may
-/// write the object it walks (#2827): a write through a path from the
+/// Whether the body of the `for` at `id` over a `Vec`, an array or an
+/// iterator may write the object it walks (#2827): a write through a path from the
 /// iterable's root that leads to it, below it or to an object holding it
 /// (a store into another field of a holder does not), a call that may
 /// write one of those (code not known here counts), or any write through
 /// a borrow of the root other than the loop's own `for mut` binding. Over a `static`, a write to it or a call that may
 /// write a `static`.
-fn array_walk_written(body: &HirBody, f: &Facts<'_>, id: HirId) -> bool {
-    let HirKind::ForIn { iterable, body: lbody, kind: Some(ForInKind::Array), .. } = &body.expr(id).kind else { return false };
+fn walk_written(body: &HirBody, f: &Facts<'_>, id: HirId) -> bool {
+    let HirKind::ForIn { iterable, body: lbody, kind, .. } = &body.expr(id).kind else { return false };
+    if !matches!(kind, Some(ForInKind::Array)) && !iterator_loop(body, id) {
+        return false;
+    }
     let inside = |at: HirId| f.contains(*lbody, at);
     let Some((r, ip)) = place_path(body, f, *iterable) else {
         let Some(HirKind::Global { name, .. }) = f.root_of(*iterable).map(|g| &body.expr(g).kind) else { return false };

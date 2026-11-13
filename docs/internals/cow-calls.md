@@ -232,13 +232,18 @@ shares it), so a write to it in the body copies it and the loop goes on over
 the old object (#2819). A `for` over a `Vec` or an array (`ForInKind::Array`)
 is an index loop that reads the length once and each element from the
 object it started on; where its body may write that object
-(`array_walk_written`: a write whose path from the iterable's root leads to
+(`walk_written`: a write whose path from the iterable's root leads to
 it, below it or to an object holding it, a call that may write one of those,
 code not known here given one, a write through a borrow of the root other
 than the loop's own `for mut` binding; over a `static`, a call that may write
 a `static`), the loop takes a share of its iterable at its start, so the
 first write copies it once (#2827). A parameter written in place for the
-caller is never tested before a write: there the loop walks an eager copy.
+caller (an `inout`) is the caller's place, and its writes are never tested:
+a loop over one whose body writes it walks an eager copy, over a `Vec` or an
+array and through an iterator alike (#2826; before, an iterator over a map
+parameter the body grew found each new entry, and the loop never ended),
+while the writes reach the caller's object. A walk that keeps its iterable
+(`walk_keeps`) stores it, which copies an `inout` already.
 A loop whose body cannot write its iterable takes no share and costs what
 it did (every `examples/` and `examples/perf` archive is unchanged).
 A write in such a loop whose root is the iterable's root keeps its unique on
@@ -269,8 +274,8 @@ borrowed `Vec` is legal, as over a borrowed map. Tests:
 `tests/memory/for_walk_writes_iterable.coil`,
 `tests/memory/for_array_walks_old_value.coil`,
 `tests/memory/compile_fail/borrow_for_*.coil`,
-`tests/memory/compile_fail/capture_borrow_for_*written.coil`. Not covered: a
-walked `inout` parameter of an iterator loop (#2826).
+`tests/memory/compile_fail/capture_borrow_for_*written.coil`,
+`tests/memory/for_walk_inout_param.coil`.
 
 ## After a walk
 
