@@ -1,0 +1,16 @@
+// @expected E0149 — `x` borrows an element of `a` while the loop body
+// stores that element in another vector: the write through `x` would show
+// through `vs[0]` too.
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let a: Vec<C> = [new C(1)];
+    let vs: Vec<C> = Vec::new();
+    for mut x in a {
+        vs.push(a[0]);
+        x.x += 10;
+    }
+    let _ = vs[0].x;
+}
