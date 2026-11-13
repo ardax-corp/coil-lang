@@ -225,18 +225,33 @@ source is a fresh local (below, "After a walk"). Tests:
 
 ## Writing what a `for` walks
 
-A `for` over an iterator (`ForInKind::Custom`: `into_iter`, then `next`)
-walks the value its iterable had when the loop began: the iterator holds
-the collection (`into_iter` stores it, which shares it), so a write to it in
-the body copies it and the loop goes on over the old object (#2819). A
-write in such a loop whose root is the iterable's root keeps its unique on
+Every `for` walks the value its iterable had when the loop began. A `for`
+over an iterator (`ForInKind::Custom`: `into_iter`, then `next`) gets that
+from its iterator, which holds the collection (`into_iter` stores it, which
+shares it), so a write to it in the body copies it and the loop goes on over
+the old object (#2819). A `for` over a `Vec` or an array (`ForInKind::Array`)
+is an index loop that reads the length once and each element from the
+object it started on; where its body may write that object
+(`array_walk_written`: a write whose path from the iterable's root leads to
+it, below it or to an object holding it, a call that may write one of those,
+code not known here given one, a write through a borrow of the root other
+than the loop's own `for mut` binding; over a `static`, a call that may write
+a `static`), the loop takes a share of its iterable at its start, so the
+first write copies it once (#2827). A parameter written in place for the
+caller is never tested before a write: there the loop walks an eager copy.
+A loop whose body cannot write its iterable takes no share and costs what
+it did (every `examples/` and `examples/perf` archive is unchanged).
+A write in such a loop whose root is the iterable's root keeps its unique on
 a fresh local too (`Plan::walked`; `fresh_locals` would skip it), or the
 write would go into the object the loop walks: a user iterator over a
-growing `Vec` never ended.
+growing `Vec` never ended. Past the loop its other holder is dead, so a
+fresh local's later writes still need no test. Bench:
+`examples/perf/cow_walk_write_vec.coil` (one copy per walk).
 
 While a borrow lives, the loop is a second holder of what it walks. A
-`for` over an iterator whose iterable is the borrowed place, one holding
-it, or the borrow itself (`for p in w`), whose body writes what the loop
+`for` (over an iterator, a `Vec` or an array) whose iterable is the borrowed
+place, one holding it, or the borrow itself (`for p in w`), whose body writes
+what the loop
 walks (a path from the source that leads to the walked object or below it,
 any write through the borrow, or a call of a `use (mut a)` closure that
 borrows it), is E0149 at the iterable: a write through the source would
@@ -247,11 +262,15 @@ old object and the borrow's object cannot both be the one value. A walk of
 an object inside the borrowed one (`for p in a.m` while `w = mut a`) is a
 second name below the borrow, which writes make unique first, as for any
 other second name. A walk whose body writes nothing it walks, or one after
-the borrow's last use, is fine. Tests:
+the borrow's last use, is fine; so is a loop's own `for mut` binding, which
+writes the element it is bound to. A `for` over a `Vec` or an array binds
+elements, not a second name for the iterable: a read-only walk over a
+borrowed `Vec` is legal, as over a borrowed map. Tests:
 `tests/memory/for_walk_writes_iterable.coil`,
+`tests/memory/for_array_walks_old_value.coil`,
 `tests/memory/compile_fail/borrow_for_*.coil`,
-`tests/memory/compile_fail/capture_borrow_for_written.coil`. Not covered: a
-walked `inout` parameter (#2826) and a `for` over a `Vec` (#2827).
+`tests/memory/compile_fail/capture_borrow_for_*written.coil`. Not covered: a
+walked `inout` parameter of an iterator loop (#2826).
 
 ## After a walk
 
@@ -296,7 +315,7 @@ captures the collection or keeps an element, an iterator that keeps what
 it walks elsewhere, `break` / `return`, a generator suspended mid-walk, a
 task that panics mid-walk with a `defer`). Benches:
 `examples/perf/cow_walk_grow_map.coil`, `cow_walk_grow_vec.coil` (the
-control: a `Vec` walk is an index loop and shares nothing).
+control: a read-only `Vec` walk is an index loop and shares nothing).
 
 ## Casts
 
