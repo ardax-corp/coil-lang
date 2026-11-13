@@ -1,0 +1,34 @@
+// `byte` orders through a `T: Ord` bound in the shared body too: its builtin
+// `Lt` / `Le` / `Gt` / `Ge` instances have entries (#2777).
+use tests::assert;
+
+fn lt<T: Ord>(T a, T b) -> bool {
+    return a < b;
+}
+
+fn ordered<T: Ord>(T a, T b) -> (bool, bool, bool, bool) {
+    return (a < b, a <= b, a > b, a >= b);
+}
+
+fn largest<T: Ord>(Vec<T> xs) -> T {
+    let best = xs[0];
+    for x in xs {
+        if x > best {
+            best = x;
+        }
+    }
+    return best;
+}
+
+test("two bytes compare through a bound") {
+    let small: byte = 1;
+    let big: byte = 200;
+    assert!(lt(small, big) && !lt(big, small) && !lt(big, big));
+    assert!(ordered(small, big) == (true, true, false, false));
+    assert!(ordered(big, big) == (false, true, false, true));
+}
+
+test("the largest byte of a vector") {
+    let xs: Vec<byte> = [3, 255, 0, 128];
+    assert!(largest(xs) == 255);
+}

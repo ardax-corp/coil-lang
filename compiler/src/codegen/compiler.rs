@@ -4633,11 +4633,14 @@ impl Compiler {
                 self.emit_builtin_entry(&fqn, &params, boolean.clone(), false, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
-        // `string` orders by its UTF-8 bytes (coil-stdlib#48).
-        let params = [(string.clone(), true), (string.clone(), true)];
-        for (class, method, op) in [("Lt", "lt", BinOp::Lt), ("Le", "le", BinOp::Le), ("Gt", "gt", BinOp::Gt), ("Ge", "ge", BinOp::Ge)] {
-            let fqn = Generics::builtin_instance_fqn(class, "string", method);
-            self.emit_builtin_entry(&fqn, &params, boolean.clone(), false, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
+        // `string` orders by its UTF-8 bytes (coil-stdlib#48), a `byte` as
+        // its int word (#2777).
+        for (ty, word) in [("string", &string), ("byte", &int)] {
+            let params = [(word.clone(), true), (word.clone(), true)];
+            for (class, method, op) in [("Lt", "lt", BinOp::Lt), ("Le", "le", BinOp::Le), ("Gt", "gt", BinOp::Gt), ("Ge", "ge", BinOp::Ge)] {
+                let fqn = Generics::builtin_instance_fqn(class, ty, method);
+                self.emit_builtin_entry(&fqn, &params, boolean.clone(), false, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
+            }
         }
         // `()` is always `()` (#1450): its operands, taken as the `Show`
         // thunk takes a unit, are never read.
