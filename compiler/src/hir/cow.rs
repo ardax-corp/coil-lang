@@ -1307,7 +1307,9 @@ impl Plan {
     /// - an argument a call writes in place while another argument of the
     ///   call is the object or one holding it, or the argument is in a
     ///   `static` and the call may read one: the path from its root pinned
-    ///   for the call, so what the callee keeps of the holder is a copy.
+    ///   for the call, and the holder argument shared there, so the callee's
+    ///   holder is a copy taken at the call (what it reads or keeps of it
+    ///   never shows its in-place write).
     ///
     /// A pin left set where an exit is not found costs copies, not values.
     fn pins(&mut self, checker: &Checker, body: &HirBody, f: &Facts<'_>) {
@@ -1355,17 +1357,34 @@ impl Plan {
                     continue;
                 }
                 let Some(chain) = pin_chain(body, v) else { continue };
-                let reached = match &body.expr(chain[0]).kind {
-                    HirKind::Global { .. } => f.static_calls.contains(&c),
-                    _ => place_path(body, f, v).is_some_and(|(root, steps)| {
-                        args.iter().enumerate().any(|(k, &b)| {
+                // The other arguments that are the object or hold it, which
+                // the callee does not write: each takes a copy at the call
+                // (a share of the pinned path), as its parameter is a value
+                // of its own. One the callee writes too stays as it is.
+                let holders: Vec<HirId> = match place_path(body, f, v) {
+                    Some((root, steps)) => args
+                        .iter()
+                        .enumerate()
+                        .filter(|&(k, &b)| {
                             let w = named_value(body, b);
-                            k != j && may_hold_objects(body.expr(w).ty.as_ref()) && place_path(body, f, w).is_some_and(|(r, s)| r == root && prefix_of(&s, &steps))
+                            k != j
+                                && k < 64
+                                && u.written & (1 << k) == 0
+                                && cow_ty(checker, body.expr(w).ty.as_ref())
+                                && place_path(body, f, w).is_some_and(|(r, s)| r == root && prefix_of(&s, &steps))
                         })
-                    }),
+                        .map(|(_, &b)| named_value(body, b))
+                        .collect(),
+                    None => Vec::new(),
                 };
+                let reached = !holders.is_empty() || (matches!(body.expr(chain[0]).kind, HirKind::Global { .. }) && f.static_calls.contains(&c));
                 if reached {
                     self.pin_paths.push((f.statement_of(c), chain));
+                    for w in holders {
+                        if !self.share.iter().any(|&(x, _)| x == w) {
+                            self.share.push((w, false));
+                        }
+                    }
                 }
             }
         }
