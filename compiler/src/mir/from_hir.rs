@@ -2145,14 +2145,24 @@ impl Lower<'_> {
     }
 
     /// `local` is a `for mut` binding of an array's object items at a
-    /// ground type, which the loop makes unique in place (#2782). An open
-    /// type's or an existential's item keeps the one word it has.
+    /// ground type, which the loop makes unique in place (#2782). An
+    /// existential's item keeps the one word it has; an open type's is
+    /// [`Self::for_mut_open_item`].
     fn for_mut_item(&self, local: HirLocal, elem: MirTy, array: bool) -> bool {
         let l = self.hir.local(local);
         array
             && l.borrow
             && elem == MirTy::HeapRef
             && l.ty.as_ref().map(strip_readonly).is_some_and(|t| !is_var(t) && !is_var_app(t) && !matches!(t, Ty::Existential { .. }))
+    }
+
+    /// The `kinds` bit of a `for mut` binding of an array's items at an
+    /// open type in a shared body, whose loop makes an item unique in place
+    /// where the bit says the type is an object (#2836).
+    fn for_mut_open_item(&self, local: HirLocal, elem: MirTy, array: bool) -> Option<(ValueId, u32)> {
+        let l = self.hir.local(local);
+        let ty = l.ty.as_ref().filter(|t| is_var(t) || is_var_app(t))?;
+        (array && l.borrow && matches!(elem, MirTy::I64 | MirTy::HeapRef)).then(|| self.kinds_bit(ty)).flatten()
     }
 
     /// A local of a two-word type that HIR emission keeps boxed in one slot.
@@ -3771,7 +3781,7 @@ impl Lower<'_> {
                     && matches!(self.b.value_ty(v), MirTy::I64 | MirTy::HeapRef)
                     && let Some(bit) = self.expr_ty(*inner).cloned().and_then(|t| self.kinds_bit(&t))
                 {
-                    return Ok(Val::V(self.guarded_cow(id, v, *unique, bit)?));
+                    return Ok(Val::V(self.guarded_cow(id, v, *unique, bit, None)?));
                 }
                 if self.b.value_ty(v) != MirTy::HeapRef || open {
                     return Ok(Val::V(v));
@@ -5660,8 +5670,17 @@ impl Lower<'_> {
 
     /// Copy-on-write op `unique` on word `v` of a type parameter whose
     /// `kinds` bit is `bit` of `kinds`: the op where the bit is set (the
-    /// word is an object), the word as it is where it is clear.
-    fn guarded_cow(&mut self, id: HirId, v: ValueId, unique: bool, (kinds, bit): (ValueId, u32)) -> Result<ValueId, Refusal> {
+    /// word is an object), the word as it is where it is clear. A unique's
+    /// word is stored back at `item`'s array and index (pinned or not)
+    /// where the op ran.
+    fn guarded_cow(
+        &mut self,
+        id: HirId,
+        v: ValueId,
+        unique: bool,
+        (kinds, bit): (ValueId, u32),
+        item: Option<(ValueId, ValueId, bool)>,
+    ) -> Result<ValueId, Refusal> {
         let ty = self.b.value_ty(v);
         let m = self.b.ins_const(MirConst::I64((1u64 << bit) as i64)).map_err(mir)?;
         let set = self.b.ins_binop(MirBinOp::BitAnd, kinds, m).map_err(mir)?;
@@ -5683,6 +5702,9 @@ impl Lower<'_> {
         }
         let out = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
         let out = self.b.ins_word_as(out, ty).map_err(mir)?;
+        if let Some((arr, index, pinned)) = item {
+            self.b.ins_store_index(arr, index, out, pinned).map_err(mir)?;
+        }
         let op_from = self.cur;
         self.jump(join)?;
         self.switch(skip);
@@ -8148,7 +8170,8 @@ impl Lower<'_> {
         match (pat, parts) {
             (HirPat::Bind(local), _) if self.unit_local(*local) => {}
             (HirPat::Bind(local), _) => {
-                let item = if self.for_mut_item(*local, elem, into_iter.is_none() && matches!(items, Items::Array)) {
+                let array = into_iter.is_none() && matches!(items, Items::Array);
+                let item = if self.for_mut_item(*local, elem, array) {
                     // `for mut c in xs`: `c` names the item in `xs`, which
                     // the plan made unique before the loop; an item another
                     // name still shares is copied and stored back first, so
@@ -8157,6 +8180,10 @@ impl Lower<'_> {
                     let own = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![own]).map_err(mir)?;
                     self.b.ins_store_index(arr, cur, own, pinned).map_err(mir)?;
                     own
+                } else if let Some(bit) = self.for_mut_open_item(*local, elem, array) {
+                    // The same in a shared body, where the `kinds` bit says
+                    // the item is an object (#2836).
+                    self.guarded_cow(id, item, true, bit, Some((arr, cur, pinned)))?
                 } else {
                     item
                 };
