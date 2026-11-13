@@ -370,8 +370,10 @@ control: a read-only `Vec` walk is an index loop and shares nothing).
 
 ## Pinned objects
 
-The runtime has a second header bit beside the shared flag, the pin
-(`GcHeader::pinned`, archive 8.2). A pinned object is one some name writes
+The runtime has a second copy-on-write bit, the pin (archive 8.2): the
+high bit of a class instance's or an array's kind byte (`COW_PIN_BIT`), so
+the inline share's kind compares miss a pinned object and an unpinned share
+costs what it did. A pinned object is one some name writes
 in place without a test while the pin lasts (an `inout` parameter, a
 borrow), so it must never be shared: `Heap::cow_share` gives a pinned
 object's share a copy instead of setting its flag (native code's inline
@@ -385,7 +387,7 @@ was made: the shared flag's rule with the copy moved to the share.
 Two MIR ops set and clear it: `CowPin { dest, src }` gives whether the
 object was pinned and pins it; `CowUnpin { dest, src, saved }` clears it
 when `saved`, the `CowPin`'s result, is `false`, so pins nest. Both are
-header bytes and allocate nothing; for a word that is no class instance or
+header byte writes and allocate nothing; for a word that is no class instance or
 array (null, another kind) `CowPin` gives `false` and `CowUnpin` does
 nothing. A pin left set is never wrong: it costs a copy at each later
 share. Nothing emits them yet (#2842 step 1). `Gc::recycle` clears the bit;

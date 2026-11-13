@@ -3701,14 +3701,16 @@ impl<'a> Lower<'a> {
             // class instance or an array, the objects `Heap::cow_share`
             // marks; anything else (null, a tagged word's object of another
             // kind) is left as it is, as the helper leaves it. A pinned
-            // object (archive 8.2) is never marked: the cold path calls the
-            // helper, which hands back a copy of it for the new name.
+            // object (archive 8.2) carries `COW_PIN_BIT` in its kind byte, so
+            // the same compares miss it: only then does the share test the
+            // bit, and call the helper, which hands back a copy of it for
+            // the new name. An unpinned share runs what it ran before.
             MirInst::Cow { dest, src, unique: false, field: None } => {
                 let s = self.get(f, *src);
                 let s = self.coerce(s, types::I64);
                 let flags = MemFlagsData::trusted();
                 let o = self.b.ins().band_imm_u(s, !1i64);
-                let (check, test, mark, copy, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+                let (check, mark, other, copy, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
                 let word = self.b.append_block_param(join, types::I64);
                 self.b.ins().brif(o, check, &[], join, &[s.into()]);
                 self.b.switch_to_block(check);
@@ -3716,14 +3718,14 @@ impl<'a> Lower<'a> {
                 let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
                 let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
                 let either = self.b.ins().bor(inst, arr);
-                self.b.ins().brif(either, test, &[], join, &[s.into()]);
-                self.b.switch_to_block(test);
-                let pinned = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
-                self.b.ins().brif(pinned, copy, &[], mark, &[]);
+                self.b.ins().brif(either, mark, &[], other, &[]);
                 self.b.switch_to_block(mark);
                 let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_SHARED_SET));
                 self.b.ins().store(flags, set, o, machine::COW_SHARED_OFFSET);
                 self.b.ins().jump(join, &[s.into()]);
+                self.b.switch_to_block(other);
+                let pinned = self.b.ins().band_imm_u(k, i64::from(machine::COW_PIN_BIT));
+                self.b.ins().brif(pinned, copy, &[], join, &[s.into()]);
                 self.b.set_cold_block(copy);
                 self.b.switch_to_block(copy);
                 let share = self.b.ins().iconst(types::I64, 0);
@@ -3735,8 +3737,8 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, word);
                 self.view_of(f, *dest);
             }
-            // The pin is a header byte beside the shared flag, set for a class
-            // instance or an array only, as a share marks only those.
+            // The pin is the high bit of a class instance's or an array's
+            // kind byte (`COW_PIN_BIT`), as a share marks only those.
             MirInst::CowPin { dest, src } => {
                 let s = self.get(f, *src);
                 let s = self.coerce(s, types::I64);
@@ -3748,14 +3750,16 @@ impl<'a> Lower<'a> {
                 self.b.ins().brif(o, check, &[], join, &[zero.into()]);
                 self.b.switch_to_block(check);
                 let k = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_KIND_OFFSET);
-                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
-                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
+                let kind = self.b.ins().band_imm_u(k, i64::from(!machine::COW_PIN_BIT));
+                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, kind, i64::from(machine::KIND_INSTANCE));
+                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, kind, i64::from(machine::KIND_ARRAY));
                 let either = self.b.ins().bor(inst, arr);
                 self.b.ins().brif(either, pin, &[], join, &[zero.into()]);
                 self.b.switch_to_block(pin);
-                let p = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
-                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_PINNED_SET));
-                self.b.ins().store(flags, set, o, machine::COW_PINNED_OFFSET);
+                let p = self.b.ins().ushr_imm_u(k, 7);
+                let on = self.b.ins().bor_imm_u(k, i64::from(machine::COW_PIN_BIT));
+                let on = self.b.ins().ireduce(types::I8, on);
+                self.b.ins().store(flags, on, o, machine::HEADER_KIND_OFFSET);
                 self.b.ins().jump(join, &[p.into()]);
                 self.b.switch_to_block(join);
                 self.set(f, *dest, was);
@@ -3773,13 +3777,14 @@ impl<'a> Lower<'a> {
                 self.b.ins().brif(o, check, &[], join, &[]);
                 self.b.switch_to_block(check);
                 let k = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_KIND_OFFSET);
-                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
-                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
+                let kind = self.b.ins().band_imm_u(k, i64::from(!machine::COW_PIN_BIT));
+                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, kind, i64::from(machine::KIND_INSTANCE));
+                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, kind, i64::from(machine::KIND_ARRAY));
                 let either = self.b.ins().bor(inst, arr);
                 self.b.ins().brif(either, unpin, &[], join, &[]);
                 self.b.switch_to_block(unpin);
-                let clear = self.b.ins().iconst(types::I8, 0);
-                self.b.ins().store(flags, clear, o, machine::COW_PINNED_OFFSET);
+                let off = self.b.ins().ireduce(types::I8, kind);
+                self.b.ins().store(flags, off, o, machine::HEADER_KIND_OFFSET);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
                 let zero = self.b.ins().iconst(types::I64, 0);

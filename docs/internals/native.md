@@ -469,13 +469,17 @@ which also counts the share for `--cow-report`'s summary line; native code's
 inline shares are not in that count (the copies are).
 
 A pinned object (archive 8.2, [cow-calls.md](cow-calls.md), "Pinned objects") is
-never marked: after the kind byte the share loads the pin at `COW_PINNED_OFFSET`
-and, when it is set, branches to a cold block that calls `coil_native_cow`, whose
-copy is the share's result. That helper allocates and never collects, so the share
-stays no GC edge and allocates nothing as far as the body's `OpProps` go: a copy
-it makes is counted, and the next safepoint collects. `CowPin` and `CowUnpin`
-are inline byte operations on the same header byte, for a class instance or an
-array only (null and other kinds: `CowPin` gives `0`, `CowUnpin` does nothing).
+never marked. The pin is the high bit of the kind byte (`COW_PIN_BIT`), so the
+share's two compares miss a pinned instance or array, and an unpinned share runs
+exactly what it ran before; only on that miss does the share test the bit and, when
+it is set, branch to a cold block that calls `coil_native_cow`, whose copy is the
+share's result. That helper allocates and never collects, so the share stays no GC
+edge and allocates nothing as far as the body's `OpProps` go: a copy it makes is
+counted, and the next safepoint collects. `CowPin` and `CowUnpin` set and clear the
+bit inline, for a class instance or an array only (null and other kinds: `CowPin`
+gives `0`, `CowUnpin` does nothing). Every runtime reader of the kind byte masks
+the bit off (`Object::from_header`); the nursery's and the sweeper's `kind != 0`
+tests and the function-value check (kind 12) need no mask.
 
 In-place stores are compiled only into release builds without `gc-stress`
 (`ProductSlots::inline_stores`): debug and `gc-stress` builds check epoch writes in

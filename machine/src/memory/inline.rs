@@ -253,8 +253,9 @@ pub fn layout_fingerprint() -> u64 {
     product_slots().hash(&mut h);
     // The inline share (#2506).
     (super::HEADER_KIND_OFFSET, super::COW_SHARED_OFFSET, super::COW_SHARED_SET, super::KIND_ARRAY).hash(&mut h);
-    // The pin the inline share tests, and `CowPin` / `CowUnpin` write.
-    (super::COW_PINNED_OFFSET, super::COW_PINNED_SET).hash(&mut h);
+    // The pin bit of the kind byte the inline share compares, which
+    // `CowPin` / `CowUnpin` set and clear.
+    super::COW_PIN_BIT.hash(&mut h);
     // The store view protocol (#2687): code built for plain views only
     // would store in place into an array with a card table.
     (super::VIEW_PLAIN, super::VIEW_TRACKED, super::CARD_SHIFT, super::CARD_MIN_WORDS).hash(&mut h);

@@ -98,8 +98,9 @@ Minor 2 (#2842 step 1) adds the copy-on-write pin, additively: MIR section
 whether the object was pinned, and the op pins it) and `CowUnpin` (tag 50: dest,
 src, saved; clears the pin when `saved` is `false`). Its layout is format 17's
 otherwise, and the reader takes 17 and 16 too; a format 17 or 16 section that holds
-tag 49 or 50 is refused. The pin is a byte of the heap header beside the shared flag
-(`machine::COW_PINNED_OFFSET`), in what was padding: no slot grows. A share of a
+tag 49 or 50 is refused. The pin is the high bit of the heap header's kind byte
+(`machine::COW_PIN_BIT`): the header does not change, and native code's inline
+share runs what it ran before for an unpinned object. A share of a
 pinned object hands out a copy instead of setting the shared flag, and a copy's
 pinned children are copied for it ([cow-calls.md](cow-calls.md), "Pinned objects").
 The AOT layout fingerprint covers the pin's offset, so an object built against the
