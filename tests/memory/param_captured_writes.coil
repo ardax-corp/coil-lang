@@ -69,6 +69,16 @@ fn nested_capture(C p) -> int {
     return outer();
 }
 
+fn closure_writes_its_copy(C p) -> int {
+    let f = fn () use (p) {
+        p.x += 5;
+        return p.x;
+    };
+    let first = f();
+    p.x += 100;
+    return first * 1000 + f();
+}
+
 fn deferred_copy(C p) -> int {
     let r = 0;
     {
@@ -119,6 +129,12 @@ test("a capture in a loop copies the value of its own pass") {
 test("a nested capture of a parameter") {
     let a = new C(1, Vec::new());
     assert!(nested_capture(a) == 1);
+    assert!(a.x == 101);
+}
+
+test("a closure writing its copy of a parameter starts from that copy on each call") {
+    let a = new C(1, Vec::new());
+    assert!(closure_writes_its_copy(a) == 6006);
     assert!(a.x == 101);
 }
 
