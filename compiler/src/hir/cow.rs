@@ -2399,14 +2399,18 @@ impl Plan {
             let stmt = unique_stmt(out, read, span);
             before.add(at, stmt);
         }
-        // `let $cap = unique(share(p))` before the lambda, which captures
-        // `$cap` in place of `p`: every new name is the result of a share.
+        // `let $cap = share(unique(share(p)))` before the lambda, which
+        // captures `$cap` in place of `p`: every new name is the result of a
+        // share. The copy is shared in turn, as any capture is: a write in
+        // the closure's body copies it, so the closure's own value never
+        // changes between calls.
         let mut moved = Vec::new();
         for &(at, inner, l) in &self.copy_before {
             let span = span_of(out, at.1);
             let ty = out.local(l).ty.clone();
             let shared = share_local(out, l, span);
             let copy = out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![shared] }, ty.clone(), span);
+            let copy = out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: false }, args: vec![copy] }, ty.clone(), span);
             let name = format!("$cap{}", out.locals.len());
             let t = out.temp_named(name, ty);
             out.locals[t.0 as usize].captured = true;
