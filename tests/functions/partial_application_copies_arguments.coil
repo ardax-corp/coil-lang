@@ -1,0 +1,67 @@
+// A partial application holds the values it was given, as a lambda's
+// `use (x)` capture does: a later write to the argument, or to a method
+// call's receiver, does not reach the partial (#2788).
+use tests::assert;
+
+class Q {
+    pub k: int,
+}
+
+impl Q {
+    pub fn m(int a, int b) -> int {
+        return self.k * 100 + a * 10 + b;
+    }
+
+    pub static fn s(Q q, int a) -> int {
+        return q.k * 10 + a;
+    }
+}
+
+fn g(Q q, int a) -> int {
+    return q.k * 10 + a;
+}
+
+fn h(Vec<int> v, int a) -> int {
+    return v.len() * 10 + a;
+}
+
+fn bump(Q q) {
+    q.k += 1;
+}
+
+test("a class argument") {
+    let q = new Q(5);
+    let p = g(q);
+    q.k = 6;
+    assert!(p(1) == 51 && q.k == 6);
+}
+
+test("a vector argument") {
+    let v: Vec<int> = [1];
+    let p = h(v);
+    v.push(2);
+    assert!(p(1) == 11 && v.len() == 2);
+}
+
+test("a method's receiver") {
+    let q = new Q(5);
+    let one = q.m(1);
+    let none = q.m();
+    q.k = 6;
+    assert!(one(2) == 512 && none(1, 2) == 512);
+}
+
+test("a static method's argument") {
+    let q = new Q(5);
+    let p = Q::s(q);
+    bump(q);
+    assert!(p(3) == 53 && q.k == 6);
+}
+
+test("the argument is unchanged by a write through the other name") {
+    let q = new Q(5);
+    let r = q;
+    let p = g(q);
+    r.k = 9;
+    assert!(p(0) == 50 && q.k == 5);
+}
