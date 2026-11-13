@@ -5248,12 +5248,16 @@ impl Compiler {
             }
             param_tys.iter().enumerate().filter(|&(i, _)| mask & (1 << i) != 0).map(|(_, ty)| ty.clone()).collect()
         };
+        // Each filled parameter is one word in the closure, as the function
+        // takes it once it has a value (`fn_value_escape`): an enum's niche
+        // word or its box (#2789), a two-word product boxed (#2790), `()`
+        // the empty tuple object, as any argument passes it.
         let mut params = Vec::with_capacity(filled.len());
         for ty in &filled {
             match classify::classify(&self.checker, ty) {
-                Some(ValueClass::Enum) | None => return Err("callee-partial"),
-                Some(class) if classify::is_word(class) => params.push(self.value_layout(ty)),
-                Some(_) => return Err("callee-partial"),
+                Some(ValueClass::Unit) => params.push(ValueLayout::Boxed),
+                Some(_) => params.push(self.value_layout(ty)),
+                None => return Err("callee-partial"),
             }
         }
         let ty = Self::hir_ty(hir, call).ok_or("call-type")?;

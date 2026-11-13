@@ -446,7 +446,10 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   the value, so every module's direct calls and values agree), static
   methods and inherent instance methods; a partial application's closure
   (`f(a)`, `recv.m()`) targets the adapter as well, so a call through it
-  that reads two words enters the function. A method's adapter takes its
+  that reads two words enters the function. The closure holds each filled
+  argument as the one-word ABI takes it: a two-word one boxed (#2790), an
+  enum its niche word or its box, `()` the empty tuple object (#2789). A
+  method's adapter takes its
   receiver first, as the method does (#2333). A static method's value
   (a bare `Owner::m`, #2746) is poisoned by the walk and targets the
   adapter as a free function's name does.
