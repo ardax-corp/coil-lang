@@ -2736,7 +2736,60 @@ fn walk<T>(T x) {
         .iter()
         .find(|m| m.message().contains("is not iterable"))
         .expect("expected a not-iterable reject");
-    assert_eq!(msg.message(), "type `T` is not iterable");
+    assert_eq!(msg.message(), "type parameter `T` is not iterable: a `for` over it needs a bound `T: Iterator`");
+}
+
+/// A `for` over a type parameter is never the one instance in scope
+/// (#2820): with no `Iterator` bound it says so, and over an `IntoIterator`
+/// bound it says why that bound is not enough.
+#[test]
+fn for_over_type_param_never_picks_the_only_instance() {
+    let src = r#"
+class Up {
+    pub i: int,
+}
+
+impl Iterator for Up {
+    type Item = int;
+    fn next(Up u) -> Option<int> {
+        return None;
+    }
+}
+
+class Bag {
+    pub i: int,
+}
+
+impl IntoIterator for Bag {
+    type Item = int;
+    type IntoIter = Up;
+    fn into_iter(Bag b) -> Up {
+        return new Up(b.i);
+    }
+}
+
+fn walk<T>(T x) {
+    for y in x { }
+}
+
+fn walk_into<T: IntoIterator>(T x) {
+    for y in x { }
+}
+
+fn walk_iter<I: Iterator>(I x) -> int {
+    let n = 0;
+    for y in x {
+        n += 1;
+    }
+    return n;
+}
+"#;
+    let (c, _) = check(src);
+    let texts: Vec<&str> = c.messages().iter().map(|m| m.message()).collect();
+    assert!(texts.iter().all(|t| !t.contains("is used as")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("type parameter `T` is not iterable")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("a `for` over `T` (bounded by `IntoIterator`) is not supported")), "{texts:?}");
+    assert_eq!(texts.len(), 2, "{texts:?}");
 }
 
 /// `use prelude::Option as …` does not free `Option` for a user type, so the

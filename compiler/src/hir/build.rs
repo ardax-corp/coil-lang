@@ -29,7 +29,7 @@ use super::{
     HirLocal, HirModule, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span,
     UnOp,
 };
-use crate::typechecking::infer::{Checker, TypedSidecar};
+use crate::typechecking::infer::{Checker, ForInKind, TypedSidecar};
 use crate::typechecking::def_id::{DefId, DefKind};
 use crate::typechecking::ty::{
     self as coil_ty, Ty, is_option_ty, option_inner, result_ok_err, result_ty, strip_readonly,
@@ -2733,12 +2733,45 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             stmts.push(body);
             body = self.synth(b, span, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()));
         }
+        if matches!(info.as_ref().map(|i| &i.kind), Some(ForInKind::Bound)) {
+            return self.bound_for_in(b, node, pat, iter, body, item_ty);
+        }
         self.emit_ty(
             b,
             node,
             HirKind::ForIn { pat, iterable: iter, body, kind: info.map(|i| i.kind) },
             Some(coil_ty::unit()),
         )
+    }
+
+    /// `for pat in it` over a type parameter's `Iterator` bound (#2820):
+    /// `loop { match it.next() { Some(pat) => body, _ => break } }`, the
+    /// `next` a dictionary call the checker recorded at the iterable's span.
+    /// A local iterable is the iterator the loop advances, as in a `for`
+    /// over any iterator; another value is bound to a temporary first.
+    fn bound_for_in(&mut self, b: &mut BodyBuilder, node: &Output<'_>, pat: HirPat, iter: HirId, body: HirId, item_ty: Option<Ty>) -> HirId {
+        let span = b.body.expr(iter).span;
+        let it_ty = self.ty_at(b, iter);
+        let mut stmts = Vec::new();
+        let it = match b.body.expr(iter).kind {
+            HirKind::Local(l) => l,
+            _ => {
+                let t = b.temp("for$it", it_ty.clone());
+                stmts.push(self.synth(b, span, HirKind::Let { local: t, init: Some(iter) }, Some(coil_ty::unit())));
+                t
+            }
+        };
+        let recv = self.synth(b, span, HirKind::Local(it), it_ty);
+        let opt = item_ty.map(coil_ty::option_ty);
+        let next = self.synth(b, span, HirKind::Call { callee: Callee::Method { name: "next".to_string() }, args: vec![recv] }, opt);
+        let stop = self.synth(b, span, HirKind::Break, Some(coil_ty::never()));
+        let arms = vec![
+            HirArm { pat: self.variant_pat(common::BUILTIN_OPTION_ENUM, "Some", HirPatFields::Tuple(vec![pat])), body },
+            HirArm { pat: HirPat::Wild, body: stop },
+        ];
+        let step = self.synth(b, span, HirKind::Match { scrutinee: next, arms }, Some(coil_ty::unit()));
+        stmts.push(self.synth(b, span, HirKind::Loop { body: step }, Some(coil_ty::unit())));
+        self.emit_ty(b, node, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()))
     }
 
     fn return_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, value: &Output<'_>) -> HirId {
