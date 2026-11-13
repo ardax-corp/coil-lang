@@ -131,6 +131,7 @@ impl Checker {
             module_item_names: HashMap::new(),
             import_locals: HashMap::new(),
             imported_enum_keys: HashMap::new(),
+            imported_class_keys: HashMap::new(),
             module_class_names: HashMap::new(),
             module_trait_names: Default::default(),
             def_interner,
@@ -1850,6 +1851,7 @@ impl Checker {
         self.unresolved_imports.clear();
         self.import_locals.clear();
         self.imported_enum_keys.clear();
+        self.imported_class_keys.clear();
         self.local_defs.clear();
         self.def_ids_by_node.clear();
         self.in_bounds_index.clear();
@@ -16755,8 +16757,9 @@ impl Checker {
     }
 
     /// Bind `use m::{Alias}` to another module's type alias, as the qualified
-    /// `m::Alias` resolves (`qualified_type_aliases`), and `use m::{E}` to
-    /// another module's enum (`imported_enum_keys`, #1947).
+    /// `m::Alias` resolves (`qualified_type_aliases`), `use m::{E}` to
+    /// another module's enum (`imported_enum_keys`, #1947) and `use m::{C}`
+    /// to another module's class (`imported_class_keys`, #2780).
     fn import_type_aliases(&mut self, node: &Output) {
         match node.1.as_ref() {
             Expression::Statement(inner)
@@ -16780,6 +16783,8 @@ impl Checker {
                     self.generic_aliases.insert(local, def);
                 } else if self.enum_tags.contains_key(&fqn) {
                     self.imported_enum_keys.insert(local, fqn);
+                } else if self.classes.contains_key(&fqn) {
+                    self.imported_class_keys.insert(local, fqn);
                 }
             }
             _ => {}
@@ -20832,6 +20837,14 @@ impl Checker {
         let qualified = self.qualify_module_name(name);
         if qualified != name && self.classes.contains_key(&qualified) {
             return Some(qualified);
+        }
+        // Another module's class under its `use` name, before the `use`
+        // binds it (an entry module's enum payload, #2780).
+        if let Some(key) = self.imported_class_keys.get(name)
+            && self.classes.contains_key(key)
+            && self.env.lookup(name).is_none()
+        {
+            return Some(key.clone());
         }
         let scheme = self.env.lookup(name)?;
         let n = Self::class_name_of_ty(&scheme.ty)?;

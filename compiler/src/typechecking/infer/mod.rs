@@ -231,6 +231,10 @@ pub struct Checker {
     /// before enums are registered so a payload type that names one resolves
     /// to it (#1947).
     imported_enum_keys: HashMap<String, String>,
+    /// Local name -> class key of every `use` of another module's class,
+    /// bound before enums are registered so a payload type that names one
+    /// resolves to it, as a field type does (#2780).
+    imported_class_keys: HashMap<String, String>,
     /// Every top-level class and enum name of the current file -> its number of type
     /// parameters, collected before any signature or enum payload is parsed:
     /// a forward reference to one is the module's own `m::Name` before the
