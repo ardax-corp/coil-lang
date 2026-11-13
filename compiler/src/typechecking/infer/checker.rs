@@ -2716,6 +2716,7 @@ impl Checker {
                 | Expression::BitOr(..)
                 | Expression::Negate(_)
                 | Expression::Positive(_)
+                | Expression::NamedArg(..)
         ) || matches!(expr.1.as_ref(), Expression::Fragment(items) if items.len() == 1)
     }
 
@@ -4555,7 +4556,7 @@ impl Checker {
                         let name = name.clone();
                         self.check_borrow_arg(&class_name, &name, arg);
                     }
-                    let aty = self.infer(arg);
+                    let aty = self.infer_expecting(arg, fty);
                     // A `forall` field takes a value as a `forall`
                     // parameter does: made at that type (#2725).
                     if matches!(strip_readonly(&apply_ty_prune(&self.subst, fty)), Ty::Forall { .. }) {
@@ -4642,7 +4643,10 @@ impl Checker {
                     (slot, arg)
                 }
             };
-            let aty = self.infer(arg);
+            let aty = match slot {
+                Some(k) => self.infer_expecting(arg, &field_tys[k]),
+                None => self.infer(arg),
+            };
             arg_slots.extend(slot);
             match slot {
                 Some(k) => {
@@ -9613,11 +9617,6 @@ impl Checker {
     /// `None` leaves it to plain unification.
     fn coerce_construct_payload(&mut self, expected: &Ty, node: &Output, context: &str) -> Option<Ty> {
         let Ty::App(_, targs) = expected else { return None };
-        // A trait object at any depth of a payload (`Option<(Tr, int)>`,
-        // #2726).
-        if !targs.iter().any(has_existential) {
-            return None;
-        }
         let Expression::Construct {
             enum_name,
             variant_name,
@@ -9626,6 +9625,13 @@ impl Checker {
         else {
             return None;
         };
+        // A trait object at any depth of a payload (`Option<(Tr, int)>`,
+        // #2726), or an array literal the payload's `Vec` is built from
+        // (`f(Option::Some([1, 2]))`, #2781).
+        let literal = args.iter().any(|a| matches!(unwrap_expr_wrappers(a).1.as_ref(), Expression::Array(items) if !items.is_empty()));
+        if !targs.iter().any(has_existential) && !literal {
+            return None;
+        }
         let enum_str = self.resolve_enum_key(enum_name).unwrap_or_else(|| enum_name.to_string());
         if !self.enum_tags.get(&enum_str).is_some_and(|t| t.contains_key(*variant_name)) || !self.is_poly_enum(&enum_str) {
             return None;
@@ -18702,13 +18708,25 @@ impl Checker {
             );
         }
 
+        // A generic enum's construct where an instance of it is expected
+        // (`let o: Option<Vec<int>> = Option::Some([1])`): each argument
+        // sees its slot at the instance's types as its expected type (#2781).
+        // Only a hint: the expected type is not the construct's own (a
+        // result-mode `return Ok(r)` may hand back a whole `Result`), so
+        // the slots are not bound to it.
+        let hint = poly_sum_owner.as_ref().and_then(|owner| {
+            let exp = apply_ty_prune(&self.subst, strip_readonly(&self.expected_here.clone()?));
+            let same = matches!((owner, &exp), (Ty::App(a, _), Ty::App(b, _)) if a == b) && !has_existential(&exp);
+            same.then(|| unify_with(&self.subst, owner, &exp).ok()).flatten()
+        });
+        let hinted = |ty: &Ty| hint.as_ref().map_or_else(|| ty.clone(), |s| apply_ty_prune(s, ty));
         // Field-by-field type check.
         match fields {
             EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
             EnumConstructPayload::Tuple(args) => {
                 let expected_tys = expected_payload.field_types();
                 for (arg, expected_ty) in args.iter().zip(expected_tys.iter()) {
-                    let arg_ty = self.infer(arg);
+                    let arg_ty = self.infer_expecting(arg, &hinted(expected_ty));
                     let context = format!("constructor `{}::{}` argument", enum_str, variant_str);
                     self.check_readonly_payload(expected_ty, &arg_ty, &arg.0.into_range(), &context);
                     self.unify(expected_ty, &arg_ty, &arg.0.into_range(), &context);
@@ -18749,7 +18767,7 @@ impl Checker {
                             );
                         }
                     };
-                    let arg_ty = self.infer(arg);
+                    let arg_ty = self.infer_expecting(arg, &hinted(decl_ty));
                     let context = format!("constructor `{}::{}.{}` argument", enum_str, variant_str, decl_name);
                     self.check_readonly_payload(decl_ty, &arg_ty, &arg.0.into_range(), &context);
                     self.unify(decl_ty, &arg_ty, &arg.0.into_range(), &context);
@@ -18806,6 +18824,21 @@ impl Checker {
             tag,
             arity,
         }
+    }
+
+    /// `arg`, a constructor's argument, inferred with its field or
+    /// payload type `ty` expected, as a `let` of that type gives its init
+    /// (#2781): an array literal builds a `Vec` there and `[]` takes the
+    /// type. A `forall` type is left to the rank-n check.
+    fn infer_expecting(&mut self, arg: &Output, ty: &Ty) -> Ty {
+        let ty = apply_ty_prune(&self.subst, ty);
+        if matches!(strip_readonly(&ty), Ty::Forall { .. } | Ty::Var(_)) {
+            return self.infer(arg);
+        }
+        let prev = self.current_expected.replace(ty);
+        let arg_ty = self.infer(arg);
+        self.current_expected = prev;
+        arg_ty
     }
 
     /// An enum payload argument against its declared type: a payload is
