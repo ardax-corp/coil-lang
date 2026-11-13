@@ -327,7 +327,10 @@ knows every name of the object, the write needs no test. That is
 `fresh_locals`: a local only ever given fresh objects (a constructor, a
 call whose summary has `shared_ret` clear), never shared, captured or bound
 from a place, and passed only to calls that neither keep it, hand it back
-nor hand it to code not known here. Its flag after a walk is one a dead
+nor hand it to code not known here; nor may a `mut` borrow of it be passed to
+such a call (before, `let w = mut a; let r = g(w); a.x += 1` with `g` a
+function value that hands `w` back wrote `r`'s object in place,
+`tests/memory/borrow_handed_back_fresh.coil`). Its flag after a walk is one a dead
 holder left, in this body or in a callee that walked it and returned.
 
 That is sound only if a walk keeps nothing past the loop but its iterator.
