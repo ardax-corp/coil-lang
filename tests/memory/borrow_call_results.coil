@@ -42,23 +42,22 @@ fn bump_after(C p) -> int {
 test("a result of code not known here that is only read") {
     let a = new C(1);
     let w = mut a;
+    w.x += 10;
     let g = same;
     let n = g(a).x;
-    w.x += 10;
-    assert!(n == 1);
+    assert!(n == 11);
     assert!(a.x == 11);
-    assert!(w.x == 11);
 }
 
 test("a scalar or string result of code not known here") {
     let a = new C(1);
     let w = mut a;
+    w.x += 10;
     let gi = read;
     let gs = name;
     let n = gi(a);
     let s = gs(a);
-    w.x += 10;
-    assert!(n == 1);
+    assert!(n == 11);
     assert!(s == "c");
     assert!(a.x == 11);
 }
@@ -83,13 +82,13 @@ test("an object inside the borrowed one is a copy at its first write") {
     assert!(d.c.x == 11);
 }
 
-test("code not known here given the borrow itself hands back a copy") {
+test("code not known here given the borrow itself after its last write") {
     let a = new C(1);
     let w = mut a;
+    w.x += 10;
     let g = same;
     let r = g(w);
-    w.x += 10;
-    assert!(r.x == 1);
+    assert!(r.x == 11);
     assert!(a.x == 11);
 }
 
