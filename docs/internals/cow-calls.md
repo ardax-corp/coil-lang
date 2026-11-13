@@ -303,7 +303,13 @@ an object inside the borrowed one (`for p in a.m` while `w = mut a`) is a
 second name below the borrow, which writes make unique first, as for any
 other second name. A walk whose body writes nothing it walks, or one after
 the borrow's last use, is fine; so is a loop's own `for mut` binding, which
-writes the element it is bound to. A `for` over a `Vec` or an array binds
+writes the element it is bound to. That binding borrows an element of the
+iterable (its place is the iterable's with one element step), so a second
+name for an element while it lives (`let b = a[0]`, `vs.push(a[0])`, a
+keeping or opaque callee given one) is E0149, as for `let w = mut a[0]`;
+before, it went unreported and the binding's writes showed through it
+(`tests/memory/for_mut_element_names.coil`,
+`tests/memory/compile_fail/for_mut_element_*.coil`). A `for` over a `Vec` or an array binds
 elements, not a second name for the iterable: a read-only walk over a
 borrowed `Vec` is legal, as over a borrowed map. Tests:
 `tests/memory/for_walk_writes_iterable.coil`,
