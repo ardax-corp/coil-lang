@@ -842,7 +842,11 @@ impl Heap {
         match self.find_object_by_addr(v.heap_addr()) {
             Some(obj @ (Object::Instance(_) | Object::Array(_))) if obj.is_pinned() => match self.cow_copy(obj, &mut HashMap::new()) {
                 Some(copy) => CowShare::Copied(copy),
-                None => CowShare::Untouched,
+                // An identity class is never copied: marked as before.
+                None => {
+                    obj.set_shared();
+                    CowShare::Marked
+                }
             },
             Some(obj @ (Object::Instance(_) | Object::Array(_))) => {
                 obj.set_shared();
