@@ -156,6 +156,21 @@ belongs in a `Ref<T>` or a `shared class`. Tests:
 `tests/memory/capture_borrow_in_step.coil`,
 `tests/memory/compile_fail/capture_borrow_*.coil`.
 
+## `defer` captures
+
+A `defer` is no closure: its body runs at the end of the scope it is declared
+in, in the same frame. `defer use (mut d)` reads and writes the variable `d`
+when it runs (an assignment after the `defer` statement is seen), and
+`defer use (d)` works on a copy taken when the statement runs (`hir/build.rs`
+binds a local to it). So neither is a borrow of an object over a span, and
+E0149 has nothing to check: a write through the capture, in the deferred body
+or after the statement, is a write to that local, made unique as any other
+write, and the copy is written back to the variable (#2830). Before, every
+write to a local a `defer` captured skipped the local's unique: a write showed
+through another name sharing the object (`let d = c; defer use (mut d) {
+d.x = 7; }` changed `c`), and a `use (d)` copy's write reached the outer `d`.
+Test: `tests/memory/defer_capture_writes.coil`.
+
 ## Call results that may be a borrowed object
 
 While a borrow lives, a call's result that may be the borrowed object, or an

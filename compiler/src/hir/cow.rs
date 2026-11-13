@@ -143,9 +143,6 @@ struct Facts<'b> {
     bound: HashMap<LocalId, (HirId, HirId)>,
     /// Locals some lambda or `defer` captures.
     captured: HashSet<LocalId>,
-    /// Locals a `defer` captures: its body may not assign them, so a write
-    /// through one is made unique below the local only.
-    defer_captured: HashSet<LocalId>,
     /// The outer locals each lambda or `defer` node captures.
     capture_lists: HashMap<HirId, Vec<LocalId>>,
     /// Outer locals a lambda captures as `use (mut x)`, by lambda.
@@ -323,7 +320,6 @@ impl<'b> Facts<'b> {
             capture_lists: HashMap::new(),
             borrow_captures: HashSet::new(),
             loose_captures: HashSet::new(),
-            defer_captured: HashSet::new(),
             reassigned: HashSet::new(),
             capture_assigns: Vec::new(),
             borrow_args: HashSet::new(),
@@ -483,9 +479,12 @@ impl<'b> Facts<'b> {
                 self.captured.extend(outer.iter().copied());
                 self.capture_lists.insert(id, outer);
             }
+            // A `defer use (mut d)` reads and writes the variable `d` when it
+            // runs; `use (d)` captures a copy (`hir/build.rs`). Either way a
+            // write through it is a write to that local, made unique as any
+            // other (#2830): the copy is written back to the variable.
             HirKind::Defer { captures, .. } => {
                 let outer: Vec<LocalId> = captures.iter().flatten().copied().collect();
-                self.defer_captured.extend(outer.iter().copied());
                 self.captured.extend(outer.iter().copied());
                 self.capture_lists.insert(id, outer);
             }
@@ -906,8 +905,6 @@ struct Plan {
     walked: HashSet<(HirId, HirId)>,
     /// Parameters written in place for the caller.
     inout: HashSet<LocalId>,
-    /// Locals a `defer` captures.
-    defer_captured: HashSet<LocalId>,
 }
 
 impl Plan {
@@ -1233,7 +1230,6 @@ impl Plan {
             plan.unique.push((w, f.statement_of(w.at)));
         }
         plan.inout = inout;
-        plan.defer_captured = f.defer_captured.clone();
         plan.check_borrows(checker, body, f);
         plan.hold_borrowed(body, f);
         plan.check_kept_views(checker, body, f);
@@ -2435,7 +2431,7 @@ impl Plan {
         match &out.expr(root).kind {
             HirKind::Local(l) => {
                 let l = *l;
-                let skip = held > 0 || (self.fresh_locals.contains(&l) && !walked) || self.inout.contains(&l) || self.defer_captured.contains(&l) || !cow_ty(checker, out.local(l).ty.as_ref());
+                let skip = held > 0 || (self.fresh_locals.contains(&l) && !walked) || self.inout.contains(&l) || !cow_ty(checker, out.local(l).ty.as_ref());
                 if !skip {
                     stmts.push(unique_stmt(out, root, span));
                 }
