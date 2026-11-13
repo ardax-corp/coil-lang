@@ -226,6 +226,12 @@ pub(super) fn round(checker: &Checker, body: &HirBody, f: &Facts<'_>, plan: &Pla
         x.node = None;
         x.flags = Default::default();
     }
+    // A path the view replaced leaves its old nodes behind: blank them, so
+    // a whole-arena scan does not see the root still read whole (a split
+    // class local's `only_field_base`, #2779).
+    if let Some(root) = out.root {
+        crate::hir::inline::blank_orphans(&mut out, root);
+    }
     Some(out)
 }
 
