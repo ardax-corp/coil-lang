@@ -1,0 +1,176 @@
+// A trait method that declares a parameter `readonly` takes a `readonly`
+// argument there however the call reaches it: a scalar receiver, the
+// static spelling, a trait object, a bound in a generic body, a default
+// method's dictionary, a superclass bound (coil-lang#2845).
+use tests::assert;
+
+class Pt {
+    pub a: int,
+}
+
+class Holder {
+    pub pt: Pt,
+}
+
+readonly class Frozen {
+    pub a: int,
+}
+
+class Box {
+    pub n: int,
+}
+
+trait Tk<S> {
+    fn take(S s, readonly Pt p) -> int {}
+
+    // A default method passes its `readonly` parameter on through the
+    // dictionary.
+    fn twice(S s, readonly Pt p) -> int {
+        return s.take(p) + s.take(p);
+    }
+}
+
+impl Tk for int {
+    fn take(int s, readonly Pt p) -> int {
+        return s + p.a;
+    }
+}
+
+impl Tk for Box {
+    fn take(Box s, readonly Pt p) -> int {
+        return s.n * p.a;
+    }
+}
+
+// Several `readonly` parameters among plain ones, the receiver itself
+// `readonly`, and a `readonly class` parameter.
+trait Mix<S> {
+    fn mix(readonly S s, int k, readonly Pt a, Pt b, readonly Pt c, readonly Frozen f) -> int {}
+}
+
+impl Mix for int {
+    fn mix(readonly int s, int k, readonly Pt a, Pt b, readonly Pt c, readonly Frozen f) -> int {
+        b.a = b.a + 1;
+        return s + k + a.a + b.a + c.a + f.a;
+    }
+}
+
+impl Mix for Box {
+    fn mix(readonly Box s, int k, readonly Pt a, Pt b, readonly Pt c, readonly Frozen f) -> int {
+        b.a = b.a + 1;
+        return s.n + k + a.a + b.a + c.a + f.a;
+    }
+}
+
+// A `readonly` generic parameter.
+trait Peek<S> {
+    fn peek<T>(S s, readonly T x, readonly T y, bool first) -> readonly T {}
+}
+
+impl Peek for int {
+    fn peek<T>(int s, readonly T x, readonly T y, bool first) -> readonly T {
+        if first {
+            return x;
+        }
+        return y;
+    }
+}
+
+// A trait whose superclass is `Tk`.
+trait Loud<S: Tk> {
+    fn loud(S s) -> int {}
+}
+
+impl Loud for int {
+    fn loud(int s) -> int {
+        return s * 100;
+    }
+}
+
+fn through_bound<T: Tk>(T t, readonly Pt p) -> int {
+    return t.take(p) + Tk::take(t, p);
+}
+
+fn through_default<T: Tk>(T t, readonly Pt p) -> int {
+    return t.twice(p);
+}
+
+fn through_super<T: Loud>(T t, readonly Pt p) -> int {
+    return t.loud() + t.take(p);
+}
+
+fn mix_bound<T: Mix>(readonly T t, readonly Pt a, readonly Pt c, readonly Frozen f) -> int {
+    return t.mix(1, a, new Pt(0), c, f) + Mix::mix(t, 1, a, new Pt(0), c, f);
+}
+
+fn peek_bound<T: Peek>(T t, readonly Pt x, readonly Pt y) -> int {
+    return t.peek(x, y, true).a + t.peek(x, y, false).a;
+}
+
+test("a scalar receiver and the static spelling take a readonly argument") {
+    let p = readonly new Pt(8);
+    assert!(1.take(p) == 9);
+    assert!(Tk::take(1, p) == 9);
+    assert!(1.take(readonly new Pt(2)) == 3);
+    let h = readonly new Holder(new Pt(5));
+    assert!(1.take(h.pt) == 6);
+    assert!(Tk::take(2, h.pt) == 7);
+}
+
+test("a trait object takes a readonly argument") {
+    let p = readonly new Pt(8);
+    let e: Tk = 1;
+    assert!(e.take(p) == 9);
+    assert!(Tk::take(e, p) == 9);
+    let b: Tk = new Box(3);
+    assert!(b.take(p) == 24);
+    let h = readonly new Holder(new Pt(5));
+    assert!(e.take(h.pt) == 6);
+    assert!(e.twice(p) == 18);
+}
+
+test("a bound takes a readonly argument, in a shared body too") {
+    let p = readonly new Pt(8);
+    assert!(through_bound(1, p) == 18);
+    assert!(through_bound(new Box(2), p) == 32);
+    assert!(through_bound(1, readonly new Pt(1)) == 4);
+}
+
+test("a default method and a class receiver take a readonly argument") {
+    let p = readonly new Pt(8);
+    assert!(1.twice(p) == 18);
+    assert!(through_default(1, p) == 18);
+    assert!(through_default(new Box(2), p) == 32);
+    let x = new Box(4);
+    assert!(x.take(p) == 32);
+    assert!(x.twice(p) == 64);
+}
+
+test("a superclass method takes a readonly argument through a bound") {
+    let p = readonly new Pt(8);
+    assert!(through_super(1, p) == 109);
+}
+
+test("several readonly parameters among plain ones, a readonly receiver") {
+    let a = readonly new Pt(10);
+    let c = readonly new Pt(100);
+    let f = new Frozen(1000);
+    let b = new Pt(5);
+    assert!(2.mix(1, a, b, c, f) == 1119);
+    assert!(b.a == 6);
+    assert!(Mix::mix(2, 1, a, new Pt(5), c, f) == 1119);
+    let r = readonly new Box(2);
+    assert!(r.mix(1, a, new Pt(5), c, f) == 1119);
+    let e: readonly Mix = r;
+    assert!(e.mix(1, a, new Pt(5), c, f) == 1119);
+    assert!(mix_bound(2, a, c, f) == 2228);
+    assert!(mix_bound(r, a, c, f) == 2228);
+}
+
+test("a readonly generic parameter") {
+    let x = readonly new Pt(3);
+    let y = readonly new Pt(4);
+    assert!(1.peek(x, y, true).a == 3);
+    assert!(Peek::peek(1, x, y, false).a == 4);
+    assert!(peek_bound(1, x, y) == 7);
+}
