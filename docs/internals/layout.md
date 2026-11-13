@@ -162,18 +162,18 @@ words:
   whose calls convert as "A generic function's value" in
   [dictionary-passing.md](dictionary-passing.md) says; so is the init of a
   `let` whose local stays polymorphic, which its calls go through.
-- A method whose declared result is a function over its type parameters
-  that is not plain words (`static fn lift<T>() -> fn(T) -> Option<T>
-  { return wrap; }`, `fn(Option<T>) -> T`, also one level down, `fn() ->
-  fn(T) -> Option<T>`) cannot return the ground layout from its shared
-  body: there the value is made at the open types and takes and returns
-  the enum objects. So it takes its per-type clone at every ground call,
-  past the budget too (`layout::nested_fn_in_result` on the declared
-  result, `fn_sig_split`), as one whose result holds such a function below
-  its top does; the clone's signature is the declared one, the returned
-  function's parameters not flattened onto the method's
-  (`hir_method_clone_sig`, #2767). A free function's shared call wraps the
-  returned closure in an adapter instead (`hir_closure_adapt`).
+- A generic function or method whose declared result is a function over
+  its type parameters that is not plain words (`static fn lift<T>() ->
+  fn(T) -> Option<T> { return wrap; }`, `fn or_else<T>(T d) ->
+  fn(Option<T>) -> T`, also one level down, `fn() -> fn(T) -> Option<T>`)
+  cannot return the ground layout from its shared body: there the value
+  is made at the open types and takes and returns the enum objects. So it
+  takes its per-type clone at every ground call, past the budget too
+  (`layout::nested_fn_in_result` on the declared result, in
+  `GenericFnSig::split` and `fn_sig_split`), as one whose result holds
+  such a function below its top does (#2766, #2767). A method clone's
+  signature is the declared one, the returned function's parameters not
+  flattened onto the method's (`hir_method_clone_sig`).
 - A ground function passed where the shared body takes a function whose
   result is an open `Option` / `Result` (`T -> Result<U, E>` in
   `Result::and_then`) returns its niche word, but the body reads that
