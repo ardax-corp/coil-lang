@@ -5891,7 +5891,9 @@ impl Lower<'_> {
         }
         let mut words = Vec::with_capacity(args.len());
         for &arg in args {
-            let Some(v) = self.word(arg)? else {
+            // A two-word immediate product is boxed, as the parameter
+            // takes it (#2790).
+            let Some(v) = self.word_or_boxed(arg)? else {
                 return Ok(Val::Never);
             };
             words.push(v);

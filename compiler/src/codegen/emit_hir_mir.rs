@@ -710,7 +710,11 @@ impl Compiler {
                 }) = emit.plan.calls.get(&id.0) =>
             {
                 let (entry, value) = (*entry as usize, *value);
-                if args.iter().zip(params).all(|(&a, &p)| self.hir_natural(hir, emit, a) == Some(Rep::Word(p)))
+                // A two-word argument goes boxed, as its parameter takes it (#2790).
+                if args.iter().zip(params).all(|(&a, &p)| match self.hir_natural(hir, emit, a) {
+                    Some(Rep::Pair(_)) => p == ValueLayout::Boxed,
+                    natural => natural == Some(Rep::Word(p)),
+                })
                     && let Some(label) = self.bodies.entry_label_for_offset(entry)
                     && let Some(target) = self.partial_value_target(entry, label, value)
                 {
