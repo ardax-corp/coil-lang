@@ -710,9 +710,14 @@ impl Compiler {
                 }) = emit.plan.calls.get(&id.0) =>
             {
                 let (entry, value) = (*entry as usize, *value);
-                // A two-word argument goes boxed, as its parameter takes it (#2790).
+                // A two-word argument goes boxed, as its parameter takes it
+                // (#2790); a variant made in place in its own type's layout,
+                // its box for a two-word type (#2789).
                 if args.iter().zip(params).all(|(&a, &p)| match self.hir_natural(hir, emit, a) {
                     Some(Rep::Pair(_)) => p == ValueLayout::Boxed,
+                    None if matches!(hir.expr(a).kind, HirKind::Make { kind: MakeKind::Variant { .. }, .. }) => {
+                        Self::hir_ty(hir, a).is_some_and(|ty| self.value_layout(&apply_ty_prune(self.checker.subst(), ty)) == p)
+                    }
                     natural => natural == Some(Rep::Word(p)),
                 })
                     && let Some(label) = self.bodies.entry_label_for_offset(entry)
