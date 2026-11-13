@@ -725,8 +725,11 @@ impl Walk<'_> {
             {
                 self.value(*value)
             }
-            // `v as Vec<byte>` of a `Vec<byte>`: the same array object.
-            HirKind::Cast { value } if self.ty(*value).is_some_and(is_byte_vec) && self.ty(id).is_some_and(is_byte_vec) => {
+            // Between byte arrays (`Vec<byte>`, `[byte; N]`, #2823): the same
+            // array object (HIR build checks a `Vec<byte>`'s length first).
+            HirKind::Cast { value }
+                if self.ty(*value).is_some_and(|t| is_byte_vec(t) || is_byte_array(t)) && self.ty(id).is_some_and(|t| is_byte_vec(t) || is_byte_array(t)) =>
+            {
                 self.value(*value)
             }
             HirKind::Cast { value } => {

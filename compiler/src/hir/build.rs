@@ -1459,6 +1459,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Positive(e) => self.expr(b, e),
             E::Cast(value, _) => {
                 let value = self.expr(b, value);
+                if let Some(cast) = self.vec_to_byte_array(b, node, value) {
+                    return cast;
+                }
                 self.emit(b, node, HirKind::Cast { value })
             }
 
@@ -2742,6 +2745,39 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             HirKind::ForIn { pat, iterable: iter, body, kind: info.map(|i| i.kind) },
             Some(coil_ty::unit()),
         )
+    }
+
+    /// `v as [byte; N]` of a `Vec<byte>` (#2823): the same array once its
+    /// length is checked, `{ let $c = v; if $c.len() != N { panic … }; $c as [byte; N] }`.
+    fn vec_to_byte_array(&mut self, b: &mut BodyBuilder, node: &Output<'_>, value: HirId) -> Option<HirId> {
+        let to = self.ty_of(node)?;
+        let Ty::Array { element, length: coil_ty::ArrayLength::Static(n) } = strip_readonly(&to) else { return None };
+        let from = self.ty_at(b, value)?;
+        if !super::classify::is_byte(element) || !super::classify::is_byte_vec(&from) || matches!(strip_readonly(&from), Ty::Array { .. }) {
+            return None;
+        }
+        let n = *n;
+        let span = span_of(node);
+        let c = b.temp("cast", Some(from.clone()));
+        let bind = self.synth(b, span, HirKind::Let { local: c, init: Some(value) }, Some(coil_ty::unit()));
+        let read = |this: &Self, b: &mut BodyBuilder| this.synth(b, span, HirKind::Local(c), Some(from.clone()));
+        let len_of = |this: &Self, b: &mut BodyBuilder| {
+            let r = read(this, b);
+            this.synth(b, span, HirKind::Call { callee: Callee::Method { name: "len".to_string() }, args: vec![r] }, Some(coil_ty::int()))
+        };
+        let len = len_of(self, b);
+        let want = self.synth(b, span, HirKind::Lit(Lit::Int(n as i64)), Some(coil_ty::int()));
+        let differs = self.synth(b, span, HirKind::Bin { op: BinOp::Ne, lhs: len, rhs: want }, Some(coil_ty::boolean()));
+        let text = format!("cannot cast a `Vec<byte>` of %i bytes to `[byte; {n}]`");
+        let fmt = self.synth(b, span, HirKind::Lit(Lit::Str(text)), Some(coil_ty::string()));
+        let got = len_of(self, b);
+        let callee = Callee::Named { name: "string::format".into(), def: None, overload: None };
+        let msg = self.synth(b, span, HirKind::Call { callee, args: vec![fmt, got] }, Some(coil_ty::string()));
+        let panic = self.synth(b, span, HirKind::Builtin { op: Builtin::Panic, args: vec![msg] }, Some(coil_ty::never()));
+        let check = self.synth(b, span, HirKind::If { cond: differs, then: panic, els: None }, Some(coil_ty::unit()));
+        let operand = read(self, b);
+        let cast = self.synth(b, span, HirKind::Cast { value: operand }, Some(to.clone()));
+        Some(self.emit_ty(b, node, HirKind::Block { stmts: vec![bind, check], tail: Some(cast) }, Some(to)))
     }
 
     /// `for pat in it` over a type parameter's `Iterator` bound (#2820):
