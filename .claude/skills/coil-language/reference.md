@@ -13,6 +13,15 @@ Read when you need syntax detail beyond SKILL.md. User docs live in [coil-websit
 - Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status::Ok`, `Status::Ok + 1`). Every operator the backing type takes works on the backing value and gives the backing type: arithmetic, bitwise, shift, string `+`, unary `-` / `~` / `!`, `&&` / `||`, a condition, and `x += Status::Ok` on an `int` `x`. `s += 1` on a `Status` is an error (the result is an `int`). Two values of one enum that has the operator's instance (`impl Mul for Bit`) use the instance. Show of a scalar case is the backing (`Status::Ok` shows as `200`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
 - Payload enums are not heap-only: heap `Option<T>` / heap-heap `Result<T,E>` are pointer niches; `Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums use two words `[payload, tag]` on a *direct* call and return. Arity-2 immediate products use `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)). Nested, `CallIndirect`, and unsure consumers stay boxed `ObjEnum`.
 
+## Function values and calls that look alike
+
+- A bare `Owner::m` is the static method's function value (`let f = Src::inc; f(4)`); the call needs `()` (`Src::inc(4)`). A bare trait method (`T::make`, `Make::make`) has no value: `E0119`. `let c: Counter = Counter::fresh;` is `E0102` (add `()`).
+- `o.f(x)` on a field `f` of function type calls the function, unless the type has a method `f` (the method wins). `o.n(4)` on a field that is not a function is `E0104`.
+- A ground annotation on a `let` of a generic function fixes its type: `let f: int -> int = id;` (`fn id<T>(T x) -> T`); `f("a")` is then a type error. Without an annotation, or with a `forall` one, `f` keeps its generic type.
+- `==` on two bare-trait existentials (`let x: Tr = …`) needs an `Eq` the trait gives its values (`trait Tr<S: Eq>`); without it `E0119`. Values of different types are never equal.
+- `coil test` takes `.coil` files and directories, several at once (`coil test a.coil dir/`).
+- Nesting: `E0125` past 4000 nested brackets, or 2000 levels in the checker (a parenthesised group counts about two; `f(f(…))` one per call). On wasm the limits are 400 and 1000, and 700 chained operators.
+
 ## Show output (`%v`, `x.show()`, `Show::show(x)`)
 
 One rule: a `string` is never quoted or escaped, alone or inside anything, and `%s` and `%v` print a string the same. So `(1, "a")` shows as `(1, a)`, `["a", "b"]` as `[a, b]`, `Some("a")` as `Some(a)`, `{x: 1, s: "a"}` as `{ s: a, x: 1 }` (fields in name order), and a derived `Show` class `Person { name, age }` as `Person { name: Ann, age: 3 }` (fields in declaration order). A payload enum shows as `Tok::Word(hi)`, `Tok::Pair(hi, 2)`. Output cannot tell `"1"` from `1`; build the quotes yourself (`"\"" + s + "\""`) when it matters. A bare `show(x)` is `E0153`.
