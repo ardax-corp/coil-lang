@@ -763,6 +763,23 @@ pub enum MirInst {
         unique: bool,
         field: Option<u32>,
     },
+    /// Copy-on-write pin (archive 8.2): `dest` (a `bool`) is whether
+    /// `src`'s object was pinned, and the op pins it, so a share of it
+    /// hands out a copy instead of marking it shared until [`Self::CowUnpin`]
+    /// (`machine::Object::is_pinned`). `false` and no effect for a word that
+    /// is no class instance or array. Allocates nothing; a header byte.
+    CowPin {
+        dest: ValueId,
+        src: ValueId,
+    },
+    /// Copy-on-write unpin: clears `src`'s pin when `saved` (the `bool` its
+    /// [`Self::CowPin`] gave) is `false`, so an outer pin stays. Dest is a
+    /// `bool` unit token.
+    CowUnpin {
+        dest: ValueId,
+        src: ValueId,
+        saved: ValueId,
+    },
     /// String `==` (`!=` when `ne`): structural equality, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
     /// [`MirTy::HeapRef`] words. Also a user type's `==` with no `Eq`
@@ -1151,6 +1168,8 @@ impl MirInst {
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
             | Self::Cow { dest, .. }
+            | Self::CowPin { dest, .. }
+            | Self::CowUnpin { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
             | Self::VecLoop { dest, .. } => dest,
@@ -1201,6 +1220,8 @@ impl MirInst {
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. }
             | Self::Cow { dest, .. }
+            | Self::CowPin { dest, .. }
+            | Self::CowUnpin { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
             | Self::VecLoop { dest, .. } => dest,
@@ -1264,7 +1285,8 @@ impl MirInst {
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
-            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
+            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
+            Self::CowUnpin { src, saved, .. } => vec![*src, *saved],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -1365,7 +1387,11 @@ impl MirInst {
                 }
             }
             Self::String { .. } | Self::CodePtr { .. } => {}
-            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
+            Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
+            Self::CowUnpin { src, saved, .. } => {
+                *src = map(*src);
+                *saved = map(*saved);
+            }
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
                 for v in args.iter_mut() {

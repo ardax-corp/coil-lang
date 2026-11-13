@@ -580,6 +580,8 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Format { .. }
         | MirInst::Stringify { .. }
         | MirInst::Cow { .. }
+        | MirInst::CowPin { .. }
+        | MirInst::CowUnpin { .. }
         | MirInst::StrEq { .. }
         | MirInst::ByteScan { .. }
         | MirInst::VecLoop { .. } => {

@@ -137,7 +137,13 @@ impl MirInst {
             Self::LanesToWords { .. } => OpProps { barrier: true, gc_edge: true, allocates: true, ..P },
             // A share sets the object's flag and allocates nothing (native
             // code does it inline, #2506): no collection there.
+            // A pinned object's share copies it (archive 8.2), in a helper
+            // that allocates and never collects, as the `Cow` helpers do: the
+            // next safepoint collects, so the share stays no GC edge.
             Self::Cow { unique: false, field: None, .. } => OpProps { barrier: true, effects: Effects::Yes, vector_barrier: true, ..P },
+            // A header byte: what later shares of the object do changes, so
+            // it stays in place among them, but it allocates nothing.
+            Self::CowPin { .. } | Self::CowUnpin { .. } => OpProps { barrier: true, effects: Effects::Yes, vector_barrier: true, ..P },
             Self::Format { .. } | Self::Stringify { .. } | Self::Cow { .. } => {
                 OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, vector_barrier: true, ..P }
             }
