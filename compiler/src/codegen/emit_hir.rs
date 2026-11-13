@@ -8287,6 +8287,17 @@ impl Compiler {
         if !matches!(cur, Ty::Fun(..)) || !quantified(cur) {
             return Ok(None);
         }
+        // A plain signature through every curried level (`fn(T) -> Vec<T>`,
+        // `fn() -> fn(T) -> T`) is one closure word the shared body and
+        // ground code call alike, as a method's returned closure is (#2771).
+        let (mut flat, mut result) = (Vec::new(), cur);
+        while let Ty::Fun(p, r) = strip_readonly(result) {
+            flat.push(p.as_ref().clone());
+            result = r;
+        }
+        if classify::plain_sig(&self.checker, &flat, result) {
+            return Ok(None);
+        }
         if receivers > 0 {
             return Err("callee-generic");
         }
