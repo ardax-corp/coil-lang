@@ -1,0 +1,14 @@
+// @expected E0149 — an iterator over `a` outlives the call that makes it
+// while `w` borrows `a` (#2816): the iterator is a second name, so the
+// next write would leave `w` on another object.
+use collections::map::HashMap;
+
+fn main() {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    let w = mut a;
+    let it = a.iter();
+    let _ = a.insert("b", 2);
+    let _ = w.insert("c", 3);
+    let _ = it.next();
+}
