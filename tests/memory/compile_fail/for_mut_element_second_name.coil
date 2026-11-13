@@ -1,0 +1,15 @@
+// @expected E0149 — `x` borrows the element `a[0]` while the loop body
+// gives that element a second name: the write through `x` would show
+// through `b` too.
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let a: Vec<C> = [new C(1)];
+    for mut x in a {
+        let b = a[0];
+        x.x += 10;
+        let _ = b.x;
+    }
+}
