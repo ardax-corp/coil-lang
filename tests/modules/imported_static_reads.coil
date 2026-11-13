@@ -4,8 +4,7 @@
 // reads it after its own initializer ran at startup (#2862).
 // @output 26\n144\n55\n14\n15\n14\n
 use io::sync::println;
-use imported_static_counter::{counter, bump, doubled};
-use imported_static_counter::counter as cnt;
+use imported_static_counter::{counter, bump, doubled, counter as cnt};
 
 fn peek(int n) -> int {
     if n > 0 {
