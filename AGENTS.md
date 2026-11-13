@@ -34,7 +34,7 @@ coil: statically typed `.coil` → typecheck → HIR (optimizations) → MIR (ev
 
 ## Invariants (do not break)
 
-- **Archive version**: `common/src/archive.rs` (`ARCHIVE_MAJOR` / `ARCHIVE_MINOR`). An additive change bumps the minor; any other change to the format the major (reset minor). Older minors are in [docs/internals/archive-history.md](docs/internals/archive-history.md).
+- **Archive version**: `common/src/archive.rs` (`ARCHIVE_MAJOR` / `ARCHIVE_MINOR`). An additive change bumps the minor; any other change to the format the major (reset minor). Today that is 8.1 (`ARCHIVE_MAJOR` 8, `ARCHIVE_MINOR` 1). The MIR section has a format of its own, `FORMAT` in `compiler/src/mir/archive.rs` (17, from `common::MIR_SECTION_SCOPES_FORMAT`; the reader also takes 16). Older minors and the history of the major are in [docs/internals/archive-history.md](docs/internals/archive-history.md); a format change adds its entry there.
 - **Virtual-module natives** via `HostInvoke`, wired in `machine/`. Frozen ids are the `*_ID` consts in `common/src/host.rs`: never renumber them. Dropped TLS/crypto/regex slots collapsed; virtual-time names stay as panic stubs so later ids do not move.
 - **No PGO.** Removed (#301). Branch layout is heuristic. Do not revive `--pgo-*`, ingest, heat knobs, or `BranchProfile`.
 - **Feature gates**: dissect `feature = "dissect"` (`compiler`), on helper binaries, not default `coil`; `gc-stress` / `gc-stats` (`machine`, through `coil-test`) for GC testing only. Release still builds `coil` / `coil-embed` in their own cargo invocation.
