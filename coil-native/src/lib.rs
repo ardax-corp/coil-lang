@@ -1281,6 +1281,15 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             need(src)?;
                         }
                     }
+                    MirInst::CowPin { dest, src } => {
+                        need_scalar(dest)?;
+                        need(src)?;
+                    }
+                    MirInst::CowUnpin { dest, src, saved } => {
+                        need(dest)?;
+                        need(src)?;
+                        need_scalar(saved)?;
+                    }
                     MirInst::Phi { dest, args, .. } => {
                         need(dest)?;
                         for (_, v) in args {
@@ -3691,27 +3700,90 @@ impl<'a> Lower<'a> {
             // (#2506). The header's kind byte says whether the word is a
             // class instance or an array, the objects `Heap::cow_share`
             // marks; anything else (null, a tagged word's object of another
-            // kind) is left as it is, as the helper leaves it.
+            // kind) is left as it is, as the helper leaves it. A pinned
+            // object (archive 8.2) is never marked: the cold path calls the
+            // helper, which hands back a copy of it for the new name.
             MirInst::Cow { dest, src, unique: false, field: None } => {
                 let s = self.get(f, *src);
                 let s = self.coerce(s, types::I64);
                 let flags = MemFlagsData::trusted();
                 let o = self.b.ins().band_imm_u(s, !1i64);
-                let (check, mark, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                let (check, test, mark, copy, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+                let word = self.b.append_block_param(join, types::I64);
+                self.b.ins().brif(o, check, &[], join, &[s.into()]);
+                self.b.switch_to_block(check);
+                let k = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_KIND_OFFSET);
+                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
+                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
+                let either = self.b.ins().bor(inst, arr);
+                self.b.ins().brif(either, test, &[], join, &[s.into()]);
+                self.b.switch_to_block(test);
+                let pinned = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
+                self.b.ins().brif(pinned, copy, &[], mark, &[]);
+                self.b.switch_to_block(mark);
+                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_SHARED_SET));
+                self.b.ins().store(flags, set, o, machine::COW_SHARED_OFFSET);
+                self.b.ins().jump(join, &[s.into()]);
+                self.b.set_cold_block(copy);
+                self.b.switch_to_block(copy);
+                let share = self.b.ins().iconst(types::I64, 0);
+                let call = self.b.ins().call(self.cow, &[self.ctx, s, share]);
+                let w = self.b.inst_results(call)[0];
+                self.bail_on_helper();
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(join);
+                self.set_word(f, *dest, word);
+                self.view_of(f, *dest);
+            }
+            // The pin is a header byte beside the shared flag, set for a class
+            // instance or an array only, as a share marks only those.
+            MirInst::CowPin { dest, src } => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                let flags = MemFlagsData::trusted();
+                let o = self.b.ins().band_imm_u(s, !1i64);
+                let (check, pin, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                let was = self.b.append_block_param(join, types::I64);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.b.ins().brif(o, check, &[], join, &[zero.into()]);
+                self.b.switch_to_block(check);
+                let k = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_KIND_OFFSET);
+                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
+                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
+                let either = self.b.ins().bor(inst, arr);
+                self.b.ins().brif(either, pin, &[], join, &[zero.into()]);
+                self.b.switch_to_block(pin);
+                let p = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
+                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_PINNED_SET));
+                self.b.ins().store(flags, set, o, machine::COW_PINNED_OFFSET);
+                self.b.ins().jump(join, &[p.into()]);
+                self.b.switch_to_block(join);
+                self.set(f, *dest, was);
+            }
+            MirInst::CowUnpin { dest, src, saved } => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                let saved = self.get(f, *saved);
+                let saved = self.coerce(saved, types::I64);
+                let flags = MemFlagsData::trusted();
+                let o = self.b.ins().band_imm_u(s, !1i64);
+                let (test, check, unpin, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(saved, join, &[], test, &[]);
+                self.b.switch_to_block(test);
                 self.b.ins().brif(o, check, &[], join, &[]);
                 self.b.switch_to_block(check);
                 let k = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_KIND_OFFSET);
                 let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
                 let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
                 let either = self.b.ins().bor(inst, arr);
-                self.b.ins().brif(either, mark, &[], join, &[]);
-                self.b.switch_to_block(mark);
-                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_SHARED_SET));
-                self.b.ins().store(flags, set, o, machine::COW_SHARED_OFFSET);
+                self.b.ins().brif(either, unpin, &[], join, &[]);
+                self.b.switch_to_block(unpin);
+                let clear = self.b.ins().iconst(types::I8, 0);
+                self.b.ins().store(flags, clear, o, machine::COW_PINNED_OFFSET);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
-                self.set_word(f, *dest, s);
-                self.view_of(f, *dest);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, zero);
             }
             MirInst::Cow { dest, src, unique, field } => {
                 let s = self.get(f, *src);
@@ -4659,6 +4731,68 @@ mod tests {
         let p = jit(&bodies, &pcs).expect("jit");
         assert_eq!(p.entries.len(), 1, "refused: {:?}", p.refused);
         assert_eq!(run(&p.entries[0], &[1.5f64.to_bits()]), (0, 1.5f64.to_bits()));
+    }
+
+    /// `f(v0)`: pin `v0`, share it, pin it again and unpin twice, the
+    /// inner unpin with the outer pin's word; returns the share's word, or
+    /// with `second`, what the second pin said.
+    fn pin_pair(second: bool) -> MirFunc {
+        let mut f = MirFunc::new("f");
+        f.blocks.clear();
+        f.types = vec![MirTy::HeapRef, MirTy::Bool, MirTy::HeapRef, MirTy::Bool, MirTy::Bool, MirTy::Bool, MirTy::I64];
+        f.params = vec![ValueId(0)];
+        f.ret_ty = Some(if second { MirTy::I64 } else { MirTy::HeapRef });
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::CowPin { dest: ValueId(1), src: ValueId(0) });
+        b.insts.push(MirInst::Cow { dest: ValueId(2), src: ValueId(0), unique: false, field: None });
+        b.insts.push(MirInst::CowPin { dest: ValueId(3), src: ValueId(0) });
+        b.insts.push(MirInst::CowUnpin { dest: ValueId(4), src: ValueId(0), saved: ValueId(3) });
+        b.insts.push(MirInst::CowUnpin { dest: ValueId(5), src: ValueId(0), saved: ValueId(1) });
+        b.insts.push(MirInst::Cast { dest: ValueId(6), src: ValueId(3), kind: compiler::native_mir::MirCastKind::Word, to: MirTy::I64 });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(if second { 6 } else { 2 })), hi: None });
+        f.blocks.push(b);
+        f
+    }
+
+    /// The pin ops and the inline share's pinned path (archive 8.2): a share
+    /// of a pinned object hands out a copy, the pin nests, and the last
+    /// unpin clears it.
+    #[test]
+    fn a_share_of_a_pinned_object_copies_it_and_the_pins_nest() {
+        let mut heap = machine::Heap::default();
+        let (obj, _) = heap.alloc(machine::ObjInstance::with_slots(5, vec![common::Value::from(7i64)]), machine::Object::Instance);
+        for second in [false, true] {
+            let bodies = vec![NativeBody { name: "f".into(), entry: Some(Label(0)), mir: pin_pair(second) }];
+            let pcs = HashMap::from([("f".to_string(), 0u32)]);
+            let p = jit(&bodies, &pcs).expect("jit");
+            assert!(p.refused.is_empty(), "refused: {:?}", p.refused);
+            let marker = 0u8;
+            let mut ctx = NativeCtx::new((std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET));
+            ctx.heap = &mut heap;
+            // SAFETY: compiled for one argument word.
+            let out = unsafe { (p.entries[0].entry)(&mut ctx, [obj.addr()].as_ptr()) };
+            assert_eq!(ctx.bail, 0);
+            if second {
+                assert_eq!(out, 1, "the second pin finds the first");
+            } else {
+                assert_ne!(out, obj.addr(), "the share hands out a copy");
+                let copy = heap.find_object_by_addr(out).expect("the copy");
+                assert!(!copy.is_shared() && !copy.is_pinned());
+            }
+            assert!(!obj.is_shared(), "a pinned object is never marked");
+            assert!(!obj.is_pinned(), "the outer unpin clears it");
+        }
+        // Unpinned, a share marks the object and hands back its word.
+        let bodies = vec![NativeBody { name: "g".into(), entry: Some(Label(0)), mir: {
+            let mut g = ident("g", MirTy::HeapRef, MirTy::HeapRef);
+            g.types.push(MirTy::HeapRef);
+            g.blocks[0].insts.push(MirInst::Cow { dest: ValueId(1), src: ValueId(0), unique: false, field: None });
+            g.blocks[0].term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+            g
+        } }];
+        let p = jit(&bodies, &HashMap::from([("g".to_string(), 0u32)])).expect("jit");
+        assert_eq!(run(&p.entries[0], &[obj.addr()]), (0, obj.addr()));
+        assert!(obj.is_shared());
     }
 
     #[test]
