@@ -826,6 +826,13 @@ struct Plan {
     unique_before: Vec<((HirId, HirId), LocalId)>,
     /// Write paths to make unique before their node.
     unique: Vec<(Write, (HirId, HirId))>,
+    /// Borrows (`let w = mut a.f`, `use (mut a)`, views, `for mut`) by
+    /// their root, place steps, live span and the node that makes them.
+    borrows: Vec<(LocalId, Vec<Option<String>>, (u32, u32), Option<HirId>)>,
+    /// How many objects, from the root down, a write path leaves as they
+    /// are (#2816): the borrowed object and the ones holding it, while a
+    /// borrow of them lives. Keyed by the write's node and path.
+    held: HashMap<(HirId, HirId), usize>,
     /// Locals never shared and only ever given fresh objects.
     fresh_locals: HashSet<LocalId>,
     /// Parameters written in place for the caller.
@@ -1115,6 +1122,7 @@ impl Plan {
         plan.inout = inout;
         plan.defer_captured = f.defer_captured.clone();
         plan.check_borrows(checker, body, f);
+        plan.hold_borrowed(body, f);
         plan.check_kept_views(checker, body, f);
         plan.note_copies(checker, body, f, &copied_from);
         plan
@@ -1271,6 +1279,7 @@ impl Plan {
                 }
             }
         }
+        self.borrows = borrows.iter().map(|b| (b.root, b.path.clone(), b.span, b.within)).collect();
         if borrows.is_empty() {
             return;
         }
@@ -1346,6 +1355,41 @@ impl Plan {
                 }
             }
         }
+    }
+
+    /// A write through a borrowed place while the borrow lives (#2816)
+    /// leaves the borrowed object, and each object holding it, as it is:
+    /// it is written in place, as it is through the borrow. The borrow made
+    /// them unique where it began and E0149 keeps every other name off them
+    /// while it lives, so a shared flag there was left by a call that kept
+    /// nothing (a callee walking the object: its iterator shared it and died
+    /// with the call). A unique would copy the object away from the borrow.
+    /// Not inside a loop over an iterator, which holds its iterable while
+    /// the loop runs.
+    fn hold_borrowed(&mut self, body: &HirBody, f: &Facts<'_>) {
+        if self.borrows.is_empty() {
+            return;
+        }
+        let mut held = HashMap::new();
+        for &(w, _) in &self.unique {
+            let at = f.order(w.at);
+            let Some((root, steps)) = write_steps(body, w.path) else { continue };
+            if at == u32::MAX || in_iterator_loop(body, f, w.at) {
+                continue;
+            }
+            let mut n = 0;
+            for (r, path, (start, end), within) in &self.borrows {
+                if *r != root || at <= *start || at > *end || within.is_some_and(|x| f.contains(x, w.at)) {
+                    continue;
+                }
+                let common = steps.iter().zip(path).take_while(|(s, p)| s.is_some() && s == p).count();
+                n = n.max(1 + common);
+            }
+            if n > 0 {
+                held.insert((w.at, w.path), n);
+            }
+        }
+        self.held = held;
     }
 
     /// E0141 where a write copies an object a binding shares with its
@@ -1648,6 +1692,45 @@ fn place_path(body: &HirBody, f: &Facts<'_>, v: HirId) -> Option<(LocalId, Vec<O
     }
 }
 
+/// A write path as [`Plan::unique_path`] walks it (fields and array
+/// elements): its root local and the steps below it, `None` for an element.
+fn write_steps(body: &HirBody, path: HirId) -> Option<(LocalId, Vec<Option<String>>)> {
+    let mut steps = Vec::new();
+    let mut at = path;
+    loop {
+        match &body.expr(at).kind {
+            HirKind::Field { base, name } => {
+                steps.push(Some(name.clone()));
+                at = *base;
+            }
+            HirKind::Index { base, kind: IndexKind::Array, .. } => {
+                steps.push(None);
+                at = *base;
+            }
+            HirKind::Local(l) => {
+                steps.reverse();
+                return Some((*l, steps));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether `id` runs inside a `for` over an iterator (not an array, a
+/// tuple or a range), whose iterator holds the iterable while it runs.
+fn in_iterator_loop(body: &HirBody, f: &Facts<'_>, id: HirId) -> bool {
+    let mut at = id;
+    while let Some(&p) = f.parent.get(&at) {
+        if let HirKind::ForIn { kind, .. } = &body.expr(p).kind
+            && !matches!(kind, Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. }))
+        {
+            return true;
+        }
+        at = p;
+    }
+    false
+}
+
 /// Whether place steps `a` lead to `b` or to an object holding it.
 /// Elements match any index.
 fn prefix_of(a: &[Option<String>], b: &[Option<String>]) -> bool {
@@ -1737,7 +1820,8 @@ impl Plan {
         // earlier changes nothing a program sees).
         let mut before = Before::default();
         for &(w, at) in &self.unique {
-            for s in self.unique_path(out, checker, w.path, w.at) {
+            let held = self.held.get(&(w.at, w.path)).copied().unwrap_or(0);
+            for s in self.unique_path(out, checker, w.path, w.at, held) {
                 before.add(at, s);
             }
         }
@@ -1810,8 +1894,9 @@ impl Plan {
     }
 
     /// The statements that make the objects on `path` writable, top-down,
-    /// writing each copy back where it was read.
-    fn unique_path(&self, out: &mut HirBody, checker: &Checker, path: HirId, stmt: HirId) -> Vec<HirId> {
+    /// writing each copy back where it was read. The first `held` objects
+    /// from the root are a borrow's, written in place ([`Self::hold_borrowed`]).
+    fn unique_path(&self, out: &mut HirBody, checker: &Checker, path: HirId, stmt: HirId, held: usize) -> Vec<HirId> {
         // A copy of an existential pack site would share its span, and
         // code emission would pack the copy too.
         if pack_site(checker, out, path) {
@@ -1875,7 +1960,7 @@ impl Plan {
         match &out.expr(root).kind {
             HirKind::Local(l) => {
                 let l = *l;
-                let skip = self.fresh_locals.contains(&l) || self.inout.contains(&l) || self.defer_captured.contains(&l) || !cow_ty(checker, out.local(l).ty.as_ref());
+                let skip = held > 0 || self.fresh_locals.contains(&l) || self.inout.contains(&l) || self.defer_captured.contains(&l) || !cow_ty(checker, out.local(l).ty.as_ref());
                 if !skip {
                     stmts.push(unique_stmt(out, root, span));
                 }
@@ -1901,7 +1986,7 @@ impl Plan {
                 x.node = None;
             }
         }
-        for &step in &chain[1..] {
+        for &step in &chain[held.clamp(1, chain.len())..] {
             if cow_ty(checker, out.expr(step).ty.as_ref()) && !borrow_field(checker, out, step) {
                 stmts.push(unique_stmt(out, step, span));
             }
