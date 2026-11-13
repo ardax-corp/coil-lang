@@ -8052,9 +8052,18 @@ impl Lower<'_> {
             _ => None,
         }
         .ok_or("for in element type")?;
+        // A tuple pattern nesting another (`for (a, (b, c)) in xs`) of an
+        // array's tuple items: read out as `let` reads one (#2783).
+        let nested_ty = match pat {
+            HirPat::Tuple(pats) if elem == MirTy::HeapRef && into_iter.is_none() && pats.iter().any(|p| matches!(p, HirPat::Tuple(_))) => {
+                Some(it_ty.as_ref().and_then(|t| array_elem(t)).cloned().ok_or("for in pattern type")?)
+            }
+            _ => None,
+        };
         // Where the item goes: the bound local, or a temp the pattern's
         // parts read.
         let parts: Option<Vec<(HirLocal, MirTy)>> = match pat {
+            _ if nested_ty.is_some() => None,
             // A `()` local has no slot: its item is read and dropped.
             HirPat::Bind(local) if self.unit_local(*local) => None,
             HirPat::Bind(local) => {
@@ -8142,6 +8151,7 @@ impl Lower<'_> {
                 let x = self.slot(*local)?;
                 self.b.def_local(x, item).map_err(mir)?;
             }
+            (HirPat::Tuple(_), None) if let Some(ty) = &nested_ty => self.bind_tuple_item(pat, item, Some(ty))?,
             (HirPat::Tuple(pats), Some(parts)) => {
                 let mut parts = parts.into_iter();
                 for (k, p) in pats.iter().enumerate() {
