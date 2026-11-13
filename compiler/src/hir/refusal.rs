@@ -985,6 +985,17 @@ impl Walk<'_> {
                 }
                 self.value(*inner)
             }
+            // A copy-on-write pin: the object's word, then a `bool`.
+            HirKind::Builtin {
+                op: Builtin::CowPin,
+                args,
+            } => {
+                let [inner] = args.as_slice() else {
+                    return Err("builtin");
+                };
+                self.word(id)?;
+                self.value(*inner)
+            }
             // `typeof e`: a string constant, `e`'s type; `e` is not evaluated.
             HirKind::Builtin {
                 op: Builtin::TypeOf,
@@ -1351,6 +1362,18 @@ impl Walk<'_> {
                 op: Builtin::Region { .. },
                 ..
             } => Ok(()),
+            // A copy-on-write unpin: the object's word and its pin's `bool`.
+            HirKind::Builtin {
+                op: Builtin::CowUnpin,
+                args,
+            } => {
+                let [obj, saved] = args.as_slice() else {
+                    return Err("builtin");
+                };
+                self.value(*obj)?;
+                self.word(*saved)?;
+                self.value(*saved)
+            }
             // `panic msg`: the message, then `Panic`.
             HirKind::Builtin {
                 op: Builtin::Panic,
@@ -1429,7 +1452,7 @@ impl Walk<'_> {
             | HirKind::Resume { .. }
             | HirKind::Lambda { .. }
             | HirKind::Builtin {
-                op: Builtin::Done | Builtin::TypeOf | Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. },
+                op: Builtin::Done | Builtin::TypeOf | Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. } | Builtin::CowPin,
                 ..
             } => self.value(id),
             other => Err(other.name()),

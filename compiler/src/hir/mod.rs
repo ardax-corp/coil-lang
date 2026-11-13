@@ -701,6 +701,13 @@ pub enum Builtin {
     /// names it); `unique: true` makes it safe to write through, copying it
     /// when shared. Added by the copy-on-write rewrite only.
     Cow { unique: bool },
+    /// Copy-on-write pin of its operand's object (the `CowPin`
+    /// instruction): a `bool`, whether it was pinned. While pinned, a share
+    /// of it gives a copy. Added by the copy-on-write rewrite only (#2842).
+    CowPin,
+    /// Clear the pin of operand 0's object unless operand 1, the `bool` its
+    /// `CowPin` gave, is `true` (the `CowUnpin` instruction).
+    CowUnpin,
     /// Enter (`true`) or leave a `region { … }` block (escape step 5): the
     /// `gc_region_enter` / `gc_region_exit` HostInvoke. No arguments.
     Region { enter: bool },

@@ -9455,7 +9455,7 @@ impl Compiler {
                 Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty)),
             )),
             HirKind::Builtin { op: Builtin::TypeOf, .. } => Some(BOXED),
-            HirKind::Builtin { op: Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. }, .. } => {
+            HirKind::Builtin { op: Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. } | Builtin::CowPin, .. } => {
                 Some(Rep::Word(Self::hir_ty(hir, id).map_or(ValueLayout::Boxed, |ty| self.value_layout(ty))))
             }
             // A value `match` (`x ?? y`) yields each arm at the layout asked
@@ -10719,6 +10719,11 @@ impl Compiler {
                 let want = self.hir_natural(hir, emit, id).ok_or("cow-shape")?;
                 self.hir_check_value(hir, emit, args[0], &want)?
             }
+            // A pin reads its operand's word and gives a `bool`.
+            HirKind::Builtin { op: Builtin::CowPin, args } => {
+                let want = self.hir_natural(hir, emit, args[0]).ok_or("cow-shape")?;
+                self.hir_check_value(hir, emit, args[0], &want)?
+            }
             HirKind::Call { args, .. } => {
                 let call = emit.plan.calls.get(&id.0).ok_or("callee")?;
                 let args = match call.builtin {
@@ -11096,6 +11101,13 @@ impl Compiler {
             HirKind::Builtin { op: Builtin::Cow { .. }, args } => {
                 let want = self.hir_natural(hir, emit, args[0]).or_else(|| self.hir_natural(hir, emit, id)).ok_or("cow-shape")?;
                 self.hir_check_value(hir, emit, args[0], &want)
+            }
+            // An unpin: its object's word and its pin's `bool`.
+            HirKind::Builtin { op: Builtin::CowUnpin, args } => {
+                let want = self.hir_natural(hir, emit, args[0]).ok_or("cow-shape")?;
+                self.hir_check_value(hir, emit, args[0], &want)?;
+                let flag = self.hir_natural(hir, emit, args[1]).ok_or("cow-shape")?;
+                self.hir_check_value(hir, emit, args[1], &flag)
             }
             HirKind::Builtin { op: Builtin::FreeEarly { .. }, args } => match self.hir_natural(hir, emit, args[0]) {
                 Some(want @ Rep::Word(_)) => self.hir_check_value(hir, emit, args[0], &want),
