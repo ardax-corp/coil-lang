@@ -2709,10 +2709,27 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             HirPat::Wild => HirPat::Bind(b.temp("item", item_ty.clone())),
             pat => pat,
         };
+        // A record pattern anywhere in it (`for {a, b} in xs`): the loop
+        // binds a temp, and the body starts with the `let` that destructures
+        // it, as `let` does (#2784).
+        let mut lets = Vec::new();
+        let pat = if has_record_pattern(&pat) {
+            let item = b.temp("for$item", item_ty.clone());
+            let mut rest = Vec::new();
+            let top = split_let_pattern(b, pat, item_ty.as_ref(), &mut rest);
+            for (pat, temp, ty) in std::iter::once((top, item, item_ty.clone())).chain(rest) {
+                let read = self.synth(b, span, HirKind::Local(temp), ty);
+                lets.push(self.synth(b, span, HirKind::LetPat { pat, init: read }, Some(coil_ty::unit())));
+            }
+            HirPat::Bind(item)
+        } else {
+            pat
+        };
         let mut body = self.expr(b, body);
         b.scopes.pop();
-        if !checks.is_empty() {
-            let mut stmts = checks.to_vec();
+        if !checks.is_empty() || !lets.is_empty() {
+            let mut stmts = lets;
+            stmts.extend_from_slice(checks);
             stmts.push(body);
             body = self.synth(b, span, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()));
         }
@@ -3533,6 +3550,15 @@ fn is_builtin_scalar(ty: &Ty) -> bool {
 
 fn is_byte(ty: Option<&Ty>) -> bool {
     matches!(ty.map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::BYTE)
+}
+
+/// Whether `pat` holds a record pattern at any depth.
+fn has_record_pattern(pat: &HirPat) -> bool {
+    match pat {
+        HirPat::Record(_) => true,
+        HirPat::Tuple(items) => items.iter().any(has_record_pattern),
+        _ => false,
+    }
 }
 
 /// `pat` (a `let` pattern of type `ty`) with each record pattern below the
