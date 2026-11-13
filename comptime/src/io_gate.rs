@@ -1,4 +1,4 @@
-//! IO natives on the compile-time VM, checked against the grants of the
+//! IO natives on the compile-time code, checked against the grants of the
 //! evaluation running ([`set_active`]): `--comptime-read` / `-write` /
 //! `-env` / `-net` for the module of the const, `comptime` expression or
 //! macro. With no grants active (silent folding, `static let`) every one
@@ -50,7 +50,7 @@ fn check_clock() -> Result<(), String> {
     clock_ran_out().map_or(Ok(()), Err)
 }
 
-/// Note the IO this thread's compile-time VM does from now on.
+/// Note the IO this thread's compile-time code does from now on.
 pub fn start_recording() {
     RECORD.with(|r| *r.borrow_mut() = Some(Vec::new()));
 }
@@ -98,7 +98,7 @@ fn note_write(path: &str) {
     }
 }
 
-/// Make `io` the grants of what this thread's compile-time VM runs next;
+/// Make `io` the grants of what this thread's compile-time code runs next;
 /// returns the previous ones.
 pub fn set_active(io: Option<Arc<ComptimeIo>>) -> Option<Arc<ComptimeIo>> {
     ACTIVE.with(|a| a.replace(io))

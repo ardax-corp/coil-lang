@@ -25,7 +25,8 @@ A sha256 of:
   archive version;
 - the working directory, the entry file's canonical path and its bytes;
 - the flags that can change the archive: `--include-tests`, `-O`, `-g`,
-  `--contracts`, `--fold-calls`, the host grants and the `--root`s;
+  `--contracts`, `--fold-calls`, the host grants, the `--root`s and the
+  report format;
 - every `COIL_*` environment variable (several switch optimizations).
 
 So two versions of one file, or two builds of coil, never share an entry and
@@ -47,8 +48,8 @@ includes an output written beside the source, such as a new `-o` file.
 
 ## Not cached
 
-- A compile that reported any diagnostic: a hit would not show its warnings
-  again.
+- A compile with diagnostics in a machine format (`--log-json`, `--log-lsp`).
+  A terminal report is kept in the entry, and a hit prints it again.
 - A compile with compile-time IO grants (`--comptime-read`, `--comptime-env`,
   `--comptime-net`, `--comptime-write`): its result can
   depend on files and the environment the key does not cover. Those

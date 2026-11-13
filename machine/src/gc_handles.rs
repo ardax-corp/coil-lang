@@ -388,7 +388,7 @@ mod tests {
         );
         assert!(
             heap.find_object_by_addr(s.bits()).is_some(),
-            "array child must live without Machine tracing"
+            "array child must live without a runtime tracing it"
         );
     }
 

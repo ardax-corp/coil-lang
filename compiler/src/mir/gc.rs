@@ -6,24 +6,17 @@
 //! plus a barrier (B6 grow). `FORMAT` / `STRINGIFY` pair the same way
 //! (Q9 R3). Heap `GetField` / `SetField` / `LoadField` lower on the map
 //! path so InitTyped+field drafts bind (D1); they are not alloc sites.
-//! Dense emit reconstructs those as `DenseFieldLoad` / `DenseFieldStore`
-//! and Object `DenseMakeObject` (D2).
-//! [`fill_live_roots`] records live heap-word SSA values (and IL
-//! slots when the builder snapshotted them). Dense specialize and MIR→LIR
-//! sidecar. S2c may emit dense / LIR across alloc when every allocation
-//! has its barrier (`mir_maps_ok`).
+//! [`fill_live_roots`] records live heap-word SSA values at each barrier
+//! (`mir_maps_ok` holds when every allocation has its barrier).
 //!
-//! Stack-map roadmap: `docs/internals/mir-stack-maps.md`.
+//! Stack maps: `docs/internals/gc-incremental.md`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use common::Instruction;
 
-use crate::il::IlOp;
 
 use super::func::MirFunc;
-use super::inst::{BlockId, LocalId, MirInst, Terminator, ValueId};
-use super::ty::MirTy;
+use super::inst::{BlockId, LocalId, MirInst, ValueId};
 
 /// Live heap words at one Alloc or GcBarrier dest (S2a).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,60 +27,6 @@ pub struct LiveRootSet {
     pub values: Vec<ValueId>,
     /// IL slots that held a live heap word at this edge (sorted).
     pub slots: Vec<LocalId>,
-}
-
-/// Residual object-init opcodes (cold `IlOp::Byte`).
-pub fn is_alloc_inst(inst: Instruction) -> bool {
-    matches!(
-        inst,
-        Instruction::InitTyped | Instruction::INIT | Instruction::DenseMake
-            | Instruction::DenseMakeK
-            | Instruction::DenseMakeObject
-    )
-}
-
-/// Inventory label: `heap/aggregate` for Make*, `heap/alloc` for InitTyped.
-pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
-    match op {
-        IlOp::MakeArray { .. } | IlOp::MakeTuple { .. } | IlOp::MakeEnum { .. } => {
-            Some("heap/aggregate")
-        }
-        IlOp::Byte { byte, .. }
-            if is_alloc_inst(*byte.bytecode())
-                || matches!(*byte.bytecode(), Instruction::DenseMake | Instruction::DenseMakeK) =>
-        {
-            Some("heap/alloc")
-        }
-        IlOp::Byte { byte, .. }
-            if matches!(
-                *byte.bytecode(),
-                Instruction::ArrayPush | Instruction::DenseArrayPush
-            ) =>
-        {
-            Some("heap/grow")
-        }
-        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::STRINGIFY => {
-            Some("heap/format")
-        }
-        IlOp::Byte { byte, .. }
-            if *byte.bytecode() == Instruction::FORMAT && byte.operand_u32() > 0 =>
-        {
-            Some("heap/format")
-        }
-        IlOp::Byte { byte, .. }
-            if matches!(
-                *byte.bytecode(),
-                Instruction::DictEntries | Instruction::MakeDict
-            ) =>
-        {
-            Some("heap/dict")
-        }
-        IlOp::Entry {
-            kind: crate::il::EntryKind::MakeCoro,
-            ..
-        } => Some("heap/coro"),
-        _ => None,
-    }
 }
 
 /// Fill [`MirFunc::gc_roots`] and each `GcBarrier.roots` from SSA liveness.
@@ -109,6 +48,8 @@ pub fn fill_live_roots(func: &mut MirFunc) {
             match inst {
                 MirInst::Alloc { dest, .. }
                 | MirInst::ArrayPush { dest, .. }
+                | MirInst::LanePush { dest, .. }
+                | MirInst::LanesToWords { dest, .. }
                 | MirInst::Format { dest, .. }
                 | MirInst::Stringify { dest, .. }
                 | MirInst::Cow { dest, .. } => {
@@ -207,46 +148,6 @@ fn live_heap(
         .collect()
 }
 
-/// The `i64` words of an [`MirFunc::opaque_words`] body (a type
-/// variable's word may be an object) live past an instruction that can
-/// collect: anything but a constant, a code pointer (a `CodePtr`, or a
-/// `CallIndirect`'s dictionary method), a parameter or a word one of
-/// these moves consumes. A frame map lists them beside its heap words.
-pub(super) fn live_opaque_words(func: &MirFunc) -> BTreeSet<ValueId> {
-    let mut out = BTreeSet::new();
-    if !func.opaque_words {
-        return out;
-    }
-    let consts: HashSet<ValueId> = func
-        .blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|i| match i {
-            MirInst::Const { dest, .. } | MirInst::CodePtr { dest, .. } => Some(*dest),
-            MirInst::CallIndirect { callee, .. } if func.ty(*callee) == MirTy::I64 => Some(*callee),
-            _ => None,
-        })
-        .collect();
-    let live = liveness_after(func);
-    for (b, block) in func.blocks.iter().enumerate() {
-        for (i, inst) in block.insts.iter().enumerate() {
-            if collects(inst) {
-                out.extend(live[b][i].iter().copied().filter(|v| func.ty(*v) == MirTy::I64 && !consts.contains(v) && !func.params.contains(v)));
-            }
-        }
-    }
-    out
-}
-
-/// Whether `inst` may run the collector: all but the moves of words
-/// [`live_opaque_words`] looks past.
-pub(super) fn collects(inst: &MirInst) -> bool {
-    !matches!(
-        inst,
-        MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Cmp { .. } | MirInst::Unary { .. } | MirInst::Cast { .. } | MirInst::Phi { .. } | MirInst::ArrayLen { .. } | MirInst::Index { .. } | MirInst::HeapFieldLoad { .. } | MirInst::HeapFieldStore { .. } | MirInst::PanicStore { .. }
-    )
-}
-
 fn barrier_dests(func: &MirFunc) -> HashSet<ValueId> {
     let mut s = HashSet::new();
     for b in &func.blocks {
@@ -261,6 +162,13 @@ fn barrier_dests(func: &MirFunc) -> HashSet<ValueId> {
 
 /// `live_after[block][inst]` = SSA values live immediately after that inst.
 pub(super) fn liveness_after(func: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
+    liveness(func).1
+}
+
+/// SSA liveness: the values live into each block (above its phis, so
+/// not their dests) and `after[block][inst]`, the values live just
+/// after each inst.
+pub fn liveness(func: &MirFunc) -> (Vec<HashSet<ValueId>>, Vec<Vec<HashSet<ValueId>>>) {
     let n = func.blocks.len();
     let mut live_in: Vec<HashSet<ValueId>> = vec![HashSet::new(); n];
     let mut after: Vec<Vec<HashSet<ValueId>>> = func
@@ -269,7 +177,7 @@ pub(super) fn liveness_after(func: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
         .map(|b| vec![HashSet::new(); b.insts.len()])
         .collect();
     if n == 0 {
-        return after;
+        return (live_in, after);
     }
     let mut changed = true;
     while changed {
@@ -277,9 +185,7 @@ pub(super) fn liveness_after(func: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
         for bi in (0..n).rev() {
             let mut live = live_out_of(func, BlockId(bi as u32), &live_in);
             if let Some(term) = &func.blocks[bi].term {
-                for u in term_uses(term) {
-                    live.insert(u);
-                }
+                live.extend(term.uses());
             }
             let insts = &func.blocks[bi].insts;
             for ii in (0..insts.len()).rev() {
@@ -301,7 +207,7 @@ pub(super) fn liveness_after(func: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
             }
         }
     }
-    after
+    (live_in, after)
 }
 
 fn live_out_of(func: &MirFunc, b: BlockId, live_in: &[HashSet<ValueId>]) -> HashSet<ValueId> {
@@ -344,31 +250,18 @@ fn phi_dests(block: &super::func::MirBlock) -> HashSet<ValueId> {
 
 fn data_uses(inst: &MirInst) -> Vec<ValueId> {
     match inst {
-        MirInst::GcBarrier { .. } | MirInst::Deopt { .. } | MirInst::Const { .. } => Vec::new(),
+        MirInst::GcBarrier { .. } | MirInst::Const { .. } => Vec::new(),
         other => other.operands(),
-    }
-}
-
-pub(super) fn term_uses(term: &Terminator) -> Vec<ValueId> {
-    match term {
-        Terminator::Br { cond, .. } => vec![*cond],
-        Terminator::JumpIfMatch { scrutinee, .. } => vec![*scrutinee],
-        Terminator::Return { lo, hi } => lo.iter().copied().chain(hi.iter().copied()).collect(),
-        Terminator::Jump { .. } | Terminator::Unreachable => Vec::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::il::IlOp;
     use crate::mir::builder::MirBuilder;
     use crate::mir::inst::{MirAllocKind, MirCmpOp, MirConst, MirGcKind};
-    use common::{Byte, DebugLoc};
-
-    fn loc() -> DebugLoc {
-        DebugLoc::unknown()
-    }
+    use crate::mir::MirTy;
+    
 
     fn alloc_and_barrier(f: &MirFunc) -> (ValueId, ValueId, Vec<ValueId>) {
         let mut obj = None;
@@ -390,80 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn make_and_init_are_alloc_barriers() {
-        let loc = loc();
-        assert_eq!(
-            refuse_reason(&IlOp::MakeArray { elem_kind: 0, arity: 1, loc }),
-            Some("heap/aggregate")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::MakeTuple { kinds: 0, arity: 2, loc }),
-            Some("heap/aggregate")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::MakeEnum {
-                kinds: 0,
-                tag: 0,
-                arity: 1,
-                loc,
-            }),
-            Some("heap/aggregate")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::Byte {
-                byte: Byte::new(Instruction::InitTyped).with_operand_u32(1),
-                loc,
-            }),
-            Some("heap/alloc")
-        );
-        assert_eq!(refuse_reason(&IlOp::Const { imm: 1, loc }), None);
-        assert_eq!(
-            refuse_reason(&IlOp::byte(Byte::new(Instruction::ArrayPush))),
-            Some("heap/grow")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(Byte::new(Instruction::DenseArrayPush))),
-            Some("heap/grow")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(
-                Byte::new(Instruction::FORMAT).with_operand_u32(1)
-            )),
-            Some("heap/format")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(
-                Byte::new(Instruction::FORMAT).with_operand_u32(0)
-            )),
-            None
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(Byte::new(Instruction::STRINGIFY))),
-            Some("heap/format")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(Byte::new(Instruction::DictEntries))),
-            Some("heap/dict")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::byte(
-                Byte::new(Instruction::MakeDict).with_operand_u32(1)
-            )),
-            Some("heap/dict")
-        );
-        assert_eq!(
-            refuse_reason(&IlOp::Entry {
-                kind: crate::il::EntryKind::MakeCoro,
-                arity: 0,
-                target: crate::il::Label(0),
-                loc,
-                ret_words: 1,
-            }),
-            Some("heap/coro")
-        );
-    }
-
-    #[test]
     fn roots_include_new_object_when_returned() {
         let mut b = MirBuilder::new("mk");
         let n = b.ins_const(MirConst::I64(1)).unwrap();
@@ -477,45 +296,6 @@ mod tests {
         assert_eq!(roots.len(), 1);
         let side = f.live_roots_at(obj).expect("alloc sidecar");
         assert!(side.values.contains(&obj));
-    }
-
-    #[test]
-    fn roots_include_live_heap_param_across_barrier() {
-        let mut b = MirBuilder::new("keep");
-        let xs = b.add_param(MirTy::HeapRef).unwrap();
-        b.def_local(LocalId(0), xs).unwrap();
-        let n = b.ins_const(MirConst::I64(1)).unwrap();
-        let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
-        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
-        let z = b.ins_const(MirConst::I64(0)).unwrap();
-        let _ = b.ins_cmp(MirCmpOp::Eq, xs, z).unwrap();
-        let _ = b.ins_cmp(MirCmpOp::Eq, a, z).unwrap();
-        b.ret(Some(g)).unwrap();
-        let f = b.finish().unwrap();
-        f.verify().unwrap();
-        let (obj, _g, roots) = alloc_and_barrier(&f);
-        assert!(roots.contains(&obj), "{roots:?}");
-        assert!(roots.contains(&xs), "live heap param: {roots:?}");
-        let side = f.live_roots_at(_g).expect("barrier sidecar");
-        assert!(side.values.contains(&xs) && side.values.contains(&obj));
-        assert!(
-            side.slots.iter().any(|s| s.0 == 0),
-            "slot 0: {:?}",
-            side.slots
-        );
-    }
-
-    #[test]
-    fn dead_heap_param_is_not_a_root() {
-        let mut b = MirBuilder::new("dead");
-        let unused = b.add_param(MirTy::HeapRef).unwrap();
-        let n = b.ins_const(MirConst::I64(1)).unwrap();
-        let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
-        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
-        b.ret(Some(g)).unwrap();
-        let f = b.finish().unwrap();
-        let (_obj, _g, roots) = alloc_and_barrier(&f);
-        assert!(!roots.contains(&unused), "dead param in roots: {roots:?}");
     }
 
     #[test]
@@ -545,4 +325,42 @@ mod tests {
         assert!(r2.contains(&a) && r2.contains(&c), "second: {r2:?}");
     }
 
+    #[test]
+    fn dead_heap_param_is_not_a_root() {
+        let mut b = MirBuilder::new("dead");
+        let unused = b.add_param(MirTy::HeapRef).unwrap();
+        let n = b.ins_const(MirConst::I64(1)).unwrap();
+        let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
+        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
+        b.ret(Some(g)).unwrap();
+        let f = b.finish().unwrap();
+        let (_obj, _g, roots) = alloc_and_barrier(&f);
+        assert!(!roots.contains(&unused), "dead param in roots: {roots:?}");
+    }
+
+    #[test]
+    fn roots_include_live_heap_param_across_barrier() {
+        let mut b = MirBuilder::new("keep");
+        let xs = b.add_param(MirTy::HeapRef).unwrap();
+        b.def_local(LocalId(0), xs).unwrap();
+        let n = b.ins_const(MirConst::I64(1)).unwrap();
+        let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
+        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
+        let z = b.ins_const(MirConst::I64(0)).unwrap();
+        let _ = b.ins_cmp(MirCmpOp::Eq, xs, z).unwrap();
+        let _ = b.ins_cmp(MirCmpOp::Eq, a, z).unwrap();
+        b.ret(Some(g)).unwrap();
+        let f = b.finish().unwrap();
+        f.verify().unwrap();
+        let (obj, _g, roots) = alloc_and_barrier(&f);
+        assert!(roots.contains(&obj), "{roots:?}");
+        assert!(roots.contains(&xs), "live heap param: {roots:?}");
+        let side = f.live_roots_at(_g).expect("barrier sidecar");
+        assert!(side.values.contains(&xs) && side.values.contains(&obj));
+        assert!(
+            side.slots.iter().any(|s| s.0 == 0),
+            "slot 0: {:?}",
+            side.slots
+        );
+    }
 }

@@ -499,7 +499,7 @@ fn register_native_object_type() {
 }
 
 #[test]
-fn infer_depth_guard_panics_with_expected_diagnostic_past_limit() {
+fn infer_depth_guard_reports_the_limit_without_unwinding() {
     // Exercise the guard directly (not via a literal deeply-nested AST):
     // recursing 2000+ levels via `+` also overflows the stack while
     // dropping the parsed AST itself (a well-known Box<T> recursive-Drop
@@ -514,14 +514,15 @@ fn infer_depth_guard_panics_with_expected_diagnostic_past_limit() {
         .parse("1;")
         .expect("trivial literal parses");
     c.infer_depth = INFER_RECURSION_LIMIT;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.infer(&ast)));
-    assert!(result.is_err(), "expected the recursion-limit panic");
+    let _ = c.infer(&ast);
     assert!(
         c.messages()
             .iter()
             .any(|m| m.code() == Some(ErrorCode::ExpressionNestingTooDeep)),
-        "expected an ExpressionNestingTooDeep diagnostic to be recorded before panicking"
+        "expected an ExpressionNestingTooDeep diagnostic"
     );
+    assert!(c.too_deep.is_some(), "the walk stops at the limit");
+    assert_eq!(c.infer_depth, INFER_RECURSION_LIMIT, "the limit's level is not entered");
 }
 
 #[test]
@@ -1514,8 +1515,8 @@ fn builtin_option_type_app_builds_ty_app() {
 #[test]
 fn ambiguous_instance_discharge_reports_error() {
     let mut c = Checker::new();
-    c.generics.instances.clear();
-    c.generics.instances.push(InstanceDef {
+    c.generics.clear_instances();
+    c.generics.push_instance(InstanceDef {
         class: "Choice".to_string(),
         defined_module: "a".to_string(),
         range: 0..1,
@@ -1524,7 +1525,7 @@ fn ambiguous_instance_discharge_reports_error() {
         assoc_tys: HashMap::new(),
         context: Vec::new(),
     });
-    c.generics.instances.push(InstanceDef {
+    c.generics.push_instance(InstanceDef {
         class: "Choice".to_string(),
         defined_module: "b".to_string(),
         range: 1..2,
@@ -1597,7 +1598,7 @@ fn implied_superclass_bound_allows_superclass_method() {
                 pub fn lt_val(int a, int b) -> bool { return a < b; }
             }
             fn cmp_eq<T: Ordered>(T a, T b) -> bool {
-                return eq_val(a, b);
+                return a.eq_val(b);
             }
             fn main() {
                 let x = cmp_eq(1, 1);
@@ -1634,8 +1635,8 @@ fn abstract_constraint_kind_uses_superclass_method_after_binding() {
                 pub fn lt_val(int a, int b) -> bool { return a < b; }
             }
             fn choose<c: * -> Constraint, T: c>(T a, T b) -> int {
-                if lt_val(a, b) { return 0; }
-                if eq_val(a, b) { return 42; }
+                if a.lt_val(b) { return 0; }
+                if a.eq_val(b) { return 42; }
                 return 1;
             }
             fn main() {
@@ -2117,7 +2118,7 @@ fn multiparam_where_clause_discharges_at_call_site() {
     let src = r#"
 trait Convert<A, B> { fn cast(A x) -> B; }
 impl Convert<int> for int { pub fn cast(int x) -> int { return x; } }
-fn apply_cast<A, B>(A x) -> B where Convert<A, B> { return cast(x); }
+fn apply_cast<A, B>(A x) -> B where Convert<A, B> { return x.cast(); }
 fn main() { let y = apply_cast(42); }
 "#;
     let (mut c, _) = check(src);
@@ -2735,7 +2736,60 @@ fn walk<T>(T x) {
         .iter()
         .find(|m| m.message().contains("is not iterable"))
         .expect("expected a not-iterable reject");
-    assert_eq!(msg.message(), "type `T` is not iterable");
+    assert_eq!(msg.message(), "type parameter `T` is not iterable: a `for` over it needs a bound `T: Iterator`");
+}
+
+/// A `for` over a type parameter is never the one instance in scope
+/// (#2820): with no `Iterator` bound it says so, and over an `IntoIterator`
+/// bound it says why that bound is not enough.
+#[test]
+fn for_over_type_param_never_picks_the_only_instance() {
+    let src = r#"
+class Up {
+    pub i: int,
+}
+
+impl Iterator for Up {
+    type Item = int;
+    fn next(Up u) -> Option<int> {
+        return None;
+    }
+}
+
+class Bag {
+    pub i: int,
+}
+
+impl IntoIterator for Bag {
+    type Item = int;
+    type IntoIter = Up;
+    fn into_iter(Bag b) -> Up {
+        return new Up(b.i);
+    }
+}
+
+fn walk<T>(T x) {
+    for y in x { }
+}
+
+fn walk_into<T: IntoIterator>(T x) {
+    for y in x { }
+}
+
+fn walk_iter<I: Iterator>(I x) -> int {
+    let n = 0;
+    for y in x {
+        n += 1;
+    }
+    return n;
+}
+"#;
+    let (c, _) = check(src);
+    let texts: Vec<&str> = c.messages().iter().map(|m| m.message()).collect();
+    assert!(texts.iter().all(|t| !t.contains("is used as")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("type parameter `T` is not iterable")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("a `for` over `T` (bounded by `IntoIterator`) is not supported")), "{texts:?}");
+    assert_eq!(texts.len(), 2, "{texts:?}");
 }
 
 /// `use prelude::Option as …` does not free `Option` for a user type, so the

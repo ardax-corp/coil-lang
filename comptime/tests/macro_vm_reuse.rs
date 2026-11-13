@@ -1,6 +1,6 @@
-//! #1008: function-style macro calls reuse one VM per expansion program
+//! #1008: function-style macro calls reuse one runtime per expansion program
 //! per thread. A call that panics or runs out of steps must not poison
-//! the VM later calls run on, and many calls in a row must keep giving
+//! the runtime later calls run on, and many calls in a row must keep giving
 //! the same output.
 
 use std::path::{Path, PathBuf};

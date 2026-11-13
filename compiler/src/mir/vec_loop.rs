@@ -29,7 +29,7 @@ use super::func::MirFunc;
 use super::inst::{BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, Terminator, ValueId, VecExpr, VecLoopKind};
 use super::licm::{natural_loops, LoopInfo};
 use super::ty::MirTy;
-use super::vectorize::{match_cond_reduce_on, match_if_store_on, match_push_on, match_reduce_on, match_store_on, Bounds, Off, VOp};
+use super::vectorize::{match_cond_reduce_on, match_if_store_on, match_push_on, match_reduce_on, match_store_on, may_trap, Bounds, Off, VOp};
 
 /// Rewrite every loop that qualifies. Returns how many did.
 pub fn vec_loops(func: &mut MirFunc) -> usize {
@@ -284,7 +284,7 @@ impl Place<'_, '_> {
         let mapped: HashMap<ValueId, ValueId> = ops.iter().map(|&o| (o, self.value(o))).collect();
         inst.rewrite_values(|x| mapped.get(&x).copied().unwrap_or(x));
         let dest = self.b.value(self.b.func.ty(v));
-        set_dest(&mut inst, dest);
+        *inst.dest_mut() = dest;
         self.b.push(self.at, inst);
         self.done.insert(v, dest);
         dest
@@ -358,16 +358,6 @@ impl Place<'_, '_> {
     }
 }
 
-fn set_dest(inst: &mut MirInst, to: ValueId) {
-    match inst {
-        MirInst::Const { dest, .. }
-        | MirInst::ArrayLen { dest, .. }
-        | MirInst::Bin { dest, .. }
-        | MirInst::Unary { dest, .. } => *dest = to,
-        _ => unreachable!("placeable values only"),
-    }
-}
-
 /// The streams a tree reads: `(array, offset)`.
 fn streams(op: &VecExpr, out: &mut Vec<(ValueId, ValueId)>) {
     match op {
@@ -393,6 +383,7 @@ fn streams(op: &VecExpr, out: &mut Vec<(ValueId, ValueId)>) {
 
 fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     let h = lp.header;
+    let trap_loc = trap_loc(func, lp, plan.iv);
     let outside: Vec<BlockId> = func.preds_of(h).into_iter().filter(|p| !lp.blocks.contains(p)).collect();
     let phis: Vec<(ValueId, MirTy, PhiArgs)> = func
         .block(h)
@@ -506,7 +497,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
                 len
             }
         };
-        match const_of(at.b.func, off) {
+        match at.b.func.const_i64(off) {
             Some(k) => {
                 let lo = at.konst(-k);
                 let from_ok = at.cmp(MirCmpOp::Ge, i0, lo);
@@ -563,6 +554,9 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     let dest = b.value(acc.map_or(MirTy::I64, |a| b.func.ty(a)));
     let pos = kind.uses_index().then(|| b.value(MirTy::I64));
     b.push(fast, MirInst::VecLoop { dest, pos, from: i0, to: end, kind });
+    if let Some(loc) = trap_loc {
+        b.func.value_locs.insert(dest, loc);
+    }
     b.func.block_mut(fast).term = Some(Terminator::Jump { dest: join });
 
     // J: where the scalar loop picks up.
@@ -593,10 +587,39 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: Plan) -> Vec<BlockId> {
     run
 }
 
-/// The constant `v` holds, when it is one (a constant stream offset).
-fn const_of(func: &MirFunc, v: ValueId) -> Option<i64> {
-    func.blocks.iter().flat_map(|b| &b.insts).find_map(|i| match i {
-        MirInst::Const { dest, c: MirConst::I64(k) } if *dest == v => Some(*k),
-        _ => None,
-    })
+/// Where a lane that traps reports its panic: the location of the loop
+/// body's outermost op that can trap, the one whose span holds the most of
+/// the others' (the first such in body order). That is the op the scalar
+/// loop traps at when it is the only one that can, or when the others are
+/// its operands (`100 / (i - k)`, #2539). The induction step is the loop's
+/// own. `None` when no such op has a location.
+fn trap_loc(func: &MirFunc, lp: &LoopInfo, iv: ValueId) -> Option<common::DebugLoc> {
+    let step: Vec<ValueId> = func
+        .block(lp.header)
+        .insts
+        .iter()
+        .find_map(|i| match i {
+            MirInst::Phi { dest, args, .. } if *dest == iv => Some(args.iter().filter(|(from, _)| lp.blocks.contains(from)).map(|&(_, v)| v).collect()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let locs: Vec<common::DebugLoc> = (0..func.blocks.len())
+        .map(|k| BlockId(k as u32))
+        .filter(|b| lp.blocks.contains(b))
+        .flat_map(|b| &func.block(b).insts)
+        .filter(|i| may_trap(func, i) && !step.contains(&i.dest()))
+        .map(|i| func.op_loc(i.dest()))
+        .filter(|l| l.is_known())
+        .collect();
+    let holds = |outer: &common::DebugLoc, inner: &common::DebugLoc| {
+        outer.file == inner.file && outer.start_byte <= inner.start_byte && inner.end_byte <= outer.end_byte
+    };
+    let mut best: Option<(usize, common::DebugLoc)> = None;
+    for l in &locs {
+        let held = locs.iter().filter(|o| holds(l, o)).count();
+        if best.is_none_or(|(n, _)| held > n) {
+            best = Some((held, *l));
+        }
+    }
+    best.map(|(_, l)| l)
 }

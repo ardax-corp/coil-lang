@@ -1,0 +1,150 @@
+// A shared generic body that takes a bare `T` and returns, or takes, a
+// generic class instance holding it (#2511): a field typed by a class
+// parameter is one word in every instance, so the object the body builds
+// or fills is the one ground code reads, and it is passed as it is.
+// @flags --clone-budget 0
+use tests::assert;
+use gc::collect;
+
+class Box<T> {
+    pub v: T,
+    pub n: int,
+}
+
+class Many<T> {
+    pub xs: Vec<T>,
+    pub last: T,
+}
+
+class Flat<T> {
+    pub v: T,
+    pub o: Option<int>,
+}
+
+readonly class Frozen<T> {
+    pub v: T,
+    pub k: int,
+}
+
+readonly class Two<T> {
+    pub a: T,
+    pub b: T,
+}
+
+enum List<T> {
+    Nil,
+    Cons(T, List<T>),
+}
+
+class Holder<T> {
+    pub l: List<T>,
+}
+
+fn rebox<T>(T x) -> Box<T> {
+    return new Box(x, 1);
+}
+
+fn put<T>(Box<T> b, T x) -> Box<T> {
+    b.v = x;
+    b.n += 1;
+    return b;
+}
+
+fn many<T>(T x, T y) -> Many<T> {
+    let v: Vec<T> = Vec::new();
+    v.push(x);
+    v.push(y);
+    return new Many(v, y);
+}
+
+fn flat<T>(T x) -> Flat<T> {
+    return new Flat(x, Some(3));
+}
+
+fn frozen<T>(T x) -> Frozen<T> {
+    return new Frozen(x, 9);
+}
+
+fn hold<T>(T x) -> Holder<T> {
+    return new Holder(List::Cons(x, List::Nil));
+}
+
+fn two<T>(T x, T y) -> Two<T> {
+    return new Two(x, y);
+}
+
+fn shift<T>(Two<T> p, T z) -> Two<T> {
+    return new Two(p.b, z);
+}
+
+fn boxes<T>(T x) -> Vec<Box<T>> {
+    let v: Vec<Box<T>> = Vec::new();
+    v.push(new Box(x, 0));
+    v.push(rebox(x));
+    return v;
+}
+
+class Cell {
+    pub c: int,
+}
+
+test("a class result at scalar types") {
+    let r = rebox(5);
+    collect();
+    assert!(r.v == 5 && r.n == 1);
+    assert!(rebox(2.5).v == 2.5);
+    assert!(!rebox(false).v);
+    assert!(rebox(()).n == 1);
+}
+
+test("a class result at heap, niche and two-word types") {
+    assert!(rebox("s").v == "s");
+    let n: Option<string> = None;
+    assert!(rebox(n).v.is_none());
+    assert!(rebox(Some("t")).v == Some("t"));
+    assert!(rebox(Some(4)).v == Some(4));
+    let t = rebox((1, 2));
+    collect();
+    assert!(t.v[1] == 2);
+    assert!(rebox(new Cell(8)).v.c == 8);
+}
+
+test("a class the caller made, filled by the shared body") {
+    let b = new Box(1, 0);
+    let c = put(b, 7);
+    assert!(b.v == 7 && b.n == 1 && c.n == 1);
+    let s = put(new Box("a", 0), "b");
+    assert!(s.v == "b");
+}
+
+test("fields of Vec, flat, readonly and enum types") {
+    let m = many(3, 4);
+    collect();
+    assert!(m.xs.len() == 2 && m.xs[0] == 3 && m.last == 4);
+    let w = many("x", "y");
+    assert!(w.xs[1] == "y");
+    let f = flat(1.5);
+    assert!(f.v == 1.5 && f.o == Some(3));
+    let z = frozen(6);
+    assert!(z.v == 6 && z.k == 9);
+    let h = hold(2);
+    let first = match h.l {
+        List::Cons(x, _) => x,
+        List::Nil => -1,
+    };
+    assert!(first == 2);
+}
+
+test("a Vec of class instances") {
+    let v = boxes(3);
+    collect();
+    assert!(v.len() == 2 && v[0].v == 3 && v[1].v == 3 && v[1].n == 1);
+}
+
+test("a two-field readonly class") {
+    let p = two(1, 2);
+    assert!(p.a == 1 && p.b == 2);
+    let q = shift(p, 3);
+    assert!(q.a == 2 && q.b == 3 && q == two(2, 3));
+    assert!(two(1.5, 2.5).b == 2.5);
+}

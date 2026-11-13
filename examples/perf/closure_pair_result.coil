@@ -1,0 +1,29 @@
+// A closure returning `Option<int>` called through its function value:
+// the call enters the closure's two-word twin, so no `Option` is boxed
+// per call.
+use io::sync::print;
+use string::format;
+
+fn run(int -> Option<int> f) -> int {
+    let s = 0;
+    let i = 0;
+    while i < 20000000 {
+        s += match f(i) {
+            Some(v) => v,
+            None => 1,
+        };
+        i += 1;
+    }
+    return s;
+}
+
+fn main() {
+    let k = 2;
+    let r = run(fn (int x) use (k) {
+        if x % 3 == 0 {
+            return None;
+        }
+        return Some(x / k);
+    });
+    let _ = print(format("%i\n", r));
+}

@@ -27,8 +27,8 @@ use std::collections::HashSet;
 
 use common::{VEC_EXTEND_RANGE_ID, VEC_FILL_ID};
 
-use super::byte_scan::{const_i64, defs, header_test, relayout, retarget, Builder, PhiArgs};
-use super::func::MirFunc;
+use super::byte_scan::{header_test, relayout, retarget, Builder, PhiArgs};
+use super::func::{const_i64, MirFunc};
 use super::inst::{BlockId, MirBinOp, MirCmpOp, MirConst, MirInst, Terminator, ValueId};
 use super::licm::{natural_loops, LoopInfo};
 use super::ty::MirTy;
@@ -95,7 +95,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo) -> Option<Plan> {
     let Some(Terminator::Br { cond, taken, not_taken }) = func.block(h).term else {
         return None;
     };
-    let defs = defs(func);
+    let defs = func.defs();
     let invariant = |v: ValueId| defs.get(&v).is_none_or(|(b, _)| !lp.blocks.contains(b));
 
     // Exactly two φs: the induction variable and the array pushed to.
@@ -295,13 +295,13 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
                 n
             };
             let dest = b.value(MirTy::I64);
-            b.push(fast, MirInst::HostInvoke { dest, native_id: VEC_EXTEND_RANGE_ID, layout, args: vec![out, src, i0, end] })
+            b.push(fast, MirInst::HostInvoke { dest, dest_hi: None, native_id: VEC_EXTEND_RANGE_ID, layout, args: vec![out, src, i0, end] })
         }
         Kind::Fill { value } => {
             let count = b.value(MirTy::I64);
             b.push(fast, MirInst::Bin { dest: count, op: MirBinOp::Sub, ty: MirTy::I64, lhs: n, rhs: i0 });
             let dest = b.value(MirTy::I64);
-            b.push(fast, MirInst::HostInvoke { dest, native_id: VEC_FILL_ID, layout, args: vec![out, value, count] });
+            b.push(fast, MirInst::HostInvoke { dest, dest_hi: None, native_id: VEC_FILL_ID, layout, args: vec![out, value, count] });
             n
         }
     };

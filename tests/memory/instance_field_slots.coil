@@ -1,0 +1,103 @@
+// Native code reads and writes instance fields in place when the object is an
+// instance with inline (up to four fields) or spilled (more) storage and, for a
+// write, the collector need not log it. Every other case goes through the
+// runtime helper. Both paths must agree: small and wide classes, fields that
+// hold heap values, objects that a collection made old, and objects whose
+// fields are written after a collection.
+use tests::assert;
+use gc::collect;
+
+class Pair {
+    pub a: int,
+    pub b: int,
+}
+
+class Wide {
+    pub f0: int,
+    pub f1: int,
+    pub f2: int,
+    pub f3: int,
+    pub f4: int,
+    pub f5: string,
+}
+
+class Holder {
+    pub label: string,
+    pub inner: Pair,
+}
+
+fn wide(int n) -> Wide {
+    return new Wide(n, n + 1, n + 2, n + 3, n + 4, "w");
+}
+
+test("inline fields load and store in place") {
+    let p = new Pair(1, 2);
+    let a = 1;
+    let b = 2;
+    let i = 0;
+    while i < 40 {
+        p.a = p.a + p.b;
+        p.b = p.a - p.b;
+        a = a + b;
+        b = a - b;
+        i = i + 1;
+    }
+    let q = new Pair(0, 0);
+    q.a = 7;
+    q.b = q.a * 3;
+    assert!(q.a == 7);
+    assert!(q.b == 21);
+    assert!(p.a == a);
+    assert!(p.b == b);
+}
+
+test("spilled fields past the fourth load and store") {
+    let w = wide(10);
+    assert!(w.f4 == 14);
+    w.f4 = w.f0 + w.f3;
+    w.f5 = "changed";
+    assert!(w.f4 == 23);
+    assert!(w.f5 == "changed");
+    let total = 0;
+    let i = 0;
+    while i < 100 {
+        w.f2 = w.f2 + 1;
+        total = total + w.f2;
+        i = i + 1;
+    }
+    assert!(w.f2 == 112);
+    assert!(total == 6250);
+}
+
+test("heap values written into an old object survive a collection") {
+    let h = new Holder("start", new Pair(1, 1));
+    collect();
+    let i = 0;
+    while i < 200 {
+        h.label = "label " + i.show();
+        h.inner = new Pair(i, i * 2);
+        i = i + 1;
+    }
+    collect();
+    assert!(h.label == "label 199");
+    assert!(h.inner.a == 199);
+    assert!(h.inner.b == 398);
+}
+
+test("a wide old object takes fresh strings across collections") {
+    let w = wide(0);
+    collect();
+    let i = 0;
+    while i < 50 {
+        w.f5 = "s" + i.show();
+        w.f0 = i;
+        if i % 10 == 0 {
+            collect();
+        }
+        i = i + 1;
+    }
+    collect();
+    assert!(w.f5 == "s49");
+    assert!(w.f0 == 49);
+    assert!(w.f1 == 1);
+}

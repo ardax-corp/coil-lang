@@ -1,0 +1,146 @@
+// A generic body whose operands are arrays or tuples of `T` does
+// element-wise arithmetic at every numeric `T`: the element's word comes
+// from the instance, not from the generic signature.
+use tests::assert;
+
+fn add<T: Num>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return a + b;
+}
+
+fn sub<T: Num>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return a - b;
+}
+
+fn mul<T: Num>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return a * b;
+}
+
+fn neg<T: Num>([T; 3] a) -> [T; 3] {
+    return -a;
+}
+
+fn scale<T: Num>([T; 3] a, T k) -> [T; 3] {
+    return a * k;
+}
+
+fn from<T: Num>(T k, [T; 3] a) -> [T; 3] {
+    return k - a;
+}
+
+fn pair_add<T: Num>((T, T) a, (T, T) b) -> (T, T) {
+    return a + b;
+}
+
+fn pair_scale<T: Num>((T, T) a, T k) -> (T, T) {
+    return a * k;
+}
+
+fn pair_neg<T: Num>((T, T) a) -> (T, T) {
+    return -a;
+}
+
+fn triple_sub<T: Num>((T, T, T) a, (T, T, T) b) -> (T, T, T) {
+    return a - b;
+}
+
+fn vec_scale<T: Num>(Vec<T> v, T k) -> Vec<T> {
+    return v * k;
+}
+
+fn vec_neg<T: Num>(Vec<T> v) -> Vec<T> {
+    return -v;
+}
+
+fn wide<T: Num>([T; 9] a, [T; 9] b) -> [T; 9] {
+    return a + b;
+}
+
+fn items<T: Num>(T x, T y, T k) -> [T; 2] {
+    return [x, y] * k - [y, x];
+}
+
+fn same<T: Num>([T; 3] a) -> [T; 3] {
+    return a;
+}
+
+fn nested<T: Num>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return (a + b) * a - same(b);
+}
+
+test("array zip at float") {
+    let a = add([1.0, 2.0, 3.0], [4.0, 5.0, 6.5]);
+    assert!(a[0] == 5.0 && a[1] == 7.0 && a[2] == 9.5);
+    let s = sub([1.0, 2.0, 3.0], [0.5, 0.5, 0.5]);
+    assert!(s[0] == 0.5 && s[1] == 1.5 && s[2] == 2.5);
+    let m = mul([1.5, 2.0, 3.0], [2.0, 0.5, 3.0]);
+    assert!(m[0] == 3.0 && m[1] == 1.0 && m[2] == 9.0);
+}
+
+test("array zip at int") {
+    let a = add([1, 2, 3], [4, 5, 6]);
+    assert!(a[0] == 5 && a[1] == 7 && a[2] == 9);
+    let s = sub([1, 2, 3], [4, 4, 4]);
+    assert!(s[0] == -3 && s[1] == -2 && s[2] == -1);
+    let m = mul([1, 2, 3], [4, 5, 6]);
+    assert!(m[0] == 4 && m[1] == 10 && m[2] == 18);
+}
+
+test("array negation and broadcast") {
+    let n = neg([1.5, -2.0, 0.5]);
+    assert!(n[0] == -1.5 && n[1] == 2.0 && n[2] == -0.5);
+    let ni = neg([1, -2, 3]);
+    assert!(ni[0] == -1 && ni[1] == 2 && ni[2] == -3);
+    let k = scale([1.5, 2.0, 3.0], 2.0);
+    assert!(k[0] == 3.0 && k[1] == 4.0 && k[2] == 6.0);
+    let ki = scale([1, 2, 3], 3);
+    assert!(ki[0] == 3 && ki[1] == 6 && ki[2] == 9);
+    let f = from(10.0, [1.0, 2.5, 3.0]);
+    assert!(f[0] == 9.0 && f[1] == 7.5 && f[2] == 7.0);
+    let fi = from(10, [1, 2, 3]);
+    assert!(fi[0] == 9 && fi[1] == 8 && fi[2] == 7);
+}
+
+test("tuples at float and int") {
+    let p = pair_add((1.5, 2.0), (0.5, 0.25));
+    assert!(p[0] == 2.0 && p[1] == 2.25);
+    let pi = pair_add((1, 2), (3, 4));
+    assert!(pi[0] == 4 && pi[1] == 6);
+    let s = pair_scale((1.5, 2.0), 2.0);
+    assert!(s[0] == 3.0 && s[1] == 4.0);
+    let n = pair_neg((1.5, -2.0));
+    assert!(n[0] == -1.5 && n[1] == 2.0);
+    let t = triple_sub((1.0, 2.0, 3.0), (0.5, 0.5, 0.5));
+    assert!(t[0] == 0.5 && t[1] == 1.5 && t[2] == 2.5);
+    let ti = triple_sub((1, 2, 3), (3, 2, 1));
+    assert!(ti[0] == -2 && ti[1] == 0 && ti[2] == 2);
+}
+
+test("a Vec broadcast and negation") {
+    let v = vec_scale(Vec::from([1.5, 2.0]), 2.0);
+    assert!(v.len() == 2 && v[0] == 3.0 && v[1] == 4.0);
+    let vi = vec_scale(Vec::from([1, 2, 3]), 2);
+    assert!(vi.len() == 3 && vi[0] == 2 && vi[2] == 6);
+    let n = vec_neg(Vec::from([1.5, -2.0]));
+    assert!(n[0] == -1.5 && n[1] == 2.0);
+}
+
+test("the packed kernel at float and int") {
+    let w = wide(
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+        [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+    );
+    assert!(w[0] == 1.5 && w[4] == 5.5 && w[8] == 9.5);
+    let wi = wide([1, 2, 3, 4, 5, 6, 7, 8, 9], [9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    assert!(wi[0] == 10 && wi[4] == 10 && wi[8] == 10);
+}
+
+test("literal items of the type parameter and nested operators") {
+    let i = items(1.5, 2.0, 2.0);
+    assert!(i[0] == 1.0 && i[1] == 2.5);
+    let ii = items(1, 2, 3);
+    assert!(ii[0] == 1 && ii[1] == 5);
+    let n = nested([1.0, 2.0, 3.0], [0.5, 0.5, 0.5]);
+    assert!(n[0] == 1.0 && n[1] == 4.5 && n[2] == 10.0);
+    let ni = nested([1, 2, 3], [1, 1, 1]);
+    assert!(ni[0] == 1 && ni[1] == 5 && ni[2] == 11);
+}

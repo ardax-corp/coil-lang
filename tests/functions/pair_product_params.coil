@@ -1,0 +1,157 @@
+// A free function's parameter of an arity-2 immediate tuple or a two-field
+// immediate `readonly class` moves as two words, as its result does: each
+// use of it in the body reads the same values a boxed argument gave.
+use tests::assert;
+use task::{scope, Scope, TaskError};
+
+readonly class Pt {
+    pub x: int,
+    pub y: int,
+}
+
+fn mk(int i) -> (int, int) {
+    return (i, i + 1);
+}
+
+#[inline(never)]
+fn add((int, int) p) -> int {
+    let (a, b) = p;
+    return a + b;
+}
+
+#[inline(never)]
+fn by_index((int, float) p) -> float {
+    return p[1] * 2.0 + p[0] as float;
+}
+
+#[inline(never)]
+fn at((int, int) p, int i) -> int {
+    return p[i];
+}
+
+#[inline(never)]
+fn walk((int, int) p) -> int {
+    let total = 0;
+    let i = 0;
+    while i < p.len() {
+        total += p[i];
+        i += 1;
+    }
+    return total;
+}
+
+#[inline(never)]
+fn swap((int, int) p) -> (int, int) {
+    let (a, b) = p;
+    return (b, a);
+}
+
+#[inline(never)]
+fn forward((int, int) p) -> int {
+    return add(p) * 10;
+}
+
+#[inline(never)]
+fn keep((int, int) p, Vec<(int, int)> out) {
+    out.push(p);
+}
+
+#[inline(never)]
+fn same((int, int) p, (int, int) q) -> bool {
+    return p == q;
+}
+
+#[inline(never)]
+fn norm1(Pt p) -> int {
+    return p.x + p.y;
+}
+
+#[inline(never)]
+fn shift(Pt p, int d) -> Pt {
+    return new Pt(p.x + d, p.y + d);
+}
+
+#[inline(never)]
+fn keep_pt(Pt p, Vec<Pt> out) {
+    out.push(p);
+}
+
+fn sum(... xs) -> int {
+    let total = 0;
+    let i = 0;
+    while i < xs.len() {
+        total += xs[i];
+        i += 1;
+    }
+    return total;
+}
+
+test("a tuple parameter destructures and indexes") {
+    assert!(add((3, 4)) == 7);
+    assert!(add(mk(5)) == 11);
+    assert!(by_index((1, 1.5)) == 4.0);
+    assert!(at((8, 9), 0) == 8);
+    assert!(at((8, 9), 1) == 9);
+    assert!(walk((20, 22)) == 42);
+}
+
+test("a tuple parameter is returned, passed on, stored and compared") {
+    let (a, b) = swap(mk(1));
+    assert!(a == 2 && b == 1);
+    assert!(forward((1, 2)) == 30);
+    let out: Vec<(int, int)> = Vec::new();
+    keep(mk(7), out);
+    keep((0, 0), out);
+    assert!(out.len() == 2);
+    assert!(out[0] == (7, 8));
+    assert!(out[1][1] == 0);
+    assert!(same(mk(2), (2, 3)));
+    assert!(!same(mk(2), (3, 2)));
+}
+
+test("a tuple parameter in a loop") {
+    let s = 0;
+    let i = 0;
+    while i < 1000 {
+        s += add(mk(i));
+        i += 1;
+    }
+    assert!(s == 1000000);
+}
+
+// Run `body` as a child task: whether it panicked.
+fn panics(unit -> int body) -> bool {
+    let r = scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    });
+    return match r {
+        Result::Ok(_) => false,
+        Result::Err(TaskError::Panicked(_)) => true,
+        Result::Err(_) => false,
+    };
+}
+
+test("a runtime index out of range still panics") {
+    assert!(panics(fn () {
+        return at((1, 2), 2);
+    }));
+    assert!(!panics(fn () {
+        return at((1, 2), 1);
+    }));
+}
+
+test("a readonly pair class parameter") {
+    assert!(norm1(new Pt(2, 5)) == 7);
+    let q = shift(new Pt(1, 2), 10);
+    assert!(q.x == 11 && q.y == 12);
+    assert!(norm1(shift(q, -11)) == 1);
+    let out: Vec<Pt> = Vec::new();
+    keep_pt(q, out);
+    assert!(out[0] == new Pt(11, 12));
+}
+
+test("a rest pack of two ints indexed at run time") {
+    assert!(sum(4, 4) == 8);
+    assert!(sum(1, 2, 3) == 6);
+}

@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::cse::dce;
-use super::func::MirFunc;
+use super::func::{MirFunc, resolve};
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
 };
@@ -26,13 +26,6 @@ const F64_PLUS_TWO: u64 = 2.0_f64.to_bits();
 /// Cheap typed rewrites. Returns how many instructions were rewritten.
 pub fn instcombine(func: &mut MirFunc) -> usize {
     combine(func, true)
-}
-
-/// [`instcombine`] without its strength rewrites, for a LIR body: constant
-/// folds, identities and constant branches only. There `x * 2` is one op
-/// with an immediate, and `x + x` would read `x` from a slot twice.
-pub fn instcombine_lir(func: &mut MirFunc) -> usize {
-    combine(func, false)
 }
 
 fn combine(func: &mut MirFunc, strength: bool) -> usize {
@@ -103,17 +96,10 @@ fn instcombine_once(func: &mut MirFunc, strength: bool) -> usize {
         }
     }
 
-    let map = |v: ValueId| resolve(&subst, v);
+    func.replace_uses(&subst);
     for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(map);
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(map);
-        }
         block.insts.retain(|i| !drop.contains(&i.dest()));
     }
-    func.rewrite_debug_slots(map);
 
     let mut known: HashMap<ValueId, MirConst> = HashMap::new();
     for block in &func.blocks {
@@ -636,7 +622,8 @@ fn is_int_minus_one(ty: MirTy, c: Option<MirConst>) -> bool {
     matches!((ty, c), (MirTy::I64, Some(MirConst::I64(-1))))
 }
 
-fn eval_bin(op: MirBinOp, ty: MirTy, a: MirConst, b: MirConst) -> Option<MirConst> {
+/// `a op b` on constants of `ty`, unless it would trap at run time.
+pub(super) fn eval_bin(op: MirBinOp, ty: MirTy, a: MirConst, b: MirConst) -> Option<MirConst> {
     match ty {
         MirTy::I64 => {
             let (MirConst::I64(x), MirConst::I64(y)) = (a, b) else {
@@ -741,15 +728,6 @@ fn eval_cast(kind: MirCastKind, to: MirTy, c: MirConst) -> Option<MirConst> {
     }
 }
 
-fn resolve(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
-    while let Some(&n) = subst.get(&v) {
-        if n == v {
-            break;
-        }
-        v = n;
-    }
-    v
-}
 
 #[cfg(test)]
 mod tests {

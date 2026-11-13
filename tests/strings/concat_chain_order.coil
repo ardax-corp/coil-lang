@@ -19,7 +19,7 @@ fn main() {
     let c = "c";
     let flat = a + b + c;
     let grouped = a + "(" + (b + c) + ")";
-    let nums = show(1) + show(2) + (show(3) + show(4));
+    let nums = 1.show() + 2.show() + (3.show() + 4.show());
     let out = "";
     for s in ["x", "y", "z"] {
         out = out + "[" + s + "]";

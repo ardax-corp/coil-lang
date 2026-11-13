@@ -1,0 +1,59 @@
+// Run from `main`, so only what `main` reaches is kept: an inherent method
+// calls a free function declared after it, a free function reaches a method
+// through another free function, and a method is called only inside a `while`.
+// @output 42,7,1
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+class Foo {
+    pub v: int,
+}
+
+impl Foo {
+    pub fn bump() -> int {
+        return helper(self.v);
+    }
+}
+
+fn helper(int n) -> int {
+    return n + 1;
+}
+
+class Box {
+    pub n: int,
+}
+
+impl Box {
+    pub fn get() -> int {
+        return self.n;
+    }
+
+    pub fn bump() {
+        self.n = self.n + 1;
+    }
+}
+
+fn peek(Box b) -> int {
+    return b.get();
+}
+
+fn wrap(Box b) -> int {
+    return peek(b);
+}
+
+fn thrash(Box b) {
+    let i = 0;
+    while i < 1 {
+        b.bump();
+        i = i + 1;
+    }
+}
+
+fn main() {
+    let f = new Foo(black_box(41));
+    let seven = new Box(black_box(7));
+    let b = new Box(black_box(0));
+    peek(b);
+    thrash(b);
+    let _ = write(stdout(), to_bytes(format("%i,%i,%i", f.bump(), wrap(seven), b.get())));
+}

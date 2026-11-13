@@ -41,6 +41,6 @@ test("a generic range over float") {
 
 test("a generic range forwarded and through a function value") {
     assert!(twice(0, 3).to_vec().len() == 3);
-    let f: (int, int) -> Range<int> = span;
+    let f: fn(int, int) -> Range<int> = span;
     assert!(f(2, 6).to_vec().len() == 4);
 }

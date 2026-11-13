@@ -1,0 +1,36 @@
+// Hit bench (ProductLoad): the items of 4k three-word tuples read by
+// constant index, 500 rounds (each its own call). A heap tuple's item is one slot read in place.
+use io::sync::print;
+use string::format;
+
+fn build(int n) -> Vec<(int, int, int)> {
+    let out: Vec<(int, int, int)> = Vec::with_capacity(n);
+    let i = 0;
+    while i < n {
+        out.push((i, i % 7, i % 11));
+        i = i + 1;
+    }
+    return out;
+}
+
+fn score(Vec<(int, int, int)> items, int k) -> int {
+    let total = k;
+    let i = 0;
+    while i < items.len() {
+        let t = items[i];
+        total = total + t[0] + t[1] * t[2];
+        i = i + 1;
+    }
+    return total;
+}
+
+fn main() {
+    let items = build(4000);
+    let total = 0;
+    let round = 0;
+    while round < 500 {
+        total = total + score(items, round);
+        round = round + 1;
+    }
+    let _ = print(format("%i", total));
+}

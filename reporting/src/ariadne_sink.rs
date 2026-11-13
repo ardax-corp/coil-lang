@@ -1,11 +1,11 @@
 //! Pretty (ariadne) diagnostic sink.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::io::Write;
 use std::path::Path;
 
-use ariadne::{
-    Color, Config, IndexType, Label as AriadneLabel, LabelAttach, Report, ReportKind, sources,
-};
+use ariadne::{Cache, Color, Config, IndexType, Label as AriadneLabel, LabelAttach, Report, ReportKind, Source};
 
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::sink::DiagnosticSink;
@@ -16,6 +16,40 @@ pub struct AriadneSink {
     sources: SourceMap,
     writer: Box<dyn Write + Send>,
     error_count: usize,
+    /// Each source a report has read, by its displayed path, line-indexed
+    /// once: indexing every registered file for every report made a
+    /// compile with many warnings quadratic in its size (#2352).
+    rendered: HashMap<String, Source<String>>,
+}
+
+/// The [`Cache`] a report reads its files from: each file of `sources`
+/// (the last one registered under a displayed path), indexed the first
+/// time a report needs it.
+struct RenderedSources<'a> {
+    rendered: &'a mut HashMap<String, Source<String>>,
+    sources: &'a SourceMap,
+}
+
+impl Cache<String> for RenderedSources<'_> {
+    type Storage = String;
+
+    fn fetch(&mut self, id: &String) -> Result<&Source<String>, impl fmt::Debug> {
+        if !self.rendered.contains_key(id) {
+            let text = self
+                .sources
+                .iter()
+                .filter(|(_, path, _)| path.display().to_string() == *id)
+                .last()
+                .map(|(_, _, text)| text.to_string())
+                .ok_or_else(|| format!("Failed to fetch source '{id}'"))?;
+            self.rendered.insert(id.clone(), Source::from(text));
+        }
+        Ok::<_, String>(&self.rendered[id])
+    }
+
+    fn display<'b>(&self, id: &'b String) -> Option<impl fmt::Display + 'b> {
+        Some(Box::new(id))
+    }
 }
 
 impl AriadneSink {
@@ -24,6 +58,7 @@ impl AriadneSink {
             sources,
             writer,
             error_count: 0,
+            rendered: HashMap::new(),
         }
     }
 
@@ -101,16 +136,11 @@ impl AriadneSink {
             report = report.with_help(help);
         }
 
-        let cache_pairs: Vec<(String, String)> = self
-            .sources
-            .iter()
-            .map(|(_, path, text)| (path.display().to_string(), text.to_string()))
-            .collect();
-        let mut cache = sources(cache_pairs);
+        let cache = RenderedSources { rendered: &mut self.rendered, sources: &self.sources };
 
         report
             .finish()
-            .write(&mut cache, &mut self.writer)
+            .write(cache, &mut self.writer)
             .map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
@@ -147,6 +177,7 @@ impl DiagnosticSink for AriadneSink {
     }
 
     fn register_source(&mut self, path: &Path, text: &str) -> SourceId {
+        self.rendered.remove(&path.display().to_string());
         self.sources.insert(path, text)
     }
 
@@ -192,6 +223,21 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A report after a file is registered again shows its new text, not
+    /// the copy an earlier report indexed.
+    #[test]
+    fn pretty_sink_reads_a_file_registered_again() {
+        let shared = SharedBuf::new();
+        let mut sink = AriadneSink::new(SourceMap::new(), Box::new(shared.clone()));
+        let file = sink.register_source(Path::new("a.coil"), "let old_name = 1;\n");
+        sink.emit(Diagnostic::warning("first").at(file, 4..12).with_label(RelatedLabel::new(Location::new(file, 4..12), "here")));
+        let file = sink.register_source(Path::new("a.coil"), "let new_name = 2;\n");
+        sink.emit(Diagnostic::warning("second").at(file, 4..12).with_label(RelatedLabel::new(Location::new(file, 4..12), "here")));
+        let out = shared.into_string();
+        let second = out.split("second").nth(1).expect("second report");
+        assert!(out.contains("old_name") && second.contains("new_name") && !second.contains("old_name"), "{out}");
     }
 
     #[test]

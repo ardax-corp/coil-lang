@@ -9,7 +9,7 @@ use coil_args::{
     OptLevelFlags, RootFlags, expand_o_shorts, merge_entry,
 };
 use compiler::{DebugLevel, EarlyFree, HostGrants, OptLevel};
-use crate::package_app::{FfiNative, parse_ffi_native};
+use crate::package_app::{FfiNative, LinkInputs, parse_ffi_native, parse_static_link};
 
 pub(crate) const DEFAULT_OUT: &str = "out.ccoil";
 
@@ -42,6 +42,9 @@ pub(crate) enum Command {
         natives: Vec<FfiNative>,
         check_native: bool,
         strip_debug: bool,
+        /// Native code or the JIT runner, static libraries and linker
+        /// arguments for the executable.
+        link: LinkInputs,
     },
     /// Dump / list native lock metadata.
     Natives {
@@ -54,7 +57,6 @@ pub(crate) enum Command {
     Dissect {
         filename: String,
         fn_pat: Option<String>,
-        show_il: bool,
         show_ast: bool,
     },
     Debug {
@@ -89,6 +91,8 @@ pub(crate) struct CliArgs {
     pub nursery: Option<bool>,
     /// `--cow-report`: copies per source line at exit.
     pub cow_report: bool,
+    /// `--mir`: `coil FILE` and `coil run` run on the MIR interpreter.
+    pub mir: bool,
     /// `--auto-par on|off`; `None` keeps the pipeline default.
     pub auto_par: Option<bool>,
     pub opt_stats: bool,
@@ -117,7 +121,7 @@ Default diagnostics: pretty reports on stderr.\n\
 Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
 `--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck.\n\
 `coil run out.ccoil` and coil-embed do\n\
-not re-apply allow flags; if the bytecode has the op, it runs. `--ffi-search-path` is\n\
+not re-apply allow flags; if the archive has the call, it runs. `--ffi-search-path` is\n\
 lookup only. `--dload-pin STEM=SHA256` / `--dload-trusted STEM` are the dload integrity.\n\
 `dload(\"c\")` stays denied even if flagged."
 )]
@@ -183,6 +187,9 @@ enum RawCommand {
         grants: HostGrantFlags,
         #[command(flatten)]
         nursery: NurseryFlag,
+        /// Compile the archive's code even when the code cache holds it
+        #[arg(long)]
+        no_build_cache: bool,
         /// Archive path
         archive: String,
     },
@@ -236,6 +243,30 @@ enum RawCommand {
         /// Fail if required shared libraries are missing
         #[arg(long)]
         check_native: bool,
+        /// Package the JIT runner with the program instead of linking native
+        /// code for it (the default links an AOT executable with `cc`)
+        #[arg(long)]
+        no_aot: bool,
+        /// What to write: `exe` (default) an executable, `obj` a relocatable
+        /// object holding the program, `lib` a static library holding the
+        /// program and the runtime. For `obj` and `lib` you run the link
+        #[arg(long, value_name = "WHAT", value_enum, default_value_t)]
+        emit: crate::package_app::Emit,
+        /// Link a static library into the AOT executable for the `extern`
+        /// block that names STEM (repeatable): its functions resolve from
+        /// the executable instead of a shared library. Without `STEM=`,
+        /// the stem is the file's (`libsum.a` is `sum`)
+        #[arg(long = "link-static", value_name = "[STEM=]PATH", value_parser = parse_static_link, action = clap::ArgAction::Append)]
+        link_static: Vec<crate::package_app::StaticLink>,
+        /// Pass ARG to the linker of the AOT executable, after the
+        /// libraries (repeatable; e.g. `-lm` for a static library's needs)
+        #[arg(long = "link-arg", value_name = "ARG", allow_hyphen_values = true, action = clap::ArgAction::Append)]
+        link_arg: Vec<String>,
+        /// What to strip from the AOT executable: `debug` (default) drops
+        /// the runtime's debug info, `all` also its symbol table, `none`
+        /// keeps both. Coil backtraces use `-g`, not these
+        #[arg(long = "strip-symbols", value_name = "WHAT", value_enum, default_value_t)]
+        strip_symbols: crate::package_app::StripSymbols,
         /// Entry `.coil` file
         file: Option<String>,
     },
@@ -244,7 +275,7 @@ enum RawCommand {
         #[command(subcommand)]
         action: NativesAction,
     },
-    /// In-memory compile and dump filtered bytecode / IL / AST
+    /// In-memory compile and dump filtered MIR / HIR / AST
     Dissect {
         #[command(flatten)]
         log: LogFlags,
@@ -261,31 +292,25 @@ enum RawCommand {
         /// Filter functions by FQN substring / trailing name
         #[arg(long = "fn", value_name = "PAT")]
         fn_pat: Option<String>,
-        /// Also print pre-opt stack IL
-        #[arg(long)]
-        il: bool,
-        /// Also print the optimized IL (before fuse / lowering)
-        #[arg(long)]
-        il_post: bool,
         /// Also print each body's HIR (typed, desugared tree)
         #[arg(long)]
         hir: bool,
         /// Also print each function's effects and why auto-par left loops sequential
         #[arg(long)]
         effects: bool,
-        /// Also print the MIR of numeric bodies (dense / LIR)
+        /// Print each body's MIR (the default)
         #[arg(long)]
         mir: bool,
-        /// Do not interleave source lines in the bytecode listing
-        #[arg(long)]
-        no_source: bool,
+        /// Include `test` blocks, as `coil test` compiles them
+        #[arg(long = "tests")]
+        tests: bool,
         /// Also print the entry-file AST
         #[arg(long)]
         ast: bool,
-        /// Print the entry file after macro expansion (no bytecode)
+        /// Print the entry file after macro expansion (no MIR)
         #[arg(long)]
         expand: bool,
-        /// Entry `.coil` file, or a compiled `.ccoil` archive (bytecode only)
+        /// Entry `.coil` file, or a compiled `.ccoil` archive (MIR only)
         file: Option<String>,
     },
     /// GDB-style debugger (REPL; --dap for IDE)
@@ -381,6 +406,7 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             early_free: None,
             nursery: None,
             cow_report: false,
+            mir: false,
             auto_par: None,
             opt_stats: false,
             opt_stats_json: false,
@@ -446,6 +472,7 @@ fn cli_from(
         early_free: opt.early_free,
         nursery: None,
         cow_report: false,
+        mir: false,
         auto_par: opt.auto_par,
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
@@ -470,6 +497,7 @@ impl RawCli {
             || self.opt.is_set()
             || self.nursery.nursery.is_some()
             || self.nursery.cow_report
+            || self.nursery.mir
             || self.debug.is_set()
             || self.profile.is_set()
             || self.include_tests
@@ -492,10 +520,13 @@ impl RawCli {
                 if is_reserved(&filename) {
                     return Err("missing input file (pass a .coil file or `--entry`)".into());
                 }
-                CliArgs {
+                // `--mir` is the raw reference unless `-O` says otherwise.
+                let mir_level = (self.nursery.mir && self.opt.opt_level.is_none()).then_some(OptLevel::None);
+                let cli = CliArgs {
                     debug_level: self.debug.level(),
                     nursery: self.nursery.nursery,
                     cow_report: self.nursery.cow_report,
+                    mir: self.nursery.mir,
                     ..cli_from(
                         Command::BuildAndRun { filename },
                         self.log,
@@ -505,7 +536,8 @@ impl RawCli {
                         self.grants,
                         self.roots.root,
                     )
-                }
+                };
+                CliArgs { opt_level: mir_level.unwrap_or(cli.opt_level), ..cli }
             }
             Some(RawCommand::Lsp { args: _ }) => cli_from(
                 Command::Lsp,
@@ -594,10 +626,13 @@ impl RawCli {
                 log,
                 grants,
                 nursery,
+                no_build_cache,
                 archive,
             }) => CliArgs {
                 nursery: nursery.nursery,
                 cow_report: nursery.cow_report,
+                mir: nursery.mir,
+                build_cache: !no_build_cache,
                 ..cli_from(
                     Command::Run { archive },
                     log,
@@ -620,6 +655,11 @@ impl RawCli {
                 runner,
                 ffi_native,
                 check_native,
+                no_aot,
+                emit,
+                link_static,
+                link_arg,
+                strip_symbols,
                 file,
             }) => {
                 let filename = merge_entry(file, entry_flag.entry)?;
@@ -628,11 +668,12 @@ impl RawCli {
                     return Err("package requires an entry file".into());
                 }
                 let out = output.unwrap_or_else(|| {
-                    Path::new(&filename)
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("a.out")
-                        .to_string()
+                    let stem = Path::new(&filename).file_stem().and_then(|s| s.to_str()).unwrap_or("a.out");
+                    match emit {
+                        crate::package_app::Emit::Exe => stem.to_string(),
+                        crate::package_app::Emit::Obj => format!("{stem}.o"),
+                        crate::package_app::Emit::Lib => format!("lib{stem}.a"),
+                    }
                 });
                 CliArgs {
                     debug_level: debug.level(),
@@ -640,6 +681,7 @@ impl RawCli {
                         Command::Package {
                             filename,
                             output: out,
+                            link: LinkInputs { aot: !no_aot && runner.is_none(), emit, statics: link_static, args: link_arg, strip: strip_symbols },
                             runner,
                             natives: ffi_native,
                             check_native,
@@ -681,12 +723,10 @@ impl RawCli {
                 roots,
                 entry_flag,
                 fn_pat,
-                il,
-                il_post: _,
                 hir: _,
                 effects: _,
                 mir: _,
-                no_source: _,
+                tests: _,
                 ast,
                 expand: _,
                 file,
@@ -700,7 +740,6 @@ impl RawCli {
                     Command::Dissect {
                         filename,
                         fn_pat,
-                        show_il: il,
                         show_ast: ast,
                     },
                     log,
@@ -767,6 +806,7 @@ pub(crate) fn print_version() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::package_app::StripSymbols;
 
     fn args(parts: &[&str]) -> Vec<String> {
         std::iter::once("coil".to_string())
@@ -884,13 +924,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_dissect_with_fn_il_ast() {
+    fn parse_dissect_with_fn_and_ast() {
         let cli = parse_args(&args(&[
             "dissect",
             "examples/fib.coil",
             "--fn",
             "fib",
-            "--il",
             "--ast",
         ]))
         .unwrap();
@@ -899,7 +938,6 @@ mod tests {
             Command::Dissect {
                 filename: "examples/fib.coil".into(),
                 fn_pat: Some("fib".into()),
-                show_il: true,
                 show_ast: true,
             }
         );
@@ -927,7 +965,6 @@ mod tests {
             Command::Dissect {
                 filename: "a.coil".into(),
                 fn_pat: None,
-                show_il: false,
                 show_ast: false,
             }
         );
@@ -1015,8 +1052,39 @@ mod tests {
                 natives: Vec::new(),
                 check_native: false,
                 strip_debug: false,
+                link: LinkInputs { aot: true, ..LinkInputs::default() },
             }
         );
+    }
+
+    #[test]
+    fn parse_package_static_links() {
+        let cli = parse_args(&args(&[
+            "package",
+            "app.coil",
+            "--link-static",
+            "deps/libsum.a",
+            "--link-static",
+            "z=deps/libz-static.a",
+            "--link-arg",
+            "-lm",
+        ]))
+        .unwrap();
+        let Command::Package { link, .. } = cli.command else { panic!("not a package command") };
+        let stems: Vec<&str> = link.statics.iter().map(|l| l.stem.as_str()).collect();
+        assert_eq!(stems, ["sum", "z"]);
+        assert_eq!(link.args, ["-lm"]);
+        assert_eq!(link.strip, StripSymbols::Debug);
+    }
+
+    #[test]
+    fn parse_package_strip_symbols() {
+        for (arg, want) in [("none", StripSymbols::None), ("debug", StripSymbols::Debug), ("all", StripSymbols::All)] {
+            let cli = parse_args(&args(&["package", "app.coil", "--strip-symbols", arg])).unwrap();
+            let Command::Package { link, .. } = cli.command else { panic!("not a package command") };
+            assert_eq!(link.strip, want, "{arg}");
+        }
+        assert!(parse_args(&args(&["package", "app.coil", "--strip-symbols", "some"])).is_err());
     }
 
     #[test]
@@ -1050,6 +1118,7 @@ mod tests {
                 }],
                 check_native: true,
                 strip_debug: true,
+                link: LinkInputs::default(),
             }
         );
     }

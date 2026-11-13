@@ -1,0 +1,102 @@
+// A tuple order operator over a bounded type parameter (coil-lang#2601):
+// `(x, 1) < (y, 1)` under `U: Ord` is the structural `Lt<(_, int)>` with
+// the frame's `Ord<U>`, as `order((x, 1), (y, 1))` through a call is.
+// All four operators, a tuple of two parameters, a trait method's own
+// bound and a lambda's captured dictionary. `P` orders by tens, so a
+// result built without its instances differs. The `clone-budget-0` cell
+// runs every case on the shared bodies.
+use tests::assert;
+
+class P {
+    pub v: int,
+}
+
+impl Eq for P {
+    fn eq(P a, P b) -> bool {
+        return a.v / 10 == b.v / 10;
+    }
+}
+
+impl Lt for P {
+    fn lt(P a, P b) -> bool {
+        return a.v / 10 < b.v / 10;
+    }
+}
+
+impl Le for P {
+    fn le(P a, P b) -> bool {
+        return a.v / 10 <= b.v / 10;
+    }
+}
+
+impl Gt for P {
+    fn gt(P a, P b) -> bool {
+        return a.v / 10 > b.v / 10;
+    }
+}
+
+impl Ge for P {
+    fn ge(P a, P b) -> bool {
+        return a.v / 10 >= b.v / 10;
+    }
+}
+
+impl Ord for P {
+}
+
+fn bit(bool x) -> string {
+    if x {
+        return "t";
+    }
+    return "f";
+}
+
+// `lt le gt ge` as four letters.
+fn order_ops<U: Ord>(U x, U y) -> string {
+    return bit((x, 1) < (y, 1)) + bit((x, 1) <= (y, 1)) + bit((x, 1) > (y, 1)) +
+           bit((x, 1) >= (y, 1));
+}
+
+fn order_pair<U: Ord>(U x, U y) -> string {
+    return bit((x, y) < (y, x)) + bit((1, x) >= (1, y));
+}
+
+fn order_in_lambda<U: Ord>(U x, U y) -> bool {
+    let f = fn (int k) use (x, y) => (x, k) < (y, k);
+    return f(3);
+}
+
+trait Ranked<S> {
+    fn before<U: Ord>(S s, U x, U y) -> bool {}
+}
+
+class Judge {
+    pub n: int,
+}
+
+impl Ranked for Judge {
+    fn before<U: Ord>(Judge s, U x, U y) -> bool {
+        return (x, s.n) < (y, s.n);
+    }
+}
+
+test("the four order operators on a tuple over a type parameter") {
+    assert!(order_ops(2, 3) == "ttff");
+    assert!(order_ops(3, 3) == "ftft");
+    assert!(order_ops(4, 3) == "fftt");
+    assert!(order_ops(new P(31), new P(39)) == "ftft");
+    assert!(order_ops(new P(31), new P(41)) == "ttff");
+    assert!(order_ops("a", "b") == "ttff");
+}
+
+test("a tuple of two type parameters") {
+    assert!(order_pair(1, 2) == "tf");
+    assert!(order_pair(new P(20), new P(29)) == "ft");
+}
+
+test("in a lambda and in a trait method with its own bound") {
+    assert!(order_in_lambda(1, 2) && !order_in_lambda(2, 1));
+    assert!(!order_in_lambda(new P(11), new P(19)));
+    let j = new Judge(0);
+    assert!(j.before(1, 2) && !Ranked::before(j, new P(12), new P(18)));
+}

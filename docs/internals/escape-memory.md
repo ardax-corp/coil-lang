@@ -13,7 +13,7 @@ the GC?" doc (2026-10-26).
 ## What exists before this work
 
 - Scalar replacement inside one body, after inlining: class field-SROA
-  (Q2, `hir/lower.rs` `class_boxes`), `hir/readonly_sroa.rs`,
+  (Q2, `hir/query.rs` `class_boxes`), `hir/readonly_sroa.rs`,
   `hir/tuple_sroa.rs`, `hir/enum_sroa.rs`, `[T; N]` slots (Q1).
 - Value representation: immediates, pointer niches, two-slot
   `Option`/`Result`/pairs, packed `Vec<byte>`/`Vec<bool>` ([layout.md](layout.md)).
@@ -91,7 +91,7 @@ Callees the analysis cannot see (function values, unresolved methods,
 trait declarations, natives) keep everything and return nothing fresh.
 Pure natives and the IO writers keep nothing; `to_bytes`, `from_bytes`,
 `format`, the string slices and `Vec::with_capacity` return a fresh
-object (checked against the VM for step 2).
+object (checked against the natives for step 2).
 
 `coil dissect --effects` prints one `;; escape NAME: …` line per function:
 `keeps nothing`, `keeps `t``, `returns `self``, `result fresh`. In
@@ -104,7 +104,7 @@ says its result is fresh. A stated fact is checked against the inferred
 one and is E0139 when it does not hold (or names no parameter); it is
 never trusted in place of the analysis.
 
-A string literal reaches nothing: it is interned, immutable, and the VM
+A string literal reaches nothing: it is interned, immutable, and the runtime
 never frees an interned string (step 3; step 1 counted it as shared, so an
 `Err` holding a literal made a whole `Result` shared). Archives are byte-identical to main and
 compile time is unchanged (b_json 0.30 s, b_csv 0.10 s).
@@ -114,7 +114,7 @@ collection (decided 2026-10-26, built in RAII step 6). The compiler flags a
 `drop` type in its finalizer registration (`common::EARLY_DROP_FLAG` on the
 type id) when the `drop`'s escape facts keep nothing of `self`. At a
 `FreeEarly`, `Heap::early_drops` lists the pending `drop` objects the free
-would give back, parent first; the VM runs them as nested calls with the
+would give back, parent first; the driver runs them as nested calls with the
 objects rooted, then frees. A `drop` of an unflagged type, or a pending one
 the walk reaches but cannot free, makes the free give back nothing. A panic
 in such a `drop` unwinds from the `FreeEarly`. Block-end frees stay shallow,
@@ -136,7 +136,7 @@ everything. Two shapes are freed:
 - **Call temporaries.** In `f(…, g(x), …)`, when `g`'s result is fresh and
   `f` neither keeps nor returns that argument, the argument is bound to a
   temporary and freed after the call. When `f` does not change what the
-  argument reaches either, the free is deep: the VM frees every object it
+  argument reaches either, the free is deep: the runtime frees every object it
   reaches through precise pointer words. `item_check(bottom_up(d))` frees
   each tree after its check.
 - **Block-end locals.** A `let` local whose every value is an object this
@@ -149,21 +149,15 @@ everything. Two shapes are freed:
   panics leave it to the collector.
 
 Each free is `Builtin::FreeEarly { deep }` of the local and a `Clear` of
-its frame word. It lowers to MIR `FreeEarly` and to the `FreeEarly`
-instruction (archive 6.1), which pops the word; the VM runs it in its main
-dispatch loop. (Step 2 first used a host call; that left the fast loop on
-every free, and a `join` with a free per part ran 25% slower.) The VM frees nothing while a collection cycle or a
+its frame word. It lowers to MIR `FreeEarly`, which native code runs through
+`coil_native_free_early`. The runtime frees nothing while a collection cycle or a
 steal epoch is open, and skips what it cannot free safely: interned
 strings, the shared unit variants and `()`, objects of a type with a
-`drop` (while any is registered), handles, and arrays an `ArrayPin` holds
-for its frame. A dense index's pin is only a cache of its register's
-object: the free drops it, so a later object in the same slot is never
-read through the stale entry. A freed slot goes back to the slab like a
-swept one, and the dense object cache forgets it.
+`drop` (while any is registered) and handles. A freed slot goes back to the
+slab like a swept one.
 
-A dead frame word (a call's argument copy, a callee's frame left above the
-stack top) may still hold a freed address. Conservative and precise root
-scans already resolve every word through the slab, so such a word marks
+A dead frame word may still hold a freed address. Root scans resolve every
+word through the slab, so such a word marks
 nothing, or the object now in that slot. Once something was freed early,
 typed `Member::Object` handles are resolved the same way before marking,
 and gc-stress builds accept a freed slot in a pointer word.
@@ -182,12 +176,12 @@ Switches: early frees follow the opt level, on at `-O1` and above and off
 at `-O0` and `-Og` (frames should match the source there). `--early-free
 on|off` overrides the level. `--early-free check` compiles them, and a run
 in the same process (`coil FILE`, `coil test`) frees nothing and at the next
-collection marks again from the roots that are certainly live (precise
-frame slots, statics, VM handles; not words a conservative frame scan
-finds), aborting if that reaches an object a free gave up. The test corpus
+collection marks again from the roots that are certainly live (the
+Runtime's roots and those the driver holds; not stale copies a conservative
+scan might find), aborting if that reaches an object a free gave up. The test corpus
 passes in both modes and with frees on.
 
-### Measured (step 2)
+### Measured (step 2, on the bytecode VM, since deleted)
 
 `COIL_EARLY_FREE=0` against `=1` on the same build (`COIL_AUTO_PAR=0`,
 2026-10-27). Allocations, frees and collections come from the local
@@ -231,10 +225,10 @@ A concatenation whose operands include fresh call results (`a + f(x) + b`)
 binds those results to temporaries and frees them once the result is
 built; the chain stays one chain, so `FORMAT` fusion still applies.
 
-Freeing now has its own instruction (`FreeEarly`, archive 6.1) instead of
-a host call: a host call left the VM's fast dispatch loop on every free,
-and a `join` with one free per part ran 25% slower; with the instruction
-`join` and `append` time the same with frees on and off.
+Freeing has its own MIR op (`FreeEarly`) instead of a host call. On the
+bytecode VM, since deleted, a host call left the fast loop on every free,
+and a `join` with one free per part ran 25% slower; with the op `join` and
+`append` timed the same with frees on and off.
 
 Later in step 3:
 
@@ -248,7 +242,7 @@ Later in step 3:
   heap values (`list = rebuild(list)`) frees the old vector deeply when it
   is reassigned, provided no other local still shares its elements.
 - **Literals count as fresh.** String literals are interned and never freed
-  by the VM, so a value that may be a literal is no longer treated as
+  by the runtime, so a value that may be a literal is no longer treated as
   shared.
 - **Zero-copy `to_bytes`.** `let b = to_bytes(s)` whose only reads are
   `b[i]` and `b.len()` reads `s` directly (string indexing yields the same
@@ -319,12 +313,12 @@ Design (copying nursery, decided 2026-10-27):
   old object allocated with references (a coroutine, a pretenured
   closure) is remembered when it is born. A prototype of the barrier measured within
   noise (0 to 3%).
-- **Minor collection.** Trace young objects from the VM roots and the
+- **Minor collection.** Trace young objects from the roots and the
   remembered objects, never into old ones. A young object reached through
-  an ambiguous word (a conservative frame word, an unknown-kind field, a
+  an ambiguous word (an ambiguous frame word, an unknown-kind field, a
   `Root` or `Weak` target, an FFI argument) is *pinned*. Every other live
   young object is copied bitwise into an old slot of its size class, and
-  precise words naming it are rewritten: must-pointer frame slots, pointer
+  precise words naming it are rewritten: native frames' precise words, pointer
   statics, the remembered objects, and the survivors themselves. This is
   the evacuation machinery of [gc-evacuation.md](gc-evacuation.md),
   limited to the nursery.
@@ -337,7 +331,9 @@ Design (copying nursery, decided 2026-10-27):
   remembered set, so a pinned 1M-element array costs nothing per minor
   (#2255). Only a major cycle frees held objects (its mark sees every
   young object). The chunk is reused once a major empties it; enough held
-  chunks ask for a major. (Promoting such a chunk to the old space
+  chunks ask for a major: a nursery's worth more than the last major
+  found live, and at least twice that (#2350; pacing in
+  [gc-incremental.md](gc-incremental.md#pacing)). (Promoting such a chunk to the old space
   instead left a 64 KiB chunk per stale stack word: result_heap_churn
   grew from 11 to 69 MB over 30M iterations.)
 - **Early frees** of young objects (step 2) put the slot on a per-class
@@ -352,7 +348,13 @@ Design (copying nursery, decided 2026-10-27):
   object into a *quiet* set instead of the remembered set and stops
   firing for it, and the set's objects are re-armed when the nursery
   starts again. Without it gc_rebuild remembered every pretenured node
-  (900k entries per minor).
+  (900k entries per minor). A quiet object carries `GEN_QUIET` until
+  then. Native code's store view of an array is the one write path that
+  outlives its barrier (stores through it are in place), and the
+  allocation that starts the nursery again drops no view. So a store view
+  of a quiet array remembers it at once (`GcData::note_store_view`), or
+  the young objects stored through the view after the restart would go
+  unseen (#2702).
 - **Major collections** stay mark-and-sweep. A minor collection runs first,
   so the major mark sees an empty nursery, and the sweep skips young
   chunks.
@@ -366,6 +368,74 @@ Design (copying nursery, decided 2026-10-27):
   chunks spread the working set, and 8 entries missed on hashmap and
   b_coll (+13% and +10% instructions). With 64 both configurations miss
   almost never.
+
+### Remembered arrays (#2687)
+
+A large old array written between two minors stays in the remembered set,
+and a minor walks all of it: once to reach young objects, once more to
+rewrite the precise words naming the ones it copied. A stdlib `HashMap`'s
+value vector is such an array. The plan
+(card-marked old arrays and a one-pass minor) lands in steps; the benches
+are `examples/perf/gc_map_update.coil` (100k keys, 10M updates) and
+`examples/perf/gc_old_vec_store.coil` (a 1M-element `Vec<int>` stored into
+in a loop that allocates).
+
+- **Census.** A `coil-test` built with `--features gc-stats` prints one
+  line per minor: `gc-stats minor: remembered=… remembered_words=…
+  rewrite_words=… (remembered …) fixups=… cards=dirty/total copied=…
+  pinned=… dead=…`. The word counts are slots walked; `pinned` counts the
+  survivors held in place. On `gc_old_vec_store` each of its 551 minors
+  walks the 1M-word vector twice (`remembered_words` and the remembered
+  share of `rewrite_words` are both 550M in total).
+- **Fix-up list (step 2).** The reach pass over a remembered array
+  notes the address of every precise slot that names a young object
+  (`reach_array_slots`), and after the copy only those slots are
+  forwarded. The array is not walked a second time. A slot whose object
+  an ambiguous word pinned later has nothing to forward, which is why
+  the pass cannot forward as it scans. Unknown-kind words are tested
+  against the slab's bounds before a chunk lookup. Other remembered kinds
+  keep `rewrite_precise_refs`. Remembered-array rewrite words went to 0
+  (`gc_old_vec_store`: 550M → 0, `gc_map_fill`: 1.82M → 10).
+  Instructions: `gc_old_vec_store` −21.4%, `vec_node` (400k) −12.3%,
+  `Bag<V>` at `--clone-budget 0` −8.4%, `gc_map_fill` −3.9%,
+  `HashMap<int, Node>` (400k) −2.9%; flagships unchanged.
+- **Card tables (steps 3 and 4).** A minor that finds a large word array
+  (`CARD_MIN_WORDS` = 1024 elements or more) remembered scans it whole and
+  gives it a clean `CardTable`: one byte per `1 << CARD_SHIFT` = 8 elements,
+  plus an all-dirty flag. Every write marks what it writes: `set` /
+  `store_indexed` / `push` the element; extend, fill, insert, remove, drain
+  and rotate their range; raw word access (`words_mut`) the whole table. Later
+  minors scan only the dirty cards and clear them. The table is attached at a
+  minor and never in the barrier, because a minor's safepoint has dropped
+  every native view, so no plain store view of the array is live when it
+  gets a table. A store view taken after that is `VIEW_TRACKED`, and native
+  code marks the card of each store inline
+  ([native.md](native.md)). Lane arrays have no table. A copy is a new
+  object without one. The major mark ignores cards. Sweep frees the table
+  with the payload, and evacuation moves it with the slot. The table lives
+  in `ArrayData::Words`, and a lane array's stride moved to `ObjArray`, so
+  the slot stays 64 bytes (const assert).
+  - **Sweep.** `CARD_MIN_WORDS` ∈ {256, 1024, 4096} × `CARD_SHIFT` ∈ {3, 4, 6}
+    on `gc_map_update`, `gc_map_fill`, the 4M-update program and
+    `gc_old_vec_store`. The threshold changed nothing beyond noise (the
+    arrays are tiny or huge). Shift 3 was cheapest on map updates (19.007 G
+    against 19.068 G at 4 and 19.065 G at 6), and 6 on the sparse store loop
+    (9.57 G against 9.89 G at 4 and 10.31 G at 3). Shift 3 was chosen: the
+    map update is the case the design is for.
+  - **Write-path cost.** The first version moved `ArrayData` to 40 bytes,
+    and `push` / `words_mut` stopped inlining; that cost up to 7.6% on
+    `gc_int_vec` and 3.6% on the #2350 map programs. Both are fixed: the
+    stride moved out of the variant, and one match does the write and the mark.
+- **Missed-barrier check.** In debug builds, under `gc-stress` and in any
+  run with `COIL_MIR_VERIFY` set (`heap_checks_on`, read once per heap),
+  each minor first walks the live objects: an old or held object the
+  remembered set does not name must not name a young one, or a store
+  skipped the barrier and the minor would free or move the object under
+  it. It panics naming the holder's kind and address, the young object's
+  and whether the word is precise. A remembered array with a card table
+  must not name a young object in a clean card (`missed card mark`, naming
+  the element). A plain release build tests one bool
+  per minor. Its first find was #2702 (the quiet store view above).
 
 ### Measured (step 4)
 

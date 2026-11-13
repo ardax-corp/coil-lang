@@ -1,0 +1,164 @@
+// An element-wise operator over a type parameter in a shared generic
+// body (no per-type clone) runs each element through the bound's
+// dictionary, at 3 elements and at 8 or more: never the int kernel.
+// @flags --clone-budget 0
+use tests::assert;
+
+class Money {
+    pub cents: int,
+}
+
+impl Add for Money {
+    pub fn add(Money a, Money b) -> Money {
+        return new Money(a.cents + b.cents);
+    }
+}
+
+impl Neg for Money {
+    pub fn neg(Money a) -> Money {
+        return new Money(0 - a.cents);
+    }
+}
+
+fn m(int cents) -> Money {
+    return new Money(cents);
+}
+
+fn user_add<T: Add>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return a + b;
+}
+
+fn user_wide<T: Add>([T; 9] a, [T; 9] b) -> [T; 9] {
+    return a + b;
+}
+
+fn user_neg<T: Neg>(Vec<T> v) -> Vec<T> {
+    return -v;
+}
+
+fn add<T: Num>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return a + b;
+}
+
+fn ops<T: Num>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return (a - b) * a / b;
+}
+
+fn rem_pow<T: Num>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return a % b + a ** b;
+}
+
+fn neg<T: Num>([T; 3] a) -> [T; 3] {
+    return -a;
+}
+
+fn scale<T: Num>([T; 3] a, [T; 1] k) -> [T; 3] {
+    return a * k[0];
+}
+
+fn from<T: Num>([T; 1] k, [T; 3] a) -> [T; 3] {
+    return k[0] - a;
+}
+
+fn items<T: Num>([T; 2] a) -> [T; 2] {
+    return [a[0], a[1]] * a[1] - [a[1], a[0]];
+}
+
+fn wide<T: Num>([T; 9] a, [T; 9] b) -> [T; 9] {
+    return a + b;
+}
+
+fn wide_ops<T: Num>([T; 9] a, [T; 1] k) -> [T; 9] {
+    return -(a * k[0] - a);
+}
+
+fn triple<T: Num>((T, T, T) a, (T, T, T) b) -> (T, T, T) {
+    return a - b;
+}
+
+fn pair<T: Num>((T, T) a, (T, T) b) -> (T, T) {
+    return -(a + b);
+}
+
+fn vec_scale<T: Num>(Vec<T> v, [T; 1] k) -> Vec<T> {
+    return v * k[0];
+}
+
+fn vec_neg<T: Num>(Vec<T> v) -> Vec<T> {
+    return -v;
+}
+
+test("3 elements at int and float") {
+    let i = add([1, 2, 3], [4, 5, 6]);
+    assert!(i[0] == 5 && i[1] == 7 && i[2] == 9);
+    let f = add([1.0, 2.0, 3.0], [4.0, 5.0, 6.5]);
+    assert!(f[0] == 5.0 && f[1] == 7.0 && f[2] == 9.5);
+    let o = ops([8, 9, 10], [2, 3, 5]);
+    assert!(o[0] == 24 && o[1] == 18 && o[2] == 10);
+    let of = ops([3.0, 5.0, 1.0], [1.0, 2.0, 0.5]);
+    assert!(of[0] == 6.0 && of[1] == 7.5 && of[2] == 1.0);
+    let r = rem_pow([7, 8, 9], [2, 3, 1]);
+    assert!(r[0] == 50 && r[1] == 514 && r[2] == 9);
+    let rf = rem_pow([7.5, 2.0, 3.0], [2.0, 3.0, 1.0]);
+    assert!(rf[0] == 57.75 && rf[1] == 10.0 && rf[2] == 3.0);
+}
+
+test("negation and broadcast") {
+    let n = neg([1, -2, 3]);
+    assert!(n[0] == -1 && n[1] == 2 && n[2] == -3);
+    let nf = neg([1.5, -2.0, 0.5]);
+    assert!(nf[0] == -1.5 && nf[1] == 2.0 && nf[2] == -0.5);
+    let s = scale([1, 2, 3], [3]);
+    assert!(s[0] == 3 && s[1] == 6 && s[2] == 9);
+    let sf = scale([1.5, 2.0, 3.0], [2.0]);
+    assert!(sf[0] == 3.0 && sf[1] == 4.0 && sf[2] == 6.0);
+    let k = from([10], [1, 2, 3]);
+    assert!(k[0] == 9 && k[1] == 8 && k[2] == 7);
+    let kf = from([10.0], [1.5, 2.0, 3.0]);
+    assert!(kf[0] == 8.5 && kf[1] == 8.0 && kf[2] == 7.0);
+    let it = items([1, 2]);
+    assert!(it[0] == 0 && it[1] == 3);
+    let itf = items([1.5, 2.0]);
+    assert!(itf[0] == 1.0 && itf[1] == 2.5);
+}
+
+test("8 or more elements at int and float") {
+    let w = wide([1, 2, 3, 4, 5, 6, 7, 8, 9], [9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    assert!(w[0] == 10 && w[4] == 10 && w[8] == 10);
+    let wf = wide(
+        [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+        [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+    );
+    assert!(wf[0] == 1.5 && wf[4] == 5.5 && wf[8] == 9.5);
+    let o = wide_ops([1, 2, 3, 4, 5, 6, 7, 8, 9], [3]);
+    assert!(o[0] == -2 && o[8] == -18);
+    let of = wide_ops([1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], [3.0]);
+    assert!(of[0] == -3.0 && of[8] == -18.0);
+}
+
+test("tuples and Vec") {
+    let t = triple((1, 2, 3), (3, 2, 1));
+    assert!(t[0] == -2 && t[1] == 0 && t[2] == 2);
+    let tf = triple((1.0, 2.0, 3.0), (0.5, 0.5, 0.5));
+    assert!(tf[0] == 0.5 && tf[1] == 1.5 && tf[2] == 2.5);
+    let p = pair((1, 2), (3, 4));
+    assert!(p[0] == -4 && p[1] == -6);
+    let pf = pair((1.5, 2.0), (0.5, 0.25));
+    assert!(pf[0] == -2.0 && pf[1] == -2.25);
+    let v = vec_scale(Vec::from([1, 2, 3]), [2]);
+    assert!(v.len() == 3 && v[0] == 2 && v[2] == 6);
+    let vf = vec_scale(Vec::from([1.5, 2.0]), [2.0]);
+    assert!(vf.len() == 2 && vf[0] == 3.0 && vf[1] == 4.0);
+    let n = vec_neg(Vec::from([1.5, -2.0]));
+    assert!(n[0] == -1.5 && n[1] == 2.0);
+}
+
+test("a user type's elements are its object words") {
+    let a = user_add([m(1), m(2), m(3)], [m(10), m(20), m(30)]);
+    assert!(a[0].cents == 11 && a[1].cents == 22 && a[2].cents == 33);
+    let one = [m(1), m(2), m(3), m(4), m(5), m(6), m(7), m(8), m(9)];
+    let w = user_wide(one, one);
+    assert!(w[0].cents == 2 && w[8].cents == 18);
+    let n = user_neg(Vec::from([m(1), m(2)]));
+    assert!(n[0].cents == -1 && n[1].cents == -2);
+}

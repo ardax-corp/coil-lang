@@ -56,7 +56,7 @@ fn hashed<T: Hash>(T x) -> int {
 }
 
 fn zero<T: Default>() -> T {
-    return default();
+    return Default::default();
 }
 
 fn sized<T: Length>(T x) -> int {

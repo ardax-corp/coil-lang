@@ -1,6 +1,6 @@
 // A vector loop whose block panics stores exactly what the scalar loop
-// would have before the panic: the VM runs that block again one lane at a
-// time (`machine::vm::vloop_lanes`). Each loop panics in the middle of
+// would have before the panic: the engine runs that block again one lane at a
+// time (`machine::lanes::vloop_lanes`). Each loop panics in the middle of
 // the third 8-lane block; a `defer` counts the stores made.
 // @output map 18\nmap scalar 18\nmixed 20\nmixed scalar 20\n
 use io::sync::println;

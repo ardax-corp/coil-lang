@@ -1,0 +1,177 @@
+//! Which bodies the HIR subset admits, and the reason it gives for the
+//! ones it refuses.
+
+use super::*;
+use crate::hir::build_module;
+use crate::typechecking::infer::Checker;
+
+fn refusal_of(src: &str, body: &str) -> Option<&'static str> {
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    assert!(
+        checker
+            .messages()
+            .iter()
+            .all(|m| *m.kind() != reporting::MessageKind::ERROR),
+        "{:?}",
+        checker.messages()
+    );
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let found = module
+        .bodies
+        .iter()
+        .find(|b| b.name == body)
+        .unwrap_or_else(|| panic!("no body `{body}`"));
+    refusal(found, &checker)
+}
+
+#[test]
+fn scalar_loops_calls_and_returns_are_in_the_subset() {
+    let src = "fn g(int a) -> int { return a * 2; }
+        fn f(int n, float x) -> int {
+            let s = 0;
+            let i = 0;
+            while i < n {
+                if i % 2 == 0 && x > 1.0 {
+                    s += g(i);
+                } else if i > 5 {
+                    break;
+                }
+                i++;
+            }
+            return s;
+        }";
+    assert_eq!(refusal_of(src, "g"), None);
+    assert_eq!(refusal_of(src, "f"), None);
+}
+
+#[test]
+fn unit_functions_and_bare_returns_are_in_the_subset() {
+    let src = "fn h(int n) { let x = n + 1; return; }";
+    assert_eq!(refusal_of(src, "h"), None);
+}
+
+#[test]
+fn strings_enums_and_matches_are_in_the_subset() {
+    let src = "fn f(string s) -> string { return s; }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "enum Shape { Circle(int), Square(int, int), Empty }
+        fn area(Shape s) -> int {
+            return match s {
+                Shape::Circle(r) => r * r * 3,
+                Shape::Square(w, h) => w * h,
+                Shape::Empty => 0,
+            };
+        }";
+    assert_eq!(refusal_of(src, "area"), None);
+    let src = "fn f(Option<int> o) -> int { return o ?? 0; }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f(Option<int> o) -> Option<int> { let v = o?; return Option::Some(v + 1); }";
+    assert_eq!(refusal_of(src, "f"), None);
+}
+
+#[test]
+fn result_mode_bodies_are_in_the_subset() {
+    let src = "fn f(int n) -> Result<int, string> { return n; }";
+    assert_eq!(refusal_of(src, "f"), None);
+}
+
+#[test]
+fn generic_shared_bodies_are_in_the_subset() {
+    let src = "fn id<T>(T x) -> T { return x; }";
+    assert_eq!(refusal_of(src, "id"), None);
+}
+
+#[test]
+fn counted_for_in_is_in_the_subset() {
+    let src = "fn f(int n) -> int { let s = 0; for i in 0..n { s += i; } return s; }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f(Vec<int> xs) -> int { let s = 0; for x in xs { s += x; } return s; }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f(Vec<(int, int)> xs) -> int { let s = 0; for (a, b) in xs { s += a + b; } return s; }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f() -> int { let s = 0; for i in 0..4 { s += i; } return s; }";
+    assert_eq!(refusal_of(src, "f"), None);
+}
+
+#[test]
+fn len_of_a_call_or_index_is_in_the_subset() {
+    let src = "fn g() -> Vec<int> { let v: Vec<int> = []; return v; } fn f() -> int { return g().len(); }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f(Vec<Vec<int>> xs) -> int { return xs[0].len(); }";
+    assert_eq!(refusal_of(src, "f"), None);
+    // A literal folds to its item count, as the AST's `eval_len_operand`.
+    let src = "fn f() -> int { return [1, 2].len(); }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f(string a) -> int { return (a + \"x\").len(); }";
+    assert_eq!(refusal_of(src, "f"), None);
+}
+
+#[test]
+fn bytes_casts_and_unit_tries_are_in_the_subset() {
+    let src = "fn f(byte c) -> int {
+            let z: byte = \"0\";
+            if c >= z && c <= \"9\" {
+                return (c as int) - (z as int);
+            }
+            return ((c as int) as float) as int;
+        }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn check(int n) -> Result<(), string> {
+            if n < 0 {
+                raise \"negative\";
+            }
+            return Result::Ok(());
+        }
+        fn twice(int n) -> Result<int, string> {
+            check(n)?;
+            return Result::Ok(n * 2);
+        }";
+    assert_eq!(refusal_of(src, "twice"), None);
+}
+
+#[test]
+fn variants_built_and_matched_at_their_enum_are_in_the_subset() {
+    // The tag and payload of each variant built or matched are checked
+    // here, not by the plan.
+    let src = "enum Shape { Circle(int), Rect { w: int, h: int }, Empty }
+        fn make(int n) -> Shape {
+            if n == 0 {
+                return Shape::Empty;
+            }
+            if n == 1 {
+                return Shape::Circle(n);
+            }
+            return Shape::Rect { w: n, h: n };
+        }
+        fn size(Shape s) -> int {
+            return match s {
+                Shape::Circle(r) => r,
+                Shape::Empty => 0,
+                default => 1,
+            };
+        }";
+    assert_eq!(refusal_of(src, "make"), None);
+    assert_eq!(refusal_of(src, "size"), None);
+    let src = "fn f(Option<Result<int, string>> o) -> int {
+            return match o {
+                Option::Some(Result::Ok(v)) => v,
+                Option::Some(Result::Err(_)) => -1,
+                Option::None => 0,
+            };
+        }
+        fn g(int n) -> Result<Option<int>, string> { return Result::Ok(Option::Some(n)); }";
+    assert_eq!(refusal_of(src, "f"), None);
+    assert_eq!(refusal_of(src, "g"), None);
+}
+
+#[test]
+fn typeof_and_let_patterns_are_in_the_subset() {
+    let src = "fn f(Vec<int> xs) -> string { return typeof xs; }";
+    assert_eq!(refusal_of(src, "f"), None);
+    let src = "fn f((int, (string, int)) t) -> int { let (a, (_, c)) = t; return a + c; }";
+    assert_eq!(refusal_of(src, "f"), None);
+}

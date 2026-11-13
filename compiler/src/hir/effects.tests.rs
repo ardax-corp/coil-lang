@@ -171,10 +171,121 @@ fn bump(int x) -> int {{
 }}"
     );
     let (m, out) = summaries(&src);
-    let names = pure_names(&m, "", &out, &HashSet::new());
+    let names = pure_names(&m, "", &out);
     assert!(names.contains("double"), "{names:?}");
     assert!(!names.contains("map"));
     assert!(!names.contains("bump"));
+}
+
+/// A contract check that may fail does not make a function impure; a
+/// `panic` it writes itself does, and so does an effect in a clause.
+#[test]
+fn contract_checks_keep_a_function_pure() {
+    let src = "
+static let HITS: int = 0;
+fn bump(int x) -> bool {
+    HITS = HITS + 1;
+    return x > 0;
+}
+fn half(int n) -> int
+    requires n >= 0
+    ensures result <= n
+{
+    return n / 2;
+}
+fn quarter(int n) -> int {
+    return half(half(n));
+}
+fn count(int n) -> int {
+    let i = 0;
+    while i < n
+        invariant i >= 0
+    {
+        i = i + 1;
+    }
+    return i;
+}
+fn strict(int n) -> int {
+    if n < 0 {
+        panic(\"negative\");
+    }
+    return n;
+}
+fn noisy(int n) -> int
+    requires bump(n)
+{
+    return n;
+}";
+    let (m, out) = summaries(src);
+    let names = pure_names(&m, "", &out);
+    for name in ["half", "quarter", "count"] {
+        assert!(names.contains(name), "`{name}`: {names:?}");
+    }
+    assert!(!names.contains("strict"), "{names:?}");
+    assert!(!names.contains("noisy"), "{names:?}");
+}
+
+/// An operator that is not one of the scalar lanes is still built in when
+/// both operands are: element-wise arithmetic, `==` on an `Option`. On a
+/// class or a type parameter it runs a trait impl.
+#[test]
+fn operators_on_built_in_operands_are_pure() {
+    let src = "
+class Money {
+    pub cents: int,
+}
+impl Lt for Money {
+    pub fn lt(Money a, Money b) -> bool { return a.cents < b.cents; }
+}
+fn sum2([int; 2] a, [int; 2] b) -> [int; 2] { return a + b; }
+fn scaled(Vec<float> xs, float k) -> Vec<float> { return xs * k; }
+fn empty(Option<int> o) -> bool { return o == Option::None; }
+fn same((int, string) a, (int, string) b) -> bool { return a == b; }
+fn less(Money a, Money b) -> bool { return a < b; }
+fn less_of<T: Lt>(T a, T b) -> bool { return a < b; }
+fn has(Option<Money> o, Money m) -> bool { return o == Option::Some(m); }";
+    let (m, out) = summaries(src);
+    let names = pure_names(&m, "", &out);
+    for name in ["sum2", "scaled", "empty", "same"] {
+        assert!(names.contains(name), "`{name}`: {names:?}");
+    }
+    for name in ["less", "less_of", "has"] {
+        assert!(!names.contains(name), "`{name}`: {names:?}");
+    }
+}
+
+/// A trait impl's method is listed under its own name, and no method
+/// under its short name alone: a bare `m(..)` is a call of a function, or
+/// of whatever impl a trait call picks (#2436).
+#[test]
+fn pure_names_list_trait_impl_methods_by_their_own_name() {
+    let src = "
+static let HITS: int = 0;
+class P {
+    pub x: int,
+}
+impl P {
+    pub fn size() -> int { return self.x; }
+}
+trait Weigh<T> {
+    fn weigh(T x) -> int;
+    fn size(T x) -> int;
+}
+impl Weigh for P {
+    fn weigh(P p) -> int { return p.x * 2; }
+    fn size(P p) -> int {
+        HITS = HITS + 1;
+        return p.x;
+    }
+}";
+    let (m, out) = summaries(src);
+    let names = pure_names(&m, "", &out);
+    assert!(names.contains("Weigh for P::weigh"), "{names:?}");
+    assert!(!names.contains("Weigh for P::size"), "{names:?}");
+    assert!(names.contains("P::size"), "{names:?}");
+    assert!(!names.contains("size") && !names.contains("weigh"), "{names:?}");
+    let steady = steady_names(&m, "", &out);
+    assert!(steady.contains("Weigh for P::weigh") && steady.contains("Weigh for P::size"), "{steady:?}");
 }
 
 fn violations(src: &str) -> Vec<String> {
@@ -279,10 +390,10 @@ impl Plain for Sq {
     }
 }
 fn total(Area a) -> int {
-    return area(a);
+    return a.area();
 }
 fn other(Plain p) -> int {
-    return plain(p);
+    return p.plain();
 }";
     let (m, out) = summaries(src);
     assert!(of(&m, &out, "total").visible.is_pure());
@@ -724,6 +835,11 @@ fn bind(Box b) -> (int) -> int {
 
 /// The body `name` after the early-free rewrite, if it changed.
 fn rewritten(src: &str, name: &str) -> Option<HirBody> {
+    rewritten_with(src, name, &Slots { local: &|_| false, value: &|_| false })
+}
+
+/// [`rewritten`], with what lowering keeps in frame slots.
+fn rewritten_with(src: &str, name: &str, slots: &Slots<'_>) -> Option<HirBody> {
     let owned = Box::leak(src.to_string().into_boxed_str());
     let ast = parser::Pratt::default().parse(owned).expect("parse");
     let mut checker = Checker::new();
@@ -738,7 +854,21 @@ fn rewritten(src: &str, name: &str) -> Option<HirBody> {
         HirKind::Call { callee: Callee::Named { name, .. }, .. } => common::host_native_id(name),
         _ => None,
     };
-    program.early_frees(&checker, "", &module, body, &host)
+    program.early_frees(&checker, "", &module, body, &host, slots)
+}
+
+/// The names of the locals `body` frees early.
+fn freed(body: &HirBody) -> Vec<String> {
+    body.exprs
+        .iter()
+        .filter_map(|x| match &x.kind {
+            HirKind::Builtin { op: crate::hir::Builtin::FreeEarly { .. }, args } => match body.expr(args[0]).kind {
+                HirKind::Local(l) => Some(body.local(l).name.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
 }
 
 /// Names of the calls left in `body`, and whether each takes its buffer.
@@ -769,7 +899,7 @@ fn frees(src: &str, name: &str) -> Vec<(bool, String)> {
         HirKind::Call { callee: Callee::Named { name, .. }, .. } => common::host_native_id(name),
         _ => None,
     };
-    let Some(rewritten) = program.early_frees(&checker, "", &module, body, &host) else {
+    let Some(rewritten) = program.early_frees(&checker, "", &module, body, &host, &Slots { local: &|_| false, value: &|_| false }) else {
         return Vec::new();
     };
     rewritten
@@ -1111,41 +1241,6 @@ fn text(Vec<byte> b) -> string {
     assert!(!left.iter().any(|c| c.1), "{left:?}");
 }
 
-const FIELDS: &str = "
-class Acc {
-    pub total: int,
-    pub count: int,
-}
-fn weight(int x) -> int {
-    if x <= 0 {
-        return 0;
-    }
-    return x % 7 + weight(x / 100);
-}
-fn peek(Acc a) -> int {
-    return a.total;
-}
-fn via(Acc a) -> int {
-    return peek(a) + weight(3);
-}
-fn same(Acc a, Acc b) -> bool {
-    return a == b;
-}
-fn apply(int x, int -> int f) -> int {
-    return f(x);
-}
-";
-
-#[test]
-fn fields_name_what_a_body_and_its_callees_touch() {
-    let (m, out) = summaries(FIELDS);
-    assert_eq!(of(&m, &out, "weight").fields, 0, "no object");
-    assert_eq!(of(&m, &out, "peek").fields, field_bit("total"));
-    assert_eq!(of(&m, &out, "via").fields, field_bit("total"), "through `peek`");
-    assert_eq!(of(&m, &out, "same").fields, ALL_FIELDS, "`==` may read every field");
-    assert_ne!(of(&m, &out, "apply").latent, 0, "a call of its parameter: any field at the call site");
-}
-
 #[test]
 fn a_returned_parameter_is_returned_not_kept() {
     // #2206: copy-on-write tells "may be the result" apart from "stored
@@ -1195,4 +1290,283 @@ fn fresh(Box b) -> Vec<int> {
     assert_eq!(items_of.returns_arg, 0, "{items_of:?}");
     let fresh = of(&m, &out, "fresh");
     assert_eq!(fresh.returns_inner, 0, "{fresh:?}");
+}
+
+/// A copy that is changed, then a block that leaves on every path, and a
+/// match on a fresh string whose arms all leave.
+const LEAVERS: &str = "
+use string::{to_bytes};
+fn sign(string s, int n) -> int {
+    let b = to_bytes(s);
+    b.push(\".\" as byte);
+    if n > b.len() {
+        return 1;
+    } else {
+        return 0;
+    }
+}
+fn shout(string s) -> Option<string> {
+    if s.len() > 0 {
+        return Option::Some(s + \"!\");
+    }
+    return Option::None;
+}
+fn loud(string s) -> int {
+    match shout(s) {
+        Option::Some(t) => {
+            return t.len();
+        },
+        Option::None => {
+            return 0;
+        },
+    }
+}
+";
+
+#[test]
+fn a_value_that_never_arrives_is_bound_to_no_temp() {
+    // D4b: a `never` temp is a local no layout places, and the whole
+    // rewrite was thrown away with it.
+    for name in ["sign", "loud"] {
+        let Some(body) = rewritten(LEAVERS, name) else { continue };
+        let never: Vec<&str> = body.locals.iter().filter(|l| matches!(l.ty, Some(Ty::Never))).map(|l| l.name.as_str()).collect();
+        assert!(never.is_empty(), "{name}: {never:?}");
+    }
+    let sign = rewritten(LEAVERS, "sign").expect("sign frees its copy");
+    assert_eq!(freed(&sign), vec!["b".to_string(), "b".to_string()]);
+}
+
+#[test]
+fn what_lowering_keeps_in_frame_slots_is_not_freed() {
+    // D4b: a two-word local or call result and a stack array have no
+    // object; a free of one did not plan.
+    let src = format!(
+        "{TREES}\nuse string::{{to_bytes}};\nfn run(int d) -> int {{\n    return item_check(bottom_up(d));\n}}\nfn count(string s) -> int {{\n    let b = to_bytes(s);\n    b.push(\".\" as byte);\n    return b.len();\n}}\n"
+    );
+    let all = Slots { local: &|_| true, value: &|_| true };
+    assert_eq!(rewritten(&src, "run").map(|b| freed(&b).len()), Some(1));
+    assert_eq!(rewritten_with(&src, "run", &all).map(|b| freed(&b)).unwrap_or_default(), Vec::<String>::new());
+    assert_eq!(rewritten(&src, "count").map(|b| freed(&b)), Some(vec!["b".to_string()]));
+    assert_eq!(rewritten_with(&src, "count", &all).map(|b| freed(&b)).unwrap_or_default(), Vec::<String>::new());
+}
+
+#[test]
+fn a_call_a_field_is_read_off_stays_a_call() {
+    // D4b: the read takes the call's own layout as its base, which the
+    // block freeing the call's argument does not have.
+    let src = "
+class Rec {
+    pub n: int,
+    pub tag: string,
+}
+fn make(int n) -> Rec {
+    return new Rec(n, \"r\");
+}
+fn later(Rec r) -> Rec {
+    return make(r.n * 2);
+}
+fn run(int n) -> int {
+    return later(make(n)).n;
+}
+fn kept(int n) -> int {
+    let r = later(make(n));
+    return r.n;
+}
+";
+    assert!(rewritten(src, "kept").is_some_and(|b| !freed(&b).is_empty()), "a local's base is freed after the read");
+    let Some(body) = rewritten(src, "run") else { return };
+    for x in &body.exprs {
+        if let HirKind::Field { base, .. } = x.kind {
+            assert!(!matches!(body.expr(base).kind, HirKind::Block { .. }), "a block as a field base");
+        }
+    }
+}
+
+#[test]
+fn a_value_of_literals_is_no_object_to_free() {
+    // D4b: a `Some` of a literal or a `None` is no object made at run
+    // time; a free of it is a call that does nothing, once per match.
+    let src = "
+fn tagged(int n) -> int {
+    return match (if n % 3 == 0 { Option::Some(\"hit\") } else { Option::None }) {
+        Option::Some(_) => 1,
+        Option::None => 0,
+    };
+}
+fn built(int n, string s) -> int {
+    return match (if n % 3 == 0 { Option::Some(s + \"!\") } else { Option::None }) {
+        Option::Some(t) => t.len(),
+        Option::None => 0,
+    };
+}
+";
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let scrutinee = |name: &str| {
+        let body = module.bodies.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("no body `{name}`"));
+        let found = body.exprs.iter().find_map(|x| match x.kind {
+            HirKind::Match { scrutinee, .. } => Some(scrutinee),
+            _ => None,
+        });
+        (body, found.expect("a match"))
+    };
+    let (body, v) = scrutinee("tagged");
+    assert!(!early_free::allocates(body, v));
+    let (body, v) = scrutinee("built");
+    assert!(early_free::allocates(body, v));
+}
+
+fn drop_resizes(src: &str) -> bool {
+    let (module, out) = summaries(src);
+    let checker = Checker::new();
+    let mut program = ProgramEffects::default();
+    program.record(&module, &checker, "", &out);
+    program.drop_may_resize()
+}
+
+/// A finalizer runs at any allocation: one that may change a length makes
+/// every allocation a point where lengths change.
+#[test]
+fn a_drop_that_pops_may_resize() {
+    assert!(drop_resizes(
+        "
+class Log {
+    pub lines: Vec<int>,
+}
+impl Log {
+    fn drop() {
+        self.lines.pop();
+    }
+}"
+    ));
+}
+
+#[test]
+fn a_drop_that_runs_unknown_code_may_resize() {
+    assert!(drop_resizes(
+        "
+class Hook {
+    pub f: int -> int,
+}
+impl Hook {
+    fn drop() {
+        let g = self.f;
+        let _ = g(1);
+    }
+}"
+    ));
+}
+
+#[test]
+fn a_drop_that_writes_a_field_or_a_static_leaves_lengths_alone() {
+    assert!(!drop_resizes(
+        "
+static let DROPS: int = 0;
+class Handle {
+    pub fd: int,
+}
+impl Handle {
+    fn drop() {
+        DROPS = DROPS + 1;
+        self.fd = 0 - 1;
+    }
+    pub fn grow(Vec<int> v) {
+        v.push(self.fd);
+    }
+}"
+    ));
+}
+
+const OVERLOADS: &str = "
+static let HITS: int = 0;
+fn f(int a, int b) -> int {
+    HITS = HITS + 1;
+    return a + b;
+}
+fn f(int a) -> int { return a + 1; }
+fn one(int a) -> int { return f(a); }
+fn two(int a) -> int { return f(a, a); }
+class C {
+    pub n: int,
+}
+impl C {
+    pub fn m(int a, int b) -> int {
+        HITS = HITS + 1;
+        return a + b;
+    }
+    pub fn m(int a) -> int { return a + self.n; }
+}
+fn mone(C c) -> int { return c.m(1); }
+fn mtwo(C c) -> int { return c.m(1, 2); }
+";
+
+/// A call of an overloaded function costs what the overload it names
+/// does, whichever is declared last (#2426).
+#[test]
+fn a_call_takes_the_effects_of_the_overload_it_names() {
+    let (m, out) = summaries(OVERLOADS);
+    assert!(of(&m, &out, "one").is_pure());
+    assert!(!of(&m, &out, "two").is_pure());
+    // A method call does not say which body it runs: either may.
+    assert!(!of(&m, &out, "mone").is_pure());
+    assert!(!of(&m, &out, "mtwo").is_pure());
+}
+
+#[test]
+fn an_overloaded_name_is_pure_when_every_overload_is() {
+    let (m, out) = summaries(OVERLOADS);
+    let names = pure_names(&m, "", &out);
+    assert!(!names.contains("f") && !names.contains("C::m") && !names.contains("m"), "{names:?}");
+    assert!(names.contains("one") && !names.contains("two"), "{names:?}");
+}
+
+#[test]
+fn a_later_module_sees_every_overload_of_a_name() {
+    let (m, out) = summaries(OVERLOADS);
+    let mut program = ProgramEffects::default();
+    program.record(&m, &Checker::new(), "", &out);
+    assert!(!program.summary_named("f").expect("f").is_pure());
+    assert!(!program.summary_named("C::m").expect("C::m").is_pure());
+}
+
+/// A function the program declares is never a host native, whatever its
+/// name: an `extern` has no body to summarise, so its call is unknown code.
+#[test]
+fn an_extern_named_like_a_host_native_is_unknown_code() {
+    let src = "
+extern \"plugin\" {
+    fn math_sin(float x) -> float;
+}
+fn wave(float x) -> float { return math_sin(x); }
+fn plain(float x) -> float { return x * 2.0; }
+";
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    // The library is not there to load; the declaration still stands.
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let program = ProgramEffects::default();
+    let out = ModuleEffects::solve(&module, &checker, "", &program).summaries;
+    let wave = of(&module, &out, "wave");
+    assert!(wave.flags.contains(EffectFlags::UNKNOWN) && !wave.is_steady(), "{wave:?}");
+    assert!(of(&module, &out, "plain").is_pure());
+}
+
+/// A function is listed under its local name and with its module's path,
+/// and a call is matched by the whole name.
+#[test]
+fn names_carry_the_module_path_and_match_whole() {
+    let (m, out) = summaries("fn sq(int x) -> int { return x * x; }");
+    let mut m = m;
+    m.bodies[0].name = "util::sq".to_string();
+    let names = pure_names(&m, "util", &out);
+    assert!(names.contains("sq") && names.contains("util::sq"), "{names:?}");
+    assert!(crate::pure_call::name_in(&names, "util::sq") && crate::pure_call::name_in(&names, "sq"));
+    assert!(!crate::pure_call::name_in(&names, "other::sq") && !crate::pure_call::name_in(&names, "Type::sq"));
 }

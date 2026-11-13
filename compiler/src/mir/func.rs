@@ -5,20 +5,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use common::DebugLoc;
 
 use super::gc::LiveRootSet;
-use super::inst::{BlockId, LocalId, MirDeoptKind, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, LocalId, MirConst, MirInst, Terminator, ValueId};
 use crate::layout::MirLayout;
 use super::ty::MirTy;
-
-/// One leave / stop edge with live IL locals (I7 / C3). Sidecar only.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeoptSite {
-    pub kind: MirDeoptKind,
-    /// Dest of the leave inst; `None` for a terminator-only Stop.
-    pub at: Option<ValueId>,
-    pub loc: DebugLoc,
-    /// Live IL slot → SSA value at the edge (over-approx is safe).
-    pub slots: Vec<(LocalId, ValueId)>,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MirBlock {
@@ -66,16 +55,14 @@ pub struct MirFunc {
     /// a frame word of its own, never an inline operand.
     pub debug_keep: bool,
     /// A coverage compile counts a line covered when code it emits runs:
-    /// the body takes LIR, and LIR keeps the code of each line instead of
+    /// the body keeps the code of each line instead of
     /// folding it away.
     pub keep_lines: bool,
-    /// Implicit + explicit leave / stop sites (I7 / C3). Not archive-encoded.
-    pub deopt_sites: Vec<DeoptSite>,
     /// An `i64` may be a type variable's word, a raw scalar or a box: the
     /// objects this body makes carry no word kinds.
     pub opaque_words: bool,
     /// Locals (frame slots, for MIR lowered from HIR) a heap word was
-    /// stored in: the fuse-IL body of the same HIR keeps them there.
+    /// stored in: another body of the same HIR keeps them there.
     pub heap_slots: BTreeSet<LocalId>,
     /// Locals a non-heap word was stored in.
     pub word_slots: BTreeSet<LocalId>,
@@ -95,11 +82,11 @@ pub struct MirFunc {
     pub cleanup: Option<Box<MirFunc>>,
     /// Callees a call of this body may reach as a `TailCall` (planned tail
     /// calls of a `return`): a call to one whose result the block returns.
-    pub tail_targets: HashSet<crate::il::Label>,
+    pub tail_targets: HashSet<crate::bodies::Label>,
     /// Calls of a pure function returning one scalar word: CSE and LICM
     /// may treat them as operators that can trap.
     pub pure_calls: HashSet<ValueId>,
-    /// `HeapFieldLoad`s of a `readonly class` instance's field: no store
+    /// `ProductLoad`s of a `readonly class` instance's field: no store
     /// or call changes the word, so LICM and CSE treat them as operators
     /// on the object (#1560).
     pub invariant_loads: HashSet<ValueId>,
@@ -107,20 +94,12 @@ pub struct MirFunc {
     /// `byte_scan` reads them as byte lanes.
     pub byte_loads: HashSet<ValueId>,
     /// `Index` reads of a heap word in a forward scan: dense emission
-    /// asks the VM to prefetch the object a few elements ahead
+    /// asks the runtime to prefetch the object a few elements ahead
     /// ([`super::mark_prefetch_scans`]).
     pub prefetch_loads: HashSet<ValueId>,
     /// Calls of a function that never resizes an array (it may write
     /// elements and fields).
     pub steady_calls: HashSet<ValueId>,
-    /// Per call, the fields it may read or write, as
-    /// [`crate::hir::effects::field_bit`]s of their names; a call not
-    /// listed may touch any.
-    pub call_fields: HashMap<ValueId, u64>,
-    /// Per heap slot, the [`crate::hir::effects::field_bit`]s of the field
-    /// names this body reads or writes there by name. A call whose
-    /// [`Self::call_fields`] miss them leaves the slot's word alone.
-    pub slot_fields: HashMap<u32, u64>,
     /// No code that runs at an allocation (a finalizer) resizes an array:
     /// an allocation leaves every length as it was.
     pub lengths_steady: bool,
@@ -129,11 +108,63 @@ pub struct MirFunc {
     /// it is rebound or the function returns, so emission zeroes past
     /// their last use only the registers of temporaries (#1650).
     pub bound_words: HashSet<ValueId>,
-    /// Low words of the pairs calls return whose enum may carry a heap
-    /// payload there (an opaque `i64`): emission zeroes them past their
-    /// last use like the payload words a match reads (#1791). A pair of
-    /// numbers (`Option<int>`) is not listed.
-    pub heap_pair_calls: HashSet<ValueId>,
+    /// The words locals were bound to, by local (each `def_local`, and the
+    /// φs merging a local's definitions). The frame holds one from its
+    /// definition until another of the same local's takes its place.
+    pub local_binds: Vec<(LocalId, ValueId)>,
+    /// `i64` words that may hold an object, which an engine roots
+    /// ambiguously: the low words of the pairs calls return, and of the pair
+    /// parameters, whose enum may carry a heap payload there, and the element
+    /// a `Vec` expansion holds across a loop ([`super::native_expand`]).
+    /// Emission zeroes a call's past their last use like the payload words a
+    /// match reads (#1791). A pair of numbers (`Option<int>`) is not listed.
+    pub heap_pair_words: HashSet<ValueId>,
+    /// This body returns a two-word result as its one word (its box), a
+    /// function value's entry; `pair_twin` is the same function taking
+    /// the same words and returning the two words. A
+    /// [`MirInst::CallIndirect`] of a two-word result enters the twin.
+    pub pair_twin: Option<crate::bodies::Label>,
+}
+
+/// The instruction defining each value (its [`MirInst::dest`]) and its
+/// block ([`MirFunc::defs`]).
+pub type Defs<'a> = HashMap<ValueId, (BlockId, &'a MirInst)>;
+
+/// The `int` constant `v` is, when [`Defs`] says so.
+pub fn const_i64(defs: &Defs, v: ValueId) -> Option<i64> {
+    match defs.get(&v) {
+        Some((_, MirInst::Const { c: MirConst::I64(k), .. })) => Some(*k),
+        _ => None,
+    }
+}
+
+/// Where `v` ends up under `subst`: its replacement's replacement, and
+/// so on. A cycle stops at the first value seen twice.
+pub fn resolve(subst: &HashMap<ValueId, ValueId>, start: ValueId) -> ValueId {
+    let (mut v, mut steps) = (start, 0);
+    while let Some(&n) = subst.get(&v) {
+        if n == v {
+            break;
+        }
+        steps += 1;
+        if steps > subst.len() {
+            return resolve_cycle(subst, start);
+        }
+        v = n;
+    }
+    v
+}
+
+#[cold]
+fn resolve_cycle(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
+    let mut seen = HashSet::new();
+    while let Some(&n) = subst.get(&v) {
+        if n == v || !seen.insert(v) {
+            break;
+        }
+        v = n;
+    }
+    v
 }
 
 impl MirFunc {
@@ -153,10 +184,6 @@ impl MirFunc {
             g.values.shrink_to_fit();
             g.slots.shrink_to_fit();
         }
-        self.deopt_sites.shrink_to_fit();
-        for d in &mut self.deopt_sites {
-            d.slots.shrink_to_fit();
-        }
         self.homes.shrink_to_fit();
         if let Some(c) = &mut self.cleanup {
             c.shrink_to_fit();
@@ -166,12 +193,16 @@ impl MirFunc {
     /// The function entries this body's code names: the callees of its
     /// calls, its code pointers and function values, its cleanup pad's
     /// included.
-    pub fn code_targets(&self) -> Vec<crate::il::Label> {
+    pub fn code_targets(&self) -> Vec<crate::bodies::Label> {
         use super::MirAllocKind;
         let mut out = Vec::new();
         for inst in self.blocks.iter().flat_map(|b| &b.insts) {
             match inst {
-                MirInst::Call { target, .. } | MirInst::CodePtr { target, .. } => out.push(*target),
+                MirInst::Call { target, .. }
+                | MirInst::CodePtr { target, .. }
+                | MirInst::CallIndirect {
+                    pair: Some((_, target)), ..
+                } => out.push(*target),
                 MirInst::Alloc {
                     kind:
                         MirAllocKind::Coro { target, .. }
@@ -183,6 +214,7 @@ impl MirFunc {
                 _ => {}
             }
         }
+        out.extend(self.pair_twin);
         if let Some(pad) = &self.cleanup {
             out.extend(pad.code_targets());
         }
@@ -191,12 +223,70 @@ impl MirFunc {
 
     /// A pass replaced values: each named local follows its value to the
     /// one that replaces it.
+    /// Rename every value an instruction or terminator reads, and the
+    /// debug slots, through `map`. Dests stay as they are.
+    pub fn map_values(&mut self, map: impl Fn(ValueId) -> ValueId) {
+        for block in &mut self.blocks {
+            for inst in &mut block.insts {
+                inst.rewrite_values(&map);
+            }
+            if let Some(term) = &mut block.term {
+                term.rewrite_values(&map);
+            }
+        }
+        self.rewrite_debug_slots(map);
+    }
+
+    /// [`Self::map_values`] through `subst`, following chains to their end
+    /// ([`resolve`]).
+    pub fn replace_uses(&mut self, subst: &HashMap<ValueId, ValueId>) {
+        if !subst.is_empty() {
+            self.map_values(|v| resolve(subst, v));
+        }
+    }
+
+    /// Every value's defining instruction, for many lookups.
+    pub fn defs(&self) -> Defs<'_> {
+        self.blocks.iter().flat_map(|b| b.insts.iter().map(move |i| (i.dest(), (b.id, i)))).collect()
+    }
+
+    /// The instruction defining `v` and its block. A scan of the body: for
+    /// more than a few lookups build [`Self::defs`].
+    pub fn def_of(&self, v: ValueId) -> Option<(BlockId, &MirInst)> {
+        self.blocks.iter().find_map(|b| b.insts.iter().find(|i| i.dest() == v).map(|i| (b.id, i)))
+    }
+
+    /// The instruction defining `v` (a scan, as [`Self::def_of`]).
+    pub fn def_inst(&self, v: ValueId) -> Option<&MirInst> {
+        self.def_of(v).map(|(_, i)| i)
+    }
+
+    /// The constant `v` is, when a `Const` defines it (a scan, as
+    /// [`Self::def_of`]).
+    pub fn const_of(&self, v: ValueId) -> Option<MirConst> {
+        match self.def_of(v) {
+            Some((_, MirInst::Const { c, .. })) => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// The `int` constant `v` is (a scan, as [`Self::def_of`]).
+    pub fn const_i64(&self, v: ValueId) -> Option<i64> {
+        match self.const_of(v) {
+            Some(MirConst::I64(k)) => Some(k),
+            _ => None,
+        }
+    }
+
     pub fn rewrite_debug_slots(&mut self, map: impl Fn(ValueId) -> ValueId) {
         for v in self.debug_slots.values_mut() {
             *v = map(*v);
         }
         let renamed: Vec<ValueId> = self.bound_words.iter().map(|&v| map(v)).collect();
         self.bound_words.extend(renamed);
+        for (_, v) in &mut self.local_binds {
+            *v = map(*v);
+        }
     }
 
     pub fn new(name: impl Into<String>) -> Self {
@@ -217,7 +307,6 @@ impl MirFunc {
             debug_slots: HashMap::new(),
             debug_keep: false,
             keep_lines: false,
-            deopt_sites: Vec::new(),
             heap_slots: BTreeSet::new(),
             word_slots: BTreeSet::new(),
             opaque_words: false,
@@ -231,11 +320,11 @@ impl MirFunc {
             byte_loads: HashSet::new(),
             prefetch_loads: HashSet::new(),
             steady_calls: HashSet::new(),
-            call_fields: HashMap::new(),
-            slot_fields: HashMap::new(),
             lengths_steady: true,
             bound_words: HashSet::new(),
-            heap_pair_calls: HashSet::new(),
+            local_binds: Vec::new(),
+            heap_pair_words: HashSet::new(),
+            pair_twin: None,
         }
     }
 
@@ -284,30 +373,6 @@ impl MirFunc {
         self.blocks
             .iter()
             .any(|b| b.insts.iter().any(MirInst::is_gc_edge))
-    }
-
-    /// A GC edge the mapped-allocation gates count: any but a function value
-    /// (`MakeFn` / `MakePolyFn`) or a boxed carrier (`BoxValue`) and the
-    /// barrier right after it, which emit as in any body
-    /// ([`super::gates::refuses_alloc`]).
-    pub fn has_mapped_gc_edge(&self) -> bool {
-        let is_fn = |i: &MirInst| {
-            matches!(
-                i,
-                MirInst::Alloc {
-                    kind: super::inst::MirAllocKind::Fn { .. }
-                        | super::inst::MirAllocKind::PolyFn { .. }
-                        | super::inst::MirAllocKind::PolyFnCapture { .. },
-                    ..
-                }
-            )
-        };
-        self.blocks.iter().any(|b| {
-            b.insts.iter().enumerate().any(|(k, i)| {
-                let after_fn = matches!(i, MirInst::GcBarrier { .. }) && k > 0 && is_fn(&b.insts[k - 1]);
-                i.is_gc_edge() && !is_fn(i) && !after_fn
-            })
-        })
     }
 
     /// Lay the blocks out in `layout` order, numbered as they come; a
@@ -501,8 +566,8 @@ impl MirFunc {
     /// Every use is dominated by its definition: a φ operand by the end of
     /// the block it comes from, any other use by an earlier instruction of
     /// its block or by a dominating block. Params and blocks nothing reaches
-    /// pass. Debug builds run it after each pass (#1869).
-    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    /// pass. Debug builds run it after each pass (#1869), and any build
+    /// under `COIL_MIR_VERIFY`.
     pub fn verify_dominance(&self) -> Result<(), String> {
         let dom = super::licm::Dominators::new(self, &self.preds());
         let mut def: Vec<Option<(BlockId, usize)>> = vec![None; self.types.len()];
@@ -678,10 +743,16 @@ impl MirFunc {
             }
             MirInst::HostInvoke {
                 dest,
+                dest_hi,
                 native_id,
                 args,
                 ..
             } => {
+                if let Some(hi) = dest_hi
+                    && self.ty(*hi) != MirTy::I64
+                {
+                    return Err(format!("{hi} host tag is not i64"));
+                }
                 let Some(spec) = super::host_allow::host_edge_spec(*native_id) else {
                     return Err(format!("{dest} host {native_id} not a typed edge"));
                 };
@@ -693,7 +764,8 @@ impl MirFunc {
                         return Err(format!("{dest} host arg {i} type"));
                     }
                 }
-                if !super::host_allow::host_result_ok(*native_id, spec.ret, self.ty(*dest)) {
+                let payload = dest_hi.is_some() && self.ty(*dest).is_word_lane();
+                if !payload && !super::host_allow::host_result_ok(*native_id, spec.ret, self.ty(*dest)) {
                     return Err(format!("{dest} host dest type"));
                 }
             }
@@ -705,9 +777,17 @@ impl MirFunc {
                     return Err(format!("{dest} ffi arg is not a word lane"));
                 }
             }
-            MirInst::CallIndirect { dest, callee, args, dicts } => {
+            MirInst::CallIndirect { dest, callee, args, dicts, pair } => {
                 if *dicts as usize > args.len() {
                     return Err(format!("{dest} CallIndirect dicts exceed args"));
+                }
+                if let Some((hi, _)) = pair {
+                    if *dicts != 0 {
+                        return Err(format!("{dest} CallIndirect pair with dictionaries"));
+                    }
+                    if !self.ty(*hi).is_word_lane() {
+                        return Err(format!("{dest} CallIndirect second word is not a word lane"));
+                    }
                 }
                 if !self.ty(*dest).is_word_lane() {
                     return Err(format!("{dest} CallIndirect dest is not a word lane"));
@@ -769,6 +849,35 @@ impl MirFunc {
                 }
                 if !self.ty(*value).is_word_lane() || self.ty(*dest) != self.ty(*value) {
                     return Err(format!("{dest} StoreIndex value type"));
+                }
+            }
+            MirInst::LaneIndex { dest, dest_hi, array, index } => {
+                if self.ty(*array) != MirTy::HeapRef || !self.ty(*index).is_int() {
+                    return Err(format!("{dest} LaneIndex operand type"));
+                }
+                if !self.ty(*dest).is_word_lane() || !self.ty(*dest_hi).is_word_lane() {
+                    return Err(format!("{dest} LaneIndex dest type"));
+                }
+            }
+            MirInst::LaneStore { dest, array, index, lo, hi, .. } => {
+                if self.ty(*array) != MirTy::HeapRef || !self.ty(*index).is_int() {
+                    return Err(format!("{dest} LaneStore operand type"));
+                }
+                if !self.ty(*lo).is_word_lane() || !self.ty(*hi).is_word_lane() || self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} LaneStore value type"));
+                }
+            }
+            MirInst::LanesToWords { dest, array, .. } => {
+                if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} LanesToWords array type"));
+                }
+            }
+            MirInst::LanePush { dest, array, lo, hi, .. } => {
+                if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} LanePush array type"));
+                }
+                if !self.ty(*lo).is_word_lane() || !self.ty(*hi).is_word_lane() {
+                    return Err(format!("{dest} LanePush value type"));
                 }
             }
             MirInst::ArrayLen { dest, array } => {
@@ -834,12 +943,9 @@ impl MirFunc {
                     return Err(format!("{dest} StoreStatic value type"));
                 }
             }
-            MirInst::PanicStore { dest, object, value, .. } => {
-                if self.ty(*dest) != MirTy::Bool || self.ty(*object) != MirTy::HeapRef {
-                    return Err(format!("{dest} PanicStore types"));
-                }
-                if !self.ty(*value).is_word_lane() {
-                    return Err(format!("{dest} PanicStore value type"));
+            MirInst::Probe { dest, .. } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} Probe dest is not bool"));
                 }
             }
             MirInst::ClearWord { dest, value } | MirInst::KeepAlive { dest, value } => {
@@ -874,18 +980,18 @@ impl MirFunc {
                     return Err(format!("{dest} MatchPayload dest type"));
                 }
             }
-            MirInst::HeapFieldLoad {
+            MirInst::ProductLoad {
                 dest,
                 object,
-                // Any slot index: the dense form packs one that fits a
+                // Any slot slot: the dense form packs one that fits a
                 // byte, and the stack form takes a full word (#1498).
-                index: _,
+                slot: _,
             } => {
                 if self.ty(*object) != MirTy::HeapRef {
-                    return Err(format!("{dest} HeapFieldLoad object type"));
+                    return Err(format!("{dest} ProductLoad object type"));
                 }
                 if !self.ty(*dest).is_specialized() {
-                    return Err(format!("{dest} HeapFieldLoad dest type"));
+                    return Err(format!("{dest} ProductLoad dest type"));
                 }
             }
             MirInst::HeapFieldStore {
@@ -924,11 +1030,6 @@ impl MirFunc {
                     if !self.ty(*r).is_heap_word() {
                         return Err(format!("{dest} GcBarrier root {i} is not a heap word"));
                     }
-                }
-            }
-            MirInst::Deopt { dest, .. } => {
-                if self.ty(*dest) != MirTy::Bool {
-                    return Err(format!("{dest} Deopt dest is not bool"));
                 }
             }
             MirInst::String { dest, .. } => {
@@ -1021,5 +1122,26 @@ impl MirFunc {
             }
         }
         Ok(())
+    }
+}
+
+/// `inst` is a planned tail call ([`MirFunc::tail_targets`]) whose result
+/// `block` returns. Any other call keeps the caller's frame, which a failed
+/// `requires` in the callee blames and a backtrace names.
+pub fn is_tail_call_inst(func: &MirFunc, block: &MirBlock, inst: &MirInst) -> bool {
+    let MirInst::Call { dest, dest_hi, target, .. } = inst else {
+        return false;
+    };
+    if !func.tail_targets.contains(target) {
+        return false;
+    }
+    match block.term {
+        Some(Terminator::Return { lo: Some(v), hi }) if v == *dest && hi == *dest_hi => {
+            matches!(
+                block.insts.last(),
+                Some(MirInst::Call { dest: d, dest_hi: h, .. }) if d == dest && h == dest_hi
+            )
+        }
+        _ => false,
     }
 }

@@ -3,10 +3,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use common::{ProgramDebug, byte_to_position};
 use compiler::{DissectArtifacts, FnSym, HostGrants, Pipeline, matches_fn_pat};
-use machine::{DebugController, Machine, StopReason};
+use coil_mir_interp::debug::Debugger;
+use machine::StopReason;
 use reporting::ReportConfig;
 
 type SourceLine = (u32, bool, String);
@@ -145,6 +147,9 @@ impl LineIndex {
     pub fn build(debug: &ProgramDebug, base_dir: Option<&Path>) -> Self {
         let mut idx = LineIndex::default();
         let mut texts: HashMap<u32, String> = HashMap::new();
+        // Each op of a line has a location: a line's breakpoint is the first
+        // op of each run of them, so it stops once per pass over the line.
+        let mut last = None;
         for (pc, loc) in debug.debug_locs.iter().enumerate() {
             if !loc.is_known() {
                 continue;
@@ -164,6 +169,9 @@ impl LineIndex {
                 continue;
             }
             let line = byte_to_position(text, loc.start_byte as usize).line;
+            if last.replace((loc.file, line)) == Some((loc.file, line)) {
+                continue;
+            }
             idx.by_file
                 .entry(path.clone())
                 .or_default()
@@ -209,6 +217,108 @@ impl LineIndex {
     }
 }
 
+/// `(file, line, column)` of each op of `debug`.
+fn op_lines(debug: &ProgramDebug, base_dir: Option<&Path>) -> Vec<Option<(u32, u32, u32)>> {
+    let mut texts: HashMap<u32, String> = HashMap::new();
+    debug
+        .debug_locs
+        .iter()
+        .map(|loc| {
+            if !loc.is_known() {
+                return None;
+            }
+            let text = texts.entry(loc.file).or_insert_with(|| {
+                let path = debug.source_files.get(loc.file as usize).map(|p| resolve_path(p, base_dir));
+                path.and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default()
+            });
+            if text.is_empty() {
+                return None;
+            }
+            let at = byte_to_position(text, loc.start_byte as usize);
+            Some((loc.file, at.line, at.column))
+        })
+        .collect()
+}
+
+/// Put the debugger's op numbers where `artifacts` holds entry ids.
+fn number_ops(artifacts: &mut DissectArtifacts, locs: Vec<common::DebugLoc>, entries: &[(String, u32)]) {
+    let starts: HashMap<&str, u32> = entries.iter().map(|(name, pc)| (name.as_str(), *pc)).collect();
+    artifacts.functions.retain_mut(|f| {
+        let start = starts.get(f.name.as_str()).copied();
+        f.body_id = start.unwrap_or(0);
+        start.is_some()
+    });
+    artifacts.functions.sort_by_key(|f| f.body_id);
+    artifacts.debug.debug_locs = locs;
+    artifacts.debug.fn_symbols = entries.iter().map(|(name, pc)| common::FnDebugSym { name: name.clone(), body_id: *pc }).collect();
+}
+
+/// A program ready to run on the interpreter.
+#[derive(Clone)]
+struct Launch {
+    program: Arc<machine::ThreadProgram>,
+    code: Option<Arc<machine::native::NativeCode>>,
+    base_dir: Option<PathBuf>,
+    search_paths: Vec<PathBuf>,
+    gate: machine::DloadGate,
+    struct_layouts: Vec<machine::CStructLayout>,
+    shared_print: Option<Arc<std::sync::Mutex<Vec<u8>>>>,
+}
+
+impl Launch {
+    fn new(pipeline: &Pipeline, artifacts: &DissectArtifacts, entry: &Path) -> Self {
+        let program = Arc::new(machine::ThreadProgram {
+            startup: Arc::new(pipeline.startup()),
+            main: pipeline.main_offset(),
+            constants: Arc::new(pipeline.constants().to_vec()),
+            strings: Arc::new(artifacts.strings.clone()),
+            static_slot_count: pipeline.static_slot_count(),
+            debug: pipeline.program_debug_full(),
+            class_word_kinds: machine::class_kind_table(&pipeline.class_word_kinds()),
+            static_word_kinds: Arc::new(pipeline.static_word_kinds()),
+        });
+        let mut gate = machine::DloadGate::from_consumer_trusted(&pipeline.dload_native_pins(), pipeline.dload_trusted_stems());
+        for stem in pipeline.extra_dload_stems() {
+            gate.grant_stem(stem);
+        }
+        for (stem, path) in pipeline.extra_dload_grants() {
+            let _ = gate.grant_file(stem, path);
+        }
+        Self {
+            program,
+            code: None,
+            base_dir: entry.parent().map(Path::to_path_buf),
+            search_paths: pipeline.ffi_search_path_bufs(),
+            gate,
+            struct_layouts: pipeline.archived_struct_layouts().iter().map(machine::CStructLayout::from_archive).collect(),
+            shared_print: None,
+        }
+    }
+
+    fn with_code(mut self, program: coil_mir_interp::InterpProgram, _code_len: usize) -> Self {
+        let complete = program.refused.is_empty();
+        let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete).with_keep(program.keep);
+        self.code = Some(Arc::new(code));
+        self
+    }
+
+    /// Run the program on this thread; whether it panicked.
+    fn run(self) -> bool {
+        if let Some(code) = self.code {
+            machine::native::install_shared_for_next_run(code);
+        }
+        let start = machine::NativeStart {
+            base_dir: self.base_dir,
+            ffi_search_paths: self.search_paths,
+            dload_gate: Some(self.gate),
+            struct_layouts: self.struct_layouts,
+            shared_print: self.shared_print,
+            host_natives: machine::standard_host_natives(),
+        };
+        machine::run_natively(self.program, start).unwrap_or(true)
+    }
+}
+
 pub fn resolve_path(path: &str, base_dir: Option<&Path>) -> PathBuf {
     let p = PathBuf::from(path);
     if p.is_absolute() || p.exists() {
@@ -232,9 +342,15 @@ pub fn resolve_path(path: &str, base_dir: Option<&Path>) -> PathBuf {
 pub struct DebugSession {
     pub entry: String,
     pub artifacts: DissectArtifacts,
-    static_slots: u32,
     line_index: LineIndex,
-    machine: Machine<256>,
+    /// What runs the program, and reads it at a stop.
+    dbg: Debugger,
+    /// The program as a run starts it.
+    launch: Launch,
+    /// Each body's MIR, by name, for `disassemble`.
+    mir_text: HashMap<String, String>,
+    /// `(file, line, column)` of each op.
+    op_lines: Vec<Option<(u32, u32, u32)>>,
     breakpoints: Vec<Breakpoint>,
     next_bp_id: usize,
     started: bool,
@@ -254,65 +370,44 @@ impl DebugSession {
     ) -> Result<Self, ()> {
         let mut pipeline = Pipeline::with_reporter(config, reporter);
         pipeline.set_debugger_attached(true);
+        pipeline.set_opt_level(compiler::OptLevel::None);
         pipeline.set_host_grants(grants);
         let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         pipeline.bind_project_roots_with_default(dir, extra_roots);
-        let artifacts = match pipeline.compile_dissect(filename, false) {
+        compiler::native_mir::start_raw_capture();
+        let mut artifacts = match pipeline.compile_dissect(filename) {
             Ok(a) => a,
             Err(_) => {
+                let _ = compiler::native_mir::take_native_capture();
                 let _ = pipeline.finish_reporting();
                 return Err(());
             }
         };
-        let static_slots = pipeline.static_slot_count();
+        let bodies = compiler::native_mir::take_native_capture();
         let entry_path = PathBuf::from(filename);
         let base_dir = entry_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
+        let launch = Launch::new(&pipeline, &artifacts, &entry_path);
+        let mir_text = bodies.iter().map(|b| (b.name.clone(), b.mir.to_string())).collect();
+        let pcs = launch.program.debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+        let debug_program = coil_mir_interp::debug::prepare_debug(bodies, &pcs);
+        let launch = launch.with_code(debug_program.program, 0);
+        number_ops(&mut artifacts, debug_program.locs, &debug_program.entries);
+        let op_lines = op_lines(&artifacts.debug, Some(&base_dir));
         let line_index = LineIndex::build(&artifacts.debug, Some(&base_dir));
-
-        let mut machine = Machine::<256>::default();
-        let pins = pipeline.dload_native_pins();
-        let trusted = pipeline.dload_trusted_stems();
-        let structs = pipeline.archived_struct_layouts();
-        let search = pipeline.ffi_search_path_bufs();
-        machine::wire_vm_host(
-            &mut machine,
-            &machine::VmHostSpec {
-                entry_path: Some(&entry_path),
-                project_root: pipeline.project_root(),
-                ffi_search_paths: &search,
-                native_pins: &pins,
-                trusted_stems: &trusted,
-                extra_dload_stems: pipeline.extra_dload_stems(),
-                extra_dload_grants: pipeline.extra_dload_grants(),
-                c_structs: &structs,
-            },
-        );
-        machine::wire_thread_program_with_maps(machine::WireThreadProgramWithMapsArgs {
-            machine: &mut machine,
-            bytecode: &artifacts.bytecode,
-            constants: &artifacts.constants,
-            strings: &artifacts.strings,
-            static_slot_count: pipeline.static_slot_count(),
-            debug: pipeline.program_debug(),
-            operand_stack_slots: pipeline.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: pipeline.precise_frames().to_vec(),
-            class_word_kinds: pipeline.class_word_kinds(),
-            static_word_kinds: pipeline.static_word_kinds(),
-        });
-        machine.set_program_debug(artifacts.debug.clone());
-        machine.attach_debug(DebugController::new());
+        let dbg = Debugger::new(op_lines.iter().map(|l| l.map(|(f, l, _)| (f, l))).collect());
         let _ = pipeline.finish_reporting();
 
         Ok(Self {
             entry: filename.to_string(),
             artifacts,
-            static_slots,
             line_index,
-            machine,
+            dbg,
+            launch,
+            mir_text,
+            op_lines,
             breakpoints: Vec::new(),
             next_bp_id: 1,
             started: false,
@@ -320,6 +415,7 @@ impl DebugSession {
             base_dir,
         })
     }
+
     #[cfg(test)]
     pub fn started(&self) -> bool {
         self.started
@@ -331,12 +427,12 @@ impl DebugSession {
     }
 
     pub fn panicked(&self) -> bool {
-        self.machine.panicked()
+        self.stopped_at_panic
     }
 
     /// Capture program stdout/stderr writes into `buf` (keeps DAP stdio clean).
     pub fn set_print_capture(&mut self, buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
-        self.machine.set_shared_print(buf);
+        self.launch.shared_print = Some(buf);
     }
 
     pub fn breakpoints(&self) -> Vec<BreakpointInfo> {
@@ -416,7 +512,7 @@ impl DebugSession {
         names: &[&str],
     ) -> Result<Vec<BreakpointInfo>, String> {
         self.breakpoints.retain(|b| b.source.is_some());
-        // Empty replacement still must drop cleared fn BPs from the VM.
+        // Empty replacement still must drop cleared fn BPs from the runtime.
         if names.is_empty() {
             self.sync_vm_breakpoints();
             return Ok(Vec::new());
@@ -464,37 +560,49 @@ impl DebugSession {
         self.begin_run(false)
     }
 
-    /// Start and stop before the first bytecode insn (DAP `stopOnEntry`).
+    /// Start and stop before the first MIR step (DAP `stopOnEntry`).
     ///
-    /// Uses a temporary PC-0 breakpoint so the VM actually builds a frame;
+    /// Uses a temporary PC-0 breakpoint so the runtime actually builds a frame;
     /// a fake pause left `stackTrace` / step empty.
     pub fn start_paused_at_entry(&mut self) -> StopReason {
         self.begin_run(true)
     }
 
     fn begin_run(&mut self, stop_on_entry: bool) -> StopReason {
-        self.machine.debug_reset();
-        if self.machine.debug_controller().is_none() {
-            self.machine.attach_debug(DebugController::new());
-        }
         self.sync_vm_breakpoints();
-        let entry_pc = 0;
-        let already_bp = self.breakpoints.iter().any(|b| b.pc == entry_pc);
-        if stop_on_entry && !already_bp
-            && let Some(dbg) = self.machine.debug_controller_mut() {
-                dbg.add_breakpoint(entry_pc);
+        self.dbg.with_controller(|c| {
+            c.clear_step();
+            if stop_on_entry {
+                c.stop_at_next();
             }
+        });
         self.started = true;
         self.stopped_at_panic = false;
-        let reason = self.run_checked(self.machine.debug_ip());
-        if stop_on_entry && !already_bp
-            && let Some(dbg) = self.machine.debug_controller_mut() {
-                dbg.remove_breakpoint(entry_pc);
-            }
+        let launch = self.launch.clone();
+        let reason = self.dbg.start(move || launch.run());
+        let reason = self.past_false_conditions(reason);
+        self.note_end(&reason);
+        reason
+    }
+
+    /// The program ended, or cannot go on.
+    fn note_end(&mut self, reason: &StopReason) {
         if matches!(reason, StopReason::Halt | StopReason::Panic) {
             self.started = false;
             self.stopped_at_panic = matches!(reason, StopReason::Panic);
         }
+        if let (StopReason::Panic, Some(message)) = (reason, self.dbg.panic_message()) {
+            let at = self.nearest_source_location(self.current_ip());
+            let at = at.map(|(file, line, column)| format!(" at {file}:{line}:{column}")).unwrap_or_default();
+            eprintln!("panic: {message}{at}");
+        }
+    }
+
+    /// Go on from a stop to the next one.
+    fn resume(&mut self) -> StopReason {
+        let reason = self.dbg.resume();
+        let reason = self.past_false_conditions(reason);
+        self.note_end(&reason);
         reason
     }
 
@@ -502,32 +610,16 @@ impl DebugSession {
         if !self.started {
             return Err("not started".into());
         }
-        self.prepare_resume();
-        let reason = self.run_checked(self.machine.debug_ip());
-        if matches!(reason, StopReason::Halt | StopReason::Panic) {
-            self.started = false;
-            self.stopped_at_panic = matches!(reason, StopReason::Panic);
-        }
-        Ok(reason)
+        self.dbg.with_controller(|c| c.clear_step());
+        Ok(self.resume())
     }
 
     pub fn stepi(&mut self) -> Result<StopReason, String> {
         if !self.started {
             return Err("not started".into());
         }
-        let ip = self.machine.debug_ip();
-        if let Some(dbg) = self.machine.debug_controller_mut() {
-            dbg.set_stepi();
-            if dbg.breakpoints().contains(&ip) {
-                dbg.skip_breakpoint_once(ip);
-            }
-        }
-        let reason = self.run_from(ip);
-        if matches!(reason, StopReason::Halt | StopReason::Panic) {
-            self.started = false;
-            self.stopped_at_panic = matches!(reason, StopReason::Panic);
-        }
-        Ok(reason)
+        self.dbg.with_controller(|c| c.stop_at_next());
+        Ok(self.resume())
     }
 
     pub fn step_in(&mut self) -> Result<StopReason, String> {
@@ -542,33 +634,27 @@ impl DebugSession {
         if !self.started {
             return Err("not started".into());
         }
-        let ip = self.machine.debug_ip();
-        let depth = self.machine.debug_frame_depth();
+        let depth = self.dbg.depth();
         if depth == 0 {
             return Err("no frame to finish".into());
         }
-        if let Some(dbg) = self.machine.debug_controller_mut() {
-            dbg.set_finish(depth - 1);
-            if dbg.breakpoints().contains(&ip) {
-                dbg.skip_breakpoint_once(ip);
-            }
-        }
-        let reason = self.run_from(ip);
-        if matches!(reason, StopReason::Halt | StopReason::Panic) {
-            self.started = false;
-            self.stopped_at_panic = matches!(reason, StopReason::Panic);
-        }
-        Ok(reason)
+        self.dbg.with_controller(|c| c.set_finish(depth - 1));
+        Ok(self.resume())
+    }
+
+    /// The MIR of function `name`, as `disassemble` shows it.
+    pub fn mir_of(&self, name: &str) -> Option<&str> {
+        self.mir_text.get(name).map(String::as_str)
     }
 
     pub fn stack_frames(&self) -> Vec<StackFrameInfo> {
-        self.live_frames(0..self.machine.debug_frame_depth())
+        self.live_frames(0..self.dbg.depth())
     }
 
     /// The scheduler's tasks (empty without child tasks): the running one
     /// and the suspended ones, which a DAP client shows as threads.
     pub fn tasks(&self) -> Vec<machine::DebugTask> {
-        self.machine.debug_tasks()
+        self.dbg.tasks()
     }
 
     /// Frames of `task`, top first. Live frames keep their machine index;
@@ -590,8 +676,7 @@ impl DebugSession {
             .unwrap_or("<unknown>")
             .to_string();
         let (path, line, column) = self
-            .machine
-            .resolve_pc_location(ip)
+            .nearest_source_location(ip)
             .map(|(p, l, c)| (Some(p), Some(l), Some(c)))
             .unwrap_or((None, None, None));
         StackFrameInfo {
@@ -605,33 +690,16 @@ impl DebugSession {
     }
 
     fn live_frames(&self, frames: std::ops::Range<usize>) -> Vec<StackFrameInfo> {
-        let depth = self.machine.debug_frame_depth();
-        if depth == 0 {
-            return Vec::new();
-        }
-        // Top frame first for display; `index` is the machine frame id so DAP
+        // Top frame first for display; `index` is the frame's id, so DAP
         // scopes/variables can pass it straight to `locals_for_frame`.
         frames
             .rev()
-            // The bootstrap frame (prologue `CALL main` at pc 0..3) is VM
-            // plumbing: hide it under user frames (at a stop-on-entry it is
-            // the only frame and stays).
-            .filter(|&frame_idx| {
-                let ip = self.machine.debug_frame_ip(frame_idx).unwrap_or(0);
-                let bootstrap = frame_idx == 0
-                    && ip < 3
-                    && symbol_at_pc(&self.artifacts.functions, ip).is_none();
-                !(bootstrap && depth > 1)
-            })
-            .map(|frame_idx| {
-                let ip = self.machine.debug_frame_ip(frame_idx).unwrap_or(0);
-                self.frame_info(frame_idx, ip)
-            })
+            .map(|frame_idx| self.frame_info(frame_idx, self.dbg.frame_op(frame_idx).unwrap_or(0)))
             .collect()
     }
 
     pub fn locals_for_frame(&self, frame_idx: usize) -> Result<Vec<LocalInfo>, String> {
-        let depth = self.machine.debug_frame_depth();
+        let depth = self.dbg.depth();
         if depth == 0 {
             return Err("no active frame".into());
         }
@@ -663,20 +731,17 @@ impl DebugSession {
                 name: name.clone(),
                 slot: Some(*slot as usize),
                 value: self
-                    .machine
-                    .debug_slot(frame_idx, *slot as usize)
-                    .map(|v| self.machine.debug_format_value(v))
+                    .dbg
+                    .local(frame_idx, *slot)
+                    .map(|v| self.dbg.format(v))
                     .unwrap_or_else(|| "<unavailable>".into()),
             })
             .collect()
     }
 
-    /// PC used to look up a frame's variables: the stop PC for the top
-    /// frame, the call instruction (return address - 1) for callers.
+    /// Op used to look up a frame's variables: where it stands.
     fn frame_lookup_pc(&self, frame_idx: usize) -> Option<usize> {
-        let ip = self.machine.debug_frame_ip(frame_idx)?;
-        let top = self.machine.debug_frame_depth().checked_sub(1)?;
-        Some(if frame_idx == top { ip } else { ip.saturating_sub(1) })
+        self.dbg.frame_op(frame_idx)
     }
 
     /// Source position `(file, byte)` of `pc`, else the nearest located PC
@@ -686,8 +751,8 @@ impl DebugSession {
             .artifacts
             .functions
             .iter()
-            .filter(|f| f.entry_pc as usize <= pc)
-            .map(|f| f.entry_pc as usize)
+            .filter(|f| f.body_id as usize <= pc)
+            .map(|f| f.body_id as usize)
             .max()
             .unwrap_or(0);
         let located = |p: usize| {
@@ -700,7 +765,7 @@ impl DebugSession {
             .artifacts
             .functions
             .iter()
-            .map(|f| f.entry_pc as usize)
+            .map(|f| f.body_id as usize)
             .filter(|&e| e > pc)
             .min()
             .unwrap_or(self.artifacts.debug.debug_locs.len());
@@ -737,7 +802,7 @@ impl DebugSession {
 
     fn renderer(&self) -> crate::render::Renderer<'_> {
         crate::render::Renderer {
-            machine: &self.machine,
+            dbg: &self.dbg,
             classes: &self.artifacts.classes,
             enums: &self.artifacts.enums,
         }
@@ -746,7 +811,7 @@ impl DebugSession {
     /// `print` argument: `$N` (raw slot), a variable, or a path through
     /// fields and indices (`p.x`, `xs[2]`, `a.b[1].c`).
     pub fn read_variable(&self, expr: &str) -> Result<LocalInfo, String> {
-        let depth = self.machine.debug_frame_depth();
+        let depth = self.dbg.depth();
         if depth == 0 {
             return Err("no active frame".into());
         }
@@ -757,13 +822,13 @@ impl DebugSession {
                 .parse()
                 .map_err(|_| format!("invalid slot `{expr}` (usage: $N)"))?;
             let val = self
-                .machine
-                .debug_slot(frame, slot)
+                .dbg
+                .local(frame, slot as u32)
                 .ok_or_else(|| format!("slot ${slot} out of range"))?;
             return Ok(LocalInfo {
                 name: expr.to_string(),
                 slot: Some(slot),
-                value: self.machine.debug_format_value(val),
+                value: self.dbg.format(val),
             });
         }
         let (base, path) = split_path(expr)?;
@@ -771,13 +836,13 @@ impl DebugSession {
         if vars.is_empty() {
             let slot = resolve_local_slot(self, base)?;
             let val = self
-                .machine
-                .debug_slot(frame, slot)
+                .dbg
+                .local(frame, slot as u32)
                 .ok_or_else(|| format!("slot ${slot} out of range"))?;
             return Ok(LocalInfo {
                 name: base.to_string(),
                 slot: Some(slot),
-                value: self.machine.debug_format_value(val),
+                value: self.dbg.format(val),
             });
         }
         let var = vars
@@ -800,16 +865,13 @@ impl DebugSession {
     }
 
     pub fn current_ip(&self) -> usize {
-        self.machine.debug_ip()
+        self.dbg.depth().checked_sub(1).and_then(|top| self.dbg.frame_op(top)).unwrap_or(0)
     }
 
     pub fn registers(&self) -> (usize, usize, usize) {
-        let ip = self.machine.debug_ip();
-        let depth = self.machine.debug_frame_depth();
-        let sp = self
-            .machine
-            .debug_frame_sp(depth.saturating_sub(1))
-            .unwrap_or(0);
+        let ip = self.current_ip();
+        let depth = self.dbg.depth();
+        let sp = self.dbg.frame_base(depth.saturating_sub(1)).unwrap_or(0);
         (ip, sp, depth)
     }
 
@@ -817,7 +879,7 @@ impl DebugSession {
         if !self.started {
             return Err("not started".into());
         }
-        let ip = self.machine.debug_ip();
+        let ip = self.current_ip();
         let (path, line) = if let Some((p, l, _)) = self.nearest_source_location(ip) {
             (p, l)
         } else {
@@ -872,69 +934,43 @@ impl DebugSession {
     }
 
     pub fn stop_symbol(&self) -> String {
-        let ip = self.machine.debug_ip();
+        let ip = self.current_ip();
         symbol_at_pc(&self.artifacts.functions, ip)
             .unwrap_or("<prog>")
             .to_string()
     }
 
     pub fn stop_location(&self) -> Option<(String, u32, u32)> {
-        self.machine.resolve_pc_location(self.machine.debug_ip())
+        self.resolve_pc_location(self.current_ip())
     }
 
     fn step_line(&mut self, next: bool) -> Result<StopReason, String> {
         if !self.started {
             return Err("not started".into());
         }
-        let ip = self.machine.debug_ip();
-        let depth = self.machine.debug_frame_depth();
-        let (file, line) = match self.machine.debug_pc_line(ip) {
-            Some(fl) => fl,
-            None => return self.stepi(),
+        let depth = self.dbg.depth();
+        let Some((file, line, _)) = self.op_lines.get(self.current_ip()).copied().flatten() else {
+            return self.stepi();
         };
-        if let Some(dbg) = self.machine.debug_controller_mut() {
+        self.dbg.with_controller(|c| {
             if next {
-                dbg.set_next(file, line, depth);
+                c.set_next(file, line, depth);
             } else {
-                dbg.set_step_line(file, line, depth);
+                c.set_step_line(file, line, depth);
             }
-            if dbg.breakpoints().contains(&ip) {
-                dbg.skip_breakpoint_once(ip);
-            }
-        }
-        let reason = self.run_from(ip);
-        if matches!(reason, StopReason::Halt | StopReason::Panic) {
-            self.started = false;
-            self.stopped_at_panic = matches!(reason, StopReason::Panic);
-        }
-        Ok(reason)
+        });
+        Ok(self.resume())
     }
 
-    fn run_from(&mut self, start_ip: usize) -> StopReason {
-        self.machine.debug_run_until_raw(
-            &self.artifacts.bytecode,
-            &self.artifacts.constants,
-            &self.artifacts.strings,
-            self.static_slots,
-            start_ip,
-        )
-    }
-
-    /// [`Self::run_from`], resuming past conditional breakpoints whose
-    /// condition does not hold.
-    fn run_checked(&mut self, start_ip: usize) -> StopReason {
-        let mut ip = start_ip;
-        loop {
-            let reason = self.run_from(ip);
-            if let StopReason::Breakpoint { pc } = reason
-                && self.condition_fails_at(pc)
-            {
-                self.prepare_resume();
-                ip = self.machine.debug_ip();
-                continue;
-            }
-            return reason;
+    /// Go on past breakpoints whose condition does not hold.
+    fn past_false_conditions(&mut self, mut reason: StopReason) -> StopReason {
+        while let StopReason::Breakpoint { pc } = reason
+            && self.condition_fails_at(pc)
+        {
+            self.dbg.with_controller(|c| c.clear_step());
+            reason = self.dbg.resume();
         }
+        reason
     }
 
     /// True when the breakpoint at `pc` has a condition that is false now.
@@ -948,7 +984,7 @@ impl DebugSession {
         else {
             return false;
         };
-        let depth = self.machine.debug_frame_depth();
+        let depth = self.dbg.depth();
         if depth == 0 {
             return false;
         }
@@ -956,46 +992,44 @@ impl DebugSession {
             Some(n) => n.parse().ok(),
             None => resolve_local_slot(self, &cond.operand).ok(),
         };
-        match slot.and_then(|slot| self.machine.debug_slot(depth - 1, slot)) {
+        match slot.and_then(|slot| self.dbg.local(depth - 1, slot as u32)) {
             Some(v) => !cond.holds(v.as_int()),
             None => false,
         }
     }
 
-    fn prepare_resume(&mut self) {
-        let ip = self.machine.debug_ip();
-        if let Some(dbg) = self.machine.debug_controller_mut() {
-            dbg.clear_step();
-            if dbg.breakpoints().contains(&ip) {
-                dbg.skip_breakpoint_once(ip);
+    fn sync_vm_breakpoints(&mut self) {
+        let pcs: Vec<usize> = self.breakpoints.iter().map(|b| b.pc).collect();
+        self.dbg.with_controller(|c| {
+            c.clear_breakpoints();
+            for pc in pcs {
+                c.add_breakpoint(pc);
             }
-        }
+        });
     }
 
-    fn sync_vm_breakpoints(&mut self) {
-        if let Some(dbg) = self.machine.debug_controller_mut() {
-            dbg.clear_breakpoints();
-            for b in &self.breakpoints {
-                dbg.add_breakpoint(b.pc);
-            }
-        }
+    /// `(path, line, column)` of op `pc`.
+    fn resolve_pc_location(&self, pc: usize) -> Option<(String, u32, u32)> {
+        let (file, line, column) = self.op_lines.get(pc).copied().flatten()?;
+        let path = self.artifacts.debug.source_files.get(file as usize)?;
+        Some((resolve_path(path, Some(&self.base_dir)).display().to_string(), line, column))
     }
 
     /// Exact loc at `ip`, else nearest known loc in the **same function**.
     ///
     /// Does not walk into callees / stdlib (a raw ±64 scan did).
     pub fn nearest_source_location(&self, ip: usize) -> Option<(String, u32, u32)> {
-        if let Some(loc) = self.machine.resolve_pc_location(ip) {
+        if let Some(loc) = self.resolve_pc_location(ip) {
             return Some(loc);
         }
         let (start, end) = self.function_pc_range(ip);
         for cand in ip + 1..end {
-            if let Some(loc) = self.machine.resolve_pc_location(cand) {
+            if let Some(loc) = self.resolve_pc_location(cand) {
                 return Some(loc);
             }
         }
         for cand in (start..ip).rev() {
-            if let Some(loc) = self.machine.resolve_pc_location(cand) {
+            if let Some(loc) = self.resolve_pc_location(cand) {
                 return Some(loc);
             }
         }
@@ -1007,7 +1041,7 @@ impl DebugSession {
             .artifacts
             .functions
             .iter()
-            .map(|s| s.entry_pc as usize)
+            .map(|s| s.body_id as usize)
             .collect();
         starts.sort_unstable();
         starts.dedup();
@@ -1049,7 +1083,7 @@ impl DebugSession {
         if matched.is_empty() {
             return Err(format!("no function matching `{arg}`"));
         }
-        let pcs: Vec<usize> = matched.iter().map(|s| s.entry_pc as usize).collect();
+        let pcs: Vec<usize> = matched.iter().map(|s| s.body_id as usize).collect();
         let name = matched[0].name.clone();
         Ok((pcs, name))
     }
@@ -1108,8 +1142,8 @@ fn split_path(expr: &str) -> Result<(&str, Vec<PathStep>), String> {
 pub fn symbol_at_pc(functions: &[FnSym], pc: usize) -> Option<&str> {
     let mut best: Option<&FnSym> = None;
     for s in functions {
-        let entry = s.entry_pc as usize;
-        if entry <= pc && best.map(|b| entry >= b.entry_pc as usize).unwrap_or(true) {
+        let entry = s.body_id as usize;
+        if entry <= pc && best.map(|b| entry >= b.body_id as usize).unwrap_or(true) {
             best = Some(s);
         }
     }
@@ -1127,7 +1161,7 @@ fn locals_for_pc(session: &DebugSession, pc: usize) -> Option<&[(String, u32)]> 
 }
 
 fn resolve_local_slot(session: &DebugSession, name: &str) -> Result<usize, String> {
-    let ip = session.machine.debug_ip();
+    let ip = session.current_ip();
     let locals = locals_for_pc(session, ip).unwrap_or(&[]);
     let name_l = name.to_ascii_lowercase();
     for (n, slot) in locals {
@@ -1222,59 +1256,6 @@ mod tests {
     }
 
     #[test]
-    fn line_index_maps_known_loc() {
-        let text = "fn main() {\n    return;\n}\n";
-        let tmp = std::env::temp_dir().join(format!("coil_dbg_line_{}", std::process::id()));
-        fs::write(&tmp, text).unwrap();
-        let path = tmp.display().to_string();
-        let mut debug = ProgramDebug {
-            source_files: vec![path.clone()],
-            debug_locs: vec![DebugLoc::unknown(); 5],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        let ret_off = text.find("return").unwrap() as u32;
-        debug.debug_locs[3] = DebugLoc {
-            file: 0,
-            start_byte: ret_off,
-            end_byte: ret_off + 6,
-        };
-        let idx = LineIndex::build(&debug, None);
-        let pcs = idx.pcs_for_line(Some(&path), 2, &path);
-        assert!(pcs.contains(&3), "pcs={pcs:?}");
-        let _ = fs::remove_file(&tmp);
-    }
-
-    #[test]
-    fn line_index_resolves_basename_hint() {
-        let text = "fn main() {\n    return;\n}\n";
-        let tmp = std::env::temp_dir().join(format!("coil_dbg_base_{}", std::process::id()));
-        fs::write(&tmp, text).unwrap();
-        let path = tmp.display().to_string();
-        let mut debug = ProgramDebug {
-            source_files: vec![path.clone()],
-            debug_locs: vec![DebugLoc::unknown(); 4],
-            fn_symbols: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup: Vec::new(),
-            table: Default::default(),
-        };
-        let ret_off = text.find("return").unwrap() as u32;
-        debug.debug_locs[2] = DebugLoc {
-            file: 0,
-            start_byte: ret_off,
-            end_byte: ret_off + 6,
-        };
-        let idx = LineIndex::build(&debug, None);
-        let base = Path::new(&path).file_name().unwrap().to_str().unwrap();
-        let pcs = idx.pcs_for_line(Some(base), 2, &path);
-        assert!(pcs.contains(&2), "pcs={pcs:?}");
-        let _ = fs::remove_file(&tmp);
-    }
-
-    #[test]
     fn function_breakpoint_exposes_fib_locals_via_frame_id() {
         let mut session = compile_fib();
         session.set_function_breakpoint("fib").expect("break fib");
@@ -1334,7 +1315,7 @@ mod tests {
         let reason = session.continue_exec().expect("continue");
         assert!(
             matches!(reason, StopReason::Halt),
-            "empty fn replace must sync VM; reason={reason:?}"
+            "empty fn replace must sync the runtime; reason={reason:?}"
         );
     }
 
@@ -1430,7 +1411,7 @@ mod tests {
         assert!(session.started());
         assert!(
             !session.stack_frames().is_empty(),
-            "stopOnEntry must build a VM frame"
+            "stopOnEntry must build a frame"
         );
         let reason = session.continue_exec().expect("continue");
         assert!(
@@ -1488,65 +1469,6 @@ mod tests {
     }
 
     #[test]
-    fn debugger_attached_may_dense_opcodes() {
-        use common::Instruction;
-        let src = r#"
-fn hot(float a, float b, int n) -> float {
-    let i = 0;
-    let s = 0.0;
-    while i < n {
-        let xf = i as float;
-        s = s + xf + a - b;
-        i = i + 1;
-    }
-    return s;
-}
-fn main() {
-    let _ = hot(2.0, 1.0, 8);
-}
-"#;
-        let dir = std::env::temp_dir().join(format!("coil_dbg_i7_{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("hot.coil");
-        fs::write(&path, src).unwrap();
-        let mut session = compile_entry(path.to_str().unwrap(), HostGrants::deny_all())
-            .expect("compile debugger-attached hot");
-        let dense = session.artifacts.bytecode.iter().any(|b| {
-            matches!(
-                *b.bytecode(),
-                Instruction::DenseBin
-                    | Instruction::DenseBin2
-                    | Instruction::DenseBinJmpf
-                    | Instruction::DenseIndexJmpf
-                    | Instruction::DenseCmp
-                    | Instruction::DenseConst
-                    | Instruction::DenseMove
-                    | Instruction::DenseUnary
-                    | Instruction::DenseCast
-                    | Instruction::VLoad
-                    | Instruction::VStore
-                    | Instruction::VBin
-                    | Instruction::VMove
-                    | Instruction::VReduce
-                    | Instruction::VFma
-                    | Instruction::DenseIndex
-                    | Instruction::DenseStoreIndex
-                    | Instruction::DenseArrayLen
-                    | Instruction::DenseMake
-                    | Instruction::DenseMakeK
-                    | Instruction::DensePush
-            )
-        });
-        assert!(dense, "B8: debugger-attached may keep dense reconstruct");
-        let reason = session.start();
-        assert!(
-            matches!(reason, StopReason::Halt),
-            "dense debug session must halt; reason={reason:?}"
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn host_grants_apply_to_debug_compile() {
         let dir = std::env::temp_dir().join(format!("coil_dbg_grant_{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
@@ -1582,5 +1504,48 @@ fn main() {
         let text = "/// docs\nmacro twice(Expr e) -> Code { return e; }\nfn main() {}\n";
         assert_eq!(find_fn_decl_line(text, "twice"), Some(2));
         assert_eq!(find_fn_decl_line(text, "main"), Some(3));
+    }
+
+    #[test]
+    fn line_index_resolves_basename_hint() {
+        let text = "fn main() {\n    return;\n}\n";
+        let tmp = std::env::temp_dir().join(format!("coil_dbg_base_{}", std::process::id()));
+        fs::write(&tmp, text).unwrap();
+        let path = tmp.display().to_string();
+        let mut debug = ProgramDebug {
+            source_files: vec![path.clone()],
+            debug_locs: vec![DebugLoc::unknown(); 4],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
+        };
+        let ret_off = text.find("return").unwrap() as u32;
+        debug.debug_locs[2] = DebugLoc::span(0, ret_off, ret_off + 6);
+        let idx = LineIndex::build(&debug, None);
+        let base = Path::new(&path).file_name().unwrap().to_str().unwrap();
+        let pcs = idx.pcs_for_line(Some(base), 2, &path);
+        assert!(pcs.contains(&2), "pcs={pcs:?}");
+        let _ = fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn line_index_maps_known_loc() {
+        let text = "fn main() {\n    return;\n}\n";
+        let tmp = std::env::temp_dir().join(format!("coil_dbg_line_{}", std::process::id()));
+        fs::write(&tmp, text).unwrap();
+        let path = tmp.display().to_string();
+        let mut debug = ProgramDebug {
+            source_files: vec![path.clone()],
+            debug_locs: vec![DebugLoc::unknown(); 5],
+            fn_symbols: Vec::new(),
+            debug_lines: Vec::new(),
+            inline_scopes: Vec::new(),
+        };
+        let ret_off = text.find("return").unwrap() as u32;
+        debug.debug_locs[3] = DebugLoc::span(0, ret_off, ret_off + 6);
+        let idx = LineIndex::build(&debug, None);
+        let pcs = idx.pcs_for_line(Some(&path), 2, &path);
+        assert!(pcs.contains(&3), "pcs={pcs:?}");
+        let _ = fs::remove_file(&tmp);
     }
 }

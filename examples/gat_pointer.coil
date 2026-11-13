@@ -23,7 +23,7 @@ impl Pointer for Option {
 }
 
 fn get<P: * -> *, Pointer, A>(P<A> ptr, A fallback) -> P::Ref<A> {
-    return deref(ptr, fallback);
+    return ptr.deref(fallback);
 }
 
 fn main() {

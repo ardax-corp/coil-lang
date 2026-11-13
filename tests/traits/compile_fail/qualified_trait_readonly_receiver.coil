@@ -1,0 +1,21 @@
+// @expected E0107 — `Items::items(b)` on a `readonly` receiver returns a
+// `readonly` result, as `b.items()` does.
+trait Items<T> {
+    fn items(T x) -> Vec<int> {}
+}
+
+class Bag {
+    pub xs: Vec<int>,
+}
+
+impl Items for Bag {
+    pub fn items(Bag b) -> Vec<int> {
+        return b.xs;
+    }
+}
+
+fn main() {
+    let b: readonly Bag = readonly new Bag([1, 2]);
+    let v = Items::items(b);
+    v.push(3);
+}

@@ -49,17 +49,20 @@ User-facing docs live in [coil-website](https://github.com/ardax-corp/coil-websi
 
 ## Features
 
-Primitives (`int`, `float`, `string`, `bool`, `byte`), scalar-backed enums and `match`, denser `Option`/`Result` ABIs (pointer niches and two-slot direct CALL), records and dicts, generics and traits, classes, coroutines, `for x in`, ranges, FFI, non-blocking IO with sync adapters, OS threads, and a userland stdlib (`collections`, `text`, `bytes`, …). HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool.
+Primitives (`int`, `float`, `string`, `bool`, `byte`), scalar-backed enums and `match`, denser `Option`/`Result` ABIs (pointer niches and two-word direct calls), records and dicts, generics and traits, classes, coroutines, `for x in`, ranges, FFI, non-blocking IO with sync adapters, OS threads, and a userland stdlib (`collections`, `text`, `bytes`, …). HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool.
 
 ## Repository layout
 
 ```
 coil/
-├── common/     # Opcodes, values, archive format
-├── parser/     # Pratt parser, AST
-├── compiler/   # HM typechecker, HIR optimizations, HIR → MIR → bytecode, pipeline
-├── machine/    # VM, heap/GC, FFI, host natives
-├── coil-*/     # CLI helpers (debug, dissect, fmt, lsp) and coil-embed (packaged-app runner, not an embed library)
+├── common/          # Values, archive format, host native table
+├── parser/          # Pratt parser, AST
+├── compiler/        # HM typechecker, HIR optimizations, HIR → MIR, MIR passes, pipeline
+├── machine/         # Runtime: driver, heap/GC, tasks, reactor, FFI, host natives
+├── coil-native/     # MIR → Cranelift: JIT and AOT executables
+├── coil-mir-interp/ # MIR interpreter (comptime, macros, debugger, wasm)
+├── coil-rt/         # Runtime library AOT executables link
+├── coil-*/          # CLI helpers (debug, dissect, fmt, lsp, test) and coil-embed (JIT runner for packaged apps)
 ├── examples/   # Runnable demos
 ├── tests/      # Integration tests (`coil test`)
 └── docs/       # Contributor internals

@@ -270,18 +270,6 @@ impl<'s> Formatter<'s> {
         (ptr >= base && ptr + text.len() <= base + self.src.len()).then(|| ptr - base)
     }
 
-    /// Whether `name` (borrowed from the source) is followed by `()`. The
-    /// parser folds `Vec::new()` and `Vec::new` into one node; the source
-    /// keeps the spelling.
-    fn empty_parens_after(&self, name: &str) -> bool {
-        let Some(start) = self.offset_of(name) else {
-            return false;
-        };
-        let rest = self.src[start + name.len()..].trim_start();
-        rest.strip_prefix('(')
-            .is_some_and(|inner| inner.trim_start().starts_with(')'))
-    }
-
     /// Position of the `close` delimiter after `from`, skipping whitespace,
     /// comments and a trailing comma.
     fn closing_after(&self, from: usize, close: u8) -> Option<usize> {
@@ -780,6 +768,11 @@ impl<'s> Formatter<'s> {
     }
 
     fn fmt_expression(&mut self, expr: &Expression<'_>) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.fmt_expression_level(expr))
+    }
+
+    fn fmt_expression_level(&mut self, expr: &Expression<'_>) {
         match expr {
             Expression::Integer(n) => self.push_str(&n.to_string()),
             // Display never uses an exponent, which Coil cannot parse
@@ -886,14 +879,8 @@ impl<'s> Formatter<'s> {
                 }
             }
 
-            Expression::Negate(n) => {
-                self.push_str("-");
-                self.fmt_operand(n, PREC_UNARY);
-            }
-            Expression::Positive(n) => {
-                self.push_str("+");
-                self.fmt_operand(n, PREC_UNARY);
-            }
+            Expression::Negate(n) => self.fmt_prefix("-", |f| f.fmt_operand(n, PREC_UNARY)),
+            Expression::Positive(n) => self.fmt_prefix("+", |f| f.fmt_operand(n, PREC_UNARY)),
             Expression::Not(n) => {
                 self.push_str("~");
                 self.fmt_operand(n, PREC_UNARY);
@@ -991,8 +978,7 @@ impl<'s> Formatter<'s> {
                     AdjustOp::Dec => "--",
                 };
                 if *prefix {
-                    self.push_str(sym);
-                    self.fmt_output(target);
+                    self.fmt_prefix(sym, |f| f.fmt_output(target));
                 } else {
                     self.fmt_output(target);
                     self.push_str(sym);
@@ -1298,9 +1284,6 @@ impl<'s> Formatter<'s> {
                 self.push_str(enum_name);
                 self.push_str("::");
                 self.push_str(variant_name);
-                if matches!(fields, EnumConstructPayload::Unit) && self.empty_parens_after(variant_name) {
-                    self.push_str("()");
-                }
                 self.fmt_construct_payload(fields);
             }
 
@@ -2059,6 +2042,7 @@ impl<'s> Formatter<'s> {
     fn fmt_construct_payload(&mut self, fields: &EnumConstructPayload<'_>) {
         match fields {
             EnumConstructPayload::Unit => {}
+            EnumConstructPayload::Empty => self.push_str("()"),
             EnumConstructPayload::Tuple(args) => {
                 self.fmt_delimited_outputs("(", ")", args, false);
             }
@@ -2347,6 +2331,21 @@ impl<'s> Formatter<'s> {
     }
 
     /// Format `e`, in parentheses when it binds looser than `min`.
+    /// The prefix `op` (`-`, `+`, `--`, `++`) and then its operand, which
+    /// `operand` prints. An operand that starts with the operator's sign gets
+    /// a space before it: `- -a` glued is `--a`, a decrement, and `+ +a` is
+    /// `++a` (#2519). No other prefix operator forms a longer token with what
+    /// can start an operand.
+    fn fmt_prefix(&mut self, op: &str, operand: impl FnOnce(&mut Self)) {
+        self.push_str(op);
+        let at = self.out.len();
+        operand(self);
+        let sign = op.as_bytes()[op.len() - 1];
+        if self.out.as_bytes().get(at) == Some(&sign) {
+            self.out.insert(at, ' ');
+        }
+    }
+
     fn fmt_operand(&mut self, e: &Output<'_>, min: u8) {
         self.fmt_operand_expr(e.1.as_ref(), min);
     }
@@ -2380,7 +2379,7 @@ impl<'s> Formatter<'s> {
                 self.fmt_output(&args[0]);
             }
             Expression::Call { name, args } => {
-                self.fmt_output(name);
+                self.fmt_callee(name);
                 // A lone block lambda argument opens on the call's line:
                 // `scope(fn (Scope s) {` (#1796), as after a short receiver.
                 if let Some([arg]) = args.as_deref()
@@ -2394,6 +2393,19 @@ impl<'s> Formatter<'s> {
                 }
             }
             other => self.fmt_expression(other),
+        }
+    }
+
+    /// A call's callee. Parens around a field read stay: `(o.f)(x)` calls
+    /// the function the field `f` holds, `o.f(x)` the method `f` (#2472).
+    fn fmt_callee(&mut self, name: &Output<'_>) {
+        let inner = strip_groups(name);
+        if has_group(name) && matches!(inner.1.as_ref(), Expression::Access(..) | Expression::OptionalAccess(..)) {
+            self.push_str("(");
+            self.fmt_output(inner);
+            self.push_str(")");
+        } else {
+            self.fmt_output(name);
         }
     }
 
@@ -3092,6 +3104,19 @@ fn strip_groups<'a, 'e>(mut output: &'a Output<'e>) -> &'a Output<'e> {
     }
 }
 
+/// Whether `output` is wrapped in parentheses (above what [`strip_groups`]
+/// strips to).
+fn has_group(mut output: &Output<'_>) -> bool {
+    loop {
+        match output.1.as_ref() {
+            Expression::Group(_) => return true,
+            Expression::Expr(inner) => output = inner,
+            Expression::Fragment(items) if items.len() == 1 => output = &items[0],
+            _ => return false,
+        }
+    }
+}
+
 /// Operands whose parens are always redundant. Numeric literals are left
 /// out: `(1).f()` must not become `1.f()`, which reads as a float.
 fn is_atom(expr: &Expression<'_>) -> bool {
@@ -3372,9 +3397,10 @@ fn main() {
 
     #[test]
     fn keeps_empty_call_parens_on_paths() {
-        let src = "fn main() {\n    let v: Vec<int> = Vec::new();\n    let n = Option::None;\n    let t = clock::mono_nanos();\n    let f = Vec::new;\n}\n";
+        let src = "fn main() {\n    let v: Vec<int> = Vec::new();\n    let n = Option::None;\n    let m = Option::None();\n    let t = clock::mono_nanos();\n    let f = Vec::new;\n    let g = Src::inc;\n    let h = Src::fresh();\n}\n";
         let formatted = format_source(src).unwrap();
         assert_eq!(formatted, src);
+        round_trip(src);
     }
 
     #[test]
@@ -3877,6 +3903,38 @@ fn main() { return; }
             text.match_indices(k).count()
                 + usize::from(k == " Access(") * text.match_indices("(Access(").count()
         })
+    }
+
+    #[test]
+    fn parens_around_a_field_callee_stay() {
+        // #2472: `(o.f)(1)` calls the function the field `f` holds;
+        // `o.f(1)` is the method call.
+        let chain = ".show().len()".repeat(7);
+        for (body, kept) in [
+            ("(o.f)(1)".to_string(), "(o.f)(1)"),
+            ("((o.f))(1)".to_string(), "(o.f)(1)"),
+            ("(a.b.f)(x)".to_string(), "(a.b.f)(x)"),
+            ("(o.f)(1)(2)".to_string(), "(o.f)(1)(2)"),
+            ("(o.f)(1).show()".to_string(), "(o.f)(1).show()"),
+            ("(self.f)(self.v)".to_string(), "(self.f)(self.v)"),
+            ("(o?.f)(1)".to_string(), "(o?.f)(1)"),
+            ("g((o.f)(1), (o.f)(2))".to_string(), "g((o.f)(1), (o.f)(2))"),
+            (format!("(o.f)(1){chain}"), "(o.f)(1)"),
+        ] {
+            let src = format!("fn main() {{\n    let n = {body};\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert!(once.contains(kept), "{src}\n=>\n{once}");
+            stable(&once);
+        }
+        // A statement, too.
+        stable("fn main() {\n    (o.f)(1);\n}\n");
+        // Parens around any other callee are still dropped, and a method
+        // call stays one.
+        for (body, want) in [("(f)(1)", "f(1)"), ("(m::f)(1)", "m::f(1)"), ("(fs[0])(1)", "fs[0](1)"), ("o.f(1)", "o.f(1)")] {
+            let src = format!("fn main() {{\n    let n = {body};\n}}\n");
+            let once = format_source(&src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
+            assert!(once.contains(&format!("let n = {want};")), "{src}\n=>\n{once}");
+        }
     }
 
     #[test]

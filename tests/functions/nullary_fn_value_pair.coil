@@ -1,0 +1,23 @@
+// A function of no parameters that returns two words is still a function
+// value: its one-word adapter calls it with no arguments.
+use tests::assert;
+
+fn three() -> Option<int> {
+    return Some(3);
+}
+
+fn none() -> Result<int, string> {
+    return Err("no");
+}
+
+fn call<T>(fn() -> T f) -> T {
+    return f();
+}
+
+test("a nullary function with a two-word result is a function value") {
+    let f = three;
+    assert!(f() == Some(3));
+    assert!(call(three) == Some(3));
+    assert!(call(none) == Err("no"));
+    assert!(three() == Some(3));
+}

@@ -1,0 +1,91 @@
+// A bounded generic function called at a tuple or array type runs
+// its shared body with the aggregate's structural instance (#2513): each
+// arithmetic method is the element-wise operator, as a clone lowers it, so
+// `T: Num` and the single-operator bounds work at any budget.
+// @flags --clone-budget 0
+use tests::assert;
+use gc::collect;
+
+class Money {
+    pub cents: int,
+}
+
+impl Add for Money {
+    pub fn add(Money a, Money b) -> Money {
+        return new Money(a.cents + b.cents);
+    }
+}
+
+impl Neg for Money {
+    pub fn neg(Money a) -> Money {
+        return new Money(0 - a.cents);
+    }
+}
+
+fn add<T: Num>(T a, T b) -> T {
+    return a + b;
+}
+
+fn ops<T: Num>(T a, T b) -> (T, T, T, T, T) {
+    return (a - b, a * b, a / b, a % b, a ** b);
+}
+
+fn neg<T: Num>(T a) -> T {
+    return -a;
+}
+
+fn plus<T: Add>(T a, T b) -> T {
+    return a + b;
+}
+
+fn minus<T: Neg>(T a) -> T {
+    return -a;
+}
+
+fn twice<T: Num>(T a) -> T {
+    return add(a, a);
+}
+
+fn sum3<T: Add>(T a, T b, T c) -> T {
+    return plus(plus(a, b), c);
+}
+
+test("tuples of int and float") {
+    let t = add((2, 3), (3, 2));
+    assert!(t[0] == 5 && t[1] == 5);
+    let f = add((1.5, 2.5, 3.5), (0.5, 0.5, 0.5));
+    assert!(f[0] == 2.0 && f[2] == 4.0);
+    let n = neg((1.5, -2.0));
+    assert!(n[0] == -1.5 && n[1] == 2.0);
+    let o = ops((7, 9), (2, 2));
+    assert!(o[0][0] == 5 && o[1][1] == 18 && o[2][0] == 3 && o[3][1] == 1 && o[4][0] == 49);
+}
+
+test("arrays") {
+    let a = add([1, 2, 3], [10, 20, 30]);
+    assert!(a[0] + a[1] + a[2] == 66);
+    let w = add([1, 2, 3, 4, 5, 6, 7, 8, 9], [1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    collect();
+    assert!(w[0] == 2 && w[8] == 10);
+    let m = neg([1, -2, 3]);
+    assert!(m[1] == 2);
+}
+
+test("user elements and single-operator bounds") {
+    let m = plus([new Money(1), new Money(2)], [new Money(10), new Money(20)]);
+    collect();
+    assert!(m[0].cents == 11 && m[1].cents == 22);
+    let n = minus((new Money(5), new Money(-6)));
+    assert!(n[0].cents == -5 && n[1].cents == 6);
+    assert!(plus((1, 2), (3, 4))[1] == 6);
+    assert!(minus([1.5])[0] == -1.5);
+}
+
+test("a shared body forwards the aggregate's dictionary") {
+    let t = twice((3, 4));
+    assert!(t[0] == 6 && t[1] == 8);
+    let a = twice([0.5, 1.5]);
+    assert!(a[1] == 3.0);
+    let s = sum3((1, 1), (2, 2), (3, 3));
+    assert!(s[0] == 6 && s[1] == 6);
+}

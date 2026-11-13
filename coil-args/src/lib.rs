@@ -77,6 +77,9 @@ pub struct NurseryFlag {
     /// At exit, print how many copy-on-write copies each source line made
     #[arg(long)]
     pub cow_report: bool,
+    /// Run on the MIR interpreter instead of native code
+    #[arg(long)]
+    pub mir: bool,
 }
 
 fn parse_nursery(s: &str) -> Result<bool, String> {

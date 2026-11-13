@@ -1,0 +1,105 @@
+// A generic function's rest parameter on its shared body (#2510): the call
+// packs the rest arguments into one `Vec<T>`, as for a clone, and the shared
+// body takes that `Vec` as one word. Packs of scalars, heap words, niche
+// words, two-word values and `()`; a `Vec` spread as the pack; named fixed
+// arguments ahead of the pack; a bound's dictionary after it.
+// @flags --clone-budget 0
+use tests::assert;
+use string::format;
+
+fn count<T>(T... xs) -> int {
+    return xs.len();
+}
+
+fn last<T>(T... xs) -> T {
+    return xs[xs.len() - 1];
+}
+
+fn sum<T: Num>(T zero, T... xs) -> T {
+    let s = zero;
+    for x in xs {
+        s = s + x;
+    }
+    return s;
+}
+
+fn joined<T: Show>(string sep, T... xs) -> string {
+    let s = "";
+    for x in xs {
+        s = s + format("%v", x) + sep;
+    }
+    return s;
+}
+
+fn pack<T>(T... xs) -> Vec<T> {
+    return xs;
+}
+
+class Cell {
+    pub v: int,
+}
+
+test("a shared rest body counts and reads its pack") {
+    assert!(count(1, 2, 3) == 3);
+    assert!(count("a") == 1);
+    assert!(last(1.5, 2.5) == 2.5);
+    assert!(last("x", "y", "z") == "z");
+    assert!(last(true, false) == false);
+    assert!(last(new Cell(1), new Cell(7)).v == 7);
+}
+
+test("niche and two-word items") {
+    let a: Option<string> = Some("s");
+    let b: Option<string> = None;
+    assert!(last(b, a) == Some("s"));
+    assert!(last(a, b).is_none());
+    let o: Option<int> = Some(4);
+    let p: Option<int> = None;
+    assert!(last(p, o) == Some(4));
+    assert!(last((1, 2), (3, 4))[1] == 4);
+    let r: Result<int, string> = Err("e");
+    assert!(count(r, r) == 2);
+    assert!(last(Ok(1), r) == Err("e"));
+}
+
+test("a bound's dictionary after the pack") {
+    assert!(sum(0, 1, 2, 3) == 6);
+    assert!(sum(0.5, 1.0) == 1.5);
+    assert!(joined(sep: ";", 1, 2) == "1;2;");
+    assert!(joined(",", "a", "b") == "a,b,");
+}
+
+test("a Vec spread is the pack") {
+    let w: Vec<int> = [1, 2, 3];
+    assert!(count(...w) == 3);
+    assert!(sum(10, ...w) == 16);
+    let v = pack(4, 5);
+    v.push(6);
+    assert!(v.len() == 3 && v[2] == 6);
+    let n: Option<int> = None;
+    let q = pack(Some(1), n);
+    assert!(q[0] == Some(1) && q[1].is_none());
+}
+
+fn outer<T>(T a, T b) -> int {
+    return count(a, b, a);
+}
+
+fn outer_sum<T: Num>(T a, T b) -> T {
+    return sum(a, b, b);
+}
+
+fn outer_pack<T>(T a) -> Vec<T> {
+    return pack(a, a);
+}
+
+test("a shared body packs its own values") {
+    assert!(outer(1, 2) == 3);
+    assert!(outer("a", "b") == 3);
+    assert!(outer_sum(1, 2) == 5);
+    assert!(outer_sum(0.5, 1.0) == 2.5);
+    let o: Option<int> = Some(3);
+    let v = outer_pack(o);
+    assert!(v.len() == 2 && v[1] == Some(3));
+    assert!(outer_pack("s")[0] == "s");
+}

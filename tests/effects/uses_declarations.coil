@@ -61,8 +61,8 @@ impl Measure for string {
 fn longer<T: Measure>(T a, T b) -> int uses {}
     requires true
 {
-    let m = measure(a);
-    let n = measure(b);
+    let m = a.measure();
+    let n = b.measure();
     if m > n {
         return m;
     }

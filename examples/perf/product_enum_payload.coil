@@ -1,0 +1,47 @@
+// Hit bench (ProductLoad): 4k boxed variants of two and three payload words
+// matched 500 rounds (each its own call). The tag and the payload words are read in place.
+use io::sync::print;
+use string::format;
+
+enum Shape {
+    Seg(int, int),
+    Tri(int, int, int),
+}
+
+fn build(int n) -> Vec<Shape> {
+    let out: Vec<Shape> = Vec::with_capacity(n);
+    let i = 0;
+    while i < n {
+        if i % 3 == 0 {
+            out.push(Shape::Seg(i, i % 5));
+        } else {
+            out.push(Shape::Tri(i, i % 7, i % 11));
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+fn measure(Vec<Shape> shapes, int k) -> int {
+    let total = k;
+    let i = 0;
+    while i < shapes.len() {
+        total = total + match shapes[i] {
+            Shape::Seg(a, b) => a + b,
+            Shape::Tri(a, b, c) => a + b * c,
+        };
+        i = i + 1;
+    }
+    return total;
+}
+
+fn main() {
+    let shapes = build(4000);
+    let total = 0;
+    let round = 0;
+    while round < 500 {
+        total = total + measure(shapes, round);
+        round = round + 1;
+    }
+    let _ = print(format("%i", total));
+}

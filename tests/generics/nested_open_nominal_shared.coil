@@ -1,0 +1,252 @@
+// A generic class or enum whose declaration holds an open `Option` /
+// `Result` below a top (a field `xs: Vec<Option<T>>`, a payload
+// `Vec<Option<T>>` or `fn(T) -> Option<T>`) is itself a nested open enum
+// (coil-lang#2446, #2493, #2509): its shared bodies hold that enum as its
+// object, ground code as the niche word where `T` is a heap type. Its
+// methods, and the generics over it, are clone-only, so each side reads the
+// values the other made. This is the twin of `nested_open_nominal.coil`, at
+// `--clone-budget 0`.
+// @flags --clone-budget 0
+use tests::assert;
+
+class C {
+    pub n: int,
+}
+
+class W<T> {
+    pub xs: Vec<Option<T>>,
+}
+
+impl W<T> {
+    pub static fn empty() -> W<T> {
+        return new W(Vec::new());
+    }
+
+    pub fn add([T; 1] a) {
+        self.xs.push(Option::Some(a[0]));
+        self.xs.push(Option::None);
+    }
+
+    pub fn count() -> int {
+        let n = 0;
+        for x in self.xs {
+            match x {
+                Option::Some(_) => {
+                    n = n + 1;
+                },
+                Option::None => {},
+            }
+        }
+        return n;
+    }
+
+    pub fn last() -> Option<T> {
+        let i = self.xs.len() - 1;
+        while i >= 0 {
+            match self.xs[i] {
+                Option::Some(v) => {
+                    return Option::Some(v);
+                },
+                Option::None => {},
+            }
+            i = i - 1;
+        }
+        return Option::None;
+    }
+}
+
+// A class holding one: nested open through its field.
+class Outer<T> {
+    pub w: W<T>,
+    pub k: int,
+}
+
+impl Outer<T> {
+    pub fn count() -> int {
+        return self.w.count() + self.k;
+    }
+}
+
+class R<T> {
+    pub rs: [Result<T, string>; 2],
+}
+
+impl R<T> {
+    pub fn oks() -> int {
+        let n = 0;
+        for r in self.rs {
+            match r {
+                Result::Ok(_) => {
+                    n = n + 1;
+                },
+                Result::Err(_) => {},
+            }
+        }
+        return n;
+    }
+}
+
+class Tup<T> {
+    pub t: (Option<T>, int),
+}
+
+impl Tup<T> {
+    pub fn some() -> bool {
+        let (o, _) = self.t;
+        return match o {
+            Option::Some(_) => true,
+            Option::None => false,
+        };
+    }
+}
+
+impl W<T> {
+    pub fn count_with<U>([U; 1] u, Vec<Option<U>> more) -> int {
+        let n = self.count();
+        for x in more {
+            match x {
+                Option::Some(_) => {
+                    n = n + 10;
+                },
+                Option::None => {},
+            }
+        }
+        return n;
+    }
+}
+
+// A plain class's method with a type parameter of its own (coil-lang#2447).
+class K {
+    pub k: int,
+}
+
+impl K {
+    pub fn wrap<T>([T; 1] a) -> Vec<Option<T>> {
+        let v: Vec<Option<T>> = Vec::new();
+        v.push(Option::Some(a[0]));
+        v.push(Option::None);
+        return v;
+    }
+}
+
+fn wrapped<T>([T; 1] a) -> Vec<Option<T>> {
+    let v: Vec<Option<T>> = Vec::new();
+    v.push(Option::None);
+    v.push(Option::Some(a[0]));
+    return v;
+}
+
+fn total<T>(W<T> w) -> int {
+    return w.count() + w.xs.len();
+}
+
+trait Cnt<T> {
+    fn cnt(T x) -> int {}
+}
+
+impl Cnt for W<T> {
+    fn cnt(W<T> w) -> int {
+        return w.count();
+    }
+}
+
+fn cnt_all<U: Cnt>(Vec<U> us) -> int {
+    let n = 0;
+    for u in us {
+        n = n + u.cnt();
+    }
+    return n;
+}
+
+enum E<T> {
+    Many(Vec<Option<T>>),
+    One(Option<T>),
+    Z,
+}
+
+fn somes<T>(E<T> e) -> int {
+    return match e {
+        E::Many(v) => {
+            let n = 0;
+            for x in v {
+                match x {
+                    Option::Some(_) => {
+                        n = n + 1;
+                    },
+                    Option::None => {},
+                }
+            }
+            n
+        },
+        E::One(o) => match o {
+            Option::Some(_) => 1,
+            Option::None => 0,
+        },
+        E::Z => -1,
+    };
+}
+
+test("a class field Vec<Option<T>> filled by ground code and methods") {
+    let w: W<string> = new W(Vec::from([Option::None, Option::Some("a")]));
+    w.add(["b"]);
+    assert!(w.count() == 2);
+    assert!((w.last() ?? "") == "b");
+    assert!(w.xs[2] == Option::Some("b"));
+    assert!(total(w) == 6);
+    let c: W<C> = W::empty();
+    c.add([new C(4)]);
+    c.xs.push(Option::Some(new C(5)));
+    assert!(c.count() == 2);
+    assert!((c.last() ?? new C(0)).n == 5);
+    let i: W<int> = new W(Vec::from([Option::Some(1), Option::None]));
+    i.add([2]);
+    assert!(i.count() == 2 && (i.last() ?? 0) == 2);
+    let f: W<float> = W::empty();
+    f.add([1.5]);
+    assert!(f.count() == 1 && (f.last() ?? 0.0) == 1.5);
+}
+
+test("a class holding one, an array of Result and a tuple field") {
+    let o = new Outer(new W(Vec::from([Option::Some("x"), Option::None])), 10);
+    o.w.add(["y"]);
+    assert!(o.count() == 12);
+    let r: R<string> = new R([Result::Ok("a"), Result::Err("e")]);
+    assert!(r.oks() == 1);
+    let rc: R<C> = new R([Result::Ok(new C(1)), Result::Ok(new C(2))]);
+    assert!(rc.oks() == 2);
+    let t: Tup<string> = new Tup((Option::Some("s"), 3));
+    assert!(t.some());
+    let tn: Tup<C> = new Tup((Option::None, 3));
+    assert!(!tn.some());
+}
+
+test("a dictionary for a nested open instance") {
+    let a: W<string> = new W(Vec::from([Option::Some("a"), Option::None, Option::Some("b")]));
+    let b: W<string> = W::empty();
+    b.add(["c"]);
+    assert!(cnt_all(Vec::from([a, b])) == 3);
+}
+
+test("an enum payload Vec<Option<T>> and Option<T>") {
+    let m: E<string> = E::Many(Vec::from([Option::None, Option::Some("a"), Option::Some("b")]));
+    let one: E<string> = E::One(Option::Some("x"));
+    let none: E<C> = E::One(Option::None);
+    assert!(somes(m) == 2 && somes(one) == 1 && somes(none) == 0);
+    let mi: E<int> = E::Many(Vec::from([Option::Some(1), Option::None]));
+    assert!(somes(mi) == 1);
+}
+
+test("a method with its own type parameter, and a call through a function value") {
+    let w: W<string> = new W(Vec::from([Option::Some("a")]));
+    assert!(w.count_with([new C(1)], Vec::from([Option::Some(new C(2)), Option::None])) == 11);
+    let k = new K(1);
+    let s = k.wrap(["a"]);
+    assert!(s[0] == Option::Some("a") && s[1] == Option::None);
+    let c = k.wrap([new C(3)]);
+    assert!((c[0] ?? new C(0)).n == 3);
+    let g = wrapped;
+    let t = g(["b"]);
+    assert!(t[0] == Option::None && t[1] == Option::Some("b"));
+    let i = g([7]);
+    assert!(i[1] == Option::Some(7));
+}

@@ -1,0 +1,67 @@
+// A method with its own type parameter on a plain class has no per-type
+// clone, so its shared body runs at default flags (coil-lang#2506,
+// #2556): a value it stores or returns is shared like the same code over
+// a concrete type, and a copy it writes through a function value is made
+// unique first.
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+class Cell<T> {
+    pub value: T,
+}
+
+class Util {
+    pub k: int,
+}
+
+impl Util {
+    pub fn wrap<T>(Cell<T> c) -> Option<T> {
+        return Some(c.value);
+    }
+
+    pub fn put<T>(Cell<T> a, Cell<T> b) {
+        b.value = a.value;
+    }
+
+    pub fn each<T>(Vec<T> xs, T -> unit f) {
+        for x in xs {
+            f(x);
+        }
+    }
+}
+
+fn zero(Box q) {
+    q.n = 0;
+}
+
+test("a method's own <T> result in Some is its own value") {
+    let u = new Util(0);
+    let c = new Cell(new Box(2));
+    match u.wrap(c) {
+        Some(b) => {
+            b.n = 7;
+        },
+        None => {},
+    }
+    assert!(c.value.n == 2);
+}
+
+test("a method's own <T> field store is its own value") {
+    let u = new Util(0);
+    let a = new Cell(new Box(1));
+    let b = new Cell(new Box(0));
+    u.put(a, b);
+    b.value.n = 9;
+    assert!(a.value.n == 1);
+}
+
+test("a method's own <T> for binding written through a function value is its own value") {
+    let u = new Util(0);
+    let xs: Vec<Box> = [new Box(1), new Box(2)];
+    u.each(xs, zero);
+    assert!(xs[0].n == 1);
+    assert!(xs[1].n == 2);
+}

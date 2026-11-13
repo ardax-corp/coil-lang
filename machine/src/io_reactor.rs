@@ -62,7 +62,7 @@ struct Inner {
     cvar: Condvar,
 }
 
-/// Per-root-VM IO readiness reactor.
+/// Per-root runtime IO readiness reactor.
 pub struct IoReactor {
     inner: Inner,
 }

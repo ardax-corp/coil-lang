@@ -73,7 +73,9 @@ test("a generic method with a rest parameter") {
     let h = new H(10);
     let p = new P(2);
     assert!(h.all(1, p, new P(3)) == 6);
-    assert!(p.x == 0);
+    // A `for` binding over the pack is its own value: the write copies it
+    // (#2506), as in a per-type clone.
+    assert!(p.x == 2);
     assert!(h.count("a", "b") == 12);
     assert!(h.count(1, 2, 3) == 13);
     let q = readonly new P(5);
@@ -99,5 +101,5 @@ test("a Vec spread into a generic method's rest") {
     let h = new H(0);
     let v: Vec<P> = [new P(1), new P(2)];
     assert!(h.all(0, ...v) == 3);
-    assert!(v[0].x == 0 && v[1].x == 0);
+    assert!(v[0].x == 1 && v[1].x == 2);
 }

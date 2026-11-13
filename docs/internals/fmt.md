@@ -37,6 +37,8 @@ Soft wraps kick in when a construct would exceed **100** columns:
 
 Short forms stay on one line (except 1-tuples, which always keep `(x,)`).
 
+`Owner::m` and `Owner::m()` are different nodes (a static method's value and its call, #2746), so each prints as written; so do `Option::None` and `Option::None()`.
+
 A broken list made only of short literals (numbers, `true`/`false`, strings of
 up to 8 characters) fills each line up to the width instead of one item per
 line, still with a trailing comma.

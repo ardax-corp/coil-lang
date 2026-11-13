@@ -5,20 +5,13 @@ edition = "2024"
 
 [features]
 default = []
-# `debugger` / `coverage` gate the hook state and APIs only. The dispatch
-# loop picks its hooked instantiation (`execute::<true>`) only while a
-# controller / collector is attached, so workspace feature unification adds
-# no per-instruction cost to `coil` (#558).
-debugger = []
-# Per-instruction hit counts for `coil-test --coverage`.
-coverage = []
-vm_profile = []
 # Collect at every allocation safepoint (GC soundness testing only).
 gc-stress = []
 # Print GC census numbers after each mark (docs/internals/gc-evacuation.md).
 gc-stats = []
 
 [dependencies]
+stacker = "0.1.25"
 common = { path = "../common" }
 coil-simd = { path = "../coil-simd" }
 crossbeam-deque = "0.8"
@@ -32,8 +25,8 @@ parking_lot = "0.12"
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 libloading = "0.9"
 libffi = "5.1.1"
+# Native code in tasks runs on per-task stacks (`native_fiber.rs`).
+corosensei = "0.3.4"
 
 [dev-dependencies]
-# Lib tests format `Instruction`/`Value` with Debug, also under `--release` (#1686).
-common = { path = "../common", features = ["debug-fmt"] }
 libc = "0.2"

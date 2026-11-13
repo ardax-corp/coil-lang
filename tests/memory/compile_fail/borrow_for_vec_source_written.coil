@@ -1,0 +1,13 @@
+// @expected E0149 — the `for` over `v` holds `v`'s object while its body
+// writes `v`, which `w` borrows (#2827): the write would copy `v` away from
+// `w` while the loop walks the old object.
+fn main() {
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    v.push(2);
+    let w = mut v;
+    for x in v {
+        v.push(x);
+    }
+    w.push(0);
+}

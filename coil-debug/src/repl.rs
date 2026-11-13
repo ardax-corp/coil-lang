@@ -1,11 +1,10 @@
 //! GDB-style REPL front-end over [`DebugSession`].
 
-use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::exit;
 
-use compiler::{format_bytecode_section, matches_fn_pat, HostGrants};
+use compiler::{matches_fn_pat, HostGrants};
 use machine::StopReason;
 use reporting::{ReportConfig, ReportFormat};
 
@@ -242,7 +241,7 @@ fn print_help() {
          \x20 info break | info registers    Status\n\
          \x20 run / r                        Start or restart\n\
          \x20 continue / c                   Resume\n\
-         \x20 stepi / si                     Step one bytecode insn\n\
+         \x20 stepi / si                     Step one MIR instruction\n\
          \x20 step / s                       Step to next source line (into)\n\
          \x20 next / n                       Step over (same/outer depth)\n\
          \x20 finish / fin                   Run until frame returns\n\
@@ -250,7 +249,7 @@ fn print_help() {
          \x20 info locals                   List named locals in current frame\n\
          \x20 bt / backtrace                 Call stack\n\
          \x20 list / l                       Source around stop\n\
-         \x20 disassemble / disas [fn]       Bytecode dump\n\
+         \x20 disassemble / disas [fn]       MIR of a function\n\
          \x20 help / h                       This help\n\
          \x20 quit / q                       Exit"
     );
@@ -321,61 +320,14 @@ fn cmd_list(session: &DebugSession) -> Result<(), String> {
 }
 
 fn cmd_disas(session: &DebugSession, pat: Option<&str>) -> Result<(), String> {
-    let arts = &session.artifacts;
-    let pc_names: HashMap<usize, &str> = arts
-        .functions
-        .iter()
-        .map(|s| (s.entry_pc as usize, s.name.as_str()))
-        .collect();
-    if let Some(p) = pat {
-        let matched: Vec<_> = arts
-            .functions
-            .iter()
-            .filter(|s| matches_fn_pat(&s.name, p))
-            .collect();
-        if matched.is_empty() {
-            return Err(format!("no function matching `{p}`"));
-        }
-        let mut syms = arts.functions.clone();
-        syms.sort_by_key(|s| s.entry_pc);
-        let len = arts.bytecode.len();
-        for (i, sym) in syms.iter().enumerate() {
-            if !matches_fn_pat(&sym.name, p) {
-                continue;
-            }
-            let start = sym.entry_pc as usize;
-            let end = syms
-                .get(i + 1)
-                .map(|n| n.entry_pc as usize)
-                .unwrap_or(len)
-                .min(len);
-            print!(
-                "{}",
-                format_bytecode_section(
-                    &sym.name,
-                    start,
-                    end.max(start),
-                    &arts.bytecode,
-                    &arts.constants,
-                    &pc_names,
-                )
-            );
-        }
-    } else {
-        let ip = session.current_ip();
-        let start = ip.saturating_sub(4);
-        let end = (ip + 12).min(arts.bytecode.len());
-        print!(
-            "{}",
-            format_bytecode_section(
-                &format!("pc={ip}"),
-                start,
-                end,
-                &arts.bytecode,
-                &arts.constants,
-                &pc_names,
-            )
-        );
+    let pat = pat.map_or_else(|| session.stop_symbol(), str::to_string);
+    let matched: Vec<_> = session.artifacts.functions.iter().filter(|s| matches_fn_pat(&s.name, &pat)).collect();
+    if matched.is_empty() {
+        return Err(format!("no function matching `{pat}`"));
+    }
+    for sym in matched {
+        println!(";; fn {} (op {})", sym.name, sym.body_id);
+        println!("{}", session.mir_of(&sym.name).unwrap_or("<no MIR>"));
     }
     Ok(())
 }

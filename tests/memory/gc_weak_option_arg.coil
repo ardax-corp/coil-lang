@@ -1,6 +1,7 @@
-// `gc::weak` and `gc::root` take any `T` (#1414), so an `Option`, a
-// `Result` or a two-word value goes to them as a generic argument does:
-// boxed to its object, which `upgrade` / `get` / `unroot` hand back.
+// `gc::weak` and `gc::root` take a niche `Option` / `Result` (#1414) as a
+// generic argument does: its word, which `upgrade` / `get` / `unroot` hand
+// back. A two-word value (`Option<int>`, `(int, int)`) has no object to
+// weaken and is refused (`compile_fail/weak_two_word_*`).
 use tests::assert;
 use gc::{collect, get, root, unroot, upgrade, weak, Root};
 
@@ -96,51 +97,6 @@ test("root of an Option<Node> local, get and unroot") {
         Option::Some(_) => false,
         Option::None => true,
     });
-}
-
-test("weak of an Option<int>") {
-    let x: Option<int> = Option::Some(4);
-    let w = weak(x);
-    let v = match upgrade(w) {
-        Option::Some(Option::Some(n)) => n,
-        Option::Some(Option::None) => -1,
-        Option::None => -2,
-    };
-    assert!(v == 4);
-}
-
-test("weak of a Result") {
-    let x: Result<int, string> = Result::Ok(6);
-    let w = weak(x);
-    let v = match upgrade(w) {
-        Option::Some(Result::Ok(n)) => n,
-        Option::Some(Result::Err(_)) => -1,
-        Option::None => -2,
-    };
-    assert!(v == 6);
-}
-
-test("weak of a pair tuple") {
-    let w = weak((1, 2));
-    let v = match upgrade(w) {
-        Option::Some(t) => {
-            let (a, b) = t;
-            a + b
-        },
-        Option::None => -2,
-    };
-    assert!(v == 3);
-}
-
-test("weak of the Option get returns") {
-    let r = root(5);
-    let w = weak(get(r));
-    let v = match upgrade(w) {
-        Option::Some(Option::Some(n)) => n,
-        Option::Some(Option::None) => -1,
-        Option::None => -2,
-    };
-    assert!(v == 5);
 }
 
 test("weak of Some(node) refers to the node: alive while it is held") {

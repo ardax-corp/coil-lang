@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 /// Bump when the entry encoding or what a key covers changes.
 const FORMAT: u64 = 1;
 
-const MAGIC: &[u8; 8] = b"COILBLD1";
+const MAGIC: &[u8; 8] = b"COILBLD2";
 
 /// Entries kept; the least recently used go first.
 const MAX_ENTRIES: usize = 256;
@@ -57,11 +57,42 @@ pub fn key(entry: &Path, options: &str) -> Option<String> {
     Some(hex(&h.finalize()))
 }
 
-/// The cached archive for `key`, if every file it lists is unchanged.
-pub fn load(dir: &Path, key: &str) -> Option<Vec<u8>> {
+/// Diagnostics as this compile printed them, for its entry.
+static REPORT: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// A diagnostics writer that also keeps what passes through it, so a hit can
+/// print the compile's warnings again.
+pub struct Reported<W>(pub W);
+
+impl<W: std::io::Write> std::io::Write for Reported<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.0.write(buf)?;
+        REPORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend_from_slice(&buf[..n]);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// What [`Reported`] kept.
+pub fn report() -> Vec<u8> {
+    REPORT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+/// An entry that still matches its inputs.
+pub struct Hit {
+    /// The diagnostics of the compile, as printed.
+    pub report: Vec<u8>,
+    pub archive: Vec<u8>,
+}
+
+/// The entry for `key`, if every file it lists is unchanged.
+pub fn load(dir: &Path, key: &str) -> Option<Hit> {
     let path = dir.join(format!("{key}.{}", common::ext::ARCHIVE_EXT));
     let bytes = std::fs::read(&path).ok()?;
-    let (deps, archive) = decode(&bytes)?;
+    let (deps, report, archive) = decode(&bytes)?;
     if deps.iter().any(|(p, digest)| path_digest(p) != *digest) {
         return None;
     }
@@ -69,7 +100,7 @@ pub fn load(dir: &Path, key: &str) -> Option<Vec<u8>> {
     if let Ok(f) = std::fs::File::options().append(true).open(&path) {
         let _ = f.set_modified(std::time::SystemTime::now());
     }
-    Some(archive.to_vec())
+    Some(Hit { report: report.to_vec(), archive: archive.to_vec() })
 }
 
 /// What a compile read: its source files, the directories they and the
@@ -96,8 +127,9 @@ pub fn inputs(entry: &Path, files: &[PathBuf], roots: &[PathBuf]) -> Vec<PathBuf
     out
 }
 
-/// Store `archive` under `key` with the digests of `inputs`, now.
-pub fn store(dir: &Path, key: &str, inputs: &[PathBuf], archive: &[u8]) -> std::io::Result<()> {
+/// Store `archive` and the compile's `report` under `key` with the digests of
+/// `inputs`, now.
+pub fn store(dir: &Path, key: &str, inputs: &[PathBuf], report: &[u8], archive: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let mut out = Vec::with_capacity(archive.len() + 64 * inputs.len() + 16);
     out.extend_from_slice(MAGIC);
@@ -108,6 +140,8 @@ pub fn store(dir: &Path, key: &str, inputs: &[PathBuf], archive: &[u8]) -> std::
         out.extend_from_slice(raw);
         out.extend_from_slice(&path_digest(p));
     }
+    out.extend_from_slice(&(report.len() as u32).to_le_bytes());
+    out.extend_from_slice(report);
     out.extend_from_slice(archive);
     let tmp = dir.join(format!("{key}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, &out)?;
@@ -122,7 +156,7 @@ pub fn store(dir: &Path, key: &str, inputs: &[PathBuf], archive: &[u8]) -> std::
 /// A path the entry depends on, with its digest when stored.
 type Input = (PathBuf, [u8; 32]);
 
-fn decode(bytes: &[u8]) -> Option<(Vec<Input>, &[u8])> {
+fn decode(bytes: &[u8]) -> Option<(Vec<Input>, &[u8], &[u8])> {
     let rest = bytes.strip_prefix(MAGIC.as_slice())?;
     let (n, mut rest) = take_u32(rest)?;
     let mut deps = Vec::with_capacity(n as usize);
@@ -135,7 +169,9 @@ fn decode(bytes: &[u8]) -> Option<(Vec<Input>, &[u8])> {
         deps.push((PathBuf::from(os), digest.try_into().ok()?));
         rest = r;
     }
-    Some((deps, rest))
+    let (len, rest) = take_u32(rest)?;
+    let (report, archive) = rest.split_at_checked(len as usize)?;
+    Some((deps, report, archive))
 }
 
 fn take_u32(bytes: &[u8]) -> Option<(u32, &[u8])> {
@@ -162,6 +198,11 @@ fn prune(dir: &Path) {
             _ => {}
         }
     }
+    keep_newest(entries);
+}
+
+/// Remove all but the newest [`MAX_ENTRIES`] of `entries`.
+pub(crate) fn keep_newest(mut entries: Vec<(std::time::SystemTime, PathBuf)>) {
     if entries.len() <= MAX_ENTRIES {
         return;
     }
@@ -181,7 +222,7 @@ fn absolute(p: &Path) -> PathBuf {
     })
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -203,15 +244,16 @@ mod tests {
         std::fs::write(&src, "fn main() {}").unwrap();
         let cache = d.join("cache");
         let inputs = inputs(&src, std::slice::from_ref(&src), &[]);
-        store(&cache, "k", &inputs, b"archive").unwrap();
-        assert_eq!(load(&cache, "k").as_deref(), Some(b"archive".as_slice()));
+        store(&cache, "k", &inputs, b"warned", b"archive").unwrap();
+        let hit = load(&cache, "k").expect("a hit");
+        assert_eq!((hit.report.as_slice(), hit.archive.as_slice()), (b"warned".as_slice(), b"archive".as_slice()));
         // A new file beside a source can change what `use` finds.
         std::fs::write(d.join("b.coil"), "").unwrap();
-        assert_eq!(load(&cache, "k"), None);
-        store(&cache, "k", &inputs, b"archive").unwrap();
+        assert!(load(&cache, "k").is_none());
+        store(&cache, "k", &inputs, b"", b"archive").unwrap();
         std::fs::write(&src, "fn main() { }").unwrap();
-        assert_eq!(load(&cache, "k"), None);
-        assert_eq!(load(&cache, "missing"), None);
+        assert!(load(&cache, "k").is_none());
+        assert!(load(&cache, "missing").is_none());
     }
 
     #[test]

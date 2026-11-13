@@ -23,7 +23,7 @@ fn kinds_left(src: &str, keep: fn(&HirKind) -> bool) -> usize {
     let mut stack = vec![out.root.expect("root")];
     while let Some(id) = stack.pop() {
         n += usize::from(keep(&out.expr(id).kind));
-        stack.extend(children(&out, id));
+        stack.extend(out.children(id));
     }
     n
 }
@@ -50,7 +50,7 @@ fn matches_left(src: &str) -> usize {
     let mut stack = vec![out.root.expect("root")];
     while let Some(id) = stack.pop() {
         n += usize::from(matches!(out.expr(id).kind, HirKind::Match { .. }));
-        stack.extend(children(&out, id));
+        stack.extend(out.children(id));
     }
     n
 }
@@ -87,7 +87,7 @@ fn folded_return(src: &str) -> String {
                 other => format!("{other:?}"),
             };
         }
-        stack.extend(children(&out, id));
+        stack.extend(out.children(id));
     }
     panic!("no return");
 }

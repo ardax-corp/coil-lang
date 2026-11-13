@@ -1,0 +1,122 @@
+// A function taking a bare-trait existential parameter, inlined at a call
+// that passes a local or a literal of a ground type, still packs that
+// argument: the pack is the argument's, so the argument cannot stand in for
+// the parameter as it is (coil-lang#2839). Before the fix the inlined
+// method call read the ground object as a `[value, dictionary]` pack.
+use tests::assert;
+
+class C {
+    pub x: int,
+}
+
+class H {
+    pub f: C,
+}
+
+trait Put<R> {
+    fn put(R self, C x) -> int {}
+}
+
+impl Put for H {
+    fn put(H self, C x) -> int {
+        self.f = x;
+        return x.x;
+    }
+}
+
+impl Put for int {
+    fn put(int self, C x) -> int {
+        return self + x.x;
+    }
+}
+
+impl Put for string {
+    fn put(string self, C x) -> int {
+        return self.len() + x.x;
+    }
+}
+
+trait Named<S> {
+    fn name(S self) -> string {}
+}
+
+impl Named for C {
+    fn name(C self) -> string {
+        return "C";
+    }
+}
+
+fn via_dyn(Put p, C x) -> int {
+    return p.put(x);
+}
+
+fn via_two(Put p, Put q, C x) -> int {
+    return p.put(x) + q.put(x);
+}
+
+fn named(Named n) -> string {
+    return n.name();
+}
+
+class V {
+    pub items: Vec<int>,
+}
+
+trait Grow<R> {
+    fn grow(R self, Vec<int> v) -> int {}
+}
+
+impl Grow for V {
+    fn grow(V self, Vec<int> v) -> int {
+        self.items = v;
+        return v.len();
+    }
+}
+
+fn via_grow(Grow g, Vec<int> v) -> int {
+    return g.grow(v);
+}
+
+test("a class local packed for an inlined existential parameter") {
+    let h = new H(new C(0));
+    let c = new C(5);
+    assert!(via_dyn(h, c) == 5);
+    assert!(h.f.x == 5);
+    let _ = via_dyn(h, new C(6));
+    assert!(h.f.x == 6);
+}
+
+test("literals packed for an inlined existential parameter") {
+    let c = new C(2);
+    assert!(via_dyn(40, c) == 42);
+    assert!(via_dyn("abc", c) == 5);
+    let n = 7;
+    assert!(via_dyn(n, c) == 9);
+}
+
+test("two existential parameters, each argument a local") {
+    let h = new H(new C(0));
+    let n = 10;
+    let c = new C(3);
+    assert!(via_two(h, n, c) == 16);
+    assert!(h.f.x == 3);
+}
+
+test("a method of no further argument") {
+    let c = new C(1);
+    assert!(named(c) == "C");
+}
+
+test("a Vec argument through an inlined existential parameter") {
+    let holder = new V(Vec::new());
+    let a: Vec<int> = [1, 2, 3];
+    assert!(via_grow(holder, a) == 3);
+    assert!(holder.items.len() == 3);
+}
+
+test("an existential local passed on is not packed again") {
+    let h = new H(new C(0));
+    let p: Put = h;
+    assert!(via_dyn(p, new C(4)) == 4);
+    assert!(h.f.x == 4);
+}

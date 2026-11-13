@@ -1,0 +1,125 @@
+// A ground trait instance method returns its two-word result (`Option<int>`,
+// `Result<int, E>`, `(int, int)`, a small payload enum) as two words to a
+// direct call; a generic caller reaches it through its dictionary adapter,
+// which boxes the pair. Both read the same values.
+use tests::assert;
+use arith::Checked;
+
+trait Halver<T> {
+    fn half(T s, int x) -> Option<int> {}
+    fn split(T s, int x) -> (int, int) {}
+    fn checked(T s, int x) -> Result<int, string> {}
+}
+
+class H {
+    pub d: int,
+}
+
+impl Halver for H {
+    #[inline(never)]
+    pub fn half(H h, int x) -> Option<int> {
+        if x % 3 == 0 {
+            return None;
+        }
+        return Some(x / h.d);
+    }
+
+    #[inline(never)]
+    pub fn split(H h, int x) -> (int, int) {
+        return (x / h.d, x % h.d);
+    }
+
+    #[inline(never)]
+    pub fn checked(H h, int x) -> Result<int, string> {
+        if x < 0 {
+            return Result::Err("negative");
+        }
+        return Result::Ok(x * h.d);
+    }
+}
+
+fn via_dict<T: Halver>(T h, int x) -> int {
+    let (q, r) = h.split(x);
+    let c = match h.checked(x) {
+        Result::Ok(v) => v,
+        Result::Err(_) => -1,
+    };
+    return match h.half(x) {
+        Some(v) => v + q * 100 + r * 1000 + c * 10000,
+        None => -1,
+    };
+}
+
+enum Small {
+    Nothing,
+    One(int),
+}
+
+trait Pick<T> {
+    fn pick(T s, int x) -> Small {}
+}
+
+impl Pick for H {
+    #[inline(never)]
+    pub fn pick(H h, int x) -> Small {
+        if x == 0 {
+            return Small::Nothing;
+        }
+        return Small::One(x + h.d);
+    }
+}
+
+fn pick_dict<T: Pick>(T h, int x) -> int {
+    return match h.pick(x) {
+        Small::Nothing => 0,
+        Small::One(v) => v,
+    };
+}
+
+test("direct calls read the pair") {
+    let h = new H(2);
+    assert!(h.half(3) == None);
+    assert!(h.half(4) == Some(2));
+    let (q, r) = h.split(7);
+    assert!(q == 3 && r == 1);
+    assert!(h.checked(5) == Result::Ok(10));
+    assert!(h.checked(-1) == Result::Err("negative"));
+    let s = 0;
+    let i = 0;
+    while i < 30 {
+        s += match h.half(i) {
+            Some(v) => v,
+            None => 1,
+        };
+        i += 1;
+    }
+    assert!(s == 155);
+}
+
+test("a dictionary call reads the same values") {
+    let h = new H(2);
+    assert!(via_dict(h, 4) == 2 + 200 + 0 + 80000);
+    assert!(via_dict(h, 3) == -1);
+    assert!(pick_dict(h, 0) == 0);
+    assert!(pick_dict(h, 5) == 7);
+    let direct = match h.pick(5) {
+        Small::Nothing => 0,
+        Small::One(v) => v,
+    };
+    assert!(direct == 7);
+}
+
+test("the stdlib's checked arithmetic") {
+    assert!(3.checked_mul(4) == Some(12));
+    assert!(9223372036854775807.checked_add(1) == None);
+    let s = 0;
+    let i = 0;
+    while i < 100 {
+        s += match i.checked_mul(3) {
+            Some(v) => v,
+            None => 0,
+        };
+        i += 1;
+    }
+    assert!(s == 14850);
+}

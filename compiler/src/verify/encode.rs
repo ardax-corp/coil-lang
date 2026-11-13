@@ -1017,7 +1017,7 @@ impl<'m> Enc<'m> {
 
     fn bind_fresh(&mut self, b: &HirBody, pat: &HirPat, st: &mut St) {
         let mut locals = Vec::new();
-        pat_locals(pat, &mut locals);
+        pat.for_each_bind(&mut |l| locals.push(l));
         for l in locals {
             let v = self.invent(b.local(l).ty.as_ref(), st);
             st.env.insert(l, v);
@@ -1383,7 +1383,7 @@ impl<'m> Enc<'m> {
         let b = f.body;
         let mut assigned = HashSet::new();
         let mut heap = false;
-        walk(b, body, &mut |e| match &b.expr(e).kind {
+        b.visit_ids(body, &mut |e| match &b.expr(e).kind {
             HirKind::Assign { place, .. } => match b.expr(*place).kind {
                 HirKind::Local(l) => {
                     assigned.insert(l);
@@ -1606,76 +1606,6 @@ fn ensures_block(b: &HirBody) -> Option<(LocalId, Vec<(HirId, String)>)> {
         return Some((local, out));
     }
     None
-}
-
-fn pat_locals(pat: &HirPat, out: &mut Vec<LocalId>) {
-    match pat {
-        HirPat::Bind(l) => out.push(*l),
-        HirPat::Variant { fields, .. } => match fields {
-            HirPatFields::Unit => {}
-            HirPatFields::Tuple(ps) => ps.iter().for_each(|p| pat_locals(p, out)),
-            HirPatFields::Record(ps) => ps.iter().for_each(|(_, p)| pat_locals(p, out)),
-        },
-        HirPat::Tuple(ps) => ps.iter().for_each(|p| pat_locals(p, out)),
-        HirPat::Record(ps) => ps.iter().for_each(|(_, p)| pat_locals(p, out)),
-        HirPat::Wild | HirPat::Int(_) => {}
-    }
-}
-
-/// Visit `id` and every node under it in this body.
-fn walk(b: &HirBody, id: HirId, f: &mut dyn FnMut(HirId)) {
-    f(id);
-    let mut kids: Vec<HirId> = Vec::new();
-    match &b.expr(id).kind {
-        HirKind::Field { base, .. } => kids.push(*base),
-        HirKind::Index { base, index, .. } => kids.extend([*base, *index]),
-        HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => kids.extend([*lhs, *rhs]),
-        HirKind::Un { operand, .. } => kids.push(*operand),
-        HirKind::Cast { value } | HirKind::Named { value, .. } | HirKind::Spread(value) => kids.push(*value),
-        HirKind::Call { callee, args } => {
-            if let Callee::Value(v) = callee {
-                kids.push(*v);
-            }
-            kids.extend(args.iter().copied());
-        }
-        HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => kids.extend(args.iter().copied()),
-        HirKind::Block { stmts, tail } => {
-            kids.extend(stmts.iter().copied());
-            kids.extend(tail.iter().copied());
-        }
-        HirKind::Let { init, .. } => kids.extend(init.iter().copied()),
-        HirKind::LetPat { init, .. } => kids.push(*init),
-        HirKind::Assign { place, value } => kids.extend([*place, *value]),
-        HirKind::Append { base, value } => kids.extend([*base, *value]),
-        HirKind::If { cond, then, els } => {
-            kids.extend([*cond, *then]);
-            kids.extend(els.iter().copied());
-        }
-        HirKind::Loop { body } => kids.push(*body),
-        HirKind::ForIn { iterable, body, .. } => kids.extend([*iterable, *body]),
-        HirKind::Return(v) => kids.extend(v.iter().copied()),
-        HirKind::Match { scrutinee, arms } => {
-            kids.push(*scrutinee);
-            kids.extend(arms.iter().map(|a| a.body));
-        }
-        HirKind::Yield { value, .. } => kids.push(*value),
-        HirKind::Resume { handle, value } => {
-            kids.push(*handle);
-            kids.extend(value.iter().copied());
-        }
-        HirKind::Defer { body, .. } => kids.push(*body),
-        HirKind::Lit(_)
-        | HirKind::Local(_)
-        | HirKind::Global { .. }
-        | HirKind::Break
-        | HirKind::Continue
-        | HirKind::Lambda { .. }
-        | HirKind::Clear(_)
-        | HirKind::Unsupported(_) => {}
-    }
-    for k in kids {
-        walk(b, k, f);
-    }
 }
 
 #[cfg(test)]

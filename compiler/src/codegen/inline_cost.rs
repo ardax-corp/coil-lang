@@ -1,4 +1,4 @@
-//! Typed inlining budgets (`Compiler::hir_inline_replan`).
+//! Typed inlining budgets (`Compiler::hir_inline_round`).
 
 /// How large a callee typed inlining may splice.
 #[derive(Clone, Debug)]
@@ -12,7 +12,7 @@ pub struct InlineCostOptions {
     /// same number. 100 takes a `HashMap` lookup's clone.
     pub max_cross_module_inline_cost: usize,
     /// Multiples of these budgets the optimization hints grant.
-    pub hint_factors: crate::il::opt::HintFactors,
+    pub hint_factors: crate::opt::HintFactors,
 }
 
 impl Default for InlineCostOptions {
@@ -21,7 +21,7 @@ impl Default for InlineCostOptions {
             max_inline_cost: 100,
             inline_across_modules: true,
             max_cross_module_inline_cost: 100,
-            hint_factors: crate::il::opt::HintFactors::default(),
+            hint_factors: crate::opt::HintFactors::default(),
         }
     }
 }

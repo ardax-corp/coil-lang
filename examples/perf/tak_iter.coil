@@ -1,5 +1,5 @@
 // Iterative sibling of tak.coil. Same tak(18, 12, 6) = 7.
-// An explicit stack walks the same call tree. There is no VM recursion
+// An explicit stack walks the same call tree. There is no native recursion
 // and no stride-1 vector loop: each step still waits on three children.
 use io::sync::print;
 use string::format;

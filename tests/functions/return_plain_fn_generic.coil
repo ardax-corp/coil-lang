@@ -1,0 +1,103 @@
+// A free generic function returning a function over its type parameter
+// whose signature is plain words (`fn(T) -> Vec<T>`, `fn(T) -> (T, T)`,
+// `fn(T) -> T`, one level down `fn() -> fn(T) -> T`), at heap, immediate,
+// float, unit and two-word types. Past the clone budget its shared call
+// hands the returned closure on as it is, as a method's does
+// (coil-lang#2771).
+use tests::assert;
+use string::format;
+
+#[derive(Show, Eq)]
+class Pt {
+    pub a: int,
+}
+
+fn twice<T>(T x) -> Vec<T> {
+    return [x, x];
+}
+
+fn dup<T>(T x) -> (T, T) {
+    return (x, x);
+}
+
+fn keep<T>(T x) -> T {
+    return x;
+}
+
+fn lift<T>() -> fn(T) -> Vec<T> {
+    return twice;
+}
+
+fn lift_dup<T>() -> fn(T) -> (T, T) {
+    return dup;
+}
+
+fn lift_keep<T>() -> fn(T) -> T {
+    return keep;
+}
+
+fn nest<T>() -> fn() -> fn(T) -> T {
+    return fn () => keep;
+}
+
+fn lam<T>() -> fn(T) -> Vec<T> {
+    return fn (T x) => Vec::from([x, x, x]);
+}
+
+fn curried<T>() -> fn(T) -> fn(T) -> (T, T) {
+    return fn (T a) => fn (T b) use (a) => (a, b);
+}
+
+test("a returned fn(T) -> Vec<T>") {
+    let i: fn(int) -> Vec<int> = lift();
+    assert!(format("%v", i(3)) == "[3, 3]");
+    let s: fn(string) -> Vec<string> = lift();
+    assert!(format("%v", s("s")) == "[s, s]");
+    let p: fn(Pt) -> Vec<Pt> = lift();
+    assert!(p(new Pt(2))[1].a == 2);
+    let f: fn(float) -> Vec<float> = lift();
+    assert!(format("%v", f(1.5)) == "[1.5, 1.5]");
+    let o: fn(Option<int>) -> Vec<Option<int>> = lift();
+    assert!(format("%v", o(Option::Some(1))) == "[Some(1), Some(1)]");
+    let t: fn((int, int)) -> Vec<(int, int)> = lift();
+    assert!(format("%v", t((1, 2))) == "[(1, 2), (1, 2)]");
+    let u: fn(()) -> Vec<()> = lift();
+    assert!(u(()).len() == 2);
+    let l: fn(string) -> Vec<string> = lam();
+    assert!(l("l").len() == 3);
+}
+
+test("a returned fn(T) -> (T, T) and fn(T) -> T") {
+    let o: fn(Option<int>) -> (Option<int>, Option<int>) = lift_dup();
+    assert!(o(Option::Some(4)) == (Option::Some(4), Option::Some(4)));
+    let t: fn((int, int)) -> ((int, int), (int, int)) = lift_dup();
+    assert!(t((1, 2)) == ((1, 2), (1, 2)));
+    let u: fn(()) -> ((), ()) = lift_dup();
+    assert!(format("%v", u(())) == "((), ())");
+    let s: fn(string) -> (string, string) = lift_dup();
+    assert!(s("s") == ("s", "s"));
+    let ku: fn(()) -> () = lift_keep();
+    assert!(format("%v", ku(())) == "()");
+    let kf: fn(float) -> float = lift_keep();
+    assert!(kf(2.5) == 2.5);
+    let kb: fn(bool) -> bool = lift_keep();
+    assert!(kb(true));
+}
+
+test("one level down and curried") {
+    let n: fn() -> fn(int) -> int = nest();
+    let k = n();
+    assert!(k(4) == 4);
+    let ns: fn() -> fn(Pt) -> Pt = nest();
+    let ks = ns();
+    assert!(ks(new Pt(7)).a == 7);
+    let nt: fn() -> fn((int, int)) -> (int, int) = nest();
+    let kt = nt();
+    assert!(kt((5, 6)) == (5, 6));
+    let c: fn(string) -> fn(string) -> (string, string) = curried();
+    let c1 = c("a");
+    assert!(c1("b") == ("a", "b"));
+    let ci: fn(int) -> fn(int) -> (int, int) = curried();
+    let ci1 = ci(1);
+    assert!(ci1(2) == (1, 2));
+}

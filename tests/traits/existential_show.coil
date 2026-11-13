@@ -5,11 +5,11 @@ use tests::assert;
 use string::format;
 
 fn described(Show x) -> string {
-    return format("<%s>", show(x));
+    return format("<%s>", x.show());
 }
 
 fn twice(Show x) -> string {
-    return show(x) + show(x);
+    return x.show() + x.show();
 }
 
 fn packed(int n) -> Show {
@@ -26,5 +26,5 @@ test("existential used twice") {
 }
 
 test("existential from a call") {
-    assert!(show(packed(5)) == "5");
+    assert!(packed(5).show() == "5");
 }

@@ -8,11 +8,11 @@ trait Shape<S> {
     fn area(S self) -> int {}
 
     fn scaled(S self, int k) -> int {
-        return area(self) * k;
+        return self.area() * k;
     }
 
     fn describe(S self) -> string {
-        return "area " + show(area(self));
+        return "area " + self.area().show();
     }
 }
 
@@ -37,12 +37,12 @@ impl Shape for Rect {
     }
 
     fn describe(Rect self) -> string {
-        return "rect " + show(self.w) + "x" + show(self.h);
+        return "rect " + self.w.show() + "x" + self.h.show();
     }
 }
 
 fn label<T: Shape>(T s) -> string {
-    return describe(s);
+    return s.describe();
 }
 
 fn double_area<T: Shape>(T s) -> int {
@@ -50,13 +50,13 @@ fn double_area<T: Shape>(T s) -> int {
 }
 
 fn label_any(Shape s) -> string {
-    return describe(s);
+    return s.describe();
 }
 
 test("an omitted default uses the impl's methods") {
     let s = new Sq(3);
     assert!(s.scaled(2) == 18);
-    assert!(scaled(s, 3) == 27);
+    assert!(s.scaled(3) == 27);
     assert!(s.describe() == "area 9");
 }
 

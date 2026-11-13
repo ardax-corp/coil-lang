@@ -8,26 +8,24 @@ compiles a `.coil` entry (and its module graph) **in memory** — it never write
 ```bash
 cargo build   # coil + coil-dissect (+ other helpers)
 coil dissect examples/fib.coil --fn fib
-coil dissect examples/fib.coil --fn fib --il
+coil dissect examples/fib.coil --fn fib --hir
 coil dissect examples/fib.coil --ast
 coil dissect gated.coil --allow-attach --fn main
 # or:
-coil-dissect examples/fib.coil --fn fib --il
+coil-dissect examples/fib.coil --fn fib
 ```
 
 | Flag | Effect |
 |------|--------|
-| (none) | Symbol index + full final fused bytecode (function headers interleaved), with the source line (`;; file:line │ text`) shown wherever it changes. Dense register ops are decoded (`r3 = r1`, `r5 = array(r15..r18)`, `r2 = len(r5)`). A `HostInvoke` names the native it calls (`HostInvoke arity=1  ; task_join`) when the `CONST` that pushed its id is found before straight-line argument code |
-| `--no-source` | Bytecode without the interleaved source lines |
+| (none) | A symbol index, then `=== mir ===`: each body's MIR under `;; fn NAME` |
 | `--fn <pat>` | Case-insensitive FQN match (exact, substring, trailing segment, `name#N`) |
-| `--il` | Also print the stack IL as planned (snapshot after finalize splices, before lower): each body is a placeholder until MIR emits it, glue and thunks are real |
-| `--il-post` | Also print the IL after each body's dense or LIR emission, before fuse / lowering |
-| `--hir` | Also print each body's HIR (typed, desugared tree) |
-| `--expand` | Print the entry file after macro expansion (no bytecode); generated and `comptime` items are marked with where they came from |
-| `--tests` | Compile `test("…") { … }` cases too (`__zs_test_N`), so PCs match a `coil test` run (for example a gc-stress report) |
-| `--mir` | Also print the MIR of each numeric body that reached emission, marked `dense` / `lir`; a dense body says whether it was kept or refused after emission (its LIR form runs instead) |
+| `--hir` | Also print each body's HIR (typed, desugared tree), under `=== hir ===` |
+| `--expand` | Print the entry file after macro expansion (no MIR); generated and `comptime` items are marked with where they came from |
+| `--tests` | Compile `test("…") { … }` cases too (`__zs_test_N`), like `coil test` |
+| `--mir` | Print the MIR the engines run (the default) |
 | `--effects` | Also print each function's effects with the first reason for each (`step: uses {write, suspend}: calls `write_all` (write, suspend)`, `apply: pure apart from its parameters: calls parameter `f``) and the parameters it mutates (`Point::bump: uses {mutate}: writes field `x` of a shared object (mutate); mutates self`, the summary a call with a `readonly` argument is checked against), then, when auto-par is on, each counted loop or fork site left sequential only because a callee is impure (`;; loop over `i` in `main` not parallelized: `step` reads static `SCALE` (read)`). See [auto-par.md](auto-par.md) |
-| `-O LEVEL` | Optimization level, as for `coil compile` (`--opt-stats` / `--opt-stats-json` print body tiers, HIR counters and compile-time work) |
+| `--boxes` | Also print every place lowering boxes a value: the function, what was boxed (`pair`, `variant`, `niche`, `host result`), its type and the lowering line that asked for it (`stored: pair `Option<int>` (from_hir.rs:5779)`). See [layout.md](layout.md) |
+| `-O LEVEL` | Optimization level, as for `coil compile` (`--opt-stats` / `--opt-stats-json` print HIR counters and compile-time work) |
 | `--ast` | Also pretty-print the entry-file AST (as `coil fmt` writes it) |
 | `--root DIR` | Extra `use`/`mod` search directory (repeatable; default `src`) |
 | `--entry FILE` | Entry `.coil` instead of the positional file |
@@ -44,9 +42,7 @@ coil-dissect examples/fib.coil --fn fib --il
 
 Host grants match `coil` compile/run (`HostGrantFlags` → `Pipeline` `HostGrants`). They are CLI-only. Dissect compiles in memory; gated calls without a flag fail the compile (`E0406`–`E0411`, `E0414`) the same as `coil compile` ([pipeline.md](pipeline.md#capabilities)). `--ffi-search-path` is lookup only.
 
-A `.ccoil` archive as the entry (`coil dissect out.ccoil`) dumps its bytecode
-without compiling; `--il` / `--il-post` / `--hir` / `--effects` / `--mir` / `--ast` need a source.
-Archives may not record function symbols, in which case the listing is one
-`<program>` section.
+A `.ccoil` archive as the entry (`coil dissect out.ccoil`) prints its MIR without
+compiling; `--hir`, `--effects`, `--boxes`, `--ast` and `--expand` need a source.
 
 Name filtering uses live compiler FQNs (`fib`, `mod::fib`, `Foo::bar`, `Show__int__show`, …). 

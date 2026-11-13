@@ -1,0 +1,19 @@
+// @expected E0149 — a generator walking `a` keeps `a` past the call that
+// starts it while `w` borrows `a` (#2816).
+use collections::map::HashMap;
+
+gen fn values(HashMap<string, int> m) {
+    for p in m {
+        yield p.value;
+    }
+}
+
+fn main() {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    let w = mut a;
+    let g = values(a);
+    let _ = a.insert("b", 2);
+    let _ = w.insert("c", 3);
+    let _ = resume g;
+}

@@ -14,11 +14,11 @@ use common::{BUILTIN_IO_ERROR_VARIANTS, BUILTIN_OPTION_VARIANTS, BUILTIN_RESULT_
 
 use crate::io_handle::{NativeHandle, WaitHandle};
 use crate::io_reactor::Interest;
-use crate::memory::{EnumPayload, Heap, Member, ObjArray, ObjStream, ObjTuple, Object, StreamKind};
+use crate::memory::{EnumPayload, Heap, ObjArray, ObjEnum, ObjStream, Object, StreamKind};
 
 type OutputRedirect = *mut (dyn Write + Send);
 
-/// Request to park the VM until a handle is ready (set by `await_*` natives).
+/// Request to park the runtime until a handle is ready (set by `await_*` natives).
 #[derive(Debug, Clone)]
 pub struct IoParkRequest {
     pub handle: WaitHandle,
@@ -42,7 +42,7 @@ thread_local! {
 }
 
 /// Whether a native failed with `TooManyOpenFiles` since the last call;
-/// clears it. The VM collects (freeing the descriptors of streams nothing
+/// clears it. The runtime collects (freeing the descriptors of streams nothing
 /// reaches) and tries an `open` / `accept` once more.
 pub fn take_fd_exhausted() -> bool {
     FD_EXHAUSTED.with(|f| f.replace(false))
@@ -142,16 +142,14 @@ pub fn set_shared_print_redirect(
     SHARED_PRINT.with(|cell| cell.replace(buf))
 }
 
-/// Install this OS thread's stdout-only capture (see
-/// [`crate::vm::Machine::set_shared_stdout`]).
+/// Install this OS thread's stdout-only capture.
 pub fn set_shared_stdout_redirect(
     buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 ) -> Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> {
     SHARED_STDOUT.with(|cell| cell.replace(buf))
 }
 
-/// Install this OS thread's stderr-only capture (see
-/// [`crate::vm::Machine::set_shared_stderr`]).
+/// Install this OS thread's stderr-only capture.
 pub fn set_shared_stderr_redirect(
     buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>,
 ) -> Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> {
@@ -373,7 +371,7 @@ pub fn stream_set_write_timeout(heap: &mut Heap, stream: Value, ms: i64) -> Resu
     })?
 }
 
-/// Wait for handle readiness via the VM's [`IoReactor`] (help-steals CPU work when available).
+/// Wait for handle readiness via the runtime's [`IoReactor`] (help-steals CPU work when available).
 pub fn reactor_wait_fd(
     handle: WaitHandle,
     interest: Interest,
@@ -491,7 +489,6 @@ pub(crate) fn alloc_unsent_stream(heap: &mut Heap) -> Value {
 
 /// Whether `v` is an [`alloc_unsent_stream`] placeholder.
 pub(crate) fn is_unsent_stream(heap: &Heap, v: Value) -> bool {
-    let v = peel_one_boxed(heap, v);
     matches!(
         heap.find_object_by_addr(v.bits()),
         Some(Object::Stream(gc)) if gc.as_ref().kind == StreamKind::Unsent
@@ -511,24 +508,12 @@ pub fn stream_open(heap: &mut Heap, path: &str, mode: &str) -> Result<Value, IoE
     alloc_stream(heap, handle, StreamKind::File).map_err(|e| IoErrorTag::from_error(&e))
 }
 
-pub(crate) fn peel_one_boxed(heap: &Heap, v: Value) -> Value {
-    match heap.find_object_by_addr(v.bits()) {
-        Some(Object::Boxed(gc)) => match &gc.as_ref().payload {
-            Member::Value(inner) => *inner,
-            Member::Object(o) => Value::from(o.addr()),
-        },
-        _ => v,
-    }
-}
-
 pub(crate) fn with_stream_mut<R>(
     heap: &mut Heap,
     stream: Value,
     f: impl FnOnce(&mut ObjStream) -> R,
 ) -> Result<R, IoErrorTag> {
-    let stream = peel_one_boxed(heap, stream);
-    let addr = stream.bits();
-    let Some(Object::Stream(mut gc)) = heap.find_object_by_addr(addr) else {
+    let Some(Object::Stream(mut gc)) = heap.find_object_by_addr(stream.bits()) else {
         return Err(IoErrorTag::InvalidInput);
     };
     Ok(f(gc.as_mut()))
@@ -823,7 +808,7 @@ fn wait_writable(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
     poll_ready(handle, false, timeout)
 }
 
-/// Non-blocking readiness probe; parks the VM via [`IoParkRequest`] when not ready.
+/// Non-blocking readiness probe; parks the runtime via [`IoParkRequest`] when not ready.
 ///
 /// Returns `Ok(None)` when a park was requested (caller must not push a value).
 /// Returns `Ok(Some(Result::Ok(())))` when already ready.
@@ -1385,16 +1370,16 @@ pub fn tcp_shutdown(heap: &mut Heap, stream: Value, how: i64) -> Result<(), IoEr
 
 fn alloc_tuple2(heap: &mut Heap, a: Value, b: Value) -> Value {
     let (obj, _) = heap.alloc(
-        ObjTuple::new(vec![a, b]),
-        Object::Tuple,
+        ObjEnum::tuple(&[a, b], 0),
+        Object::Enum,
     );
     Value::from(obj.addr())
 }
 
 fn alloc_tuple3(heap: &mut Heap, a: Value, b: Value, c: Value) -> Value {
     let (obj, _) = heap.alloc(
-        ObjTuple::new(vec![a, b, c]),
-        Object::Tuple,
+        ObjEnum::tuple(&[a, b, c], 0),
+        Object::Enum,
     );
     Value::from(obj.addr())
 }
@@ -1570,13 +1555,17 @@ pub fn udp_recv_from_wait(heap: &mut Heap, stream: Value, buf: Value) -> Result<
     }
 }
 
-/// Decode a heap string `Value` into a Rust `String`.
-pub fn value_as_string(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
-    let v = peel_one_boxed(heap, v);
+/// The text of heap string `v`, if it is one.
+pub fn heap_string(heap: &Heap, v: Value) -> Option<String> {
     match heap.find_object_by_addr(v.bits()) {
-        Some(Object::String(gc)) => Ok(gc.as_ref().data.to_string()),
-        _ => Err(IoErrorTag::InvalidInput),
+        Some(Object::String(gc)) => Some(gc.as_ref().data.to_string()),
+        _ => None,
     }
+}
+
+/// [`heap_string`], `InvalidInput` when `v` is not a string.
+pub fn value_as_string(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
+    heap_string(heap, v).ok_or(IoErrorTag::InvalidInput)
 }
 
 /// `open` mode may be a heap string or an untagged 1-byte immediate (`"r"`).
@@ -1584,7 +1573,7 @@ pub fn value_as_open_mode(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
     match value_as_string(heap, v) {
         Ok(s) => Ok(s),
         Err(_) => {
-            let n = peel_one_boxed(heap, v).as_int();
+            let n = v.as_int();
             if (0..=255).contains(&n) && (n as u8).is_ascii_lowercase() {
                 Ok(String::from_utf8_lossy(&[n as u8]).into_owned())
             } else {
@@ -1594,9 +1583,8 @@ pub fn value_as_open_mode(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
     }
 }
 
-/// Marshal a Stream (or one Boxed Stream) to its fd. `None` if `v` is not a stream.
+/// Marshal a Stream to its fd. `None` if `v` is not a stream.
 pub fn stream_fd_i64(heap: &Heap, v: Value) -> Option<i64> {
-    let v = peel_one_boxed(heap, v);
     match heap.find_object_by_addr(v.bits()) {
         Some(Object::Stream(gc)) => gc.as_ref().handle.as_ref().map(|h| h.fd_i64()),
         _ => None,
@@ -1653,7 +1641,7 @@ pub fn from_bytes_take(heap: &mut Heap, buf: Value) -> Result<Value, crate::str_
 /// rejects this case).
 pub fn to_bytes(heap: &mut Heap, s: Value) -> Value {
     // One pass over the string's bytes (no intermediate `String` copy).
-    let bytes: Vec<u8> = match heap.find_object_by_addr(peel_one_boxed(heap, s).bits()) {
+    let bytes: Vec<u8> = match heap.find_object_by_addr(s.bits()) {
         Some(Object::String(gc)) => gc.as_ref().data.as_bytes().to_vec(),
         _ => Vec::new(),
     };
@@ -1957,7 +1945,7 @@ mod tests {
 
     fn tuple_elems(heap: &Heap, v: Value) -> Vec<Value> {
         match heap.find_object_by_addr(v.bits()) {
-            Some(Object::Tuple(gc)) => gc.as_ref().elements().to_vec(),
+            Some(Object::Enum(gc)) if gc.as_ref().is_tuple() => gc.as_ref().elements().to_vec(),
             _ => panic!("expected tuple"),
         }
     }
@@ -2374,7 +2362,7 @@ mod tests {
         stream_set_read_timeout(&mut heap, stream, 123).unwrap();
         let _ = take_pending_io_park();
         let parked = stream_await_readable(&mut heap, stream).expect("await");
-        assert!(parked.is_none(), "empty socket must park the VM");
+        assert!(parked.is_none(), "empty socket must park the task");
         let req = take_pending_io_park().expect("park request");
         assert_eq!(req.interest, Interest::Readable);
         assert_eq!(req.timeout, Some(Duration::from_millis(123)));
@@ -2417,15 +2405,14 @@ mod tests {
 
     #[test]
     fn stream_close_cancels_reactor_waiters() {
-        let mut vm = crate::Machine::<64>::default();
-        let io = std::sync::Arc::clone(vm.io_reactor());
+        let io = crate::io_reactor::IoReactor::new();
         let (r, w) = tcp_connected_pair();
         let wait = WaitHandle::from_tcp(&r);
         let mut heap = Heap::default();
         let stream = alloc_stream(&mut heap, NativeHandle::Tcp(r), StreamKind::Tcp).unwrap();
         let tok = io.register_wait(wait, Interest::Readable);
         assert!(io.has_wait(tok));
-        let _guard = crate::thread::HostStateGuard::enter(&mut vm);
+        let _guard = crate::thread::HostStateGuard::enter_io(std::sync::Arc::clone(&io));
         stream_close(&mut heap, stream).unwrap();
         assert!(!io.has_wait(tok));
         drop(w);
@@ -2433,11 +2420,10 @@ mod tests {
 
     #[test]
     fn io_drive_with_host_state_counts_ready_waiters() {
-        let mut vm = crate::Machine::<64>::default();
-        let io = std::sync::Arc::clone(vm.io_reactor());
+        let io = crate::io_reactor::IoReactor::new();
         let (r, mut w) = tcp_connected_pair();
         let tok = io.register_wait(WaitHandle::from_tcp(&r), Interest::Readable);
-        let _guard = crate::thread::HostStateGuard::enter(&mut vm);
+        let _guard = crate::thread::HostStateGuard::enter_io(std::sync::Arc::clone(&io));
         let mut heap = Heap::default();
         assert_eq!(io_drive(&mut heap).as_int(), 0);
         w.write_all(b"q").expect("write");
@@ -2465,11 +2451,10 @@ mod tests {
 
     #[test]
     fn io_wait_ready_blocks_until_waiter_ready() {
-        let mut vm = crate::Machine::<64>::default();
-        let io = std::sync::Arc::clone(vm.io_reactor());
+        let io = crate::io_reactor::IoReactor::new();
         let (r, mut w) = tcp_connected_pair();
         let tok = io.register_wait(WaitHandle::from_tcp(&r), Interest::Readable);
-        let _guard = crate::thread::HostStateGuard::enter(&mut vm);
+        let _guard = crate::thread::HostStateGuard::enter_io(std::sync::Arc::clone(&io));
         let mut heap = Heap::default();
         // Make readable before wait so we don't hang the unit test.
         w.write_all(b"q").expect("write");

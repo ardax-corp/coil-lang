@@ -39,6 +39,18 @@ pub const GC_SWEEP_QUANTUM: usize = 128;
 /// Slots one steal-epoch mutator takes per size class under the epoch lock.
 const EPOCH_BATCH: usize = 64;
 
+/// Whether the collector checks its own invariants as it goes (the
+/// missed-barrier check at the top of each minor, #2687): `gc-stress` and
+/// debug builds, and any run with `COIL_MIR_VERIFY` set. A heap reads it
+/// once, when it is made.
+pub(crate) fn heap_checks_on() -> bool {
+    if cfg!(any(feature = "gc-stress", debug_assertions)) {
+        return true;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("COIL_MIR_VERIFY").is_some_and(|v| !v.is_empty() && v != "0"))
+}
+
 /// One size class's untaken slots: `(slot size, align)` and the slots.
 type BatchClass = ((u32, u32), Vec<NonNull<u8>>);
 
@@ -93,7 +105,7 @@ thread_local! {
 
 /// This thread's epoch batch, set aside while it helps with a job that may
 /// allocate in another heap's epoch (a join help-steals unrelated jobs: other
-/// test cases, other VMs' auto-par work). Dropping it puts the batch back.
+/// test cases, other runtimes' auto-par work). Dropping it puts the batch back.
 #[must_use]
 pub struct EpochBatchStash(Option<EpochBatch>);
 
@@ -138,7 +150,7 @@ pub struct EpochWriteScope {
 }
 
 impl EpochWriteScope {
-    /// Enter a job on `heap` (the heap the job's VM is bound to): a
+    /// Enter a job on `heap` (the heap the job's runtime is bound to): a
     /// shared-heap job of `heap`'s open epoch when `shared`, otherwise a job
     /// that may write anything ([`Self::unchecked`]).
     #[cfg(any(debug_assertions, feature = "gc-stress"))]
@@ -148,7 +160,7 @@ impl EpochWriteScope {
     }
 
     /// Lift the guard until dropped: a join that help-steals runs the stolen
-    /// job (and the reset of its helper VM's own heap) on this thread.
+    /// job (and the reset of its helper runtime's own heap) on this thread.
     #[cfg(any(debug_assertions, feature = "gc-stress"))]
     #[inline]
     pub fn unchecked() -> Self {
@@ -213,10 +225,32 @@ pub enum GcPhase {
     Sweeping,
 }
 
+/// The heap's allocation counters and the gate of native code's inline
+/// allocation, boxed so native code updates them in place
+/// ([`InlineLayout`]).
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct HeapCounts {
+    /// Non-zero while a nursery object may be bump-allocated inline: the
+    /// conditions [`Heap::alloc`] checks before it allocates young that do
+    /// not depend on the object ([`Heap::sync_inline_gate`]).
+    pub inline_gate: u64,
+    /// [`Heap::finalizer_types`]: its words' address and count, so inline
+    /// code leaves an instance whose type has a `drop` to the helper.
+    pub fin_words: u64,
+    pub fin_len: u64,
+    pub alloc_bytes: usize,
+    /// Bytes allocated in the nursery since the last minor collection
+    /// (part of `alloc_bytes`; an estimate, arrays grow in place).
+    pub young_bytes: usize,
+    /// Live object count (alloc +1, sweep/dealloc −1). Not a membership set.
+    pub live_count: usize,
+}
+
 /// Managed heap. Objects are linked in an intrusive list for traversal.
-/// `Gc<T>` handles are copyable; the VM controls when objects become unreachable.
+/// `Gc<T>` handles are copyable; the runtime controls when objects become unreachable.
 pub struct Heap {
-    alloc_bytes: usize,
+    counts: Box<HeapCounts>,
     gc_next_threshold: usize,
     /// Most bytes the heap may hold ([`Self::set_byte_cap`]); `usize::MAX`
     /// when unlimited. The collection threshold never exceeds it, so an
@@ -230,8 +264,6 @@ pub struct Heap {
     gc_sweep_freed: usize,
     strings: Table<()>,
     slab: Slab,
-    /// Live object count (alloc +1, sweep/dealloc −1). Not a membership set.
-    live_count: usize,
     /// Per class `type_id`: field word kinds from static types
     /// (`common::WORD_*`). Missing rows / fields are unknown.
     class_kinds: std::sync::Arc<Vec<Box<[u8]>>>,
@@ -239,18 +271,18 @@ pub struct Heap {
     /// instead of the heap (#1870). A superset: entries a sweep freed or a
     /// slot reuse replaced drop out when it next runs.
     weaks: Vec<u64>,
-    /// Class / enum `type_id`s with a `drop` (the VM's finalizer registry),
+    /// Class / enum `type_id`s with a `drop` (the runtime's finalizer registry),
     /// one bit per id: every allocation asks while any is registered.
     finalizer_types: Vec<u64>,
     /// The [`Self::finalizer_types`] whose `drop` keeps nothing of `self`
     /// (the compiler's escape facts): an early free may run it at the free.
     early_drop_types: Vec<u64>,
-    /// Class `type_id`s that are identities, never copied on write
-    /// (`shared class`, `Ref<T>`), one bit per id. Classes with a `drop`
-    /// are identities too.
-    identity_types: Vec<u64>,
     /// Objects [`Self::cow_unique`] copied.
     cow_copies: u64,
+    /// Objects `Cow` shared.
+    cow_shares: u64,
+    /// `--cow-report`: copies by native site.
+    cow_sites: Option<std::collections::HashMap<u32, u64>>,
     /// Every object of a [`Self::finalizer_types`] type, a superset pruned
     /// by [`Self::unmarked_finalizable`] like [`Self::weaks`].
     finalizable: Vec<u64>,
@@ -259,8 +291,6 @@ pub struct Heap {
     /// Last tag returned by [`Self::immortal_unit_enum`]. Unit constructors
     /// (binary-tree leaves) hit this instead of the map.
     unit_enum: Option<(u32, Object)>,
-    /// Shared `()` ([`Self::immortal_empty_tuple`]), never swept or moved.
-    empty_tuple: Option<Object>,
     /// Shared function values that capture and fill nothing, by entry,
     /// arity and rest flag ([`Self::immortal_plain_fn`]), never swept.
     immortal_fns: HashMap<(u32, u32, bool), Object>,
@@ -274,6 +304,9 @@ pub struct Heap {
     doomed: Vec<u64>,
     /// What the last [`Self::free_early`] gave back.
     early_freed: Vec<u64>,
+    /// Scratch of a deep [`Heap::free_early`] walk (found, mark work,
+    /// children), kept so a free does not allocate.
+    early_scratch: (Vec<Object>, Vec<Object>, Vec<u64>),
     /// [`Self::free_early`] freed something: a dead frame word or a dead
     /// object may now point at a freed or reused slot, so a typed handle
     /// is looked up before it is marked ([`Self::early_freed_slot`]).
@@ -285,11 +318,16 @@ pub struct Heap {
     /// young; when it closes they join the write barrier
     /// ([`Self::exit_epoch_stw`]).
     epoch_born: Vec<u64>,
-    /// Bytes allocated in the nursery since the last minor collection
-    /// (part of `alloc_bytes`; an estimate, arrays grow in place).
-    young_bytes: usize,
     /// Nursery chunks in use that ask for a minor collection.
     nursery_chunks: usize,
+    /// Held nursery chunks the last major cycle found live
+    /// ([`Self::set_held_after_major`]).
+    held_after_major: usize,
+    /// Held nursery chunks that ask for a major cycle
+    /// ([`Self::held_over_budget`]).
+    held_budget: usize,
+    /// [`heap_checks_on`], read once.
+    pub(super) heap_checks: bool,
     /// Bytes still to allocate old after a minor collection most of the
     /// nursery survived ([`Self::note_survival`]).
     pretenure_bytes: usize,
@@ -321,7 +359,7 @@ pub struct Heap {
     epoch_gen: u8,
 }
 
-/// Machine-owned heap that can borrow the root Heap for a C1 steal job.
+/// A runtime's own heap that can borrow the root Heap for a C1 steal job.
 #[derive(Default)]
 pub struct HeapSlot {
     owned: Heap,
@@ -330,8 +368,8 @@ pub struct HeapSlot {
 
 impl Default for Heap {
     fn default() -> Self {
-        Self {
-            alloc_bytes: 0,
+        let mut heap = Self {
+            counts: Box::default(),
             gc_next_threshold: GC_NEXT_THRESHOLD,
             byte_cap: usize::MAX,
             gc_growth_factor: GC_GROWTH_FACTOR,
@@ -339,17 +377,16 @@ impl Default for Heap {
             gc_sweep_freed: 0,
             strings: Table::default(),
             slab: Slab::new(),
-            live_count: 0,
             class_kinds: std::sync::Arc::default(),
             weaks: Vec::new(),
             finalizer_types: Vec::new(),
             early_drop_types: Vec::new(),
-            identity_types: Vec::new(),
             cow_copies: 0,
+            cow_shares: 0,
+            cow_sites: None,
             finalizable: Vec::new(),
             immortal_enums: HashMap::default(),
             unit_enum: None,
-            empty_tuple: None,
             immortal_fns: HashMap::new(),
             gc_gray: Vec::new(),
             gc_root_objects: Vec::new(),
@@ -357,11 +394,14 @@ impl Default for Heap {
             gc_dangling_strings: Vec::new(),
             doomed: Vec::new(),
             early_freed: Vec::new(),
+            early_scratch: (Vec::new(), Vec::new(), Vec::new()),
             freed_early: false,
             nursery: false,
             epoch_born: Vec::new(),
-            young_bytes: 0,
             nursery_chunks: NURSERY_CHUNKS,
+            held_after_major: 0,
+            held_budget: NURSERY_CHUNKS,
+            heap_checks: heap_checks_on(),
             pretenure_bytes: 0,
             pretenure_streak: 0,
             region_depth: 0,
@@ -374,7 +414,9 @@ impl Default for Heap {
             alloc_lock: ptr::null(),
             #[cfg(any(debug_assertions, feature = "gc-stress"))]
             epoch_gen: 0,
-        }
+        };
+        inline::make_inline_classes(&mut heap.slab);
+        heap
     }
 }
 
@@ -475,10 +517,11 @@ impl Heap {
         // young object may exist for them to store.
         self.promote_young();
         self.epoch_stw = true;
+        self.sync_inline_gate();
         self.epoch_gc_ceiling = self
             .gc_next_threshold
             .saturating_mul(EPOCH_GC_HEADROOM_FACTOR)
-            .max(self.alloc_bytes.saturating_add(EPOCH_GC_HEADROOM_MIN));
+            .max(self.counts.alloc_bytes.saturating_add(EPOCH_GC_HEADROOM_MIN));
         self.alloc_lock = lock as *const Mutex<()>;
         #[cfg(any(debug_assertions, feature = "gc-stress"))]
         {
@@ -489,6 +532,7 @@ impl Heap {
 
     pub fn exit_epoch_stw(&mut self) {
         self.epoch_stw = false;
+        self.sync_inline_gate();
         self.alloc_lock = ptr::null();
         for addr in std::mem::take(&mut self.epoch_born) {
             if let Some(obj) = self.find_object_by_addr(addr)
@@ -561,14 +605,13 @@ impl Heap {
                 batch.born.push(object.addr());
             }
         });
-        crate::vm::note_heap_alloc();
         (object, content)
     }
 
     /// Add a batch's pending byte / object counts to the heap (lock held).
     fn fold_epoch_counts(&mut self, batch: &mut EpochBatch) {
-        self.alloc_bytes += std::mem::take(&mut batch.bytes);
-        self.live_count += std::mem::take(&mut batch.objects);
+        self.counts.alloc_bytes += std::mem::take(&mut batch.bytes);
+        self.counts.live_count += std::mem::take(&mut batch.objects);
         self.weaks.append(&mut batch.weaks);
         self.finalizable.append(&mut batch.finalizable);
         self.epoch_born.append(&mut batch.born);
@@ -634,16 +677,18 @@ impl Heap {
         let slot = if young { self.slab.alloc_young(layout) } else { self.slab.alloc(layout) };
         let (object, content) = Self::init_slot(slot.cast::<GcData<T>>(), data, map);
         let size = object.size();
-        self.alloc_bytes += size;
-        self.live_count += 1;
+        self.counts.alloc_bytes += size;
+        self.counts.live_count += 1;
         if young {
             content.header.generation.set(GEN_YOUNG);
-            self.young_bytes += size;
-            crate::vm::note_heap_alloc();
+            self.counts.young_bytes += size;
             return (object, content);
         }
         if T::NURSERY && self.pretenure_bytes != 0 {
             self.pretenure_bytes = self.pretenure_bytes.saturating_sub(size);
+            if self.pretenure_bytes == 0 {
+                self.sync_inline_gate();
+            }
         }
         if T::HOLDS_REFS && self.nursery {
             if self.epoch_stw {
@@ -674,7 +719,6 @@ impl Heap {
             // behind it (most reuse, freed by this sweep) need no tag.
             content.set_fresh();
         }
-        crate::vm::note_heap_alloc();
         debug_assert!(
             self.find_object_by_addr(object.addr()).is_some(),
             "slab alloc must be findable at {:#x}",
@@ -682,6 +726,24 @@ impl Heap {
         );
 
         (object, content)
+    }
+
+    /// Open or close native code's inline nursery allocation
+    /// ([`HeapCounts::inline_gate`]): called wherever one of the
+    /// object-independent conditions of a young allocation changes.
+    pub(crate) fn sync_inline_gate(&mut self) {
+        let open = !cfg!(feature = "gc-stress")
+            && self.nursery
+            && !self.epoch_stw
+            && self.pretenure_bytes == 0
+            && self.gc_phase != GcPhase::Marking;
+        self.counts.inline_gate = u64::from(open);
+    }
+
+    /// Where native code's inline allocation reads and bumps: the
+    /// counters and the nursery cursors ([`InlineLayout`]).
+    pub fn inline_alloc_ptrs(&mut self) -> (*mut HeapCounts, *mut super::slab::Bump) {
+        (std::ptr::from_mut(self.counts.as_mut()), self.slab.bumps_ptr())
     }
 
     /// The GC side list a fresh object joins, if any.
@@ -718,6 +780,7 @@ impl Heap {
             self.finalizer_types.resize(word + 1, 0);
         }
         self.finalizer_types[word] |= 1 << (type_id % 64);
+        self.sync_finalizer_words();
         let existing: Vec<u64> = self
             .objects()
             .filter(|&o| Self::finalizer_type_of(o) == Some(type_id))
@@ -727,7 +790,7 @@ impl Heap {
     }
 
     #[inline(always)]
-    fn has_finalizer(&self, type_id: u32) -> bool {
+    pub(crate) fn has_finalizer(&self, type_id: u32) -> bool {
         self.finalizer_types
             .get(type_id as usize / 64)
             .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
@@ -749,30 +812,23 @@ impl Heap {
             .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
     }
 
-    /// Forget every finalizer type (a VM reset).
+    /// Point [`HeapCounts::fin_words`] at the finalizer type words.
+    fn sync_finalizer_words(&mut self) {
+        self.counts.fin_words = self.finalizer_types.as_ptr() as u64;
+        self.counts.fin_len = self.finalizer_types.len() as u64;
+    }
+
+    /// Forget every finalizer type (a runtime reset).
     pub fn clear_finalizer_types(&mut self) {
         self.finalizer_types.clear();
+        self.sync_finalizer_words();
         self.early_drop_types.clear();
         self.finalizable.clear();
-        self.identity_types.clear();
     }
 
-    /// Note that `type_id` is an identity: [`Self::cow_unique`] never
-    /// copies its objects.
-    pub fn register_identity_type(&mut self, type_id: u32) {
-        let word = type_id as usize / 64;
-        if self.identity_types.len() <= word {
-            self.identity_types.resize(word + 1, 0);
-        }
-        self.identity_types[word] |= 1 << (type_id % 64);
-    }
-
+    /// A class with a `drop` is an identity: [`Self::cow_unique`] never copies it.
     fn is_identity_type(&self, type_id: u32) -> bool {
         self.has_finalizer(type_id)
-            || self
-                .identity_types
-                .get(type_id as usize / 64)
-                .is_some_and(|w| w & (1 << (type_id % 64)) != 0)
     }
 
     /// Copy-on-write: a second place now names `v`'s object, so the next
@@ -804,7 +860,7 @@ impl Heap {
                 if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
                     return None;
                 }
-                let slots = inst.storage.as_slice()?.to_vec();
+                let slots = inst.storage.as_slice().to_vec();
                 self.alloc(ObjInstance::with_slots(inst.type_id, slots), Object::Instance).0
             }
             Object::Array(gc) => {
@@ -822,69 +878,41 @@ impl Heap {
         Some(Value::from(copy.addr()))
     }
 
-    /// Measuring only (`COIL_COW_EAGER`): a deep copy of `v`'s class
-    /// instances and arrays, as a design that copies on assignment makes.
-    pub fn cow_deep_copy(&mut self, v: Value) -> Value {
-        let mut seen: std::collections::HashMap<u64, Value> = std::collections::HashMap::new();
-        self.deep_copy_in(v, &mut seen, 0)
-    }
-
-    fn deep_copy_in(&mut self, v: Value, seen: &mut std::collections::HashMap<u64, Value>, depth: u32) -> Value {
-        let addr = v.heap_addr();
-        if addr == 0 || depth > 10_000 {
-            return v;
-        }
-        if let Some(&c) = seen.get(&addr) {
-            return c;
-        }
-        let words = match self.find_object_by_addr(addr) {
-            Some(Object::Instance(gc)) => {
-                let inst = gc.as_ref();
-                if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
-                    return v;
-                }
-                let Some(slots) = inst.storage.as_slice() else { return v };
-                (Some(inst.type_id), slots.to_vec())
-            }
-            Some(Object::Array(gc)) => match &gc.as_ref().data {
-                ArrayData::Words(w) => (None, w.clone()),
-                ArrayData::Bytes(_) => {
-                    let copy = gc.as_ref().copy();
-                    let c = Value::from(self.alloc(copy, Object::Array).0.addr());
-                    seen.insert(addr, c);
-                    return c;
-                }
-            },
-            _ => return v,
-        };
-        let (type_id, mut slots) = words;
-        let kind = match self.find_object_by_addr(addr) {
-            Some(Object::Array(gc)) => Some(gc.as_ref().elem_kind),
-            _ => None,
-        };
-        for w in &mut slots {
-            if matches!(self.find_object_by_addr(w.heap_addr()), Some(Object::Instance(_) | Object::Array(_))) {
-                *w = self.deep_copy_in(*w, seen, depth + 1);
-            }
-        }
-        let c = match type_id {
-            Some(t) => Value::from(self.alloc(ObjInstance::with_slots(t, slots), Object::Instance).0.addr()),
-            None => {
-                let mut a = ObjArray::new(slots);
-                if let Some(k) = kind {
-                    a.elem_kind = k;
-                }
-                Value::from(self.alloc(a, Object::Array).0.addr())
-            }
-        };
-        self.cow_copies += 1;
-        seen.insert(addr, c);
-        c
-    }
-
     /// How many objects [`Self::cow_unique`] copied.
     pub fn cow_copies(&self) -> u64 {
         self.cow_copies
+    }
+
+    /// `--cow-report`: count the copies each site makes from now on.
+    pub fn report_cow(&mut self) {
+        self.cow_sites = Some(std::collections::HashMap::new());
+    }
+
+    pub fn cow_report_on(&self) -> bool {
+        self.cow_sites.is_some()
+    }
+
+    /// A `Cow` at `site` ran; `mark` is [`Self::cow_copies`] before it.
+    pub fn cow_report_note(&mut self, mark: u64, site: u32) {
+        if self.cow_copies > mark
+            && let Some(sites) = self.cow_sites.as_mut()
+        {
+            *sites.entry(site).or_insert(0) += 1;
+        }
+    }
+
+    /// A `Cow` shared an object.
+    pub fn note_cow_share(&mut self) {
+        self.cow_shares += 1;
+    }
+
+    pub fn cow_shares(&self) -> u64 {
+        self.cow_shares
+    }
+
+    /// The copies by site since [`Self::report_cow`].
+    pub fn take_cow_sites(&mut self) -> Option<std::collections::HashMap<u32, u64>> {
+        self.cow_sites.take()
     }
 
     /// A generator suspended with a `defer` armed: it owes a close, which
@@ -916,8 +944,8 @@ impl Heap {
                 return false;
             };
             let (type_id, finalized) = match obj {
-                Object::Instance(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
-                Object::Enum(gc) => (gc.as_ref().type_id, gc.as_ref().finalized),
+                Object::Instance(gc) => (gc.as_ref().type_id, obj.is_finalized()),
+                Object::Enum(gc) => (gc.as_ref().type_id, obj.is_finalized()),
                 // A closeable generator stays listed until it is done.
                 Object::Coroutine(gc) => {
                     let open = gc.as_ref().closeable && gc.as_ref().state == CoroState::Suspended;
@@ -979,13 +1007,6 @@ impl Heap {
         self.alloc(ObjString::new(data), Object::String).1
     }
 
-    /// Allocate `head + tail` without interning, appending in place when
-    /// `head` ends at its buffer's tail (amortized linear `s = s + x`).
-    pub fn alloc_concat(&mut self, head: RefString, tail: &str) -> RefString {
-        let joined = head.as_ref().concat(tail);
-        self.alloc(joined, Object::String).1
-    }
-
     /// Allocate bytes `[from, to)` of `src`, sharing its buffer when that is
     /// cheap ([`super::StrData::slice`]). `None` when an offset is out of
     /// range or splits a UTF-8 sequence.
@@ -996,7 +1017,6 @@ impl Heap {
 
     /// Intern a borrowed string without allocating when it is already cached.
     pub fn intern_str(&mut self, data: &str) -> RefString {
-        crate::vm::note_intern_str();
         let _epoch_guard = self.epoch_guard();
         let hash = ObjString::hash(data);
         if let Some(s) = self.strings.find(data, hash) {
@@ -1039,6 +1059,7 @@ impl Heap {
             signatures: Vec::new(),
             by_name: std::collections::HashMap::new(),
             closures: Vec::new(),
+            static_symbols: None,
         };
         self.alloc(obj_lib, Object::Library)
     }
@@ -1069,8 +1090,9 @@ impl Heap {
         }
         self.unlink_unmarked_interns();
         self.gc_phase = GcPhase::Sweeping;
+        self.sync_inline_gate();
         self.unmark_young();
-        self.gc_sweep_start_bytes = self.alloc_bytes;
+        self.gc_sweep_start_bytes = self.counts.alloc_bytes;
         self.gc_sweep_freed = 0;
         self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
         self.finish_sweep();
@@ -1084,11 +1106,6 @@ impl Heap {
     #[inline]
     pub fn gc_is_idle(&self) -> bool {
         self.gc_phase == GcPhase::Idle
-    }
-
-    #[inline]
-    pub fn gc_is_marking(&self) -> bool {
-        self.gc_phase == GcPhase::Marking
     }
 
     #[inline]
@@ -1139,6 +1156,7 @@ impl Heap {
             return;
         }
         self.gc_phase = GcPhase::Marking;
+        self.sync_inline_gate();
         let mut gray = std::mem::take(&mut self.gc_gray);
         gray.clear();
         for &addr in root_addrs {
@@ -1176,7 +1194,8 @@ impl Heap {
         self.unlink_unmarked_interns();
         self.unmark_young();
         self.gc_phase = GcPhase::Sweeping;
-        self.gc_sweep_start_bytes = self.alloc_bytes;
+        self.sync_inline_gate();
+        self.gc_sweep_start_bytes = self.counts.alloc_bytes;
         self.gc_sweep_freed = 0;
         self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
     }
@@ -1243,7 +1262,7 @@ impl Heap {
     fn finish_sweep_cycle(&mut self) {
         // Floor at the initial budget: a tiny live set would otherwise
         // schedule a collection every few allocations.
-        let growth = if self.alloc_bytes.saturating_mul(2) > self.gc_sweep_start_bytes {
+        let growth = if self.counts.alloc_bytes.saturating_mul(2) > self.gc_sweep_start_bytes {
             self.gc_growth_factor.max(GC_GROWTH_FACTOR_SURVIVING)
         } else {
             self.gc_growth_factor
@@ -1251,14 +1270,15 @@ impl Heap {
         // What the mark kept, not what a lazy sweep let the program allocate
         // meanwhile: counting those (pretenured objects, mostly) as live
         // would push the next collection out by the growth factor.
-        let survived = self.gc_sweep_start_bytes.saturating_sub(self.gc_sweep_freed).min(self.alloc_bytes);
-        self.gc_next_threshold = (survived.saturating_sub(self.young_bytes))
+        let survived = self.gc_sweep_start_bytes.saturating_sub(self.gc_sweep_freed).min(self.counts.alloc_bytes);
+        self.gc_next_threshold = (survived.saturating_sub(self.counts.young_bytes))
             .saturating_mul(growth)
             .max(GC_NEXT_THRESHOLD)
             .min(self.byte_cap);
         // Empty chunks the program did not touch all cycle go back to the OS.
         self.slab.release_idle_chunks();
         self.gc_phase = GcPhase::Idle;
+        self.sync_inline_gate();
         self.gc_sweep_cursor = None;
     }
 
@@ -1279,42 +1299,62 @@ impl Heap {
     /// Free the object `v` points at before a collection would, because
     /// the compiler proved nothing else reaches it (`feature/escape-memory`
     /// step 2). `deep` also frees every object it reaches through precise
-    /// pointer words. `keep` names objects the VM still holds itself (frame
+    /// pointer words. `keep` names objects the runtime still holds itself (frame
     /// pins); those and anything this cannot free safely stay for the GC:
     /// interned strings, the shared unit variants and `()`, objects whose
-    /// `drop` has not run (the VM runs it first when [`Self::early_drops`]
+    /// `drop` has not run (the runtime runs it first when [`Self::early_drops`]
     /// lists it), handles, and everything while a cycle or a steal epoch is
     /// open. `check` frees nothing and records the objects instead, which
     /// the next mark must not reach. Returns how many objects it freed.
     /// [`Self::early_freed`] lists the addresses it freed.
     pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool) -> usize {
         self.early_freed.clear();
-        let Some((found, reaches_drop, _)) = self.early_walk(v, deep, keep) else {
+        if !deep {
+            // One object: no walk.
+            let Some(root) = self.early_root(v, keep) else {
+                return 0;
+            };
+            if self.pending_drop(root) {
+                return 0;
+            }
+            if check {
+                self.doomed.push(root.addr());
+                return 0;
+            }
+            self.freed_early = true;
+            self.early_freed.push(root.addr());
+            unsafe { self.dealloc(root) };
+            return 1;
+        }
+        let Some((mut found, reaches_drop, _)) = self.early_walk(v, deep, keep) else {
             return 0;
         };
         // A `drop` that has not run yet keeps its object (and what reaches
         // it: the `drop` may read anything the walk would free) for the
-        // collector; [`Self::early_drops`] lets the VM run it first.
-        if reaches_drop {
-            return 0;
-        }
-        if check {
+        // collector; [`Self::early_drops`] lets the runtime run it first.
+        let n = if reaches_drop {
+            0
+        } else if check {
             self.doomed.extend(found.iter().map(Object::addr));
-            return 0;
-        }
-        self.freed_early = true;
-        self.early_freed.extend(found.iter().map(Object::addr));
-        for &obj in &found {
-            unsafe { self.dealloc(obj) };
-        }
-        found.len()
+            0
+        } else {
+            self.freed_early = true;
+            self.early_freed.extend(found.iter().map(Object::addr));
+            for &obj in &found {
+                unsafe { self.dealloc(obj) };
+            }
+            found.len()
+        };
+        found.clear();
+        self.early_scratch.0 = found;
+        n
     }
 
     /// The objects an early free of `v` would give back once their `drop`s
     /// ran, in walk order (the root first, a parent before what it
     /// reaches): `None` when the free would free nothing, or when one of
     /// them has a `drop` that may not run there. Empty when no `drop` is
-    /// pending. The VM runs these `drop`s, then calls [`Self::free_early`].
+    /// pending. The runtime runs these `drop`s, then calls [`Self::free_early`].
     pub fn early_drops(&mut self, v: Value, deep: bool, keep: &dyn Fn(u64) -> bool) -> Option<Vec<Object>> {
         if self.finalizer_types.is_empty() {
             return Some(Vec::new());
@@ -1344,23 +1384,19 @@ impl Heap {
     /// frees nothing (a collection is under way, the root is kept or not
     /// freeable). A pending `drop` object is walked like any other.
     fn early_walk(&mut self, v: Value, deep: bool, keep: &dyn Fn(u64) -> bool) -> Option<(Vec<Object>, bool, bool)> {
-        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
-            return None;
-        }
-        let root = self.find_object_by_addr(v.heap_addr())?;
-        if !self.early_freeable(root) || keep(root.addr()) {
-            return None;
-        }
+        let root = self.early_root(v, keep)?;
         let mut reaches_drop = self.pending_drop(root);
         if !deep {
             return Some((vec![root], reaches_drop, false));
         }
         let mut blocked = false;
-        let mut found = vec![root];
+        let (mut found, mut work, mut children) = std::mem::take(&mut self.early_scratch);
+        found.clear();
+        found.push(root);
         // Every mark bit is clear while idle: a set bit means visited.
-        let mut work = Vec::new();
+        work.clear();
         root.mark(&mut work);
-        let mut children = Vec::new();
+        children.clear();
         let mut i = 0;
         while i < found.len() {
             // Walk in `found` order (breadth first): a parent comes before
@@ -1374,7 +1410,9 @@ impl Heap {
                 }
             });
             for addr in children.drain(..) {
-                let Some(child) = self.find_object_by_addr(addr) else {
+                // SAFETY: `for_each_reference` visits only the addresses of
+                // live objects (it looked each word up).
+                let Some(child) = (unsafe { Object::from_header(addr) }) else {
                     continue;
                 };
                 if child.is_marked() {
@@ -1395,7 +1433,19 @@ impl Heap {
         for obj in &found {
             obj.unmark();
         }
+        work.clear();
+        self.early_scratch = (Vec::new(), work, children);
         Some((found, reaches_drop, blocked))
+    }
+
+    /// The object an early free of `v` starts at: `None` while a collection
+    /// or a steal epoch is open, or when it is kept or not freeable.
+    fn early_root(&self, v: Value, keep: &dyn Fn(u64) -> bool) -> Option<Object> {
+        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
+            return None;
+        }
+        let root = self.find_object_by_addr(v.heap_addr())?;
+        (self.early_freeable(root) && !keep(root.addr())).then_some(root)
     }
 
     /// The addresses the last [`Self::free_early`] gave back.
@@ -1422,11 +1472,8 @@ impl Heap {
     /// Whether `obj` has a `drop` that has not run yet.
     fn pending_drop(&self, obj: Object) -> bool {
         self.finalizer_object(obj)
-            && match obj {
-                Object::Instance(gc) => !gc.as_ref().finalized,
-                Object::Enum(gc) => !gc.as_ref().finalized,
-                _ => false,
-            }
+            && matches!(obj, Object::Instance(_) | Object::Enum(_))
+            && !obj.is_finalized()
     }
 
     /// Whether [`Self::free_early`] may free `obj` (when nothing reaches it).
@@ -1438,7 +1485,6 @@ impl Heap {
                 !s_ref.hash_set() || self.strings.find(&s_ref.data, s_ref.hash_code()).is_none_or(|i| i.as_ptr() != s.as_ptr())
             }
             Object::Array(_) => true,
-            Object::Tuple(t) => !t.as_ref().elements().is_empty(),
             // An object whose `drop` is pending is walked; [`Self::free_early`]
             // leaves it to the collector unless its `drop` already ran.
             Object::Enum(e) => !e.as_ref().payload.is_empty(),
@@ -1472,21 +1518,34 @@ impl Heap {
 
     /// Returns the number of bytes that are being allocated.
     pub const fn size(&self) -> usize {
-        self.alloc_bytes
+        self.counts.alloc_bytes
     }
 
     /// Limit the heap to `cap` bytes (`usize::MAX`: unlimited). The heap
-    /// itself never refuses an allocation; the VM checks
+    /// itself never refuses an allocation; the runtime checks
     /// [`Self::over_byte_cap`] at its GC safepoints.
     pub fn set_byte_cap(&mut self, cap: usize) {
         self.byte_cap = cap;
         self.gc_next_threshold = self.gc_next_threshold.min(cap);
     }
 
+    /// An empty heap with this one's settings.
+    pub(crate) fn emptied(&self) -> Self {
+        let mut heap = Self::default();
+        heap.set_nursery(self.nursery);
+        heap.set_byte_cap(self.byte_cap);
+        heap
+    }
+
+    /// The cap from [`Self::set_byte_cap`].
+    pub fn byte_cap(&self) -> usize {
+        self.byte_cap
+    }
+
     /// True when the heap holds more than [`Self::set_byte_cap`] allows.
     #[inline]
     pub fn over_byte_cap(&self) -> bool {
-        self.alloc_bytes > self.byte_cap
+        self.counts.alloc_bytes > self.byte_cap
     }
 
     /// Slab chunks currently mapped (64KiB each). Sweep does not unmap.
@@ -1502,7 +1561,7 @@ impl Heap {
     /// Number of live heap objects (for GC pressure after `HostInvoke`).
     #[inline]
     pub fn live_object_count(&self) -> usize {
-        self.live_count
+        self.counts.live_count
     }
 
     /// True when idle and live heap bytes exceed the collection threshold.
@@ -1518,9 +1577,37 @@ impl Heap {
         };
         self.gc_phase == GcPhase::Idle
             && (cfg!(feature = "gc-stress")
-                || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
-                || self.slab.held_chunks() >= self.nursery_chunks
+                || self.counts.alloc_bytes.saturating_sub(self.counts.young_bytes) > limit
+                || self.held_over_budget()
                 || self.slab.young_chunks_in_use() >= self.nursery_chunks)
+    }
+
+    /// Enough nursery chunks are held for pinned survivors to ask for a
+    /// major cycle, the only one that frees them: a nursery's worth more
+    /// than the last major kept, and at least twice that. A budget from
+    /// what the last major found live is what keeps the work linear (#2350):
+    /// a growing set of pinned survivors (a map's values, in a vector a
+    /// shared generic body made, whose words are of unknown kind) left
+    /// every safepoint over a fixed
+    /// budget, and each started a major that marked the whole heap again.
+    /// Like the byte threshold's growth factor, it also bounds the held
+    /// chunks to about twice the live ones.
+    #[inline]
+    fn held_over_budget(&self) -> bool {
+        self.slab.held_chunks() >= self.held_budget
+    }
+
+    /// A major cycle (or a promotion) left `held` nursery chunks held.
+    pub(super) fn set_held_after_major(&mut self, held: usize) {
+        self.held_after_major = held;
+        self.sync_held_budget();
+    }
+
+    /// Recompute [`Self::held_budget`]. Native code checks
+    /// [`Self::should_collect`] on every allocation, so the budget is kept
+    /// rather than computed there.
+    fn sync_held_budget(&mut self) {
+        self.held_budget = self.held_after_major + self.nursery_chunks.max(self.held_after_major);
     }
 
     /// The nursery is full: run a minor collection.
@@ -1538,6 +1625,7 @@ impl Heap {
     /// that every later collection sweeps.
     pub fn pretenure_after_promote(&mut self) {
         self.pretenure_bytes = self.nursery_chunks * super::slab::CHUNK_BYTES;
+        self.sync_inline_gate();
     }
 
     /// A minor collection found `survivors` of `objects` young objects
@@ -1553,13 +1641,14 @@ impl Heap {
         if survivors * 2 > objects {
             self.pretenure_streak = (self.pretenure_streak + 1).min(6);
             self.pretenure_bytes = (self.nursery_chunks * super::slab::CHUNK_BYTES) << (self.pretenure_streak - 1);
+            self.sync_inline_gate();
         } else {
             self.pretenure_streak = 0;
         }
     }
 
     /// A `region` block opens. Returns true for the outermost one, which
-    /// the VM starts with an empty nursery.
+    /// the runtime starts with an empty nursery.
     pub fn region_enter(&mut self) -> bool {
         self.region_depth += 1;
         if self.region_depth != 1 {
@@ -1567,13 +1656,15 @@ impl Heap {
         }
         self.region_saved_chunks = self.nursery_chunks;
         self.nursery_chunks = self.nursery_chunks.max(REGION_CHUNKS);
+        self.sync_held_budget();
         self.pretenure_bytes = 0;
+        self.sync_inline_gate();
         self.pretenure_streak = 0;
         true
     }
 
     /// A `region` block ends. Returns true for the outermost one, after
-    /// which the VM collects the nursery.
+    /// which the runtime collects the nursery.
     pub fn region_exit(&mut self) -> bool {
         if self.region_depth == 0 {
             return false;
@@ -1583,6 +1674,7 @@ impl Heap {
             return false;
         }
         self.nursery_chunks = self.region_saved_chunks;
+        self.sync_held_budget();
         true
     }
 
@@ -1595,14 +1687,15 @@ impl Heap {
             self.gc_next_threshold
         };
         cfg!(feature = "gc-stress")
-            || self.alloc_bytes.saturating_sub(self.young_bytes) > limit
-            || self.slab.held_chunks() >= self.nursery_chunks
+            || self.counts.alloc_bytes.saturating_sub(self.counts.young_bytes) > limit
+            || self.held_over_budget()
     }
 
     /// Allocate instances, enums, boxes, tuples, arrays and closures in the
-    /// nursery (the VM turns it on; `--nursery off` keeps it off).
+    /// nursery (the runtime turns it on; `--nursery off` keeps it off).
     pub fn set_nursery(&mut self, on: bool) {
         self.nursery = on;
+        self.sync_inline_gate();
     }
 
     pub fn nursery(&self) -> bool {
@@ -1612,7 +1705,7 @@ impl Heap {
     /// Objects to sweep at one safepoint (doubles under pressure).
     #[inline]
     pub fn gc_sweep_quantum(&self) -> usize {
-        if self.alloc_bytes > self.gc_next_threshold {
+        if self.counts.alloc_bytes > self.gc_next_threshold {
             GC_SWEEP_QUANTUM.saturating_mul(2)
         } else {
             GC_SWEEP_QUANTUM
@@ -1622,10 +1715,11 @@ impl Heap {
     /// Lower the byte threshold so the next [`Self::should_collect`] check
     /// fires (test helper for GC stress). The nursery then collects at every
     /// safepoint that finds a young object.
-    #[cfg(any(test, feature = "debugger"))]
+    #[cfg(test)]
     pub fn set_gc_threshold_for_test(&mut self, bytes: usize) {
         self.gc_next_threshold = bytes;
         self.nursery_chunks = 1;
+        self.sync_held_budget();
     }
 
     /// Count an array's storage change (see [`ObjArray::take_resize`]).
@@ -1641,9 +1735,9 @@ impl Heap {
     pub fn account_resize(&mut self, old_size: usize, new_size: usize) {
         let _epoch_guard = self.epoch_guard();
         if new_size >= old_size {
-            self.alloc_bytes += new_size - old_size;
+            self.counts.alloc_bytes += new_size - old_size;
         } else {
-            self.alloc_bytes -= old_size - new_size;
+            self.counts.alloc_bytes -= old_size - new_size;
         }
     }
 
@@ -1657,15 +1751,15 @@ impl Heap {
     ///   removed from the linked list of heap-allocated objects.
     unsafe fn dealloc(&mut self, object: Object) {
         let size = object.size();
-        self.alloc_bytes -= size;
-        debug_assert!(self.live_count > 0);
-        self.live_count -= 1;
+        self.counts.alloc_bytes -= size;
+        debug_assert!(self.counts.live_count > 0);
+        self.counts.live_count -= 1;
         let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
         let young = object.generation() & GEN_YOUNG != 0;
         unsafe { object.recycle_payload() };
         if young {
             // Reused by the nursery until its chunk is reset.
-            self.young_bytes = self.young_bytes.saturating_sub(size);
+            self.counts.young_bytes = self.counts.young_bytes.saturating_sub(size);
             self.slab.free_young(ptr);
         } else {
             self.slab.free(ptr);
@@ -1675,10 +1769,10 @@ impl Heap {
     /// [`Self::dealloc`] of the slot the sweep walk is at.
     unsafe fn dealloc_swept(&mut self, object: Object, cur: &mut super::slab::SlotCursor) {
         let size = object.size();
-        self.alloc_bytes -= size;
+        self.counts.alloc_bytes -= size;
         self.gc_sweep_freed += size;
-        debug_assert!(self.live_count > 0);
-        self.live_count -= 1;
+        debug_assert!(self.counts.live_count > 0);
+        self.counts.live_count -= 1;
         let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
         unsafe { object.recycle_payload() };
         self.slab.free_at_cursor(cur, ptr);
@@ -1737,7 +1831,7 @@ impl Heap {
         while !self.mark_quantum(usize::MAX) {}
     }
 
-    /// Complete collect without a `Machine`: mark `extra_roots` plus immortal
+    /// Complete collect with no host's roots: mark `extra_roots` plus immortal
     /// enums, clear dead weaks, sweep.
     pub fn collect(&mut self, extra_roots: &[u64]) {
         if self.epoch_stw {
@@ -1811,9 +1905,6 @@ impl Heap {
         for obj in self.immortal_enums.values() {
             roots.push(obj.addr());
         }
-        if let Some(obj) = self.empty_tuple {
-            roots.push(obj.addr());
-        }
         roots.extend(self.immortal_fns.values().map(Object::addr));
         roots
     }
@@ -1828,7 +1919,7 @@ impl Heap {
         }
         let _epoch_guard = self.epoch_guard();
         let pfn = ObjFn { entry, arity, is_rest, filled_mask: 0, captured_args: Vec::new(), captures: Vec::new(), dicts: None };
-        // Old: a root for the VM's lifetime, never worth a nursery copy.
+        // Old: a root for the runtime's lifetime, never worth a nursery copy.
         let (object, _) = self.alloc_unlocked_in(pfn, Object::Fn, false);
         self.immortal_fns.insert((entry, arity, is_rest), object);
         object
@@ -1837,13 +1928,7 @@ impl Heap {
     /// The shared empty tuple `()`. It has no elements to change, so every
     /// `()` (a `Result<(), E>` `Ok`, a unit return) can be one object.
     pub fn immortal_empty_tuple(&mut self) -> Object {
-        if let Some(obj) = self.empty_tuple {
-            return obj;
-        }
-        let _epoch_guard = self.epoch_guard();
-        let (object, _) = self.alloc_unlocked(ObjTuple::from_slice(&[]), Object::Tuple);
-        self.empty_tuple = Some(object);
-        object
+        self.immortal_unit_enum(common::PRODUCT_TAG)
     }
 
     /// Return a shared arity-0 enum for `tag`, allocating once per tag.
@@ -1973,10 +2058,6 @@ impl Heap {
         self.class_kinds = table;
     }
 
-    pub fn class_word_kinds_table(&self) -> std::sync::Arc<Vec<Box<[u8]>>> {
-        std::sync::Arc::clone(&self.class_kinds)
-    }
-
     /// Word kinds of `type_id`'s typed fields (empty = all unknown).
     #[inline]
     pub fn class_field_kinds(&self, type_id: u32) -> &[u8] {
@@ -1998,20 +2079,6 @@ impl Heap {
         }
     }
 
-    /// Mark enum payload / tuple words, skipping those the construction
-    /// site proved scalar.
-    #[inline]
-    fn mark_kinded_words(&self, words: &[Value], kinds: u8, grey_objects: &mut Vec<Object>) {
-        for (i, v) in words.iter().enumerate() {
-            let kind = common::packed_word_kind(kinds, i);
-            #[cfg(feature = "gc-stress")]
-            self.verify_kinded_word("an enum payload / tuple", i, kind, *v);
-            if kind != common::WORD_SCALAR {
-                self.mark_value(*v, grey_objects);
-            }
-        }
-    }
-
     /// Every live object, in slab order.
     pub fn objects(&self) -> HeapIter<'_> {
         HeapIter {
@@ -2021,6 +2088,7 @@ impl Heap {
     }
 
     /// Find a heap object by its address (mapped slot + header kind).
+    #[inline]
     pub fn find_object_by_addr(&self, addr: u64) -> Option<Object> {
         if addr == 0 || !self.slab.contains_slot(addr) {
             return None;
@@ -2028,46 +2096,20 @@ impl Heap {
         unsafe { Object::from_header(addr) }
     }
 
-    /// [`Self::find_object_by_addr`] for a word the compiler typed as a heap
-    /// object (the target of an index, field or length op). Release builds
-    /// read the header without the slab lookup; debug builds still check
-    /// that a non-zero word is a mapped slot.
-    #[inline(always)]
-    pub(crate) fn trusted_object(&self, addr: u64) -> Option<Object> {
-        #[cfg(debug_assertions)]
-        assert!(
-            addr == 0 || self.slab.contains_slot(addr),
-            "heap operand {addr:#x} is not an object"
-        );
-        if addr == 0 {
-            return None;
-        }
-        // SAFETY: a non-zero word typed as a heap object is a live slot
-        // (checked above in debug builds).
-        unsafe { Object::from_header(addr) }
-    }
-
-    /// [`Self::find_object_by_addr`] for an enum (`match` / `Unpack`): reads
-    /// the header kind once instead of building an [`Object`] to match on.
+    /// The function object at `addr`, for a word whose static type is a
+    /// function (a code offset or an `ObjFn`): a range check and the
+    /// header kind, without [`Self::find_object_by_addr`]'s slot search,
+    /// which a typed word does not need. `None` for anything else.
     #[inline]
-    pub fn find_enum_by_addr(&self, addr: u64) -> Option<Gc<ObjEnum>> {
-        if addr == 0 || !self.slab.contains_slot(addr) {
+    pub fn fn_at(&self, addr: u64) -> Option<Gc<ObjFn>> {
+        if addr == 0 || !addr.is_multiple_of(8) || !self.slab.may_contain(addr) {
             return None;
         }
-        // SAFETY: a mapped slot start holds a header (poisoned when free).
+        // SAFETY: the slab's range stays mapped and a function value's
+        // word is a slot start; a header kind is read either way.
         let header = unsafe { &*(addr as *const GcHeader) };
-        // Kind 3 is `Object::Enum` (see `Object::from_header`).
-        (header.kind.get() == 3).then(|| unsafe { Gc::from_addr(addr) })
-    }
-
-    /// The enum cell at `addr`, without [`Self::find_enum_by_addr`]'s slab
-    /// lookup.
-    ///
-    /// # Safety
-    /// `addr` must be a live `ObjEnum` slot.
-    #[inline(always)]
-    pub(crate) unsafe fn enum_at_unchecked(&self, addr: u64) -> Gc<ObjEnum> {
-        unsafe { Gc::from_addr(addr) }
+        // Kind 12 is `Object::Fn` (see `Object::from_header`).
+        (header.kind.get() == 12).then(|| unsafe { Gc::from_addr(addr) })
     }
 
     /// Classify a raw payload / field word as an object or an immediate.
@@ -2126,13 +2168,13 @@ impl Drop for Heap {
         let mut cur = super::slab::SlotCursor::default();
         while let Some(addr) = self.slab.next_slot(&mut cur) {
             if let Some(object) = unsafe { Object::from_header(addr) } {
-                self.alloc_bytes -= object.size();
-                self.live_count -= 1;
+                self.counts.alloc_bytes -= object.size();
+                self.counts.live_count -= 1;
                 unsafe { object.recycle_payload() };
             }
         }
 
-        debug_assert_eq!(0, self.alloc_bytes);
+        debug_assert_eq!(0, self.counts.alloc_bytes);
     }
 }
 
@@ -2206,7 +2248,6 @@ impl fmt::Display for Error {
     }
 }
 
-pub type RefBoxed = Gc<ObjBoxed>;
 pub type RefRoot = Gc<ObjRoot>;
 pub type RefWeak = Gc<ObjWeak>;
 pub type RefFn = Gc<ObjFn>;
@@ -2242,10 +2283,8 @@ pub enum Object {
     Instance(RefInstance),
     Enum(RefEnum),
     Library(RefLibrary),
-    Tuple(crate::memory::Gc<ObjTuple>),
     Array(crate::memory::Gc<ObjArray>),
     Coroutine(RefCoroutine),
-    Boxed(RefBoxed),
     /// Strong GC pin: marks `payload` while this handle is reachable.
     Root(RefRoot),
     /// Non-rooting handle; cleared when the referent is unmarked.
@@ -2259,77 +2298,194 @@ pub enum Object {
     RwLock(RefRwLock),
 }
 
+/// `$body` with `$r` bound to `$obj`'s handle, whatever its kind.
+macro_rules! each_kind {
+    ($obj:expr, $r:ident => $body:expr) => {
+        match $obj {
+            Object::String($r) => $body,
+            Object::Instance($r) => $body,
+            Object::Enum($r) => $body,
+            Object::Library($r) => $body,
+            Object::Array($r) => $body,
+            Object::Coroutine($r) => $body,
+            Object::Root($r) => $body,
+            Object::Weak($r) => $body,
+            Object::Fn($r) => $body,
+            Object::Stream($r) => $body,
+            Object::Thread($r) => $body,
+            Object::Sender($r) => $body,
+            Object::Receiver($r) => $body,
+            Object::Mutex($r) => $body,
+            Object::RwLock($r) => $body,
+        }
+    };
+}
+
+/// What [`Object::visit_slots`] calls for each slot that may hold a
+/// reference: a raw word with its kind (`common::WORD_*`), or a typed
+/// member. Implementations mark their methods `#[inline(always)]`: a walk
+/// calls them from every arm, and the mark and nursery paths are hot.
+pub(crate) trait SlotVisitor {
+    fn word(&mut self, v: &Value, kind: u8);
+    fn member(&mut self, m: &Member);
+}
+
+/// [`SlotVisitor`] with the slots writable ([`Object::visit_slots_mut`]).
+pub(crate) trait SlotVisitorMut {
+    fn word(&mut self, v: &mut Value, kind: u8);
+    fn member(&mut self, m: &mut Member);
+}
+
+/// The one walk of an object's slots, behind [`Object::visit_slots`] (reads)
+/// and [`Object::visit_slots_mut`] (rewrites). It says which words of each
+/// kind of object may hold a reference and how sure that is:
+///
+/// - instance slots and enum payload (tuple) words: every word, with the
+///   kind its class row or construction site recorded (scalars included);
+/// - array words, when [`ObjArray::may_hold_refs`]: a word array's words
+///   with its element kind, a lane array's pointer lanes only;
+/// - coroutine words: [`common::WORD_POINTER`] where `saved_live_mask`
+///   names them, [`common::WORD_UNKNOWN`] where there is no mask;
+/// - closure captures: [`common::WORD_UNKNOWN`]; `Root` payloads
+///   and closure dicts: members.
+///
+/// The two expansions differ only in how they borrow the payloads.
+macro_rules! walk_slots {
+    ($obj:expr, $heap:expr, $f:expr, $get:ident, $slice:ident, $gc_words:ident, $iter:ident $(, $m:tt)?) => {{
+        let f = $f;
+        match $obj {
+            Object::Instance(i) => {
+                let inst = i.$get();
+                let mut kinds = common::ClassSlotKinds::new($heap.class_field_kinds(inst.type_id), inst.storage.as_slice().len());
+                let slots = & $($m)? *inst.storage.$slice();
+                for i in 0..slots.len() {
+                    let kind = kinds.next_kind(slots);
+                    f.word(& $($m)? slots[i], kind);
+                }
+            }
+            Object::Enum(e) => {
+                let payload = & $($m)? e.$get().payload;
+                let kinds = payload.kinds();
+                for (i, v) in payload.$slice().$iter().enumerate() {
+                    f.word(v, common::packed_word_kind(kinds, i));
+                }
+            }
+            Object::Array(a) => {
+                let a = a.$get();
+                if a.may_hold_refs() {
+                    let (k, mask, kind) = (a.lanes(), a.tag_mask, a.elem_kind());
+                    if let Some(words) = a.$gc_words() {
+                        if k > 1 {
+                            for i in 0..words.len() {
+                                if ObjArray::lane_pointer(words, k, mask, i) {
+                                    f.word(& $($m)? words[i], common::WORD_POINTER);
+                                }
+                            }
+                        } else {
+                            for v in words.$iter() {
+                                f.word(v, kind);
+                            }
+                        }
+                    }
+                }
+            }
+            Object::Coroutine(c) => {
+                let coro = c.$get();
+                let mask = coro.saved_live_mask;
+                for (i, v) in coro.saved_stack.$iter().enumerate() {
+                    let masked = mask != 0 && i < 64;
+                    if masked && mask & (1u64 << i) == 0 {
+                        continue;
+                    }
+                    f.word(v, if masked { common::WORD_POINTER } else { common::WORD_UNKNOWN });
+                }
+            }
+            Object::Root(r) => {
+                if let Some(m) = & $($m)? r.$get().payload {
+                    f.member(m);
+                }
+            }
+            Object::Fn(func) => {
+                let func = func.$get();
+                for v in func.captures.$iter().chain(func.captured_args.$iter()) {
+                    f.word(v, common::WORD_UNKNOWN);
+                }
+                for m in func.dicts.$iter().flatten().flatten() {
+                    f.member(m);
+                }
+            }
+            Object::String(_)
+            | Object::Library(_)
+            | Object::Weak(_)
+            | Object::Stream(_)
+            | Object::Thread(_)
+            | Object::Sender(_)
+            | Object::Receiver(_)
+            | Object::Mutex(_)
+            | Object::RwLock(_) => {}
+        }
+    }};
+}
+
 impl Object {
+    /// Every kind starts with the `repr(C)` [`GcHeader`].
+    #[inline]
+    fn header(&self) -> &GcHeader {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }
+    }
+
     /// Mark the current object reference and put it in `grey_objects` if its has not been marked.
+    #[inline]
     pub fn mark(&self, grey_objects: &mut Vec<Self>) {
-        let marked = match self {
-            Self::String(s) => s.mark(),
-            Self::Instance(i) => i.mark(),
-            Self::Enum(e) => e.mark(),
-            Self::Library(l) => l.mark(),
-            Self::Tuple(t) => t.mark(),
-            Self::Array(a) => a.mark(),
-            Self::Coroutine(c) => c.mark(),
-            Self::Boxed(b) => b.mark(),
-            Self::Root(r) => r.mark(),
-            Self::Weak(w) => w.mark(),
-            Self::Fn(f) => f.mark(),
-            Self::Stream(s) => s.mark(),
-            Self::Thread(t) => t.mark(),
-            Self::Sender(s) => s.mark(),
-            Self::Receiver(r) => r.mark(),
-            Self::Mutex(m) => m.mark(),
-            Self::RwLock(l) => l.mark(),
-        };
-        if marked {
+        let header = self.header();
+        if !header.marked.get() {
+            header.marked.set(true);
             grey_objects.push(*self);
         }
     }
 
     /// Unmark the object.
+    #[inline]
     pub fn unmark(&self) {
-        match self {
-            Self::String(s) => s.unmark(),
-            Self::Instance(i) => i.unmark(),
-            Self::Enum(e) => e.unmark(),
-            Self::Library(l) => l.unmark(),
-            Self::Tuple(t) => t.unmark(),
-            Self::Array(a) => a.unmark(),
-            Self::Coroutine(c) => c.unmark(),
-            Self::Boxed(b) => b.unmark(),
-            Self::Root(r) => r.unmark(),
-            Self::Weak(w) => w.unmark(),
-            Self::Fn(f) => f.unmark(),
-            Self::Stream(s) => s.unmark(),
-            Self::Thread(t) => t.unmark(),
-            Self::Sender(s) => s.unmark(),
-            Self::Receiver(r) => r.unmark(),
-            Self::Mutex(m) => m.unmark(),
-            Self::RwLock(l) => l.unmark(),
-        }
+        self.header().marked.set(false);
     }
 
     #[must_use]
+    #[inline]
     pub fn is_marked(&self) -> bool {
-        match self {
-            Self::String(s) => s.is_marked(),
-            Self::Instance(i) => i.is_marked(),
-            Self::Enum(e) => e.is_marked(),
-            Self::Library(l) => l.is_marked(),
-            Self::Tuple(t) => t.is_marked(),
-            Self::Array(a) => a.is_marked(),
-            Self::Coroutine(c) => c.is_marked(),
-            Self::Boxed(b) => b.is_marked(),
-            Self::Root(r) => r.is_marked(),
-            Self::Weak(w) => w.is_marked(),
-            Self::Fn(f) => f.is_marked(),
-            Self::Stream(s) => s.is_marked(),
-            Self::Thread(t) => t.is_marked(),
-            Self::Sender(s) => s.is_marked(),
-            Self::Receiver(r) => r.is_marked(),
-            Self::Mutex(m) => m.is_marked(),
-            Self::RwLock(l) => l.is_marked(),
+        self.header().marked.get()
+    }
+
+    /// Call `f` on each slot of `self` that may hold a reference
+    /// ([`walk_slots`]).
+    #[inline]
+    pub(crate) fn visit_slots(&self, heap: &Heap, f: &mut impl SlotVisitor) {
+        walk_slots!(self, heap, f, as_ref, as_slice, gc_words, iter)
+    }
+
+    /// `gc-stats`: how many slots [`Self::visit_slots`] walks.
+    #[cfg(feature = "gc-stats")]
+    pub(crate) fn slot_words(&self, heap: &Heap) -> usize {
+        struct Count(usize);
+        impl SlotVisitor for Count {
+            fn word(&mut self, _: &Value, _: u8) {
+                self.0 += 1;
+            }
+
+            fn member(&mut self, _: &Member) {
+                self.0 += 1;
+            }
         }
+        let mut count = Count(0);
+        self.visit_slots(heap, &mut count);
+        count.0
+    }
+
+    /// [`Self::visit_slots`] with the slots writable, for a moving
+    /// collector. Takes each payload as a write does ([`Gc::payload_mut`]).
+    pub(crate) fn visit_slots_mut(&self, heap: &Heap, f: &mut impl SlotVisitorMut) {
+        walk_slots!(self, heap, f, payload_mut, as_mut_slice, gc_words_mut, iter_mut, mut)
     }
 
     /// Mark a stored member, including Result `Err` tagged pointers in `Value`.
@@ -2347,178 +2503,113 @@ impl Object {
     /// Aggregates that store raw [`Value`]s (arrays, tuples, fn captures,
     /// coroutine stacks) resolve those addresses through `heap`. Stream attach
     /// state is host-side (A4); channel payloads are PortableValue copies,
-    /// not this-heap pointers.
+    /// not this-heap pointers. An array found to hold none is flagged so the
+    /// next mark skips it until a write.
+    #[inline]
     pub fn mark_references(&self, heap: &Heap, grey_objects: &mut Vec<Self>) {
+        struct Marker<'a> {
+            heap: &'a Heap,
+            grey: &'a mut Vec<Object>,
+            any: bool,
+            #[cfg(feature = "gc-stress")]
+            check: Option<(String, usize)>,
+        }
+        impl SlotVisitor for Marker<'_> {
+            #[inline(always)]
+            fn word(&mut self, &v: &Value, kind: u8) {
+                #[cfg(feature = "gc-stress")]
+                if let Some((what, i)) = &mut self.check {
+                    if kind != common::WORD_UNKNOWN {
+                        self.heap.verify_kinded_word(what, *i, kind, v);
+                    }
+                    *i += 1;
+                }
+                let reference = match kind {
+                    common::WORD_SCALAR => false,
+                    // `0` or an object: no classification.
+                    common::WORD_POINTER => v.heap_addr() != 0,
+                    _ => self.heap.may_be_ref(v),
+                };
+                if reference {
+                    self.any = true;
+                    self.heap.mark_value(v, self.grey);
+                }
+            }
+
+            #[inline(always)]
+            fn member(&mut self, m: &Member) {
+                Object::mark_member(self.heap, m, self.grey);
+            }
+        }
+        let mut marker = Marker {
+            heap,
+            grey: grey_objects,
+            any: false,
+            // Coroutine words are not checked.
+            #[cfg(feature = "gc-stress")]
+            check: (!matches!(self, Self::Coroutine(_))).then(|| (self.slot_owner(), 0)),
+        };
+        self.visit_slots(heap, &mut marker);
+        // Clear flag: scanned clean at this mark, unwritten since.
+        if let Self::Array(a) = self
+            && !marker.any
+            && a.as_ref().may_hold_refs()
+        {
+            a.payload_mut().may_hold_refs = false;
+        }
+    }
+
+    /// What a gc-stress check names the slots of `self` by.
+    #[cfg(feature = "gc-stress")]
+    fn slot_owner(&self) -> String {
         match self {
-            Self::String(_) => {}
-            Self::Instance(i) => i.as_ref().mark_members(heap, grey_objects),
-            Self::Enum(e) => {
-                let payload = &e.as_ref().payload;
-                heap.mark_kinded_words(payload, payload.kinds(), grey_objects);
-            }
-            Self::Library(_) => {}
-            Self::Tuple(t) => {
-                let t = t.as_ref();
-                heap.mark_kinded_words(t.elements(), t.kinds(), grey_objects);
-            }
-            Self::Array(a) => {
-                // Clear flag: scanned clean at a previous mark, unwritten since.
-                if a.as_ref().may_hold_refs() {
-                    let pointers = a.as_ref().elem_kind() == common::WORD_POINTER;
-                    let mut any = false;
-                    for v in a.as_ref().words().unwrap_or_default() {
-                        #[cfg(feature = "gc-stress")]
-                        if pointers {
-                            heap.verify_kinded_word("a pointer-kind array", 0, common::WORD_POINTER, *v);
-                        }
-                        // Pointer kind: `0` or an object, no classification.
-                        if (pointers && v.heap_addr() != 0) || (!pointers && heap.may_be_ref(*v)) {
-                            any = true;
-                            heap.mark_value(*v, grey_objects);
-                        }
-                    }
-                    if !any {
-                        a.payload_mut().may_hold_refs = false;
-                    }
-                }
-            }
-            Self::Coroutine(c) => {
-                let coro = c.as_ref();
-                let mask = coro.saved_live_mask;
-                for (i, v) in coro.saved_stack.iter().enumerate() {
-                    if mask != 0 && i < 64 && mask & (1u64 << i) == 0 {
-                        continue;
-                    }
-                    heap.mark_value(*v, grey_objects);
-                }
-                heap.mark_value(coro.pending_send, grey_objects);
-                for link in [coro.yield_from, coro.delegator].into_iter().flatten() {
-                    Object::Coroutine(link).mark(grey_objects);
-                }
-            }
-            Self::Boxed(b) => Self::mark_member(heap, &b.as_ref().payload, grey_objects),
-            Self::Root(r) => {
-                if let Some(member) = &r.as_ref().payload {
-                    Self::mark_member(heap, member, grey_objects);
-                }
-            }
-            Self::Weak(_) => {}
-            Self::Fn(f) => {
-                let f = f.as_ref();
-                for v in f.captures.iter().chain(f.captured_args.iter()) {
-                    heap.mark_value(*v, grey_objects);
-                }
-                for captured in f.dicts.iter().flatten().flatten() {
-                    Self::mark_member(heap, captured, grey_objects);
-                }
-            }
-            Self::Stream(_) => {}
-            Self::Thread(_) => {}
-            Self::Sender(_) => {}
-            Self::Receiver(_) => {}
-            Self::Mutex(_) => {}
-            Self::RwLock(_) => {}
+            Self::Instance(i) => format!("class {}", i.as_ref().type_id),
+            Self::Array(a) if a.as_ref().lanes() > 1 => "a lane array's pointer lane".into(),
+            Self::Array(_) => "a pointer-kind array".into(),
+            _ => "an enum payload / tuple".into(),
         }
     }
 
     /// Every heap reference `self` holds, with whether the word is precise.
     ///
-    /// Precise: `Member::Object` fields, coroutine links, and coroutine stack
-    /// words named by a nonzero `saved_live_mask`. Everything else is a raw
+    /// Precise: `Member::Object` fields, words a class row, construction
+    /// site or element kind records as pointers, and coroutine stack words
+    /// named by a nonzero `saved_live_mask`. Everything else is a raw
     /// `Value` word that is traced by address lookup and may be an immediate
-    /// (tuple / array elements, closure captures, unmasked coroutine words,
-    /// `Member::Value` fields) — a moving collector cannot rewrite those
+    /// (unknown-kind words, closure captures, unmasked coroutine words,
+    /// `Member::Value` fields): a moving collector cannot rewrite those
     /// (`docs/internals/gc-evacuation.md`). Not on the mark path.
     pub fn for_each_reference(&self, heap: &Heap, visit: &mut dyn FnMut(u64, bool)) {
-        let word = |v: Value, precise: bool, visit: &mut dyn FnMut(u64, bool)| {
-            let addr = v.heap_addr();
-            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                visit(addr, precise);
-            }
-        };
-        let kinded = |words: &[Value], kinds: u8, visit: &mut dyn FnMut(u64, bool)| {
-            for (i, v) in words.iter().enumerate() {
-                match common::packed_word_kind(kinds, i) {
-                    common::WORD_SCALAR => {}
-                    kind => word(*v, kind == common::WORD_POINTER, visit),
-                }
-            }
-        };
-        let member = |m: &Member, visit: &mut dyn FnMut(u64, bool)| match m {
-            Member::Object(o) => visit(o.addr(), true),
-            Member::Value(v) => word(*v, false, visit),
-        };
-        match self {
-            Self::Instance(i) => {
-                let inst = i.as_ref();
-                match &inst.storage {
-                    InstanceStorage::Table(table) => {
-                        table.iter().for_each(|(_, v)| member(&v, visit));
-                    }
-                    InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
-                        let kinds = heap.class_field_kinds(inst.type_id);
-                        for (i, v) in inst.storage.as_slice().into_iter().flatten().enumerate() {
-                            match kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN) {
-                                common::WORD_SCALAR => {}
-                                kind => word(*v, kind == common::WORD_POINTER, visit),
-                            }
-                        }
-                    }
-                }
-            }
-            Self::Enum(e) => {
-                let payload = &e.as_ref().payload;
-                kinded(payload, payload.kinds(), visit);
-            }
-            Self::Tuple(t) => {
-                let t = t.as_ref();
-                kinded(t.elements(), t.kinds(), visit);
-            }
-            Self::Array(a) => {
-                let a = a.as_ref();
-                if a.may_hold_refs() {
-                    let precise = a.elem_kind() == common::WORD_POINTER;
-                    a.words().unwrap_or_default().iter().for_each(|v| word(*v, precise, visit));
-                }
-            }
-            Self::Coroutine(c) => {
-                let coro = c.as_ref();
-                let mask = coro.saved_live_mask;
-                for (i, v) in coro.saved_stack.iter().enumerate() {
-                    let masked = mask != 0 && i < 64;
-                    if masked && mask & (1u64 << i) == 0 {
-                        continue;
-                    }
-                    word(*v, masked, visit);
-                }
-                word(coro.pending_send, false, visit);
-                for link in [coro.yield_from, coro.delegator].into_iter().flatten() {
-                    visit(Object::Coroutine(link).addr(), true);
-                }
-            }
-            Self::Boxed(b) => member(&b.as_ref().payload, visit),
-            Self::Root(r) => {
-                if let Some(m) = &r.as_ref().payload {
-                    member(m, visit);
-                }
-            }
-            Self::Fn(f) => {
-                let f = f.as_ref();
-                for v in f.captures.iter().chain(f.captured_args.iter()) {
-                    word(*v, false, visit);
-                }
-                f.dicts.iter().flatten().flatten().for_each(|m| member(m, visit));
-            }
-            Self::String(_)
-            | Self::Library(_)
-            | Self::Weak(_)
-            | Self::Stream(_)
-            | Self::Thread(_)
-            | Self::Sender(_)
-            | Self::Receiver(_)
-            | Self::Mutex(_)
-            | Self::RwLock(_) => {}
+        struct Tracer<'a, 'v> {
+            heap: &'a Heap,
+            visit: &'v mut dyn FnMut(u64, bool),
         }
+        impl Tracer<'_, '_> {
+            #[inline(always)]
+            fn resolve(&mut self, v: Value, precise: bool) {
+                let addr = v.heap_addr();
+                if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
+                    (self.visit)(addr, precise);
+                }
+            }
+        }
+        impl SlotVisitor for Tracer<'_, '_> {
+            #[inline(always)]
+            fn word(&mut self, &v: &Value, kind: u8) {
+                if kind != common::WORD_SCALAR {
+                    self.resolve(v, kind == common::WORD_POINTER);
+                }
+            }
+
+            #[inline(always)]
+            fn member(&mut self, m: &Member) {
+                match m {
+                    Member::Object(o) => (self.visit)(o.addr(), true),
+                    Member::Value(v) => self.resolve(*v, false),
+                }
+            }
+        }
+        self.visit_slots(heap, &mut Tracer { heap, visit });
     }
 
     /// Header nursery bits ([`GEN_YOUNG`] and friends).
@@ -2540,44 +2631,54 @@ impl Object {
         unsafe { &*(self.addr() as *const GcHeader) }.shared.get()
     }
 
+    /// This object as a tuple: an enum object of [`common::PRODUCT_TAG`].
     #[inline]
-    pub(crate) fn set_shared(&self) {
-        unsafe { &*(self.addr() as *const GcHeader) }.shared.set(true);
-    }
-
-    #[must_use]
-    pub fn addr(&self) -> u64 {
+    pub fn as_tuple(self) -> Option<RefEnum> {
         match self {
-            Self::String(s) => s.as_ptr() as u64,
-            Self::Instance(i) => i.as_ptr() as u64,
-            Self::Enum(e) => e.as_ptr() as u64,
-            Self::Library(l) => l.as_ptr() as u64,
-            Self::Tuple(t) => t.as_ptr() as u64,
-            Self::Array(a) => a.as_ptr() as u64,
-            Self::Coroutine(c) => c.as_ptr() as u64,
-            Self::Boxed(b) => b.as_ptr() as u64,
-            Self::Root(r) => r.as_ptr() as u64,
-            Self::Weak(w) => w.as_ptr() as u64,
-            Self::Fn(f) => f.as_ptr() as u64,
-            Self::Stream(s) => s.as_ptr() as u64,
-            Self::Thread(t) => t.as_ptr() as u64,
-            Self::Sender(s) => s.as_ptr() as u64,
-            Self::Receiver(r) => r.as_ptr() as u64,
-            Self::Mutex(m) => m.as_ptr() as u64,
-            Self::RwLock(l) => l.as_ptr() as u64,
+            Self::Enum(e) if e.as_ref().is_tuple() => Some(e),
+            _ => None,
         }
     }
 
+    /// Whether this object's `drop` has been claimed.
+    #[inline]
+    pub fn is_finalized(&self) -> bool {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.finalized.get()
+    }
+
+    /// Claim this object's `drop`: `false` when it was claimed already.
+    #[inline]
+    pub fn claim_finalizer(&self) -> bool {
+        // SAFETY: as in `is_finalized`.
+        !unsafe { &*(self.addr() as *const GcHeader) }.finalized.replace(true)
+    }
+
+    #[inline]
+    pub(crate) fn set_shared(&self) {
+        // SAFETY: a live object's header; the flag is a `Cell<bool>` at
+        // [`COW_SHARED_OFFSET`], which native code's inline share writes the
+        // same way.
+        unsafe { *((self.addr() + COW_SHARED_OFFSET as u64) as *mut u8) = COW_SHARED_SET };
+    }
+
+    #[must_use]
+    #[inline]
+    pub fn addr(&self) -> u64 {
+        each_kind!(self, r => r.as_ptr() as u64)
+    }
+
+    /// The header kind byte. 5 (a tuple, now an enum object of
+    /// [`common::PRODUCT_TAG`]), 8 (a boxed scalar) and 11 are free; no kind
+    /// takes them, so a stale number never reads as another kind.
     fn kind(self) -> u8 {
         match self {
             Self::String(_) => 1,
-            Self::Instance(_) => 2,
-            Self::Enum(_) => 3,
+            Self::Instance(_) => KIND_INSTANCE,
+            Self::Enum(_) => KIND_ENUM,
             Self::Library(_) => 4,
-            Self::Tuple(_) => 5,
             Self::Array(_) => 6,
             Self::Coroutine(_) => 7,
-            Self::Boxed(_) => 8,
             Self::Root(_) => 9,
             Self::Weak(_) => 10,
             Self::Fn(_) => 12,
@@ -2590,42 +2691,45 @@ impl Object {
         }
     }
 
+    /// What a collector check names an object by.
+    pub(crate) fn kind_name(self) -> &'static str {
+        match self {
+            Self::String(_) => "a string",
+            Self::Instance(_) => "an instance",
+            Self::Enum(e) if e.as_ref().is_tuple() => "a tuple",
+            Self::Enum(_) => "an enum",
+            Self::Library(_) => "a library",
+            Self::Array(a) if a.as_ref().elem_kind() == common::WORD_POINTER => "a pointer-kind array",
+            Self::Array(_) => "an array",
+            Self::Coroutine(_) => "a coroutine",
+            Self::Root(_) => "a root",
+            Self::Weak(_) => "a weak",
+            Self::Fn(_) => "a closure",
+            Self::Stream(_) => "a stream",
+            Self::Thread(_) => "a thread",
+            Self::Sender(_) => "a sender",
+            Self::Receiver(_) => "a receiver",
+            Self::Mutex(_) => "a mutex",
+            Self::RwLock(_) => "a rwlock",
+        }
+    }
+
     /// Drop the payload and poison `kind = 0`. Slot memory stays mapped.
     unsafe fn recycle_payload(self) {
-        match self {
-            Self::String(s) => unsafe { s.recycle() },
-            Self::Instance(i) => unsafe { i.recycle() },
-            Self::Enum(e) => unsafe { e.recycle() },
-            Self::Library(l) => unsafe { l.recycle() },
-            Self::Tuple(t) => unsafe { t.recycle() },
-            Self::Array(a) => unsafe { a.recycle() },
-            Self::Coroutine(c) => unsafe { c.recycle() },
-            Self::Boxed(b) => unsafe { b.recycle() },
-            Self::Root(r) => unsafe { r.recycle() },
-            Self::Weak(w) => unsafe { w.recycle() },
-            Self::Fn(f) => unsafe { f.recycle() },
-            Self::Stream(s) => unsafe { s.recycle() },
-            Self::Thread(t) => unsafe { t.recycle() },
-            Self::Sender(s) => unsafe { s.recycle() },
-            Self::Receiver(r) => unsafe { r.recycle() },
-            Self::Mutex(m) => unsafe { m.recycle() },
-            Self::RwLock(l) => unsafe { l.recycle() },
-        }
+        each_kind!(self, r => unsafe { r.recycle() })
     }
 
     /// Rebuild a typed handle from a live allocation. The address must be a
     /// current [`Heap::alloc`] result (non-moving); kind is the header byte.
-    unsafe fn from_header(addr: u64) -> Option<Self> {
+    pub(crate) unsafe fn from_header(addr: u64) -> Option<Self> {
         let header = unsafe { &*(addr as *const GcHeader) };
         Some(match header.kind.get() {
             1 => Self::String(unsafe { Gc::from_addr(addr) }),
-            2 => Self::Instance(unsafe { Gc::from_addr(addr) }),
+            KIND_INSTANCE => Self::Instance(unsafe { Gc::from_addr(addr) }),
             3 => Self::Enum(unsafe { Gc::from_addr(addr) }),
             4 => Self::Library(unsafe { Gc::from_addr(addr) }),
-            5 => Self::Tuple(unsafe { Gc::from_addr(addr) }),
-            6 => Self::Array(unsafe { Gc::from_addr(addr) }),
+            KIND_ARRAY => Self::Array(unsafe { Gc::from_addr(addr) }),
             7 => Self::Coroutine(unsafe { Gc::from_addr(addr) }),
-            8 => Self::Boxed(unsafe { Gc::from_addr(addr) }),
             9 => Self::Root(unsafe { Gc::from_addr(addr) }),
             10 => Self::Weak(unsafe { Gc::from_addr(addr) }),
             12 => Self::Fn(unsafe { Gc::from_addr(addr) }),
@@ -2642,25 +2746,7 @@ impl Object {
 
 impl GcSized for Object {
     fn size(&self) -> usize {
-        match self {
-            Self::String(s) => s.size(),
-            Self::Instance(i) => i.size(),
-            Self::Enum(e) => e.size(),
-            Self::Library(l) => l.size(),
-            Self::Tuple(t) => t.size(),
-            Self::Array(a) => a.size(),
-            Self::Coroutine(c) => c.size(),
-            Self::Boxed(b) => b.size(),
-            Self::Root(r) => r.size(),
-            Self::Weak(w) => w.size(),
-            Self::Fn(f) => f.size(),
-            Self::Stream(s) => s.size(),
-            Self::Thread(t) => t.size(),
-            Self::Sender(s) => s.size(),
-            Self::Receiver(r) => r.size(),
-            Self::Mutex(m) => m.size(),
-            Self::RwLock(l) => l.size(),
-        }
+        each_kind!(self, r => r.size())
     }
 }
 
@@ -2669,12 +2755,11 @@ impl fmt::Display for Object {
         match self {
             Self::String(s) => write!(f, "{}", s.as_ref()),
             Self::Instance(_) => write!(f, "0x{:08x}", self.addr()),
+            Self::Enum(e) if e.as_ref().is_tuple() => write!(f, "{}", e.as_ref()),
             Self::Enum(_) => write!(f, "0x{:08x}", self.addr()),
             Self::Library(_) => write!(f, "0x{:08x}", self.addr()),
-            Self::Tuple(t) => write!(f, "{}", t.as_ref()),
             Self::Array(a) => write!(f, "{}", a.as_ref()),
             Self::Coroutine(c) => write!(f, "{}", c.as_ref()),
-            Self::Boxed(_) => write!(f, "<boxed 0x{:08x}>", self.addr()),
             Self::Root(_) => write!(f, "<root 0x{:08x}>", self.addr()),
             Self::Weak(_) => write!(f, "<weak 0x{:08x}>", self.addr()),
             Self::Fn(_) => write!(f, "<fn 0x{:08x}>", self.addr()),
@@ -2689,34 +2774,12 @@ impl fmt::Display for Object {
 }
 
 impl Object {
-    /// C string pointer for FFI; non-strings return null.
-    pub fn as_cstr(&self) -> *const std::os::raw::c_char {
-        match self {
-            Self::String(s) => s.data.data.as_str().as_ptr() as *const std::os::raw::c_char,
-            Self::Instance(_)
-            | Self::Enum(_)
-            | Self::Library(_)
-            | Self::Tuple(_)
-            | Self::Array(_)
-            | Self::Coroutine(_)
-            | Self::Boxed(_)
-            | Self::Root(_)
-            | Self::Weak(_)
-            | Self::Fn(_)
-            | Self::Stream(_)
-            | Self::Thread(_)
-            | Self::Sender(_)
-            | Self::Receiver(_)
-            | Self::Mutex(_)
-            | Self::RwLock(_) => std::ptr::null(),
-        }
-    }
 }
 
 /// How a moving collector may treat a root (`docs/internals/gc-evacuation.md`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RootKind {
-    /// A word the VM knows is a heap reference; could be rewritten.
+    /// A word the runtime knows is a heap reference; could be rewritten.
     Precise,
     /// A word that may be an immediate (conservative frame, static); the
     /// object it hits must not move.
@@ -2731,154 +2794,63 @@ pub enum Member {
     Object(Object),
 }
 
-/// Max typed field count stored inside [`ObjInstance`] without a Rust `Vec`.
-///
-/// Typed fields are raw words (the GC resolves them like tuple elements), so
-/// four fit where two tagged [`Member`]s used to; larger classes spill.
-pub const INSTANCE_INLINE_FIELDS: usize = 4;
+/// Max typed field count stored inside [`ObjInstance`] without a Rust `Vec`:
+/// the inline width of the store every product object shares
+/// ([`EnumPayload`]).
+pub const INSTANCE_INLINE_FIELDS: usize = ENUM_INLINE_ARITY;
 
-/// Named intern table (`type_id == 0` / `INIT`) or dense typed slots.
-enum InstanceStorage {
-    Table(Table<Member>),
-    Inline {
-        len: u8,
-        slots: [Value; INSTANCE_INLINE_FIELDS],
-    },
-    Spill(Vec<Value>),
-}
-
-impl InstanceStorage {
-    fn typed_slots(nfields: usize) -> Self {
-        if nfields <= INSTANCE_INLINE_FIELDS {
-            Self::Inline {
-                len: nfields as u8,
-                slots: [Value::from(0i64); INSTANCE_INLINE_FIELDS],
-            }
-        } else {
-            Self::Spill(vec![Value::from(0i64); nfields])
-        }
-    }
-
-    fn from_vec(slots: Vec<Value>) -> Self {
-        let n = slots.len();
-        if n <= INSTANCE_INLINE_FIELDS {
-            let mut inline = [Value::from(0i64); INSTANCE_INLINE_FIELDS];
-            inline[..n].copy_from_slice(&slots);
-            Self::Inline {
-                len: n as u8,
-                slots: inline,
-            }
-        } else {
-            Self::Spill(slots)
-        }
-    }
-
-    fn as_slice(&self) -> Option<&[Value]> {
-        match self {
-            Self::Inline { len, slots } => Some(&slots[..*len as usize]),
-            Self::Spill(slots) => Some(slots.as_slice()),
-            Self::Table(_) => None,
-        }
-    }
-
-    fn as_mut_slice(&mut self) -> Option<&mut [Value]> {
-        match self {
-            Self::Inline { len, slots } => Some(&mut slots[..*len as usize]),
-            Self::Spill(slots) => Some(slots.as_mut_slice()),
-            Self::Table(_) => None,
-        }
-    }
-
-    fn is_inline(&self) -> bool {
-        matches!(self, Self::Inline { .. })
-    }
-
-    fn spill_capacity(&self) -> usize {
-        match self {
-            Self::Spill(slots) => slots.capacity(),
-            Self::Inline { .. } | Self::Table(_) => 0,
-        }
-    }
-}
-
+/// `type_id` first, so the slots sit at the offset of an [`ObjEnum`]'s
+/// payload: one inline read serves both ([`product_slots`]).
+#[repr(C)]
 pub struct ObjInstance {
-    storage: InstanceStorage,
-    /// Compile-time class identity (`0` = none / dict / legacy `INIT`).
+    /// Compile-time class identity (`0` = none).
     pub type_id: u32,
-    /// Set when `drop` has run (GC or explicit); drop must not run twice.
-    pub finalized: bool,
+    /// The fields' words; their kinds come from the class row, so the
+    /// store's own packed kinds stay `0`.
+    storage: EnumPayload,
 }
 
 impl Default for ObjInstance {
     fn default() -> Self {
         Self {
-            storage: InstanceStorage::Table(Table::default()),
+            storage: EnumPayload::empty(),
             type_id: 0,
-            finalized: false,
         }
     }
 }
 
 impl ObjInstance {
-
-    #[must_use]
-    pub fn with_type_id(type_id: u32) -> Self {
-        Self::with_type_id_and_fields(type_id, 0)
-    }
-
-    /// Typed instances (`type_id != 0`) use dense slots of `nfields`.
-    /// Counts ≤ [`INSTANCE_INLINE_FIELDS`] stay in the header; larger spill.
-    /// `nfields == 0` keeps a named table so legacy `InitTyped` + GetField still works.
+    /// `nfields` dense slots, zeroed. Counts ≤ [`INSTANCE_INLINE_FIELDS`]
+    /// stay in the header; larger spill.
     #[must_use]
     pub fn with_type_id_and_fields(type_id: u32, nfields: usize) -> Self {
-        let storage = if type_id != 0 && nfields > 0 {
-            InstanceStorage::typed_slots(nfields)
-        } else {
-            InstanceStorage::Table(Table::default())
-        };
         Self {
-            storage,
+            storage: EnumPayload::zeros(nfields),
             type_id,
-            finalized: false,
         }
     }
 
-    pub fn set(&mut self, key: RefString, value: Member) {
-        if let InstanceStorage::Table(table) = &mut self.storage {
-            table.insert(key, value);
-        }
-    }
-
-    /// Named read: the table entry, or a typed slot by its known name.
+    /// Named read of a typed slot by its known name.
     pub fn get(&self, key: RefString) -> Option<Value> {
-        match &self.storage {
-            InstanceStorage::Table(table) => table.get(key).map(|m| match m {
-                Member::Value(v) => v,
-                Member::Object(o) => Value::from(o.addr()),
-            }),
-            InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
-                let slot = common::range_heap_field_slot(self.type_id, &key.as_ref().data)?;
-                self.slot(slot)
-            }
-        }
+        let slot = common::range_heap_field_slot(self.type_id, &key.as_ref().data)?;
+        self.slot(slot)
     }
 
     pub fn slot(&self, index: usize) -> Option<Value> {
-        self.storage.as_slice()?.get(index).copied()
+        self.storage.as_slice().get(index).copied()
     }
 
     pub fn set_slot(&mut self, index: usize, value: Value) {
-        if let Some(slots) = self.storage.as_mut_slice()
-            && let Some(slot) = slots.get_mut(index) {
-                *slot = value;
-            }
+        if let Some(slot) = self.storage.as_mut_slice().get_mut(index) {
+            *slot = value;
+        }
     }
 
-    pub fn slot_len(&self) -> Option<usize> {
-        self.storage.as_slice().map(|s| s.len())
+    pub fn slot_len(&self) -> usize {
+        self.storage.as_slice().len()
     }
 
-    pub fn slots(&self) -> Option<&[Value]> {
+    pub fn slots(&self) -> &[Value] {
         self.storage.as_slice()
     }
 
@@ -2891,59 +2863,8 @@ impl ObjInstance {
     #[must_use]
     pub fn with_slots(type_id: u32, slots: Vec<Value>) -> Self {
         Self {
-            storage: InstanceStorage::from_vec(slots),
+            storage: EnumPayload::from_vec(slots),
             type_id,
-            finalized: false,
-        }
-    }
-
-    /// Iterate live `(key, value)` entries in table order (DictEntries).
-    /// Typed slot instances have no interned names.
-    pub fn iter_fields(&self) -> InstanceFieldIter<'_> {
-        match &self.storage {
-            InstanceStorage::Table(table) => InstanceFieldIter::Table(table.iter()),
-            InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => InstanceFieldIter::Empty,
-        }
-    }
-
-    fn mark_members(&self, heap: &Heap, grey_objects: &mut Vec<Object>) {
-        match &self.storage {
-            InstanceStorage::Table(table) => {
-                table.iter().for_each(|(k, v)| {
-                    k.mark();
-                    Object::mark_member(heap, &v, grey_objects);
-                });
-            }
-            InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
-                if let Some(slots) = self.storage.as_slice() {
-                    let kinds = heap.class_field_kinds(self.type_id);
-                    for (i, v) in slots.iter().enumerate() {
-                        let kind = kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN);
-                        #[cfg(feature = "gc-stress")]
-                        heap.verify_kinded_word(&format!("class {}", self.type_id), i, kind, *v);
-                        if kind != common::WORD_SCALAR {
-                            heap.mark_value(*v, grey_objects);
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Named-field walk for dicts; empty for dense typed slots.
-pub enum InstanceFieldIter<'a> {
-    Table(Iter<'a, Member>),
-    Empty,
-}
-
-impl Iterator for InstanceFieldIter<'_> {
-    type Item = (RefString, Member);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Table(it) => it.next(),
-            Self::Empty => None,
         }
     }
 }
@@ -2956,7 +2877,7 @@ impl GcSized for ObjInstance {
     }
 
     fn size(&self) -> usize {
-        // `Table` / inline slots live in the object; only a spill `Vec` is extra.
+        // Inline slots live in the object; only a spill `Vec` is extra.
         std::mem::size_of::<Self>()
             + self.storage.spill_capacity() * std::mem::size_of::<Value>()
     }
@@ -2968,11 +2889,17 @@ impl GcSized for ObjInstance {
 /// so four fit where two tagged [`Member`]s used to; larger variants spill.
 pub const ENUM_INLINE_ARITY: usize = 4;
 
-/// Flat enum payload: inline words up to [`ENUM_INLINE_ARITY`], else a `Vec`.
+/// The fixed-slot store of every product object: a variant's payload, a
+/// tuple's items ([`ObjEnum`]) and an instance's fields ([`ObjInstance`]).
+/// Inline words up to [`ENUM_INLINE_ARITY`], else a `Vec`.
+#[repr(C)]
 pub struct EnumPayload {
     inner: EnumPayloadInner,
 }
 
+/// `repr(u8)`: fixed layout, so native code fills an inline payload in
+/// place ([`InlineLayout`]).
+#[repr(u8)]
 enum EnumPayloadInner {
     /// `kinds`: packed word kinds (`common::packed_word_kind`), in padding.
     Inline {
@@ -2996,6 +2923,21 @@ impl EnumPayload {
                 kinds: 0,
                 slots: [Value::default(); ENUM_INLINE_ARITY],
             },
+        }
+    }
+
+    /// `n` zero words: an instance's fields before their stores.
+    pub fn zeros(n: usize) -> Self {
+        if n <= ENUM_INLINE_ARITY {
+            Self {
+                inner: EnumPayloadInner::Inline {
+                    len: n as u8,
+                    kinds: 0,
+                    slots: [Value::from(0i64); ENUM_INLINE_ARITY],
+                },
+            }
+        } else {
+            Self::from_vec(vec![Value::from(0i64); n])
         }
     }
 
@@ -3137,14 +3079,13 @@ impl<'a> IntoIterator for &'a EnumPayload {
 }
 
 /// Heap-allocated enum variant (`tag` + inline-or-spill word payload).
+#[repr(C)]
 pub struct ObjEnum {
     pub tag: u32,
-    pub payload: EnumPayload,
     /// Finalizer key for an enum with `fn drop()` (`TagEnumType`); `0` = none.
     /// Unit variants are shared immortals and are never tagged.
     pub type_id: u32,
-    /// Set once the finalizer has been claimed, like [`ObjInstance::finalized`].
-    pub finalized: bool,
+    pub payload: EnumPayload,
 }
 
 impl ObjEnum {
@@ -3153,8 +3094,27 @@ impl ObjEnum {
             tag,
             payload,
             type_id: 0,
-            finalized: false,
         }
+    }
+
+    /// A tuple of `elements`, `kinds` their packed word kinds: a product,
+    /// an enum object of [`common::PRODUCT_TAG`]. Immutable; up to
+    /// [`ENUM_INLINE_ARITY`] words live in the object, wider ones spill.
+    #[inline]
+    pub fn tuple(elements: &[Value], kinds: u8) -> Self {
+        Self::new(common::PRODUCT_TAG, EnumPayload::from_slice(elements).with_kinds(kinds))
+    }
+
+    /// Whether this object is a tuple ([`Self::tuple`]), not a variant.
+    #[inline]
+    pub fn is_tuple(&self) -> bool {
+        self.tag == common::PRODUCT_TAG
+    }
+
+    /// A tuple's elements (a variant's payload words).
+    #[inline]
+    pub fn elements(&self) -> &[Value] {
+        &self.payload
     }
 }
 
@@ -3166,7 +3126,7 @@ impl GcSized for ObjEnum {
     }
 
     fn size(&self) -> usize {
-        std::mem::size_of::<Self>() + self.payload.spill_capacity() * std::mem::size_of::<Member>()
+        std::mem::size_of::<Self>() + self.payload.spill_capacity() * std::mem::size_of::<Value>()
     }
 }
 
@@ -3254,45 +3214,6 @@ impl From<&str> for ObjString {
     }
 }
 
-/// Immutable tuple: up to [`ENUM_INLINE_ARITY`] words live in the object,
-/// wider tuples spill (same storage as enum payloads).
-pub struct ObjTuple {
-    elements: EnumPayload,
-}
-
-impl ObjTuple {
-    pub fn new(elements: Vec<Value>) -> Self {
-        Self {
-            elements: EnumPayload::from_vec(elements),
-        }
-    }
-
-    #[inline]
-    pub fn from_slice(elements: &[Value]) -> Self {
-        Self {
-            elements: EnumPayload::from_slice(elements),
-        }
-    }
-
-    /// Record the construction site's element word kinds.
-    #[inline]
-    pub fn with_kinds(self, kinds: u8) -> Self {
-        Self {
-            elements: self.elements.with_kinds(kinds),
-        }
-    }
-
-    #[inline]
-    pub fn kinds(&self) -> u8 {
-        self.elements.kinds()
-    }
-
-    #[inline]
-    pub fn elements(&self) -> &[Value] {
-        &self.elements
-    }
-}
-
 /// Element storage of an [`ObjArray`].
 ///
 /// `Bytes` holds one byte per element and is lossless: it only ever holds
@@ -3302,9 +3223,95 @@ impl ObjTuple {
 /// reference) unpacks the array to `Words` first, so the packing is a pure
 /// space optimisation and never depends on the static element type.
 enum ArrayData {
-    Words(Vec<Value>),
+    /// One word per element, and the card table of a large old array
+    /// ([`CardTable`]).
+    Words(Vec<Value>, Option<Box<CardTable>>),
     Bytes(Vec<u8>),
+    /// `k` words per element, element `i` at `words[i * k..][..k]`: a
+    /// `Vec` of a two-word type (`Option<int>`, `(int, float)`) keeps
+    /// both words in place (`MakeArrayK` stamps it from the element
+    /// layout). One-word reads and writes refuse it: only the lane API
+    /// below and code that knows the stride touch it.
+    /// `k` is [`ObjArray::stride`]: kept out of the variant so that
+    /// [`Self::Words`]'s card table fits in the same size.
+    Lanes { words: Vec<Value> },
 }
+
+/// Elements per card of a [`CardTable`]: `1 << CARD_SHIFT`. Eight: a sweep
+/// of {8, 16, 64} found 8 cheapest on map updates (most cards dirty) and 64
+/// on a sparse store loop (#2687).
+pub const CARD_SHIFT: u32 = 3;
+/// Elements a remembered word array has when a minor gives it a
+/// [`CardTable`]; a smaller one is scanned whole.
+pub const CARD_MIN_WORDS: usize = 1024;
+
+/// Which parts of a large old word array were written since the last minor
+/// collection (#2687): one byte per card of `1 << CARD_SHIFT` elements,
+/// non-zero when a write may have stored a reference there, so a minor
+/// that finds the array remembered scans only those elements. `all` covers
+/// a write that names no index (raw word access). A minor gives a
+/// remembered array its table ([`ObjArray::attach_cards`]) and clears
+/// what it scanned. A minor's safepoint drops every native view, so no
+/// plain view taken before the table exists outlives it, and every store
+/// view taken after it is [`VIEW_TRACKED`]: native code marks the card of
+/// each element it stores in place.
+pub(crate) struct CardTable {
+    pub(crate) all: bool,
+    pub(crate) cards: Vec<u8>,
+}
+
+impl CardTable {
+    fn new(capacity: usize) -> Self {
+        Self { all: false, cards: vec![0; Self::cards_for(capacity)] }
+    }
+
+    /// Cards that cover `n` elements.
+    #[inline]
+    pub(crate) fn cards_for(n: usize) -> usize {
+        n.div_ceil(1 << CARD_SHIFT)
+    }
+
+    #[inline(always)]
+    fn mark(&mut self, i: usize) {
+        match self.cards.get_mut(i >> CARD_SHIFT) {
+            Some(c) => *c = 1,
+            None => self.grow_mark(i, i + 1),
+        }
+    }
+
+    /// Mark the cards of elements `lo..hi`.
+    fn mark_range(&mut self, lo: usize, hi: usize) {
+        if lo >= hi {
+            return;
+        }
+        let (a, b) = (lo >> CARD_SHIFT, (hi - 1) >> CARD_SHIFT);
+        if b >= self.cards.len() {
+            self.grow_mark(lo, hi);
+            return;
+        }
+        self.cards[a..=b].fill(1);
+    }
+
+    /// The array grew past the cards: cover twice as many, then mark.
+    #[cold]
+    #[inline(never)]
+    fn grow_mark(&mut self, lo: usize, hi: usize) {
+        let need = Self::cards_for(hi).max(2 * self.cards.len());
+        self.cards.resize(need, 0);
+        self.mark_range(lo, hi);
+    }
+
+    /// Bytes the table takes, for heap accounting.
+    fn bytes(&self) -> usize {
+        mem::size_of::<Self>() + self.cards.capacity()
+    }
+}
+
+/// `coil_native_view`'s states (`0`: no view): `VIEW_PLAIN` loads and stores
+/// in place; `VIEW_TRACKED` does too, and each store also marks its
+/// element's card in the array's table, whose bytes the view carries.
+pub const VIEW_PLAIN: u64 = 1;
+pub const VIEW_TRACKED: u64 = 2;
 
 /// The word stored as one byte, when it fits.
 #[inline(always)]
@@ -3372,6 +3379,12 @@ pub struct ObjArray {
     /// treats them as precise references. `WORD_BYTE` packs the storage
     /// instead of being kept.
     elem_kind: u8,
+    /// Words per element: `k` of a lane array, `1` otherwise.
+    stride: u8,
+    /// A lane array's pointer tags: element lane 1 is a tag, and lane 0
+    /// is a heap reference exactly when bit `tag` is set (`0` for a
+    /// product of scalars). Unused by other storage.
+    tag_mask: u64,
     /// Storage bytes the heap has counted for this array (see
     /// [`Self::take_resize`]). [`GcSized::size`] reports this, not the live
     /// storage, so a grow or a pack / unpack the heap was not told about
@@ -3379,15 +3392,22 @@ pub struct ObjArray {
     accounted: usize,
 }
 
+// The card table fits where the slot had room (#2687): a word array's
+// table sits in its variant, and a lane array's stride left its variant.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(mem::size_of::<GcData<ObjArray>>() == 64);
+
 impl ObjArray {
     /// Conservative: any element may be a reference.
     pub fn new(elements: Vec<Value>) -> Self {
         let may_hold_refs = !elements.is_empty();
         Self {
             accounted: elements.capacity() * mem::size_of::<Value>(),
-            data: ArrayData::Words(elements),
+            data: ArrayData::Words(elements, None),
             may_hold_refs,
             elem_kind: common::WORD_UNKNOWN,
+            stride: 1,
+            tag_mask: 0,
         }
     }
 
@@ -3396,18 +3416,22 @@ impl ObjArray {
         let may_hold_refs = elements.iter().any(|v| heap.may_be_ref(*v));
         Self {
             accounted: elements.capacity() * mem::size_of::<Value>(),
-            data: ArrayData::Words(elements),
+            data: ArrayData::Words(elements, None),
             may_hold_refs,
             elem_kind: common::WORD_UNKNOWN,
+            stride: 1,
+            tag_mask: 0,
         }
     }
 
     pub fn with_capacity(n: usize) -> Self {
         Self {
             accounted: n * mem::size_of::<Value>(),
-            data: ArrayData::Words(Vec::with_capacity(n)),
+            data: ArrayData::Words(Vec::with_capacity(n), None),
             may_hold_refs: false,
             elem_kind: common::WORD_UNKNOWN,
+            stride: 1,
+            tag_mask: 0,
         }
     }
 
@@ -3418,7 +3442,189 @@ impl ObjArray {
             data: ArrayData::Bytes(bytes),
             may_hold_refs: false,
             elem_kind: common::WORD_UNKNOWN,
+            stride: 1,
+            tag_mask: 0,
         }
+    }
+
+    /// An empty array of `k`-word elements with room for `n`, whose
+    /// lane 0 is a reference under the tags in `tag_mask`.
+    pub fn with_lanes(k: usize, n: usize, tag_mask: u64) -> Self {
+        assert!(k >= 2, "a lane array has two or more words per element");
+        Self {
+            accounted: n * k * mem::size_of::<Value>(),
+            data: ArrayData::Lanes { words: Vec::with_capacity(n * k) },
+            may_hold_refs: tag_mask != 0,
+            elem_kind: common::WORD_UNKNOWN,
+            stride: Self::stride_of(k),
+            tag_mask,
+        }
+    }
+
+    /// A lane array of the elements laid out in `words` (`k` each).
+    pub fn from_lanes(words: Vec<Value>, k: usize, tag_mask: u64) -> Self {
+        assert!(k >= 2 && words.len().is_multiple_of(k), "lane words are whole elements");
+        Self {
+            accounted: words.capacity() * mem::size_of::<Value>(),
+            may_hold_refs: tag_mask != 0 && !words.is_empty(),
+            data: ArrayData::Lanes { words },
+            elem_kind: common::WORD_UNKNOWN,
+            stride: Self::stride_of(k),
+            tag_mask,
+        }
+    }
+
+    /// A lane array's `k` as [`Self::stride`].
+    fn stride_of(k: usize) -> u8 {
+        u8::try_from(k).expect("a lane array has at most 255 words per element")
+    }
+
+    /// Turn a lane array into one word per element in place: `boxes` holds
+    /// each element's object, in order. The array stays the same object;
+    /// its element kind is pointer, as a boxed two-word element's
+    /// (`array_elem_stamp`).
+    pub fn lanes_into_words(&mut self, boxes: Vec<Value>) {
+        debug_assert_eq!(boxes.len(), self.len(), "a box per element");
+        self.may_hold_refs = !boxes.is_empty();
+        self.data = ArrayData::Words(boxes, None);
+        self.stride = 1;
+        self.elem_kind = common::WORD_POINTER;
+        self.tag_mask = 0;
+    }
+
+    /// Words per element: `1` but for a lane array.
+    #[inline]
+    pub fn lanes(&self) -> usize {
+        match &self.data {
+            ArrayData::Lanes { .. } => usize::from(self.stride),
+            _ => 1,
+        }
+    }
+
+    /// A lane array's pointer tags ([`Self::with_lanes`]).
+    #[inline]
+    pub fn tag_mask(&self) -> u64 {
+        self.tag_mask
+    }
+
+    /// A lane array's words, `k` per element.
+    #[inline]
+    pub fn lane_words(&self) -> Option<&[Value]> {
+        match &self.data {
+            ArrayData::Lanes { words, .. } => Some(words),
+            _ => None,
+        }
+    }
+
+    /// Element `i`'s words in a lane array.
+    #[inline]
+    pub fn get_lanes(&self, i: usize) -> Option<&[Value]> {
+        let k = &usize::from(self.stride);
+        match &self.data {
+            ArrayData::Lanes { words } => words.get(i * k..(i + 1) * k),
+            _ => None,
+        }
+    }
+
+    /// Overwrite element `i` of a lane array (`false` out of range).
+    #[inline]
+    pub fn set_lanes(&mut self, i: usize, lanes: &[Value]) -> bool {
+        let k = &usize::from(self.stride);
+        let mask = self.tag_mask;
+        let ArrayData::Lanes { words } = &mut self.data else {
+            panic!("set_lanes on an array of one-word elements");
+        };
+        let Some(slot) = words.get_mut(i * *k..(i + 1) * *k) else {
+            return false;
+        };
+        slot.copy_from_slice(lanes);
+        if mask != 0 {
+            self.note();
+        }
+        true
+    }
+
+    /// Append one element to a lane array.
+    #[inline]
+    pub fn push_lanes(&mut self, lanes: &[Value]) {
+        let k = &usize::from(self.stride);
+        let mask = self.tag_mask;
+        let ArrayData::Lanes { words } = &mut self.data else {
+            panic!("push_lanes on an array of one-word elements");
+        };
+        debug_assert_eq!(lanes.len(), *k);
+        words.extend_from_slice(lanes);
+        if mask != 0 {
+            self.note();
+        }
+    }
+
+    /// Remove the last element of a lane array into `out`.
+    #[inline]
+    pub fn pop_lanes(&mut self, out: &mut [Value]) -> bool {
+        let k = &usize::from(self.stride);
+        let ArrayData::Lanes { words } = &mut self.data else {
+            panic!("pop_lanes on an array of one-word elements");
+        };
+        if words.len() < *k {
+            return false;
+        }
+        let at = words.len() - *k;
+        out.copy_from_slice(&words[at..]);
+        words.truncate(at);
+        true
+    }
+
+    /// Insert one element at `i` of a lane array (caller checks `i <= len`).
+    pub fn insert_lanes(&mut self, i: usize, lanes: &[Value]) {
+        let k = &usize::from(self.stride);
+        let mask = self.tag_mask;
+        let ArrayData::Lanes { words } = &mut self.data else {
+            panic!("insert_lanes on an array of one-word elements");
+        };
+        let at = i * *k;
+        words.splice(at..at, lanes.iter().copied());
+        if mask != 0 {
+            self.note();
+        }
+    }
+
+    /// Remove element `i` of a lane array into `out` (caller checks `i < len`).
+    pub fn remove_lanes(&mut self, i: usize, out: &mut [Value]) {
+        let k = &usize::from(self.stride);
+        let ArrayData::Lanes { words } = &mut self.data else {
+            panic!("remove_lanes on an array of one-word elements");
+        };
+        let at = i * *k;
+        out.copy_from_slice(&words[at..at + *k]);
+        words.drain(at..at + *k);
+    }
+
+    /// Each stored word with the kind the collector reads it as: an
+    /// array's element kind, or a lane array's per lane (lane 0 a pointer
+    /// or a scalar by the element's tag, the rest scalars).
+    pub(crate) fn kinded_words(&self) -> impl Iterator<Item = (Value, u8)> + '_ {
+        let k = &usize::from(self.stride);
+        let (words, k, kind): (&[Value], usize, u8) = match &self.data {
+            ArrayData::Words(w, ..) => (w, 1, self.elem_kind),
+            ArrayData::Bytes(_) => (&[], 1, common::WORD_SCALAR),
+            ArrayData::Lanes { words } => (words, *k, common::WORD_SCALAR),
+        };
+        let mask = self.tag_mask;
+        words.iter().enumerate().map(move |(i, &v)| {
+            if k == 1 {
+                return (v, kind);
+            }
+            (v, if Self::lane_pointer(words, k, mask, i) { common::WORD_POINTER } else { common::WORD_SCALAR })
+        })
+    }
+
+    /// Whether word `i` of lane words `words` (`k` per element) is a
+    /// reference: lane 0 of an element whose tag (lane 1) is in `mask`.
+    #[inline]
+    fn lane_pointer(words: &[Value], k: usize, mask: u64, i: usize) -> bool {
+        let lane = i % k;
+        lane == 0 && words.get(i + 1).is_some_and(|t| t.bits() < 64 && mask >> t.bits() & 1 == 1)
     }
 
     /// Element word kind (`common::WORD_*`).
@@ -3447,7 +3653,7 @@ impl ObjArray {
 
     /// Switch to byte storage when every element fits; otherwise no-op.
     pub fn pack(&mut self) {
-        let ArrayData::Words(words) = &self.data else {
+        let ArrayData::Words(words, ..) = &self.data else {
             return;
         };
         let mut bytes = Vec::with_capacity(words.capacity());
@@ -3468,7 +3674,7 @@ impl ObjArray {
         if let ArrayData::Bytes(bytes) = &self.data {
             let mut words = Vec::with_capacity(bytes.capacity());
             words.extend(bytes.iter().map(|b| word_of(*b)));
-            self.data = ArrayData::Words(words);
+            self.data = ArrayData::Words(words, None);
         }
     }
 
@@ -3479,8 +3685,9 @@ impl ObjArray {
             self.unpack();
         }
         match &mut self.data {
-            ArrayData::Words(w) => w,
+            ArrayData::Words(w, ..) => w,
             ArrayData::Bytes(_) => unreachable!(),
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
 
@@ -3488,8 +3695,8 @@ impl ObjArray {
     #[inline]
     pub fn words(&self) -> Option<&[Value]> {
         match &self.data {
-            ArrayData::Words(w) => Some(w),
-            ArrayData::Bytes(_) => None,
+            ArrayData::Words(w, ..) => Some(w),
+            ArrayData::Bytes(_) | ArrayData::Lanes { .. } => None,
         }
     }
 
@@ -3497,7 +3704,7 @@ impl ObjArray {
     #[inline]
     pub fn bytes(&self) -> Option<&[u8]> {
         match &self.data {
-            ArrayData::Words(_) => None,
+            ArrayData::Words(..) | ArrayData::Lanes { .. } => None,
             ArrayData::Bytes(b) => Some(b),
         }
     }
@@ -3506,7 +3713,7 @@ impl ObjArray {
     #[inline]
     pub fn bytes_mut(&mut self) -> Option<&mut Vec<u8>> {
         match &mut self.data {
-            ArrayData::Words(_) => None,
+            ArrayData::Words(..) | ArrayData::Lanes { .. } => None,
             ArrayData::Bytes(b) => Some(b),
         }
     }
@@ -3515,8 +3722,9 @@ impl ObjArray {
     #[inline]
     pub fn iter(&self) -> ArrayIter<'_> {
         match &self.data {
-            ArrayData::Words(w) => ArrayIter::Words(w.iter().copied()),
+            ArrayData::Words(w, ..) => ArrayIter::Words(w.iter().copied()),
             ArrayData::Bytes(b) => ArrayIter::Bytes(b.iter()),
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
 
@@ -3524,9 +3732,11 @@ impl ObjArray {
     /// with the same element kind (the same words, so a pointer kind still
     /// holds).
     pub fn copy(&self) -> Self {
+        let k = &usize::from(self.stride);
         let mut copy = match &self.data {
-            ArrayData::Words(w) => Self::new(w.clone()),
+            ArrayData::Words(w, ..) => Self::new(w.clone()),
             ArrayData::Bytes(b) => Self::from_bytes(b.clone()),
+            ArrayData::Lanes { words } => Self::from_lanes(words.clone(), *k, self.tag_mask),
         };
         copy.elem_kind = self.elem_kind;
         copy
@@ -3535,16 +3745,18 @@ impl ObjArray {
     /// Copy of the elements as words.
     pub fn to_vec(&self) -> Vec<Value> {
         match &self.data {
-            ArrayData::Words(w) => w.clone(),
+            ArrayData::Words(w, ..) => w.clone(),
             ArrayData::Bytes(b) => b.iter().map(|b| word_of(*b)).collect(),
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
 
     /// Copy of elements `start..end` as words (caller checks bounds).
     pub fn slice_to_vec(&self, start: usize, end: usize) -> Vec<Value> {
         match &self.data {
-            ArrayData::Words(w) => w[start..end].to_vec(),
+            ArrayData::Words(w, ..) => w[start..end].to_vec(),
             ArrayData::Bytes(b) => b[start..end].iter().map(|b| word_of(*b)).collect(),
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
 
@@ -3552,38 +3764,29 @@ impl ObjArray {
     #[inline]
     pub fn get(&self, i: usize) -> Option<Value> {
         match &self.data {
-            ArrayData::Words(w) => w.get(i).copied(),
+            ArrayData::Words(w, ..) => w.get(i).copied(),
             ArrayData::Bytes(b) => b.get(i).map(|b| word_of(*b)),
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
 
-    /// Ask the cache for the object the word `dist` elements past `index`
-    /// names ([`common::dense::HEAP_PREFETCH`]). A hint: a word that is no
-    /// address, or one past the end, costs nothing but the check.
-    #[inline(always)]
-    pub fn prefetch_ahead(&self, index: i64, dist: usize) {
-        if let ArrayData::Words(w) = &self.data
-            && let Some(v) = w.get((index as usize).wrapping_add(dist))
-        {
-            prefetch_addr(v.bits());
-        }
-    }
-
-    /// `elements[index]` with the VM's bounds rules: `unchecked` is a proven
+    /// `elements[index]` with the runtime's bounds rules: `unchecked` is a proven
     /// index; otherwise out of range returns `None`.
     #[inline(always)]
     pub fn read_indexed(&self, index: i64, unchecked: bool) -> Option<Value> {
         match &self.data {
-            ArrayData::Words(w) => read_indexed_in(w, index, unchecked),
+            ArrayData::Words(w, ..) => read_indexed_in(w, index, unchecked),
             ArrayData::Bytes(b) => read_indexed_in(b, index, unchecked).map(word_of),
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
         match &self.data {
-            ArrayData::Words(w) => w.len(),
+            ArrayData::Words(w, ..) => w.len(),
             ArrayData::Bytes(b) => b.len(),
+            ArrayData::Lanes { words } => words.len() / usize::from(self.stride),
         }
     }
 
@@ -3596,8 +3799,9 @@ impl ObjArray {
     #[inline]
     pub fn capacity(&self) -> usize {
         match &self.data {
-            ArrayData::Words(w) => w.capacity(),
+            ArrayData::Words(w, ..) => w.capacity(),
             ArrayData::Bytes(b) => b.capacity(),
+            ArrayData::Lanes { words } => words.capacity() / usize::from(self.stride),
         }
     }
 
@@ -3606,7 +3810,8 @@ impl ObjArray {
     #[inline]
     pub fn storage_bytes(&self) -> usize {
         match &self.data {
-            ArrayData::Words(w) => w.capacity() * mem::size_of::<Value>(),
+            ArrayData::Words(w, cards) => w.capacity() * mem::size_of::<Value>() + cards.as_ref().map_or(0, |t| t.bytes()),
+            ArrayData::Lanes { words: w, .. } => w.capacity() * mem::size_of::<Value>(),
             ArrayData::Bytes(b) => b.capacity(),
         }
     }
@@ -3628,6 +3833,48 @@ impl ObjArray {
         self.may_hold_refs
     }
 
+    /// The element words in place, for native code (`None` for a byte
+    /// array). `for_store` marks the array as a runtime store would.
+    /// [`Self::words_view`] for loads only: no write to the object, so a
+    /// shared-heap worker may view an array from before its epoch.
+    pub(crate) fn words_view_for_load(&self) -> Option<(*mut Value, usize)> {
+        match &self.data {
+            ArrayData::Words(w, ..) => Some((w.as_ptr().cast_mut(), w.len())),
+            ArrayData::Bytes(_) | ArrayData::Lanes { .. } => None,
+        }
+    }
+
+    /// The words in place for native code's stores, marked as a runtime
+    /// store would, with the first card byte of the array's card table
+    /// (null without one).
+    #[inline]
+    pub(crate) fn words_view_for_store(&mut self) -> Option<(*mut Value, usize, *mut u8)> {
+        self.note();
+        match &mut self.data {
+            ArrayData::Words(w, cards) => Some((w.as_mut_ptr(), w.len(), cards.as_mut().map_or(std::ptr::null_mut(), |t| t.cards.as_mut_ptr()))),
+            ArrayData::Bytes(_) | ArrayData::Lanes { .. } => None,
+        }
+    }
+
+    /// A two-word lane array's words in place, for native code, with its
+    /// element count (`None` for any other array). Loads only: no write to
+    /// the object ([`Self::words_view_for_load`]).
+    pub(crate) fn lanes_view_for_load(&self) -> Option<(*mut Value, usize)> {
+        match &self.data {
+            ArrayData::Lanes { words } if self.stride == 2 => Some((words.as_ptr().cast_mut(), words.len() / 2)),
+            _ => None,
+        }
+    }
+
+    /// [`Self::lanes_view_for_load`] for stores: marks the array as
+    /// [`Self::set_lanes`] does when an element may hold a reference.
+    pub(crate) fn lanes_view(&mut self) -> Option<(*mut Value, usize)> {
+        if self.tag_mask != 0 {
+            self.note();
+        }
+        self.lanes_view_for_load()
+    }
+
     /// A write may add a reference: the next mark rescans.
     #[inline(always)]
     fn note(&mut self) {
@@ -3635,6 +3882,53 @@ impl ObjArray {
         // (predictable) branch in hot store loops.
         if !self.may_hold_refs {
             self.may_hold_refs = true;
+        }
+    }
+
+    /// [`Self::note`] for a write of elements `lo..hi`.
+    #[inline]
+    fn note_range(&mut self, lo: usize, hi: usize) {
+        self.note();
+        if let ArrayData::Words(_, Some(t)) = &mut self.data {
+            t.mark_range(lo, hi);
+        }
+    }
+
+    /// Whether the array has a card table: native code's stores into it
+    /// mark cards ([`VIEW_TRACKED`]).
+    #[inline]
+    #[cfg(test)]
+    pub(crate) fn has_cards(&self) -> bool {
+        matches!(self.data, ArrayData::Words(_, Some(_)))
+    }
+
+    /// A minor found this array remembered and scanned it whole: give a
+    /// large one a clean card table. Returns whether it did.
+    pub(crate) fn attach_cards(&mut self) -> bool {
+        match &mut self.data {
+            ArrayData::Words(w, cards @ None) if w.len() >= CARD_MIN_WORDS => {
+                *cards = Some(Box::new(CardTable::new(w.capacity())));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The words and the card table, for a minor's card scan.
+    #[inline]
+    pub(crate) fn words_and_cards_mut(&mut self) -> Option<(&mut [Value], Option<&mut CardTable>)> {
+        match &mut self.data {
+            ArrayData::Words(w, cards) => Some((w, cards.as_deref_mut())),
+            _ => None,
+        }
+    }
+
+    /// The card table, for the missed-barrier check.
+    #[inline]
+    pub(crate) fn cards(&self) -> Option<&CardTable> {
+        match &self.data {
+            ArrayData::Words(_, cards) => cards.as_deref(),
+            _ => None,
         }
     }
 
@@ -3653,8 +3947,25 @@ impl ObjArray {
         unsafe { *self.words_vec().get_unchecked_mut(i) = v };
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn push(&mut self, v: Value) {
+        if let ArrayData::Words(w, cards) = &mut self.data {
+            if !self.may_hold_refs {
+                self.may_hold_refs = true;
+            }
+            if let Some(t) = cards {
+                t.mark(w.len());
+            }
+            w.push(v);
+        } else {
+            self.push_packed(v);
+        }
+    }
+
+    /// [`Self::push`] onto byte storage (unpacking makes word storage with
+    /// no card table).
+    #[inline(never)]
+    fn push_packed(&mut self, v: Value) {
         if let ArrayData::Bytes(b) = &mut self.data
             && let Some(byte) = byte_of(v)
         {
@@ -3665,41 +3976,25 @@ impl ObjArray {
         self.words_vec().push(v);
     }
 
-    /// Append `v` when the storage has room for it as it is: no growth,
-    /// no unpack, so nothing to account and no allocation safepoint.
-    /// False (and nothing changed) otherwise (#1864).
-    #[inline(always)]
-    pub fn push_in_place(&mut self, v: Value) -> bool {
-        match &mut self.data {
-            ArrayData::Words(w) if w.len() < w.capacity() => {
-                if !self.may_hold_refs {
-                    self.may_hold_refs = true;
-                }
-                w.push(v);
-                true
-            }
-            ArrayData::Bytes(b) if b.len() < b.capacity() => match byte_of(v) {
-                Some(byte) => {
-                    b.push(byte);
-                    true
-                }
-                None => false,
-            },
-            _ => false,
-        }
-    }
-
     /// Overwrite element `i` (caller checks bounds).
     #[inline]
     pub fn set(&mut self, i: usize, v: Value) {
-        if let ArrayData::Bytes(b) = &mut self.data
-            && let Some(byte) = byte_of(v)
-        {
-            b[i] = byte;
-            return;
+        match &mut self.data {
+            ArrayData::Words(w, cards) => {
+                if !self.may_hold_refs {
+                    self.may_hold_refs = true;
+                }
+                if let Some(t) = cards {
+                    t.mark(i);
+                }
+                w[i] = v;
+            }
+            ArrayData::Bytes(b) if let Some(byte) = byte_of(v) => b[i] = byte,
+            _ => {
+                self.note();
+                self.words_vec()[i] = v;
+            }
         }
-        self.note();
-        self.words_vec()[i] = v;
     }
 
     /// Unchecked [`Self::set`]; `i < len` is the caller's proof.
@@ -3708,17 +4003,25 @@ impl ObjArray {
     /// `i` must be in bounds.
     #[inline]
     pub unsafe fn set_unchecked(&mut self, i: usize, v: Value) {
-        if let ArrayData::Bytes(b) = &mut self.data
-            && let Some(byte) = byte_of(v)
-        {
-            unsafe { *b.get_unchecked_mut(i) = byte };
-            return;
+        match &mut self.data {
+            ArrayData::Words(w, cards) => {
+                if !self.may_hold_refs {
+                    self.may_hold_refs = true;
+                }
+                if let Some(t) = cards {
+                    t.mark(i);
+                }
+                unsafe { *w.get_unchecked_mut(i) = v };
+            }
+            ArrayData::Bytes(b) if let Some(byte) = byte_of(v) => unsafe { *b.get_unchecked_mut(i) = byte },
+            _ => {
+                self.note();
+                unsafe { *self.words_vec().get_unchecked_mut(i) = v };
+            }
         }
-        self.note();
-        unsafe { *self.words_vec().get_unchecked_mut(i) = v };
     }
 
-    /// `elements[index] = value` with the VM's bounds rules: `unchecked` is a
+    /// `elements[index] = value` with the runtime's bounds rules: `unchecked` is a
     /// proven index; otherwise out of range returns `false`.
     #[inline(always)]
     pub fn store_indexed(&mut self, index: i64, value: Value, unchecked: bool) -> bool {
@@ -3731,19 +4034,26 @@ impl ObjArray {
             return false;
         }
         match &mut self.data {
-            ArrayData::Words(elements) => {
+            ArrayData::Words(elements, cards) => {
                 unsafe {
                     *elements.get_unchecked_mut(idx) = value;
                 }
-                self.note();
+                if !self.may_hold_refs {
+                    self.may_hold_refs = true;
+                }
+                if let Some(t) = cards {
+                    t.mark(idx);
+                }
             }
             ArrayData::Bytes(b) => match byte_of(value) {
                 Some(byte) => unsafe { *b.get_unchecked_mut(idx) = byte },
                 None => {
+                    // Unpacking makes word storage with no card table.
                     self.note();
                     unsafe { *self.words_vec().get_unchecked_mut(idx) = value };
                 }
             },
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
         true
     }
@@ -3752,8 +4062,9 @@ impl ObjArray {
     #[inline]
     pub fn pop(&mut self) -> Option<Value> {
         match &mut self.data {
-            ArrayData::Words(w) => w.pop(),
+            ArrayData::Words(w, ..) => w.pop(),
             ArrayData::Bytes(b) => b.pop().map(word_of),
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
 
@@ -3765,21 +4076,60 @@ impl ObjArray {
             b.insert(i, byte);
             return;
         }
-        self.note();
+        let len = self.len();
+        self.note_range(i, len + 1);
         self.words_vec().insert(i, v);
     }
 
     /// Remove element `i` (caller checks `i < len`).
     pub fn remove(&mut self, i: usize) -> Value {
+        // The elements after `i` move down a card boundary.
+        if let ArrayData::Words(w, Some(t)) = &mut self.data {
+            t.mark_range(i, w.len());
+        }
         match &mut self.data {
-            ArrayData::Words(w) => w.remove(i),
+            ArrayData::Words(w, ..) => w.remove(i),
             ArrayData::Bytes(b) => word_of(b.remove(i)),
+            ArrayData::Lanes { .. } => lane_misuse(),
+        }
+    }
+
+    /// Drop elements `from..to`, the ones after them moving down (the
+    /// range cut to the length).
+    pub fn drain_range(&mut self, from: usize, to: usize) {
+        let k = &usize::from(self.stride);
+        let to = to.min(self.len());
+        let from = from.min(to);
+        if let ArrayData::Words(w, Some(t)) = &mut self.data {
+            t.mark_range(from, w.len());
+        }
+        match &mut self.data {
+            ArrayData::Words(w, ..) => drop(w.drain(from..to)),
+            ArrayData::Bytes(b) => drop(b.drain(from..to)),
+            ArrayData::Lanes { words } => drop(words.drain(from * *k..to * *k)),
+        }
+    }
+
+    /// Move the last element to `i`, elements `i..` moving up one (nothing
+    /// when `i` is not below the length).
+    pub fn rotate_last_to(&mut self, i: usize) {
+        let k = &usize::from(self.stride);
+        if i >= self.len() {
+            return;
+        }
+        if let ArrayData::Words(w, Some(t)) = &mut self.data {
+            t.mark_range(i, w.len());
+        }
+        match &mut self.data {
+            ArrayData::Words(w, ..) => w[i..].rotate_right(1),
+            ArrayData::Bytes(b) => b[i..].rotate_right(1),
+            ArrayData::Lanes { words } => words[i * *k..].rotate_right(*k),
         }
     }
 
     pub fn clear(&mut self) {
         match &mut self.data {
-            ArrayData::Words(w) => w.clear(),
+            ArrayData::Words(w, ..) | ArrayData::Lanes { words: w, .. } => w.clear(),
             ArrayData::Bytes(b) => b.clear(),
         }
     }
@@ -3789,12 +4139,21 @@ impl ObjArray {
     pub fn extend_from(&mut self, src: &Self, lo: usize, hi: usize) {
         match (&mut self.data, &src.data) {
             (ArrayData::Bytes(out), ArrayData::Bytes(inp)) => out.extend_from_slice(&inp[lo..hi]),
-            (ArrayData::Words(out), ArrayData::Words(inp)) => {
+            (ArrayData::Words(out, ..), ArrayData::Words(inp, ..)) => {
+                let at = out.len();
                 out.extend_from_slice(&inp[lo..hi]);
+                if src.may_hold_refs {
+                    self.note_range(at, at + (hi - lo));
+                }
+            }
+            (ArrayData::Lanes { words: out }, ArrayData::Lanes { words: inp }) if self.stride == src.stride => {
+                let k = &usize::from(self.stride);
+                out.extend_from_slice(&inp[lo * *k..hi * *k]);
                 if src.may_hold_refs {
                     self.note();
                 }
             }
+            (ArrayData::Lanes { .. }, _) | (_, ArrayData::Lanes { .. }) => lane_misuse(),
             _ => {
                 self.reserve(hi - lo);
                 for i in lo..hi {
@@ -3808,7 +4167,8 @@ impl ObjArray {
     pub fn extend_bytes(&mut self, bytes: &[u8]) {
         match &mut self.data {
             ArrayData::Bytes(out) => out.extend_from_slice(bytes),
-            ArrayData::Words(out) => out.extend(bytes.iter().map(|&b| Value::from(i64::from(b)))),
+            ArrayData::Words(out, ..) => out.extend(bytes.iter().map(|&b| Value::from(i64::from(b)))),
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
 
@@ -3820,15 +4180,18 @@ impl ObjArray {
             b.resize(b.len() + n, byte);
             return;
         }
-        self.note();
+        let len = self.len();
+        self.note_range(len, len + n);
         let w = self.words_vec();
         w.resize(w.len() + n, v);
     }
 
     pub fn reserve(&mut self, extra: usize) {
+        let k = &usize::from(self.stride);
         match &mut self.data {
-            ArrayData::Words(w) => w.reserve(extra),
+            ArrayData::Words(w, ..) => w.reserve(extra),
             ArrayData::Bytes(b) => b.reserve(extra),
+            ArrayData::Lanes { words } => words.reserve(extra * *k),
         }
     }
 
@@ -3837,7 +4200,7 @@ impl ObjArray {
     /// ([`Self::restore_bytes`] puts them back); `None` for word storage.
     pub fn take_bytes(&mut self) -> Option<Vec<u8>> {
         match &mut self.data {
-            ArrayData::Words(_) => None,
+            ArrayData::Words(..) | ArrayData::Lanes { .. } => None,
             ArrayData::Bytes(b) => Some(std::mem::take(b)),
         }
     }
@@ -3849,8 +4212,9 @@ impl ObjArray {
 
     pub fn to_byte_vec(&self) -> Vec<u8> {
         match &self.data {
-            ArrayData::Words(w) => w.iter().map(|v| v.as_int() as u8).collect(),
+            ArrayData::Words(w, ..) => w.iter().map(|v| v.as_int() as u8).collect(),
             ArrayData::Bytes(b) => b.clone(),
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
 
@@ -3860,11 +4224,12 @@ impl ObjArray {
         let n = bytes.len().min(self.len().saturating_sub(at));
         match &mut self.data {
             ArrayData::Bytes(b) => b[at..at + n].copy_from_slice(&bytes[..n]),
-            ArrayData::Words(w) => {
+            ArrayData::Words(w, ..) => {
                 for (slot, &b) in w[at..at + n].iter_mut().zip(bytes) {
                     *slot = word_of(b);
                 }
             }
+            ArrayData::Lanes { .. } => lane_misuse(),
         }
     }
 
@@ -3880,38 +4245,49 @@ impl ObjArray {
     /// Raw word access for writes the classifier does not see. Unpacks a
     /// byte array and marks the array as possibly holding references
     /// (always safe).
-    #[inline]
+    #[inline(always)]
     pub fn words_mut(&mut self) -> &mut Vec<Value> {
         self.may_hold_refs = true;
-        self.words_vec()
+        if let ArrayData::Bytes(_) = self.data {
+            self.unpack();
+        }
+        match &mut self.data {
+            ArrayData::Words(w, cards) => {
+                if let Some(t) = cards {
+                    t.all = true;
+                }
+                w
+            }
+            ArrayData::Bytes(_) => unreachable!(),
+            ArrayData::Lanes { .. } => lane_misuse(),
+        }
     }
 
     /// Word elements for the collector's in-place fixups (compaction); no
     /// flag change, `None` for packed bytes (never references).
     #[inline]
+    pub(crate) fn gc_words(&self) -> Option<&[Value]> {
+        match &self.data {
+            ArrayData::Words(w, ..) | ArrayData::Lanes { words: w, .. } => Some(w),
+            ArrayData::Bytes(_) => None,
+        }
+    }
+
     pub(crate) fn gc_words_mut(&mut self) -> Option<&mut [Value]> {
         match &mut self.data {
-            ArrayData::Words(w) => Some(w),
+            ArrayData::Words(w, ..) | ArrayData::Lanes { words: w, .. } => Some(w),
             ArrayData::Bytes(_) => None,
         }
     }
 }
 
-/// A read prefetch of `addr` into every cache level; never faults.
-#[inline(always)]
-fn prefetch_addr(addr: u64) {
-    #[cfg(target_arch = "x86_64")]
-    // SAFETY: a prefetch reads nothing the program sees and never faults.
-    unsafe {
-        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(addr as *const i8)
-    };
-    #[cfg(target_arch = "aarch64")]
-    // SAFETY: as above.
-    unsafe {
-        core::arch::asm!("prfm pldl1keep, [{0}]", in(reg) addr, options(nostack, preserves_flags, readonly))
-    };
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    let _ = addr;
+/// A one-word element read or write on a lane array: a code path that
+/// does not know the array's stride. Loud, never a misread.
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn lane_misuse() -> ! {
+    panic!("an array of two-word elements read or written one word per element")
 }
 
 /// Shared bounds rule of [`ObjArray::read_indexed`].
@@ -3939,30 +4315,14 @@ pub struct ObjCoroutine {
     /// Bitmask of `saved_stack` slots that hold heap pointers (for precise GC).
     /// When zero, GC conservatively scans every slot.
     pub saved_live_mask: u64,
-    /// `(ip, sp_offset)` pairs; `sp_offset` is relative to the coroutine segment base.
-    pub saved_frames: Vec<(usize, usize)>,
-    /// Value from the resumer's `resume h with v` (delivered at the next binding yield).
-    pub pending_send: Value,
-    /// Active `yield from` delegate, if any.
-    pub yield_from: Option<RefCoroutine>,
-    /// Coroutine delegating to this one via `yield from` (back edge of
-    /// `yield_from`). Traced: a running delegate keeps its parent alive.
-    pub delegator: Option<RefCoroutine>,
-    /// Outer continuation IP when the delegate completes.
-    pub yield_from_resume_ip: usize,
     /// The body has run: a close has `defer`s to run only after this.
     pub started: bool,
     /// Listed for a close by the collector: it suspended with a `defer`
     /// armed ([`Heap::note_closeable`]).
     pub closeable: bool,
-}
-
-/// Heap-allocated boxed value for the generics runtime.
-pub struct ObjBoxed {
-    /// `ValueTag` discriminant stored as a raw `u16`.
-    pub tag: u16,
-    /// The wrapped payload.
-    pub payload: Member,
+    /// Its body is native code, suspended on this fiber (`gen_fiber.rs`):
+    /// `saved_stack` then holds that frame's root words.
+    pub native: Option<Box<crate::native::GenFiber>>,
 }
 
 /// Explicit strong GC pin: keeps `payload` alive while this object is reachable.
@@ -3983,7 +4343,7 @@ pub struct ObjWeak {
 /// or explicit-capture lambda (`MakeFn`), or a generic function value
 /// (`MakePolyFn*`, which sets [`Self::dicts`]).
 pub struct ObjFn {
-    /// Bytecode entry of the body.
+    /// Entry id of the body.
     pub entry: u32,
     /// Fixed arity, or rest `nfixed` when `is_rest`.
     pub arity: u32,
@@ -4055,7 +4415,7 @@ impl fmt::Display for ObjStream {
     }
 }
 
-/// Join handle for a spawned OS thread (host `JoinState` lives outside the VM heap).
+/// Join handle for a spawned OS thread (host `JoinState` lives outside the heap).
 pub struct ObjThread {
     pub state: std::sync::Arc<crate::thread::JoinState>,
 }
@@ -4136,14 +4496,6 @@ impl fmt::Display for ObjRwLock {
     }
 }
 
-impl GcSized for ObjTuple {
-    const NURSERY: bool = true;
-
-    fn size(&self) -> usize {
-        mem::size_of::<Self>() + self.elements.spill_capacity() * mem::size_of::<Value>()
-    }
-}
-
 impl GcSized for ObjArray {
     const NURSERY: bool = true;
 
@@ -4154,16 +4506,8 @@ impl GcSized for ObjArray {
 
 impl GcSized for ObjCoroutine {
     fn size(&self) -> usize {
-        // `saved_stack` / `saved_frames` use Rust's allocator, not the VM
+        // `saved_stack` uses Rust's allocator, not the runtime
         // heap byte counter (same contract as `ObjInstance`).
-        mem::size_of::<Self>()
-    }
-}
-
-impl GcSized for ObjBoxed {
-    const NURSERY: bool = true;
-
-    fn size(&self) -> usize {
         mem::size_of::<Self>()
     }
 }
@@ -4189,12 +4533,15 @@ impl GcSized for ObjFn {
     }
 }
 
-impl fmt::Display for ObjTuple {
+impl fmt::Display for ObjEnum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if !self.is_tuple() {
+            return write!(f, "<variant {}>", self.tag);
+        }
         write!(
             f,
             "({})",
-            self.elements
+            self.payload
                 .iter()
                 .map(|v| format!("{}", v.as_int()))
                 .collect::<Vec<_>>()
@@ -4235,35 +4582,13 @@ pub struct ObjLibrary {
     pub by_name: std::collections::HashMap<String, usize>,
     /// libffi closures registered for callbacks (keeps trampolines alive).
     pub closures: Vec<crate::ffi::OwnedClosure>,
-}
-
-/// C signature metadata for an FFI function.
-#[derive(Clone, Debug)]
-pub struct FunctionSig {
-    pub name: String,
-    /// Fixed-prefix arity (`nfixed` when [`Self::variadic`]).
-    pub arity: usize,
-    pub arg_types: Vec<FfiType>,
-    pub ret_type: FfiType,
-    /// C-style varargs, CIF rebuilt per invoke with `Cif::new_variadic`.
-    pub variadic: bool,
-}
-
-impl FunctionSig {
-    pub fn from_ffi_signature(sig: &crate::ffi::FfiSignature) -> Self {
-        Self {
-            name: sig.name.clone(),
-            arity: sig.arity(),
-            arg_types: sig.args.clone(),
-            ret_type: sig.ret,
-            variadic: sig.variadic,
-        }
-    }
+    /// A library linked into the executable: its functions' addresses
+    /// (`library` is then the process itself).
+    pub static_symbols: Option<&'static crate::ffi::StaticLibrary>,
 }
 
 /// A declared FFI function with a prepared libffi call interface.
 pub struct RegisteredFunction {
-    pub sig: FunctionSig,
     /// The signature the call path marshals against, kept so an invoke
     /// does not rebuild (and allocate) it.
     pub ffi_sig: crate::ffi::FfiSignature,
@@ -4424,6 +4749,12 @@ pub trait GcSized {
     }
 }
 
+/// [`GcHeader::kind`] of the objects native code allocates inline, and of
+/// those a share marks (an instance, an array).
+pub const KIND_INSTANCE: u8 = 2;
+const KIND_ENUM: u8 = 3;
+pub const KIND_ARRAY: u8 = 6;
+
 /// [`GcHeader::generation`]: the object lives in a young (nursery) chunk.
 pub(crate) const GEN_YOUNG: u8 = 1;
 /// [`GcHeader::generation`]: an old object not in the remembered set; its
@@ -4437,6 +4768,12 @@ pub(crate) const GEN_PINNED: u8 = 4;
 /// it, and the write barrier records it ([`GEN_UNLOGGED`]) like any old
 /// object (#2255).
 pub(crate) const GEN_HELD: u8 = 8;
+
+/// [`GcHeader::generation`]: an old object the barrier logged as quiet
+/// ([`QUIET`]), whose barrier the nursery's restart turns back on
+/// ([`relog_quiet`]). A store view of it must remember it at once instead
+/// ([`GcData::note_store_view`]).
+pub(crate) const GEN_QUIET: u8 = 16;
 
 /// Generation bits of an object the write barrier covers: an old one or a
 /// held one.
@@ -4481,10 +4818,7 @@ pub(super) fn relog_all(slab: &super::slab::Slab) {
     let mut cur = super::slab::SlotCursor::default();
     while let Some(addr) = slab.next_slot(&mut cur) {
         // SAFETY: `next_slot` yields slot starts in mapped chunks.
-        let header = unsafe { &*(addr as *const GcHeader) };
-        if header.kind.get() != 0 && barriered(header.generation.get()) {
-            header.generation.set(header.generation.get() | GEN_UNLOGGED);
-        }
+        relog(unsafe { &*(addr as *const GcHeader) });
     }
 }
 
@@ -4499,13 +4833,19 @@ pub(super) fn relog_quiet(slab: &super::slab::Slab) {
             // SAFETY: a slot start in a mapped chunk holds a header; a
             // freed or re-carved slot reads as free or as another old
             // object, and an extra log bit only costs one more record.
-            let header = unsafe { &*(addr as *const GcHeader) };
-            if header.kind.get() != 0 && barriered(header.generation.get()) {
-                header.generation.set(header.generation.get() | GEN_UNLOGGED);
-            }
+            relog(unsafe { &*(addr as *const GcHeader) });
             false
         });
     });
+}
+
+/// The nursery starts again: an old object written while it was empty is
+/// logged again on its next write.
+fn relog(header: &GcHeader) {
+    let g = header.generation.get();
+    if header.kind.get() != 0 && barriered(g) {
+        header.generation.set(g & !GEN_QUIET | GEN_UNLOGGED);
+    }
 }
 
 /// A heap on this thread started (`true`) or stopped using nursery chunks.
@@ -4517,9 +4857,9 @@ pub(super) fn note_young_heap(on: bool) {
 #[cold]
 #[inline(never)]
 fn remember_written(header: &GcHeader) {
-    header.generation.set(header.generation.get() & !GEN_UNLOGGED);
     let addr = header as *const GcHeader as u64;
     if YOUNG_HEAPS.with(Cell::get) == 0 {
+        header.generation.set(header.generation.get() & !GEN_UNLOGGED | GEN_QUIET);
         QUIET.with_borrow_mut(|q| {
             q.push(addr);
             if q.len() >= QUIET_CAP {
@@ -4529,6 +4869,14 @@ fn remember_written(header: &GcHeader) {
         });
         return;
     }
+    header.generation.set(header.generation.get() & !GEN_UNLOGGED);
+    REMEMBERED.with_borrow_mut(|r| r.push(addr));
+}
+
+/// Slow path of [`GcData::note_store_view`].
+#[cold]
+#[inline(never)]
+fn remember_viewed(addr: u64) {
     REMEMBERED.with_borrow_mut(|r| r.push(addr));
 }
 
@@ -4546,6 +4894,9 @@ struct GcHeader {
     /// copies it first ([`Heap::cow_unique`]). Sticky until the slot is
     /// reused.
     shared: Cell<bool>,
+    /// An instance's or enum's `drop` has been claimed: it never runs
+    /// twice ([`Object::claim_finalizer`]).
+    finalized: Cell<bool>,
     /// Debug / gc-stress: generation of the steal epoch the object was
     /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes a
     /// byte of what is header padding before an 8-aligned payload; release
@@ -4553,6 +4904,23 @@ struct GcHeader {
     #[cfg(any(debug_assertions, feature = "gc-stress"))]
     epoch: Cell<u8>,
 }
+
+
+/// Byte offset of a header's kind byte ([`GcHeader::kind`]): what
+/// [`Object::from_header`] reads, and native code's inline share
+/// (#2506, `coil-native`).
+pub const HEADER_KIND_OFFSET: i32 = std::mem::offset_of!(GcHeader, kind) as i32;
+/// Byte offset of a header's copy-on-write flag ([`GcHeader::shared`]).
+/// A share stores [`COW_SHARED_SET`] there: [`Object::set_shared`], and
+/// native code's inline share of a class instance or an array (#2506).
+pub const COW_SHARED_OFFSET: i32 = std::mem::offset_of!(GcHeader, shared) as i32;
+/// The byte a share stores at [`COW_SHARED_OFFSET`]: `true`.
+pub const COW_SHARED_SET: u8 = 1;
+
+// The flag and the kind are one byte each, so native code reads and writes
+// them as bytes.
+const _: () = assert!(std::mem::size_of::<Cell<bool>>() == 1 && std::mem::size_of::<Cell<u8>>() == 1);
+const _: () = assert!(COW_SHARED_SET == true as u8);
 
 #[repr(C)]
 pub struct GcData<T> {
@@ -4568,6 +4936,7 @@ impl GcHeader {
             fresh: Cell::new(false),
             generation: Cell::new(0),
             shared: Cell::new(false),
+            finalized: Cell::new(false),
             #[cfg(any(debug_assertions, feature = "gc-stress"))]
             epoch: Cell::new(0),
         }
@@ -4627,10 +4996,28 @@ impl<T> AsMut<T> for GcData<T> {
     }
 }
 
+impl GcData<ObjArray> {
+    /// Native code took a store view of this array, after
+    /// [`AsMut::as_mut`] ran its barrier: stores through the view skip the
+    /// barrier until native code drops it. An array the barrier logged as
+    /// quiet is remembered now. Its barrier would come back on when the
+    /// nursery starts again, which an allocation does with the view still
+    /// live, and the young objects stored through the view would go
+    /// unseen (#2702).
+    #[inline]
+    pub(crate) fn note_store_view(&self) {
+        let g = self.header.generation.get();
+        if unlikely(g & GEN_QUIET != 0) {
+            self.header.generation.set(g & !GEN_QUIET);
+            remember_viewed(self as *const Self as u64);
+        }
+    }
+}
+
 #[cfg(any(debug_assertions, feature = "gc-stress"))]
 impl<T> GcData<T> {
     /// Inside a shared-heap job, a payload write must target an object
-    /// allocated in that job's epoch ([`EpochWriteScope`]). Every VM
+    /// allocated in that job's epoch ([`EpochWriteScope`]). Every runtime
     /// payload write reaches the object through [`AsMut::as_mut`] (directly
     /// or via [`Gc::payload_mut`]), so this one check covers field stores,
     /// index stores, pushes, `may_hold_refs` and resize bookkeeping.
@@ -4706,8 +5093,8 @@ impl<T> Gc<T> {
         }
     }
 
-    /// Mutable access to the inner payload (single-threaded VM only).
-    #[allow(clippy::mut_from_ref)] // `Gc<T>` is a copyable slot handle; the VM mutates the payload through shared `&self`
+    /// Mutable access to the inner payload (single-threaded runtime only).
+    #[allow(clippy::mut_from_ref)] // `Gc<T>` is a copyable slot handle; the runtime mutates the payload through shared `&self`
     pub fn payload_mut(&self) -> &mut T {
         unsafe {
             let ptr = self.ptr.as_ptr().cast::<GcData<T>>();
@@ -5065,6 +5452,10 @@ pub use compact::{AddrMap, EvacPlan, Evacuation};
 
 #[path = "nursery.rs"]
 mod nursery;
+
+#[path = "inline.rs"]
+mod inline;
+pub use inline::{InlineObject, InlineShape, ProductSlots, inline_object, product_slots, layout_fingerprint};
 pub use nursery::MinorPlan;
 
 #[path = "snapshot.rs"]
@@ -5081,6 +5472,34 @@ mod tests {
             addrs.insert(obj.addr());
         }
         addrs
+    }
+
+    #[test]
+    fn lane_array_keeps_each_elements_words() {
+        let mut a = ObjArray::with_lanes(2, 2, 0);
+        for i in 0..5_i64 {
+            a.push_lanes(&[Value::from(i), Value::from(i * 10)]);
+        }
+        assert_eq!((a.len(), a.lanes()), (5, 2));
+        assert!(a.set_lanes(1, &[Value::from(7_i64), Value::from(70_i64)]));
+        assert!(!a.set_lanes(5, &[Value::from(0_i64), Value::from(0_i64)]));
+        a.insert_lanes(0, &[Value::from(-1_i64), Value::from(-10_i64)]);
+        let mut out = [Value::from(0_i64); 2];
+        a.remove_lanes(2, &mut out);
+        assert_eq!(out.map(|v| v.as_int()), [7, 70]);
+        assert!(a.pop_lanes(&mut out));
+        assert_eq!(out.map(|v| v.as_int()), [4, 40]);
+        let all: Vec<i64> = a.lane_words().unwrap().iter().map(|v| v.as_int()).collect();
+        assert_eq!(all, [-1, -10, 0, 0, 2, 20, 3, 30]);
+        assert_eq!(a.copy().get_lanes(2).unwrap()[1].as_int(), 20);
+        assert!(a.words().is_none(), "no one-word view of a lane array");
+    }
+
+    #[test]
+    #[should_panic(expected = "two-word elements")]
+    fn lane_array_refuses_a_one_word_read() {
+        let a = ObjArray::from_lanes(vec![Value::from(1_i64), Value::from(2_i64)], 2, 0);
+        let _ = a.get(0);
     }
 
     #[test]
@@ -5197,15 +5616,15 @@ mod tests {
     fn instance_slots_inlines_upto_cap_and_spills_above() {
         let one = ObjInstance::with_type_id_and_fields(1, 1);
         assert!(one.slots_are_inline());
-        assert_eq!(one.slot_len(), Some(1));
+        assert_eq!(one.slot_len(), 1);
 
         let two = ObjInstance::with_type_id_and_fields(1, INSTANCE_INLINE_FIELDS);
         assert!(two.slots_are_inline());
-        assert_eq!(two.slot_len(), Some(INSTANCE_INLINE_FIELDS));
+        assert_eq!(two.slot_len(), INSTANCE_INLINE_FIELDS);
 
         let spilled = ObjInstance::with_type_id_and_fields(1, INSTANCE_INLINE_FIELDS + 1);
         assert!(!spilled.slots_are_inline());
-        assert_eq!(spilled.slot_len(), Some(INSTANCE_INLINE_FIELDS + 1));
+        assert_eq!(spilled.slot_len(), INSTANCE_INLINE_FIELDS + 1);
 
         let from_vec = ObjInstance::with_slots(
             2,
@@ -5287,7 +5706,7 @@ mod tests {
             ObjEnum::new(1, EnumPayload::from_slice(&words).with_kinds(kinds)),
             Object::Enum,
         );
-        let (tup, _) = heap.alloc(ObjTuple::from_slice(&words).with_kinds(kinds), Object::Tuple);
+        let (tup, _) = heap.alloc(ObjEnum::tuple(&words, kinds), Object::Enum);
 
         for obj in [en, tup] {
             let mut seen = Vec::new();
@@ -5541,7 +5960,7 @@ mod tests {
         unsafe { heap.sweep() };
         heap.restore_gc_roots(roots);
         match heap.find_object_by_addr(first) {
-            Some(Object::Tuple(t)) => assert!(t.as_ref().elements().is_empty()),
+            Some(Object::Enum(t)) => assert!(t.as_ref().is_tuple() && t.as_ref().elements().is_empty()),
             _ => panic!("`()` must survive a sweep"),
         }
     }
@@ -5890,9 +6309,7 @@ mod tests {
         let drops = heap.early_drops(Value::from(late.addr()), false, &keep).expect("listed");
         assert_eq!(drops.iter().map(|o| o.addr()).collect::<Vec<_>>(), vec![late.addr()]);
         assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 0, "its drop has not run");
-        if let Object::Instance(gc) = late {
-            gc.payload_mut().finalized = true;
-        }
+        late.claim_finalizer();
         assert!(heap.early_drops(Value::from(late.addr()), false, &keep).is_some_and(|d| d.is_empty()));
         assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 1);
     }
@@ -5916,8 +6333,7 @@ mod tests {
         let mut want = vec![early.addr(), tagged.addr()];
         want.sort_unstable();
         assert_eq!(got, want);
-        let Object::Instance(gc) = early else { unreachable!() };
-        gc.payload_mut().finalized = true;
+        early.claim_finalizer();
         let left: Vec<u64> = heap.unmarked_finalizable().iter().map(|o| o.addr()).collect();
         assert_eq!(left, vec![tagged.addr()]);
         assert_eq!(heap.finalizable.len(), 2, "finalized entries leave the list");
@@ -6071,16 +6487,16 @@ mod tests {
     fn epoch_defers_collect_until_ceiling() {
         let lock = Mutex::new(());
         let mut heap = Heap::default();
-        heap.alloc_bytes = GC_NEXT_THRESHOLD + 1;
+        heap.counts.alloc_bytes = GC_NEXT_THRESHOLD + 1;
         assert!(heap.should_collect());
         heap.enter_epoch_stw(&lock);
         assert!(!heap.should_collect(), "past threshold, under epoch ceiling");
-        heap.alloc_bytes = heap.epoch_gc_ceiling + 1;
+        heap.counts.alloc_bytes = heap.epoch_gc_ceiling + 1;
         assert!(heap.should_collect(), "past the epoch ceiling");
         heap.exit_epoch_stw();
-        heap.alloc_bytes = GC_NEXT_THRESHOLD + 1;
+        heap.counts.alloc_bytes = GC_NEXT_THRESHOLD + 1;
         assert!(heap.should_collect(), "normal threshold again after the epoch");
-        heap.alloc_bytes = 0;
+        heap.counts.alloc_bytes = 0;
     }
 
     /// A thread that waits mid-epoch on heap A and helps with a job in heap

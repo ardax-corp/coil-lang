@@ -1,0 +1,6 @@
+// @expected E0102 — `byte` does not cast to `float`: the message names both
+// types and the help goes through `int` (#2803).
+fn main() {
+    let b = "a" as byte;
+    let f = b as float;
+}

@@ -1,0 +1,59 @@
+// Methods whose results move as two words, for
+// `tests/modules/imported_method_pair_result.coil` (#2333).
+use string::format;
+
+class Meter {
+    pub base: int,
+}
+
+impl Meter {
+    #[inline(never)]
+    pub fn at(int k) -> Option<int> {
+        if k < 0 {
+            return None;
+        }
+        return Some(self.base + k);
+    }
+
+    #[inline(never)]
+    pub fn pair(int k) -> (int, int) {
+        return (self.base, k);
+    }
+
+    #[inline(never)]
+    pub fn check(int k) -> Result<int, string> {
+        if k > self.base {
+            return Err(format("%i", k));
+        }
+        return Ok(k);
+    }
+
+    #[inline(never)]
+    pub fn local_sum(int k) -> int {
+        return match self.at(k) {
+            Some(v) => v,
+            None => 0,
+        };
+    }
+}
+
+class Cell<T> {
+    pub item: T,
+    pub n: int,
+}
+
+impl Cell<T> {
+    #[inline(never)]
+    pub fn count(int k) -> Option<int> {
+        if k > self.n {
+            return None;
+        }
+        return Some(self.n - k);
+    }
+}
+
+fn use_here(int k) -> int {
+    let m = new Meter(5);
+    let (a, b) = m.pair(k);
+    return m.local_sum(k) + a + b;
+}

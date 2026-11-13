@@ -225,6 +225,25 @@ fn access_unknown_field_lists_known_fields_in_help() {
 }
 
 #[test]
+fn uncalled_static_method_value_hints_its_call() {
+    // A bare `Counter::fresh` is the static method's value (#2746): where
+    // its result was expected, the mismatch's help says to call it.
+    let src = "class Counter { pub n: int, } \
+               impl Counter { pub static fn fresh() -> Counter { return new Counter(0); } } \
+               fn main() { let c: Counter = Counter::fresh; }";
+    let ast = Pratt::default().parse(src).expect("parse failed");
+    let mut c = Checker::new();
+    let _ty = c.check_program(&ast);
+    let msgs = c.take_messages();
+    let mismatch = msgs
+        .iter()
+        .find(|m| m.code() == Some(ErrorCode::TypeMismatch))
+        .unwrap_or_else(|| panic!("expected a type mismatch, got {:?}", msgs.iter().map(|m| m.message()).collect::<Vec<_>>()));
+    let help = mismatch.help().as_ref().expect("expected a help hint");
+    assert!(help.contains("add `()` to call it"), "got help: {help:?}");
+}
+
+#[test]
 fn shallow_const_on_array_emits_warning() {
     let msgs = check_messages(r#"fn main() { const a = [1, 2, 3]; }"#);
     assert!(
@@ -974,4 +993,56 @@ fn orphan_instance_in_entry_file_names_the_file_and_the_foreign_argument() {
         "names the entry file, got: {orphan}"
     );
     assert!(orphan.contains("`string`"), "names the foreign argument, got: {orphan}");
+}
+
+/// #2803: every refused `as` names what cannot be converted to what, under
+/// E0102, and says which side is wrong: the target when it is no cast
+/// target, the operand otherwise (`string as int` used to say the target
+/// must be primitive).
+#[test]
+fn cast_refusals_name_the_side_that_is_wrong() {
+    const PRE: &str = "class C {\n    pub x: int,\n}\n\nenum E {\n    A,\n    B,\n}\n\n";
+    enum Side {
+        Pair,
+        Source,
+        Target,
+        ByteArray,
+    }
+    let cases: &[(&str, &str, &str, Side)] = &[
+        ("let b = \"a\" as byte; let y = b as float;", "byte", "float", Side::Pair),
+        ("let b = \"a\" as byte; let y = b as bool;", "byte", "bool", Side::Pair),
+        ("let f = 1.5; let y = f as byte;", "float", "byte", Side::Pair),
+        ("let f = 1.5; let y = f as bool;", "float", "bool", Side::Pair),
+        ("let t = true; let y = t as byte;", "bool", "byte", Side::Pair),
+        ("let t = true; let y = t as float;", "bool", "float", Side::Pair),
+        ("let s: string = \"1\"; let y = s as int;", "string", "int", Side::Source),
+        ("let s: string = \"1\"; let y = s as float;", "string", "float", Side::Source),
+        ("let s: string = \"1\"; let y = s as bool;", "string", "bool", Side::Source),
+        ("let c = new C(1); let y = c as int;", "C", "int", Side::Source),
+        ("let e = E::A; let y = e as int;", "E", "int", Side::Source),
+        ("let t = (1, 2); let y = t as float;", "(int, int)", "float", Side::Source),
+        ("let n = 1; let y = n as string;", "int", "string", Side::Target),
+        ("let n = 1; let y = n as int32;", "int", "int32", Side::Target),
+        ("let n = 1; let y = n as C;", "int", "C", Side::Target),
+        ("let n = 1; let y = n as (int, int);", "int", "(int, int)", Side::Target),
+        ("let c = new C(1); let y = c as string;", "C", "string", Side::Target),
+        ("let n = 1; let y = n as [byte; 2];", "int", "[byte; 2]", Side::ByteArray),
+    ];
+    for (body, from, to, side) in cases {
+        let src = format!("{PRE}fn main() {{\n    {body}\n}}\n");
+        let msgs = check_messages(&src);
+        let errors: Vec<&Message> = msgs.iter().filter(|m| m.code().is_some()).collect();
+        assert_eq!(errors.len(), 1, "`{body}`: expected one error, got: {msgs:?}");
+        let m = errors[0];
+        assert_eq!(m.code(), Some(ErrorCode::TypeMismatch), "`{body}`: {msgs:?}");
+        let text = m.message();
+        assert!(text.contains(&format!("cannot cast `{from}` to `{to}`")), "`{body}`: {text}");
+        let (target, source) = (text.contains("is not a cast target"), text.contains("values convert with `as`"));
+        match side {
+            Side::Pair => assert!(!target && !source && m.help().as_deref().is_some_and(|h| !h.is_empty()), "`{body}`: {text}"),
+            Side::Source => assert!(source && !target, "`{body}`: {text}"),
+            Side::Target => assert!(target && !source, "`{body}`: {text}"),
+            Side::ByteArray => assert!(text.contains("converts to a byte array"), "`{body}`: {text}"),
+        }
+    }
 }

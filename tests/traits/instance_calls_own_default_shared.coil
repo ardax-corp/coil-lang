@@ -1,0 +1,119 @@
+// A method of an instance with a generic head (`impl Own for Option<T>`)
+// calls one of its trait's default methods on its own value
+// (coil-lang#2491): the call takes the default body with the instance's
+// own dictionary, in both spellings, as a call from outside the impl does.
+// Here past the clone budget, where every call reaches a shared entry.
+// @flags --clone-budget 0
+use tests::assert;
+
+trait Own<T> {
+    fn base(T x) -> int {}
+
+    fn dbl(T x) -> int {
+        return x.base() * 2;
+    }
+
+    fn quad(T x) -> int {}
+
+    fn oct(T x) -> int {
+        return x.quad() * 2;
+    }
+}
+
+class Bx<T> {
+    pub v: T,
+}
+
+class Early {
+    pub inner: Bx<int>,
+}
+
+// Declared before the instance it calls a default method of.
+impl Own for Early {
+    fn base(Early e) -> int {
+        return e.inner.dbl() + 1;
+    }
+
+    fn quad(Early e) -> int {
+        return Own::oct(e.inner);
+    }
+}
+
+impl Own for Option<T> {
+    fn base(Option<T> o) -> int {
+        return match o {
+            Some(_) => 5,
+            None => 1,
+        };
+    }
+
+    fn quad(Option<T> o) -> int {
+        return o.dbl() * 2;
+    }
+}
+
+impl Own for Result<T, E> {
+    fn base(Result<T, E> r) -> int {
+        return match r {
+            Ok(_) => 3,
+            Err(_) => 2,
+        };
+    }
+
+    fn quad(Result<T, E> r) -> int {
+        return Own::dbl(r) * 2;
+    }
+}
+
+impl Own for Bx<T> {
+    fn base(Bx<T> b) -> int {
+        return 7;
+    }
+
+    fn quad(Bx<T> b) -> int {
+        return b.dbl() + Own::dbl(b);
+    }
+}
+
+fn through<T: Own>(T x) -> int {
+    return x.quad() + x.oct();
+}
+
+test("an Option instance, one word and two") {
+    let a: Option<string> = Some("one");
+    let n: Option<string> = None;
+    assert!(a.quad() == 20 && n.quad() == 4);
+    let i: Option<int> = Some(1);
+    let m: Option<int> = None;
+    assert!(i.quad() == 20 && m.quad() == 4);
+    assert!(a.oct() == 40 && Own::oct(m) == 8);
+}
+
+test("a Result instance through the trait spelling") {
+    let ok: Result<string, int> = Ok("a");
+    let err: Result<string, int> = Err(1);
+    assert!(ok.quad() == 12 && err.quad() == 8);
+    let two: Result<int, string> = Ok(1);
+    assert!(two.quad() == 12 && two.oct() == 24);
+}
+
+test("a generic class instance, both spellings") {
+    let b = new Bx("s");
+    assert!(b.quad() == 28);
+    assert!(new Bx(1).oct() == 56);
+}
+
+test("an instance declared before the one it calls") {
+    let e = new Early(new Bx(1));
+    assert!(e.base() == 15);
+    assert!(e.quad() == 56);
+    assert!(e.dbl() == 30);
+}
+
+test("through a bound") {
+    let a: Option<string> = Some("one");
+    assert!(through(a) == 60);
+    assert!(through(new Bx(2)) == 84);
+    let i: Option<int> = None;
+    assert!(through(i) == 12);
+}

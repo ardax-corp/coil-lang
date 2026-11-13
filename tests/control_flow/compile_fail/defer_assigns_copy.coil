@@ -1,0 +1,15 @@
+// @expected E0152 — `use (v)` copies `v` when the `defer` statement runs,
+// so assigning it changes only the defer's copy (#2308).
+fn one() -> int {
+    let v = 1;
+    {
+        defer use (v) {
+            v = 3;
+        }
+    }
+    return v;
+}
+
+fn main() {
+    let _ = one();
+}

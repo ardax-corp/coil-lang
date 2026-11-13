@@ -1,4 +1,6 @@
-//! VM-only packaged-app runner (no compiler / parser).
+//! Packaged-app runner: the runtime and Cranelift, no interpreter, parser or linker.
+//! `coil package` appends the program with its MIR, which this JITs at start.
+//! It is what `--no-aot` packages, and what a failed link falls back to.
 
 use std::process::exit;
 
@@ -9,7 +11,7 @@ static RUNNER_MARKER: &[u8] = b"coil-embed-runner:v1";
 fn main() {
     // Keep the marker in the image through LTO and section GC.
     std::hint::black_box(RUNNER_MARKER);
-    if let Some(panicked) = coil_cli::try_run_embedded() {
+    if let Some(panicked) = coil_cli::try_run_embedded_with(coil_native::install_section) {
         // Q5: language `panic` aborts (exit 1). Uncaught `raise` is Result.Err, exit 0.
         exit(if panicked { 1 } else { 0 });
     }

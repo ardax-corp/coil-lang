@@ -1,0 +1,31 @@
+// @expected E0119 — `Shelf<bool>` has `Gauge`'s instance (for `Shelf<T>`) and
+// `Third`'s (for `Shelf<bool>`): `s.level(1)` names neither (#2481).
+trait Gauge<T> {
+    fn level(T x, int v) -> int {}
+}
+
+trait Third<T> {
+    fn level(T x, int v) -> int {}
+}
+
+class Shelf<T> {
+    pub item: T,
+    pub n: int,
+}
+
+impl Gauge for Shelf<T> {
+    pub fn level(Shelf<T> x, int v) -> int {
+        return x.n + v;
+    }
+}
+
+impl Third for Shelf<bool> {
+    pub fn level(Shelf<bool> x, int v) -> int {
+        return v;
+    }
+}
+
+fn main() {
+    let s = new Shelf(true, 3);
+    let n = s.level(1);
+}

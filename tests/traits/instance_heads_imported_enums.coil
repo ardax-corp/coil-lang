@@ -1,0 +1,97 @@
+// A trait of this module implemented for an enum of another module: a ground
+// enum and a generic one, called as `x.m()` and as `Trait::m(x)`, through a
+// bound and before the impls are declared (#2504). The same for a third
+// module's trait and impl, called there and here, and for an impl that names
+// the enum by a `use` alias.
+use tests::assert;
+use inst_head_shades::{Shade, Tint, Shade as Hue};
+use inst_head_glow::{Glow, glow_twice};
+
+trait Mine<T> {
+    fn mine(T x) -> int {}
+}
+
+// Called before any impl of `Mine` is declared.
+fn early_shade(Shade s) -> int {
+    return Mine::mine(s) + s.mine();
+}
+
+fn early_tint(Tint<string> t) -> int {
+    return Mine::mine(t) + t.mine();
+}
+
+impl Mine for Shade {
+    pub fn mine(Shade x) -> int {
+        return match x {
+            Shade::Dark => 0,
+            Shade::Light(n) => n,
+        };
+    }
+}
+
+impl Mine for Tint<T> {
+    pub fn mine(Tint<T> x) -> int {
+        return match x {
+            Tint::Clear => 5,
+            Tint::Dye(_, n) => n + 50,
+        };
+    }
+}
+
+trait Theirs<T> {
+    fn theirs(T x) -> int {}
+}
+
+impl Theirs for Hue {
+    pub fn theirs(Hue x) -> int {
+        return match x {
+            Hue::Dark => 7,
+            Hue::Light(n) => n + 70,
+        };
+    }
+}
+
+fn total<T: Mine>(T x) -> int {
+    return x.mine() + Mine::mine(x);
+}
+
+test("a ground imported enum takes this module's impl") {
+    assert!(Mine::mine(Shade::Light(2)) == 2);
+    assert!(Shade::Dark.mine() == 0);
+    let s = Shade::Light(3);
+    assert!(s.mine() == 3);
+}
+
+test("a generic imported enum takes this module's impl") {
+    let t: Tint<string> = Tint::Dye("red", 1);
+    assert!(Mine::mine(t) == 51);
+    assert!(t.mine() == 51);
+    let c: Tint<int> = Tint::Clear;
+    assert!(Mine::mine(c) == 5);
+    assert!(c.mine() == 5);
+}
+
+test("a bound takes each imported enum's instance") {
+    assert!(total(Shade::Light(2)) == 4);
+    assert!(total(Shade::Dark) == 0);
+    let t: Tint<bool> = Tint::Dye(true, 2);
+    assert!(total(t) == 104);
+}
+
+test("a call written before the impls") {
+    assert!(early_shade(Shade::Light(4)) == 8);
+    let t: Tint<string> = Tint::Clear;
+    assert!(early_tint(t) == 10);
+}
+
+test("another module's trait and impl for the imported enum") {
+    assert!(glow_twice(Shade::Light(2)) == 40);
+    assert!(glow_twice(Shade::Dark) == 2);
+    assert!(Glow::glow(Shade::Light(3)) == 30);
+    assert!(Shade::Dark.glow() == 1);
+}
+
+test("an impl that names the imported enum by an alias") {
+    assert!(Theirs::theirs(Shade::Light(1)) == 71);
+    assert!(Hue::Dark.theirs() == 7);
+}

@@ -2,7 +2,6 @@
 // Same `[payload, tag]` ABI as helper B3; keep/refuse is the cost gate.
 use tests::assert;
 
-#[max_depth(32)]
 fn walk(int n) -> Option<int> {
     if n <= 0 {
         return Option::Some(0);
@@ -15,7 +14,6 @@ fn walk(int n) -> Option<int> {
     return Option::Some(x + 1);
 }
 
-#[max_depth(32)]
 fn walk_tail(int n, int acc) -> Option<int> {
     if n <= 0 {
         return Option::Some(acc);
@@ -23,7 +21,6 @@ fn walk_tail(int n, int acc) -> Option<int> {
     return walk_tail(n - 1, acc + 1);
 }
 
-#[max_depth(32)]
 fn pair_walk(int n) -> (int, int) {
     if n <= 0 {
         return (0, 1);

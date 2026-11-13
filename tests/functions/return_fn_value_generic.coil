@@ -1,0 +1,76 @@
+// A generic function returning a function over its type parameter whose
+// own signature holds an open `Option` / `Result` (`fn(Option<T>) -> T`,
+// `fn(T) -> Option<T>`), at one and two levels of nesting, at heap,
+// immediate, unit and two-word types (coil-lang#2759). Its ground calls
+// take the per-type clone past the clone budget too (coil-lang#2766).
+use tests::assert;
+
+#[derive(Show, Eq)]
+class Pt {
+    pub a: int,
+}
+
+fn or_else<T>(T d) -> fn(Option<T>) -> T {
+    return fn (Option<T> o) use (d) => o ?? d;
+}
+
+fn nest<T>(T d) -> fn() -> fn(Option<T>) -> T {
+    return fn () use (d) => or_else(d);
+}
+
+fn ok_or<T>(T d) -> fn(Option<T>) -> Result<T, string> {
+    return fn (Option<T> o) use (d) => Result::Ok(o ?? d);
+}
+
+fn wrap<T>(T x) -> Option<T> {
+    return Option::Some(x);
+}
+
+fn lift<T>() -> fn(T) -> Option<T> {
+    return wrap;
+}
+
+fn first<T>((T, int) x) -> Result<T, string> {
+    return Result::Ok(x[0]);
+}
+
+fn lift_first<T>() -> fn() -> fn((T, int)) -> Result<T, string> {
+    return fn () => first;
+}
+
+test("a returned function over the type parameter's Option") {
+    assert!(or_else("d")(Option::None) == "d");
+    assert!(or_else("d")(Option::Some("s")) == "s");
+    assert!(or_else(new Pt(2))(Option::Some(new Pt(3))).a == 3);
+    assert!(or_else(4)(Option::None) == 4);
+}
+
+test("two levels") {
+    assert!(nest("n")()(Option::None) == "n");
+    assert!(nest(7)()(Option::Some(8)) == 8);
+    let f = nest(new Pt(1));
+    let g = f();
+    assert!(g(Option::None).a == 1);
+}
+
+test("a returned function with an open Result in its result") {
+    assert!(ok_or("d")(Option::None) == Result::Ok("d"));
+    assert!(ok_or(new Pt(2))(Option::Some(new Pt(3))) == Result::Ok(new Pt(3)));
+    assert!(ok_or((1, 2))(Option::None) == Result::Ok((1, 2)));
+    assert!(ok_or(Option::Some(1))(Option::None) == Result::Ok(Option::Some(1)));
+}
+
+test("a generic function's value returned at the type parameter") {
+    let s: fn(string) -> Option<string> = lift();
+    assert!(s("s") == Option::Some("s"));
+    let p: fn(Pt) -> Option<Pt> = lift();
+    assert!(p(new Pt(5)) == Option::Some(new Pt(5)));
+    let u: fn(()) -> Option<()> = lift();
+    assert!(u(()) == Option::Some(()));
+    let f: fn() -> fn((string, int)) -> Result<string, string> = lift_first();
+    let g = f();
+    assert!(g(("s", 1)) == Result::Ok("s"));
+    let h: fn() -> fn(((int, int), int)) -> Result<(int, int), string> = lift_first();
+    let k = h();
+    assert!(k(((1, 2), 3)) == Result::Ok((1, 2)));
+}

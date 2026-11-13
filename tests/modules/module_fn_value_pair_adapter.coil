@@ -1,0 +1,110 @@
+// Functions of another module whose result moves as two words
+// (`Option<int>`, `(int, int)`, `Result<int, E>`, a small payload enum),
+// used as values here and in their own module, return their two words to
+// direct calls in both modules; their values enter one one-word adapter.
+// Needs `--root examples/src` (fn_value_pair_mod) and the stdlib.
+use tests::assert;
+use ascii::{digit_val, hex_val};
+use fn_value_pair_mod::{Sign, add_opt, checked_div, direct_sum, half, halves, sign, split};
+
+#[inline(never)]
+fn through(int -> Option<int> f, int x) -> int {
+    return match f(x) {
+        Some(v) => v,
+        None => -1,
+    };
+}
+
+fn apply<T>(int -> T f, int x) -> T {
+    return f(x);
+}
+
+fn sign_code(Sign s) -> int {
+    return match s {
+        Sign::Neg(v) => -v,
+        Sign::Zero => 0,
+        Sign::Pos(v) => v,
+    };
+}
+
+test("direct calls and calls through the value agree") {
+    assert!(half(8) == Some(4));
+    assert!(half(7) == None);
+    assert!(through(half, 8) == 4);
+    assert!(through(half, 7) == -1);
+    let f = half;
+    assert!(f(6) == Some(3));
+}
+
+test("the defining module's own value and direct calls") {
+    let xs: Vec<int> = Vec::new();
+    xs.push(2);
+    xs.push(3);
+    xs.push(4);
+    assert!(halves(xs) == 1 - 1 + 2);
+    assert!(direct_sum(42) == 21 + 4 + 2 + 21);
+}
+
+test("a shared generic body takes the boxed result") {
+    assert!(apply(half, 10) == Some(5));
+    assert!(apply(half, 3) == None);
+    let (a, b) = apply(split, 42);
+    assert!(a == 4 && b == 2);
+    assert!(sign_code(apply(sign, -3)) == -3);
+    assert!(sign_code(apply(sign, 0)) == 0);
+}
+
+test("tuple, Result and enum results through values kept in a vec") {
+    let fs: Vec<int -> (int, int)> = Vec::new();
+    fs.push(split);
+    let (a, b) = fs[0](57);
+    assert!(a == 5 && b == 7);
+    let (c, d) = split(31);
+    assert!(c == 3 && d == 1);
+    let g = checked_div;
+    let ok = match g(9, 3) {
+        Ok(v) => v,
+        Err(_) => 0,
+    };
+    let err = match g(1, 0) {
+        Ok(_) => "",
+        Err(e) => e,
+    };
+    assert!(ok == 3 && err == "div by zero");
+    assert!(checked_div(8, 2) == Ok(4));
+    let s = sign;
+    assert!(sign_code(s(5)) == 5 && sign_code(sign(-2)) == -2);
+}
+
+test("a partial of a module function") {
+    let p = add_opt(10);
+    assert!(p(1) == Some(11));
+    assert!(p(-20) == None);
+    assert!(through(p, 2) == 12);
+    assert!(add_opt(2, 3) == Some(5));
+    let q = add_opt(-1);
+    assert!(q(0) == None && q(4) == Some(3));
+}
+
+test("direct calls in a hot loop") {
+    let s = 0;
+    let i = 0;
+    while i < 1000 {
+        s += half(i) ?? 0;
+        i += 1;
+    }
+    assert!(s == 249500 / 2);
+}
+
+test("a stdlib function used as a value and called in its module") {
+    let f = digit_val;
+    assert!(f("7" as byte) == Some(7));
+    assert!(f("x" as byte) == None);
+    assert!(through(fn (int c) => digit_val(c as byte), 51) == 3);
+    assert!(digit_val("4" as byte) == Some(4));
+    assert!(hex_val("9" as byte) == Some(9) && hex_val("b" as byte) == Some(11));
+    let vs: Vec<byte -> Option<int>> = Vec::new();
+    vs.push(digit_val);
+    vs.push(hex_val);
+    assert!(vs[0]("2" as byte) == Some(2) && vs[1]("F" as byte) == Some(15));
+}

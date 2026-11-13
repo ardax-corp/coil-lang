@@ -1,0 +1,37 @@
+// `==` on aggregates with `float` leaves: compiler-made glue, once the
+// `values_eq_shaped` runtime call. Arrays, a Vec, tuples and records.
+// ITERS=2000000. Checksum 6000000.
+use io::sync::print;
+use string::format;
+
+fn main() {
+    let iters = 2000000;
+    let a = [1.0, 2.0, 3.0, 4.0];
+    let b = [1.0, 2.0, 3.0, 4.0];
+    let v: Vec<float> = Vec::new();
+    let w: Vec<float> = Vec::new();
+    let k = 0;
+    while k < 8 {
+        v.push(k as float);
+        w.push(k as float);
+        k = k + 1;
+    }
+    let r = { x: 0.5, y: -0.0 };
+    let acc = 0;
+    let i = 0;
+    while i < iters {
+        let t = (i as float, i);
+        let u = (i as float, i);
+        if a == b {
+            acc = acc + 1;
+        }
+        if v == w && t == u {
+            acc = acc + 1;
+        }
+        if r == { x: 0.5, y: 0.0 } {
+            acc = acc + 1;
+        }
+        i = i + 1;
+    }
+    let _ = print(format("%i", acc));
+}

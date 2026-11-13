@@ -1,7 +1,7 @@
 # Macros: derives, attribute macros and function-style macros
 
 Packages define `derive`s, attribute macros and function-style macros in coil.
-The compiler runs them in the VM at compile time, after parsing and before
+The compiler runs them on the MIR interpreter at compile time, after parsing and before
 typechecking, and splices their output next to (derive) or in place of
 (attribute macro) the declaration, or in place of the `name!(…)` call.
 The built-in derives (`Show`, `Eq`, `Ord`, `Hash`, `Default`, `Send`,
@@ -9,7 +9,7 @@ The built-in derives (`Show`, `Eq`, `Ord`, `Hash`, `Default`, `Send`,
 
 Code: `compiler/src/macros/` (lowering, input encoding, `MacroHost`),
 `compiler/src/pipeline_macros.rs` (the pipeline stage), `compiler/src/prelude/macro.coil`
-(the embedded `macro` module), `comptime/` (the VM host).
+(the embedded `macro` module), `comptime/` (the host).
 
 ## Surface
 
@@ -166,7 +166,7 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
 
 1. **Attribute expansion** (`attrs::expand_program_in`, per file, during
    discovery) lowers macro items and records every derive, each item's
-   first attribute that is not built in (`derive`, `repr`, `max_depth`, …),
+   first attribute that is not built in (`derive`, `repr`, `inline`, …),
    and every outermost `name!(…)` call, as a `PendingMacro`. It still adds the type-name `Show`
    default. A field / variant attribute on a type with no derive is an
    error right away.
@@ -195,7 +195,7 @@ discover_all → expand_user_macros → (discover newly used modules) → typech
    attribute arguments in parameter order; a call's arguments are
    `(kind, source text)` each, the rest as a count then its items.
    `macro::Reader` (`r.type_decl()`, `r.fn_decl()`, `r.expr()`, `r.exprs()`,
-   `r.str()`, `r.int()`, `r.bool()`) decodes it in the VM. Attribute-macro
+   `r.str()`, `r.int()`, `r.bool()`) decodes it in the macro. Attribute-macro
    parameters are `string`, `int` or `bool`.
 4. **Compile** the expansion program for the round's provider modules
    (`<coil>/expand.coil`: `use` of every macro function each provider declares,
@@ -255,7 +255,7 @@ instructions):
 | 1600 | 1.82 s, 13.1 G  | 1.07 s, 7.67 G  |
 
 `coil compile` output is byte-identical. What is left per call is constant:
-the macro's VM run (about half at N = 1600, including zeroing fresh heap
+the macro's run (about half at N = 1600, including zeroing fresh heap
 chunks) and building the parser for each output.
 
 `coil dissect --expand FILE` prints the entry file after expansion. Each run
@@ -337,13 +337,14 @@ error is the only one reported.
 ## Compile-time host
 
 `MacroHost` (`compiler::macros`) keeps the compiler free of `machine`; binaries
-call `comptime::install()` at startup and pipelines pick it up. `VmMacroHost`
-keeps one `Machine` per compiled expansion program per thread (#1008). The
+call `comptime::install()` at startup and pipelines pick it up. `IsolateMacroHost`
+keeps one `machine::Isolate` per compiled expansion program per thread (#1008):
+a runtime whose calls run the program's MIR on the interpreter. The
 natives, statics and program are loaded once; each call resets the step
 budget and calls the entry, and a call that returns normally ends with
-`Machine::reset_isolate_heap` so the next one starts from a clean heap. A call
-that panics, errors or runs out of steps drops the machine, and the next call
-builds a fresh one. The sandboxed native table is built once per process.
+`Isolate::reset` so the next one starts from a clean heap. A call that panics,
+errors or runs out of steps drops the isolate, and the next call builds a fresh
+one. The sandboxed native table is built once per process.
 
 - The host natives are the standard table in ABI order. The fs, `open`,
   stream and `env_var` natives are gated (`comptime::io_gate`, see
@@ -352,8 +353,8 @@ builds a fresh one. The sandboxed native table is built once per process.
   evaluation (`native_allowed_at_compile_time`).
 - Each call runs within `ComptimeLimits` (`HostGrants::comptime`): a step
   budget (`--comptime-steps`, default 1B loop back-edges + calls, see
-  `Machine::set_step_budget`) and a cap on live heap bytes (`--comptime-mem`,
-  default 1024 MiB, see `Machine::set_heap_cap`). A runaway macro fails with
+  `Isolate::set_step_budget`) and a cap on live heap bytes (`--comptime-mem`,
+  default 1024 MiB, see `Isolate::set_heap_cap`). A runaway macro fails with
   "it ran too long", a hoarding one with "it used too much memory", each
   naming the flag to raise. 1B steps is about 15 s of a tight loop on a
   release build. The cap is checked at GC safepoints after a full collection,
@@ -361,7 +362,7 @@ builds a fresh one. The sandboxed native table is built once per process.
   call. Expansion sub-pipelines inherit the parent's limits.
 - A panic fails the macro with its message, so `panic "…"` is the way to
   inspect what a macro received.
-- The VM's thread-local output redirect is restored before the machine drops.
+- The thread-local output redirect is restored before the isolate drops.
 
 ## Compile-time IO
 
@@ -416,7 +417,7 @@ again:
   one-root heap snapshot) and a macro call (its output text) whose
   evaluation made at least one granted IO call and wrote no file. Pure
   evaluations are always computed: they cannot change between builds. The
-  VM notes each granted call (`io_gate::start_recording`), with the sha256 of
+  run notes each granted call (`io_gate::start_recording`), with the sha256 of
   what a read saw (`path_digest`: a file's bytes, a directory's sorted names,
   `missing`, plus a symlink's target).
 - Key (sha256): cache format, archive version, OS and arch, the const's
@@ -450,7 +451,7 @@ again:
   missing or stale entry is a diagnostic that says how to refresh it.
   `--comptime-refresh` is ignored there. A cache made by `coil` in the same
   working directory with the same grants is the one the editor reads.
-- A cached const is restored into the evaluating VM instead of calling its
+- A cached const is restored into the evaluating isolate instead of calling its
   initializer (`ConstEval::cached`), so later consts read it as usual and
   the program's snapshot is captured as before.
 
@@ -459,10 +460,9 @@ Module statics of providers are not initialised (the expansion program has no
 
 Perf (#1008, release build, 2026-10-16): compiling one file with N
 `assert!(x == 1);` calls went from 271 ms to 207 ms at N = 100 (median of 7),
-about 0.6 ms saved per call. At N = 400 the build is about 1.25 s either way:
-there the time goes to codegen of the one large `main` (`mir::gc::fill_live_roots`
-and `stackmap::encode_draft_regs`, about 55% of instructions), and macro
-expansion is 17%.
+about 0.6 ms saved per call. At N = 400 the build was about 1.25 s either way:
+there the time went to codegen of the one large `main` (about 55% of
+instructions), and macro expansion was 17%. These are bytecode-VM numbers.
 
 ## Built-in derives
 
@@ -476,10 +476,25 @@ field its type's default (`0`, `0.0`, `false`, `""`, or `Ty::default()`; an
 enum takes its first variant), and scalar-backed enums
 compare / show / order their backing (a `#[repr(string)]` enum by its
 string's bytes, coil-lang#1722). When they replaced the Rust code, every
-derive-using program compiled to identical bytecode except enums with tuple
+derive-using program compiled to identical code except enums with tuple
 variants: their payloads are bound by the pattern (`E::V(s_p0)`) since the old
 `p.0` field access cannot be written in source.
 `comptime/tests/derive_golden.rs` pins the generated source.
+`Eq`, `Hash` and `Show` read each field or payload through `__data(e)`
+(coil-lang#2457): `e` itself, typed as the data it is at run time, so a
+`Matrix<D>` anywhere in its type is `D`. The checker types the call
+(`infer_call_expr`) and the HIR builder drops it (`call`), so the body is the
+one `e` alone gives. Without it a `Matrix` field's `==` is the element-wise
+comparison (a `Matrix` of `byte`, not a `bool`). A user derive may write the
+same call. A bare `Matrix<D>` value has the data's instances too
+(coil-lang#2466): a `Show`, `Eq` or `Hash` goal that names a `Matrix<D>`, at
+any depth, is looked up as the goal on `D` (`Generics::matrix_data_args`, in
+every instance lookup, and `Checker::matching_instances` /
+`ensure_structural_instance`), so the instance a call records is the data's,
+the one code generation's run-time types name. No instance of those traits
+can have a `Matrix` head (trait and type are both builtin), so nothing is
+shadowed. The `==` operator on matrices is typed before any goal and stays
+element-wise.
 `Serialize` / `Deserialize` were removed (placeholders that cast fields to a
 byte); serializers belong in format packages as user derives. The `String`
 trait (`to_string`, a second copy of `Show`) was removed too: `Show` is the
@@ -506,8 +521,8 @@ while compiling, on the same host (`MacroHost::eval_consts`):
 
 - Its initializer must be pure (the HIR effect summary of its `Static` body):
   a read or write of a `static let`, or any IO, is E0134 naming the cause.
-- After `finalize_bytecode`, `Pipeline::compute_consts` runs every const's
-  `__static_init$NAME` in setup order on one fresh VM, each within
+- After `finalize_bodies`, `Pipeline::compute_consts` runs every const's
+  `__static_init$NAME` in setup order on one fresh isolate, each within
   `ComptimeLimits`, storing each value to its slot so later consts can read
   earlier ones. A panic or a limit is E0134 at the const.
 - The values are captured as one `common::HeapSnapshot` (sharing and cycles
@@ -522,14 +537,14 @@ while compiling, on the same host (`MacroHost::eval_consts`):
 - The setup region's `CALL init; StoreStatic slot` pairs become `NOOP`s and
   one `RestoreSnapshot` (snapshot appended to the constant pool) at the first
   const's place. The initializer bodies stay in the program.
-- Without a host (a pipeline built with no VM linked) consts keep their
+- Without a host (a pipeline built with no host linked) consts keep their
   startup initializers.
 - A `static let` with a pure initializer is computed the same way, silently
   (`ConstEval::silent`): within the silent tier
   (`ComptimeLimits::SILENT_CALL_STEPS` each, `SILENT_MODULE_STEPS` for the
   module), and one that panics, runs out or has no snapshot form keeps its
-  startup initializer. A failed call leaves the VM in an unknown state, so
-  the values computed so far move to a fresh VM through a snapshot. The
+  startup initializer. A failed call leaves the isolate in an unknown state, so
+  the values computed so far move to a fresh isolate through a snapshot. The
   restored value is an ordinary heap object, so the static stays mutable.
 
 ## Compile-time calls
@@ -543,13 +558,12 @@ the consts (so the call can read them):
   generic, a coroutine, a closure or in result mode, returning `int`,
   `float`, `bool`, `byte` or `string` (`Compiler::fold_bodies`, by bind
   name in `fold_fns`).
-- After finalize, `Compiler::fold_sites` finds each one-word-result `CALL`
-  to a candidate whose arguments are the `CONST` / `STRING` words right
-  before it, with no branch landing among them
-  (`common::jump_targets`): on every path those words are its arguments.
+- `Compiler::fold_sites` takes each one-word MIR `Call` of the capture
+  (`mir::capture_const_calls`) to a candidate whose arguments are all `Const`
+  / `String` values.
   A call to an auto-par worker computes the function it runs, without the
   worker's depth argument.
-- Each distinct call runs once on the compile-time VM within the silent
+- Each distinct call runs once on the compile-time host within the silent
   tier (sharing its 20M-step pool with the silent static lets). One that
   panics, runs out or returns a non-string where a string is expected
   stays a call.
@@ -559,9 +573,8 @@ the consts (so the call can read them):
 - Sites inside an explicit (`const` / `comptime`) initializer are dropped
   (`Compiler::function_end` bounds the initializer): the initializer computes
   them within the explicit budget.
-- `apply_call_folds` turns the argument words into `NOOP`s and the `CALL`
-  into a `CONST` (a negative or wide word from the pool) or `STRING`, then
-  builds the precise frame maps again.
+- `apply_call_folds` turns each `Call` into a `Const` or `String` in the
+  captured MIR (`mir::replace_const_calls`).
 - A program with any `fn drop()` folds no call and no silent static let:
   their temporaries would finalize at compile time instead of when the
   program runs.

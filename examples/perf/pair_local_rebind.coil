@@ -1,0 +1,32 @@
+// Two-word locals rebound in a hot loop (`best = h`, `p = (p[1], ..)`):
+// each `=` writes the local's two slots, so no `Option` or tuple is boxed
+// per iteration.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+
+fn main() {
+    let best = half(1);
+    let p = (0, 1);
+    let i = 0;
+    while i < 20000000 {
+        let h = half(i);
+        if h != None {
+            best = h;
+        }
+        p = (p[1], (p[0] + p[1]) % 1000003);
+        i += 1;
+    }
+    let b = match best {
+        Some(v) => v,
+        None => -1,
+    };
+    let _ = print(format("%i %i\n", b, p[0]));
+}

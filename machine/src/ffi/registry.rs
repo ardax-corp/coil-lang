@@ -18,19 +18,22 @@ pub enum HostOp {
     Ordinary,
     Collect,
     RegisterFinalizer,
-    /// Task scheduler native (`task_*`): the VM runs it, since it can switch
+    /// Task scheduler native (`task_*`): the runtime runs it, since it can switch
     /// tasks. Ids [`common::TASK_SCOPE_OPEN_ID`]..=[`common::TASK_YIELD_ID`]
     /// and [`common::TASK_CANCEL_ID`]..=[`common::TASK_SHIELD_EXIT_ID`]
     /// and [`common::TASK_COND_NEW_ID`]..=[`common::TASK_COND_NOTIFY_ID`],
     /// and [`common::CONTRACT_FAIL_ID`] (it reads the caller's frame).
     Task,
-    /// `unwind_resume`: the end of a `defer` cleanup pad; the VM unwinder
+    /// `unwind_resume`: the end of a `defer` cleanup pad; the runtime unwinder
     /// takes the frame back ([`common::UNWIND_RESUME_ID`]).
     Unwind,
-    /// `gc_region_enter` / `gc_region_exit` around a `region` block: the VM
+    /// `gc_region_enter` / `gc_region_exit` around a `region` block: the runtime
     /// runs a minor collection ([`common::GC_REGION_ENTER_ID`]).
     RegionEnter,
     RegionExit,
+    /// `startup_restore`: the driver restores the snapshot at a pool index
+    /// ([`common::STARTUP_RESTORE_ID`]).
+    Restore,
 }
 
 pub trait NativeFn: Send + Sync {
@@ -41,10 +44,58 @@ pub trait NativeFn: Send + Sync {
         HostOp::Ordinary
     }
     /// The plain function behind a native that always returns a value and
-    /// never parks, opens descriptors or switches tasks. The VM calls it
+    /// never parks, opens descriptors or switches tasks. The runtime calls it
     /// straight from the dispatch loop instead of through [`Self::invoke`].
     fn direct(&self) -> Option<crate::HostValueFn> {
         None
+    }
+
+    /// [`Self::direct`] of a native that first checks its `Stream`
+    /// argument is not unsent (`host_natives::stream_first`): the plain
+    /// function behind that check, which native code makes itself.
+    fn guarded_direct(&self) -> Option<crate::HostValueFn> {
+        None
+    }
+
+    /// A slot of a host table without this native: an AOT executable links
+    /// only the natives its program calls (`host_natives_of_groups`).
+    fn is_absent(&self) -> bool {
+        false
+    }
+}
+
+/// How native code calls host native `id` ([`Natives::host_call`]).
+#[derive(Clone, Copy, Default)]
+pub struct HostCall {
+    /// The plain function (`None`: the native needs the runtime).
+    pub func: Option<crate::HostValueFn>,
+    /// It takes a `Stream` first, which must not be unsent.
+    pub guarded: bool,
+    /// `gc_collect`: a full collection on the runtime, with native code's
+    /// words rooted around the call.
+    pub collect: bool,
+    /// An ordinary native that needs the runtime (it may park the task, open
+    /// descriptors, ...), a task op, a `region` hook (a minor collection) or
+    /// the finalizer registry's `gc_register_finalizer`: native code runs it
+    /// as a runtime call.
+    pub on_machine: bool,
+}
+
+impl HostCall {
+    pub fn of(n: &dyn NativeFn) -> Self {
+        if n.is_absent() {
+            return Self::default();
+        }
+        let guarded = crate::host_natives::stream_first(n.name());
+        let func = if guarded { n.guarded_direct() } else { n.direct() };
+        let collect = n.name() == crate::gc_handles::GC_COLLECT_NATIVE;
+        let on_machine = func.is_none()
+            && !collect
+            && matches!(
+                n.host_op(),
+                HostOp::Ordinary | HostOp::Task | HostOp::RegionEnter | HostOp::RegionExit | HostOp::RegisterFinalizer | HostOp::Restore
+            );
+        Self { func, guarded, collect, on_machine }
     }
 }
 
@@ -73,7 +124,7 @@ impl HostClosureFn {
 
     /// A native that is a plain [`crate::HostValueFn`]: it always returns a
     /// value, and never parks, opens descriptors or switches tasks, so the
-    /// VM may call it directly ([`NativeFn::direct`]).
+    /// runtime may call it directly ([`NativeFn::direct`]).
     pub fn new_direct(signature: FfiSignature, func: crate::HostValueFn) -> Self {
         let mut native = Self::new(signature, move |heap, args| Ok(Some(func(heap, args))));
         native.direct = Some(func);
@@ -129,7 +180,7 @@ impl NativeFn for HostClosureFn {
     }
 
     fn direct(&self) -> Option<crate::HostValueFn> {
-        // A special host op runs in the VM, never as a plain call.
+        // A special host op runs in the runtime, never as a plain call.
         if self.host_op == HostOp::Ordinary { self.direct } else { None }
     }
 
@@ -158,6 +209,8 @@ pub struct Natives {
     by_id: Arc<Vec<Arc<dyn NativeFn>>>,
     /// [`NativeFn::direct`] of each id, read by the dispatch loop.
     direct: Arc<Vec<Option<crate::HostValueFn>>>,
+    /// How native code calls each id.
+    calls: Arc<Vec<HostCall>>,
 }
 
 impl Natives {
@@ -167,13 +220,16 @@ impl Natives {
 
     pub fn register(&mut self, native: Arc<dyn NativeFn>) -> usize {
         let id = self.by_id.len();
-        let name = native.name().to_string();
-        let by_name = Arc::make_mut(&mut self.by_name);
-        if by_name.is_empty() {
-            // The standard host table is ~140 natives; skip the rehash ladder.
-            by_name.reserve(192);
+        if !native.is_absent() {
+            let name = native.name().to_string();
+            let by_name = Arc::make_mut(&mut self.by_name);
+            if by_name.is_empty() {
+                // The standard host table is ~210 natives; skip the rehash ladder.
+                by_name.reserve(256);
+            }
+            by_name.insert(name, Arc::clone(&native));
         }
-        by_name.insert(name, Arc::clone(&native));
+        Arc::make_mut(&mut self.calls).push(HostCall::of(native.as_ref()));
         Arc::make_mut(&mut self.direct).push(native.direct());
         Arc::make_mut(&mut self.by_id).push(native);
         id
@@ -191,6 +247,12 @@ impl Natives {
     #[inline(always)]
     pub fn direct_by_id(&self, id: usize) -> Option<crate::HostValueFn> {
         self.direct.get(id).copied().flatten()
+    }
+
+    /// How native code calls native `id`.
+    #[inline(always)]
+    pub fn host_call(&self, id: usize) -> Option<HostCall> {
+        self.calls.get(id).copied()
     }
 
     pub fn len(&self) -> usize {

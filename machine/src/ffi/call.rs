@@ -43,7 +43,7 @@ impl InvokeContext {
     }
 
     fn heap(&mut self) -> &mut Heap {
-        // SAFETY: VM is single-threaded; reentrant callbacks may borrow the heap
+        // SAFETY: runtime is single-threaded; reentrant callbacks may borrow the heap
         // while libffi is active, so this cannot overlap with `&mut Heap` borrows
         // held across the native call.
         unsafe { &mut *self.heap }
@@ -209,16 +209,10 @@ fn instance_field(heap: &mut Heap, addr: u64, layout: &CStructLayout, i: usize) 
         .ok_or_else(|| FfiError::Unsupported("struct value not found on heap".into()))?;
     match obj {
         // A record: the field's slot.
-        Object::Instance(gc) if gc.as_ref().slot_len().is_some() => gc
+        Object::Instance(gc) => gc
             .as_ref()
             .slot(struct_record_slot(layout, i))
             .ok_or_else(|| FfiError::Unsupported(format!("missing field `{fname}`"))),
-        Object::Instance(gc) => {
-            let key = heap.intern(fname.to_string());
-            gc.as_ref()
-                .get(key)
-                .ok_or_else(|| FfiError::Unsupported(format!("missing field `{fname}`")))
-        }
         _ => Err(FfiError::Unsupported(
             "struct argument must be a record/dict instance".into(),
         )),
@@ -392,7 +386,7 @@ fn array_buffer_from_value(
     if let Some(obj) = heap.find_object_by_addr(addr) {
         let mut buf: Vec<i64> = match &obj {
             Object::Array(gc) => gc.as_ref().iter().map(|v| v.as_int()).collect(),
-            Object::Tuple(gc) => gc.as_ref().elements().iter().map(|v| v.as_int()).collect(),
+            Object::Enum(gc) if gc.as_ref().is_tuple() => gc.as_ref().elements().iter().map(|v| v.as_int()).collect(),
             _ => Vec::new(),
         };
         if !buf.is_empty() {
@@ -414,7 +408,7 @@ static EMPTY_CONST_BYTES: [u8; 1] = [0];
 /// goes back into that array after the call.
 ///
 /// A string is lent in place: its bytes never move or change while the
-/// string lives (`memory::strbuf`), and the VM roots the call's arguments
+/// string lives (`memory::strbuf`), and the interpreter roots the call's arguments
 /// until it returns. A packed array is lent in place too when `lend` (no
 /// coil callback can run during the call, so nothing can grow, unpack or
 /// free it) and no other argument names the same array (so C sees no
@@ -450,7 +444,7 @@ fn byte_arg_from_value(
             }
             (gc.as_ref().to_byte_vec(), writable)
         }
-        Some(Object::Tuple(gc)) => {
+        Some(Object::Enum(gc)) if gc.as_ref().is_tuple() => {
             (gc.as_ref().elements().iter().map(|v| v.as_int() as u8).collect(), false)
         }
         _ => {
@@ -581,9 +575,8 @@ pub fn invoke_via_libffi(
     let mut slots: Vec<ArgSlot> = Vec::with_capacity(effective_types.len());
 
     fn value_is_stream(heap: &Heap, value: &Value) -> bool {
-        let v = crate::io::peel_one_boxed(heap, *value);
         matches!(
-            heap.find_object_by_addr(v.bits()),
+            heap.find_object_by_addr(value.bits()),
             Some(Object::Stream(_))
         )
     }
@@ -800,7 +793,6 @@ pub fn invoke_via_libffi(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::Member;
     use crate::ffi::FfiSignatureBuilder;
     use crate::ffi::library_candidates;
 
@@ -1134,7 +1126,7 @@ mod tests {
                 return;
             }
         };
-        resolve_symbol(&lib, "system").expect("hand-written bytecode may resolve system");
+        resolve_symbol(&lib, "system").expect("hand-written code may resolve system");
     }
 
     #[test]
@@ -1152,7 +1144,7 @@ mod tests {
         // POSIX `execve` is not exported by Windows CRT; `_wsystem` is the
         // classified FFI-exec symbol that opens with the same libc handle.
         let name = if cfg!(windows) { "_wsystem" } else { "execve" };
-        resolve_symbol(&lib, name).expect("hand-written bytecode may resolve FFI exec symbols");
+        resolve_symbol(&lib, name).expect("hand-written code may resolve FFI exec symbols");
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1418,16 +1410,12 @@ mod tests {
         assert_eq!(layout.align, 4);
 
         let mut heap = Heap::default();
-        let ka = heap.intern("a".into());
-        let kb = heap.intern("b".into());
-        let kc = heap.intern("c".into());
-        let (obj, mut gc) = heap.alloc(crate::memory::ObjInstance::default(), Object::Instance);
-        {
-            let inst = gc.as_mut();
-            inst.set(ka, Member::Value(Value::from(1i64)));
-            inst.set(kb, Member::Value(Value::from(0x11223344i64)));
-            inst.set(kc, Member::Value(Value::from(7i64)));
-        }
+        // A record: its slots are the fields sorted by name.
+        let slots = vec![Value::from(1i64), Value::from(0x11223344i64), Value::from(7i64)];
+        let (obj, _) = heap.alloc(
+            crate::memory::ObjInstance::with_slots(common::FFI_STRUCT_TYPE_ID, slots),
+            Object::Instance,
+        );
         let value = Value::from(obj.addr());
         let mut packed = Vec::new();
         pack_struct(

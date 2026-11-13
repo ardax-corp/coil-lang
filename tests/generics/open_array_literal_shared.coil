@@ -1,0 +1,103 @@
+// An array literal of a type parameter's values in a shared generic body
+// (coil-lang#2581): `let v: Vec<T> = [x];` kept its items in frame slots,
+// one word each, and an open `T` has no slot word type, so the body had no
+// MIR (an internal compiler error). Such a literal is an array object.
+// At default flags the shared bodies here are a trait method with a bound
+// of its own (never cloned) and a polymorphically recursive function; the
+// `--clone-budget 0` twin is `open_array_literal_shared_cb0.coil`. The
+// trait method shows elements only: showing a shape over its own `U` is
+// #2594.
+use tests::assert;
+
+class Shelf {
+    pub n: int,
+}
+
+trait Lister<S> {
+    fn one<U: Show>(S s, U x) -> string {}
+    fn two<U: Show>(S s, U x, U y) -> string {}
+    fn tuple<U: Show>(S s, U x) -> string {}
+    fn nested<U: Show>(S s, U x) -> string {}
+    fn each<U: Show>(S s, U x, U y) -> string {}
+    fn passed<U: Show>(S s, U x, U y) -> string {}
+    fn copied<U: Show>(S s, U x, U y) -> string {}
+}
+
+fn takes<T: Show>(Vec<T> v) -> string {
+    return v.show();
+}
+
+impl Lister for Shelf {
+    fn one<U: Show>(Shelf s, U x) -> string {
+        let v: Vec<U> = [x];
+        return v[0].show() + s.n.show();
+    }
+
+    fn two<U: Show>(Shelf s, U x, U y) -> string {
+        let a: [U; 2] = [x, y];
+        let v = [y, x];
+        return a[0].show() + a[1].show() + v[0].show();
+    }
+
+    fn tuple<U: Show>(Shelf s, U x) -> string {
+        let a = [(x, s.n)];
+        let (p, q) = a[0];
+        return p.show() + q.show();
+    }
+
+    fn nested<U: Show>(Shelf s, U x) -> string {
+        let a = [[x], [x]];
+        return a[1][0].show() + a.len().show();
+    }
+
+    fn each<U: Show>(Shelf s, U x, U y) -> string {
+        let out = "";
+        for e in [x, y] {
+            out = out + e.show();
+        }
+        return out;
+    }
+
+    fn passed<U: Show>(Shelf s, U x, U y) -> string {
+        let v: Vec<U> = [x, y];
+        return takes(v) + takes([y]);
+    }
+
+    fn copied<U: Show>(Shelf s, U x, U y) -> string {
+        let a = [x, y];
+        let b = a;
+        b[0] = y;
+        return a[0].show() + a[1].show() + b[0].show() + b[1].show();
+    }
+}
+
+fn poly<T: Show>(T x, int n) -> string {
+    if n == 0 {
+        let v: Vec<T> = [x];
+        let a = [x, x];
+        return v.show() + a[1].show();
+    }
+    return poly(Some(x), n - 1);
+}
+
+test("an array literal of a trait method's own type parameter") {
+    let s = new Shelf(1);
+    assert!(s.one(5) == "51");
+    assert!(s.one("a") == "a1");
+    assert!(s.two(1, 2) == "122");
+    assert!(s.two("a", "b") == "abb");
+    assert!(s.tuple(3) == "31");
+    assert!(s.tuple("t") == "t1");
+    assert!(s.nested(4) == "42");
+    assert!(s.each(1, 2) == "12");
+    assert!(s.each("x", "y") == "xy");
+    assert!(s.passed(1, 2) == "[1, 2][2]");
+    assert!(s.passed("p", "q") == "[p, q][q]");
+    assert!(s.copied(1, 2) == "1222");
+}
+
+test("an array literal in a polymorphically recursive function") {
+    assert!(poly(3, 0) == "[3]3");
+    assert!(poly(3, 2) == "[Some(Some(3))]Some(Some(3))");
+    assert!(poly("s", 1) == "[Some(s)]Some(s)");
+}

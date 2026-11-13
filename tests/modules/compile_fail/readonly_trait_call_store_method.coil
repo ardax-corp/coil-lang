@@ -1,0 +1,7 @@
+// @expected E0107 — `Peek::poke`'s impl for `Tally`, both in another module, writes its field: the method call on a `readonly` value is refused (#2468).
+use ro_trait_store::{Tally, Peek};
+
+fn main() {
+    let t = readonly new Tally(1);
+    let _ = t.poke(2);
+}

@@ -71,7 +71,7 @@ pub enum FfiError {
     },
     /// FFI string argument contained an interior NUL.
     InteriorNul,
-    /// A host kernel's int arithmetic trapped; the VM panics with the
+    /// A host kernel's int arithmetic trapped; the runtime panics with the
     /// trap's message.
     IntTrap(common::int_arith::IntTrap),
 }

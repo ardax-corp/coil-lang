@@ -67,7 +67,7 @@ fn main() {
     let d = "x".count(e);
     let f = 17.count(e);
     let g = "abcdefghijklmnopq".count(e);
-    let text = show(a) + " " + show(b) + " " + show(c) + " " + show(d) + " " + show(f) + " " +
-               show(g);
+    let text = a.show() + " " + b.show() + " " + c.show() + " " + d.show() + " " + f.show() + " " +
+               g.show();
     let _ = write(stdout(), to_bytes(text));
 }

@@ -1,0 +1,63 @@
+// A two-word enum passed by value keeps its heap payload in an `int` typed
+// word. That word must stay rooted while a collection runs in the callee, on
+// every engine: the object it names moves unless something pins it.
+use tests::assert;
+use gc::collect;
+
+enum Outer {
+    Leaf,
+    Via(Inner),
+}
+
+enum Inner {
+    Back(Outer),
+}
+
+#[inline(never)]
+fn depth(Outer o) -> int {
+    let junk = [1, 2, 3];
+    collect();
+    return match o {
+        Outer::Leaf => junk.len() - 3,
+        Outer::Via(Inner::Back(next)) => 1 + depth(next),
+    };
+}
+
+#[inline(never)]
+fn walk(Outer o) -> int {
+    let at = o;
+    let n = 0;
+    while true {
+        collect();
+        match at {
+            Outer::Leaf => {
+                return n;
+            },
+            Outer::Via(Inner::Back(next)) => {
+                at = next;
+                n = n + 1;
+            },
+        }
+    }
+    return n;
+}
+
+// The argument is built here, from a value only known at run time: a constant
+// enum would be a snapshot object, which a collection does not move.
+#[inline(never)]
+fn depth_of(Outer leaf) -> int {
+    return depth(Outer::Via(Inner::Back(Outer::Via(Inner::Back(leaf)))));
+}
+
+#[inline(never)]
+fn walk_of(Outer leaf) -> int {
+    return walk(Outer::Via(Inner::Back(Outer::Via(Inner::Back(Outer::Via(Inner::Back(leaf)))))));
+}
+
+test("a two-word enum parameter survives a collection in its callee") {
+    assert!(depth_of(Outer::Leaf) == 2);
+}
+
+test("a two-word enum merged in a loop survives a collection") {
+    assert!(walk_of(Outer::Leaf) == 3);
+}

@@ -21,29 +21,29 @@ class Box<T> {
 }
 
 fn shout_before<X: Show>(X x) -> string {
-    return show(x) + "!";
+    return Show::show(x) + "!";
 }
 
 impl Pass for int {
     pub fn third<W: Show>(int s, W w) -> string {
-        return shout_before(w) + " " + show(w) + " " + w.show();
+        return shout_before(w) + " " + Show::show(w) + " " + w.show();
     }
 }
 
 impl Pass for Pt {
     pub fn third<W: Show>(Pt s, W w) -> string {
-        return shout_after(w) + " " + show(w) + " " + w.show();
+        return shout_after(w) + " " + Show::show(w) + " " + w.show();
     }
 }
 
 impl Pass for Box<T: Show> {
     pub fn third<W: Show>(Box<T> s, W w) -> string {
-        return show(s.v) + "|" + shout_after(w);
+        return Show::show(s.v) + "|" + shout_after(w);
     }
 }
 
 fn shout_after<X: Show>(X x) -> string {
-    return show(x) + "!";
+    return Show::show(x) + "!";
 }
 
 fn use_pass<P: Pass>(P p) -> string {

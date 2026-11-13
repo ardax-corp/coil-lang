@@ -983,7 +983,7 @@ for methods that need a bound on the impl's parameter. A unary
 
 ```coil
 fn convert<A, B>(A x) -> B where Into<A, B> {
-    return into(x);
+    return x.into();
 }
 
 class Cell<T> {
@@ -1123,11 +1123,12 @@ bodies, and a trait can declare associated types (`type Elem;`) and
 `static fn` constructors. Use it as a bound (`T: Area`) or as an
 existential parameter type.
 
-A trait method is called as a method (`x.area()`), as a function
-(`area(x)`), or qualified by its trait (`Area::area(x)`). The qualified
-form resolves like the function form but only considers that trait's
-method, so it picks between two traits (or a trait and a free function)
-that share a method name; it compiles to the same call.
+A trait method is called as a method (`x.area()`) or qualified by its
+trait (`Area::area(x)`); both compile to the same call. The qualified form
+only considers that trait's method, so it picks between two traits (or a
+trait and a free function) that share a method name, and it is the
+spelling for a method without a receiver. A bare `area(x)` is not a trait
+call (E0153).
 
 ```coil
 trait Area<T> {
@@ -1145,7 +1146,7 @@ impl Area for Square {
 }
 
 fn total<T: Area>(T a, T b) -> int {
-    return area(a) + Area::area(b);
+    return a.area() + Area::area(b);
 }
 ```
 
@@ -1154,7 +1155,7 @@ fn total<T: Area>(T a, T b) -> int {
 Declares a test case run by `coil test`: `test("name") { … }`.
 
 The body runs in result mode, so `assert!(…)`, `raise` and `?` fail the case.
-Each case runs in its own VM. Cases are left out of ordinary builds; a file
+Each case runs in its own runtime. Cases are left out of ordinary builds; a file
 with test cases has no `fn main`.
 
 ```coil
@@ -1424,6 +1425,6 @@ which trait bounds another parameter.
 
 ```coil
 fn show_it<c: * -> Constraint, T: c>(T x) -> string {
-    return show(x);
+    return x.show();
 }
 ```

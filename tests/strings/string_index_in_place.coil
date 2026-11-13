@@ -1,0 +1,81 @@
+// `s[i]` reads a string's bytes in place: across collections that move a
+// short string, after the string is rebound, on bytes above 127, and still
+// panicking past the end.
+use tests::assert;
+use gc::collect;
+use string::format;
+use thread::{join, spawn, ThreadError};
+
+fn sum_across_collections(string s) -> int {
+    let total = 0;
+    let i = 0;
+    while i < s.len() {
+        total = total + s[i] as int;
+        let junk = format("%i-%i", i, total);
+        if junk.len() > 1000 {
+            return -1;
+        }
+        collect();
+        i = i + 1;
+    }
+    return total;
+}
+
+fn rebound() -> int {
+    let s = "ab";
+    let first = s[0] as int;
+    s = "yz";
+    return first * 1000 + s[0] as int;
+}
+
+fn reads_each(Vec<string> words) -> int {
+    let total = 0;
+    for w in words {
+        total = total * 7 + w[0] as int;
+    }
+    return total;
+}
+
+fn past_end() -> int {
+    let s = format("%i", 42);
+    let i = 0;
+    let total = 0;
+    while i <= s.len() {
+        total = total + s[i] as int;
+        i = i + 1;
+    }
+    return total;
+}
+
+fn panics(() -> int f) -> bool {
+    let t = match spawn(f) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "spawn failed",
+    };
+    return match join(t) {
+        Result::Err(ThreadError::Panicked(_)) => true,
+        default => false,
+    };
+}
+
+test("a short string read across collections") {
+    assert!(sum_across_collections(format("%s%i", "ab", 7)) == 97 + 98 + 55);
+}
+
+test("a rebound string reads its new bytes") {
+    assert!(rebound() == 97121);
+}
+
+test("each loop string reads its own bytes") {
+    assert!(reads_each(["a", "b", "c"]) == (97 * 7 + 98) * 7 + 99);
+}
+
+test("bytes above 127 read unsigned") {
+    let s = "é";
+    assert!(s[0] as int == 195);
+    assert!(s[1] as int == 169);
+}
+
+test("a read past the end still panics") {
+    assert!(panics(past_end));
+}

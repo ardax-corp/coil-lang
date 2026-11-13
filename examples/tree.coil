@@ -11,7 +11,6 @@ enum Tree {
     Node(int, Tree, Tree),
 }
 
-#[max_depth(64)]
 fn sum_tree(Tree t) -> int {
     return match t {
         Tree::Leaf => 0,

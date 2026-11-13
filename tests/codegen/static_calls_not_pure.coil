@@ -1,0 +1,104 @@
+// `Owner::name(..)` is written like an enum constructor. One that is a
+// call (a trait's static method, a class's static method) has the effects
+// of what it calls, and a bare `Owner::name` that is a class static is a
+// read of shared state: every call of a function that does either runs
+// (#2407). The callers are kept out of line so their calls stay calls.
+use tests::assert;
+
+static let CALLS: int = 0;
+
+class Shape {
+    pub side: int,
+}
+
+trait Make<T> {
+    static fn make(int n) -> T {}
+}
+
+impl Make for Shape {
+    pub static fn make(int n) -> Shape {
+        CALLS++;
+        return new Shape(n);
+    }
+}
+
+class Tally {
+    pub n: int,
+    static total: int = 0,
+}
+
+impl Tally {
+    pub static fn add(int n) -> int {
+        CALLS++;
+        return n + 1;
+    }
+    pub static fn bump() {
+        Tally::total = Tally::total + 1;
+    }
+}
+
+#[inline(never)]
+fn built(int n) -> int {
+    let s = Shape::make(n);
+    return s.side;
+}
+
+#[inline(never)]
+fn built_of<T: Make>(T like, int n) -> int {
+    let s: T = T::make(n);
+    return n;
+}
+
+#[inline(never)]
+fn added(int n) -> int {
+    return Tally::add(n);
+}
+
+#[inline(never)]
+fn total() -> int {
+    return Tally::total;
+}
+
+test("a call of a trait's static method on a class runs every time") {
+    CALLS = 0;
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += built(3);
+        i += 1;
+    }
+    assert!(acc == 30);
+    assert!(CALLS == 10);
+}
+
+test("a call of a trait's static method on a type parameter") {
+    let like = new Shape(0);
+    CALLS = 0;
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += built_of(like, 3);
+        i += 1;
+    }
+    assert!(acc == 30);
+    assert!(CALLS == 10);
+}
+
+test("a call of a class's static method") {
+    CALLS = 0;
+    let acc = 0;
+    let i = 0;
+    while i < 10 {
+        acc += added(3);
+        i += 1;
+    }
+    assert!(acc == 40);
+    assert!(CALLS == 10);
+}
+
+test("a read of a class static sees the writes between calls") {
+    let before = total();
+    Tally::bump();
+    let after = total();
+    assert!(after == before + 1);
+}

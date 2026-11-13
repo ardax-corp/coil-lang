@@ -1,0 +1,8 @@
+// Helper module for tests/modules/readonly_trait_call_across_modules.coil
+// (#2468): a trait alone. `level` is implemented without a write and `wind`
+// with one, in every module that implements it.
+
+trait Gauge<T> {
+    fn level(T x, int v) -> int {}
+    fn wind(T x, int v) -> int {}
+}

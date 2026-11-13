@@ -1,8 +1,8 @@
 // examples/perf/mir_lir_fold.coil run as a test: the checksum pins the shape below.
 // @output 65535 645758238144
 
-// Hit bench for #1434: MIR constant folding on LIR bodies. A body whose
-// only arithmetic is bitwise ops and shifts takes LIR (no dense attempt),
+// Hit bench for #1434: MIR constant folding. A body whose
+// only arithmetic is bitwise ops and shifts is not a dense loop,
 // and its constants only meet once `mask` inlines.
 use io::stdout;
 use io::sync::write_all;

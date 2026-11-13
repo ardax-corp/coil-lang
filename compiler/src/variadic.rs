@@ -249,6 +249,26 @@ pub fn original_span(span: Range<usize>) -> Option<(usize, Range<usize>)> {
     Some((index, span.start - base..end))
 }
 
+/// The function `name` was copied from, or `name` when it is no copy.
+pub fn copied_from(name: &str) -> &str {
+    let copy_of = |suffix| {
+        let (template, index) = name.rsplit_once(suffix)?;
+        (!index.is_empty() && index.bytes().all(|b| b.is_ascii_digit())).then_some(template)
+    };
+    copy_of("__va").or_else(|| copy_of("__vx")).unwrap_or(name)
+}
+
+/// Where in its file the code at `start..end` was written: a copy's span
+/// moved back into the template's, any other as it is.
+pub fn written_span(start: usize, end: usize) -> (usize, usize) {
+    if start < SPAN_BASE {
+        return (start, end);
+    }
+    let offset = (start - SPAN_BASE) % SPAN_REGION;
+    let base = start - offset;
+    (offset, end.saturating_sub(base).max(offset))
+}
+
 /// Point a diagnostic inside a copy at the template's source, naming the
 /// argument types it was compiled for, and spell copies by their template.
 pub fn remap_message(msg: &Message, instances: &[Instance], copies: &[ForeignCopy<'_>]) -> Message {

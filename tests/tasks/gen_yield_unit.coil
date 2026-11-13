@@ -1,0 +1,102 @@
+// A generator of `()` (#2679): `yield ()`, a unit call or local yielded,
+// read by `for` and by `resume`, a `()` sent with `resume .. with`, and
+// a generic generator at `T = ()`.
+use tests::assert;
+
+gen fn units(int n) {
+    let i = 0;
+    while i < n {
+        yield ();
+        i = i + 1;
+    }
+}
+
+fn noop() {}
+
+gen fn calls() {
+    yield noop();
+    let u = ();
+    yield u;
+}
+
+gen fn takes_units() {
+    let a = yield 1;
+    let b = yield 2;
+    if a == b {
+        yield 3;
+    }
+}
+
+gen fn early(int n) {
+    if n == 0 {
+        return;
+    }
+    yield ();
+}
+
+gen fn repeat<T>(T x, int n) {
+    let i = 0;
+    while i < n {
+        yield x;
+        i = i + 1;
+    }
+}
+
+fn count<T>(coroutine<T> g) -> int {
+    let n = 0;
+    for x in g {
+        n = n + 1;
+    }
+    return n;
+}
+
+fn drain<T>(coroutine<T> g) -> Vec<T> {
+    let out = Vec::new();
+    for x in g {
+        out.push(x);
+    }
+    return out;
+}
+
+test("for over a generator of ()") {
+    let n = 0;
+    for u in units(3) {
+        n = n + 1;
+    }
+    assert!(n == 3);
+    let m = 0;
+    for u in calls() {
+        m = m + 1;
+    }
+    assert!(m == 2);
+}
+
+test("resume by hand and done") {
+    let g = units(2);
+    resume g;
+    let u = resume g;
+    assert!(u == ());
+    assert!(!done(g));
+    resume g;
+    assert!(done(g));
+    let e = early(0);
+    resume e;
+    assert!(done(e));
+}
+
+test("a () sent with resume .. with") {
+    let g = takes_units();
+    assert!((resume g) == 1);
+    assert!((resume g with ()) == 2);
+    assert!((resume g with ()) == 3);
+}
+
+test("a generic generator and consumers at ()") {
+    let g = repeat((), 3);
+    assert!((resume g) == ());
+    assert!(count(repeat((), 4)) == 4);
+    assert!(count(units(5)) == 5);
+    let v = drain(units(2));
+    assert!(v.len() == 2 && v[1] == ());
+    assert!(drain(repeat((), 3)) == Vec::from([(), (), ()]));
+}

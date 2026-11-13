@@ -40,16 +40,6 @@ pub fn add_i64(a: &[i64; LANES], b: &[i64; LANES], out: &mut [i64; LANES]) {
 }
 
 #[inline]
-pub fn sub_i64(a: &[i64; LANES], b: &[i64; LANES], out: &mut [i64; LANES]) {
-    kernels::zip_sub_i64(a, b, out);
-}
-
-#[inline]
-pub fn mul_i64(a: &[i64; LANES], b: &[i64; LANES], out: &mut [i64; LANES]) {
-    kernels::zip_mul_i64(a, b, out);
-}
-
-#[inline]
 pub fn neg_i64(a: &[i64; LANES], out: &mut [i64; LANES]) {
     kernels::zip_neg_i64(a, out);
 }
@@ -75,16 +65,6 @@ pub fn fold_add_f64(init: f64, lanes: &[f64; LANES]) -> f64 {
     s
 }
 
-/// Wrapping left-fold add (same result as a tree sum).
-#[inline]
-pub fn fold_add_i64(init: i64, lanes: &[i64; LANES]) -> i64 {
-    let mut s = init;
-    for x in lanes {
-        s = s.wrapping_add(*x);
-    }
-    s
-}
-
 /// Left-fold `init * lanes[0] * …`. Float order matches scalar `s = s * a[i]`.
 #[inline]
 pub fn fold_mul_f64(init: f64, lanes: &[f64; LANES]) -> f64 {
@@ -95,30 +75,12 @@ pub fn fold_mul_f64(init: f64, lanes: &[f64; LANES]) -> f64 {
     s
 }
 
-/// Wrapping left-fold multiply.
-#[inline]
-pub fn fold_mul_i64(init: i64, lanes: &[i64; LANES]) -> i64 {
-    let mut s = init;
-    for x in lanes {
-        s = s.wrapping_mul(*x);
-    }
-    s
-}
-
 /// Conservative FMA: `out[i] = (a[i] * b[i]) + c[i]` (two IEEE roundings).
 #[inline]
 pub fn fmadd_f64(a: &[f64; LANES], b: &[f64; LANES], c: &[f64; LANES], out: &mut [f64; LANES]) {
     let mut prod = [0.0f64; LANES];
     kernels::zip_mul_f64(a, b, &mut prod);
     kernels::zip_add_f64(&prod, c, out);
-}
-
-/// Wrapping `out[i] = a[i] * b[i] + c[i]`.
-#[inline]
-pub fn fmadd_i64(a: &[i64; LANES], b: &[i64; LANES], c: &[i64; LANES], out: &mut [i64; LANES]) {
-    let mut prod = [0i64; LANES];
-    kernels::zip_mul_i64(a, b, &mut prod);
-    kernels::zip_add_i64(&prod, c, out);
 }
 
 #[cfg(test)]

@@ -1,0 +1,11 @@
+// @expected E0153 — a default body calls a static sibling as `Make::make(n)`
+// (or `T::make(n)`), not `make(n)`.
+trait Make<T> {
+    static fn make(int n) -> T {}
+
+    fn remake(T x, int n) -> T {
+        return make(n);
+    }
+}
+
+fn main() {}

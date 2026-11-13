@@ -1,8 +1,8 @@
 // Integer-payload Option: helper RETURNS two-slot Option<int>
-// (`CALL` bit 31 / `RETURN` 2). No ObjEnum; no int-niche ISA.
-// MIR→LIR (COI-270) re-emits the same ABI for the leaf. Heap-payload
+// (two-slot return). No ObjEnum.
+// Heap-payload
 // counterpart: examples/perf/gc_churn.coil.
-// ITERS=20000000 (period-10 checksum 42 * 2e6); release VM-only ~1-3s.
+// ITERS=20000000 (period-10 checksum 42 * 2e6); release ~1-3s.
 use io::sync::print;
 use string::format;
 

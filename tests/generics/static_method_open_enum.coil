@@ -1,0 +1,182 @@
+// A static method with type parameters of its own (on a plain class or a
+// generic one) takes an open `Option<T>` / `Result<T, E>` parameter and
+// returns one as a free generic function does: at a niche type the call
+// passes the enum object the shared body reads, or takes the clone at its
+// types, directly, as a value and partially applied (coil-lang#2758).
+use tests::assert;
+use string::format;
+
+#[derive(Show, Eq)]
+class Pt {
+    pub a: int,
+}
+
+class M {
+    pub k: int,
+}
+
+impl M {
+    pub static fn has<T>(Option<T> x) -> int {
+        return match x {
+            Option::Some(_) => 1,
+            Option::None => 2,
+        };
+    }
+
+    pub static fn get<T>(Option<T> x, T d) -> T {
+        return match x {
+            Option::Some(v) => v,
+            Option::None => d,
+        };
+    }
+
+    pub static fn ok<T>(Result<T, string> x, T d) -> T {
+        return match x {
+            Result::Ok(v) => v,
+            Result::Err(_) => d,
+        };
+    }
+
+    pub static fn wrap<T>(T x) -> Option<T> {
+        return Option::Some(x);
+    }
+
+    pub static fn wrap_ok<T>(T x) -> Result<T, string> {
+        return Result::Ok(x);
+    }
+
+    pub static fn same<T>(Option<T> x) -> Option<T> {
+        return x;
+    }
+
+    pub static fn deep<T>(Option<Option<T>> x, T d) -> T {
+        return match x {
+            Option::Some(Option::Some(v)) => v,
+            default => d,
+        };
+    }
+
+    pub fn own<T>(Option<T> x, T d) -> T {
+        return match x {
+            Option::Some(v) => v,
+            Option::None => d,
+        };
+    }
+}
+
+class G<T> {
+    pub t: T,
+}
+
+impl G<T> {
+    pub static fn get(Option<T> x, T d) -> T {
+        return match x {
+            Option::Some(v) => v,
+            Option::None => d,
+        };
+    }
+
+    pub static fn wrap(T x) -> Option<T> {
+        return Option::Some(x);
+    }
+
+    pub static fn mix<U>(Option<U> x, T t) -> (T, int) {
+        return match x {
+            Option::Some(_) => (t, 1),
+            Option::None => (t, 2),
+        };
+    }
+}
+
+fn apply<A, B>(fn(A) -> B f, A a) -> B {
+    return f(a);
+}
+
+fn show<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+test("an open Option parameter of a static method at a niche type") {
+    let o: Option<string> = Option::Some("a");
+    let n: Option<string> = Option::None;
+    assert!(M::has(o) == 1);
+    assert!(M::has(n) == 2);
+    assert!(M::get(o, "d") == "a");
+    assert!(M::get(n, "d") == "d");
+    let c: Option<Pt> = Option::Some(new Pt(3));
+    assert!(M::has(c) == 1);
+    assert!(M::get(c, new Pt(0)).a == 3);
+    assert!(M::get(Option::None, new Pt(5)).a == 5);
+}
+
+test("an open Result parameter of a static method at a niche type") {
+    let r: Result<string, string> = Result::Ok("r");
+    let e: Result<string, string> = Result::Err("e");
+    assert!(M::ok(r, "d") == "r");
+    assert!(M::ok(e, "d") == "d");
+    let p: Result<Pt, string> = Result::Ok(new Pt(4));
+    assert!(M::ok(p, new Pt(0)).a == 4);
+    let u: Result<(), string> = Result::Ok(());
+    assert!(show(M::ok(u, ())) == "()");
+}
+
+test("an open Option result of a static method at a niche type") {
+    assert!(show(M::wrap("w")) == "Some(w)");
+    assert!(show(M::wrap(new Pt(6))) == "Some(Pt { a: 6 })");
+    assert!(show(M::wrap_ok("k")) == "Ok(k)");
+    let o: Option<string> = Option::Some("s");
+    assert!(show(M::same(o)) == "Some(s)");
+    let x = M::wrap("x") ?? "none";
+    assert!(x == "x");
+}
+
+test("the other types: int, Option<int>, unit and a pair") {
+    assert!(M::get(Option::Some(3), 0) == 3);
+    let oi: Option<Option<int>> = Option::Some(Option::Some(7));
+    assert!(show(M::get(oi, Option::None)) == "Some(7)");
+    assert!(M::has(Option::Some(())) == 1);
+    let pr: Option<(int, int)> = Option::Some((1, 2));
+    assert!(show(M::get(pr, (0, 0))) == "(1, 2)");
+    assert!(show(M::wrap(5)) == "Some(5)");
+    assert!(show(M::wrap((1, 2))) == "Some((1, 2))");
+    assert!(show(M::wrap(())) == "Some(())");
+    assert!(show(M::wrap(Option::Some(1))) == "Some(Some(1))");
+}
+
+test("an Option of an Option of the method's parameter") {
+    let o: Option<Option<string>> = Option::Some(Option::Some("d"));
+    assert!(M::deep(o, "x") == "d");
+    assert!(M::deep(Option::None, "x") == "x");
+}
+
+test("a generic class's static method at a niche type") {
+    let o: Option<string> = Option::Some("g");
+    assert!(G::get(o, "d") == "g");
+    assert!(G::get(Option::None, "d") == "d");
+    assert!(show(G::wrap("w")) == "Some(w)");
+    let p: Option<Pt> = Option::Some(new Pt(8));
+    assert!(G::get(p, new Pt(0)).a == 8);
+    assert!(show(G::mix(o, 4)) == "(4, 1)");
+    assert!(show(G::mix(Option::Some(new Pt(1)), "t")) == "(t, 1)");
+}
+
+test("an instance method with its own parameter, alike") {
+    let m = new M(1);
+    let o: Option<string> = Option::Some("i");
+    assert!(m.own(o, "d") == "i");
+    assert!(m.own(Option::None, "d") == "d");
+}
+
+test("a static method's value and a method's partial application at a niche type") {
+    let o: Option<string> = Option::Some("v");
+    let n: Option<string> = Option::None;
+    assert!(apply(M::has, o) == 1);
+    assert!(apply(M::has, n) == 2);
+    assert!(show(apply(M::wrap, "w")) == "Some(w)");
+    assert!(show(apply(M::same, o)) == "Some(v)");
+    assert!(show(apply(G::wrap, new Pt(2))) == "Some(Pt { a: 2 })");
+    let m = new M(1);
+    let f = m.own();
+    assert!(f(o, "d") == "v");
+    assert!(f(n, "d") == "d");
+}

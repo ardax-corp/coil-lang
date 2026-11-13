@@ -1,0 +1,215 @@
+// A shared generic body that takes a bare `T` and builds, fills or reads
+// a generic class whose field's top is an open `Option` / `Result`
+// (`r: Result<T, string>`, #2511). A class field is stored in its
+// declared layout, the enum object, on both sides, and the object holds
+// `T`'s words, so the instance the body makes is the one ground code
+// reads, at any depth of the result.
+// @flags --clone-budget 0
+use tests::assert;
+use gc::collect;
+
+class Cell {
+    pub c: int,
+}
+
+class Box<T> {
+    pub v: T,
+}
+
+class Opt<T> {
+    pub o: Option<T>,
+}
+
+class Res<T> {
+    pub r: Result<T, string>,
+    pub n: int,
+}
+
+class ErrSide<T> {
+    pub e: Result<int, T>,
+}
+
+class Deep<T> {
+    pub p: Option<(T, int)>,
+    pub xs: Option<Vec<T>>,
+    pub b: Result<Box<T>, string>,
+}
+
+class Outer<T> {
+    pub inner: Res<T>,
+}
+
+enum Either<T> {
+    L(Opt<T>),
+    N,
+}
+
+fn one<U>(U x) -> Vec<U> {
+    let v: Vec<U> = Vec::new();
+    v.push(x);
+    return v;
+}
+
+fn opt<T>(T x) -> Opt<T> {
+    return new Opt(Some(x));
+}
+
+fn none<T>(T _x) -> Opt<T> {
+    return new Opt(None);
+}
+
+fn res<T>(T x) -> Res<T> {
+    return new Res(Ok(x), 1);
+}
+
+fn err<T>(T x) -> ErrSide<T> {
+    return new ErrSide(Err(x));
+}
+
+fn deep<T>(T x) -> Deep<T> {
+    return new Deep(Some((x, 2)), Some(one(x)), Ok(new Box(x)));
+}
+
+fn res_vec<T>(T x) -> Vec<Res<T>> {
+    let v = one(new Res(Ok(x), 3));
+    v.push(res(x));
+    return v;
+}
+
+fn res_pair<T>(T x) -> (Res<T>, int) {
+    return (res(x), 4);
+}
+
+fn maybe_opt<T>(T x) -> Option<Opt<T>> {
+    return Some(opt(x));
+}
+
+fn outer<T>(T x) -> Outer<T> {
+    return new Outer(res(x));
+}
+
+fn either<T>(T x) -> Either<T> {
+    return Either::L(opt(x));
+}
+
+fn put<T>(Res<T> c, T x) {
+    c.r = Ok(x);
+    c.n += 1;
+}
+
+fn get<T>(Opt<T> c, T d) -> T {
+    return match c.o {
+        Option::Some(y) => y,
+        Option::None => d,
+    };
+}
+
+fn first<T>(Vec<Opt<T>> v, T d) -> T {
+    return get(v[0], d);
+}
+
+fn ok_of<T>(Res<T> c, T d) -> T {
+    return match c.r {
+        Result::Ok(y) => y,
+        Result::Err(_) => d,
+    };
+}
+
+test("an open Option field built by a shared body") {
+    let a = opt(5);
+    collect();
+    assert!(a.o == Some(5));
+    assert!(opt(1.5).o == Some(1.5));
+    assert!(opt(true).o == Some(true));
+    assert!(opt("s").o == Some("s"));
+    assert!(opt(()).o == Some(()));
+    assert!(opt(Some(4)).o == Some(Some(4)));
+    let n: Option<string> = None;
+    assert!(opt(n).o == Some(n));
+    assert!(opt(Some("q")).o == Some(Some("q")));
+    let t = opt((1, 2));
+    collect();
+    assert!(t.o == Some((1, 2)));
+    let c = match opt(new Cell(8)).o {
+        Option::Some(k) => k.c,
+        Option::None => -1,
+    };
+    assert!(c == 8);
+    assert!(none(3).o == None);
+    let x: Option<string> = None;
+    assert!(none("x").o == x);
+}
+
+test("an open Result field, on either side") {
+    let a = res(7);
+    collect();
+    assert!(a.r == Ok(7) && a.n == 1);
+    assert!(res(2.5).r == Ok(2.5));
+    assert!(res("t").r == Ok("t"));
+    assert!(res(Some(1)).r == Ok(Some(1)));
+    assert!(res((3, 4)).r == Ok((3, 4)));
+    assert!(err(9).e == Err(9));
+    assert!(err("e").e == Err("e"));
+    assert!(err(false).e == Err(false));
+    assert!(err(Some("z")).e == Err(Some("z")));
+}
+
+test("a tuple, Vec and class inside the open field") {
+    let d = deep(6);
+    collect();
+    assert!(d.p == Some((6, 2)));
+    let xs = match d.xs {
+        Option::Some(v) => v[0],
+        Option::None => -1,
+    };
+    assert!(xs == 6);
+    let b = match d.b {
+        Result::Ok(k) => k.v,
+        Result::Err(_) => -1,
+    };
+    assert!(b == 6);
+    let s = deep("w");
+    assert!(s.p == Some(("w", 2)));
+    let f = match deep(0.5).b {
+        Result::Ok(k) => k.v,
+        Result::Err(_) => -1.0,
+    };
+    assert!(f == 0.5);
+}
+
+test("the class below the result's top") {
+    let v = res_vec(3);
+    collect();
+    assert!(v.len() == 2 && v[0].r == Ok(3) && v[0].n == 3 && v[1].r == Ok(3));
+    assert!(res_vec("a")[1].r == Ok("a"));
+    let (p, k) = res_pair(1.25);
+    assert!(p.r == Ok(1.25) && k == 4);
+    let m = match maybe_opt("m") {
+        Option::Some(o) => o.o == Some("m"),
+        Option::None => false,
+    };
+    assert!(m);
+    assert!(outer(11).inner.r == Ok(11));
+    assert!(outer(Some(2)).inner.r == Ok(Some(2)));
+    let e = match either(true) {
+        Either::L(o) => o.o == Some(true),
+        Either::N => false,
+    };
+    assert!(e);
+}
+
+test("a class the caller made, read and written by a shared body") {
+    let c = new Res(Err("no"), 0);
+    put(c, 5);
+    collect();
+    assert!(c.r == Ok(5) && c.n == 1);
+    let s = new Res(Err("no"), 0);
+    put(s, "y");
+    assert!(s.r == Ok("y"));
+    assert!(ok_of(new Res(Ok(2.0), 0), 0.0) == 2.0);
+    assert!(ok_of(new Res(Err("no"), 0), "d") == "d");
+    assert!(get(new Opt(Some((1, 9))), (0, 0)) == (1, 9));
+    assert!(get(new Opt(Some(Some("p"))), None) == Some("p"));
+    assert!(first(one(new Opt(Some(4))), 0) == 4);
+    assert!(first(one(new Opt(None)), "d") == "d");
+}

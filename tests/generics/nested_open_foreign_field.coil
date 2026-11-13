@@ -1,0 +1,153 @@
+// Another module's generic class whose `pub` field holds an open `Option` /
+// `Result` below its top (`xs: Vec<Option<T>>`), constructed, written and
+// read by ground code here and by the class's own methods there
+// (coil-lang#2547). Both sides hold the field's enums in the ground layout:
+// the class's methods are per-type clones compiled from its module's body.
+// A free generic of that module with such a parameter is one too. The
+// `_shared` twin runs the same at `--clone-budget 0`. Needs `--root
+// examples/src` (nested_open_fields).
+use tests::assert;
+use nested_open_fields::{Bag, Pt, Tally, count_some};
+
+fn some_of(Vec<Option<string>> xs) -> int {
+    let n = 0;
+    for x in xs {
+        match x {
+            Some(s) => {
+                n = n + s.len();
+            },
+            None => {},
+        }
+    }
+    return n;
+}
+
+test("construct a Bag<string> with ground slots") {
+    let v: Vec<Option<string>> = Vec::new();
+    v.push(Option::Some("a"));
+    v.push(Option::None);
+    v.push(Option::Some("bc"));
+    let b: Bag<string> = new Bag(v);
+    assert!(b.count() == 2);
+    assert!((b.last() ?? "") == "bc");
+    assert!(count_some(b.xs) == 2);
+}
+
+test("ground code and methods fill one Bag<string>") {
+    let b: Bag<string> = new Bag(Vec::new());
+    b.xs.push(Option::Some("a"));
+    b.xs.push(Option::None);
+    b.put("xyz");
+    assert!(b.count() == 2);
+    assert!((b.last() ?? "") == "xyz");
+    assert!(b.xs[2] == Option::Some("xyz"));
+    assert!(some_of(b.xs) == 4);
+    match b.xs[0] {
+        Some(s) => {
+            assert!(s == "a");
+        },
+        None => {
+            assert!(false);
+        },
+    }
+}
+
+test("a field write replaces a Bag<string>'s slots") {
+    let b: Bag<string> = Bag::empty();
+    b.put("old");
+    let v: Vec<Option<string>> = Vec::new();
+    v.push(Option::None);
+    v.push(Option::Some("new"));
+    b.xs = v;
+    assert!(b.count() == 1);
+    assert!((b.last() ?? "") == "new");
+}
+
+test("a Bag of a class the module knows") {
+    let b: Bag<Pt> = new Bag(Vec::new());
+    b.xs.push(Option::Some(new Pt(4)));
+    b.put(new Pt(5));
+    assert!(b.count() == 2);
+    assert!((b.last() ?? new Pt(0)).x == 5);
+    match b.xs[0] {
+        Some(p) => {
+            assert!(p.x == 4);
+        },
+        None => {
+            assert!(false);
+        },
+    }
+    assert!(count_some(b.xs) == 2);
+}
+
+test("a Bag<int> and a Bag<float>") {
+    let b: Bag<int> = new Bag(Vec::new());
+    b.xs.push(Option::Some(7));
+    b.put(8);
+    assert!(b.count() == 2);
+    assert!((b.last() ?? 0) == 8);
+    assert!(b.xs[0] == Option::Some(7));
+    let f: Bag<float> = new Bag(Vec::new());
+    f.xs.push(Option::Some(1.5));
+    f.put(2.5);
+    assert!(f.count() == 2);
+    assert!((f.last() ?? 0.0) == 2.5);
+    match f.xs[0] {
+        Some(x) => {
+            assert!(x == 1.5);
+        },
+        None => {
+            assert!(false);
+        },
+    }
+}
+
+test("a Tally<string> holds Results the two sides make") {
+    let t: Tally<string> = new Tally(Vec::new());
+    t.rs.push(Result::Err("first"));
+    t.rs.push(Result::Ok("a"));
+    t.put("b");
+    assert!(t.oks() == 2);
+    assert!((t.first() ?? "") == "a");
+    match t.rs[3] {
+        Ok(_) => {
+            assert!(false);
+        },
+        Err(e) => {
+            assert!(e == "no");
+        },
+    }
+    match t.rs[2] {
+        Ok(s) => {
+            assert!(s == "b");
+        },
+        Err(_) => {
+            assert!(false);
+        },
+    }
+}
+
+test("a Tally of a class, an int and a float") {
+    let t: Tally<Pt> = new Tally(Vec::new());
+    t.rs.push(Result::Ok(new Pt(3)));
+    t.put(new Pt(9));
+    assert!(t.oks() == 2);
+    assert!((t.first() ?? new Pt(0)).x == 3);
+    let i: Tally<int> = new Tally(Vec::new());
+    i.put(6);
+    i.rs.push(Result::Ok(1));
+    assert!(i.oks() == 2);
+    assert!((i.first() ?? 0) == 6);
+    let f: Tally<float> = new Tally(Vec::new());
+    f.rs.push(Result::Ok(0.5));
+    f.put(1.5);
+    assert!(f.oks() == 2);
+    match f.rs[1] {
+        Ok(x) => {
+            assert!(x == 1.5);
+        },
+        Err(_) => {
+            assert!(false);
+        },
+    }
+}

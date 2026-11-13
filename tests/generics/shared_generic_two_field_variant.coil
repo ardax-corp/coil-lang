@@ -1,0 +1,31 @@
+// A variant of two fields made in a shared generic body keeps its fields in
+// order: `Alloc`'s payload words are in declaration order.
+// @flags --clone-budget 0
+use tests::assert;
+
+enum Two<A, B> {
+    Both(A, B),
+    Neither,
+}
+
+fn make<A, B>(A a, B b) -> Two<A, B> {
+    return Two::Both(a, b);
+}
+
+test("an int and a float") {
+    let (x, y) = match make(3, 4.5) {
+        Two::Both(x, y) => (x, y),
+        Two::Neither => (0, 0.0),
+    };
+    assert!(x == 3);
+    assert!(y == 4.5);
+}
+
+test("a string and an int") {
+    let (s, n) = match make("s", 7) {
+        Two::Both(s, n) => (s, n),
+        Two::Neither => ("", 0),
+    };
+    assert!(s == "s");
+    assert!(n == 7);
+}

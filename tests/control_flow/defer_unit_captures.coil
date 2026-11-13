@@ -1,0 +1,126 @@
+// A `defer` may capture a `()` value like any other (#2809), as a lambda
+// may (#2792): alone, among other captures, as `use (mut u)`, from a
+// parameter, in a loop and in a lambda, on a return and while a panic
+// unwinds.
+use tests::assert;
+use string::format;
+use task::{scope, Scope, TaskError};
+
+static let LOG: string = "";
+
+fn log(string s) {
+    LOG = LOG + s;
+}
+
+fn nothing() -> () {}
+
+fn lone() -> string {
+    let x = ();
+    defer use (x) {
+        log(format("[%v]", x));
+    }
+    return "ran";
+}
+
+fn among(int n) -> int {
+    let u = nothing();
+    let s = "s";
+    defer use (n, u, s) {
+        log(format("%i %v %s;", n, u, s));
+    }
+    return n + 1;
+}
+
+fn mutable() -> int {
+    let u = ();
+    defer use (mut u) {
+        log(format("m%v", u));
+    }
+    return 3;
+}
+
+fn param(() p, int k) -> int {
+    defer use (p, k) {
+        log(format("p%v%i", p, k));
+    }
+    return k * 2;
+}
+
+fn looped(int n) -> int {
+    let i = 0;
+    while i < n {
+        let u = ();
+        defer use (u, i) {
+            log(format("%v%i", u, i));
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+fn unwinds(int k) -> int {
+    let u = ();
+    defer use (u) {
+        log(format("u%v", u));
+    }
+    if k > 0 {
+        panic "unwinds";
+    }
+    return k;
+}
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+test("a lone () capture") {
+    LOG = "";
+    assert!(lone() == "ran");
+    assert!(LOG == "[()]");
+}
+
+test("among other captures, from a call") {
+    LOG = "";
+    assert!(among(4) == 5);
+    assert!(LOG == "4 () s;");
+}
+
+test("a mut capture and a () parameter") {
+    LOG = "";
+    assert!(mutable() == 3 && param((), 2) == 4);
+    assert!(LOG == "m()p()2");
+}
+
+test("in a loop body, once per iteration") {
+    LOG = "";
+    assert!(looped(3) == 3);
+    assert!(LOG == "()0()1()2");
+}
+
+test("in a lambda") {
+    LOG = "";
+    let f = fn (int k) {
+        let u = ();
+        defer use (u, k) {
+            log(format("f%v%i", u, k));
+        }
+        return k + 1;
+    };
+    assert!(f(6) == 7);
+    assert!(LOG == "f()6");
+}
+
+test("while a panic unwinds") {
+    LOG = "";
+    let r = scope(fn (Scope s) {
+        let _ = s.spawn(fn () => unwinds(1));
+        0
+    });
+    assert!(message(r) == "unwinds");
+    assert!(LOG == "u()");
+    assert!(unwinds(0) == 0 && LOG == "u()u()");
+}

@@ -1,26 +1,27 @@
 //! Render frame words with their compile-time types.
 
 use compiler::debug_vars::{DebugClassTable, DebugEnumTable, DebugTy, DebugVar, DebugVarLoc};
-use machine::{DebugObject, Machine};
+use coil_mir_interp::debug::Debugger;
+use machine::DebugObject;
 
 /// How deep nested objects are expanded, and how many elements are shown.
 const MAX_DEPTH: u32 = 3;
 const MAX_ELEMS: usize = 16;
 
 pub struct Renderer<'a> {
-    pub machine: &'a Machine<256>,
+    pub dbg: &'a Debugger,
     pub classes: &'a DebugClassTable,
     pub enums: &'a DebugEnumTable,
 }
 
 impl Renderer<'_> {
-    /// Value of `var` in frame `frame` stopped at `pc`, or `<optimized out>`.
+    /// Value of `var` in frame `frame` stopped at `pc`, or `<not set>` before anything bound it.
     pub fn var(&self, var: &DebugVar, frame: usize, pc: u32) -> String {
-        let word = |slot: u32| self.machine.debug_slot(frame, slot as usize);
+        let word = |slot: u32| self.dbg.local(frame, slot);
         match &var.loc {
             DebugVarLoc::Slot(_) => match var.slot_at(pc).and_then(word) {
                 Some(w) => self.value(w, &var.ty, 0),
-                None => "<optimized out>".into(),
+                None => "<not set>".into(),
             },
             DebugVarLoc::Fields { class, fields } => {
                 let parts: Vec<String> = fields
@@ -28,7 +29,7 @@ impl Renderer<'_> {
                     .enumerate()
                     .map(|(i, (name, _, ty))| match var.component_slot(i, pc).and_then(word) {
                         Some(w) => format!("{name}: {}", self.value(w, ty, 1)),
-                        None => format!("{name}: <optimized out>"),
+                        None => format!("{name}: <not set>"),
                     })
                     .collect();
                 format!("{class} {{ {} }}", parts.join(", "))
@@ -37,7 +38,7 @@ impl Renderer<'_> {
                 let parts: Vec<String> = (0..slots.len())
                     .map(|i| match var.component_slot(i, pc).and_then(word) {
                         Some(w) => self.value(w, elem, 1),
-                        None => "<optimized out>".into(),
+                        None => "<not set>".into(),
                     })
                     .collect();
                 format!("[{}]", parts.join(", "))
@@ -51,7 +52,7 @@ impl Renderer<'_> {
                     var.component_slot(0, pc).and_then(word),
                     var.component_slot(1, pc).and_then(word),
                 ) else {
-                    return "<optimized out>".into();
+                    return "<not set>".into();
                 };
                 let variant = self.variant_name(enum_name, t.as_int() as u32);
                 if self.variant_is_unit(enum_name, &variant) {
@@ -71,18 +72,18 @@ impl Renderer<'_> {
             DebugTy::Bool => (word.as_int() != 0).to_string(),
             DebugTy::Byte => (word.as_int() & 0xFF).to_string(),
             DebugTy::Unit => "()".into(),
-            DebugTy::Str => match self.machine.debug_object(word) {
+            DebugTy::Str => match self.dbg.object(word) {
                 Some(DebugObject::Str(s)) => format!("{s:?}"),
                 _ => "<invalid string>".into(),
             },
             DebugTy::Class(name) => self.class(word, name, depth),
-            DebugTy::Array(elem) => match self.machine.debug_object(word) {
+            DebugTy::Array(elem) => match self.dbg.object(word) {
                 Some(DebugObject::Array(items)) => self.list("[", "]", &items, |w| {
                     self.value(w, elem, depth + 1)
                 }, depth),
                 _ => self.untyped(word, depth),
             },
-            DebugTy::Tuple(items) => match self.machine.debug_object(word) {
+            DebugTy::Tuple(items) => match self.dbg.object(word) {
                 Some(DebugObject::Tuple(words)) => {
                     let parts: Vec<String> = words
                         .iter()
@@ -106,7 +107,7 @@ impl Renderer<'_> {
         if word.is_zero() {
             return "null".into();
         }
-        match self.machine.debug_object(word) {
+        match self.dbg.object(word) {
             Some(DebugObject::Instance { fields, .. }) => {
                 if depth >= MAX_DEPTH {
                     return format!("{name} {{ … }}");
@@ -128,7 +129,7 @@ impl Renderer<'_> {
 
     fn enum_value(&self, word: common::Value, name: &str, args: &[DebugTy], depth: u32) -> String {
         let arg = |i: usize| args.get(i).cloned().unwrap_or(DebugTy::Other("?".into()));
-        let object = self.machine.debug_object(word);
+        let object = self.dbg.object(word);
         if let Some(DebugObject::Enum { tag, payload }) = &object {
             let variant = self.variant_name(name, *tag);
             if payload.is_empty() {
@@ -162,7 +163,7 @@ impl Renderer<'_> {
     /// A word without a usable type: an object when one lives at that
     /// address, else an integer.
     fn untyped(&self, word: common::Value, depth: u32) -> String {
-        match self.machine.debug_object(word) {
+        match self.dbg.object(word) {
             Some(DebugObject::Str(s)) => format!("{s:?}"),
             Some(DebugObject::Array(items)) => {
                 self.list("[", "]", &items, |w| self.untyped(w, depth + 1), depth)
@@ -178,7 +179,6 @@ impl Renderer<'_> {
             Some(DebugObject::Instance { fields, .. }) => {
                 self.list("{ ", " }", &fields, |w| self.untyped(w, depth + 1), depth)
             }
-            Some(DebugObject::Boxed(inner)) => inner.as_int().to_string(),
             Some(DebugObject::Other(kind)) => format!("<{kind}>"),
             None => word.as_int().to_string(),
         }
@@ -230,8 +230,8 @@ pub fn eval_path(
 ) -> Result<String, String> {
     use crate::session::PathStep;
     let word = |slot: u32| {
-        r.machine
-            .debug_slot(frame, slot as usize)
+        r.dbg
+            .local(frame, slot)
             .ok_or_else(|| "<unavailable>".to_string())
     };
     let mut steps = path.iter();
@@ -244,7 +244,7 @@ pub fn eval_path(
                 .position(|(name, _, _)| name == f)
                 .ok_or_else(|| format!("`{class}` has no field `{f}`"))?;
             let Some(slot) = var.component_slot(i, pc) else {
-                return Ok("<optimized out>".into());
+                return Ok("<not set>".into());
             };
             (word(slot)?, fields[i].2.clone())
         }
@@ -254,20 +254,20 @@ pub fn eval_path(
                 return Err(format!("index {i} out of bounds (len {})", slots.len()));
             }
             let Some(slot) = var.component_slot(*i, pc) else {
-                return Ok("<optimized out>".into());
+                return Ok("<not set>".into());
             };
             (word(slot)?, elem.clone())
         }
         (DebugVarLoc::Slot(_), _) => {
             let slot = var
                 .slot_at(pc)
-                .ok_or_else(|| format!("`{}` is optimized out here", var.name))?;
+                .ok_or_else(|| format!("`{}` is not set here", var.name))?;
             (word(slot)?, var.ty.clone())
         }
         _ => return Err(format!("cannot index into `{}` this way", var.name)),
     };
     for step in steps {
-        (value, ty) = match (step, &ty, r.machine.debug_object(value)) {
+        (value, ty) = match (step, &ty, r.dbg.object(value)) {
             (PathStep::Field(f), DebugTy::Class(name), Some(DebugObject::Instance { fields, .. })) => {
                 let layout = r.classes.get(name).ok_or_else(|| format!("unknown class `{name}`"))?;
                 let idx = layout

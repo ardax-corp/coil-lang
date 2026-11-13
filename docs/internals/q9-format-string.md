@@ -1,6 +1,6 @@
 # Q9 — Full format / string on MIR (reopen I4)
 
-> **Status: historical.** Written while stack-lowered (fuse-IL) bodies were the default. Since M5 (2026-10-15) every body lowers through MIR and emits dense or LIR. Today's pipeline: [pipeline.md](pipeline.md).
+> **Status: historical.** Written while stack-lowered (fuse-IL) bodies were the default. The tiers it discusses (fuse-IL, dense, LIR) and the bytecode VM that ran them have been deleted: every body now lowers from HIR to MIR and runs as native code or on the MIR interpreter. Today's pipeline: [pipeline.md](pipeline.md).
 
 Linear: COI-332.
 Spec: [language-quirks.md](language-quirks.md) Q9. Island: [mir-islands.md](mir-islands.md) I4.

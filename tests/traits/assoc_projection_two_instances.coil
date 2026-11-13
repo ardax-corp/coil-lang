@@ -42,14 +42,14 @@ impl Collect for Words {
 }
 
 fn or_head<C: Collect>(C xs, C::Elem fallback) -> C::Elem {
-    if count(xs) == 0 {
+    if xs.count() == 0 {
         return fallback;
     }
-    return head(xs);
+    return xs.head();
 }
 
 fn take_head<C: Collect>(C xs) -> C::Elem {
-    return head(xs);
+    return xs.head();
 }
 
 fn main() {
@@ -57,7 +57,7 @@ fn main() {
     let b = or_head(new Words("x"), "z");
     let c = take_head(Option::None);
     let d = take_head(new Words("y"));
-    let n = count(new Words("w"));
-    let m = count(Option::Some(3));
+    let n = (new Words("w")).count();
+    let m = Option::Some(3).count();
     let _ = write(stdout(), to_bytes(format("%i %s %i %s %i %i\n", a, b, c, d, n, m)));
 }

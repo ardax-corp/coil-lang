@@ -22,14 +22,16 @@ Release builds publish it as `coil-wasm32-wasip1.wasm` (edge and `v*` tags).
 
 | Area | On wasm |
 |------|---------|
+| Engine | The MIR interpreter runs programs, `coil test` and comptime: no native code, and no fibers, so generators and tasks park their frames on the heap ([mir-interp.md](mir-interp.md), step 7). A `.ccoil` holds every body's MIR. |
 | `Value` | The word is a `u64`, not a pointer: wasm32 pointers are 32 bits, and ints and floats need all 64. `Value::bits()` reads the whole word on every target; build a `Value` from a `u64` with `Value::from(u64)`, never through `as *mut u8`. |
 | FFI | No dynamic libraries: `machine/src/ffi/nolib.rs` stands in for libffi and libloading. `extern` declarations compile; loading a library or calling through FFI fails with `FfiError::Unsupported`. |
 | Threads | No OS threads (no `atomics` target feature). The reactor starts no workers (`reactor::NO_THREADS`): `join`, a `recv` on an empty channel and the end of `main` run queued `thread::spawn` jobs on the current thread. A spawned thread therefore runs when something waits for it, not at once; output interleaving differs from native. A wait nothing can satisfy fails (`JoinFailed`, `Disconnected`) instead of hanging. Auto-par runs sequentially. |
-| Tasks | Work as natively: tasks share one thread anyway. |
+| Tasks | Work as natively: tasks share one thread anyway. A task cannot wait under a native callback (an `extern` callback, say): it panics. |
 | Sockets | `io::net` calls fail with `IoError::Other` (WASI preview 1 has no sockets). |
 | Files | Work against whatever the WASI host preopens. Symlinks are not supported. |
 | Terminal | `io::tty`: nothing is a terminal; raw mode fails with `NotATerminal`. |
 | stdio | WASI cannot `dup`, so a stdio stream owns descriptor 0/1/2; closing the stream never closes the process's own stdio. |
+| Nesting | The compiler runs on the host's call stack, which cannot grow, so the limits are lower than native (`parser::PARSE_NESTING_LIMIT`, `OPERATOR_CHAIN_LIMIT`, `INFER_RECURSION_LIMIT`): `E0125` past 400 nested brackets (native 4000), past 1000 levels in the checker (native 2000) and past 700 chained binary operators and `as` casts (native: none). Measurements are in [limitations.md](limitations.md), "Deep expressions". |
 | `coil test` | Runs the test runner in the `coil` binary (no `coil-test` to re-exec). `coil mutate` is not available. |
 | `coil dissect` | Runs in the `coil` binary too (`coil-dissect` is a library as well as a binary). The playground's Inspect panel uses it. Other helpers (`fmt`, `lsp`, `verify`, `debug`) are not in the wasm build. |
 | Child processes | The `process` module compiles, but starting a program fails (`ProcessError::Spawn(IoError::Other)`). |
@@ -45,4 +47,4 @@ needs something wasm lacks says so in its header and is skipped there:
 // @needs sockets
 ```
 
-Known features: `sockets`, `symlinks`, `ffi`, `processes`, and `unix` (Unix-only behaviour such as signals; false on Windows and wasm). An unknown name fails the file.
+Known features: `sockets`, `symlinks`, `ffi`, `processes`, `unix` (Unix-only behaviour such as signals; false on Windows and wasm), and `wasm` (a file about the wasm build's own limits, such as its operator-chain limit; it runs only there). An unknown name fails the file.

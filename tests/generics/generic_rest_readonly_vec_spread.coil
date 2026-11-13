@@ -62,3 +62,12 @@ test("a Vec spread is a generic rest pack") {
     assert!(count(...w) == 3);
     assert!(first("a", ...w) == "a");
 }
+
+fn twice<T>(T a, T b) -> int {
+    return count(a, b, a);
+}
+
+test("a generic body packs its own values") {
+    assert!(twice(1, 2) == 3);
+    assert!(twice(new P(1), new P(2)) == 3);
+}

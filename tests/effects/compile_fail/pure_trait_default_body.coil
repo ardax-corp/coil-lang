@@ -17,5 +17,5 @@ impl Count for C {
 }
 
 fn main() {
-    count(new C(1));
+    (new C(1)).count();
 }

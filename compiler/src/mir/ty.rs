@@ -1,10 +1,10 @@
 //! MIR type lattice (COI-267 P0 numeric; COI-293 I1 heap / niche words).
 //!
-//! [`MirTy::Value`] is the boxed VM word — the interpreter path — and the
+//! [`MirTy::Value`] is the boxed word and the
 //! lattice top. I1 names shipped one-word heap/niche ABIs so later islands
 //! can SSA them. Dense specialize uses [`MirTy::is_word_lane`] (numeric,
 //! `HeapRef`, and niche Option/Result words). Two-slot CALL/RETURN may
-//! dense or LIR (B3 / C1).
+//! native code (B3 / C1).
 
 #[cfg(test)]
 use crate::typechecking::infer::Checker;
@@ -39,7 +39,7 @@ pub enum MirTy {
     NicheOpt,
     /// Heap-heap `Result<T,E>` word: `Ok` = aligned pointer, `Err` = `ptr | 1`.
     NicheRes,
-    /// Boxed VM `Value`. Not specialized; P1+ keeps this ABI at edges.
+    /// Boxed runtime `Value`. Not specialized; P1+ keeps this ABI at edges.
     Value,
 }
 

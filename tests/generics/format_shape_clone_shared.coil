@@ -1,0 +1,54 @@
+// A per-type clone that shows a shape over its type parameter with `%v`
+// (`Vec<T>`, `Vec<Vec<T>>`) shows it through the shape's
+// ground instance at the clone's types, as its `.show()` does, at any
+// type, `()` too (coil-lang#2613). The dictionary planned for the goal is
+// the ground instance's; the call used to take the shape's instance with
+// open items, whose shared entry reads the open items' dictionaries from
+// it.
+//
+// The same cases as format_shape_clone.coil with no mono clones.
+// @flags --clone-budget 0
+use string::format;
+use tests::assert;
+
+class Box<T> {
+    pub x: T,
+}
+
+impl Show for Box<T: Show> {
+    fn show(Box<T> b) -> string {
+        let v: Vec<T> = [b.x];
+        return format("Box%v", v);
+    }
+}
+
+fn twice<T: Show>(T x) -> string {
+    let v: Vec<T> = [x, x];
+    return format("%v", v);
+}
+
+fn given<T: Show>(Vec<T> v) -> string {
+    return format("<%v>", v);
+}
+
+fn nested<T: Show>(T x) -> string {
+    let v: Vec<Vec<T>> = [[x], []];
+    return format("%v and %v", v, v.show());
+}
+
+test("a Vec<T> at (), int and string") {
+    assert!(twice(()) == "[(), ()]");
+    assert!(twice(1) == "[1, 1]");
+    assert!(twice("s") == "[s, s]");
+    let w: Vec<int> = [1, 2];
+    assert!(given(w) == "<[1, 2]>");
+}
+
+test("a Vec of Vec, and %v next to .show()") {
+    assert!(nested(4) == "[[4], []] and [[4], []]");
+}
+
+test("a bounded instance method's clone") {
+    assert!(new Box(()).show() == "Box[()]");
+    assert!(new Box(7).show() == "Box[7]");
+}

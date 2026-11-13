@@ -1,0 +1,12 @@
+// @expected E0102 — `s += 1` on a scalar-backed enum: `+` gives the backing
+// `int`, which is no `Status` to store back (#2463).
+#[repr(int)]
+enum Status {
+    Ok = 200,
+    NotFound = 404,
+}
+
+fn main() {
+    let s = Status::Ok;
+    s += 1;
+}

@@ -1,0 +1,45 @@
+// A generic class's method spliced into a plain caller keeps its bound
+// calls (`hash`, `==`) on the ground instances while the caller's own
+// constants fold, its loops unroll and its dead objects are freed.
+use tests::assert;
+
+class Bucket<K> {
+    pub keys: Vec<K>,
+}
+
+impl Bucket<K: Hash + Eq> {
+    pub fn slot(K k) -> int {
+        return k.hash() & 7;
+    }
+
+    pub fn has(K k) -> bool {
+        let i = 0;
+        while i < self.keys.len() {
+            if self.keys[i] == k {
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+}
+
+test("a constant folds beside a spliced bound call") {
+    let b = new Bucket(Vec::new());
+    b.keys.push("a");
+    assert!(b.slot("a") == ("a".hash() & (3 + 4)));
+    assert!(b.has("a"));
+    assert!(!b.has("b"));
+}
+
+test("a short loop unrolls around a spliced bound call") {
+    let b = new Bucket(Vec::new());
+    let hits = 0;
+    for i in 0..3 {
+        b.keys.push(i);
+        if b.has(i) && b.slot(i) == (i & (8 - 1)) {
+            hits = hits + 1;
+        }
+    }
+    assert!(hits == 3);
+}

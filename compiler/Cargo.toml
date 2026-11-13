@@ -6,11 +6,9 @@ edition = "2024"
 [features]
 default = []
 dissect = []
-pratt = []
-# Test-only: Pipeline VM wire helpers. Production compiler does not depend on machine.
-vm-wire = ["dep:machine"]
 
 [dependencies]
+rustc-hash = "2"
 common = { path = "../common" }
 parser = { path = "../parser" }
 reporting = { path = "../reporting" }
@@ -18,13 +16,13 @@ rkyv = "0.8.12"
 serde = { version = "1", features = ["derive"] }
 stacker = "0.1.25"
 sha2 = "0.10"
-machine = { path = "../machine", optional = true, default-features = false, features = ["vm_profile"] }
 
 [dev-dependencies]
-# Lib tests format `Instruction`/`Byte` with Debug, also under `--release` (#1455).
-common = { path = "../common", features = ["debug-fmt"] }
-machine = { path = "../machine", default-features = false, features = ["vm_profile"] }
-# Integration tests run user and built-in derive macros on the VM.
+machine = { path = "../machine", default-features = false }
+# Integration tests run programs on the MIR interpreter, and user and
+# built-in derive macros at compile time. These crates depend on `compiler`.
+coil-host = { path = "../coil-host" }
+coil-mir-interp = { path = "../coil-mir-interp" }
 comptime = { path = "../comptime" }
 proptest = "1"
 libc = "0.2"
@@ -34,14 +32,3 @@ serde_json = "1"
 name = "dissect"
 required-features = ["dissect"]
 
-[[test]]
-name = "pipeline"
-required-features = ["vm-wire"]
-
-[[test]]
-name = "namespace"
-required-features = ["vm-wire"]
-
-[[test]]
-name = "perf_metrics"
-required-features = ["vm-wire"]

@@ -1,5 +1,5 @@
 // Canary: interned string keys, dict increment, intern/hash pressure.
-// A later intern/hash or dict-field cut should drop VM-only time vs this.
+// A later intern/hash or dict-field cut should drop time vs this.
 use io::sync::print;
 use string::format;
 

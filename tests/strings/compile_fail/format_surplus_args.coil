@@ -1,5 +1,5 @@
 // @expected E0119 — `{}` is not a format specifier, so both
-// arguments are surplus (the VM would silently drop them).
+// arguments are surplus (an engine would silently drop them).
 use io::stdout;
 use io::sync::write_all;
 use string::{format, to_bytes};

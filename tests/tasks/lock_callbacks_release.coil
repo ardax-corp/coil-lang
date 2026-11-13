@@ -1,0 +1,67 @@
+// `with_lock` and the `RwLock` calls hold the lock only while their
+// callback runs: a panic in the callback releases it, and a `try_` call
+// made while it is held reports `WouldBlock`.
+use tests::assert;
+use thread::{LockError, Mutex, RwLock, join, mutex, rwlock, spawn, try_read, try_write, with_lock, with_read, with_write};
+
+fn bump_then_panic(Mutex<int> m) -> int {
+    let _ = with_lock(
+        m,
+        fn (int n) {
+            if n >= 0 {
+                panic "callback failed";
+            }
+            return (n + 1, 0);
+        },
+    );
+    return 0;
+}
+
+fn keep_with_seven<T>(T x) -> (T, int) {
+    return (x, 7);
+}
+
+fn would_block<R>(Result<R, LockError> r) -> bool {
+    return match r {
+        Result::Err(LockError::WouldBlock) => true,
+        default => false,
+    };
+}
+
+test("a panic in a with_lock callback releases the mutex") {
+    let m = mutex(1)?;
+    let t = spawn(bump_then_panic, m)?;
+    assert!(join(t).is_err());
+    assert!(with_lock(m, fn (int n) => (n + 1, n))? == 1);
+    assert!(with_lock(m, fn (int n) => (n, n))? == 2);
+}
+
+test("try_read and try_write report WouldBlock while a writer holds the lock") {
+    let rw = rwlock(5)?;
+    let inner = with_write(
+        rw,
+        fn (int n) use (rw) => (
+            n * 2,
+            would_block(try_read(rw, fn (int x) => x)) &&
+            would_block(try_write(rw, fn (int x) => (x, x))),
+        ),
+    )?;
+    assert!(inner);
+    assert!(with_read(rw, fn (int n) => n)? == 10);
+}
+
+test("reads share the lock and a try_write after them succeeds") {
+    let rw: RwLock<string> = rwlock("a")?;
+    let both = with_read(
+        rw,
+        fn (string s) use (rw) => s + with_read(rw, fn (string t) => t).unwrap_or("?"),
+    )?;
+    assert!(both == "aa");
+    assert!(try_write(rw, fn (string s) => (s + "b", s.len()))? == 1);
+    assert!(try_read(rw, fn (string s) => s)? == "ab");
+}
+
+test("a generic function value is a lock callback") {
+    let m = mutex("x")?;
+    assert!(with_lock(m, keep_with_seven)? == 7);
+}

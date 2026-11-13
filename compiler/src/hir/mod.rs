@@ -1,10 +1,10 @@
 //! High-level IR (HIR): a typed, desugared tree built after `check_program`.
 //!
 //! The port is phased (see the HIR plan doc). Phase 0 is [`layout`]: the one
-//! query that decides how a value of a given type is represented, so the
-//! AST codegen, MIR and the future HIR lowering cannot disagree. Phase 1 is
+//! query that decides how a value of a given type is represented, so HIR
+//! planning and MIR cannot disagree. Phase 1 is
 //! [`build`] (AST + checker facts to HIR) and [`print`] (`coil dissect
-//! --hir`). Phase 2 is [`lower`]: codegen lowers every function body from
+//! --hir`). Phase 2 is [`refusal`]: codegen lowers every function body from
 //! HIR (the AST walk is gone since phase 8). Phase 3 widens that subset to enums, `Option` /
 //! `Result` in every layout (boxed, niche, two-slot), `match`, `?`, `??` and
 //! Result-mode returns.
@@ -16,13 +16,17 @@
 //! flags, so a consumer never asks the checker again.
 
 pub mod build;
+pub mod call_graph;
 pub mod cold;
 pub mod check;
 pub mod effects;
 pub mod enum_sroa;
 pub mod inline;
 pub mod outline;
-pub mod lower;
+pub mod par;
+pub mod classify;
+pub mod query;
+pub mod refusal;
 pub mod match_tree;
 pub mod print;
 pub mod stage;
@@ -169,6 +173,8 @@ pub struct HirBody {
     /// `mut e` that borrows nothing (E0150): outside a `let` / `for`
     /// binding (`None`), or binding a scalar, which is copied (its type).
     pub stray_muts: Vec<(Span, Option<String>)>,
+    /// The callees inlining spliced in ([`HirExpr::scope`]).
+    pub inline_scopes: Vec<HirInlineScope>,
 }
 
 impl HirBody {
@@ -196,6 +202,244 @@ impl HirBody {
 
     pub fn local(&self, id: LocalId) -> &HirLocal {
         &self.locals[id.0 as usize]
+    }
+
+    /// The direct subexpressions of `id`, in evaluation order. A lambda's
+    /// body is another body, so it is not among them.
+    pub fn children(&self, id: HirId) -> Children<'_> {
+        let mut c = Children { head: [None; 2], rest: &[], tail: None, arms: &[] };
+        match &self.expr(id).kind {
+            HirKind::Field { base: a, .. }
+            | HirKind::Un { operand: a, .. }
+            | HirKind::Cast { value: a }
+            | HirKind::Named { value: a, .. }
+            | HirKind::Spread(a)
+            | HirKind::LetPat { init: a, .. }
+            | HirKind::Loop { body: a }
+            | HirKind::Defer { body: a, .. } => c.head = [Some(*a), None],
+            HirKind::Yield { value: a, zero, .. } => {
+                c.head = [Some(*a), None];
+                c.tail = *zero;
+            }
+            HirKind::Index { base: a, index: b, .. }
+            | HirKind::Bin { lhs: a, rhs: b, .. }
+            | HirKind::Logic { lhs: a, rhs: b, .. }
+            | HirKind::Assign { place: a, value: b }
+            | HirKind::Append { base: a, value: b }
+            | HirKind::ForIn { iterable: a, body: b, .. } => c.head = [Some(*a), Some(*b)],
+            HirKind::Call { callee, args } => {
+                if let Callee::Value(v) = callee {
+                    c.head = [Some(*v), None];
+                }
+                c.rest = args;
+            }
+            HirKind::Make { args, .. } | HirKind::Builtin { args, .. } => c.rest = args,
+            HirKind::Block { stmts, tail } => {
+                c.rest = stmts;
+                c.tail = *tail;
+            }
+            HirKind::Let { init, .. } => c.head = [*init, None],
+            HirKind::If { cond, then, els } => {
+                c.head = [Some(*cond), Some(*then)];
+                c.tail = *els;
+            }
+            HirKind::Return(v) => c.head = [*v, None],
+            HirKind::Match { scrutinee, arms } => {
+                c.head = [Some(*scrutinee), None];
+                c.arms = arms;
+            }
+            HirKind::Resume { handle, value, zero } => {
+                c.head = [Some(*handle), *value];
+                c.tail = *zero;
+            }
+            HirKind::Lit(_)
+            | HirKind::Local(_)
+            | HirKind::Global { .. }
+            | HirKind::Break
+            | HirKind::Continue
+            | HirKind::Lambda { .. }
+            | HirKind::Clear(_)
+            | HirKind::Unsupported(_) => {}
+        }
+        c
+    }
+
+    /// Every node of `id`'s subtree, `id` first.
+    pub fn visit(&self, id: HirId, f: &mut impl FnMut(&HirExpr)) {
+        self.visit_ids(id, &mut |k| f(self.expr(k)));
+    }
+
+    /// Every id of `id`'s subtree in pre-order, `id` first. A loop, not a
+    /// recursion: a chain of thousands of operators is that deep.
+    pub fn visit_ids(&self, id: HirId, f: &mut impl FnMut(HirId)) {
+        let _ = self.any_visiting(id, &|_| false, f);
+    }
+
+    /// Whether some node of `id`'s subtree, `id` included, satisfies
+    /// `pred`, in pre-order; stops at the first that does.
+    pub fn any(&self, id: HirId, pred: &impl Fn(HirId) -> bool) -> bool {
+        self.any_visiting(id, pred, &mut |_| {})
+    }
+
+    /// [`Self::any`], calling `seen` on each node before `pred`.
+    fn any_visiting(&self, id: HirId, pred: &impl Fn(HirId) -> bool, seen: &mut impl FnMut(HirId)) -> bool {
+        let mut work = vec![id];
+        while let Some(at) = work.pop() {
+            seen(at);
+            if pred(at) {
+                return true;
+            }
+            let first = work.len();
+            work.extend(self.children(at));
+            work[first..].reverse();
+        }
+        false
+    }
+
+    /// Each node's parent, by id (`None` for a root and for an unreached
+    /// node).
+    pub fn parents(&self) -> Vec<Option<HirId>> {
+        let mut parent = vec![None; self.exprs.len()];
+        for i in 0..self.exprs.len() {
+            let id = HirId(i as u32);
+            for c in self.children(id) {
+                parent[c.0 as usize] = Some(id);
+            }
+        }
+        parent
+    }
+
+    /// Append `e`; its id.
+    pub fn push(&mut self, e: HirExpr) -> HirId {
+        let id = HirId(self.exprs.len() as u32);
+        self.exprs.push(e);
+        id
+    }
+
+    /// Append a node the compiler made: one word, no AST node, no flags.
+    pub fn push_new(&mut self, kind: HirKind, ty: Option<Ty>, span: Span) -> HirId {
+        self.push(HirExpr { kind, ty, layout: Layout::Word, span, node: None, flags: HirFlags::default(), scope: 0, src: None })
+    }
+
+    /// A fresh compiler temp named `name`.
+    pub fn temp_named(&mut self, name: String, ty: Option<Ty>) -> LocalId {
+        let id = LocalId(self.locals.len() as u32);
+        self.locals.push(HirLocal { name, ty, kind: LocalKind::Temp, captured: false, borrow: false });
+        id
+    }
+
+    /// A fresh compiler temp named `prefix` and its id (`$free3`).
+    pub fn temp(&mut self, prefix: &str, ty: Option<Ty>) -> LocalId {
+        self.temp_named(format!("{prefix}{}", self.locals.len()), ty)
+    }
+}
+
+/// [`HirBody::children`]: up to two leading operands, then a list, an
+/// optional tail and `match` arm bodies, without allocating.
+pub struct Children<'a> {
+    head: [Option<HirId>; 2],
+    rest: &'a [HirId],
+    tail: Option<HirId>,
+    arms: &'a [HirArm],
+}
+
+impl Iterator for Children<'_> {
+    type Item = HirId;
+
+    fn next(&mut self) -> Option<HirId> {
+        if let Some(id) = self.head[0].take().or_else(|| self.head[1].take()) {
+            return Some(id);
+        }
+        if let Some((&id, rest)) = self.rest.split_first() {
+            self.rest = rest;
+            return Some(id);
+        }
+        if let Some(id) = self.tail.take() {
+            return Some(id);
+        }
+        let (arm, arms) = self.arms.split_first()?;
+        self.arms = arms;
+        Some(arm.body)
+    }
+}
+
+impl DoubleEndedIterator for Children<'_> {
+    fn next_back(&mut self) -> Option<HirId> {
+        if let Some((arm, arms)) = self.arms.split_last() {
+            self.arms = arms;
+            return Some(arm.body);
+        }
+        if let Some(id) = self.tail.take() {
+            return Some(id);
+        }
+        if let Some((&id, rest)) = self.rest.split_last() {
+            self.rest = rest;
+            return Some(id);
+        }
+        self.head[1].take().or_else(|| self.head[0].take())
+    }
+}
+
+impl HirKind {
+    /// A short name for the construct, as refusal reasons give it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            HirKind::Lit(_) => "literal",
+            HirKind::Local(_) => "local",
+            HirKind::Global { .. } => "global",
+            HirKind::Field { .. } => "field",
+            HirKind::Index { .. } => "index",
+            HirKind::Bin { .. } => "operator",
+            HirKind::Logic { .. } => "logic",
+            HirKind::Un { .. } => "unary",
+            HirKind::Cast { .. } => "cast",
+            HirKind::Call { .. } => "call",
+            HirKind::Named { .. } => "named-argument",
+            HirKind::Spread(_) => "spread",
+            HirKind::Make { kind, .. } => match kind {
+                MakeKind::Range { .. } => "make-range",
+                MakeKind::Record(_) => "make-record",
+                MakeKind::Tuple => "make-unit",
+                _ => "make",
+            },
+            HirKind::Block { .. } => "block-value",
+            HirKind::Let { .. } => "let",
+            HirKind::LetPat { .. } => "let-pattern",
+            HirKind::Assign { .. } => "assign",
+            HirKind::Append { .. } => "append",
+            HirKind::If { .. } => "if-value",
+            HirKind::Loop { .. } => "loop",
+            HirKind::ForIn { .. } => "for-in",
+            HirKind::Break | HirKind::Continue => "jump",
+            HirKind::Return(_) => "return",
+            HirKind::Match { .. } => "match",
+            HirKind::Lambda { .. } => "lambda",
+            HirKind::Yield { .. } => "yield",
+            HirKind::Resume { .. } => "resume",
+            HirKind::Defer { .. } => "defer",
+            HirKind::Builtin { .. } => "builtin",
+            HirKind::Clear(_) => "clear",
+            HirKind::Unsupported(_) => "unsupported",
+        }
+    }
+}
+
+impl HirPat {
+    /// Each local the pattern binds, left to right.
+    pub fn for_each_bind(&self, f: &mut impl FnMut(LocalId)) {
+        match self {
+            HirPat::Bind(l) => f(*l),
+            HirPat::Variant { fields: HirPatFields::Tuple(ps), .. } | HirPat::Tuple(ps) => ps.iter().for_each(|p| p.for_each_bind(f)),
+            HirPat::Variant { fields: HirPatFields::Record(fs), .. } | HirPat::Record(fs) => fs.iter().for_each(|(_, p)| p.for_each_bind(f)),
+            HirPat::Variant { fields: HirPatFields::Unit, .. } | HirPat::Wild | HirPat::Int(_) => {}
+        }
+    }
+
+    /// Whether the pattern binds `local`.
+    pub fn binds(&self, local: LocalId) -> bool {
+        let mut found = false;
+        self.for_each_bind(&mut |l| found |= l == local);
+        found
     }
 }
 
@@ -226,7 +470,7 @@ pub enum LocalKind {
 
 /// Sidecar facts copied onto a node.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HirFlags(u8);
+pub struct HirFlags(u16);
 
 impl HirFlags {
     pub const FRAME_LOCAL: Self = Self(1);
@@ -262,6 +506,34 @@ pub struct HirExpr {
     /// The AST node this was built from; `None` for desugaring temps.
     pub node: Option<NodeId>,
     pub flags: HirFlags,
+    /// `0`: code of the body itself. `k`: inlining spliced it in from the
+    /// callee [`HirBody::inline_scopes`]`[k - 1]` names (#2578).
+    pub scope: u32,
+    /// Where the node is in the source when `span` is not that place: a
+    /// node of another module's callee spliced in takes the call's span,
+    /// which the planner's facts are keyed by, and keeps its own here,
+    /// in its scope's file ([`HirInlineScope::file`], #2666).
+    pub src: Option<Span>,
+}
+
+/// A callee inlining spliced into a body ([`HirExpr::scope`]): its name,
+/// the call it replaced and the scope that call was in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HirInlineScope {
+    pub callee: String,
+    /// The call's span, in the body's file.
+    pub call: Span,
+    /// The call's own [`HirExpr::scope`].
+    pub call_scope: u32,
+    /// Where the callee's result is computed: its `return` statement (the
+    /// spliced result is lowered inside the caller's statement, with no
+    /// statement of its own).
+    pub ret: Span,
+    /// The spliced nodes have the call's span (another module's callee).
+    pub at_call: bool,
+    /// The file of the callee's code when it is not the caller's: another
+    /// module's (its nodes' [`HirExpr::src`] are in it).
+    pub file: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -503,8 +775,13 @@ pub enum HirKind {
     Match { scrutinee: HirId, arms: Vec<HirArm> },
     /// A lambda: the index of its body in [`HirModule::bodies`].
     Lambda { body: usize },
-    Yield { value: HirId, from: bool },
-    Resume { handle: HirId, value: Option<HirId> },
+    /// `zero`: the zero of the value a binding `yield` receives, made
+    /// where it is resumed without `with` and the type's zero is an object
+    /// ([`crate::layout::Zero::Built`], #2717).
+    Yield { value: HirId, from: bool, zero: Option<HirId> },
+    /// `zero`: the zero of the value, made where the `resume` completes a
+    /// body that ended without `return e` and the type's zero is an object.
+    Resume { handle: HirId, value: Option<HirId>, zero: Option<HirId> },
     /// `defer use (captures) { body }`: the body runs as a thunk whose
     /// frame holds the captures (`None`: a name that did not resolve).
     Defer { captures: Vec<Option<LocalId>>, body: HirId },
@@ -588,6 +865,16 @@ pub fn take_hir_capture() -> HirCapture {
 
 pub(crate) fn hir_capture_active() -> bool {
     HIR_CAPTURE.with(|c| c.borrow().is_some())
+}
+
+/// Record `problem` with the captured HIR's, when capture is on: something
+/// a later stage found wrong with a body.
+pub(crate) fn capture_problem(problem: impl FnOnce() -> String) {
+    HIR_CAPTURE.with(|c| {
+        if let Some(out) = c.borrow_mut().as_mut() {
+            out.problems.push(problem());
+        }
+    });
 }
 
 /// Build `ast`'s HIR and record it, when capture is on.

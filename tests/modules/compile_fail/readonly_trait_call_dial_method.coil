@@ -1,0 +1,8 @@
+// @expected E0107 — the impl of `Gauge::wind` (a trait of one module) for `Dial` (a class of another) writes its field: the method call on a `readonly` value is refused (#2468).
+use ro_trait_gauge::Gauge;
+use ro_trait_dial::Dial;
+
+fn main() {
+    let d = readonly new Dial(1);
+    let _ = d.wind(2);
+}

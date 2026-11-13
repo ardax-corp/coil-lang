@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, HirPatFields, Lit, LocalId, LocalKind, MakeKind};
+use super::{HirArm, HirBody, HirFlags, HirId, HirKind, HirLocal, HirPat, HirPatFields, Lit, LocalId, LocalKind, MakeKind};
 use crate::typechecking::ty::{self, Ty};
 
 /// One scalarized local: its tag local and each variant's field locals.
@@ -56,7 +56,7 @@ pub fn scalarize(body: &HirBody, ok: impl Fn(&str) -> bool) -> Option<HirBody> {
     if built.is_empty() {
         return None;
     }
-    let parent = parents(body);
+    let parent = body.parents();
     let mut candidates: Vec<LocalId> = Vec::new();
     'local: for (k, l) in body.locals.iter().enumerate() {
         let local = LocalId(k as u32);
@@ -115,9 +115,9 @@ pub fn scalarize(body: &HirBody, ok: impl Fn(&str) -> bool) -> Option<HirBody> {
                     _ => false,
                 },
                 HirKind::Defer { captures, .. } => !captures.contains(&Some(local)),
-                HirKind::LetPat { pat, .. } => !binds(pat, local),
-                HirKind::Match { arms, .. } => !arms.iter().any(|a| binds(&a.pat, local)),
-                HirKind::ForIn { pat, .. } => !binds(pat, local),
+                HirKind::LetPat { pat, .. } => !pat.binds(local),
+                HirKind::Match { arms, .. } => !arms.iter().any(|a| a.pat.binds(local)),
+                HirKind::ForIn { pat, .. } => !pat.binds(local),
                 _ => true,
             };
             if !use_ok {
@@ -161,26 +161,7 @@ fn variant_of(body: &HirBody, v: HirId) -> Option<(&str, u32)> {
 
 /// A type a field local holds: a scalar, or a `string`.
 fn field(t: &Ty) -> bool {
-    super::lower::primitive(t).is_some() || matches!(ty::strip_readonly(t), Ty::Con(n) if n == "string")
-}
-
-fn binds(pat: &HirPat, local: LocalId) -> bool {
-    match pat {
-        HirPat::Bind(l) => *l == local,
-        HirPat::Variant { fields: HirPatFields::Tuple(ps), .. } | HirPat::Tuple(ps) => ps.iter().any(|p| binds(p, local)),
-        HirPat::Variant { fields: HirPatFields::Record(fs), .. } | HirPat::Record(fs) => fs.iter().any(|(_, p)| binds(p, local)),
-        _ => false,
-    }
-}
-
-fn parents(body: &HirBody) -> Vec<Option<HirId>> {
-    let mut parent = vec![None; body.exprs.len()];
-    for i in 0..body.exprs.len() {
-        for c in super::lower::children(body, HirId(i as u32)) {
-            parent[c.0 as usize] = Some(HirId(i as u32));
-        }
-    }
-    parent
+    super::classify::primitive(t).is_some() || matches!(ty::strip_readonly(t), Ty::Con(n) if n == "string")
 }
 
 /// The tag and field locals for `local`: a field's type from a build's
@@ -331,7 +312,7 @@ fn plan(body: &mut HirBody, local: LocalId) -> Option<Split> {
 
 /// Replace every build and match of `local` with its split locals.
 fn rewrite(body: &mut HirBody, local: LocalId, split: &Split) {
-    let parent = parents(body);
+    let parent = body.parents();
     let stage = super::tuple_sroa::self_reads(body, local);
     for (i, &up) in parent.iter().enumerate() {
         let id = HirId(i as u32);
@@ -366,7 +347,14 @@ fn rewrite(body: &mut HirBody, local: LocalId, split: &Split) {
                         let taken = split.fixed.and_then(|t| {
                             arms.iter().find(|a| matches!(a.pat, HirPat::Wild) || a.pat == HirPat::Int(i64::from(t)))
                         });
+                        // A field or index read straight off the match
+                        // takes the match's own layout as its base, which
+                        // a block does not have: the arm stays a match.
+                        let based = parent[p.0 as usize].is_some_and(|up| {
+                            matches!(body.expr(up).kind, HirKind::Field { base, .. } | HirKind::Index { base, .. } if base == p)
+                        });
                         body.exprs[p.0 as usize].kind = match taken {
+                            Some(a) if based => HirKind::Match { scrutinee, arms: vec![HirArm { pat: HirPat::Wild, ..a.clone() }] },
                             Some(a) => HirKind::Block { stmts: Vec::new(), tail: Some(a.body) },
                             None => HirKind::Match { scrutinee, arms },
                         };
@@ -422,10 +410,10 @@ fn build(body: &mut HirBody, v: HirId, stage: bool, split: &Split, define: bool)
             HirKind::Let { local, init: Some(value) }
         } else {
             let ty = body.local(local).ty.clone();
-            let place = push(body, HirKind::Local(local), ty, span);
+            let place = body.push_new(HirKind::Local(local), ty, span);
             HirKind::Assign { place, value }
         };
-        push(body, kind, Some(ty::unit()), span)
+        body.push_new(kind, Some(ty::unit()), span)
     };
     // A reassignment whose payload reads the local (`s = A(match s {..})`,
     // `stage`) computes it before any field changes.
@@ -445,18 +433,18 @@ fn build(body: &mut HirBody, v: HirId, stage: bool, split: &Split, define: bool)
         {
             for f in others {
                 let ty = body.local(f).ty.clone();
-                let zero = match ty.as_ref().and_then(super::lower::primitive) {
+                let zero = match ty.as_ref().and_then(super::classify::primitive) {
                     Some("float") => Lit::Float(0.0),
                     Some("bool") => Lit::Bool(false),
                     Some(_) => Lit::Int(0),
                     None => Lit::Str(String::new()),
                 };
-                let z = push(body, HirKind::Lit(zero), ty, span);
+                let z = body.push_new(HirKind::Lit(zero), ty, span);
                 stmts.push(set(body, f, z));
             }
         }
     }
-    let t = push(body, HirKind::Lit(Lit::Int(i64::from(tag))), Some(ty::int()), span);
+    let t = body.push_new(HirKind::Lit(Lit::Int(i64::from(tag))), Some(ty::int()), span);
     stmts.push(set(body, split.tag, t));
     // The build itself is gone.
     body.exprs[v.0 as usize].kind = HirKind::Lit(Lit::Unit);
@@ -479,23 +467,23 @@ fn arm(body: &mut HirBody, a: HirArm, split: &Split) -> HirArm {
             // A binding read-only like its field reads the field itself.
             if !body.local(*b).captured
                 && body.local(*b).ty == body.local(f).ty
-                && !super::lower::assigns_local(body, a.body, *b)
-                && !super::lower::assigns_local(body, a.body, f)
+                && !super::query::assigns_local(body, a.body, *b)
+                && !super::query::assigns_local(body, a.body, f)
             {
                 rename(body, a.body, *b, f);
                 rename_in_clears(body, *b, f);
                 continue;
             }
             let ty = body.local(f).ty.clone();
-            let read = push(body, HirKind::Local(f), ty, span);
-            stmts.push(push(body, HirKind::Let { local: *b, init: Some(read) }, Some(ty::unit()), span));
+            let read = body.push_new(HirKind::Local(f), ty, span);
+            stmts.push(body.push_new(HirKind::Let { local: *b, init: Some(read) }, Some(ty::unit()), span));
         }
     }
     let arm_body = if stmts.is_empty() {
         a.body
     } else {
         let ty = body.expr(a.body).ty.clone();
-        push(body, HirKind::Block { stmts, tail: Some(a.body) }, ty, span)
+        body.push_new(HirKind::Block { stmts, tail: Some(a.body) }, ty, span)
     };
     HirArm {
         pat: HirPat::Int(i64::from(*tag)),
@@ -510,7 +498,7 @@ fn rename(body: &mut HirBody, id: HirId, from: LocalId, to: LocalId) {
         if matches!(body.expr(k).kind, HirKind::Local(l) if l == from) {
             body.exprs[k.0 as usize].kind = HirKind::Local(to);
         }
-        stack.extend(super::lower::children(body, k));
+        stack.extend(body.children(k));
     }
 }
 
@@ -522,15 +510,3 @@ fn set_block(body: &mut HirBody, at: HirId, stmts: Vec<HirId>) {
     e.node = None;
 }
 
-fn push(body: &mut HirBody, kind: HirKind, ty: Option<Ty>, span: super::Span) -> HirId {
-    let id = HirId(body.exprs.len() as u32);
-    body.exprs.push(HirExpr {
-        kind,
-        ty,
-        layout: crate::layout::Layout::Word,
-        span,
-        node: None,
-        flags: HirFlags::default(),
-    });
-    id
-}

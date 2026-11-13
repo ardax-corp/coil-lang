@@ -1,0 +1,177 @@
+// A lambda inside a lambda captures what the enclosing lambda captured, two
+// and three levels deep: an `int`, a `string`, a class object (shared with
+// `use (mut x)`), a function's name, a lambda, a local bound from a
+// generic function, a function parameter and a value of a generic body's
+// type parameter. A function value the middle lambda only relays, which
+// the inner one only calls, has the outer local's type, and a local bound
+// from a generic function is made at the type the innermost lambda reads
+// it at (coil-lang#2671).
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+trait Val<T> {
+    fn val(T x) -> int {}
+}
+
+impl Val for int {
+    fn val(int x) -> int {
+        return x;
+    }
+}
+
+impl Val for Box {
+    fn val(Box b) -> int {
+        return b.n;
+    }
+}
+
+fn inc(int x) -> int {
+    return x + 1;
+}
+
+fn twice<U: Val>(U x) -> int {
+    return x.val() * 2;
+}
+
+fn values() -> int -> int {
+    let k = 5;
+    let s = "abc";
+    let b = new Box(4);
+    let h = fn (int y) use (k, s, b) {
+        let inner = fn (int z) use (k, s, b) => z + k + s.len() + b.n;
+        inner
+    };
+    return h(0);
+}
+
+fn values_three() -> int -> int {
+    let k = 5;
+    let s = "abc";
+    let h = fn (int y) use (k, s) {
+        let mid = fn (int w) use (k, s) {
+            let inner = fn (int z) use (k, s) => z + k + s.len();
+            inner
+        };
+        mid(y)
+    };
+    return h(0);
+}
+
+fn functions() -> int -> int {
+    let named = inc;
+    let lam = fn (int x) => x * 2;
+    let h = fn (int y) use (named, lam) {
+        let inner = fn (int z) use (named, lam) => named(z) + lam(z);
+        inner
+    };
+    return h(0);
+}
+
+fn functions_three() -> int -> int {
+    let named = inc;
+    let h = fn (int y) use (named) {
+        let mid = fn (int w) use (named) {
+            let inner = fn (int z) use (named) => named(z);
+            inner
+        };
+        mid(y)
+    };
+    return h(0);
+}
+
+fn generic_value() -> int -> int {
+    let f = twice;
+    let h = fn (int y) use (f) {
+        let inner = fn (int z) use (f) => f(z);
+        inner
+    };
+    return h(0);
+}
+
+fn generic_value_three() -> int -> int {
+    let f = twice;
+    let h = fn (int y) use (f) {
+        let mid = fn (int w) use (f) {
+            let inner = fn (int z) use (f) => f(z);
+            inner
+        };
+        mid(y)
+    };
+    return h(0);
+}
+
+fn generic_value_at<T: Val>(T k) -> unit -> int {
+    let f = twice;
+    let h = fn (int y) use (f, k) {
+        let inner = fn () use (f, k) => f(k);
+        inner
+    };
+    return h(0);
+}
+
+fn parameter(int -> int f) -> int -> int {
+    let h = fn (int y) use (f) {
+        let inner = fn (int z) use (f) => f(z) + 1;
+        inner
+    };
+    return h(0);
+}
+
+fn over_t<T: Val>(T k, T -> int f) -> unit -> int {
+    let h = fn (int y) use (k, f) {
+        let inner = fn () use (k, f) => k.val() + f(k);
+        inner
+    };
+    return h(0);
+}
+
+test("values, two and three levels") {
+    let g = values();
+    assert!(g(100) == 112);
+    let t = values_three();
+    assert!(t(100) == 108);
+}
+
+test("function values the middle lambda only relays") {
+    let g = functions();
+    assert!(g(10) == 31);
+    let t = functions_three();
+    assert!(t(10) == 11);
+    let p = parameter(inc);
+    assert!(p(10) == 12);
+}
+
+test("a local bound from a generic function") {
+    let g = generic_value();
+    assert!(g(7) == 14);
+    let t = generic_value_three();
+    assert!(t(7) == 14);
+    let i = generic_value_at(4);
+    assert!(i() == 8);
+    let b = generic_value_at(new Box(5));
+    assert!(b() == 10);
+}
+
+test("a generic body's type parameter and a function over it") {
+    let i = over_t(5, twice);
+    assert!(i() == 15);
+    let b = new Box(3);
+    let j = over_t(b, twice);
+    assert!(j() == 9);
+}
+
+test("a class object borrowed with use (mut) is shared") {
+    let c = new Box(0);
+    let h = fn () use (mut c) {
+        let inner = fn () use (mut c) {
+            c.n = c.n + 1;
+        };
+        inner();
+        inner();
+    };
+    h();
+    assert!(c.n == 2);
+}

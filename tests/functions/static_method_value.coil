@@ -1,0 +1,191 @@
+// A bare `Owner::m` names static method `m` as a function value, as a free
+// function's name does; a call is written with parentheses (#2746). A
+// static field and a unit variant keep their paren-less meaning.
+use tests::assert;
+use string::format;
+
+class Src {
+    pub n: int,
+    pub static count: int = 3,
+}
+
+impl Src {
+    #[inline(never)]
+    pub static fn inc(int x) -> int {
+        return x + 1;
+    }
+
+    pub static fn fresh() -> Src {
+        return new Src(7);
+    }
+
+    pub static fn add(int a, int b) -> int {
+        return a + b;
+    }
+
+    pub static fn sid<U>(U x) -> U {
+        return x;
+    }
+
+    pub static fn shown<U: Show>(U x) -> string {
+        return format("<%v>", x);
+    }
+
+    #[inline(never)]
+    pub static fn pick(Option<int> o, (int, int) p) -> int {
+        let (a, b) = p;
+        return match o {
+            Some(v) => v + a + b,
+            None => -1,
+        };
+    }
+
+    #[inline(never)]
+    pub static fn half(int x) -> Option<int> {
+        if x % 2 == 1 {
+            return None;
+        }
+        return Some(x / 2);
+    }
+}
+
+class Bx<T> {
+    pub v: T,
+}
+
+impl Bx<T> {
+    pub static fn make(T v) -> Bx<T> {
+        return new Bx(v);
+    }
+
+    pub static fn tag<U: Show>(T v, U u) -> string {
+        return format("%v", u);
+    }
+
+    pub fn remake(T w) -> Bx<T> {
+        let m = Bx::make;
+        return m(w);
+    }
+}
+
+enum Shape {
+    Dot,
+    Ring(int),
+}
+
+impl Shape {
+    pub static fn ring(int r) -> Shape {
+        return Shape::Ring(r);
+    }
+}
+
+class Holder {
+    pub f: int -> int,
+}
+
+fn apply(fn(int) -> int f, int x) -> int {
+    return f(x);
+}
+
+fn both(forall U. U -> U f) -> string {
+    return format("%i %s", f(5), f("s"));
+}
+
+fn made() -> int -> int {
+    return Src::inc;
+}
+
+fn build<T>(T v) -> Bx<T> {
+    let m = Bx::make;
+    return m(v);
+}
+
+fn via<T>(T v, T -> Bx<T> k) -> T {
+    return k(v).v;
+}
+
+fn radius(Shape s) -> int {
+    return match s {
+        Shape::Ring(r) => r,
+        Shape::Dot => 0,
+    };
+}
+
+test("a ground static method's value through a local and a parameter") {
+    let f = Src::inc;
+    assert!(f(1) == 2);
+    assert!(apply(Src::inc, 2) == 3);
+    let g = Src::add;
+    assert!(g(2, 3) == 5);
+}
+
+test("a static method of no parameters: the value, and the call with parentheses") {
+    let g = Src::fresh;
+    assert!(g().n == 7);
+    assert!(Src::fresh().n == 7);
+}
+
+test("a static method's value stored, returned and called later") {
+    let h = new Holder(Src::inc);
+    assert!((h.f)(4) == 5);
+    let fs: Vec<int -> int> = [Src::inc, made()];
+    assert!(fs[0](10) + fs[1](20) == 32);
+    let r = made();
+    assert!(r(10) == 11);
+}
+
+test("a static method's value captured by a lambda") {
+    let f = Src::inc;
+    let twice = fn (int x) use (f) => f(f(x));
+    assert!(twice(1) == 3);
+    let k = fn (int x) => apply(Src::inc, x) * 2;
+    assert!(k(4) == 10);
+}
+
+test("a static method with two-word parameters and result through its value") {
+    let h = Src::half;
+    assert!(h(8) == Some(4));
+    assert!(h(3) == None);
+    let p = Src::pick;
+    assert!(p(Some(3), (1, 2)) == 6);
+    assert!(p(None, (0, 0)) == -1);
+    assert!(Src::pick(Some(4), (1, 1)) == 6);
+}
+
+test("a generic static method's value at several types and as a forall argument") {
+    let s = Src::sid;
+    assert!(s(3) == 3);
+    let t: string -> string = Src::sid;
+    assert!(t("a") == "a");
+    assert!(both(Src::sid) == "5 s");
+    let w = Src::shown;
+    assert!(w(4) == "<4>");
+    let v: string -> string = Src::shown;
+    assert!(v("q") == "<q>");
+}
+
+test("a generic class's static method's value") {
+    let m = Bx::make;
+    let b: Bx<int> = m(9);
+    assert!(b.v == 9);
+    assert!(build("x").v == "x");
+    assert!(build(4).v == 4);
+    assert!(via(5, Bx::make) == 5);
+    assert!(via("y", Bx::make) == "y");
+    let t = Bx::tag;
+    assert!(t(1, "u") == "u");
+    assert!(new Bx(1).remake(8).v == 8);
+}
+
+test("an enum's static method's value, and its unit variant") {
+    let r = Shape::ring;
+    assert!(radius(r(3)) == 3);
+    assert!(radius(Shape::Dot) == 0);
+    assert!(radius(Shape::Dot()) == 0);
+}
+
+test("a static field reads without parentheses") {
+    assert!(Src::count == 3);
+    let none: Option<int> = Option::None();
+    assert!(none == Option::None);
+}

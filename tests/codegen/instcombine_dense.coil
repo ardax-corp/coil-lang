@@ -1,4 +1,4 @@
-// COI-281: `t * 2.0` → add on dense SSA (plus leftover identities).
+// COI-281: `t * 2.0` → add in a dense loop (plus leftover identities).
 use tests::assert;
 
 fn hot(float scale, int n) -> float {

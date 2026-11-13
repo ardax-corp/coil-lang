@@ -19,8 +19,8 @@
 
 use std::collections::HashSet;
 
-use super::tuple_sroa::{fresh, mentions, parents, push, set, set_block, staged};
-use super::{HirBody, HirFlags, HirId, HirKind, HirPat, LocalId, LocalKind, MakeKind};
+use super::tuple_sroa::{fresh, mentions, set, set_block, staged};
+use super::{HirBody, HirFlags, HirId, HirKind, LocalId, LocalKind, MakeKind};
 use crate::typechecking::ty::Ty;
 
 /// The most whole uses one local is rebuilt at.
@@ -48,11 +48,16 @@ pub fn scalarize(body: &HirBody, fields: impl Fn(&str) -> Option<Vec<(String, Ty
     if made.is_empty() {
         return None;
     }
-    let parent = parents(body);
+    let parent = body.parents();
     let mut out: Option<HirBody> = None;
     for (k, l) in body.locals.iter().enumerate() {
         let local = LocalId(k as u32);
         if l.captured || !matches!(l.kind, LocalKind::Let | LocalKind::Temp) || !made.contains(&local) {
+            continue;
+        }
+        // A local of a bare trait type holds the `new` packed (#2721): a
+        // whole use rebuilt as the class would no longer be the pack.
+        if l.ty.as_ref().is_some_and(|t| matches!(crate::typechecking::ty::strip_readonly(t), Ty::Existential { .. })) {
             continue;
         }
         let Some((class, decl)) = candidate(body, &parent, local, &fields) else {
@@ -120,8 +125,8 @@ fn candidate(
                 _ => uses.push(id),
             },
             HirKind::Defer { captures, .. } if captures.contains(&Some(local)) => return None,
-            HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } if binds(pat, local) => return None,
-            HirKind::Match { arms, .. } if arms.iter().any(|a| binds(&a.pat, local)) => return None,
+            HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } if pat.binds(local) => return None,
+            HirKind::Match { arms, .. } if arms.iter().any(|a| a.pat.binds(local)) => return None,
             _ => {}
         }
     }
@@ -191,27 +196,10 @@ fn exclusive(body: &HirBody, a: &[HirId], b: &[HirId]) -> bool {
     }
 }
 
-fn binds(pat: &HirPat, local: LocalId) -> bool {
-    match pat {
-        HirPat::Bind(l) => *l == local,
-        HirPat::Variant {
-            fields: super::HirPatFields::Tuple(ps),
-            ..
-        }
-        | HirPat::Tuple(ps) => ps.iter().any(|p| binds(p, local)),
-        HirPat::Variant {
-            fields: super::HirPatFields::Record(fs),
-            ..
-        }
-        | HirPat::Record(fs) => fs.iter().any(|(_, p)| binds(p, local)),
-        _ => false,
-    }
-}
-
 /// Replace `local`'s `let`, reassignments, field reads and whole uses
 /// with its field locals.
 fn rewrite(body: &mut HirBody, local: LocalId, class: &str, names: &[String], fields: &[LocalId]) {
-    let parent = parents(body);
+    let parent = body.parents();
     // Values stored to `local` that read it compute every field first.
     let stage: Vec<HirId> = body
         .exprs
@@ -248,7 +236,7 @@ fn rewrite(body: &mut HirBody, local: LocalId, class: &str, names: &[String], fi
                         .iter()
                         .map(|&f| {
                             let ty = body.local(f).ty.clone();
-                            push(body, HirKind::Local(f), ty, span)
+                            body.push_new(HirKind::Local(f), ty, span)
                         })
                         .collect();
                     let e = &mut body.exprs[i];

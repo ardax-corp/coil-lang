@@ -1,0 +1,9 @@
+// @expected E0119 — a `Vec` has no `Add` instance: its `+` does not zip two dynamic lengths (#2564).
+fn plus<T: Add>(T a, T b) -> T {
+    return a + b;
+}
+
+fn main() {
+    let v: Vec<int> = Vec::new();
+    let w = plus(v, v);
+}

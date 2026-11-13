@@ -1,0 +1,122 @@
+// `Vec::insert` and `Vec::remove` move element words (`Vec::from` copies
+// them). Native code writes the first two out as loops over the array
+// (`mir/native_expand.rs`) where the interpreter calls its runtime natives; both
+// keep these results, for scalar, byte and heap elements and at every edge.
+use tests::assert;
+use thread::{join, spawn, ThreadError};
+
+fn ints(int n) -> Vec<int> {
+    let v = Vec::from([1, 2, 3]);
+    v.insert(0, n);
+    v.insert(v.len(), n + 1);
+    v.insert(2, n + 2);
+    return v;
+}
+
+fn words(string s) -> Vec<string> {
+    let v: Vec<string> = Vec::from(["a", "b"]);
+    v.insert(1, s);
+    v.insert(0, s + s);
+    return v;
+}
+
+fn int_or(Option<int> o, int d) -> int {
+    return match o {
+        Option::Some(x) => x,
+        Option::None => d,
+    };
+}
+
+fn byte_or(Option<byte> o) -> int {
+    return match o {
+        Option::Some(x) => x as int,
+        Option::None => -7,
+    };
+}
+
+fn word_or(Option<string> o, string d) -> string {
+    return match o {
+        Option::Some(x) => x,
+        Option::None => d,
+    };
+}
+
+fn insert_at(int i) -> int {
+    let v = ints(1);
+    v.insert(i, 0);
+    return v.len();
+}
+
+fn insert_past_end() -> int {
+    return insert_at(7);
+}
+
+fn insert_before_start() -> int {
+    return insert_at(-1);
+}
+
+fn panic_message(() -> int f) -> string {
+    let t = match spawn(f) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "spawn failed",
+    };
+    return match join(t) {
+        Result::Err(ThreadError::Panicked(msg)) => msg,
+        default => "no panic",
+    };
+}
+
+test("insert shifts int elements up") {
+    let v = ints(10);
+    assert!(v == Vec::from([10, 1, 12, 2, 3, 11]));
+}
+
+test("insert shifts string elements up") {
+    let v = words("x");
+    assert!(v == Vec::from(["xx", "a", "x", "b"]));
+}
+
+test("remove shifts elements down and returns the one it took") {
+    let v = ints(10);
+    assert!(int_or(v.remove(1), -7) == 1);
+    assert!(int_or(v.remove(v.len() - 1), -7) == 11);
+    assert!(int_or(v.remove(0), -7) == 10);
+    assert!(v == Vec::from([12, 2, 3]));
+    let s = words("x");
+    assert!(word_or(s.remove(2), "none") == "x");
+    assert!(word_or(s.remove(0), "none") == "xx");
+    assert!(s == Vec::from(["a", "b"]));
+}
+
+test("remove out of range is None and leaves the vec") {
+    let v = ints(10);
+    assert!(int_or(v.remove(v.len()), -7) == -7);
+    assert!(int_or(v.remove(-1), -7) == -7);
+    let s = words("x");
+    assert!(word_or(s.remove(9), "none") == "none");
+    assert!(v.len() == 6 && s.len() == 4);
+}
+
+test("insert and remove keep byte elements") {
+    let b: Vec<byte> = Vec::from([1 as byte, 2 as byte, 3 as byte]);
+    b.insert(1, 200 as byte);
+    assert!(b == Vec::from([1 as byte, 200 as byte, 2 as byte, 3 as byte]));
+    assert!(byte_or(b.remove(0)) == 1);
+    assert!(b == Vec::from([200 as byte, 2 as byte, 3 as byte]));
+}
+
+test("from copies the array") {
+    let a = [4, 5, 6];
+    let v = Vec::from(a);
+    v.push(7);
+    assert!(v.len() == 4 && a.len() == 3);
+    let none: [int; 0] = [];
+    let e = Vec::from(none);
+    e.push(1);
+    assert!(e.len() == 1);
+}
+
+test("insert out of range panics with the index and length") {
+    assert!(panic_message(insert_past_end) == "Vec::insert: index 7 out of bounds (len 6)");
+    assert!(panic_message(insert_before_start) == "Vec::insert: index -1 out of bounds (len 6)");
+}

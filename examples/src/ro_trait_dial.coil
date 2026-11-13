@@ -1,0 +1,24 @@
+// Helper module for tests/modules/readonly_trait_call_across_modules.coil
+// (#2468): a class and its impl of another module's trait, with a caller.
+
+use ro_trait_gauge::Gauge;
+
+class Dial {
+    pub n: int,
+}
+
+impl Gauge for Dial {
+    pub fn level(Dial x, int v) -> int {
+        return x.n * v;
+    }
+
+    pub fn wind(Dial x, int v) -> int {
+        x.n = x.n + v;
+        return x.n;
+    }
+}
+
+fn dial_reads() -> int {
+    let d = readonly new Dial(2);
+    return Gauge::level(d, 2) + d.level(3);
+}

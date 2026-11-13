@@ -1,0 +1,139 @@
+// A counted `for` loop whose `invariant` reads the accumulator is checked
+// against the running fold, as the sequential loop has it, not against one
+// chunk's partial: a violation part way through is reported, and a partial
+// that would break the clause on its own is not. An invariant over values
+// the loop leaves alone holds or fails the same either way.
+// @output ok
+use io::{stdout, write};
+use string::to_bytes;
+use task::{scope, Scope, TaskError};
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task; its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+// Panic unless `m` contains `part`.
+fn expect(string m, string part) {
+    if find_from(m, part, 0) < 0 {
+        panic "expected `" + part + "` in: " + m;
+    }
+}
+
+fn up_then_down(int i) -> int {
+    if i < 200000 {
+        return 1;
+    }
+    return 0 - 1;
+}
+
+fn down_then_up(int i) -> int {
+    return 0 - up_then_down(i);
+}
+
+fn sq(int i) -> int {
+    return i * i;
+}
+
+// The fold climbs to 200000 and falls back to 0; no quarter of the range
+// adds up to more than 100000.
+fn peak() -> int {
+    let total = 0;
+    for i in 0..400000
+        invariant total <= 150000, "peak"
+    {
+        total = total + up_then_down(i);
+    }
+    return total;
+}
+
+// The fold is never positive; the second half on its own is.
+fn dip() -> int {
+    let total = 0;
+    for i in 0..400000
+        invariant total <= 0, "dip"
+    {
+        total = total + down_then_up(i);
+    }
+    return total;
+}
+
+fn exact(int n) -> int {
+    let total = 0;
+    for i in 0..n
+        invariant total % 2 == 0, "even"
+    {
+        total = total + 2;
+    }
+    return total;
+}
+
+fn scaled(int k) -> int {
+    let total = 0;
+    for i in 0..1000
+        invariant k > 0, "positive scale"
+    {
+        total = total + (sq(i % 7) + k);
+    }
+    return total;
+}
+
+fn scaled_down() -> int {
+    return scaled(0 - 7);
+}
+
+fn main() {
+    expect(
+        outcome(fn () => peak()),
+        "contract violated: invariant total <= 150000 (\"peak\") in peak",
+    );
+    if !(dip() == 0) {
+        panic "dip";
+    }
+    if !(exact(1000) == 2000) {
+        panic "exact";
+    }
+    if !(scaled(7) == 19977) {
+        panic "scaled";
+    }
+    expect(
+        outcome(fn () => scaled_down()),
+        "contract violated: invariant k > 0 (\"positive scale\") in scaled",
+    );
+    let _ = write(stdout(), to_bytes("ok"));
+}
+
+// The first `needle` in `hay` at or after `start` (clamped), or `-1`.
+fn find_from(string hay, string needle, int start) -> int {
+    let n = hay.len();
+    let m = needle.len();
+    let i = if start < 0 {
+        0
+    } else if start > n {
+        n
+    } else {
+        start
+    };
+    while i + m <= n {
+        let j = 0;
+        while j < m && hay[i + j] == needle[j] {
+            j = j + 1;
+        }
+        if j == m {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}

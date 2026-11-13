@@ -1,19 +1,16 @@
-//! Shared CLI helpers for coil binaries (archive load, VM execute, git-style dispatch).
+//! Shared CLI helpers for coil binaries (archive load, runtime execute, git-style dispatch).
 
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
 
 use common::{
-    ARCHIVE_VERSION, ArchiveDecodeError, ArchivedArchivedProgram, Byte, NativeLock, ProgramDebug,
+    ARCHIVE_VERSION, ArchiveDecodeError, ArchivedArchivedProgram, NativeLock, ProgramDebug,
     archive_version_compatible, decode_archived_program, default_natives_root,
     embedded_archive_slice, format_archive_version, read_embedded_native_lock,
-    read_package_trailer, resolve_archive_operand_slots,
+    read_package_trailer,
 };
-use machine::{
-    DloadGate, Machine, WireThreadProgramWithMapsArgs, wire_standard_host_natives,
-    wire_thread_program_with_maps,
-};
+use machine::DloadGate;
 
 /// Errors loading a `.ccoil` / embedded archive blob.
 #[derive(Debug)]
@@ -21,27 +18,22 @@ pub enum LoadErr {
     Missing,
     Corrupt,
     Version(u32),
-    /// Bytecode failed load-time verification.
-    Invalid(common::BytecodeError),
 }
 
 /// Owned archive payload restored by CLI and packaged execute.
 pub struct LoadedArchive {
-    pub bytecode: Vec<Byte>,
+    pub startup: Vec<common::StartupOp>,
+    pub main: Option<u32>,
     pub constants: Vec<u64>,
     pub strings: Vec<String>,
     pub static_slots: u32,
     pub debug: ProgramDebug,
     pub struct_layouts: Vec<common::CStructLayout>,
-    /// Analyzed capacity when the envelope stored it (minor 13+).
-    pub operand_stack_slots: Option<u32>,
-    /// S2b maps when the envelope stored them (minor 14+). Empty = conservative GC.
-    pub stack_maps: Vec<common::FrameStackMap>,
-    /// Complete frame maps (minor 21+). Empty = every frame conservative.
-    pub precise_frames: Vec<common::PreciseFrameMap>,
-    /// Per-class field word kinds (minor 24+). Empty = every field unknown.
+    /// Per-class field word kinds. Empty = every field unknown.
     pub class_word_kinds: Vec<common::ClassWordKinds>,
     pub static_word_kinds: Vec<u8>,
+    /// The bodies' MIR.
+    pub native_mir: Vec<u8>,
 }
 
 /// Deserialize an `ArchivedProgram` blob (from `.ccoil` or an embedded slice).
@@ -57,31 +49,22 @@ pub fn load_archive_bytes(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
 }
 
 fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
-    let decoded = decode_archived_program(buffer).map_err(|e| match e {
+    let program = decode_archived_program(buffer).map_err(|e| match e {
         ArchiveDecodeError::Corrupt => LoadErr::Corrupt,
         ArchiveDecodeError::Version(v) => LoadErr::Version(v),
-        ArchiveDecodeError::Invalid(e) => LoadErr::Invalid(e),
     })?;
-    let program = decoded.program;
     let debug = program.debug_bundle();
     Ok(LoadedArchive {
-        bytecode: program.bytecode,
         constants: program.constants,
         strings: program.strings,
         static_slots: program.static_slot_count,
         debug,
         struct_layouts: program.struct_layouts,
-        operand_stack_slots: decoded
-            .operand_stack_slots_persisted
-            .then_some(program.operand_stack_slots),
-        stack_maps: if decoded.stack_maps_persisted {
-            program.stack_maps
-        } else {
-            Vec::new()
-        },
-        precise_frames: program.precise_frames,
         class_word_kinds: program.class_word_kinds,
         static_word_kinds: program.static_word_kinds,
+        native_mir: program.native_mir,
+        startup: program.startup,
+        main: program.main,
     })
 }
 
@@ -93,65 +76,39 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
     load_archive_bytes(&buffer)
 }
 
-/// Run archived bytecode with standard host natives (no compiler).
-///
-/// Returns `true` when a language-level `panic` aborted.
-/// `raise` is catchable (`Result.Err`); it does not set this flag (Q5).
-///
-/// Restores [`common::CStructLayout`] from the archive (CLI `.ccoil` and packaged
-/// runner share this path). `ffi_search_paths` are searched before `entry`'s parent.
-///
-/// Host capability flags are **not** stored in `.ccoil` and are **not** re-applied
-/// here. If the bytecode has the op, it runs. `dload` still uses pin /
-/// trusted integrity when `dload_gate` is supplied.
-/// Minor 13+ stores the compiler stack bound. Minor 14+ stores S2b maps;
-/// older archives keep empty maps (conservative stack GC). Seek+CALL
-/// archives still grow to [`machine::MAX_OPERAND_STACK_SLOTS`].
-pub fn archive_operand_slots(bytecode: &[Byte]) -> usize {
-    common::legacy_archive_operand_slots(bytecode) as usize
-}
-
 pub fn execute_archived_program(
     loaded: &LoadedArchive,
     entry: Option<&Path>,
     ffi_search_paths: Vec<PathBuf>,
     dload_gate: Option<DloadGate>,
+    host_natives: Vec<std::sync::Arc<dyn machine::NativeFn>>,
 ) -> bool {
-    let slots =
-        resolve_archive_operand_slots(loaded.operand_stack_slots, &loaded.bytecode) as usize;
-    let mut machine = Machine::<256>::with_operand_capacity(slots);
-    wire_standard_host_natives(&mut machine);
-    if let Some(gate) = dload_gate {
-        machine.set_dload_gate(gate);
-    }
-
     let base_dir = entry.and_then(|p| p.parent()).map(PathBuf::from);
-    machine.set_ffi_paths(base_dir, ffi_search_paths);
-    for layout in &loaded.struct_layouts {
-        machine.register_struct_layout(machine::CStructLayout::from_archive(layout));
-    }
-
-    wire_thread_program_with_maps(WireThreadProgramWithMapsArgs {
-        machine: &mut machine,
-        bytecode: &loaded.bytecode,
-        constants: &loaded.constants,
-        strings: &loaded.strings,
+    // Native code that covers every body (an AOT executable's) runs the
+    // program on the driver, with no interpreter.
+    let program = std::sync::Arc::new(machine::ThreadProgram {
+        startup: std::sync::Arc::new(loaded.startup.clone()),
+        main: loaded.main,
+        constants: std::sync::Arc::new(loaded.constants.clone()),
+        strings: std::sync::Arc::new(loaded.strings.clone()),
         static_slot_count: loaded.static_slots,
         debug: loaded.debug.clone(),
-        operand_stack_slots: slots as u32,
-        stack_maps: loaded.stack_maps.clone(),
-        precise_frames: loaded.precise_frames.clone(),
-        class_word_kinds: loaded.class_word_kinds.clone(),
-        static_word_kinds: loaded.static_word_kinds.clone(),
+        class_word_kinds: machine::class_kind_table(&loaded.class_word_kinds),
+        static_word_kinds: std::sync::Arc::new(loaded.static_word_kinds.clone()),
     });
-    machine.set_program_debug(loaded.debug.clone());
-    machine.run_raw(
-        &loaded.bytecode,
-        &loaded.constants,
-        &loaded.strings,
-        loaded.static_slots,
-    );
-    machine.panicked()
+    let start = machine::NativeStart {
+        base_dir,
+        ffi_search_paths,
+        dload_gate,
+        struct_layouts: loaded.struct_layouts.iter().map(machine::CStructLayout::from_archive).collect(),
+        shared_print: None,
+        host_natives,
+    };
+    if let Some(panicked) = machine::run_natively(program, start) {
+        return panicked;
+    }
+    eprintln!("coil: this archive's code does not cover the program");
+    true
 }
 
 /// Natives-cache directories that hold a lock entry's library (size checked).
@@ -172,18 +129,39 @@ fn native_cache_dirs(lock: &NativeLock) -> Vec<PathBuf> {
     dirs
 }
 
-/// If this process is a packaged binary, run the embedded program and return `Some(panicked)`.
-pub fn try_run_embedded() -> Option<bool> {
-    use machine::packaged_app_ffi_startup_check;
+/// Run the package linked into this executable on the host natives its
+/// object links (`machine::native::aot_host_natives`): `Some(panicked)`,
+/// `None` when it cannot be read.
+pub fn run_linked_package(package: &[u8]) -> Option<bool> {
+    let exe = std::env::current_exe().ok()?;
+    run_package(package, exe, machine::native::aot_host_natives(), |_| Ok(()))
+}
 
+/// If this process is a packaged JIT runner, run the program appended to it,
+/// `Some(panicked)`. It makes its native code at start:
+/// `prepare` takes the archive's native MIR section and installs it for the
+/// run. Its error stops the program.
+pub fn try_run_embedded_with(prepare: impl FnOnce(&[u8]) -> Result<(), String>) -> Option<bool> {
     let exe = std::env::current_exe().ok()?;
     let data = std::fs::read(&exe).ok()?;
-    let trailer = read_package_trailer(&data)?;
-    let archive = embedded_archive_slice(&data, trailer)?;
+    run_package(&data, exe, machine::standard_host_natives(), prepare)
+}
+
+/// Run the package that ends `data`; `exe` is the running executable.
+fn run_package(
+    data: &[u8],
+    exe: PathBuf,
+    host_natives: Vec<std::sync::Arc<dyn machine::NativeFn>>,
+    prepare: impl FnOnce(&[u8]) -> Result<(), String>,
+) -> Option<bool> {
+    use machine::packaged_app_ffi_startup_check;
+
+    let trailer = read_package_trailer(data)?;
+    let archive = embedded_archive_slice(data, trailer)?;
 
     if !archive_version_compatible(trailer.archive_version, ARCHIVE_VERSION) {
         eprintln!(
-            "embedded bytecode version {} does not match this runner ({}); rebuild with `coil package`",
+            "embedded archive version {} does not match this runner ({}); rebuild with `coil package`",
             format_archive_version(trailer.archive_version),
             format_archive_version(ARCHIVE_VERSION)
         );
@@ -200,12 +178,8 @@ pub fn try_run_embedded() -> Option<bool> {
             );
             exit(1);
         }
-        Err(LoadErr::Invalid(e)) => {
-            eprintln!("embedded bytecode archive is invalid: {e}");
-            exit(1);
-        }
         Err(_) => {
-            eprintln!("embedded bytecode archive is corrupt");
+            eprintln!("embedded archive is corrupt");
             exit(1);
         }
     };
@@ -217,7 +191,7 @@ pub fn try_run_embedded() -> Option<bool> {
 
     let mut ffi_search_paths = Vec::new();
     let mut dload_gate = None;
-    match read_embedded_native_lock(&data, trailer) {
+    match read_embedded_native_lock(data, trailer) {
         Ok(Some(lock)) if !lock.entries.is_empty() => {
             if lock.os != std::env::consts::OS || lock.arch != std::env::consts::ARCH {
                 eprintln!(
@@ -250,8 +224,12 @@ pub fn try_run_embedded() -> Option<bool> {
         ffi_search_paths.push(parent.join("lib"));
     }
 
+    if let Err(msg) = prepare(&loaded.native_mir) {
+        eprintln!("error: {msg}");
+        exit(1);
+    }
     let panicked =
-        execute_archived_program(&loaded, Some(exe.as_path()), ffi_search_paths, dload_gate);
+        execute_archived_program(&loaded, Some(exe.as_path()), ffi_search_paths, dload_gate, host_natives);
     Some(panicked)
 }
 
@@ -383,19 +361,10 @@ pub fn is_coil_embed_runner(bytes: &[u8]) -> bool {
     bytes.windows(marker.len()).any(|w| w == marker.as_slice())
 }
 
-/// Stdout/stderr writer selection for SARIF / LSP / pretty reports.
-pub fn writer_for_format(pretty_on_stderr: bool) -> Box<dyn Write + Send> {
-    if pretty_on_stderr {
-        Box::new(std::io::stderr())
-    } else {
-        Box::new(std::io::stdout())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::Instruction;
+    
 
     #[test]
     fn sibling_bin_uses_host_exe_suffix() {
@@ -419,84 +388,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn archive_stack_grows_for_dense_recursive_call() {
-        let seek = Byte::new(Instruction::Seek).with_operand_u32(25);
-        let call = Byte::new(Instruction::CALL);
-        assert_eq!(
-            archive_operand_slots(&[seek, call]),
-            machine::MAX_OPERAND_STACK_SLOTS
-        );
-        assert_eq!(
-            archive_operand_slots(&[seek]),
-            machine::DEFAULT_OPERAND_STACK_SLOTS
-        );
-    }
-
-    #[test]
-    fn execute_uses_persisted_operand_stack_slots() {
-        let seek = Byte::new(Instruction::Seek).with_operand_u32(25);
-        let call = Byte::new(Instruction::CALL);
-        let loaded = LoadedArchive {
-            bytecode: vec![seek, call, Byte::new(Instruction::HALT)],
-            constants: vec![],
-            strings: vec![],
-            static_slots: 0,
-            debug: ProgramDebug::default(),
-            struct_layouts: vec![],
-            operand_stack_slots: Some(512),
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-        };
-        assert_eq!(
-            resolve_archive_operand_slots(loaded.operand_stack_slots, &loaded.bytecode),
-            512
-        );
-        assert_eq!(
-            resolve_archive_operand_slots(None, &loaded.bytecode),
-            machine::MAX_OPERAND_STACK_SLOTS as u32
-        );
-    }
-
-    #[test]
-    fn load_persists_stack_maps() {
-        use common::{ArchivedProgram, FrameStackMap, SlotMap, ARCHIVE_VERSION};
-        use rkyv::rancor::Error;
-
-        let maps = vec![FrameStackMap {
-            entry_pc: 0,
-            end_pc: 4,
-            frame_slots: vec![0],
-            safepoints: vec![SlotMap {
-                pc: 0,
-                slots: vec![0],
-            }],
-        }];
-        let program = ArchivedProgram {
-            version: ARCHIVE_VERSION,
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: maps.clone(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
-        let loaded = load_archive_bytes(bytes.as_slice()).expect("load");
-        assert_eq!(loaded.stack_maps, maps);
-        assert_eq!(loaded.operand_stack_slots, Some(256));
-    }
 }

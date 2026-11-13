@@ -183,7 +183,7 @@ impl MirCmpOp {
             (Self::Gt, true) => "fcmp.ogt",
             (Self::Ge, true) => "fcmp.oge",
             (Self::Eq, true) => "fcmp.oeq",
-            (Self::Ne, true) => "fcmp.one",
+            (Self::Ne, true) => "fcmp.une",
         }
     }
 
@@ -201,7 +201,7 @@ impl MirCmpOp {
             "fcmp.ogt" => (Self::Gt, true),
             "fcmp.oge" => (Self::Ge, true),
             "fcmp.oeq" => (Self::Eq, true),
-            "fcmp.one" => (Self::Ne, true),
+            "fcmp.une" => (Self::Ne, true),
             _ => return None,
         })
     }
@@ -311,6 +311,7 @@ impl LaneExpr {
         Self::not(self.clone()) == *other || Self::not(other.clone()) == *self
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn not(a: Self) -> Self {
         match a {
             Self::Const(b) => Self::Const(!b),
@@ -327,7 +328,7 @@ impl LaneExpr {
                 Self::Cmp { op, lhs, rhs }
             }
             // De Morgan when it costs no nodes: `!(a | b)` with compares
-            // on both sides is `!a & !b`, the shape the VM's fast scans
+            // on both sides is `!a & !b`, the shape the runtime's fast scans
             // match (a threaded `&&` chain's mask, #1976).
             Self::And(x, y) => {
                 let size = 1 + x.size() + y.size();
@@ -457,6 +458,9 @@ pub enum MirInst {
     /// edge). I6 types other natives as barriers; impure never hoists.
     HostInvoke {
         dest: ValueId,
+        /// A two-word result (`common::HOST_ENUM_LAYOUT_PAIR`): its tag,
+        /// `dest` its payload word.
+        dest_hi: Option<ValueId>,
         native_id: u16,
         /// `common::HOST_ENUM_LAYOUT_*` packed on reconstruct.
         layout: u8,
@@ -464,7 +468,7 @@ pub enum MirInst {
     },
     /// An FFI opcode (`extern` calls and `dload` / `declare` / `invoke`):
     /// `args` are its stack operands in push order, `operand` the opcode's
-    /// own; `dest` is the boxed `Result` the VM pushes. A call that may run
+    /// own; `dest` is the boxed `Result` the runtime pushes. A call that may run
     /// a callback: an effect barrier, as an impure HostInvoke; dense refuses.
     Ffi {
         dest: ValueId,
@@ -472,14 +476,14 @@ pub enum MirInst {
         operand: u32,
         args: Vec<ValueId>,
     },
-    /// Dense / LIR `CALL` (COI-291 / B3). Args stay on the operand stack
+    /// `CALL` (COI-291 / B3). Args stay on the operand stack
     /// (LOAD / BinSlotImm convoy). One-word `Entry` uses `dest` only;
     /// two-slot `[payload, tag]` sets `dest_hi`. `STORE` only when a dest
     /// is live in a slot. Same bits as the callee's slots `0..n`.
     Call {
         dest: ValueId,
         dest_hi: Option<ValueId>,
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         args: Vec<ValueId>,
     },
     /// `CallIndirect n`: call the function value `callee` (an `ObjFn` /
@@ -494,6 +498,12 @@ pub enum MirInst {
         /// How many of `args` (the last ones) are instance dictionaries a
         /// `PolyFn` callee takes after its arguments.
         dicts: u32,
+        /// A two-word result (`Option<int>`, `(int, int)`): its second
+        /// word, and `unpair`, a body taking the result's one word (its
+        /// box) and returning its two words. An engine enters the
+        /// callee's two-word twin ([`super::MirFunc::pair_twin`]) when it
+        /// has one; otherwise it calls the callee and `unpair` on the word.
+        pair: Option<(ValueId, crate::bodies::Label)>,
     },
     /// Taken-edge / last-arm payload of [`Terminator::JumpIfMatch`] or
     /// `Unpack` (I2 / D3). `index` is the declaration-order payload word.
@@ -504,12 +514,12 @@ pub enum MirInst {
     },
     /// Heap `LoadField` of slot `index` on an escaping object (D1 maps).
     /// `object` is [`MirTy::HeapRef`]. Dest is the field word (not SROA).
-    HeapFieldLoad {
+    ProductLoad {
         dest: ValueId,
         object: ValueId,
-        index: u32,
+        slot: u32,
     },
-    /// Heap `SetField` of slot `index`. Dest is the stored value (VM
+    /// Heap `SetField` of slot `index`. Dest is the stored value (runtime
     /// leaves it TOS).
     HeapFieldStore {
         dest: ValueId,
@@ -526,7 +536,7 @@ pub enum MirInst {
         index: ValueId,
         unchecked: bool,
     },
-    /// Heap index store (S3). Dest is the stored value (VM leaves it TOS).
+    /// Heap index store (S3). Dest is the stored value (runtime leaves it TOS).
     StoreIndex {
         dest: ValueId,
         array: ValueId,
@@ -547,7 +557,7 @@ pub enum MirInst {
         send: Option<ValueId>,
     },
     /// `YieldCoro` (or `YieldFromCoro` when `from`): suspend the running
-    /// coroutine with `value` (a sub-coroutine handle for `from`). The VM
+    /// coroutine with `value` (a sub-coroutine handle for `from`). The runtime
     /// saves the frame as it stands and resumes at the next instruction,
     /// so this is one instruction, and a GC safepoint as a call is: every
     /// live heap word stays in the frame. With `receive`, dest is the word
@@ -609,16 +619,51 @@ pub enum MirInst {
         dest: ValueId,
         value: ValueId,
     },
-    /// The field store a panic in the code after this owes the heap: a
-    /// field kept in a register across a loop ([`super::promote_fields`])
-    /// holds `value` here, where the source had stored it. A panic between
-    /// this and the next label stores it before unwinding. Dest is a
-    /// `bool` unit token. Emits nothing in line.
-    PanicStore {
+    /// Count one more run of coverage probe `id`
+    /// ([`super::coverage::instrument`]). Only a capture holds one, so the
+    /// code tiers never see it. Dest is a `bool` unit token.
+    Probe {
         dest: ValueId,
-        object: ValueId,
-        value: ValueId,
-        index: u32,
+        id: u32,
+    },
+    /// Element `index` of a lane array (two words per element): its first
+    /// word in `dest`, its second (an enum's tag) in `dest_hi`. Out of
+    /// bounds panics, as [`Self::Index`] does.
+    LaneIndex {
+        dest: ValueId,
+        dest_hi: ValueId,
+        array: ValueId,
+        index: ValueId,
+    },
+    /// Store `lo` and `hi` as element `index` of a lane array (or, on an
+    /// array of one word per element, the element boxed as `shape` says).
+    /// Dest is a `bool` unit token.
+    LaneStore {
+        dest: ValueId,
+        array: ValueId,
+        index: ValueId,
+        lo: ValueId,
+        hi: ValueId,
+        shape: MirLaneShape,
+    },
+    /// Append the element `[lo, hi]` to a lane array in place (boxed as
+    /// `shape` says on an array of one word per element). Dest is the same
+    /// `HeapRef` identity; a GC safepoint like [`Self::ArrayPush`].
+    LanePush {
+        dest: ValueId,
+        array: ValueId,
+        lo: ValueId,
+        hi: ValueId,
+        shape: MirLaneShape,
+    },
+    /// Turn a lane array into one word per element in place, each element
+    /// boxed as `shape` says, before code that reads it one word per
+    /// element; an array that already is one does not change. Dest is the
+    /// same `HeapRef` identity; a GC safepoint like [`Self::ArrayPush`].
+    LanesToWords {
+        dest: ValueId,
+        array: ValueId,
+        shape: MirLaneShape,
     },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
     /// Always a GC safepoint; pair with [`Self::GcBarrier`].
@@ -634,6 +679,9 @@ pub enum MirInst {
     Alloc {
         dest: ValueId,
         kind: MirAllocKind,
+        /// The object's words in declaration order: an array's elements,
+        /// a tuple's items, a variant's payload, a function value's
+        /// captures then filled parameters.
         elems: Vec<ValueId>,
         /// Construction word kinds from the source types, as HIR emission
         /// stamps them: an array's element kind (`MakeArrayK`), or a tuple's
@@ -650,15 +698,6 @@ pub enum MirInst {
         kind: MirGcKind,
         roots: Vec<ValueId>,
     },
-    /// Debugger stop / deopt boundary (I7). Dest is a `bool` token.
-    /// Sidecar only — emit skips this inst. Names the edge a later
-    /// native tier must leave or pause at. Only tests build one today.
-    #[cfg_attr(not(test), allow(dead_code))]
-    Deopt {
-        dest: ValueId,
-        kind: MirDeoptKind,
-        loc: common::DebugLoc,
-    },
     /// Const string-table push (I4 / Q9 R1). Dest is [`MirTy::HeapRef`].
     String {
         dest: ValueId,
@@ -669,7 +708,7 @@ pub enum MirInst {
     /// [`MirTy::I64`].
     CodePtr {
         dest: ValueId,
-        target: crate::il::Label,
+        target: crate::bodies::Label,
     },
     /// `PRINT` (I4 / Q9 R1). Dest is a `bool` unit token. IO barrier.
     Print {
@@ -724,10 +763,10 @@ pub enum MirInst {
         unique: bool,
         field: Option<u32>,
     },
-    /// String `==` (`!=` when `ne`): VM `EQ` / `NEQ`, which compare strings
+    /// String `==` (`!=` when `ne`): structural equality, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
     /// [`MirTy::HeapRef`] words. Also a user type's `==` with no `Eq`
-    /// instance, which the VM compares structurally: that reads mutable
+    /// instance, which the runtime compares structurally: that reads mutable
     /// objects, so it is never CSE'd or hoisted (it is not, as above).
     StrEq {
         dest: ValueId,
@@ -756,7 +795,7 @@ pub enum MirInst {
         expr: LaneExpr,
     },
     /// A counted map or reduce loop over 8 lanes at a time (archive 6.2,
-    /// VM `VLoop`): `kind` for `p = from, from + 8, ..` below `to`
+    /// the vector loop): `kind` for `p = from, from + 8, ..` below `to`
     /// (`to - from` a multiple of 8, every read and write in range). A
     /// reduce's `dest` is the accumulator; a store loop's is unused.
     /// `pos` (a second dest) holds the block position while the body
@@ -775,7 +814,7 @@ pub enum MirInst {
 /// `p`. Kinds are `common::simd` / `dense` codes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VecExpr {
-    /// An invariant `i64` / `f64` in every lane (`ty` is `dense::TY_*`).
+    /// An invariant `i64` / `f64` in every lane (`ty` is the lane type code).
     Splat { v: ValueId, ty: u8 },
     /// The loop index `p + k` in lane `k` (an int lane).
     Index,
@@ -858,7 +897,7 @@ impl VecExpr {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum VecLoopKind {
     /// `dest = init`, then `dest = dest ⊕ term` lane by lane, left to
-    /// right (`fold` is `simd::REDUCE_*`, `ty` `dense::TY_*`). `stores`
+    /// right (`fold` is `simd::REDUCE_*`, `ty` the lane type code). `stores`
     /// (as in [`Self::Store`]) run first in each block: a loop that both
     /// maps and folds.
     Reduce { init: ValueId, ty: u8, fold: u8, term: VecExpr, stores: Vec<(ValueId, ValueId, u8, VecExpr)> },
@@ -950,20 +989,38 @@ impl MirFfiOp {
         }
     }
 
-    pub fn instruction(self) -> common::Instruction {
+    /// What the runtime's `coil_native_ffi` calls the op.
+    pub fn code(self) -> u8 {
         match self {
-            Self::Load => common::Instruction::FfiLoad,
-            Self::Declare => common::Instruction::DeclareFFI,
-            Self::Invoke => common::Instruction::FfiInvoke,
+            Self::Load => common::FFI_OP_LOAD,
+            Self::Declare => common::FFI_OP_DECLARE,
+            Self::Invoke => common::FFI_OP_INVOKE,
         }
     }
+}
+
+/// How a two-word element of a lane array is boxed as one word: an enum
+/// variant object (tag `t` carries its payload word when bit `t` of
+/// `payload_mask` is set, the empty tuple when bit `t` of `unit_mask` is),
+/// or a two-item tuple when `payload_mask` is `0`. `tag_mask` is the lane
+/// array's: the tags under which the first word is a heap reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
+pub struct MirLaneShape {
+    pub tag_mask: u64,
+    pub payload_mask: u64,
+    pub unit_mask: u64,
 }
 
 /// Heap object constructed by [`MirInst::Alloc`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirAllocKind {
     Array,
-    Tuple,
+    /// A lane array of two-word elements, `elems` their words in order
+    /// (`ObjArray::from_lanes`); lane 0 is a heap reference under the tags
+    /// set in `tag_mask`.
+    Lanes {
+        tag_mask: u64,
+    },
     /// `InitTyped` (`type_id`, `nfields`). Heap fields are SSA for maps (D1);
     /// dense Object `DenseMakeObject` is D2.
     Object {
@@ -981,7 +1038,7 @@ pub enum MirAllocKind {
     },
     /// `MakeCoro`: args → coroutine handle (C2b). Target is the async body.
     Coro {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
     },
     /// `MakeFn`: a function value of the code at `target`, elems its
     /// captures then its filled parameters (the `Const mask` fill mask and
@@ -989,13 +1046,13 @@ pub enum MirAllocKind {
     /// operand; `mask` has a bit per filled parameter (0: none, a closure
     /// or a named function's value; a prefix: a partial application).
     Fn {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         operand: u32,
         mask: u32,
     },
     /// `MakePolyFn`: a generic function's value with no dictionaries.
     PolyFn {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
     },
     /// `MakePolyFnCapture`: a generic function's value carrying its
     /// instance dictionaries, the elems (a `0` word for evidence the call
@@ -1003,17 +1060,21 @@ pub enum MirAllocKind {
     /// its declared parameter count (0: unrecorded), so a call given more
     /// hands the rest to its result (#1589).
     PolyFnCapture {
-        target: crate::il::Label,
+        target: crate::bodies::Label,
         params: u32,
     },
 }
 
 impl MirAllocKind {
+    /// A tuple: a product, an enum object of [`common::PRODUCT_TAG`].
+    pub const TUPLE: Self = Self::Enum { tag: common::PRODUCT_TAG };
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Array => "array",
-            Self::Tuple => "tuple",
+            Self::Lanes { .. } => "lanes",
             Self::Object { .. } => "object",
+            Self::TUPLE => "tuple",
             Self::Enum { .. } => "enum",
             Self::DropEnum { .. } => "dropenum",
             Self::Coro { .. } => "coro",
@@ -1046,32 +1107,6 @@ impl MirGcKind {
     }
 }
 
-/// Stop / leave-specialized edge (I7). Not a bytecode opcode.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum MirDeoptKind {
-    /// Interpreter may pause here (line / `stepi` boundary).
-    Stop,
-    /// Leave specialized or native code; resume fuse-IL at this edge.
-    Deopt,
-}
-
-impl MirDeoptKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Stop => "stop",
-            Self::Deopt => "deopt",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "stop" => Self::Stop,
-            "deopt" => Self::Deopt,
-            _ => return None,
-        })
-    }
-}
-
 impl MirInst {
     pub fn dest(&self) -> ValueId {
         match *self {
@@ -1086,7 +1121,7 @@ impl MirInst {
             | Self::Call { dest, .. }
             | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
-            | Self::HeapFieldLoad { dest, .. }
+            | Self::ProductLoad { dest, .. }
             | Self::HeapFieldStore { dest, .. }
             | Self::Index { dest, .. }
             | Self::StoreIndex { dest, .. }
@@ -1100,11 +1135,64 @@ impl MirInst {
             | Self::HomeStore { dest, .. }
             | Self::ClearWord { dest, .. }
             | Self::KeepAlive { dest, .. }
-            | Self::PanicStore { dest, .. }
+            | Self::Probe { dest, .. }
             | Self::ArrayPush { dest, .. }
+            | Self::LaneIndex { dest, .. }
+            | Self::LaneStore { dest, .. }
+            | Self::LanePush { dest, .. }
+            | Self::LanesToWords { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
-            | Self::Deopt { dest, .. }
+            | Self::String { dest, .. }
+            | Self::CodePtr { dest, .. }
+            | Self::Print { dest, .. }
+            | Self::FreeEarly { dest, .. }
+            | Self::Panic { dest, .. }
+            | Self::Format { dest, .. }
+            | Self::Stringify { dest, .. }
+            | Self::Cow { dest, .. }
+            | Self::StrEq { dest, .. }
+            | Self::ByteScan { dest, .. }
+            | Self::VecLoop { dest, .. } => dest,
+        }
+    }
+
+    /// [`Self::dest`], to rename it (a cloned instruction's).
+    pub fn dest_mut(&mut self) -> &mut ValueId {
+        match self {
+            Self::Const { dest, .. }
+            | Self::Bin { dest, .. }
+            | Self::Cmp { dest, .. }
+            | Self::Unary { dest, .. }
+            | Self::Cast { dest, .. }
+            | Self::Phi { dest, .. }
+            | Self::HostInvoke { dest, .. }
+            | Self::Ffi { dest, .. }
+            | Self::Call { dest, .. }
+            | Self::CallIndirect { dest, .. }
+            | Self::MatchPayload { dest, .. }
+            | Self::ProductLoad { dest, .. }
+            | Self::HeapFieldStore { dest, .. }
+            | Self::Index { dest, .. }
+            | Self::StoreIndex { dest, .. }
+            | Self::ArrayLen { dest, .. }
+            | Self::ResumeCoro { dest, .. }
+            | Self::Yield { dest, .. }
+            | Self::DoneCoro { dest, .. }
+            | Self::LoadStatic { dest, .. }
+            | Self::StoreStatic { dest, .. }
+            | Self::HomeLoad { dest, .. }
+            | Self::HomeStore { dest, .. }
+            | Self::ClearWord { dest, .. }
+            | Self::KeepAlive { dest, .. }
+            | Self::Probe { dest, .. }
+            | Self::ArrayPush { dest, .. }
+            | Self::LaneIndex { dest, .. }
+            | Self::LaneStore { dest, .. }
+            | Self::LanePush { dest, .. }
+            | Self::LanesToWords { dest, .. }
+            | Self::Alloc { dest, .. }
+            | Self::GcBarrier { dest, .. }
             | Self::String { dest, .. }
             | Self::CodePtr { dest, .. }
             | Self::Print { dest, .. }
@@ -1126,27 +1214,12 @@ impl MirInst {
                 dest_hi: Some(h), ..
             } => Some(h),
             Self::VecLoop { pos: Some(p), .. } => Some(p),
+            Self::CallIndirect { pair: Some((h, _)), .. } => Some(h),
+            Self::HostInvoke { dest_hi: Some(h), .. } => Some(h),
+            Self::LaneIndex { dest_hi, .. } => Some(dest_hi),
             _ => None,
         };
         std::iter::once(self.dest()).chain(hi)
-    }
-
-    /// Allocation or GC safepoint — specialize / native must not cross.
-    pub fn is_gc_edge(&self) -> bool {
-        matches!(
-            self,
-            Self::Alloc { .. }
-                | Self::ArrayPush { .. }
-                | Self::Format { .. }
-                | Self::Stringify { .. }
-                | Self::Cow { .. }
-                | Self::GcBarrier { .. }
-        )
-    }
-
-    /// Explicit I7 stop / deopt inst.
-    pub fn is_deopt_edge(&self) -> bool {
-        matches!(self, Self::Deopt { .. })
     }
 
     pub fn is_phi(&self) -> bool {
@@ -1155,15 +1228,15 @@ impl MirInst {
 
     pub fn operands(&self) -> Vec<ValueId> {
         match self {
-            Self::Const { .. } => Vec::new(),
+            Self::Const { .. } | Self::Probe { .. } => Vec::new(),
             Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } | Self::StrEq { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
             Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => args.clone(),
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
-            Self::HeapFieldLoad { object, .. } => vec![*object],
-            Self::HeapFieldStore { object, value, .. } | Self::PanicStore { object, value, .. } => vec![*object, *value],
+            Self::ProductLoad { object, .. } => vec![*object],
+            Self::HeapFieldStore { object, value, .. } => vec![*object, *value],
             Self::Index { array, index, .. } => vec![*array, *index],
             Self::StoreIndex {
                 array,
@@ -1184,9 +1257,13 @@ impl MirInst {
             Self::LoadStatic { .. } | Self::HomeLoad { .. } => Vec::new(),
             Self::StoreStatic { value, .. } | Self::HomeStore { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => vec![*value],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
+            Self::LaneIndex { array, index, .. } => vec![*array, *index],
+            Self::LaneStore { array, index, lo, hi, .. } => vec![*array, *index, *lo, *hi],
+            Self::LanePush { array, lo, hi, .. } => vec![*array, *lo, *hi],
+            Self::LanesToWords { array, .. } => vec![*array],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
-            Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
+            Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
@@ -1204,7 +1281,7 @@ impl MirInst {
 
     pub fn rewrite_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         match self {
-            Self::Const { .. } => {}
+            Self::Const { .. } | Self::Probe { .. } => {}
             Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } | Self::StrEq { lhs, rhs, .. } => {
                 *lhs = map(*lhs);
                 *rhs = map(*rhs);
@@ -1227,8 +1304,8 @@ impl MirInst {
                 *callee = map(*callee);
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
-            Self::HeapFieldLoad { object, .. } => *object = map(*object),
-            Self::HeapFieldStore { object, value, .. } | Self::PanicStore { object, value, .. } => {
+            Self::ProductLoad { object, .. } => *object = map(*object),
+            Self::HeapFieldStore { object, value, .. } => {
                 *object = map(*object);
                 *value = map(*value);
             }
@@ -1261,6 +1338,22 @@ impl MirInst {
                 *array = map(*array);
                 *value = map(*value);
             }
+            Self::LaneIndex { array, index, .. } => {
+                *array = map(*array);
+                *index = map(*index);
+            }
+            Self::LaneStore { array, index, lo, hi, .. } => {
+                *array = map(*array);
+                *index = map(*index);
+                *lo = map(*lo);
+                *hi = map(*hi);
+            }
+            Self::LanePush { array, lo, hi, .. } => {
+                *array = map(*array);
+                *lo = map(*lo);
+                *hi = map(*hi);
+            }
+            Self::LanesToWords { array, .. } => *array = map(*array),
             Self::Alloc { elems, .. } => {
                 for v in elems.iter_mut() {
                     *v = map(*v);
@@ -1271,7 +1364,7 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::Deopt { .. } | Self::String { .. } | Self::CodePtr { .. } => {}
+            Self::String { .. } | Self::CodePtr { .. } => {}
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);
@@ -1315,7 +1408,7 @@ pub enum Terminator {
     /// Taken pops the scrutinee and binds `payloads` (declaration order;
     /// last word TOS), including boxed-overlap `JumpIfMatch` arity 0 with
     /// a unary payload. Miss leaves the scrutinee on the stack (same as
-    /// bytecode `JumpIfMatch`).
+    /// code `JumpIfMatch`).
     JumpIfMatch {
         scrutinee: ValueId,
         tag: u32,
@@ -1355,6 +1448,29 @@ impl Terminator {
                 taken, not_taken, ..
             } => vec![taken, not_taken],
             Self::Return { .. } | Self::Unreachable => Vec::new(),
+        }
+    }
+
+    /// The values this terminator reads: a branch's condition, a match's
+    /// scrutinee, the returned words. Not a match's [`Self::binds`].
+    pub fn uses(&self) -> impl Iterator<Item = ValueId> {
+        let words = match *self {
+            Self::Br { cond, .. } => [Some(cond), None],
+            Self::JumpIfMatch { scrutinee, .. } => [Some(scrutinee), None],
+            Self::Return { lo, hi } => [lo, hi],
+            Self::Jump { .. } | Self::Unreachable => [None, None],
+        };
+        words.into_iter().flatten()
+    }
+
+    /// The payload words a `JumpIfMatch` binds on its taken edge. Each is
+    /// the dest of a `MatchPayload` in the same block, which the engines
+    /// skip: the terminator writes the word, so it is not live before it.
+    /// A pass that deletes dead code still keeps those `MatchPayload`s.
+    pub fn binds(&self) -> &[ValueId] {
+        match self {
+            Self::JumpIfMatch { payloads, .. } => payloads,
+            _ => &[],
         }
     }
 
@@ -1413,5 +1529,29 @@ mod tests {
         assert_eq!(LaneExpr::and(x2, LaneExpr::and(ne(3), LaneExpr::not(ne(1)))), LaneExpr::Const(false));
         // Nothing shared: left as it is.
         assert_eq!(LaneExpr::or(ne(0), ne(1)).size(), 3);
+    }
+
+    /// A match reads its scrutinee; its payloads are words it binds on
+    /// the taken edge, not reads.
+    #[test]
+    fn terminator_uses_and_binds() {
+        let (s, p, q) = (ValueId(1), ValueId(2), ValueId(3));
+        let m = Terminator::JumpIfMatch { scrutinee: s, tag: 1, payloads: vec![p, q], taken: BlockId(1), not_taken: BlockId(2) };
+        assert_eq!(m.uses().collect::<Vec<_>>(), [s]);
+        assert_eq!(m.binds(), [p, q]);
+        let r = Terminator::Return { lo: Some(p), hi: Some(q) };
+        assert_eq!(r.uses().collect::<Vec<_>>(), [p, q]);
+        assert!(r.binds().is_empty());
+        assert_eq!(Terminator::Jump { dest: BlockId(0) }.uses().count(), 0);
+    }
+
+    /// Both engines compute float `!=` unordered (`NaN != x` holds), as
+    /// Rust's `!=` and Cranelift's `FloatCC::NotEqual` do: the label says
+    /// so, and the text parser reads it back.
+    #[test]
+    fn float_ne_is_labelled_unordered() {
+        let label = MirCmpOp::Ne.as_str(true);
+        assert!(label.starts_with("fcmp.u"), "{label}");
+        assert_eq!(MirCmpOp::parse(label), Some((MirCmpOp::Ne, true)));
     }
 }

@@ -1,10 +1,15 @@
 //! Print / parse a small CLIF-like text form for round-trip tests.
 
 use super::func::{MirBlock, MirFunc};
-use super::inst::{MirAllocKind, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator};
+use super::inst::{MirAllocKind, MirCastKind, MirConst, MirInst, MirLaneShape, MirUnaryOp, Terminator};
 #[cfg(test)]
-use super::inst::{BlockId, MirBinOp, MirCmpOp, MirDeoptKind, MirGcKind, ValueId};
+use super::inst::{BlockId, MirBinOp, MirCmpOp, MirGcKind, ValueId};
 use super::ty::MirTy;
+
+/// A [`MirLaneShape`] as the text form writes it.
+fn lane_shape(s: &MirLaneShape) -> String {
+    format!("{}/{}/{}", s.tag_mask, s.payload_mask, s.unit_mask)
+}
 
 impl std::fmt::Display for MirFunc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -150,6 +155,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         }
         MirInst::HostInvoke {
             dest,
+            dest_hi,
             native_id,
             layout,
             args,
@@ -157,10 +163,15 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             let name = super::host_allow::host_edge_spec(*native_id)
                 .map(|s| s.name)
                 .unwrap_or("unknown");
-            if *layout == 0 {
-                write!(f, "{dest} = host.{name}")?;
+            if let Some(hi) = dest_hi {
+                write!(f, "{dest}, {hi} = ")?;
             } else {
-                write!(f, "{dest} = host.{name}.L{layout}")?;
+                write!(f, "{dest} = ")?;
+            }
+            if *layout == 0 {
+                write!(f, "host.{name}")?;
+            } else {
+                write!(f, "host.{name}.L{layout}")?;
             }
             for (i, a) in args.iter().enumerate() {
                 if i == 0 {
@@ -198,13 +209,19 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::CallIndirect { dest, callee, args, dicts } => {
-            write!(f, "{dest} = callind.{} {callee}", func.ty(*dest))?;
+        MirInst::CallIndirect { dest, callee, args, dicts, pair } => {
+            match pair {
+                Some((hi, _)) => write!(f, "{dest}, {hi} = callind.{} {callee}", func.ty(*dest))?,
+                None => write!(f, "{dest} = callind.{} {callee}", func.ty(*dest))?,
+            }
             for a in args {
                 write!(f, ", {a}")?;
             }
             if *dicts != 0 {
                 write!(f, " dicts {dicts}")?;
+            }
+            if let Some((_, unpair)) = pair {
+                write!(f, " unpair {}", unpair.0)?;
             }
             Ok(())
         }
@@ -213,7 +230,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             scrutinee,
             index,
         } => write!(f, "{dest} = matchpayload {scrutinee}, {index}"),
-        MirInst::HeapFieldLoad { dest, object, index } => write!(f, "{dest} = heaploadfield {object}, {index}"),
+        MirInst::ProductLoad { dest, object, slot } => write!(f, "{dest} = productload {object}, {slot}"),
         MirInst::HeapFieldStore {
             dest,
             object,
@@ -244,6 +261,14 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             write!(f, "{dest} = {name} {array}, {index}, {value}")
         }
         MirInst::ArrayLen { dest, array } => write!(f, "{dest} = arraylen {array}"),
+        MirInst::LaneIndex { dest, dest_hi, array, index } => {
+            write!(f, "{dest}, {dest_hi} = laneindex.{}.{} {array}, {index}", func.ty(*dest), func.ty(*dest_hi))
+        }
+        MirInst::LaneStore { dest, array, index, lo, hi, shape } => {
+            write!(f, "{dest} = lanestore {array}, {index}, {lo}, {hi}, {}", lane_shape(shape))
+        }
+        MirInst::LanePush { dest, array, lo, hi, shape } => write!(f, "{dest} = lanepush {array}, {lo}, {hi}, {}", lane_shape(shape)),
+        MirInst::LanesToWords { dest, array, shape } => write!(f, "{dest} = lanestowords {array}, {}", lane_shape(shape)),
         MirInst::ResumeCoro {
             dest,
             handle,
@@ -267,7 +292,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::HomeStore { dest, home, value } => write!(f, "{dest} = homestore {home}, {value}"),
         MirInst::ClearWord { dest, value } => write!(f, "{dest} = clearword {value}"),
         MirInst::KeepAlive { dest, value } => write!(f, "{dest} = keepalive {value}"),
-        MirInst::PanicStore { dest, object, value, index } => write!(f, "{dest} = panicstore {object}, {value}, {index}"),
+        MirInst::Probe { dest, id } => write!(f, "{dest} = probe {id}"),
         MirInst::ArrayPush {
             dest,
             array,
@@ -282,6 +307,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                 MirAllocKind::Object { type_id, nfields } => {
                     write!(f, " {type_id}, {nfields}")?;
                 }
+                MirAllocKind::TUPLE => {}
                 MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
                 MirAllocKind::DropEnum { tag, type_id } => write!(f, " {tag}, {type_id}")?,
                 MirAllocKind::Coro { target } => write!(f, " {}", target.0)?,
@@ -301,11 +327,12 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                         write!(f, ", params {params}")?;
                     }
                 }
-                MirAllocKind::Array | MirAllocKind::Tuple => {}
+                MirAllocKind::Lanes { tag_mask } => write!(f, " {tag_mask}")?,
+                MirAllocKind::Array => {}
             }
             for (i, e) in elems.iter().enumerate() {
                 if i == 0
-                    && matches!(kind, MirAllocKind::Array | MirAllocKind::Tuple)
+                    && matches!(*kind, MirAllocKind::Array | MirAllocKind::TUPLE)
                 {
                     write!(f, " {e}")?;
                 } else {
@@ -325,7 +352,6 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::Deopt { dest, kind, .. } => write!(f, "{dest} = deopt.{}", kind.as_str()),
         MirInst::String { dest, idx } => write!(f, "{dest} = string {idx}"),
         MirInst::CodePtr { dest, target } => write!(f, "{dest} = codeptr {}", target.0),
         MirInst::Print { dest, src } => write!(f, "{dest} = print {src}"),
@@ -460,7 +486,19 @@ impl<'a> Parser<'a> {
         };
         self.expect('=')?;
         let op = self.ident_dots()?;
-        if dest_hi.is_some() && !op.starts_with("call.") {
+        if let Some(rest) = op.strip_prefix("laneindex.") {
+            let (lo_s, hi_s) = rest.split_once('.').ok_or_else(|| ParseError(op.clone()))?;
+            let lo = MirTy::parse(lo_s).ok_or_else(|| ParseError(op.clone()))?;
+            let hi_ty = MirTy::parse(hi_s).ok_or_else(|| ParseError(op.clone()))?;
+            let hi = dest_hi.ok_or_else(|| ParseError("laneindex takes two dests".into()))?;
+            let array = self.value()?;
+            self.expect(',')?;
+            let index = self.value()?;
+            ensure_ty(types, dest, lo);
+            ensure_ty(types, hi, hi_ty);
+            return Ok(MirInst::LaneIndex { dest, dest_hi: hi, array, index });
+        }
+        if dest_hi.is_some() && !op.starts_with("call.") && !op.starts_with("callind.") && !op.starts_with("host.") {
             return Err(ParseError("pair dest is call-only".into()));
         }
         if let Some(rest) = op.strip_prefix("iconst.") {
@@ -540,8 +578,7 @@ impl<'a> Parser<'a> {
         }
         if op == "lnot"
             || op == "matchpayload"
-            || op == "heapgetfield"
-            || op == "heaploadfield"
+            || op == "productload"
             || op == "heapsetfield"
             || op == "heapsetfield.slot"
         {
@@ -565,12 +602,12 @@ impl<'a> Parser<'a> {
                     index,
                 });
             }
-            if op == "heaploadfield" {
+            if op == "productload" {
                 let object = self.value()?;
                 self.expect(',')?;
                 let index = self.uint()? as u32;
                 ensure_ty(types, dest, MirTy::I64);
-                return Ok(MirInst::HeapFieldLoad { dest, object, index });
+                return Ok(MirInst::ProductLoad { dest, object, slot: index });
             }
             if op == "heapsetfield.slot" {
                 let object = self.value()?;
@@ -649,6 +686,11 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::DoneCoro { dest, handle });
         }
+        if op == "probe" {
+            let id = self.uint()? as u32;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::Probe { dest, id });
+        }
         if op == "loadstatic" {
             let slot = self.uint()? as u32;
             ensure_ty(types, dest, MirTy::I64);
@@ -666,19 +708,43 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::ClearWord { dest, value });
         }
-        if op == "panicstore" {
-            let object = self.value()?;
-            self.expect(',')?;
-            let value = self.value()?;
-            self.expect(',')?;
-            let index = self.uint()? as u32;
-            ensure_ty(types, dest, MirTy::Bool);
-            return Ok(MirInst::PanicStore { dest, object, value, index });
-        }
         if op == "keepalive" {
             let value = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::KeepAlive { dest, value });
+        }
+        if op == "lanestore" || op == "lanepush" {
+            let array = self.value()?;
+            self.expect(',')?;
+            let index = if op == "lanestore" {
+                let i = self.value()?;
+                self.expect(',')?;
+                Some(i)
+            } else {
+                None
+            };
+            let lo = self.value()?;
+            self.expect(',')?;
+            let hi = self.value()?;
+            self.expect(',')?;
+            let shape = self.lane_shape()?;
+            return Ok(match index {
+                Some(index) => {
+                    ensure_ty(types, dest, MirTy::Bool);
+                    MirInst::LaneStore { dest, array, index, lo, hi, shape }
+                }
+                None => {
+                    ensure_ty(types, dest, MirTy::HeapRef);
+                    MirInst::LanePush { dest, array, lo, hi, shape }
+                }
+            });
+        }
+        if op == "lanestowords" {
+            let array = self.value()?;
+            self.expect(',')?;
+            let shape = self.lane_shape()?;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::LanesToWords { dest, array, shape });
         }
         if op == "arraypush" {
             let array = self.value()?;
@@ -798,8 +864,12 @@ impl<'a> Parser<'a> {
                 }
             }
             ensure_ty(types, dest, spec.ret);
+            if let Some(hi) = dest_hi {
+                ensure_ty(types, hi, MirTy::I64);
+            }
             return Ok(MirInst::HostInvoke {
                 dest,
+                dest_hi,
                 native_id: spec.id,
                 layout,
                 args,
@@ -813,12 +883,21 @@ impl<'a> Parser<'a> {
                 args.push(self.value()?);
             }
             let dicts = if self.eat_str("dicts") { self.uint()? as u32 } else { 0 };
+            let unpair = if self.eat_str("unpair") { Some(crate::bodies::Label(self.uint()? as u32)) } else { None };
             ensure_ty(types, dest, ty);
-            return Ok(MirInst::CallIndirect { dest, callee, args, dicts });
+            let pair = match (dest_hi, unpair) {
+                (Some(hi), Some(unpair)) => {
+                    ensure_ty(types, hi, MirTy::I64);
+                    Some((hi, unpair))
+                }
+                (None, None) => None,
+                _ => return Err(ParseError("callind pair".into())),
+            };
+            return Ok(MirInst::CallIndirect { dest, callee, args, dicts, pair });
         }
         if let Some(ty_s) = op.strip_prefix("call.") {
             let ty = MirTy::parse(ty_s).ok_or_else(|| ParseError(op.clone()))?;
-            let target = crate::il::Label(self.uint()? as u32);
+            let target = crate::bodies::Label(self.uint()? as u32);
             let mut args = Vec::new();
             if self.peek('v') {
                 args.push(self.value()?);
@@ -847,7 +926,8 @@ impl<'a> Parser<'a> {
             };
             let kind = match kind_s {
                 "array" => MirAllocKind::Array,
-                "tuple" => MirAllocKind::Tuple,
+                "lanes" => MirAllocKind::Lanes { tag_mask: self.uint()? },
+                "tuple" => MirAllocKind::TUPLE,
                 "object" => {
                     let type_id = self.uint()? as u32;
                     self.expect(',')?;
@@ -864,20 +944,20 @@ impl<'a> Parser<'a> {
                     MirAllocKind::DropEnum { tag, type_id }
                 }
                 "coro" => MirAllocKind::Coro {
-                    target: crate::il::Label(self.uint()? as u32),
+                    target: crate::bodies::Label(self.uint()? as u32),
                 },
                 "fn" => {
-                    let target = crate::il::Label(self.uint()? as u32);
+                    let target = crate::bodies::Label(self.uint()? as u32);
                     self.expect(',')?;
                     let operand = self.uint()? as u32;
                     let mask = if self.eat_str(", mask ") { self.uint()? as u32 } else { 0 };
                     MirAllocKind::Fn { target, operand, mask }
                 }
                 "polyfn" => MirAllocKind::PolyFn {
-                    target: crate::il::Label(self.uint()? as u32),
+                    target: crate::bodies::Label(self.uint()? as u32),
                 },
                 "polyfncap" => {
-                    let target = crate::il::Label(self.uint()? as u32);
+                    let target = crate::bodies::Label(self.uint()? as u32);
                     let params = if self.eat_str(", params ") { self.uint()? as u32 } else { 0 };
                     MirAllocKind::PolyFnCapture { target, params }
                 }
@@ -908,18 +988,8 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::HeapRef);
             return Ok(MirInst::GcBarrier { dest, kind, roots });
         }
-        if let Some(kind_s) = op.strip_prefix("deopt.") {
-            let kind = MirDeoptKind::parse(kind_s)
-                .ok_or_else(|| ParseError(format!("unknown deopt {kind_s}")))?;
-            ensure_ty(types, dest, MirTy::Bool);
-            return Ok(MirInst::Deopt {
-                dest,
-                kind,
-                loc: common::DebugLoc::unknown(),
-            });
-        }
         if op == "codeptr" {
-            let target = crate::il::Label(self.uint()? as u32);
+            let target = crate::bodies::Label(self.uint()? as u32);
             ensure_ty(types, dest, MirTy::I64);
             return Ok(MirInst::CodePtr { dest, target });
         }
@@ -1170,6 +1240,16 @@ impl<'a> Parser<'a> {
         Ok(if neg { -n } else { n })
     }
 
+    /// A [`MirLaneShape`]: `tag_mask/payload_mask/unit_mask`.
+    fn lane_shape(&mut self) -> Result<MirLaneShape, ParseError> {
+        let tag_mask = self.uint()?;
+        self.expect('/')?;
+        let payload_mask = self.uint()?;
+        self.expect('/')?;
+        let unit_mask = self.uint()?;
+        Ok(MirLaneShape { tag_mask, payload_mask, unit_mask })
+    }
+
     fn uint(&mut self) -> Result<u64, ParseError> {
         self.skip();
         let start = self.i;
@@ -1323,29 +1403,29 @@ bb3:
         let k = b.add_param(MirTy::I64).unwrap();
         let x = b.add_param(MirTy::I64).unwrap();
         let kind = MirAllocKind::Fn {
-            target: crate::il::Label(7),
+            target: crate::bodies::Label(7),
             operand: 3,
             mask: 0,
         };
         let f = b.ins_alloc(kind, vec![k]).unwrap();
         let f = b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).unwrap();
-        let g = b.ins_alloc(MirAllocKind::PolyFn { target: crate::il::Label(9) }, Vec::new()).unwrap();
+        let g = b.ins_alloc(MirAllocKind::PolyFn { target: crate::bodies::Label(9) }, Vec::new()).unwrap();
         let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![g]).unwrap();
         // A partial application: its first parameter filled.
         let partial = MirAllocKind::Fn {
-            target: crate::il::Label(8),
+            target: crate::bodies::Label(8),
             operand: 0x0002_0100,
             mask: 1,
         };
         let p = b.ins_alloc(partial, vec![x]).unwrap();
         let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![p]).unwrap();
         // An instance dictionary: a method's code pointer in a tuple.
-        let code = b.ins_code_ptr(crate::il::Label(11)).unwrap();
-        let dict = b.ins_alloc(MirAllocKind::Tuple, vec![code]).unwrap();
+        let code = b.ins_code_ptr(crate::bodies::Label(11)).unwrap();
+        let dict = b.ins_alloc(MirAllocKind::TUPLE, vec![code]).unwrap();
         let dict = b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).unwrap();
         // A constrained generic's value over its dictionary, called with
         // the call site's.
-        let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::il::Label(12), params: 0 }, vec![dict]).unwrap();
+        let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::bodies::Label(12), params: 0 }, vec![dict]).unwrap();
         let poly = b.ins_gc_barrier(MirGcKind::Safepoint, vec![poly]).unwrap();
         let _ = b.ins_call_indirect_dicts(poly, vec![x, dict], 1, MirTy::I64).unwrap();
         let y = b.ins_call_indirect(f, vec![x], MirTy::I64).unwrap();

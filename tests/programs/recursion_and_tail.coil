@@ -1,4 +1,4 @@
-// Tail-recursive sum, `#[max_depth]` fibonacci, mutual recursion, `match`-based factorial and gcd.
+// Tail-recursive sum, fibonacci, mutual recursion, `match`-based factorial and gcd.
 // @output 500000500000 6765 true 120 [1, 1, 2, 3, 5, 8] 7\n
 use io::sync::println;
 use string::format;
@@ -10,7 +10,6 @@ fn sum_to(int n, int acc) -> int {
     return sum_to(n - 1, acc + n);
 }
 
-#[max_depth(64)]
 fn fib(int n) -> int {
     if n < 2 {
         return n;

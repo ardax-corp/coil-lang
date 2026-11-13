@@ -6,7 +6,7 @@
 //! [`Checker`] owns the substitution, accumulates diagnostics with error
 //! recovery, and caches inferred types keyed by pre-walk [`NodeId`]s.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
 use parser::ast::{Expression, Output, Visibility};
@@ -105,6 +105,11 @@ pub enum ForInKind {
         next_fqn: Option<String>,
         counted: Option<ForInCounted>,
     },
+    /// A value of a type parameter bounded by `Iterator` (#2820): the loop
+    /// calls the bound's `next` through its dictionary, as `it.next()` does
+    /// (a [`BoundMethodCall`] at the iterable's span). HIR build lowers it
+    /// to a `loop` over that call.
+    Bound,
 }
 
 /// Counted `IntoIter` shapes for user `into_iter` (C2b).
@@ -143,8 +148,8 @@ const OWN_DICT_PLACEHOLDER: &str = "$instance";
 /// One candidate in a compile-time overload set (arity and/or parameter types).
 ///
 /// Stored in [`Checker::overload_sets`] keyed by the function's simple
-/// (or qualified) name.  Codegen uses the span-indexed
-/// [`Checker::selected_overloads_by_span`] to decide which ABI to emit.
+/// (or qualified) name.  Codegen uses the call site's selection
+/// ([`Checker::selected_overload_at`]) to decide which ABI to emit.
 #[derive(Clone, Debug)]
 pub struct OverloadCandidate {
     /// Unique id within the overload family (registration order).
@@ -231,11 +236,20 @@ pub struct Checker {
     /// before enums are registered so a payload type that names one resolves
     /// to it (#1947).
     imported_enum_keys: HashMap<String, String>,
+    /// Local name -> class key of every `use` of another module's class,
+    /// bound before enums are registered so a payload type that names one
+    /// resolves to it, as a field type does (#2780).
+    imported_class_keys: HashMap<String, String>,
     /// Every top-level class and enum name of the current file -> its number of type
     /// parameters, collected before any signature or enum payload is parsed:
     /// a forward reference to one is the module's own `m::Name` before the
     /// class itself is registered (#1980, #1983).
     module_class_names: HashMap<String, usize>,
+    /// Every top-level trait of the current file with one type parameter
+    /// of kind `Type`, collected with [`Self::module_class_names`]: an enum
+    /// payload, parsed before traits are registered, names one as its
+    /// bare-class existential (#2744).
+    module_trait_names: std::collections::HashSet<String>,
     /// Local names bound by disk-module `use` (e.g. `io::sync::write_all`).
     /// Like virtual imports and module-visible named `fn`s, these are
     /// file-level globals — not lambda/defer captures — and must be rebound
@@ -261,19 +275,16 @@ pub struct Checker {
     pub(crate) in_bounds_index: HashSet<NodeId>,
     /// Expressions proven `>= 0` at the use site (Q4 skip Euclidean rem).
     pub(crate) nonneg_expr: HashSet<NodeId>,
-    /// Array parameter nodes that may be `ArrayPin`'d for the whole frame.
-    pub(crate) pin_array: HashSet<NodeId>,
     /// `(fn_name, param_name)` for helper pins (survives mono AST clones).
     pub(crate) pin_params: HashSet<(String, String)>,
     /// `for x in arr` loops whose synthetic index is in-bounds (length stable).
     pub(crate) for_in_pin: HashSet<NodeId>,
     /// For-in pin by source span (emit_idx / clone fallback).
     pub(crate) for_in_pin_spans: HashSet<(usize, usize)>,
-    /// Whole-function effect bits keyed by [`DefId`] (empty = pure).
-    pub(crate) fn_effects: HashMap<DefId, crate::typechecking::purity::EffectFlags>,
-    /// [`Self::fn_effects`] for every file checked so far (not reset per
-    /// file), so calls into an already-checked module resolve by [`DefId`].
-    pub(crate) program_fn_effects: HashMap<DefId, crate::typechecking::purity::EffectFlags>,
+    /// The AST walk's effect bits of every function checked so far (not
+    /// reset per file), so its calls into an already-checked module resolve
+    /// by [`DefId`] (`purity::record_length_stability`).
+    pub(crate) program_fn_effects: HashMap<DefId, common::EffectFlags>,
     /// Fixed parameter count and rest flag of every function and method
     /// checked so far, by module-qualified name (`m::f`, `m::C::f`; the
     /// entry file's unqualified), so a call into an already-checked module
@@ -284,12 +295,10 @@ pub struct Checker {
     program_typed_rest: HashMap<String, Vec<String>>,
     /// Impl method effects for every file checked so far, keyed
     /// `module::Owner::method` (methods have no [`DefId`] of their own).
-    pub(crate) program_method_effects: HashMap<String, crate::typechecking::purity::EffectFlags>,
-    /// Bind names proven pure (LICM / index facts / auto-par).
-    pub(crate) pure_fn_names: HashSet<String>,
+    pub(crate) program_method_effects: HashMap<String, common::EffectFlags>,
     /// Functions that cannot change an array length, and whether allocation
     /// (which can run finalizers) is length-stable. Recomputed per file.
-    pub(crate) length_stability: crate::typechecking::purity::LengthStability,
+    pub(crate) length_stability: crate::effects::LengthStability,
     /// Whole-compile "some `fn drop()` may resize an array" from the pipeline
     /// (every file in the use graph). `None` = this file is the program.
     pub(crate) program_finalizers_resize: Option<bool>,
@@ -343,6 +352,10 @@ pub struct Checker {
     /// against a fixed limit so a pathologically nested expression gets a
     /// clean diagnostic instead of a stack overflow.
     infer_depth: u32,
+    /// Set when [`infer`](Self::infer) passed its depth limit: how many
+    /// messages there were with its diagnostic. Every later `infer` returns
+    /// at once, and `check_program` drops what the rest of the walk said.
+    too_deep: Option<usize>,
 
     /// Span-indexed inferred types for codegen ([`lookup_at`](Self::lookup_at)).
     cache: std::collections::HashMap<NodeId, Ty>,
@@ -358,6 +371,12 @@ pub struct Checker {
     static_decl_frames: HashMap<String, usize>,
     /// Span → NodeId so post-infer coercions can retarget `cache` (B2 sidecar).
     node_ids_by_span: HashMap<(usize, usize), NodeId>,
+    /// Span of a generic function's name passed to a `forall` parameter →
+    /// that parameter's type at the call (#2621).
+    rank_n_args: HashMap<(usize, usize), Ty>,
+    /// Bounds of `forall` arguments on open variables, checked at the end
+    /// of their call (#2639).
+    rank_n_deferred: Vec<(Constraint, Range<usize>)>,
 
     /// Variable types for codegen when infer cache is misaligned in function bodies.
     codegen_var_types: std::collections::HashMap<String, Ty>,
@@ -411,8 +430,6 @@ pub struct Checker {
     /// and any `fn(...args) -> R` parameter types in its signature.
     current_tuple_pack: Option<Ty>,
 
-    /// `callee(...pack)` spread calls keyed by call span → unpacked arity.
-    spread_call_arity: HashMap<(usize, usize), usize>,
 
     /// Tuple bases expanded by [`flatten_spread_call_args`] (by span).
     spread_expanded_bases: std::collections::HashSet<(usize, usize)>,
@@ -432,62 +449,53 @@ pub struct Checker {
     /// candidates, call-site resolution uses [`Checker::select_overload_for_args`].
     overload_sets: std::collections::HashMap<String, Vec<OverloadCandidate>>,
 
-    /// Call-site selection results keyed by source span `(start, end)`.
-    ///
-    /// Value is `(fixed_arity, is_rest, candidate_id)`. Populated during
-    /// inference; consumed by codegen for the mangled table key.
-    pub selected_overloads_by_span: std::collections::HashMap<(usize, usize), (usize, bool, u32)>,
-
-    /// Same as [`Self::selected_overloads_by_span`], keyed by the call/ident [`NodeId`].
-    selected_overloads: std::collections::HashMap<NodeId, (usize, bool, u32)>,
+    /// Call-site overload selections: `(fixed_arity, is_rest,
+    /// candidate_id)`. Populated during inference; consumed by codegen for
+    /// the mangled table key.
+    selected_overloads: SideTable<(usize, bool, u32)>,
 
     /// Declaration span → `(candidate_id, fixed_arity, is_rest)` for
     /// overloaded functions so codegen can mangle each body uniquely.
     pub overload_decl_by_span: std::collections::HashMap<(usize, usize), (u32, usize, bool)>,
 
     /// Concrete trait dictionaries selected at each generic call site.
-    call_site_dicts: HashMap<NodeId, Vec<InstanceDef>>,
-    /// Span fallback when pre-walk / infer NodeIds are misaligned in
-    /// function bodies (same motivation as `bound_method_calls_by_span`).
-    call_site_dicts_by_span: HashMap<(usize, usize), Vec<InstanceDef>>,
+    call_site_dicts: SideTable<Vec<InstanceDef>>,
 
     /// Open dictionaries forwarded from the enclosing generic function.
-    call_site_forward_dicts: HashMap<NodeId, Vec<usize>>,
-    call_site_forward_dicts_by_span: HashMap<(usize, usize), Vec<usize>>,
+    call_site_forward_dicts: SideTable<Vec<usize>>,
+
+    /// A trait method body's dictionaries by its FQN, in frame order
+    /// (`__dict0..`): the instance's (or the trait's, for a default
+    /// body), the context, then the method's own bounds. What
+    /// `dict_index_for` numbers a forwarded goal by (#2594).
+    trait_body_dicts: HashMap<String, Vec<crate::typechecking::ty::Constraint>>,
+
+    /// The active constraints when the last `infer_function` left its body.
+    last_body_dicts: Vec<crate::typechecking::ty::Constraint>,
 
     /// Calls resolved through an active trait constraint.
-    bound_method_calls: HashMap<NodeId, BoundMethodCall>,
-    bound_method_calls_by_span: HashMap<(usize, usize), BoundMethodCall>,
+    bound_method_calls: SideTable<BoundMethodCall>,
 
     /// Operators resolved through an active trait constraint.
-    bound_operator_calls: HashMap<NodeId, BoundOperatorCall>,
-    bound_operator_calls_by_span: HashMap<(usize, usize), BoundOperatorCall>,
+    bound_operator_calls: SideTable<BoundOperatorCall>,
 
     /// Aggregate (tuple/array) element-wise / broadcast arithmetic.
-    aggregate_arith: HashMap<NodeId, crate::typechecking::aggregate_arith::AggregateArithInfo>,
-    aggregate_arith_by_span:
-        HashMap<(usize, usize), crate::typechecking::aggregate_arith::AggregateArithInfo>,
+    aggregate_arith: SideTable<crate::typechecking::aggregate_arith::AggregateArithInfo>,
 
     /// Named linear-algebra helpers (`dot` / `matmul` / `cross`).
-    linear_algebra: HashMap<NodeId, crate::typechecking::aggregate_arith::LinearAlgebraInfo>,
-    linear_algebra_by_span:
-        HashMap<(usize, usize), crate::typechecking::aggregate_arith::LinearAlgebraInfo>,
+    linear_algebra: SideTable<crate::typechecking::aggregate_arith::LinearAlgebraInfo>,
 
     /// `%v` arguments resolved through an active `Show` constraint.
-    bound_display_calls: HashMap<NodeId, BoundDisplayCall>,
-    bound_display_calls_by_span: HashMap<(usize, usize), BoundDisplayCall>,
+    bound_display_calls: SideTable<BoundDisplayCall>,
 
     /// Expressions whose result must be packed as `(boxed_value, dict)`.
-    existential_packs: HashMap<NodeId, ExistentialPack>,
-    existential_packs_by_span: HashMap<(usize, usize), ExistentialPack>,
+    existential_packs: SideTable<ExistentialPack>,
 
     /// Calls dispatched through an existential argument/receiver dictionary.
-    existential_method_calls: HashMap<NodeId, ExistentialMethodCall>,
-    existential_method_calls_by_span: HashMap<(usize, usize), ExistentialMethodCall>,
+    existential_method_calls: SideTable<ExistentialMethodCall>,
 
     /// `for x in` lowering info (Iterator protocol).
-    for_in_infos: HashMap<NodeId, ForInInfo>,
-    for_in_infos_by_span: HashMap<(usize, usize), ForInInfo>,
+    for_in_infos: SideTable<ForInInfo>,
 
     /// Typeclass method signatures, keyed by `(class, method)`.
     typeclass_method_schemes: HashMap<(String, String), Scheme>,
@@ -535,6 +543,9 @@ pub struct Checker {
     /// declared type does not describe the word, so their kind stays unknown.
     synthetic_statics: std::collections::HashSet<String>,
     next_static_slot: u32,
+    /// The tail slot of each `static let` of a closed two-word type, which
+    /// holds its second word ([`Checker::finalize_static_tails`]).
+    static_tails: HashMap<String, u32>,
 
     /// `const` class fields: class name → field names (immutable for everyone).
     const_class_fields: HashMap<String, HashSet<String>>,
@@ -558,6 +569,10 @@ pub struct Checker {
     // BTreeMap indexes variant name → tag.
     enums: BTreeMap<String, Vec<String>>,
     enum_tags: BTreeMap<String, BTreeMap<String, u32>>,
+    /// The module-qualified keys of [`Self::enum_tags`] by their last
+    /// `::` segment (`m::E` under `E`), kept in step by
+    /// [`Checker::insert_enum_tags`] and [`Checker::remove_enum_tags`].
+    enum_tag_leaves: HashMap<String, BTreeSet<String>>,
     enum_payloads: BTreeMap<String, Vec<EnumVariantPayloadTy>>,
     enum_arities: BTreeMap<String, Vec<usize>>,
     /// Present only for scalar-backed enums (unboxed Int/Float/String/Bool).
@@ -565,16 +580,28 @@ pub struct Checker {
 
     /// Bare `Some`/`Ok`/`Red` (Call or Identifier) resolved to `Enum::Case`.
     bare_constructs_by_span: HashMap<(usize, usize), (String, String)>,
-    /// `Trait::method(args)` resolved as the free call `method(args)`
-    /// limited to `Trait`: span → the callee name lowering gives it.
+    /// `Trait::method(args)`, resolved as `x.method(rest)` is but limited
+    /// to `Trait`: span → the callee name lowering gives it.
     qualified_trait_calls_by_span: HashMap<(usize, usize), String>,
     /// `m::F(args)` / `C::f(args)` calling the function value of a
     /// `const` or `static` (#1705): span → the callee's type.
     qualified_value_calls_by_span: HashMap<(usize, usize), Ty>,
+    /// `o.f(args)` calling the function instance field `f` holds, with no
+    /// method `f` on the receiver (#2752): span → the field's type.
+    field_value_calls_by_span: HashMap<(usize, usize), Ty>,
+    /// A bare `C::f` naming static method `f` (#2746): its function
+    /// value, as a free function's name is. Span → the method's key.
+    static_method_values_by_span: HashMap<(usize, usize), String>,
 
     /// Bare constructor patterns (`Some(v)`, `None`, `Red`) resolved to their
     /// enum's registry key, by pattern span (#1352).
     bare_patterns_by_span: HashMap<(usize, usize), String>,
+
+    /// The stub the impl pre-pass registered for each `impl Trait for ..`,
+    /// by module, trait and the impl's span (in source order where a macro
+    /// gives several one span): the instance
+    /// [`Checker::infer_typeclass_impl`] claims for that impl (#2480).
+    impl_stubs: HashMap<(String, String, usize, usize), Vec<usize>>,
 
     /// Bare unit case patterns (`None`, `Red`) of each checked module, by
     /// span: the one record of which bare pattern names are cases rather
@@ -627,8 +654,12 @@ pub struct Checker {
     /// weakened, directly (#1644) or through a type parameter (#1670).
     weak_checks: checker::weak_check::WeakChecks,
 
-    /// Names of `gen fn` declarations (for codegen).
-    async_functions: std::collections::HashSet<String>,
+    /// The goals a structural instance with open items met (`Show<Option<T>>`
+    /// under `T: Show`, #2554), at the goal's types: a per-type clone of
+    /// the body asks for each at its types, whose ground structural
+    /// instance codegen has registered first
+    /// ([`Checker::ensure_clone_structural_goals`]).
+    open_structural_goals: Vec<Constraint>,
 
     /// Nesting depth inside `gen fn` bodies (for `yield` validation).
     async_depth: usize,
@@ -759,8 +790,6 @@ pub struct Checker {
     /// `Result` type (`return r;` with `r: Result<T, E>`): returned as is,
     /// not Ok-wrapped (#786).
     whole_result_returns: HashSet<(usize, usize)>,
-    /// Function names whose return type is (or was inferred as) `Option<_>`.
-    option_mode_fns: HashSet<String>,
 
     /// Literal descriptions from top-level `test("…") { … }` declarations
     /// (source order). Used by codegen / the test harness.
@@ -796,8 +825,8 @@ pub struct Checker {
     current_typeclass: Option<String>,
 
     /// Bare name of the trait instance method whose body is being inferred.
-    /// Its recursion binding does not shadow a ground function-style trait
-    /// call: `third(4, w)` in `Pass for Box<T>`'s `third` is `int`'s (#1483).
+    /// Its recursion binding is not a free fn: a bare `third(4, w)` in
+    /// `Pass for Box<T>`'s `third` is the trait's method, so E0153.
     current_instance_method: Option<String>,
 
     /// Set to `true` only when `infer_function` is called for a genuine
@@ -825,6 +854,11 @@ pub struct Checker {
     /// argument goes. The one place named arguments are matched to
     /// parameters or fields; later stages read this instead.
     named_arg_slots_by_span: std::collections::HashMap<(usize, usize), NamedArgSlots>,
+
+    /// The `Vec<T>` a call packs its rest arguments into (`T... xs`), by
+    /// the call's span (#2537): an empty pack has no item to type it, and
+    /// its element is the callee's `T` as the call bound it.
+    rest_pack_tys_by_span: std::collections::HashMap<(usize, usize), Ty>,
 
     /// Per-slot types for [`partial_fills_by_span`] entries (slot index, ty).
     /// Needed when named holes are non-prefix (`add(b: 2)`) so typing does
@@ -915,7 +949,9 @@ impl Default for Checker {
 
 mod checker;
 mod coverage;
+mod side_table;
 mod sidecar;
+use side_table::SideTable;
 use coverage::CoverageTree;
 pub use sidecar::{SelectedOverload, TypedSidecar};
 
@@ -982,19 +1018,6 @@ fn build_record_field_hint(
     }
 }
 
-/// Normalize a runtime value type to the head used in `impl Show for T`
-/// registration (`Ty::Con("Point")` rather than `Sum` / `Constructor`).
-fn show_lookup_ty(ty: &Ty) -> Ty {
-    if let Some(app) = crate::typechecking::ty::builtin_enum_app(ty) {
-        return app;
-    }
-    match ty {
-        Ty::Sum { name, .. } => Ty::Con(name.clone()),
-        Ty::Constructor { owner, .. } => show_lookup_ty(owner),
-        other => other.clone(),
-    }
-}
-
 /// Map a format specifier character to the type it expects.
 fn format_specifier_type(spec: char) -> &'static str {
     match spec {
@@ -1023,7 +1046,7 @@ fn type_matches_specifier(ty: &Ty, spec: char) -> bool {
         's' => matches!(ty, Ty::Con(n) if n == "string"),
         'z' => matches!(ty, Ty::Con(n) if n == "bool"),
         'v' => true, // Show check happens in `check_format_arg`
-        // Unknown specifier (including `%d`, which the VM does not
+        // Unknown specifier (including `%d`, which the runtime does not
         // implement) — can't be matched; the caller will still
         // record a diagnostic, but we don't want to say it matches
         // every type.

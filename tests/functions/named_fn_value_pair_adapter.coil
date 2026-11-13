@@ -1,0 +1,53 @@
+// A named function returning two words (`Option<int>`, `(int, int)`) and
+// also used as a value returns its two words to direct calls; its value
+// enters a one-word adapter (`f$value`) whose twin is the function, so a
+// two-word call through the value takes the words and a one-word one (a
+// shared generic body) the box.
+use tests::assert;
+
+fn half(int x) -> Option<int> {
+    if x % 2 != 0 {
+        return None;
+    }
+    return Some(x / 2);
+}
+
+fn split(int x) -> (int, int) {
+    return (x / 10, x % 10);
+}
+
+#[inline(never)]
+fn through(int -> Option<int> f, int x) -> int {
+    return match f(x) {
+        Some(v) => v,
+        None => -1,
+    };
+}
+
+fn apply<T>(int -> T f, int x) -> T {
+    return f(x);
+}
+
+test("direct calls and calls through the value agree") {
+    assert!(half(8) == Some(4));
+    assert!(through(half, 8) == 4);
+    assert!(through(half, 7) == -1);
+    let f = half;
+    assert!(f(6) == Some(3));
+}
+
+test("a shared generic body takes the boxed result") {
+    assert!(apply(half, 10) == Some(5));
+    assert!(apply(half, 3) == None);
+    let (a, b) = apply(split, 42);
+    assert!(a == 4 && b == 2);
+}
+
+test("values kept in a vec") {
+    let fs: Vec<int -> (int, int)> = Vec::new();
+    fs.push(split);
+    let (a, b) = fs[0](57);
+    assert!(a == 5 && b == 7);
+    let (c, d) = split(31);
+    assert!(c == 3 && d == 1);
+}

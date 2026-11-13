@@ -24,7 +24,12 @@ use crate::typechecking::ty::{Ty, strip_readonly};
 /// The view class `ty` is an instance of, when it is one.
 fn view_of(checker: &Checker, ty: Option<&Ty>) -> Option<String> {
     let ty = crate::typechecking::subst::apply_ty_prune(checker.subst(), ty?);
-    let name = match strip_readonly(&ty) {
+    view_of_resolved(checker, &ty)
+}
+
+/// [`view_of`] of a type the substitution is already applied to.
+fn view_of_resolved(checker: &Checker, ty: &Ty) -> Option<String> {
+    let name = match strip_readonly(ty) {
         Ty::Con(n) => n.clone(),
         Ty::App(head, _) => match head.as_ref() {
             Ty::Con(n) => n.clone(),
@@ -39,13 +44,34 @@ fn view_of(checker: &Checker, ty: Option<&Ty>) -> Option<String> {
 /// A view type held inside `ty` (not `ty` itself): a type argument, an
 /// array element or a tuple slot.
 fn nested_view(checker: &Checker, ty: &Ty) -> Option<String> {
-    let inner: Vec<&Ty> = match strip_readonly(ty) {
+    if !matches!(strip_readonly(ty), Ty::App(..) | Ty::Array { .. } | Ty::Tuple(_)) {
+        return None;
+    }
+    // The substitution once, not again at every level (#2657): `ty` is
+    // walked as written, each part's view looked up in its resolved copy.
+    nested_view_in(checker, ty, &crate::typechecking::subst::apply_ty_prune(checker.subst(), ty))
+}
+
+/// The parts of `ty` as written, with `resolved` (its resolved copy, the
+/// same shape where `ty` has one) alongside.
+fn nested_view_in(checker: &Checker, ty: &Ty, resolved: &Ty) -> Option<String> {
+    let inner = view_parts(ty)?;
+    let resolved_inner = view_parts(resolved).filter(|r| r.len() == inner.len());
+    inner.into_iter().enumerate().find_map(|(k, t)| match resolved_inner.as_ref().map(|r| r[k]) {
+        Some(r) => view_of_resolved(checker, r).or_else(|| nested_view_in(checker, t, r)),
+        None => view_of(checker, Some(t)).or_else(|| nested_view(checker, t)),
+    })
+}
+
+/// The types a view may be held inside of in `ty`: type arguments, an
+/// array's element, a tuple's items.
+fn view_parts(ty: &Ty) -> Option<Vec<&Ty>> {
+    Some(match strip_readonly(ty) {
         Ty::App(_, args) => args.iter().collect(),
         Ty::Array { element, .. } => vec![element.as_ref()],
         Ty::Tuple(items) => items.iter().collect(),
         _ => return None,
-    };
-    inner.into_iter().find_map(|t| view_of(checker, Some(t)).or_else(|| nested_view(checker, t)))
+    })
 }
 
 fn short(key: &str) -> &str {

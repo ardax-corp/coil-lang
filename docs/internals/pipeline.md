@@ -1,64 +1,53 @@
 # Compilation and execution pipeline
 
-How a `.coil` program becomes running bytecode on the VM.
+How a `.coil` program becomes running code.
 
 ## Stages
 
 1. **Parse** — the Pratt parser in `parser/` reads `.coil` source into an AST.
-   Derives (built-in ones included) and attribute macros run in the VM right after
-   discovery and splice their output before typechecking ([Macros](macros.md));
+   Derives (built-in ones included) and attribute macros run on the MIR interpreter
+   right after discovery and splice their output before typechecking ([Macros](macros.md));
    `compiler/src/attrs.rs` records them and checks built-in attributes.
-2. **Typecheck** — constraint-based inference in `compiler/src/typechecking/`. Generics are explicit (`fn f<T>`, `class Cell<T>`); `let` bindings are monomorphic (not Algorithm W). Diagnostics are source-anchored via ariadne. After infer, [`purity`](../../compiler/src/typechecking/purity.rs) records per-`DefId` [`EffectFlags`](../../compiler/src/typechecking/purity.rs) (host/FFI, escaping heap mutation, yield, `thread::spawn`, `gc::collect` / finalizers, I/O, attach/park; unknown is impure). Prelude math / packed LA / `simd_axpy_reduce` are empty (pure); clocks / IO / GC / FFI stay impure. LICM / fuse-select / index facts read those names from the sidecar — a proven-pure `CALL` is not a length or hoist barrier; an impure `CALL` is. MIR LICM uses the same bits on HostInvoke edges (I6): impure hosts never hoist; W4 dense emit stays the closed math/packed/axpy allowlist. [`index_facts`](../../compiler/src/typechecking/index_facts.rs) records `0 <= i < arr.len()` and length-stable helper-parameter facts on the same sidecar; a function's prologue emits `ArrayPin` for those parameters ([array-pin.md](array-pin.md)). Each type has one value representation (pointer niches for heap `Option` / heap-heap `Result`, a two-slot `[payload, tag]` convention on direct `CALL`/`RETURN` for immediate pairs, boxed `ObjEnum` otherwise), decided by [`layout::rep`](../../compiler/src/layout/rep.rs) for every consumer: [layout.md](layout.md). Checker and codegen key per-node facts by the pre-walk's exact `NodeId` (address + span), not the drifting pre-order counter. HIR marks proven indexes in-bounds from those facts and MIR emits them as `IndexUnchecked`; `hir::bounds` also proves counted loops after inlining. Yield clears facts. Ground generic helpers (bounded or unbounded) monomorphize to a direct `CALL` of a cloned body; escaped `let f = id` keeps `MakePolyFn` / `CallIndirect`, its words unboxed.
-3. **HIR** — `hir::build` turns the AST plus checker facts into HIR (`compiler/src/hir/`, a typed, desugared tree; `coil dissect --hir`). The typed inliner (a call to a mono or method clone, a generic class's methods included, splices the generic body at the clone's types; a ground `hash()` of a string plans as its `hash_string` `HostInvoke`, not the `Hash__string__hash` thunk) and the HIR passes (`hir::unroll`, `hir::fold`, `hir::bounds`, `hir::sink_return`, `hir::enum_sroa` / `hir::tuple_sroa` / `hir::readonly_sroa`) run there. `codegen/emit_hir.rs` then **plans** each body: it decides value layouts (pair locals, boxed niches, records, stack arrays), dictionaries and call targets, and records them as tables for MIR lowering. It no longer emits instructions; each body's stack IL is a placeholder that only binds its labels. A body HIR cannot lower is an internal error (`OptimizeOptions::require_mir`); there is no AST codegen and no stack-lowering fallback.
-4. **MIR** — `mir::lower_from_hir` (`mir/from_hir.rs`) lowers every body from HIR plus those tables to typed SSA ([mir.md](mir.md)). Values cross function boundaries in their [layout.md](layout.md) representation; a two-slot pair moves two words on a direct `CALL`/`RETURN` (`CALL` bit 31 / `RETURN` operand `2`). Non-escaping enum, tuple and class locals are scalar-replaced into slots.
-5. **Tiers and lower** — after multi-file link, `finalize_bytecode` **tree-shakes** unused function bodies (it follows MIR call targets from `main`, and `test_cases` when `--include-tests`), then `IlModule::optimize_and_flatten` picks each body's tier, leaf first:
-   - **dense**: MIR passes (CSE/GVN, LICM, InstCombine, DestProp, IV strength reduction, SIMD packs) and dense 3-address opcodes (`DenseBin` … `DenseCast`), kept only when its cost beats the LIR form and every callee it `CALL`s is dense;
-   - **LIR**: MIR SROA/CSE, then `mir::emit_lir` writes VM stack ops (`IlOp`) from the SSA. This is what most bodies run.
+2. **Typecheck** — constraint-based inference in `compiler/src/typechecking/`. Generics are explicit (`fn f<T>`, `class Cell<T>`); `let` bindings are monomorphic (not Algorithm W). Diagnostics are source-anchored via ariadne. After infer, [`purity`](../../compiler/src/typechecking/purity.rs) walks the AST for each function's [`EffectFlags`](../../common/src/effects.rs) (host/FFI, escaping heap mutation, yield, `thread::spawn`, `gc::collect` / finalizers, I/O, attach/park; unknown is impure) and keeps the functions that cannot change an array's length (`LengthStability`). Only index facts read that set: a length-stable call keeps a bounds proof; any other call ends it. Everything after the checker (purity for LICM and CSE, auto-par, `uses {…}`, copy-on-write, escape) reads the HIR effect summaries (`hir::effects`). Prelude math / packed LA / `simd_axpy_reduce` are empty (pure); clocks / IO / GC / FFI stay impure. MIR LICM uses the same bits on `HostInvoke` edges: impure hosts never hoist. [`index_facts`](../../compiler/src/typechecking/index_facts.rs) records `0 <= i < arr.len()` and length-stable helper-parameter facts on the same sidecar. Each type has one value representation (pointer niches for heap `Option` / heap-heap `Result`, a two-slot `[payload, tag]` convention on direct calls and returns for immediate pairs, boxed `ObjEnum` otherwise), decided by [`layout::rep`](../../compiler/src/layout/rep.rs) for every consumer: [layout.md](layout.md). Checker and codegen key per-node facts by the pre-walk's exact `NodeId` (address + span), not the drifting pre-order counter. HIR marks proven indexes in-bounds from those facts and MIR takes them unchecked; `hir::bounds` also proves counted loops after inlining. Yield clears facts. Ground generic helpers (bounded or unbounded) monomorphize to a direct call of a cloned body; an escaped `let f = id` stays a polymorphic function value, called through `CallIndirect`, its words unboxed.
+3. **HIR** — `hir::build` turns the AST plus checker facts into HIR (`compiler/src/hir/`, a typed, desugared tree; `coil dissect --hir`). The typed inliner (a call to a mono or method clone, a generic class's methods included, splices the generic body at the clone's types; a ground `hash()` of a string plans as its `hash_string` `HostInvoke`, not the `Hash__string__hash` thunk) and the HIR passes (`hir::unroll`, `hir::fold`, `hir::bounds`, `hir::sink_return`, `hir::enum_sroa` / `hir::tuple_sroa` / `hir::readonly_sroa`) run there. `codegen/emit_hir.rs` **plans** each body: it decides value layouts (pair locals, boxed niches, records, stack arrays), dictionaries and call targets, which MIR lowering asks for as it reaches each node (`mir::LowerCx`). A body is planned as built, then once more as the passes left it (`Compiler::hir_rewrite`); between passes only its calls are resolved again (`hir_resolve`), for the next inlining round and for early frees. A rewritten body that does not plan is made again with each inlining round planned, then with no inlining, then with no early frees, each step counted (`--opt-stats`, `hir inline: refused`). A body HIR cannot lower is an internal error (`finalize_bodies` panics on a clean compile with one).
+4. **MIR** — `mir::lower_from_hir` (`mir/from_hir.rs`) lowers every body from HIR and that plan to typed SSA ([mir.md](mir.md)). Values cross function boundaries in their [layout.md](layout.md) representation; a two-slot pair moves two words on a direct call and return. Non-escaping enum, tuple and class locals are scalar-replaced into slots.
+5. **Finalize** — after multi-file link, `finalize_bodies` **tree-shakes** unused function bodies (`reachable_bodies` follows MIR call targets from `main`, startup bodies and `test_cases` with `--include-tests`), collects the locations the bodies use, and hands the bodies to an open capture (`capture_native_bodies`), which runs the MIR passes on each ([mir.md](mir.md#passes-by-level)). Each body gets its identity, `label.0 + 1` (`0` names nothing), and the startup list is built (`common::StartupOp`, [native.md](native.md#program-start)). `Pipeline::compute_consts` then evaluates `const`s and folds calls on the interpreter: `Compiler::fold_sites` lists pure one-word calls with constant arguments in the captured MIR, and `apply_call_folds` replaces each with its value. That rewrites the MIR, so it changes what runs. `--fold-calls off` turns it off, and flagship benches need that, or `main` becomes a constant.
+6. **Archive** — `coil compile` writes a versioned `ArchivedProgram` (packed `major.minor` in `common/src/archive.rs`), MIR and data only, to `out.ccoil` (or `-o`). Default `coil file.coil` compiles and runs **in memory** and does not read or write `out.ccoil`. See [Debug line table](debug-info.md). **Policy:** `.ccoil` does not record grants. Host grants come from CLI flags / `Pipeline` `HostGrants` at **compile**. Ungranted host calls **fail the compile** ([Capabilities](#capabilities)); granted programs keep the real host and FFI ops. **The artifact is the grant:** `coil run out.ccoil` and packaged executables do **not** re-apply allow flags; if the program has the op, it runs. `dload` still checks native sha256 (`--dload-pin`) / `--dload-trusted` integrity and treats `--ffi-search-path` dirs as locators. `dload("c")` stays denied even if flagged. Non-const `dload` paths are a compile error.
+7. **Execute** — one of two engines runs the MIR, under `machine::driver::Driver` over a `Runtime`:
+   - **native code**: Cranelift, JIT at start by default, AOT with `coil package` ([native.md](native.md));
+   - **the MIR interpreter** (`coil-mir-interp`, [mir-interp.md](mir-interp.md)): compile-time code, macros, `coil debug`, wasm, `--mir`, `--engine mir`, `--cow-report` and `coil mutate`.
 
-   A `defer` body (pinned) takes LIR with its cleanup pad. The bodies are concatenated and lowered once by `il::lower`: fuse-select with **label / abs-jump barriers** (plus `*Return` join-on-window[0]), assign PCs once, encode `Vec<Byte>`. No optimization pass rewrites the stack ops; the IL is only the encoding step. Enabled fuse patterns: const fold, `BinSlotImm` / `BinSlotSlot` (including const-left commute `CONST; LOAD; int-bin`, COI-384), `CmpJmpf` / `LogNotJmpf` / `BinSlotImmJmpf` / `BinSlotSlotJmpf`, `BinSlotImmStore` / `BinSlotSlotStore` (the latter takes float ops as well as int — archive minor 2), packed multi-slot `LOAD`/`STORE` (`n≤3`), `LoadReturnSlot` / `ConstReturnImm` / `BinReturn`. CALL/TailCall/MakeCoro/CodePtr use `IlOp::Entry`; production abs JMP is rejected in lower. Inlining happens only in the HIR. GC frame maps for dense and LIR bodies are built from their MIR ([mir-stack-maps.md](mir-stack-maps.md)). Compiler-made glue (instance-clone and dictionary-adapter thunks, stream `Read`/`Write` shims, static and FFI initializers) is still written as stack IL directly in `codegen/compiler.rs`.
-6. **Archive** — `coil compile` wraps bytecode in a versioned `ArchivedProgram` envelope (packed `major.minor` in `common/src/archive.rs`) and writes `out.ccoil` (or `-o`). Default `coil file.coil` compiles and runs **in memory** and does not read or write `out.ccoil`. See [Debug line table](debug-info.md). **Policy:** `.ccoil` does not record grants (no rkyv major for grants). Host grants come from CLI flags / `Pipeline` `HostGrants` at **compile**. Ungranted host calls **fail the compile** ([Capabilities](#capabilities)); granted programs still emit the real `HostInvoke` / `FfiLoad`. **The artifact is the grant:** `coil run out.ccoil` and packaged `coil-embed` do **not** re-apply allow flags; if the bytecode has the op, it runs. `dload` still checks native sha256 (`--dload-pin`) / `--dload-trusted` integrity and treats `--ffi-search-path` dirs as locators. `dload("c")` stays denied even if flagged. Non-const `dload` paths are a compile error.
-7. **Execute** — the VM in `machine/` runs `main` (or each `test("…")` case under `coil test`), from the in-memory compile or from a loaded `.ccoil`.
+   The driver runs the startup, then `main` (or each `test("…")` case under `coil test`), from the in-memory compile or from a loaded `.ccoil`.
 
 ```
-AST + types → HIR (inline, HIR passes) → layout plan → MIR (SSA) → dense or LIR stack ops → fuse-select / PCs → Vec<Byte> → .ccoil → VM
+AST + types → HIR (inline, HIR passes) → layout plan → MIR (SSA) → MIR passes → .ccoil → Cranelift or the interpreter
 ```
 
-Where each former stack-IL pass went, and the fuse-select contract: [`compiler/src/il/opt/README.md`](../../compiler/src/il/opt/README.md).
-
-## IL intent
-
-The stack IL (`compiler/src/il/`) is the **encoding step**, not a semantic IR and not where code is generated:
-
-1. **Produce** — `mir::emit_lir` and the dense emitter write VM-shaped [`IlOp`](../../compiler/src/il/op.rs)s with **symbolic labels** (`Jump` / `Label` / `Entry`), not absolute PCs. Only compiler-made glue (see stage 5) is written as stack IL by hand.
-2. **Lower** — one `il::lower`: **fuse-select**, **assign PCs once**, encode `Vec<Byte>`. Production rejects residual absolute JMP; there is no post-lower peephole / `adjust_target` hot path.
-
-Names, types, and call meaning live in **DefIds**, the **typed sidecar** and HIR. Optimizations live in HIR and MIR ([mir.md](mir.md)); `il/opt/` only holds `OptimizeOptions`, opt levels, label helpers and statistics ([`il/opt/README.md`](../../compiler/src/il/opt/README.md)). Classes and heap values use the VM `Value` word; `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` run on LIR (dense refuses table ops). Host Option / Result values pack once at `HostInvoke` (`host_enum`).
+Names, types and call meaning live in **DefIds**, the **typed sidecar** and HIR. Optimizations live in HIR and MIR ([mir.md](mir.md)). Host `Option` / `Result` values pack once at `HostInvoke` (`host_enum`).
 
 ## Optimization levels
 
-`Pipeline::set_opt_level` / CLI `-O` / `--opt-level` select an [`OptLevel`](../../compiler/src/il/opt/opt_level.rs) preset that fills `OptimizeOptions` (and typed-inlining budgets). Default is **Standard**. The switches gate HIR passes, HIR lowering and the MIR tiers.
+`Pipeline::set_opt_level` / CLI `-O` / `--opt-level` select an [`OptLevel`](../../compiler/src/opt/opt_level.rs) preset that fills `OptimizeOptions` (and typed-inlining budgets). Default is **Standard**. The switches gate HIR passes, HIR lowering and the MIR passes.
 
 | Level | CLI | HIR passes | MIR passes |
 |-------|-----|------------|------------|
-| None | `-O0`, `none` | constant folding only; no inlining | none |
-| Basic | `-O1`, `basic` | None + small-budget inlining (same module only) | folds: SCCP, InstCombine, DestProp (`mir_fold`) |
-| Standard | `-O2`, `standard` (default) | fold, enum / tuple / readonly class scalar replacement, bounds proofs, unroll, `sink_return`, early-exit layout; cross-module inlining | folds + CSE, LICM, IV strength reduction, GVN/PRE, saxpy-reduce pack and vectorizer (`mir_loop`) |
-| Aggressive | `-O3`, `aggressive` | Standard passes with a larger inline budget. (`seek_back_edge` was removed: its residual `Seek` blocked MIR dense and made `-O3` 1.3–2.5× slower than `-O2` on loop benches.) | as Standard |
+| None | `-O0`, `none` | constant folding only; no inlining | `sroa`, `phi_sroa` |
+| Basic | `-O1`, `basic` | None + small-budget inlining (same module only) | folds: SCCP, InstCombine, DestProp (`mir_fold`), `sroa`, `phi_sroa` |
+| Standard | `-O2`, `standard` (default) | fold, enum / tuple / readonly class scalar replacement, bounds proofs, unroll, `sink_return`, early-exit layout; cross-module inlining | folds + CSE, LICM, IV strength reduction, GVN/PRE and the loop rewrites (`mir_loop`) |
+| Aggressive | `-O3`, `aggressive` | Standard passes with a larger inline budget | as Standard |
 | Size | `-Os`, `size` | Standard without loop unroll or `sink_return`, smaller inline budget | as Standard |
-| Debug | `-Og`, `debug` | constant folding only (no scalar replacement, unroll or inlining) | none |
+| Debug | `-Og`, `debug` | constant folding only (no scalar replacement, unroll or inlining) | `sroa`, `phi_sroa` |
 
-MIR passes run in `mir::specialize` ([mir.md](mir.md#passes-by-level)). At every level a body still lowers to MIR and takes dense or LIR by the same gates; what emission needs runs regardless of level: SROA's reuse of a stored array, deopt maps, `tidy` after a fold, the dense cost gate.
+MIR passes run in `mir::specialize::optimize_mir` ([mir.md](mir.md#passes-by-level)). The interpreter's raw capture at `-O0` skips even `sroa` and `phi_sroa` ([mir-interp.md](mir-interp.md#the-reference-output)).
 
 `None ⊂ Basic ⊂ Standard ⊂ Aggressive` on enable flags. Size and Debug are independent axes.
 
-Branch layout (COI-128) is **on** at Standard, Aggressive and Size (`branch_optimization`) and happens in HIR lowering: an `if` arm or two-arm niche `match` arm that always returns is moved after the function's fall-through return (`CodeBuf::move_exits_to_end`), and the jump that skipped it inverts, so the code after the exit falls through. Layout is heuristic only (a returning arm is cold). **PGO was removed** ([#301](https://github.com/ardax-corp/coil-lang/pull/301)): no `--pgo-*` flags, ingest, instrumentation, heat knobs, or `BranchProfile`. Do not revive that plumbing.
-
-Basic-block reordering (COI-129) and jump threading also happen in HIR lowering: the cold-exit layout above covers the `else` arm and a pair `match`'s returning last arm, and an `if` / `else` ending a loop body jumps straight to the back edge. The stack-IL `block_reordering` and `jump_thread` passes were removed 2026-10.
+Branch layout is **on** at Standard, Aggressive and Size (`branch_optimization`) and happens in HIR lowering: early exits are laid out after the body (`HirPlan::cold_ok`). Layout is heuristic only (a returning arm is cold). **There is no PGO** ([#301](https://github.com/ardax-corp/coil-lang/pull/301)): no `--pgo-*` flags, ingest, instrumentation, heat knobs or `BranchProfile`. Do not revive that plumbing. An `if` / `else` ending a loop body jumps straight to the back edge.
 
 ### Environment knobs
 
 A few switches no level sets are on at every level
-(`level_free_knobs` in [`opt_level.rs`](../../compiler/src/il/opt/opt_level.rs));
+(`level_free_knobs` in [`opt_level.rs`](../../compiler/src/opt/opt_level.rs));
 `Compiler::set_opt_level` keeps their values across a level change.
 
 | Switch | Field | Off means |
@@ -74,9 +63,9 @@ builds do not read it.
 
 Iterative optimization (COI-130) was removed: re-running the pipeline miscompiled loop tests (LICM is not idempotent) and no opt level enabled it. The pipeline runs once.
 
-Optimization statistics (COI-131) are **off** by default (`collect_stats` / CLI `--opt-stats` and `--opt-stats-json`). When enabled, it records each body's final tier (dense / LIR, with the dense refusal reasons) and HIR lowering and inlining counters (typed-inlining call sites increment `functions_inlined`). Human text or a single JSON object is printed to stderr after a source compile. Collection clones the op buffer only while the flag is on.
+Optimization statistics (COI-131) are **off** by default (CLI `--opt-stats` and `--opt-stats-json`). When enabled, it records HIR lowering counters (bodies planned and refused, bodies lowered to MIR), typed-inlining call sites (`hir_inlined`) and compile-time work. Human text or a single JSON object is printed to stderr after a source compile.
 
-The IL is **compile-time only**. The archive version is recorded only in `common/src/archive.rs` ([older minors](archive-history.md)). If an optimization is sound but flagship `.ccoil` do not change, prove it on focused `examples/perf` hit benches ([roadmap](optimization-roadmap.md#hit-bench-prove-rule)).
+The archive version is recorded only in `common/src/archive.rs` ([older minors](archive-history.md)). If an optimization is sound but flagship `.ccoil` do not change, prove it on focused `examples/perf` hit benches ([roadmap](optimization-roadmap.md#hit-bench-prove-rule)).
 
 ## Capabilities
 
@@ -87,10 +76,10 @@ non-literal mode → both, `common::open_mode_caps`).
 
 HIR lowering tags each gated `HostInvoke` with the call's
 `DebugLoc` and records it in `Compiler.gated_host_calls`. Before
-`finalize_bytecode`, `Compiler::capability_violations`
-(`compiler/src/codegen/capabilities.rs`) walks the IL call graph
-(`il::reachable_functions`, shared with the tree-shaker) from `main`, the
-test cases, code outside function bodies and static / FFI initializers, and
+`finalize_bodies`, `Compiler::capability_violations`
+(`compiler/src/codegen/capabilities.rs`) walks the MIR call graph
+(`reachable_bodies`, shared with the tree-shaker) from `main`, the
+test cases and the startup bodies, and
 reports each reached call whose caps are not in `HostGrants::caps()`, with
 the chain that reaches it:
 
@@ -104,9 +93,9 @@ gated: it sits in the embedded `process` module, so the chain names the
 user's call into it (`main` → `process::exec` → …). Only what the program reaches counts, so importing a module with an
 unused `env::exit` helper needs no grant. A build with no `main` and
 no tests (a library) reports nothing. Two gates stay at the call site in
-typecheck, because they have no IL call to tag: the `stream.attach(…)` method
+typecheck, because they have no MIR call to tag: the `stream.attach(…)` method
 form and FFI (`dload`, process-exec symbols). Macro sub-programs are granted
-everything: the macro VM refuses host calls at run time (`E0119`).
+everything: the macro host refuses host calls at run time (`E0119`).
 
 Flags: `--allow-read`, `--allow-write`, `--allow-net`, `--allow-env`,
 `--allow-exec`, `--allow-exit`, `--allow-attach`, `--allow-ffi-exec`, and
@@ -130,8 +119,4 @@ Incrementality (fingerprint-based reuse of a compile) is a later design, not cur
 
 ## Multi-file programs
 
-The pipeline discovers dependencies via `use` / `mod` under the `--root` search roots, compiles each file with a namespace prefix into one shared IL buffer, and **lowers once** after linking. The **entry file** uses the empty namespace. See [Modules](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/modules.md) and [Project config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/project-config.md).
-
-## Opcode discipline
-
-New `Instruction` variants are **append-only** (preserve `#[repr(u8)]` discriminants). Additive changes bump the archive **minor**; incompatible changes bump the **major** (reset minor). Loaders accept the same major when the archive minor is ≤ the runtime minor. The release VM `promise!` ceiling must track the last variant. Selected builtin-related opcodes are listed in [opcodes.md](opcodes.md).
+The pipeline discovers dependencies via `use` / `mod` under the `--root` search roots, compiles each file with a namespace prefix into one shared table of bodies, and finalizes once after linking. The **entry file** uses the empty namespace. Each module is compiled after the modules it imports (`worklist_in_dependency_order`), so modules that import each other, directly or through others, are one error before any is checked: E0154 names the cycle (`a -> b -> a`) at the import that starts it (`Pipeline::import_cycle`, #2536). See [Modules](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/modules.md) and [Project config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/project-config.md).

@@ -1,0 +1,19 @@
+// @expected E0107 — a `readonly` argument to a parameter the trait does not declare `readonly`, on a scalar receiver: the trait's declaration decides, not the impl's (#2845).
+class Pt {
+    pub a: int,
+}
+
+trait Tk<S> {
+    fn take(S s, Pt p) -> int {}
+}
+
+impl Tk for int {
+    fn take(int s, readonly Pt p) -> int {
+        return s + p.a;
+    }
+}
+
+fn main() {
+    let p = readonly new Pt(8);
+    let _ = 1.take(p);
+}

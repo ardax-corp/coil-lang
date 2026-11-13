@@ -1,0 +1,200 @@
+// A trait method whose result is a two-word value (`Option<int>`, an
+// immediate-`Ok` `Result`, a two-item tuple, a two-slot enum or readonly
+// class), a heap tuple, a boxed enum or a niche word, called on a
+// bare-trait existential: the slot's method returns it in one word, as to
+// a bound's call, and the call reads the value back (#2684). Default
+// bodies, superclass methods and existentials in a `Vec` included.
+use tests::assert;
+
+enum One {
+    Num(int),
+    Off,
+}
+
+readonly class P2 {
+    pub a: int,
+    pub b: int,
+}
+
+trait Peek<S> {
+    fn peek(S s, int k) -> Option<int> {}
+    fn pair(S s) -> (int, int) {}
+    fn mixed(S s) -> (int, float) {}
+    fn check(S s, int k) -> Result<int, string> {}
+    fn one(S s) -> One {}
+    fn point(S s) -> P2 {}
+    fn named(S s) -> (string, int) {}
+    fn nested(S s) -> Option<Option<int>> {}
+    fn niche(S s) -> Option<string> {}
+
+    fn twice(S s, int k) -> Option<int> {
+        return match s.peek(k) {
+            Option::Some(v) => Option::Some(v * 2),
+            Option::None => Option::None,
+        };
+    }
+}
+
+trait Sized2<S: Peek> {
+    fn size(S s) -> int {}
+}
+
+class Bag {
+    pub base: int,
+}
+
+impl Peek for Bag {
+    pub fn peek(Bag b, int k) -> Option<int> {
+        if k < 0 {
+            return Option::None;
+        }
+        return Option::Some(b.base + k);
+    }
+
+    pub fn pair(Bag b) -> (int, int) {
+        return (b.base, b.base + 1);
+    }
+
+    pub fn mixed(Bag b) -> (int, float) {
+        return (b.base, 0.5);
+    }
+
+    pub fn check(Bag b, int k) -> Result<int, string> {
+        if k > b.base {
+            return Result::Err("big");
+        }
+        return Result::Ok(k);
+    }
+
+    pub fn one(Bag b) -> One {
+        return One::Num(b.base);
+    }
+
+    pub fn point(Bag b) -> P2 {
+        return new P2(b.base, 2);
+    }
+
+    pub fn named(Bag b) -> (string, int) {
+        return ("bag", b.base);
+    }
+
+    pub fn nested(Bag b) -> Option<Option<int>> {
+        return Option::Some(Option::Some(b.base));
+    }
+
+    pub fn niche(Bag b) -> Option<string> {
+        return Option::Some("b");
+    }
+}
+
+impl Sized2 for Bag {
+    pub fn size(Bag b) -> int {
+        return b.base;
+    }
+}
+
+class Empty {
+    pub n: int,
+}
+
+impl Peek for Empty {
+    pub fn peek(Empty e, int k) -> Option<int> {
+        return Option::None;
+    }
+
+    pub fn pair(Empty e) -> (int, int) {
+        return (0, e.n);
+    }
+
+    pub fn mixed(Empty e) -> (int, float) {
+        return (e.n, 1.5);
+    }
+
+    pub fn check(Empty e, int k) -> Result<int, string> {
+        return Result::Err("empty");
+    }
+
+    pub fn one(Empty e) -> One {
+        return One::Off;
+    }
+
+    pub fn point(Empty e) -> P2 {
+        return new P2(0, 0);
+    }
+
+    pub fn named(Empty e) -> (string, int) {
+        return ("empty", e.n);
+    }
+
+    pub fn nested(Empty e) -> Option<Option<int>> {
+        return Option::Some(Option::None);
+    }
+
+    pub fn niche(Empty e) -> Option<string> {
+        return Option::None;
+    }
+
+    pub fn twice(Empty e, int k) -> Option<int> {
+        return Option::Some(-1);
+    }
+}
+
+test("each result shape through an existential") {
+    let p: Peek = new Bag(3);
+    assert!(p.peek(1) == Option::Some(4));
+    assert!(p.peek(-1) == Option::None);
+    assert!(p.pair() == (3, 4));
+    let (a, b) = p.pair();
+    assert!(a == 3 && b == 4);
+    assert!(p.mixed() == (3, 0.5));
+    assert!(p.check(2) == Result::Ok(2));
+    assert!(p.check(9) == Result::Err("big"));
+    let n = match p.one() {
+        One::Num(v) => v,
+        One::Off => -1,
+    };
+    assert!(n == 3);
+    let q = p.point();
+    assert!(q.a == 3 && q.b == 2);
+    assert!(p.named() == ("bag", 3));
+    assert!(p.nested() == Option::Some(Option::Some(3)));
+    assert!(p.niche() == Option::Some("b"));
+}
+
+test("a default body and an overriding one") {
+    let p: Peek = new Bag(5);
+    assert!(p.twice(1) == Option::Some(12));
+    assert!(p.twice(-1) == Option::None);
+    let e: Peek = new Empty(2);
+    assert!(e.twice(1) == Option::Some(-1));
+}
+
+test("a superclass's method through the subclass's existential") {
+    let s: Sized2 = new Bag(7);
+    assert!(s.size() == 7);
+    assert!(s.peek(1) == Option::Some(8));
+    assert!(s.pair() == (7, 8));
+}
+
+test("existentials in a Vec, called in a loop") {
+    let xs: Vec<Peek> = Vec::new();
+    xs.push(new Bag(1));
+    xs.push(new Empty(4));
+    xs.push(new Bag(10));
+    let total = 0;
+    let nones = 0;
+    let names = "";
+    for x in xs {
+        match x.peek(2) {
+            Option::Some(v) => total = total + v,
+            Option::None => nones = nones + 1,
+        }
+        let (a, b) = x.pair();
+        total = total + a + b;
+        let (s, _) = x.named();
+        names = names + s;
+    }
+    assert!(total == 3 + 12 + (1 + 2) + (0 + 4) + (10 + 11));
+    assert!(nones == 1);
+    assert!(names == "bagemptybag");
+}

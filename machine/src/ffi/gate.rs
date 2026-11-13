@@ -11,7 +11,7 @@ use super::signature::FfiError;
 
 /// Default-deny integrity check for opening shared libraries.
 ///
-/// Bytecode that `dload`s a stem still needs a matching `--dload-pin` sha256,
+/// Code that `dload`s a stem still needs a matching `--dload-pin` sha256,
 /// unless the stem is `--dload-trusted` (honor-only skip of the hash).
 /// `--allow-dload` is compile-time only. Host [`Self::grant_file`] / [`Self::grant_stem`] remain test-only
 /// and do not restore a first-party exemption. Libc aliases stay denied.

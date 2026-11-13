@@ -34,7 +34,7 @@ test("compound bitwise") {
 
 // The literal cases above fold at compile time. `opaque` hides a value from
 // the optimizer (it round-trips through a `Vec`), so the cases below run the
-// VM's bitwise and shift instructions.
+// the bitwise and shift ops.
 fn opaque(int x) -> int {
     let v: Vec<int> = Vec::new();
     v.push(x);

@@ -1,0 +1,136 @@
+// A parallel `while` that steps by more than one and whose index is read
+// after the loop: the index ends at the first value at or past the bound,
+// which is the bound only when the range is a multiple of the stride, and
+// at its start when the loop runs no trips (#2450). Each result is checked
+// against a loop written with `break`, which always runs sequentially.
+use tests::assert;
+
+fn weight(int i) -> int {
+    return i % 7;
+}
+
+// `total` and the index after the loop, as one number.
+fn both(int total, int i) -> int {
+    return total * 10000000 + i;
+}
+
+// The loop the functions below write, stepping by `stride`.
+fn expected(int begin, int end, int stride, bool inclusive, int scale) -> int {
+    let total = 0;
+    let i = begin;
+    while true {
+        if i > end || (i == end && !inclusive) {
+            break;
+        }
+        total = total + weight(i) * scale;
+        i = i + stride;
+    }
+    return both(total, i);
+}
+
+fn by_two(int n) -> int {
+    let total = 0;
+    let i = 0;
+    while i < n {
+        total = total + weight(i);
+        i = i + 2;
+    }
+    return both(total, i);
+}
+
+fn by_three(int n) -> int {
+    let total = 0;
+    let i = 0;
+    while i < n {
+        total = total + weight(i);
+        i = i + 3;
+    }
+    return both(total, i);
+}
+
+// A start the caller picks.
+fn by_three_from(int begin, int n) -> int {
+    let total = 0;
+    let i = begin;
+    while i < n {
+        total = total + weight(i);
+        i = i + 3;
+    }
+    return both(total, i);
+}
+
+// An inclusive end, and a live capture.
+fn by_two_through(int n, int scale) -> int {
+    let total = 0;
+    let i = 1;
+    while i <= n {
+        total = total + weight(i) * scale;
+        i += 2;
+    }
+    return both(total, i);
+}
+
+// A const range: 100000 trips, the last index 299997.
+fn by_three_const() -> int {
+    let total = 0;
+    let i = 0;
+    while i < 299999 {
+        total = total + weight(i);
+        i = i + 3;
+    }
+    return both(total, i);
+}
+
+// A loop that counts down always runs sequentially.
+fn down_by_two(int n) -> int {
+    let total = 0;
+    let i = n;
+    while i > 0 {
+        total = total + weight(i);
+        i = i - 2;
+    }
+    return both(total, i);
+}
+
+test("stride two: the end a multiple of the stride or not") {
+    for n in [400000, 400001, 399999, 42, 41, 40, 3, 2, 1, 0, 0 - 1, 0 - 7] {
+        assert!(by_two(n) == expected(0, n, 2, false, 1));
+    }
+    assert!(by_two(400001) % 10000000 == 400002);
+}
+
+test("stride three: the end a multiple of the stride or not") {
+    for n in [400000, 400001, 400002, 399999, 62, 61, 60, 4, 3, 2, 1, 0, 0 - 2] {
+        assert!(by_three(n) == expected(0, n, 3, false, 1));
+    }
+    assert!(by_three(400000) % 10000000 == 400002);
+    assert!(by_three(399999) % 10000000 == 399999);
+}
+
+test("stride three from a start the caller picks") {
+    for begin in [0, 1, 2, 5, 0 - 4, 300000, 300001] {
+        for n in [300000, 300001, 300002, 100, 5, 0, 0 - 4, 0 - 9] {
+            assert!(by_three_from(begin, n) == expected(begin, n, 3, false, 1));
+        }
+    }
+    assert!(by_three_from(9, 4) % 10000000 == 9);
+}
+
+test("stride two through an inclusive end") {
+    for n in [400000, 400001, 43, 42, 2, 1, 0, 0 - 3] {
+        assert!(by_two_through(n, 3) == expected(1, n, 2, true, 3));
+    }
+    assert!(by_two_through(400001, 1) % 10000000 == 400003);
+}
+
+test("stride three over a const range") {
+    assert!(by_three_const() == expected(0, 299999, 3, false, 1));
+    assert!(by_three_const() % 10000000 == 300000);
+}
+
+test("counting down by two") {
+    // 400000, 399998, .. 2: every even number once, the index ending at 0.
+    assert!(down_by_two(400000) == expected(2, 400000, 2, true, 1) - 400002);
+    assert!(down_by_two(7) == both(7 % 7 + 5 + 3 + 1, 0 - 1));
+    assert!(down_by_two(0) == 0);
+}

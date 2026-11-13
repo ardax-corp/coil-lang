@@ -19,11 +19,11 @@ impl Sz for Box<T> {
 }
 
 fn shown_len<A: Show, B: Length>(A a, B b) -> int {
-    return show(a).len() + b.len();
+    return a.show().len() + b.len();
 }
 
 fn shown_sz<A: Show, B: Sz>(A a, B b) -> int {
-    return show(a).len() + b.sz();
+    return a.show().len() + b.sz();
 }
 
 fn apply_arr(forall T: Show. T -> [int; 3] -> int f) -> int {

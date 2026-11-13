@@ -1,6 +1,5 @@
 //! End-to-end golden tests for `.coil` example programs.
 
-use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -26,41 +25,199 @@ fn workspace_stdlib() -> PathBuf {
     workspace.join(".deps/coil-stdlib/src")
 }
 
-use compiler::Pipeline;
-use machine::Machine;
+use compiler::native_mir::{MirAllocKind, MirFfiOp, MirFunc, MirInst, NativeBody};
+use compiler::{CompileFail, Pipeline};
+use machine::native::NativeCode;
+use machine::reactor::{Reactor, TestCase, TestReport};
+use machine::{NativeStart, ThreadProgram};
 
-/// Captures VM `PRINT` output into a shared buffer (`Send` for thread workers).
-#[derive(Clone, Default)]
-struct SharedBuf {
-    inner: Arc<Mutex<Vec<u8>>>,
+/// What a compile leaves: the constant pool and the bodies an engine runs.
+struct Compiled {
+    constants: Vec<u64>,
+    bodies: Vec<NativeBody>,
 }
 
-impl SharedBuf {
-    pub fn new() -> Self {
-        Self::default()
+impl Compiled {
+    fn body(&self, name: &str) -> &MirFunc {
+        let body = self.bodies.iter().find(|b| b.name == name);
+        let names = || self.bodies.iter().map(|b| b.name.as_str()).collect::<Vec<_>>();
+        &body.unwrap_or_else(|| panic!("no body `{name}`; have {:?}", names())).mir
     }
 
-    fn into_utf8(self) -> String {
-        let bytes = self
-            .inner
-            .lock()
-            .expect("print buffer mutex poisoned")
-            .clone();
-        String::from_utf8(bytes).expect("captured output should be valid UTF-8")
+    /// The instructions of `name`.
+    fn insts(&self, name: &str) -> impl Iterator<Item = &MirInst> {
+        self.body(name).blocks.iter().flat_map(|b| &b.insts)
+    }
+
+    /// The instructions of every body.
+    fn all_insts(&self) -> impl Iterator<Item = &MirInst> {
+        self.bodies.iter().flat_map(|b| &b.mir.blocks).flat_map(|b| &b.insts)
     }
 }
 
-impl Write for SharedBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner
-            .lock()
-            .map_err(|_| std::io::ErrorKind::Other)?
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
+fn allocates_object(inst: &MirInst) -> bool {
+    matches!(inst, MirInst::Alloc { kind: MirAllocKind::Object { .. }, .. })
+}
+
+fn touches_field(inst: &MirInst) -> bool {
+    matches!(inst, MirInst::ProductLoad { .. } | MirInst::HeapFieldStore { .. })
+}
+
+/// Run `compile` with a capture open, as a run does: without one a compile
+/// leaves no bodies.
+fn capturing(compile: impl FnOnce() -> Result<Vec<u64>, CompileFail>) -> Result<Compiled, CompileFail> {
+    compiler::native_mir::start_native_capture();
+    let constants = compile();
+    let bodies = compiler::native_mir::take_native_capture();
+    Ok(Compiled { constants: constants?, bodies })
+}
+
+fn compile(pipeline: &mut Pipeline, src: &str) -> Result<Compiled, CompileFail> {
+    capturing(|| pipeline.compile_src(src))
+}
+
+fn compile_file(pipeline: &mut Pipeline, file: &str) -> Result<Compiled, CompileFail> {
+    capturing(|| pipeline.compile_src_from_file(file))
+}
+
+/// `bodies` as the MIR interpreter runs them. A refused body fails the test:
+/// it would not run.
+fn interpreted(bodies: Vec<NativeBody>, pcs: &std::collections::HashMap<String, u32>) -> Arc<NativeCode> {
+    let program = coil_mir_interp::prepare(bodies, pcs);
+    assert!(program.refused.is_empty(), "the interpreter refused {:?}", program.refused);
+    Arc::new(NativeCode::new(program.entries, program.sites).with_complete(true).with_keep(program.keep))
+}
+
+/// Function name to body entry.
+fn body_ids(pipeline: &Pipeline) -> std::collections::HashMap<String, u32> {
+    pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect()
+}
+
+fn thread_program(constants: &[u64], pipeline: &Pipeline) -> Arc<ThreadProgram> {
+    Arc::new(coil_host::thread_program(
+        pipeline,
+        coil_host::CompiledProgram {
+            constants,
+            strings: pipeline.strings(),
+            static_slots: pipeline.static_slot_count(),
+            debug: pipeline.program_debug(),
+        },
+    ))
+}
+
+/// What a program did.
+struct Run {
+    /// Everything it printed, panic messages included.
+    output: String,
+    panicked: bool,
+}
+
+/// Run `program` from `main` on this thread with `code`, its output captured.
+fn run_with_code(program: Arc<ThreadProgram>, code: Arc<NativeCode>, mut start: NativeStart) -> Run {
+    let print = Arc::new(Mutex::new(Vec::new()));
+    start.shared_print = Some(Arc::clone(&print));
+    machine::native::install_shared_for_next_run(code);
+    let panicked = machine::run_natively(program, start).expect("the interpreter covers every body");
+    machine::io::set_shared_print_redirect(None);
+    Run { output: captured_output(&print), panicked }
+}
+
+fn captured_output(print: &Mutex<Vec<u8>>) -> String {
+    let bytes = print.lock().expect("print buffer mutex poisoned").clone();
+    String::from_utf8(bytes).expect("captured output should be valid UTF-8")
+}
+
+/// Run `compiled` on the MIR interpreter.
+fn run(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) -> Run {
+    let code = interpreted(compiled.bodies, &body_ids(pipeline));
+    let program = thread_program(&compiled.constants, pipeline);
+    let entry = entry.map(coil_host::ffi_entry_path);
+    let start = coil_host::native_start(pipeline, &pipeline.archived_struct_layouts(), entry.as_deref());
+    run_with_code(program, code, start)
+}
+
+/// What [`run`] printed.
+fn run_compiled(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) -> String {
+    run(compiled, pipeline, entry).output
+}
+
+/// `compiled` as a `.ccoil` holds it: to bytes and back, then run from what
+/// came back.
+fn run_through_archive(compiled: Compiled, pipeline: &Pipeline) -> Run {
+    use common::decode_archived_program;
+    use compiler::native_mir::archive;
+    use rkyv::rancor::Error;
+
+    let program = pipeline.archive(compiled.constants, |_| archive::encode(&compiled.bodies, &body_ids(pipeline), &[]));
+    let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
+    let loaded = decode_archived_program(bytes.as_slice()).expect("decode");
+    let (bodies, pcs) = archive::decode(&loaded.native_mir).expect("decode the MIR section");
+    let code = interpreted(bodies, &pcs);
+    let start = coil_host::native_start(pipeline, &loaded.struct_layouts, None);
+    let program = ThreadProgram {
+        startup: Arc::new(loaded.startup.clone()),
+        main: loaded.main,
+        constants: Arc::new(loaded.constants.clone()),
+        strings: Arc::new(loaded.strings.clone()),
+        static_slot_count: loaded.static_slot_count,
+        debug: loaded.debug_bundle(),
+        class_word_kinds: machine::class_kind_table(&loaded.class_word_kinds),
+        static_word_kinds: Arc::new(loaded.static_word_kinds.clone()),
+    };
+    run_with_code(Arc::new(program), code, start)
+}
+
+/// Run `case` as `coil test` runs one: alone, on a VM of its own, on this
+/// thread, a panic's message in `print`.
+fn run_case(
+    pipeline: &Pipeline,
+    program: &Arc<ThreadProgram>,
+    code: &Arc<NativeCode>,
+    reactor: &Arc<Reactor>,
+    case: TestCase,
+    entry: Option<&Path>,
+    print: Arc<Mutex<Vec<u8>>>,
+) -> TestReport {
+    let start = coil_host::native_start(pipeline, &pipeline.archived_struct_layouts(), entry);
+    let ctx = machine::spawn_context(Arc::clone(program), start, Arc::clone(reactor), Some(Arc::clone(code)))
+        .expect("thread spawn context");
+    reactor.run_test_here(ctx, case, print)
+}
+
+fn test_case(entry: u32, expect_ok_result: bool) -> TestCase {
+    TestCase { entry, expect_ok_result, coverage: false, probes: 0, step_budget: None }
+}
+
+/// Run `main` as a case on a reactor of its own: what it did and the jobs it
+/// submitted. Where [`run`] leaves a panic's message on stderr, this keeps it
+/// in the output.
+fn run_as_case(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) -> (Run, usize) {
+    let main = pipeline.main_offset().expect("main");
+    let code = interpreted(compiled.bodies, &body_ids(pipeline));
+    let program = thread_program(&compiled.constants, pipeline);
+    let reactor = Reactor::new(1);
+    let print = Arc::new(Mutex::new(Vec::new()));
+    let report = run_case(pipeline, &program, &code, &reactor, test_case(main, false), entry, Arc::clone(&print));
+    let jobs = reactor.jobs_submitted();
+    reactor.shutdown();
+    (Run { output: captured_output(&print), panicked: !report.passed }, jobs)
+}
+
+/// Run each of `cases` alone: its name and whether it passed.
+fn run_each_case<'a>(compiled: Compiled, pipeline: &Pipeline, cases: &'a [(String, u32)]) -> Vec<(&'a str, bool)> {
+    let code = interpreted(compiled.bodies, &body_ids(pipeline));
+    let program = thread_program(&compiled.constants, pipeline);
+    let reactor = Reactor::new(1);
+    let results = cases
+        .iter()
+        .map(|(name, entry)| {
+            let print = Arc::new(Mutex::new(Vec::new()));
+            let report = run_case(pipeline, &program, &code, &reactor, test_case(*entry, true), None, print);
+            (name.as_str(), report.passed)
+        })
+        .collect();
+    reactor.shutdown();
+    results
 }
 
 /// Match `RUST_MIN_STACK` in `.cargo/config.toml` / the OS default main
@@ -209,7 +366,7 @@ fn example_pool_caps_concurrent_jobs() {
     }
     let peak = max_seen.load(Ordering::SeqCst);
     assert!(
-        peak >= 1 && peak <= EXAMPLE_POOL_SIZE,
+        (1..=EXAMPLE_POOL_SIZE).contains(&peak),
         "peak concurrent example jobs was {peak}, want 1..={EXAMPLE_POOL_SIZE}"
     );
 }
@@ -308,20 +465,17 @@ fn assert_compile_fails_pipeline(pipeline: &mut Pipeline, src: &str, code: compi
     );
 }
 
-fn compile_ok(pipeline: &mut Pipeline, src: &str) -> Vec<common::Byte> {
-    pipeline
-        .compile_src(src)
-        .unwrap_or_else(|_| {
-            panic!(
-                "expected compile Ok, messages={:?}",
-                pipeline
-                    .messages()
-                    .iter()
-                    .map(|m| (m.code(), m.message().to_string()))
-                    .collect::<Vec<_>>()
-            )
-        })
-        .0
+fn compile_ok(pipeline: &mut Pipeline, src: &str) -> Compiled {
+    compile(pipeline, src).unwrap_or_else(|_| {
+        panic!(
+            "expected compile Ok, messages={:?}",
+            pipeline
+                .messages()
+                .iter()
+                .map(|m| (m.code(), m.message().to_string()))
+                .collect::<Vec<_>>()
+        )
+    })
 }
 
 /// `env::exec` moved to the coil-process package: the `env` module no
@@ -339,7 +493,7 @@ fn env_exec_is_gone() {
 fn granted_exit_emits_host_invoke() {
     let mut pipeline = test_pipeline();
     pipeline.grant_exit();
-    let bc = compile_ok(
+    let compiled = compile_ok(
         &mut pipeline,
         r#"
 use env::{exit};
@@ -347,8 +501,7 @@ fn main() { exit(0); }
 "#,
     );
     assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::HostInvoke)),
+        compiled.all_insts().any(|i| matches!(i, MirInst::HostInvoke { .. })),
         "granted env::exit must emit HostInvoke"
     );
 }
@@ -357,7 +510,7 @@ fn main() { exit(0); }
 fn granted_dload_emits_ffi_load() {
     let mut pipeline = test_pipeline();
     pipeline.grant_dload_allow("plugin");
-    let bc = compile_ok(
+    let compiled = compile_ok(
         &mut pipeline,
         r#"
 use ffi::{dload};
@@ -365,9 +518,8 @@ fn main() { let _ = dload("plugin"); }
 "#,
     );
     assert!(
-        bc.iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::FfiLoad)),
-        "granted dload must emit FfiLoad"
+        compiled.all_insts().any(|i| matches!(i, MirInst::Ffi { op: MirFfiOp::Load, .. })),
+        "granted dload must emit an FFI load"
     );
 }
 
@@ -408,6 +560,13 @@ fn test_pipeline() -> Pipeline {
     p
 }
 
+/// [`test_pipeline`] at `-g0`: a panic prints its message alone.
+fn message_only_pipeline() -> Pipeline {
+    let mut p = test_pipeline();
+    p.set_debug_level(compiler::DebugLevel::None);
+    p
+}
+
 fn deny_pipeline() -> Pipeline {
     comptime::install();
     let mut p = Pipeline::new();
@@ -415,26 +574,22 @@ fn deny_pipeline() -> Pipeline {
     p
 }
 
-fn compile_src_with_tests(src: &str) -> (Pipeline, Vec<common::Byte>, Vec<u64>) {
+fn compile_src_with_tests(src: &str) -> (Pipeline, Compiled) {
     let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("source with tests should compile");
-    (pipeline, bytecode, constants)
+    let compiled = compile(&mut pipeline, src).expect("source with tests should compile");
+    (pipeline, compiled)
 }
 
 fn run_harness_src(src: &str) -> String {
-    let (pipeline, bytecode, constants) = compile_src_with_tests(src);
-    run_bytecode(bytecode, constants, &pipeline, None)
+    let (pipeline, compiled) = compile_src_with_tests(src);
+    run_compiled(compiled, &pipeline, None)
 }
 
 fn run_example_src_with_entry(src: &str, entry: Option<&std::path::Path>) -> String {
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("example failed to compile (parse error or type errors)");
-    run_bytecode(bytecode, constants, &pipeline, entry)
+    let compiled = compile(&mut pipeline, src).expect("example failed to compile (parse error or type errors)");
+    run_compiled(compiled, &pipeline, entry)
 }
 
 /// Multi-file examples (`use` / `mod`) must go through
@@ -446,10 +601,8 @@ fn run_example_multifile(path: &str) -> String {
         .expect("compiler crate must have a parent (workspace root)");
     let full = workspace_root.join(path);
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src_from_file(full.to_str().unwrap())
-        .unwrap_or_else(|_| panic!("multi-file example failed to compile: {}", full.display()));
-    run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
+    let compiled = compile_file(&mut pipeline, full.to_str().unwrap()).unwrap_or_else(|_| panic!("multi-file example failed to compile: {}", full.display()));
+    run_compiled(compiled, &pipeline, Some(full.as_path()))
 }
 
 /// Every `examples/*.coil` ends its header with `// @output <exact stdout>`
@@ -479,6 +632,10 @@ fn examples_print_their_documented_output() {
         if documented.starts_with("(not checked") {
             continue;
         }
+        // It reads `/etc/hosts` and `/etc/passwd`.
+        if cfg!(windows) && name == "task_files.coil" {
+            continue;
+        }
         let expected = parser::test_headers::unescape(documented);
         let got = run_example(&path);
         checked += 1;
@@ -494,6 +651,7 @@ fn examples_print_their_documented_output() {
     assert!(checked > 100, "only {checked} examples were checked");
 }
 
+#[cfg(unix)]
 /// Soft-skip an FFI-dependent test outside CI. In CI (`CI` env set), skip is a
 /// hard failure so missing `cc` / libffi never silently greens the suite.
 fn ffi_soft_skip(reason: &str) {
@@ -501,41 +659,6 @@ fn ffi_soft_skip(reason: &str) {
         panic!("FFI soft-skip forbidden in CI: {reason}");
     }
     eprintln!("skipping: {reason}");
-}
-
-fn run_bytecode(
-    bytecode: Vec<common::Byte>,
-    constants: Vec<u64>,
-    pipeline: &Pipeline,
-    entry: Option<&std::path::Path>,
-) -> String {
-    run_bytecode_counting_jobs(bytecode, constants, pipeline, entry).0
-}
-
-fn run_bytecode_counting_jobs(
-    bytecode: Vec<common::Byte>,
-    constants: Vec<u64>,
-    pipeline: &Pipeline,
-    entry: Option<&std::path::Path>,
-) -> (String, usize) {
-    let operand_slots = pipeline.operand_stack_slots() as usize;
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<256>::with_operand_capacity(operand_slots);
-    machine.set_shared_print(shared.inner.clone());
-    machine.with_output(shared.clone());
-    pipeline.wire_vm_ffi(&mut machine, entry);
-    pipeline.wire_host_natives(&mut machine);
-    pipeline.wire_thread_program(&mut machine, &bytecode, &constants, pipeline.strings());
-    machine.set_program_debug(pipeline.program_debug());
-    machine.run_raw(
-        &bytecode,
-        &constants,
-        pipeline.strings(),
-        pipeline.static_slot_count(),
-    );
-    let jobs = machine.reactor().jobs_submitted();
-    let _ = machine.restore_output();
-    (shared.into_utf8(), jobs)
 }
 
 fn run_src_with_grants(
@@ -547,10 +670,8 @@ fn run_src_with_grants(
     for (stem, path) in grants {
         pipeline.grant_dload_file((*stem).to_string(), path.clone());
     }
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("example failed to compile (parse error or type errors)");
-    run_bytecode(bytecode, constants, &pipeline, entry)
+    let compiled = compile(&mut pipeline, src).expect("example failed to compile (parse error or type errors)");
+    run_compiled(compiled, &pipeline, entry)
 }
 
 #[test]
@@ -560,9 +681,7 @@ fn example_panic_loc_archive_has_source_files() {
         .expect("workspace root");
     let path = workspace_root.join("examples/panic_loc.coil");
     let mut pipeline = test_pipeline();
-    let (bytecode, _constants) = pipeline
-        .compile_src_from_file(path.to_str().unwrap())
-        .expect("panic_loc should compile");
+    let compiled = compile_file(&mut pipeline, path.to_str().unwrap()).expect("panic_loc should compile");
     let debug = pipeline.program_debug();
     assert!(
         debug
@@ -572,13 +691,9 @@ fn example_panic_loc_archive_has_source_files() {
         "expected panic_loc.coil in source_files: {:?}",
         debug.source_files
     );
-    assert_eq!(debug.debug_locs.len(), bytecode.len());
-    use common::Instruction;
     assert!(
-        bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::Panic)),
-        "expected Panic opcode"
+        compiled.all_insts().any(|i| matches!(i, MirInst::Panic { .. })),
+        "expected a panic"
     );
 }
 
@@ -595,72 +710,48 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline
-        .compile_src(src)
-        .expect("scalar enum should compile");
+    let compiled = compile(&mut pipeline, src).expect("scalar enum should compile");
     assert!(
-        !bytecode
-            .iter()
-            .any(|b| matches!(
-                b.bytecode(),
-                common::Instruction::MakeEnum | common::Instruction::MakeEnumK
-            )),
-        "scalar-backed HttpCode::Ok must not allocate ObjEnum (MakeEnum)"
+        !compiled
+            .all_insts()
+            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. })),
+        "scalar-backed HttpCode::Ok must not allocate an enum object"
     );
 }
 
 #[test]
 fn panic_aborts_and_writes_message() {
-    let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(
+    let mut pipeline = message_only_pipeline();
+    let compiled = compile(
+        &mut pipeline,
             r#"
 fn main() {
     panic "boom";
 }
 "#,
-        )
-        .expect("panic example should compile");
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<128>::default();
-    machine.with_output(shared.clone());
-    machine.run_raw(
-        &bytecode,
-        &constants,
-        pipeline.strings(),
-        pipeline.static_slot_count(),
-    );
-    assert!(machine.panicked(), "expected language-level panic");
-    let _ = machine.restore_output();
-    let s = shared.into_utf8();
-    assert_eq!(s, "panic: boom");
+    )
+    .expect("panic example should compile");
+    let (run, _) = run_as_case(compiled, &pipeline, None);
+    assert!(run.panicked, "expected language-level panic");
+    assert_eq!(run.output, "panic: boom");
 }
 
 #[test]
 fn raise_from_main_fails_the_program() {
-    let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(
+    let mut pipeline = message_only_pipeline();
+    let compiled = compile(
+        &mut pipeline,
             r#"
 fn main() {
     raise "boom";
 }
 "#,
-        )
-        .expect("raise in main should compile (Result mode)");
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<128>::default();
-    machine.with_output(shared.clone());
-    machine.run_raw(
-        &bytecode,
-        &constants,
-        pipeline.strings(),
-        pipeline.static_slot_count(),
-    );
+    )
+    .expect("raise in main should compile (Result mode)");
+    let (run, _) = run_as_case(compiled, &pipeline, None);
     // An `Err` that ends `main` is not silent (#1353).
-    assert!(machine.panicked(), "an Err returned from main fails the program");
-    let _ = machine.restore_output();
-    assert_eq!(shared.into_utf8(), "panic: main returned Err(boom)");
+    assert!(run.panicked, "an Err returned from main fails the program");
+    assert_eq!(run.output, "panic: main returned Err(boom)");
 }
 
 
@@ -674,6 +765,16 @@ fn main() {
 
 
 
+
+/// How many dictionaries the program's one `PolyFnCapture` holds, past
+/// the shared entry's `kinds` word it captures last (#2506).
+fn polyfn_capture_elems(compiled: &Compiled) -> usize {
+    let capture = compiled.all_insts().find_map(|i| match i {
+        MirInst::Alloc { kind: MirAllocKind::PolyFnCapture { .. }, elems, .. } => Some(elems.len() - 1),
+        _ => None,
+    });
+    capture.expect("expected a PolyFn capture when the function escapes a constrained scope")
+}
 
 /// Phase 4: captured dictionaries remain valid after the creating frame returns
 /// and the application site need not supply dictionaries (`app_dict_arity=0`).
@@ -689,7 +790,7 @@ use string::{format, to_bytes};
             pub fn describe_val(int x) -> int { return x + 1; }
         }
         fn show<T: Describable>(T x) -> int {
-            return describe_val(x);
+            return x.describe_val();
         }
         fn capture_show<T: Describable>(T _w) {
             return show;
@@ -700,35 +801,19 @@ use string::{format, to_bytes};
         }
     "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, _constants) = pipeline.compile_src(src).expect("compile");
-    let capture = bytecode
-        .iter()
-        .find(|b| matches!(b.bytecode(), common::Instruction::MakePolyFnCapture))
-        .expect("expected MakePolyFnCapture when escaping show from a constrained scope");
+    let compiled = compile(&mut pipeline, src).expect("compile");
     assert_eq!(
-        capture.operand_u32() & 0xFF,
+        polyfn_capture_elems(&compiled),
         1,
         "capture should reserve one Describable dict slot"
     );
-    // Application of the returned PolyFn must not require a second MakeTuple
-    // dict at the call site — evidence lives in the capture.
-    let capture_pos = bytecode
-        .iter()
-        .position(|b| matches!(b.bytecode(), common::Instruction::MakePolyFnCapture))
-        .unwrap();
-    let call_indirects_after: Vec<_> = bytecode[capture_pos..]
-        .iter()
-        .filter(|b| matches!(b.bytecode(), common::Instruction::CallIndirect))
-        .collect();
+    // Application of the returned PolyFn must not require a second dict at
+    // the call site: evidence lives in the capture.
     assert!(
-        call_indirects_after
-            .iter()
-            .any(|b| (b.operand_u32() >> 16) == 0),
-        "captured PolyFn call should use app_dict_arity=0; CallIndirect operands: {:?}",
-        call_indirects_after
-            .iter()
-            .map(|b| b.operand_u32())
-            .collect::<Vec<_>>()
+        compiled
+            .all_insts()
+            .any(|i| matches!(i, MirInst::CallIndirect { dicts: 0, .. })),
+        "captured PolyFn call should take no dictionaries"
     );
     assert_eq!(run_example_src(src), "42");
 }
@@ -748,7 +833,7 @@ use string::{format, to_bytes};
             pub fn cast(int x) -> int { return x; }
         }
         fn convert_fn<A, B>(A x) -> B where Convert<A, B> {
-            return cast(x);
+            return x.cast();
         }
         fn capture_convert<A, B>(A _wa, B _wb) where Convert<A, B> {
             return convert_fn;
@@ -759,19 +844,14 @@ use string::{format, to_bytes};
         }
     "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, _constants) = pipeline.compile_src(src).expect("compile");
-    let capture = bytecode
-        .iter()
-        .find(|b| matches!(b.bytecode(), common::Instruction::MakePolyFnCapture))
-        .expect("expected MakePolyFnCapture for multiparam escape");
-    assert_eq!(capture.operand_u32() & 0xFF, 1);
+    let compiled = compile(&mut pipeline, src).expect("compile");
+    assert_eq!(polyfn_capture_elems(&compiled), 1);
     assert_eq!(run_example_src(src), "42");
 }
 
-/// Phase 1: PolyFn + fib-style arithmetic still receives peephole fusion.
+/// A generic function's value next to a recursive function.
 #[test]
-fn polyfn_with_fib_keeps_fused_superinstructions() {
-    use common::Instruction;
+fn polyfn_with_fib_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -786,29 +866,13 @@ use string::{format, to_bytes};
         }
     "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    let compiled = compile(&mut pipeline, src).expect("compile");
     assert!(
-        bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::MakePolyFn))
+        compiled
+            .all_insts()
+            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::PolyFn { .. } | MirAllocKind::PolyFnCapture { .. }, .. }))
     );
-    // Fuse-select is intentionally conservative while absolute JMP joins
-    // finish migrating; fib arithmetic may be unfused.
-    let has_arith = bytecode.iter().any(|b| {
-        matches!(
-            *b.bytecode(),
-            Instruction::ADD
-                | Instruction::LEQ
-                | Instruction::BinSlotImm
-                | Instruction::BinSlotSlot
-                | Instruction::BinReturn
-                | Instruction::DenseBin
-                | Instruction::DenseBin2
-                | Instruction::DenseBinJmpf
-        )
-    });
-    assert!(has_arith, "expected fib arithmetic with PolyFn present");
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     // fib(6) = 8
     assert_eq!(output, "8");
 }
@@ -826,12 +890,12 @@ fn main() {
 "#;
     let parser = parser::Pratt::default();
     let mut ast = parser.parse(src).expect("ill-typed program should parse");
-    let (bytecode, constants) = pipeline.compile_test("", &mut ast);
+    let compiled = capturing(|| Ok(pipeline.compile_test("", &mut ast))).expect("compile_test");
     assert!(
-        bytecode.is_empty(),
-        "compile_test must not emit bytecode for a program the checker rejected"
+        compiled.bodies.is_empty(),
+        "compile_test must not emit bodies for a program the checker rejected"
     );
-    assert!(constants.is_empty());
+    assert!(compiled.constants.is_empty());
 }
 
 
@@ -848,6 +912,7 @@ fn main() {
 
 
 
+#[cfg(unix)]
 fn ensure_ffi_libsum_built() -> std::path::PathBuf {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -965,93 +1030,6 @@ fn main() {
         "expected HostDloadDenied, got {:?}",
         pipeline.messages()
     );
-}
-
-/// Serialize fd-1 redirection: parallel tests + libtest status lines share
-/// process stdout, so nested `dup2` would corrupt capture.
-#[cfg(unix)]
-static OS_STDOUT_CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Restores process stdout (fd 1) on drop — including panics inside `f`.
-#[cfg(unix)]
-struct StdoutFdGuard {
-    old_stdout: i32,
-}
-
-#[cfg(unix)]
-impl Drop for StdoutFdGuard {
-    fn drop(&mut self) {
-        if self.old_stdout < 0 {
-            return;
-        }
-        unsafe {
-            libc::fflush(std::ptr::null_mut());
-            let _ = libc::dup2(self.old_stdout, 1);
-            libc::close(self.old_stdout);
-        }
-        self.old_stdout = -1;
-    }
-}
-
-/// Capture bytes written to OS stdout (fd 1) while `f` runs.
-/// Needed for libc `printf`, which bypasses the VM's `PRINT` sink.
-#[cfg(unix)]
-fn with_captured_os_stdout<R>(f: impl FnOnce() -> R) -> (R, String) {
-    use std::io::Read;
-    use std::os::fd::FromRawFd;
-
-    let _lock = OS_STDOUT_CAPTURE_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-
-    let (read_fd, guard) = unsafe {
-        let mut pipefd = [0i32; 2];
-        assert_eq!(libc::pipe(pipefd.as_mut_ptr()), 0);
-        let read_fd = pipefd[0];
-        let write_fd = pipefd[1];
-        let old_stdout = libc::dup(1);
-        assert!(old_stdout >= 0);
-        assert_eq!(libc::dup2(write_fd, 1), 1);
-        libc::close(write_fd);
-        (read_fd, StdoutFdGuard { old_stdout })
-    };
-
-    // Catch panics so we can restore fd 1 (via `guard`) before rethrowing —
-    // otherwise later tests inherit a broken stdout.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-    drop(guard);
-
-    let mut file = unsafe { std::fs::File::from_raw_fd(read_fd) };
-    let mut buf = Vec::new();
-    let _ = file.read_to_end(&mut buf);
-    drop(file);
-
-    let s = String::from_utf8_lossy(&buf).into_owned();
-    match result {
-        Ok(r) => (r, s),
-        Err(payload) => std::panic::resume_unwind(payload),
-    }
-}
-
-/// Drop noise that lands in a process-wide stdout pipe under `cargo test`
-/// parallelism: libtest harness status lines.
-#[cfg(unix)]
-fn clean_captured_os_stdout(output: &str) -> String {
-    output
-        .lines()
-        .filter(|l| {
-            let t = l.trim();
-            if t.is_empty() {
-                return false;
-            }
-            // libtest: `test foo::bar ... ok` (other threads finish mid-capture)
-            if t.starts_with("test ") && t.contains(" ... ") {
-                return false;
-            }
-            true
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[test]
@@ -1177,26 +1155,24 @@ fn compiled_dload_project(
     test_name: &str,
     src: &str,
     grants: compiler::HostGrants,
-) -> (Pipeline, std::path::PathBuf, std::path::PathBuf, Vec<common::Byte>, Vec<u64>) {
+) -> (Pipeline, std::path::PathBuf, std::path::PathBuf, Compiled) {
     let (dir, entry) = dload_project(test_name, src);
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_roots_with_default(dir.clone(), [workspace_stdlib()]);
     pipeline.set_host_grants(grants);
-    let (bytecode, constants) = pipeline
-        .compile_src_from_file(entry.to_str().unwrap())
-        .unwrap_or_else(|_| {
+    let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| {
             for msg in pipeline.messages() {
                 eprintln!("PIPELINE ERROR: {}", msg.message());
             }
             panic!("dload project failed to compile");
         });
-    (pipeline, dir, entry, bytecode, constants)
+    (pipeline, dir, entry, compiled)
 }
 
 fn dload_gate_for(test_name: &str, flags: DloadFlags) -> machine::DloadGate {
     let grants = flags.grants(compiler::HostGrants::deny_all());
     let (pipeline, dir, ..) = compiled_dload_project(test_name, "fn main() {}\n", grants);
-    let gate = pipeline.build_dload_gate();
+    let gate = coil_host::pipeline_dload_gate(&pipeline);
     let _ = std::fs::remove_dir_all(&dir);
     gate
 }
@@ -1228,9 +1204,9 @@ fn run_userland_dload_project_grants(
     flags: DloadFlags,
     grants: compiler::HostGrants,
 ) -> String {
-    let (pipeline, dir, entry, bytecode, constants) =
+    let (pipeline, dir, entry, compiled) =
         compiled_dload_project(test_name, src, flags.grants(grants));
-    let output = run_bytecode(bytecode, constants, &pipeline, Some(entry.as_path()));
+    let output = run_compiled(compiled, &pipeline, Some(entry.as_path()));
     let _ = std::fs::remove_dir_all(&dir);
     output
 }
@@ -1528,80 +1504,7 @@ fn pipeline_gate_first_party_allow_plus_trusted_skips_hash() {
 
 
 
-/// The `to_vec` bodies, built as HIR, take the dense tier: int ones compare
-/// with LE(Q) and step with `IADD64`, float siblings compare with LE(Q)F
-/// and step with `FADD64`.
-#[test]
-fn range_to_vec_thunks_use_int_vs_float_opcodes() {
-    use common::Instruction;
-    use common::dense::{FADD64, IADD64};
-    let src = r#"
-fn main() {
-    let _a = (0..3).to_vec();
-    let _b = (0..=2).to_vec();
-    let _c = (1.0..3.0).to_vec();
-    let _d = (1.0..=2.0).to_vec();
-}
-"#;
-    let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("range to_vec compile");
-    let syms = pipeline.program_debug().fn_symbols;
-    let body = |name: &str| {
-        let idx = syms.iter().position(|s| s.name == name).unwrap_or_else(|| {
-            panic!(
-                "missing `{name}`; have {:?}",
-                syms.iter().map(|s| &s.name).collect::<Vec<_>>()
-            )
-        });
-        let start = syms[idx].entry_pc as usize;
-        let end = syms
-            .get(idx + 1)
-            .map(|s| s.entry_pc as usize)
-            .unwrap_or(bytecode.len());
-        &bytecode[start..end]
-    };
-    let jmpf_ops = |slice: &[common::Byte]| -> Vec<u8> {
-        slice
-            .iter()
-            // The loop test may branch either way round.
-            .filter(|b| matches!(*b.bytecode(), Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt))
-            .map(|b| b.bin_slot_slot_jmpf_parts().0)
-            .collect()
-    };
-    let steps = |slice: &[common::Byte]| -> Vec<u8> {
-        slice
-            .iter()
-            // A rotated latch (#1867) bumps in its `DenseBinJmpf`.
-            .filter(|b| {
-                matches!(
-                    *b.bytecode(),
-                    Instruction::DenseBin | Instruction::DenseBin2 | Instruction::DenseBinJmpf
-                )
-            })
-            .map(|b| b.dense_abc_parts().0)
-            .collect()
-    };
-    for (name, cmp, step, other_step) in [
-        ("Range::to_vec", Instruction::LE, IADD64, FADD64),
-        ("RangeInclusive::to_vec", Instruction::LEQ, IADD64, FADD64),
-        ("Range::__float_to_vec", Instruction::LEF, FADD64, IADD64),
-        ("RangeInclusive::__float_to_vec", Instruction::LEQF, FADD64, IADD64),
-    ] {
-        let slice = body(name);
-        let (cmps, steps) = (jmpf_ops(slice), steps(slice));
-        assert!(cmps.contains(&(cmp as u8)), "`{name}` compare: {cmps:?}");
-        assert!(steps.contains(&step), "`{name}` step: {steps:?}");
-        assert!(!steps.contains(&other_step), "`{name}` steps with the wrong numeric kind: {steps:?}");
-    }
-}
-
-
-
-
-
-
-
-
+#[cfg(unix)]
 fn run_ffi_example_with_lib(path: &str, lib_path: &std::path::Path) -> String {
     ensure_ffi_libsum_built();
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1702,14 +1605,12 @@ fn example_perf_mandelbrot_ipa_emits_chunk_worker() {
         .expect("workspace root");
     let full = workspace_root.join("examples/perf/mandelbrot_ipa.coil");
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src_from_file(full.to_str().unwrap())
-        .expect("mandelbrot_ipa should compile");
+    let compiled = compile_file(&mut pipeline, full.to_str().unwrap()).expect("mandelbrot_ipa should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "flat pixel scan must emit a loop-IPA chunk worker"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()));
+    let output = run_compiled(compiled, &pipeline, Some(full.as_path()));
     assert_eq!(output, "625885");
 }
 
@@ -1719,9 +1620,9 @@ fn example_perf_mandelbrot_ipa_emits_chunk_worker() {
 /// Err arm in a binding match must still panic with the literal message.
 #[test]
 fn let_result_ok_panic_match_err_path_panics() {
-    let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(
+    let mut pipeline = message_only_pipeline();
+    let compiled = compile(
+        &mut pipeline,
             r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -1733,21 +1634,11 @@ fn main() {
     write(stdout(), to_bytes(format("%i", x)));
 }
 "#,
-        )
-        .expect("compile");
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<128>::default();
-    machine.with_output(shared.clone());
-    machine.run_raw(
-        &bytecode,
-        &constants,
-        pipeline.strings(),
-        pipeline.static_slot_count(),
-    );
-    assert!(machine.panicked(), "expected language-level panic on Err");
-    let _ = machine.restore_output();
-    let s = shared.into_utf8();
-    assert_eq!(s, "panic: accept");
+    )
+    .expect("compile");
+    let (run, _) = run_as_case(compiled, &pipeline, None);
+    assert!(run.panicked, "expected language-level panic on Err");
+    assert_eq!(run.output, "panic: accept");
 }
 
 
@@ -1769,32 +1660,17 @@ test("ok") {
 fn harness_virtual_main_prints_failure_and_panics() {
     let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
-    let (bytecode, constants) = pipeline
-        .compile_src(
+    let compiled = compile(
+        &mut pipeline,
             r#"
 test("broken") {
     if !(false) { raise "assertion failed"; }
 }
 "#,
-        )
-        .expect("compile");
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<128>::default();
-    machine.with_output(shared.clone());
-    pipeline.wire_host_natives(&mut machine);
-    machine.set_program_debug(pipeline.program_debug());
-    machine.run_raw(
-        &bytecode,
-        &constants,
-        pipeline.strings(),
-        pipeline.static_slot_count(),
-    );
-    let _ = machine.restore_output();
-    assert!(
-        machine.panicked(),
-        "virtual main must panic when a case fails"
-    );
-    let output = shared.into_utf8();
+    )
+    .expect("compile");
+    let (Run { output, panicked }, _) = run_as_case(compiled, &pipeline, None);
+    assert!(panicked, "virtual main must panic when a case fails");
     assert!(
         output.contains("> Test \"broken\" failed"),
         "expected failure banner, got {output:?}"
@@ -1808,8 +1684,8 @@ test("broken") {
 fn harness_virtual_main_reports_each_failed_case_in_order() {
     let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
-    let (bytecode, constants) = pipeline
-        .compile_src(
+    let compiled = compile(
+        &mut pipeline,
             r#"
 static let runs: int = 0;
 
@@ -1829,22 +1705,10 @@ test("all ran") {
     if !(runs == 3) { raise "assertion failed"; }
 }
 "#,
-        )
-        .expect("compile");
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<128>::default();
-    machine.with_output(shared.clone());
-    pipeline.wire_host_natives(&mut machine);
-    machine.set_program_debug(pipeline.program_debug());
-    machine.run_raw(
-        &bytecode,
-        &constants,
-        pipeline.strings(),
-        pipeline.static_slot_count(),
-    );
-    let _ = machine.restore_output();
-    assert!(machine.panicked(), "virtual main must panic when a case fails");
-    let output = shared.into_utf8();
+    )
+    .expect("compile");
+    let (Run { output, panicked }, _) = run_as_case(compiled, &pipeline, None);
+    assert!(panicked, "virtual main must panic when a case fails");
     assert_eq!(
         output, "> Test \"first fails\" failed\n> Test \"returns Err\" failed\npanic: tests failed",
         "got {output:?}"
@@ -1858,10 +1722,9 @@ test("all ran") {
 fn harness_virtual_main_lowers_to_direct_mir() {
     let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
-    pipeline.set_collect_opt_stats(true);
-    pipeline
-        .compile_src(
-            r#"
+    let compiled = compile(
+        &mut pipeline,
+        r#"
 test("passes") {
     if !(true) { raise "unreachable"; }
 }
@@ -1869,28 +1732,27 @@ test("fails") {
     return Result::Err("nope");
 }
 "#,
-        )
-        .expect("compile");
-    let tiers = compiler::last_opt_stats().body_tiers;
-    let main = tiers.iter().find(|t| t.name == "main").expect("virtual main");
-    assert_eq!(main.hir_reason.as_deref(), Some("lowered"), "virtual main: {:?}", main.hir_reason);
+    )
+    .expect("compile");
+    assert!(compiled.insts("main").any(|i| matches!(i, MirInst::Print { .. })), "the banner is a MIR print");
+    assert!(compiled.insts("main").any(|i| matches!(i, MirInst::Panic { .. })), "the failure is a MIR panic");
 }
 
-/// CLI-style isolation: each case is `call_function`'d independently so a
-/// soft failure does not prevent later cases from running.
+/// CLI-style isolation: each case runs alone, so a soft failure does not
+/// prevent later cases from running.
 #[test]
-fn harness_isolated_call_function_continues_after_soft_fail() {
+fn harness_isolated_case_continues_after_soft_fail() {
     let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
-    let (bytecode, constants) = pipeline
-        .compile_src(
+    let compiled = compile(
+        &mut pipeline,
             r#"
 test("a") { if !(true) { raise "assertion failed"; } }
 test("b") { if !(false) { raise "assertion failed"; } }
 test("c") { if !(1 + 1 == 2) { raise "assertion failed"; } }
 "#,
-        )
-        .expect("compile");
+    )
+    .expect("compile");
     let cases = pipeline.test_cases().to_vec();
     assert_eq!(cases.len(), 3);
     assert_eq!(
@@ -1898,53 +1760,31 @@ test("c") { if !(1 + 1 == 2) { raise "assertion failed"; } }
         ["a", "b", "c"]
     );
 
-    let mut results = Vec::new();
-    for (name, offset) in &cases {
-        let mut machine = Machine::<128>::default();
-        pipeline.wire_host_natives(&mut machine);
-        machine.load_program(&bytecode, &constants, pipeline.strings());
-        let ret = machine.call_function(*offset, &[]);
-        let ok = !machine.panicked() && machine.result_is_ok(ret);
-        results.push((name.as_str(), ok));
-    }
+    let results = run_each_case(compiled, &pipeline, &cases);
     assert_eq!(results, [("a", true), ("b", false), ("c", true)]);
 }
 
-/// Hard-`panic` path: each case is still isolated (fresh VM + unwind fence),
-/// matching `run_test_case` in the CLI so a VM abort does not fail-fast.
+/// Hard-`panic` path: each case is still isolated, as under `coil test`, so
+/// a panic does not fail-fast.
 #[test]
-fn harness_isolated_call_function_continues_after_hard_panic() {
+fn harness_isolated_case_continues_after_hard_panic() {
     let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
-    let (bytecode, constants) = pipeline
-        .compile_src(
+    let compiled = compile(
+        &mut pipeline,
             r#"
 test("boom") { panic "x"; }
 test("after") { if !(true) { raise "assertion failed"; } }
 "#,
-        )
-        .expect("compile");
+    )
+    .expect("compile");
     let cases = pipeline.test_cases().to_vec();
     assert_eq!(
         cases.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
         ["boom", "after"]
     );
 
-    let mut results = Vec::new();
-    for (name, offset) in &cases {
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut machine = Machine::<128>::default();
-            pipeline.wire_host_natives(&mut machine);
-            machine.load_program(&bytecode, &constants, pipeline.strings());
-            let ret = machine.call_function(*offset, &[]);
-            !machine.panicked() && machine.result_is_ok(ret)
-        }));
-        let ok = match outcome {
-            Ok(ok) => ok,
-            Err(_) => false,
-        };
-        results.push((name.as_str(), ok));
-    }
+    let results = run_each_case(compiled, &pipeline, &cases);
     assert_eq!(results, [("boom", false), ("after", true)]);
 }
 
@@ -2000,8 +1840,8 @@ fn main() {
 #[test]
 fn production_compile_strips_harness_declarations() {
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(
+    let compiled = compile(
+        &mut pipeline,
             r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -2009,19 +1849,19 @@ test("hidden") { if !(false) { raise "assertion failed"; } }
 test("also hidden") { if !(false) { raise "assertion failed"; } }
 fn main() { write(stdout(), to_bytes("ok")); }
 "#,
-        )
-        .expect("compile");
+    )
+    .expect("compile");
     assert!(
         pipeline.test_cases().is_empty(),
         "production compile must not register harness cases"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "ok");
 }
 
 #[test]
 fn include_tests_flag_embeds_harness_metadata() {
-    let (pipeline, _bc, _constants) = compile_src_with_tests(
+    let (pipeline, _compiled) = compile_src_with_tests(
         r#"
 test("via attr") { if !(true) { raise "assertion failed"; } }
 test("via block") { if !(true) { raise "assertion failed"; } }
@@ -2049,11 +1889,9 @@ test("via block") { if !(true) { raise "assertion failed"; } }
 
 
 
-/// `if !done { break }` leaves no standalone `LogNot`: the stack path fuses
-/// `LogNot; JMPF`, and in registers the branch takes its targets swapped.
-/// (`LogNotJmpt` came from `invert_guard_branch`, removed 2026-10.)
+/// `if !done { break }` takes the break.
 #[test]
-fn not_flag_break_log_not_jmpf_runs() {
+fn not_flag_break_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -2067,22 +1905,12 @@ fn main() {
     write(stdout(), to_bytes(format("%i", n)));
 }
 "#;
-    let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("compile");
-    assert!(
-        !bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::LogNot)),
-        "expected the `!` folded into the branch"
-    );
     assert_eq!(run_example_src(src), "0");
 }
 
-/// Two-local `if a < b { break }` fuses to a two-slot compare jump (fuse-IL
-/// `BinSlotSlotJmpt`, or `BinSlotSlotJmpf` when `main` runs dense) and takes
-/// the break.
+/// Two-local `if a < b { break }` takes the break.
 #[test]
-fn two_local_compare_break_bin_slot_slot_jmpt_runs() {
+fn two_local_compare_break_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -2100,16 +1928,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", n)));
 }
 "#;
-    // Heap reads, not literals: MIR→LIR would fold a constant compare away.
-    let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("compile");
-    assert!(
-        bytecode.iter().any(|b| matches!(
-            b.bytecode(),
-            common::Instruction::BinSlotSlotJmpt | common::Instruction::BinSlotSlotJmpf
-        )),
-        "expected a two-slot compare jump in bytecode"
-    );
+    // Heap reads, not literals: a constant compare would fold away.
     assert_eq!(run_example_src(src), "0");
 }
 
@@ -2119,6 +1938,47 @@ fn main() {
 
 
 
+
+/// A recursion whose leaves compare with a user `Lt` is not pure, so it
+/// gets no fork worker: the impl's static updates would be lost on worker
+/// threads (#2388).
+#[test]
+fn auto_par_user_operator_recursion_is_not_forked() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+static let CALLS: int = 0;
+class Money {
+    pub cents: int,
+}
+impl Lt for Money {
+    pub fn lt(Money a, Money b) -> bool {
+        CALLS++;
+        return a.cents < b.cents;
+    }
+}
+fn walk(int n) -> int {
+    if n <= 1 {
+        if new Money(n) < new Money(5) {
+            return 1;
+        }
+        return 0;
+    }
+    return walk(n - 1) + walk(n - 2);
+}
+fn main() {
+    let r = walk(27);
+    write(stdout(), to_bytes(format("%i %i", r, CALLS)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    pipeline.set_call_fold(false);
+    compile(&mut pipeline, src).expect("walk should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_walk").is_none(),
+        "a recursion that runs a user operator must stay sequential"
+    );
+}
 
 /// Constant sites above the expression grain floor must emit `__coil_par_*` and stay correct.
 #[test]
@@ -2139,9 +1999,7 @@ fn main() {
     let mut pipeline = test_pipeline();
     // The call would be computed while compiling; this checks its worker.
     pipeline.set_call_fold(false);
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par fib should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par fib should compile");
     assert!(
         pipeline.function_offset("__coil_par_fib").is_some(),
         "expected one parameterized worker for fib"
@@ -2158,10 +2016,10 @@ fn main() {
         pipeline.function_offset("__coil_par_fib_20").is_none(),
         "fib(20) must not get a parallel specialization"
     );
-    let (output, jobs) = run_bytecode_counting_jobs(bytecode, constants, &pipeline, None);
+    let (Run { output, .. }, jobs) = run_as_case(compiled, &pipeline, None);
     assert_eq!(output, "17711");
     assert!(
-        jobs >= 1 && jobs < 20,
+        (1..20).contains(&jobs),
         "fib(22) must spawn, but not a cutoff-chain storm: jobs={jobs}"
     );
 }
@@ -2176,14 +2034,12 @@ enum Tree {
     Leaf,
     Node(Tree, Tree),
 }
-#[max_depth(64)]
 fn build(int n) -> Tree {
     if n <= 1 {
         return Tree::Leaf();
     }
     return Tree::Node(build(n - 1), build(n - 2));
 }
-#[max_depth(64)]
 fn leaves(Tree t) -> int {
     return match t {
         Tree::Leaf => 1,
@@ -2195,15 +2051,13 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par enum-ctor should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par enum-ctor should compile");
     assert!(
         pipeline.function_offset("__coil_par_build").is_some(),
         "expected an enum-ctor worker for build"
     );
     // `build` shares fib's recurrence, so the leaf count is fib(22).
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "17711");
 }
 
@@ -2257,14 +2111,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par sub binop should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par sub binop should compile");
     assert!(
         pipeline.function_offset("__coil_par_diff").is_some(),
         "expected a Sub worker for diff"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     // d(n)=d(n-1)-d(n-2) with d(0)=0,d(1)=1 is period-6; d(22)=-1.
     assert_eq!(output, "-1");
 }
@@ -2278,7 +2130,6 @@ fn auto_par_self_call_combine_emits_spec() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(4096)]
 fn tak(int a, int b, int c) -> int {
     if b >= a {
         return c;
@@ -2290,9 +2141,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par self-call should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par self-call should compile");
     assert!(
         pipeline.function_offset("__coil_par_tak").is_some(),
         "expected a parameterized worker for tak(21, 12, 6)"
@@ -2301,7 +2150,7 @@ fn main() {
         pipeline.function_offset("__coil_par_tak_21_12_6").is_none(),
         "must not emit a per-arg tak clone"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "12");
 }
 
@@ -2311,7 +2160,6 @@ fn auto_par_narrow_tak_stays_sequential() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(4096)]
 fn tak(int a, int b, int c) -> int {
     if b >= a {
         return c;
@@ -2323,14 +2171,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("narrow tak should compile");
+    let compiled = compile(&mut pipeline, src).expect("narrow tak should compile");
     assert!(
         pipeline.function_offset("__coil_par_tak").is_none(),
         "a narrow x - y gap must not emit a worker"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "21");
 }
 
@@ -2341,7 +2187,6 @@ fn auto_par_fair_tak_load_emits_worker() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(4096)]
 fn tak(int a, int b, int c) -> int {
     if b >= a {
         return c;
@@ -2353,12 +2198,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline.compile_src(src).expect("fair tak should compile");
+    let compiled = compile(&mut pipeline, src).expect("fair tak should compile");
     assert!(
         pipeline.function_offset("__coil_par_tak").is_some(),
         "fair tak(18, 12, 6) must get a parallel worker under loose grain"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "7");
 }
 
@@ -2411,7 +2256,6 @@ use thread::{mutex, with_lock};
 fn bump(Mutex m) {
     with_lock(m, fn (int x) => (x + 1, 0))?;
 }
-#[max_depth(64)]
 fn rec(Mutex m, int n) -> int {
     if n <= 1 {
         bump(m);
@@ -2462,7 +2306,6 @@ fn dump(int n) -> int {
     write(f, to_bytes(format("%i", n)));
     return n;
 }
-#[max_depth(64)]
 fn rec(int n) -> int {
     if n <= 1 { return dump(n); }
     return rec(n - 1) + rec(n - 2);
@@ -2505,7 +2348,6 @@ fn leaf(int n) -> int {
     write(stderr(), to_bytes(format("%i", n)));
     return n;
 }
-#[max_depth(64)]
 fn rec(int n) -> int {
     if n <= 1 { return leaf(n); }
     return rec(n - 1) + rec(n - 2);
@@ -2556,7 +2398,6 @@ fn poke(int n) -> int {
     };
     return n;
 }
-#[max_depth(64)]
 fn rec(int n) -> int {
     if n <= 1 { return poke(n); }
     return rec(n - 1) + rec(n - 2);
@@ -2609,9 +2450,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("helper-arm IPA should compile");
+    let compiled = compile(&mut pipeline, src).expect("helper-arm IPA should compile");
     assert!(
         pipeline.function_offset("__coil_par_pair_fib").is_some(),
         "expected a worker for pair_fib(22)"
@@ -2621,7 +2460,7 @@ fn main() {
         "helper arms must stay sequential (no nested fib AlwaysPar)"
     );
     // fib(22) + fib(21)
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "28657");
 }
 
@@ -2643,15 +2482,13 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("trivial helper arms should compile");
+    let compiled = compile(&mut pipeline, src).expect("trivial helper arms should compile");
     assert!(
         pipeline.function_offset("__coil_par_pair_sq").is_none(),
         "two multiplies must not buy a spawn"
     );
     // 22² + 21²
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "925");
 }
 
@@ -2661,7 +2498,6 @@ fn auto_par_irrefutable_match_arm_emits_spec() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(64)]
 fn fibm(int n) -> int {
     if n <= 1 { return n; }
     return match n {
@@ -2673,14 +2509,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("match-arm IPA should compile");
+    let compiled = compile(&mut pipeline, src).expect("match-arm IPA should compile");
     assert!(
         pipeline.function_offset("__coil_par_fibm").is_some(),
         "irrefutable match arm must still emit a worker"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "17711");
 }
 
@@ -2709,18 +2543,16 @@ fn main() {
     let mut pipeline = test_pipeline();
     // The call would be computed while compiling; this checks its worker.
     pipeline.set_call_fold(false);
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par triple_fib should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par triple_fib should compile");
     assert!(
         pipeline.function_offset("__coil_par_triple_fib").is_some(),
         "expected a 3-arm worker for triple_fib"
     );
-    let (output, jobs) = run_bytecode_counting_jobs(bytecode, constants, &pipeline, None);
+    let (Run { output, .. }, jobs) = run_as_case(compiled, &pipeline, None);
     // fib(22)+fib(21)+fib(20) with fib(n<=1)=n
     assert_eq!(output, "35422");
     assert!(
-        jobs >= 1 && jobs < 20,
+        (1..20).contains(&jobs),
         "triple_fib(22) must spawn, but not a cutoff-chain storm: jobs={jobs}"
     );
 }
@@ -2744,14 +2576,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("let-bound IPA should compile");
+    let compiled = compile(&mut pipeline, src).expect("let-bound IPA should compile");
     assert!(
         pipeline.function_offset("__coil_par_fib").is_some(),
         "expected a worker for let-bound fib"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "17711");
 }
 
@@ -2772,14 +2602,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("param-plus IPA should compile");
+    let compiled = compile(&mut pipeline, src).expect("param-plus IPA should compile");
     assert!(
         pipeline.function_offset("__coil_par_walk").is_some(),
         "expected a worker for walk(16, 0)"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "524288");
 }
 
@@ -2789,7 +2617,6 @@ fn auto_par_xor_binop_emits_spec_and_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[max_depth(64)]
 fn mix(int n) -> int {
     if n <= 1 {
         return n;
@@ -2801,14 +2628,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par xor should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par xor should compile");
     assert!(
         pipeline.function_offset("__coil_par_mix").is_some(),
         "expected a Xor worker for mix"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "1");
 }
 
@@ -2833,21 +2658,21 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par loop should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "expected a chunk worker for the counted loop"
     );
     // Sum of i*i for i in 0..100, and the induction variable past its range.
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "328350,100");
 }
 
 /// E1: a function that passes a pure lambda to a higher-order function is
 /// pure (HIR effects), so a loop over it splits; an impure lambda keeps it
-/// sequential. (`twice` is not generic: coil-lang#699.)
+/// sequential. (`twice` is not generic: coil-lang#699.) The fold is `^`:
+/// what a function value returns has no known sign, and a `+` fold of
+/// such terms runs sequentially (coil-lang#2423).
 #[test]
 fn auto_par_loop_over_a_pure_lambda_call_splits() {
     let body = |lambda: &str| {
@@ -2870,7 +2695,7 @@ fn main() {{
     let acc = 0;
     let i = 0;
     while i < 100 {{
-        acc = acc + score(i);
+        acc = acc ^ score(i);
         i = i + 1;
     }}
     write(stdout(), to_bytes(format("%i", acc)));
@@ -2879,16 +2704,14 @@ fn main() {{
         )
     };
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(&body("fn (int x) => x + 1"))
-        .expect("pure lambda loop should compile");
+    let compiled = compile(&mut pipeline, &body("fn (int x) => x + 2")).expect("pure lambda loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "expected a chunk worker: score is pure through its lambda"
     );
-    // sum of i + 2 for i in 0..100.
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
-    assert_eq!(output, "5150");
+    // The xor of i + 4 for i in 0..100.
+    let output = run_compiled(compiled, &pipeline, None);
+    assert_eq!(output, "0");
 
     let mut pipeline = test_pipeline();
     pipeline
@@ -2923,22 +2746,25 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("dynamic loop should compile");
+    let compiled = compile(&mut pipeline, src).expect("dynamic loop should compile");
     assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
     // sum of squares 0..40 is 20540; 0..10 stays under the grain floor.
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "20540,285");
 }
 
 /// An int parameter is a worker argument, not a reason to stay sequential.
+/// The guard gives it a sign: a `+` fold of terms whose sign is the
+/// caller's runs sequentially (coil-lang#2423).
 #[test]
 fn auto_par_loop_int_capture_matches_sequential() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
 fn run(int k) -> int {
+    if k < 0 {
+        return 0;
+    }
     let acc = 0;
     let i = 0;
     while i < 100 {
@@ -2952,11 +2778,9 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("captured int loop should compile");
+    let compiled = compile(&mut pipeline, src).expect("captured int loop should compile");
     assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "300");
 }
 
@@ -2979,11 +2803,9 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("branched loop should compile");
+    let compiled = compile(&mut pipeline, src).expect("branched loop should compile");
     assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "380,40");
 }
 
@@ -3004,11 +2826,9 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("stride loop should compile");
+    let compiled = compile(&mut pipeline, src).expect("stride loop should compile");
     assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     // 0+2+...+78 = 1560, and the induction variable lands on 80.
     assert_eq!(output, "1560,80");
 }
@@ -3031,12 +2851,18 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("dynamic fib should compile");
+    let compiled = compile(&mut pipeline, src).expect("dynamic fib should compile");
     assert!(pipeline.function_offset("__coil_par_fib").is_some());
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "17711");
+}
+
+/// The program calls `thread_spawn_shared`.
+fn spawns_shared(compiled: &Compiled) -> bool {
+    let shared_id = common::THREAD_SPAWN_SHARED_ID;
+    compiled
+        .all_insts()
+        .any(|i| matches!(i, MirInst::HostInvoke { native_id, .. } if *native_id == shared_id))
 }
 
 /// C1 loop IPA emits `thread_spawn_shared` and skips `PortableValue` encode.
@@ -3059,19 +2885,14 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par loop should compile");
-    let shared_id = common::THREAD_SPAWN_SHARED_ID as u32;
+    let compiled = compile(&mut pipeline, src).expect("auto-par loop should compile");
     assert!(
-        bytecode.iter().any(|b| {
-            matches!(b.bytecode(), common::Instruction::CONST) && b.value_u32() == shared_id
-        }),
-        "loop IPA should HostInvoke thread_spawn_shared (id {shared_id})"
+        spawns_shared(&compiled),
+        "loop IPA should HostInvoke thread_spawn_shared"
     );
     machine::thread::reset_portable_encode_count();
     let before = machine::thread::portable_encode_count();
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "328350");
     let encoded = machine::thread::portable_encode_count() - before;
     assert_eq!(
@@ -3099,19 +2920,14 @@ fn main() {
     let mut pipeline = test_pipeline();
     // The call would be computed while compiling; this checks its worker.
     pipeline.set_call_fold(false);
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par fib should compile");
-    let shared_id = common::THREAD_SPAWN_SHARED_ID as u32;
+    let compiled = compile(&mut pipeline, src).expect("auto-par fib should compile");
     assert!(
-        bytecode.iter().any(|b| {
-            matches!(b.bytecode(), common::Instruction::CONST) && b.value_u32() == shared_id
-        }),
-        "expression IPA should HostInvoke thread_spawn_shared (id {shared_id})"
+        spawns_shared(&compiled),
+        "expression IPA should HostInvoke thread_spawn_shared"
     );
     machine::thread::reset_portable_encode_count();
     let before = machine::thread::portable_encode_count();
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "17711");
     let encoded = machine::thread::portable_encode_count() - before;
     assert_eq!(
@@ -3130,14 +2946,12 @@ enum Tree {
     Leaf,
     Node(Tree, Tree),
 }
-#[max_depth(64)]
 fn build(int n) -> Tree {
     if n <= 1 {
         return Tree::Leaf();
     }
     return Tree::Node(build(n - 1), build(n - 2));
 }
-#[max_depth(64)]
 fn leaves(Tree t) -> int {
     return match t {
         Tree::Leaf => 1,
@@ -3149,19 +2963,14 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par enum-ctor should compile");
-    let shared_id = common::THREAD_SPAWN_SHARED_ID as u32;
+    let compiled = compile(&mut pipeline, src).expect("auto-par enum-ctor should compile");
     assert!(
-        bytecode.iter().any(|b| {
-            matches!(b.bytecode(), common::Instruction::CONST) && b.value_u32() == shared_id
-        }),
-        "enum-ctor IPA should HostInvoke thread_spawn_shared (id {shared_id})"
+        spawns_shared(&compiled),
+        "enum-ctor IPA should HostInvoke thread_spawn_shared"
     );
     machine::thread::reset_portable_encode_count();
     let before = machine::thread::portable_encode_count();
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "17711");
     let encoded = machine::thread::portable_encode_count() - before;
     assert_eq!(
@@ -3187,19 +2996,14 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("user spawn should compile");
-    let shared_id = common::THREAD_SPAWN_SHARED_ID as u32;
+    let compiled = compile(&mut pipeline, src).expect("user spawn should compile");
     assert!(
-        bytecode.iter().all(|b| {
-            !(matches!(b.bytecode(), common::Instruction::CONST) && b.value_u32() == shared_id)
-        }),
+        !spawns_shared(&compiled),
         "user thread::spawn must not emit thread_spawn_shared"
     );
     machine::thread::reset_portable_encode_count();
     let before = machine::thread::portable_encode_count();
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "42");
     let encoded = machine::thread::portable_encode_count() - before;
     assert!(
@@ -3234,16 +3038,14 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("two auto-par loops should compile");
+    let compiled = compile(&mut pipeline, src).expect("two auto-par loops should compile");
     for name in ["__coil_par_loop_1", "__coil_par_loop_2"] {
         assert!(
             pipeline.function_offset(name).is_some(),
             "expected a chunk worker named {name}"
         );
     }
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "8555,780");
 }
 
@@ -3293,14 +3095,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("short loop should compile");
+    let compiled = compile(&mut pipeline, src).expect("short loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_none(),
         "a 20-trip loop cannot pay for a spawn"
     );
-    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "2470");
+    assert_eq!(run_compiled(compiled, &pipeline, None), "2470");
 }
 
 /// Counted `for x in 0..K` above the trip-count grain gate chunks like `while`.
@@ -3321,14 +3121,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par for-range should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par for-range should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "expected a chunk worker for the counted for-range"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "328350");
 }
 
@@ -3350,15 +3148,13 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("inclusive for-range should compile");
+    let compiled = compile(&mut pipeline, src).expect("inclusive for-range should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "expected a chunk worker for inclusive for-range"
     );
     // sum of i*i for i in 1..=60 = n(n+1)(2n+1)/6 at n=60.
-    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "73810");
+    assert_eq!(run_compiled(compiled, &pipeline, None), "73810");
 }
 
 /// B5: `let r = 0..K` then `for x in r` is the same counted latch.
@@ -3380,14 +3176,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par const range local should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par const range local should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "expected a chunk worker for a const range local"
     );
-    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "328350");
+    assert_eq!(run_compiled(compiled, &pipeline, None), "328350");
 }
 
 /// XOR reduction is associative with identity 0, so counted loops still chunk.
@@ -3408,14 +3202,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par xor loop should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par xor loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "expected a chunk worker for xor reduction"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "13452");
 }
 
@@ -3438,14 +3230,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("auto-par const-scale loop should compile");
+    let compiled = compile(&mut pipeline, src).expect("auto-par const-scale loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "expected a chunk worker for const-int scale"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_compiled(compiled, &pipeline, None);
     assert_eq!(output, "985050");
 }
 
@@ -3467,14 +3257,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("commuted add loop should compile");
+    let compiled = compile(&mut pipeline, src).expect("commuted add loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "expected a chunk worker for commuted add"
     );
-    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "328350");
+    assert_eq!(run_compiled(compiled, &pipeline, None), "328350");
 }
 
 /// Dynamic `for x in 0..n` splits when the runtime trip count clears the grain floor.
@@ -3498,14 +3286,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("dynamic for-range should compile");
+    let compiled = compile(&mut pipeline, src).expect("dynamic for-range should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "a parameter range above the grain floor should spawn"
     );
-    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "328350");
+    assert_eq!(run_compiled(compiled, &pipeline, None), "328350");
 }
 
 /// A for-range at the trip-count floor stays sequential.
@@ -3526,14 +3312,12 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("short for-range should compile");
+    let compiled = compile(&mut pipeline, src).expect("short for-range should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_none(),
         "a 20-trip for-range cannot pay for a spawn"
     );
-    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "2470");
+    assert_eq!(run_compiled(compiled, &pipeline, None), "2470");
 }
 
 
@@ -3566,28 +3350,9 @@ fn main() {
     assert_eq!(output, "5");
 
     let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("class field source");
-    let symbols = pipeline.program_debug().fn_symbols;
-    let main = symbols
-        .iter()
-        .position(|symbol| symbol.name == "main")
-        .expect("main symbol");
-    let start = symbols[main].entry_pc as usize;
-    let end = symbols
-        .get(main + 1)
-        .map(|symbol| symbol.entry_pc as usize)
-        .unwrap_or(bytecode.len());
-    let main_code = &bytecode[start..end];
+    let compiled = compile(&mut pipeline, src).expect("class field source");
     assert!(
-        main_code.iter().all(|byte| {
-            !matches!(
-                byte.bytecode(),
-                common::Instruction::INIT
-                    | common::Instruction::InitTyped
-                    | common::Instruction::SetField
-                    | common::Instruction::GetField
-            )
-        }),
+        !compiled.insts("main").any(|i| allocates_object(i) || touches_field(i)),
         "direct class field access should not allocate or touch fields"
     );
 }
@@ -3610,33 +3375,10 @@ fn main() {
     assert_eq!(output, "6");
 
     let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("second field temp");
-    let symbols = pipeline.program_debug().fn_symbols;
-    let main = symbols
-        .iter()
-        .position(|symbol| symbol.name == "main")
-        .expect("main symbol");
-    let start = symbols[main].entry_pc as usize;
-    let end = symbols
-        .get(main + 1)
-        .map(|symbol| symbol.entry_pc as usize)
-        .unwrap_or(bytecode.len());
-    let main_code = &bytecode[start..end];
+    let compiled = compile(&mut pipeline, src).expect("second field temp");
     assert!(
-        main_code.iter().all(|byte| {
-            !matches!(
-                byte.bytecode(),
-                common::Instruction::INIT
-                    | common::Instruction::InitTyped
-                    | common::Instruction::SetField
-                    | common::Instruction::GetField
-            )
-        }),
-        "second-field temp elision must not allocate; opcodes: {:?}",
-        main_code
-            .iter()
-            .map(|b| b.bytecode().mnemonic())
-            .collect::<Vec<_>>()
+        !compiled.insts("main").any(|i| allocates_object(i) || touches_field(i)),
+        "second-field temp elision must not allocate"
     );
 }
 
@@ -3658,37 +3400,14 @@ fn main() {
     assert_eq!(output, "5");
 
     let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("grouped field temp");
-    let symbols = pipeline.program_debug().fn_symbols;
-    let main = symbols
-        .iter()
-        .position(|symbol| symbol.name == "main")
-        .expect("main symbol");
-    let start = symbols[main].entry_pc as usize;
-    let end = symbols
-        .get(main + 1)
-        .map(|symbol| symbol.entry_pc as usize)
-        .unwrap_or(bytecode.len());
-    let main_code = &bytecode[start..end];
+    let compiled = compile(&mut pipeline, src).expect("grouped field temp");
     assert!(
-        main_code.iter().all(|byte| {
-            !matches!(
-                byte.bytecode(),
-                common::Instruction::INIT
-                    | common::Instruction::InitTyped
-                    | common::Instruction::SetField
-                    | common::Instruction::GetField
-            )
-        }),
-        "grouped new Class(args).field must still elide; opcodes: {:?}",
-        main_code
-            .iter()
-            .map(|b| b.bytecode().mnemonic())
-            .collect::<Vec<_>>()
+        !compiled.insts("main").any(|i| allocates_object(i) || touches_field(i)),
+        "grouped new Class(args).field must still elide"
     );
 }
 
-/// Q2: a named class used as a whole object materializes one `InitTyped`.
+/// Q2: a named class used as a whole object materializes once.
 #[test]
 fn named_local_class_stays_heap_allocated() {
     let src = r#"
@@ -3712,28 +3431,158 @@ fn main() {
     let mut pipeline = test_pipeline();
     // `take` inlined, `p` is scalar-replaced: keep the call.
     pipeline.set_inline_max_cost(0);
-    let (bytecode, _) = pipeline.compile_src(src).expect("named local class");
-    let symbols = pipeline.program_debug().fn_symbols;
-    let main = symbols
-        .iter()
-        .position(|symbol| symbol.name == "main")
-        .expect("main symbol");
-    let start = symbols[main].entry_pc as usize;
-    let end = symbols
-        .get(main + 1)
-        .map(|symbol| symbol.entry_pc as usize)
-        .unwrap_or(bytecode.len());
-    let main_code = &bytecode[start..end];
+    let compiled = compile(&mut pipeline, src).expect("named local class");
+    assert_eq!(
+        compiled.insts("main").filter(|i| allocates_object(i)).count(),
+        1,
+        "identity use must allocate once"
+    );
+}
+
+/// An inherent method's `Option<int>` parameter takes its two words: the
+/// caller passes the pair without boxing an `Option`.
+#[test]
+fn inherent_method_pair_parameter_takes_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+class H {
+    pub d: int,
+}
+impl H {
+    pub fn get(Option<int> o) -> int {
+        return match o {
+            Some(v) => v,
+            None => self.d,
+        };
+    }
+}
+fn main() {
+    let h = new H(1);
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        let o = if i % 3 == 0 { None } else { Some(i) };
+        s += h.get(o);
+        i += 1;
+    }
+    let _ = write(stdout(), to_bytes(format("%i", s)));
+}
+"#;
+    assert_eq!(run_example_src(src), "31");
+
+    let mut pipeline = test_pipeline();
+    // Keep the call: inlined, there is no edge to look at.
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("inherent pair parameter");
+    assert_eq!(compiled.body("H::get").params.len(), 3, "`get` takes `self` and `o` as two words");
     assert!(
-        main_code.iter().any(|byte| matches!(
-            byte.bytecode(),
-            common::Instruction::InitTyped | common::Instruction::DenseMakeObject
-        )),
-        "identity use must InitTyped once; opcodes: {:?}",
-        main_code
-            .iter()
-            .map(|b| b.bytecode().mnemonic())
-            .collect::<Vec<_>>()
+        !compiled.insts("main").any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. })),
+        "`main` passes the pair without boxing it"
+    );
+}
+
+/// A ground trait instance method returns its `Option<int>` as two words
+/// to a direct call; its `$dict` adapter, which a dictionary holds, boxes
+/// the pair.
+#[test]
+fn ground_instance_method_returns_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+trait Halver<T> {
+    fn half(T s, int x) -> Option<int> {}
+}
+class H {
+    pub d: int,
+}
+impl Halver for H {
+    pub fn half(H h, int x) -> Option<int> {
+        if x % 3 == 0 {
+            return None;
+        }
+        return Some(x / h.d);
+    }
+}
+fn via<T: Halver>(T h, int x) -> int {
+    return match h.half(x) {
+        Some(v) => v,
+        None => 0,
+    };
+}
+fn main() {
+    let h = new H(2);
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += match h.half(i) {
+            Some(v) => v,
+            None => 1,
+        };
+        i += 1;
+    }
+    let _ = write(stdout(), to_bytes(format("%i %i", s, via(h, 8))));
+}
+"#;
+    assert_eq!(run_example_src(src), "16 4");
+
+    let mut pipeline = test_pipeline();
+    // Keep the calls: inlined, there is no edge to look at.
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("pair-returning instance method");
+    let method = compiled.bodies.iter().find(|b| b.name.ends_with("::half") || b.name.ends_with("__half")).expect("the method body");
+    assert!(method.mir.ret_hi_ty.is_some(), "`half` returns two words");
+    assert!(
+        !compiled.insts("main").any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. })),
+        "`main` reads the pair without a box"
+    );
+}
+
+/// A free function's `(int, int)` / two-field readonly class parameter
+/// takes its two words, as its result does: the caller passes them
+/// without building a tuple or an instance.
+#[test]
+fn product_and_pair_class_parameters_take_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+readonly class Pt {
+    pub x: int,
+    pub y: int,
+}
+fn mk(int i) -> (int, int) {
+    return (i, i + 1);
+}
+fn add((int, int) p) -> int {
+    let (a, b) = p;
+    return a + b;
+}
+fn norm1(Pt p) -> int {
+    return p.x + p.y;
+}
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += add(mk(i)) + add((i, 1)) + norm1(new Pt(i, 2));
+        i += 1;
+    }
+    let _ = write(stdout(), to_bytes(format("%i", s)));
+}
+"#;
+    assert_eq!(run_example_src(src), "220");
+
+    let mut pipeline = test_pipeline();
+    // Keep the calls: inlined, there is no edge to look at.
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("pair parameters");
+    assert_eq!(compiled.body("add").params.len(), 2, "`add` takes `p` as two words");
+    assert_eq!(compiled.body("norm1").params.len(), 2, "`norm1` takes `p` as two words");
+    assert!(
+        !compiled
+            .insts("main")
+            .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::TUPLE | MirAllocKind::Object { .. }, .. })),
+        "`main` passes the pairs without boxing them"
     );
 }
 
@@ -3755,30 +3604,10 @@ fn main() {
     assert_eq!(output, "5");
 
     let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("unbox named local");
-    let symbols = pipeline.program_debug().fn_symbols;
-    let main = symbols
-        .iter()
-        .position(|symbol| symbol.name == "main")
-        .expect("main symbol");
-    let start = symbols[main].entry_pc as usize;
-    let end = symbols
-        .get(main + 1)
-        .map(|symbol| symbol.entry_pc as usize)
-        .unwrap_or(bytecode.len());
-    let main_code = &bytecode[start..end];
+    let compiled = compile(&mut pipeline, src).expect("unbox named local");
     assert!(
-        main_code.iter().all(|byte| {
-            !matches!(
-                byte.bytecode(),
-                common::Instruction::InitTyped | common::Instruction::GetField
-            )
-        }),
-        "non-escaping named local field read should unbox; opcodes: {:?}",
-        main_code
-            .iter()
-            .map(|b| b.bytecode().mnemonic())
-            .collect::<Vec<_>>()
+        !compiled.insts("main").any(|i| allocates_object(i) || touches_field(i)),
+        "non-escaping named local field read should unbox"
     );
 }
 
@@ -3802,33 +3631,10 @@ fn main() {
     assert_eq!(output, "21");
 
     let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("unbox field store");
-    let symbols = pipeline.program_debug().fn_symbols;
-    let main = symbols
-        .iter()
-        .position(|symbol| symbol.name == "main")
-        .expect("main symbol");
-    let start = symbols[main].entry_pc as usize;
-    let end = symbols
-        .get(main + 1)
-        .map(|symbol| symbol.entry_pc as usize)
-        .unwrap_or(bytecode.len());
-    let main_code = &bytecode[start..end];
+    let compiled = compile(&mut pipeline, src).expect("unbox field store");
     assert!(
-        main_code.iter().all(|byte| {
-            !matches!(
-                byte.bytecode(),
-                common::Instruction::InitTyped
-                    | common::Instruction::GetField
-                    | common::Instruction::SetField
-                    | common::Instruction::LoadField
-            )
-        }),
-        "non-escaping named local field store should unbox; opcodes: {:?}",
-        main_code
-            .iter()
-            .map(|b| b.bytecode().mnemonic())
-            .collect::<Vec<_>>()
+        !compiled.insts("main").any(|i| allocates_object(i) || touches_field(i)),
+        "non-escaping named local field store should unbox"
     );
 }
 
@@ -3850,44 +3656,19 @@ fn main() {
     assert_eq!(output, "7");
 
     let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("drop temp field");
-    let symbols = pipeline.program_debug().fn_symbols;
-    let main = symbols
-        .iter()
-        .position(|symbol| symbol.name == "main")
-        .expect("main symbol");
-    let start = symbols[main].entry_pc as usize;
-    let end = symbols
-        .get(main + 1)
-        .map(|symbol| symbol.entry_pc as usize)
-        .unwrap_or(bytecode.len());
-    let main_code = &bytecode[start..end];
+    let compiled = compile(&mut pipeline, src).expect("drop temp field");
     assert!(
-        main_code.iter().any(|byte| matches!(
-            byte.bytecode(),
-            common::Instruction::InitTyped | common::Instruction::DenseMakeObject
-        )),
-        "drop class temp must allocate in main so the finalizer can run; opcodes: {:?}",
-        main_code
-            .iter()
-            .map(|b| b.bytecode().mnemonic())
-            .collect::<Vec<_>>()
+        compiled.insts("main").any(allocates_object),
+        "drop class temp must allocate in main so the finalizer can run"
     );
     assert!(
-        main_code.iter().any(|byte| matches!(
-            byte.bytecode(),
-            common::Instruction::LoadField | common::Instruction::DenseFieldLoad
-        )),
-        "drop class temp must LoadField the heap instance; opcodes: {:?}",
-        main_code
-            .iter()
-            .map(|b| b.bytecode().mnemonic())
-            .collect::<Vec<_>>()
+        compiled.insts("main").any(touches_field),
+        "drop class temp must read the heap instance"
     );
 }
 
 #[test]
-fn class_field_access_emits_load_field_not_get_field() {
+fn class_field_store_then_load_reads_the_store() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -3905,24 +3686,6 @@ fn main() {
 "#;
     let output = run_example_src(src);
     assert_eq!(output, "5");
-
-    let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("class slots");
-    assert!(
-        bytecode.iter().any(|b| matches!(
-            b.bytecode(),
-            common::Instruction::LoadField | common::Instruction::DenseFieldLoad
-        )),
-        "class reads must use slot field loads"
-    );
-    let named_set = bytecode.iter().any(|b| {
-        matches!(b.bytecode(), common::Instruction::SetField)
-            && common::set_field_slot_index(b.operand_u32()).is_none()
-    });
-    assert!(
-        !named_set,
-        "class stores must not use interned-name SetField"
-    );
 }
 
 #[test]
@@ -3940,7 +3703,7 @@ fn main() {
 }
 
 #[test]
-fn s2b_maps_attach_to_alloc_keep_and_collect_survives() {
+fn array_argument_survives_collect_in_callee() {
     let src = r#"
 use gc::{collect};
 use io::{stdout, write};
@@ -3961,25 +3724,14 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-    // Fuse-IL bodies carry no S2b map; keep()'s precise frame map lists
-    // its array parameter at the collect.
-    let maps = pipeline.precise_frames();
-    assert!(
-        maps.iter().any(|m| m
-            .at_pc
-            .iter()
-            .any(|at| at.slots.iter().any(|&s| common::precise_slot_index(s) == 0))),
-        "keep() should have a precise heap slot 0: {maps:?}"
-    );
-    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    let compiled = compile(&mut pipeline, src).expect("compile");
+    let out = run_compiled(compiled, &pipeline, None);
     assert_eq!(out, "42");
 }
 
-/// Heap-free functions get an empty any-PC map; a function holding an object
-/// gets per-PC maps that list it, and the program still runs under collections.
+/// A function holding an object across a collection keeps it.
 #[test]
-fn heap_free_functions_get_precise_frame_maps() {
+fn object_held_across_collect_survives() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -4003,35 +3755,13 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-    let fib = pipeline.function_offset("fib").expect("fib") as u32;
-    let holds = pipeline.function_offset("holds").expect("holds") as u32;
-    let precise = pipeline.precise_frames();
-    assert!(
-        precise
-            .iter()
-            .any(|m| m.entry_pc == fib && m.any_pc.as_deref() == Some(&[][..])),
-        "fib must be heap-free: {precise:?}"
-    );
-    let holds_map = precise
-        .iter()
-        .find(|m| m.entry_pc == holds)
-        .expect("holds gets per-PC maps");
-    assert!(holds_map.any_pc.is_none(), "holds keeps a heap object: {holds_map:?}");
-    assert!(
-        holds_map.at_pc.iter().any(|s| !s.slots.is_empty()),
-        "the fresh object is listed at its safepoint: {holds_map:?}"
-    );
-    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    let compiled = compile(&mut pipeline, src).expect("compile");
+    let out = run_compiled(compiled, &pipeline, None);
     assert_eq!(out, "58");
 }
 
 #[test]
-fn s2b_maps_survive_archive_load_and_collect() {
-    use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
-    use machine::{WireThreadProgramWithMapsArgs, wire_thread_program_with_maps};
-    use rkyv::rancor::Error;
-
+fn archive_load_keeps_objects_across_collect() {
     let src = r#"
 use gc::{collect};
 use io::{stdout, write};
@@ -4051,72 +3781,14 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-    let debug = pipeline.program_debug();
-    let program = ArchivedProgram {
-        version: ARCHIVE_VERSION,
-        static_slot_count: pipeline.static_slot_count(),
-        constants: constants.clone(),
-        strings: pipeline.strings().to_vec(),
-        bytecode: bytecode.clone(),
-        source_files: debug.source_files,
-        debug_locs: debug.debug_locs,
-        fn_symbols: debug.fn_symbols,
-        struct_layouts: pipeline.archived_struct_layouts(),
-        operand_stack_slots: pipeline.operand_stack_slots(),
-        stack_maps: Vec::new(),
-        precise_frames: pipeline.precise_frames().to_vec(),
-        class_word_kinds: pipeline.class_word_kinds(),
-        static_word_kinds: pipeline.static_word_kinds(),
-        debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
-    };
-    let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
-    let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
-    assert!(decoded.stack_maps_persisted);
-    assert!(decoded.program.stack_maps.is_empty(), "new archives carry no S2b maps");
-    assert_eq!(decoded.program.precise_frames.as_slice(), pipeline.precise_frames());
-    assert!(
-        !decoded.program.precise_frames.is_empty(),
-        "keep() must persist its precise frame maps"
-    );
-
-    let loaded = &decoded.program;
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<256>::with_operand_capacity(loaded.operand_stack_slots as usize);
-    machine.set_shared_print(shared.inner.clone());
-    machine.with_output(shared.clone());
-    pipeline.wire_vm_ffi(&mut machine, None);
-    pipeline.wire_host_natives(&mut machine);
-    wire_thread_program_with_maps(WireThreadProgramWithMapsArgs {
-        machine: &mut machine,
-        bytecode: &loaded.bytecode,
-        constants: &loaded.constants,
-        strings: &loaded.strings,
-        static_slot_count: loaded.static_slot_count,
-        debug: loaded.debug_bundle(),
-        operand_stack_slots: loaded.operand_stack_slots,
-        stack_maps: loaded.stack_maps.clone(),
-        precise_frames: loaded.precise_frames.clone(),
-        class_word_kinds: loaded.class_word_kinds.clone(),
-        static_word_kinds: loaded.static_word_kinds.clone(),
-    });
-    machine.set_program_debug(loaded.debug_bundle());
-    machine.run_raw(
-        &loaded.bytecode,
-        &loaded.constants,
-        &loaded.strings,
-        loaded.static_slot_count,
-    );
-    let _ = machine.restore_output();
-    assert!(!machine.panicked(), "archive-loaded keep/collect panicked");
-    assert_eq!(shared.into_utf8(), "42");
+    let compiled = compile(&mut pipeline, src).expect("compile");
+    let run = run_through_archive(compiled, &pipeline);
+    assert!(!run.panicked, "archive-loaded keep/collect panicked");
+    assert_eq!(run.output, "42");
 }
 
 #[test]
-fn s2c_mapped_pair_runs_and_keeps_maps() {
+fn pair_of_ints_in_a_vec_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -4129,32 +3801,22 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-    assert!(
-        pipeline.precise_frames().iter().any(|m| !m.at_pc.is_empty()),
-        "pair/main should have precise frame maps: {:?}",
-        pipeline.precise_frames()
-    );
-    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    let compiled = compile(&mut pipeline, src).expect("compile");
+    let out = run_compiled(compiled, &pipeline, None);
     assert_eq!(out, "7");
 }
 
 #[test]
-fn b6_vec_push_maps_and_nsieve_checksum() {
+fn nsieve_checksum() {
     let src = include_str!("../../examples/perf/nsieve.coil");
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline.compile_src(src).expect("compile nsieve");
-    assert!(
-        pipeline.precise_frames().iter().any(|m| !m.at_pc.is_empty()),
-        "B6 nsieve Vec.push should have precise frame maps: {:?}",
-        pipeline.precise_frames()
-    );
-    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    let compiled = compile(&mut pipeline, src).expect("compile nsieve");
+    let out = run_compiled(compiled, &pipeline, None);
     assert_eq!(out, "1900");
 }
 
 #[test]
-fn b6_call_plus_make_array_maps() {
+fn call_result_in_an_array_literal_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -4170,13 +3832,8 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-    assert!(
-        pipeline.precise_frames().iter().any(|m| !m.at_pc.is_empty()),
-        "CALL+MakeArray should have precise frame maps: {:?}",
-        pipeline.precise_frames()
-    );
-    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    let compiled = compile(&mut pipeline, src).expect("compile");
+    let out = run_compiled(compiled, &pipeline, None);
     assert_eq!(out, "5");
 }
 
@@ -4217,7 +3874,7 @@ fn main() {
 
 #[test]
 fn nested_spawn_joins_via_shared_root_registry() {
-    // Worker mid spawns leaf on the root Machine's live-thread registry.
+    // Worker mid spawns leaf on the root runtime's live-thread registry.
     // Main returns without join; root auto-join must still wait for leaf.
     let output = run_example_src(
         r#"
@@ -4259,12 +3916,11 @@ fn main() {
 
 
 #[test]
-fn aggregate_float_negate_uses_negf_not_int_neg() {
-    // Regression: float aggregate unary `-` must not emit int `NEG`
-    // (which bit-twiddles a float as i64). Float path is `NEGF`. The
-    // elements are read from a static something writes: literals (and a
-    // static nothing writes) fold at compile time.
-    use common::Instruction;
+fn aggregate_float_negate_negates_as_float() {
+    // Regression: float aggregate unary `-` must not negate as an int
+    // (which bit-twiddles a float as i64). The elements are read from a
+    // static something writes: literals (and a static nothing writes) fold
+    // at compile time.
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -4276,23 +3932,9 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-    // The dense tier spells both as `DenseUnary` kinds.
-    let unary = |b: &common::Byte, kind: u8| {
-        *b.bytecode() == Instruction::DenseUnary && b.dense_unary_parts().0 == kind
-    };
-    assert!(
-        bytecode.iter().any(|b| matches!(b.bytecode(), Instruction::NEGF)
-            || unary(b, common::dense::UNARY_FNEG)),
-        "expected NEGF for float aggregate negate"
-    );
-    assert!(
-        !bytecode.iter().any(|b| matches!(b.bytecode(), Instruction::NEG)
-            || unary(b, common::dense::UNARY_NEG)),
-        "float aggregate negate must not emit int NEG"
-    );
+    let compiled = compile(&mut pipeline, src).expect("compile");
     assert_eq!(
-        run_bytecode(bytecode, constants, &pipeline, None),
+        run_compiled(compiled, &pipeline, None),
         "-1.5,-2.0"
     );
 }
@@ -4645,8 +4287,8 @@ fn main() {
 
 
 
-/// `if (!c) { A } else { B }` inverts to `if (c) { B } else { A }` — arms must
-/// not swap incorrectly when LogNot is eliminated.
+/// `if (!c) { A } else { B }` inverts to `if (c) { B } else { A }`: the arms
+/// must not swap incorrectly.
 #[test]
 fn invert_not_if_else_preserves_arm_semantics() {
     let src = r#"
@@ -4664,22 +4306,12 @@ fn main() {
     write(stdout(), to_bytes(format("%i", pick(true))));
 }
 "#;
-    let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("compile");
-    assert!(
-        !bytecode.iter().any(|b| matches!(
-            b.bytecode(),
-            common::Instruction::LogNot | common::Instruction::LogNotJmpf
-        )),
-        "inverted if(!c) else should drop LogNot / LogNotJmpf"
-    );
     assert_eq!(run_example_src(src), "10,20");
 }
 
-/// SetField leaves the RHS on the stack — statement forms must POP.
-/// Const index stores into stack `[T; N]` locals use direct STORE (no StoreIndex).
+/// Field and index assignments as statements.
 #[test]
-fn set_field_and_store_index_statements_pop_value() {
+fn field_and_index_assignment_statements_run() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -4698,23 +4330,11 @@ fn main() {
     write(stdout(), to_bytes(format("%i", a[0] + a[1])));
 }
 "#;
-    let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("compile");
-    // Field SROA may drop SetField entirely; any that remain must POP.
-    let set_field_without_pop = bytecode.windows(2).any(|w| {
-        matches!(w[0].bytecode(), common::Instruction::SetField)
-            && !matches!(w[1].bytecode(), common::Instruction::POP)
-    });
-    assert!(
-        !set_field_without_pop,
-        "class field assignment statements need SetField; POP"
-    );
-    // Fixed-array const stores are direct STORE — heap StoreIndex is optional.
     assert_eq!(run_example_src(src), "7,30");
 }
 
 
-/// for-in over arrays hoists ArrayLen out of the loop header.
+/// for-in over arrays hoists the length out of the loop header.
 #[test]
 fn for_in_array_hoists_array_len_once() {
     let src = r#"
@@ -4728,44 +4348,19 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("compile");
-    let syms = pipeline.program_debug().fn_symbols;
-    let main_idx = syms.iter().position(|s| s.name == "main").expect("main");
-    let start = syms[main_idx].entry_pc as usize;
-    let end = syms
-        .get(main_idx + 1)
-        .map(|s| s.entry_pc as usize)
-        .unwrap_or(bytecode.len());
-    let lens = bytecode[start..end]
-        .iter()
-        .filter(|b| {
-            matches!(
-                b.bytecode(),
-                common::Instruction::ArrayLen | common::Instruction::DenseArrayLen
-            )
-        })
+    let compiled = compile(&mut pipeline, src).expect("compile");
+    let lens = compiled
+        .insts("main")
+        .filter(|i| matches!(i, MirInst::ArrayLen { .. }))
         .count();
-    assert_eq!(
-        lens, 1,
-        "main for-in should ArrayLen once before the loop (got {lens})"
-    );
-    assert!(
-        bytecode[start..end]
-            .iter()
-            .any(|b| matches!(b.bytecode(), common::Instruction::BinSlotSlotJmpf)),
-        "loop header should fuse idx < len into BinSlotSlotJmpf"
-    );
+    assert_eq!(lens, 1, "main for-in should read the length once before the loop");
     assert_eq!(run_example_src(src), "123");
 }
 
 
-/// v35 string table: serialize → load → run must keep STRING indexes valid,
-/// and the compiler must not emit legacy trailing DATA payloads.
+/// String table: serialize → load → run must keep string indexes valid.
 #[test]
 fn string_table_archive_round_trip_preserves_literals() {
-    use common::{ARCHIVE_VERSION, ArchivedProgram, Instruction};
-    use rkyv::rancor::Error;
-
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -4774,84 +4369,19 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-    assert!(
-        !pipeline.strings().is_empty(),
-        "expected program string table entries"
-    );
+    let compiled = compile(&mut pipeline, src).expect("compile");
     assert!(
         pipeline.strings().iter().any(|s| s == "archive"),
         "string table should contain literal `archive`: {:?}",
         pipeline.strings()
     );
-    assert!(
-        bytecode
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::STRING)),
-        "expected STRING opcodes indexing the table"
-    );
-    assert!(
-        bytecode
-            .iter()
-            .all(|b| !matches!(b.bytecode(), Instruction::DATA)),
-        "compiler must not emit DATA tombstones after STRING"
-    );
-
-    let program = ArchivedProgram {
-        version: ARCHIVE_VERSION,
-        static_slot_count: pipeline.static_slot_count(),
-        constants: constants.clone(),
-        strings: pipeline.strings().to_vec(),
-        bytecode: bytecode.clone(),
-        source_files: pipeline.program_debug().source_files,
-        debug_locs: pipeline.program_debug().debug_locs,
-        fn_symbols: Vec::new(),
-        struct_layouts: Vec::new(),
-        operand_stack_slots: pipeline.operand_stack_slots(),
-        stack_maps: Vec::new(),
-        precise_frames: pipeline.precise_frames().to_vec(),
-        class_word_kinds: pipeline.class_word_kinds(),
-        static_word_kinds: pipeline.static_word_kinds(),
-        debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
-    };
-    let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
-    let archived =
-        rkyv::access::<rkyv::Archived<ArchivedProgram>, Error>(bytes.as_slice()).expect("access");
-    assert_eq!(u32::from(archived.version), ARCHIVE_VERSION);
-    let loaded_bc: Vec<common::Byte> =
-        rkyv::deserialize::<Vec<common::Byte>, Error>(&archived.bytecode).expect("bc");
-    let loaded_constants: Vec<u64> =
-        rkyv::deserialize::<Vec<u64>, Error>(&archived.constants).expect("consts");
-    let loaded_strings: Vec<String> =
-        rkyv::deserialize::<Vec<String>, Error>(&archived.strings).expect("strings");
-    let static_slots = u32::from(archived.static_slot_count);
-    assert!(
-        loaded_strings.iter().any(|s| s == "archive"),
-        "deserialized string table lost literals: {loaded_strings:?}"
-    );
-
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<128>::default();
-    machine.set_shared_print(shared.inner.clone());
-    machine.with_output(shared.clone());
-    pipeline.wire_host_natives(&mut machine);
-    machine.run_raw(&loaded_bc, &loaded_constants, &loaded_strings, static_slots);
-    let _ = machine.restore_output();
-    assert_eq!(shared.into_utf8(), "archive-35");
+    assert_eq!(run_through_archive(compiled, &pipeline).output, "archive-35");
 }
 
-
-
-
-
-/// Bytecode shape: two concatenations keep their STRING `"%s%s"` hits
-/// (not collapse them via Dup-CSE). (One chain `a + b + c` is a single
-/// `"%s%s%s"` format, so the two are separate statements.)
+/// Two concatenations in separate statements (one chain `a + b + c` is a
+/// single format).
 #[test]
-fn nested_string_concat_keeps_multiple_pct_s_string_ops() {
+fn nested_string_concat_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::to_bytes;
@@ -4864,33 +4394,6 @@ fn main() {
     write(stdout(), to_bytes(ab + c));
 }
 "#;
-    let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("compile");
-    let pct_idx = pipeline
-        .strings()
-        .iter()
-        .position(|s| s == "%s%s")
-        .expect("concat should intern %s%s") as u32;
-    let pct_string_ops = bytecode
-        .iter()
-        .filter(|b| {
-            matches!(b.bytecode(), common::Instruction::STRING) && b.operand_u32() == pct_idx
-        })
-        .count();
-    assert!(
-        pct_string_ops >= 2,
-        "two concatenations should emit ≥2 STRING \"%s%s\" (got {pct_string_ops}); Dup-CSE would under-count"
-    );
-    // No STRING \"%s%s\" immediately rewritten to DUPLICATE in the final stream.
-    let string_then_dup = bytecode.windows(2).any(|w| {
-        matches!(w[0].bytecode(), common::Instruction::STRING)
-            && w[0].operand_u32() == pct_idx
-            && matches!(w[1].bytecode(), common::Instruction::DUPLICATE)
-    });
-    assert!(
-        !string_then_dup,
-        "STRING \"%s%s\" must not be followed by DUPLICATE (within-block Dup-CSE)"
-    );
     assert_eq!(run_example_src(src), "abc");
 }
 
@@ -4970,10 +4473,60 @@ fn compile_is_deterministic_for_many_drop_classes() {
         src.push_str(&format!("    let _c{i} = new C{i}({i});\n"));
     }
     src.push_str("}\n");
-    let compile = || test_pipeline().compile_src(&src).expect("drop classes compile");
+    let compile = || {
+        let mut pipeline = test_pipeline();
+        let compiled = compile(&mut pipeline, &src).expect("drop classes compile");
+        compiler::native_mir::archive::encode(&compiled.bodies, &body_ids(&pipeline), &[])
+    };
     let first = compile();
     for _ in 0..4 {
-        assert_eq!(compile(), first, "bytecode differs between identical compiles");
+        assert!(compile() == first, "MIR differs between identical compiles");
+    }
+}
+
+/// The archive of a program built from several modules is the same bytes on
+/// every compile. String, label, static and clone ids are handed out as
+/// lowering reaches each use, so nothing on that path may follow hash order.
+#[test]
+fn compile_is_deterministic_for_multi_module_programs() {
+    use compiler::native_mir::archive;
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("workspace root");
+    // Programs over the stdlib and `examples/src`: generics and their
+    // clones, trait dictionaries, derives, macros, closures, generators,
+    // contracts, hash maps, string formatting.
+    let programs = [
+        "examples/perf/text_scan_long.coil",
+        "examples/perf/generic_many_types.coil",
+        "examples/derive_show_eq.coil",
+        "examples/modules_brace.coil",
+        "examples/macro_fn.coil",
+        "tests/macros/attr_macro.coil",
+        "tests/comptime/generated_macros.coil",
+        "tests/programs/bits_and_floats.coil",
+        "tests/programs/priority_queue.coil",
+        "tests/programs/gen_fold_zip.coil",
+        "tests/programs/pipeline_ranges.coil",
+        "tests/collections/hashmap_for_in_entry_types.coil",
+        "tests/traits/trait_method_bound_dispatch.coil",
+        "tests/contracts/contract_failure_messages.coil",
+        "tests/representation/drop_enum__hashmap_entry.coil",
+        // Open structural instances, whose thunks take labels per method
+        // (#2675).
+        "tests/generics/open_structural_goal.coil",
+        "tests/traits/own_bound_open_structural.coil",
+    ];
+    for program in programs {
+        let path = workspace_root.join(program);
+        let archive = || {
+            let mut pipeline = test_pipeline();
+            let compiled = compile_file(&mut pipeline, path.to_str().expect("utf-8 path")).unwrap_or_else(|_| panic!("{program} failed to compile"));
+            let program = pipeline.archive(compiled.constants, |_| archive::encode(&compiled.bodies, &body_ids(&pipeline), &[]));
+            rkyv::to_bytes::<rkyv::rancor::Error>(&program).expect("serialize").to_vec()
+        };
+        let first = archive();
+        for _ in 0..2 {
+            assert!(archive() == first, "{program}: the archive differs between identical compiles");
+        }
     }
 }
 
@@ -5005,7 +4558,7 @@ fn broken_effect_declarations_are_errors() {
                 pipeline.messages().iter().map(|m| m.message().to_string()).collect::<Vec<_>>()
             );
         }
-        let kept = "trait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        return self.side * self.side;\n    }\n}\npure fn total(Area a, Area b) -> int {\n    if !(true) {\n        panic \"assertion failed\";\n    }\n    return area(a) + area(b);\n}\nfn apply(int -> int f, int x) -> int uses {} {\n    return f(x);\n}\n";
+        let kept = "trait Area<A> {\n    pure fn area(A self) -> int;\n}\nclass Sq {\n    pub side: int,\n}\nimpl Area for Sq {\n    fn area(Sq self) -> int {\n        return self.side * self.side;\n    }\n}\npure fn total(Area a, Area b) -> int {\n    if !(true) {\n        panic \"assertion failed\";\n    }\n    return a.area() + b.area();\n}\nfn apply(int -> int f, int x) -> int uses {} {\n    return f(x);\n}\n";
         let mut pipeline = test_pipeline();
         compile_ok(&mut pipeline, kept);
     }
@@ -5089,6 +4642,39 @@ fn tests_are_entry_points_for_capabilities() {
     );
 }
 
+/// E4: a gated call a macro wrote is checked as one the user wrote. Its
+/// span is the expansion's, not a place in a file, and the check finds the
+/// call's `HostInvoke` by that span: in an expression where the macro is
+/// used, and in a function the macro declares.
+#[test]
+fn macro_generated_host_calls_still_need_their_capabilities() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!("coil_gated_macros_{}_{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(dir.join("src")).expect("temp dir");
+    let provider = "use macro::{Expr, Code};\n\nmacro probe(Expr path) -> Code {\n    return quote expr { exists(${path}) };\n}\n\nmacro prober(Expr name) -> Code {\n    return quote items {\n        fn ${name}() -> bool {\n            let _ = exists(\"gen.toml\");\n            return true;\n        }\n    };\n}\n";
+    let main = "use io::fs::{exists};\nuse gated_macros::{probe, prober};\n\nprober!(generated);\n\nfn main() {\n    let _ = probe!(\"cfg.toml\");\n    if generated() {\n        return;\n    }\n}\n";
+    std::fs::write(dir.join("src/gated_macros.coil"), provider).expect("write the provider");
+    let file = dir.join("main.coil");
+    std::fs::write(&file, main).expect("write the program");
+    let pipeline = |grant: bool| {
+        let mut pipeline = deny_pipeline();
+        pipeline.bind_project_roots_with_default(dir.clone(), Pipeline::workspace_language_extra_roots());
+        if grant {
+            assert!(pipeline.grant_capability("read"));
+        }
+        pipeline
+    };
+    let mut denied = pipeline(false);
+    assert!(denied.compile_src_from_file(file.to_str().expect("utf-8 path")).is_err(), "compiled with no grant");
+    let msgs: Vec<String> = denied.messages().iter().map(|m| m.message().to_string()).collect();
+    assert!(msgs.iter().any(|m| m == "`io::fs::exists` requires `--allow-read`: reached from `main`"), "{msgs:?}");
+    assert!(msgs.iter().any(|m| m == "`io::fs::exists` requires `--allow-read`: reached from `main` → `generated`"), "{msgs:?}");
+    let mut granted = pipeline(true);
+    assert!(granted.compile_src_from_file(file.to_str().expect("utf-8 path")).is_ok(), "{:?}", granted.messages().iter().map(|m| m.message().to_string()).collect::<Vec<_>>());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Compile and run with contract checks at `level`, from a file so panics
 /// name their locations (`contracts.coil:LINE:COL`).
 fn run_contracts_src(src: &str, level: compiler::ContractLevel) -> String {
@@ -5104,12 +4690,11 @@ fn run_contracts_src(src: &str, level: compiler::ContractLevel) -> String {
     std::fs::write(&file, src).expect("write source");
     let mut pipeline = test_pipeline();
     pipeline.set_contracts(level);
-    let (bytecode, constants) = pipeline
-        .compile_src_from_file(file.to_str().expect("utf-8 path"))
+    let compiled = compile_file(&mut pipeline, file.to_str().expect("utf-8 path"))
         .expect("compile");
-    let out = run_bytecode(bytecode, constants, &pipeline, Some(file.as_path()));
+    let (run, _) = run_as_case(compiled, &pipeline, Some(file.as_path()));
     let _ = std::fs::remove_dir_all(&dir);
-    out
+    run.output
 }
 
 const CONTRACTS_SRC: &str = r#"
@@ -5413,6 +4998,35 @@ fn missing_module_reports_no_internal_lowering_error() {
     assert!(!errors.iter().any(|(_, m)| m.contains("cannot lower")), "{errors:?}");
 }
 
+/// #2536: modules that import each other are one E0154 naming the cycle,
+/// at the import that starts it, not an E0100 for a name the other module
+/// does declare.
+#[test]
+fn import_cycle_is_one_error_naming_its_path() {
+    let dir = std::env::temp_dir().join(format!("coil-2536-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let ca = "use cb::twice;\n\nclass Box1 {\n    pub n: int,\n}\n\nfn box_twice(Box1 b) -> int {\n    return twice(b);\n}\n";
+    std::fs::write(dir.join("ca.coil"), ca).expect("write ca");
+    std::fs::write(dir.join("cb.coil"), "use ca::Box1;\n\nfn twice(Box1 b) -> int {\n    return b.n * 2;\n}\n").expect("write cb");
+    let entry = dir.join("main.coil");
+    std::fs::write(&entry, "use ca::{Box1, box_twice};\n\nfn main() {\n    let _ = box_twice(new Box1(3));\n}\n").expect("write entry");
+    let mut pipeline = test_pipeline();
+    pipeline.bind_project_root(dir.clone(), vec![dir.clone()]);
+    assert!(pipeline.compile_src_from_file(entry.to_str().expect("utf-8")).is_err());
+    let errors: Vec<_> = pipeline
+        .messages()
+        .iter()
+        .filter(|m| *m.kind() == reporting::MessageKind::ERROR)
+        .map(|m| (m.code(), m.message().to_string(), m.range().clone()))
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let (code, message, range) = &errors[0];
+    assert_eq!(*code, Some(compiler::ErrorCode::ImportCycle), "{errors:?}");
+    assert!(message.contains("`ca -> cb -> ca`"), "{errors:?}");
+    assert_eq!(&ca[range.clone()], "use cb::twice;", "{errors:?}");
+}
+
 #[test]
 fn gc_finalizer_runs_on_teardown() {
     let output = run_example_src(
@@ -5436,4 +5050,54 @@ fn main() {
 "#,
     );
     assert_eq!(output, "closed");
+}
+
+/// A lambda whose result moves as two words (`Option<int>`) gets a twin
+/// returning the two words, and a call through the function value reads
+/// them with a two-word `CallIndirect`: neither side boxes the result.
+#[test]
+fn function_value_pair_result_takes_two_words() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn run(int -> Option<int> f) -> int {
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += match f(i) {
+            Some(v) => v,
+            None => 1,
+        };
+        i += 1;
+    }
+    return s;
+}
+fn main() {
+    let k = 2;
+    let r = run(fn (int x) use (k) {
+        if x % 3 == 0 {
+            return None;
+        }
+        return Some(x / k);
+    });
+    let _ = write(stdout(), to_bytes(format("%i", r)));
+}
+"#;
+    assert_eq!(run_example_src(src), "16");
+
+    let mut pipeline = test_pipeline();
+    pipeline.set_inline_max_cost(0);
+    let compiled = compile(&mut pipeline, src).expect("pair-returning lambda");
+    assert!(
+        compiled.insts("run").any(|i| matches!(i, MirInst::CallIndirect { pair: Some(_), .. })),
+        "`run` reads the result as two words"
+    );
+    let twins: Vec<_> = compiled.bodies.iter().filter_map(|b| b.mir.pair_twin).collect();
+    assert_eq!(twins.len(), 1, "the lambda has a two-word twin");
+    let twin = compiled.bodies.iter().find(|b| b.entry == Some(twins[0])).expect("the twin body");
+    assert!(twin.mir.ret_hi_ty.is_some(), "the twin returns two words");
+    assert!(
+        !twin.mir.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. })),
+        "the twin builds no box"
+    );
 }

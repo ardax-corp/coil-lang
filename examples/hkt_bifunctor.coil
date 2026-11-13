@@ -16,7 +16,7 @@ impl Bifunctor for Result {
 }
 
 fn get_tag<F: * -> * -> *, Bifunctor, A, B>(F<A, B> xs) -> int {
-    return tag(xs);
+    return xs.tag();
 }
 
 fn main() {

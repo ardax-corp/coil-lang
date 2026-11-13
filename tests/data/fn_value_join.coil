@@ -1,0 +1,98 @@
+// A function value bound by a `match` or an `if` whose branches
+// each give a closure word (an enum's function payload, a named function,
+// a lambda) is that closure word, and a call through it is an indirect
+// call (coil-lang#2565). The enum may be generic, at a ground instance.
+use tests::assert;
+
+enum G<T> {
+    F(fn(T) -> T),
+    N,
+}
+
+enum Step {
+    Map(fn(int) -> int),
+    Skip,
+}
+
+class Pt {
+    pub a: int,
+}
+
+fn half(float x) -> float {
+    return x / 2.0;
+}
+
+fn inc(int x) -> int {
+    return x + 1;
+}
+
+fn bang(string s) -> string {
+    return s + "!";
+}
+
+fn bump(Pt p) -> Pt {
+    return new Pt(p.a + 10);
+}
+
+test("a match over a generic enum's payload and a named function") {
+    let g: G<float> = G::F(half);
+    let f = match g {
+        G::F(f) => f,
+        G::N => half,
+    };
+    assert!(f(1.0) == 0.5);
+    let n: G<int> = G::N;
+    let k = match n {
+        G::F(f) => f,
+        G::N => inc,
+    };
+    assert!(k(1) == 2);
+}
+
+test("at a string and a class") {
+    let s: G<string> = G::F(bang);
+    let f = match s {
+        G::F(f) => f,
+        G::N => fn (string x) => x,
+    };
+    assert!(f("a") == "a!");
+    let p: G<Pt> = G::F(bump);
+    let h = match p {
+        G::F(f) => f,
+        G::N => bump,
+    };
+    assert!(h(new Pt(1)).a == 11);
+}
+
+test("a non-generic enum, an if and a capturing lambda") {
+    let s = Step::Map(inc);
+    let f = match s {
+        Step::Map(f) => f,
+        Step::Skip => fn (int x) => x,
+    };
+    assert!(f(4) == 5);
+    let flag = f(0) == 1;
+    let g = if flag {
+        inc
+    } else {
+        fn (int x) => x * 2
+    };
+    assert!(g(3) == 4);
+    let base = 7;
+    let h = match s {
+        Step::Map(_) => fn (int x) use (base) => x + base,
+        Step::Skip => inc,
+    };
+    assert!(h(1) == 8);
+}
+
+test("a match arm that returns") {
+    let g: G<int> = G::F(inc);
+    let f = match g {
+        G::F(f) => f,
+        G::N => {
+            return;
+        },
+    };
+    assert!(f(9) == 10);
+}

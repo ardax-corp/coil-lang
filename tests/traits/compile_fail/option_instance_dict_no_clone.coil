@@ -1,0 +1,31 @@
+// @expected E0801 — `Wrap<Option<string>>` as a bound's dictionary: the
+// shared `w` holds its `W` as the type's own word (`Option<string>` in one
+// word), and `impl Wrap for Option<U>`'s shared entry takes the enum
+// object. The method's result names `Option<T>`, so it has no per-type
+// clone to go in the dictionary instead (coil-lang#2477). `f` is a
+// function value of the generic `w`, whose call takes the shared body.
+trait Wrap<T> {
+    fn wrap(T x) -> Option<T> {}
+}
+
+impl Wrap for Option<U> {
+    fn wrap(Option<U> o) -> Option<Option<U>> {
+        return match o {
+            Some(_) => Some(o),
+            None => None,
+        };
+    }
+}
+
+fn w<W: Wrap>(W x) -> int {
+    return match x.wrap() {
+        Some(_) => 1,
+        None => 0,
+    };
+}
+
+fn main() {
+    let a: Option<string> = Some("one");
+    let f = w;
+    let _ = f(a);
+}

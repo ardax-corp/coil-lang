@@ -18,7 +18,7 @@ use reporting::{ErrorCode, Message};
 
 use crate::macros::{CallPosition, MacroDecl, MacroKind, PendingMacro};
 
-const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr", "lang", "noescape", "fresh", "shared", "view", "inline", "cold", "hot"];
+const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "repr", "lang", "noescape", "fresh", "shared", "view", "inline", "cold", "hot"];
 
 /// Optimizer hints: speed only, never behaviour (`docs/internals/opt-hints.md`).
 const OPT_HINTS: &[&str] = &["inline", "cold", "hot"];
@@ -269,7 +269,7 @@ fn derive_traits_from_attrs<'a>(attrs: &[Attribute<'a>]) -> Vec<&'a str> {
 /// implements `Hash` or is itself a hashing readonly class. A `Vec`, an
 /// array, a map, a function or a type from another module has no `Hash`
 /// known here, so such a class implies only `Eq` and can `impl Hash`.
-fn readonly_class_hashes<'a>(decls: &[Output<'a>], name: &'a str, seen: &mut Vec<&'a str>) -> bool {
+fn readonly_class_hashes<'a>(decls: &[Output<'a>], heads: &ImplHeads<'_>, name: &'a str, seen: &mut Vec<&'a str>) -> bool {
     if seen.contains(&name) {
         return true;
     }
@@ -285,7 +285,7 @@ fn readonly_class_hashes<'a>(decls: &[Output<'a>], name: &'a str, seen: &mut Vec
     let params: Vec<&str> = type_params.iter().map(|tp| tp.name).collect();
     let ok = fields.iter().all(|f| match f.1.as_ref() {
         Expression::Field { modifier: parser::ast::FieldModifier::Static, .. } => true,
-        Expression::Field { ty, .. } => type_hashes(decls, ty, &params, seen),
+        Expression::Field { ty, .. } => type_hashes(decls, heads, ty, &params, seen),
         _ => true,
     });
     seen.pop();
@@ -293,17 +293,17 @@ fn readonly_class_hashes<'a>(decls: &[Output<'a>], name: &'a str, seen: &mut Vec
 }
 
 /// Whether a written field type hashes, for [`readonly_class_hashes`].
-fn type_hashes<'a>(decls: &[Output<'a>], ty: &Output<'a>, params: &[&str], seen: &mut Vec<&'a str>) -> bool {
+fn type_hashes<'a>(decls: &[Output<'a>], heads: &ImplHeads<'_>, ty: &Output<'a>, params: &[&str], seen: &mut Vec<&'a str>) -> bool {
     match ty.1.as_ref() {
-        Expression::Readonly(inner) => type_hashes(decls, inner, params, seen),
-        Expression::Tuple(items) => items.iter().all(|t| type_hashes(decls, t, params, seen)),
+        Expression::Readonly(inner) => type_hashes(decls, heads, inner, params, seen),
+        Expression::Tuple(items) => items.iter().all(|t| type_hashes(decls, heads, t, params, seen)),
         Expression::Type(n) => {
-            matches!(*n, "int" | "float" | "string" | "bool" | "byte" | "unit")
+            crate::typechecking::ty::BuiltinScalar::named(n).is_some_and(|s| s.traits.contains(&"Hash"))
                 || params.contains(n)
-                || named_type_hashes(decls, n, seen)
+                || named_type_hashes(decls, heads, n, seen)
         }
         Expression::TypeApp { name, args } => {
-            named_type_hashes(decls, name, seen) && args.iter().all(|t| type_hashes(decls, t, params, seen))
+            named_type_hashes(decls, heads, name, seen) && args.iter().all(|t| type_hashes(decls, heads, t, params, seen))
         }
         _ => false,
     }
@@ -311,13 +311,13 @@ fn type_hashes<'a>(decls: &[Output<'a>], ty: &Output<'a>, params: &[&str], seen:
 
 /// Whether this module's class or enum `name` has `Hash`: derived,
 /// implemented, or implied as a readonly class.
-fn named_type_hashes<'a>(decls: &[Output<'a>], name: &'a str, seen: &mut Vec<&'a str>) -> bool {
-    if has_explicit_impl(decls, "Hash", name) {
+fn named_type_hashes<'a>(decls: &[Output<'a>], heads: &ImplHeads<'_>, name: &'a str, seen: &mut Vec<&'a str>) -> bool {
+    if has_explicit_impl(heads, "Hash", name) {
         return true;
     }
     decls.iter().any(|d| match d.1.as_ref() {
         Expression::Class { name: n, attrs, readonly, .. } if *n == name => {
-            derive_traits_from_attrs(attrs).contains(&"Hash") || (*readonly && readonly_class_hashes(decls, name, seen))
+            derive_traits_from_attrs(attrs).contains(&"Hash") || (*readonly && readonly_class_hashes(decls, heads, name, seen))
         }
         Expression::EnumDecl { name: n, attrs, .. } if *n == name => derive_traits_from_attrs(attrs).contains(&"Hash"),
         _ => false,
@@ -347,7 +347,7 @@ fn validate_attrs<'x, 'a>(
                 span.into_range(),
             ));
         }
-        if matches!(attr.name, "max_depth" | "noescape" | "fresh") && target != "function" {
+        if matches!(attr.name, "noescape" | "fresh") && target != "function" {
             messages.push(Message::error(
                 ErrorCode::GenericTypeError,
                 format!("Attribute `{}` is not valid on {}", attr.name, target),
@@ -544,6 +544,7 @@ pub(crate) fn scalar_backing_ty_name<'a>(
 
 fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>) -> Vec<Message> {
     let mut messages = Vec::new();
+    let mut heads = ImplHeads::of(decls);
     let mut i = 0;
     while i < decls.len() {
         let span = decls[i].0;
@@ -666,8 +667,8 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                 if *readonly {
                     for implied in ["Eq", "Hash"] {
                         if !derives.contains(&implied)
-                            && !has_explicit_impl(decls, implied, name)
-                            && (implied == "Eq" || readonly_class_hashes(decls, name, &mut Vec::new()))
+                            && !has_explicit_impl(&heads, implied, name)
+                            && (implied == "Eq" || readonly_class_hashes(decls, &heads, name, &mut Vec::new()))
                         {
                             derives.push(implied);
                         }
@@ -693,7 +694,7 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
                 derives: &job.derives,
                 scalar_backing: job.scalar_backing,
                 variants: job.variants,
-                decls,
+                heads: &heads,
                 pending,
             })
         });
@@ -741,6 +742,7 @@ fn expand_decls<'a>(decls: &mut Vec<Output<'a>>, pending: &mut Vec<PendingMacro>
             }
             let n = impls.len();
             for (offset, impl_node) in impls.into_iter().enumerate() {
+                heads.add(&impl_node);
                 decls.insert(i + 1 + offset, impl_node);
             }
             i += 1 + n;
@@ -759,7 +761,7 @@ struct ExpandDerivesArgs<'args, 'a> {
     scalar_backing: Option<&'a str>,
     /// The enum's variants (empty for a class).
     variants: &'args [Output<'a>],
-    decls: &'args [Output<'a>],
+    heads: &'args ImplHeads<'a>,
     pending: &'args mut Vec<PendingMacro>,
 }
 
@@ -774,7 +776,7 @@ fn expand_derives<'a>(args: ExpandDerivesArgs<'_, 'a>) -> Vec<Output<'a>> {
         derives,
         scalar_backing,
         variants,
-        decls,
+        heads,
         pending,
     } = args;
     // A generic type's derives expand to bounded instances
@@ -787,7 +789,7 @@ fn expand_derives<'a>(args: ExpandDerivesArgs<'_, 'a>) -> Vec<Output<'a>> {
         return Vec::new();
     }
     let mut out = Vec::new();
-    push_default_display_impls(span, name, derives, decls, scalar_backing, variants, &mut out);
+    push_default_display_impls(span, name, derives, heads, scalar_backing, variants, &mut out);
     out
 }
 
@@ -804,12 +806,12 @@ fn push_default_display_impls<'a>(
     span: SimpleSpan,
     name: &'a str,
     derives: &[&str],
-    decls: &[Output<'a>],
+    heads: &ImplHeads<'_>,
     scalar_backing: Option<&'a str>,
     variants: &[Output<'a>],
     out: &mut Vec<Output<'a>>,
 ) {
-    if !derives.contains(&"Show") && !has_explicit_impl(decls, "Show", name) {
+    if !derives.contains(&"Show") && !has_explicit_impl(heads, "Show", name) {
         if let Some(backing) = scalar_backing {
             out.push(synth_show_scalar_enum(span, name, backing));
         } else if !variants.is_empty() {
@@ -825,24 +827,37 @@ fn path_leaf(path: &str) -> &str {
     path.rsplit("::").next().unwrap_or(path)
 }
 
-/// A hand-written `impl class for ty_name` in `decls`. Module-qualified
-/// heads (`impl json::Serialize for m::Point`) match on their last segment.
-fn has_explicit_impl(decls: &[Output<'_>], class: &str, ty_name: &str) -> bool {
-    decls.iter().any(|d| {
-        matches!(
-            d.1.as_ref(),
-            Expression::TypeClassImpl {
-                class: c,
-                args,
-                ..
-            } if path_leaf(c) == path_leaf(class)
-                && args.first().is_some_and(|a| match a.1.as_ref() {
-                    Expression::Type(n) | Expression::Identifier(n) => *n == ty_name,
-                    Expression::TypeProjection { name, .. } => *name == ty_name,
-                    _ => false,
-                })
-        )
-    })
+/// The `impl class for ty_name` heads among a module's items, as
+/// (last segment of the trait, the head's name): module-qualified heads
+/// (`impl json::Serialize for m::Point`) match on their last segment.
+/// Kept in step as [`expand_decls`] inserts items.
+struct ImplHeads<'a>(std::collections::HashSet<(&'a str, &'a str)>);
+
+impl<'a> ImplHeads<'a> {
+    fn of(decls: &[Output<'a>]) -> Self {
+        let mut heads = Self(std::collections::HashSet::new());
+        for d in decls {
+            heads.add(d);
+        }
+        heads
+    }
+
+    fn add(&mut self, decl: &Output<'a>) {
+        if let Expression::TypeClassImpl { class, args, .. } = decl.1.as_ref()
+            && let Some(name) = args.first().and_then(|a| match a.1.as_ref() {
+                Expression::Type(n) | Expression::Identifier(n) => Some(*n),
+                Expression::TypeProjection { name, .. } => Some(*name),
+                _ => None,
+            })
+        {
+            self.0.insert((path_leaf(class), name));
+        }
+    }
+}
+
+/// A hand-written `impl class for ty_name` among the module's items.
+fn has_explicit_impl(heads: &ImplHeads<'_>, class: &str, ty_name: &str) -> bool {
+    heads.0.contains(&(path_leaf(class), ty_name))
 }
 
 fn synth_show_type_name<'a>(span: SimpleSpan, name: &'a str) -> Output<'a> {
@@ -946,9 +961,18 @@ pub(crate) fn leak(s: String) -> &'static str {
 /// use the real header span from `expand_decls`.
 pub(crate) fn fresh_span() -> SimpleSpan {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    static NEXT: AtomicUsize = AtomicUsize::new(0x4000_0000);
+    static NEXT: AtomicUsize = AtomicUsize::new(FRESH_SPAN_BASE);
     let start = NEXT.fetch_add(1, Ordering::Relaxed);
     SimpleSpan::from(start..start + 1)
+}
+
+/// Where [`fresh_span`] starts counting.
+const FRESH_SPAN_BASE: usize = 0x4000_0000;
+
+/// Whether `start` begins a [`fresh_span`]: a number in the order spans
+/// were minted, in this process, not a place in any source.
+pub(crate) fn is_fresh_span(start: usize) -> bool {
+    (FRESH_SPAN_BASE..crate::variadic::SPAN_BASE).contains(&start)
 }
 
 fn at<'a>(_diag_span: SimpleSpan, expr: Expression<'a>) -> Output<'a> {

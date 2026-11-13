@@ -1,0 +1,103 @@
+// An inherent method's two-word parameter (`Option<int>`, `Result<int, E>`,
+// a `(int, int)` tuple) moves as two words, as a free function's does:
+// the body reads the same values, stores them and passes them on.
+use tests::assert;
+
+class H {
+    pub d: int,
+}
+
+impl H {
+    #[inline(never)]
+    pub fn get(Option<int> o) -> int {
+        return match o {
+            Some(v) => v,
+            None => self.d,
+        };
+    }
+
+    #[inline(never)]
+    pub fn ok_or(Result<int, string> r) -> int {
+        return match r {
+            Result::Ok(v) => v,
+            Result::Err(e) => e.len() * self.d,
+        };
+    }
+
+    #[inline(never)]
+    pub fn add((int, int) p) -> int {
+        let (a, b) = p;
+        return a + b + self.d;
+    }
+
+    #[inline(never)]
+    pub fn keep(Option<int> o, Vec<Option<int>> out) {
+        out.push(o);
+    }
+
+    #[inline(never)]
+    pub fn again(Option<int> o) -> int {
+        return self.get(o) * 10;
+    }
+
+    #[inline(never)]
+    pub fn mixed(int a, Option<int> o, (int, int) p, int b) -> int {
+        let (x, y) = p;
+        let v = match o {
+            Some(v) => v,
+            None => 0,
+        };
+        return a * 1000 + v * 100 + x * 10 + y + b * 10000;
+    }
+
+    #[inline(never)]
+    pub static fn make(Option<int> o) -> H {
+        return new H(match o {
+            Some(v) => v,
+            None => -1,
+        });
+    }
+}
+
+fn opt(int i) -> Option<int> {
+    if i % 3 == 0 {
+        return None;
+    }
+    return Some(i);
+}
+
+test("an Option parameter") {
+    let h = new H(7);
+    assert!(h.get(Some(3)) == 3);
+    assert!(h.get(None) == 7);
+    assert!(h.get(opt(4)) == 4);
+    assert!(h.again(opt(3)) == 70);
+    let s = 0;
+    let i = 0;
+    while i < 30 {
+        s += h.get(opt(i));
+        i += 1;
+    }
+    assert!(s == 370);
+}
+
+test("a Result and a tuple parameter") {
+    let h = new H(2);
+    assert!(h.ok_or(Result::Ok(5)) == 5);
+    assert!(h.ok_or(Result::Err("abc")) == 6);
+    assert!(h.add((1, 2)) == 5);
+    assert!(h.mixed(1, Some(2), (3, 4), 5) == 51234);
+    assert!(h.mixed(1, None, (0, 0), 0) == 1000);
+}
+
+test("an Option parameter stored and on a static method") {
+    let h = new H(1);
+    let out: Vec<Option<int>> = Vec::new();
+    h.keep(Some(9), out);
+    h.keep(None, out);
+    assert!(out.len() == 2);
+    assert!(out[0] == Some(9));
+    assert!(out[1] == None);
+    assert!(H::make(Some(4)).d == 4);
+    assert!(H::make(None).d == -1);
+}

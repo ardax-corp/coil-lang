@@ -1,0 +1,180 @@
+// A shared generic body that takes a user generic enum of `T` next to a
+// bare `T`, and returns that enum (#2512): the enum's object is the same
+// words for the body and ground code (one word per payload item), so the
+// call passes it as it is and rebuilds only the top of the result.
+// @flags --clone-budget 0
+use tests::assert;
+use gc::collect;
+
+enum List<T> {
+    Nil,
+    Cons(T, List<T>),
+}
+
+fn push<T>(List<T> l, T x) -> List<T> {
+    return List::Cons(x, l);
+}
+
+fn head_or<T>(List<T> l, T d) -> T {
+    return match l {
+        List::Nil => d,
+        List::Cons(x, _) => x,
+    };
+}
+
+fn len<T>(List<T> l) -> int {
+    return match l {
+        List::Nil => 0,
+        List::Cons(_, r) => 1 + len(r),
+    };
+}
+
+fn fill<T>(T x, int n) -> List<T> {
+    let l: List<T> = List::Nil;
+    let i = 0;
+    while i < n {
+        l = List::Cons(x, l);
+        i += 1;
+    }
+    return l;
+}
+
+fn sum(List<int> l) -> int {
+    return match l {
+        List::Nil => 0,
+        List::Cons(x, r) => x + sum(r),
+    };
+}
+
+enum Tree<T> {
+    Leaf,
+    Node(Tree<T>, T, Tree<T>),
+}
+
+fn node<T>(Tree<T> l, T v, Tree<T> r) -> Tree<T> {
+    return Tree::Node(l, v, r);
+}
+
+fn mirror<T>(Tree<T> t) -> Tree<T> {
+    return match t {
+        Tree::Leaf => Tree::Leaf,
+        Tree::Node(l, v, r) => Tree::Node(mirror(r), v, mirror(l)),
+    };
+}
+
+fn walk(Tree<int> t, Vec<int> out) {
+    match t {
+        Tree::Leaf => {},
+        Tree::Node(l, v, r) => {
+            walk(l, out);
+            out.push(v);
+            walk(r, out);
+        },
+    }
+}
+
+enum Pick<T> {
+    One(T),
+    No,
+}
+
+fn pick<T>(Pick<T> p, T x) -> Pick<T> {
+    return match p {
+        Pick::One(_) => Pick::No,
+        Pick::No => Pick::One(x),
+    };
+}
+
+enum Bag<T> {
+    Items(Vec<T>, int),
+}
+
+fn add<T>(Bag<T> b, T x) -> Bag<T> {
+    return match b {
+        Bag::Items(v, n) => {
+            v.push(x);
+            Bag::Items(v, n + 1)
+        },
+    };
+}
+
+class Cell {
+    pub v: int,
+}
+
+test("a list at scalar types") {
+    let l: List<int> = List::Nil;
+    l = push(l, 1);
+    l = push(l, 2);
+    l = push(l, 3);
+    collect();
+    assert!(len(l) == 3 && sum(l) == 6 && head_or(l, 0) == 3);
+    let f: List<float> = List::Nil;
+    f = push(push(f, 1.5), 2.5);
+    assert!(head_or(f, 0.0) == 2.5 && len(f) == 2);
+    let b = push(push(List::Nil, true), false);
+    assert!(!head_or(b, true));
+}
+
+test("a list at heap, niche and two-word types") {
+    let s = push(push(List::Nil, "a"), "b");
+    collect();
+    assert!(head_or(s, "") == "b" && len(s) == 2);
+    let n: Option<string> = None;
+    let o = push(push(List::Nil, Some("x")), n);
+    assert!(head_or(o, Some("d")).is_none() && len(o) == 2);
+    let p = push(push(List::Nil, Some(1)), Some(2));
+    assert!(head_or(p, None) == Some(2));
+    let t = push(push(List::Nil, (1, 2)), (3, 4));
+    collect();
+    assert!(head_or(t, (0, 0))[1] == 4);
+    let c = push(List::Nil, new Cell(7));
+    assert!(head_or(c, new Cell(0)).v == 7);
+}
+
+test("a list a shared body builds") {
+    let l = fill(4, 5);
+    collect();
+    assert!(len(l) == 5 && sum(l) == 20);
+    assert!(head_or(push(fill("z", 2), "y"), "") == "y");
+}
+
+test("a tree at int and string") {
+    let t: Tree<int> = Tree::Leaf;
+    t = node(node(Tree::Leaf, 1, Tree::Leaf), 2, node(Tree::Leaf, 3, t));
+    t = mirror(t);
+    collect();
+    let out: Vec<int> = Vec::new();
+    walk(t, out);
+    assert!(out.len() == 3 && out[0] == 3 && out[1] == 2 && out[2] == 1);
+    let s: Tree<string> = node(node(Tree::Leaf, "a", Tree::Leaf), "m", Tree::Leaf);
+    let n = match s {
+        Tree::Node(l, v, _) => match l {
+            Tree::Node(_, w, _) => v + w,
+            Tree::Leaf => v,
+        },
+        Tree::Leaf => "",
+    };
+    assert!(n == "ma");
+}
+
+test("a one-payload enum and a Vec payload") {
+    let p: Pick<int> = Pick::No;
+    p = pick(p, 6);
+    let v = match p {
+        Pick::One(x) => x,
+        Pick::No => -1,
+    };
+    assert!(v == 6);
+    assert!(match pick(p, 1) {
+        Pick::One(_) => false,
+        Pick::No => true,
+    });
+    let start: Vec<int> = [1];
+    let b = add(add(Bag::Items(start, 1), 2), 3);
+    collect();
+    let n = match b {
+        Bag::Items(xs, k) => xs.len() * 10 + k,
+    };
+    assert!(n == 33);
+}

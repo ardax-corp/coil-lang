@@ -21,22 +21,22 @@ impl OwnedClosure {
     }
 }
 
-/// Type-erased reentrant call into a `Machine<S>` (set per closure).
-pub type VmCallFn = unsafe fn(*mut c_void, u32, *const Value, usize) -> Value;
+/// Type-erased reentrant call into the running program (set per closure).
+pub type ProgramCallFn = unsafe fn(*mut c_void, u32, *const Value, usize) -> Value;
 
-/// VM state stashed in callback userdata (single-threaded).
-pub struct VmCallbackState {
-    pub vm: *mut c_void,
+/// runtime state stashed in callback userdata (single-threaded).
+pub struct CallbackState {
+    pub program: *mut c_void,
     pub fn_offset: u32,
-    pub call_fn: VmCallFn,
+    pub call_fn: ProgramCallFn,
 }
 
 /// Trampoline for `extern "C" fn(int64) -> int64` callbacks into coil.
-unsafe extern "C" fn vm_int_to_int_trampoline(
+unsafe extern "C" fn int_to_int_trampoline(
     _cif: &low::ffi_cif,
     result: &mut i64,
     args: *const *const c_void,
-    userdata: &mut Option<VmCallbackState>,
+    userdata: &mut Option<CallbackState>,
 ) {
     // Edition 2024: bodies of `unsafe fn`/`unsafe extern` are safe by default.
     unsafe {
@@ -46,7 +46,7 @@ unsafe extern "C" fn vm_int_to_int_trampoline(
         let arg_ptr = *args;
         let arg = *(arg_ptr as *const i64);
         let args = [Value::from(arg)];
-        let out = (state.call_fn)(state.vm, state.fn_offset, args.as_ptr(), args.len());
+        let out = (state.call_fn)(state.program, state.fn_offset, args.as_ptr(), args.len());
         *result = out.as_int();
     }
 }
@@ -71,17 +71,17 @@ pub fn callback_cif(
 
 /// Create an owned closure for a coil `fn(int) -> int` at `fn_offset`.
 pub fn make_int_callback(
-    vm: *mut c_void,
+    program: *mut c_void,
     fn_offset: u32,
-    call_fn: VmCallFn,
+    call_fn: ProgramCallFn,
     cif: Cif,
 ) -> Result<OwnedClosure, FfiError> {
-    let state = VmCallbackState {
-        vm,
+    let state = CallbackState {
+        program,
         fn_offset,
         call_fn,
     };
-    let inner = ClosureOnce::new(cif, vm_int_to_int_trampoline, state);
+    let inner = ClosureOnce::new(cif, int_to_int_trampoline, state);
     Ok(OwnedClosure { inner })
 }
 
@@ -93,9 +93,9 @@ mod tests {
     use std::ffi::c_void;
 
     #[test]
-    fn make_int_callback_invokes_trampoline_without_vm() {
+    fn make_int_callback_invokes_the_trampoline() {
         unsafe fn fake_call(
-            _vm: *mut c_void,
+            _program: *mut c_void,
             _offset: u32,
             args_ptr: *const Value,
             len: usize,

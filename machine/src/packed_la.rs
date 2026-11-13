@@ -1,4 +1,4 @@
-//! Packed linear-algebra kernels invoked via [`Instruction::HostInvoke`].
+//! Packed linear-algebra kernels invoked via `HostInvoke`.
 //!
 //! Kept off the `Instruction` enum so fib/scalar dispatch matches `main`
 //! (Approach A originally appended four opcodes and regressed branch
@@ -9,20 +9,20 @@
 //! aggregates into contiguous `f64` / `i64` buffers.
 //!
 //! Int cells use exact arithmetic: a sum, product or quotient that would
-//! overflow or divide by zero is an [`IntTrap`], which the VM raises as a
+//! overflow or divide by zero is an [`IntTrap`], which the runtime raises as a
 //! panic, like the scalar ops. Dot products and matmul cells sum in index
 //! order, as the scalar loop does.
 //!
 //! **Defensive posture:** malformed handles / shape mismatches do **not**
 //! trap. Missing aggregates yield `0` (dot) or zero-filled cells
-//! (matmul/zip/neg) so the VM stays aligned with other silent-fallback
+//! (matmul/zip/neg) so the runtime stays aligned with other silent-fallback
 //! arms. Correctness for well-typed programs relies on the typechecker
 //! and codegen never emitting these kernels with bad static shapes.
 
 use common::Value;
 use common::int_arith::{self, IntResult, IntTrap};
 
-use crate::{Heap, ObjArray, ObjTuple, Object};
+use crate::{Heap, ObjArray, ObjEnum, Object};
 
 /// `out[i] = f(a[i], b[i])`, stopping at the first trap.
 fn zip_i64(a: &[i64], b: &[i64], out: &mut [i64], f: fn(i64, i64) -> IntResult) -> Result<(), IntTrap> {
@@ -78,7 +78,7 @@ fn elements_of(obj: &Object) -> Option<std::borrow::Cow<'_, [Value]>> {
             Some(w) => std::borrow::Cow::Borrowed(w),
             None => std::borrow::Cow::Owned(gc.as_ref().to_vec()),
         }),
-        Object::Tuple(gc) => Some(std::borrow::Cow::Borrowed(gc.as_ref().elements())),
+        Object::Enum(gc) if gc.as_ref().is_tuple() => Some(std::borrow::Cow::Borrowed(gc.as_ref().elements())),
         _ => None,
     }
 }
@@ -165,7 +165,7 @@ fn pack_i64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<i64>
 
 fn alloc_aggregate(heap: &mut Heap, values: Vec<Value>, is_tuple: bool) -> Value {
     let addr = if is_tuple {
-        let (object, _) = heap.alloc(ObjTuple::new(values), Object::Tuple);
+        let (object, _) = heap.alloc(ObjEnum::tuple(&values, 0), Object::Enum);
         object.addr()
     } else {
         let arr = ObjArray::from_values(values, heap);
@@ -196,11 +196,21 @@ fn f64_to_values(cells: &[f64]) -> Vec<Value> {
     cells.iter().copied().map(Value::from).collect()
 }
 
+/// `byte` results keep their low 8 bits, as the scalar operators. A byte
+/// operand is in `0..=255`, so the int op before this did not trap.
+fn wrap_bytes(cells: &mut [i64], byte: bool) {
+    if byte {
+        cells.iter_mut().for_each(|v| *v &= 0xFF);
+    }
+}
+
 fn i64_to_values(cells: &[i64]) -> Vec<Value> {
     cells.iter().copied().map(Value::from).collect()
 }
 
-/// `packed_dot(a, b, meta)` — `meta` bits match former `PackedDot` operands.
+/// `packed_dot(a, b, meta)` — `meta` bits match former `PackedDot` operands:
+/// bits 0..15 length, bit 16 float elements, bit 17 `byte` elements (the
+/// sum wraps modulo 256).
 pub fn packed_dot(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> {
     if args.len() < 3 {
         return Ok(Value::default());
@@ -235,11 +245,14 @@ pub fn packed_dot(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> {
             bv.resize(len, 0);
         }
         let n = len.min(av.len()).min(bv.len());
-        Ok(Value::from(dot_i64(&av[..n], &bv[..n])?))
+        let sum = dot_i64(&av[..n], &bv[..n])?;
+        Ok(Value::from(if (ops & (1 << 17)) != 0 { sum & 0xFF } else { sum }))
     }
 }
 
-/// `packed_matmul(a, b, meta)` — former `PackedMatMul` operand layout.
+/// `packed_matmul(a, b, meta)` — former `PackedMatMul` operand layout:
+/// bits 0..7 `m`, 8..15 `k`, 16..23 `n`, bit 24 float cells, bit 25 outer
+/// tuple, bit 26 row tuple, bit 27 `byte` cells (each cell wraps modulo 256).
 pub fn packed_matmul(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> {
     if args.len() < 3 {
         return Ok(Value::default());
@@ -280,6 +293,7 @@ pub fn packed_matmul(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> 
         }
         let mut c = vec![0_i64; m.saturating_mul(n)];
         matmul_i64(&a_cells, &b_cells, &mut c, m, k, n)?;
+        wrap_bytes(&mut c, (ops & (1 << 27)) != 0);
         i64_to_values(&c)
     };
     Ok(alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple))
@@ -292,7 +306,7 @@ pub fn packed_matmul(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> 
 /// - bit 24 input cells are `f64` (mask ops still return `0`/`1` integers)
 /// - bit 25 outer tuple, bit 26 row tuple
 /// - bit 27 scalar broadcast, bit 28 scalar is the left argument
-/// - bit 29 `byte` cells (bitwise results masked to `0..=255`)
+/// - bit 29 `byte` cells (`+`, `-` and bitwise results wrap to `0..=255`)
 ///
 /// `zip_kind`: 0 add, 1 sub, 2 eq, 3 ne, 4 lt, 5 le, 6 gt, 7 ge,
 /// 8 and, 9 or, 10 xor, 11 shl, 12 shr, 13 intersect, 14 diff.
@@ -375,6 +389,7 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTr
             } else {
                 zip_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out[..nlen], int_arith::add)?;
             }
+            wrap_bytes(&mut out, byte_width);
         } else {
             // Element-wise `<<` / `>>` trap on a count outside 0..=63 like
             // the scalar ops (#1076); the kernels only see in-range counts.
@@ -535,6 +550,7 @@ pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTr
             coil_simd::zip_i64_not(&a_cells, &mut out, byte_width);
         } else {
             neg_i64(&a_cells, &mut out)?;
+            wrap_bytes(&mut out, byte_width);
         }
         i64_to_values(&out)
     };
@@ -550,6 +566,7 @@ pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTr
 /// - bit 25: result is tuple (else array)
 /// - bit 26: broadcast mode (`args[1]` is scalar; ignored for neg)
 /// - bit 27: scalar is on the left (broadcast only; matters for sub/div)
+/// - bit 28: `byte` elements (each result wraps modulo 256)
 pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTrap> {
     if args.len() < 2 {
         return Ok(Value::default());
@@ -561,6 +578,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
     let is_tuple = (ops & (1 << 25)) != 0;
     let broadcast = (ops & (1 << 26)) != 0;
     let scalar_left = (ops & (1 << 27)) != 0;
+    let wrap = |o: &mut [i64]| wrap_bytes(o, (ops & (1 << 28)) != 0);
 
     if op == 4 {
         // Unary neg: args = [vec, meta]
@@ -589,6 +607,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
             while o.len() < len {
                 o.push(0);
             }
+            wrap(&mut o);
             i64_to_values(&o[..len])
         };
         return Ok(alloc_aggregate(heap, out, is_tuple));
@@ -659,6 +678,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
             while o.len() < len {
                 o.push(0);
             }
+            wrap(&mut o);
             i64_to_values(&o[..len])
         };
         return Ok(alloc_aggregate(heap, out, is_tuple));
@@ -709,6 +729,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
         while o.len() < len {
             o.push(0);
         }
+        wrap(&mut o);
         i64_to_values(&o[..len])
     };
     Ok(alloc_aggregate(heap, out, is_tuple))

@@ -15,11 +15,11 @@ impl Tagged for int {
 }
 
 fn text<T: Show>(T x) -> string {
-    return show(x);
+    return x.show();
 }
 
 fn tagged<T: Tagged>(T x) -> int {
-    return tag_of(x);
+    return x.tag_of();
 }
 
 fn konst<T>(T x) -> string {

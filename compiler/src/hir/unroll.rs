@@ -12,8 +12,7 @@
 use std::collections::HashMap;
 
 use super::inline::map_ids;
-use super::lower::children;
-use super::{BinOp, HirBody, HirExpr, HirId, HirKind, Lit, LocalId};
+use super::{BinOp, HirBody, HirId, HirKind, Lit, LocalId};
 
 /// Most trips a loop may have to unroll.
 pub const MAX_TRIPS: i64 = 8;
@@ -64,13 +63,13 @@ fn once(body: &HirBody, factor: usize) -> Option<HirBody> {
         // `i` ends where the loop left it.
         let mut place = out.expr(then_place(&out, then, i)).clone();
         place.node = None;
-        let place = push(&mut out, place);
+        let place = out.push(place);
         let value = lit(&mut out, place, start + trips);
         let mut last = out.expr(lp).clone();
         last.kind = HirKind::Assign { place, value };
         last.ty = out.expr(place).ty.clone();
         last.node = None;
-        copies.push(push(&mut out, last));
+        copies.push(out.push(last));
         let e = &mut out.exprs[lp.0 as usize];
         e.kind = HirKind::Block { stmts: copies, tail: None };
         e.node = None;
@@ -106,13 +105,7 @@ fn lit(body: &mut HirBody, like: HirId, v: i64) -> HirId {
     let mut e = body.expr(like).clone();
     e.kind = HirKind::Lit(Lit::Int(v));
     e.node = None;
-    push(body, e)
-}
-
-fn push(body: &mut HirBody, e: HirExpr) -> HirId {
-    let at = HirId(body.exprs.len() as u32);
-    body.exprs.push(e);
-    at
+    body.push(e)
 }
 
 /// Collect every loop to unroll.
@@ -130,7 +123,7 @@ fn find(body: &HirBody, id: HirId, factor: i64, out: &mut Vec<Found>) {
         }
         return;
     }
-    for k in children(body, id) {
+    for k in body.children(id) {
         find(body, k, factor, out);
     }
 }
@@ -167,11 +160,13 @@ fn counted(body: &HirBody, s: HirId, before: &[HirId]) -> Option<Found> {
         BinOp::Le => k.checked_sub(start)?.checked_add(1)?,
         _ => return None,
     };
-    if !(1..=MAX_TRIPS).contains(&trips) || !plain(body, then, i) {
+    // The copies drop the last trip's bump for `i = start + trips`: past
+    // `int` max (`i <= K`, `K` max) that bump traps, so the loop stays (#2793).
+    if !(1..=MAX_TRIPS).contains(&trips) || start.checked_add(trips).is_none() || !plain(body, then, i) {
         return None;
     }
     let mut size = 0;
-    visit(body, then, &mut |_| size += 1);
+    body.visit_ids(then, &mut |_| size += 1);
     (size * trips as usize <= MAX_GROWTH).then_some(Found { lp: s, then, i, start, trips })
 }
 
@@ -210,7 +205,7 @@ fn plain(body: &HirBody, then: HirId, i: LocalId) -> bool {
         }
     }
     let mut ok = bumps == 1;
-    visit(body, then, &mut |k| {
+    body.visit_ids(then, &mut |k| {
         ok &= !matches!(
             body.expr(k).kind,
             HirKind::Loop { .. }
@@ -244,7 +239,7 @@ fn bump(body: &HirBody, s: HirId, i: LocalId) -> bool {
 /// Whether anything under `id` may write `i`.
 fn writes(body: &HirBody, id: HirId, i: LocalId) -> bool {
     let mut out = false;
-    visit(body, id, &mut |k| {
+    body.visit_ids(id, &mut |k| {
         out |= match &body.expr(k).kind {
             HirKind::Assign { place, .. } | HirKind::Append { base: place, .. } => {
                 matches!(body.expr(*place).kind, HirKind::Local(l) if l == i)
@@ -266,20 +261,13 @@ fn copy(body: &mut HirBody, id: HirId, i: LocalId, v: i64) -> HirId {
         return lit(body, id, v);
     }
     let mut map = HashMap::new();
-    for k in children(body, id) {
+    for k in body.children(id).collect::<Vec<_>>() {
         map.insert(k, copy(body, k, i, v));
     }
     let mut e = body.expr(id).clone();
     e.kind = map_ids(&e.kind, &|x| map.get(&x).copied().unwrap_or(x), &|l| l);
     e.node = None;
-    push(body, e)
-}
-
-fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(HirId)) {
-    f(id);
-    for k in children(body, id) {
-        visit(body, k, f);
-    }
+    body.push(e)
 }
 
 #[cfg(test)]

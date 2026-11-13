@@ -1,0 +1,6 @@
+// @expected E0119 — `weak()` is refused for a two-word value (`Option<int>`): it lives in its two words, with no object to observe.
+use gc::weak;
+
+fn main() {
+    let w = weak(Some(3));
+}

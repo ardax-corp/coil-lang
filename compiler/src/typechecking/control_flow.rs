@@ -227,6 +227,40 @@ pub fn defer_body_exits(body: &Output<'_>) -> Vec<(Range<usize>, &'static str)> 
     out
 }
 
+/// The names a `defer` body assigns (`x = ..`, `x += ..`, `x++`), with
+/// the assignment's span, among `names`. A lambda's body and a name the
+/// body binds again (`let x`) are its own.
+pub fn defer_body_assigns<'a>(body: &Output<'_>, names: &[&'a str]) -> Vec<(Range<usize>, &'a str)> {
+    fn bound(expr: &Output<'_>, out: &mut Vec<String>) {
+        match expr.1.as_ref() {
+            Expression::Lambda { .. } | Expression::Function { .. } => return,
+            Expression::Variable(name, _) => out.push((*name).to_string()),
+            _ => {}
+        }
+        expr.1.for_each_child(&mut |c| bound(c, out));
+    }
+    fn visit<'a>(expr: &Output<'_>, names: &[&'a str], out: &mut Vec<(Range<usize>, &'a str)>) {
+        let target = match expr.1.as_ref() {
+            Expression::Lambda { .. } | Expression::Function { .. } => return,
+            Expression::Assignment(t, _) | Expression::CompoundAssign(t, _, _) | Expression::Adjust { target: t, .. } => Some(t),
+            _ => None,
+        };
+        if let Some(t) = target
+            && let Expression::Identifier(id) = t.1.as_ref()
+            && let Some(name) = names.iter().find(|n| **n == *id)
+        {
+            out.push((expr.0.into_range(), name));
+        }
+        expr.1.for_each_child(&mut |c| visit(c, names, out));
+    }
+    let mut rebound = Vec::new();
+    bound(body, &mut rebound);
+    let names: Vec<&'a str> = names.iter().copied().filter(|n| !rebound.iter().any(|r| r == n)).collect();
+    let mut out = Vec::new();
+    visit(body, &names, &mut out);
+    out
+}
+
 /// True when `expr` is a proven non-terminating `while`/`for` (const-true cond, no break).
 pub fn is_infinite_loop(expr: &Output<'_>, lookup: &dyn Fn(&str) -> Option<ConstVal>) -> bool {
     match expr.1.as_ref() {

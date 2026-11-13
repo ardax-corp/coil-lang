@@ -63,7 +63,7 @@ fn go<T: Sink>(T s, int b) -> int {
 }
 
 fn err_of<T: Sink>(T s, int b) -> string {
-    let r = put(s, b);
+    let r = s.put(b);
     return match r {
         Result::Ok(_) => "ok",
         Result::Err(e) => e,

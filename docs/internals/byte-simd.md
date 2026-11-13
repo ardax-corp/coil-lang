@@ -6,20 +6,23 @@ itself. There are no SIMD types in the language and no search natives:
 coil-stdlib's `text` search is written as ordinary loops, and the compiler
 vectorises them.
 
-The work happens on the feature branch `feature/byte-simd`, one PR per
-step.
+The work happened on the feature branch `feature/byte-simd`, one PR per
+step. The timings and instruction counts here were taken on the bytecode
+VM, since deleted. Today MIR's `ByteScan` runs on the runtime's lane code
+(`machine::lanes::vscan`), which native code and the MIR interpreter both
+reach through `coil_native_vector`.
 
-## What exists before this work
+## What existed before this work
 
-- `V*` opcodes (`VLoad` / `VStore` / `VBin` / `VMove` / `VReduce` /
+- `V*` lane words (`VLoad` / `VStore` / `VBin` / `VMove` / `VReduce` /
   `VFma`): 8 lanes of `i64` / `f64` in eight 64-byte vector registers,
   run by `coil-simd` with runtime ISA dispatch (SSE2 / AVX2 / AVX-512 /
   NEON). `mir/vectorize.rs` emitted them only for counted map and reduce
   loops, and only when the whole function was that loop (since 6.2 they
-  run in a `VLoop` anywhere in a function; see `simd.md`).
-- `s[i]` on a string is a `HostInvoke string_byte_at` per byte, plus a
+  run anywhere in a function; see `simd.md`).
+- `s[i]` on a string was a `HostInvoke string_byte_at` per byte, plus a
   `< 0` test for the out-of-bounds panic.
-- `text::Pattern for string` calls the `string::find_from` native
+- `text::Pattern for string` called the `string::find_from` native
   (`memchr::memmem`).
 
 ## Baseline
@@ -48,30 +51,28 @@ costs about 220 ns per candidate: a first-byte filter, where `memmem`
 filters on two bytes. The stdlib rewrite (step 4) filters on two bytes
 in plain Coil.
 
-Step 4 tuned the VM side: a scan that is too short for 64 lanes returns
+Step 4 tuned the lane code: a scan that is too short for 64 lanes returns
 before decoding its body, each stream loads once per block, the range
 checks are hoisted out of the block loop, and the two commonest bodies
 (one stream against a byte, two offsets of one string against two
-bytes) run as tight loops over the string. A dense `s[i]` also pins its
-string per register, so a loop reading two strings stops looking them up
-on every read. The stdlib's plain-loop search then runs within 2 times
-the native for a byte and the two-byte filter, and `split` within
-1.5 times (each piece pays a call and a scan setup).
+bytes) run as tight loops over the string. The stdlib's plain-loop search
+then ran within 2 times the native for a byte and the two-byte filter,
+and `split` within 1.5 times (each piece pays a call and a scan setup).
 
 A first attempt kept the 64-byte loop in MIR (a `ByteMask` instruction
 per block, then `== 0`, `+ 64` and a range test as ordinary ops). That
 cost about 7 dispatches and 95 ns per 64 bytes (find a byte: 98 000 ns),
-so the loop moved into the VM as one `VScan` op.
+so the loop moved into the runtime as one op.
 
 ## Design
 
-### 1. `s[i]` as a dense op
+### 1. `s[i]`
 
-A string byte read becomes a dense-native index (`DenseIndex` with a
-string flag) instead of a `HostInvoke`. This speeds up every byte loop
-and the scalar tail of a vector loop.
+A string byte read is `string_byte_at`, then the branch to its panic
+(`string_index`, `mir/from_hir.rs`). `byte_scan` reads that shape as a
+byte stream.
 
-### 2. Byte lanes in the VM
+### 2. Byte lanes
 
 A vector register is 64 bytes, so byte lanes reuse it as 64 `u8` lanes:
 
@@ -82,9 +83,6 @@ A vector register is 64 bytes, so byte lanes reuse it as 64 `u8` lanes:
   `i64`, so `s[i] as int == b` with `b` outside `0..=255` is all false,
   as the scalar loop is.
 - Mask logic: `and`, `or`, `andnot` on lane masks.
-- `VMask`: movemask of 64 lanes into an `i64` slot (bit `k` = lane `k`).
-- Dense unaries `ctz` (count trailing zeros) and `blsr` (clear the
-  lowest set bit), both non-trapping.
 
 `coil_simd::bytes64` runs each op as four 16-byte SSE2 / NEON steps (the
 targets' baseline, so no runtime dispatch). Its `scalar` module is the
@@ -92,7 +90,7 @@ reference in tests and the fallback on other targets.
 
 ### 3. Vectorising early-exit loops (skip-ahead)
 
-A new MIR pass (`mir/byte_scan.rs`, dense tier) looks for a loop with an
+A MIR pass (`mir/byte_scan.rs`) looks for a loop with an
 `i64` induction variable stepped by 1 and a bound test, where an
 iteration can be a *no-op*: the path from the loop body to the latch
 reads bytes at `arr[iv + inv]`, compares them, and changes nothing but
@@ -107,9 +105,9 @@ G:  i' = φ(init, i + 1 from latch), other φs likewise
 H:  the old loop, now entered at i2, its latch going back to G
 ```
 
-`ByteScan` is one MIR instruction and one VM op, `VScan`. Its body is
-the predicate as byte-lane `VLoad` / `VBin` words, run by the VM in a
-loop without dispatch: from `i'`, 64 lanes at a time, it stops at the
+`ByteScan` is one MIR instruction. Its body is the predicate as
+byte-lane `VLoad` / `VBin` words, run by `machine::lanes::vscan` in a
+loop: from `i'`, 64 lanes at a time, it stops at the
 first lane where `P` holds, at the bound, or where a read would leave
 its string, and returns that position. The strings are resolved once per
 scan. Vector registers live only inside the op, so no vector value
@@ -145,15 +143,15 @@ coil-stdlib's `Pattern for string` (`find_in`, `is_prefix_of`, ...),
 candidates on the needle's first two bytes. With them within 2 times the
 native (see the table above), the `string::find_from` / `rfind` /
 `match_at` / `byte_at` natives left the language (Dimitar, 2026-10-23):
-userland reads bytes with `s[i]`. The VM keeps their HostInvoke rows for
-older archives, and `string_byte_at` is still what `s[i]` lowers to.
+userland reads bytes with `s[i]`. Their rows stay in the frozen host
+table, and `string_byte_at` is still what `s[i]` lowers to.
 
 ### 5. Backward loops (#1968)
 
 A count-down loop (`i = i - 1`, or `i + -1`, tested `i >= lo` / `i > lo`
 in either operand order or as the exit test) gets the same scan with the
-`VScan` flag `simd::SCAN_BACKWARD` (archive minor 48; it takes bit 6 of
-the length field, so a body is at most 63 words). From `p = from` it runs
+flag `simd::SCAN_BACKWARD` (it takes bit 6 of the length field, so a body
+is at most 63 words). From `p = from` it runs
 the body over lanes `p - 63 ..= p` while the lowest one passes the bound
 and every read stays in its string, stops at the highest lane where `P`
 holds (`63 - lzcnt(mask)`), else steps `p -= 64`. coil-stdlib's
@@ -165,13 +163,11 @@ A backward byte search over 1 MB (`while i >= 0 { if s[i] == b ... i = i - 1; }`
 
 ### 6. Per-match cost (#1976)
 
-`a && b` lowered to a join block holding only `φ(false, b)` and a branch
-on it: `DenseCmp; LOAD; JMPF` per candidate, leaving the hot streak. MIR
-`thread_bool_phis` (`mir/bool_thread.rs`) makes each way in branch for
-itself, so the test is one fused compare-branch, and `LaneExpr::not`
-pushes a negation through `&` / `|` when that costs no nodes, so the
-threaded two-byte filter is `(s0 == k0) & (s1 == k1)` again (the VM's
-`scan_pair` shape).
+`a && b` lowers to a join block holding only `φ(false, b)` and a branch
+on it. MIR `thread_bool_phis` (`mir/bool_thread.rs`) makes each way in
+branch for itself, and `LaneExpr::not` pushes a negation through `&` /
+`|` when that costs no nodes, so the threaded two-byte filter is
+`(s0 == k0) & (s1 == k1)` again (the `scan_pair` shape).
 
 Callgrind, 20k pieces of 62 bytes joined by `" "`, 5 passes (instructions
 per match, compile subtracted): `split(" ")` 6450 → 6408,
@@ -186,8 +182,7 @@ The libraries (json, csv, url, deflate, http, `bytes::*`) loop over
 MIR types do not say what an array holds, so HIR lowering marks each
 `Index` whose element is `byte` (a `Vec<byte>` or `[byte; N]`) in
 `MirFunc::byte_loads`. `byte_scan` takes those as streams beside
-`string_byte_at`; the VM's `VScan` already loads packed and word byte
-arrays.
+`string_byte_at`; `vscan` loads packed and word byte arrays.
 
 An array, unlike a string, can change while the loop runs: the
 iterations that run scalar may store into it or push to it. Each scan
@@ -216,6 +211,9 @@ String loops are unchanged (find a byte, a substring and a two-byte
 filter on 64 KiB, within noise).
 
 ## Steps
+
+The branch's history. `Dense*`, `VMask`, `VScan` as an op and the archive
+minors here belonged to the bytecode format, since deleted.
 
 | Step | PR | Change |
 |------|----|--------|

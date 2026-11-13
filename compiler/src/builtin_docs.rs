@@ -11,6 +11,7 @@ pub const MODULE_SOURCES: &[(&str, &str)] = &[
     ("prelude::math", include_str!("builtin_docs/prelude/math.coil")),
     ("prelude::task", include_str!("builtin_docs/prelude/task.coil")),
     ("prelude::process", include_str!("builtin_docs/prelude/process.coil")),
+    ("prelude::thread", include_str!("builtin_docs/prelude/thread.coil")),
     ("io", include_str!("builtin_docs/io.coil")),
     ("io::fs", include_str!("builtin_docs/io/fs.coil")),
     ("io::tty", include_str!("builtin_docs/io/tty.coil")),

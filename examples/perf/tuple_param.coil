@@ -1,0 +1,20 @@
+// A free function's `(int, int)` parameter: two words on the call, no
+// tuple built per call (pair parameters on MIR).
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn add((int, int) p) -> int {
+    let (a, b) = p;
+    return a + b;
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 20000000 {
+        s += add((i, i + 1));
+        i += 1;
+    }
+    let _ = print(format("%i", s));
+}

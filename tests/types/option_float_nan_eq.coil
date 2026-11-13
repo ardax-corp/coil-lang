@@ -1,0 +1,25 @@
+// `==` on an `Option<float>` compares its payload by IEEE, as every other
+// float leaf: `Some(nan) == Some(nan)` is false, also for an element read
+// out of a `Vec` (#2321).
+use tests::assert;
+
+test("nan is unequal in every shape") {
+    let nan = 0.0 / 0.0;
+    assert!(!(nan == nan));
+    assert!(!(Some(nan) == Some(nan)));
+    assert!(!((nan, 1) == (nan, 1)));
+    assert!(!([nan] == [nan]));
+    let v: Vec<Option<float>> = Vec::new();
+    v.push(Some(nan));
+    assert!(!(v[0] == Some(nan)));
+}
+
+test("equal floats stay equal") {
+    let v: Vec<Option<float>> = Vec::new();
+    v.push(Some(1.5));
+    v.push(None);
+    assert!(Some(1.5) == Some(1.5));
+    assert!(v[0] == Some(1.5));
+    assert!(v[1] == None);
+    assert!(!(v[0] == None));
+}

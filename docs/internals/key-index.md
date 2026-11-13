@@ -29,16 +29,16 @@ Probing is linear from `home(h)` (the hash's high bits folded into the low ones,
 | `compact(table, hashes, live)` | 195 | drops removed slots, renumbers in order, rebuilds the table |
 | `retain(v, live)` | 196 | drops the elements of any `Vec` whose slot is removed |
 | `clear(table, hashes, live)` | 197 | no entries; the table keeps its size |
-| `find(table, hashes, keys, h, k, mode)` | 198 | the slot whose key equals `k`, comparing in the VM, or `-1` |
+| `find(table, hashes, keys, h, k, mode)` | 198 | the slot whose key equals `k`, comparing in the runtime, or `-1` |
 | `eq_mode(k)` | 199 | how `find` may compare keys of `k`'s type |
 
-All are direct natives (`DIRECT_HOST_NATIVES`), so dense code calls them with `DenseHostCall`.
+All are direct natives (`DIRECT_HOST_NATIVES`): plain functions of their arguments that never park or switch tasks.
 
 ## Equality
 
 `probe` returns candidates and the caller's `==` decides, so any `Hash + Eq` key works, a hand-written `Eq` included (it must agree with `Hash`).
 
-For keys whose `==` the VM runs itself, `find` compares too and a lookup is one call. `eq_mode(k)` names the compare:
+For keys whose `==` the runtime runs itself, `find` compares too and a lookup is one call. `eq_mode(k)` names the compare:
 
 | Mode | Key type | `find` compares |
 |------|----------|-----------------|

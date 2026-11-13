@@ -1,0 +1,7 @@
+// @expected E0119 — `weak()` is refused for a two-word tuple of immediates.
+use gc::weak;
+
+fn main() {
+    let p = (1, 2.5);
+    let w = weak(p);
+}

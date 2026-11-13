@@ -1,0 +1,78 @@
+// A call through a generic function's value inside a generic body, at the
+// body's own type parameter (coil-lang#2652): a local bound from the
+// function and a `forall` parameter. Its result is the body's type
+// parameter, and its bound is the body's: the call passes the body's
+// dictionary, as the direct call of the function would.
+use tests::assert;
+
+class Pt {
+    pub x: int,
+}
+
+impl Show for Pt {
+    pub fn show(Pt p) -> string {
+        return "Pt(" + p.x.show() + ")";
+    }
+}
+
+fn ident<U>(U x) -> U {
+    return x;
+}
+
+fn shown<U: Show>(U x) -> string {
+    return x.show();
+}
+
+fn local_ident<T>(T x) -> T {
+    let f = ident;
+    return f(x);
+}
+
+fn local_shown<T: Show>(T x) -> string {
+    let f = shown;
+    return f(x);
+}
+
+fn run_any<V>(forall U. U -> U g, V x) -> V {
+    return g(x);
+}
+
+fn run_show<V: Show>(forall U: Show. U -> string g, V x) -> string {
+    return g(x);
+}
+
+fn via_run_any<T>(T x) -> T {
+    return run_any(ident, x);
+}
+
+fn via_run_show<T: Show>(T x) -> string {
+    return run_show(shown, x);
+}
+
+test("a local's result is the body's type parameter") {
+    assert!(local_ident(3) == 3);
+    assert!(local_ident("s") == "s");
+    assert!(local_ident(new Pt(2)).x == 2);
+    let o: Option<string> = Some("o");
+    assert!(local_ident(o) == Some("o"));
+    assert!(local_ident((1, 2)) == (1, 2));
+}
+
+test("a local's bound is the body's") {
+    assert!(local_shown(3) == "3");
+    assert!(local_shown("s") == "s");
+    assert!(local_shown(new Pt(2)) == "Pt(2)");
+}
+
+test("a forall parameter's result is the body's type parameter") {
+    assert!(run_any(ident, 3) == 3);
+    assert!(via_run_any("s") == "s");
+    assert!(via_run_any(new Pt(4)).x == 4);
+    assert!(via_run_any((1, 2)) == (1, 2));
+}
+
+test("a forall parameter's bound is the body's") {
+    assert!(run_show(shown, 3) == "3");
+    assert!(via_run_show("s") == "s");
+    assert!(via_run_show(new Pt(5)) == "Pt(5)");
+}

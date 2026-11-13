@@ -13,9 +13,9 @@
 //! callee's statements ahead of the enclosing statement, which keeps the
 //! evaluation order; a call evaluated with no operand below it otherwise
 //! runs in place as a block value. Calls inside inlined code inline in the
-//! next round (`Compiler::hir_inline_replan`).
+//! next round (`Compiler::hir_inline_round`).
 
-use super::{Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, HirPatFields, LocalId, LocalKind};
+use super::{Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirInlineScope, HirKind, HirLocal, HirPat, HirPatFields, LocalId, LocalKind};
 use super::{BinOp, BodyKind, Builtin, Lit};
 use crate::typechecking::ty;
 
@@ -34,6 +34,12 @@ pub struct Shape {
     heap_locals: Vec<LocalId>,
     /// The callee is another module's: its nodes take the call's span.
     foreign: bool,
+    /// A foreign callee's source file: its nodes keep their own place in
+    /// it ([`super::HirExpr::src`]).
+    file: Option<u32>,
+    /// The callee's frame name when it is not the body's: a clone's entry
+    /// (`f$inst$int`), as a call of it shows.
+    frame: Option<String>,
     /// In a loop, `heap_locals` keep their value until the next trip
     /// rebinds them, as the loop's own locals do (nothing observes when
     /// those values die), and are not cleared.
@@ -52,6 +58,16 @@ impl Shape {
 
     pub fn with_foreign(mut self, foreign: bool) -> Self {
         self.foreign = foreign;
+        self
+    }
+
+    pub fn with_file(mut self, file: Option<u32>) -> Self {
+        self.file = file;
+        self
+    }
+
+    pub fn with_frame(mut self, frame: &str) -> Self {
+        self.frame = Some(frame.to_string());
         self
     }
 
@@ -148,9 +164,29 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
         heap_result: false,
         heap_locals: Vec::new(),
         foreign: false,
+        file: None,
+        frame: None,
         looping,
         loop_inert: false,
     })
+}
+
+/// `body` with one exit, as another module splices it: as it is when it
+/// has one, else its guard returns folded ([`single_exit`]); code after a
+/// statement that always exits (a folded `if true { return a; }`) dropped
+/// first when they do not fold with it. `None` when they still do not.
+pub fn one_exit(mut body: HirBody) -> Option<HirBody> {
+    if inlinable(&body, usize::MAX).err() != Some("return") {
+        return Some(body);
+    }
+    if let Some(folded) = single_exit(&body) {
+        return Some(folded);
+    }
+    blank_unreachable(&mut body);
+    match inlinable(&body, usize::MAX) {
+        Err("return") => single_exit(&body),
+        _ => Some(body),
+    }
 }
 
 /// `callee` with its guard returns folded into `if` values, so it has a
@@ -184,6 +220,11 @@ pub fn single_exit(callee: &HirBody) -> Option<HirBody> {
 /// The value of running `stmts` then `tail` up to the function's exit, as
 /// one expression; `folded` counts the `return`s it absorbed.
 fn fold_exit(b: &mut HirBody, stmts: &[HirId], tail: Option<HirId>, folded: &mut usize) -> Option<HirId> {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| fold_exit_level(b, stmts, tail, folded))
+}
+
+fn fold_exit_level(b: &mut HirBody, stmts: &[HirId], tail: Option<HirId>, folded: &mut usize) -> Option<HirId> {
     let span = b.expr(b.root?).span;
     // A tail `if` folds like a last statement.
     if let Some(t) = tail
@@ -250,7 +291,7 @@ fn fold_exit(b: &mut HirBody, stmts: &[HirId], tail: Option<HirId>, folded: &mut
         (None, _) => (stmts.to_vec(), None),
     };
     let ty = ret_ty(b);
-    let value = value.unwrap_or_else(|| push_expr(b, HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
+    let value = value.unwrap_or_else(|| b.push_new(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
     Some(push_block(b, stmts, Some(value), ty, span))
 }
 
@@ -286,25 +327,12 @@ fn exits(b: &HirBody, branch: HirId) -> bool {
 /// Some `return` under `e`.
 fn has_return(b: &HirBody, e: HirId) -> bool {
     let mut found = false;
-    super::lower::visit(b, e, &mut |x| found |= matches!(x.kind, HirKind::Return(_)));
+    b.visit(e, &mut |x| found |= matches!(x.kind, HirKind::Return(_)));
     found
 }
 
 fn push_block(b: &mut HirBody, stmts: Vec<HirId>, tail: Option<HirId>, ty: Option<ty::Ty>, span: super::Span) -> HirId {
-    push_expr(b, HirKind::Block { stmts, tail }, ty, span)
-}
-
-fn push_expr(b: &mut HirBody, kind: HirKind, ty: Option<ty::Ty>, span: super::Span) -> HirId {
-    let id = HirId(b.exprs.len() as u32);
-    b.exprs.push(HirExpr {
-        kind,
-        ty,
-        layout: crate::layout::Layout::Word,
-        span,
-        node: None,
-        flags: HirFlags::default(),
-    });
-    id
+    b.push_new(HirKind::Block { stmts, tail }, ty, span)
 }
 
 /// Rewrite every eligible call site of `caller`. `callee_of(call)` names
@@ -346,7 +374,7 @@ pub fn inline_calls<'a>(
         if !std::mem::replace(&mut live[id.0 as usize], true) {
             looped[id.0 as usize] = in_loop;
             let inner = in_loop || matches!(caller.expr(id).kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
-            todo.extend(super::lower::children(caller, id).into_iter().map(|c| (c, inner)));
+            todo.extend(caller.children(id).map(|c| (c, inner)));
         }
     }
     for (i, live) in live.into_iter().enumerate() {
@@ -377,7 +405,7 @@ pub fn inline_calls<'a>(
             let returns = s.is_some_and(|s| matches!(b.body.expr(s).kind, HirKind::Return(_)));
             if !clear.is_empty() && !returns {
                 let span = b.body.exprs[i].span;
-                out.push(b.push(HirKind::Clear(clear), Some(ty::unit()), span));
+                out.push(b.body.push_new(HirKind::Clear(clear), Some(ty::unit()), span));
             }
         }
         // A tail's calls hoist into the statements; the tail itself stays,
@@ -426,6 +454,17 @@ impl Inliner<'_> {
     /// and the callee has no result).
     fn statement<'a>(
         &mut self,
+        s: HirId,
+        callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
+        growth: usize,
+        out: &mut Vec<HirId>,
+    ) -> Option<HirId> {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.statement_level(s, callee_of, growth, out))
+    }
+
+    fn statement_level<'a>(
+        &mut self,
         mut s: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
         growth: usize,
@@ -467,7 +506,7 @@ impl Inliner<'_> {
                 Site::Stmt => s = result?,
                 Site::Direct => {
                     let span = self.body.expr(call).span;
-                    let value = result.unwrap_or_else(|| self.push(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
+                    let value = result.unwrap_or_else(|| self.body.push_new(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
                     match &mut self.body.exprs[s.0 as usize].kind {
                         HirKind::Let { init: Some(i), .. } => *i = value,
                         HirKind::Return(Some(v)) => *v = value,
@@ -522,6 +561,17 @@ impl Inliner<'_> {
     /// only may trap (int `+`, ...) goes to `spills`: evaluated into a temp
     /// first, it still traps before the call runs (coil-lang#856).
     fn search<'a>(
+        &self,
+        e: HirId,
+        callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
+        found: &mut Option<(HirId, &'a HirBody, Shape)>,
+        spills: &mut Vec<HirId>,
+    ) -> Result<(), ()> {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.search_level(e, callee_of, found, spills))
+    }
+
+    fn search_level<'a>(
         &self,
         e: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
@@ -603,17 +653,28 @@ impl Inliner<'_> {
     /// (an operand the hoisting in [`Inliner::site_in`] cannot move ahead
     /// of: past an effect, under `&&` / `||`, ...), whose callee then runs
     /// in place as a block value: its parameters' `let`s and statements,
-    /// then its result. Those `let`s need the empty operand stack, so above
-    /// live operands (`zero` false) only an [`Inliner::expression_only`]
-    /// callee splices, as its result expression.
+    /// then its result. Above live operands (`zero` false) only an
+    /// [`Inliner::expression_only`] callee splices, as its result
+    /// expression (a rule from the stack IL, whose `let`s needed an empty
+    /// operand stack; MIR lowering takes a binding inside any operand).
     fn in_place_site<'a>(
         &self,
         s: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
         zero: bool,
     ) -> Option<(HirId, &'a HirBody, Shape)> {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.in_place_site_level(s, callee_of, zero))
+    }
+
+    fn in_place_site_level<'a>(
+        &self,
+        s: HirId,
+        callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
+        zero: bool,
+    ) -> Option<(HirId, &'a HirBody, Shape)> {
         let b = &self.body;
-        let scalar = |e: HirId| b.expr(e).ty.as_ref().and_then(super::lower::primitive).is_some();
+        let scalar = |e: HirId| b.expr(e).ty.as_ref().and_then(super::classify::primitive).is_some();
         let at = |x: HirId, zero: bool| self.in_place_site(x, callee_of, zero);
         match &b.expr(s).kind {
             HirKind::Call { callee, args }
@@ -655,7 +716,7 @@ impl Inliner<'_> {
         e: HirId,
         callee_of: &impl Fn(HirId) -> Option<(&'a HirBody, Shape)>,
     ) -> Option<(HirId, &'a HirBody, Shape)> {
-        super::lower::children(&self.body, e)
+        self.body.children(e)
             .into_iter()
             .find_map(|x| self.in_place_site(x, callee_of, false))
     }
@@ -667,9 +728,17 @@ impl Inliner<'_> {
         shape.stmts.is_empty()
             && shape.result.is_some()
             && shape.heap_locals.iter().all(|l| callee.params.contains(l))
-            && callee.params.iter().zip(args).all(|(&p, &a)| {
-                matches!(self.body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)) && !rebinds(callee, p)
-            })
+            && callee.params.iter().zip(args).all(|(&p, &a)| self.stands_in(callee, p, a))
+    }
+
+    /// A literal or local argument `a` stands in for its parameter `p` when
+    /// the callee never rebinds `p` and the argument is not packed into a
+    /// trait object there: the pack is keyed on the argument's node, which
+    /// a substitution drops (#2839).
+    fn stands_in(&self, callee: &HirBody, p: LocalId, a: HirId) -> bool {
+        let arg = self.body.expr(a);
+        let packed = existential(&callee.locals[p.0 as usize].ty) && !existential(&arg.ty);
+        matches!(arg.kind, HirKind::Lit(_) | HirKind::Local(_)) && !packed && !rebinds(callee, p)
     }
 
     /// Splice `callee` in for `call` as a block value in the call's place:
@@ -678,7 +747,7 @@ impl Inliner<'_> {
         let span = self.body.expr(call).span;
         let mut stmts = Vec::new();
         let result = self.splice(call, callee, shape, Site::Direct, &mut stmts);
-        let tail = result.unwrap_or_else(|| self.push(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
+        let tail = result.unwrap_or_else(|| self.body.push_new(HirKind::Lit(Lit::Unit), Some(ty::unit()), span));
         // The call's node becomes the block (or the bare result), so its
         // parent still reads it. A result packed into the call's trait
         // object stays a node of its own: its pack is keyed on it (#1757).
@@ -740,7 +809,7 @@ impl Inliner<'_> {
         node.kind = HirKind::Local(local);
         node.node = None;
         node.flags = HirFlags::default();
-        self.push(HirKind::Let { local, init: Some(init) }, Some(ty::unit()), span)
+        self.body.push_new(HirKind::Let { local, init: Some(init) }, Some(ty::unit()), span)
     }
 
     /// Splice `callee` in for `call`: hoisted statements go to `out`. For
@@ -757,17 +826,13 @@ impl Inliner<'_> {
         let HirKind::Call { args, .. } = self.body.expr(call).kind.clone() else {
             unreachable!()
         };
-        // A literal or local argument stands in for its parameter when the
-        // callee never rebinds that parameter.
+        // A literal or local argument stands in for its parameter
+        // ([`Inliner::stands_in`]).
         let subst: Vec<Option<HirKind>> = callee
             .params
             .iter()
             .zip(&args)
-            .map(|(&p, &a)| {
-                let arg = &self.body.expr(a).kind;
-                let substitutable = matches!(arg, HirKind::Lit(_) | HirKind::Local(_));
-                (substitutable && !rebinds(callee, p)).then(|| arg.clone())
-            })
+            .map(|(&p, &a)| self.stands_in(callee, p, a).then(|| self.body.expr(a).kind.clone()))
             .collect();
         for l in &callee.locals {
             self.body.locals.push(HirLocal {
@@ -778,6 +843,26 @@ impl Inliner<'_> {
                 borrow: false,
             });
         }
+        // The spliced nodes are in a scope of their own, at the call (#2578);
+        // the callee's own scopes nest in it.
+        let call_scope = self.body.expr(call).scope;
+        // A foreign callee's place is known only with its file.
+        let file = shape.file.filter(|_| shape.foreign);
+        let at_call = shape.foreign && file.is_none();
+        let ret = match shape.ret.or(shape.result) {
+            Some(r) if !at_call => callee.expr(r).src.unwrap_or(callee.expr(r).span),
+            _ => span,
+        };
+        self.body.inline_scopes.push(HirInlineScope { callee: shape.frame.clone().unwrap_or_else(|| callee.name.clone()), call: span, call_scope, ret, at_call, file });
+        let here = self.body.inline_scopes.len() as u32;
+        let soff = here;
+        for inner in &callee.inline_scopes {
+            let call_scope = if inner.call_scope == 0 { here } else { inner.call_scope + soff };
+            // Its call is in the callee's code, so in the callee's file.
+            let file = inner.file.or(file);
+            self.body.inline_scopes.push(HirInlineScope { call_scope, file, ..inner.clone() });
+        }
+        let scope_of = |k: u32| if k == 0 { here } else { k + soff };
         let param_of = |l: LocalId| callee.params.iter().position(|&p| p == l);
         for e in &callee.exprs {
             let kind = match &e.kind {
@@ -787,8 +872,8 @@ impl Inliner<'_> {
                 },
                 k => remap(k, off, loff),
             };
-            let (span, node) = if shape.foreign { (span, None) } else { (e.span, e.node) };
-            self.body.exprs.push(HirExpr { kind, span, node, ..e.clone() });
+            let (span, node, src) = if shape.foreign { (span, None, Some(e.src.unwrap_or(e.span))) } else { (e.span, e.node, e.src) };
+            self.body.exprs.push(HirExpr { kind, span, node, src, scope: scope_of(e.scope), ..e.clone() });
         }
         // A substituted parameter has no slot of its own.
         let substituted = |l: &LocalId| param_of(*l).is_some_and(|k| subst[k].is_some());
@@ -804,7 +889,9 @@ impl Inliner<'_> {
                 self.tombstone(a);
             } else {
                 let local = LocalId(p.0 + loff);
-                hoisted.push(self.push(HirKind::Let { local, init: Some(a) }, Some(ty::unit()), span));
+                let bind = self.body.push_new(HirKind::Let { local, init: Some(a) }, Some(ty::unit()), span);
+                self.body.exprs[bind.0 as usize].scope = call_scope;
+                hoisted.push(bind);
             }
         }
         hoisted.extend(shape.stmts.iter().map(|s| HirId(s.0 + off)));
@@ -834,7 +921,9 @@ impl Inliner<'_> {
                             captured: false,
                             borrow: false,
                         });
-                        out.push(self.push(HirKind::Let { local, init: Some(r) }, Some(ty::unit()), span));
+                        let bind = self.body.push_new(HirKind::Let { local, init: Some(r) }, Some(ty::unit()), span);
+                        self.body.exprs[bind.0 as usize].scope = call_scope;
+                        out.push(bind);
                         self.body.exprs[call.0 as usize].kind = HirKind::Local(local);
                     }
                     None => self.body.exprs[call.0 as usize].kind = HirKind::Lit(Lit::Unit),
@@ -854,18 +943,6 @@ impl Inliner<'_> {
         e.node = None;
     }
 
-    fn push(&mut self, kind: HirKind, ty: Option<crate::typechecking::ty::Ty>, span: super::Span) -> HirId {
-        let id = HirId(self.body.exprs.len() as u32);
-        self.body.exprs.push(HirExpr {
-            kind,
-            ty,
-            layout: crate::layout::Layout::Word,
-            span,
-            node: None,
-            flags: HirFlags::default(),
-        });
-        id
-    }
 }
 
 /// A bare-class existential (`Sum`): a `[value, dictionary]` pack.
@@ -884,7 +961,7 @@ fn value_ty(t: &Option<ty::Ty>) -> bool {
 fn reads_only(callee: &HirBody, p: LocalId) -> bool {
     let mut parent = vec![None; callee.exprs.len()];
     for i in 0..callee.exprs.len() {
-        for c in super::lower::children(callee, HirId(i as u32)) {
+        for c in callee.children(HirId(i as u32)) {
             parent[c.0 as usize] = Some(HirId(i as u32));
         }
     }
@@ -1036,13 +1113,15 @@ pub(crate) fn map_ids(kind: &HirKind, hf: &dyn Fn(HirId) -> HirId, lf: &dyn Fn(L
                 .collect(),
         },
         HirKind::Lambda { body } => HirKind::Lambda { body: *body },
-        HirKind::Yield { value, from } => HirKind::Yield {
+        HirKind::Yield { value, from, zero } => HirKind::Yield {
             value: h(value),
             from: *from,
+            zero: zero.as_ref().map(h),
         },
-        HirKind::Resume { handle, value } => HirKind::Resume {
+        HirKind::Resume { handle, value, zero } => HirKind::Resume {
             handle: h(handle),
             value: value.as_ref().map(h),
+            zero: zero.as_ref().map(h),
         },
         HirKind::Defer { captures, body } => HirKind::Defer {
             captures: captures.iter().map(|c| c.as_ref().map(l)).collect(),
@@ -1102,7 +1181,7 @@ pub fn invariant_locals(body: &HirBody) -> std::collections::HashSet<LocalId> {
             _ => {}
         }
         let inner = in_loop || matches!(body.expr(id).kind, HirKind::Loop { .. } | HirKind::ForIn { .. });
-        todo.extend(super::lower::children(body, id).into_iter().map(|c| (c, inner)));
+        todo.extend(body.children(id).map(|c| (c, inner)));
     }
     body.params
         .iter()
@@ -1228,19 +1307,47 @@ pub fn blank_unreachable(body: &mut HirBody) {
             body.exprs[i].kind = HirKind::Block { stmts: kept, tail: None };
         }
     }
+    blank_orphans(body, root);
+}
+
+/// Blank the nodes not reachable from `root`: what a query that scans the
+/// whole arena reads is then only code that can run.
+pub fn blank_orphans(body: &mut HirBody, root: HirId) {
+    let live = reachable(body, root);
+    for (e, live) in body.exprs.iter_mut().zip(live) {
+        if !live {
+            e.kind = HirKind::Lit(Lit::Unit);
+        }
+    }
+}
+
+/// `body` with its orphans blanked ([`blank_orphans`]), when it has any.
+pub fn without_orphans(body: &HirBody, root: HirId) -> Option<HirBody> {
+    let live = reachable(body, root);
+    let blank = HirKind::Lit(Lit::Unit);
+    if body.exprs.iter().zip(&live).all(|(e, &live)| live || e.kind == blank) {
+        return None;
+    }
+    let mut out = body.clone();
+    for (e, live) in out.exprs.iter_mut().zip(live) {
+        if !live {
+            e.kind = blank.clone();
+        }
+    }
+    Some(out)
+}
+
+/// Which nodes `root` reaches.
+fn reachable(body: &HirBody, root: HirId) -> Vec<bool> {
     let mut live = vec![false; body.exprs.len()];
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         if std::mem::replace(&mut live[id.0 as usize], true) {
             continue;
         }
-        stack.extend(super::lower::children(body, id));
+        stack.extend(body.children(id));
     }
-    for (e, live) in body.exprs.iter_mut().zip(live) {
-        if !live {
-            e.kind = HirKind::Lit(Lit::Unit);
-        }
-    }
+    live
 }
 
 /// Push `s` onto `out`, a nested block that always exits as its own

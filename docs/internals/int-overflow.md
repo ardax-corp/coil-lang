@@ -28,31 +28,40 @@ result of `+ - * <<` and unary `-` with `& 255` (`build::wrap_byte`), and
 lowers `**` to a square-and-multiply over the exponent's 8 bits that masks
 every step (`build::byte_pow`), so it never reaches an int overflow. The
 checker warns E0130 (`ByteWrap`) on each of these operators and their
-compound forms. Later work may prove a range was checked first and turn an
-unchecked wrap into an error.
-
-Before this, a release VM wrapped silently and a debug VM aborted the
-process, and `x / 0` aborted in both.
+compound forms. An element-wise operator on `byte` elements (`[byte; N]`,
+a tuple of bytes, `Vec<byte>`) wraps each element the same way and gives
+the same warning ([coil-lang#2401](https://github.com/ardax-corp/coil-lang/issues/2401)):
+the MIR lowering masks every element (`Lower::aggregate`, with
+`Lower::byte_pow` for `**`), and the packed kernel masks its results when
+the meta word's byte bit is set (`packed_vec_arith`, bit 28). Linear
+algebra on byte cells does too
+([coil-lang#2403](https://github.com/ardax-corp/coil-lang/issues/2403)):
+`Matrix` `+`, `-`, negation and `*`, `matmul`, `dot` and `cross` wrap each
+result (a `dot` or a product cell wraps its sum once, which is the same
+value as wrapping every step), in the kernels of `packed_la.rs` and in the
+unrolled lowering. Later work
+may prove a range was checked first and turn an unchecked wrap into an
+error.
 
 ## One definition
 
 `common::int_arith` (`add`, `sub`, `mul`, `neg`, `div`, `rem`, `pow`)
-returns `Result<i64, IntTrap>`. Everything below calls it, so the VM and the
-compiler agree on every edge.
+returns `Result<i64, IntTrap>`. It defines every edge: the compiler's folds
+and the runtime's kernels call it, and the engines reach the same traps and
+the same `IntTrap` messages.
 
-## VM
+## Engines
 
-- Stack ops (`ADD` … `Pow`, `INC` / `DEC`, `Dyn*`): `exec_rest.rs`
-  (`int_bin!`, `int_trap!` → `runtime_panic`).
-- Fused ops (`BinSlot*`, `BinReturn`): `fused::eval_bin` returns a
-  `Result`; the giant match panics, a dense streak sets `panic_msg`.
-- Dense MIR ops: `dense::eval_bin` / `eval_unary`, including the peeked
-  trailing `DenseBin` in a streak.
-- `V*` SIMD lanes: `simd.rs`. Int lanes are checked per lane, and a
+- Native code (`coil-native`): overflow checks in line, branching to a trap
+  (`TRAP_OVERFLOW`, `TRAP_DIV_ZERO`, `TRAP_SHIFT`); `**` calls `coil_native_ipow`.
+  `native::NativePanic` turns a trap code into the `IntTrap` message.
+- MIR interpreter (`coil-mir-interp/src/exec.rs`): checked Rust arithmetic,
+  with the same trap codes.
+- Vector lanes: `lanes.rs` and `simd.rs`. Int lanes are checked per lane, and a
   reduce is a checked left fold in element order, so it panics on the
   first partial sum the scalar loop would.
 - Packed vector / matrix kernels: `packed_la.rs` return a `Result`, and the
-  host closure turns a trap into `FfiError::IntTrap`, which `HostInvoke`
+  host closure turns a trap into `FfiError::IntTrap`, which the host call
   raises as a plain panic. Dot products and matmul cells sum in index order.
 
 ## Compiler
@@ -61,7 +70,7 @@ compiler agree on every edge.
   `const_eval`) fold only an exact result; an op that would trap stays for
   run time.
 - Rewrites that would move, add or drop a trap are off for ints:
-  - `x * 2^n` stays a `MUL` (a shift does not trap); a `byte` still shifts.
+  - `x * 2^n` stays a multiply (a shift does not trap); a `byte` still shifts.
   - MIR IV strength reduction is float-only.
   - `-(-x)` → `x` is float-only.
   - MIR LICM hoists an int `+ - *` only from the loop header, ahead of

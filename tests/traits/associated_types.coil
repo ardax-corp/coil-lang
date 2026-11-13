@@ -43,10 +43,10 @@ impl Collect for Words {
 }
 
 test("each instance defines the associated type") {
-    let n: int = head(Option::Some(42));
+    let n: int = Option::Some(42).head();
     assert!(n == 42);
     let w = new Words(Vec::from(["a", "b"]));
-    let s: string = head(w);
+    let s: string = w.head();
     assert!(s == "a");
-    assert!(count(w) == 2);
+    assert!(w.count() == 2);
 }

@@ -10,5 +10,5 @@ impl Describe for int {
 }
 
 fn main() {
-    describe("text");
+    "text".describe();
 }

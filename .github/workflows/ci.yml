@@ -59,9 +59,9 @@ jobs:
   # ───────────────────────────── stage 1: Linux ─────────────────────────────
 
   # Every crate's default feature set is empty, and `coil-debug` /
-  # `coil-dissect` / `coil-test` already turn on `compiler/dissect` and
-  # `machine/{debugger,coverage}` for the whole workspace, so one feature set
-  # covers `--no-default-features` / `--features dissect|debugger` too.
+  # `coil-dissect` already turn on `compiler/dissect` for the whole
+  # workspace, so one feature set covers `--no-default-features` /
+  # `--features dissect` too.
   # Criterion benches stay out (`--lib --tests --bins`).
   clippy:
     name: clippy (ubuntu-latest)
@@ -119,8 +119,9 @@ jobs:
           cargo build -p coil-fmt
           ./target/debug/coil-fmt --check examples tests compiler/src/prelude comptime/tests
           # `grep -L` exits 1 when it lists nothing; only coil-fmt's status counts.
+          # E0001 and E0208 files are not valid source; E0125 ones nest past what the parser takes, so coil-fmt cannot read them either.
           find tests -path '*/compile_fail/*.coil' -print0 \
-            | { xargs -0 grep -LZE '^// @expected .*E0(001|208)\b' || true; } \
+            | { xargs -0 grep -LZE '^// @expected .*E0(001|125|208)\b' || true; } \
             | xargs -0 ./target/debug/coil-fmt --check
           # Empty once every known-wrong cell is fixed, and git keeps no empty dirs.
           if [ -d scripts/rep_matrix_known_wrong ]; then
@@ -212,7 +213,7 @@ jobs:
           log="$(mktemp)"
           set +e
           # shellcheck disable=SC2086 # a word list
-          cargo test --workspace --lib --tests --bins -- $skip 2>&1 | tee "$log"
+          cargo test --workspace --lib --tests --bins --no-fail-fast -- $skip 2>&1 | tee "$log"
           code="${PIPESTATUS[0]}"
           set -e
           if grep -E -q 'test result: FAILED|error: test failed' "$log" && [ "$code" -eq 0 ]; then
@@ -260,10 +261,10 @@ jobs:
         run: cargo test -p parser --test fmt_round_trip
 
 
-  # Release-profile and VM-wire checks: Linux only, beside `test` instead of
-  # after its workspace suite.
+  # Release-profile checks: Linux only, beside `test` instead of after its
+  # workspace suite.
   test-release:
-    name: test (release checks, vm-wire)
+    name: test (release checks)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -284,55 +285,19 @@ jobs:
         with:
           key: test-release
 
-      - name: Release label lower (COI-407)
-        run: |
-          # Opt-level 3 / no debug_assertions (the release-compiler panic).
-          # Skip fat LTO so this stays a focused label-lower check.
-          CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
-          CARGO_PROFILE_RELEASE_PANIC=unwind \
-            cargo test --release -p compiler --test coi407_trailing_label -- --exact
-
       - name: Release compiler lib tests build (#1455)
         run: |
-          # Lib tests must compile without debug_assertions (cfg-gated Debug
-          # impls in `common`); build only, same profile as the step above.
+          # Lib tests must compile without debug_assertions; build only.
           CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
           CARGO_PROFILE_RELEASE_PANIC=unwind \
             cargo test --release -p compiler --lib --no-run
 
       - name: Release machine lib tests (#1686)
         run: |
-          # Same profile as the step above, without debug_assertions; the
-          # dev-dependency on `common/debug-fmt` supplies the Debug impls.
+          # Same profile as the step above, without debug_assertions.
           CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
           CARGO_PROFILE_RELEASE_PANIC=unwind \
             cargo test --release -p machine --lib
-
-      - name: Release VM no_pool park/close (COI-410)
-        run: |
-          # Opt-level 3 like the release VM, with debug_assertions on and
-          # unwind so the harness can compile.
-          CARGO_PROFILE_RELEASE_LTO=off \
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
-          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
-          CARGO_PROFILE_RELEASE_PANIC=unwind \
-            cargo test --release -p machine --lib \
-            vm::tests::no_pool_close_park_resume_two_hundred \
-            -- --exact
-          CARGO_PROFILE_RELEASE_LTO=off \
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
-          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
-          CARGO_PROFILE_RELEASE_PANIC=unwind \
-            cargo test --release -p machine --lib \
-            vm::tests::program_string_cache_dropped_when_incremental_sweep_starts \
-            -- --exact
-
-      - name: VM-wire suites (pipeline / perf_metrics / namespace)
-        run: |
-          # `required-features = ["vm-wire"]` keeps these out of the workspace
-          # suite. Name them: `--tests` would rerun every compiler test.
-          cargo test -p compiler --features vm-wire \
-            --test pipeline --test perf_metrics --test namespace
 
   # The `.coil` harness binaries, built once per OS and build: `debug` and
   # `release` (the same corpus must pass in both, so a build-mode difference
@@ -377,6 +342,12 @@ jobs:
         if: matrix.mode != 'gc-stress'
         run: cargo build ${{ matrix.mode == 'release' && '--release' || '' }} --bin coil --bin coil-test
 
+      # The runtime `coil package` links native executables with: the
+      # native cell packages one for the inventory (interpreter symbols).
+      - name: Build the native runtime
+        if: matrix.mode == 'release'
+        run: cargo build --release -p coil-rt
+
       # `coil test` re-execs `coil-test`; the GC-stress cells run this
       # harness directly. Release only: the debug GC-stress cells are off
       # (#2131).
@@ -392,6 +363,9 @@ jobs:
             cp target/gc-stress/release/coil-test harness-bin/gc-stress/
           else
             cp target/${{ matrix.mode }}/coil target/${{ matrix.mode }}/coil-test harness-bin/
+            if [ "${{ matrix.mode }}" = release ]; then
+              cp target/release/libcoil_rt.a harness-bin/
+            fi
           fi
 
       - uses: actions/upload-artifact@v4
@@ -421,7 +395,7 @@ jobs:
     steps: *harness-build-steps
 
 
-  # The `.coil` corpora under each compiler / VM setting and build mode, one
+  # The `.coil` corpora under each compiler / engine setting and build mode, one
   # cell each so debug and release run side by side.
   # `scripts/test_corpora.py` runs each `tests/<corpus>` as its own process,
   # in parallel. A GC-stress cell is named `(release, …)` and runs the
@@ -470,31 +444,110 @@ jobs:
           find harness-bin -type f -exec chmod +x {} +
           run="python3 scripts/test_corpora.py --bin harness-bin"
           case "${{ matrix.variant }}" in
-            default) $run -- $FLAGS ;;
+            default) $run -- --engine native $FLAGS ;;
             # Optimizations hide codegen bugs (LICM materializes invariants,
             # inlining drops CALL targets); run the unoptimized pipeline too.
-            O0) $run -- -O 0 $FLAGS ;;
+            O0) $run -- --engine native -O 0 $FLAGS ;;
             leak-smoke)
-              # Each corpus process gets 128 MiB of address space above the
-              # harness's own code, and one job: every extra thread reserves
-              # a glibc malloc arena (64 MiB of address space), which alone
-              # exceeds the room left.
+              # Each corpus process gets 256 MiB of address space above the
+              # harness's own code, one job and one malloc arena: a thread's
+              # own arena reserves 64 MiB of address space, so whether a deep
+              # test fits would depend on the order of the files. A leak
+              # grows far past this; a million-frame recursion on the
+              # interpreter takes about 128 MiB.
+              # Parked frames, because a fiber's reserved stack counts as
+              # address space with nothing behind it.
               code_kb=$(( $(size -d harness-bin/coil-test | awk 'NR==2 {print $4}') / 1024 ))
-              $run -j 1 --limit-as-kb $(( code_kb + 131072 )) -- $FLAGS ;;
+              MALLOC_ARENA_MAX=1 COIL_NO_FIBERS=1 $run -j 1 --limit-as-kb $(( code_kb + 262144 )) -- --engine mir $FLAGS ;;
             # Collect and evacuate at every allocation (precise-root soundness).
             # The memory corpus also at -O0: without inlining, a call's
-            # result reaches its consumer on the operand stack instead of a
+            # result reaches its consumer as a call result instead of a
             # local, so the roots differ from the default level (#1481).
             # Generics too: uninlined calls through `forall` parameters
             # pass dictionaries the default level folds away (#1530).
-            # A full cycle per allocation makes allocation-heavy cases cost
-            # minutes each (heap_churn_checksums.coil, bare_unit_case_in_pure_fn.coil:
-            # 3 to 4 minutes alone on one core), so the per-case wall limit
-            # is wider than the default 600 s.
+            # A full cycle per allocation costs time quadratic in what a
+            # case keeps live, so a case holds thousands of objects, not
+            # hundreds of thousands, and forces the collection it needs
+            # with `collect()`. The per-case wall limit is wider than the
+            # default 600 s for slow runners.
             gc-stress)
-              $run --harness harness-bin/gc-stress/coil-test -- --wall-timeout 1200 $FLAGS
-              $run --harness harness-bin/gc-stress/coil-test memory generics -- -O 0 --wall-timeout 1200 $FLAGS ;;
+              # On both engines, whose roots are their own: stack maps, and
+              # the interpreter's scan.
+              $run --harness harness-bin/gc-stress/coil-test -- --engine native --wall-timeout 1200 $FLAGS
+              $run --harness harness-bin/gc-stress/coil-test memory generics -- --engine native -O 0 --wall-timeout 1200 $FLAGS
+              # Stack maps as a code image carries them.
+              COIL_CODE_IMAGE_CHECK=1 $run --harness harness-bin/gc-stress/coil-test memory -- --engine native --wall-timeout 1200 $FLAGS
+              $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS
+              # And the frames parked on the heap, as on wasm.
+              COIL_NO_FIBERS=1 $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS ;;
+            # Every corpus on native code (`docs/internals/native.md`). Each
+            # run also records the bodies native code refused
+            # (`scripts/native_inventory.py`, next step). Every program goes
+            # through a code image and runs from the copy, as a code cache
+            # hit would: the `default` cells run compiled code as it is.
+            native) mkdir -p target && COIL_CODE_IMAGE_CHECK=1 COIL_NATIVE_INVENTORY="$PWD/target/native-inventory.tsv" $run -- --engine native $FLAGS ;;
+            # Every corpus on the MIR interpreter: raw MIR at `-O 0`, the
+            # reference the optimized engines are compared against
+            # (`docs/internals/mir-interp.md`).
+            # Every body also goes through the MIR archive format and must
+            # come back equal: the run uses the copy.
+            mir) COIL_MIR_ARCHIVE_CHECK=1 $run -- --engine mir $FLAGS ;;
+            # And each level above it, on the MIR native code compiles: a
+            # failure here and not in `mir` is a pass's.
+            # With the MIR verifier on after every pass (see `mir-verify`):
+            # it costs about 1% and names the pass.
+            mir-opt) for level in 1 2 3 s g; do COIL_MIR_VERIFY=1 $run -- --engine mir -O $level --cell mir-verify $FLAGS; done ;;
+            # Generators and tasks parked on the heap instead of on fibers:
+            # what wasm runs, where a failure is harder to read.
+            mir-parked) COIL_NO_FIBERS=1 $run -- --engine mir $FLAGS ;;
+            # No per-type clones: every generic call takes its shared body
+            # (dictionaries, boxed words), which the default cells reach
+            # only past the clone budget. A file's own
+            # `// @flags --clone-budget N` still wins. `--cell` names the
+            # run for the `// @xfail clone-budget-0 #issue` header lines:
+            # those files must fail, and one that passes fails the cell.
+            # The MIR verifier (`MirFunc::verify`, `verify_dominance`) on every
+            # body as lowered and after each MIR pass, which only debug
+            # builds run otherwise: a pass that breaks SSA is a hang or a
+            # wrong value in a release build (#2422). A violation panics,
+            # naming the pass, the function and the file, and ends that
+            # corpus's process, so a file with a filed violation is kept out
+            # with `// @skip mir-verify #issue`. `mir-opt` runs the other
+            # levels this way.
+            mir-verify)
+              for engine in native mir; do
+                COIL_MIR_VERIFY=1 $run -- --engine $engine --cell mir-verify $FLAGS
+              done ;;
+            # Every program with a `main` (corpus, examples, perf benches)
+            # as its own process with `--auto-par on` and `--auto-par off`,
+            # on 8 workers and both engines: stdout, stderr and the exit
+            # code must be the same. `// @skip auto-par <why>` keeps out a
+            # program whose output depends on time or scheduling, and
+            # `// @xfail auto-par #issue` lists a known difference.
+            auto-par) python3 scripts/auto_par_diff.py --bin harness-bin -- $FLAGS ;;
+            clone-budget-0)
+              for engine in native mir; do
+                $run -- --engine $engine --clone-budget 0 --cell clone-budget-0 $FLAGS
+              done ;;
           esac
+
+      # Native code takes every body, and a packaged program builds.
+      - name: Native inventory
+        if: matrix.variant == 'native' && always()
+        run: |
+          mkdir -p target/native-hello
+          printf 'use io::sync::println;\nfn main() {\n    let _ = println("hello");\n}\n' > target/native-hello/hello.coil
+          COIL_RT_LIB=harness-bin/libcoil_rt.a harness-bin/coil package --root .deps/coil-stdlib/src \
+            target/native-hello/hello.coil -o target/native-hello/hello
+          ls -l target/native-hello/hello
+          python3 scripts/native_inventory.py target/native-inventory.tsv --max refused=0 --max failed=0
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.variant == 'native' && always()
+        with:
+          name: native-inventory
+          path: target/native-inventory.tsv
+          retention-days: 14
 
       # The examples in the builtin doc stubs (compiler/src/builtin_docs/)
       # and the embedded modules (compiler/src/prelude/, such as `task`),
@@ -526,7 +579,9 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         mode: [release]
-        variant: [default, O0, leak-smoke]
+        # Native code runs in release only: a debug cell would test the
+        # same Cranelift output at a fraction of the speed.
+        variant: [default, O0, leak-smoke, native, mir, mir-opt, mir-parked, mir-verify, clone-budget-0, auto-par]
     env: *harness-env
     steps: *harness-steps
 
@@ -592,7 +647,7 @@ jobs:
             -O0 --fn sq --hir --root .deps/coil-stdlib/src > target/wasm-dissect/out.txt
           cat target/wasm-dissect/out.txt
           grep -q '=== hir ===' target/wasm-dissect/out.txt
-          grep -qE 'op=MUL|kind=IMUL64' target/wasm-dissect/out.txt
+          grep -q 'imul' target/wasm-dissect/out.txt
 
       - name: Language harness (wasm)
         run: |
@@ -661,13 +716,13 @@ jobs:
         name: Install system deps (Windows)
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: UCRT64
           update: true
           install: >-
             base-devel
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-libffi
-            mingw-w64-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-libffi
+            mingw-w64-ucrt-x86_64-pkgconf
 
       - &msys2-pkgconfig
         name: Configure pkg-config (Windows)
@@ -687,7 +742,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-windows-gnu-clippy
+          shared-key: ci-windows-ucrt-clippy
 
       - name: Clippy
         shell: msys2 {0}
@@ -740,7 +795,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-windows-gnu-default
+          shared-key: ci-windows-ucrt-default
 
       - &build-windows-gnu
         name: Build all CLI binaries
@@ -787,7 +842,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-windows-gnu-default
+          shared-key: ci-windows-ucrt-default
           save-if: false
 
       - name: HIR and coil fmt round trip over the corpus
@@ -817,7 +872,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-windows-gnu-default
+          shared-key: ci-windows-ucrt-default
           save-if: false
 
       - name: Build coil and coil-test

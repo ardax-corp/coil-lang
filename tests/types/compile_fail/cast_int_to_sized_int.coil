@@ -1,0 +1,6 @@
+// @expected E0110 — `i32` is not a type: there are no sized number types
+// (#2803).
+fn main() {
+    let n = 5;
+    let m = n as i32;
+}

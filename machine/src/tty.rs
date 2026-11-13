@@ -18,7 +18,7 @@ use crate::io::{
     IoErrorTag, alloc_io_error, alloc_option_none, alloc_option_some, alloc_result_err,
     alloc_result_ok, is_capturing, stream_read, with_stream_mut,
 };
-use crate::memory::{EnumPayload, Heap, ObjTuple, Object, StreamKind};
+use crate::memory::{EnumPayload, Heap, ObjEnum, Object, StreamKind};
 
 /// Why an `io::tty` call failed: a `TtyError` (`NotATerminal` = 0,
 /// `Io(IoError)` = 1).
@@ -175,7 +175,7 @@ pub fn tty_enable_vt(heap: &mut Heap, stream: Value) -> bool {
     }
 }
 
-/// Restore every terminal still in raw mode (the VM's exit path and tests).
+/// Restore every terminal still in raw mode (the runtime's exit path and tests).
 pub fn restore_all() {
     os::restore_all();
 }
@@ -189,8 +189,8 @@ enum Wait {
 
 fn alloc_size(heap: &mut Heap, (cols, rows): (i64, i64)) -> Value {
     let (obj, _) = heap.alloc(
-        ObjTuple::new(vec![Value::from(cols), Value::from(rows)]),
-        Object::Tuple,
+        ObjEnum::tuple(&[Value::from(cols), Value::from(rows)], 0),
+        Object::Enum,
     );
     Value::from(obj.addr())
 }

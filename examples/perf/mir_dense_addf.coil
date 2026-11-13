@@ -1,5 +1,5 @@
-// Hit bench for COI-287 W1: dense specialize on float +/− (no * or /).
-// Pre-W1 infer required MULF/DIVF; add-only stayed fuse-IL. DIVF already
+// Hit bench for COI-287 W1: dense lowering of float +/− (no * or /).
+// Add-only loops must take the dense path too. DIVF already
 // qualified — this kernel must not use * or / or parent and W1 match.
 use io::sync::print;
 use string::format;

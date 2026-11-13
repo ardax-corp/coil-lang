@@ -1,4 +1,4 @@
-//! Thin VM glue for compiler-only `V*` opcodes. Float math goes through
+//! Thin runtime glue for compiler-only `V*` opcodes. Float math goes through
 //! [`coil_simd::lanes`]; int lanes use [`common::int_arith`], which traps
 //! on overflow like the scalar ops.
 
@@ -254,13 +254,6 @@ fn byte_cmp_scalar(pred: u8, a: &bytes64::Block, s: i64) -> bytes64::Block {
     bytes64::splat(if all { 0xFF } else { 0 })
 }
 
-/// A byte-lane `VBin` on the register file: `regs[dest] = regs[a] op
-/// regs[b]`, or lane `regs[b]` against `scalar` for `BS_CMP` kinds.
-#[inline]
-pub fn vbin_bytes_in(regs: &mut [[u64; LANES]; simd::NREGS], kind: u8, dest: usize, a: usize, b: usize, scalar: Value) {
-    ByteOp::new(kind, dest, a, b, scalar).run(regs);
-}
-
 /// `VScan` with one stream compared against one byte: from `p = from` in
 /// steps of 64 while `p <= hi` and lanes `p + off ..` lie in `bytes`, the
 /// first `p + k` where `bytes[p + off + k] pred b`, else where it stopped.
@@ -440,54 +433,4 @@ pub fn eval_vbin_wide(kind: u8, lhs: &[u64; WIDE], rhs: &[u64; WIDE], scalar: Va
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod byte_tests {
-    use super::*;
-
-    /// `a op b` (or lane `b` against `scalar`) into a fresh register.
-    fn eval_vbin_bytes(kind: u8, a: &[u64; LANES], b: &[u64; LANES], scalar: Value) -> [u64; LANES] {
-        let mut regs = [[0u64; LANES]; simd::NREGS];
-        regs[0] = *a;
-        regs[1] = *b;
-        vbin_bytes_in(&mut regs, kind, 2, 0, 1, scalar);
-        regs[2]
-    }
-
-    fn reg(bytes: &[u8]) -> [u64; LANES] {
-        let mut r = [0u64; LANES];
-        as_bytes_mut(&mut r)[..bytes.len()].copy_from_slice(bytes);
-        r
-    }
-
-    #[test]
-    fn scalar_compare_out_of_byte_range() {
-        let r = reg(b"a,b");
-        let eq = |s: i64| movemask(&eval_vbin_bytes(simd::BS_CMP + dense::CMP_EQ, &[0; LANES], &r, Value::from(s)));
-        assert_eq!(eq(44), 0b10);
-        assert_eq!(eq(44 + 256), 0);
-        assert_eq!(eq(-1), 0);
-        let lt = |s: i64| movemask(&eval_vbin_bytes(simd::BS_CMP + dense::CMP_LT, &[0; LANES], &r, Value::from(s)));
-        assert_eq!(lt(300), u64::MAX as i64);
-        assert_eq!(lt(-5), 0);
-        assert_eq!(lt(98) & 0b111, 0b011);
-    }
-
-    #[test]
-    fn vector_compare_and_masks() {
-        let a = reg(b"abcd");
-        let b = reg(b"abzd");
-        let ne = eval_vbin_bytes(simd::B_CMP + dense::CMP_NE, &a, &b, Value::from(0i64));
-        assert_eq!(movemask(&ne), 0b100);
-        let gt = eval_vbin_bytes(simd::B_CMP + dense::CMP_GT, &b, &a, Value::from(0i64));
-        assert_eq!(movemask(&gt), 0b100);
-        let not = eval_vbin_bytes(simd::M_NOT, &ne, &ne, Value::from(0i64));
-        let both = eval_vbin_bytes(simd::M_AND, &not, &ne, Value::from(0i64));
-        assert_eq!(movemask(&both), 0);
-        let either = eval_vbin_bytes(simd::M_OR, &not, &ne, Value::from(0i64));
-        assert_eq!(movemask(&either), -1);
-        let andn = eval_vbin_bytes(simd::M_ANDN, &either, &ne, Value::from(0i64));
-        assert_eq!(movemask(&andn), !0b100);
-    }
 }

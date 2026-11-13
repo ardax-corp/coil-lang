@@ -1,0 +1,364 @@
+// A generic generator follows a generic function's rules (#2673): a ground
+// call takes its per-type clone where one is made and the shared body (its
+// dictionaries and `kinds` word) where not, so it runs at default flags and
+// past the clone budget alike.
+use tests::assert;
+use string::format;
+
+class Pt {
+    pub x: int,
+}
+
+impl Show for Pt {
+    pub fn show(Pt p) -> string {
+        return format("Pt(%i)", p.x);
+    }
+}
+
+class Bag<T> {
+    pub items: Vec<T>,
+}
+
+impl Bag<T> {
+    pub gen fn each() {
+        let i = 0;
+        while i < self.items.len() {
+            yield self.items[i];
+            i = i + 1;
+        }
+    }
+
+    pub gen fn tagged(int base) {
+        let i = 0;
+        while i < self.items.len() {
+            yield (self.items[i], base + i);
+            i = i + 1;
+        }
+    }
+
+    pub gen fn mapped<U>(T -> U f) {
+        for x in self.items {
+            yield f(x);
+        }
+    }
+}
+
+class Times {
+    pub n: int,
+}
+
+impl Times {
+    pub gen fn reps<U>(U x) {
+        let i = 0;
+        while i < self.n {
+            yield x;
+            i = i + 1;
+        }
+    }
+}
+
+gen fn count<T>(Vec<T> xs) {
+    yield xs.len();
+}
+
+gen fn each<T>(Vec<T> xs) {
+    let i = 0;
+    while i < xs.len() {
+        yield xs[i];
+        i = i + 1;
+    }
+}
+
+gen fn maybe<T>(Vec<T> xs) {
+    let i = 0;
+    while i < xs.len() {
+        if i % 2 == 0 {
+            yield Option::Some(xs[i]);
+        } else {
+            yield Option::None;
+        }
+        i = i + 1;
+    }
+}
+
+gen fn indexed<T>(Vec<T> xs) {
+    let i = 0;
+    while i < xs.len() {
+        yield (xs[i], i);
+        i = i + 1;
+    }
+}
+
+gen fn prefixes<T>(Vec<T> xs) {
+    let i = 0;
+    while i < xs.len() {
+        let acc = Vec::new();
+        let j = 0;
+        while j <= i {
+            acc.push(xs[j]);
+            j = j + 1;
+        }
+        yield acc;
+        i = i + 1;
+    }
+}
+
+gen fn shown<T: Show>(Vec<T> xs) {
+    for x in xs {
+        yield x.show();
+    }
+}
+
+gen fn repeat<T>(T x, int n) {
+    let i = 0;
+    while i < n {
+        yield x;
+        i = i + 1;
+    }
+}
+
+fn lens(coroutine<int> g) -> int {
+    let total = 0;
+    for n in g {
+        total = total + n;
+    }
+    return total;
+}
+
+fn drain<T>(coroutine<T> g) -> Vec<T> {
+    let out = Vec::new();
+    for x in g {
+        out.push(x);
+    }
+    return out;
+}
+
+test("a count over each element type") {
+    assert!((resume count(Vec::from([1, 2]))) == 2);
+    assert!((resume count(Vec::from(["a", "b", "c"]))) == 3);
+    assert!((resume count(Vec::from([new Pt(1)]))) == 1);
+    assert!((resume count(Vec::from([Option::Some(1), Option::None]))) == 2);
+    assert!((resume count(Vec::from([(1, 2), (3, 4)]))) == 2);
+    assert!((resume count(Vec::from([(), (), (), ()]))) == 4);
+}
+
+test("yields of T, consumed by for in") {
+    let ints = Vec::new();
+    for x in each(Vec::from([3, 4, 5])) {
+        ints.push(x);
+    }
+    assert!(ints == Vec::from([3, 4, 5]));
+    let strs = "";
+    for s in each(Vec::from(["p", "q"])) {
+        strs = strs + s;
+    }
+    assert!(strs == "pq");
+    let xs = 0;
+    for p in each(Vec::from([new Pt(2), new Pt(7)])) {
+        xs = xs + p.x;
+    }
+    assert!(xs == 9);
+    let opts = Vec::new();
+    for o in each(Vec::from([Option::Some(1), Option::None, Option::Some(3)])) {
+        opts.push(o);
+    }
+    assert!(opts == Vec::from([Option::Some(1), Option::None, Option::Some(3)]));
+    let sum = 0;
+    for pair in each(Vec::from([(1, 10), (2, 20)])) {
+        let (a, b) = pair;
+        sum = sum + a * b;
+    }
+    assert!(sum == 50);
+    let units = 0;
+    for u in each(Vec::from([(), ()])) {
+        units = units + 1;
+    }
+    assert!(units == 2);
+}
+
+test("yields of Option<T>, resumed by hand") {
+    let g = maybe(Vec::from([5, 6, 7]));
+    assert!((resume g) == Option::Some(5));
+    assert!((resume g) == Option::None);
+    assert!((resume g) == Option::Some(7));
+    let h = maybe(Vec::from(["x", "y"]));
+    assert!((resume h) == Option::Some("x"));
+    assert!((resume h) == Option::None);
+    let k = maybe(Vec::from([new Pt(4)]));
+    let first = match resume k {
+        Option::Some(p) => p.x,
+        Option::None => 0,
+    };
+    assert!(first == 4);
+    let m = maybe(Vec::from([(1, 2), (3, 4), (5, 6)]));
+    assert!((resume m) == Option::Some((1, 2)));
+    assert!((resume m) == Option::None);
+    assert!((resume m) == Option::Some((5, 6)));
+    let n = maybe(Vec::from([Option::Some(9)]));
+    assert!((resume n) == Option::Some(Option::Some(9)));
+}
+
+test("yields of (T, int)") {
+    let total = 0;
+    for pair in indexed(Vec::from([10, 20, 30])) {
+        let (x, i) = pair;
+        total = total + x * i;
+    }
+    assert!(total == 80);
+    let g = indexed(Vec::from([7, 8]));
+    let (x0, i0) = resume g;
+    let (x1, i1) = resume g;
+    assert!(x0 == 7 && i0 == 0 && x1 == 8 && i1 == 1);
+    let strs = "";
+    for pair in indexed(Vec::from(["a", "b"])) {
+        let (s, i) = pair;
+        strs = format("%s%s%i", strs, s, i);
+    }
+    assert!(strs == "a0b1");
+    let xs = 0;
+    for pair in indexed(Vec::from([new Pt(3), new Pt(4)])) {
+        let (p, j) = pair;
+        xs = xs + p.x * j;
+    }
+    assert!(xs == 4);
+    let somes = 0;
+    for pair in indexed(Vec::from([Option::Some(2), Option::None])) {
+        let (o, _) = pair;
+        if o == Option::Some(2) {
+            somes = somes + 1;
+        }
+    }
+    assert!(somes == 1);
+    let g2 = indexed(Vec::from(["a", "b"]));
+    let (s0, i0) = resume g2;
+    let (s1, i1) = resume g2;
+    assert!(s0 == "a" && i0 == 0 && s1 == "b" && i1 == 1);
+    let h = indexed(Vec::from([new Pt(3), new Pt(4)]));
+    resume h;
+    let (p, j) = resume h;
+    assert!(p.x == 4 && j == 1);
+    let k = indexed(Vec::from([Option::Some(2), Option::None]));
+    let (o, _) = resume k;
+    assert!(o == Option::Some(2));
+}
+
+test("yields of Vec<T>") {
+    let lens = Vec::new();
+    for v in prefixes(Vec::from([1, 2, 3])) {
+        lens.push(v.len());
+    }
+    assert!(lens == Vec::from([1, 2, 3]));
+    let g = prefixes(Vec::from(["a", "b"]));
+    resume g;
+    assert!((resume g) == Vec::from(["a", "b"]));
+    let h = prefixes(Vec::from([(1, 2), (3, 4)]));
+    resume h;
+    let last = resume h;
+    assert!(last[1] == (3, 4));
+}
+
+test("a bounded T calls its trait method") {
+    let out = "";
+    for s in shown(Vec::from([1, 2])) {
+        out = out + s;
+    }
+    assert!(out == "12");
+    let g = shown(Vec::from([new Pt(5)]));
+    assert!((resume g) == "Pt(5)");
+    let h = shown(Vec::from(["s"]));
+    assert!((resume h) == "s");
+}
+
+test("a bare T parameter, done after the last resume") {
+    let g = repeat(new Pt(8), 2);
+    assert!((resume g).x == 8);
+    assert!((resume g).x == 8);
+    assert!(!done(g));
+    resume g;
+    assert!(done(g));
+    let h = repeat("w", 1);
+    assert!((resume h) == "w");
+    let k = repeat((1, 2), 1);
+    assert!((resume k) == (1, 2));
+    let f = repeat(2.5, 1);
+    assert!((resume f) == 2.5);
+    let t = repeat(true, 1);
+    assert!(resume t);
+    let ns = repeat(Option::Some("n"), 1);
+    assert!((resume ns) == Option::Some("n"));
+    let un = repeat((), 2);
+    assert!((resume un) == ());
+    resume un;
+    resume un;
+    assert!(done(un));
+    let m = repeat(Option::Some(3), 3);
+    assert!(drain(m) == Vec::from([Option::Some(3), Option::Some(3), Option::Some(3)]));
+}
+
+test("a generic generator passed as a value") {
+    assert!(lens(count(Vec::from(["a", "b"]))) == 2);
+    assert!(drain(each(Vec::from([1, 2, 3]))) == Vec::from([1, 2, 3]));
+    assert!(drain(each(Vec::from(["u", "v"]))) == Vec::from(["u", "v"]));
+    assert!(drain(each(Vec::from([(1, 1)]))) == Vec::from([(1, 1)]));
+    let g = each(Vec::from([new Pt(6)]));
+    let ps = drain(g);
+    assert!(ps[0].x == 6);
+}
+
+test("a generic class's generator method") {
+    let b = new Bag(Vec::from([1, 2, 3]));
+    let sum = 0;
+    for x in b.each() {
+        sum = sum + x;
+    }
+    assert!(sum == 6);
+    let s = new Bag(Vec::from(["m", "n"]));
+    let g = s.each();
+    assert!((resume g) == "m");
+    assert!((resume g) == "n");
+    let p = new Bag(Vec::from([new Pt(1), new Pt(2)]));
+    assert!(drain(p.each()).len() == 2);
+    let o = new Bag(Vec::from([Option::Some(1), Option::None]));
+    assert!(drain(o.each()) == Vec::from([Option::Some(1), Option::None]));
+    let t = new Bag(Vec::from([(1, 2)]));
+    for pair in t.tagged(10) {
+        let (a, i) = pair;
+        assert!(a == (1, 2) && i == 10);
+    }
+    let tg = t.tagged(10);
+    let (a, i) = resume tg;
+    assert!(a == (1, 2) && i == 10);
+    let total = 0;
+    for pair in b.tagged(100) {
+        let (x, j) = pair;
+        total = total + x + j;
+    }
+    assert!(total == 309);
+}
+
+test("a generator method with a type parameter of its own") {
+    let b = new Bag(Vec::from([1, 2, 3]));
+    let out = "";
+    for s in b.mapped(fn (int x) => format("<%i>", x)) {
+        out = out + s;
+    }
+    assert!(out == "<1><2><3>");
+    let w = new Bag(Vec::from(["a"]));
+    let g = w.mapped(fn (string s) => s.len());
+    assert!((resume g) == 1);
+    let t = new Times(2);
+    let qs = "";
+    for q in t.reps("q") {
+        qs = qs + q;
+    }
+    assert!(qs == "qq");
+    let somes = 0;
+    for o in t.reps(Option::Some(2)) {
+        if o == Option::Some(2) {
+            somes = somes + 1;
+        }
+    }
+    assert!(somes == 2);
+    let h = t.reps((4, 5));
+    assert!((resume h) == (4, 5));
+}

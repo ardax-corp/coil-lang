@@ -1,17 +1,12 @@
 use std::{
     borrow::Borrow,
     collections::{HashMap, HashSet, VecDeque},
-    fs::File,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
 };
 
-use common::{
-    decode_archived_program, ArchivedProgram, Byte, Instruction, ProgramDebug, ARCHIVE_VERSION,
-};
-#[cfg(any(test, feature = "vm-wire"))]
-use machine::{FfiError, FfiSignature, FfiType, Heap, HostClosureFn, NativeFn};
-use parser::{ast::Expression, Pratt, SimpleSpan};
+use common::ProgramDebug;
+use parser::{ast::Expression, SimpleSpan};
 use reporting::{
     create_sink, Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap,
 };
@@ -30,9 +25,6 @@ mod contracts;
 #[path = "pipeline_contract_tests.rs"]
 mod contract_tests;
 pub use contract_tests::CASE_PREFIX as CONTRACT_CASE_PREFIX;
-
-/// Bytecode, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
-type RunArtifacts = (Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug);
 
 /// Compile failed. Diagnostics are already on the pipeline; the error carries no extra payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +48,42 @@ struct WorkItem {
 /// Predicate over a source path (see [`Pipeline::set_keep_fns_in`]).
 pub type KeepFnFilter = std::sync::Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// One file, parsed and expanded in `module`.
+fn parse_and_expand(source: String, module: &str) -> crate::ast_cache::CachedAst {
+    let mut cached = crate::ast_cache::CachedAst::parse(source);
+    let _ = cached.expand_in(module);
+    cached
+}
+
+/// [`parse_and_expand`] of `jobs` (a file, its source, its module) on several
+/// threads, as deep as the main thread: an AST's depth follows its source.
+fn parse_all(jobs: Vec<(PathBuf, String, String)>) -> Vec<(PathBuf, crate::ast_cache::CachedAst)> {
+    const STACK_BYTES: usize = 8 << 20;
+    const MAX_THREADS: usize = 8;
+    let cores = std::thread::available_parallelism().map_or(1, usize::from);
+    let threads = jobs.len().min(cores).min(MAX_THREADS);
+    let jobs = std::sync::Mutex::new(jobs);
+    let next = || jobs.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop();
+    let work = || {
+        let mut done = Vec::new();
+        while let Some((file, source, module)) = next() {
+            done.push((file, parse_and_expand(source, &module)));
+        }
+        done
+    };
+    std::thread::scope(|scope| {
+        // This thread parses too, so a limit that refuses a thread costs only speed.
+        let workers: Vec<_> = (1..threads)
+            .filter_map(|_| std::thread::Builder::new().stack_size(STACK_BYTES).spawn_scoped(scope, work).ok())
+            .collect();
+        let mut parsed = work();
+        parsed.extend(workers.into_iter().flat_map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e))));
+        // Threads finish in any order; a compile does not depend on it.
+        parsed.sort_by(|(a, _), (b, _)| a.cmp(b));
+        parsed
+    })
+}
+
 /// Where [`Pipeline::compile_src_from_file`] is (see [`Pipeline::set_progress`]).
 #[derive(Debug, Clone, Copy)]
 pub enum CompileStep<'a> {
@@ -63,7 +91,7 @@ pub enum CompileStep<'a> {
     Modules(usize),
     /// Compiling this module.
     Module(&'a std::path::Path),
-    /// Every module compiled: linking and lowering to bytecode.
+    /// Every module compiled: linking and lowering to code.
     Link,
 }
 
@@ -75,7 +103,6 @@ pub struct Pipeline {
     project_root: PathBuf,
     /// `use`/`mod` search roots, relative to [`Self::project_root`] or absolute.
     roots: Vec<PathBuf>,
-    bytecode: Vec<Byte>,
     /// Set of files already visited (used to short-circuit
     /// diamond dependencies in the worklist).
     ///
@@ -90,15 +117,9 @@ pub struct Pipeline {
     worklist: VecDeque<WorkItem>,
     /// `use`/`mod` edges for topo-sort compile order (discovery can reorder worklist).
     module_deps: HashMap<PathBuf, Vec<PathBuf>>,
-    /// Native functions registered by the host (tests / extra closures).
-    #[cfg(any(test, feature = "vm-wire"))]
-    natives: Vec<NativeDecl>,
-    /// Extra Host Rust closures from [`Self::register_host_native`].
-    #[cfg(any(test, feature = "vm-wire"))]
-    host_natives: Vec<std::sync::Arc<dyn NativeFn>>,
-    /// Test-native signatures (and host ids), replayed when the compiler is rebuilt.
-    #[cfg(any(test, feature = "vm-wire"))]
-    native_sigs: Vec<(String, Vec<crate::typechecking::ty::Ty>, crate::typechecking::ty::Ty, Option<usize>)>,
+    /// The span of the first `use` / `mod` of each edge in [`Self::module_deps`]
+    /// (`(from, on)`), for an import cycle's diagnostic.
+    module_dep_spans: HashMap<(PathBuf, PathBuf), std::ops::Range<usize>>,
     /// The entry file (the file passed to `compile`).
     /// This file is special: it's the program root and
     /// lives in the top-level namespace (no prefix),
@@ -112,10 +133,6 @@ pub struct Pipeline {
     overlays: HashMap<PathBuf, String>,
     /// Parsed + expanded AST per file (discover / compile / typecheck).
     ast_cache: crate::ast_cache::AstCache,
-    /// Files that declare a `fn drop()`, and whether an in-memory entry
-    /// does ([`Self::seed_fn_value_escapes`]).
-    finalizer_files: HashSet<PathBuf>,
-    finalizers_in_entry: bool,
     /// The file each compiled program came from, by its program number
     /// (foreign clones compile from its AST).
     program_files: HashMap<usize, PathBuf>,
@@ -130,7 +147,7 @@ pub struct Pipeline {
     /// When false (`--auto-par off`), skip auto fork-join.
     auto_par: bool,
     /// Typed inlining of HIR bodies, when set; `None` keeps the compiler's
-    /// [`crate::il::opt::OptimizeOptions::hir_inline`] (on).
+    /// [`crate::opt::OptimizeOptions::hir_inline`] (on).
     hir_inline: Option<bool>,
     /// `--early-free on|off`; `None` follows the opt level.
     early_free: Option<bool>,
@@ -140,15 +157,18 @@ pub struct Pipeline {
     extra_dload_stems: Vec<String>,
     /// CLI / Pipeline API grants and dload pins.
     host_grants: HostGrants,
-    /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
+    /// Optimization preset ([`crate::OptLevel`], COI-127 / COI-173): which HIR
+    /// and MIR passes run, and the inline budget. Default Standard.
     opt_level: crate::OptLevel,
     /// `--contracts`; `None` derives it from the opt level.
     contracts: Option<crate::ContractLevel>,
     /// `-g0` / `-g1` / `-g2`; `None` derives it from the opt level.
     debug_level: Option<common::DebugLevel>,
+    /// [`Self::set_runs_mir`].
+    runs_mir: bool,
     /// I7: `coil debug` sets this; B8 does not disable MIR specialize.
     debugger_attached: bool,
-    /// Collect IL opt counters for `--opt-stats` (COI-131).
+    /// Collect HIR and compile-time counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
     /// Off: no call is computed at compile time, whatever the level.
     /// `--fold-calls` sets it.
@@ -167,7 +187,7 @@ pub struct Pipeline {
     messages_emitted: usize,
     /// Told what [`Self::compile_src_from_file`] is doing (a CLI progress bar).
     progress: Option<CompileProgress>,
-    /// Runs user macros at compile time (`coil` wires the VM here).
+    /// Runs user macros at compile time (`coil` wires the runtime here).
     macro_host: Option<std::sync::Arc<dyn crate::macros::MacroHost>>,
     /// Files whose macros an enclosing pipeline is expanding (cycle check).
     macro_stack: Vec<PathBuf>,
@@ -178,16 +198,7 @@ pub struct Pipeline {
     /// Generated-code spans per file, for moving diagnostics to macro sites.
     generated_ranges: Vec<macros::GeneratedRange>,
     /// Items each derived type already received, to splice in derive order.
-    derived_items: HashMap<parser::SimpleSpan, usize>,
-}
-
-/// Native function declaration registered by the host.
-#[cfg(any(test, feature = "vm-wire"))]
-#[derive(Debug, Clone)]
-pub struct NativeDecl {
-    pub name: String,
-    pub namespace: String,
-    pub sig: FfiSignature,
+    derived_items: HashMap<(PathBuf, parser::SimpleSpan), usize>,
 }
 
 impl Default for Pipeline {
@@ -209,108 +220,20 @@ impl Pipeline {
         self.overlays.remove(file);
     }
 
-    /// Install the compile-time host that runs user derive / attribute macros.
-    pub fn set_macro_host(&mut self, host: std::sync::Arc<dyn crate::macros::MacroHost>) {
-        self.macro_host = Some(host);
-    }
-
     /// In-memory override for `file`, if the editor (or a test) set one.
     pub fn overlay_text(&self, file: &Path) -> Option<&str> {
         self.overlays.get(file).map(String::as_str)
     }
-    /// Register a host native with an explicit [`FfiSignature`]
-    /// and Rust closure. Test-only; production ids come from
-    /// [`common::HOST_NATIVES`].
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn register_host_native<F>(&mut self, sig: FfiSignature, func: F) -> usize
-    where
-        F: Fn(&mut Heap, &[common::Value]) -> Result<Option<common::Value>, FfiError>
-            + Send
-            + Sync
-            + 'static,
-    {
-        let params: Vec<crate::typechecking::ty::Ty> =
-            sig.args.iter().copied().map(ffi_type_to_ty).collect();
-        let ret = ffi_type_to_ty(sig.ret);
-        self.compiler_lazy_mut().register(&sig.name, &params, &ret);
-        let id = common::HOST_NATIVES.len() + self.host_natives.len();
-        self.compiler_lazy_mut().register_native_id(&sig.name, id);
-        self.native_sigs.push((sig.name.clone(), params, ret, Some(id)));
-        self.host_natives
-            .push(std::sync::Arc::new(HostClosureFn::new(sig, func)));
-        id
-    }
-
-    /// Register a native function's type signature (metadata
-    /// only, no VM closure). Embedders that supply their own
-    /// closures should prefer [`Self::register_host_native`].
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn register_native_function(&mut self, name: String, namespace: String, sig: FfiSignature) {
-        let params: Vec<crate::typechecking::ty::Ty> =
-            sig.args.iter().copied().map(ffi_type_to_ty).collect();
-        let ret = ffi_type_to_ty(sig.ret);
-        self.compiler_lazy_mut().register(&name, &params, &ret);
-        self.native_sigs.push((name.clone(), params, ret, None));
-        self.natives.push(NativeDecl {
-            name,
-            namespace,
-            sig,
-        });
-    }
-
-    /// Wire the standard HostInvoke table plus any extra test natives.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn wire_host_natives<const N: usize>(&self, machine: &mut machine::Machine<N>) {
-        machine::wire_standard_host_natives(machine);
-        for native in &self.host_natives {
-            machine.register_native(std::sync::Arc::clone(native));
-        }
-    }
-
-    /// Record HostInvoke ids from [`common::HOST_NATIVES`] (no VM closures).
+    /// Record HostInvoke ids from [`common::HOST_NATIVES`] (no runtime closures).
     fn register_standard_host_natives(&mut self) {
         self.pending_native_ids = common::host_native_ids()
             .map(|(name, id)| (name.to_string(), id))
             .collect();
     }
 
-    /// Install shared bytecode on `machine` for `thread::spawn` workers.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn wire_thread_program<const N: usize>(
-        &self,
-        machine: &mut machine::Machine<N>,
-        bytecode: &[Byte],
-        constants: &[u64],
-        strings: &[String],
-    ) {
-        machine::wire_thread_program_with_maps(machine::WireThreadProgramWithMapsArgs {
-            machine,
-            bytecode,
-            constants,
-            strings,
-            static_slot_count: self.static_slot_count(),
-            debug: self.program_debug(),
-            operand_stack_slots: self.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: self.precise_frames().to_vec(),
-            class_word_kinds: self.class_word_kinds(),
-            static_word_kinds: self.static_word_kinds(),
-        });
-    }
-
-    /// Bytecode entry offset for a registered function (for tests).
+    /// Code entry offset for a registered function (for tests).
     pub fn function_offset(&self, name: &str) -> Option<usize> {
         self.compiler_lazy().function_offset(name)
-    }
-
-    /// Borrow the inner `Compiler` mutably. Used by the
-    /// integration tests in `compiler/src/lib.rs::tests`
-    /// and `compiler/tests/namespace.rs` that need to
-    /// inspect the compiler's diagnostic messages
-    /// directly.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn compiler_mut(&mut self) -> &mut Compiler {
-        self.compiler_lazy_mut()
     }
 
     pub fn compiler(&self) -> &Compiler {
@@ -326,7 +249,6 @@ impl Pipeline {
                 c.register_native_id(name, *id);
             }
             c.set_opt_level(self.opt_level);
-            c.set_collect_opt_stats(self.collect_opt_stats);
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
             if let Some(on) = self.hir_inline {
@@ -337,13 +259,6 @@ impl Pipeline {
             }
             c.set_include_tests(self.include_tests);
             c.set_keep_fns_in(self.keep_fns_in.clone());
-            #[cfg(any(test, feature = "vm-wire"))]
-            for (name, params, ret, id) in &self.native_sigs {
-                c.register(name, params, ret);
-                if let Some(id) = id {
-                    c.register_native_id(name, *id);
-                }
-            }
             c
         })
     }
@@ -364,15 +279,13 @@ impl Pipeline {
     }
 
     /// Borrow the compiler's accumulated diagnostic
-    /// messages. Public so integration tests can read
-    /// them (the `#[cfg(test)]`-only `compiler_mut` is
-    /// only visible to in-crate tests).
+    /// messages.
     pub fn messages(&self) -> &[Message] {
         self.compiler_lazy().get_messages()
     }
 
     /// Typecheck an entry and its discovered modules without generating
-    /// bytecode. Each result is associated with the source file that was
+    /// code. Each result is associated with the source file that was
     /// checked, which makes this suitable for editor diagnostics.
     ///
     /// Bind roots with [`Self::bind_project_root`].
@@ -394,6 +307,12 @@ impl Pipeline {
                 results.push((file.clone(), vec![err.clone()]));
                 broken.insert(file.clone());
             }
+        }
+        if let Some(cycle) = self.import_cycle() {
+            let (file, _, msg) = self.import_cycle_error(&cycle);
+            self.compiler_lazy_mut().push_message(msg.clone());
+            results.push((file, vec![msg]));
+            return results;
         }
         for item in self.worklist_in_dependency_order() {
             // Importers of an unparsable module would only report cascades
@@ -430,15 +349,6 @@ impl Pipeline {
             results.push((item.file, messages));
         }
         results
-    }
-
-    /// Typecheck one source file through the project-aware pipeline.
-    pub fn typecheck_src_from_file(&mut self, file: &str) -> Vec<Message> {
-        self.typecheck_project(Path::new(file))
-            .into_iter()
-            .find(|(path, _)| path == Path::new(file))
-            .map(|(_, messages)| messages)
-            .unwrap_or_default()
     }
 
     /// Project directory (cwd unless [`Self::bind_project_root`] set another).
@@ -602,7 +512,7 @@ impl Pipeline {
         }
     }
 
-    /// Host grants applied at typecheck (deny-all until set). The VM does not
+    /// Host grants applied at typecheck (deny-all until set). The runtime does not
     /// re-apply these; the compiled artifact is the grant.
     pub fn host_grants(&self) -> &HostGrants {
         &self.host_grants
@@ -622,51 +532,14 @@ impl Pipeline {
     }
 
     /// Stems from `--dload-trusted` (no hash check).
+    /// Each `extern` function's library (as its block names it) and C
+    /// symbol, from the last compile.
+    pub fn extern_symbols(&self) -> Vec<(String, String)> {
+        self.compiler_lazy().extern_symbols().to_vec()
+    }
+
     pub fn dload_trusted_stems(&self) -> Vec<String> {
         self.host_grants.dload_trusted.clone()
-    }
-
-    pub fn c_struct_encodings(&self) -> Vec<(String, Vec<(String, u32)>)> {
-        self.compiler_lazy()
-            .c_structs()
-            .iter()
-            .map(|def| (def.name.clone(), def.fields.clone()))
-            .collect()
-    }
-
-    /// Fail-closed integrity: lock hash, trusted, and host grants.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn build_dload_gate(&self) -> machine::DloadGate {
-        let mut gate = machine::DloadGate::from_consumer_trusted(
-            &self.host_grants.dload_pins,
-            &self.host_grants.dload_trusted,
-        );
-        for stem in &self.extra_dload_stems {
-            gate.grant_stem(stem);
-        }
-        for (stem, path) in &self.extra_dload_grants {
-            let _ = gate.grant_file(stem, path);
-        }
-        gate
-    }
-
-    /// Wire FFI library resolution paths and C struct layouts into the VM.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn wire_vm_ffi<const N: usize>(
-        &self,
-        vm: &mut machine::Machine<N>,
-        entry_path: Option<&std::path::Path>,
-    ) {
-        use machine::CStructLayout;
-        let base_dir = entry_path
-            .and_then(|p| p.parent())
-            .map(std::path::PathBuf::from);
-        let search = self.ffi_search_path_bufs();
-        vm.set_ffi_paths(base_dir, search);
-        vm.set_dload_gate(self.build_dload_gate());
-        for layout in self.archived_struct_layouts() {
-            vm.register_struct_layout(CStructLayout::from_archive(&layout));
-        }
     }
 
     /// Compute C align/pad once for every `extern struct` (declaration order).
@@ -710,37 +583,19 @@ impl Pipeline {
             emitted: std::sync::Arc::clone(&diagnostics),
         });
 
-        // The prologue is `[CALL, JMP, HALT]`. The pipeline
-        // patches the JMP at offset 1 to point at `main`
-        // (or `program_start_offset` if `extern` blocks ran
-        // first). See `Self::prologue` for the layout.
-        let bytecode = vec![
-            Byte::new(Instruction::CALL),
-            Byte::new(Instruction::JMP).with_operand_u32(u32::MAX),
-            Byte::new(Instruction::HALT),
-        ];
-
         let mut pipeline = Self {
             failed: false,
             project_root: cwd,
             roots: default_module_roots(),
-            bytecode,
             processed: Vec::new(),
             worklist: VecDeque::new(),
             module_deps: HashMap::new(),
-            #[cfg(any(test, feature = "vm-wire"))]
-            natives: Vec::new(),
-            #[cfg(any(test, feature = "vm-wire"))]
-            host_natives: Vec::new(),
-            #[cfg(any(test, feature = "vm-wire"))]
-            native_sigs: Vec::new(),
+            module_dep_spans: HashMap::new(),
             entry_file: None,
             source_interner: common::Interner::default(),
             source_cache: Vec::new(),
             overlays: HashMap::new(),
             ast_cache: crate::ast_cache::AstCache::default(),
-            finalizer_files: HashSet::new(),
-            finalizers_in_entry: false,
             program_files: HashMap::new(),
             include_tests: false,
             contract_runs: 0,
@@ -755,6 +610,7 @@ impl Pipeline {
             opt_level: crate::OptLevel::Standard,
             contracts: None,
             debug_level: None,
+            runs_mir: false,
             debugger_attached: false,
             collect_opt_stats: false,
             call_fold: true,
@@ -898,9 +754,7 @@ impl Pipeline {
         self.sink.finish()
     }
 
-    /// How many diagnostics (errors, warnings, notes) were reported so
-    /// far. The build cache keeps only compiles that reported none, since
-    /// a cached run would not repeat them.
+    /// How many diagnostics (errors, warnings, notes) were reported so far.
     pub fn diagnostics_emitted(&self) -> usize {
         self.diagnostics.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -933,7 +787,7 @@ impl Pipeline {
             Expression::Use { path, name, .. } => {
                 // The embedded `macro` model is coil source shipped in the compiler.
                 if let Some((file, _)) = crate::macros::embedded_use(path, name) {
-                    self.record_module_dep(parent_file, &file);
+                    self.record_use_dep(parent_file, &file, use_range.clone());
                     self.enqueue_file(file);
                     return;
                 }
@@ -954,7 +808,7 @@ impl Pipeline {
                         if let Some(file) =
                             resolve_use_in_roots(&self.roots, &self.project_root, &segments, &last)
                         {
-                            self.record_module_dep(parent_file, &file);
+                            self.record_use_dep(parent_file, &file, use_range.clone());
                             self.enqueue_file(file);
                         } else {
                             self.emit_module_not_found(
@@ -967,7 +821,7 @@ impl Pipeline {
                     } else if let Some(file) =
                         resolve_mod_in_roots(&self.roots, &self.project_root, "*")
                     {
-                        self.record_module_dep(parent_file, &file);
+                        self.record_use_dep(parent_file, &file, use_range.clone());
                         self.enqueue_file(file);
                     } else {
                         self.emit_module_not_found(parent_file, parent_src, use_range, "`use *`");
@@ -975,7 +829,7 @@ impl Pipeline {
                 } else if let Some(file) =
                     resolve_use_in_roots(&self.roots, &self.project_root, path, name)
                 {
-                    self.record_module_dep(parent_file, &file);
+                    self.record_use_dep(parent_file, &file, use_range.clone());
                     self.enqueue_file(file);
                 } else if let Some(help) = crate::typechecking::VirtualModules::removed_item(path, name) {
                     let mut msg = Message::error(
@@ -997,7 +851,7 @@ impl Pipeline {
             }
             Expression::Module(name, _body) => {
                 if let Some(file) = resolve_mod_in_roots(&self.roots, &self.project_root, name) {
-                    self.record_module_dep(parent_file, &file);
+                    self.record_use_dep(parent_file, &file, use_range.clone());
                     self.enqueue_file(file);
                 } else {
                     self.emit_module_not_found(
@@ -1028,6 +882,102 @@ impl Pipeline {
         }
         self.record_module_dep(from, &core);
         self.enqueue_file(core);
+    }
+
+    /// [`Self::record_module_dep`] of a `use` / `mod` at `range` in `from`.
+    fn record_use_dep(&mut self, from: &Path, on: &Path, range: std::ops::Range<usize>) {
+        self.module_dep_spans.entry((from.to_path_buf(), on.to_path_buf())).or_insert(range);
+        self.record_module_dep(from, on);
+    }
+
+    /// The first import cycle among the discovered modules (`a -> b -> a`,
+    /// #2536): its modules, the first again at the end. Each module is checked after
+    /// the modules it imports, so in a cycle the module checked first sees
+    /// nothing the others declare. The search follows each module's imports
+    /// in source order from the modules in discovery order, so the same
+    /// program always reports the same cycle.
+    fn import_cycle(&self) -> Option<Vec<PathBuf>> {
+        let files: Vec<&PathBuf> = self.worklist.iter().map(|i| &i.file).collect();
+        let deps = |file: &PathBuf| -> Vec<&PathBuf> {
+            let mut out: Vec<&PathBuf> = Vec::new();
+            for d in self.module_deps.get(file).into_iter().flatten() {
+                if files.contains(&d) && !out.contains(&d) {
+                    out.push(d);
+                }
+            }
+            out
+        };
+        // 1: on the search path, 2: done (no cycle through it).
+        let mut state: HashMap<&PathBuf, u8> = HashMap::new();
+        for &root in &files {
+            if state.contains_key(root) {
+                continue;
+            }
+            let mut stack: Vec<(&PathBuf, Vec<&PathBuf>, usize)> = vec![(root, deps(root), 0)];
+            state.insert(root, 1);
+            while let Some((node, next, at)) = stack.last_mut() {
+                let node = *node;
+                let Some(&dep) = next.get(*at) else {
+                    state.insert(node, 2);
+                    stack.pop();
+                    continue;
+                };
+                *at += 1;
+                match state.get(dep) {
+                    Some(1) => {
+                        let from = stack.iter().position(|(f, ..)| *f == dep).expect("on the path");
+                        return Some(stack[from..].iter().map(|(f, ..)| (*f).clone()).chain([dep.clone()]).collect());
+                    }
+                    Some(_) => {}
+                    None => {
+                        state.insert(dep, 1);
+                        stack.push((dep, deps(dep), 0));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// The error for import cycle `cycle` ([`Self::import_cycle`]), at the
+    /// import of `cycle[1]` in `cycle[0]`, with that file and its source.
+    fn import_cycle_error(&mut self, cycle: &[PathBuf]) -> (PathBuf, String, Message) {
+        let src = self.read_source(&cycle[0]).unwrap_or_default();
+        let name = |file: &PathBuf| {
+            self.worklist
+                .iter()
+                .find(|i| &i.file == file)
+                .and_then(|i| i.namespace.clone())
+                .filter(|ns| !ns.is_empty())
+                .or_else(|| file.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| file.display().to_string())
+        };
+        let path = cycle.iter().map(name).collect::<Vec<_>>().join(" -> ");
+        // The statement's span runs on to the next line: the import alone.
+        let mut range = self.module_dep_spans.get(&(cycle[0].clone(), cycle[1].clone())).cloned().unwrap_or(0..0);
+        if let Some(text) = src.get(range.clone()) {
+            range.end = range.start + text.trim_end().len();
+        }
+        let mut msg = Message::error(ErrorCode::ImportCycle, format!("import cycle: `{path}`"), range);
+        msg.with_help(format!(
+            "`{}` imports `{}`, and the imports lead back to it: a module is checked after the modules it imports, so modules cannot import each other, directly or through others; move what they share into a module of its own that each of them imports",
+            name(&cycle[0]),
+            name(&cycle[1]),
+        ));
+        (cycle[0].clone(), src, msg)
+    }
+
+    /// Report the first import cycle ([`Self::import_cycle`]) and fail the
+    /// compile: no module of the program is checked then, as each one in
+    /// the cycle would report the other's names missing. `true` if one was.
+    fn report_import_cycle(&mut self) -> bool {
+        let Some(cycle) = self.import_cycle() else {
+            return false;
+        };
+        let (file, src, msg) = self.import_cycle_error(&cycle);
+        self.emit_message(&file, &src, &msg);
+        self.failed = true;
+        true
     }
 
     /// Record that `from` `use`s/`mod`s `on` (compile `on` first).
@@ -1196,6 +1146,7 @@ impl Pipeline {
         self.processed.clear();
         self.worklist.clear();
         self.module_deps.clear();
+        self.module_dep_spans.clear();
         self.ast_cache.clear();
         self.generated_ranges.clear();
         self.derived_items.clear();
@@ -1203,38 +1154,24 @@ impl Pipeline {
         if let Some(c) = self.compiler.get_mut() {
             c.clear_fn_value_escaped_program();
             c.set_program_finalizers_resize(None);
-            c.set_pending_finalizers(true);
             c.set_written_names_program(None);
         }
     }
 
-    /// Walk every cached AST (and optional in-memory entry) before emit so
-    /// two-slot RETURN cannot be chosen for a function whose address is
-    /// taken in another file of this compile.
-    fn seed_fn_value_escapes(&mut self, extra: Option<&(parser::SimpleSpan, Box<Expression<'_>>)>) {
+    /// Walk every cached AST before emit so two-slot RETURN cannot be
+    /// chosen for a function whose address is taken in another file of this
+    /// compile.
+    fn seed_fn_value_escapes(&mut self) {
         let mut names = HashSet::new();
         // A finalizer in any file runs at every file's allocation safepoints.
         let mut finalizers_resize = false;
-        self.finalizer_files.clear();
-        self.finalizers_in_entry = false;
         let mut written = HashSet::new();
-        for (file, cached) in self.ast_cache.iter() {
+        for (_, cached) in self.ast_cache.iter() {
             if let Some(ast) = cached.ast() {
                 crate::static_writes::collect_written_names(ast, &mut written);
                 crate::typechecking::fn_value_escape::collect_fn_value_escaped(ast, &mut names);
-                let (declared, resize) = crate::typechecking::purity::finalizer_facts(ast);
-                if declared {
-                    self.finalizer_files.insert(file.clone());
-                }
-                finalizers_resize |= resize;
+                finalizers_resize |= crate::typechecking::purity::finalizer_may_resize(ast);
             }
-        }
-        if let Some(ast) = extra {
-            crate::static_writes::collect_written_names(ast, &mut written);
-            crate::typechecking::fn_value_escape::collect_fn_value_escaped(ast, &mut names);
-            let (declared, resize) = crate::typechecking::purity::finalizer_facts(ast);
-            self.finalizers_in_entry = declared;
-            finalizers_resize |= resize;
         }
         let compiler = self.compiler_lazy_mut();
         compiler.set_fn_value_escaped_program(names);
@@ -1244,23 +1181,13 @@ impl Pipeline {
 
     /// Compile every discovered module in dependency order.
     fn compile_discovered_modules(&mut self) {
-        self.seed_fn_value_escapes(None);
-        self.emit_discovered_modules();
-    }
-
-    fn emit_discovered_modules(&mut self) {
+        if self.report_import_cycle() {
+            return;
+        }
+        self.seed_fn_value_escapes();
         let order = self.worklist_in_dependency_order();
         self.step(CompileStep::Modules(order.len()));
-        // Whether a module compiled after each one declares a `fn drop()`
-        // (an in-memory entry compiles after all of them).
-        let mut later = self.finalizers_in_entry;
-        let mut pending = vec![false; order.len()];
-        for (k, item) in order.iter().enumerate().rev() {
-            pending[k] = later;
-            later |= self.finalizer_files.contains(&item.file);
-        }
-        for (item, pending) in order.into_iter().zip(pending) {
-            self.compiler_lazy_mut().set_pending_finalizers(pending);
+        for item in order {
             let is_entry = self
                 .entry_file
                 .as_ref()
@@ -1300,8 +1227,37 @@ impl Pipeline {
             return false;
         };
         let module = self.namespace_for(file);
-        let mut cached = crate::ast_cache::CachedAst::parse(source);
-        let _ = cached.expand_in(&module);
+        self.keep_ast(file, parse_and_expand(source, &module));
+        true
+    }
+
+    /// Parse the files on the worklist no one has reached yet, side by side.
+    /// Each stands alone until it is checked; [`Self::fill_ast_cache`] then
+    /// finds them.
+    fn parse_ahead(&mut self) {
+        if cfg!(target_family = "wasm") {
+            return;
+        }
+        let queued: Vec<PathBuf> = self.worklist.iter().map(|item| item.file.clone()).collect();
+        let mut jobs = Vec::new();
+        for file in queued {
+            if self.ast_cache.get(&file).is_none()
+                && !self.overlays.contains_key(&file)
+                && let Some(source) = self.read_source(&file)
+            {
+                let module = self.namespace_for(&file);
+                jobs.push((file, source, module));
+            }
+        }
+        if jobs.len() > 1 {
+            for (file, cached) in parse_all(jobs) {
+                self.keep_ast(&file, cached);
+            }
+        }
+    }
+
+    /// Keep `cached`, the parsed and expanded `file`.
+    fn keep_ast(&mut self, file: &Path, mut cached: crate::ast_cache::CachedAst) {
         // A provider's macros run only in the expansion program. The entry
         // file keeps them so its macro bodies are still checked.
         if !self.expansion_program
@@ -1315,7 +1271,6 @@ impl Pipeline {
             }
         }
         self.ast_cache.insert(file.to_path_buf(), cached);
-        true
     }
 
     /// Parse → expand → check one file. Used by compile and `typecheck_project`.
@@ -1413,6 +1368,9 @@ impl Pipeline {
                 continue;
             }
             already_scanned.push(file.clone());
+            if self.ast_cache.get(&file).is_none() {
+                self.parse_ahead();
+            }
             if !self.fill_ast_cache(&file) {
                 self.emit_spanless_error(
                     ErrorCode::IoError,
@@ -1509,9 +1467,7 @@ impl Pipeline {
             .set_source_file(rel);
 
         // `compile_prepared_module`: expand/check already ran.
-        let bytecode = if check_failed {
-            Vec::new()
-        } else {
+        if !check_failed {
             let compiler = self.compiler.get_mut().expect("compiler initialized");
             let cached = self
                 .ast_cache
@@ -1531,21 +1487,16 @@ impl Pipeline {
                 .get_mut(&file)
                 .expect("parse_expand_check_file filled cache");
             let ast = cached.ast_mut().expect("parsed");
-            let bytecode = if begun {
-                compiler.compile_prepared_module_finish(namespace.as_str(), ast)
-            } else {
-                Vec::new()
-            };
+            if begun {
+                compiler.compile_prepared_module_finish(namespace.as_str(), ast);
+            }
             let seq = compiler.program_seq();
             if !compiler.may_clone_from(seq) {
                 cached.release_tree();
             }
             self.program_files.insert(seq, file.clone());
             self.emit_foreign_clones();
-            bytecode
-        };
-
-        self.bytecode.extend(bytecode);
+        }
 
         let src = self
             .ast_cache
@@ -1576,93 +1527,7 @@ impl Pipeline {
         compiler.emit_foreign_clones(&asts);
     }
 
-    pub fn compile(mut self, filename: String, output: String) {
-        // Seed the worklist with the entry file. The
-        // entry is treated specially (top-level
-        // namespace), see `compile_file`.
-        let entry = PathBuf::from(&filename);
-        self.entry_file = Some(entry.clone());
-        self.begin_compile_opt_stats();
-        self.enqueue_file(entry);
-
-        // Discovery pass: walk the dependency graph
-        // transitively, enqueueing every referenced
-        // file. We re-process the worklist, parsing
-        // each file's AST to find its `use`/`mod`
-        // declarations, but NOT compiling yet. This
-        // builds the complete worklist so that the
-        // compilation pass can run in dependency
-        // order (dependencies first).
-        self.discover_all();
-        self.expand_user_macros();
-
-        // Compilation pass: topo-sort on `use`/`mod` edges
-        // (see `worklist_in_dependency_order`). Discovery's
-        // scan rotation invalidates plain LIFO `pop_back`.
-        self.compile_discovered_modules();
-
-        if self.failed || !self.check_capabilities() {
-            return;
-        }
-
-        // Modules emit labeled stack IL. `finalize_bytecode` tree-shakes,
-        // runs IL opts, then a single lower (fuse-select + label → PC).
-        // No post-lower peephole; production abs JMP is rejected in lower.
-        self.compiler_lazy_mut().finalize_bytecode();
-        self.compute_consts(None);
-        if self.failed || self.had_errors() {
-            return;
-        }
-        self.bytecode = self.compiler_lazy().bytecode_vec();
-
-        // Patch the JMP at offset 1 to point to the
-        // user-program's `main`. If the source had at
-        // least one `extern` block or module statics,
-        // jump to `program_start_offset` so setup runs
-        // before `main`. Otherwise jump straight to `main`.
-        let jmp_target = self.compiler_lazy().prologue_jmp_target();
-        if let Some(byte) = self.bytecode.get_mut(1) {
-            *byte = Byte::new(Instruction::JMP).with_operand_u32(jmp_target);
-        }
-
-        // Wrap the bytecode in the versioned `ArchivedProgram` envelope
-        // so that older `.ccoil` files can be rejected at load time via
-        // `version` mismatch (see `Pipeline::run`).
-        let debug = self.program_debug_full();
-        let level = self.debug_level();
-        let mut program = ArchivedProgram {
-            version: ARCHIVE_VERSION,
-            static_slot_count: self.compiler_lazy().static_slot_count(),
-            constants: self.compiler_lazy().constants().to_vec(),
-            strings: self.compiler_lazy().strings().to_vec(),
-            source_files: Vec::new(),
-            debug_locs: Vec::new(),
-            fn_symbols: Vec::new(),
-            struct_layouts: self.archived_struct_layouts(),
-            operand_stack_slots: self.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: self.precise_frames().to_vec(),
-            class_word_kinds: self.class_word_kinds(),
-            static_word_kinds: self.static_word_kinds(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-            bytecode: self.bytecode,
-        };
-        program.set_debug(debug, level);
-
-        let mut out = File::create(output).expect("Unable to open output file");
-        let _ = out
-            .write(
-                rkyv::to_bytes::<rkyv::rancor::Error>(&program)
-                    .unwrap()
-                    .as_slice(),
-            )
-            .expect("Unable to write compiled output to file");
-    }
-
-    /// Compile a parsed AST and return the bytecode.
+    /// Compile a parsed AST and return the code.
     ///
     /// Does **not** emit when the checker rejected the program (B2).
     /// Ill-typed examples belong in diagnostics fixtures, not here.
@@ -1670,118 +1535,47 @@ impl Pipeline {
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'_>>),
-    ) -> (Vec<Byte>, Vec<u64>) {
+    ) -> Vec<u64> {
         crate::hir::set_contract_level(self.contracts());
-        let mut bytecode = self.compiler_lazy_mut().compile(module, ast);
+        self.compiler_lazy_mut().compile(module, ast);
         let rejected = self
             .compiler_lazy()
             .get_messages()
             .iter()
             .any(|m| *m.kind() == reporting::MessageKind::ERROR);
         if rejected {
-            return (Vec::new(), Vec::new());
+            return Vec::new();
         }
 
-        // Patch the JMP at offset 1 (the second prologue
-        // instruction).
-        if let Some(byte) = bytecode.get_mut(1) {
-            *byte = Byte::new(Instruction::JMP)
-                .with_operand_u32(self.compiler_lazy().prologue_jmp_target());
-        }
-
-        (bytecode, self.compiler_lazy_mut().constants().to_vec())
+        self.compiler_lazy_mut().constants().to_vec()
     }
 
-    pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
-        // Derives, attribute and function-style macros and trait contract
-        // copies run in the discovery stage, which works on cached files:
-        // compile such input as an in-memory file.
-        let trait_contracts = src.contains("trait ") && (src.contains("requires") || src.contains("ensures"));
-        let macro_call = src
-            .match_indices("!(")
-            .any(|(at, _)| src[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_'));
-        // A `readonly class` derives its implied `Eq` / `Hash` there too.
-        let readonly_class = src.contains("readonly class");
-        if src.contains("#[") || trait_contracts || macro_call || readonly_class {
-            let path = PathBuf::from("<input>.coil");
-            self.overlays.insert(path.clone(), src.to_string());
-            let result = self.compile_src_from_file(path.to_str().expect("utf-8 path"));
-            self.overlays.remove(&path);
-            return result;
-        }
-        let parser = Pratt::default();
-        let path = Path::new("<input>");
-        let mut ast = match parser.parse(src) {
-            Ok(mut ast) => {
-                crate::const_fold::lift_startup_consts(&mut ast);
-                ast
-            }
-            Err(err) => {
-                self.emit_message(path, src, &err);
-                return Err(CompileFail);
-            }
-        };
+    /// Compile `src` as the entry file `<input>.coil`, its `use`s read from
+    /// disk.
+    pub fn compile_src(&mut self, src: &str) -> Result<Vec<u64>, CompileFail> {
+        // As a file, so derives, attribute and function-style macros and
+        // trait contract copies (which run in the discovery stage, on cached
+        // files) see it.
+        let path = PathBuf::from("<input>.coil");
+        self.overlays.insert(path.clone(), src.to_string());
+        let result = self.compile_src_from_file(path.to_str().expect("utf-8 path"));
+        self.overlays.remove(&path);
+        result
+    }
 
-        self.reset_session();
-        self.sync_host_caps();
-        self.entry_file = None;
-        self.begin_compile_opt_stats();
-
-        // Discover disk modules (`io/sync.coil` in coil-stdlib, …) referenced by `use`
-        // before compiling the in-memory entry, same dependency order as
-        // `compile_src_from_file`, without requiring a temp file.
-        self.enqueue_uses(path, src, &ast);
-        self.enqueue_core(path);
-        self.discover_all();
-        self.expand_user_macros();
-        self.seed_fn_value_escapes(Some(&ast));
-        self.emit_discovered_modules();
-        if self.failed || self.had_errors() {
-            return Err(CompileFail);
-        }
-
-        self.compiler_lazy_mut().set_source_file(path);
-        self.compiler_lazy_mut().set_source_text(src);
-        self.compiler_lazy_mut().set_pending_finalizers(false);
-        // As `compile_file`: the other modules' method clones this one
-        // calls compile first, for its typed inlining to splice.
-        if self.compiler_lazy_mut().compile_module_begin("", &mut ast) {
-            self.emit_foreign_clones();
-            self.compiler_lazy_mut().compile_prepared_module_finish("", &mut ast);
-        }
-        self.emit_foreign_clones();
-
-        // Register source and drain typecheck / codegen diagnostics via the sink.
-        let file_id = self.sink.register_source(path, src);
-        self.emit_new_messages(file_id);
-        if self.had_errors() || !self.check_capabilities() {
-            return Err(CompileFail);
-        }
-
-        self.compiler_lazy_mut().finalize_bytecode();
-        self.compute_consts(Some((path, src)));
-        let mut bytecode = self.compiler_lazy_mut().bytecode_vec();
-
-        if let Some(byte) = bytecode.get_mut(1) {
-            *byte = Byte::new(Instruction::JMP)
-                .with_operand_u32(self.compiler_lazy().prologue_jmp_target());
-        }
-
-        // Warnings are kept for callers to inspect; only hard errors fail.
-        if self.had_errors() {
-            return Err(CompileFail);
-        }
-
-        self.debug_verify(&bytecode);
-        Ok((bytecode, self.compiler_lazy_mut().constants().to_vec()))
+    /// A capture for [`Self::compute_consts`], when the macro host runs MIR:
+    /// it has to open before the bodies are lowered, and it closes with the
+    /// compile however that ends.
+    fn comptime_capture(&self) -> Option<crate::mir::ComptimeCapture> {
+        self.macro_host.as_ref().is_some_and(|h| h.runs_mir()).then(crate::mir::ComptimeCapture::open)
     }
 
     /// Compute every `const` and pure `static let` initializer on the
-    /// compile-time VM and replace its startup call with the computed value
+    /// compile-time interpreter and replace its startup call with the computed value
     /// (`RestoreSnapshot`). A const's failure is E0134 at the const; a
     /// `static let` that fails keeps its startup initializer. At `-O2` and
     /// above, pure calls with constant arguments are computed too and
-    /// replaced with their values; one that fails stays a call. Without a macro host (no VM linked)
+    /// replaced with their values; one that fails stays a call. Without a macro host (no runtime linked)
     /// consts keep their startup initializers. `entry_src` is the text of an
     /// in-memory entry, which has no file to read.
     fn compute_consts(&mut self, entry_src: Option<(&Path, &str)>) {
@@ -1794,13 +1588,9 @@ impl Pipeline {
         let mut sites = if self.call_fold && self.compiler_lazy().call_fold_on() { self.compiler_lazy().fold_sites() } else { Vec::new() };
         // A call in a `const` or `comptime` initializer is computed with it,
         // within the explicit budget (coil-lang#1918).
-        let explicit: Vec<std::ops::Range<usize>> = consts
-            .iter()
-            .filter(|c| !c.silent)
-            .filter_map(|c| c.entry.map(|e| e as usize))
-            .map(|e| e..self.compiler_lazy().function_end(e))
-            .collect();
-        sites.retain(|(pc, _, _)| !explicit.iter().any(|r| r.contains(pc)));
+        let explicit: HashSet<u32> = consts.iter().filter(|c| !c.silent).filter_map(|c| c.entry).collect();
+        let symbols = self.compiler_lazy().fn_debug_symbols();
+        sites.retain(|(call, _)| !symbols.iter().any(|s| s.name == call.body && explicit.contains(&s.body_id)));
         if consts.is_empty() && sites.is_empty() {
             return;
         }
@@ -1831,14 +1621,14 @@ impl Pipeline {
         let mut cache = ConstCache::default();
         self.load_cached_consts(&consts, &mut evals, &io, &mut cache);
         let program = crate::macros::CompiledExpansion {
-            bytecode: std::sync::Arc::new(self.compiler_lazy().bytecode_vec()),
             constants: std::sync::Arc::new(self.compiler_lazy().constants().to_vec()),
             strings: std::sync::Arc::new(self.compiler_lazy().strings().to_vec()),
             static_slot_count: self.compiler_lazy().static_slot_count(),
-            operand_stack_slots: self.operand_stack_slots(),
             program_debug: self.program_debug(),
             class_word_kinds: self.class_word_kinds(),
             static_word_kinds: std::sync::Arc::new(kinds.clone()),
+            mir: std::sync::Arc::new(if host.runs_mir() { crate::mir::peek_native_capture() } else { Vec::new() }),
+            runnable: std::sync::OnceLock::new(),
         };
         let limits = self.host_grants.comptime;
         // One evaluation per distinct call.
@@ -1846,7 +1636,7 @@ impl Pipeline {
         let mut index: HashMap<crate::macros::FoldCall, usize> = HashMap::new();
         let site_calls: Vec<usize> = sites
             .iter()
-            .map(|(_, _, call)| {
+            .map(|(_, call)| {
                 *index.entry(call.clone()).or_insert_with(|| {
                     folds.push(call.clone());
                     folds.len() - 1
@@ -1855,16 +1645,16 @@ impl Pipeline {
             .collect();
         let outcome = host.eval_consts(&program, &evals, &folds, &limits, &io);
         let cached = evals.iter().filter(|e| e.cached.is_some()).count();
-        crate::il::opt::note_comptime_consts(evals.len(), cached, folds.len(), started.elapsed().as_micros() as u64);
+        crate::opt::note_comptime_consts(evals.len(), cached, folds.len(), started.elapsed().as_micros() as u64);
         match outcome {
             Ok(outcome) => {
                 self.store_cached_consts(&consts, &outcome.records, &cache, entry_src);
                 let folded: Vec<_> = sites
                     .iter()
                     .zip(&site_calls)
-                    .filter_map(|((pc, arity, _), &i)| Some((*pc, *arity, outcome.folded.get(i)?.clone()?)))
+                    .filter_map(|((call, _), &i)| Some((call.clone(), outcome.folded.get(i)?.clone()?)))
                     .collect();
-                self.compiler_lazy_mut().apply_call_folds(&folded);
+                self.compiler_lazy_mut().apply_call_folds(folded);
                 self.note_fold_budget(&sites, &site_calls, &outcome.over_budget, entry_src);
                 let const_sites: Vec<(u32, u32)> = evals
                     .iter()
@@ -1999,7 +1789,6 @@ impl Pipeline {
                         None => out.push_str(&format!(" (field {index})")),
                     }
                 }
-                common::SnapStep::Boxed => {}
             }
         }
         out
@@ -2027,7 +1816,7 @@ impl Pipeline {
     /// each ran before it stopped.
     fn note_fold_budget(
         &mut self,
-        sites: &[(usize, usize, crate::macros::FoldCall)],
+        sites: &[(crate::mir::ConstCall, crate::macros::FoldCall)],
         site_calls: &[usize],
         over: &[(usize, u64)],
         entry_src: Option<(&Path, &str)>,
@@ -2037,9 +1826,12 @@ impl Pipeline {
         }
         let files = self.compiler_lazy().source_files_list();
         let mut seen = HashSet::new();
-        for ((pc, _, _), call) in sites.iter().zip(site_calls) {
+        for ((site, _), call) in sites.iter().zip(site_calls) {
             let Some(&(_, micros)) = over.iter().find(|(i, _)| i == call) else { continue };
-            let Some(loc) = self.debug_locs().get(*pc).copied().filter(|l| l.is_known()) else { continue };
+            let loc = site.loc;
+            if !loc.is_known() {
+                continue;
+            }
             if !seen.insert((loc.file, loc.start_byte, loc.end_byte)) {
                 continue;
             }
@@ -2089,27 +1881,13 @@ impl Pipeline {
         }
     }
 
-    /// Debug builds verify every compiled program the way archive load does,
-    /// so the test suite catches codegen that emits out-of-range operands.
-    fn debug_verify(&self, bytecode: &[Byte]) {
-        if cfg!(debug_assertions) {
-            let c = self.compiler_lazy();
-            let limits = common::VerifyLimits {
-                strings: c.strings().len(),
-                static_slots: c.static_slot_count() as usize,
-            };
-            if let Err(e) = common::verify_bytecode(bytecode, c.constants(), limits) {
-                panic!("compiler emitted {e}");
-            }
-        }
-    }
-
     /// Compile a single source file in-memory and return the
-    /// resulting bytecode, resolving `use` and `mod`
+    /// resulting code, resolving `use` and `mod`
     /// declarations by reading the referenced files from disk.
     ///
     /// Multi-file entry point: discovers and compiles the module graph from disk.
-    pub fn compile_src_from_file(&mut self, file: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
+    pub fn compile_src_from_file(&mut self, file: &str) -> Result<Vec<u64>, CompileFail> {
+        let _capture = self.comptime_capture();
         let entry = PathBuf::from(file);
         self.reset_session();
         self.entry_file = Some(entry.clone());
@@ -2137,98 +1915,46 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
-        // Linked IL → one lower (fuse-select + labels). See `Pipeline::compile`.
+        // Link every module's bodies once: tree-shake and resolve labels.
         self.step(CompileStep::Link);
-        self.compiler_lazy_mut().finalize_bytecode();
+        self.compiler_lazy_mut().finalize_bodies();
         self.compute_consts(None);
-        self.bytecode = self.compiler_lazy_mut().bytecode_vec();
 
-        // Patch the JMP at offset 1.
-        let jmp_target = self.compiler_lazy().prologue_jmp_target();
-        if let Some(byte) = self.bytecode.get_mut(1) {
-            *byte = Byte::new(Instruction::JMP).with_operand_u32(jmp_target);
-        }
 
         // Warnings are kept for callers to inspect; only hard errors fail.
         if self.had_errors() {
             return Err(CompileFail);
         }
 
-        self.debug_verify(&self.bytecode);
-        Ok((
-            std::mem::take(&mut self.bytecode),
-            self.compiler_lazy_mut().constants().to_vec(),
-        ))
+        Ok(self.compiler_lazy_mut().constants().to_vec())
     }
 
-    /// Compile a source entry in-memory for `coil dissect` (never writes an archive).
-    ///
-    /// When `capture_il` is true, retains pre-opt stack IL after finalize splices.
+    /// Compile a source entry in-memory for `coil dissect` and `coil debug`
+    /// (never writes an archive).
     #[cfg(any(test, feature = "dissect"))]
-    pub fn compile_dissect(
-        &mut self,
-        file: &str,
-        capture_il: bool,
-    ) -> Result<crate::DissectArtifacts, CompileFail> {
-        let entry = PathBuf::from(file);
-        self.reset_session();
-        self.entry_file = Some(entry.clone());
-        // `coil verify`'s proof of this file, while it still matches; never
-        // while verifying, which makes the proof.
-        let proof = (!crate::verify::capture_active()).then(|| crate::verify::proof::Proof::load(&entry)).flatten();
-        let _proof = crate::verify::proof::ProofScope::set(proof);
-        self.begin_compile_opt_stats();
-        self.enqueue_file(entry);
+    pub fn compile_dissect(&mut self, file: &str) -> Result<crate::DissectArtifacts, CompileFail> {
+        self.compile_src_from_file(file)?;
+        Ok(self.dissect_artifacts())
+    }
 
-        self.discover_all();
-        self.expand_user_macros();
-        self.compile_discovered_modules();
-
-        if self.failed || self.had_errors() || !self.check_capabilities() {
-            return Err(CompileFail);
-        }
-
-        let il = if capture_il {
-            Some(self.compiler_lazy_mut().finalize_bytecode_capturing_il())
-        } else {
-            self.compiler_lazy_mut().finalize_bytecode();
-            None
-        };
-        self.compute_consts(None);
-        if self.failed || self.had_errors() {
-            return Err(CompileFail);
-        }
-        self.bytecode = self.compiler_lazy_mut().bytecode_vec();
-
-        let jmp_target = self.compiler_lazy().prologue_jmp_target();
-        if let Some(byte) = self.bytecode.get_mut(1) {
-            *byte = Byte::new(Instruction::JMP).with_operand_u32(jmp_target);
-        }
-
-        // Warnings are kept for callers to inspect; only hard errors fail.
-        if self.had_errors() {
-            return Err(CompileFail);
-        }
-
+    /// The functions, strings, debug and type tables of the last compile,
+    /// for `coil dissect` and `coil debug`. The listing interleaves source
+    /// whatever `-g` an archive would keep.
+    #[cfg(any(test, feature = "dissect"))]
+    pub fn dissect_artifacts(&mut self) -> crate::DissectArtifacts {
         let functions = self.compiler_lazy_mut().function_symbols();
-        // The listing interleaves source whatever `-g` the archive would keep.
         let debug = self.program_debug_full();
         let (classes, enums) = self.compiler_lazy().debug_type_tables();
-        let il_post = self.compiler_lazy_mut().take_post_il_snapshot();
-        Ok(crate::DissectArtifacts {
-            bytecode: std::mem::take(&mut self.bytecode),
-            constants: self.compiler_lazy_mut().constants().to_vec(),
+        crate::DissectArtifacts {
             strings: self.compiler_lazy_mut().strings().to_vec(),
             functions,
-            il,
-            il_post,
             debug,
             classes,
             enums,
-        })
+        }
     }
 
-    /// Harness test cases from the last compile (`description`, bytecode offset).
+    /// Harness test cases from the last compile (`description`, entry id).
     pub fn test_cases(&self) -> &[(String, u32)] {
         self.compiler_lazy().test_cases()
     }
@@ -2283,7 +2009,6 @@ impl Pipeline {
         }
     }
 
-    /// Select an IL optimization preset. Default is [`crate::OptLevel::Standard`].
     /// Turn computing pure calls with constant arguments at compile time
     /// off (or back on, at `-O2` and above). Tests of what such a call
     /// compiles to turn it off. `--fold-calls on|off` calls this.
@@ -2303,10 +2028,8 @@ impl Pipeline {
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         self.opt_level = level;
         if self.compiler.get().is_some() {
-            let collect = self.collect_opt_stats;
             let dbg = self.debugger_attached;
             self.compiler_lazy_mut().set_opt_level(level);
-            self.compiler_lazy_mut().set_collect_opt_stats(collect);
             self.compiler_lazy_mut().set_debugger_attached(dbg);
         }
     }
@@ -2320,14 +2043,12 @@ impl Pipeline {
     }
 
     /// Mark a debugger-attached compile (I7). `coil debug` sets this.
-    /// B8: does not disable MIR specialize; stops stay on reconstructed bytecode.
+    /// B8: does not disable MIR specialize; stops stay on reconstructed code.
     pub fn set_debugger_attached(&mut self, on: bool) {
         self.debugger_attached = on;
         if self.compiler.get().is_some() {
-            let collect = self.collect_opt_stats;
             let level = self.opt_level;
             self.compiler_lazy_mut().set_opt_level(level);
-            self.compiler_lazy_mut().set_collect_opt_stats(collect);
             self.compiler_lazy_mut().set_debugger_attached(on);
         }
     }
@@ -2336,12 +2057,10 @@ impl Pipeline {
         self.debugger_attached
     }
 
-    /// Collect IL optimization counters (COI-131). Off by default.
+    /// Start a fresh `--opt-stats` window at each compile (COI-131). Off
+    /// by default.
     pub fn set_collect_opt_stats(&mut self, on: bool) {
         self.collect_opt_stats = on;
-        if self.compiler.get().is_some() {
-            self.compiler_lazy_mut().set_collect_opt_stats(on);
-        }
     }
 
     /// Which contract clauses become runtime checks. Unset, `-O0` / `-O1` /
@@ -2360,19 +2079,12 @@ impl Pipeline {
     fn begin_compile_opt_stats(&mut self) {
         crate::hir::set_contract_level(self.contracts());
         if self.collect_opt_stats {
-            crate::il::opt::begin_opt_stats();
-            self.compiler_lazy_mut().set_collect_opt_stats(true);
+            crate::opt::begin_opt_stats();
         }
     }
 
     pub fn opt_level(&self) -> crate::OptLevel {
         self.opt_level
-    }
-
-    /// Borrow host-registered native function metadata.
-    #[cfg(any(test, feature = "vm-wire"))]
-    pub fn natives(&self) -> &[NativeDecl] {
-        &self.natives
     }
 
     pub fn constants(&self) -> &[u64] {
@@ -2383,29 +2095,70 @@ impl Pipeline {
         self.compiler_lazy().strings()
     }
 
-    /// Operand-stack capacity from the last compile's recursion-depth analysis.
-    pub fn operand_stack_slots(&self) -> u32 {
-        self.compiler_lazy().operand_stack_slots()
-    }
-
     pub fn static_slot_count(&self) -> u32 {
         self.compiler_lazy().static_slot_count()
     }
 
-    pub fn prologue_jmp_target(&self) -> u32 {
-        self.compiler_lazy().prologue_jmp_target()
+    /// What runs before `main`.
+    pub fn startup(&self) -> Vec<common::StartupOp> {
+        self.compiler_lazy().startup().to_vec()
     }
 
     pub fn main_offset(&self) -> Option<u32> {
         self.compiler_lazy().main_offset()
     }
 
-    /// `-g` level: the one set, else `-g1` at `-Os` and `-g2` otherwise.
+    /// The `.ccoil` archive of the program just compiled to `constants`, its
+    /// debug tables at [`Self::debug_level`]. `native_mir` makes the MIR
+    /// section from the full debug tables (body ids by name); empty for
+    /// none.
+    /// The program as an archive, with the native MIR section
+    /// `native_mir` makes from the debug tables (it encodes their
+    /// `inline_scopes`, which the `-g` level keeps or drops as the rest).
+    pub fn archive(&self, constants: Vec<u64>, native_mir: impl FnOnce(&ProgramDebug) -> Vec<u8>) -> common::ArchivedProgram {
+        let mut debug = self.program_debug_full();
+        if self.debug_level() == common::DebugLevel::None {
+            debug.inline_scopes.clear();
+        }
+        let mut program = common::ArchivedProgram {
+            version: common::ARCHIVE_VERSION,
+            static_slot_count: self.static_slot_count(),
+            constants,
+            strings: self.strings().to_vec(),
+            source_files: Vec::new(),
+            debug_locs: Vec::new(),
+            fn_symbols: Vec::new(),
+            struct_layouts: self.archived_struct_layouts(),
+            class_word_kinds: self.class_word_kinds(),
+            static_word_kinds: self.static_word_kinds(),
+            debug_lines: Vec::new(),
+            native_mir: native_mir(&debug),
+            startup: self.startup(),
+            main: self.main_offset(),
+        };
+        program.set_debug(debug, self.debug_level());
+        program
+    }
+
+    /// `-g` level: the one set, else `-g1` at `-Os` and `-g2` otherwise. An
+    /// engine that runs MIR finds a panic's location by its byte span
+    /// (`Locator::native_site_location`), so there `-g1` keeps the spans
+    /// too; `-g0` stays bare.
     pub fn debug_level(&self) -> common::DebugLevel {
-        self.debug_level.unwrap_or(match self.opt_level {
+        let level = self.debug_level.unwrap_or(match self.opt_level {
             crate::OptLevel::Size => common::DebugLevel::Lines,
             _ => common::DebugLevel::Full,
-        })
+        });
+        match level {
+            common::DebugLevel::Lines if self.runs_mir => common::DebugLevel::Full,
+            level => level,
+        }
+    }
+
+    /// The program runs on an engine that runs MIR, or an archive carries
+    /// MIR for one: see [`Self::debug_level`].
+    pub fn set_runs_mir(&mut self) {
+        self.runs_mir = true;
     }
 
     pub fn set_debug_level(&mut self, level: common::DebugLevel) {
@@ -2424,9 +2177,11 @@ impl Pipeline {
             debug_locs: self.compiler_lazy().debug_locs().to_vec(),
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
             debug_lines: Vec::new(),
-            cleanup: self.compiler_lazy().cleanup_ranges().to_vec(),
-            table: Default::default(),
+            inline_scopes: self.compiler_lazy().inline_scopes(),
         };
+        // A panic site looks its location up as the MIR has it, so the
+        // table stays keyed by that; its lines are the remapped ones.
+        let keys = debug.debug_locs.clone();
         self.remap_generated_debug_locs(&mut debug);
         // Lines are resolved now, while the sources exist, so archives and
         // packaged binaries never read them back (#580).
@@ -2437,6 +2192,7 @@ impl Pipeline {
                 .cloned()
                 .or_else(|| std::fs::read_to_string(path).ok())
         });
+        debug.debug_locs = keys;
         debug
     }
 
@@ -2446,6 +2202,27 @@ impl Pipeline {
         if self.generated_ranges.is_empty() {
             return;
         }
+        // The generated ranges by the 4 KiB pages of bytes they cover, each
+        // list in `generated_ranges` order: a byte's page lists every
+        // range that holds it.
+        const PAGE: u32 = 12;
+        let mut by_page: HashMap<usize, Vec<usize>> = HashMap::new();
+        for (i, g) in self.generated_ranges.iter().enumerate() {
+            if g.range.is_empty() {
+                continue;
+            }
+            for page in (g.range.start >> PAGE)..=((g.range.end - 1) >> PAGE) {
+                by_page.entry(page).or_default().push(i);
+            }
+        }
+        let holding = |byte: usize| {
+            by_page
+                .get(&(byte >> PAGE))
+                .into_iter()
+                .flatten()
+                .map(|&i| &self.generated_ranges[i])
+                .filter(move |g| g.range.contains(&byte))
+        };
         for loc in &mut debug.debug_locs {
             if !loc.is_known() {
                 continue;
@@ -2458,11 +2235,10 @@ impl Pipeline {
             // written; the rest to the macro's site.
             loop {
                 let byte = range.start;
-                let Some(g) = self.generated_ranges.iter().find(|g| {
-                    g.range.contains(&byte) && source_file_matches_generated(stored, &g.file)
-                }).or_else(|| {
-                    self.generated_ranges.iter().find(|g| g.range.contains(&byte))
-                }) else {
+                let Some(g) = holding(byte)
+                    .find(|g| source_file_matches_generated(stored, &g.file))
+                    .or_else(|| holding(byte).next())
+                else {
                     break;
                 };
                 if let Some(r) = g.translate(&range) {
@@ -2477,10 +2253,6 @@ impl Pipeline {
         }
     }
 
-    pub fn precise_frames(&self) -> &[common::PreciseFrameMap] {
-        self.compiler_lazy().precise_frames()
-    }
-
     /// Per-class field word kinds from the checked program (archive minor 24).
     pub fn static_word_kinds(&self) -> Vec<u8> {
         self.compiler_lazy().checker().static_word_kinds()
@@ -2488,10 +2260,6 @@ impl Pipeline {
 
     pub fn class_word_kinds(&self) -> Vec<common::ClassWordKinds> {
         self.compiler_lazy().checker().class_word_kinds()
-    }
-
-    pub fn deopt_map_drafts(&self) -> &[crate::mir::DraftDeoptMap] {
-        self.compiler_lazy().deopt_map_drafts()
     }
 
     pub fn debug_locs(&self) -> &[common::DebugLoc] {
@@ -2508,33 +2276,6 @@ impl Pipeline {
     }
 
 
-    pub fn run(
-        self,
-        filename: String,
-    ) -> Result<RunArtifacts, CompileFail> {
-        let mut f = File::open(filename).expect("Unable to find file");
-        let mut buffer = Vec::with_capacity(1024);
-        f.read_to_end(&mut buffer).expect("Unable to read file");
-
-        let decoded = decode_archived_program(&buffer).map_err(|_| CompileFail)?;
-
-        if self.failed {
-            return Err(CompileFail);
-        }
-
-        let program = decoded.program;
-        let debug = ProgramDebug {
-            fn_symbols: self.compiler_lazy().fn_debug_symbols(),
-            ..program.debug_bundle()
-        };
-        Ok((
-            program.bytecode,
-            program.constants,
-            program.strings,
-            program.static_slot_count,
-            debug,
-        ))
-    }
 }
 
 /// Hand the allocator's free pages back to the OS. glibc keeps a phase's
@@ -2558,29 +2299,6 @@ fn source_file_matches_generated(stored: &str, generated: &std::path::Path) -> b
         || stored.file_name() == generated.file_name()
         || generated.ends_with(stored)
         || stored.ends_with(generated)
-}
-
-#[cfg(any(test, feature = "vm-wire"))]
-fn ffi_type_to_ty(ty: FfiType) -> crate::typechecking::ty::Ty {
-    use crate::typechecking::ty::{array, boolean, float, int, string, unit};
-    match ty {
-        FfiType::Int
-        | FfiType::Int8
-        | FfiType::Int16
-        | FfiType::Int32
-        | FfiType::UInt8
-        | FfiType::UInt16
-        | FfiType::UInt32
-        | FfiType::UInt64 => int(),
-        FfiType::Float => float(),
-        FfiType::String => string(),
-        FfiType::Void => unit(),
-        FfiType::Bool => boolean(),
-        FfiType::Ptr => array(int()),
-        FfiType::Bytes => array(crate::typechecking::ty::Ty::Con("byte".into())),
-        FfiType::ConstBytes => string(),
-        FfiType::Callback(_) | FfiType::Struct(_) => int(),
-    }
 }
 
 /// Counts what reaches `inner`, for [`Pipeline::diagnostics_emitted`].
@@ -2615,7 +2333,7 @@ mod tests {
 
     use reporting::{ErrorCode, Message, MessageKind, ReportConfig, ReportFormat};
 
-    use common::Instruction;
+    
     use super::Pipeline;
 
     /// Coverage compiles keep never-called functions from accepted files;
@@ -2771,196 +2489,7 @@ fn main() { write(stdout(), to_bytes(format("%i", missing))); }"#;
     }
 
     #[test]
-    fn fib32_compile_sets_operand_stack_slots_above_default() {
-        let mut pipeline = Pipeline::new();
-        pipeline
-            .compile_src(
-                r#"
-fn fib(int n) -> int {
-    if n <= 2 { return 1; }
-    return fib(n - 1) + fib(n - 2);
-}
-fn main() {
-    let x = fib(32);
-    return;
-}
-"#,
-            )
-            .expect("fib(32) must compile");
-        assert!(
-            pipeline.operand_stack_slots() > crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
-            "fib(32) should raise the operand stack above the default, got {}",
-            pipeline.operand_stack_slots()
-        );
-    }
-
-    #[test]
-    fn fib32_archive_round_trip_persists_operand_stack_slots() {
-        use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
-        use rkyv::rancor::Error;
-
-        let mut pipeline = Pipeline::new();
-        let src = r#"
-fn fib(int n) -> int {
-    if n <= 2 { return 1; }
-    return fib(n - 1) + fib(n - 2);
-}
-fn main() {
-    let x = fib(32);
-    return;
-}
-"#;
-        let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-        let debug = pipeline.program_debug();
-        let program = ArchivedProgram {
-            version: ARCHIVE_VERSION,
-            static_slot_count: pipeline.static_slot_count(),
-            constants,
-            strings: pipeline.strings().to_vec(),
-            bytecode,
-            source_files: debug.source_files,
-            debug_locs: debug.debug_locs,
-            fn_symbols: debug.fn_symbols,
-            struct_layouts: pipeline.archived_struct_layouts(),
-            operand_stack_slots: pipeline.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: pipeline.precise_frames().to_vec(),
-            class_word_kinds: pipeline.class_word_kinds(),
-            static_word_kinds: pipeline.static_word_kinds(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
-        let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
-        assert!(decoded.operand_stack_slots_persisted);
-        assert_eq!(decoded.program.operand_stack_slots, 512);
-        assert!(decoded.stack_maps_persisted);
-    }
-
-    #[test]
-    fn mapped_pair_archive_round_trip_persists_frame_maps() {
-        use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
-        use rkyv::rancor::Error;
-
-        let mut pipeline = Pipeline::new();
-        let src = r#"
-fn pair(int a, int b) -> [int; 2] {
-    return [a, b];
-}
-fn main() {
-    let xs = pair(3, 4);
-    let _ = xs[0] + xs[1];
-}
-"#;
-        let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-        assert!(
-            !pipeline.precise_frames().is_empty(),
-            "pair() should emit precise frame maps"
-        );
-        let debug = pipeline.program_debug();
-        let program = ArchivedProgram {
-            version: ARCHIVE_VERSION,
-            static_slot_count: pipeline.static_slot_count(),
-            constants,
-            strings: pipeline.strings().to_vec(),
-            bytecode,
-            source_files: debug.source_files,
-            debug_locs: debug.debug_locs,
-            fn_symbols: debug.fn_symbols,
-            struct_layouts: pipeline.archived_struct_layouts(),
-            operand_stack_slots: pipeline.operand_stack_slots(),
-            stack_maps: Vec::new(),
-            precise_frames: pipeline.precise_frames().to_vec(),
-            class_word_kinds: pipeline.class_word_kinds(),
-            static_word_kinds: pipeline.static_word_kinds(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
-        let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
-        assert!(decoded.stack_maps_persisted);
-        assert_eq!(
-            decoded.program.precise_frames.as_slice(),
-            pipeline.precise_frames()
-        );
-    }
-
-    #[test]
-    fn main_after_static_setup_gets_a_precise_frame_map() {
-        // The prologue jumps to the static setup, which jumps to `main`:
-        // without a map, `main`'s frame is scanned conservatively and stale
-        // words the setup left above it keep dead objects alive.
-        let mut pipeline = Pipeline::new();
-        pipeline
-            .compile_src(
-                r#"
-// A `fn drop()` keeps the static from folding at compile time.
-static let drops = 0;
-enum Conn {
-    Open(int),
-    Closed,
-}
-impl Conn {
-    fn drop() {
-        drops = drops + 1;
-    }
-}
-fn open(int fd) -> int {
-    let c = Conn::Open(fd);
-    return match c {
-        Conn::Open(x) => x,
-        Conn::Closed => 0,
-    };
-}
-static let first = open(3);
-fn main() {
-    let c = Conn::Open(first);
-    let _ = match c {
-        Conn::Open(x) => x + open(4),
-        Conn::Closed => 0,
-    };
-}
-"#,
-            )
-            .expect("compile");
-        let main = pipeline.main_offset().expect("main");
-        let row = pipeline
-            .precise_frames()
-            .iter()
-            .find(|r| r.entry_pc == main)
-            .expect("main has a frame map row");
-        assert!(
-            row.any_pc.is_some() || !row.at_pc.is_empty(),
-            "main entered from the setup should be mapped precisely"
-        );
-    }
-
-    #[test]
-    fn non_recursive_compile_keeps_default_operand_stack_slots() {
-        let mut pipeline = Pipeline::new();
-        pipeline
-            .compile_src(
-                r#"
-fn add(int a, int b) -> int { return a + b; }
-fn main() {
-    let x = add(1, 2);
-    return;
-}
-"#,
-            )
-            .expect("compile");
-        assert_eq!(
-            pipeline.operand_stack_slots(),
-            crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS
-        );
-    }
-
-    #[test]
-    fn dynamic_recursion_without_max_depth_compiles() {
+    fn dynamic_recursion_compiles() {
         let mut pipeline = Pipeline::new();
         let compiled = pipeline.compile_src(
             r#"
@@ -3000,7 +2529,7 @@ fn main() {
     }
 
     /// Buffered standard-native ids must land in the typechecker map when the
-    /// compiler is first built, otherwise HostInvoke fn_ids drift from the VM.
+    /// compiler is first built, otherwise HostInvoke fn_ids drift from the runtime.
     #[test]
     fn first_compiler_access_replays_pending_native_ids() {
         let pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
@@ -3031,27 +2560,11 @@ fn main() {
         );
     }
 
-    /// Wiring the VM for `coil run` only needs the host-native table, not a
-    /// typechecker. Touching the compiler here would undo the startup win.
+    /// The compiler's lazy init replays the pending standard ids, so HostInvoke
+    /// codegen sees them.
     #[test]
-    fn wire_host_natives_does_not_build_compiler() {
-        let pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
-        assert!(pipeline.compiler.get().is_none());
-
-        let mut machine = machine::Machine::<128>::default();
-        pipeline.wire_host_natives(&mut machine);
-        assert!(
-            pipeline.compiler.get().is_none(),
-            "wire_host_natives must not initialize the compiler"
-        );
-        assert_eq!(pipeline.pending_native_ids.len(), common::HOST_NATIVES.len());
-    }
-
-    /// `register_host_native` forces compiler init; pending standard ids must
-    /// already be present so later HostInvoke codegen stays consistent.
-    #[test]
-    fn register_host_native_preserves_replayed_standard_ids() {
-        let mut pipeline =
+    fn compiler_init_replays_standard_ids() {
+        let pipeline =
             Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
         assert!(pipeline.compiler.get().is_none());
         let stdout_id = pipeline
@@ -3061,53 +2574,8 @@ fn main() {
             .map(|(_, id)| *id)
             .expect("stdout native buffered at construction");
 
-        let custom_id = pipeline.register_host_native(
-            machine::FfiSignature::from_parts("coverage_probe", vec![], machine::FfiType::Int)
-                .expect("sig"),
-            |_heap, _args| Ok(Some(common::Value::from(7))),
-        );
-        assert!(pipeline.compiler.get().is_some());
         assert_eq!(pipeline.compiler().native_id("stdout"), Some(stdout_id));
-        assert!(
-            custom_id >= pipeline.pending_native_ids.len(),
-            "custom host native must append after the standard table"
-        );
-    }
-
-    /// End-to-end: deferred construction + lazy replay still emits working
-    /// HostInvoke for virtual `io` natives.
-    #[test]
-    fn deferred_compiler_host_invoke_io_round_trip() {
-        let mut pipeline =
-            Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
-        assert!(pipeline.compiler.get().is_none());
-
-        let (bytecode, constants) = pipeline
-            .compile_src(
-                r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    write(stdout(), to_bytes(format("%s", "ok")));
-}
-"#,
-            )
-            .expect("io HostInvoke program must compile after lazy init");
         assert!(pipeline.compiler.get().is_some());
-
-        let shared = SharedBuf::new();
-        let mut machine = machine::Machine::<128>::default();
-        machine.set_shared_print(shared.inner.clone());
-        machine.with_output(shared.clone());
-        pipeline.wire_host_natives(&mut machine);
-        machine.run_raw(
-            &bytecode,
-            &constants,
-            pipeline.strings(),
-            pipeline.static_slot_count(),
-        );
-        let _ = machine.restore_output();
-        assert_eq!(shared.into_string(), "ok");
     }
 
     #[test]
@@ -3144,16 +2612,13 @@ fn main() { add(1, 2); }
         pipeline.set_collect_opt_stats(true);
         pipeline.compile_src(src).expect("compile");
         let stats = crate::last_opt_stats();
-        assert!(
-            stats.functions_inlined >= 1,
-            "tiny add should inline; stats={stats:?}"
-        );
+        assert!(stats.hir_inlined >= 1, "tiny add should inline; stats={stats:?}");
         let json = stats.format_json();
-        assert!(json.contains("\"functions_inlined\""));
+        assert!(json.contains("\"hir_inlined\""));
     }
 
     #[test]
-    fn opt_stats_census_counts_every_body_tier() {
+    fn opt_stats_count_every_lowered_body() {
         let src = r#"
 fn sum(int n) -> int {
     let s = 0;
@@ -3170,850 +2635,8 @@ fn main() { sum(10); }
         pipeline.set_collect_opt_stats(true);
         pipeline.compile_src(src).expect("compile");
         let stats = crate::last_opt_stats();
-        let bodies = stats.bodies_dense + stats.bodies_lir + stats.bodies_fuse;
-        assert!(bodies >= 2, "main and sum are both counted; stats={stats:?}");
-        let reasons: usize = stats.fuse_reasons.iter().map(|r| r.applied).sum();
-        assert_eq!(reasons, stats.bodies_fuse, "every fuse-IL body has a reason");
-        assert!(stats.format_text().contains("bodies:"));
-    }
-
-    #[test]
-    fn vec_scan_array_pin_entry_jumps_stay_in_function() {
-        use common::Instruction;
-
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap();
-        let src =
-            std::fs::read_to_string(root.join("examples/perf/vec_scan.coil")).expect("read vec_scan");
-        let mut pipeline = Pipeline::new();
-        pipeline.bind_workspace_language_roots();
-        // `fill` and `scan` are called in a loop: inlined, their bodies go.
-        pipeline.set_inline_max_cost(0);
-        let (bytecode, _) = pipeline.compile_src(&src).expect("compile vec_scan");
-        let syms = pipeline.program_debug().fn_symbols;
-        let end = bytecode.len();
-        for name in ["fill", "scan"] {
-            let idx = syms.iter().position(|s| s.name == name).expect("fn sym");
-            let start = syms[idx].entry_pc as usize;
-            let end = syms
-                .get(idx + 1)
-                .map(|s| s.entry_pc as usize)
-                .unwrap_or(end);
-            for (pc, b) in bytecode[start..end].iter().enumerate() {
-                let pc = start + pc;
-                let insn = *b.bytecode();
-                if matches!(insn, Instruction::JMP) {
-                    let target = b.operand_u32() as usize;
-                    assert!(
-                        (start..end).contains(&target),
-                        "{name}: JMP at {pc} escapes function body (target={target}, range={start}..{end})"
-                    );
-                }
-            }
-            let heap = bytecode[start..end].iter().any(|b| {
-                matches!(
-                    *b.bytecode(),
-                    Instruction::ArrayPin
-                        | Instruction::VLoad
-                        | Instruction::VStore
-                        | Instruction::VReduce
-                        | Instruction::Index
-                        | Instruction::IndexUnchecked
-                        | Instruction::StoreIndex
-                        | Instruction::StoreIndexUnchecked
-                        | Instruction::DenseIndex
-                        | Instruction::DenseIndexJmpf
-                        | Instruction::DenseStoreIndex
-                )
-            });
-            assert!(
-                heap,
-                "{name} should keep a heap-index residual (pin, V*, or Index); opcodes={:?}",
-                bytecode[start..end]
-                    .iter()
-                    .map(|b| b.bytecode().mnemonic())
-                    .collect::<Vec<_>>()
-            );
-        }
-    }
-
-    #[test]
-    fn vec_scan_from_file_keeps_fill_store() {
-        use common::Instruction;
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap();
-        let mut pipeline = Pipeline::new();
-        pipeline.bind_workspace_language_roots();
-        // `fill` is called in a loop: inlined, its body goes.
-        pipeline.set_inline_max_cost(0);
-        let path = root.join("examples/perf/vec_scan.coil");
-        let (bytecode, constants) = pipeline
-            .compile_src_from_file(path.to_str().unwrap())
-            .expect("compile vec_scan from file");
-        let syms = pipeline.program_debug().fn_symbols;
-        let idx = syms.iter().position(|s| s.name == "fill").expect("fill");
-        let start = syms[idx].entry_pc as usize;
-        let end = syms
-            .get(idx + 1)
-            .map(|s| s.entry_pc as usize)
-            .unwrap_or(bytecode.len());
-        let names: Vec<_> = bytecode[start..end]
-            .iter()
-            .map(|b| b.bytecode().mnemonic())
-            .collect();
-        assert!(
-            bytecode[start..end].iter().any(|b| matches!(
-                *b.bytecode(),
-                Instruction::StoreIndex
-                    | Instruction::StoreIndexUnchecked
-                    | Instruction::StoreIndexPin
-                    | Instruction::StoreIndexPinUnchecked
-                    | Instruction::DenseStoreIndex
-            )),
-            "from_file fill must keep StoreIndex; opcodes={names:?}"
-        );
-        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
-        pipeline.wire_host_natives(&mut vm);
-        vm.set_program_debug(pipeline.program_debug());
-        vm.run_raw(
-            &bytecode,
-            &constants,
-            pipeline.strings(),
-            pipeline.static_slot_count(),
-        );
-        assert!(!vm.panicked(), "vec_scan panicked");
-    }
-
-    /// An embedder native (`register_host_native`, an id past
-    /// `HOST_NATIVES`) is a HostInvoke edge on direct MIR (#1127): calls to
-    /// it, nested and in a loop, run and return its value.
-    #[test]
-    fn embedder_host_native_runs_on_direct_mir() {
-        use machine::{FfiSignature, FfiType};
-        let mut pipeline = Pipeline::new();
-        let sig = FfiSignature::from_parts("twice", vec![FfiType::Int], FfiType::Int).expect("sig");
-        pipeline.register_host_native(sig, |_, args| Ok(Some(common::Value::from(args[0].as_int() * 2))));
-        let sig = FfiSignature::from_parts("seven", vec![], FfiType::Int).expect("sig");
-        pipeline.register_host_native(sig, |_, _| Ok(Some(common::Value::from(7))));
-        let sig = FfiSignature::from_parts("is_pos", vec![FfiType::Int], FfiType::Bool).expect("sig");
-        pipeline.register_host_native(sig, |_, args| Ok(Some(common::Value::from(args[0].as_int() > 0))));
-        let sig = FfiSignature::from_parts("half", vec![FfiType::Float], FfiType::Float).expect("sig");
-        pipeline.register_host_native(sig, |_, args| Ok(Some(common::Value::from(args[0].as_float() / 2.0))));
-        let src = r#"
-fn main() {
-    if twice(twice(seven())) != 28 {
-        panic "nested";
-    }
-    let s = 0;
-    for i in 0..4 {
-        s = s + twice(i);
-    }
-    if s != 12 {
-        panic "loop";
-    }
-    if !is_pos(3) || is_pos(-3) {
-        panic "bool";
-    }
-    if half(5.0) != 2.5 {
-        panic "float";
-    }
-}
-"#;
-        let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
-        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
-        pipeline.wire_host_natives(&mut vm);
-        vm.run_raw(&bytecode, &constants, pipeline.strings(), pipeline.static_slot_count());
-        assert!(!vm.panicked(), "embedder natives returned the wrong values");
-    }
-
-    /// Naive `fib` and `fact` through the real compiler and VM.
-    ///
-    /// `fib(n <= 2)` returns the constant 1; the VM may skip that call.
-    /// `fact` returns `n` on the base, so the call must still run. Both
-    /// results have to match the closed forms (`fib(10) = 55`, `fact(6) = 720`).
-    #[test]
-    fn recursive_fib_and_fact_match_closed_values() {
-        let src = r#"
-fn fib(int n) -> int {
-    if n <= 2 {
-        return 1;
-    }
-    return fib(n - 1) + fib(n - 2);
-}
-fn fact(int n) -> int {
-    if n <= 1 {
-        return n;
-    }
-    return n * fact(n - 1);
-}
-fn fact_rev(int n) -> int {
-    if n <= 1 {
-        return n;
-    }
-    return fact_rev(n - 1) * n;
-}
-fn sum_rec(int n) -> int {
-    if n <= 1 {
-        return n;
-    }
-    return 1 + sum_rec(n - 1);
-}
-fn main() {
-    if fib(1) != 1 {
-        panic "fib1";
-    }
-    if fib(3) != 2 {
-        panic "fib3";
-    }
-    if fib(10) != 55 {
-        panic "fib10";
-    }
-    if fact(1) != 1 {
-        panic "fact1";
-    }
-    if fact(6) != 720 {
-        panic "fact";
-    }
-    if fact_rev(6) != 720 {
-        panic "fact_rev";
-    }
-    if sum_rec(6) != 6 {
-        panic "sum_rec";
-    }
-}
-"#;
-        let mut pipeline = Pipeline::new();
-        let (bytecode, constants) = pipeline.compile_src(src).expect("compile fib and fact");
-        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
-        pipeline.wire_host_natives(&mut vm);
-        vm.run_raw(
-            &bytecode,
-            &constants,
-            pipeline.strings(),
-            pipeline.static_slot_count(),
-        );
-        assert!(
-            !vm.panicked(),
-            "recursive fib/fact panicked\nbytecode={:?}",
-            bytecode
-                .iter()
-                .map(|b| b.bytecode().mnemonic())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn recursive_fib_matches_recurrence() {
-        let src = r#"
-fn fib(int n) -> int {
-    if n <= 2 {
-        return 1;
-    }
-    return fib(n - 1) + fib(n - 2);
-}
-fn main() {
-    if fib(1) != 1 {
-        panic "fib1";
-    }
-    if fib(3) != 2 {
-        panic "fib3";
-    }
-    if fib(10) != 55 {
-        panic "fib10";
-    }
-}
-"#;
-        let mut pipeline = Pipeline::new();
-        let (bytecode, constants) = pipeline.compile_src(src).expect("compile fib");
-        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
-        pipeline.wire_host_natives(&mut vm);
-        vm.run_raw(
-            &bytecode,
-            &constants,
-            pipeline.strings(),
-            pipeline.static_slot_count(),
-        );
-        assert!(!vm.panicked(), "recursive fib panicked");
-    }
-
-    #[test]
-    fn nsieve_retained_il_and_bytecode_emit_store_index_pin() {
-        use common::Instruction;
-
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap();
-        let path = root.join("examples/perf/nsieve.coil");
-        let mut pipeline = Pipeline::new();
-        pipeline.bind_workspace_language_roots();
-        let art = pipeline
-            .compile_dissect(path.to_str().expect("utf-8 path"), true)
-            .expect("compile nsieve");
-        let bytecode = art.bytecode;
-        let snap = art.il_post.as_ref().expect("optimized IL snapshot");
-        let il_index_pins = snap
-            .ops()
-            .iter()
-            .filter(|op| {
-                op.as_encode_byte().is_some_and(|b| {
-                    matches!(
-                        b.bytecode(),
-                        Instruction::IndexPin | Instruction::IndexPinUnchecked
-                    )
-                })
-            })
-            .count();
-        let il_pins = snap
-            .ops()
-            .iter()
-            .filter(|op| {
-                op.as_encode_byte().is_some_and(|b| {
-                    matches!(
-                        b.bytecode(),
-                        Instruction::StoreIndexPin | Instruction::StoreIndexPinUnchecked
-                    )
-                })
-            })
-            .count();
-        let dense = bytecode
-            .iter()
-            .any(|b| *b.bytecode() == Instruction::DenseStoreIndex);
-        let bc_pins = bytecode
-            .iter()
-            .filter(|b| {
-                matches!(
-                    b.bytecode(),
-                    Instruction::StoreIndexPin | Instruction::StoreIndexPinUnchecked
-                )
-            })
-            .count();
-        if dense {
-            assert_eq!(
-                bc_pins, 0,
-                "D0 dense nsieve cannot keep pin keys; bc_pins={bc_pins}"
-            );
-        } else {
-            assert!(
-                il_index_pins >= 1,
-                "retained IL should contain IndexPin*; il_index_pins={il_index_pins}"
-            );
-            assert!(
-                il_pins >= 1,
-                "retained IL should contain StoreIndexPin*; il_pins={il_pins} il_index_pins={il_index_pins}"
-            );
-            assert_eq!(
-                bc_pins, il_pins,
-                "bytecode should preserve StoreIndexPin* count; il={il_pins} bc={bc_pins}"
-            );
-        }
-    }
-
-    #[test]
-    fn pure_helper_on_index_hoists_len_and_unchecks() {
-        use common::Instruction;
-
-        let src = r#"
-fn absorb(int x) -> int {
-    let t = 0;
-    let k = 0;
-    while k < x {
-        t = t + 1;
-        k = k + 1;
-    }
-    return t;
-}
-fn main() -> int {
-    let b: Vec<int> = Vec::new();
-    let n = 16;
-    let i = 0;
-    while i < n {
-        b.push(i);
-        i = i + 1;
-    }
-    let acc = 0;
-    let j = 0;
-    while j < b.len() {
-        acc = acc + absorb(b[j]);
-        j = j + 1;
-    }
-    return acc;
-}
-"#;
-        // The dissect compile keeps the optimized pre-fuse IL; it reads a file.
-        let dir = std::env::temp_dir().join(format!("coil_pure_scan_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("scan.coil");
-        std::fs::write(&path, src).expect("write source");
-        let mut pipeline = Pipeline::new();
-        let art = pipeline
-            .compile_dissect(path.to_str().expect("utf-8 path"), true)
-            .expect("compile pure helper scan");
-        let _ = std::fs::remove_dir_all(&dir);
-        let bytecode = art.bytecode;
-        let snap = art.il_post.as_ref().expect("optimized IL snapshot");
-        let unchecked = snap
-            .ops()
-            .iter()
-            .filter(|op| {
-                op.as_encode_byte().is_some_and(|b| {
-                    matches!(
-                        *b.bytecode(),
-                        Instruction::IndexUnchecked
-                            | Instruction::IndexPinUnchecked
-                            | Instruction::DenseIndex
-                            | Instruction::DenseIndexJmpf
-                    )
-                })
-            })
-            .count();
-        let bc_index = bytecode.iter().any(|b| {
-            matches!(
-                *b.bytecode(),
-                Instruction::IndexUnchecked
-                    | Instruction::IndexPinUnchecked
-                    | Instruction::DenseIndex
-                    | Instruction::DenseIndexJmpf
-            )
-        });
-        assert!(
-            unchecked >= 1 || bc_index,
-            "b[j] should be proven under j < b.len() (unchecked or DenseIndex)"
-        );
-        let calls = bytecode
-            .iter()
-            .filter(|b| *b.bytecode() == Instruction::CALL)
-            .count();
-        assert!(
-            calls >= 1,
-            "absorb must remain a CALL (not tiny-inlined); otherwise the test is vacuous"
-        );
-    }
-
-    #[test]
-    fn pushing_helper_refuses_len_hoist() {
-        let src = r#"
-fn grow(Vec<int> a, int x) {
-    a.push(x);
-}
-fn main() {
-    let b: Vec<int> = Vec::new();
-    let n = 16;
-    let i = 0;
-    while i < n {
-        b.push(i);
-        i = i + 1;
-    }
-    let j = 0;
-    while j < b.len() {
-        grow(b, b[j]);
-        j = j + 1;
-    }
-}
-"#;
-        let mut pipeline = Pipeline::new();
-        let (bytecode, _) = pipeline
-            .compile_src(src)
-            .expect("compile pushing helper scan");
-        let main = fn_ops(&bytecode, &pipeline.program_debug().fn_symbols, "main");
-        assert!(
-            main.iter().all(|b| !is_unchecked_index(*b.bytecode())),
-            "pushing callee must not prove Index; body={:?}",
-            main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
-        );
-    }
-
-    /// Yield is a length-proof barrier: resume restores empty pin maps, so a
-    /// counted loop that yields must keep checked Index and must not pin.
-    #[test]
-    fn yielding_counted_loop_refuses_pin_non_yielding_sibling_pins() {
-        use common::Instruction;
-
-        fn fn_span(
-            syms: &[common::FnDebugSym],
-            bytecode_len: usize,
-            name: &str,
-        ) -> std::ops::Range<usize> {
-            let idx = syms.iter().position(|s| s.name == name).unwrap_or_else(|| {
-                let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
-                panic!("missing fn_symbol `{name}`; have {names:?}");
-            });
-            let start = syms[idx].entry_pc as usize;
-            let end = syms
-                .get(idx + 1)
-                .map(|s| s.entry_pc as usize)
-                .unwrap_or(bytecode_len);
-            start..end
-        }
-
-        fn is_pin(op: Instruction) -> bool {
-            matches!(
-                op,
-                Instruction::ArrayPin
-                    | Instruction::IndexPin
-                    | Instruction::IndexPinUnchecked
-                    | Instruction::StoreIndexPin
-                    | Instruction::StoreIndexPinUnchecked
-            )
-        }
-
-        let src = r#"
-fn scan_sum(Vec<int> b) -> int {
-    let acc = 0;
-    let j = 0;
-    while j < b.len() {
-        acc = acc + b[j];
-        j = j + 1;
-    }
-    return acc;
-}
-gen fn scan_yield(Vec<int> b) {
-    let j = 0;
-    while j < b.len() {
-        yield b[j];
-        j = j + 1;
-    }
-}
-fn main() -> int {
-    let b: Vec<int> = Vec::new();
-    let n = 16;
-    let i = 0;
-    while i < n {
-        b.push(i);
-        i = i + 1;
-    }
-    let acc = scan_sum(b);
-    let h = scan_yield(b);
-    resume h;
-    return acc;
-}
-"#;
-        let mut pipeline = Pipeline::new();
-        let (bytecode, _) = pipeline
-            .compile_src(src)
-            .expect("compile yield-barrier scan");
-        let syms = pipeline.program_debug().fn_symbols;
-        let yield_span = fn_span(&syms, bytecode.len(), "scan_yield");
-        let sum_span = fn_span(&syms, bytecode.len(), "scan_sum");
-        let yield_body = &bytecode[yield_span.clone()];
-        let sum_body = &bytecode[sum_span.clone()];
-
-        assert!(
-            yield_body
-                .iter()
-                .any(|b| *b.bytecode() == Instruction::YieldCoro),
-            "scan_yield must contain YieldCoro"
-        );
-        // A yielding body may take dense (a yield is one MIR instruction,
-        // a safepoint as a call is); its read stays bounds-checked: a dense
-        // index without the unchecked flag checks against the live length.
-        let checked_dense = |b: &common::Byte| {
-            matches!(*b.bytecode(), Instruction::DenseIndex | Instruction::DenseIndexJmpf)
-                && b.dense_abc_parts().0 & common::dense::HEAP_UNCHECKED == 0
-        };
-        let unchecked_dense = |b: &common::Byte| {
-            matches!(*b.bytecode(), Instruction::DenseIndex | Instruction::DenseIndexJmpf | Instruction::DenseStoreIndex)
-                && b.dense_abc_parts().0 & common::dense::HEAP_UNCHECKED != 0
-        };
-        assert!(
-            yield_body
-                .iter()
-                .any(|b| *b.bytecode() == Instruction::Index || checked_dense(b)),
-            "scan_yield must keep checked Index; body={:?}",
-            yield_body
-                .iter()
-                .map(|b| b.bytecode().mnemonic())
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            yield_body.iter().all(|b| !is_pin(*b.bytecode())
-                && !unchecked_dense(b)
-                && *b.bytecode() != Instruction::IndexUnchecked
-                && *b.bytecode() != Instruction::StoreIndexUnchecked),
-            "scan_yield must not pin or uncheck; body={:?}",
-            yield_body
-                .iter()
-                .map(|b| b.bytecode().mnemonic())
-                .collect::<Vec<_>>()
-        );
-        assert!(
-            sum_body.iter().any(|b| is_pin(*b.bytecode())
-                || matches!(
-                    *b.bytecode(),
-                    Instruction::VReduce
-                        | Instruction::VLoad
-                        | Instruction::Index
-                        | Instruction::IndexUnchecked
-                        | Instruction::DenseIndex
-                )),
-            "non-yielding sibling scan_sum should pin or take dense/V1; body={:?}",
-            sum_body
-                .iter()
-                .map(|b| b.bytecode().mnemonic())
-                .collect::<Vec<_>>()
-        );
-    }
-
-    fn fn_ops<'a>(
-        bytecode: &'a [common::Byte],
-        syms: &[common::FnDebugSym],
-        name: &str,
-    ) -> &'a [common::Byte] {
-        let idx = syms.iter().position(|s| s.name == name).unwrap_or_else(|| {
-            let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
-            panic!("missing fn_symbol `{name}`; have {names:?}");
-        });
-        let start = syms[idx].entry_pc as usize;
-        let end = syms
-            .get(idx + 1)
-            .map(|s| s.entry_pc as usize)
-            .unwrap_or(bytecode.len());
-        &bytecode[start..end]
-    }
-
-    fn is_unchecked_index(op: common::Instruction) -> bool {
-        matches!(
-            op,
-            Instruction::IndexUnchecked | Instruction::IndexPinUnchecked
-        )
-    }
-
-    fn is_pin_op(op: common::Instruction) -> bool {
-        matches!(
-            op,
-            Instruction::ArrayPin
-                | Instruction::IndexPin
-                | Instruction::IndexPinUnchecked
-                | Instruction::StoreIndexPin
-                | Instruction::StoreIndexPinUnchecked
-        )
-    }
-
-    fn is_dense_heap_index(op: common::Instruction) -> bool {
-        matches!(
-            op,
-            Instruction::DenseIndex
-                | Instruction::DenseIndexJmpf
-                | Instruction::DenseStoreIndex
-                | Instruction::DenseArrayPush
-        )
-    }
-
-    #[test]
-    fn for_in_stable_length_pins() {
-        use common::Instruction;
-        let src = r#"
-fn main() -> int {
-    let b: Vec<int> = Vec::new();
-    let n = 8;
-    let i = 0;
-    while i < n {
-        b.push(i);
-        i = i + 1;
-    }
-    let acc = 0;
-    for x in b {
-        acc = acc + x;
-    }
-    return acc;
-}
-"#;
-        let mut pipeline = Pipeline::new();
-        let (bytecode, _) = pipeline.compile_src(src).expect("compile for-in pin");
-        let syms = pipeline.program_debug().fn_symbols;
-        let main = fn_ops(&bytecode, &syms, "main");
-        assert!(
-            main.iter()
-                .any(|b| is_pin_op(*b.bytecode()) || is_dense_heap_index(*b.bytecode())),
-            "stable for-in should pin or densify; body={:?}",
-            main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
-        );
-        assert!(
-            main.iter().any(|b| is_unchecked_index(*b.bytecode())
-                || *b.bytecode() == Instruction::DenseIndex
-                || *b.bytecode() == Instruction::DenseIndexJmpf),
-            "stable for-in should uncheck or keep DenseIndex; body={:?}",
-            main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn helper_caller_proof_unchecks_and_pins() {
-        use common::Instruction;
-        let src = r#"
-fn at(Vec<int> a, int i) -> int {
-    let t = 0;
-    let k = 0;
-    while k < 4 {
-        t = t + 1;
-        k = k + 1;
-    }
-    return a[i] + t - 4;
-}
-fn main() -> int {
-    let b: Vec<int> = Vec::new();
-    let n = 8;
-    let i = 0;
-    while i < n {
-        b.push(i);
-        i = i + 1;
-    }
-    let acc = 0;
-    let j = 0;
-    while j < b.len() {
-        acc = acc + at(b, j);
-        j = j + 1;
-    }
-    return acc;
-}
-"#;
-        let mut pipeline = Pipeline::new();
-        // `at` is called in a loop: with inlining it would splice in.
-        pipeline.set_inline_max_cost(0);
-        let (bytecode, _) = pipeline
-            .compile_src(src)
-            .expect("compile helper caller proof");
-        let syms = pipeline.program_debug().fn_symbols;
-        let at = fn_ops(&bytecode, &syms, "at");
-        let calls = bytecode
-            .iter()
-            .filter(|b| *b.bytecode() == Instruction::CALL)
-            .count();
-        assert!(calls >= 1, "at must remain a CALL; otherwise the test is vacuous");
-        let dense = at
-            .iter()
-            .any(|b| *b.bytecode() == Instruction::DenseIndex);
-        if dense {
-            // A3: counted helper lifts to dense-native index; pin/uncheck is fuse-IL.
-            return;
-        }
-        assert!(
-            at.iter().any(|b| is_unchecked_index(*b.bytecode())),
-            "caller-proven at(a,i) should uncheck a[i]; body={:?}",
-            at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
-        );
-        assert!(
-            at.iter().any(|b| is_pin_op(*b.bytecode())),
-            "caller-proven helper should ArrayPin; body={:?}",
-            at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn helper_callee_len_guard_unchecks() {
-        let src = r#"
-fn at(Vec<int> a, int i) -> int {
-    let t = 0;
-    let k = 0;
-    while k < 4 {
-        t = t + 1;
-        k = k + 1;
-    }
-    if i >= 0 && i < a.len() {
-        return a[i] + t - 4;
-    }
-    return 0;
-}
-fn main() -> int {
-    let b: Vec<int> = Vec::new();
-    b.push(3);
-    return at(b, 0);
-}
-"#;
-        let mut pipeline = Pipeline::new();
-        let (bytecode, _) = pipeline
-            .compile_src(src)
-            .expect("compile helper callee guard");
-        let syms = pipeline.program_debug().fn_symbols;
-        let at = fn_ops(&bytecode, &syms, "at");
-        // Dense keeps the proof as the `DenseIndex` unchecked flag (bit 0 of
-        // [31:24]) and caches the object instead of pinning.
-        let dense_unchecked = |b: &common::Byte| {
-            *b.bytecode() == Instruction::DenseIndex && (b.operand_u32() >> 24) & 1 == 1
-        };
-        let dense = at.iter().any(|b| *b.bytecode() == Instruction::DenseIndex);
-        assert!(
-            at.iter().any(|b| is_unchecked_index(*b.bytecode()) || dense_unchecked(b)),
-            "i < a.len() in callee should uncheck a[i]; body={:?}",
-            at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
-        );
-        assert!(
-            dense || at.iter().any(|b| is_pin_op(*b.bytecode())),
-            "callee-proven helper should ArrayPin; body={:?}",
-            at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn stride_two_counted_loop_unchecks() {
-        let src = r#"
-fn main() -> int {
-    let b: Vec<int> = Vec::new();
-    let n = 16;
-    let i = 0;
-    while i < n {
-        b.push(i);
-        i = i + 1;
-    }
-    let acc = 0;
-    let j = 0;
-    while j < b.len() {
-        acc = acc + b[j];
-        j = j + 2;
-    }
-    return acc;
-}
-"#;
-        let mut pipeline = Pipeline::new();
-        let (bytecode, _) = pipeline.compile_src(src).expect("compile stride");
-        let unchecked = bytecode
-            .iter()
-            .filter(|b| is_unchecked_index(*b.bytecode()))
-            .count();
-        let dense = bytecode
-            .iter()
-            .any(|b| is_dense_heap_index(*b.bytecode()));
-        assert!(
-            unchecked >= 1 || dense,
-            "i += 2 under j < len should uncheck or densify; unchecked={unchecked}"
-        );
-    }
-
-    #[test]
-    fn mutation_call_keeps_checked_index() {
-        let src = r#"
-fn grow(Vec<int> a, int x) {
-    a.push(x);
-}
-fn main() -> int {
-    let b: Vec<int> = Vec::new();
-    let n = 4;
-    let i = 0;
-    while i < n {
-        b.push(i);
-        i = i + 1;
-    }
-    let j = 0;
-    while j < b.len() {
-        grow(b, b[j]);
-        j = j + 1;
-    }
-    return 0;
-}
-"#;
-        let mut pipeline = Pipeline::new();
-        let (bytecode, _) = pipeline.compile_src(src).expect("compile mutation");
-        let main = fn_ops(&bytecode, &pipeline.program_debug().fn_symbols, "main");
-        let scan_unchecked = main
-            .iter()
-            .filter(|b| is_unchecked_index(*b.bytecode()))
-            .count();
-        assert_eq!(
-            scan_unchecked, 0,
-            "mutating helper must keep checked Index; body={:?}",
-            main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
-        );
+        assert!(stats.hir_lowered >= 2, "main and sum are both counted; stats={stats:?}");
+        assert!(stats.format_text().contains("hir:"));
     }
 
     fn temp_hy(name: &str, src: &str) -> (std::path::PathBuf, std::path::PathBuf) {

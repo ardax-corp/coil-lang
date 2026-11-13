@@ -2,14 +2,17 @@
 // roots: the dense lowering used to type the first call's result as a
 // scalar, so a collection during the second call freed that subtree.
 use tests::assert;
+use gc::collect;
 
 enum Tree {
     Leaf,
     Node(Tree, Tree),
 }
 
+// Every leaf collects, so one runs during each second call in any build.
 fn bottom_up(int depth) -> Tree {
     if depth == 0 {
+        collect();
         return Tree::Leaf();
     }
     let a = bottom_up(depth - 1);
@@ -19,6 +22,7 @@ fn bottom_up(int depth) -> Tree {
 
 fn direct(int depth) -> Tree {
     if depth == 0 {
+        collect();
         return Tree::Leaf();
     }
     return Tree::Node(direct(depth - 1), direct(depth - 1));
@@ -32,6 +36,6 @@ fn count(Tree t) -> int {
 }
 
 test("enum payloads from call results survive collection") {
-    assert!(count(bottom_up(16)) == 65536);
-    assert!(count(direct(16)) == 65536);
+    assert!(count(bottom_up(10)) == 1024);
+    assert!(count(direct(10)) == 1024);
 }

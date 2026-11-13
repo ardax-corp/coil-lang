@@ -2,9 +2,7 @@
 
 use super::env::substitute_vars;
 use super::subst::{Subst, apply_ty};
-use super::ty::{
-    Constraint, Ty, TyVarId, ftv_ty, option_inner, peel_constructor_refinement, result_ok_err,
-};
+use super::ty::{Constraint, Ty, TyVarId, ftv_ty, nominal_enum};
 
 /// Failure modes for unification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,25 +207,17 @@ pub fn unify_with(subst: &Subst, t1: &Ty, t2: &Ty) -> Result<Subst, UnifyError> 
             Ok(current)
         }
 
-        // Poly enum annotations are `Ty::App` (Option/Result and user
-        // `enum Box<T>`). Constructor owners may still be structural
-        // `Ty::Sum` (builtins) — bridge those via payload extraction.
-        // User generic constructs use `Ty::App` owners and unify via the
-        // Constructor arm below (App ↔ owner).
+        // A generic enum's type is an application (`Option<T>`, a user
+        // `enum Box<T>`), also as a constructor's owner; a structural `Sum`
+        // is an enum with no parameters. The two never unify.
         (app @ Ty::App(_, _), sum @ Ty::Sum { .. })
-        | (sum @ Ty::Sum { .. }, app @ Ty::App(_, _)) => {
-            match unify_builtin_app_sum(subst, &app, &sum) {
-                Some(result) => result,
-                None => Err(UnifyError::Mismatch {
-                    left: app,
-                    right: sum,
-                }),
-            }
-        }
+        | (sum @ Ty::Sum { .. }, app @ Ty::App(_, _)) => Err(UnifyError::Mismatch {
+            left: app,
+            right: sum,
+        }),
 
         // Constructor values unify with an App parent by unifying the
-        // App against the constructor's owner (Sum for builtins, App
-        // for user generic enums).
+        // App against the constructor's owner (an App for a generic enum).
         (app @ Ty::App(_, _), ctor @ Ty::Constructor { .. })
         | (ctor @ Ty::Constructor { .. }, app @ Ty::App(_, _)) => {
             let owner = match &ctor {
@@ -458,89 +448,11 @@ pub fn unify_with(subst: &Subst, t1: &Ty, t2: &Ty) -> Result<Subst, UnifyError> 
     }
 }
 
-fn unify_builtin_app_sum(subst: &Subst, app: &Ty, sum: &Ty) -> Option<Result<Subst, UnifyError>> {
-    let Ty::App(con, args) = app else {
-        return None;
-    };
-
-    // Concrete head: `Option<T>` / `Result<T, E>` annotations vs structural sums.
-    if let Ty::Con(name) = con.as_ref() {
-        if common::is_builtin_option_enum(name) {
-            if args.len() != 1 {
-                return Some(Err(UnifyError::Mismatch {
-                    left: app.clone(),
-                    right: sum.clone(),
-                }));
-            }
-            let inner = option_inner(sum)?;
-            return Some(unify_with(subst, &args[0], &inner));
-        }
-
-        if common::is_builtin_result_enum(name) {
-            if args.len() != 2 {
-                return Some(Err(UnifyError::Mismatch {
-                    left: app.clone(),
-                    right: sum.clone(),
-                }));
-            }
-            let (ok, err) = result_ok_err(sum)?;
-            let s = match unify_with(subst, &args[0], &ok) {
-                Ok(s) => s,
-                Err(e) => return Some(Err(e)),
-            };
-            return Some(unify_with(&s, &args[1], &err));
-        }
-
-        return None;
-    }
-
-    // Variable head (Phase 5 HKT): unify `F<A>` with builtin Option/Result by
-    // binding `F` to the constructor constant, then unifying payload args.
-    // Without this, `get(Option::Some(42))` cannot discharge `Container<F>`.
-    if let Ty::Var(var) = con.as_ref() {
-        if let Some(inner) = option_inner(sum) {
-            if args.len() != 1 {
-                return Some(Err(UnifyError::Mismatch {
-                    left: app.clone(),
-                    right: sum.clone(),
-                }));
-            }
-            let s = match bind_var(subst, *var, Ty::Con(common::BUILTIN_OPTION_ENUM.into())) {
-                Ok(s) => s,
-                Err(e) => return Some(Err(e)),
-            };
-            return Some(unify_with(&s, &args[0], &inner));
-        }
-
-        if let Some((ok, err)) = result_ok_err(sum) {
-            if args.len() != 2 {
-                return Some(Err(UnifyError::Mismatch {
-                    left: app.clone(),
-                    right: sum.clone(),
-                }));
-            }
-            let s = match bind_var(subst, *var, Ty::Con(common::BUILTIN_RESULT_ENUM.into())) {
-                Ok(s) => s,
-                Err(e) => return Some(Err(e)),
-            };
-            let s = match unify_with(&s, &args[0], &ok) {
-                Ok(s) => s,
-                Err(e) => return Some(Err(e)),
-            };
-            return Some(unify_with(&s, &args[1], &err));
-        }
-
-        return None;
-    }
-
-    None
-}
-
 /// Bind `var` to `ty` after the occurs check.
 fn bind_var(subst: &Subst, var: TyVarId, ty: Ty) -> Result<Subst, UnifyError> {
     // Do not pin a polymorphic param to a single variant tag — otherwise
     // `min(Rank::Mid, Rank::Low)` binds `T` to `::v1` and rejects `::v0`.
-    let ty = peel_constructor_refinement(ty);
+    let ty = nominal_enum(ty);
     if ftv_ty(&ty).contains(&var) {
         return Err(UnifyError::Occurs { var, ty });
     }

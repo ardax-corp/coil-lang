@@ -233,6 +233,13 @@ pub fn resolve_library(
     search_paths: &[PathBuf],
     gate: &DloadGate,
 ) -> Result<Arc<Library>, FfiError> {
+    // Linked into the executable (`coil package --link-static`): there is
+    // no file to open, pin or grant at run time; compiling the `extern`
+    // block took the grant.
+    #[cfg(not(target_family = "wasm"))]
+    if super::static_library(name).is_some() {
+        return this_process().map(Arc::new);
+    }
     let stem = gate.check_request(name)?;
     let candidates = library_candidates(name, base_dir, search_paths);
     let mut errors = Vec::new();
@@ -266,6 +273,19 @@ pub fn resolve_library(
         tried: candidates.iter().map(|p| p.display().to_string()).collect(),
         detail: errors.join("; "),
     })
+}
+
+/// The running executable as a library handle.
+#[cfg(not(target_family = "wasm"))]
+fn this_process() -> Result<Library, FfiError> {
+    #[cfg(unix)]
+    return Ok(libloading::os::unix::Library::this().into());
+    #[cfg(windows)]
+    return libloading::os::windows::Library::this().map(Into::into).map_err(|e| FfiError::LibraryNotFound {
+        name: "<this executable>".into(),
+        tried: Vec::new(),
+        detail: e.to_string(),
+    });
 }
 
 #[cfg(test)]
@@ -457,11 +477,11 @@ mod tests {
             }
             other => panic!("expected resolve deny for {name:?}, got {other:?}"),
         }
-        match super::super::load_library(name) {
+        match resolve_library(name, None, &[], &DloadGate::deny_all()) {
             Err(FfiError::LibraryDenied { stem, .. }) => {
                 assert_eq!(stem, expected_stem);
             }
-            other => panic!("expected load_library deny for {name:?}, got {other:?}"),
+            other => panic!("expected deny_all deny for {name:?}, got {other:?}"),
         }
     }
 
@@ -643,9 +663,9 @@ mod tests {
                 other => panic!("expected LibraryNotFound for trusted {stem}, got {other:?}"),
             }
         }
-        match super::super::load_library(&missing_abs_lib("crypto")) {
+        match resolve_library(&missing_abs_lib("crypto"), None, &[], &DloadGate::deny_all()) {
             Err(FfiError::LibraryDenied { .. }) => {}
-            other => panic!("load_library uses deny_all; expected LibraryDenied, got {other:?}"),
+            other => panic!("deny_all: expected LibraryDenied, got {other:?}"),
         }
     }
 

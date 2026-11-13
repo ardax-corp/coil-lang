@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::generics::InstanceDef;
 use crate::typechecking::id::NodeId;
-use crate::typechecking::purity::EffectFlags;
 use crate::typechecking::subst::apply_ty_prune;
 use crate::typechecking::ty::Ty;
 
@@ -37,15 +36,10 @@ pub struct TypedSidecar {
     in_bounds_index: HashSet<NodeId>,
     /// Dividend / index nodes proven `>= 0` (Q4: skip Euclidean rem fixup).
     nonneg_expr: HashSet<NodeId>,
-    /// Array parameter nodes to pin for the frame (`ArrayPin`).
-    pin_array: HashSet<NodeId>,
     pin_params: HashSet<(String, String)>,
     for_in_pin: HashSet<NodeId>,
     for_in_pin_spans: HashSet<(usize, usize)>,
-    /// Effect bits per function DefId (empty = pure). Missing DefId is unknown/impure.
-    fn_effects: HashMap<DefId, EffectFlags>,
-    pure_fn_names: HashSet<String>,
-    length_stability: crate::typechecking::purity::LengthStability,
+    length_stability: crate::effects::LengthStability,
     /// Names that appear as a function *value* in this module — see
     /// [`crate::typechecking::fn_value_escape`]. Package-wide proof is the
     /// pipeline seed; this set is the per-file snapshot.
@@ -103,11 +97,6 @@ impl TypedSidecar {
         &self.nonneg_expr
     }
 
-    /// True when `id` is an array parameter that may be pinned at function entry.
-    pub fn is_pin_array(&self, id: NodeId) -> bool {
-        self.pin_array.contains(&id)
-    }
-
     pub fn is_pin_param(&self, fn_name: &str, param: &str) -> bool {
         let short = fn_name.rsplit("::").next().unwrap_or(fn_name);
         self.pin_params
@@ -126,23 +115,9 @@ impl TypedSidecar {
         self.for_in_pin_spans.contains(&(start, end))
     }
 
-    /// True when `id` is a user `fn` the checker proved effect-free.
-    pub fn is_pure_def(&self, id: DefId) -> bool {
-        self.fn_effects.get(&id).is_some_and(|f| f.is_pure())
-    }
-
-    pub fn effects(&self, id: DefId) -> Option<EffectFlags> {
-        self.fn_effects.get(&id).copied()
-    }
-
-    /// Bind names of proven-pure user functions (LICM / PureCallCtx).
-    pub fn pure_fn_names(&self) -> &HashSet<String> {
-        &self.pure_fn_names
-    }
-
     /// Functions that cannot change any array's length, for the loop length
-    /// proofs (superset of [`Self::pure_fn_names`]).
-    pub fn length_stability(&self) -> &crate::typechecking::purity::LengthStability {
+    /// proofs.
+    pub fn length_stability(&self) -> &crate::effects::LengthStability {
         &self.length_stability
     }
 
@@ -156,16 +131,6 @@ impl TypedSidecar {
         self.fn_value_escaped.contains(name) || self.fn_value_escaped.contains(short)
     }
 
-    pub fn name_is_pure(&self, name: &str) -> bool {
-        let stem = name.split("$mono$").next().unwrap_or(name);
-        if self.pure_fn_names.contains(stem) {
-            return true;
-        }
-        match stem.rsplit_once("::") {
-            Some((prefix, short)) if !prefix.contains("::") => self.pure_fn_names.contains(short),
-            _ => false,
-        }
-    }
 }
 
 impl Checker {
@@ -177,8 +142,8 @@ impl Checker {
             tys.insert(*id, apply_ty_prune(subst, ty));
         }
 
-        let mut overloads = HashMap::with_capacity(self.selected_overloads.len());
-        for (id, &(fixed_arity, is_rest, candidate_id)) in &self.selected_overloads {
+        let mut overloads = HashMap::with_capacity(self.selected_overloads.by_id().len());
+        for (id, &(fixed_arity, is_rest, candidate_id)) in self.selected_overloads.by_id() {
             overloads.insert(
                 *id,
                 SelectedOverload {
@@ -206,17 +171,14 @@ impl Checker {
             tys_by_span,
             def_ids: self.def_ids_by_node.clone(),
             overloads,
-            dicts: self.call_site_dicts.clone(),
-            for_in: self.for_in_infos.clone(),
+            dicts: self.call_site_dicts.by_id().clone(),
+            for_in: self.for_in_infos.by_id().clone(),
             ffi_tags,
             in_bounds_index: self.in_bounds_index.clone(),
             nonneg_expr: self.nonneg_expr.clone(),
-            pin_array: self.pin_array.clone(),
             pin_params: self.pin_params.clone(),
             for_in_pin: self.for_in_pin.clone(),
             for_in_pin_spans: self.for_in_pin_spans.clone(),
-            fn_effects: self.fn_effects.clone(),
-            pure_fn_names: self.pure_fn_names.clone(),
             length_stability: self.length_stability.clone(),
             fn_value_escaped: self.fn_value_escaped.clone(),
         }

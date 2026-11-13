@@ -1,5 +1,5 @@
 // A body HIR lowers with a `defer` gets its cleanup pad from HIR, not
-// from the thunk its stack IL registers: defers on a branch, in a loop
+// from the thunk it registers: defers on a branch, in a loop
 // and after an early return run on each exit.
 use tests::assert;
 

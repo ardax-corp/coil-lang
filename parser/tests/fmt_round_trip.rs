@@ -122,6 +122,11 @@ fn hy_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// file that does not parse, so there is nothing to format.
 fn check_file(name: &str, path: &Path) -> Result<bool, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("{name}: read: {e}"))?;
+    // A program about the wasm build's limits (5,000-term operator chains,
+    // #2704): its AST's derived `Debug` alone runs a debug build's stack out.
+    if src.lines().take_while(|l| l.starts_with("//")).any(|l| l.trim() == "// @needs wasm") {
+        return Ok(false);
+    }
     let compile_fail = path.components().any(|c| c.as_os_str() == "compile_fail");
     let once = match format_source(&src) {
         Ok(once) => once,
@@ -331,4 +336,83 @@ fn changed_lines(a: &[&str], b: &[&str]) -> Vec<String> {
         }
     }
     out
+}
+
+/// A prefix operator printed against an operand that starts with an
+/// operator must not glue into another token: `- -a` is not `--a` (a
+/// decrement), `+ +a` is not `++a` (#2519). Every prefix operator against
+/// every operand shape, and every binary operator on both sides of them.
+#[test]
+fn adjacent_operators_never_glue_into_another_token() {
+    const PREFIXES: [&str; 10] = [
+        "-", "+", "!", "~", "--", "++", "typeof", "comptime", "readonly", "mut",
+    ];
+    const OPERANDS: [&str; 18] = [
+        "a", "-a", "+a", "!a", "~a", "--a", "++a", "- -a", "+ +a", "-1", "- -1", "(-a)", "a--", "a++",
+        "-a.b", "(-a).b", "-a[0]", "-f(a)",
+    ];
+    const BINARY: [&str; 25] = [
+        "-", "+", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "&&", "||", "==", "!=", "<", ">",
+        "<=", ">=", "??", "..", "..=", "=", "-=", "+=",
+    ];
+    let mut cases: Vec<String> = vec![
+        "- -a".into(),
+        "+ +a".into(),
+        "- --a".into(),
+        "+ ++a".into(),
+        "-- -a".into(),
+        "++ +a".into(),
+        "- - -a".into(),
+        "- -5".into(),
+        "-(-a)".into(),
+        "! !a".into(),
+        "~ ~a".into(),
+        "a - -b".into(),
+        "a + +b".into(),
+        "a - --b".into(),
+        "a + ++b".into(),
+        "a-- - b".into(),
+        "a++ + b".into(),
+        "a-- - -b".into(),
+        "a < -b".into(),
+        "a & !b".into(),
+        "0..-1".into(),
+        "a..=-b".into(),
+    ];
+    for p in PREFIXES {
+        for o in OPERANDS {
+            cases.push(format!("{p} {o}"));
+        }
+    }
+    for b in BINARY {
+        for o in OPERANDS {
+            // `x = (-a)` drops the parentheses, a `Group` the tree compares.
+            if matches!(b, "=" | "-=" | "+=") && o.starts_with('(') {
+                continue;
+            }
+            cases.push(format!("x {b} {o}"));
+            cases.push(format!("{o} {b} x"));
+        }
+    }
+    let mut parsed = 0;
+    let mut failures = Vec::new();
+    for case in &cases {
+        let src = format!("fn main() {{\n    let r = {case};\n}}\n");
+        if Pratt::default().parse(&src).is_err() {
+            continue;
+        }
+        parsed += 1;
+        let result = format_source(&src)
+            .map_err(|e| format!("`{case}`: coil fmt failed: {}", e.message()))
+            .and_then(|once| check(&format!("`{case}`"), &src, &once, None));
+        if let Err(report) = result {
+            failures.push(report);
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    assert!(
+        parsed * 10 >= cases.len() * 8,
+        "only {parsed} of {} cases parse",
+        cases.len()
+    );
 }

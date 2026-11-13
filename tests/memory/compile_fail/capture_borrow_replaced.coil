@@ -1,0 +1,15 @@
+// @expected E0149 — `a` is replaced while a `use (mut a)` closure borrows
+// it, so the closure would write the old object (#2787).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let a = new C(1);
+    let f = fn () use (mut a) {
+        a.x += 10;
+    };
+    a = new C(5);
+    f();
+    let _ = a.x;
+}

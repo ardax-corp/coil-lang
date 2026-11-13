@@ -1,0 +1,67 @@
+// CPU: copy-on-write after a walk over a vector (#2821), the control for
+// `cow_walk_grow_map.coil`. `for x in v` over a `Vec` is an index loop
+// that shares nothing, and a collection whose iterator holds it (`Bag`
+// below) is shared by the walk only while the loop runs: neither copies
+// at the next push.
+use io::sync::print;
+use string::format;
+
+class Bag {
+    pub items: Vec<int>,
+}
+
+class BagIter {
+    pub bag: Bag,
+    pub i: int,
+}
+
+impl IntoIterator for Bag {
+    type Item = int;
+    type IntoIter = BagIter;
+    fn into_iter(Bag b) -> BagIter {
+        return new BagIter(b, 0);
+    }
+}
+
+impl Iterator for BagIter {
+    type Item = int;
+    fn next(BagIter it) -> Option<int> {
+        if it.i >= it.bag.items.len() {
+            return None;
+        }
+        let v = it.bag.items[it.i];
+        it.i += 1;
+        return Some(v);
+    }
+}
+
+fn total(Vec<int> v) -> int {
+    let n = 0;
+    for x in v {
+        n += x;
+    }
+    return n;
+}
+
+fn bag_total(Bag b) -> int {
+    let n = 0;
+    for x in b {
+        n += x;
+    }
+    return n;
+}
+
+fn main() {
+    let v: Vec<int> = Vec::new();
+    let b = new Bag(Vec::new());
+    let s = 0;
+    let i = 0;
+    while i < 3000 {
+        v.push(i);
+        s += total(v);
+        b.items.push(i);
+        s += bag_total(b);
+        i += 1;
+    }
+    let _ = print(format("%i %i %i\n", v.len(), b.items.len(), s));
+}

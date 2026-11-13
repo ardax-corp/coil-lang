@@ -2,7 +2,6 @@
 // hands that pair straight back; its result is never a boxed word.
 use tests::assert;
 
-#[max_depth(64)]
 fn find_from(int n, int acc) -> Option<int> {
     let i = 0;
     while i < 3 {

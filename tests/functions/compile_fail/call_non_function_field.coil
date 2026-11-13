@@ -1,0 +1,9 @@
+// @expected E0104 — `o.n(1)` calls an instance field that is an `int`, not a function; a field holding a function is called this way (#2752).
+class Op {
+    pub n: int,
+}
+
+fn main() {
+    let o = new Op(1);
+    let _ = o.n(1);
+}

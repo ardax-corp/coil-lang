@@ -21,7 +21,7 @@ fn same<T>(T x) -> T {
 }
 
 fn take_head<C: Collect>(C xs) -> C::Elem {
-    return head(xs);
+    return xs.head();
 }
 
 fn pass_on<C: Collect>(C xs) -> C::Elem {
@@ -38,7 +38,7 @@ fn twice<C: Collect>(C xs) -> C::Elem {
 }
 
 fn pass_direct<C: Collect>(C xs) -> C::Elem {
-    return same(head(xs));
+    return same(xs.head());
 }
 
 test("a generic passes its projection value to another generic") {

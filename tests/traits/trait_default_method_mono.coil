@@ -6,7 +6,7 @@ trait Tiny<T> {
     fn base(T x) -> int {}
 
     fn next(T x) -> int {
-        return base(x) + 1;
+        return x.base() + 1;
     }
 }
 
@@ -17,7 +17,7 @@ impl Tiny for int {
 }
 
 fn get<T: Tiny>(T x) -> int {
-    return next(x);
+    return x.next();
 }
 
 test("default method via generic call") {

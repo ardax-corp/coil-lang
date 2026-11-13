@@ -1,0 +1,71 @@
+// Scans whose next hit is near test lanes in place before the lane kernel;
+// these check them against plain loops: dense hits, a compare against an
+// `int` that is no byte, a read one past the lane, and hits at the end.
+use tests::assert;
+
+fn count_le(string s, int limit) -> int {
+    let n = 0;
+    let i = 0;
+    while i < s.len() {
+        if s[i] as int <= limit {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn pair_at(string s, byte a, byte b) -> int {
+    let i = 0;
+    while i + 1 < s.len() {
+        if s[i] == a && s[i + 1] == b {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn count_byte(string s, byte b) -> int {
+    let n = 0;
+    let i = 0;
+    while i < s.len() {
+        if s[i] == b {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+fn text(int n) -> string {
+    let s = "";
+    let i = 0;
+    while i < n {
+        s = s + "ab o.x";
+        i = i + 1;
+    }
+    return s;
+}
+
+test("dense hits count every one") {
+    let s = text(40);
+    assert!(count_byte(s, 111 as byte) == 40);
+    assert!(count_byte(s + "o", 111 as byte) == 41);
+    assert!(count_byte("o" + s, 111 as byte) == 41);
+}
+
+test("a limit that is no byte compares as an int") {
+    let s = text(30);
+    assert!(count_le(s, -1) == 0);
+    assert!(count_le(s, 300) == s.len());
+    // `a`, `b`, ` ` and `.` of each `ab o.x`.
+    assert!(count_le(s, 98) == 4 * 30);
+}
+
+test("a read one past the lane stops at the end") {
+    let s = text(20);
+    assert!(pair_at(s, 46 as byte, 120 as byte) == 4);
+    assert!(pair_at(s + "zq", 122 as byte, 113 as byte) == s.len());
+    assert!(pair_at(s + "z", 122 as byte, 113 as byte) == -1);
+}

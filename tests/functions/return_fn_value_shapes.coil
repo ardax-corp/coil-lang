@@ -1,0 +1,186 @@
+// A function returning a function returns one closure word whatever the
+// returned function's own result is: a niche `Option` / `Result`, a
+// two-slot one, a boxed one, a tuple, a scalar, `()`; at two and three
+// levels of nesting, from free functions, methods and generics
+// (coil-lang#2759).
+use tests::assert;
+use string::format;
+
+#[derive(Show, Eq)]
+class Pt {
+    pub a: int,
+}
+
+fn some_s(string s) -> Option<string> {
+    return Option::Some(s);
+}
+
+fn some_i(int x) -> Option<int> {
+    return Option::Some(x);
+}
+
+fn ok_pt(Pt p) -> Result<Pt, string> {
+    return Result::Ok(p);
+}
+
+fn err_s(string s) -> Result<string, string> {
+    return Result::Err(s);
+}
+
+fn unit_ok(() u) -> Result<(), string> {
+    return Result::Ok(u);
+}
+
+fn int_ok(int x) -> Result<int, string> {
+    return Result::Ok(x);
+}
+
+fn deep(string s) -> Option<Option<string>> {
+    return Option::Some(Option::Some(s));
+}
+
+fn pair(int x) -> (int, int) {
+    return (x, x + 1);
+}
+
+fn half(int x) -> float {
+    return x as float / 2.0;
+}
+
+fn get_s() -> fn(string) -> Option<string> {
+    return some_s;
+}
+
+fn get_i() -> fn(int) -> Option<int> {
+    return some_i;
+}
+
+fn get_pt() -> fn(Pt) -> Result<Pt, string> {
+    return ok_pt;
+}
+
+fn get_err() -> fn(string) -> Result<string, string> {
+    return err_s;
+}
+
+fn get_unit() -> fn(()) -> Result<(), string> {
+    return unit_ok;
+}
+
+fn get_int_ok() -> fn(int) -> Result<int, string> {
+    return int_ok;
+}
+
+fn get_deep() -> fn(string) -> Option<Option<string>> {
+    return deep;
+}
+
+fn get_pair() -> fn(int) -> (int, int) {
+    return pair;
+}
+
+fn get_half() -> fn(int) -> float {
+    return half;
+}
+
+fn pick(bool b) -> fn(string) -> Option<string> {
+    if b {
+        return some_s;
+    }
+    return fn (string s) => Option::None;
+}
+
+fn adder(int k) -> fn(int) -> Option<int> {
+    return fn (int x) use (k) => Option::Some(x + k);
+}
+
+fn two() -> fn() -> fn(string) -> Option<string> {
+    return get_s;
+}
+
+fn three() -> fn() -> fn() -> fn(string) -> Option<string> {
+    return two;
+}
+
+fn curried(string a) -> fn(string) -> fn(string) -> Result<string, string> {
+    return fn (string b) use (a) => fn (string c) use (a, b) => Result::Ok(a + b + c);
+}
+
+fn wrap<T>(T x) -> Option<T> {
+    return Option::Some(x);
+}
+
+fn get_wrap() -> fn(string) -> Option<string> {
+    return wrap;
+}
+
+fn lift<T>() -> fn(T) -> Option<T> {
+    return wrap;
+}
+
+class M {
+    pub k: int,
+}
+
+impl M {
+    pub static fn get() -> fn(string) -> Option<string> {
+        return some_s;
+    }
+
+    pub fn named(string pre) -> fn(string, string) -> Option<string> {
+        return fn (string a, string b) use (pre) => Option::Some(pre + a + b);
+    }
+
+    pub fn add() -> fn(int) -> Option<int> {
+        let k = self.k;
+        return fn (int x) use (k) => Option::Some(x + k);
+    }
+}
+
+fn show<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+test("a returned function's niche Option and Result results") {
+    assert!(show(get_s()("a")) == "Some(a)");
+    let p = get_pt();
+    assert!(show(p(new Pt(1))) == "Ok(Pt { a: 1 })");
+    assert!(show(get_err()("e")) == "Err(e)");
+    assert!(show(get_unit()(())) == "Ok(())");
+    assert!(show(pick(true)("t")) == "Some(t)");
+    assert!(show(pick(false)("f")) == "None");
+}
+
+test("a returned function's two-slot, boxed, tuple and scalar results") {
+    assert!(show(get_i()(3)) == "Some(3)");
+    assert!(show(get_int_ok()(4)) == "Ok(4)");
+    assert!(show(get_deep()("d")) == "Some(Some(d))");
+    assert!(show(get_pair()(5)) == "(5, 6)");
+    assert!(get_half()(3) == 1.5);
+    assert!(show(adder(10)(1)) == "Some(11)");
+}
+
+test("two and three levels of nesting") {
+    assert!(show(two()()("b")) == "Some(b)");
+    assert!(show(three()()()("c")) == "Some(c)");
+    let f = three();
+    let g = f();
+    let h = g();
+    assert!(show(h("h")) == "Some(h)");
+    assert!(show(curried("x")("y")("z")) == "Ok(xyz)");
+}
+
+test("a generic function returned, or returning one over a ground type") {
+    assert!(show(get_wrap()("w")) == "Some(w)");
+    let l: fn(string) -> Option<string> = lift();
+    assert!(show(l("l")) == "Some(l)");
+}
+
+test("a method returning a function") {
+    assert!(show(M::get()("m")) == "Some(m)");
+    let m = new M(5);
+    assert!(show(m.add()(1)) == "Some(6)");
+    assert!(show(m.named("p")("a", "b")) == "Some(pab)");
+    let n = m.named("q");
+    assert!(show(n("c", "d")) == "Some(qcd)");
+}

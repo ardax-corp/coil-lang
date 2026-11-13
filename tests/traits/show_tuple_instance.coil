@@ -18,7 +18,7 @@ impl Show for Point {
 }
 
 fn shown<T: Show>(T x) -> string {
-    return show(x);
+    return x.show();
 }
 
 fn shown_method<T: Show>(T x) -> string {
@@ -30,18 +30,18 @@ fn mk(int n) -> ((), int, ()) {
 }
 
 test("show of a tuple with a unit item") {
-    assert!(show(((), 1)) == "((), 1)", show(((), 1)));
-    assert!(show(((), 1)) == format("%v", ((), 1)));
     assert!(((), 1).show() == "((), 1)", ((), 1).show());
-    assert!(show(mk(2)) == "((), 2, ())", show(mk(2)));
+    assert!(((), 1).show() == format("%v", ((), 1)));
+    assert!(((), 1).show() == "((), 1)", ((), 1).show());
+    assert!(mk(2).show() == "((), 2, ())", mk(2).show());
 }
 
 test("show of tuples of primitives, nested tuples and user types") {
-    assert!(show((1, 2)) == "(1, 2)", show((1, 2)));
-    assert!(show((1.5, true, "s")) == format("%v", (1.5, true, "s")), show((1.5, true, "s")));
-    assert!(show((1, ((), 2))) == "(1, ((), 2))", show((1, ((), 2))));
+    assert!((1, 2).show() == "(1, 2)", (1, 2).show());
+    assert!((1.5, true, "s").show() == format("%v", (1.5, true, "s")), (1.5, true, "s").show());
+    assert!((1, ((), 2)).show() == "(1, ((), 2))", (1, ((), 2)).show());
     let p = new Point(3, 4);
-    assert!(show((p, 5)) == "(<3 4>, 5)", show((p, 5)));
+    assert!((p, 5).show() == "(<3 4>, 5)", (p, 5).show());
 }
 
 test("a tuple meets a Show bound") {

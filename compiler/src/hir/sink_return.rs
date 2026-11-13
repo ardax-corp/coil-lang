@@ -1,13 +1,12 @@
 //! Return sinking: `return match s { p => a, q => b }` becomes
 //! `match s { p => return a, q => return b }`, and the same for an `if` with
 //! an `else` and a block's tail. Each branch then returns where it ends
-//! instead of jumping to a shared `RETURN` (a `CONST; RETURN` arm fuses to
-//! one op), and a call in any branch becomes a tail call. Branches that
+//! instead of jumping to a shared `RETURN`, and a call in any branch becomes a tail call. Branches that
 //! already leave (`never`) stay as they are, and so does a `match` that
 //! lowering returns better as a value (see [`keeps_value`]). Bodies with a
 //! `defer` are left alone: every return would repeat the deferred code.
 
-use super::lower::{children, is_identity_arm};
+use super::query::is_identity_arm;
 use super::{HirBody, HirExpr, HirId, HirKind};
 use crate::typechecking::ty::Ty;
 
@@ -27,7 +26,7 @@ pub fn sink(body: &HirBody) -> Option<HirBody> {
         {
             returns.push(k);
         }
-        stack.extend(children(body, k));
+        stack.extend(body.children(k));
     }
     if returns.is_empty() {
         return None;

@@ -1,0 +1,133 @@
+// A shared generic body hands back a value of its type parameter as the
+// word it holds, with no share (coil-lang#2502): the caller, which knows
+// the type, shares the result where the callee's own share would have
+// been, so a write to the result never reaches the object it came from.
+// Here past the clone budget, where every generic call reaches the shared
+// body.
+// @flags --clone-budget 0
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+class Cell<T> {
+    value: T,
+}
+
+impl Cell<T> {
+    pub fn get() -> T {
+        return self.value;
+    }
+
+    pub fn set(T v) {
+        self.value = v;
+    }
+}
+
+class Wrap<T> {
+    inner: Cell<T>,
+}
+
+impl Wrap<T> {
+    pub fn peek() -> T {
+        return self.inner.get();
+    }
+}
+
+fn get_shared<T>(Cell<T> c) -> T {
+    return c.get();
+}
+
+fn get_twice<T>(Cell<T> c) -> T {
+    return get_shared(c);
+}
+
+fn get_bound<T>(Cell<T> c) -> T {
+    let x = c.get();
+    return x;
+}
+
+fn get_branch<T>(Cell<T> a, Cell<T> b, bool first) -> T {
+    if first {
+        return a.get();
+    }
+    return b.get();
+}
+
+fn first<T>(Vec<T> xs) -> T {
+    return xs[0];
+}
+
+fn first_of<T>(Vec<T> xs) -> T {
+    return first(xs);
+}
+
+test("a getter called in a shared body") {
+    let c = new Cell(new Box(2));
+    let x = get_shared(c);
+    x.n = 7;
+    assert!(c.get().n == 2);
+    assert!(x.n == 7);
+}
+
+test("through two shared bodies") {
+    let c = new Cell(new Box(2));
+    let x = get_twice(c);
+    x.n = 7;
+    assert!(c.get().n == 2);
+    assert!(x.n == 7);
+}
+
+test("through a local of the shared body") {
+    let c = new Cell(new Box(2));
+    let x = get_bound(c);
+    x.n = 7;
+    assert!(c.get().n == 2);
+    assert!(x.n == 7);
+}
+
+test("from either of two arguments") {
+    let a = new Cell(new Box(1));
+    let b = new Cell(new Box(2));
+    let x = get_branch(a, b, true);
+    x.n = 7;
+    let y = get_branch(a, b, false);
+    y.n = 8;
+    assert!(a.get().n == 1 && b.get().n == 2);
+    assert!(x.n == 7 && y.n == 8);
+}
+
+test("a method that asks another generic object") {
+    let w = new Wrap(new Cell(new Box(3)));
+    let x = w.peek();
+    x.n = 9;
+    assert!(w.peek().n == 3);
+    assert!(x.n == 9);
+}
+
+test("an element through two shared bodies") {
+    let xs: Vec<Box> = Vec::new();
+    xs.push(new Box(3));
+    let y = first_of(xs);
+    y.n = 4;
+    assert!(xs[0].n == 3);
+    assert!(y.n == 4);
+}
+
+test("the stored value stays the caller's after a write to the result") {
+    let c = new Cell(new Box(2));
+    let x = get_shared(c);
+    x.n = 7;
+    let z = get_shared(c);
+    assert!(z.n == 2);
+    c.set(new Box(6));
+    assert!(get_shared(c).n == 6 && x.n == 7 && z.n == 2);
+}
+
+test("scalar and string instances are unchanged") {
+    let c = new Cell(5);
+    assert!(get_shared(c) == 5 && get_twice(c) == 5);
+    let s = new Cell("a");
+    assert!(get_shared(s) == "a");
+}

@@ -2,7 +2,7 @@ use std::cell::Cell;
 
 use common::{HeapSnapshot, SnapStep, SnapWord, SnapshotError, Value};
 
-use super::super::{EnumPayload, Heap, ObjArray, ObjEnum, ObjInstance, ObjString, ObjTuple, ObjWeak, Object};
+use super::super::{EnumPayload, Heap, ObjArray, ObjEnum, ObjInstance, ObjString, ObjWeak, Object};
 use super::SnapRoot;
 
 fn string(heap: &mut Heap, s: &str) -> Value {
@@ -40,7 +40,7 @@ fn text(heap: &Heap, v: Value) -> String {
 
 fn instance_slots(heap: &Heap, v: Value) -> Vec<Value> {
     match object(heap, v) {
-        Object::Instance(gc) => gc.as_ref().slots().expect("typed").to_vec(),
+        Object::Instance(gc) => gc.as_ref().slots().to_vec(),
         _ => panic!("not an instance"),
     }
 }
@@ -89,9 +89,10 @@ fn restores_cycles() {
 fn roots_share_objects() {
     let mut heap = Heap::default();
     let s = string(&mut heap, "shared");
-    let pair = Value::from(heap.alloc(ObjTuple::new(vec![s, Value::from(1i64)]), Object::Tuple).0.addr());
+    let pair = Value::from(heap.alloc(ObjEnum::tuple(&[s, Value::from(1i64)], 0), Object::Enum).0.addr());
     let (fresh, statics) = transplant(&heap, &[root(0, s), root(1, pair)]);
-    let Object::Tuple(t) = object(&fresh, statics[1].1) else { panic!("tuple") };
+    let Object::Enum(t) = object(&fresh, statics[1].1) else { panic!("tuple") };
+    assert!(t.as_ref().is_tuple());
     assert_eq!(t.as_ref().elements()[0], statics[0].1);
 }
 
@@ -102,10 +103,9 @@ fn scalar_kinds_are_never_references() {
     let mut heap = Heap::default();
     let s = string(&mut heap, "x");
     let kinds = common::pack_word_kinds([common::WORD_SCALAR, common::WORD_UNKNOWN]);
-    let t = ObjTuple::new(vec![s, s]).with_kinds(kinds);
-    let t = Value::from(heap.alloc(t, Object::Tuple).0.addr());
+    let t = Value::from(heap.alloc(ObjEnum::tuple(&[s, s], kinds), Object::Enum).0.addr());
     let snapshot = heap.capture_snapshot(&[root(0, t)]).expect("capture");
-    let common::SnapObject::Tuple { words, .. } = &snapshot.objects[0] else { panic!("tuple") };
+    let common::SnapObject::Enum { tag: common::PRODUCT_TAG, words, .. } = &snapshot.objects[0] else { panic!("tuple") };
     assert_eq!(words[0], SnapWord::Raw(s.bits()));
     assert!(matches!(words[1], SnapWord::Ref { .. }));
     let scalar_root = SnapRoot {

@@ -13,7 +13,7 @@ impl Collect for Option<int> {
 }
 
 fn bad<C: Collect>(C xs) -> int {
-    return head(xs);
+    return xs.head();
 }
 
 fn main() {

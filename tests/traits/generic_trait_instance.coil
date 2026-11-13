@@ -57,7 +57,7 @@ fn first<T>(Box<T> b) -> T {
 test("generic class instance at several instantiations") {
     assert!(new Box(3).describe() == "Box");
     assert!(new Box("x").describe() == "Box");
-    assert!(describe(new Box(1.5)) == "Box");
+    assert!((new Box(1.5)).describe() == "Box");
     assert!(new Box(new Box(1)).describe() == "Box");
     assert!(new Box(1).tag() == 1);
 }

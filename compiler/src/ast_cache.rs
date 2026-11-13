@@ -40,6 +40,7 @@ impl CachedAst {
         match Pratt::default().parse(&source) {
             Ok(mut ast) => {
                 crate::const_fold::lift_startup_consts(&mut ast);
+                crate::macros::forward_thread_uses(&mut ast);
                 // SAFETY: `ast` borrows the pinned `Box<str>`. The pin is never
                 // moved out of this struct; `ast` is dropped first.
                 let ast = unsafe { extend_ast_lifetime(ast) };

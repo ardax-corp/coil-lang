@@ -1,6 +1,6 @@
 // A trait instance for a generic head (`impl Add for Duo<T: Add>`) and a
 // trait's default body are compiled once per concrete type they are used
-// at: operator, method and function-style calls, `%v` and dictionaries of a
+// at: operator, method and trait-qualified calls, `%v` and dictionaries of a
 // ground type reach the clone, whose bound calls are ground instance calls.
 // Uses through an open type still go to the shared body.
 
@@ -79,10 +79,10 @@ test("operators reach the per-type clone") {
     assert!(f.b == 3.0);
 }
 
-test("method, function-style and show calls on clones") {
+test("method, trait-qualified and show calls on clones") {
     let d = new Duo(3, 4);
     assert!(d.size() == 7);
-    assert!(size(new Duo("ab", "c")) == 3);
+    assert!(Measure::size(new Duo("ab", "c")) == 3);
     assert!(new Duo(new Duo(1, 2), new Duo(3, 4)).size() == 10);
     assert!(format("%v", d) == "<3|4>");
     assert!(format("%v", new Duo("x", "y")) == "<x|y>");

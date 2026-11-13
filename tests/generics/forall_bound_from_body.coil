@@ -1,0 +1,57 @@
+// A generic function passed to a `forall` parameter inside a generic body,
+// one of its bounds on the body's own bounded type parameter: the bound's
+// dictionary is the body's, as a direct call there takes it
+// (coil-lang#2639).
+use tests::assert;
+
+trait Name<T> {
+    fn name(T x) -> string {}
+}
+
+trait Tag<T> {
+    fn tag(T x) -> string {}
+}
+
+impl Name for int {
+    fn name(int x) -> string {
+        return "int";
+    }
+}
+
+impl Name for string {
+    fn name(string x) -> string {
+        return "string";
+    }
+}
+
+impl Tag for bool {
+    fn tag(bool x) -> string {
+        return "#b";
+    }
+}
+
+fn both<A: Name, B: Name>(A a, B b) -> string {
+    return a.name() + " " + b.name();
+}
+
+fn run<T: Name>(forall X: Name. X -> T -> string g, T t) -> string {
+    return g(1, t);
+}
+
+fn make<T: Name>(T t) -> string {
+    return run(both, t);
+}
+
+// The body's bound is its first dictionary, the function's second.
+fn make_tagged<T: Name, U: Tag>(T t, U u) -> string {
+    return run(both, t) + u.tag();
+}
+
+test("a bound on the body's type parameter") {
+    assert!(make(2) == "int int");
+    assert!(make("s") == "int string");
+}
+
+test("the body's bound at another place than the function's") {
+    assert!(make_tagged("s", true) == "int string#b");
+}

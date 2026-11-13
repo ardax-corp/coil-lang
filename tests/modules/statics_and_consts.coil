@@ -1,7 +1,7 @@
 // Globals in bodies lowered straight from HIR to MIR: static reads
 // (`LoadStatic`), writes and compound assigns (`StoreStatic`), heap
 // statics (a class object, a `Vec`) and folded `const` reads, inside
-// loops so the bodies reach the dense and LIR tiers.
+// loops so the bodies reach the loop lowerings.
 
 use tests::assert;
 use io::stdout;

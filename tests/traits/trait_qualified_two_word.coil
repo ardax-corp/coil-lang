@@ -1,0 +1,219 @@
+// `Trait::m(x, ..)` on a value whose instance returns two words (a
+// `readonly` class of two fields, a two-word enum): the same call as
+// `x.m(..)` (coil-lang#2434), in ground code, a clone and a shared body.
+use tests::assert;
+
+readonly class V2 {
+    pub x: int,
+    pub y: int,
+}
+
+readonly class F2 {
+    pub x: float,
+    pub n: int,
+}
+
+enum Amt {
+    Int(int),
+    Zero,
+}
+
+enum Sign {
+    Pos,
+    Neg,
+}
+
+trait Flip<T> {
+    fn flip(T a) -> T {}
+    fn scaled(T a, int k) -> T {}
+    fn weight(T a) -> int {}
+    static fn unit() -> T {}
+    static fn of(int n) -> T {}
+}
+
+impl Add for V2 {
+    pub fn add(V2 a, V2 b) -> V2 {
+        return new V2(a.x + b.x, a.y + b.y);
+    }
+}
+
+impl Neg for V2 {
+    pub fn neg(V2 a) -> V2 {
+        return new V2(0 - a.x, 0 - a.y);
+    }
+}
+
+impl Flip for V2 {
+    pub fn flip(V2 a) -> V2 {
+        return new V2(a.y, a.x);
+    }
+
+    pub fn scaled(V2 a, int k) -> V2 {
+        return new V2(a.x * k, a.y * k);
+    }
+
+    pub fn weight(V2 a) -> int {
+        return a.x + a.y;
+    }
+
+    pub static fn unit() -> V2 {
+        return new V2(1, 1);
+    }
+
+    pub static fn of(int n) -> V2 {
+        return new V2(n, n + 1);
+    }
+}
+
+impl Add for F2 {
+    pub fn add(F2 a, F2 b) -> F2 {
+        return new F2(a.x + b.x, a.n + b.n);
+    }
+}
+
+impl Add for Amt {
+    pub fn add(Amt a, Amt b) -> Amt {
+        return match a {
+            Amt::Int(x) => Amt::Int(x + amt(b)),
+            Amt::Zero => b,
+        };
+    }
+}
+
+impl Flip for Amt {
+    pub fn flip(Amt a) -> Amt {
+        return match a {
+            Amt::Int(x) => Amt::Int(0 - x),
+            Amt::Zero => Amt::Zero,
+        };
+    }
+
+    pub fn scaled(Amt a, int k) -> Amt {
+        return Amt::Int(amt(a) * k);
+    }
+
+    pub fn weight(Amt a) -> int {
+        return amt(a);
+    }
+
+    pub static fn unit() -> Amt {
+        return Amt::Int(1);
+    }
+
+    pub static fn of(int n) -> Amt {
+        return Amt::Int(n);
+    }
+}
+
+impl Flip for Sign {
+    pub fn flip(Sign a) -> Sign {
+        return match a {
+            Sign::Pos => Sign::Neg,
+            Sign::Neg => Sign::Pos,
+        };
+    }
+
+    pub fn scaled(Sign a, int k) -> Sign {
+        if k < 0 {
+            return Flip::flip(a);
+        }
+        return a;
+    }
+
+    pub fn weight(Sign a) -> int {
+        return sign(a);
+    }
+
+    pub static fn unit() -> Sign {
+        return Sign::Pos;
+    }
+
+    pub static fn of(int n) -> Sign {
+        if n < 0 {
+            return Sign::Neg;
+        }
+        return Sign::Pos;
+    }
+}
+
+fn amt(Amt a) -> int {
+    return match a {
+        Amt::Int(x) => x,
+        Amt::Zero => 0,
+    };
+}
+
+fn sign(Sign s) -> int {
+    return match s {
+        Sign::Pos => 1,
+        Sign::Neg => -1,
+    };
+}
+
+fn plus<T: Add>(T a, T b) -> T {
+    return Add::add(a, b);
+}
+
+fn flipped<T: Flip>(T a, int k) -> T {
+    return Flip::scaled(Flip::flip(a), k);
+}
+
+fn weighed<T: Flip>(T a) -> int {
+    return Flip::weight(Flip::flip(a));
+}
+
+test("an operator trait's method through the trait") {
+    let q = Add::add(new V2(5, 6), new V2(1, 2));
+    assert!(q.x == 6 && q.y == 8);
+    let m = new V2(5, 6).add(new V2(1, 2));
+    assert!(m.x == q.x && m.y == q.y);
+    let n = Neg::neg(q);
+    assert!(n.x == -6 && n.y == -8);
+    let nested = Add::add(Add::add(q, q), Neg::neg(new V2(1, 1)));
+    assert!(nested.x == 11 && nested.y == 15);
+    let f = Add::add(new F2(1.5, 2), new F2(2.25, 3));
+    assert!(f.x == 3.75 && f.n == 5);
+    assert!(amt(Add::add(Amt::Int(3), Amt::Int(4))) == 7);
+    assert!(amt(Add::add(Amt::Zero, Amt::Int(4))) == 4);
+}
+
+test("a user trait's methods through the trait") {
+    let v = new V2(2, 3);
+    let f = Flip::flip(v);
+    assert!(f.x == 3 && f.y == 2);
+    let s = Flip::scaled(v, 4);
+    assert!(s.x == 8 && s.y == 12);
+    assert!(Flip::weight(v) == 5 && Flip::weight(Flip::scaled(v, 2)) == 10);
+    assert!(v.flip().x == 3 && v.scaled(4).y == 12);
+    assert!(amt(Flip::flip(Amt::Int(3))) == -3);
+    assert!(amt(Flip::scaled(Amt::Int(3), 5)) == 15);
+    assert!(Flip::weight(Amt::Int(9)) == 9);
+    assert!(sign(Flip::flip(Sign::Pos)) == -1);
+    assert!(sign(Flip::scaled(Sign::Pos, -2)) == -1 && Flip::weight(Sign::Neg) == -1);
+}
+
+test("a static trait method returning two words") {
+    let u: V2 = Flip::unit();
+    assert!(u.x == 1 && u.y == 1);
+    let o: V2 = Flip::of(4);
+    assert!(o.x == 4 && o.y == 5);
+    let v = V2::of(7);
+    assert!(v.x == 7 && v.y == 8);
+    let a: Amt = Flip::of(6);
+    assert!(amt(a) == 6 && amt(Amt::unit()) == 1);
+    let s: Sign = Flip::of(-1);
+    assert!(sign(s) == -1);
+}
+
+test("the trait spelling in a generic body") {
+    let v = plus(new V2(5, 6), new V2(1, 2));
+    assert!(v.x == 6 && v.y == 8);
+    let f = flipped(new V2(2, 3), 2);
+    assert!(f.x == 6 && f.y == 4);
+    assert!(weighed(new V2(2, 3)) == 5);
+    assert!(amt(plus(Amt::Int(1), Amt::Int(2))) == 3);
+    assert!(amt(flipped(Amt::Int(3), 2)) == -6);
+    assert!(sign(flipped(Sign::Pos, 1)) == -1 && weighed(Sign::Pos) == -1);
+    let p = plus(new F2(1.5, 1), new F2(1.5, 1));
+    assert!(p.x == 3.0 && p.n == 2);
+}

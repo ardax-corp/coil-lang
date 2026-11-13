@@ -51,5 +51,5 @@ test("an Option<float> constructor as a bounded method's value") {
     let s: Slot<int, Option<float>> = new Slot(1, None);
     s.set(Some(1.5));
     assert!(s.get(1, None) == Some(1.5));
-    assert!(show(s.get(2, None)) == "None");
+    assert!(s.get(2, None).show() == "None");
 }

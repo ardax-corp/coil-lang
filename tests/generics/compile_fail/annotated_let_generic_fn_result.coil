@@ -1,0 +1,10 @@
+// @expected E0102 — `g` is annotated `fn(int) -> Option<int>`, so its result is an `Option<int>`, not the `Option<string>` the next local declares (#2760).
+fn wrap<T>(T x) -> Option<T> {
+    return Option::Some(x);
+}
+
+fn main() {
+    let g: fn(int) -> Option<int> = wrap;
+    let s: Option<string> = g(1);
+    let _ = s;
+}

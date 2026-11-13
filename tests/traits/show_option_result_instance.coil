@@ -18,7 +18,7 @@ impl Show for Point {
 }
 
 fn shown<T: Show>(T x) -> string {
-    return show(x);
+    return x.show();
 }
 
 fn shown_method<T: Show>(T x) -> string {
@@ -42,30 +42,30 @@ fn half(int n) -> Result<int, string> {
 test("show of Option") {
     let o: Option<int> = Some(1);
     let n: Option<int> = None;
-    assert!(show(o) == "Some(1)", show(o));
-    assert!(show(n) == "None", show(n));
     assert!(o.show() == "Some(1)", o.show());
-    assert!(show(find(3)) == "Some(3)", show(find(3)));
-    assert!(show(find(0)) == "None", show(find(0)));
+    assert!(n.show() == "None", n.show());
+    assert!(o.show() == "Some(1)", o.show());
+    assert!(find(3).show() == "Some(3)", find(3).show());
+    assert!(find(0).show() == "None", find(0).show());
     let s: Option<string> = Some("s");
-    assert!(show(s) == "Some(s)", show(s));
+    assert!(s.show() == "Some(s)", s.show());
     let u: Option<()> = Some(());
-    assert!(show(u) == "Some(())", show(u));
+    assert!(u.show() == "Some(())", u.show());
     let p: Option<Point> = Some(new Point(1, 2));
-    assert!(show(p) == "Some(<1 2>)", show(p));
+    assert!(p.show() == "Some(<1 2>)", p.show());
     let t: Option<(int, int)> = Some((1, 2));
-    assert!(show(t) == "Some((1, 2))", show(t));
+    assert!(t.show() == "Some((1, 2))", t.show());
     let nested: Option<Option<int>> = Some(None);
-    assert!(show(nested) == "Some(None)", show(nested));
+    assert!(nested.show() == "Some(None)", nested.show());
 }
 
 test("show of Result") {
-    assert!(show(half(4)) == "Ok(2)", show(half(4)));
-    assert!(show(half(3)) == "Err(odd)", show(half(3)));
+    assert!(half(4).show() == "Ok(2)", half(4).show());
+    assert!(half(3).show() == "Err(odd)", half(3).show());
     let r: Result<float, int> = Err(7);
     assert!(r.show() == "Err(7)", r.show());
     let ok: Result<(), string> = Ok(());
-    assert!(show(ok) == "Ok(())", show(ok));
+    assert!(ok.show() == "Ok(())", ok.show());
 }
 
 test("format %v of Option and Result") {
@@ -78,7 +78,7 @@ test("format %v of Option and Result") {
     assert!(format("%v", (find(2), 1)) == "(Some(2), 1)", format("%v", (find(2), 1)));
     let xs: [Option<int>; 2] = [Some(1), None];
     assert!(format("%v", xs) == "[Some(1), None]", format("%v", xs));
-    assert!(show(xs) == "[Some(1), None]", show(xs));
+    assert!(xs.show() == "[Some(1), None]", xs.show());
 }
 
 test("Option and Result meet a Show bound") {

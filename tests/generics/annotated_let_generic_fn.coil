@@ -1,0 +1,110 @@
+// A `let` annotated with a ground function type and bound to a generic
+// function's name holds the function at that type: the local is that
+// type, called, copied, re-assigned, passed on and captured as any value
+// of it. Unannotated, or annotated `forall`, the local stays polymorphic
+// (coil-lang#2760).
+use tests::assert;
+use string::format;
+
+#[derive(Show, Eq)]
+class Pt {
+    pub a: int,
+}
+
+fn wrap<T>(T x) -> Option<T> {
+    return Option::Some(x);
+}
+
+fn ok<T>(T x) -> Result<T, string> {
+    return Result::Ok(x);
+}
+
+fn twice<T>(T x) -> (T, T) {
+    return (x, x);
+}
+
+fn keep<T>(T x) -> T {
+    return x;
+}
+
+fn first<T>(Option<T> x, T d) -> T {
+    return x ?? d;
+}
+
+fn plus(int x) -> Option<int> {
+    return Option::Some(x + 1);
+}
+
+class M {
+    pub k: int,
+}
+
+impl M {
+    pub static fn wrap<T>(T x) -> Option<T> {
+        return Option::Some(x);
+    }
+}
+
+fn run(fn(int) -> Option<int> f, int x) -> Option<int> {
+    return f(x);
+}
+
+fn show<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+test("an annotated local holds the generic function at its type") {
+    let g: fn(int) -> Option<int> = wrap;
+    assert!(show(g(3)) == "Some(3)");
+    let s: fn(string) -> Option<string> = wrap;
+    assert!(show(s("q")) == "Some(q)");
+    let p: fn(Pt) -> Result<Pt, string> = ok;
+    assert!(show(p(new Pt(2))) == "Ok(Pt { a: 2 })");
+    let t: fn(string) -> (string, string) = twice;
+    assert!(show(t("a")) == "(a, a)");
+    let k: fn(Option<int>) -> Option<int> = keep;
+    assert!(show(k(Option::Some(4))) == "Some(4)");
+    let u: fn(()) -> Option<()> = wrap;
+    assert!(show(u(())) == "Some(())");
+    let f: fn(Option<string>, string) -> string = first;
+    assert!(f(Option::None, "d") == "d");
+    let m: fn(string) -> Option<string> = M::wrap;
+    assert!(show(m("m")) == "Some(m)");
+}
+
+test("the local is called, passed on and copied as a value of its type") {
+    let g: fn(int) -> Option<int> = wrap;
+    assert!(show(run(g, 5)) == "Some(5)");
+    assert!(show(g(6)) == "Some(6)");
+    let h = g;
+    assert!(show(h(7)) == "Some(7)");
+    let v: Vec<fn(int) -> Option<int>> = Vec::from([g, plus]);
+    assert!(show(v[1](1)) == "Some(2)");
+    assert!(show(v[0](1)) == "Some(1)");
+}
+
+test("the local is re-assigned a ground function of its type and back") {
+    let g: fn(int) -> Option<int> = wrap;
+    g = plus;
+    assert!(show(g(1)) == "Some(2)");
+    g = wrap;
+    assert!(show(g(1)) == "Some(1)");
+}
+
+test("a lambda captures the local and calls it") {
+    let g: fn(string) -> Option<string> = wrap;
+    let k = fn (string s) use (g) => g(s);
+    assert!(show(k("c")) == "Some(c)");
+    let r: fn(Pt) -> Result<Pt, string> = ok;
+    let j = fn () use (r) => r(new Pt(9));
+    assert!(show(j()) == "Ok(Pt { a: 9 })");
+}
+
+test("unannotated or annotated forall, the local stays polymorphic") {
+    let g = wrap;
+    assert!(show(g(1)) == "Some(1)");
+    assert!(show(g("p")) == "Some(p)");
+    let f: forall T. T -> Option<T> = wrap;
+    assert!(show(f(2)) == "Some(2)");
+    assert!(show(f("f")) == "Some(f)");
+}

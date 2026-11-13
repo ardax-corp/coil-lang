@@ -1,0 +1,90 @@
+// Stores of young objects into a large old vector (#2687): once a minor
+// has given the vector a card table, every write path marks its cards,
+// and the next minor finds the young objects through them. Under
+// gc-stress and COIL_MIR_VERIFY the collector checks that no young object
+// sits in a clean card.
+use tests::assert;
+use gc::collect;
+
+class Node {
+    pub v: int,
+}
+
+// Allocates enough to run minors between the writes below.
+fn churn(int n) -> int {
+    let ring: Vec<Node> = Vec::new();
+    let i = 0;
+    while i < 8 {
+        ring.push(new Node(i));
+        i = i + 1;
+    }
+    let s = 0;
+    i = 0;
+    while i < n {
+        let x = new Node(i);
+        ring[i % 8] = x;
+        s = s + x.v;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn big(int n) -> Vec<Node> {
+    let v: Vec<Node> = Vec::new();
+    let i = 0;
+    while i < n {
+        v.push(new Node(i));
+        i = i + 1;
+    }
+    return v;
+}
+
+fn check(Vec<Node> v) -> int {
+    let bad = 0;
+    let i = 0;
+    while i < v.len() {
+        if v[i].v != i {
+            bad = bad + 1;
+        }
+        i = i + 1;
+    }
+    return bad;
+}
+
+test("stores into a tracked vector are found by card") {
+    let v = big(2048);
+    // Old, then remembered and scanned whole once: it has its table.
+    let _ = collect();
+    v[0] = new Node(0);
+    let _ = churn(70000);
+    let k = 0;
+    while k < 3000 {
+        // A quarter of the cards: the rest stay clean between minors.
+        let i = (k % 64) * 32 + k % 7;
+        v[i] = new Node(i);
+        if k % 100 == 0 {
+            let _ = churn(5000 + k);
+        }
+        k = k + 1;
+    }
+    let _ = churn(70000);
+    assert!(check(v) == 0, "every element names its own node");
+}
+
+test("pushes, inserts and removes move young objects across cards") {
+    let v = big(2048);
+    let _ = collect();
+    v[0] = new Node(0);
+    let _ = churn(70000);
+    let k = 0;
+    while k < 200 {
+        v.push(new Node(-1));
+        v.insert(5, new Node(-2));
+        let _ = v.remove(5);
+        let _ = v.pop();
+        v[k] = new Node(k);
+        k = k + 1;
+    }
+    let _ = churn(70000);
+    assert!(check(v) == 0, "every element names its own node");
+}

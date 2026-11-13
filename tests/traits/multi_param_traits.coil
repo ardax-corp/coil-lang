@@ -30,12 +30,12 @@ impl Convert<int> for Celsius {
 
 impl Convert<string> for int {
     fn cast(int x) -> string {
-        return "#" + show(x);
+        return "#" + x.show();
     }
 }
 
 fn apply_cast<A, B>(A x) -> B where Convert<A, B> {
-    return cast(x);
+    return x.cast();
 }
 
 test("the expected type of a method call picks the instance") {
@@ -44,7 +44,7 @@ test("the expected type of a method call picks the instance") {
     assert!(f.f == 212);
     let n: int = c.cast();
     assert!(n == 100);
-    let s: string = cast(7);
+    let s: string = 7.cast();
     assert!(s == "#7");
 }
 

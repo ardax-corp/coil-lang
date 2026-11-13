@@ -1,0 +1,112 @@
+// An element-wise operator on `byte` elements wraps each element modulo
+// 256, as the scalar operator does (coil-lang#882): the stored element,
+// an element read and `%v` agree. Fixed arrays, tuples, `Vec<byte>`, the
+// packed kernel (8 or more elements).
+use string::format;
+use tests::assert;
+
+fn b(int n) -> byte {
+    return n as byte;
+}
+
+fn x() -> [byte; 2] {
+    return [250, 1];
+}
+
+fn y() -> [byte; 2] {
+    return [10, 2];
+}
+
+fn wide() -> [byte; 9] {
+    return [250, 1, 2, 3, 4, 5, 6, 7, 8];
+}
+
+fn twos() -> [byte; 9] {
+    return [251, 2, 2, 2, 2, 2, 2, 2, 2];
+}
+
+test("a fixed array zip wraps what it stores") {
+    let c = x() + y();
+    assert!(c[0] == b(4) && c[1] == b(3));
+    assert!(c[0] as int == 4);
+    let first: byte = c[0];
+    assert!(first == b(4));
+    assert!(format("%v", c) == "[4, 3]", format("%v", c));
+    let d = y() - x();
+    assert!(format("%v", d) == "[16, 1]", format("%v", d));
+    let e = x() * y();
+    assert!(format("%v", e) == "[196, 2]", format("%v", e));
+}
+
+test("negation, broadcast and compound assignment") {
+    let n = -x();
+    assert!(format("%v", n) == "[6, 255]", format("%v", n));
+    let k = b(10);
+    let p = x() + k;
+    assert!(format("%v", p) == "[4, 11]", format("%v", p));
+    let q = k - x();
+    assert!(format("%v", q) == "[16, 9]", format("%v", q));
+    let m = x() * k;
+    assert!(format("%v", m) == "[196, 10]", format("%v", m));
+    let c = x();
+    c += y();
+    c *= k;
+    assert!(format("%v", c) == "[40, 30]", format("%v", c));
+}
+
+test("power wraps, division and remainder stay exact") {
+    let p = x() ** y();
+    assert!(format("%v", p) == "[0, 1]", format("%v", p));
+    let three: [byte; 2] = [3, 7];
+    let e: [byte; 2] = [7, 3];
+    let r = three ** e;
+    assert!(format("%v", r) == "[139, 87]", format("%v", r));
+    let d = x() / y();
+    assert!(format("%v", d) == "[25, 0]", format("%v", d));
+    let m = x() % y();
+    assert!(format("%v", m) == "[0, 1]", format("%v", m));
+}
+
+test("tuples") {
+    let t = (b(250), b(1));
+    let u = (b(10), b(2));
+    let s = t + u;
+    assert!(s[0] == b(4) && s[1] == b(3));
+    assert!(format("%v", s) == "(4, 3)", format("%v", s));
+    let t3 = (b(250), b(1), b(2));
+    let m = t3 * b(10);
+    assert!(format("%v", m) == "(196, 10, 20)", format("%v", m));
+    let n = -t3;
+    assert!(format("%v", n) == "(6, 255, 254)", format("%v", n));
+}
+
+test("a Vec of bytes") {
+    let v: Vec<byte> = Vec::from(x());
+    let k = b(10);
+    let m = v * k;
+    assert!(m[0] == b(196) && m[1] == b(10));
+    assert!(format("%v", m) == "[196, 10]", format("%v", m));
+    let p = v + k;
+    assert!(format("%v", p) == "[4, 11]", format("%v", p));
+    let s = k - v;
+    assert!(format("%v", s) == "[16, 9]", format("%v", s));
+    let n = -v;
+    assert!(format("%v", n) == "[6, 255]", format("%v", n));
+}
+
+test("the packed kernel") {
+    let l = wide();
+    let a = l + l;
+    assert!(a[0] == b(244) && a[8] == b(16));
+    assert!(format("%v", a) == "[244, 2, 4, 6, 8, 10, 12, 14, 16]", format("%v", a));
+    let s = l - twos();
+    assert!(format("%v", s) == "[255, 255, 0, 1, 2, 3, 4, 5, 6]", format("%v", s));
+    let m = l * l;
+    assert!(format("%v", m) == "[36, 1, 4, 9, 16, 25, 36, 49, 64]", format("%v", m));
+    let n = -l;
+    assert!(format("%v", n) == "[6, 255, 254, 253, 252, 251, 250, 249, 248]", format("%v", n));
+    let k = l * b(100);
+    assert!(format("%v", k) == "[168, 100, 200, 44, 144, 244, 88, 188, 32]", format("%v", k));
+    let f = b(5) - l;
+    assert!(format("%v", f) == "[11, 4, 3, 2, 1, 0, 255, 254, 253]", format("%v", f));
+}

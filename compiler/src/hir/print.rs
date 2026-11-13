@@ -362,15 +362,21 @@ impl Printer<'_> {
                     .map_or("?", |b| b.name.as_str());
                 self.line(depth, id, format!("lambda {name}"));
             }
-            HirKind::Yield { value, from } => {
+            HirKind::Yield { value, from, zero } => {
                 self.line(depth, id, (if from { "yield from" } else { "yield" }).to_string());
                 self.node(value, d);
+                if let Some(z) = zero {
+                    self.node(z, d);
+                }
             }
-            HirKind::Resume { handle, value } => {
+            HirKind::Resume { handle, value, zero } => {
                 self.line(depth, id, "resume".to_string());
                 self.node(handle, d);
                 if let Some(v) = value {
                     self.node(v, d);
+                }
+                if let Some(z) = zero {
+                    self.node(z, d);
                 }
             }
             HirKind::Defer { body, .. } => {

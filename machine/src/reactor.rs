@@ -1,6 +1,6 @@
 //! Fixed-size work-stealing pool for `thread::spawn` / auto-par fork-join.
 //!
-//! OS threads are created once per root VM (see [`crate::thread::WorkerCap`]
+//! OS threads are created once per root runtime (see [`crate::thread::WorkerCap`]
 //! pool size). Jobs are pushed to a shared injector and stolen via
 //! [`crossbeam_deque`]; `join` help-steals so fork-join does not deadlock
 //! when workers sit on joins.
@@ -16,11 +16,9 @@ use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
 use crate::ffi::{DloadGate, Natives};
 use crate::thread::{
-    HostStateGuard, JoinState, LiveThreadRegistry, PortableValue, SharedPrintWriter, SpawnArg,
-    ThreadErrorTag, ThreadProgram, ThreadSpawnContext, WORKER_STACK_SLOTS, spawn_arg_to_value,
-    value_to_portable,
+    JoinState, LiveThreadRegistry, PortableValue, SpawnArg,
+    ThreadErrorTag, ThreadProgram, ThreadSpawnContext,
 };
-use crate::vm::Machine;
 
 /// No OS threads on this target (wasm without the atomics feature): the pool
 /// starts no workers, and a joiner runs queued jobs itself, so a spawned
@@ -49,13 +47,13 @@ fn bump(counter: &AtomicUsize) {
     }
 }
 
-/// One unit of work for the reactor (isolated `call_function` on a worker VM).
+/// One unit of work for the reactor (isolated `call_function` on a worker runtime).
 /// A job's starting statics (see [`Job::statics`]).
 pub enum JobStatics {
-    /// The spawning VM's static words, raw: they name objects of the one
+    /// The spawning runtime's static words, raw: they name objects of the one
     /// heap a shared-heap job is bound to (#1561).
     Shared(Arc<Vec<u64>>),
-    /// The spawning VM's statics copied out of its heap for an isolate job,
+    /// The spawning runtime's statics copied out of its heap for an isolate job,
     /// one entry per slot; `None` (a slot that is unset, or holds a value
     /// that cannot cross threads) starts zeroed (#1663).
     Copied(Vec<Option<crate::thread::SpawnArg>>),
@@ -68,7 +66,7 @@ pub struct Job {
     pub program: Arc<ThreadProgram>,
     pub natives: Natives,
     pub shared_print: Option<Arc<Mutex<Vec<u8>>>>,
-    /// The stdout part of `shared_print` (see [`Machine::set_shared_stdout`]).
+    /// The stdout part of `shared_print` (see [`crate::io::set_shared_stdout_redirect`]).
     pub shared_stdout: Option<Arc<Mutex<Vec<u8>>>>,
     /// The stderr part of `shared_print`.
     pub shared_stderr: Option<Arc<Mutex<Vec<u8>>>>,
@@ -81,29 +79,33 @@ pub struct Job {
     /// C1 shared-heap steal (None = isolate + PortableValue).
     pub epoch: Option<Arc<crate::shared_heap::SharedHeapEpoch>>,
     /// C struct layouts for pass-by-value FFI (ids are indices, so the
-    /// worker VM takes the parent's list as is).
+    /// worker runtime takes the parent's list as is).
     pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
-    /// What the job's statics start as: the spawning VM's, so startup
+    /// What the job's statics start as: the spawning runtime's, so startup
     /// `const`s read the same values (#1561, #1663). `None` starts them
     /// zeroed.
     pub statics: Option<JobStatics>,
     /// Harness case (`coil-test`): run static init first, then report
     /// pass / fail instead of a spawn result.
     pub test: Option<TestJob>,
+    /// The spawner's native code (`None`: interpreter only).
+    pub native: Option<Arc<crate::native::NativeCode>>,
+    /// An attempt its spawner discards when it fails (an auto-par chunk or
+    /// arm): its panic fails the join and is not reported, since the
+    /// spawner then runs the same code itself and reports what that does.
+    pub speculative: bool,
 }
 
 /// A `test("…")` case (or a case-less file's `main`) run as a reactor job.
 pub struct TestJob {
-    /// Start of the static-init prologue. The job's program must have the
-    /// prologue's final `JMP main` patched to `HALT` (as
-    /// [`Machine::halt_first_jump_to`] does); `None` when there is no prologue.
-    pub init_ip: Option<u32>,
     /// `true`: pass means "returned `Result::Ok`" (a `test` case).
     /// `false`: pass means "did not panic" (a file's `main`).
     pub expect_ok_result: bool,
     /// Count executed instructions (`coverage` feature; ignored without it).
     pub coverage: bool,
-    /// Step budget for static init + case ([`Machine::set_step_budget`]);
+    /// Coverage probes in the program's MIR (`compiler::native_mir::coverage`).
+    pub probes: u32,
+    /// Step budget for static init + case ([`crate::Isolate::set_step_budget`]);
     /// `None` = unlimited. Threads the case spawns are not limited.
     pub step_budget: Option<u64>,
     /// Filled once the job finishes, before its join state completes.
@@ -117,10 +119,11 @@ pub struct TestReport {
     /// Why it failed when it returned `Err(reason)` (a panic's message is in
     /// the job's print buffer instead).
     pub reason: Option<String>,
-    /// Hit count per PC (static init + case) when the job asked for coverage.
-    /// Threads the case spawns run on other VMs and are not counted.
+    /// Hit count per coverage probe (static init + case) when the job asked
+    /// for coverage.
+    /// Threads the case spawns run on other runtimes and are not counted.
     pub hits: Option<Vec<u32>>,
-    /// Steps charged (static init + case; see [`Machine::set_step_budget`]).
+    /// Steps charged (static init + case; see [`crate::Isolate::set_step_budget`]).
     pub steps: u64,
     /// The case ran out of [`TestJob::step_budget`] (and so failed).
     pub timed_out: bool,
@@ -129,7 +132,7 @@ pub struct TestReport {
 /// Most spare threads [`Reactor::help_off_stack`] keeps alive at once.
 const MAX_SPARES: usize = 64;
 
-/// Per-root-VM work-stealing reactor.
+/// Per-root runtime work-stealing reactor.
 pub struct Reactor {
     injector: Injector<Job>,
     /// Harness cases ([`Self::submit_test`]). Only an idle worker takes one
@@ -250,12 +253,18 @@ impl Reactor {
 
     /// Wake idle workers and joiners. Holds `sleep` so a waiter cannot miss the
     /// signal between a failed steal and `wait` (idle and join park with no timeout).
+    /// A job stored its result: one fewer in flight, and waiters wake.
+    pub(crate) fn job_done(&self) {
+        self.inflight.fetch_sub(1, Ordering::SeqCst);
+        self.notify();
+    }
+
     fn notify(&self) {
         let _g = self.sleep.lock().unwrap_or_else(|e| e.into_inner());
         self.sleep_cvar.notify_all();
     }
 
-    /// Stop worker threads and join them. Call once the owning root VM's run
+    /// Stop worker threads and join them. Call once the owning root runtime's run
     /// has fully drained (its `live_threads` registry is empty) — workers
     /// hold their own `Arc<Reactor>` clone, so without an explicit stop they
     /// park forever and the reactor is never dropped.
@@ -311,7 +320,7 @@ impl Reactor {
         steal_from_injector(self).or_else(|| steal_from_peers(self))
     }
 
-    /// Run at most one stolen job on this thread's TLS helper VM.
+    /// Run at most one stolen job on this thread's TLS helper runtime.
     pub fn help_once(self: &Arc<Self>) {
         if let Some(job) = self.steal_job() {
             run_help_job(self, job);
@@ -390,10 +399,10 @@ impl Reactor {
         if is_pool_worker() {
             return wait_join_on_worker(self, state);
         }
-        self.wait_join_with_helper_vm(state)
+        self.wait_join_helping(state)
     }
 
-    fn wait_join_with_helper_vm(
+    fn wait_join_helping(
         self: &Arc<Self>,
         state: &JoinState,
     ) -> Result<PortableValue, ThreadErrorTag> {
@@ -470,12 +479,6 @@ thread_local! {
     static LOCAL_WORKER: std::cell::RefCell<Option<LocalWorkerBinding>> =
         const { std::cell::RefCell::new(None) };
     static IS_POOL_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Reused join-help VMs (one live checkout per nested steal on this thread).
-    /// Boxed so checking one out moves a pointer, not the VM (clippy only
-    /// sees the VM as small on 32-bit targets).
-    #[allow(clippy::vec_box)]
-    static HELP_VMS: std::cell::RefCell<Vec<Box<Machine<WORKER_STACK_SLOTS>>>> =
-        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// TLS binding of a work-stealing deque to the reactor that registered it.
@@ -520,48 +523,9 @@ fn with_owned_local_worker<R>(reactor: &Reactor, f: impl FnOnce(&Worker<Job>) ->
     })
 }
 
-fn machine_for_program(program: &ThreadProgram) -> Box<Machine<WORKER_STACK_SLOTS>> {
-    Box::new(Machine::with_operand_capacity(
-        program.operand_stack_slots as usize,
-    ))
-}
-
-/// Checkout a TLS helper VM, run `f`, then return it with a bounded heap.
-fn with_help_vm<R>(program: &ThreadProgram, f: impl FnOnce(&mut Machine<WORKER_STACK_SLOTS>) -> R) -> R {
-    let mut vm = HELP_VMS
-        .with(|slot| slot.borrow_mut().pop())
-        .unwrap_or_else(|| machine_for_program(program));
-    ensure_operand_capacity(&mut vm, program.operand_stack_slots);
-    let out = f(&mut vm);
-    vm.reset_isolate_heap();
-    HELP_VMS.with(|slot| {
-        let mut pool = slot.borrow_mut();
-        pool.push(vm);
-        // Nested steal can check out several VMs; keep one idle helper so
-        // peak RSS is not the high-water of every nest depth for the thread.
-        pool.truncate(1);
-    });
-    out
-}
-
-#[cfg(test)]
-fn help_vm_pool_len() -> usize {
-    HELP_VMS.with(|slot| slot.borrow().len())
-}
-
-fn ensure_operand_capacity(vm: &mut Machine<WORKER_STACK_SLOTS>, slots: u32) {
-    let need = (slots as usize).max(1);
-    if vm.operand_stack_capacity() < need {
-        *vm = Machine::with_operand_capacity(need);
-    }
-}
-
 fn worker_loop(reactor: Arc<Reactor>) {
     let local = Worker::new_fifo();
     reactor.register_stealer(local.stealer());
-
-    let mut vm = Machine::<WORKER_STACK_SLOTS>::default();
-    vm.set_reactor(Arc::clone(&reactor));
 
     IS_POOL_WORKER.with(|c| c.set(true));
     let binding_id = Arc::as_ptr(&reactor);
@@ -585,9 +549,11 @@ fn worker_loop(reactor: Arc<Reactor>) {
                 .or_else(|| park_idle_worker(&reactor))
         };
         if let Some(job) = job {
-            ensure_operand_capacity(&mut vm, job.program.operand_stack_slots);
-            vm.set_reactor(Arc::clone(&reactor));
-            run_job_on_vm(&mut vm, job);
+            if crate::worker::runs_natively(&job) {
+                crate::worker::run_native_job(job);
+                continue;
+            }
+            refuse_job(job);
         }
     }
 
@@ -597,14 +563,29 @@ fn worker_loop(reactor: Arc<Reactor>) {
 
 fn run_help_job(reactor: &Reactor, job: Job) {
     bump(&reactor.join_helps);
-    let program = Arc::clone(&job.program);
     // The waiting job may be mid-epoch on its own heap; the helped one must
     // not allocate from (or flush into) that batch (#766, #779).
     let _stash = crate::memory::stash_epoch_batch();
     // The waiting job's shared-heap write guard does not cover the helped
-    // job, nor the reset of the helper VM's own heap afterwards.
+    // job, nor the reset of the helper runtime's own heap afterwards.
     let _write_scope = crate::memory::EpochWriteScope::unchecked();
-    with_help_vm(&program, |vm| run_job_on_vm(vm, job));
+    run_job_here(job);
+}
+
+/// Run `job` on this thread: on the driver when its native code covers
+/// it, else on a helper runtime.
+fn run_job_here(job: Job) {
+    if crate::worker::runs_natively(&job) {
+        return crate::worker::run_native_job(job);
+    }
+    refuse_job(job);
+}
+
+/// A job with no code to run fails its join.
+fn refuse_job(job: Job) {
+    eprintln!("coil: a thread's code was not compiled for this runtime");
+    job.state.store_result_with_panic(Err(ThreadErrorTag::JoinFailed), None);
+    job.reactor.job_done();
 }
 
 /// Recheck shutdown/steal under `sleep` then wait until `notify` (submit /
@@ -690,154 +671,6 @@ fn wait_join_on_worker(
     })
 }
 
-fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
-    let Job {
-        entry,
-        args,
-        state,
-        program,
-        natives,
-        shared_print,
-        shared_stdout,
-        shared_stderr,
-        live_threads,
-        reactor,
-        io_reactor,
-        ffi_base_dir,
-        ffi_search_paths,
-        dload_gate,
-        epoch,
-        struct_layouts,
-        test,
-        statics,
-    } = job;
-
-    // A joining root help-steals jobs onto its *own* thread, so the print
-    // redirects have to be saved and put back: `OUTPUT_REDIRECT` points into
-    // `vm`'s boxed writer, which dies with `vm` at the end of this call.
-    let redirected = shared_print.is_some();
-    let prev_output = redirected
-        .then(|| crate::io::set_output_redirect(None))
-        .flatten();
-    let prev_shared_print = redirected
-        .then(|| crate::io::set_shared_print_redirect(None))
-        .flatten();
-    let prev_shared_stdout = redirected
-        .then(|| crate::io::set_shared_stdout_redirect(None))
-        .flatten();
-    let prev_shared_stderr = redirected
-        .then(|| crate::io::set_shared_stderr_redirect(None))
-        .flatten();
-    // A job starts with no `io::capture_begin()` open, and one it leaves
-    // open (an `assert!` between begin and end) ends with it.
-    let prev_captures = crate::io::take_captures();
-    if let Some(e) = &epoch {
-        vm.bind_shared_heap(e);
-    }
-    let shared = epoch.is_some();
-    // A trapped `env::exit` belongs to the job that made it; a job this
-    // thread runs while helping a join neither sees nor clears it.
-    let outer_exit = crate::env::take_exit_request();
-    // `set_thread_program` installs the job's static word kinds on this
-    // thread; a VM waiting here in a join reads its own statics by the ones
-    // it had (#2053).
-    let outer_static_kinds = crate::vm::swap_static_word_kinds(Arc::clone(&program.static_word_kinds));
-    let mut panic_message = None;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        vm.install_natives(&natives);
-        vm.set_thread_program(Arc::clone(&program));
-        vm.set_program_debug(program.debug.clone());
-        vm.set_live_threads(Arc::clone(&live_threads));
-        vm.set_reactor(Arc::clone(&reactor));
-        vm.set_io_reactor(Arc::clone(&io_reactor));
-        vm.set_worker_cap(crate::thread::WorkerCap::from_count(reactor.worker_count()));
-        vm.set_ffi_paths(ffi_base_dir, ffi_search_paths);
-        vm.set_dload_gate(dload_gate);
-        if let Some(buf) = &shared_print {
-            vm.set_shared_print(Arc::clone(buf));
-            vm.with_output(SharedPrintWriter(Arc::clone(buf)));
-            crate::io::set_shared_print_redirect(Some(Arc::clone(buf)));
-            vm.set_shared_stdout(shared_stdout.clone());
-            vm.set_shared_stderr(shared_stderr.clone());
-        }
-        vm.load_shared_program(
-            Arc::clone(&program.code),
-            Arc::clone(&program.constants),
-            Arc::clone(&program.strings),
-        );
-        vm.set_struct_layouts(struct_layouts);
-        // A job reads the spawner's statics (startup `const`s, tables built
-        // once): a shared-heap job its words as they are, an isolate job
-        // the copies made into its own heap.
-        match statics {
-            Some(JobStatics::Shared(words)) if shared => vm.load_shared_statics(&words),
-            statics => {
-                vm.init_static_slots(program.static_slot_count);
-                if let Some(JobStatics::Copied(slots)) = statics {
-                    vm.load_copied_statics(slots);
-                }
-            }
-        }
-
-        let _guard = HostStateGuard::enter(vm);
-        // Debug / gc-stress: a shared-heap job may write only objects of its
-        // epoch; any other job on this thread (help-steal) writes freely.
-        let _write_scope = crate::memory::EpochWriteScope::enter(vm.heap(), shared);
-        if let Some(test) = &test {
-            return Ok(run_test_job(vm, entry, test));
-        }
-        let mut child_args = Vec::with_capacity(args.len());
-        for a in args {
-            child_args.push(spawn_arg_to_value(vm.heap_mut(), a)?);
-        }
-        // A reused worker VM still holds its last job's panic message.
-        let _ = vm.take_panic_message();
-        let ret = vm.call_function(entry, &child_args);
-        if epoch.as_ref().is_some_and(|e| e.is_aborted()) {
-            return Err(ThreadErrorTag::JoinFailed);
-        }
-        if vm.panicked() {
-            panic_message = Some(vm.take_panic_message());
-            return Err(ThreadErrorTag::Panicked);
-        }
-        if shared {
-            Ok(PortableValue::Immediate(ret.bits()))
-        } else {
-            value_to_portable(vm.heap(), ret)
-        }
-    }));
-    crate::env::restore_exit_request(outer_exit);
-    crate::vm::swap_static_word_kinds(outer_static_kinds);
-    crate::io::flush_open_captures();
-    if redirected {
-        crate::io::set_output_redirect(prev_output);
-        crate::io::set_shared_print_redirect(prev_shared_print);
-        crate::io::set_shared_stdout_redirect(prev_shared_stdout);
-        crate::io::set_shared_stderr_redirect(prev_shared_stderr);
-    }
-    crate::io::restore_captures(prev_captures);
-
-    let stored = match result {
-        Ok(Ok(pv)) => Ok(pv),
-        Ok(Err(tag)) => Err(tag),
-        Err(_) => Err(ThreadErrorTag::JoinFailed),
-    };
-    if shared {
-        // Before the joiner can see the result and close the epoch.
-        vm.heap_mut().flush_epoch_batch();
-    }
-    state.store_result_with_panic(stored, panic_message);
-    reactor.inflight.fetch_sub(1, Ordering::SeqCst);
-    reactor.notify();
-    if shared {
-        vm.clear_statics();
-        vm.unbind_shared_heap();
-        vm.reset_shared_stack();
-    } else {
-        vm.reset_isolate_heap();
-    }
-}
-
 /// A submitted [`TestJob`]; [`Self::wait`] blocks (help-stealing) until it ends.
 pub struct TestHandle {
     reactor: Arc<Reactor>,
@@ -863,7 +696,7 @@ impl TestHandle {
         TestProbe(Arc::clone(&self.state))
     }
 
-    /// Block until the case finishes. A Rust panic inside the VM (an ICE) is
+    /// Block until the case finishes. A Rust panic inside the runtime (an ICE) is
     /// a failed case, not a harness abort.
     pub fn wait(self) -> TestReport {
         let joined = self.reactor.wait_join(&self.state);
@@ -886,7 +719,7 @@ impl TestHandle {
 }
 
 impl Reactor {
-    /// Queue a harness case built from a root VM's spawn context. `print`
+    /// Queue a harness case built from a root runtime's spawn context. `print`
     /// captures the case's output (prints and panic messages).
     pub fn submit_test(
         self: &Arc<Self>,
@@ -918,8 +751,7 @@ impl Reactor {
     ) -> TestReport {
         let (job, state, report) = self.test_job(ctx, case, print);
         self.inflight.fetch_add(1, Ordering::SeqCst);
-        let program = Arc::clone(&job.program);
-        with_help_vm(&program, |vm| run_job_on_vm(vm, job));
+        run_job_here(job);
         TestHandle {
             reactor: Arc::clone(self),
             state,
@@ -940,9 +772,9 @@ impl Reactor {
         job.reactor = Arc::clone(self);
         job.shared_print = Some(print);
         job.test = Some(TestJob {
-            init_ip: case.init_ip,
             expect_ok_result: case.expect_ok_result,
             coverage: case.coverage,
+            probes: case.probes,
             step_budget: case.step_budget,
             report: Arc::clone(&report),
         });
@@ -955,67 +787,55 @@ impl Reactor {
 pub struct TestCase {
     /// Function to call (a `test("…")` body, or `main`).
     pub entry: u32,
-    /// See [`TestJob::init_ip`].
-    pub init_ip: Option<u32>,
     /// See [`TestJob::expect_ok_result`].
     pub expect_ok_result: bool,
     /// See [`TestJob::coverage`].
     pub coverage: bool,
+    /// See [`TestJob::probes`].
+    pub probes: u32,
     /// See [`TestJob::step_budget`].
     pub step_budget: Option<u64>,
 }
 
-/// Static init, then the case; the report is stored before the join completes.
-fn run_test_job(vm: &mut Machine<WORKER_STACK_SLOTS>, entry: u32, test: &TestJob) -> PortableValue {
-    // A case's GC roots must not depend on which job this worker ran before
-    // (#1006): no stale word from it may pass for a root.
-    vm.clear_operand_stack();
-    #[cfg(feature = "coverage")]
-    if test.coverage {
-        vm.begin_coverage();
+/// A harness case on the driver: its static init, then the case, then
+/// (for a file's `main`) the finalizers left. The case's return, `None`
+/// when it panicked.
+pub(crate) fn test_on_driver(d: &mut crate::driver::Driver<'_>, entry: u32, test: &TestJob) -> Option<common::Value> {
+    d.run_startup();
+    if d.panicked() {
+        return None;
     }
-    vm.set_step_budget(test.step_budget);
-    if let Some(ip) = test.init_ip {
-        vm.run_from(ip as usize);
+    let ret = d.call(entry as usize, &[]);
+    if !test.expect_ok_result {
+        d.run_remaining_finalizers();
     }
-    let (mut passed, reason) = if vm.panicked() {
-        (false, None)
-    } else {
-        let ret = vm.call_function(entry, &[]);
-        if !test.expect_ok_result {
-            // A `main` case is a whole program: as with `coil FILE`, the
-            // finalizers still pending run before exit, while their output
-            // is still captured (the worker heap is reset after the job).
-            vm.run_remaining_finalizers();
-        }
-        if vm.panicked() {
-            (false, None)
-        } else if !test.expect_ok_result || vm.result_is_ok(ret) {
-            (true, None)
-        } else {
-            (false, vm.result_err_text(ret))
-        }
+    ret.map(|(lo, _)| common::Value::from(lo))
+}
+
+/// Store a finished case's report: whether it passed, by `ret` (its
+/// return) and whether it `panicked`.
+pub(crate) fn finish_test(
+    panicked: bool,
+    ret: Option<common::Value>,
+    heap: &crate::memory::Heap,
+    test: &TestJob,
+    hits: Option<Vec<u32>>,
+    (steps, timed_out): (u64, bool),
+) -> PortableValue {
+    let (mut passed, reason) = match ret {
+        _ if panicked => (false, None),
+        Some(_) if !test.expect_ok_result => (true, None),
+        Some(v) if crate::format::result_is_ok(heap, v) => (true, None),
+        Some(v) => (false, crate::format::result_err_text(heap, v)),
+        None => (false, None),
     };
     // A trapped `env::exit` (#1401) panicked the job. A `main` case is a
     // program, so `exit(0)` is its clean end; a `test` case that exits
     // skipped the rest of its body, so it fails whatever the code.
     if let Some(code) = crate::env::take_exit_request() {
-        passed = !test.expect_ok_result && code == 0 && !vm.step_budget_exhausted();
+        passed = !test.expect_ok_result && code == 0 && !timed_out;
     }
-    #[cfg(feature = "coverage")]
-    let hits = vm.take_coverage();
-    #[cfg(not(feature = "coverage"))]
-    let hits = None;
-    let (steps, timed_out) = (vm.steps_charged(), vm.step_budget_exhausted());
-    // The worker VM runs other jobs next.
-    vm.set_step_budget(None);
-    let report = TestReport {
-        passed,
-        reason,
-        hits,
-        steps,
-        timed_out,
-    };
+    let report = TestReport { passed, reason, hits, steps, timed_out };
     *test.report.lock().unwrap_or_else(|e| e.into_inner()) = Some(report);
     PortableValue::Immediate(u64::from(passed))
 }
@@ -1046,31 +866,48 @@ pub fn job_from_spawn_context(
         struct_layouts: ctx.struct_layouts,
         test: None,
         statics: None,
+        native: ctx.native,
+        speculative: false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{Byte, Instruction, ProgramDebug};
+    use common::ProgramDebug;
 
-    fn const_return_program(imm: i32) -> Arc<ThreadProgram> {
-        let code = vec![
-            Byte::new(Instruction::CONST).with_value_u32(imm as u32),
-            Byte::new(Instruction::RETURN),
-        ];
+    fn const_return_program(_: i32) -> Arc<ThreadProgram> {
         Arc::new(ThreadProgram {
-            code: Arc::new(code),
+            startup: Arc::default(),
+            main: None,
             constants: Arc::new(Vec::new()),
             strings: Arc::new(Vec::new()),
             static_slot_count: 0,
             debug: ProgramDebug::default(),
-            operand_stack_slots: crate::DEFAULT_OPERAND_STACK_SLOTS as u32,
-            stack_maps: Vec::new(),
-            precise_frames: Arc::default(),
             class_word_kinds: Arc::default(),
             static_word_kinds: Arc::default(),
         })
+    }
+
+    /// Native code whose one body, at PC 0, returns `imm`.
+    fn const_code(imm: i32) -> Option<Arc<crate::native::NativeCode>> {
+        unsafe extern "C" fn returns_data(ctx: *mut crate::native::NativeCtx, _: *const u64) -> u64 {
+            // SAFETY: the context of this call.
+            unsafe { (*ctx).entry_data }
+        }
+        let entry = crate::native::NativeEntry {
+            pc: 0,
+            arity: 0,
+            suspends: false,
+            reads: 0,
+            ret_words: 1,
+            generator: false,
+            cleanup: false,
+            entry: returns_data,
+            data: imm as usize,
+            twin: 0,
+        };
+        Some(Arc::new(crate::native::NativeCode::new(vec![entry], Vec::new()).with_complete(true)))
     }
 
     fn submit_const_job(reactor: &Arc<Reactor>, imm: i32) -> Arc<JoinState> {
@@ -1094,6 +931,8 @@ mod tests {
             struct_layouts: Arc::default(),
             test: None,
             statics: None,
+            native: const_code(imm),
+            speculative: false,
         };
         reactor.submit(job);
         state
@@ -1106,7 +945,7 @@ mod tests {
     }
 
     fn test_ctx(reactor: &Arc<Reactor>, imm: i32) -> crate::thread::ThreadSpawnContext {
-        program_ctx(reactor, const_return_program(imm))
+        crate::thread::ThreadSpawnContext { native: const_code(imm), ..program_ctx(reactor, const_return_program(imm)) }
     }
 
     fn program_ctx(
@@ -1128,6 +967,7 @@ mod tests {
             dload_gate: DloadGate::deny_all(),
             struct_layouts: Arc::default(),
             statics: Arc::default(),
+            native: None,
         }
     }
 
@@ -1138,9 +978,9 @@ mod tests {
         let reactor = Reactor::new(2);
         let case = TestCase {
             entry: 0,
-            init_ip: None,
             expect_ok_result: false,
             coverage: false,
+            probes: 0,
             step_budget: None,
         };
         let pooled = reactor.submit_test(test_ctx(&reactor, 3), case, Arc::default());
@@ -1149,7 +989,7 @@ mod tests {
             passed: true,
             reason: None,
             hits: None,
-            steps: 1,
+            steps: 0,
             timed_out: false,
         };
         assert_eq!(pooled.wait(), expect);
@@ -1163,45 +1003,16 @@ mod tests {
         reactor.shutdown();
     }
 
-    /// A case that never returns fails once its step budget runs out, and
-    /// the worker VM runs the next job without a budget.
-    #[test]
-    fn test_jobs_time_out_on_step_budget() {
-        let reactor = Reactor::new(1);
-        let spin = Arc::new(ThreadProgram {
-            code: Arc::new(vec![Byte::new(Instruction::JMP).with_value_u32(0)]),
-            ..(*const_return_program(0)).clone()
-        });
-        let case = TestCase {
-            entry: 0,
-            init_ip: None,
-            expect_ok_result: false,
-            coverage: false,
-            step_budget: Some(50),
-        };
-        let report = reactor.run_test_here(program_ctx(&reactor, spin), case, Arc::default());
-        assert!(!report.passed);
-        assert!(report.timed_out);
-        assert_eq!(report.steps, 50);
-        let unlimited = TestCase {
-            step_budget: None,
-            ..case
-        };
-        let next = reactor.run_test_here(test_ctx(&reactor, 2), unlimited, Arc::default());
-        assert!(next.passed && !next.timed_out);
-        reactor.shutdown();
-    }
-
     /// A job run on a thread that is waiting on its own job (a join's
     /// help-steal, or a test run here) leaves that thread's static word
-    /// kinds as they were: the waiting VM's next GC reads its statics by
+    /// kinds as they were: the waiting runtime's next GC reads its statics by
     /// them, and a helped job of another program has another layout
     /// (coil-lang#2053).
     #[test]
     fn job_run_here_keeps_this_threads_static_kinds() {
         let reactor = Reactor::new(1);
         let mine = Arc::new(vec![common::WORD_SCALAR, common::WORD_POINTER]);
-        let outer = crate::vm::swap_static_word_kinds(Arc::clone(&mine));
+        let outer = crate::collect::swap_static_word_kinds(Arc::clone(&mine));
         let other = Arc::new(ThreadProgram {
             static_slot_count: 1,
             static_word_kinds: Arc::new(vec![common::WORD_POINTER]),
@@ -1209,31 +1020,15 @@ mod tests {
         });
         let case = TestCase {
             entry: 0,
-            init_ip: None,
             expect_ok_result: false,
             coverage: false,
+            probes: 0,
             step_budget: None,
         };
-        assert!(reactor.run_test_here(program_ctx(&reactor, other), case, Arc::default()).passed);
-        let after = crate::vm::swap_static_word_kinds(outer);
+        let ctx = crate::thread::ThreadSpawnContext { native: const_code(1), ..program_ctx(&reactor, other) };
+        assert!(reactor.run_test_here(ctx, case, Arc::default()).passed);
+        let after = crate::collect::swap_static_word_kinds(outer);
         assert_eq!(*after, *mine);
-        reactor.shutdown();
-    }
-
-    /// With coverage on, both instructions of `CONST; RETURN` are counted once.
-    #[cfg(feature = "coverage")]
-    #[test]
-    fn test_jobs_count_executed_instructions() {
-        let reactor = Reactor::new(1);
-        let case = TestCase {
-            entry: 0,
-            init_ip: None,
-            expect_ok_result: false,
-            coverage: true,
-            step_budget: None,
-        };
-        let report = reactor.run_test_here(test_ctx(&reactor, 1), case, Arc::default());
-        assert_eq!(report.hits.as_deref(), Some(&[1, 1][..]));
         reactor.shutdown();
     }
 
@@ -1395,6 +1190,8 @@ mod tests {
             struct_layouts: Arc::default(),
             test: None,
             statics: None,
+            native: None,
+            speculative: false,
         };
         // Must not push onto owner's deque — job goes to `foreign`'s injector.
         assert!(
@@ -1434,65 +1231,5 @@ mod tests {
         reactor.help_once();
         reactor.help_once();
         assert_eq!(reactor.inflight(), 0);
-    }
-
-    #[test]
-    fn ensure_operand_capacity_grows_but_not_shrinks() {
-        let mut vm = Machine::<WORKER_STACK_SLOTS>::with_operand_capacity(64);
-        assert_eq!(vm.operand_stack_capacity(), 64);
-
-        ensure_operand_capacity(&mut vm, 512);
-        assert_eq!(vm.operand_stack_capacity(), 512);
-
-        // Smaller request must leave the larger stack in place.
-        ensure_operand_capacity(&mut vm, 128);
-        assert_eq!(vm.operand_stack_capacity(), 512);
-    }
-
-    #[test]
-    fn machine_for_program_honors_operand_stack_slots() {
-        let prog = Arc::new(ThreadProgram {
-            code: Arc::new(vec![
-                Byte::new(Instruction::CONST).with_value_u32(7),
-                Byte::new(Instruction::RETURN),
-            ]),
-            constants: Arc::new(Vec::new()),
-            strings: Arc::new(Vec::new()),
-            static_slot_count: 0,
-            debug: ProgramDebug::default(),
-            operand_stack_slots: 1024,
-            stack_maps: Vec::new(),
-            precise_frames: Arc::default(),
-            class_word_kinds: Arc::default(),
-            static_word_kinds: Arc::default(),
-        });
-        let vm = machine_for_program(&prog);
-        assert_eq!(vm.operand_stack_capacity(), 1024);
-    }
-
-    #[test]
-    fn tls_help_vm_pool_reuses_and_nests() {
-        HELP_VMS.with(|slot| slot.borrow_mut().clear());
-        let prog = const_return_program(1);
-        with_help_vm(&prog, |_| {});
-        assert_eq!(help_vm_pool_len(), 1);
-        let first = HELP_VMS.with(|slot| {
-            slot.borrow().last().map(|vm| vm.as_ref() as *const Machine<WORKER_STACK_SLOTS>)
-        });
-        with_help_vm(&prog, |_| {});
-        let second = HELP_VMS.with(|slot| {
-            slot.borrow().last().map(|vm| vm.as_ref() as *const Machine<WORKER_STACK_SLOTS>)
-        });
-        assert_eq!(first, second, "idle helper must be reused");
-
-        with_help_vm(&prog, |_| {
-            with_help_vm(&prog, |_| {});
-        });
-        assert_eq!(
-            help_vm_pool_len(),
-            1,
-            "nested join-help must not keep every nest depth idle"
-        );
-        HELP_VMS.with(|slot| slot.borrow_mut().clear());
     }
 }

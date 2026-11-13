@@ -1,0 +1,101 @@
+// A local of a two-word type lives in two slots whatever its init: an
+// element or field read unpacks once at the `let`, and `=` rebinds both
+// words, in straight-line code and around loops.
+use tests::assert;
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+
+readonly class P {
+    pub a: int,
+    pub b: int,
+}
+
+class Holder {
+    pub o: Option<int>,
+}
+
+fn last_half(int n) -> int {
+    let best = half(1);
+    let i = 0;
+    while i < n {
+        let h = half(i);
+        if h != None {
+            best = h;
+        }
+        i = i + 1;
+    }
+    return match best {
+        Some(v) => v,
+        None => -1,
+    };
+}
+
+fn fib(int n) -> int {
+    let p = (0, 1);
+    let i = 0;
+    while i < n {
+        p = (p[1], p[0] + p[1]);
+        i = i + 1;
+    }
+    return p[0];
+}
+
+fn mixed(int n) -> float {
+    let p = (n, 0.5);
+    if n > 2 {
+        p = (n * 2, 1.5);
+    }
+    return (p[0] as float) + p[1];
+}
+
+fn swap_class(int n) -> int {
+    let q = new P(n, n + 1);
+    let i = 0;
+    while i < 3 {
+        q = new P(q.b, q.a);
+        i = i + 1;
+    }
+    return q.a * 10 + q.b;
+}
+
+fn from_element(Vec<Option<int>> v) -> int {
+    let s = 0;
+    for i in 0..v.len() {
+        let o = v[i];
+        s += match o {
+            Some(x) => x,
+            None => 100,
+        };
+    }
+    return s;
+}
+
+fn from_field(Holder h) -> int {
+    let o = h.o;
+    o = match o {
+        Some(x) => Some(x + 1),
+        None => None,
+    };
+    return match o {
+        Some(x) => x,
+        None => 0,
+    };
+}
+
+fn main() {
+    assert!(last_half(9) == 4);
+    assert!(last_half(0) == -1);
+    assert!(fib(10) == 55);
+    assert!(mixed(1) == 1.5);
+    assert!(mixed(3) == 7.5);
+    assert!(swap_class(1) == 21);
+    assert!(from_element(Vec::from([Some(1), None, Some(5)])) == 106);
+    assert!(from_field(new Holder(Some(41))) == 42);
+    assert!(from_field(new Holder(None)) == 0);
+}

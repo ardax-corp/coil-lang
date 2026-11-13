@@ -1,0 +1,88 @@
+// A lambda that captures a `forall` parameter calls it at any type, as the
+// body that has the parameter does: the call through the capture passes
+// the dictionaries and `kinds` bits of its own types (coil-lang#2724).
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+trait Bump<T> {
+    fn bump(T x) {}
+}
+
+impl Bump for Box {
+    fn bump(Box b) {
+        b.n = b.n + 1;
+    }
+}
+
+impl Bump for int {
+    fn bump(int x) {}
+}
+
+fn id<T>(T x) -> T {
+    return x;
+}
+
+fn shown<T: Show>(T x) -> string {
+    return x.show() + "!";
+}
+
+fn same<A: Eq, B: Show>(B b, A x, A y) -> string {
+    if x == y {
+        return b.show();
+    }
+    return "ne";
+}
+
+fn bumped<T: Bump>(T x) -> T {
+    let y = x;
+    y.bump();
+    return x;
+}
+
+fn run_id(forall T. T -> T g) -> string {
+    let f = fn () use (g) => g(1).show() + g("s");
+    return f();
+}
+
+fn run_shown(forall T: Show. T -> string g) -> string {
+    let f = fn (int k) use (g) => g(k) + g("s") + g(Option::Some(2));
+    return f(4);
+}
+
+fn run_same(forall A: Eq, B: Show. B -> A -> A -> string g) -> string {
+    let f = fn () use (g) => g(1, "a", "a") + " " + g("x", 1, 2);
+    return f();
+}
+
+fn run_bumped(forall T: Bump. T -> T g, Box b) -> int {
+    let f = fn () use (g, b) => g(b).n;
+    return f();
+}
+
+// Two levels of lambdas.
+fn run_nested(forall T: Show. T -> string g) -> string {
+    let outer = fn () use (g) {
+        let inner = fn () use (g) => g(true);
+        inner()
+    };
+    return outer();
+}
+
+test("an unbounded forall called from a lambda") {
+    assert!(run_id(id) == "1s");
+}
+
+test("bounded foralls called from a lambda") {
+    assert!(run_shown(shown) == "4!s!Some(2)!");
+    assert!(run_same(same) == "1 ne");
+    assert!(run_nested(shown) == "true!");
+}
+
+test("a copy written in the callee leaves the captured value") {
+    let b = new Box(1);
+    assert!(run_bumped(bumped, b) == 1);
+    assert!(b.n == 1);
+}

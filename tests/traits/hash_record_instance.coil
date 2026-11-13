@@ -1,0 +1,64 @@
+// A ground anonymous record has a structural `Hash` instance, as a tuple
+// has: `hash` combines its fields' hashes in name order, as a derived
+// `Hash` combines fields. It meets a `T: Hash` bound through a monomorphic
+// clone and a shared generic body, so a record can key a `HashMap` (#2380).
+use tests::assert;
+use collections::map::HashMap;
+
+#[derive(Eq, Hash)]
+class Point {
+    pub x: int,
+    pub y: int,
+}
+
+fn hashed<T: Hash>(T x) -> int {
+    return x.hash();
+}
+
+// A derived `Hash`'s combination of two hashes.
+fn combine(int a, int b) -> int {
+    return ((a & 288230376151711743) * 31) ^ b;
+}
+
+test("hash of a record") {
+    assert!({ x: 1, y: 2 }.hash() == combine(1.hash(), 2.hash()));
+    assert!({ x: 1, y: 2 }.hash() == { x: 1, y: 2 }.hash());
+    assert!({ x: 1, y: 2 }.hash() != { x: 2, y: 1 }.hash());
+    assert!(
+        { a: "a", b: true, c: 3 }.hash() == combine(combine("a".hash(), true.hash()), 3.hash()),
+    );
+    assert!({ only: "s" }.hash() == "s".hash());
+}
+
+test("fields hash in name order") {
+    assert!({ y: 2, x: 1 }.hash() == combine(1.hash(), 2.hash()));
+    assert!({ y: "b", x: 1 }.hash() == { x: 1, y: "b" }.hash());
+    assert!(hashed({ y: "b", x: 1 }) == hashed({ x: 1, y: "b" }));
+}
+
+test("a record's parts hash through their own instances") {
+    let p = new Point(1, 2);
+    assert!({ p: p, t: (1, 2) }.hash() == combine(p.hash(), (1, 2).hash()));
+    assert!({ a: [1, 2], u: () }.hash() == combine([1, 2].hash(), 0));
+    assert!({ inner: { x: 1, y: 2 }, z: 3 }.hash() == combine({ x: 1, y: 2 }.hash(), 3.hash()));
+    assert!(({ x: 1 }, 2).hash() == combine({ x: 1 }.hash(), 2.hash()));
+    assert!([{ x: 1 }, { x: 2 }].hash() == combine({ x: 1 }.hash(), { x: 2 }.hash()));
+}
+
+test("a record meets a Hash bound") {
+    assert!(hashed({ x: 1, y: 2 }) == { x: 1, y: 2 }.hash());
+    let h = hashed;
+    assert!(h({ x: 1, y: 2 }) == { x: 1, y: 2 }.hash());
+    assert!(h({ name: "a", on: true }) == { name: "a", on: true }.hash());
+}
+
+test("a record keys a HashMap") {
+    let m = HashMap::new();
+    m.insert({ x: 1, y: 2 }, "a");
+    m.insert({ x: 2, y: 1 }, "b");
+    m.insert({ y: 2, x: 1 }, "c");
+    assert!(m.len() == 2);
+    assert!(m.get_or({ x: 1, y: 2 }, "") == "c");
+    assert!(m.get_or({ x: 2, y: 1 }, "") == "b");
+    assert!(m.get_or({ x: 3, y: 3 }, "none") == "none");
+}

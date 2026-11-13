@@ -1,0 +1,27 @@
+// @expected E0149 — code not known here is given `d`, which holds the
+// object `w` borrows, and may keep it (#2825); `w` writes after the call.
+class C {
+    pub x: int,
+}
+
+class Box {
+    pub c: C,
+}
+
+class Shelf {
+    pub b: Box,
+}
+
+fn put(Shelf s, Box b) -> int {
+    s.b = b;
+    return 0;
+}
+
+fn main() {
+    let s = new Shelf(new Box(new C(0)));
+    let d = new Box(new C(1));
+    let w = mut d.c;
+    let p = put;
+    let _ = p(s, d);
+    w.x += 10;
+}

@@ -1,0 +1,195 @@
+// A generic body that calls a function value returning a fixed array of
+// its type parameter (`fn() -> [T; 3]`) lowers as one over `Vec<T>` does
+// (coil-lang#2615): a fixed array is the same heap array a `Vec` is, one
+// word on both sides, so its function is a plain word. A ground function
+// of a fixed array of a closed two-word type (`[Option<int>; 3]`) returns
+// a lane array, which a function argument's adapter turns into boxed
+// elements (coil-lang#2592); a function below a signature's top makes the
+// signature clone-only.
+//
+// The same cases as fn_result_fixed_array.coil with no mono clones: each
+// call runs the shared body, or the clone a clone-only signature takes.
+// @flags --clone-budget 0
+use gc::collect;
+use tests::assert;
+
+class Pt {
+    pub a: int,
+}
+
+impl Eq for Pt {
+    fn eq(Pt x, Pt y) -> bool {
+        return x.a == y.a;
+    }
+}
+
+fn mid<T>(fn() -> [T; 3] f) -> T {
+    let a = f();
+    return a[1];
+}
+
+fn at<T>(fn(int) -> [T; 3] f, int n) -> T {
+    return f(n)[n];
+}
+
+fn later<T>(fn() -> [T; 3] f) -> T {
+    let g = f;
+    collect();
+    let a = g();
+    collect();
+    let n = 0;
+    for x in a {
+        n = n + 1;
+    }
+    return a[n - 1];
+}
+
+fn wrapped<T>(fn() -> [Option<T>; 2] f) -> Option<T> {
+    return f()[1];
+}
+
+fn in_tuple<T>(fn() -> ([T; 3], int) f) -> T {
+    let (a, n) = f();
+    return a[n];
+}
+
+fn from_vec<T>(Vec<fn() -> [T; 3]> fs) -> T {
+    let f = fs[0];
+    return f()[2];
+}
+
+fn from_opt<T>(Option<fn() -> [T; 3]> o, T d) -> T {
+    return match o {
+        Some(f) => f()[0],
+        None => d,
+    };
+}
+
+fn dup<T>(fn(T) -> [T; 2] f, T x) -> T {
+    return f(x)[1];
+}
+
+fn apply<T>(fn([T; 3]) -> T f, fn() -> [T; 3] g) -> T {
+    return f(g());
+}
+
+fn opt_pair(Option<int> o) -> [Option<int>; 2] {
+    let a: [Option<int>; 2] = [None, o];
+    return a;
+}
+
+fn last_opt([Option<int>; 3] a) -> Option<int> {
+    return a[2];
+}
+
+fn ints() -> [int; 3] {
+    let a: [int; 3] = [1, 2, 3];
+    return a;
+}
+
+fn opts() -> [Option<int>; 3] {
+    let a: [Option<int>; 3] = [Some(1), None, Some(5)];
+    return a;
+}
+
+fn opts_at(int n) -> [Option<int>; 3] {
+    let a: [Option<int>; 3] = [None, Some(n), Some(n + 1)];
+    return a;
+}
+
+fn pairs() -> [(int, int); 3] {
+    let a: [(int, int); 3] = [(1, 2), (3, 4), (5, 6)];
+    return a;
+}
+
+fn floats() -> [float; 3] {
+    let a: [float; 3] = [0.5, 1.5, 2.5];
+    return a;
+}
+
+fn strings() -> [string; 3] {
+    let a: [string; 3] = ["a", "b", "c"];
+    return a;
+}
+
+fn pts() -> [Pt; 3] {
+    let a: [Pt; 3] = [new Pt(1), new Pt(2), new Pt(3)];
+    return a;
+}
+
+fn units() -> [(); 3] {
+    let a: [(); 3] = [(), (), ()];
+    return a;
+}
+
+fn some_ints() -> [Option<int>; 2] {
+    let a: [Option<int>; 2] = [None, Some(4)];
+    return a;
+}
+
+fn opt_tuple() -> ([Option<int>; 3], int) {
+    let a: [Option<int>; 3] = [None, Some(7), None];
+    return (a, 1);
+}
+
+test("fn() -> [T; 3] at one-word elements") {
+    assert!(mid(ints) == 2);
+    assert!(mid(floats) == 1.5);
+    assert!(mid(strings) == "b");
+    assert!(mid(pts) == new Pt(2));
+    assert!(mid(units) == ());
+    assert!(later(strings) == "c");
+}
+
+test("fn() -> [T; 3] at two-word elements") {
+    assert!(mid(opts) == None);
+    assert!(mid(pairs) == (3, 4));
+    assert!(later(opts) == Some(5));
+    assert!(later(pairs) == (5, 6));
+}
+
+test("fn(int) -> [T; 3]") {
+    assert!(at(opts_at, 1) == Some(1));
+    assert!(at(opts_at, 2) == Some(3));
+    assert!(at(fn (int n) => pairs(), 0) == (1, 2));
+    assert!(at(fn (int n) => ints(), 2) == 3);
+}
+
+test("a lambda returning a lane array") {
+    let f = fn () {
+        let a: [Option<int>; 3] = [None, Some(6), None];
+        a
+    };
+    assert!(mid(f) == Some(6));
+    assert!(mid(fn () => pairs()) == (3, 4));
+}
+
+test("[Option<T>; 2] at int") {
+    assert!(wrapped(some_ints) == Some(4));
+}
+
+test("a fixed array inside the result") {
+    assert!(in_tuple(opt_tuple) == Some(7));
+}
+
+test("a function below the top") {
+    let fs: Vec<fn() -> [Option<int>; 3]> = [opts];
+    assert!(from_vec(fs) == Some(5));
+    assert!(from_opt(Some(pairs), (0, 0)) == (1, 2));
+    let ss: Vec<fn() -> [string; 3]> = [strings];
+    assert!(from_vec(ss) == "c");
+}
+
+test("fn(T) -> [T; 2] and a fixed-array parameter") {
+    assert!(dup(opt_pair, Some(2)) == Some(2));
+    assert!(
+        dup(
+            fn (string x) {
+                let a: [string; 2] = [x, x + "!"];
+                a
+            },
+            "q",
+        ) == "q!",
+    );
+    assert!(apply(last_opt, opts) == Some(5));
+}

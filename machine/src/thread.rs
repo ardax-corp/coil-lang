@@ -1,4 +1,4 @@
-//! Host-backed OS threads, channels, and locks (isolate `Machine` per thread).
+//! Host-backed OS threads, channels, and locks (a runtime of its own per thread).
 
 use std::cell::{RefCell, UnsafeCell};
 use std::collections::{HashSet, VecDeque};
@@ -6,22 +6,23 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
-use parking_lot::RawMutex;
 use parking_lot::lock_api::RawMutex as RawMutexOps;
+use parking_lot::lock_api::{RawRwLock as RawRwLockOps, RawRwLockTimed};
+use parking_lot::{RawMutex, RawRwLock};
 use parking_lot::lock_api::RawMutexTimed as _;
 
 use crate::AddrHashBuilder;
 use crate::task::ThreadWaiters;
 
-/// Per-root-VM registry of undetached spawns (shared with nested workers via
+/// Per-root runtime registry of undetached spawns (shared with nested workers via
 /// [`ThreadSpawnContext`]). Process-global storage was wrong: parallel tests /
-/// multiple `Machine`s would steal each other's joins via `mem::take`.
+/// multiple runtimes would steal each other's joins via `mem::take`.
 pub type LiveThreadRegistry = Arc<Mutex<Vec<Arc<JoinState>>>>;
 
-/// Per-root-VM bound on concurrent OS **pool** threads for the work-stealing
+/// Per-root runtime bound on concurrent OS **pool** threads for the work-stealing
 /// reactor (see [`crate::reactor::Reactor`]).
 ///
 /// Caps host threads used for `spawn` / auto-par. Override with
@@ -92,8 +93,8 @@ fn register_live_thread(registry: &LiveThreadRegistry, state: Arc<JoinState>) {
 
 /// Block until every undetached, not-yet-joined spawn in `registry` has finished.
 ///
-/// Called automatically at the end of [`Machine::run_with_pool`] for that
-/// machine's own registry. Explicit `join(t)` still returns the worker's value;
+/// Called when a program's `main` returns (`start.rs`), for that
+/// runtime's own registry. Explicit `join(t)` still returns the worker's value;
 /// this path only keeps the process alive. `detach(t)` opts a thread out.
 ///
 /// Loops until the registry drains: a worker may `spawn` nested threads onto
@@ -127,35 +128,26 @@ pub fn join_undetached_threads(registry: &LiveThreadRegistry) {
     }
 }
 
-use common::{BUILTIN_RESULT_VARIANTS, Byte, ProgramDebug, Value};
+use common::{ProgramDebug, Value};
 
 use crate::ffi::Natives;
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
-use crate::io::alloc_result_err;
 use crate::memory::{
-    EnumPayload, Heap, Member, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
-    ObjSender, ObjThread, ObjThreadMutex, ObjTuple, Object,
+    EnumPayload, Heap, ObjArray, ObjEnum, ObjFn, ObjInstance, ObjReceiver, ObjRwLock,
+    ObjSender, ObjThread, ObjThreadMutex, Object,
 };
-use crate::vm::Machine;
-
-/// Operand-stack slots for worker VMs (same default as `execute_archive` in `src/main.rs`).
-pub const WORKER_STACK_SLOTS: usize = 256;
 
 /// Immutable program image shared across OS threads.
 #[derive(Clone)]
 pub struct ThreadProgram {
-    pub code: Arc<Vec<Byte>>,
+    /// What runs before `main`.
+    pub startup: Arc<Vec<common::StartupOp>>,
+    /// `main`'s body, when the program has one.
+    pub main: Option<u32>,
     pub constants: Arc<Vec<u64>>,
     pub strings: Arc<Vec<String>>,
     pub static_slot_count: u32,
     pub debug: ProgramDebug,
-    /// Operand-stack capacity for worker VMs running this program.
-    pub operand_stack_slots: u32,
-    /// S2b slot / frame maps of an older archive (empty when it had none, and
-    /// for every program compiled now).
-    pub stack_maps: Vec<common::FrameStackMap>,
-    /// Complete frame maps; frames without one keep the conservative scan.
-    pub precise_frames: Arc<Vec<common::PreciseFrameMap>>,
     /// Per class `type_id`: field word kinds (see [`crate::class_kind_table`]).
     pub class_word_kinds: Arc<Vec<Box<[u8]>>>,
     /// Per static slot word kind (`common::WORD_*`); empty = all ambiguous.
@@ -268,19 +260,18 @@ pub enum PortableValue {
     Array(Vec<PortableValue>),
     /// A packed byte array (`Vec<byte>` / `Vec<bool>`), kept packed.
     Bytes(Vec<u8>),
-    Tuple(Vec<PortableValue>),
+    /// A variant, or a tuple under [`common::PRODUCT_TAG`].
     Enum {
         tag: u32,
         payload: Vec<PortableValue>,
         /// `fn drop()` key, kept like [`Self::Instance`]'s `type_id`.
         type_id: u32,
     },
+    /// A class instance: its slots in order.
     Instance {
         type_id: u32,
-        fields: Vec<(String, PortableValue)>,
+        fields: Vec<PortableValue>,
     },
-    /// A `BoxValue` cell: its tag (what `UnboxValue` checks) and payload.
-    Boxed(u16, Box<PortableValue>),
     Sender(Arc<ChannelInner>),
     Receiver(Arc<ChannelInner>),
     MutexHandle(Arc<MutexInner>),
@@ -301,7 +292,6 @@ impl std::fmt::Debug for PortableValue {
             Self::String(s) => write!(f, "String({s:?})"),
             Self::Array(a) => f.debug_tuple("Array").field(a).finish(),
             Self::Bytes(b) => f.debug_tuple("Bytes").field(b).finish(),
-            Self::Tuple(t) => f.debug_tuple("Tuple").field(t).finish(),
             Self::Enum {
                 tag,
                 payload,
@@ -317,7 +307,6 @@ impl std::fmt::Debug for PortableValue {
                 .field("type_id", type_id)
                 .field("fields", fields)
                 .finish(),
-            Self::Boxed(tag, inner) => f.debug_tuple("Boxed").field(tag).field(inner).finish(),
             Self::Sender(_) => write!(f, "Sender(..)"),
             Self::Receiver(_) => write!(f, "Receiver(..)"),
             Self::MutexHandle(_) => write!(f, "MutexHandle(..)"),
@@ -335,7 +324,6 @@ impl PartialEq for PortableValue {
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Array(a), Self::Array(b)) => a == b,
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
-            (Self::Tuple(a), Self::Tuple(b)) => a == b,
             (
                 Self::Enum {
                     tag: t1,
@@ -351,7 +339,6 @@ impl PartialEq for PortableValue {
             (Self::Instance { type_id: t1, fields: f1 }, Self::Instance { type_id: t2, fields: f2 }) => {
                 t1 == t2 && f1 == f2
             }
-            (Self::Boxed(t1, a), Self::Boxed(t2, b)) => t1 == t2 && a == b,
             (Self::Sender(a), Self::Sender(b)) => Arc::ptr_eq(a, b),
             (Self::Receiver(a), Self::Receiver(b)) => Arc::ptr_eq(a, b),
             (Self::MutexHandle(a), Self::MutexHandle(b)) => Arc::ptr_eq(a, b),
@@ -395,6 +382,148 @@ pub struct JoinState {
     shared_epoch: Option<Arc<crate::shared_heap::SharedHeapEpoch>>,
     /// Tasks waiting in `join` (woken when the result is stored).
     waiters: ThreadWaiters,
+    /// How a speculative job is stopped ([`Self::cancel`]); `None` for
+    /// any other, which nothing cancels.
+    cancel: Option<Box<Cancel>>,
+    /// The list of the run that spawned it, a speculative job
+    /// ([`crate::runtime::Runtime::speculative_out`]).
+    spawned_in: OnceLock<std::sync::Weak<Mutex<Vec<Arc<JoinState>>>>>,
+    /// It failed and cancelled what came after it ([`Self::cancel_later`]):
+    /// until it is joined, a job its spawner adds is cancelled too.
+    failed: AtomicBool,
+}
+
+/// The speculative jobs a run has out, in the order it spawned them
+/// ([`crate::runtime::Runtime::speculative_out`]). Shared, so a job that
+/// fails can cancel the ones its spawner made after it
+/// ([`JoinState::cancel_later`]).
+pub(crate) type SpeculativeOut = Arc<Mutex<Vec<Arc<JoinState>>>>;
+
+/// What stops a speculative job ([`crate::reactor::Job::speculative`])
+/// whose result its spawner will not use (#2442). Nothing on the job's
+/// fast paths reads it: native code traps at the next function entry on
+/// a poisoned stack limit, and the interpreter looks at the flag only
+/// when a slice of its fuel runs out ([`refuel`]).
+pub(crate) struct Cancel {
+    flag: AtomicBool,
+    inner: Mutex<CancelInner>,
+}
+
+#[derive(Default)]
+struct CancelInner {
+    /// [`crate::native::NativeCtx::stack_limit`] of each native call the
+    /// job is in.
+    limits: Vec<StackLimit>,
+    /// The speculative jobs the job spawned.
+    children: Vec<std::sync::Weak<JoinState>>,
+}
+
+/// A running call's stack limit, written by the thread that cancels.
+struct StackLimit(*mut u64);
+
+// SAFETY: written only through `AtomicU64::from_ptr`, while the call it
+// belongs to is registered ([`CallGuard`]).
+unsafe impl Send for StackLimit {}
+
+/// The stack limit of a cancelled job's native calls: below every stack
+/// pointer, so the next function entry traps.
+pub(crate) const CANCELLED_STACK_LIMIT: u64 = u64::MAX;
+
+/// The fuel a speculative job runs on the interpreter between looks at
+/// its cancel flag ([`refuel`]).
+pub(crate) const FUEL_SLICE: u64 = 1 << 12;
+
+thread_local! {
+    /// The speculative job this thread runs, while it runs it.
+    static CURRENT_JOB: RefCell<Option<Arc<JoinState>>> = const { RefCell::new(None) };
+}
+
+/// [`CURRENT_JOB`] for the length of a job's run on this thread
+/// (`None` for a job nothing cancels); the one before it after.
+pub(crate) struct JobScope(Option<Arc<JoinState>>);
+
+impl JobScope {
+    pub(crate) fn enter(job: Option<Arc<JoinState>>) -> Self {
+        Self(CURRENT_JOB.with(|c| c.replace(job)))
+    }
+}
+
+impl Drop for JobScope {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        CURRENT_JOB.with(|c| *c.borrow_mut() = prev);
+    }
+}
+
+/// A native call of the job this thread runs, listed so a cancel can
+/// poison its stack limit ([`JoinState::cancel`]).
+pub(crate) struct CallGuard(Option<(Arc<JoinState>, *mut u64)>);
+
+impl CallGuard {
+    /// List the call whose context's stack limit is at `limit`, for as
+    /// long as the guard lives; a job cancelled already gets it poisoned
+    /// now.
+    pub(crate) fn enter(limit: *mut u64) -> Self {
+        CURRENT_JOB.with(|c| {
+            let c = c.borrow();
+            let Some(job) = c.as_ref().filter(|j| j.cancel.is_some()) else { return Self(None) };
+            let cancel = job.cancel.as_deref().expect("filtered");
+            let mut inner = cancel.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if cancel.flag.load(Ordering::SeqCst) {
+                // SAFETY: the caller's context, not running yet.
+                unsafe { *limit = CANCELLED_STACK_LIMIT };
+            }
+            inner.limits.push(StackLimit(limit));
+            Self(Some((Arc::clone(job), limit)))
+        })
+    }
+}
+
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        let Some((job, limit)) = self.0.take() else { return };
+        let Some(cancel) = job.cancel.as_deref() else { return };
+        let mut inner = cancel.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(i) = inner.limits.iter().rposition(|l| l.0 == limit) {
+            inner.limits.swap_remove(i);
+        }
+    }
+}
+
+/// The interpreter's fuel ran out: whether it goes on. A speculative
+/// job runs on slices of [`FUEL_SLICE`] and gets another unless it was
+/// cancelled; any other run stops (a step budget, a heap cap).
+pub(crate) fn refuel(fuel: *mut u64) -> bool {
+    CURRENT_JOB.with(|c| {
+        let c = c.borrow();
+        let Some(cancel) = c.as_ref().and_then(|j| j.cancel.as_deref()) else { return false };
+        if cancel.flag.load(Ordering::SeqCst) {
+            return false;
+        }
+        // SAFETY: the running call's fuel, on this thread.
+        unsafe { *fuel = FUEL_SLICE };
+        true
+    })
+}
+
+/// Note `child`, a speculative job just spawned, under the job this
+/// thread runs: cancelling that cancels `child` too.
+fn note_child(child: &Arc<JoinState>) {
+    let parent = CURRENT_JOB.with(|c| c.borrow().clone());
+    let Some(parent) = parent else { return };
+    let Some(cancel) = parent.cancel.as_deref() else { return };
+    let cancelled = {
+        let mut inner = cancel.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // Drop the finished ones now and then: a long job may spawn many.
+        if inner.children.len() >= 64 && inner.children.len().is_power_of_two() {
+            inner.children.retain(|w| w.strong_count() > 0);
+        }
+        inner.children.push(Arc::downgrade(child));
+        cancel.flag.load(Ordering::SeqCst)
+    };
+    if cancelled {
+        child.cancel();
+    }
 }
 
 /// Join-state payload (result slot).
@@ -416,7 +545,69 @@ impl JoinState {
             done: AtomicBool::new(false),
             shared_epoch: None,
             waiters: ThreadWaiters::default(),
+            cancel: None,
+            spawned_in: OnceLock::new(),
+            failed: AtomicBool::new(false),
         }
+    }
+
+    /// A speculative job's state, which [`Self::cancel`] stops.
+    pub(crate) fn speculative(mut self) -> Self {
+        self.cancel = Some(Box::new(Cancel { flag: AtomicBool::new(false), inner: Mutex::new(CancelInner::default()) }));
+        self
+    }
+
+    /// Stop the job, which is speculative and whose result nobody will
+    /// use, as soon as it can: a job not started yet does not start, one
+    /// running traps at its next function entry (native) or fuel slice
+    /// (the interpreter) and unwinds quietly, and the jobs it spawned are
+    /// cancelled too. A job nothing cancels (a thread the program
+    /// spawned) is left alone.
+    pub(crate) fn cancel(&self) {
+        let Some(cancel) = self.cancel.as_deref() else { return };
+        if cancel.flag.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let children = {
+            let inner = cancel.inner.lock().unwrap_or_else(|e| e.into_inner());
+            for limit in &inner.limits {
+                // SAFETY: a registered call's context is alive; native
+                // code and the interpreter only read the limit.
+                unsafe { AtomicU64::from_ptr(limit.0) }.store(CANCELLED_STACK_LIMIT, Ordering::Relaxed);
+            }
+            inner.children.clone()
+        };
+        for child in children {
+            if let Some(child) = child.upgrade() {
+                child.cancel();
+            }
+        }
+    }
+
+    /// The job failed, so its fork-join did: cancel the jobs its spawner
+    /// made after it that are still out. Those are the later arms or
+    /// chunks of the same fork-join and whatever the spawner forked since
+    /// (the self-arms it runs itself), all of it work the sequential rerun
+    /// replaces: a fork-join joins every job it spawns before it returns,
+    /// so none after this one belongs to another. The ones ahead of it are
+    /// an enclosing fork-join's, and run on.
+    pub(crate) fn cancel_later(&self) {
+        let Some(out) = self.spawned_in.get().and_then(std::sync::Weak::upgrade) else { return };
+        let later: Vec<Arc<JoinState>> = {
+            let jobs = out.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(at) = jobs.iter().position(|s| std::ptr::eq(Arc::as_ptr(s), self)) else { return };
+            // The spawner may not be done spawning this fork-join's arms.
+            self.failed.store(true, Ordering::SeqCst);
+            jobs[at + 1..].iter().filter(|s| !s.joined.load(Ordering::SeqCst)).cloned().collect()
+        };
+        for job in later {
+            job.cancel();
+        }
+    }
+
+    /// Whether [`Self::cancel`] stopped the job.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancel.as_deref().is_some_and(|c| c.flag.load(Ordering::SeqCst))
     }
 
     pub(crate) fn with_shared_epoch(epoch: Arc<crate::shared_heap::SharedHeapEpoch>) -> Self {
@@ -596,16 +787,86 @@ impl Drop for RawUnlock<'_> {
     }
 }
 
-/// Host readers-writer lock cell.
+/// Host readers-writer lock cell: a raw lock over the value, so a held
+/// lock outlives one native (`rw_acquire_*` / `rw_release_*`, the Coil
+/// `with_read` / `with_write`) as a `Mutex`'s does.
 pub struct RwLockInner {
-    pub cell: RwLock<PortableValue>,
+    lock: RawRwLock,
+    value: UnsafeCell<PortableValue>,
+    /// Tasks waiting to lock it (woken by every release).
+    waiters: ThreadWaiters,
 }
+
+unsafe impl Send for RwLockInner {}
+unsafe impl Sync for RwLockInner {}
 
 impl RwLockInner {
     fn new(initial: PortableValue) -> Self {
         Self {
-            cell: RwLock::new(initial),
+            lock: RawRwLock::INIT,
+            value: UnsafeCell::new(initial),
+            waiters: ThreadWaiters::default(),
         }
+    }
+
+    /// Take it shared (`write` false) or exclusive, or (under a task
+    /// scheduler, when it is held the other way) park the running task
+    /// until a release. False when it parked.
+    fn lock_or_park_task(&self, write: bool) -> bool {
+        let try_lock = || if write { self.lock.try_lock_exclusive() } else { self.lock.try_lock_shared() };
+        if try_lock() {
+            return true;
+        }
+        match self.waiters.park_unless(try_lock) {
+            Some(locked) => locked,
+            None => {
+                // The holder may be a queued job (see `help_while_blocked`).
+                loop {
+                    let locked = if write {
+                        self.lock.try_lock_exclusive_for(HELP_SLICE)
+                    } else {
+                        self.lock.try_lock_shared_for(HELP_SLICE)
+                    };
+                    if locked {
+                        return true;
+                    }
+                    help_while_blocked();
+                }
+            }
+        }
+    }
+
+    fn try_lock(&self, write: bool) -> bool {
+        if write { self.lock.try_lock_exclusive() } else { self.lock.try_lock_shared() }
+    }
+
+    /// Release a hold taken with `write` as given.
+    ///
+    /// # Safety
+    /// The caller holds the lock that way.
+    pub(crate) unsafe fn unlock(&self, write: bool) {
+        unsafe {
+            if write {
+                self.lock.unlock_exclusive();
+            } else {
+                self.lock.unlock_shared();
+            }
+        }
+        self.waiters.wake_all();
+    }
+
+    /// Payload pointer while `lock` is held (written only exclusive).
+    fn value(&self) -> *mut PortableValue {
+        self.value.get()
+    }
+}
+
+/// Releases a [`RwLockInner`] hold on drop.
+struct RwUnlock<'a>(&'a RwLockInner, bool);
+
+impl Drop for RwUnlock<'_> {
+    fn drop(&mut self) {
+        unsafe { self.0.unlock(self.1) }
     }
 }
 
@@ -613,12 +874,13 @@ thread_local! {
     static HELD_MUTEX: RefCell<Option<(u64, Arc<MutexInner>)>> = const { RefCell::new(None) };
 }
 
-/// Per-`execute` host VM binding (any `Machine<const N>` frame depth).
+/// Per-run host runtime binding.
 pub(crate) struct MachineHostState {
     raw: *mut (),
     call_function: unsafe fn(*mut (), u32, &[Value]) -> Value,
     begin_shared_steal: unsafe fn(*mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag>,
     end_shared_steal: unsafe fn(*mut (), Value),
+    speculative_out: unsafe fn(*mut (), Arc<JoinState>),
     debugger_attached: bool,
     // Built on demand from `raw`: `execute` is re-entered after every FFI
     // call, so cloning these up front (the natives and the dload gate's
@@ -639,30 +901,62 @@ pub(crate) struct HostStateGuard {
 }
 
 impl HostStateGuard {
-    pub fn enter<const N: usize>(vm: &mut Machine<N>) -> Self {
+    /// Bind only `io`, for a test of the IO natives.
+    #[cfg(test)]
+    pub(crate) fn enter_io(io: Arc<crate::io_reactor::IoReactor>) -> Self {
+        unsafe fn no_call(_: *mut (), _: u32, _: &[Value]) -> Value {
+            Value::default()
+        }
+        unsafe fn no_steal(_: *mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
+            Err(ThreadErrorTag::Other)
+        }
+        unsafe fn no_end(_: *mut (), _: Value) {}
+        unsafe fn no_out(_: *mut (), _: Arc<JoinState>) {}
+        unsafe fn no_context(_: *mut ()) -> Option<ThreadSpawnContext> {
+            None
+        }
+        unsafe fn no_statics(_: *mut ()) -> Arc<Vec<u64>> {
+            Arc::default()
+        }
+        unsafe fn no_gate(_: *mut ()) -> *const crate::ffi::DloadGate {
+            std::ptr::null()
+        }
         let prev = HOST_STATE.with(|c| c.borrow_mut().take());
-        let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
-        let cpu_reactor = Some(std::sync::Arc::clone(vm.reactor()));
-        let debugger_attached = {
-            #[cfg(any(test, feature = "debugger"))]
-            {
-                vm.debug_is_attached()
-            }
-            #[cfg(not(any(test, feature = "debugger")))]
-            {
-                false
-            }
-        };
         HOST_STATE.with(|c| {
             *c.borrow_mut() = Some(MachineHostState {
-                raw: (vm as *mut Machine<N>).cast(),
-                call_function: Self::call::<N>,
-                begin_shared_steal: Self::begin_steal::<N>,
-                end_shared_steal: Self::end_steal::<N>,
-                debugger_attached,
-                spawn_context: Self::spawn_context::<N>,
-                static_words: Self::static_words::<N>,
-                dload_gate: Self::dload_gate::<N>,
+                raw: std::ptr::null_mut(),
+                call_function: no_call,
+                begin_shared_steal: no_steal,
+                end_shared_steal: no_end,
+                speculative_out: no_out,
+                debugger_attached: false,
+                spawn_context: no_context,
+                static_words: no_statics,
+                dload_gate: no_gate,
+                io_reactor: Some(io),
+                cpu_reactor: None,
+            });
+        });
+        Self { prev }
+    }
+
+    /// Bind the native driver `d`: host natives on this thread spawn,
+    /// steal and call back through it.
+    pub(crate) fn enter_driver(d: &mut crate::driver::Driver<'_>) -> Self {
+        let prev = HOST_STATE.with(|c| c.borrow_mut().take());
+        let io_reactor = Some(Arc::clone(&d.rt.io_reactor));
+        let cpu_reactor = Some(Arc::clone(&d.rt.reactor));
+        HOST_STATE.with(|c| {
+            *c.borrow_mut() = Some(MachineHostState {
+                raw: std::ptr::from_mut(d).cast(),
+                call_function: Self::driver_call,
+                begin_shared_steal: Self::driver_begin_steal,
+                end_shared_steal: Self::driver_end_steal,
+                speculative_out: Self::driver_speculative_out,
+                debugger_attached: false,
+                spawn_context: Self::driver_spawn_context,
+                static_words: Self::driver_static_words,
+                dload_gate: Self::driver_dload_gate,
                 io_reactor,
                 cpu_reactor,
             });
@@ -670,31 +964,52 @@ impl HostStateGuard {
         Self { prev }
     }
 
-    unsafe fn call<const N: usize>(raw: *mut (), offset: u32, args: &[Value]) -> Value {
-        unsafe { (*(raw.cast::<Machine<N>>())).call_function(offset, args) }
+    /// # Safety
+    /// `raw` is the driver [`Self::enter_driver`] bound, still alive.
+    unsafe fn driver<'a>(raw: *mut ()) -> &'a mut crate::driver::Driver<'static> {
+        unsafe { &mut *raw.cast::<crate::driver::Driver<'static>>() }
     }
 
-    unsafe fn spawn_context<const N: usize>(raw: *mut ()) -> Option<ThreadSpawnContext> {
-        unsafe { (*(raw.cast::<Machine<N>>())).thread_spawn_context() }
+    unsafe fn driver_call(raw: *mut (), offset: u32, args: &[Value]) -> Value {
+        let d = unsafe { Self::driver(raw) };
+        d.call(offset as usize, args).map_or_else(Value::default, |(lo, _)| Value::from(lo))
     }
 
-    unsafe fn static_words<const N: usize>(raw: *mut ()) -> Arc<Vec<u64>> {
-        unsafe { (*(raw.cast::<Machine<N>>())).static_words() }
+    unsafe fn driver_spawn_context(raw: *mut ()) -> Option<ThreadSpawnContext> {
+        unsafe { Self::driver(raw) }.thread_spawn_context()
     }
 
-    unsafe fn dload_gate<const N: usize>(raw: *mut ()) -> *const crate::ffi::DloadGate {
-        unsafe { (*(raw.cast::<Machine<N>>())).dload_gate() as *const _ }
+    unsafe fn driver_static_words(raw: *mut ()) -> Arc<Vec<u64>> {
+        unsafe { Self::driver(raw) }.rt.static_words()
     }
 
-    unsafe fn begin_steal<const N: usize>(
-        raw: *mut (),
-    ) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
-        unsafe { (*(raw.cast::<Machine<N>>())).begin_shared_steal() }
+    unsafe fn driver_dload_gate(raw: *mut ()) -> *const crate::ffi::DloadGate {
+        &raw const unsafe { Self::driver(raw) }.rt.ffi.dload_gate
     }
 
-    unsafe fn end_steal<const N: usize>(raw: *mut (), extra: Value) {
-        unsafe { (*(raw.cast::<Machine<N>>())).end_shared_steal(extra) }
+    unsafe fn driver_begin_steal(raw: *mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
+        crate::collect::begin_shared_steal(unsafe { Self::driver(raw) })
     }
+
+    unsafe fn driver_end_steal(raw: *mut (), published: Value) {
+        crate::collect::end_shared_steal(unsafe { Self::driver(raw) }, published);
+    }
+
+    unsafe fn driver_speculative_out(raw: *mut (), state: Arc<JoinState>) {
+        let out = &unsafe { Self::driver(raw) }.rt.speculative_out;
+        let _ = state.spawned_in.set(Arc::downgrade(out));
+        let mut jobs = out.lock().unwrap_or_else(|e| e.into_inner());
+        jobs.retain(|s| !s.joined.load(Ordering::SeqCst));
+        // A job ahead of it failed and is not joined yet: this one is part
+        // of that failed fork-join's attempt ([`JoinState::cancel_later`]).
+        let doomed = jobs.iter().any(|s| s.failed.load(Ordering::SeqCst));
+        jobs.push(Arc::clone(&state));
+        drop(jobs);
+        if doomed {
+            state.cancel();
+        }
+    }
+
 }
 
 impl Drop for HostStateGuard {
@@ -723,7 +1038,7 @@ fn host_spawn_context() -> Result<ThreadSpawnContext, ThreadErrorTag> {
     })
 }
 
-/// The running VM's static words as they are now.
+/// The running runtime's static words as they are now.
 fn host_static_words() -> Option<Arc<Vec<u64>>> {
     HOST_STATE.with(|c| c.borrow().as_ref().map(|s| unsafe { (s.static_words)(s.raw) }))
 }
@@ -747,6 +1062,33 @@ fn host_begin_shared_steal() -> Result<Arc<crate::shared_heap::SharedHeapEpoch>,
     })?
 }
 
+/// Note a shared-heap job the bound run has out, until it is joined.
+fn host_speculative_out(job: &Arc<JoinState>) {
+    HOST_STATE.with(|c| {
+        if let Some(state) = c.borrow().as_ref() {
+            unsafe { (state.speculative_out)(state.raw, Arc::clone(job)) }
+        }
+    });
+}
+
+/// Join a shared-heap job whose fork-join a panic unwound before its
+/// join, and close the job's share of the steal epoch. The fork-join's
+/// own `join` of it, should it still run (another task's), fails, and
+/// that fork reruns sequentially.
+pub(crate) fn join_abandoned<H: crate::collect::GcHost + ?Sized>(h: &mut H, state: &JoinState) {
+    if state.detached.load(Ordering::SeqCst) || state.joined.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let reactor = Arc::clone(&h.rt().reactor);
+    let _ = reactor.wait_join(state);
+    if let Some(handle) = state.join_handle.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        let _ = handle.join();
+    }
+    if state.shared_epoch() {
+        crate::collect::end_shared_steal(h, Value::default());
+    }
+}
+
 fn host_end_shared_steal(published: Value) {
     HOST_STATE.with(|c| {
         if let Some(state) = c.borrow().as_ref() {
@@ -755,7 +1097,7 @@ fn host_end_shared_steal(published: Value) {
     });
 }
 
-/// Block on IO readiness using the bound VM's reactors. Queued CPU jobs run on
+/// Block on IO readiness using the bound runtime's reactors. Queued CPU jobs run on
 /// a spare thread meanwhile, never nested under the wait (#869).
 pub(crate) fn host_io_wait(
     handle: crate::io_handle::WaitHandle,
@@ -814,7 +1156,7 @@ pub(crate) fn host_code_ptr_from_hashed_dload(
         let Some(state) = state.as_ref() else {
             return Err(IoErrorTag::PermissionDenied);
         };
-        // SAFETY: `raw` is the Machine bound by the live guard.
+        // SAFETY: `raw` is the host bound by the live guard.
         let gate = unsafe { &*(state.dload_gate)(state.raw) };
         hashed_dload_code_ptr(gate, addr as *const std::ffi::c_void)
     })
@@ -948,12 +1290,6 @@ pub fn alloc_thread_error(heap: &mut Heap, set: ErrorSet, tag: ThreadErrorTag) -
     alloc_enum(heap, tag.tag_in(set), vec![])
 }
 
-pub fn alloc_result_thread_err(heap: &mut Heap, set: ErrorSet, tag: ThreadErrorTag) -> Value {
-    let _ = BUILTIN_RESULT_VARIANTS;
-    let err = alloc_thread_error(heap, set, tag);
-    alloc_result_err(heap, err)
-}
-
 pub fn as_result_value(heap: &mut Heap, set: ErrorSet, r: Result<Value, ThreadErrorTag>) -> Value {
     match r {
         Ok(v) => pack_result_or_panic(heap, Ok(v)),
@@ -971,16 +1307,6 @@ pub fn as_result_unit(heap: &mut Heap, set: ErrorSet, r: Result<(), ThreadErrorT
             let err = alloc_thread_error(heap, set, tag);
             pack_result_unit_or_panic(heap, Err(err))
         }
-    }
-}
-
-fn member_from_value(heap: &Heap, value: Value) -> Member {
-    if !value.is_zero()
-        && let Some(obj) = heap.find_object_by_addr(value.bits())
-    {
-        Member::Object(obj)
-    } else {
-        Member::Value(value)
     }
 }
 
@@ -1071,13 +1397,6 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
             }
             Ok(PortableValue::Array(out))
         }
-        Object::Tuple(gc) => {
-            let mut out = Vec::with_capacity(gc.as_ref().elements().len());
-            for e in gc.as_ref().elements() {
-                out.push(encode_value(heap, *e, cx)?);
-            }
-            Ok(PortableValue::Tuple(out))
-        }
         Object::Enum(gc) => {
             let mut payload = Vec::with_capacity(gc.as_ref().payload.len());
             for m in &gc.as_ref().payload {
@@ -1091,32 +1410,14 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
         }
         Object::Instance(gc) => {
             let inst = gc.as_ref();
-            let mut fields = Vec::new();
-            if let Some(slots) = inst.slots() {
-                for v in slots {
-                    fields.push((String::new(), encode_value(heap, *v, cx)?));
-                }
-            } else {
-                for (k, m) in inst.iter_fields() {
-                    let name = k.as_ref().data.to_string();
-                    let pv = match m {
-                        Member::Value(iv) => encode_value(heap, iv, cx)?,
-                        Member::Object(o) => encode_object(heap, o, cx)?,
-                    };
-                    fields.push((name, pv));
-                }
+            let mut fields = Vec::with_capacity(inst.slots().len());
+            for v in inst.slots() {
+                fields.push(encode_value(heap, *v, cx)?);
             }
             Ok(PortableValue::Instance {
                 type_id: inst.type_id,
                 fields,
             })
-        }
-        Object::Boxed(gc) => {
-            let inner = match &gc.as_ref().payload {
-                Member::Value(iv) => encode_value(heap, *iv, cx)?,
-                Member::Object(o) => encode_object(heap, *o, cx)?,
-            };
-            Ok(PortableValue::Boxed(gc.as_ref().tag, Box::new(inner)))
         }
         Object::Stream(_)
         | Object::Thread(_)
@@ -1130,10 +1431,6 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
             unreachable!("host handles returned before deep encode")
         }
     }
-}
-
-fn encode_object(heap: &Heap, obj: Object, cx: &mut Encode) -> Result<PortableValue, ThreadErrorTag> {
-    encode_value(heap, Value::from(obj.addr()), cx)
 }
 
 /// A stream inside one of the spawner's statics, as an isolate worker
@@ -1177,19 +1474,15 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             let (obj, _) = heap.alloc(ObjArray::from_bytes(bytes), Object::Array);
             Ok(Value::from(obj.addr()))
         }
-        PortableValue::Tuple(elems) => {
-            let mut elements = Vec::with_capacity(elems.len());
-            for e in elems {
-                elements.push(decode_portable(heap, e)?);
-            }
-            let (obj, _) = heap.alloc(ObjTuple::new(elements), Object::Tuple);
-            Ok(Value::from(obj.addr()))
-        }
         PortableValue::Enum {
             tag,
             payload,
             type_id,
         } => {
+            // Unit variants and `()` are the shared immortals.
+            if payload.is_empty() && type_id == 0 {
+                return Ok(Value::from(heap.immortal_unit_enum(tag).addr()));
+            }
             let mut members = Vec::with_capacity(payload.len());
             for pv in payload {
                 let v = decode_portable(heap, pv)?;
@@ -1201,37 +1494,11 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Instance { type_id, fields } => {
-            if type_id != 0 && !fields.is_empty() && fields.iter().all(|(n, _)| n.is_empty()) {
-                let mut slots = Vec::with_capacity(fields.len());
-                for (_, pv) in fields {
-                    slots.push(decode_portable(heap, pv)?);
-                }
-                let inst = ObjInstance::with_slots(type_id, slots);
-                let (obj, _) = heap.alloc(inst, Object::Instance);
-                Ok(Value::from(obj.addr()))
-            } else {
-                let mut inst = if type_id != 0 {
-                    ObjInstance::with_type_id(type_id)
-                } else {
-                    ObjInstance::default()
-                };
-                for (name, pv) in fields {
-                    let key = heap.intern(name);
-                    let val = decode_portable(heap, pv)?;
-                    inst.set(key, member_from_value(heap, val));
-                }
-                let (obj, _) = heap.alloc(inst, Object::Instance);
-                Ok(Value::from(obj.addr()))
+            let mut slots = Vec::with_capacity(fields.len());
+            for pv in fields {
+                slots.push(decode_portable(heap, pv)?);
             }
-        }
-        PortableValue::Boxed(tag, inner) => {
-            let v = decode_portable(heap, *inner)?;
-            // Keep the tag: `UnboxValue` yields null on a tag mismatch.
-            let payload = member_from_value(heap, v);
-            let (obj, _) = heap.alloc(
-                crate::memory::ObjBoxed { tag, payload },
-                Object::Boxed,
-            );
+            let (obj, _) = heap.alloc(ObjInstance::with_slots(type_id, slots), Object::Instance);
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Sender(inner) => {
@@ -1395,12 +1662,12 @@ impl Write for SharedPrintWriter {
     }
 }
 
-/// Context copied from the parent `Machine` when spawning.
+/// Context copied from the parent runtime when spawning.
 pub struct ThreadSpawnContext {
     pub program: Arc<ThreadProgram>,
     pub natives: Natives,
     pub shared_print: Option<Arc<Mutex<Vec<u8>>>>,
-    /// The stdout part of `shared_print` (see [`Machine::set_shared_stdout`]).
+    /// The stdout part of `shared_print` (see [`crate::io::set_shared_stdout_redirect`]).
     pub shared_stdout: Option<Arc<Mutex<Vec<u8>>>>,
     /// The stderr part of `shared_print`: stderr writes and panic messages.
     pub shared_stderr: Option<Arc<Mutex<Vec<u8>>>>,
@@ -1408,9 +1675,9 @@ pub struct ThreadSpawnContext {
     pub worker_cap: Arc<WorkerCap>,
     pub reactor: Arc<crate::reactor::Reactor>,
     pub io_reactor: Arc<crate::io_reactor::IoReactor>,
-    /// Entry-script directory for relative `dload` (same as parent `wire_vm_ffi`).
+    /// Entry-script directory for relative `dload` (as the parent's).
     pub ffi_base_dir: Option<PathBuf>,
-    /// `--ffi-search-path` dirs from the parent Machine.
+    /// `--ffi-search-path` dirs from the parent runtime.
     pub ffi_search_paths: Vec<PathBuf>,
     /// Fail-closed `dload` integrity (lock hash / trusted / host grants).
     pub dload_gate: crate::ffi::DloadGate,
@@ -1420,6 +1687,8 @@ pub struct ThreadSpawnContext {
     /// startup `const`s (#1561). Its words name the parent's heap, so an
     /// isolate job takes copies ([`copy_statics_out`]) instead.
     pub statics: Arc<Vec<u64>>,
+    /// The parent's native code (`None`: interpreter only).
+    pub native: Option<Arc<crate::native::NativeCode>>,
 }
 
 impl Clone for ThreadSpawnContext {
@@ -1439,6 +1708,7 @@ impl Clone for ThreadSpawnContext {
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
             statics: Arc::clone(&self.statics),
+            native: self.native.clone(),
         }
     }
 }
@@ -1480,10 +1750,12 @@ fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<Spaw
 }
 
 pub fn host_spawn(heap: &mut Heap, args: &[Value]) -> Value {
-    let r = try_host_spawn(heap, args);
+    let r = try_host_spawn(heap, args, false);
     as_result_value(heap, ErrorSet::Thread, r)}
 
-fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
+/// `speculative`: the job is an attempt its spawner discards when it fails
+/// ([`crate::reactor::Job::speculative`]).
+fn try_host_spawn(heap: &mut Heap, args: &[Value], speculative: bool) -> Result<Value, ThreadErrorTag> {
     // A closure's frame starts with its captures, then its parameters.
     let (entry, arity, mut spawn_args) = spawn_fn_from_value(heap, args[0])?;
     if args.len() > 1 {
@@ -1497,7 +1769,7 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorT
     let ctx = host_spawn_context()?;
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
-    let state = Arc::new(JoinState::new());
+    let state = Arc::new(if speculative { JoinState::new().speculative() } else { JoinState::new() });
     let statics = copy_statics_out(heap, &ctx.statics, &ctx.program.static_word_kinds);
     let mut job = crate::reactor::job_from_spawn_context(
         ctx,
@@ -1506,44 +1778,52 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorT
         Arc::clone(&state),
     );
     job.statics = Some(crate::reactor::JobStatics::Copied(statics));
+    job.speculative = speculative;
+    if speculative {
+        // Listed and noted as a shared-heap job is, so a failed join or
+        // a panic cancels it too.
+        note_child(&state);
+        host_speculative_out(&state);
+    }
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);
     Ok(Value::from(obj.addr()))
 }
 
+/// Spawn an auto-par chunk or arm on the spawner's heap. Only compiler-made
+/// fork-joins call this, and each runs the same code itself when the join
+/// fails, so the job is speculative: its panic is the join's failure and
+/// is not reported. That holds when it falls back to an isolate job too.
 pub fn host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_spawn_shared(heap, args);
     as_result_value(heap, ErrorSet::Thread, r)}
 
 fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
     if host_debugger_attached() {
-        return try_host_spawn(heap, args);
+        return try_host_spawn(heap, args, true);
     }
     let ctx = match host_spawn_context() {
         Ok(c) => c,
-        Err(_) => return try_host_spawn(heap, args),
+        Err(_) => return try_host_spawn(heap, args, true),
     };
     let (entry, arity) = fn_entry_from_value(heap, args[0])?;
     if args.len() > 1 && args.len() - 1 != arity as usize {
         return Err(ThreadErrorTag::Other);
     }
-    let all_immediate = args[1..].iter().all(|v| is_immediate_value(heap, *v));
-    if !all_immediate && !crate::shared_heap::program_has_real_maps(&ctx.program) {
-        return try_host_spawn(heap, args);
-    }
+    let _all_immediate = args[1..].iter().all(|v| is_immediate_value(heap, *v));
     let mut spawn_args = Vec::with_capacity(args.len().saturating_sub(1));
     for v in &args[1..] {
         if crate::shared_heap::is_c1_shareable(heap, *v) {
             spawn_args.push(SpawnArg::Shared(v.bits()));
         } else {
-            return try_host_spawn(heap, args);
+            return try_host_spawn(heap, args, true);
         }
     }
     let epoch = host_begin_shared_steal()?;
     let live_threads = Arc::clone(&ctx.live_threads);
     let reactor = Arc::clone(&ctx.reactor);
-    let state = Arc::new(JoinState::with_shared_epoch(Arc::clone(&epoch)));
+    let state = Arc::new(JoinState::with_shared_epoch(Arc::clone(&epoch)).speculative());
     // Opening the epoch may collect and move objects, so the statics are
     // read again after it: `ctx`'s copy can name a moved object's old slot.
     let statics = host_static_words().unwrap_or_else(|| Arc::clone(&ctx.statics));
@@ -1555,6 +1835,9 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
     );
     job.epoch = Some(epoch);
     job.statics = Some(crate::reactor::JobStatics::Shared(statics));
+    job.speculative = true;
+    note_child(&state);
+    host_speculative_out(&state);
     reactor.submit(job);
     register_live_thread(&live_threads, Arc::clone(&state));
     let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);
@@ -1644,7 +1927,7 @@ pub fn host_channel(heap: &mut Heap, _args: &[Value]) -> Value {
     );
     let (rx_obj, _) = heap.alloc(ObjReceiver { inner }, Object::Receiver);
     let pair = vec![Value::from(tx_obj.addr()), Value::from(rx_obj.addr())];
-    let (tup, _) = heap.alloc(ObjTuple::new(pair), Object::Tuple);
+    let (tup, _) = heap.alloc(ObjEnum::tuple(&pair, 0), Object::Enum);
     let v = Value::from(tup.addr());
     as_result_value(heap, ErrorSet::Channel, Ok(v))}
 
@@ -1732,7 +2015,7 @@ const HELP_SLICE: std::time::Duration = std::time::Duration::from_millis(5);
 /// own deque, so a wait for one of them with every other executor busy or
 /// waiting the same way would never end. Off this stack, as an IO wait
 /// helps (#869): a job run under the wait could wait on the frame it sits
-/// on. A no-op without a reactor (a bare `Machine`) or nothing queued.
+/// on. A no-op without a reactor (a bare runtime) or nothing queued.
 fn help_while_blocked() {
     let reactor = HOST_STATE.with(|c| c.borrow().as_ref().and_then(|s| s.cpu_reactor.clone()));
     if let Some(r) = reactor {
@@ -1842,7 +2125,7 @@ fn try_host_with_lock(
 }
 
 fn parse_lock_callback_result(heap: &Heap, ret: Value) -> Result<(Value, Value), ThreadErrorTag> {
-    let Some(Object::Tuple(gc)) = heap.find_object_by_addr(ret.bits()) else {
+    let Some(gc) = heap.find_object_by_addr(ret.bits()).and_then(Object::as_tuple) else {
         return Err(ThreadErrorTag::Other);
     };
     let elems = &gc.as_ref().elements();
@@ -1939,100 +2222,209 @@ fn try_host_rwlock(heap: &mut Heap, initial: Value) -> Result<Value, ThreadError
 
 pub fn host_with_read(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_with_read(heap, args[0], args[1]);
+    if crate::task::thread_parked() {
+        return Value::default();
+    }
     as_result_value(heap, ErrorSet::Lock, r)}
 
-fn try_host_with_read(
-    heap: &mut Heap,
-    lock: Value,
-    callback: Value,
-) -> Result<Value, ThreadErrorTag> {
-    let (entry, captures) = lock_callback(heap, callback)?;
+/// `RwLock` `lock`'s inner cell, or `Other` for any other handle.
+fn rwlock_inner(heap: &Heap, lock: Value) -> Result<Arc<RwLockInner>, ThreadErrorTag> {
     let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.bits()) else {
         return Err(ThreadErrorTag::Other);
     };
-    let guard = gc
-        .as_ref()
-        .inner
-        .cell
-        .read()
-        .map_err(|_| ThreadErrorTag::Poisoned)?;
-    let t_val = portable_to_value(heap, guard.clone())?;
-    drop(guard);
+    Ok(Arc::clone(&gc.as_ref().inner))
+}
+
+/// Run a lock callback on a copy of the value under a shared hold, taken
+/// parking (`try_only` false) or not at all; the hold ends before the
+/// callback runs.
+fn read_with(heap: &mut Heap, lock: Value, callback: Value, try_only: bool) -> Result<Value, ThreadErrorTag> {
+    let (entry, captures) = lock_callback(heap, callback)?;
+    let inner = rwlock_inner(heap, lock)?;
+    let locked = if try_only { inner.try_lock(false) } else { inner.lock_or_park_task(false) };
+    if !locked {
+        // Parked: the task runs it again after a release.
+        return Err(ThreadErrorTag::WouldBlock);
+    }
+    let value = {
+        let _unlock = RwUnlock(&inner, false);
+        unsafe { (*inner.value()).clone() }
+    };
+    let t_val = portable_to_value(heap, value)?;
+    host_call_function(entry, &callback_args(captures, t_val))
+}
+
+/// Run a `(T) -> (T, R)` lock callback under an exclusive hold, taken
+/// parking (`try_only` false) or not at all, and store its new value.
+fn write_with(heap: &mut Heap, lock: Value, callback: Value, try_only: bool) -> Result<Value, ThreadErrorTag> {
+    let (entry, captures) = lock_callback(heap, callback)?;
+    let inner = rwlock_inner(heap, lock)?;
+    let locked = if try_only { inner.try_lock(true) } else { inner.lock_or_park_task(true) };
+    if !locked {
+        return Err(ThreadErrorTag::WouldBlock);
+    }
+    let _unlock = RwUnlock(&inner, true);
+    let t_val = portable_to_value(heap, unsafe { (*inner.value()).clone() })?;
     let ret = host_call_function(entry, &callback_args(captures, t_val))?;
-    Ok(ret)
+    let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
+    unsafe { *inner.value() = value_to_portable(heap, new_t)? };
+    Ok(out_r)
+}
+
+fn try_host_with_read(heap: &mut Heap, lock: Value, callback: Value) -> Result<Value, ThreadErrorTag> {
+    read_with(heap, lock, callback, false)
 }
 
 pub fn host_with_write(heap: &mut Heap, args: &[Value]) -> Value {
-    let r = try_host_with_write(heap, args[0], args[1]);
+    let r = write_with(heap, args[0], args[1], false);
+    if crate::task::thread_parked() {
+        return Value::default();
+    }
     as_result_value(heap, ErrorSet::Lock, r)}
-
-fn try_host_with_write(
-    heap: &mut Heap,
-    lock: Value,
-    callback: Value,
-) -> Result<Value, ThreadErrorTag> {
-    let (entry, captures) = lock_callback(heap, callback)?;
-    let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.bits()) else {
-        return Err(ThreadErrorTag::Other);
-    };
-    let inner = Arc::clone(&gc.as_ref().inner);
-    let mut guard = inner.cell.write().map_err(|_| ThreadErrorTag::Poisoned)?;
-    let t_val = portable_to_value(heap, guard.clone())?;
-    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
-    let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
-    *guard = value_to_portable(heap, new_t)?;
-    Ok(out_r)
-}
 
 pub fn host_try_read(heap: &mut Heap, args: &[Value]) -> Value {
-    let r = try_host_try_read(heap, args[0], args[1]);
+    let r = read_with(heap, args[0], args[1], true);
     as_result_value(heap, ErrorSet::Lock, r)}
-
-fn try_host_try_read(
-    heap: &mut Heap,
-    lock: Value,
-    callback: Value,
-) -> Result<Value, ThreadErrorTag> {
-    let (entry, captures) = lock_callback(heap, callback)?;
-    let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.bits()) else {
-        return Err(ThreadErrorTag::Other);
-    };
-    let guard = match gc.as_ref().inner.cell.try_read() {
-        Ok(g) => g,
-        Err(std::sync::TryLockError::WouldBlock) => return Err(ThreadErrorTag::WouldBlock),
-        Err(std::sync::TryLockError::Poisoned(_)) => return Err(ThreadErrorTag::Poisoned),
-    };
-    let t_val = portable_to_value(heap, guard.clone())?;
-    drop(guard);
-    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
-    Ok(ret)
-}
 
 pub fn host_try_write(heap: &mut Heap, args: &[Value]) -> Value {
-    let r = try_host_try_write(heap, args[0], args[1]);
+    let r = write_with(heap, args[0], args[1], true);
     as_result_value(heap, ErrorSet::Lock, r)}
 
-fn try_host_try_write(
-    heap: &mut Heap,
-    lock: Value,
-    callback: Value,
-) -> Result<Value, ThreadErrorTag> {
-    let (entry, captures) = lock_callback(heap, callback)?;
-    let Some(Object::RwLock(gc)) = heap.find_object_by_addr(lock.bits()) else {
-        return Err(ThreadErrorTag::Other);
-    };
-    let inner = Arc::clone(&gc.as_ref().inner);
-    let mut guard = match inner.cell.try_write() {
-        Ok(g) => g,
-        Err(std::sync::TryLockError::WouldBlock) => return Err(ThreadErrorTag::WouldBlock),
-        Err(std::sync::TryLockError::Poisoned(_)) => return Err(ThreadErrorTag::Poisoned),
-    };
-    let t_val = portable_to_value(heap, guard.clone())?;
-    let ret = host_call_function(entry, &callback_args(captures, t_val))?;
-    let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
-    *guard = value_to_portable(heap, new_t)?;
-    Ok(out_r)
+// Lock primitives the Coil `with_lock` family builds on (`prelude::thread`).
+// A hold taken here outlives the native: the Coil caller releases it, in a
+// `defer` right after the acquire, so a panic or a cancel releases it too.
+// Acquires park the running task as `lock` does and run again from the
+// start after the wake; they never block a thread a scope's tasks share.
+
+/// `Mutex` `m`'s inner cell.
+fn mutex_inner(heap: &Heap, m: Value) -> Option<Arc<MutexInner>> {
+    match heap.find_object_by_addr(m.bits()) {
+        Some(Object::Mutex(gc)) => Some(Arc::clone(&gc.as_ref().inner)),
+        _ => None,
+    }
 }
+
+/// `lock_acquire(m)`: lock `m`, parking the task while another holds it.
+pub fn host_lock_acquire(heap: &mut Heap, args: &[Value]) -> Value {
+    if let Some(inner) = mutex_inner(heap, args[0]) {
+        // False: parked, and run again after an unlock.
+        let _ = inner.lock_or_park_task();
+    }
+    Value::from(0i64)
+}
+
+/// `lock_release(m)`: unlock `m` (a no-op when it is not locked).
+pub fn host_lock_release(heap: &mut Heap, args: &[Value]) -> Value {
+    if let Some(inner) = mutex_inner(heap, args[0])
+        && inner.lock.is_locked()
+    {
+        unsafe { inner.unlock() };
+    }
+    Value::from(0i64)
+}
+
+/// `lock_load(m) -> Result<T, LockError>`: a copy of the value `m` guards.
+/// The caller holds `m`.
+pub fn host_lock_load(heap: &mut Heap, args: &[Value]) -> Value {
+    let r = match mutex_inner(heap, args[0]) {
+        Some(inner) => portable_to_value(heap, unsafe { (*inner.value()).clone() }),
+        None => Err(ThreadErrorTag::Other),
+    };
+    as_result_value(heap, ErrorSet::Lock, r)
+}
+
+/// `lock_store(m, v) -> Result<(), LockError>`: make `v` the value `m`
+/// guards. The caller holds `m`.
+pub fn host_lock_store(heap: &mut Heap, args: &[Value]) -> Value {
+    let r = match mutex_inner(heap, args[0]) {
+        Some(inner) => value_to_portable(heap, args[1]).map(|pv| unsafe { *inner.value() = pv }),
+        None => Err(ThreadErrorTag::Other),
+    };
+    as_result_unit(heap, ErrorSet::Lock, r)
+}
+
+fn rw_acquire(heap: &mut Heap, lock: Value, write: bool) -> Value {
+    if let Ok(inner) = rwlock_inner(heap, lock) {
+        // False: parked, and run again after a release.
+        let _ = inner.lock_or_park_task(write);
+    }
+    Value::from(0i64)
+}
+
+fn rw_try(heap: &mut Heap, lock: Value, write: bool) -> Value {
+    Value::from(rwlock_inner(heap, lock).is_ok_and(|inner| inner.try_lock(write)))
+}
+
+fn rw_release(heap: &mut Heap, lock: Value, write: bool) -> Value {
+    if let Ok(inner) = rwlock_inner(heap, lock) {
+        let held = if write { inner.lock.is_locked_exclusive() } else { inner.lock.is_locked() && !inner.lock.is_locked_exclusive() };
+        if held {
+            unsafe { inner.unlock(write) };
+        }
+    }
+    Value::from(0i64)
+}
+
+/// `rw_acquire_read(l)`: a shared hold, parking while a writer holds `l`.
+pub fn host_rw_acquire_read(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_acquire(heap, args[0], false)
+}
+
+/// `rw_acquire_write(l)`: the exclusive hold, parking while any holds `l`.
+pub fn host_rw_acquire_write(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_acquire(heap, args[0], true)
+}
+
+/// `rw_try_read(l) -> bool`: a shared hold if one is free now.
+pub fn host_rw_try_read(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_try(heap, args[0], false)
+}
+
+/// `rw_try_write(l) -> bool`: the exclusive hold if it is free now.
+pub fn host_rw_try_write(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_try(heap, args[0], true)
+}
+
+/// `rw_release_read(l)`: end a shared hold.
+pub fn host_rw_release_read(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_release(heap, args[0], false)
+}
+
+/// `rw_release_write(l)`: end the exclusive hold.
+pub fn host_rw_release_write(heap: &mut Heap, args: &[Value]) -> Value {
+    rw_release(heap, args[0], true)
+}
+
+/// `rw_load(l) -> Result<T, LockError>`: a copy of `l`'s value. The caller
+/// holds `l`.
+pub fn host_rw_load(heap: &mut Heap, args: &[Value]) -> Value {
+    let r = rwlock_inner(heap, args[0]).and_then(|inner| portable_to_value(heap, unsafe { (*inner.value()).clone() }));
+    as_result_value(heap, ErrorSet::Lock, r)
+}
+
+/// `rw_store(l, v) -> Result<(), LockError>`: make `v` `l`'s value. The
+/// caller holds `l` exclusive.
+pub fn host_rw_store(heap: &mut Heap, args: &[Value]) -> Value {
+    let r = rwlock_inner(heap, args[0])
+        .and_then(|inner| value_to_portable(heap, args[1]).map(|pv| unsafe { *inner.value() = pv }));
+    as_result_unit(heap, ErrorSet::Lock, r)
+}
+
+/// HostInvoke wiring for the lock primitives (archive 6.21), last.
+pub const LOCK_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
+    ("lock_acquire", 1, host_lock_acquire),
+    ("lock_release", 1, host_lock_release),
+    ("lock_load", 1, host_lock_load),
+    ("lock_store", 2, host_lock_store),
+    ("rw_acquire_read", 1, host_rw_acquire_read),
+    ("rw_acquire_write", 1, host_rw_acquire_write),
+    ("rw_try_read", 1, host_rw_try_read),
+    ("rw_try_write", 1, host_rw_try_write),
+    ("rw_release_read", 1, host_rw_release_read),
+    ("rw_release_write", 1, host_rw_release_write),
+    ("rw_load", 1, host_rw_load),
+    ("rw_store", 2, host_rw_store),
+];
 
 // Pipeline registry names (`thread_spawn`, …).
 pub use host_channel as thread_channel;
@@ -2059,30 +2451,89 @@ pub use host_with_write as thread_with_write;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::ObjFn;
+    use crate::memory::{Member, ObjFn};
     use std::time::Duration;
 
+    /// A thread the program spawns has no cancel; a speculative job's
+    /// cancel reaches the jobs it spawned, the ones it spawns after, and
+    /// the stack limits of its calls (#2442).
     #[test]
-    fn live_thread_registries_are_per_machine() {
-        let m1 = Machine::<WORKER_STACK_SLOTS>::default();
-        let m2 = Machine::<WORKER_STACK_SLOTS>::default();
+    fn a_cancel_stops_a_speculative_job_and_its_children_only() {
+        let user = Arc::new(JoinState::new());
+        user.cancel();
+        assert!(!user.cancelled(), "a thread the program spawns is never cancelled");
+
+        let job = Arc::new(JoinState::new().speculative());
+        let child = Arc::new(JoinState::new().speculative());
+        let mut early = 7u64;
+        let mut late = 9u64;
+        let (child_before, child_after);
+        {
+            let _scope = JobScope::enter(Some(Arc::clone(&job)));
+            note_child(&child);
+            let early_call = CallGuard::enter(&raw mut early);
+            let mut fuel = 0u64;
+            assert!(refuel(&raw mut fuel), "a running job gets another slice");
+            assert_eq!(fuel, FUEL_SLICE);
+            job.cancel();
+            assert_eq!(early, CANCELLED_STACK_LIMIT, "a call in progress is poisoned");
+            assert!(!refuel(&raw mut fuel), "a cancelled job gets no more fuel");
+            child_before = child.cancelled();
+            // Calls and spawns after the cancel start cancelled.
+            let late_call = CallGuard::enter(&raw mut late);
+            let spawned = Arc::new(JoinState::new().speculative());
+            note_child(&spawned);
+            child_after = spawned.cancelled();
+            drop(late_call);
+            drop(early_call);
+        }
+        assert!(child_before, "a child is cancelled with its parent");
+        assert!(child_after, "a child spawned after the cancel is cancelled");
+        assert_eq!(late, CANCELLED_STACK_LIMIT, "a call entered after the cancel is poisoned");
+        let mut fuel = 0u64;
+        assert!(!refuel(&raw mut fuel), "outside a job, a zero stops the run");
+    }
+
+    /// A failed job cancels what its spawner added after it, and what it
+    /// adds until the failed job is joined; not what came before it.
+    #[test]
+    fn a_failed_job_cancels_the_jobs_spawned_after_it() {
+        let out = SpeculativeOut::default();
+        let push = |s: &Arc<JoinState>| {
+            let _ = s.spawned_in.set(Arc::downgrade(&out));
+            out.lock().unwrap().push(Arc::clone(s));
+        };
+        let [before, failed, after] = [(); 3].map(|()| Arc::new(JoinState::new().speculative()));
+        for s in [&before, &failed, &after] {
+            push(s);
+        }
+        failed.cancel_later();
+        assert!(!before.cancelled(), "an enclosing fork-join's job runs on");
+        assert!(after.cancelled(), "a later arm of the failed fork-join is cancelled");
+        assert!(failed.failed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn live_thread_registries_are_per_runtime() {
+        let r1 = crate::runtime::Runtime::new();
+        let r2 = crate::runtime::Runtime::new();
         assert!(
-            !std::sync::Arc::ptr_eq(m1.live_threads(), m2.live_threads()),
-            "each Machine must own a distinct live-thread registry"
+            !std::sync::Arc::ptr_eq(&r1.live_threads, &r2.live_threads),
+            "each runtime must own a distinct live-thread registry"
         );
-        // Joining an empty registry must not touch another Machine's list.
+        // Joining an empty registry must not touch another runtime's list.
         let sentinel = Arc::new(JoinState::new());
-        register_live_thread(m2.live_threads(), Arc::clone(&sentinel));
-        join_undetached_threads(m1.live_threads());
+        register_live_thread(&r2.live_threads, Arc::clone(&sentinel));
+        join_undetached_threads(&r1.live_threads);
         assert_eq!(
-            m2.live_threads().lock().unwrap().len(),
+            r2.live_threads.lock().unwrap().len(),
             1,
-            "joining m1 must not drain m2's undetached spawns"
+            "joining r1 must not drain r2's undetached spawns"
         );
         // Avoid leaving a JoinState that never finishes: mark detached so a
         // later join skips waiting.
         sentinel.detached.store(true, Ordering::SeqCst);
-        join_undetached_threads(m2.live_threads());
+        join_undetached_threads(&r2.live_threads);
     }
 
     #[test]
@@ -2153,7 +2604,7 @@ mod tests {
             panic!("expected Result");
         };
         assert_eq!(gc.as_ref().tag, 0);
-        let Member::Object(Object::Tuple(tup)) = &heap.member_of(gc.as_ref().payload[0]) else {
+        let Member::Object(Object::Enum(tup)) = &heap.member_of(gc.as_ref().payload[0]) else {
             panic!("expected (Sender, Receiver) tuple");
         };
         let elems = &tup.as_ref().elements();
@@ -2214,16 +2665,14 @@ mod tests {
     #[test]
     fn portable_roundtrip_tuple_and_enum() {
         let mut heap = Heap::default();
-        let (tup, _) = heap.alloc(
-            ObjTuple::new(vec![Value::from(7_i64), Value::from(8_i64)]),
-            Object::Tuple,
-        );
+        let (tup, _) = heap.alloc(ObjEnum::tuple(&[Value::from(7_i64), Value::from(8_i64)], 0), Object::Enum);
         let pv = value_to_portable(&heap, Value::from(tup.addr())).unwrap();
-        assert!(matches!(pv, PortableValue::Tuple(ref e) if e.len() == 2));
+        assert!(matches!(pv, PortableValue::Enum { tag: common::PRODUCT_TAG, ref payload, .. } if payload.len() == 2));
         let back = portable_to_value(&mut heap, pv).unwrap();
-        let Object::Tuple(gc) = heap.find_object_by_addr(back.bits()).unwrap() else {
+        let Object::Enum(gc) = heap.find_object_by_addr(back.bits()).unwrap() else {
             panic!("expected tuple");
         };
+        assert!(gc.as_ref().is_tuple());
         assert_eq!(gc.as_ref().elements()[0].as_int(), 7);
         assert_eq!(gc.as_ref().elements()[1].as_int(), 8);
 
@@ -2310,14 +2759,11 @@ mod tests {
         let mut heap = Heap::default();
         let out = crate::io::stream_stdout(&mut heap).unwrap();
         let unsent = crate::io::alloc_unsent_stream(&mut heap);
-        let (tup, _) = heap.alloc(
-            ObjTuple::new(vec![out, Value::from(1_i64), unsent]),
-            Object::Tuple,
-        );
+        let (tup, _) = heap.alloc(ObjEnum::tuple(&[out, Value::from(1_i64), unsent], 0), Object::Enum);
         let v = Value::from(tup.addr());
         assert_eq!(value_to_portable(&heap, v), Err(ThreadErrorTag::NotSendable));
         assert!(value_to_spawn_arg(&heap, v).is_err());
-        let Ok(SpawnArg::Value(PortableValue::Tuple(elems))) = value_to_static_arg(&heap, v) else {
+        let Ok(SpawnArg::Value(PortableValue::Enum { tag: common::PRODUCT_TAG, payload: elems, .. })) = value_to_static_arg(&heap, v) else {
             panic!("expected a copied tuple");
         };
         assert!(matches!(
@@ -2331,8 +2777,8 @@ mod tests {
         assert_eq!(elems[1], PortableValue::Immediate(Value::from(1_i64).bits()));
         assert_eq!(elems[2], PortableValue::UnsentStream);
         let mut worker = Heap::default();
-        let copy = portable_to_value(&mut worker, PortableValue::Tuple(elems)).unwrap();
-        let Some(Object::Tuple(gc)) = worker.find_object_by_addr(copy.bits()) else {
+        let copy = portable_to_value(&mut worker, PortableValue::Enum { tag: common::PRODUCT_TAG, payload: elems, type_id: 0 }).unwrap();
+        let Some(Object::Enum(gc)) = worker.find_object_by_addr(copy.bits()) else {
             panic!("expected a tuple");
         };
         let elems = gc.as_ref().elements().to_vec();
@@ -2389,37 +2835,14 @@ mod tests {
         assert!(matches!(rw_pv, PortableValue::RwLockHandle(_)));
 
         // Nested in a tuple (request/reply spawn arg shape).
-        let (tup, _) = heap.alloc(
-            ObjTuple::new(vec![tx, rx]),
-            Object::Tuple,
-        );
+        let (tup, _) = heap.alloc(ObjEnum::tuple(&[tx, rx], 0), Object::Enum);
         let tup_pv = value_to_portable(&heap, Value::from(tup.addr())).unwrap();
-        let PortableValue::Tuple(elems) = tup_pv else {
+        let PortableValue::Enum { tag: common::PRODUCT_TAG, payload: elems, .. } = tup_pv else {
             panic!("expected tuple");
         };
         assert_eq!(elems.len(), 2);
         assert!(matches!(elems[0], PortableValue::Sender(_)));
         assert!(matches!(elems[1], PortableValue::Receiver(_)));
-    }
-
-    #[test]
-    fn boxed_value_keeps_its_tag_across_threads() {
-        // `UnboxValue tag=3` on the worker must find tag 3 again (#1195).
-        let mut heap = Heap::default();
-        let s = heap.alloc_string("ada".to_string());
-        let payload = Member::Object(Object::String(s));
-        let (boxed, _) = heap.alloc(crate::memory::ObjBoxed { tag: 3, payload }, Object::Boxed);
-        let pv = value_to_portable(&heap, Value::from(boxed.addr())).unwrap();
-        let mut other = Heap::default();
-        let v = portable_to_value(&mut other, pv).unwrap();
-        let Some(Object::Boxed(gc)) = other.find_object_by_addr(v.bits()) else {
-            panic!("expected a box");
-        };
-        assert_eq!(gc.as_ref().tag, 3);
-        let Member::Object(Object::String(inner)) = &gc.as_ref().payload else {
-            panic!("expected a string payload");
-        };
-        assert_eq!(inner.as_ref().data.to_string(), "ada");
     }
 
     #[test]

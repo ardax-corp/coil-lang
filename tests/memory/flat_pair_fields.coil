@@ -1,0 +1,302 @@
+// A class field of a two-word type whose words are never pointers
+// (`Option<int>`, `(int, float)`, `Result<int, int>`, a range, a small
+// enum) sits flat in the object: its first word in the field's slot, its
+// second in a tail slot after the declared fields. Reads, writes, `new`,
+// methods, derived `Show` / `Eq`, collections of such objects, a thread
+// that receives a readonly one and the collector all see the same two
+// words.
+use tests::assert;
+use string::format;
+use gc::collect;
+use thread::{join, spawn};
+
+#[derive(Show)]
+enum Dir {
+    Up,
+    Down(int),
+}
+
+class H {
+    pub name: string,
+    pub o: Option<int>,
+    pub p: (int, float),
+    pub r: Result<int, int>,
+    pub d: Dir,
+    pub span: Range<int>,
+    pub n: int,
+}
+
+impl H {
+    pub fn bump() {
+        self.o = match self.o {
+            Some(v) => Some(v + 1),
+            None => Some(0),
+        };
+        self.p = (self.p[0] + 1, self.p[1] * 2.0);
+    }
+
+    pub fn total() -> int {
+        let o = match self.o {
+            Some(v) => v,
+            None => 0,
+        };
+        let r = match self.r {
+            Ok(v) => v,
+            Err(e) => -e,
+        };
+        let d = match self.d {
+            Dir::Up => 1,
+            Dir::Down(k) => k,
+        };
+        let s = 0;
+        for i in self.span {
+            s += i;
+        }
+        return o + self.p[0] + r + d + s + self.n;
+    }
+}
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+
+fn make(int i) -> H {
+    return new H(format("h%i", i), half(i), (i, 0.5), Err(i), Dir::Down(i), 0..i, i);
+}
+
+test("new, reads and writes keep both words") {
+    let h = new H("a", Some(1), (2, 0.5), Ok(3), Dir::Up, 0..3, 4);
+    assert!(h.total() == 1 + 2 + 3 + 1 + 3 + 4);
+    h.bump();
+    assert!(h.o == Some(2));
+    assert!(h.p[0] == 3 && h.p[1] == 1.0);
+    h.o = None;
+    h.r = Err(5);
+    h.d = Dir::Down(7);
+    h.span = 2..4;
+    assert!(h.o == None);
+    assert!(h.total() == 0 + 3 - 5 + 7 + 5 + 4);
+    assert!(h.name == "a" && h.n == 4);
+}
+
+test("a loop rewriting a field") {
+    let h = make(0);
+    let s = 0;
+    for i in 0..10 {
+        h.o = half(i);
+        s += match h.o {
+            Some(v) => v,
+            None => 100,
+        };
+    }
+    assert!(s == 510);
+}
+
+test("objects in a Vec, through a collection") {
+    let v: Vec<H> = Vec::new();
+    for i in 0..200 {
+        v.push(make(i));
+    }
+    collect();
+    let s = 0;
+    for h in v {
+        s += h.total();
+    }
+    let want = 0;
+    for i in 0..200 {
+        let o = if i % 2 == 0 {
+            i / 2
+        } else {
+            0
+        };
+        want += o + i - i + i + (i * (i - 1)) / 2 + i;
+    }
+    assert!(s == want);
+    assert!(v[3].name == "h3" && v[3].o == None && v[4].o == Some(2));
+}
+
+#[derive(Show, Eq)]
+class S {
+    pub o: Option<int>,
+    pub p: (int, float),
+    pub d: Dir,
+}
+
+test("derived Show and Eq read every field") {
+    let a = new S(Some(1), (2, 0.5), Dir::Down(3));
+    assert!(a.show() == "S { o: Some(1), p: (2, 0.5), d: Dir::Down(3) }");
+    assert!(a == new S(Some(1), (2, 0.5), Dir::Down(3)));
+    assert!(a != new S(None, (2, 0.5), Dir::Down(3)));
+}
+
+readonly class R {
+    pub o: Option<int>,
+    pub n: int,
+}
+
+test("a thread receives a readonly object's words") {
+    let h = new R(Some(5), 6);
+    let t = match spawn(
+        fn () use (h) => match h.o {
+            Some(v) => v + h.n,
+            None => -2,
+        },
+    ) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "spawn failed",
+    };
+    let got = match join(t) {
+        Result::Ok(v) => v,
+        Result::Err(_) => -1,
+    };
+    assert!(got == 11);
+}
+
+enum Tok {
+    Num(int),
+    Word(string),
+    End,
+}
+
+class P {
+    pub r: Result<int, string>,
+    pub t: Tok,
+}
+
+fn word(int i) -> string {
+    return format("w%i", i);
+}
+
+test("a flat field whose payload is a heap word for some tags survives collections") {
+    let v: Vec<P> = Vec::new();
+    for i in 0..300 {
+        let r: Result<int, string> = if i % 2 == 0 {
+            Ok(i)
+        } else {
+            Err(word(i))
+        };
+        let t = if i % 3 == 0 {
+            Tok::Num(i)
+        } else if i % 3 == 1 {
+            Tok::Word(word(i + 1000))
+        } else {
+            Tok::End
+        };
+        v.push(new P(r, t));
+        if i % 50 == 0 {
+            collect();
+        }
+    }
+    collect();
+    let n = 0;
+    for i in 0..300 {
+        let p = v[i];
+        n += match p.r {
+            Ok(k) => k,
+            Err(s) => if s == word(i) {
+                1
+            } else {
+                -100000
+            },
+        };
+        n += match p.t {
+            Tok::Num(k) => k,
+            Tok::Word(s) => if s == word(i + 1000) {
+                1
+            } else {
+                -100000
+            },
+            Tok::End => 0,
+        };
+    }
+    let want = 0;
+    for i in 0..300 {
+        want += if i % 2 == 0 {
+            i
+        } else {
+            1
+        };
+        want += if i % 3 == 0 {
+            i
+        } else if i % 3 == 1 {
+            1
+        } else {
+            0
+        };
+    }
+    assert!(n == want);
+    let p = v[1];
+    p.r = Ok(7);
+    p.t = Tok::Word("x");
+    collect();
+    assert!(p.r == Ok(7));
+    assert!(match p.t {
+        Tok::Word(s) => s == "x",
+        default => false,
+    });
+}
+
+class G<T> {
+    pub v: T,
+    pub o: Option<int>,
+    pub span: Range<int>,
+}
+
+impl G<T> {
+    pub fn bump() {
+        self.o = match self.o {
+            Some(k) => Some(k + 1),
+            None => Some(0),
+        };
+    }
+}
+
+fn reset<T>(G<T> g) {
+    g.o = None;
+    g.span = 1..3;
+}
+
+fn sum<T>(G<T> g) -> int {
+    let s = match g.o {
+        Some(k) => k,
+        None => 100,
+    };
+    for i in g.span {
+        s += i;
+    }
+    return s;
+}
+
+test("a generic class's closed two-word fields, in clones and shared bodies") {
+    let a = new G("x", None, 0..2);
+    let b = new G(1.5, Some(4), 0..0);
+    a.bump();
+    b.bump();
+    assert!(a.o == Some(0) && b.o == Some(5));
+    assert!(sum(a) == 1 && sum(b) == 5);
+    let f = sum;
+    reset(b);
+    assert!(f(b) == 103 && b.v == 1.5);
+    let gs: Vec<G<string>> = Vec::new();
+    for i in 0..100 {
+        gs.push(new G(word(i), half(i), 0..i));
+    }
+    collect();
+    let n = 0;
+    for g in gs {
+        n += sum(g);
+    }
+    let want = 0;
+    for i in 0..100 {
+        want += (if i % 2 == 0 {
+            i / 2
+        } else {
+            100
+        }) + (i * (i - 1)) / 2;
+    }
+    assert!(n == want && gs[7].v == "w7");
+}

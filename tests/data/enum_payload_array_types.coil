@@ -1,0 +1,109 @@
+// A fixed-array type in an enum payload is a type, at any depth and inside
+// a tuple, a `readonly` or an `Option` (coil-lang#2456): the payload was
+// also read as an array literal, so `[[int; 2]; 2]` and `[string; 2]` were
+// E0402. The same types in the other declared positions (a field, a
+// parameter, a result, a generic argument, an alias, a static) for contrast.
+use tests::assert;
+
+enum Shape {
+    Grid([[int; 2]; 2], int),
+    Named { m: [[int; 2]; 2], k: int },
+    Cube([[[float; 2]; 2]; 2]),
+    Words([string; 2]),
+    Pair(([[int; 2]; 2], [string; 2])),
+    Frozen(readonly [[int; 2]; 2]),
+    Maybe(Option<[[int; 2]; 2]>),
+    Empty,
+}
+
+enum Cell<T> {
+    Grid([[T; 2]; 2]),
+    Row { r: [T; 2], names: [string; 2] },
+    Empty,
+}
+
+type Grid = [[int; 2]; 2];
+
+class Holder {
+    pub m: [[int; 2]; 2],
+    pub t: ([[string; 2]; 2], int),
+}
+
+static let UNIT: [[int; 2]; 2] = [[1, 0], [0, 1]];
+
+fn corner(Shape s) -> int {
+    return match s {
+        Shape::Grid(m, k) => m[1][1] + k,
+        Shape::Named { m, k } => m[0][1] + k,
+        Shape::Cube(c) => c[1][1][1] as int,
+        Shape::Words(w) => w[0].len() + w[1].len(),
+        Shape::Pair(p) => p[0][1][0] + p[1][1].len(),
+        Shape::Frozen(m) => m[1][0],
+        Shape::Maybe(o) => match o {
+            Some(m) => m[0][0],
+            None => -1,
+        },
+        Shape::Empty => 0,
+    };
+}
+
+fn first<T>(Cell<T> c, T or) -> T {
+    return match c {
+        Cell::Grid(m) => m[0][0],
+        Cell::Row { r, names } => r[1],
+        Cell::Empty => or,
+    };
+}
+
+fn trace([[int; 2]; 2] m) -> int {
+    return m[0][0] + m[1][1];
+}
+
+fn flip([[int; 2]; 2] m) -> [[int; 2]; 2] {
+    return [[m[1][1], m[1][0]], [m[0][1], m[0][0]]];
+}
+
+fn last<T>(Vec<[[T; 2]; 2]> all) -> Option<[[T; 2]; 2]> {
+    if all.len() == 0 {
+        return None;
+    }
+    return Some(all[all.len() - 1]);
+}
+
+test("nested fixed-array payloads") {
+    assert!(corner(Shape::Grid([[1, 2], [3, 4]], 10)) == 14);
+    assert!(corner(Shape::Named { m: [[1, 2], [3, 4]], k: 20 }) == 22);
+    assert!(corner(Shape::Cube([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])) == 8);
+    assert!(corner(Shape::Empty) == 0);
+}
+
+test("arrays of strings, tuples, readonly and Option payloads") {
+    assert!(corner(Shape::Words(["ab", "cde"])) == 5);
+    assert!(corner(Shape::Pair(([[1, 2], [3, 4]], ["x", "four"]))) == 7);
+    let m: [[int; 2]; 2] = [[5, 6], [7, 8]];
+    assert!(corner(Shape::Frozen(readonly m)) == 7);
+    assert!(corner(Shape::Maybe(Some([[9, 0], [0, 9]]))) == 9);
+    assert!(corner(Shape::Maybe(None)) == -1);
+}
+
+test("a generic enum's array payloads") {
+    assert!(first(Cell::Grid([[3, 4], [5, 6]]), 0) == 3);
+    assert!(first(Cell::Grid([["a", "b"], ["c", "d"]]), "") == "a");
+    assert!(first(Cell::Row { r: [1.5, 2.5], names: ["x", "y"] }, 0.0) == 2.5);
+    let none: Cell<int> = Cell::Empty;
+    assert!(first(none, 7) == 7);
+}
+
+test("the same types in the other declared positions") {
+    let g: Grid = [[1, 2], [3, 4]];
+    assert!(trace(g) == 5 && trace(UNIT) == 2);
+    let f = flip(g);
+    assert!(f[0][0] == 4 && f[1][1] == 1);
+    let h = new Holder(g, ([["a", "b"], ["c", "d"]], 3));
+    assert!(h.m[1][0] == 3 && h.t[0][1][1] == "d" && h.t[1] == 3);
+    let all: Vec<[[int; 2]; 2]> = [g, f];
+    let l = last(all) ?? UNIT;
+    assert!(l[0][0] == 4);
+    let empty: Vec<[[int; 2]; 2]> = [];
+    assert!(last(empty).is_none());
+}

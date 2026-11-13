@@ -1,0 +1,53 @@
+// A lambda may capture a `()` value like any other (#2792): the closure
+// holds the empty tuple object, as anywhere a `()` word is stored.
+use tests::assert;
+use string::format;
+
+class H {
+    pub f: fn() -> string,
+}
+
+fn nothing() -> () {}
+
+test("a lone capture") {
+    let x = ();
+    let f = fn () use (x) => format("%v", x);
+    assert!(f() == "()");
+}
+
+test("among other captures, with a parameter") {
+    let n = 41;
+    let x = nothing();
+    let s = "s";
+    let g = fn (int k) use (n, x, s) => format("%i %v %s %i", n, x, s, k);
+    assert!(g(1) == "41 () s 1");
+}
+
+test("stored in a field and in a Vec") {
+    let x = ();
+    let h = new H(fn () use (x) => format("%v!", x));
+    let fs: Vec<fn() -> string> = Vec::new();
+    for i in 0..2 {
+        let u = ();
+        fs.push(fn () use (u, i) => format("%v%i", u, i));
+    }
+    assert!(h.f() == "()!" && fs[0]() + fs[1]() == "()0()1");
+}
+
+test("nested lambdas and a mut capture") {
+    let x = ();
+    let n = 7;
+    let outer = fn () use (x, n) {
+        let inner = fn () use (x, n) => format("%v-%i", x, n);
+        return inner();
+    };
+    let u = ();
+    let m = fn () use (mut u) => format("%v", u);
+    assert!(outer() == "()-7" && m() == "()");
+}
+
+test("an Option of unit") {
+    let o = Option::Some(());
+    let f = fn () use (o) => o.is_some();
+    assert!(f());
+}

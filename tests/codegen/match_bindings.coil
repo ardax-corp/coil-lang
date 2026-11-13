@@ -1,0 +1,32 @@
+// Matching a scrutinee again inside one of its arms: the outer binding stays
+// live in the inner arm, and the other case takes the outer arm.
+use tests::assert;
+
+enum Choice {
+    A(int),
+    B,
+}
+
+fn nested(Choice c) -> int {
+    return match c {
+        Choice::A(x) => match c {
+            Choice::A(y) => x + y,
+            Choice::B => -1,
+        },
+        Choice::B => 0,
+    };
+}
+
+fn choice(int n) -> Choice {
+    if n > 0 {
+        return Choice::A(n);
+    }
+    return Choice::B;
+}
+
+test("a repeated match takes each outer arm") {
+    assert!(nested(Choice::A(21)) == 42);
+    assert!(nested(Choice::B) == 0);
+    assert!(nested(choice(black_box(21))) == 42);
+    assert!(nested(choice(black_box(0))) == 0);
+}

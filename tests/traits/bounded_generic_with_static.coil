@@ -22,7 +22,7 @@ impl Area for Sq {
 
 fn first<T: Area>(Vec<T> xs) -> int {
     let x = xs[0];
-    return area(x);
+    return x.area();
 }
 
 fn main() {

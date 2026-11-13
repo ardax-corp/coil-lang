@@ -1,6 +1,5 @@
 //! Self-contained executable packaging (append `.ccoil` archive + trailer).
 
-use crate::opcode::{Byte, Instruction};
 
 /// Magic at the end of a packaged `coil` binary.
 pub const PACKAGE_MAGIC: &[u8; 8] = b"COILAPP\0";
@@ -8,11 +7,16 @@ pub const PACKAGE_MAGIC: &[u8; 8] = b"COILAPP\0";
 /// Trailer size in bytes (little-endian fields).
 pub const PACKAGE_TRAILER_SIZE: usize = 32;
 
-/// [`PackageTrailer::flags`]: program bytecode uses dynamic FFI (`dload` / `extern`).
+/// [`PackageTrailer::flags`]: program code uses dynamic FFI (`dload` / `extern`).
 pub const PACKAGE_FLAG_USES_FFI: u32 = 1;
 
 /// [`PackageTrailer::flags`]: a [`NativeLock`] blob sits between the `.ccoil` archive and the trailer.
 pub const PACKAGE_FLAG_HAS_NATIVE_LOCK: u32 = 2;
+
+/// The package is linked into the program, not appended to a file, so
+/// nothing says where in the file it starts: `archive_offset` is how far
+/// before the trailer the archive starts.
+pub const PACKAGE_FLAG_LINKED: u32 = 4;
 
 /// Metadata stored in the last 32 bytes of a packaged executable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +34,16 @@ impl PackageTrailer {
 
     pub fn has_native_lock(self) -> bool {
         self.flags & PACKAGE_FLAG_HAS_NATIVE_LOCK != 0
+    }
+
+    pub fn is_linked(self) -> bool {
+        self.flags & PACKAGE_FLAG_LINKED != 0
+    }
+
+    /// Where the archive starts in `data`, which ends with this trailer.
+    fn archive_start(self, data: &[u8]) -> Option<usize> {
+        let off = usize::try_from(self.archive_offset).ok()?;
+        if self.is_linked() { data.len().checked_sub(PACKAGE_TRAILER_SIZE)?.checked_sub(off) } else { Some(off) }
     }
 
     pub fn encode(self) -> [u8; PACKAGE_TRAILER_SIZE] {
@@ -438,7 +452,7 @@ pub fn read_package_trailer(data: &[u8]) -> Option<PackageTrailer> {
 
 /// Slice of embedded archive bytes inside a packaged executable.
 pub fn embedded_archive_slice(data: &[u8], trailer: PackageTrailer) -> Option<&[u8]> {
-    let off = usize::try_from(trailer.archive_offset).ok()?;
+    let off = trailer.archive_start(data)?;
     let len = usize::try_from(trailer.archive_len).ok()?;
     let end = off.checked_add(len)?;
     if end > data.len().saturating_sub(PACKAGE_TRAILER_SIZE) {
@@ -458,7 +472,7 @@ pub fn embedded_native_lock_slice(data: &[u8], trailer: PackageTrailer) -> Optio
     if !trailer.has_native_lock() {
         return None;
     }
-    let off = usize::try_from(trailer.archive_offset).ok()?;
+    let off = trailer.archive_start(data)?;
     let len = usize::try_from(trailer.archive_len).ok()?;
     let lock_start = off.checked_add(len)?;
     let lock_end = data.len().checked_sub(PACKAGE_TRAILER_SIZE)?;
@@ -482,6 +496,38 @@ pub fn read_embedded_native_lock(data: &[u8], trailer: PackageTrailer) -> Result
     }
     let text = std::str::from_utf8(slice).map_err(|_| "native lock is not UTF-8".to_string())?;
     NativeLock::from_json(text).map(Some)
+}
+
+/// The package an AOT object carries: `archive`, optional `native_lock`
+/// JSON and a trailer, which the readers above take as they take a file.
+/// The archive comes first, so a 16-byte-aligned symbol aligns it.
+pub fn linked_package(archive: &[u8], native_lock: Option<&[u8]>, flags: u32, archive_version: u32) -> Vec<u8> {
+    let mut out = archive.to_vec();
+    let mut flags = flags | PACKAGE_FLAG_LINKED;
+    if let Some(lock) = native_lock.filter(|l| !l.is_empty()) {
+        out.extend_from_slice(lock);
+        flags |= PACKAGE_FLAG_HAS_NATIVE_LOCK;
+    }
+    let trailer = PackageTrailer {
+        archive_offset: u64::try_from(out.len()).expect("package too large"),
+        archive_len: u64::try_from(archive.len()).expect("archive too large"),
+        flags,
+        archive_version,
+    };
+    out.extend_from_slice(&trailer.encode());
+    out
+}
+
+/// The [`linked_package`] inside the executable `data`, up to the end of its
+/// trailer, for tools that read the file from outside.
+pub fn find_linked_package(data: &[u8]) -> Option<&[u8]> {
+    // The magic is also in the runtime's code, as a constant.
+    let starts = (0..data.len().saturating_sub(PACKAGE_MAGIC.len())).rev().filter(|&i| data[i..].starts_with(PACKAGE_MAGIC));
+    starts.into_iter().find_map(|at| {
+        let found = data.get(..at.checked_add(PACKAGE_TRAILER_SIZE)?)?;
+        let trailer = read_package_trailer(found).filter(|t| t.is_linked())?;
+        embedded_archive_slice(found, trailer).map(|_| found)
+    })
 }
 
 /// Whether `data` already ends with a package trailer (template is already packaged).
@@ -564,57 +610,6 @@ pub fn is_system_ffi_stem(name: &str) -> bool {
     }
 }
 
-fn is_ffi_opcode(op: Instruction) -> bool {
-    matches!(
-        op,
-        Instruction::FfiLoad
-            | Instruction::FfiInvoke
-            | Instruction::DeclareFFI
-            | Instruction::NATIVE
-    )
-}
-
-/// True when bytecode may call into shared libraries at runtime.
-pub fn bytecode_uses_ffi(bytecode: &[Byte]) -> bool {
-    bytecode.iter().any(|b| is_ffi_opcode(*b.bytecode()))
-}
-
-/// Decode a `STRING` table index at `i`. Returns `(text, index_after)`.
-fn decode_string_literal(
-    bytecode: &[Byte],
-    strings: &[String],
-    i: usize,
-) -> Option<(String, usize)> {
-    let b = bytecode.get(i)?;
-    if *b.bytecode() != Instruction::STRING {
-        return None;
-    }
-    let idx = b.operand_u32() as usize;
-    let text = strings.get(idx)?.clone();
-    Some((text, i + 1))
-}
-
-/// Library names passed to `FfiLoad` (`STRING` immediately before each `FfiLoad`).
-pub fn ffi_library_names_from_bytecode(bytecode: &[Byte], strings: &[String]) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut i = 0;
-    while i < bytecode.len() {
-        if let Some((name, end)) = decode_string_literal(bytecode, strings, i) {
-            if bytecode
-                .get(end)
-                .is_some_and(|b| *b.bytecode() == Instruction::FfiLoad)
-                && !names.iter().any(|n| n == &name)
-            {
-                names.push(name);
-            }
-            i = end;
-        } else {
-            i += 1;
-        }
-    }
-    names
-}
-
 /// Default natives cache root (`~/.coil/natives`).
 pub fn default_natives_root() -> std::path::PathBuf {
     let home = std::env::var_os("HOME")
@@ -627,7 +622,42 @@ pub fn default_natives_root() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::opcode::Byte;
+
+    #[test]
+    fn a_linked_package_reads_as_a_file_does() {
+        let data = linked_package(b"archive", Some(b"{}"), PACKAGE_FLAG_USES_FFI, 7);
+        let trailer = read_package_trailer(&data).expect("trailer");
+        assert!(trailer.is_linked() && trailer.has_native_lock() && trailer.uses_ffi());
+        assert_eq!(embedded_archive_slice(&data, trailer), Some(&b"archive"[..]));
+        assert_eq!(embedded_native_lock_slice(&data, trailer), Some(&b"{}"[..]));
+    }
+
+    #[test]
+    fn a_linked_package_is_found_in_an_image() {
+        let package = linked_package(b"archive", None, 0, 7);
+        let mut image = b"code".to_vec();
+        image.extend_from_slice(&package);
+        image.extend_from_slice(b"more code");
+        let found = find_linked_package(&image).expect("package");
+        let trailer = read_package_trailer(found).expect("trailer");
+        assert_eq!(embedded_archive_slice(found, trailer), Some(&b"archive"[..]));
+    }
+
+    /// The runtime holds the magic as a constant, followed by anything.
+    #[test]
+    fn a_stray_magic_is_not_a_package() {
+        let package = linked_package(b"archive", None, 0, 7);
+        let mut image = package.clone();
+        image.extend_from_slice(PACKAGE_MAGIC);
+        image.extend_from_slice(&[0xff; 64]);
+        image.extend_from_slice(PACKAGE_MAGIC);
+        let found = find_linked_package(&image).expect("package");
+        assert_eq!(found, &package[..]);
+        let mut bare = PACKAGE_MAGIC.to_vec();
+        bare.extend_from_slice(&[0xff; 64]);
+        assert!(find_linked_package(&bare).is_none());
+    }
+    
 
     #[test]
     fn json_bool_roundtrip() {
@@ -732,29 +762,6 @@ mod tests {
         assert_eq!(
             embedded_archive_slice(&out, trailer),
             Some(archive.as_slice())
-        );
-    }
-
-    #[test]
-    fn detects_ffi_opcodes() {
-        let bc = vec![
-            Byte::new(Instruction::HALT),
-            Byte::new(Instruction::FfiLoad),
-        ];
-        assert!(bytecode_uses_ffi(&bc));
-        assert!(!bytecode_uses_ffi(&[Byte::new(Instruction::HALT)]));
-    }
-
-    #[test]
-    fn extracts_dload_library_name_before_ffi_load() {
-        let strings = vec!["sum".to_string()];
-        let bc = vec![
-            Byte::new(Instruction::STRING).with_operand_u32(0),
-            Byte::new(Instruction::FfiLoad),
-        ];
-        assert_eq!(
-            ffi_library_names_from_bytecode(&bc, &strings),
-            vec!["sum".to_string()]
         );
     }
 

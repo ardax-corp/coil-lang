@@ -180,8 +180,11 @@ impl Pipeline {
             let cached = self.ast_cache.get(file);
             // Includes earlier rounds' generated code (its spans point past the file).
             let report = cached.map(|c| c.report_source()).unwrap_or_default();
-            // Calls looked up by span, one walk for the whole round.
+            // Calls looked up by span, and the file's `use` items, one walk
+            // each for the whole round: nothing is spliced until every job
+            // is resolved.
             let calls = cached.and_then(|c| c.ast()).map(index_calls).unwrap_or_default();
+            let uses = cached.and_then(|c| c.ast()).map(top_level_uses).unwrap_or_default();
             for p in pending {
                 if p.kind == MacroKind::Comptime {
                     if self.macro_stack.contains(file) {
@@ -212,7 +215,7 @@ impl Pipeline {
                     continue;
                 }
                 let call = calls.get(&p.target).copied();
-                match self.resolve_macro(file, &p, call) {
+                match self.resolve_macro(file, &uses, &p, call) {
                     Ok((provider, decl, provider_module)) => {
                         if &provider == file {
                             errors.push(Message::error(
@@ -259,7 +262,7 @@ impl Pipeline {
                         }
                     }
                     Err(None) => {
-                        let candidates = self.import_candidates(file, &p.name);
+                        let candidates = self.import_candidates(&uses, &p.name);
                         // The provider does not parse: that is why nothing
                         // declares the macro, and the use site says so, as
                         // it does for a provider that does not typecheck.
@@ -325,9 +328,11 @@ impl Pipeline {
         // Calls in expression / statement position are replaced in one walk
         // per file once every output is parsed.
         let mut replacements: HashMap<PathBuf, CallReplacements> = HashMap::new();
+        // A file's derive outputs go in together, before its other splices.
+        let mut derives: HashMap<PathBuf, Vec<StagedDerive>> = HashMap::new();
         for (job, result) in jobs.iter().zip(results) {
             let msgs = match result {
-                Ok(text) => self.splice(job, &text, &mut replacements),
+                Ok(text) => self.splice(job, &text, &mut replacements, &mut derives),
                 Err(err) => {
                     let err = match &job.block {
                         Some(block) => self.block_positions(&job.file, block, &err),
@@ -343,6 +348,10 @@ impl Pipeline {
             if let Some(cached) = self.ast_cache.get_mut(&job.file) {
                 cached.push_expand_messages(msgs);
             }
+        }
+        let staged: Vec<PathBuf> = derives.keys().cloned().collect();
+        for file in staged {
+            self.flush_derives(&file, &mut derives);
         }
         for (file, mut calls) in replacements {
             if let Some(ast) = self.ast_cache.get_mut(&file).and_then(|c| c.ast_mut()) {
@@ -449,15 +458,17 @@ impl Pipeline {
     ///
     /// `Err(None)`: nothing in scope provides it.
     #[allow(clippy::type_complexity)]
+    /// `uses` is `file`'s [`top_level_uses`].
     fn resolve_macro(
         &self,
         file: &Path,
+        uses: &[UseItem],
         p: &PendingMacro,
         call: Option<&Output<'_>>,
     ) -> Result<(PathBuf, MacroDecl, String), Option<Message>> {
-        let Some(ast) = self.ast_cache.get(file).and_then(|c| c.ast()) else {
+        if self.ast_cache.get(file).and_then(|c| c.ast()).is_none() {
             return Err(None);
-        };
+        }
         // A function-style macro may be overloaded by arity: the call's
         // argument count picks the declaration.
         let argc = match call.map(|c| c.1.as_ref()) {
@@ -480,18 +491,18 @@ impl Pipeline {
                 .map(|(file, _)| file)
                 .or_else(|| resolve_use_in_roots(&self.roots, &self.project_root, path, name))
         };
-        // Declarations of `p` that the top-level `use` items of `ast` import,
+        // Declarations of `p` that the top-level `use` items `uses` import,
         // one per providing module.
-        let imported = |ast: &Output<'_>| -> Result<Vec<(PathBuf, MacroDecl)>, Message> {
+        let imported = |uses: &[UseItem]| -> Result<Vec<(PathBuf, MacroDecl)>, Message> {
             let mut found: Vec<(PathBuf, MacroDecl)> = Vec::new();
-            for (path, name, alias) in top_level_uses(ast) {
-                let visible = alias.as_deref().unwrap_or(&name);
+            for (path, name, alias) in uses {
+                let visible = alias.as_deref().unwrap_or(name);
                 let (candidate, item) = if name == "*" {
                     let mut segs = path.clone();
                     let Some(last) = segs.pop() else { continue };
                     (resolve(&segs, &last), p.name.clone())
-                } else if visible == p.name {
-                    (resolve(&path, &name), name.clone())
+                } else if *visible == p.name {
+                    (resolve(path, name), name.clone())
                 } else {
                     continue;
                 };
@@ -504,7 +515,7 @@ impl Pipeline {
             }
             Ok(found)
         };
-        let mut found = imported(ast).map_err(Some)?;
+        let mut found = imported(uses).map_err(Some)?;
         // Macro output may use its provider's other macros without an import,
         // and the macros the provider itself imports (#1407).
         if found.is_empty()
@@ -513,7 +524,7 @@ impl Pipeline {
             if let Some(decl) = pick(provider, &p.name).map_err(Some)? {
                 found.push((provider.clone(), decl));
             } else if let Some(provider_ast) = self.ast_cache.get(provider).and_then(|c| c.ast()) {
-                found = imported(provider_ast).map_err(Some)?;
+                found = imported(&top_level_uses(provider_ast)).map_err(Some)?;
             }
         }
         // Built-in derives come from the embedded `derive` module. It is not
@@ -554,25 +565,22 @@ impl Pipeline {
         }
     }
 
-    /// Modules `file`'s `use` items would take a macro `name` from.
-    fn import_candidates(&self, file: &Path, name: &str) -> Vec<PathBuf> {
-        let Some(ast) = self.ast_cache.get(file).and_then(|c| c.ast()) else {
-            return Vec::new();
-        };
+    /// Modules the `use` items `uses` (a file's [`top_level_uses`]) would
+    /// take a macro `name` from.
+    fn import_candidates(&self, uses: &[UseItem], name: &str) -> Vec<PathBuf> {
         let resolve = |path: &[String], item: &str| {
             crate::macros::embedded_use(path, item)
                 .map(|(file, _)| file)
                 .or_else(|| resolve_use_in_roots(&self.roots, &self.project_root, path, item))
         };
-        top_level_uses(ast)
-            .into_iter()
+        uses.iter()
             .filter_map(|(path, item, alias)| {
                 if item == "*" {
                     let mut segs = path.clone();
                     let last = segs.pop()?;
                     resolve(&segs, &last)
-                } else if alias.as_deref().unwrap_or(&item) == name {
-                    resolve(&path, &item)
+                } else if alias.as_deref().unwrap_or(item) == name {
+                    resolve(path, item)
                 } else {
                     None
                 }
@@ -823,7 +831,7 @@ impl Pipeline {
     fn run_expansions(&mut self, jobs: &[Job]) -> Vec<Result<String, String>> {
         let started = std::time::Instant::now();
         let (results, reused) = self.run_expansions_timed(jobs);
-        crate::il::opt::note_comptime_macros(jobs.len(), reused, started.elapsed().as_micros() as u64);
+        crate::opt::note_comptime_macros(jobs.len(), reused, started.elapsed().as_micros() as u64);
         results
     }
 
@@ -987,7 +995,7 @@ impl Pipeline {
             // its own module's.
             let module = jobs[idx[0]].provider_module.clone();
             let io = self.host_grants.comptime_io_for(&module);
-            // A nested compile plus a VM run is deeper than Windows' 1 MiB
+            // A nested compile plus a runtime run is deeper than Windows' 1 MiB
             // main thread stack; continue on a fresh segment when little is left.
             let outs = stacker::maybe_grow(EXPANSION_RED_ZONE, EXPANSION_STACK, || {
                 let program = match compiled_program(key, ctx) {
@@ -1276,14 +1284,25 @@ impl Pipeline {
     }
 
     /// Parse one macro's output and put it into the file's AST (a call in
-    /// expression or statement position: into `replacements`).
-    fn splice(&mut self, job: &Job, text: &str, replacements: &mut HashMap<PathBuf, CallReplacements>) -> Vec<Message> {
+    /// expression or statement position: into `replacements`; a derive's
+    /// items: into `derives`, which go in before the file's next other
+    /// splice, [`Self::flush_derives`]).
+    fn splice(
+        &mut self,
+        job: &Job,
+        text: &str,
+        replacements: &mut HashMap<PathBuf, CallReplacements>,
+        derives: &mut HashMap<PathBuf, Vec<StagedDerive>>,
+    ) -> Vec<Message> {
         if matches!(job.pending.position, CallPosition::Expr | CallPosition::Stmt) {
             return self.splice_call(job, text, replacements);
         }
         let mut messages = Vec::new();
         let module = self.namespace_for(&job.file);
         let is_method = job.pending.owner.is_some();
+        if is_method || job.decl.kind != MacroKind::Derive {
+            self.flush_derives(&job.file, derives);
+        }
         let snippet = if is_method {
             format!("impl __coil_owner {{\n{text}\n}}")
         } else {
@@ -1359,25 +1378,12 @@ impl Pipeline {
                 }
             }
             (None, MacroKind::Derive) => {
-                let Some(at) = children.iter().position(|c| c.0 == job.pending.target) else {
-                    return messages;
-                };
-                let type_name = decl_name(&children[at]).map(str::to_string);
-                if let Some(type_name) = &type_name {
-                    drop_default_display_impls(children, type_name, &items);
-                }
-                let at = children
-                    .iter()
-                    .position(|c| c.0 == job.pending.target)
-                    .expect("target still present");
-                // After this type's earlier derive outputs, so impls keep
-                // the order the derives are listed in.
-                let done = self.derived_items.entry(job.pending.target).or_insert(0);
-                let start = at + 1 + *done;
-                *done += items.len();
-                for (k, item) in items.into_iter().enumerate() {
-                    children.insert(start + k, item);
-                }
+                let shows = impl_heads(&items).into_iter().filter(|(class, _)| class == "Show").map(|(_, head)| head).collect();
+                derives.entry(job.file.clone()).or_default().push(StagedDerive {
+                    target: job.pending.target,
+                    items,
+                    shows,
+                });
             }
             (None, MacroKind::Function) => {
                 // `name!(…);` at the top level: its items replace the statement.
@@ -1413,6 +1419,18 @@ impl Pipeline {
             }
         }
         messages
+    }
+
+    /// Put the derive outputs staged for `file` into its items
+    /// ([`splice_derives`]).
+    fn flush_derives(&mut self, file: &Path, derives: &mut HashMap<PathBuf, Vec<StagedDerive>>) {
+        let Some(staged) = derives.remove(file).filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let Some(Expression::Program(children)) = self.ast_cache.get_mut(file).and_then(|c| c.ast_mut()).map(|ast| ast.1.as_mut()) else {
+            return;
+        };
+        splice_derives(children, staged, file, &mut self.derived_items);
     }
 
     /// Splice a call's output in expression or statement position. The
@@ -1821,9 +1839,12 @@ fn encode_call(call: Option<&Output<'_>>, source: &str, p: &PendingMacro, decl: 
     Ok(wire.finish())
 }
 
+/// A top-level `use`: `(path, name, alias)`.
+type UseItem = (Vec<String>, String, Option<String>);
+
 /// `(path, name, alias)` of every top-level `use`.
-fn top_level_uses(ast: &Output<'_>) -> Vec<(Vec<String>, String, Option<String>)> {
-    fn walk(node: &Output<'_>, out: &mut Vec<(Vec<String>, String, Option<String>)>) {
+fn top_level_uses(ast: &Output<'_>) -> Vec<UseItem> {
+    fn walk(node: &Output<'_>, out: &mut Vec<UseItem>) {
         match node.1.as_ref() {
             Expression::Use { path, name, alias } => out.push((path.clone(), name.clone(), alias.clone())),
             Expression::Program(items) | Expression::Fragment(items) => {
@@ -1895,23 +1916,124 @@ fn is_default_display_impl(node: &Output<'_>, type_name: &str) -> bool {
     match node.1.as_ref() {
         Expression::TypeClassImpl { class, args, .. } if is_synthetic(node.0) => {
             *class == "Show"
-                && args.first().is_some_and(|a| a.1.to_string() == type_name)
+                && args.first().is_some_and(|a| match a.1.as_ref() {
+                    Expression::Type(name) => *name == type_name,
+                    head => head.to_string() == type_name,
+                })
         }
         _ => false,
     }
 }
 
-/// A derive that writes `impl Show for T` replaces the compiler's type-name
-/// default for `T`.
-fn drop_default_display_impls(children: &mut Vec<Output<'_>>, type_name: &str, generated: &[Output<'_>]) {
-    let heads = impl_heads(generated);
-    children.retain(|c| {
-        !(is_default_display_impl(c, type_name)
-            && heads.iter().any(|(class, head)| {
-                head == type_name
-                    && matches!(c.1.as_ref(), Expression::TypeClassImpl { class: c2, .. } if c2 == class)
-            }))
-    });
+/// The type a compiler-made type-name `impl Show` is for
+/// ([`is_default_display_impl`]).
+fn default_display_type(node: &Output<'_>) -> Option<String> {
+    match node.1.as_ref() {
+        Expression::TypeClassImpl { class, args, .. } if is_synthetic(node.0) && *class == "Show" => args.first().map(|a| match a.1.as_ref() {
+            Expression::Type(name) => name.to_string(),
+            head => head.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// One derive's output for a file, staged until it goes into the file's
+/// items ([`splice_derives`]).
+struct StagedDerive {
+    /// The derived type's node.
+    target: parser::SimpleSpan,
+    items: Vec<Output<'static>>,
+    /// The types its `impl Show for T` items are for.
+    shows: Vec<String>,
+}
+
+/// Put a file's staged derive outputs into its items, in staging order:
+/// each derive's items after its type and that type's earlier derive
+/// outputs (`derived`, by file and type), so impls keep the order the
+/// derives are listed in. A derive that writes `impl Show for T` replaces
+/// the compiler's type-name default for `T`. In one pass over the items
+/// when that gives what splicing them one at a time gives, which is when
+/// no default it drops and no other type sits among a type's earlier
+/// outputs; else one at a time (#2690).
+fn splice_derives(children: &mut Vec<Output<'static>>, staged: Vec<StagedDerive>, file: &Path, derived: &mut HashMap<(PathBuf, parser::SimpleSpan), usize>) {
+    let n = children.len();
+    let mut index: HashMap<parser::SimpleSpan, usize> = HashMap::with_capacity(n);
+    for (i, c) in children.iter().enumerate() {
+        index.entry(c.0).or_insert(i);
+    }
+    // Each target's place, and where its outputs go: after its earlier ones.
+    let mut at: HashMap<parser::SimpleSpan, (usize, usize)> = HashMap::new();
+    let mut earlier = vec![false; n];
+    let mut dropped: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut whole = true;
+    for job in &staged {
+        let Some(&pos) = index.get(&job.target) else {
+            continue;
+        };
+        if let Some(name) = decl_name(&children[pos])
+            && job.shows.iter().any(|s| s == name)
+        {
+            dropped.insert(name.to_string());
+        }
+        if let std::collections::hash_map::Entry::Vacant(slot) = at.entry(job.target) {
+            let ins = pos + 1 + derived.get(&(file.to_path_buf(), job.target)).copied().unwrap_or(0);
+            whole &= ins <= n;
+            earlier[pos + 1..ins.min(n)].iter_mut().for_each(|e| *e = true);
+            slot.insert((pos, ins));
+        }
+    }
+    let mut places = std::collections::HashSet::new();
+    whole &= at.values().all(|&(pos, ins)| !earlier[pos] && places.insert(ins));
+    let drop: Vec<bool> = children.iter().map(|c| default_display_type(c).is_some_and(|t| dropped.contains(&t))).collect();
+    whole &= drop.iter().zip(&earlier).all(|(d, e)| !(*d && *e));
+    whole &= !staged.iter().flat_map(|j| &j.items).any(|i| default_display_type(i).is_some_and(|t| dropped.contains(&t)));
+    if !whole {
+        for job in staged {
+            splice_derive(children, job, file, derived);
+        }
+        return;
+    }
+    let mut groups: HashMap<usize, Vec<Output<'static>>> = HashMap::new();
+    let mut added = 0;
+    for job in staged {
+        let Some(&(_, ins)) = at.get(&job.target) else {
+            continue;
+        };
+        *derived.entry((file.to_path_buf(), job.target)).or_insert(0) += job.items.len();
+        added += job.items.len();
+        groups.entry(ins).or_default().extend(job.items);
+    }
+    let old = std::mem::replace(children, Vec::with_capacity(n + added));
+    for (i, (c, d)) in old.into_iter().zip(drop).enumerate() {
+        if let Some(g) = groups.remove(&i) {
+            children.extend(g);
+        }
+        if !d {
+            children.push(c);
+        }
+    }
+    if let Some(g) = groups.remove(&n) {
+        children.extend(g);
+    }
+}
+
+/// [`splice_derives`] for one derive.
+fn splice_derive(children: &mut Vec<Output<'static>>, job: StagedDerive, file: &Path, derived: &mut HashMap<(PathBuf, parser::SimpleSpan), usize>) {
+    let Some(at) = children.iter().position(|c| c.0 == job.target) else {
+        return;
+    };
+    if let Some(type_name) = decl_name(&children[at]).map(str::to_string)
+        && job.shows.contains(&type_name)
+    {
+        children.retain(|c| !is_default_display_impl(c, &type_name));
+    }
+    let at = children.iter().position(|c| c.0 == job.target).expect("target still present");
+    let done = derived.entry((file.to_path_buf(), job.target)).or_insert(0);
+    let start = at + 1 + *done;
+    *done += job.items.len();
+    for (k, item) in job.items.into_iter().enumerate() {
+        children.insert(start + k, item);
+    }
 }
 
 /// Per derived type: helpers its derives own, attributes its members use, site.
@@ -1974,6 +2096,11 @@ thread_local! {
 /// The program for `key`, compiled on first use. Parallel pipelines wait
 /// for one compile instead of repeating it; failures are not cached.
 fn compiled_program(key: u64, ctx: SubProgram) -> Result<std::sync::Arc<CompiledProgram>, CompileFailure> {
+    crate::mir::without_native_capture(|| compiled_program_uncaptured(key, ctx))
+}
+
+/// [`compiled_program`] with the native capture closed.
+fn compiled_program_uncaptured(key: u64, ctx: SubProgram) -> Result<std::sync::Arc<CompiledProgram>, CompileFailure> {
     if COMPILING.with(|c| c.borrow().contains(&key)) {
         return ctx.compile().map(std::sync::Arc::new);
     }
@@ -2071,7 +2198,15 @@ impl SubProgram {
         sub.host_grants.comptime = self.comptime;
         sub.host_grants.comptime_io = self.comptime_io;
         sub.host_grants.comptime_cache = self.comptime_cache;
-        let (bytecode, constants) = match sub.compile_src_from_file(entry.to_str().expect("utf-8 path")) {
+        // `compiled_program` closed any outer capture: this one is the
+        // expansion program's own.
+        let capture = self.host.runs_mir().then(crate::mir::ComptimeCapture::open);
+        // The level is per thread, and the parent's compile goes on here.
+        let contracts = crate::hir::contract_level();
+        let compiled = sub.compile_src_from_file(entry.to_str().expect("utf-8 path"));
+        crate::hir::set_contract_level(contracts);
+        let mir = capture.map(crate::mir::ComptimeCapture::take).unwrap_or_default();
+        let constants = match compiled {
             Ok(out) => out,
             Err(_) => {
                 let detail = sub
@@ -2105,14 +2240,14 @@ impl SubProgram {
         }
         Ok(CompiledProgram {
             expansion: crate::macros::CompiledExpansion {
-                bytecode: std::sync::Arc::new(bytecode),
                 constants: std::sync::Arc::new(constants),
                 strings: std::sync::Arc::new(sub.strings().to_vec()),
                 static_slot_count: sub.static_slot_count(),
-                operand_stack_slots: sub.operand_stack_slots(),
                 program_debug: sub.program_debug(),
                 class_word_kinds: sub.class_word_kinds(),
                 static_word_kinds: std::sync::Arc::new(sub.static_word_kinds()),
+                mir: std::sync::Arc::new(mir),
+                runnable: std::sync::OnceLock::new(),
             },
             offsets,
         })
@@ -2200,20 +2335,16 @@ fn encode_program(program: &CompiledProgram) -> Option<Vec<u8>> {
         static_slot_count: e.static_slot_count,
         constants: e.constants.to_vec(),
         strings: e.strings.to_vec(),
-        bytecode: e.bytecode.to_vec(),
         source_files: Vec::new(),
         debug_locs: Vec::new(),
         fn_symbols: Vec::new(),
         struct_layouts: Vec::new(),
-        operand_stack_slots: e.operand_stack_slots,
-        stack_maps: Vec::new(),
-        precise_frames: Vec::new(),
         class_word_kinds: e.class_word_kinds.clone(),
         static_word_kinds: e.static_word_kinds.to_vec(),
         debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
+        native_mir: program_mir(e),
+        startup: Vec::new(),
+        main: None,
     };
     archive.set_debug(e.program_debug.clone(), common::DebugLevel::Full);
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&archive).ok()?;
@@ -2252,23 +2383,32 @@ fn decode_program(bytes: &[u8]) -> Option<CompiledProgram> {
     // rkyv needs the archive aligned.
     let mut aligned = rkyv::util::AlignedVec::<16>::new();
     aligned.extend_from_slice(rest);
-    let decoded = common::decode_archived_program(&aligned).ok()?;
-    let p = decoded.program;
+    let p = common::decode_archived_program(&aligned).ok()?;
     if p.version != common::ARCHIVE_VERSION {
         return None;
     }
     let program_debug = p.debug_bundle();
+    let mir = if p.native_mir.is_empty() { Vec::new() } else { crate::mir::archive::decode(&p.native_mir).ok()?.0 };
     Some(CompiledProgram {
         expansion: crate::macros::CompiledExpansion {
-            bytecode: std::sync::Arc::new(p.bytecode),
             constants: std::sync::Arc::new(p.constants),
             strings: std::sync::Arc::new(p.strings),
             static_slot_count: p.static_slot_count,
-            operand_stack_slots: p.operand_stack_slots,
             program_debug,
             class_word_kinds: p.class_word_kinds,
             static_word_kinds: std::sync::Arc::new(p.static_word_kinds),
+            mir: std::sync::Arc::new(mir),
+            runnable: std::sync::OnceLock::new(),
         },
         offsets,
     })
+}
+
+/// `e`'s bodies in the MIR archive format (empty for none).
+fn program_mir(e: &crate::macros::CompiledExpansion) -> Vec<u8> {
+    if e.mir.is_empty() {
+        return Vec::new();
+    }
+    let pcs: HashMap<String, u32> = e.program_debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    crate::mir::archive::encode(&e.mir, &pcs, &e.program_debug.inline_scopes)
 }

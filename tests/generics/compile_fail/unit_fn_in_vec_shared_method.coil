@@ -1,0 +1,22 @@
+// @expected E0801 — a method with type parameters of its own on a plain class
+// has no clone, so its shared body would read `T = ()` from functions held in
+// a `Vec` as the word `0`, not the empty tuple object a `()` is where it is
+// stored (#2498). No adapter reaches a function inside a `Vec`: the call is
+// refused, not given a wrong value.
+class Runner {
+    pub n: int,
+}
+
+impl Runner {
+    pub fn first<T>(Vec<fn() -> T> fs) -> Option<T> {
+        return Some(fs[0]());
+    }
+}
+
+fn unit() -> () {}
+
+fn main() {
+    let r = new Runner(1);
+    let fs: Vec<fn() -> ()> = [unit];
+    let _ = r.first(fs) == Some(());
+}

@@ -1,0 +1,215 @@
+// `a != b` on a scalar-backed enum whose `impl Eq` defines only `eq` runs
+// the trait's default `ne`, which calls that `eq` (coil-lang#2462): the
+// answer is the instance's, not a comparison of the backing words, for
+// every backing type, and the same as `a.ne(b)`, `Eq::ne(a, b)` and a
+// `T: Eq` body give.
+// Here past the clone budget, where the default `ne` is one shared body.
+// @flags --clone-budget 0
+use tests::assert;
+
+// Any two are equal.
+#[repr(int)]
+enum Flag {
+    Off = 0,
+    On = 1,
+}
+
+impl Eq for Flag {
+    pub fn eq(Flag a, Flag b) -> bool {
+        return true;
+    }
+}
+
+// Equal when both are below 1.0 or both are not.
+#[repr(float)]
+enum Ratio {
+    Third = 0.25,
+    Half = 0.5,
+    Full = 1.0,
+}
+
+fn small(Ratio r) -> bool {
+    return match r {
+        Ratio::Full => false,
+        default => true,
+    };
+}
+
+impl Eq for Ratio {
+    pub fn eq(Ratio a, Ratio b) -> bool {
+        return small(a) == small(b);
+    }
+}
+
+// No two are equal, not even a case and itself.
+#[repr(string)]
+enum Tone {
+    Hi = "hi",
+    Lo = "lo",
+}
+
+impl Eq for Tone {
+    pub fn eq(Tone a, Tone b) -> bool {
+        return false;
+    }
+}
+
+// Any two are equal.
+#[repr(bool)]
+enum Switch {
+    Up = true,
+    Down = false,
+}
+
+impl Eq for Switch {
+    pub fn eq(Switch a, Switch b) -> bool {
+        return true;
+    }
+}
+
+// Defines both: `!=` is its own `ne`, whatever `eq` says.
+#[repr(int)]
+enum Odd {
+    A = 1,
+    B = 2,
+}
+
+impl Eq for Odd {
+    pub fn eq(Odd a, Odd b) -> bool {
+        return true;
+    }
+
+    pub fn ne(Odd a, Odd b) -> bool {
+        return true;
+    }
+}
+
+class Panel {
+    pub left: Flag,
+    pub right: Flag,
+    pub level: Ratio,
+}
+
+fn differ<T: Eq>(T a, T b) -> bool {
+    return a != b;
+}
+
+fn same<T: Eq>(T a, T b) -> bool {
+    return a == b;
+}
+
+fn pick(int n) -> Flag {
+    if n % 2 == 0 {
+        return Flag::Off;
+    }
+    return Flag::On;
+}
+
+test("`!=` runs the default `ne` on an int-backed enum") {
+    let on = Flag::On;
+    let off = Flag::Off;
+    assert!(on == off);
+    assert!(!(on != off));
+    assert!(!(off != on));
+    assert!(!(on != on));
+    assert!(!(Flag::On != Flag::Off));
+    // The backing words still differ.
+    assert!(on + 0 != off + 0);
+}
+
+test("`!=` runs the default `ne` on float, string and bool backings") {
+    let third = Ratio::Third;
+    let half = Ratio::Half;
+    let full = Ratio::Full;
+    assert!(!(third != half));
+    assert!(half != full);
+    assert!(full != third);
+    assert!(!(full != full));
+
+    let hi = Tone::Hi;
+    let lo = Tone::Lo;
+    assert!(hi != lo);
+    assert!(hi != hi);
+    assert!(!(hi == hi));
+
+    let up = Switch::Up;
+    let down = Switch::Down;
+    assert!(!(up != down));
+    assert!(up == down);
+}
+
+test("an instance's own `ne` is the `!=`") {
+    let a = Odd::A;
+    let b = Odd::B;
+    assert!(a == b);
+    assert!(a != b);
+    assert!(a != a);
+}
+
+test("the method and trait spellings and a generic body agree with `!=`") {
+    let on = Flag::On;
+    let off = Flag::Off;
+    assert!(!on.ne(off));
+    assert!(!Eq::ne(on, off));
+    assert!(!differ(on, off));
+    assert!(same(on, off));
+
+    let half = Ratio::Half;
+    let full = Ratio::Full;
+    assert!(half.ne(full));
+    assert!(Eq::ne(half, full));
+    assert!(differ(half, full));
+    assert!(!differ(half, Ratio::Third));
+
+    let hi = Tone::Hi;
+    assert!(hi.ne(hi));
+    assert!(differ(hi, hi));
+    assert!(!same(hi, hi));
+
+    assert!(!differ(Switch::Up, Switch::Down));
+}
+
+test("`!=` on fields, call results, in a loop and in a condition") {
+    let p = new Panel(Flag::On, Flag::Off, Ratio::Half);
+    assert!(!(p.left != p.right));
+    assert!(p.level != Ratio::Full);
+    assert!(!(p.level != Ratio::Third));
+
+    let n = 0;
+    let i = 0;
+    while i < 10 {
+        if pick(i) != pick(i + 1) {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    assert!(n == 0);
+
+    let levels = [Ratio::Third, Ratio::Half, Ratio::Full, Ratio::Full];
+    let steps = 0;
+    let k = 1;
+    while k < levels.len() {
+        if levels[k] != levels[k - 1] {
+            steps = steps + 1;
+        }
+        k = k + 1;
+    }
+    assert!(steps == 1);
+
+    let verdict = if Flag::On != Flag::Off {
+        "differ"
+    } else {
+        "same"
+    };
+    assert!(verdict == "same");
+}
+
+test("`!=` on an aggregate holding the enum goes through its `eq`") {
+    assert!(!((Flag::On, 1) != (Flag::Off, 1)));
+    assert!((Flag::On, 1) != (Flag::Off, 2));
+    assert!(!(Some(Flag::On) != Some(Flag::Off)));
+    let none: Option<Flag> = None;
+    assert!(Some(Flag::On) != none);
+    assert!((Ratio::Half, Ratio::Full) != (Ratio::Full, Ratio::Half));
+    assert!(!((Ratio::Half, Ratio::Full) != (Ratio::Third, Ratio::Full)));
+}

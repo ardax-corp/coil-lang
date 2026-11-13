@@ -12,7 +12,6 @@ enum Tree {
     Node(Tree, Tree),
 }
 
-#[max_depth(64)]
 fn bottom_up(int depth) -> Tree {
     if depth == 0 {
         return Tree::Leaf();
@@ -20,7 +19,6 @@ fn bottom_up(int depth) -> Tree {
     return Tree::Node(bottom_up(depth - 1), bottom_up(depth - 1));
 }
 
-#[max_depth(64)]
 fn item_check(Tree t) -> int {
     return match t {
         Tree::Leaf => 1,

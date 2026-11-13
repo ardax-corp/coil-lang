@@ -16,7 +16,7 @@ class Pt {
 
 impl Describe for Pt {
     fn describe(Pt p) -> string {
-        return "pt " + show(p.x);
+        return "pt " + p.x.show();
     }
 }
 
@@ -31,7 +31,7 @@ class Labeled {
 fn all(Vec<Show> xs) -> int {
     let n = 0;
     for x in xs {
-        n = n + show(x).len();
+        n = n + x.show().len();
     }
     return n;
 }
@@ -45,12 +45,12 @@ fn main() {
     let p: Show = new Pt(5);
     xs.push(p);
     xs.push(t.what);
-    let first = format("%s %i", show(t.what), all(xs));
+    let first = format("%s %i", t.what.show(), all(xs));
     let u = new Tagged(new Pt(1));
     let l = new Labeled(new Pt(2));
     let ys: Vec<Show> = Vec::new();
     ys.push(3);
     ys.push(new Pt(4));
-    let rest = format("%s|%s|%s|%s", show(u.what), describe(l.what), show(ys[0]), show(ys[1]));
+    let rest = format("%s|%s|%s|%s", u.what.show(), l.what.describe(), ys[0].show(), ys[1].show());
     let _ = write(stdout(), to_bytes(first + "|" + rest));
 }

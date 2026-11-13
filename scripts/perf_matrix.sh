@@ -126,7 +126,7 @@ compile_perf() {
     local archive="$2"
     # Sequential baseline row: keep auto-par off so Coil matches the naive
     # Lua/Node ports rather than fork-join specializations (fib(32) especially).
-    "$BIN" compile --auto-par off "examples/perf/${name}.coil" -o "$archive" >/dev/null
+    "$BIN" compile --fold-calls off --auto-par off "examples/perf/${name}.coil" -o "$archive" >/dev/null
 }
 
 for name in "${CROSS_LANG[@]}"; do
@@ -143,7 +143,7 @@ for name in "${CROSS_LANG[@]}"; do
 
     # Default IPA on — evidence that principle-based auto-par helps when sites exist.
     archive_par="$OUT_DIR/${name}_autopar.ccoil"
-    "$BIN" compile "examples/perf/${name}.coil" -o "$archive_par" >/dev/null
+    "$BIN" compile --fold-calls off "examples/perf/${name}.coil" -o "$archive_par" >/dev/null
     touch "$archive_par"
     got_par="$("$BIN" run "$archive_par")"
     if [[ "$got_par" != "${EXPECTED[$name]}" ]]; then
@@ -165,7 +165,7 @@ done
 
 for name in "${AOT_ONLY[@]}"; do
     archive="$OUT_DIR/${name}.ccoil"
-    "$BIN" compile "examples/perf/${name}.coil" -o "$archive" >/dev/null
+    "$BIN" compile --fold-calls off "examples/perf/${name}.coil" -o "$archive" >/dev/null
     touch "$archive"
     check_archive "$name" "$archive"
     run_pooped "$name" "$BIN run $archive"

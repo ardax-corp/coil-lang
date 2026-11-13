@@ -15,7 +15,7 @@ use crate::mutate::MutateOptions;
 use crate::mutate::job::Isolation;
 use crate::mutate::sites::Operator;
 use crate::order::{Order, fresh_seed, parse_seed};
-use crate::runner::{DocTests, Report, TestOptions};
+use crate::runner::{DocTests, Engine, Report, TestOptions};
 
 /// Default test root when no path is given.
 pub const TESTS_DIR: &str = "tests";
@@ -44,7 +44,7 @@ pub const DEFAULT_CASE_WALL_TIMEOUT: u64 = 600;
 #[derive(Parser, Debug)]
 #[command(
     name = "coil-test",
-    about = "Compile and run every test under [PATH] (default: ./tests)",
+    about = "Compile and run the tests of each PATH, a `.coil` file or a directory of them (default: ./tests)",
     disable_help_subcommand = true,
     after_help = "Files under a `compile_fail/` directory must be rejected by the compiler\n\
 with an error code their header declares (`// @expected E0209 — why`).\n\
@@ -116,9 +116,17 @@ struct TestCli {
     /// (the files are parsed, not compiled)
     #[arg(long)]
     doc_tests_only: bool,
-    /// Test root (default: ./tests)
+    /// What runs the compiled code: native (Cranelift, the default) or mir
+    /// (the MIR interpreter)
+    #[arg(long, value_name = "native|mir", value_parser = Engine::parse)]
+    engine: Option<Engine>,
+    /// Name this run's configuration: a file whose header lists it
+    /// (`// @xfail NAME #issue`) must fail, and fails the run if it passes
+    #[arg(long, value_name = "NAME")]
+    cell: Option<String>,
+    /// Test files and directories (default: ./tests)
     #[arg(value_name = "PATH")]
-    path: Option<String>,
+    paths: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -231,7 +239,7 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
         no_shuffle: cli.no_shuffle,
         jobs: cli.jobs,
         json: cli.json,
-        path: cli.path,
+        paths: cli.paths,
         fail_fast: cli.fail_fast,
         show_output: cli.show_output,
         verbose: cli.verbose,
@@ -247,6 +255,8 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
             DocTests::On
         },
         wall_timeout: cli.wall_timeout,
+        engine: cli.engine.unwrap_or_else(Engine::host_default),
+        cell: cli.cell,
     })?;
     Ok(Parsed::Run(config, test))
 }
@@ -273,7 +283,7 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         no_shuffle: cli.no_shuffle,
         jobs: cli.jobs,
         json: cli.json,
-        path: cli.path,
+        paths: cli.path.into_iter().collect(),
         fail_fast: false,
         show_output: false,
         verbose: cli.verbose,
@@ -285,6 +295,9 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
         doc_tests: DocTests::Off,
         // The parent kills a mutant's worker after `--wall-timeout`.
         wall_timeout: 0,
+        // Only the interpreter charges steps, which the budget counts.
+        engine: Engine::Mir,
+        cell: None,
     })?;
     let forwarded = original.get(2..).unwrap_or(&[]).to_vec();
     let operators = match cli.operators {
@@ -322,7 +335,7 @@ struct RunParts {
     no_shuffle: bool,
     jobs: Option<usize>,
     json: bool,
-    path: Option<String>,
+    paths: Vec<String>,
     fail_fast: bool,
     show_output: bool,
     verbose: bool,
@@ -333,6 +346,8 @@ struct RunParts {
     doc_tests: DocTests,
     /// Seconds per case before the run stops; 0: never.
     wall_timeout: u64,
+    engine: Engine,
+    cell: Option<String>,
 }
 
 fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String> {
@@ -349,7 +364,11 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
     Ok((
         config,
         Box::new(TestOptions {
-            root: PathBuf::from(parts.path.unwrap_or_else(|| TESTS_DIR.to_string())),
+            paths: if parts.paths.is_empty() {
+                vec![PathBuf::from(TESTS_DIR)]
+            } else {
+                parts.paths.iter().map(PathBuf::from).collect()
+            },
             fail_fast: parts.fail_fast,
             order,
             jobs: parts.jobs.unwrap_or_else(default_jobs),
@@ -365,7 +384,8 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
                 per_test_out: parts.per_test_out,
                 project_root: std::env::current_dir().unwrap_or_default(),
             }),
-            opt_level: parts.opt.level(),
+            // The interpreter is the raw reference unless `-O` says otherwise.
+            opt_level: if parts.engine == Engine::Mir && parts.opt.opt_level.is_none() { compiler::OptLevel::None } else { parts.opt.level() },
             debug_level: parts.debug,
             contracts: parts.opt.contracts,
             fold_calls: parts.opt.fold_calls,
@@ -383,6 +403,8 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
             doc_tests: parts.doc_tests,
             wall_timeout: (parts.wall_timeout != 0)
                 .then(|| std::time::Duration::from_secs(parts.wall_timeout)),
+            engine: parts.engine,
+            cell: parts.cell,
         }),
     ))
 }
@@ -470,7 +492,7 @@ mod tests {
     #[test]
     fn defaults_to_tests_dir_standard_opt_and_deny_all() {
         let (_, o) = run(&[]);
-        assert_eq!(o.root, PathBuf::from(TESTS_DIR));
+        assert_eq!(o.paths, vec![PathBuf::from(TESTS_DIR)]);
         assert!(!o.fail_fast);
         assert_eq!(o.opt_level, OptLevel::Standard);
         assert_eq!(o.grants, HostGrants::deny_all());
@@ -491,7 +513,7 @@ mod tests {
             "plugin",
             "--ffi-search-path=native",
         ]);
-        assert_eq!(o.root, PathBuf::from("./suite"));
+        assert_eq!(o.paths, vec![PathBuf::from("./suite")]);
         assert!(o.fail_fast);
         assert_eq!(o.opt_level, OptLevel::None);
         assert_eq!(
@@ -579,18 +601,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_flags_extra_paths_and_missing_values() {
+    fn rejects_unknown_flags_and_missing_values() {
         for bad in [
             &["-o", "x"][..],
             &["--include-tests"],
             &["--opt-stats"],
-            &["a", "b"],
             &["--root"],
             &["-O", "fast"],
             &["--allow-dload"],
         ] {
             assert!(parse_args(&argv(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn takes_several_paths() {
+        let Ok(Parsed::Run(_, o)) = parse_args(&argv(&["a.coil", "b"])) else {
+            panic!("parse");
+        };
+        assert_eq!(o.paths, vec![PathBuf::from("a.coil"), PathBuf::from("b")]);
     }
 
     #[test]
@@ -634,7 +663,7 @@ mod tests {
         assert!(m.json);
         assert_eq!(m.test.order, Order::Shuffled(7));
         assert_eq!(m.test.jobs, 2);
-        assert_eq!(m.test.root, PathBuf::from("spec"));
+        assert_eq!(m.test.paths, vec![PathBuf::from("spec")]);
         assert!(m.test.coverage.is_none());
         match &m.isolation {
             Isolation::Child { args, wall, .. } => {
@@ -647,7 +676,7 @@ mod tests {
         let d = mutate(&[]);
         assert_eq!(d.operators, Operator::ALL);
         assert_eq!(d.timeout_factor, DEFAULT_TIMEOUT_FACTOR);
-        assert_eq!(d.test.root, PathBuf::from(TESTS_DIR));
+        assert_eq!(d.test.paths, vec![PathBuf::from(TESTS_DIR)]);
     }
 
     #[test]

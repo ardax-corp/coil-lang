@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use super::{Builtin, BinOp, Callee, Cx, HirBody, HirId, HirKind, HirModule, HirPat, LocalId, LocalKind, MakeKind, Summary, Walk};
-use super::{is_vec, pat_binds, VEC_MUTATORS};
+use super::{is_vec, VEC_MUTATORS};
 use crate::typechecking::ty::Ty;
 
 /// Bit `i` of [`Src::sites`] for the first 63 allocation sites; later
@@ -73,10 +73,7 @@ pub(super) fn leaf(ty: Option<&Ty>) -> bool {
 pub(super) fn no_heap(ty: Option<&Ty>) -> bool {
     match ty {
         Some(Ty::Readonly(inner)) => no_heap(Some(inner)),
-        Some(Ty::Con(n)) => matches!(
-            n.as_str(),
-            "int" | "float" | "bool" | "byte" | "unit" | "char" | "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64"
-        ),
+        Some(Ty::Con(n)) => crate::typechecking::ty::BuiltinScalar::named(n).is_some_and(|s| s.no_heap),
         _ => false,
     }
 }
@@ -87,7 +84,7 @@ pub(super) fn summarize(cx: &Cx<'_>, w: &Walk<'_>) -> (u64, u64, bool) {
     let body = &cx.module.bodies[w.index];
     let lookup = |callee: &Callee, args: &[HirId]| match callee {
         Callee::Named { name, def, .. } => Some(cx.named(w, name, *def)),
-        Callee::Method { name } => cx.method(w, *args.first()?, name).map(|(s, _)| s),
+        Callee::Method { name } => cx.method(w, None, *args.first()?, name).map(|(s, _)| s),
         Callee::Value(f) => cx.fn_value(w, *f),
         Callee::Resolved(_) => None,
     };
@@ -296,7 +293,7 @@ impl<'c, 'a> Escape<'c, 'a> {
 
     fn bind(&mut self, pat: &HirPat, s: Src) {
         let mut binds = Vec::new();
-        pat_binds(pat, &mut binds);
+        pat.for_each_bind(&mut |l| binds.push(l));
         for l in binds {
             if !no_heap(self.body.local(l).ty.as_ref()) {
                 self.add_local(l, s);
@@ -354,6 +351,11 @@ impl<'c, 'a> Escape<'c, 'a> {
 
     /// What the value of `id` may reach.
     pub(super) fn src(&mut self, id: HirId) -> Src {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.src_level(id))
+    }
+
+    fn src_level(&mut self, id: HirId) -> Src {
         let body = self.body;
         let e = body.expr(id);
         if no_heap(e.ty.as_ref()) {
@@ -361,7 +363,7 @@ impl<'c, 'a> Escape<'c, 'a> {
         }
         match &e.kind {
             // A string literal is interned: immutable, and never freed early
-            // (the VM skips interned strings), so holding one is like
+            // (the runtime skips interned strings), so holding one is like
             // holding nothing.
             HirKind::Lit(_) => Src::EMPTY,
             HirKind::Local(l) => self.local(*l),
@@ -553,7 +555,7 @@ pub(super) fn region_leaks(module: &HirModule, body: &HirBody, lookup: &CallLook
         let mut work = vec![inner];
         while let Some(at) = work.pop() {
             if inside.insert(at) {
-                work.extend(crate::hir::lower::children(body, at));
+                work.extend(body.children(at));
             }
         }
         let mut declared = std::collections::HashSet::new();
@@ -564,13 +566,13 @@ pub(super) fn region_leaks(module: &HirModule, body: &HirBody, lookup: &CallLook
                 }
                 HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } => {
                     let mut binds = Vec::new();
-                    pat_binds(pat, &mut binds);
+                    pat.for_each_bind(&mut |l| binds.push(l));
                     declared.extend(binds);
                 }
                 HirKind::Match { arms, .. } => {
                     for arm in arms {
                         let mut binds = Vec::new();
-                        pat_binds(&arm.pat, &mut binds);
+                        arm.pat.for_each_bind(&mut |l| binds.push(l));
                         declared.extend(binds);
                     }
                 }
@@ -674,7 +676,7 @@ pub(super) fn region_leaks(module: &HirModule, body: &HirBody, lookup: &CallLook
 
 /// Host natives that allocate their result and keep nothing they are
 /// passed. Early freeing frees what these return, so each is checked
-/// against the VM: `to_bytes`, `from_bytes` and `vec_with_capacity`
+/// against the runtime: `to_bytes`, `from_bytes` and `vec_with_capacity`
 /// allocate a new object, `string_slice_bytes` a new string (that may
 /// share its bytes, which are reference-counted), and `format` (also how
 /// `a + b` on strings runs) a new string.
@@ -686,11 +688,20 @@ const FRESH_HOSTS: &[&str] = &[
     "format",
     "vec_with_capacity",
     "with_capacity",
+    // `key_index::table`: a new, empty table (`HashMap::new`, #2821).
+    "key_index_table",
 ];
 
 /// Host natives with effects that still keep nothing they are passed: the
 /// buffer of a `write` is read during the call only.
 const NON_RETAINING_HOSTS: &[&str] = &["write", "write_from", "write_all", "read", "print", "println", "eprint", "eprintln"];
+
+/// The registry name of a host function export that is in [`FRESH_HOSTS`]
+/// under it, where its surface name differs (`key_index::table` is
+/// `key_index_table`): what its escape facts are known by.
+pub(super) fn fresh_registry(export: &crate::typechecking::virtual_modules::BuiltinExport) -> Option<&'static str> {
+    export.host_registry().filter(|r| FRESH_HOSTS.contains(r))
+}
 
 /// Whether `name` is in [`FRESH_HOSTS`] or [`NON_RETAINING_HOSTS`].
 pub(super) fn is_listed_host(name: &str) -> bool {

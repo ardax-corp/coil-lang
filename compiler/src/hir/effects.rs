@@ -1,10 +1,11 @@
 //! Effects over HIR (E1): which bodies are pure, and which of their
 //! function-typed parameters they call.
 //!
-//! The AST walk ([`crate::typechecking::purity`]) keys effects by name and
-//! gives any call through a function value unknown effects, so every
-//! higher-order function (`map`, `filter`, `fold`) and every caller of one
-//! is impure. Here a body's [`Summary`] keeps the effects it has of its own
+//! The AST walk ([`crate::typechecking::purity`], which now only feeds the
+//! checker's bounds proofs) keys effects by name and gives any call through
+//! a function value unknown effects, so every higher-order function (`map`,
+//! `filter`, `fold`) and every caller of one is impure there. Here a body's
+//! [`Summary`] keeps the effects it has of its own
 //! apart from the parameters it calls (`latent`). A call site fills those in
 //! from its arguments, so `map(xs, fn (int x) => x * 2)` costs the lambda's
 //! effects, which are none: each instance of a generic function gets the
@@ -30,11 +31,10 @@ use std::collections::{HashMap, HashSet};
 
 use common::EffectFlags;
 
-use super::lower::children;
-use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, HirPatFields, IndexKind, LocalId, LocalKind, MakeKind};
+use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, IndexKind, LocalId, LocalKind, MakeKind, UnOp};
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::infer::{Checker, ForInKind};
-use crate::typechecking::purity::classify_host_name;
+use crate::effects::classify_host_name;
 use crate::typechecking::ty::Ty;
 
 const UNKNOWN: EffectFlags =
@@ -92,28 +92,13 @@ pub struct Summary {
     /// something else also reaches. `false`: a caller that drops the
     /// result may free all of it.
     pub shared_ret: bool,
-    /// The fields of any object the call may read or write, itself or
-    /// through a callee, as [`field_bit`]s of their names; [`ALL_FIELDS`]
-    /// when it may touch one this summary cannot name (unknown code, a
-    /// whole-object op such as `==`, a native given an object). Lets MIR
-    /// keep a field in a register across the call (locality step 3).
-    pub fields: u64,
-}
-
-/// [`Summary::fields`] of a call that may touch any field.
-pub const ALL_FIELDS: u64 = u64::MAX;
-
-/// The [`Summary::fields`] bit of field `name`: one of 64 by a hash of the
-/// name, so two names may share a bit, never one name two.
-pub fn field_bit(name: &str) -> u64 {
-    let h = name.bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
-    1 << (h % 64)
 }
 
 #[path = "escape.rs"]
 mod escape;
 #[path = "early_free.rs"]
 mod early_free;
+pub use early_free::Slots;
 #[path = "cow.rs"]
 pub mod cow;
 
@@ -151,6 +136,32 @@ impl Summary {
         self.flags.is_pure() && self.latent == 0
     }
 
+    /// Never changes the length of an array or `Vec`, whatever it is passed.
+    pub fn is_steady(self) -> bool {
+        self.latent == 0 && !self.flags.contains(EffectFlags::RESIZE | EffectFlags::YIELD)
+    }
+
+    /// What a call costs that runs this body or `other`, the caller not
+    /// knowing which.
+    fn join(self, other: Self) -> Self {
+        Self {
+            flags: self.flags.union(other.flags),
+            visible: self.visible.union(other.visible),
+            latent: self.latent | other.latent,
+            mutates: self.mutates | other.mutates,
+            statics: self.statics || other.statics,
+            // Discharged only where both bodies' bits are.
+            param_only: self.param_only & other.param_only,
+            escapes: self.escapes | other.escapes,
+            keeps: self.keeps | other.keeps,
+            returns_arg: self.returns_arg | other.returns_arg,
+            returns_inner: self.returns_inner | other.returns_inner,
+            opaque_args: self.opaque_args | other.opaque_args,
+            returns: self.returns | other.returns,
+            shared_ret: self.shared_ret || other.shared_ret,
+        }
+    }
+
     fn of(flags: EffectFlags) -> Self {
         // Host tables pair `unknown` with host state to be safe; unknown
         // already says it all.
@@ -170,7 +181,6 @@ impl Summary {
             opaque_args: if flags.contains(EffectFlags::UNKNOWN) { u64::MAX } else { 0 },
             returns: u64::MAX,
             shared_ret: true,
-            fields: if flags.contains(EffectFlags::UNKNOWN) { ALL_FIELDS } else { 0 },
         }
     }
 }
@@ -236,21 +246,73 @@ pub struct ProgramEffects {
     /// Why a body mutates each parameter it mutates, by full body name:
     /// `(parameter index, "writes field `x`")`.
     mutations: Mutations,
+    /// The full body name of each trait impl method so far, by the module
+    /// of its `impl` and the key its calls name (the instance's
+    /// `method_fqns`): what a later module's call of that instance runs.
+    instance_bodies: HashMap<(String, String), String>,
+    /// The same by the key alone (`IntoIterator__Bag__into_iter`): the
+    /// instance a `for` loop's desugar names (#2821).
+    instance_by_key: HashMap<String, String>,
+    /// A `drop` so far may change the length of an array or `Vec`.
+    drop_resizes: bool,
 }
 
 impl ProgramEffects {
-    /// Why the body named `key` (or `module::key`, `.m()` for a method
-    /// `Owner::m`) mutates its parameter `j`, when an earlier module said.
-    fn mutation_reason(&self, key: &str, j: u32) -> Option<String> {
+    /// Why the body named `key` (or `module::key`) mutates its parameter
+    /// `j`, when an earlier module said. `.m()` names a method and a trait
+    /// method's name its impl: `owner` is the class it was called on and
+    /// `trait_name` the trait, when the call knows them; `module_path` is
+    /// the calling module.
+    ///
+    /// Several bodies may share a short name (`HashMap::insert`,
+    /// `SortedSet::insert`): the owner and the trait pick among them, and
+    /// what is still a tie goes to the first by name, never to the map's
+    /// iteration order (#2464).
+    fn mutation_reason(&self, key: &str, owner: Option<&str>, trait_name: Option<&str>, module_path: &str, j: u32) -> Option<String> {
+        let method = key.starts_with('.');
         let key = key.trim_start_matches('.').trim_end_matches("()");
-        let suffix = format!("::{key}");
-        let found = self.mutations.get(key).or_else(|| {
-            self.mutations
+        let reason = |name: &str| self.mutations.get(name)?.iter().find(|(k, _)| *k == j).map(|(_, r)| r.clone());
+        let exact = match owner {
+            // The keys `Cx::method` finds an inherent method's summary under.
+            Some(owner) if method => [format!("{owner}::{key}"), format!("{module_path}::{owner}::{key}"), format!("core::{owner}::{key}")]
                 .iter()
-                .find(|(name, _)| name.ends_with(&suffix))
-                .map(|(_, r)| r)
-        })?;
-        found.iter().find(|(k, _)| *k == j).map(|(_, r)| r.clone())
+                .find_map(|k| reason(k)),
+            _ => reason(key),
+        };
+        if exact.is_some() {
+            return exact;
+        }
+        // The first by name of the bodies `path::key` that `keep` takes.
+        let first = |key: &str, keep: &dyn Fn(&str) -> bool| {
+            let suffix = format!("::{key}");
+            let mut names: Vec<&str> =
+                self.mutations.keys().map(String::as_str).filter(|name| name.strip_suffix(&suffix).is_some_and(keep)).collect();
+            names.sort_unstable();
+            names.into_iter().find_map(reason)
+        };
+        let Some(head) = owner.map(type_head) else {
+            return first(key, &|_| true);
+        };
+        let of_owner = |path: &str| {
+            type_head(path) == head
+                && trait_name.is_none_or(|t| path.rsplit_once(" for ").is_some_and(|(tr, _)| short_name(tr) == short_name(t)))
+        };
+        // A method of another class or trait says nothing of this call; a
+        // name that is also some trait method's may still be a function.
+        first(short_name(key), &of_owner).or_else(|| if method || trait_name.is_some() { None } else { first(key, &|_| true) })
+    }
+
+    /// The impl body an earlier module recorded for the method `fqn` of an
+    /// instance declared in `module`: its full name and summary.
+    fn instance_body(&self, module: &str, fqn: &str) -> Option<(&str, Summary)> {
+        let name = self.instance_bodies.get(&(module.to_string(), fqn.to_string()))?;
+        Some((name.as_str(), *self.by_name.get(name)?))
+    }
+
+    /// Why the body named `name` mutates its parameter `j`, when an earlier
+    /// module said.
+    fn reason_of(&self, name: &str, j: u32) -> Option<String> {
+        self.mutations.get(name)?.iter().find(|(k, _)| *k == j).map(|(_, r)| r.clone())
     }
 
     /// The summary of the body named `name` (`module::f`, `module::Owner::m`).
@@ -275,17 +337,28 @@ impl ProgramEffects {
 
     /// `body` (as the HIR optimizer left it) with early frees of the
     /// objects nothing else reaches ([`early_free`]), when it has any.
-    /// `host` names the host native a call node runs, as planned.
-    pub fn early_frees(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, host: &dyn Fn(HirId) -> Option<usize>) -> Option<HirBody> {
+    /// `host` names the host native a call node runs, as planned; `slots`
+    /// is what the plan keeps in frame slots.
+    pub fn early_frees(
+        &self,
+        checker: &Checker,
+        module_path: &str,
+        module: &HirModule,
+        body: &HirBody,
+        host: &dyn Fn(HirId) -> Option<usize>,
+        slots: &early_free::Slots<'_>,
+    ) -> Option<HirBody> {
         let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
-        early_free::rewrite(checker, module, body, &lookup, host)
+        early_free::rewrite(checker, module, body, &lookup, host, slots)
     }
 
     /// `body` with its copy-on-write ops ([`cow`]), when it needs any.
     /// `mutates` is the body's own summary bits: the parameters it writes
     /// in place for its caller.
-    pub fn cow_rewrite(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, mutates: u64) -> (Option<HirBody>, Vec<reporting::Message>) {
-        let lookup = |callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, body, callee, args);
+    pub fn cow_rewrite(&self, checker: &Checker, module_path: &str, module: &HirModule, body: &HirBody, mutates: u64) -> cow::Rewrite {
+        // The rewrite may analyse a body it made (loop views): each call is
+        // read in the body that holds it.
+        let lookup = |b: &HirBody, callee: &Callee, args: &[HirId]| self.call_summary(checker, module_path, b, callee, args);
         cow::rewrite(checker, module, body, &lookup, mutates)
     }
 
@@ -319,9 +392,23 @@ impl ProgramEffects {
         let current = checker.current_module_name() == module_path;
         let def = def.or_else(|| current.then(|| checker.def_id_of(name)).flatten());
         if let Some(def) = def {
-            return self.fns.get(&def).copied();
+            if let Some(&s) = self.fns.get(&def) {
+                return Some(s);
+            }
+            // `fns` holds functions only: a static method's def (`H::wrap`)
+            // is found by its body's name below, as the solver finds it
+            // (`Cx::known_named`). A function with no summary is unknown.
+            use crate::typechecking::DefKind;
+            if checker.def_interner().info(def).is_some_and(|info| matches!(info.kind, DefKind::Fn | DefKind::Ffi)) {
+                return None;
+            }
         }
         if let Some(&s) = self.by_name.get(name).or_else(|| self.by_name.get(format!("{module_path}::{name}").as_str())) {
+            return Some(s);
+        }
+        // A trait impl method by its instance key (a `for` loop's
+        // `into_iter` / `next`).
+        if let Some(&s) = self.instance_by_key.get(name).and_then(|n| self.by_name.get(n)) {
             return Some(s);
         }
         // An imported type's static (`Pool::with_capacity`), by the module
@@ -347,7 +434,7 @@ impl ProgramEffects {
             });
         }
         let short = if current && let Some(export) = checker.scope_binding(name) {
-            export.short_name().to_string()
+            escape::fresh_registry(export).unwrap_or(export.short_name()).to_string()
         } else {
             name.to_string()
         };
@@ -365,29 +452,12 @@ impl ProgramEffects {
         })
     }
 
-    /// [`Summary::fields`] of a call of the user function or method
-    /// `name` (`def` when the call has one), as recorded so far; every
-    /// field for a body not recorded or one that calls its function
-    /// parameters.
-    pub fn call_fields(&self, checker: &Checker, module_path: &str, name: &str, def: Option<DefId>) -> u64 {
-        let current = checker.current_module_name() == module_path;
-        let s = match def.or_else(|| current.then(|| checker.def_id_of(name)).flatten()) {
-            Some(def) => self.fns.get(&def),
-            None => self.by_name.get(name).or_else(|| self.by_name.get(format!("{module_path}::{name}").as_str())),
-        };
-        match s {
-            Some(s) if s.latent == 0 => s.fields,
-            _ => ALL_FIELDS,
-        }
-    }
-
-    /// [`Summary::fields`] of every `fn drop()` recorded so far: what a
-    /// finalizer run at an allocation may touch.
-    pub fn drop_fields(&self) -> u64 {
-        self.by_name
-            .iter()
-            .filter(|(name, _)| name.rsplit("::").next() == Some("drop"))
-            .fold(0, |m, (_, s)| m | if s.latent == 0 { s.fields } else { ALL_FIELDS })
+    /// Whether a `drop` of the modules so far may change the length of an
+    /// array or `Vec`. A finalizer runs at any allocation, so while this is
+    /// `false` and no later module has such a `drop` either, an allocation
+    /// leaves every length as it was.
+    pub fn drop_may_resize(&self) -> bool {
+        self.drop_resizes
     }
 
     /// Keep why a module's bodies mutate their parameters
@@ -399,11 +469,20 @@ impl ProgramEffects {
     /// Keep `module`'s summaries for the modules compiled after it.
     pub fn record(&mut self, module: &HirModule, checker: &Checker, module_path: &str, summaries: &[Summary]) {
         self.traits.extend(module.trait_effects.iter().cloned());
+        for (fqn, &i) in &module.instance_fns {
+            self.instance_bodies.insert((module_path.to_string(), fqn.clone()), module.bodies[i].name.clone());
+            self.instance_by_key.insert(fqn.clone(), module.bodies[i].name.clone());
+        }
+        // The overloads of a name share it and its def: a later module's
+        // call may run any of them.
+        let mut named: HashMap<&str, Summary> = HashMap::new();
         for (body, &s) in module.bodies.iter().zip(summaries) {
             if !matches!(body.kind, BodyKind::Function | BodyKind::Method) {
                 continue;
             }
+            let s = *named.entry(body.name.as_str()).and_modify(|all| *all = all.join(s)).or_insert(s);
             self.by_name.insert(body.name.clone(), s);
+            self.drop_resizes |= short_name(&body.name) == "drop" && !s.is_steady();
             if body.kind == BodyKind::Function
                 && let Some(def) = def_of(checker, module_path, &body.name)
             {
@@ -413,66 +492,127 @@ impl ProgramEffects {
     }
 }
 
-/// Names of `module`'s pure functions and methods, keyed as
-/// [`crate::typechecking::purity::record_fn_effects`] keys them: `f`,
-/// `Owner::m` and `module::Owner::m`. A bare `m` is listed when every body
-/// of that short name is pure, here or in `known` (the AST walk's set).
-pub fn pure_names(module: &HirModule, module_path: &str, summaries: &[Summary], known: &HashSet<String>) -> HashSet<String> {
-    names_where(module, module_path, summaries, known, Summary::is_pure)
+/// Names of `module`'s pure functions and methods, as a callee is looked
+/// up ([`crate::pure_call::name_in`]): each body's own name, local (`f`,
+/// `Owner::m`, `Trait for Owner::m`) and with the module path in front. A
+/// name with several bodies (overloads) is listed when all of them are
+/// pure. No body is listed under its short name alone: a bare `m(..)` or
+/// another type's `Other::m(..)` is not a call of `Owner::m` (#2436).
+pub fn pure_names(module: &HirModule, module_path: &str, summaries: &[Summary]) -> HashSet<String> {
+    names_where(module, module_path, summaries, Summary::is_pure)
 }
 
 /// Functions and methods that never change the length of an array or
 /// `Vec` (no append, resize, yield or unknown code), whatever they are
-/// passed. `known` are names already known to qualify.
-pub fn steady_names(module: &HirModule, module_path: &str, summaries: &[Summary], known: &HashSet<String>) -> HashSet<String> {
-    names_where(module, module_path, summaries, known, |s| {
-        s.latent == 0 && !s.flags.contains(EffectFlags::RESIZE | EffectFlags::UNKNOWN | EffectFlags::YIELD)
-    })
+/// passed.
+pub fn steady_names(module: &HirModule, module_path: &str, summaries: &[Summary]) -> HashSet<String> {
+    names_where(module, module_path, summaries, Summary::is_steady)
 }
 
-fn names_where(
-    module: &HirModule,
-    module_path: &str,
-    summaries: &[Summary],
-    known: &HashSet<String>,
-    ok: impl Fn(Summary) -> bool,
-) -> HashSet<String> {
-    let mut out = HashSet::new();
-    let mut by_short: HashMap<&str, bool> = HashMap::new();
+/// Whether some body of each short name (`f`, the `m` of `Owner::m`) among
+/// `module`'s functions and methods is impure: the names and verdicts the
+/// E0805 hints go by ([`HirModule::par_escape_hints`]).
+pub fn impure_short_names(module: &HirModule, summaries: &[Summary]) -> HashMap<String, bool> {
+    let mut out: HashMap<String, bool> = HashMap::new();
     for (body, s) in module.bodies.iter().zip(summaries) {
-        let Some(local) = local_name(module_path, &body.name) else { continue };
-        let (owner, short) = match local.rsplit_once("::") {
-            Some((owner, short)) => (Some(owner), short),
-            None => (None, local),
-        };
-        let pure = ok(*s) || known.contains(local);
-        match (body.kind, owner) {
-            (BodyKind::Function, None) => {
-                if ok(*s) {
-                    out.insert(local.to_string());
-                }
-            }
-            // Trait impls (`Show for P::m`) and nested functions keep the
-            // AST walk's verdict.
-            (BodyKind::Method, Some(owner)) if !owner.contains(' ') && !owner.contains("::") => {
-                if ok(*s) {
-                    out.insert(local.to_string());
-                    if !module_path.is_empty() {
-                        out.insert(body.name.clone());
-                    }
-                }
-            }
-            _ => continue,
-        }
-        let all = by_short.entry(short).or_insert(true);
-        *all &= pure;
-    }
-    for (short, pure) in by_short {
-        if pure {
-            out.insert(short.to_string());
+        if matches!(body.kind, BodyKind::Function | BodyKind::Method) {
+            *out.entry(short_name(&body.name).to_string()).or_default() |= !s.is_pure();
         }
     }
     out
+}
+
+/// The pure functions of a lone module, for the tests of the passes that
+/// take them.
+#[cfg(test)]
+pub(crate) fn lone_module_effects(module: &HirModule, checker: &Checker) -> (HashSet<String>, HashMap<String, bool>) {
+    let program = ProgramEffects::default();
+    let summaries = ModuleEffects::solve(module, checker, "", &program).summaries;
+    (pure_names(module, "", &summaries), impure_short_names(module, &summaries))
+}
+
+/// How a function or method body is written: what its names are keyed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameShape {
+    /// `fn f` at the top of a module.
+    Function,
+    /// `fn inner` inside another body (`outer::inner`), or a method of an
+    /// impl written inside one.
+    Nested,
+    /// A method of `impl Owner`, or a trait's own default body.
+    Method,
+    /// A method of `impl Trait for Owner`.
+    TraitImpl,
+}
+
+/// The shape of `body` and its short name, from its module-local name.
+fn name_shape(kind: BodyKind, local: &str) -> Option<(NameShape, &str)> {
+    let (owner, short) = match local.rsplit_once("::") {
+        Some((owner, short)) => (Some(owner), short),
+        None => (None, local),
+    };
+    let shape = match (kind, owner) {
+        (BodyKind::Function, None) => NameShape::Function,
+        (BodyKind::Function, Some(_)) => NameShape::Nested,
+        (BodyKind::Method, Some(owner)) if owner.contains(' ') => NameShape::TraitImpl,
+        (BodyKind::Method, Some(owner)) if owner.contains("::") => NameShape::Nested,
+        (BodyKind::Method, Some(_)) => NameShape::Method,
+        _ => return None,
+    };
+    Some((shape, short))
+}
+
+fn names_where(module: &HirModule, module_path: &str, summaries: &[Summary], ok: impl Fn(Summary) -> bool) -> HashSet<String> {
+    // Every body of a name has to qualify: the overloads of `f` share it.
+    let mut by_name: HashMap<&str, bool> = HashMap::new();
+    for (body, s) in module.bodies.iter().zip(summaries) {
+        let Some(local) = local_name(module_path, &body.name) else { continue };
+        if name_shape(body.kind, local).is_none() {
+            continue;
+        }
+        *by_name.entry(local).or_insert(true) &= ok(*s);
+        if local != body.name {
+            *by_name.entry(body.name.as_str()).or_insert(true) &= ok(*s);
+        }
+    }
+    by_name.into_iter().filter(|(_, good)| *good).map(|(name, _)| name.to_string()).collect()
+}
+
+/// The env var that turns [`log_seed_disagreements`] on in a debug build.
+const SEED_DIFF_ENV: &str = "COIL_EFFECTS_SEED_DIFF";
+
+/// Debug builds, with `COIL_EFFECTS_SEED_DIFF` set: one stderr line for each
+/// function and method the checker's AST walk and these summaries disagree
+/// on being length-stable, with the body's shape and what it does here.
+/// `ast_steady` is the walk's set ([`crate::effects::LengthStability::fns`]),
+/// which the checker's bounds proofs (`index_facts`) still read: it runs
+/// before there is any HIR.
+pub(crate) fn log_seed_disagreements(module: &HirModule, module_path: &str, fx: &ModuleEffects<'_>, ast_steady: &HashSet<String>) {
+    if !cfg!(debug_assertions) || std::env::var_os(SEED_DIFF_ENV).is_none() {
+        return;
+    }
+    for (index, body) in module.bodies.iter().enumerate() {
+        let Some(local) = local_name(module_path, &body.name) else { continue };
+        let Some((shape, short)) = name_shape(body.kind, local) else { continue };
+        // The walk keys a method `Owner::m` whatever trait the impl is
+        // for, without the owner's type arguments, and a nested function
+        // by its bare name.
+        let key = match shape {
+            NameShape::Function => local.to_string(),
+            NameShape::Nested => short.to_string(),
+            NameShape::Method | NameShape::TraitImpl => {
+                let owner = local.rsplit_once("::").map_or("", |(o, _)| o);
+                let owner = owner.rsplit_once(" for ").map_or(owner, |(_, o)| o);
+                let owner = owner.split('<').next().unwrap_or(owner);
+                format!("{owner}::{short}")
+            }
+        };
+        let (ast, hir) = (ast_steady.contains(&key), fx.summaries[index].is_steady());
+        if ast != hir {
+            let side = |yes: bool| if yes { "steady" } else { "not" };
+            eprintln!("effects-seed\tsteady\tast={}\thir={}\t{shape:?}\t{module_path}\t{}\t{}", side(ast), side(hir), body.name, fx.why(index));
+        }
+    }
 }
 
 thread_local! {
@@ -568,15 +708,7 @@ pub fn effect_declaration_errors(checker: &Checker, ast: &parser::ast::Output<'_
 /// purity is all that stops it: each counted loop or fork site that would
 /// split if every function it calls were pure, with the impure callee and
 /// the first reason it is impure ("`step` calls `write_all` (write)").
-pub(crate) fn auto_par_explanations(
-    ast: &parser::ast::Output<'_>,
-    module: &HirModule,
-    module_path: &str,
-    fx: &ModuleEffects<'_>,
-    pure: &HashSet<String>,
-    cases: &crate::typechecking::bare_cases::BareCases,
-) -> Vec<String> {
-    use crate::typechecking::{analyze_loop_par_sites, analyze_par_fork_sites};
+pub(crate) fn auto_par_explanations(module: &HirModule, module_path: &str, fx: &ModuleEffects<'_>, pure: &HashSet<String>) -> Vec<String> {
     let mut all = pure.clone();
     for body in &module.bodies {
         if matches!(body.kind, BodyKind::Function | BodyKind::Method)
@@ -587,20 +719,54 @@ pub(crate) fn auto_par_explanations(
         }
     }
     let mut out = Vec::new();
-    let actual = analyze_loop_par_sites(ast, pure);
-    let mut blocked: Vec<_> = analyze_loop_par_sites(ast, &all)
+    let actual = module.loop_par_sites(fx.cx.checker, module_path, pure);
+    let mut blocked: Vec<_> = module.loop_par_sites(fx.cx.checker, module_path, &all)
         .into_iter()
         .filter(|(span, _)| !actual.contains_key(span))
         .collect();
     blocked.sort_by_key(|(span, _)| *span);
-    for ((start, end), site) in blocked {
-        let owner = module
+    let owner_of = |(start, end): (usize, usize)| {
+        module
             .bodies
             .iter()
             .filter(|b| matches!(b.kind, BodyKind::Function | BodyKind::Method | BodyKind::Test))
             .filter(|b| b.span.0 <= start && end <= b.span.1)
-            .min_by_key(|b| b.span.1 - b.span.0);
-        let Some(owner) = owner else { continue };
+            .min_by_key(|b| b.span.1 - b.span.0)
+    };
+    // A fold whose terms are not proved to have one sign (#2423).
+    let mut unsigned: Vec<_> = module.loop_par_unsigned(fx.cx.checker, module_path, pure).into_iter().collect();
+    unsigned.sort_by_key(|(span, _)| *span);
+    for (span, site) in unsigned {
+        let Some(owner) = owner_of(span) else { continue };
+        let (op, signs) = match site.op {
+            crate::hir::par::LoopReduceOp::Mul => ("*", "`>= 1` or `<= -2`"),
+            _ => ("+", "all `>= 0` or all `<= 0`"),
+        };
+        out.push(format!(
+            "loop over `{}` in `{}` not parallelized: the terms of its `{op}` fold onto `{}` are not proved {signs}",
+            site.index, owner.name, site.acc
+        ));
+    }
+    // A fold signed by a run-time test of its captures.
+    let mut guarded: Vec<_> = actual.iter().filter(|(_, site)| !site.guard.is_empty()).collect();
+    guarded.sort_by_key(|(span, _)| **span);
+    for (&span, site) in guarded {
+        let Some(owner) = owner_of(span) else { continue };
+        let tests: Vec<String> = site.guard.iter().map(|t| format!("`{t}`")).collect();
+        let (op, signs) = match site.op {
+            crate::hir::par::LoopReduceOp::Mul => ("*", "may be `0` or `-1`"),
+            _ => ("+", "may have both signs"),
+        };
+        out.push(format!(
+            "loop over `{}` in `{}` parallel only when {}: otherwise the terms of its `{op}` fold onto `{}` {signs}",
+            site.index,
+            owner.name,
+            tests.join(" and "),
+            site.acc
+        ));
+    }
+    for ((start, end), site) in blocked {
+        let Some(owner) = owner_of((start, end)) else { continue };
         let reasons = impure_callees(fx, owner, (start, end), pure);
         if reasons.is_empty() {
             continue;
@@ -612,8 +778,9 @@ pub(crate) fn auto_par_explanations(
             reasons.join("; ")
         ));
     }
-    let actual = analyze_par_fork_sites(ast, pure, cases);
-    let mut blocked: Vec<String> = analyze_par_fork_sites(ast, &all, cases)
+    let actual = module.par_fork_sites(fx.cx.checker, pure);
+    let mut blocked: Vec<String> = module
+        .par_fork_sites(fx.cx.checker, &all)
         .into_keys()
         .filter(|name| !actual.contains_key(name))
         .collect();
@@ -664,15 +831,22 @@ fn short_name(path: &str) -> &str {
     path.rsplit("::").next().unwrap_or(path)
 }
 
+/// The short name of the type a method's owner path names: `Tally` for
+/// `store::Tally`, `Pair<int>` and `store::Show for Tally`.
+fn type_head(owner: &str) -> &str {
+    let ty = owner.rsplit_once(" for ").map_or(owner, |(_, ty)| ty);
+    short_name(ty.split('<').next().unwrap_or(ty).trim())
+}
+
 /// `name` without the module prefix, or `None` when it is not this module's.
-fn local_name<'a>(module_path: &str, name: &'a str) -> Option<&'a str> {
+pub(crate) fn local_name<'a>(module_path: &str, name: &'a str) -> Option<&'a str> {
     if module_path.is_empty() {
         return Some(name);
     }
     name.strip_prefix(module_path)?.strip_prefix("::")
 }
 
-fn def_of(checker: &Checker, module_path: &str, name: &str) -> Option<DefId> {
+pub(super) fn def_of(checker: &Checker, module_path: &str, name: &str) -> Option<DefId> {
     let local = local_name(module_path, name)?;
     checker
         .interned_def(module_path, local)
@@ -689,15 +863,12 @@ impl<'a> ModuleEffects<'a> {
     pub fn solve(module: &'a HirModule, checker: &'a Checker, module_path: &'a str, program: &'a ProgramEffects) -> Self {
         let mut by_def = HashMap::new();
         let mut by_name: HashMap<&str, Option<usize>> = HashMap::new();
+        let mut overloads: HashMap<&str, Vec<(Option<u32>, usize)>> = HashMap::new();
         for (i, body) in module.bodies.iter().enumerate() {
             if !matches!(body.kind, BodyKind::Function | BodyKind::Method) {
                 continue;
             }
-            if body.kind == BodyKind::Function
-                && let Some(def) = def_of(checker, module_path, &body.name)
-            {
-                by_def.insert(def, i);
-            }
+            let id = checker.overload_decl_at(body.span.0, body.span.1).map(|(id, ..)| id);
             let mut names = vec![body.name.as_str()];
             if let Some(local) = local_name(module_path, &body.name)
                 && local != body.name
@@ -706,6 +877,17 @@ impl<'a> ModuleEffects<'a> {
             }
             for n in names {
                 by_name.entry(n).and_modify(|seen| *seen = None).or_insert(Some(i));
+                overloads.entry(n).or_default().push((id, i));
+            }
+        }
+        overloads.retain(|_, bodies| bodies.len() > 1);
+        // The overloads of a name share its def, which then names no one body.
+        for (i, body) in module.bodies.iter().enumerate() {
+            if body.kind == BodyKind::Function
+                && !overloads.contains_key(body.name.as_str())
+                && let Some(def) = def_of(checker, module_path, &body.name)
+            {
+                by_def.insert(def, i);
             }
         }
         let facts: Vec<BodyFacts> = module.bodies.iter().map(|b| BodyFacts::new(module, b)).collect();
@@ -729,6 +911,7 @@ impl<'a> ModuleEffects<'a> {
             program,
             by_def,
             by_name,
+            overloads,
             facts,
             instances,
         };
@@ -873,7 +1056,7 @@ impl<'a> ModuleEffects<'a> {
             let w = self.cx.walk(i, &self.summaries, false);
             let lookup = |callee: &Callee, args: &[HirId]| match callee {
                 Callee::Named { name, def, .. } => Some(self.cx.named(&w, name, *def)),
-                Callee::Method { name } => self.cx.method(&w, *args.first()?, name).map(|(s, _)| s),
+                Callee::Method { name } => self.cx.method(&w, None, *args.first()?, name).map(|(s, _)| s),
                 Callee::Value(f) => self.cx.fn_value(&w, *f),
                 Callee::Resolved(_) => None,
             };
@@ -900,6 +1083,21 @@ impl<'a> ModuleEffects<'a> {
     /// Body `index`'s user-visible effects in one line: `pure`, or its
     /// `uses {…}` and the reasons for it (`uses {write}: calls `write_all`
     /// (write)`).
+    /// Every cause of an effect in `index`, hidden ones (a panic, a
+    /// `defer`) included, and the parameters it calls: `; `-separated.
+    fn why(&self, index: usize) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for cause in self.explain(index) {
+            if !parts.contains(&cause.what) {
+                parts.push(cause.what);
+            }
+        }
+        if self.summaries[index].latent != 0 {
+            parts.push("calls a parameter".into());
+        }
+        parts.join("; ")
+    }
+
     pub fn describe(&self, index: usize) -> String {
         let s = self.summaries[index];
         if s.visible.is_pure() && s.latent == 0 {
@@ -1316,7 +1514,7 @@ fn owned_locals(body: &HirBody, owned: &mut HashSet<LocalId>) {
     let mut parent: HashMap<HirId, HirId> = HashMap::new();
     for i in 0..body.exprs.len() {
         let id = HirId(i as u32);
-        for k in children(body, id) {
+        for k in body.children(id) {
             parent.insert(k, id);
         }
     }
@@ -1379,10 +1577,7 @@ fn owned_locals(body: &HirBody, owned: &mut HashSet<LocalId>) {
 fn may_hold_mutable(ty: Option<&Ty>) -> bool {
     match ty {
         Some(Ty::Readonly(inner)) => may_hold_mutable(Some(inner)),
-        Some(Ty::Con(n)) => !matches!(
-            n.as_str(),
-            "int" | "float" | "bool" | "byte" | "string" | "unit" | "char" | "f32" | "f64"
-        ),
+        Some(Ty::Con(n)) => !crate::typechecking::ty::is_builtin_scalar(n),
         Some(Ty::Fun(..)) => false,
         _ => true,
     }
@@ -1427,20 +1622,6 @@ fn local_roots(body: &HirBody, derived: &HashMap<LocalId, u64>, l: LocalId) -> u
     own | derived.get(&l).copied().unwrap_or(0)
 }
 
-pub(crate) fn pat_binds(pat: &HirPat, out: &mut Vec<LocalId>) {
-    match pat {
-        HirPat::Bind(l) => out.push(*l),
-        HirPat::Tuple(items) => items.iter().for_each(|p| pat_binds(p, out)),
-        HirPat::Record(fields) => fields.iter().for_each(|(_, p)| pat_binds(p, out)),
-        HirPat::Variant { fields, .. } => match fields {
-            HirPatFields::Unit => {}
-            HirPatFields::Tuple(items) => items.iter().for_each(|p| pat_binds(p, out)),
-            HirPatFields::Record(fields) => fields.iter().for_each(|(_, p)| pat_binds(p, out)),
-        },
-        HirPat::Wild | HirPat::Int(_) => {}
-    }
-}
-
 /// [`BodyFacts::derived`]: what each local may reach of the parameters,
 /// through `let`, assignment, pattern bindings and `for` variables.
 fn derived_locals(body: &HirBody) -> HashMap<LocalId, u64> {
@@ -1475,16 +1656,16 @@ fn derived_locals(body: &HirBody) -> HashMap<LocalId, u64> {
                     _ => 0,
                 },
                 HirKind::LetPat { pat, init } => {
-                    pat_binds(pat, &mut binds);
+                    pat.for_each_bind(&mut |l| binds.push(l));
                     param_roots(body, &derived, *init)
                 }
                 HirKind::ForIn { pat, iterable, .. } => {
-                    pat_binds(pat, &mut binds);
+                    pat.for_each_bind(&mut |l| binds.push(l));
                     param_roots(body, &derived, *iterable)
                 }
                 HirKind::Match { scrutinee, arms } => {
                     for arm in arms {
-                        pat_binds(&arm.pat, &mut binds);
+                        arm.pat.for_each_bind(&mut |l| binds.push(l));
                     }
                     param_roots(body, &derived, *scrutinee)
                 }
@@ -1542,35 +1723,6 @@ fn user_type_member(checker: &Checker, name: &str) -> bool {
     })
 }
 
-/// A value of `ty` reaches no object field and runs no code: a
-/// primitive, or a `Vec` or tuple of those. A function value passed to a
-/// native may be called there.
-fn field_free(ty: Option<&Ty>) -> bool {
-    match ty {
-        Some(Ty::Readonly(inner)) => field_free(Some(inner)),
-        Some(Ty::Fun(..)) => false,
-        Some(Ty::App(_, items)) if is_vec(ty) => items.iter().all(|t| field_free(Some(t))),
-        Some(Ty::Tuple(items)) => items.iter().all(|t| field_free(Some(t))),
-        Some(t) => !may_hold_mutable(Some(t)),
-        None => false,
-    }
-}
-
-/// The fields a pattern reads by name ([`Summary::fields`]).
-fn pat_fields(pat: &HirPat) -> u64 {
-    let named = |fields: &[(String, HirPat)]| fields.iter().fold(0, |m, (n, p)| m | field_bit(n) | pat_fields(p));
-    match pat {
-        HirPat::Tuple(items) | HirPat::Variant { fields: HirPatFields::Tuple(items), .. } => items.iter().fold(0, |m, p| m | pat_fields(p)),
-        HirPat::Record(fields) | HirPat::Variant { fields: HirPatFields::Record(fields), .. } => named(fields),
-        _ => 0,
-    }
-}
-
-/// A call that only builds a `Vec` or a variant around its arguments.
-fn holds_args(checker: &Checker, name: &str) -> bool {
-    is_vec_ctor(name) || name == "Vec::from" || name.rsplit_once("::").is_some_and(|(owner, member)| checker.tag_for(owner, member).is_some())
-}
-
 fn is_vec_ctor(name: &str) -> bool {
     matches!(name, "Vec::new" | "Vec::with_capacity")
 }
@@ -1600,11 +1752,22 @@ struct Cx<'a> {
     program: &'a ProgramEffects,
     by_def: HashMap<DefId, usize>,
     by_name: HashMap<&'a str, Option<usize>>,
+    /// The bodies of each name that has several (overloads), each with the
+    /// checker's id for it.
+    overloads: HashMap<&'a str, Vec<(Option<u32>, usize)>>,
     facts: Vec<BodyFacts>,
     /// Trait impl bodies by receiver head and method: `Text for string`'s
     /// `trim` is `("string", "trim")`, `VecSum for Vec<int>`'s `sum` is
     /// `("Vec", "sum")` (#2008).
     instances: HashMap<(String, String), Vec<InstanceBody>>,
+}
+
+/// The impl body a trait method call runs ([`Cx::call_impl`]): this
+/// module's, or an earlier module's by its full name with its summary.
+#[derive(Clone, Copy)]
+enum ImplBody<'a> {
+    Local(usize),
+    Program(&'a str, Summary),
 }
 
 /// A trait impl's method body: in this module, or summarised by an earlier one.
@@ -1673,6 +1836,39 @@ struct Flat {
     dynamic: bool,
 }
 
+/// The tuple element `place` is or reaches through fields and elements
+/// (`t[0]`, `t[0].x`, `h.t[1][i]`), when it is a place inside a tuple.
+fn tuple_element(body: &HirBody, mut place: HirId) -> Option<HirId> {
+    loop {
+        match &body.expr(place).kind {
+            HirKind::Index { kind: IndexKind::Tuple, .. } => return Some(place),
+            HirKind::Field { base, .. } | HirKind::Index { base, .. } => place = *base,
+            _ => return None,
+        }
+    }
+}
+
+/// How to write what a write through tuple element `elem` meant: bind the
+/// element, change it, build a new tuple. Names the tuple and the element
+/// when they are a local and a literal index.
+fn tuple_rewrite_help(checker: &Checker, body: &HirBody, elem: HirId) -> String {
+    let generic = "bind the element, change it and build a new tuple: `let c = t[0]; c.x = 9; t = (c, t[1]);`".to_string();
+    let HirKind::Index { base, index, .. } = &body.expr(elem).kind else { return generic };
+    let (HirKind::Local(l), HirKind::Lit(super::Lit::Int(i))) = (&body.expr(*base).kind, &body.expr(*index).kind) else {
+        return generic;
+    };
+    let ty = body.expr(*base).ty.as_ref().map(|t| crate::typechecking::subst::apply_ty_prune(checker.subst(), t));
+    let Some(Ty::Tuple(items)) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else { return generic };
+    let t = &body.local(*l).name;
+    let n = if *i >= 0 { *i as usize } else { return generic };
+    if n >= items.len() {
+        return generic;
+    }
+    let e = if t == "e" { "x" } else { "e" };
+    let parts: Vec<String> = (0..items.len()).map(|k| if k == n { e.to_string() } else { format!("{t}[{k}]") }).collect();
+    format!("bind the element, change it and build a new tuple: `let {e} = {t}[{n}]; …change {e}…; {t} = ({});`", parts.join(", "))
+}
+
 /// Every parameter from `j` on.
 fn bits_from(j: usize) -> u64 {
     if j >= 64 { 0 } else { u64::MAX << j }
@@ -1715,7 +1911,7 @@ impl Cx<'_> {
             let body = &self.module.bodies[index];
             let lookup = |callee: &Callee, args: &[HirId]| match callee {
                 Callee::Named { name, def, .. } => Some(self.named(&w, name, *def)),
-                Callee::Method { name } => self.method(&w, *args.first()?, name).map(|(s, _)| s),
+                Callee::Method { name } => self.method(&w, None, *args.first()?, name).map(|(s, _)| s),
                 Callee::Value(f) => self.fn_value(&w, *f),
                 Callee::Resolved(_) => None,
             };
@@ -1833,7 +2029,8 @@ impl Cx<'_> {
                     }
                 });
             }
-            if w.ro_hits.is_none() || !readonly_at_top(self.checker, ty.as_ref()) {
+            let tuple = tuple_element(body, arg);
+            if w.ro_hits.is_none() || !(tuple.is_some() || readonly_at_top(self.checker, ty.as_ref())) {
                 continue;
             }
             // One error for the argument, at the first parameter it mutates.
@@ -1844,11 +2041,34 @@ impl Cx<'_> {
             }
             let reason = match callee_body {
                 Some(b) => Some(self.mutation_reason(b, j, w.summaries)),
-                None => key.and_then(|k| self.program.mutation_reason(k, j)),
+                None => key.and_then(|k| {
+                    // An earlier module's impl the call runs says why itself.
+                    let picked = self.receiver_class(body, args).and_then(|owner| self.call_impl(body, at, k, &owner));
+                    if let Some(ImplBody::Program(name, _)) = picked
+                        && let Some(reason) = self.program.reason_of(name, j)
+                    {
+                        return Some(reason);
+                    }
+                    let method = k.starts_with('.');
+                    let owner = if method || self.is_trait_method(k) { self.receiver_class(body, args) } else { None };
+                    let trait_name = if method || owner.is_none() { None } else { self.call_trait(body, at, short_name(k)) };
+                    self.program.mutation_reason(k, owner.as_deref(), trait_name, self.module_path, j)
+                }),
             };
             let because = reason.map_or_else(String::new, |r| format!(" ({r})"));
             // A method call's receiver is what it is called on; any other
             // argument is passed to it, by name when it is a local (#1681).
+            if let Some(elem) = tuple {
+                let message = if trait_decl && j == 0 {
+                    format!("Cannot call `{shown}` on a tuple element: its trait does not declare {param} `readonly`, so it may change it")
+                } else if shown.starts_with('.') && j == 0 {
+                    format!("Cannot call `{shown}` on a tuple element: it mutates {param}{because}")
+                } else {
+                    format!("Cannot pass a tuple element to `{shown}`: it mutates {param}{because}")
+                };
+                self.push_tuple_hit(w, at, elem, message);
+                continue;
+            }
             let message = if shown.starts_with('.') && j == 0 {
                 format!("Cannot call `{shown}` on a `readonly` value: it mutates {param}{because}")
             } else if let Some(n) = name {
@@ -1954,8 +2174,7 @@ impl Cx<'_> {
         let name = match callee_body {
             Some(b) => self.module.bodies[b].name.clone(),
             None if method => {
-                let recv = body.expr(*args.first()?);
-                let owner = self.checker.class_owner_at_span(recv.span).or_else(|| class_of(recv.ty.as_ref()).map(str::to_string))?;
+                let owner = self.receiver_class(body, args)?;
                 format!("{owner}::{}", key?.trim_start_matches('.').trim_end_matches("()"))
             }
             None => key?.to_string(),
@@ -2013,6 +2232,12 @@ impl Cx<'_> {
             }
             _ => None,
         }
+    }
+
+    /// The class a method call's receiver (its first argument) is.
+    fn receiver_class(&self, body: &HirBody, args: &[HirId]) -> Option<String> {
+        let recv = body.expr(*args.first()?);
+        self.checker.class_owner_at_span(recv.span).or_else(|| class_of(recv.ty.as_ref()).map(str::to_string))
     }
 
     /// How a diagnostic names parameter `j` of a callee: `self` or
@@ -2150,7 +2375,6 @@ impl Cx<'_> {
         w.out.flags = w.out.flags.union(s.flags);
         w.out.visible = w.out.visible.union(s.visible);
         w.out.statics |= s.statics;
-        w.out.fields |= s.fields;
         if let Some(causes) = w.causes.as_mut()
             && !s.flags.is_pure()
         {
@@ -2166,12 +2390,17 @@ impl Cx<'_> {
     }
 
     fn expr(&self, w: &mut Walk<'_>, id: HirId) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.expr_level(w, id))
+    }
+
+    fn expr_level(&self, w: &mut Walk<'_>, id: HirId) {
         let body = &self.module.bodies[w.index];
         let e = body.expr(id);
-        w.out.fields |= self.own_fields(body, id);
         match &e.kind {
             HirKind::Call { callee, args } => self.call(w, id, callee, args),
             HirKind::Assign { place, value } => match &body.expr(*place).kind {
+                HirKind::Field { base, .. } | HirKind::Index { base, .. } if self.tuple_element_write(w, id, *base, || "Cannot assign through a tuple element".to_string()) => {}
                 HirKind::Field { base, name } if self.roots(w, *base) != 0 => {
                     let bits = self.roots(w, *base);
                     self.mutate(w, bits, None, || format!("writes field `{name}`"));
@@ -2205,13 +2434,21 @@ impl Cx<'_> {
                 }
                 _ => {}
             },
+            // `let w = mut place`: `w` writes the place's object.
+            HirKind::Let { local, init: Some(init) } if body.local(*local).borrow => {
+                self.tuple_element_write(w, id, *init, || "Cannot borrow a tuple element with `mut`".to_string());
+            }
             // `new View(mut place, …)`: the view writes the place's object.
             HirKind::Make { .. } => {
                 for a in crate::hir::view_lint::borrow_args(self.checker, body, id) {
+                    if self.tuple_element_write(w, a, a, || "Cannot borrow a tuple element with `mut`".to_string()) {
+                        continue;
+                    }
                     let bits = self.roots(w, a);
                     self.mutate(w, bits, None, || "borrows it in a view".to_string());
                 }
             }
+            HirKind::Append { base, .. } if self.tuple_element_write(w, id, *base, || "Cannot append through a tuple element".to_string()) => {}
             HirKind::Append { base, value } if !self.is_private(w, *base) => {
                 let bits = self.roots(w, *base);
                 self.mutate(w, bits, None, || "appends to an array".to_string());
@@ -2238,7 +2475,13 @@ impl Cx<'_> {
             HirKind::Resume { .. } => {
                 self.note(w, id, EffectFlags::YIELD | EffectFlags::RESIZE, || "resumes a generator".into())
             }
-            HirKind::ForIn { kind, .. } => {
+            HirKind::ForIn { pat, iterable, kind, .. } => {
+                // `for mut x in place`: each `x` writes its item in place.
+                let mut borrows = false;
+                pat.for_each_bind(&mut |l| borrows |= body.local(l).borrow);
+                if borrows {
+                    self.tuple_element_write(w, id, *iterable, || "Cannot iterate a tuple element with `for mut`".to_string());
+                }
                 if !matches!(
                     kind,
                     Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. })
@@ -2251,6 +2494,11 @@ impl Cx<'_> {
             // As the AST walk: the deferred body is still walked.
             HirKind::Defer { .. } => self.note_hidden(w, id, EffectFlags::UNKNOWN, || "has a `defer`".into()),
             HirKind::Builtin { op, .. } => match op {
+                // A failed `requires` / `ensures` / `invariant` check: the
+                // function is as pure as its body, as it is with the
+                // checks compiled out. The clause itself is walked like
+                // any other code.
+                Builtin::Panic if body.contract_spans.contains(&body.expr(id).span) => {}
                 // Not a user-visible effect: bounds checks panic almost
                 // anywhere.
                 Builtin::Panic => self.note_hidden(w, id, EffectFlags::UNKNOWN, || "may panic".into()),
@@ -2267,40 +2515,56 @@ impl Cx<'_> {
             HirKind::Global { name, .. } if self.checker.is_mutable_static(name) => {
                 self.note_static(w, id, EffectFlags::HOST, || format!("reads static `{name}`"))
             }
-            // A trait operator runs user code this pass does not resolve.
+            // A trait operator runs user code this pass does not resolve,
+            // unless both operands are built-in: an element-wise `a + b`,
+            // `o == Option::None`, an `int` with a `float`. No user impl
+            // can stand behind those (the orphan rule).
             HirKind::Bin { op: BinOp::Overloaded(op), lhs, rhs } => {
-                self.note(w, id, EffectFlags::UNKNOWN, || format!("uses a trait operator `{op}`"));
-                self.operator_mutates(w, id, op, *lhs, *rhs);
+                let user = |operand: HirId| crate::effects::operator_runs_user_code(body.expr(operand).ty.as_ref());
+                if user(*lhs) || user(*rhs) {
+                    self.note(w, id, EffectFlags::UNKNOWN | EffectFlags::RESIZE, || format!("uses a trait operator `{op}`"));
+                    self.operator_mutates(w, id, op, *lhs, *rhs);
+                }
+            }
+            // As is `-a` or `~a` on anything but a built-in scalar.
+            HirKind::Un { op: op @ (UnOp::Neg | UnOp::BitNot), operand }
+                if crate::effects::operator_runs_user_code(body.expr(*operand).ty.as_ref()) =>
+            {
+                let sym = if *op == UnOp::Neg { "-" } else { "~" };
+                self.note(w, id, EffectFlags::UNKNOWN | EffectFlags::RESIZE, || format!("uses a trait operator `{sym}`"));
             }
             HirKind::Unsupported(what) => {
                 self.note(w, id, UNKNOWN.bits(), || format!("uses {what}, which this analysis does not model"))
             }
             _ => {}
         }
-        for k in children(body, id) {
+        for k in body.children(id) {
             self.expr(w, k);
         }
     }
 
-    /// The fields node `id` itself reads or writes ([`Summary::fields`]):
-    /// a field by name, or every field for an op that reads whole objects
-    /// (structural `==`, a builtin given one, resuming a generator).
-    fn own_fields(&self, body: &HirBody, id: HirId) -> u64 {
-        let objects = |ids: &[HirId]| ids.iter().any(|a| !field_free(body.expr(*a).ty.as_ref()));
-        match &body.expr(id).kind {
-            HirKind::Field { name, .. } => field_bit(name),
-            HirKind::Bin {
-                op: BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
-                lhs,
-                rhs,
-            } if objects(&[*lhs, *rhs]) => ALL_FIELDS,
-            HirKind::Index { base, kind: IndexKind::Other, .. } if objects(&[*base]) => ALL_FIELDS,
-            HirKind::Builtin { args, .. } if objects(args) => ALL_FIELDS,
-            HirKind::Spread(inner) if objects(&[*inner]) => ALL_FIELDS,
-            HirKind::Resume { .. } => ALL_FIELDS,
-            HirKind::Match { arms, .. } => arms.iter().fold(0, |m, a| m | pat_fields(&a.pat)),
-            HirKind::LetPat { pat, .. } | HirKind::ForIn { pat, .. } => pat_fields(pat),
-            _ => 0,
+    /// E0107 when `place` is a tuple element or reaches one through
+    /// fields and elements (#2791): a tuple cannot be changed in place, and
+    /// a write to what one of its elements holds is a change to the tuple.
+    /// True when it reported one.
+    fn tuple_element_write(&self, w: &mut Walk<'_>, at: HirId, place: HirId, message: impl FnOnce() -> String) -> bool {
+        if w.ro_hits.is_none() {
+            return false;
+        }
+        let body = &self.module.bodies[w.index];
+        let Some(elem) = tuple_element(body, place) else { return false };
+        self.push_tuple_hit(w, at, elem, message());
+        true
+    }
+
+    /// Record the tuple element write at `at` through element `elem`, with
+    /// the rewrite that does what it meant.
+    fn push_tuple_hit(&self, w: &mut Walk<'_>, at: HirId, elem: HirId, message: String) {
+        let body = &self.module.bodies[w.index];
+        let help = tuple_rewrite_help(self.checker, body, elem);
+        let span = body.expr(at).span;
+        if let Some(hits) = w.ro_hits.as_mut() {
+            hits.push(RoHit { span, message: format!("{message}; a tuple cannot be changed in place"), help });
         }
     }
 
@@ -2313,23 +2577,19 @@ impl Cx<'_> {
     fn call(&self, w: &mut Walk<'_>, at: HirId, callee: &Callee, args: &[HirId]) {
         let body = &self.module.bodies[w.index];
         match callee {
-            Callee::Named { name, def, .. } => {
-                let mut s = self.named(w, name, *def);
-                let callee = self.local_body(name, *def);
+            Callee::Named { name, def, overload } => {
+                let picked = self.overload(name, *overload);
+                let mut s = picked.map_or_else(|| self.named(w, name, *def), |i| w.summaries[i]);
+                let callee = picked.or_else(|| self.local_body(name, *def));
                 if callee.is_none() {
                     s = open_mode_summary(body, name, args, s);
                 }
                 self.apply(w, at, name, s, callee, args);
                 let host = callee.is_none() && self.known_named(w, name, *def).is_none();
-                // A native given an object may read any of its fields
-                // (`format("%v", o)`); a new `Vec` or variant only holds it.
-                if host && !holds_args(self.checker, name) && args.iter().any(|a| !field_free(body.expr(*a).ty.as_ref())) {
-                    w.out.fields = ALL_FIELDS;
-                }
                 let trait_decl = host && self.is_trait_method(name);
                 // `Trait::m(p)` on a concrete receiver runs its impl, whose
                 // body says what it mutates, as `p.m()` (#1647).
-                if trait_decl && let Some((mutates, impl_body)) = self.named_instance_mutates(w, name, args) {
+                if trait_decl && let Some((mutates, impl_body)) = self.named_instance_mutates(w, at, name, args) {
                     self.call_mutates(w, at, name, mutates, impl_body, Some(name), args, false);
                     return;
                 }
@@ -2347,6 +2607,9 @@ impl Cx<'_> {
                         return;
                     }
                     if VEC_MUTATORS.contains(&name.as_str()) {
+                        if self.tuple_element_write(w, at, recv, || format!("Cannot call `.{name}()` on a tuple element: it changes the `Vec`")) {
+                            return;
+                        }
                         let bits = self.roots(w, recv);
                         self.mutate(w, bits, None, || format!("calls `.{name}()` on a `Vec`"));
                         if !self.is_private(w, recv) {
@@ -2358,13 +2621,8 @@ impl Cx<'_> {
                     }
                 }
                 let shown = format!(".{name}()");
-                match self.method(w, recv, name) {
+                match self.method(w, Some(at), recv, name) {
                     Some((s, callee)) => {
-                        // As a native above: a `Vec` method may compare
-                        // elements (`contains`).
-                        if callee.is_none() && args.iter().any(|a| !field_free(body.expr(*a).ty.as_ref())) {
-                            w.out.fields = ALL_FIELDS;
-                        }
                         self.apply(w, at, &shown, s, callee, args);
                         let trait_decl = callee.is_none() && self.method_is_trait_dispatch(w, recv, name);
                         self.call_mutates(w, at, &shown, s.mutates, callee, Some(&shown), args, trait_decl);
@@ -2552,6 +2810,19 @@ impl Cx<'_> {
     }
 
     /// This module's body for the function `name`.
+    /// The body a call of the overloaded `name` runs, when the checker
+    /// said which (`id`) and it is this module's.
+    fn overload(&self, name: &str, id: Option<u32>) -> Option<usize> {
+        let id = id?;
+        self.overloads.get(name)?.iter().find(|(body_id, _)| *body_id == Some(id)).map(|(_, i)| *i)
+    }
+
+    /// What a call of the overloaded `name` costs when it may run any of
+    /// its bodies: a method call, or a function not called by its id.
+    fn any_overload(&self, w: &Walk<'_>, name: &str) -> Option<Summary> {
+        self.overloads.get(name)?.iter().map(|(_, i)| w.summaries[*i]).reduce(Summary::join)
+    }
+
     fn local_body(&self, name: &str, def: Option<DefId>) -> Option<usize> {
         let def = def.or_else(|| {
             (self.checker.current_module_name() == self.module_path)
@@ -2614,7 +2885,6 @@ impl Cx<'_> {
             opaque_args: u64::MAX,
             returns: u64::MAX,
             shared_ret: true,
-            fields: ALL_FIELDS,
         })
     }
 
@@ -2685,23 +2955,71 @@ impl Cx<'_> {
     /// What trait method `name` (`m`, `Trait::m`) mutates when called on
     /// `args`, from the impl body of its first argument's class, when that
     /// is a class whose impl was seen.
-    fn named_instance_mutates(&self, w: &Walk<'_>, name: &str, args: &[HirId]) -> Option<(u64, Option<usize>)> {
+    fn named_instance_mutates(&self, w: &Walk<'_>, at: HirId, name: &str, args: &[HirId]) -> Option<(u64, Option<usize>)> {
         let recv = *args.first()?;
         let body = &self.module.bodies[w.index];
         if matches!(body.expr(recv).kind, HirKind::Named { .. } | HirKind::Spread(_)) {
             return None;
         }
         let owner = class_of(body.expr(recv).ty.as_ref())?;
-        match name.rsplit_once("::") {
-            Some((trait_name, method)) => self
-                .checker
-                .generics()
-                .typeclasses
-                .keys()
-                .filter(|t| short_name(t) == short_name(trait_name))
-                .find_map(|t| self.instance_mutates_of(w, t, owner, method)),
-            None => self.instance_mutates(w, owner, name),
+        // The impl the checker picked for the call, wherever the trait, the
+        // class and the impl are declared (#2468).
+        if let Some(found) = self.call_impl(body, at, name, owner) {
+            return Some(match found {
+                ImplBody::Local(i) => (w.summaries[i].mutates, Some(i)),
+                ImplBody::Program(_, s) => (s.mutates, None),
+            });
         }
+        match name.rsplit_once("::") {
+            Some((trait_name, method)) => {
+                let mut traits: Vec<&String> =
+                    self.checker.generics().typeclasses.keys().filter(|t| short_name(t) == short_name(trait_name)).collect();
+                traits.sort_unstable();
+                traits.into_iter().find_map(|t| self.instance_mutates_of(w, t, owner, method))
+            }
+            // `Trait::m(x)` lowered under the bare `m`: the instance the
+            // checker picked for the call says which trait's `m` (#2464).
+            None => self
+                .call_trait(body, at, name)
+                .and_then(|t| self.instance_mutates_of(w, t, owner, name))
+                .or_else(|| self.instance_mutates(w, owner, name)),
+        }
+    }
+
+    /// The trait whose method `name` the call `at` runs, when the checker
+    /// discharged an instance for it.
+    fn call_trait(&self, body: &HirBody, at: HirId, name: &str) -> Option<&str> {
+        self.call_dicts(body, at)?.iter().find(|inst| inst.method_fqns.contains_key(name)).map(|inst| inst.class.as_str())
+    }
+
+    /// The instances the checker discharged for the call `at`.
+    fn call_dicts(&self, body: &HirBody, at: HirId) -> Option<&[crate::typechecking::generics::InstanceDef]> {
+        let e = body.expr(at);
+        let dicts = e.node.and_then(|n| self.checker.call_dicts_at(n)).or_else(|| self.checker.call_dicts_for_span(e.span.0, e.span.1))?;
+        Some(dicts)
+    }
+
+    /// The impl body the call `at` of trait method `name` (`m`, `Trait::m`,
+    /// `.m()`) runs on a receiver of class `owner`: the method of the
+    /// instance the checker picked for the call, in this module or an
+    /// earlier one. The instance names its module and the body's key, so
+    /// neither how the impl spells the trait and the class nor another
+    /// module's class of the same name comes into it (#2468). `None` when
+    /// the call has no instance for `owner` (a bound receiver), or the
+    /// instance no body for `name` (a builtin's, a default method).
+    fn call_impl(&self, body: &HirBody, at: HirId, name: &str, owner: &str) -> Option<ImplBody<'_>> {
+        let name = name.trim_start_matches('.').trim_end_matches("()");
+        let (trait_name, method) = name.rsplit_once("::").map_or((None, name), |(t, m)| (Some(t), m));
+        let (inst, fqn) = self.call_dicts(body, at)?.iter().find_map(|inst| {
+            let fqn = inst.method_fqns.get(method)?;
+            let fits = trait_name.is_none_or(|t| short_name(t) == short_name(&inst.class))
+                && class_of(inst.args.first()) == Some(owner);
+            fits.then_some((inst, fqn))
+        })?;
+        if inst.defined_module == self.module_path {
+            return self.module.instance_fns.get(fqn).map(|&i| ImplBody::Local(i));
+        }
+        self.program.instance_body(&inst.defined_module, fqn).map(|(name, s)| ImplBody::Program(name, s))
     }
 
     /// Fold what the trait operator `lhs op rhs` mutates into `w`, as the
@@ -2732,7 +3050,7 @@ impl Cx<'_> {
     /// What the impl of trait method `name` for class `owner` mutates, when
     /// its body was seen (this module's or an earlier one's).
     fn instance_mutates(&self, w: &Walk<'_>, owner: &str, name: &str) -> Option<(u64, Option<usize>)> {
-        let traits: Vec<&String> = self
+        let mut traits: Vec<&String> = self
             .checker
             .generics()
             .typeclasses
@@ -2740,6 +3058,9 @@ impl Cx<'_> {
             .filter(|(_, def)| def.methods.iter().any(|m| m.name == name))
             .map(|(t, _)| t)
             .collect();
+        // Two traits with a method `name`, both implemented for `owner`:
+        // the same one on every run.
+        traits.sort_unstable();
         traits.into_iter().find_map(|t| self.instance_mutates_of(w, t, owner, name))
     }
 
@@ -2765,6 +3086,12 @@ impl Cx<'_> {
         if let Some(s) = self.known_named(w, name, def) {
             return s;
         }
+        // A function of the program with no summary (an `extern`, or one
+        // whose module was rejected or is compiled later) is unknown code,
+        // whatever host native shares its name.
+        if self.declared_fn(name, def) {
+            return Summary::of(UNKNOWN);
+        }
         let member = name.rsplit_once("::");
         let (owner, method) = (member.map(|(owner, _)| owner), member.map_or(name, |(_, m)| m));
         if let Some(s) = self.trait_method(owner, method) {
@@ -2779,6 +3106,36 @@ impl Cx<'_> {
             None => 0,
         };
         s
+    }
+
+    /// Whether `name` (with the def its call carries, if any) is a `fn` or
+    /// an `extern` function some module declares.
+    fn declared_fn(&self, name: &str, def: Option<DefId>) -> bool {
+        use crate::typechecking::DefKind;
+        let def = def.or_else(|| {
+            (self.checker.current_module_name() == self.module_path)
+                .then(|| self.checker.def_id_of(name))
+                .flatten()
+        });
+        def.and_then(|d| self.checker.def_interner().info(d)).is_some_and(|info| matches!(info.kind, DefKind::Fn | DefKind::Ffi))
+    }
+
+    /// Whether a call named `name` runs a trait's method: `Trait::m(..)`,
+    /// `Type::m(..)` or `T::m(..)` for a method `m` some trait has, or the
+    /// bare `m` that `Trait::m(x)` lowers under. A bare `m` bound to a
+    /// builtin in this module's scope is that builtin: the checker names
+    /// the trait call `Trait::m` then.
+    fn names_trait_method(&self, name: &str) -> bool {
+        let traits = &self.checker.generics().typeclasses;
+        match name.rsplit_once("::") {
+            Some((owner, m)) => {
+                short_name(owner).starts_with(|c: char| c.is_ascii_uppercase()) && traits.values().any(|t| t.methods.iter().any(|d| d.name == m))
+            }
+            None => {
+                let builtin = self.checker.current_module_name() == self.module_path && self.checker.scope_binding(name).is_some();
+                !builtin && traits.values().any(|t| t.methods.iter().any(|d| d.name == name))
+            }
+        }
     }
 
     /// [`Self::named`] for a name that is no user function or trait method.
@@ -2801,20 +3158,21 @@ impl Cx<'_> {
         let short = if self.checker.current_module_name() == self.module_path
             && let Some(export) = self.checker.scope_binding(name)
         {
-            export.short_name().to_string()
+            escape::fresh_registry(export).unwrap_or(export.short_name()).to_string()
         } else {
             name.to_string()
         };
         // A user type's static is unknown code here, whatever its short
         // name: `Pool::with_capacity` is not the `with_capacity` native.
-        if user_type_member(self.checker, name) {
-            return Summary::of(classify_host_name(&short));
+        // So is a trait's method called through the trait, a type or a
+        // type parameter (#2437).
+        if user_type_member(self.checker, name) || self.names_trait_method(name) {
+            return Summary::of(UNKNOWN);
         }
         escape::host_summary(&short, Summary::of(classify_host_name(&short)))
     }
 
-    /// A user function's summary: this module's, an earlier module's, or
-    /// the AST walk's flags for a module compiled without HIR.
+    /// A user function's summary: this module's or an earlier module's.
     fn known_named(&self, w: &Walk<'_>, name: &str, def: Option<DefId>) -> Option<Summary> {
         // A `use`d name has no def on the call; the module's def table has it.
         let def = def.or_else(|| {
@@ -2833,6 +3191,9 @@ impl Cx<'_> {
         if let Some(Some(i)) = self.by_name.get(name) {
             return Some(w.summaries[*i]);
         }
+        if let Some(s) = self.any_overload(w, name) {
+            return Some(s);
+        }
         // An imported function: its def names the module it is in.
         let interner = self.checker.def_interner();
         let declared = def
@@ -2850,15 +3211,8 @@ impl Cx<'_> {
                 return Some(s);
             }
         }
-        // The AST walk does not say which fields a body touches.
-        let walked = |fx: &EffectFlags| Summary {
-            fields: ALL_FIELDS,
-            ..Summary::of(*fx)
-        };
-        if let Some(fx) = def.and_then(|d| self.checker.program_fn_effects.get(&d)) {
-            return Some(walked(fx));
-        }
-        self.checker.program_method_effects.get(name).map(walked)
+        // An earlier module's trait impl method by its instance key.
+        self.program.instance_by_key.get(name).and_then(|n| self.program.by_name.get(n)).copied()
     }
 
     /// The summary of `recv.name(..)` when the receiver is a user class or
@@ -2876,31 +3230,15 @@ impl Cx<'_> {
                 InstanceBody::Local(i) => w.summaries[i],
                 InstanceBody::Program(s) => s,
             };
-            out = Some(match out {
-                None => s,
-                Some(o) => Summary {
-                    flags: o.flags.union(s.flags),
-                    visible: o.visible.union(s.visible),
-                    latent: o.latent | s.latent,
-                    mutates: o.mutates | s.mutates,
-                    statics: o.statics || s.statics,
-                    // Discharged only where every impl's bits are.
-                    param_only: o.param_only & s.param_only,
-                    escapes: o.escapes | s.escapes,
-                    keeps: o.keeps | s.keeps,
-                    returns_arg: o.returns_arg | s.returns_arg,
-                    returns_inner: o.returns_inner | s.returns_inner,
-                    opaque_args: o.opaque_args | s.opaque_args,
-                    returns: o.returns | s.returns,
-                    shared_ret: o.shared_ret || s.shared_ret,
-                    fields: o.fields | s.fields,
-                },
-            });
+            out = Some(out.map_or(s, |o| o.join(s)));
         }
         out.map(|s| (s, None))
     }
 
-    fn method(&self, w: &Walk<'_>, recv: HirId, name: &str) -> Option<(Summary, Option<usize>)> {
+    /// The summary of `recv.name(..)`. `at` is the call, when the caller has
+    /// it: the instance the checker picked there names the impl a trait
+    /// method runs.
+    fn method(&self, w: &Walk<'_>, at: Option<HirId>, recv: HirId, name: &str) -> Option<(Summary, Option<usize>)> {
         let body = &self.module.bodies[w.index];
         let e = body.expr(recv);
         if let Some(Ty::Existential { class }) = e.ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
@@ -2915,6 +3253,10 @@ impl Cx<'_> {
             if let Some(Some(i)) = self.by_name.get(key.as_str()) {
                 return Some((w.summaries[*i], Some(*i)));
             }
+            // An overloaded method: the call does not say which body.
+            if let Some(s) = self.any_overload(w, &key) {
+                return Some((s, None));
+            }
             let qualified = format!("{}::{key}", self.module_path);
             // The prelude's `Option` / `Result` methods live in `core`.
             let core = format!("core::{key}");
@@ -2922,15 +3264,21 @@ impl Cx<'_> {
                 if let Some(&s) = self.program.by_name.get(k) {
                     return Some((s, None));
                 }
-                if let Some(fx) = self.checker.program_method_effects.get(k) {
-                    return Some((Summary::of(*fx), None));
-                }
             }
         }
-        // A trait method on a concrete receiver whose impl body is known
-        // costs what that body does (every impl for the receiver's head
-        // together, `Vec<int>` and `Vec<float>` alike), as an inherent
-        // method does (#2008).
+        // A trait method on a concrete receiver costs what the impl the
+        // checker picked for the call does, as `Trait::m(recv)` (#2468).
+        if let (Some(owner), Some(at)) = (owner.as_deref(), at)
+            && let Some(found) = self.call_impl(body, at, name, owner)
+        {
+            return Some(match found {
+                ImplBody::Local(i) => (w.summaries[i], Some(i)),
+                ImplBody::Program(_, s) => (s, None),
+            });
+        }
+        // With no instance on the call: every impl body known for the
+        // receiver's head together (`Vec<int>` and `Vec<float>` alike), as
+        // an inherent method (#2008).
         if let Some(owner) = owner.as_deref()
             && let Some(found) = self.instance_summary(w, owner, name)
         {

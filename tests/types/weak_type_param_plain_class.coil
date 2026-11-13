@@ -91,11 +91,11 @@ impl Probe for Box<T> {
 }
 
 test("a trait instance that never calls weak takes a readonly class") {
-    assert!(size(new Box(new P(6))) == 1);
+    assert!((new Box(new P(6))).size() == 1);
 }
 
 test("a trait instance that calls weak takes a plain class") {
     let n = new Node(7);
-    assert!(probe(new Box(n)) == 1);
+    assert!((new Box(n)).probe() == 1);
     assert!(n.v == 7);
 }

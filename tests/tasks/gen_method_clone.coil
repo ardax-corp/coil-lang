@@ -1,0 +1,172 @@
+// A generic `gen fn` method (of a generic class, with type parameters of
+// its own, a static one) and a free generic generator called from a
+// method's per-type clone take the generator's per-type clone, so the value
+// nobody produced (an unsent binding `yield`, a completion with no value)
+// is decided by the type they run at (coil-lang#2748, #2717, #2738).
+use tests::assert;
+use string::format;
+use text::Searchable;
+use task::{scope, Scope, TaskError};
+
+#[derive(Show)]
+class Pt {
+    pub a: int,
+}
+
+gen fn echo<T>(T x) -> coroutine<T, T> {
+    let r = yield x;
+    yield r;
+}
+
+class Bx<T> {
+    pub v: T,
+}
+
+impl Bx<T> {
+    pub gen fn echo() -> coroutine<T, T> {
+        let r = yield self.v;
+        yield r;
+    }
+
+    pub gen fn once() -> coroutine<T> {
+        yield self.v;
+    }
+
+    pub gen fn tag<U>(U x) -> coroutine<U, U> {
+        let r = yield x;
+        yield r;
+    }
+
+    pub fn relay() -> coroutine<T, T> {
+        return echo(self.v);
+    }
+}
+
+impl Bx<T: Show> {
+    pub fn shown() -> string {
+        let out = "";
+        for v in self.echo() {
+            out = out + format("[%v]", v);
+        }
+        return out;
+    }
+}
+
+class Plain {
+    pub n: int,
+}
+
+impl Plain {
+    pub gen fn echo<U>(U x) -> coroutine<U, U> {
+        let r = yield x;
+        yield r;
+    }
+
+    pub gen static fn make<U>(U x) -> coroutine<U, U> {
+        let r = yield x;
+        yield r;
+    }
+
+    pub gen fn once<U>(U x) -> coroutine<U> {
+        yield x;
+    }
+
+    pub fn run<T: Show>(T x) -> string {
+        let out = "";
+        for v in echo(x) {
+            out = out + format("[%v]", v);
+        }
+        return out;
+    }
+}
+
+fn joined<T: Show>(coroutine<T, T> h) -> string {
+    let out = "";
+    for v in h {
+        out = out + format("[%v]", v);
+    }
+    return out;
+}
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task: its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+test("a generic class's gen method gives an unsent binding yield the zero") {
+    assert!(joined(new Bx("e").echo()) == "[e][]");
+    assert!(joined(new Bx(Option::Some(3)).echo()) == "[Some(3)][None]");
+    assert!(joined(new Bx((3, 4)).echo()) == "[(3, 4)][(0, 0)]");
+    assert!(joined(new Bx(7).echo()) == "[7][0]");
+    assert!(new Bx("s").shown() == "[s][]");
+}
+
+test("a gen method's own type parameter, on a plain and a generic class") {
+    assert!(joined(new Plain(1).echo("e")) == "[e][]");
+    assert!(joined(new Plain(1).echo(Option::Some(3))) == "[Some(3)][None]");
+    assert!(joined(new Bx(1).tag("t")) == "[t][]");
+}
+
+test("a static generic gen method") {
+    assert!(joined(Plain::make("m")) == "[m][]");
+    assert!(joined(Plain::make(Option::Some(2))) == "[Some(2)][None]");
+}
+
+test("a free generic generator called from a method's clone") {
+    assert!(new Plain(1).run("e") == "[e][]");
+    assert!(new Plain(1).run(Option::Some(3)) == "[Some(3)][None]");
+    assert!(joined(new Bx("r").relay()) == "[r][]");
+    assert!(joined(new Bx(Option::Some(4)).relay()) == "[Some(4)][None]");
+}
+
+test("a gen method's completion with no value at a type with a zero") {
+    let h = new Bx("z").once();
+    let _ = resume h;
+    assert!((resume h) == "");
+    let k = new Plain(1).once(Option::Some(5));
+    let _ = resume k;
+    assert!(format("%v", resume k) == "None");
+}
+
+fn send_none_pt() -> int {
+    let n = 0;
+    for v in new Bx(new Pt(1)).echo() {
+        n = n + v.a;
+    }
+    return n;
+}
+
+fn relay_none_pt() -> int {
+    let n = 0;
+    for v in new Bx(new Pt(1)).relay() {
+        n = n + v.a;
+    }
+    return n;
+}
+
+fn complete_pt() -> int {
+    let h = new Plain(1).once(new Pt(2));
+    let _ = resume h;
+    let v = resume h;
+    return v.a;
+}
+
+test("a type with no zero panics where a gen method's value is read") {
+    let m = outcome(fn () => send_none_pt());
+    assert!(m.contains("resumed without a value of Pt"), m);
+    let m = outcome(fn () => relay_none_pt());
+    assert!(m.contains("resumed without a value of Pt"), m);
+    let m = outcome(fn () => complete_pt());
+    assert!(m.contains("the generator finished without a value of Pt"), m);
+}

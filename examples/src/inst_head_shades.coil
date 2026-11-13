@@ -1,0 +1,13 @@
+// Helper module for tests/traits/instance_heads_imported_enums.coil (#2504):
+// a ground and a generic enum that other modules implement their own traits
+// for.
+
+enum Shade {
+    Dark,
+    Light(int),
+}
+
+enum Tint<T> {
+    Clear,
+    Dye(T, int),
+}

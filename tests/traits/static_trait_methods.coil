@@ -27,7 +27,7 @@ trait FromVal<T> {
 
     // A default static body reaches its sibling through the dictionary.
     static fn from_int(int i) -> T {
-        return from_val(new Val(i, "d"));
+        return FromVal::from_val(new Val(i, "d"));
     }
 }
 

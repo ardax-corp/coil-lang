@@ -11,8 +11,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::lower::children;
-use super::{BinOp, Callee, HirBody, HirFlags, HirId, HirKind, HirPat, IndexKind, Lit, LocalId, MakeKind};
+use super::{BinOp, Callee, HirBody, HirFlags, HirId, HirKind, HirPat, IndexKind, Lit, LocalId, MakeKind, UnOp};
+use crate::effects::operator_runs_user_code;
+use crate::typechecking::infer::ForInKind;
 use crate::typechecking::ty::{self, Ty};
 
 /// `body` with proven index sites flagged, or `None` when none are new.
@@ -75,8 +76,13 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
     /// Prove the loops under `id`, which runs with `facts` holding
     /// throughout.
     fn walk(&mut self, id: HirId, facts: &Facts) {
+        // Walks recurse through here once per level of the tree.
+        common::deep_stack(|| self.walk_level(id, facts))
+    }
+
+    fn walk_level(&mut self, id: HirId, facts: &Facts) {
         let HirKind::Block { stmts, tail } = &self.body.expr(id).kind else {
-            for k in children(self.body, id) {
+            for k in self.body.children(id) {
                 self.walk(k, facts);
             }
             return;
@@ -98,7 +104,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
                     self.walk(then, &at_top);
                 }
                 None => {
-                    for k in children(self.body, s) {
+                    for k in self.body.children(s) {
                         self.walk(k, &inner);
                     }
                 }
@@ -185,7 +191,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
     fn only_grows(&self, loop_body: HirId, i: LocalId, facts: &Facts, w: &Writes) -> bool {
         let body = self.body;
         let mut ok = true;
-        visit(body, loop_body, &mut |id| match &body.expr(id).kind {
+        body.visit_ids(loop_body, &mut |id| match &body.expr(id).kind {
             HirKind::Assign { place, value } if matches!(body.expr(*place).kind, HirKind::Local(l) if l == i) => {
                 ok &= match body.expr(*value).kind {
                     HirKind::Bin { op: BinOp::IntAdd, lhs, rhs } => {
@@ -325,7 +331,7 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
                     HirKind::Local(a) if a != i && a != n && facts.empty.contains(&a) && !body.local(a).captured => {
                         let wx = self.writes(*x);
                         let mut leaves = false;
-                        visit(body, *x, &mut |k| {
+                        body.visit_ids(*x, &mut |k| {
                             leaves |= matches!(body.expr(k).kind, HirKind::Break | HirKind::Continue | HirKind::Return(_));
                         });
                         (wx.steady && wx.locals.is_empty() && !leaves).then_some(a)
@@ -348,13 +354,28 @@ impl<S: Fn(&str) -> bool> Cx<'_, S> {
     fn writes(&self, id: HirId) -> Writes {
         let body = self.body;
         let mut w = Writes { locals: HashSet::new(), steady: true };
-        visit(body, id, &mut |k| match &body.expr(k).kind {
+        body.visit_ids(id, &mut |k| match &body.expr(k).kind {
             HirKind::Let { local, .. } => {
                 w.locals.insert(*local);
             }
-            HirKind::LetPat { pat, .. } => binds(pat, &mut w.locals),
-            HirKind::Match { arms, .. } => arms.iter().for_each(|a| binds(&a.pat, &mut w.locals)),
-            HirKind::ForIn { pat, .. } => binds(pat, &mut w.locals),
+            HirKind::LetPat { pat, .. } => pat.for_each_bind(&mut |l| { w.locals.insert(l); }),
+            HirKind::Match { arms, .. } => arms.iter().for_each(|a| a.pat.for_each_bind(&mut |l| { w.locals.insert(l); })),
+            // Anything but an array, a tuple or a range runs an iterator's
+            // `next` or resumes a generator: user code (#2438).
+            HirKind::ForIn { pat, kind, .. } => {
+                pat.for_each_bind(&mut |l| { w.locals.insert(l); });
+                w.steady &= matches!(kind, Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. }));
+            }
+            // An operator on anything but built-in operands runs a trait
+            // impl, as a call would.
+            HirKind::Bin { op: BinOp::Overloaded(_), lhs, rhs } => {
+                let user = |operand: HirId| operator_runs_user_code(body.expr(operand).ty.as_ref());
+                w.steady &= !user(*lhs) && !user(*rhs);
+            }
+            HirKind::Un { op: UnOp::Neg | UnOp::BitNot, operand } => {
+                w.steady &= !operator_runs_user_code(body.expr(*operand).ty.as_ref());
+            }
+            HirKind::Unsupported(_) => w.steady = false,
             HirKind::Assign { place, .. } => {
                 if let HirKind::Local(l) = body.expr(*place).kind {
                     w.locals.insert(l);
@@ -388,33 +409,6 @@ fn length_of(body: &HirBody, args: &[HirId]) -> bool {
     })
 }
 
-fn binds(pat: &HirPat, out: &mut HashSet<LocalId>) {
-    match pat {
-        HirPat::Bind(l) => {
-            out.insert(*l);
-        }
-        HirPat::Variant {
-            fields: super::HirPatFields::Tuple(ps),
-            ..
-        }
-        | HirPat::Tuple(ps) => ps.iter().for_each(|p| binds(p, out)),
-        HirPat::Variant {
-            fields: super::HirPatFields::Record(fs),
-            ..
-        }
-        | HirPat::Record(fs) => fs.iter().for_each(|(_, p)| binds(p, out)),
-        _ => {}
-    }
-}
-
-/// Every node under `id`, nested function bodies included.
-fn visit(body: &HirBody, id: HirId, f: &mut impl FnMut(HirId)) {
-    f(id);
-    for k in children(body, id) {
-        visit(body, k, f);
-    }
-}
-
 /// The nodes under `id` that run when it does: not inside a lambda or a
 /// `defer`, which run later.
 fn visit_now(body: &HirBody, id: HirId, f: &mut impl FnMut(HirId)) {
@@ -422,7 +416,7 @@ fn visit_now(body: &HirBody, id: HirId, f: &mut impl FnMut(HirId)) {
         return;
     }
     f(id);
-    for k in children(body, id) {
+    for k in body.children(id) {
         visit_now(body, k, f);
     }
 }

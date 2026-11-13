@@ -1,5 +1,8 @@
 //! HIR Phase 1 gate: every positive `tests/<domain>` program builds HIR with no
 //! unsupported node and every node's span matches its AST node.
+//! It is compiled whole, so the gate also holds what emission reports of a
+//! body: a loop the auto-par analysis lists as a site and the plan cannot
+//! build (`Compiler::hir_par_disagreement`).
 
 use compiler::Pipeline;
 
@@ -56,6 +59,9 @@ fn check(file: &std::path::Path) -> Option<Vec<String>> {
     let mut pipeline = Pipeline::new();
     pipeline.bind_workspace_language_roots();
     pipeline.set_include_tests(true);
+    // As `coil test` compiles it: loop checks are built, so a loop under
+    // them is planned as it is there.
+    pipeline.set_contracts(compiler::ContractLevel::All);
     compiler::start_hir_capture();
     let ok = pipeline.compile_src_from_file(file.to_str().unwrap()).is_ok();
     let capture = compiler::take_hir_capture();

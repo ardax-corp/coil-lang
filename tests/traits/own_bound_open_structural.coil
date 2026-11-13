@@ -1,0 +1,232 @@
+// A trait method with a bound of its own (`fn tup<U: Show>`) at a builtin
+// shape over that parameter (coil-lang#2594): `Show<(U, int)>`,
+// `Show<Vec<U>>`, `Eq<Option<U>>`, `Hash<[U; 2]>`, `Ord<(U, int)>`. The
+// shape's structural instance takes its context from the frame's own
+// dictionary for `U`, which follows the instance's dictionary and its
+// context. `P`'s instances are not the structural ones (its `==` compares
+// tens, its `show` prefixes `P`), so a result built with another frame
+// dictionary differs. Instance methods (with and without a context),
+// default bodies, calls through a bound, and an inherent method's own
+// bound. The `clone-budget-0` cell runs every case on the shared bodies.
+use tests::assert;
+
+class P {
+    pub v: int,
+}
+
+impl Show for P {
+    fn show(P p) -> string {
+        return "P" + p.v.show();
+    }
+}
+
+impl Eq for P {
+    fn eq(P a, P b) -> bool {
+        return a.v / 10 == b.v / 10;
+    }
+}
+
+impl Hash for P {
+    fn hash(P p) -> int {
+        return p.v / 10;
+    }
+}
+
+impl Lt for P {
+    fn lt(P a, P b) -> bool {
+        return a.v / 10 < b.v / 10;
+    }
+}
+
+impl Le for P {
+    fn le(P a, P b) -> bool {
+        return a.v / 10 <= b.v / 10;
+    }
+}
+
+impl Gt for P {
+    fn gt(P a, P b) -> bool {
+        return a.v / 10 > b.v / 10;
+    }
+}
+
+impl Ge for P {
+    fn ge(P a, P b) -> bool {
+        return a.v / 10 >= b.v / 10;
+    }
+}
+
+impl Ord for P {
+}
+
+fn same<V: Eq>(V a, V b) -> bool {
+    return a == b;
+}
+
+fn hashed<V: Hash>(V a) -> int {
+    return a.hash();
+}
+
+fn before<V: Ord>(V a, V b) -> bool {
+    return a < b;
+}
+
+class Shelf {
+    pub n: int,
+}
+
+class Crate<T> {
+    pub item: T,
+}
+
+trait Lister<S> {
+    fn tup<U: Show>(S s, U x) -> string {}
+    fn vec<U: Show>(S s, Vec<U> xs) -> string {}
+    fn arr<U: Show>(S s, U x) -> string {}
+    fn opt<U: Show>(S s, U x) -> string {}
+    fn eq<U: Eq>(S s, U x, U y) -> bool {}
+    fn eq_ord<U: Ord>(S s, U x, U y) -> bool {}
+    fn hash<U: Hash>(S s, U x) -> int {}
+    fn order<U: Ord>(S s, U x, U y) -> bool {}
+
+    fn dflt<U: Show>(S s, U x) -> string {
+        let t = (x, 9);
+        return t.show();
+    }
+}
+
+impl Lister for Shelf {
+    fn tup<U: Show>(Shelf s, U x) -> string {
+        let t = (x, s.n);
+        return t.show();
+    }
+
+    fn vec<U: Show>(Shelf s, Vec<U> xs) -> string {
+        return xs.show();
+    }
+
+    fn arr<U: Show>(Shelf s, U x) -> string {
+        let a: [U; 2] = [x, x];
+        return a.show();
+    }
+
+    fn opt<U: Show>(Shelf s, U x) -> string {
+        return Some(x).show();
+    }
+
+    fn eq<U: Eq>(Shelf s, U x, U y) -> bool {
+        return same((x, s.n), (y, s.n));
+    }
+
+    fn eq_ord<U: Ord>(Shelf s, U x, U y) -> bool {
+        return same(Some(x), Some(y));
+    }
+
+    fn hash<U: Hash>(Shelf s, U x) -> int {
+        return hashed([x, x]);
+    }
+
+    fn order<U: Ord>(Shelf s, U x, U y) -> bool {
+        return before((x, s.n), (y, s.n));
+    }
+}
+
+impl Lister for Crate<T: Show> {
+    fn tup<U: Show>(Crate<T> c, U x) -> string {
+        let t = (x, c.item);
+        return t.show();
+    }
+
+    fn vec<U: Show>(Crate<T> c, Vec<U> xs) -> string {
+        return (xs, [c.item]).show();
+    }
+
+    fn arr<U: Show>(Crate<T> c, U x) -> string {
+        let a: [U; 2] = [x, x];
+        return a.show() + c.item.show();
+    }
+
+    fn opt<U: Show>(Crate<T> c, U x) -> string {
+        return (Some(x), Some(c.item)).show();
+    }
+
+    fn eq<U: Eq>(Crate<T> c, U x, U y) -> bool {
+        return same((x, 1), (y, 1));
+    }
+
+    fn eq_ord<U: Ord>(Crate<T> c, U x, U y) -> bool {
+        return same(Some(x), Some(y));
+    }
+
+    fn hash<U: Hash>(Crate<T> c, U x) -> int {
+        return hashed((x, 0));
+    }
+
+    fn order<U: Ord>(Crate<T> c, U x, U y) -> bool {
+        return before((x, 1), (y, 1));
+    }
+}
+
+impl Crate<T> {
+    pub fn pair<U: Show>(U x) -> string {
+        return (x, 2).show();
+    }
+}
+
+fn via<S: Lister>(S s, P p) -> string {
+    return s.tup(p) + " " + s.opt(p) + " " + s.dflt(p);
+}
+
+test("own Show bound at a shape over it, context-free instance") {
+    let s = new Shelf(1);
+    assert!(s.tup(2) == "(2, 1)");
+    assert!(s.tup(new P(3)) == "(P3, 1)");
+    assert!(s.tup("a") == "(a, 1)");
+    assert!(s.vec([new P(4), new P(5)]) == "[P4, P5]");
+    assert!(s.arr(new P(6)) == "[P6, P6]");
+    assert!(s.opt(new P(7)) == "Some(P7)");
+    assert!(Lister::tup(s, new P(9)) == "(P9, 1)");
+}
+
+test("own Show bound at a shape over it, bounded generic-head instance") {
+    let c = new Crate(new P(1));
+    assert!(c.tup(2) == "(2, P1)");
+    assert!(c.tup(new P(3)) == "(P3, P1)");
+    assert!(c.vec([new P(4)]) == "([P4], [P1])");
+    assert!(c.arr("x") == "[x, x]P1");
+    assert!(c.opt(new P(7)) == "(Some(P7), Some(P1))");
+    let d = new Crate(5);
+    assert!(d.tup(new P(3)) == "(P3, 5)");
+}
+
+test("own Show bound at a shape over it, default body") {
+    assert!(new Shelf(1).dflt(new P(2)) == "(P2, 9)");
+    assert!(new Crate(3).dflt("b") == "(b, 9)");
+}
+
+test("own bounds through a bound's dictionary") {
+    assert!(via(new Shelf(1), new P(2)) == "(P2, 1) Some(P2) (P2, 9)");
+    assert!(via(new Crate(new P(3)), new P(4)) == "(P4, P3) (Some(P4), Some(P3)) (P4, 9)");
+}
+
+test("own Eq, Hash and Ord bounds at a shape over them") {
+    let s = new Shelf(1);
+    assert!(s.eq(new P(11), new P(12)));
+    assert!(!s.eq(new P(11), new P(21)));
+    assert!(s.eq_ord(new P(11), new P(12)));
+    assert!(!s.eq_ord(new P(11), new P(21)));
+    assert!(s.hash(new P(31)) == hashed([new P(35), new P(32)]));
+    assert!(s.order(new P(11), new P(21)));
+    assert!(!s.order(new P(11), new P(12)));
+    let c = new Crate("t");
+    assert!(c.eq(new P(11), new P(12)));
+    assert!(!c.eq(new P(11), new P(21)));
+    assert!(c.eq_ord(new P(11), new P(12)));
+    assert!(c.hash(new P(31)) == hashed((new P(35), 0)));
+    assert!(c.order(new P(11), new P(21)));
+    assert!(!c.order(new P(11), new P(12)));
+}
+
+test("an inherent method's own bound at a shape over it") {
+    assert!(new Crate(1).pair(new P(5)) == "(P5, 2)");
+}

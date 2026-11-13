@@ -23,6 +23,14 @@ pub fn eval_expr<'a>(
     ast: &(SimpleSpan, Box<Expression<'a>>),
     env: &HashMap<String, ConstValue>,
 ) -> Option<ConstValue> {
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| eval_expr_level(ast, env))
+}
+
+fn eval_expr_level<'a>(
+    ast: &(SimpleSpan, Box<Expression<'a>>),
+    env: &HashMap<String, ConstValue>,
+) -> Option<ConstValue> {
     match ast.1.as_ref() {
         Expression::Integer(n) => Some(ConstValue::Int(*n)),
         Expression::Float(n) => Some(ConstValue::Float(*n)),
@@ -165,7 +173,7 @@ fn eval_int_bit<'a>(
     Some(ConstValue::Int(op(a, b)))
 }
 
-/// Fold `<<` / `>>` with the VM's 64-bit semantics (`int_arith::shl` /
+/// Fold `<<` / `>>` with the runtime's 64-bit semantics (`int_arith::shl` /
 /// `shr`); a count outside `0..=63` traps there, so it is left unfolded.
 fn eval_int_shift<'a>(
     lhs: &Output<'a>,

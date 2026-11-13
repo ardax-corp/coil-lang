@@ -275,7 +275,7 @@ pub enum QuotePart<'expr> {
     Repeat { list: Output<'expr>, sep: &'expr str },
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(PartialEq, Debug)]
 pub enum Expression<'expr> {
     Noop(Output<'expr>),
     Integer(i64),
@@ -752,6 +752,292 @@ pub enum Expression<'expr> {
     },
 }
 
+/// A derived `Clone` recurses once per level of the tree on the thread's
+/// stack, so cloning a chain of thousands of operators (a call argument
+/// the checker copies) would overflow it: each level goes through
+/// [`common::deep_stack`] instead.
+impl Clone for Expression<'_> {
+    // Every field clones the same way, `Copy` ones too, as a derive does.
+    #[allow(clippy::clone_on_copy)]
+    fn clone(&self) -> Self {
+        use Expression as E;
+        common::deep_stack(|| match self {
+            E::Noop(a0) => E::Noop(Clone::clone(a0)),
+            E::Integer(a0) => E::Integer(Clone::clone(a0)),
+            E::Float(a0) => E::Float(Clone::clone(a0)),
+            E::String(a0) => E::String(Clone::clone(a0)),
+            E::Bool(a0) => E::Bool(Clone::clone(a0)),
+            E::Module(a0, a1) => E::Module(Clone::clone(a0), Clone::clone(a1)),
+            E::Argument { docs, ty, name, is_rest } => E::Argument {
+                docs: Clone::clone(docs),
+                ty: Clone::clone(ty),
+                name: Clone::clone(name),
+                is_rest: Clone::clone(is_rest),
+            },
+            E::Spread(a0) => E::Spread(Clone::clone(a0)),
+            E::TypeFn { params, ret, spelling } => E::TypeFn {
+                params: Clone::clone(params),
+                ret: Clone::clone(ret),
+                spelling: Clone::clone(spelling),
+            },
+            E::AttrDecl { docs, name, type_params, args, returns, where_constraints, body } => E::AttrDecl {
+                docs: Clone::clone(docs),
+                name: Clone::clone(name),
+                type_params: Clone::clone(type_params),
+                args: Clone::clone(args),
+                returns: Clone::clone(returns),
+                where_constraints: Clone::clone(where_constraints),
+                body: Clone::clone(body),
+            },
+            E::DeriveDecl { docs, name, args, returns, helpers, body } => E::DeriveDecl {
+                docs: Clone::clone(docs),
+                name: Clone::clone(name),
+                args: Clone::clone(args),
+                returns: Clone::clone(returns),
+                helpers: Clone::clone(helpers),
+                body: Clone::clone(body),
+            },
+            E::FnMacroDecl { docs, name, args, returns, body } => E::FnMacroDecl {
+                docs: Clone::clone(docs),
+                name: Clone::clone(name),
+                args: Clone::clone(args),
+                returns: Clone::clone(returns),
+                body: Clone::clone(body),
+            },
+            E::MacroCall { name, args } => E::MacroCall { name: Clone::clone(name), args: Clone::clone(args) },
+            E::Quote { kind, parts } => E::Quote { kind: Clone::clone(kind), parts: Clone::clone(parts) },
+            E::Identifier(a0) => E::Identifier(Clone::clone(a0)),
+            E::Type(a0) => E::Type(Clone::clone(a0)),
+            E::TypeApp { name, args } => E::TypeApp { name: Clone::clone(name), args: Clone::clone(args) },
+            E::TypeProjection { owner, name, args } => E::TypeProjection {
+                owner: Clone::clone(owner),
+                name: Clone::clone(name),
+                args: Clone::clone(args),
+            },
+            E::Return(a0) => E::Return(Clone::clone(a0)),
+            E::ImplicitReturn(a0) => E::ImplicitReturn(Clone::clone(a0)),
+            E::Raise(a0) => E::Raise(Clone::clone(a0)),
+            E::Panic(a0) => E::Panic(Clone::clone(a0)),
+            E::Yield(a0) => E::Yield(Clone::clone(a0)),
+            E::YieldFrom(a0) => E::YieldFrom(Clone::clone(a0)),
+            E::Resume(a0, a1) => E::Resume(Clone::clone(a0), Clone::clone(a1)),
+            E::Try(a0) => E::Try(Clone::clone(a0)),
+            E::Coalesce(a0, a1) => E::Coalesce(Clone::clone(a0), Clone::clone(a1)),
+            E::Cast(a0, a1) => E::Cast(Clone::clone(a0), Clone::clone(a1)),
+            E::TypeOf(a0) => E::TypeOf(Clone::clone(a0)),
+            E::Comptime(a0) => E::Comptime(Clone::clone(a0)),
+            E::OptionalAccess(a0, a1) => E::OptionalAccess(Clone::clone(a0), Clone::clone(a1)),
+            E::Negate(a0) => E::Negate(Clone::clone(a0)),
+            E::Not(a0) => E::Not(Clone::clone(a0)),
+            E::LogicalNot(a0) => E::LogicalNot(Clone::clone(a0)),
+            E::Positive(a0) => E::Positive(Clone::clone(a0)),
+            E::Default(a0) => E::Default(Clone::clone(a0)),
+            E::CompoundAssign(a0, a1, a2) => E::CompoundAssign(Clone::clone(a0), Clone::clone(a1), Clone::clone(a2)),
+            E::Adjust { op, prefix, target } => E::Adjust {
+                op: Clone::clone(op),
+                prefix: Clone::clone(prefix),
+                target: Clone::clone(target),
+            },
+            E::Add(a0, a1) => E::Add(Clone::clone(a0), Clone::clone(a1)),
+            E::Sub(a0, a1) => E::Sub(Clone::clone(a0), Clone::clone(a1)),
+            E::Mul(a0, a1) => E::Mul(Clone::clone(a0), Clone::clone(a1)),
+            E::Div(a0, a1) => E::Div(Clone::clone(a0), Clone::clone(a1)),
+            E::Mod(a0, a1) => E::Mod(Clone::clone(a0), Clone::clone(a1)),
+            E::Pow(a0, a1) => E::Pow(Clone::clone(a0), Clone::clone(a1)),
+            E::Shl(a0, a1) => E::Shl(Clone::clone(a0), Clone::clone(a1)),
+            E::Shr(a0, a1) => E::Shr(Clone::clone(a0), Clone::clone(a1)),
+            E::Xor(a0, a1) => E::Xor(Clone::clone(a0), Clone::clone(a1)),
+            E::And(a0, a1) => E::And(Clone::clone(a0), Clone::clone(a1)),
+            E::BitAnd(a0, a1) => E::BitAnd(Clone::clone(a0), Clone::clone(a1)),
+            E::Or(a0, a1) => E::Or(Clone::clone(a0), Clone::clone(a1)),
+            E::BitOr(a0, a1) => E::BitOr(Clone::clone(a0), Clone::clone(a1)),
+            E::Eq(a0, a1) => E::Eq(Clone::clone(a0), Clone::clone(a1)),
+            E::Neq(a0, a1) => E::Neq(Clone::clone(a0), Clone::clone(a1)),
+            E::Leq(a0, a1) => E::Leq(Clone::clone(a0), Clone::clone(a1)),
+            E::Geq(a0, a1) => E::Geq(Clone::clone(a0), Clone::clone(a1)),
+            E::Le(a0, a1) => E::Le(Clone::clone(a0), Clone::clone(a1)),
+            E::Gt(a0, a1) => E::Gt(Clone::clone(a0), Clone::clone(a1)),
+            E::Range { start, end, inclusive } => E::Range {
+                start: Clone::clone(start),
+                end: Clone::clone(end),
+                inclusive: Clone::clone(inclusive),
+            },
+            E::Array(a0) => E::Array(Clone::clone(a0)),
+            E::Expr(a0) => E::Expr(Clone::clone(a0)),
+            E::Group(a0) => E::Group(Clone::clone(a0)),
+            E::ExprStatement(a0) => E::ExprStatement(Clone::clone(a0)),
+            E::Statement(a0) => E::Statement(Clone::clone(a0)),
+            E::Fragment(a0) => E::Fragment(Clone::clone(a0)),
+            E::Block(a0) => E::Block(Clone::clone(a0)),
+            E::Program(a0) => E::Program(Clone::clone(a0)),
+            E::Defer { captures, borrows, body } => E::Defer {
+                captures: Clone::clone(captures),
+                borrows: Clone::clone(borrows),
+                body: Clone::clone(body),
+            },
+            E::Assignment(a0, a1) => E::Assignment(Clone::clone(a0), Clone::clone(a1)),
+            E::Tuple(a0) => E::Tuple(Clone::clone(a0)),
+            E::Dict(a0) => E::Dict(Clone::clone(a0)),
+            E::Index(a0, a1) => E::Index(Clone::clone(a0), Clone::clone(a1)),
+            E::Readonly(a0) => E::Readonly(Clone::clone(a0)),
+            E::QualifiedAccess { owner, member } => E::QualifiedAccess {
+                owner: Clone::clone(owner),
+                member: Clone::clone(member),
+            },
+            E::StaticDecl { docs, is_const, name, ty, init, lifted } => E::StaticDecl {
+                docs: Clone::clone(docs),
+                is_const: Clone::clone(is_const),
+                name: Clone::clone(name),
+                ty: Clone::clone(ty),
+                init: Clone::clone(init),
+                lifted: Clone::clone(lifted),
+            },
+            E::Dload(a0) => E::Dload(Clone::clone(a0)),
+            E::Done(a0) => E::Done(Clone::clone(a0)),
+            E::Declare(a0) => E::Declare(Clone::clone(a0)),
+            E::Invoke(a0) => E::Invoke(Clone::clone(a0)),
+            E::Use { path, name, alias } => E::Use {
+                path: Clone::clone(path),
+                name: Clone::clone(name),
+                alias: Clone::clone(alias),
+            },
+            E::ExternBlock { library, declarations } => E::ExternBlock {
+                library: Clone::clone(library),
+                declarations: Clone::clone(declarations),
+            },
+            E::Function { docs, attrs, name, is_coro, is_static, type_params, args, returns, where_constraints, effects, contracts, body } => E::Function {
+                docs: Clone::clone(docs),
+                attrs: Clone::clone(attrs),
+                name: Clone::clone(name),
+                is_coro: Clone::clone(is_coro),
+                is_static: Clone::clone(is_static),
+                type_params: Clone::clone(type_params),
+                args: Clone::clone(args),
+                returns: Clone::clone(returns),
+                where_constraints: Clone::clone(where_constraints),
+                effects: Clone::clone(effects),
+                contracts: Clone::clone(contracts),
+                body: Clone::clone(body),
+            },
+            E::Branch(a0, a1) => E::Branch(Clone::clone(a0), Clone::clone(a1)),
+            E::If(a0) => E::If(Clone::clone(a0)),
+            E::Call { name, args } => E::Call { name: Clone::clone(name), args: Clone::clone(args) },
+            E::NamedArg(a0, a1) => E::NamedArg(Clone::clone(a0), Clone::clone(a1)),
+            E::Break => E::Break,
+            E::Continue => E::Continue,
+            E::Loop { identifier, pattern, iterable, body, contracts } => E::Loop {
+                identifier: Clone::clone(identifier),
+                pattern: Clone::clone(pattern),
+                iterable: Clone::clone(iterable),
+                body: Clone::clone(body),
+                contracts: Clone::clone(contracts),
+            },
+            E::IfLet { scrutinee, then_arm, else_arm } => E::IfLet {
+                scrutinee: Clone::clone(scrutinee),
+                then_arm: Clone::clone(then_arm),
+                else_arm: Clone::clone(else_arm),
+            },
+            E::WhileLet { scrutinee, then_arm, on_miss } => E::WhileLet {
+                scrutinee: Clone::clone(scrutinee),
+                then_arm: Clone::clone(then_arm),
+                on_miss: Clone::clone(on_miss),
+            },
+            E::Variable(a0, a1) => E::Variable(Clone::clone(a0), Clone::clone(a1)),
+            E::Constant(a0, a1, a2) => E::Constant(Clone::clone(a0), Clone::clone(a1), Clone::clone(a2)),
+            E::LetDestructure { pattern, rhs } => E::LetDestructure {
+                pattern: Clone::clone(pattern),
+                rhs: Clone::clone(rhs),
+            },
+            E::Class { docs, attrs, name, type_params, fields, invariants, readonly } => E::Class {
+                docs: Clone::clone(docs),
+                attrs: Clone::clone(attrs),
+                name: Clone::clone(name),
+                type_params: Clone::clone(type_params),
+                fields: Clone::clone(fields),
+                invariants: Clone::clone(invariants),
+                readonly: Clone::clone(readonly),
+            },
+            E::Implementation { what, owner, type_params, methods } => E::Implementation {
+                what: Clone::clone(what),
+                owner: Clone::clone(owner),
+                type_params: Clone::clone(type_params),
+                methods: Clone::clone(methods),
+            },
+            E::Field { docs, attrs, visibility, modifier, name, ty, init } => E::Field {
+                docs: Clone::clone(docs),
+                attrs: Clone::clone(attrs),
+                visibility: Clone::clone(visibility),
+                modifier: Clone::clone(modifier),
+                name: Clone::clone(name),
+                ty: Clone::clone(ty),
+                init: Clone::clone(init),
+            },
+            E::Method(a0, a1) => E::Method(Clone::clone(a0), Clone::clone(a1)),
+            E::Member(a0) => E::Member(Clone::clone(a0)),
+            E::Access(a0, a1) => E::Access(Clone::clone(a0), Clone::clone(a1)),
+            E::Instantiate(a0, a1) => E::Instantiate(Clone::clone(a0), Clone::clone(a1)),
+            E::TypeAlias { docs, name, type_params, ty } => E::TypeAlias {
+                docs: Clone::clone(docs),
+                name: Clone::clone(name),
+                type_params: Clone::clone(type_params),
+                ty: Clone::clone(ty),
+            },
+            E::TestCase { name, body } => E::TestCase { name: Clone::clone(name), body: Clone::clone(body) },
+            E::ComptimeBlock(a0) => E::ComptimeBlock(Clone::clone(a0)),
+            E::RegionMark => E::RegionMark,
+            E::EnumDecl { docs, attrs, name, type_params, variants } => E::EnumDecl {
+                docs: Clone::clone(docs),
+                attrs: Clone::clone(attrs),
+                name: Clone::clone(name),
+                type_params: Clone::clone(type_params),
+                variants: Clone::clone(variants),
+            },
+            E::ExternStruct(a0) => E::ExternStruct(Clone::clone(a0)),
+            E::EnumVariant { docs, attrs, name, payload, discriminant } => E::EnumVariant {
+                docs: Clone::clone(docs),
+                attrs: Clone::clone(attrs),
+                name: Clone::clone(name),
+                payload: Clone::clone(payload),
+                discriminant: Clone::clone(discriminant),
+            },
+            E::Construct { enum_name, variant_name, fields } => E::Construct {
+                enum_name: Clone::clone(enum_name),
+                variant_name: Clone::clone(variant_name),
+                fields: Clone::clone(fields),
+            },
+            E::Match { scrutinee, arms } => E::Match { scrutinee: Clone::clone(scrutinee), arms: Clone::clone(arms) },
+            E::Forall { params, ty } => E::Forall { params: Clone::clone(params), ty: Clone::clone(ty) },
+            E::TypeClass { docs, name, type_params, methods } => E::TypeClass {
+                docs: Clone::clone(docs),
+                name: Clone::clone(name),
+                type_params: Clone::clone(type_params),
+                methods: Clone::clone(methods),
+            },
+            E::TypeClassImpl { class, args, type_params, methods } => E::TypeClassImpl {
+                class: Clone::clone(class),
+                args: Clone::clone(args),
+                type_params: Clone::clone(type_params),
+                methods: Clone::clone(methods),
+            },
+            E::AssocTypeDecl { name, type_params } => E::AssocTypeDecl {
+                name: Clone::clone(name),
+                type_params: Clone::clone(type_params),
+            },
+            E::AssocTypeDef { name, type_params, ty } => E::AssocTypeDef {
+                name: Clone::clone(name),
+                type_params: Clone::clone(type_params),
+                ty: Clone::clone(ty),
+            },
+            E::Lambda { args, captures, borrows, body } => E::Lambda {
+                args: Clone::clone(args),
+                captures: Clone::clone(captures),
+                borrows: Clone::clone(borrows),
+                body: Clone::clone(body),
+            },
+        })
+    }
+}
+
 /// Payload shape for an `enum` variant declaration.
 #[derive(Clone, PartialEq, Debug)]
 pub enum EnumVariantPayload<'expr> {
@@ -807,8 +1093,12 @@ pub struct PatternField<'expr> {
 /// Payload shape for a qualified constructor application.
 #[derive(Clone, PartialEq, Debug)]
 pub enum EnumConstructPayload<'expr> {
-    /// `Foo` (no fields — bare qualified enum value).
+    /// `Foo` (no fields — bare qualified enum value). Of a static
+    /// method, its function value (#2746).
     Unit,
+    /// `Foo()`: empty parentheses. A unit variant or a static field reads
+    /// as [`Self::Unit`]; a static method is called with no arguments.
+    Empty,
     /// `Foo(arg1, arg2, ...)`.
     Tuple(Vec<Output<'expr>>),
     /// `Foo { name: expr, ... }` — fields may appear in any order.
@@ -1642,6 +1932,7 @@ impl<'a> Display for Expression<'a> {
                 write!(f, "{}::{}", enum_name, variant_name)?;
                 match fields {
                     EnumConstructPayload::Unit => Ok(()),
+                    EnumConstructPayload::Empty => write!(f, "()"),
                     EnumConstructPayload::Tuple(args) => {
                         write!(
                             f,
@@ -1931,7 +2222,15 @@ impl<'expr> Expression<'expr> {
     /// Covers every variant with no `_` arm, so a new variant must decide
     /// its children here. Tooling (LSP hover, rename, spans) walks the tree
     /// through this instead of hand-rolled partial matches.
+    ///
+    /// A walk recurses through here once per level of the tree, so past the
+    /// thread's stack it continues on a new segment ([`common::deep_stack`]):
+    /// a chain of thousands of operators is that many levels.
     pub fn for_each_child<'a>(&'a self, f: &mut dyn FnMut(&'a Output<'expr>)) {
+        common::deep_stack(|| self.visit_children(f));
+    }
+
+    fn visit_children<'a>(&'a self, f: &mut dyn FnMut(&'a Output<'expr>)) {
         use Expression as E;
         match self {
             E::Integer(_)
@@ -2156,7 +2455,7 @@ impl<'expr> Expression<'expr> {
                 }
             }
             E::Construct { fields, .. } => match fields {
-                EnumConstructPayload::Unit => {}
+                EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
                 EnumConstructPayload::Tuple(items) => items.iter().for_each(f),
                 EnumConstructPayload::Record(fields) => {
                     fields.iter().for_each(|field| f(&field.value))
@@ -2175,6 +2474,10 @@ impl<'expr> Expression<'expr> {
 
     /// Mutable twin of [`Self::for_each_child`] (same children, same order).
     pub fn for_each_child_mut(&mut self, f: &mut dyn FnMut(&mut Output<'expr>)) {
+        common::deep_stack(|| self.visit_children_mut(f));
+    }
+
+    fn visit_children_mut(&mut self, f: &mut dyn FnMut(&mut Output<'expr>)) {
         use Expression as E;
         match self {
             E::Integer(_)
@@ -2399,7 +2702,7 @@ impl<'expr> Expression<'expr> {
                 }
             }
             E::Construct { fields, .. } => match fields {
-                EnumConstructPayload::Unit => {}
+                EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
                 EnumConstructPayload::Tuple(items) => items.iter_mut().for_each(f),
                 EnumConstructPayload::Record(fields) => {
                     fields.iter_mut().for_each(|field| f(&mut field.value))

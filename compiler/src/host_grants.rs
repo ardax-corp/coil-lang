@@ -1,6 +1,6 @@
 //! Host capability grants and `dload` integrity inputs, from CLI flags only.
 //!
-//! Capabilities are checked at typecheck and the VM does not
+//! Capabilities are checked at typecheck and the runtime does not
 //! re-apply them (the compiled artifact is the grant). Native pins and
 //! trusted stems feed the run-time `dload` gate.
 
@@ -160,7 +160,7 @@ impl ComptimeGrants {
 /// ([`Self::SILENT_CALL_STEPS`]) and gives up quietly instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ComptimeLimits {
-    /// Loop back-edges + calls (see `Machine::set_step_budget`).
+    /// Loop back-edges + calls (see `machine::Isolate::set_step_budget`).
     pub steps: u64,
     /// Heap bytes of live objects after a full collection.
     pub heap_bytes: u64,

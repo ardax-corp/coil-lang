@@ -1,0 +1,21 @@
+// @expected E0119 — `==` on two bare-trait existentials whose trait has no `Eq` superclass (#2740).
+trait Tr<S> {
+    fn get(S s) -> int {}
+}
+
+#[derive(Eq)]
+class A {
+    pub n: int,
+}
+
+impl Tr for A {
+    pub fn get(A a) -> int {
+        return a.n;
+    }
+}
+
+fn main() {
+    let x: Tr = new A(1);
+    let y: Tr = new A(1);
+    let _ = x == y;
+}

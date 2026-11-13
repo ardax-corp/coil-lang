@@ -1,0 +1,117 @@
+// A call through a function value whose result moves as two words
+// (`Option<int>`, `Result<int, E>`, `(int, int)`, a readonly pair class, a
+// small payload enum) reads the same values whether the callee is a lambda
+// (which has a two-word twin), a named function, a partial application or
+// a function a generic body made. (A partial of one is #2316.)
+use tests::assert;
+
+readonly class Pt {
+    pub x: int,
+    pub y: int,
+}
+
+enum Small {
+    Nothing,
+    One(int),
+}
+
+fn halve(int x) -> Option<int> {
+    if x % 2 == 1 {
+        return None;
+    }
+    return Some(x / 2);
+}
+
+fn sum_opt(int n, int -> Option<int> f) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s += match f(i) {
+            Some(v) => v,
+            None => 1000,
+        };
+        i += 1;
+    }
+    return s;
+}
+
+fn pick<T>(T x) -> unit -> T {
+    return fn () use (x) {
+        return x;
+    };
+}
+
+test("a lambda returning an Option") {
+    let k = 3;
+    let f = fn (int x) use (k) {
+        if x % k == 0 {
+            return None;
+        }
+        return Some(x * k);
+    };
+    assert!(f(3) == None);
+    assert!(f(4) == Some(12));
+    assert!(sum_opt(6, f) == 1000 + 3 + 6 + 1000 + 12 + 15);
+}
+
+test("a named function and a generic result") {
+    assert!(sum_opt(4, halve) == 0 + 1000 + 1 + 1000);
+    let h = pick(Some(7));
+    assert!(h() == Some(7));
+    let none: Option<int> = None;
+    let n = pick(none);
+    assert!(n() == None);
+}
+
+test("results, tuples, classes and enums") {
+    let r = fn (int x) {
+        if x < 0 {
+            return Result::Err("neg");
+        }
+        return Result::Ok(x * 2);
+    };
+    assert!(r(4) == Result::Ok(8));
+    assert!(r(-1) == Result::Err("neg"));
+    let t = fn (int x) {
+        return (x, x + 1);
+    };
+    let (a, b) = t(5);
+    assert!(a == 5 && b == 6);
+    let p = fn (int x) {
+        return new Pt(x, -x);
+    };
+    assert!(p(2).y == -2);
+    let e = fn (int x) {
+        if x == 0 {
+            return Small::Nothing;
+        }
+        return Small::One(x);
+    };
+    let got = match e(9) {
+        Small::Nothing => 0,
+        Small::One(v) => v,
+    };
+    assert!(got == 9);
+    assert!(match e(0) {
+        Small::Nothing => true,
+        Small::One(_) => false,
+    });
+}
+
+test("a two-word result stored and compared") {
+    let f = fn (int x) {
+        return Some(x);
+    };
+    let out: Vec<Option<int>> = Vec::new();
+    out.push(f(1));
+    out.push(f(2));
+    assert!(out[1] == Some(2));
+    let fs: Vec<int -> Option<int>> = Vec::new();
+    fs.push(fn (int x) {
+        return Some(x + 1);
+    });
+    fs.push(halve);
+    assert!(fs[0](1) == Some(2));
+    assert!(fs[1](1) == None);
+    assert!(fs[1](4) == Some(2));
+}

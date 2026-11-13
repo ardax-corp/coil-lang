@@ -1,7 +1,7 @@
 // sum.c — a minimal C library exposed to userland via the
 // FFI mechanism. Defines a single `sum` function that adds
 // two integers. Compiled to a shared library and loaded by
-// the VM at startup via `dlopen` + `dlsym`.
+// the runtime at startup via `dlopen` + `dlsym`.
 //
 // Build:
 //   cc -shared -fPIC -o libsum.so sum.c
@@ -21,11 +21,11 @@
 /// }
 /// ```
 ///
-/// The VM's `dlopen("sum")` call looks for `libsum.so` on
+/// The runtime's `dlopen("sum")` call looks for `libsum.so` on
 /// the system library search path (or the current
 /// directory). The `dlsym("sum")` call resolves the symbol
-/// in that library. The VM then wraps the resolved function
-/// pointer in a `LibraryFn` and dispatches `NATIVE` opcodes
+/// in that library. The runtime then wraps the resolved function
+/// pointer in a `LibraryFn` and sends the calls
 /// that name `sum` to it.
 #include <stdarg.h>
 #include <stdint.h>
@@ -106,7 +106,7 @@ int64_fn_int64 get_doubler(void) {
 static int64_t noted = 0;
 
 /// Add `a + b` to a running total; returns nothing (for void `extern`
-/// tests: each call must leave the VM's operand stack as it found it).
+/// tests: each call must leave the runtime's stack as it found it).
 void sum_note(void *tag, int64_t a, int64_t b) {
     (void)tag;
     noted += a + b;

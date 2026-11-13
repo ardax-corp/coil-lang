@@ -3,6 +3,23 @@
 use tests::assert;
 use task::{scope, Scope, Task, TaskError};
 
+// What the tasks write, shared by every closure that names it: the spawns
+// keep their closures, so a `use (mut log)` of a copy-on-write `Vec` would
+// be E0149 (#2787).
+shared class Log<T> {
+    pub items: Vec<T>,
+}
+
+impl Log<T> {
+    pub fn push(T x) {
+        self.items.push(x);
+    }
+
+    pub fn len() -> int {
+        return self.items.len();
+    }
+}
+
 fn ok_or(Result<int, TaskError> r, int fallback) -> int {
     return match r {
         Result::Ok(v) => v,
@@ -25,14 +42,14 @@ test("a scope returns a non-int body value") {
 }
 
 test("the scope waits for children nobody joined") {
-    let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        s.spawn(fn () use (mut log) {
+    let log: Log<int> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (log) {
+        s.spawn(fn () use (log) {
             task::sleep(20);
             log.push(1);
             0
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (log) {
             task::yield_now();
             log.push(2);
             0
@@ -41,7 +58,7 @@ test("the scope waits for children nobody joined") {
     });
     assert!(ok_or(r, -1) == 0);
     assert!(log.len() == 2);
-    assert!(log[0] == 2 && log[1] == 1);
+    assert!(log.items[0] == 2 && log.items[1] == 1);
 }
 
 test("join returns each value whatever order the children finish in") {
@@ -69,11 +86,11 @@ test("joining a task twice returns its value both times") {
 }
 
 test("a child can spawn a sibling through the captured scope") {
-    let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        let first = s.spawn(fn () use (s, mut log) {
+    let log: Log<int> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (log) {
+        let first = s.spawn(fn () use (s, log) {
             log.push(1);
-            s.spawn(fn () use (mut log) {
+            s.spawn(fn () use (log) {
                 log.push(3);
                 0
             });
@@ -84,7 +101,7 @@ test("a child can spawn a sibling through the captured scope") {
     });
     assert!(ok_or(r, -1) == 0);
     assert!(log.len() == 3);
-    assert!(log[0] == 1 && log[1] == 2 && log[2] == 3);
+    assert!(log.items[0] == 1 && log.items[1] == 2 && log.items[2] == 3);
 }
 
 test("a child returns a heap value through join") {

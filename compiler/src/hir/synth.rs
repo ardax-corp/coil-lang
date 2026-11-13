@@ -2,14 +2,14 @@
 //! auto-par fork-join workers, the test-runner `main` and the builtin
 //! methods' bodies (`Range::to_vec`, …). They lower like
 //! any other body (HIR lowering, then direct MIR), instead of being written
-//! out as stack IL by hand.
+//! out by hand.
 //!
 //! Every node takes [`SPAN`], which no source node has, so no span-keyed
 //! checker or sidecar fact is found for it; lowering clears the debug
 //! locations it would derive from it.
 
 use crate::layout;
-use super::{BinOp, Builtin, Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, Lit, LocalId, LocalKind};
+use super::{BinOp, Builtin, Callee, HirArm, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirPat, Lit, LocalId, LocalKind, MakeKind};
 use crate::typechecking::infer::Checker;
 use crate::typechecking::ty::{self as coil_ty, Ty};
 
@@ -49,6 +49,7 @@ impl<'a> Synth<'a> {
                 aliased_fn_values: Vec::new(),
                 fn_key_sites: Vec::new(),
                 stray_muts: Vec::new(),
+                inline_scopes: Vec::new(),
             },
         }
     }
@@ -77,6 +78,8 @@ impl<'a> Synth<'a> {
             span: SPAN,
             node: None,
             flags: HirFlags::default(),
+            scope: 0,
+            src: None,
         });
         id
     }
@@ -156,6 +159,142 @@ impl<'a> Synth<'a> {
     pub fn finish(mut self, root: HirId) -> HirBody {
         self.body.root = Some(root);
         self.body
+    }
+}
+
+/// A product type taken apart: a tuple, an anonymous record or one enum
+/// variant. At run time each is one slot store; here they differ only in
+/// the pattern that opens them.
+#[derive(Clone, Debug)]
+pub struct Product {
+    pub ctor: ProductCtor,
+    /// Each part's type, in pattern order (a record variant's too: a
+    /// pattern binds it positionally).
+    pub parts: Vec<Ty>,
+}
+
+#[derive(Clone, Debug)]
+pub enum ProductCtor {
+    Tuple,
+    /// A record, by its field names.
+    Record(Vec<String>),
+    Variant { enum_name: String, name: String, tag: Option<u32> },
+}
+
+impl Product {
+    pub fn tuple(items: &[Ty]) -> Self {
+        Self { ctor: ProductCtor::Tuple, parts: items.to_vec() }
+    }
+
+    /// A record's product, its fields in name order (the order a ground
+    /// record's and an open one's structural thunks take them in).
+    pub fn record(fields: &[(String, Ty)]) -> Self {
+        let mut fields = fields.to_vec();
+        fields.sort_by(|a, b| a.0.cmp(&b.0));
+        let (names, parts) = fields.into_iter().unzip();
+        Self { ctor: ProductCtor::Record(names), parts }
+    }
+
+    /// A tuple's or record's product.
+    pub fn of(ty: &Ty) -> Option<Self> {
+        match ty {
+            Ty::Tuple(items) => Some(Self::tuple(items)),
+            Ty::Record { fields } => Some(Self::record(fields)),
+            _ => None,
+        }
+    }
+
+    /// This product's pattern over one pattern per part.
+    pub fn pat_of(&self, parts: Vec<HirPat>) -> HirPat {
+        match &self.ctor {
+            ProductCtor::Tuple => HirPat::Tuple(parts),
+            ProductCtor::Record(names) => HirPat::Record(names.iter().cloned().zip(parts).collect()),
+            ProductCtor::Variant { enum_name, name, tag } => HirPat::Variant {
+                enum_name: enum_name.clone(),
+                variant: name.clone(),
+                tag: *tag,
+                fields: if parts.is_empty() { super::HirPatFields::Unit } else { super::HirPatFields::Tuple(parts) },
+            },
+        }
+    }
+
+    /// The pattern that binds each part to a new local `{side}{i}`, and
+    /// those locals.
+    pub fn pat(&self, b: &mut Synth, side: &str) -> (HirPat, Vec<LocalId>) {
+        let locals: Vec<_> = self.parts.iter().enumerate().map(|(i, t)| b.local(&format!("{side}{i}"), t.clone(), LocalKind::Pattern)).collect();
+        (self.pat_of(locals.iter().map(|&l| HirPat::Bind(l)).collect()), locals)
+    }
+
+    /// `let <pat> = init` of [`Self::pat`], for a tuple or record.
+    pub fn bind(&self, b: &mut Synth, init: HirId, side: &str) -> (HirId, Vec<LocalId>) {
+        let (pat, locals) = self.pat(b, side);
+        (b.push(HirKind::LetPat { pat, init }, coil_ty::unit()), locals)
+    }
+}
+
+/// Whether `a ⊕ p` leaves the `int` range, as a test that does not trap
+/// (`None`: `op` cannot overflow). A fork-join asks before it folds two
+/// results, and runs the sequential code instead of trapping itself.
+pub fn int_overflows(b: &mut Synth, op: BinOp, a: LocalId, p: LocalId) -> Option<HirId> {
+    let boolean = coil_ty::boolean;
+    let cmp = |b: &mut Synth, op: BinOp, l: LocalId, r: HirId| {
+        let l = b.read(l);
+        b.bin(op, l, r, boolean())
+    };
+    let positive = |b: &mut Synth, l: LocalId| {
+        let zero = b.int(0);
+        cmp(b, BinOp::Gt, l, zero)
+    };
+    // `limit ⊘ x` for a literal `limit`.
+    let room = |b: &mut Synth, op: BinOp, limit: i64, x: LocalId| {
+        let (limit, x) = (b.int(limit), b.read(x));
+        b.bin(op, limit, x, coil_ty::int())
+    };
+    match op {
+        // `a + p` leaves the range past `MAX - p` or under `MIN - p`.
+        BinOp::IntAdd => {
+            let up = positive(b, p);
+            let most = room(b, BinOp::IntSub, i64::MAX, p);
+            let over = cmp(b, BinOp::Gt, a, most);
+            let least = room(b, BinOp::IntSub, i64::MIN, p);
+            let under = cmp(b, BinOp::Lt, a, least);
+            Some(b.if_(up, over, Some(under), boolean()))
+        }
+        // `a - p` leaves it under `MIN + p` or past `MAX + p`.
+        BinOp::IntSub => {
+            let up = positive(b, p);
+            let least = room(b, BinOp::IntAdd, i64::MIN, p);
+            let under = cmp(b, BinOp::Lt, a, least);
+            let most = room(b, BinOp::IntAdd, i64::MAX, p);
+            let over = cmp(b, BinOp::Gt, a, most);
+            Some(b.if_(up, under, Some(over), boolean()))
+        }
+        // `a * p` by the signs: each quotient is of a literal by a
+        // non-zero operand whose sign keeps it in range.
+        BinOp::IntMul => {
+            let a_up = positive(b, a);
+            let on_up = {
+                let p_up = positive(b, p);
+                let most = room(b, BinOp::IntDiv, i64::MAX, p);
+                let over = cmp(b, BinOp::Gt, a, most);
+                let least = room(b, BinOp::IntDiv, i64::MIN, a);
+                let under = cmp(b, BinOp::Lt, p, least);
+                b.if_(p_up, over, Some(under), boolean())
+            };
+            let on_down = {
+                let p_up = positive(b, p);
+                let least = room(b, BinOp::IntDiv, i64::MIN, p);
+                let under = cmp(b, BinOp::Lt, a, least);
+                let zero = b.int(0);
+                let p_down = cmp(b, BinOp::Lt, p, zero);
+                let most = room(b, BinOp::IntDiv, i64::MAX, p);
+                let over = cmp(b, BinOp::Lt, a, most);
+                let over = b.push(HirKind::Logic { and: true, lhs: p_down, rhs: over }, boolean());
+                b.if_(p_up, under, Some(over), boolean())
+            };
+            Some(b.if_(a_up, on_up, Some(on_down), boolean()))
+        }
+        _ => None,
     }
 }
 
@@ -293,18 +432,33 @@ pub fn array_show(b: &mut Synth, array: HirId, element: Ty) -> HirId {
     b.block(vec![init_out, init_sep, each], Some(shown), string)
 }
 
-/// `Hash::hash` of a tuple (`items`, one per item) or array (`items` its
-/// element) `value` (#1479): `h = ((h & M) * 31) ^ hash(x)` over the items
-/// from `0`, as a derived `Hash` combines fields. `targets` names each
-/// item's `hash` entry (`None`: a `()` item, hashed as `0`).
-pub fn structural_hash(b: &mut Synth, value: HirId, items: &[Ty], targets: &[Option<String>]) -> HirId {
+/// The callee of item `i`'s comparison `sym` in [`tuple_order`].
+pub type OrderTarget = dyn Fn(&str, usize) -> String;
+
+/// `Hash::hash` of `value` (#1479, #2380), a tuple or record (`product`,
+/// a record's fields in name order) or an array (`None`; `targets` holds
+/// its element's): `h = ((h & M) * 31) ^ hash(x)` over the items from `0`,
+/// as a derived `Hash` combines fields. `targets` names each item's `hash`
+/// entry (`None`: a `()` item, hashed as `0`); with `dict`, each is
+/// called with that local after the item (an open instance's, #2554).
+///
+/// `relayout[i]`, where given, is the type in whose layout item `i`'s
+/// `hash` takes it (a shared entry's open `Option<T>`, #2590).
+pub fn structural_hash(b: &mut Synth, value: HirId, product: Option<&Product>, targets: &[Option<String>], relayout: &[Option<Ty>], dict: Option<LocalId>) -> HirId {
     let int = coil_ty::int();
     let acc = b.local("h", int.clone(), LocalKind::Let);
     let zero = b.int(0);
     let init = b.let_(acc, zero);
-    let step = |b: &mut Synth, item: Option<HirId>, target: &Option<String>| {
-        let h = match (item, target) {
-            (Some(item), Some(target)) => b.call(target, vec![item], int.clone()),
+    let step = |b: &mut Synth, item: Option<HirId>, i: usize| {
+        let h = match (item, &targets[i]) {
+            (Some(mut item), Some(target)) => {
+                if let Some(Some(ty)) = relayout.get(i) {
+                    item = b.builtin(crate::hir::Builtin::Relayout, vec![item], ty.clone());
+                }
+                let mut args = vec![item];
+                args.extend(dict.map(|d| b.read(d)));
+                b.call(target, args, int.clone())
+            }
             _ => b.int(0),
         };
         let cur = b.read(acc);
@@ -316,16 +470,18 @@ pub fn structural_hash(b: &mut Synth, value: HirId, items: &[Ty], targets: &[Opt
         b.assign(acc, mixed)
     };
     let mut stmts = vec![init];
-    match b.body.exprs[value.0 as usize].ty.clone() {
-        Some(Ty::Array { element, .. }) => {
+    match (product, b.body.exprs[value.0 as usize].ty.clone()) {
+        (None, Some(Ty::Array { element, .. })) => {
             let x = b.local("x", (*element).clone(), LocalKind::Pattern);
             let v = b.read(x);
-            let body = step(b, Some(v), &targets[0]);
+            let body = step(b, Some(v), 0);
             let body = b.block(vec![body], None, coil_ty::unit());
             let kind = Some(crate::typechecking::infer::ForInKind::Array);
             stmts.push(b.push(HirKind::ForIn { pat: HirPat::Bind(x), iterable: value, body, kind }, coil_ty::unit()));
         }
-        _ => {
+        (None, _) => unreachable!("structural hash of a tuple, record or array"),
+        (Some(product), _) => {
+            let items = &product.parts;
             let mut pats = Vec::with_capacity(items.len());
             let mut locals = Vec::with_capacity(items.len());
             for (i, item) in items.iter().enumerate() {
@@ -338,10 +494,10 @@ pub fn structural_hash(b: &mut Synth, value: HirId, items: &[Ty], targets: &[Opt
                     locals.push(Some(l));
                 }
             }
-            stmts.push(b.push(HirKind::LetPat { pat: HirPat::Tuple(pats), init: value }, coil_ty::unit()));
-            for (local, target) in locals.into_iter().zip(targets) {
+            stmts.push(b.push(HirKind::LetPat { pat: product.pat_of(pats), init: value }, coil_ty::unit()));
+            for (i, local) in locals.into_iter().enumerate() {
                 let v = local.map(|l| b.read(l));
-                let s = step(b, v, target);
+                let s = step(b, v, i);
                 stmts.push(s);
             }
         }
@@ -357,7 +513,10 @@ pub fn structural_hash(b: &mut Synth, value: HirId, items: &[Ty], targets: &[Opt
 /// (`x_i <= y_i && y_i <= x_i`, so a `NaN` item decides `false`); the last
 /// takes the operator itself. Each item compares as the operator does at
 /// its type (a primitive, a string's bytes, its own instance).
-pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str) -> HirId {
+///
+/// With `bound`, item `i`'s `sym` is a call of `bound.1(sym, i)` with the
+/// two items and local `bound.0` (an open instance's dictionary, #2554).
+pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str, bound: Option<(LocalId, &OrderTarget)>) -> HirId {
     let boolean = coil_ty::boolean();
     let (strict, op): (&'static str, &'static str) = match method {
         "lt" => ("<", "<"),
@@ -365,20 +524,17 @@ pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str
         "gt" => (">", ">"),
         _ => (">", ">="),
     };
-    let mut stmts = Vec::with_capacity(2);
-    let mut sides = [Vec::with_capacity(items.len()), Vec::with_capacity(items.len())];
-    for (side, (value, prefix)) in [(a, "x"), (c, "y")].into_iter().enumerate() {
-        let mut pats = Vec::with_capacity(items.len());
-        for (i, item) in items.iter().enumerate() {
-            let l = b.local(&format!("{prefix}{i}"), item.clone(), LocalKind::Pattern);
-            pats.push(HirPat::Bind(l));
-            sides[side].push(l);
-        }
-        stmts.push(b.push(HirKind::LetPat { pat: HirPat::Tuple(pats), init: value }, coil_ty::unit()));
-    }
+    let product = Product::tuple(items);
+    let (la, xs) = product.bind(b, a, "x");
+    let (lc, ys) = product.bind(b, c, "y");
+    let sides = [xs, ys];
     let cmp = |b: &mut Synth, sym: &'static str, i: usize, swap: bool| {
         let (l, r) = if swap { (sides[1][i], sides[0][i]) } else { (sides[0][i], sides[1][i]) };
         let (l, r) = (b.read(l), b.read(r));
+        if let Some((dict, target)) = bound {
+            let d = b.read(dict);
+            return b.call(&target(sym, i), vec![l, r, d], boolean.clone());
+        }
         let op = super::build::resolve_bin(sym, Some(&items[i]), Some(&items[i]));
         b.bin(op, l, r, boolean.clone())
     };
@@ -392,5 +548,63 @@ pub fn tuple_order(b: &mut Synth, a: HirId, c: HirId, items: &[Ty], method: &str
         let rest = b.push(HirKind::Logic { and: true, lhs: same, rhs: acc }, boolean.clone());
         acc = b.push(HirKind::Logic { and: false, lhs: before, rhs: rest }, boolean.clone());
     }
-    b.block(stmts, Some(acc), boolean)
+    b.block(vec![la, lc], Some(acc), boolean)
+}
+
+/// The zero of `ty` as literal nodes appended to `exprs`, where the zero is
+/// an object ([`layout::Zero::Built`]): what a `resume` or a binding
+/// `yield` reads for a value nobody produced (#2717). `None` where the zero
+/// is the word `0` or there is none.
+pub fn zero_value(checker: &Checker, exprs: &mut Vec<HirExpr>, ty: &Ty) -> Option<HirId> {
+    let ty = coil_ty::nominal_enum_deep(ty);
+    (layout::zero_of(checker, &ty) == layout::Zero::Built).then(|| zero_tree(checker, exprs, &ty))
+}
+
+/// The zero of `ty`, which has one ([`layout::zero_of`]).
+fn zero_tree(checker: &Checker, exprs: &mut Vec<HirExpr>, ty: &Ty) -> HirId {
+    let kind = match coil_ty::strip_readonly(ty) {
+        t if layout::is_unit(t) => HirKind::Lit(Lit::Unit),
+        Ty::Con(n) if n == coil_ty::FLOAT => HirKind::Lit(Lit::Float(0.0)),
+        Ty::Con(n) if n == coil_ty::BOOL => HirKind::Lit(Lit::Bool(false)),
+        Ty::Con(n) if n == coil_ty::STRING => HirKind::Lit(Lit::Str(String::new())),
+        Ty::Con(_) => HirKind::Lit(Lit::Int(0)),
+        t if coil_ty::is_option_ty(t) => HirKind::Make {
+            kind: MakeKind::Variant {
+                enum_name: common::BUILTIN_OPTION_ENUM.to_string(),
+                variant: "None".to_string(),
+                tag: checker.tag_for(common::BUILTIN_OPTION_ENUM, "None"),
+                fields: None,
+            },
+            args: Vec::new(),
+        },
+        Ty::Tuple(items) => HirKind::Make {
+            kind: MakeKind::Tuple,
+            args: items.iter().map(|t| zero_tree(checker, exprs, t)).collect(),
+        },
+        Ty::Record { fields } => HirKind::Make {
+            kind: MakeKind::Record(fields.iter().map(|(n, _)| n.clone()).collect()),
+            args: fields.iter().map(|(_, t)| zero_tree(checker, exprs, t)).collect(),
+        },
+        Ty::Array {
+            element,
+            length: coil_ty::ArrayLength::Static(n),
+        } => HirKind::Make {
+            kind: MakeKind::Array,
+            args: (0..*n).map(|_| zero_tree(checker, exprs, element)).collect(),
+        },
+        // A `Vec`: the empty one.
+        _ => HirKind::Make { kind: MakeKind::Array, args: Vec::new() },
+    };
+    let id = HirId(exprs.len() as u32);
+    exprs.push(HirExpr {
+        kind,
+        layout: layout::of_resolved(checker, ty),
+        ty: Some(ty.clone()),
+        span: SPAN,
+        node: None,
+        flags: HirFlags::default(),
+        scope: 0,
+        src: None,
+    });
+    id
 }

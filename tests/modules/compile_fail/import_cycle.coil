@@ -1,0 +1,10 @@
+// @expected E0154 — `compile_fail::cycle_a` imports `compile_fail::cycle_b`,
+// which imports `cycle_a` back. A module is checked after the modules it
+// imports, so the one checked first cannot see the other's items, and the
+// error used to be E0100 "Cannot find value `twice`" (#2536). The cycle is
+// one error that names its path.
+use compile_fail::cycle_a::{Box1, box_twice};
+
+fn main() {
+    let _ = box_twice(new Box1(3));
+}

@@ -1,0 +1,98 @@
+// A bounded generic body matching a generic enum variant whose payload mixes
+// the type parameter with a ground field (`Two { a: T, b: int }`,
+// `Two(T, int)`): each binding takes its own field's type at every instance,
+// `bool` and `string` as well as `int`, used or not (#2358).
+use tests::assert;
+use string::format;
+
+enum Rec<T> {
+    Two { a: T, b: int },
+    Zero,
+}
+
+enum Tup<T> {
+    Two(T, int),
+    Zero,
+}
+
+fn rec_both<T: Show>(Rec<T> p) -> string {
+    return match p {
+        Rec::Two { a, b } => format("%v %v", a, b),
+        Rec::Zero => "zero",
+    };
+}
+
+fn rec_first<T: Show>(Rec<T> p) -> string {
+    return match p {
+        Rec::Two { a, b } => format("%v", a),
+        Rec::Zero => "zero",
+    };
+}
+
+fn rec_second<T: Show>(Rec<T> p) -> int {
+    return match p {
+        Rec::Two { a, b } => b,
+        Rec::Zero => 0,
+    };
+}
+
+fn tup_both<T: Show>(Tup<T> p) -> string {
+    return match p {
+        Tup::Two(a, b) => format("%v %v", a, b),
+        Tup::Zero => "zero",
+    };
+}
+
+fn tup_first<T: Show>(Tup<T> p) -> string {
+    return match p {
+        Tup::Two(a, b) => format("%v", a),
+        Tup::Zero => "zero",
+    };
+}
+
+fn tup_second<T: Show>(Tup<T> p) -> int {
+    return match p {
+        Tup::Two(a, b) => b,
+        Tup::Zero => 0,
+    };
+}
+
+fn no_rec() -> Rec<bool> {
+    return Rec::Zero;
+}
+
+fn no_tup() -> Tup<string> {
+    return Tup::Zero;
+}
+
+test("record payload, both fields") {
+    assert!(rec_both(Rec::Two { a: true, b: 2 }) == "true 2");
+    assert!(rec_both(Rec::Two { a: "s", b: 3 }) == "s 3");
+    assert!(rec_both(Rec::Two { a: 1, b: 4 }) == "1 4");
+    assert!(rec_both(no_rec()) == "zero");
+}
+
+test("record payload, one field unused") {
+    assert!(rec_first(Rec::Two { a: false, b: 2 }) == "false");
+    assert!(rec_first(Rec::Two { a: "t", b: 3 }) == "t");
+    assert!(rec_first(Rec::Two { a: 5, b: 4 }) == "5");
+    assert!(rec_second(Rec::Two { a: true, b: 6 }) == 6);
+    assert!(rec_second(Rec::Two { a: "u", b: 7 }) == 7);
+    assert!(rec_second(Rec::Two { a: 9, b: 8 }) == 8);
+}
+
+test("tuple payload, both fields") {
+    assert!(tup_both(Tup::Two(true, 2)) == "true 2");
+    assert!(tup_both(Tup::Two("s", 3)) == "s 3");
+    assert!(tup_both(Tup::Two(1, 4)) == "1 4");
+    assert!(tup_both(no_tup()) == "zero");
+}
+
+test("tuple payload, one field unused") {
+    assert!(tup_first(Tup::Two(false, 2)) == "false");
+    assert!(tup_first(Tup::Two("t", 3)) == "t");
+    assert!(tup_first(Tup::Two(5, 4)) == "5");
+    assert!(tup_second(Tup::Two(true, 6)) == 6);
+    assert!(tup_second(Tup::Two("u", 7)) == 7);
+    assert!(tup_second(Tup::Two(9, 8)) == 8);
+}

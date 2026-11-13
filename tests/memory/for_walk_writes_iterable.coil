@@ -1,0 +1,122 @@
+// A `for` over an iterator walks the value its iterable had when the loop
+// began: the iterator holds the collection, so a write to it in the body
+// copies it and the loop goes on over the old value (#2819). The same with
+// a `mut` borrow of the collection that the body does not write, or of an
+// object the loop walks only a part of.
+use tests::assert;
+use string::format;
+use collections::map::HashMap;
+
+class Bag {
+    pub items: Vec<int>,
+}
+
+class BagIter {
+    pub bag: Bag,
+    pub i: int,
+}
+
+impl IntoIterator for Bag {
+    type Item = int;
+    type IntoIter = BagIter;
+    fn into_iter(Bag b) -> BagIter {
+        return new BagIter(b, 0);
+    }
+}
+
+impl Iterator for BagIter {
+    type Item = int;
+    fn next(BagIter it) -> Option<int> {
+        if it.i >= it.bag.items.len() {
+            return None;
+        }
+        let v = it.bag.items[it.i];
+        it.i += 1;
+        return Some(v);
+    }
+}
+
+class Reg {
+    pub m: HashMap<string, int>,
+    pub n: int,
+}
+
+fn shm(HashMap<string, int> m) -> string {
+    let s = "{";
+    for p in m {
+        s = s + format("%s:%i,", p.key, p.value);
+    }
+    return s + "}";
+}
+
+test("a map grown while it is walked: the loop walks the old map") {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    let n = 0;
+    for p in a {
+        let _ = a.insert(p.key + "2", 2);
+        n += 1;
+    }
+    assert!(n == 1);
+    assert!(shm(a) == "{a:1,a2:2,}");
+}
+
+test("a fresh object with its own iterator grown while it is walked") {
+    let b = new Bag(Vec::new());
+    b.items.push(1);
+    b.items.push(2);
+    let n = 0;
+    for x in b {
+        b.items.push(x + 10);
+        n += 1;
+    }
+    assert!(n == 2);
+    assert!(b.items.len() == 4);
+    assert!(b.items[3] == 12);
+}
+
+test("a borrow the walking body does not write through") {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    let w = mut a;
+    let n = 0;
+    for p in a {
+        n += p.value;
+    }
+    let _ = w.insert("b", 2);
+    let _ = a.insert("c", 3);
+    assert!(n == 1);
+    assert!(shm(w) == shm(a));
+    assert!(a.len() == 3);
+}
+
+test("a walk over a map inside the borrowed object") {
+    let r = new Reg(HashMap::new(), 0);
+    let _ = r.m.insert("a", 1);
+    let w = mut r;
+    let n = 0;
+    for p in r.m {
+        let _ = r.m.insert(p.key + "2", 2);
+        let _ = w.m.insert(p.key + "3", 3);
+        n += 1;
+    }
+    w.n += 1;
+    assert!(n == 1);
+    assert!(r.n == 1);
+    assert!(shm(r.m) == shm(w.m));
+    assert!(r.m.len() == 3);
+}
+
+test("a walk of the borrowed map after the borrow is done") {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    let w = mut a;
+    let _ = w.insert("b", 2);
+    let n = 0;
+    for p in a {
+        let _ = a.insert(p.key + "2", 2);
+        n += 1;
+    }
+    assert!(n == 2);
+    assert!(a.len() == 4);
+}

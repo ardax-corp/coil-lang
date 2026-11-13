@@ -1,0 +1,81 @@
+// A generic whose result holds a function over its type parameter below
+// the result's top (`Vec<T -> int>`, `(T -> int, int)`, `[T -> string; 1]`)
+// is clone-only, as one holding such a function returning `T` is: no
+// adapter reaches a function inside the result, so a ground call takes
+// the per-type clone past the clone budget too, and is not refused
+// (coil-lang#2664). Here at `--clone-budget 0`, at a scalar, `float`,
+// `bool`, `string`, a class and `()`.
+// @flags --clone-budget 0
+use tests::assert;
+
+class Pt {
+    pub x: int,
+}
+
+fn one<U>(U x) -> int {
+    return 1;
+}
+
+fn name<U>(U x) -> string {
+    return "nm";
+}
+
+fn in_vec<T>(T x) -> Vec<T -> int> {
+    let v: Vec<T -> int> = Vec::new();
+    v.push(one);
+    return v;
+}
+
+fn in_tuple<T>(T x) -> (T -> int, int) {
+    return (one, 1);
+}
+
+fn in_array<T>(T x) -> [T -> string; 1] {
+    return [name];
+}
+
+test("a Vec of functions over T") {
+    let a = in_vec(7);
+    let f = a[0];
+    assert!(f(7) == 1);
+    let b = in_vec(2.5);
+    let g = b[0];
+    assert!(g(2.5) == 1);
+    let c = in_vec(true);
+    let h = c[0];
+    assert!(h(false) == 1);
+    let d = in_vec("s");
+    let k = d[0];
+    assert!(k("t") == 1);
+    let e = in_vec(new Pt(3));
+    let m = e[0];
+    assert!(m(new Pt(4)) == 1);
+    let u = in_vec(());
+    let n = u[0];
+    assert!(n(()) == 1);
+}
+
+test("a tuple of a function over T") {
+    let (f, k) = in_tuple(7);
+    assert!(f(7) + k == 2);
+    let (g, _) = in_tuple(2.5);
+    assert!(g(2.5) == 1);
+    let (h, _) = in_tuple("s");
+    assert!(h("s") == 1);
+    let (m, _) = in_tuple(new Pt(3));
+    assert!(m(new Pt(3)) == 1);
+    let (n, _) = in_tuple(());
+    assert!(n(()) == 1);
+}
+
+test("an array of a function over T to string") {
+    let a = in_array(7);
+    let f = a[0];
+    assert!(f(7) == "nm");
+    let b = in_array(true);
+    let g = b[0];
+    assert!(g(true) == "nm");
+    let c = in_array(new Pt(1));
+    let h = c[0];
+    assert!(h(new Pt(1)) == "nm");
+}

@@ -1,4 +1,4 @@
-//! Shared FFI type tags and names (compiler + VM must agree).
+//! Shared FFI type tags and names (compiler + runtime must agree).
 
 /// Tag integers embedded in `CONST` operands and `FFIType` enum variants.
 pub mod tag {
@@ -29,7 +29,7 @@ pub mod tag {
 
 pub const BUILTIN_FFI_TYPE_ENUM: &str = "FFIType";
 
-/// Built-in `FFIType` variant names in tag order (must match VM decoder).
+/// Built-in `FFIType` variant names in tag order (must match runtime decoder).
 pub const BUILTIN_FFI_TYPE_VARIANTS: &[&str] = &[
     "Int", "Float", "String", "Void", "Bool", "Int8", "Int16", "Int32", "UInt8", "UInt16",
     "UInt32", "UInt64", "Ptr", "Callback", "Struct", "Bytes", "ConstBytes",
@@ -100,6 +100,11 @@ pub fn tag_from_variant_name(variant_name: &str) -> Option<u32> {
         .position(|v| *v == variant_name)
         .map(|i| i as u32)
 }
+
+/// The FFI operations native code asks the runtime for.
+pub const FFI_OP_LOAD: u8 = 0;
+pub const FFI_OP_DECLARE: u8 = 1;
+pub const FFI_OP_INVOKE: u8 = 2;
 
 #[cfg(test)]
 mod tests {

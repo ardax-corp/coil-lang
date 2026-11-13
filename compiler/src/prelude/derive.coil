@@ -4,7 +4,8 @@
 //
 // Generated code matches what the former Rust expansion built: payloads are
 // read by field access (`p.w`) for records and bound by the pattern for tuple
-// variants; scalar-backed enums compare / show their backing value.
+// variants; scalar-backed enums compare / show their backing value. `Eq`,
+// `Hash` and `Show` read each field or payload as its data (`data` below).
 use macro::{TypeDecl, Field, Variant, TypeRef, Code, raw, lit};
 
 fn format_int(int n) -> string {
@@ -72,6 +73,14 @@ fn payload_value(Variant v, string recv, string bind, string name) -> string {
     return recv + "." + name;
 }
 
+// A field or payload read as the data it holds: `__data(e)` is `e`, with a
+// `Matrix<D>` in its type as `D`. `==` on a `Matrix` field itself is the
+// element-wise comparison, and a `Matrix` has no `Hash` or `Show`; its data
+// compares to a `bool`, hashes and shows.
+fn data(string value) -> string {
+    return "__data(" + value + ")";
+}
+
 // `%v` format of a value: `Name { a: %v, b: %v }` / `E::V(%v, %v)` / `E::V`.
 fn show_format(TypeDecl t, string p) -> string {
     if t.is_class() {
@@ -83,7 +92,7 @@ fn show_format(TypeDecl t, string p) -> string {
                 specs += ", ";
             }
             specs += f.name.str() + ": %v";
-            args += ", " + p + "." + f.name.str();
+            args += ", " + data(p + "." + f.name.str());
             i += 1;
         }
         return "return string::format(" + lit(t.name.str() + " { " + specs + " }").src() + args +
@@ -105,7 +114,7 @@ fn show_format(TypeDecl t, string p) -> string {
             } else {
                 specs += "%v";
             }
-            args += ", " + payload_value(v, p, "s_", names[i]);
+            args += ", " + data(payload_value(v, p, "s_", names[i]));
             i += 1;
         }
         let text = head;
@@ -156,7 +165,7 @@ fn eq_fields(Vec<string> names, string a, string b, bool tuple) -> string {
             l = "a_" + names[i];
             r = "b_" + names[i];
         }
-        let eq = "(" + l + " == " + r + ")";
+        let eq = "(" + data(l) + " == " + data(r) + ")";
         if i == 0 {
             out = eq;
         } else {
@@ -325,7 +334,7 @@ derive Hash(TypeDecl t) -> Code {
     } else if t.is_class() {
         let values: Vec<string> = Vec::new();
         for f in t.fields() {
-            values.push(p + "." + f.name.str());
+            values.push(data(p + "." + f.name.str()));
         }
         body = "return " + hash_chain("0", values) + ";";
     } else {
@@ -334,7 +343,7 @@ derive Hash(TypeDecl t) -> Code {
         for v in t.variants() {
             let values: Vec<string> = Vec::new();
             for n in payload_names(v) {
-                values.push(payload_value(v, p, "h_", n));
+                values.push(data(payload_value(v, p, "h_", n)));
             }
             arms += pattern(t, v, "h_") + " => " + hash_chain(format_int(tag), values) + ",\n";
             tag += 1;

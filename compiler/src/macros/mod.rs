@@ -9,7 +9,7 @@
 //! Using one (`#[derive(Name)]`, `#[name(...)]`, `name!(…)`) records a
 //! [`PendingMacro`] during attribute expansion. After discovery the pipeline
 //! compiles each providing module into an expansion program, runs it through
-//! a [`MacroHost`] (the VM, with no host access and a step budget), re-parses
+//! a [`MacroHost`] (the runtime, with no host access and a step budget), re-parses
 //! the returned source and splices it next to (derive) or in place of
 //! (attribute, call) the use. See `docs/internals/macros.md`.
 
@@ -19,7 +19,6 @@ pub mod lower;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use common::Byte;
 
 /// Module path of the embedded declaration model (`use macro::{TypeDecl, Code}`).
 pub const MACRO_MODULE: &str = "macro";
@@ -58,6 +57,37 @@ pub const CORE_MODULE: &str = "core";
 
 /// Source of the embedded `core` module.
 pub const CORE_SOURCE: &str = include_str!("../prelude/core.coil");
+
+/// Module path of the embedded `thread::with_lock` family, in Coil over
+/// the `prelude::thread` lock primitives.
+pub const THREAD_LOCKS_MODULE: &str = "thread_locks";
+
+/// Source of the embedded `thread_locks` module.
+pub const THREAD_LOCKS_SOURCE: &str = include_str!("../prelude/thread_locks.coil");
+
+/// The `thread` names [`THREAD_LOCKS_MODULE`] defines: a `use thread::x`
+/// of one is a `use thread_locks::x` ([`forward_thread_uses`]).
+pub const THREAD_LOCKS_FNS: &[&str] = &["with_lock", "with_read", "with_write", "try_read", "try_write"];
+
+/// Point each top-level `use thread::x` of a [`THREAD_LOCKS_FNS`] name at
+/// [`THREAD_LOCKS_MODULE`], where `x` is written in Coil.
+pub fn forward_thread_uses(ast: &mut parser::ast::Output<'_>) {
+    use parser::ast::Expression;
+    fn visit(e: &mut Expression<'_>) {
+        match e {
+            Expression::Use { path, name, .. } => {
+                if path.len() == 1 && path[0] == "thread" && THREAD_LOCKS_FNS.contains(&name.as_str()) {
+                    path[0] = THREAD_LOCKS_MODULE.to_string();
+                }
+            }
+            Expression::Fragment(items) => items.iter_mut().for_each(|i| visit(&mut i.1)),
+            _ => {}
+        }
+    }
+    if let Expression::Program(children) = ast.1.as_mut() {
+        children.iter_mut().for_each(|c| visit(&mut c.1));
+    }
+}
 
 /// An enum the core prelude marks with `#[lang(..)]`.
 #[derive(Debug)]
@@ -159,6 +189,11 @@ pub fn arbitrary_module_path() -> PathBuf {
     PathBuf::from("<coil>/arbitrary.coil")
 }
 
+/// Pseudo path of the embedded `thread_locks` module.
+pub fn thread_locks_module_path() -> PathBuf {
+    PathBuf::from("<coil>/thread_locks.coil")
+}
+
 /// Pseudo path of the core prelude module.
 pub fn core_module_path() -> PathBuf {
     PathBuf::from("<coil>/core.coil")
@@ -178,6 +213,8 @@ pub fn embedded_source(path: &Path) -> Option<&'static str> {
         Some(ARBITRARY_SOURCE)
     } else if path == core_module_path() {
         Some(CORE_SOURCE)
+    } else if path == thread_locks_module_path() {
+        Some(THREAD_LOCKS_SOURCE)
     } else {
         None
     }
@@ -197,6 +234,8 @@ pub fn embedded_module(path: &Path) -> Option<&'static str> {
         Some(ARBITRARY_MODULE)
     } else if path == core_module_path() {
         Some(CORE_MODULE)
+    } else if path == thread_locks_module_path() {
+        Some(THREAD_LOCKS_MODULE)
     } else {
         None
     }
@@ -216,6 +255,9 @@ pub fn embedded_use(path: &[String], name: &str) -> Option<(PathBuf, &'static st
     }
     if head == ARBITRARY_MODULE {
         return Some((arbitrary_module_path(), ARBITRARY_MODULE));
+    }
+    if head == THREAD_LOCKS_MODULE {
+        return Some((thread_locks_module_path(), THREAD_LOCKS_MODULE));
     }
     (head == DERIVE_MODULE).then(|| (derive_module_path(), DERIVE_MODULE))
 }
@@ -367,26 +409,36 @@ pub struct PendingMacro {
 /// It depends only on the providing modules, so one is compiled per provider
 /// set and reused for every macro call (see `pipeline_macros`).
 pub struct CompiledExpansion {
-    pub bytecode: std::sync::Arc<Vec<Byte>>,
     pub constants: std::sync::Arc<Vec<u64>>,
     pub strings: std::sync::Arc<Vec<String>>,
     pub static_slot_count: u32,
-    pub operand_stack_slots: u32,
     pub program_debug: common::ProgramDebug,
     /// Per-class field word kinds, so captured instances know which fields
     /// are scalars.
     pub class_word_kinds: Vec<common::ClassWordKinds>,
     /// Word kind of each static slot (`common::WORD_*`).
     pub static_word_kinds: std::sync::Arc<Vec<u8>>,
+    /// The program's bodies for a host that runs MIR
+    /// ([`MacroHost::runs_mir`]), else empty.
+    pub mir: std::sync::Arc<Vec<crate::mir::NativeBody>>,
+    /// What the host made of [`Self::mir`], made once for every thread that
+    /// runs the program.
+    pub runnable: std::sync::OnceLock<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// Runs a compiled expansion program. Implemented by the `comptime` crate on
-/// top of the VM so the compiler itself does not depend on `machine`.
+/// top of the runtime so the compiler itself does not depend on `machine`.
 pub trait MacroHost: Send + Sync {
-    /// Id of the compiler and VM this host was built with, which keys the
+    /// Id of the compiler and runtime this host was built with, which keys the
     /// on-disk cache of compiled expansion programs; empty keeps none.
     fn build_id(&self) -> &'static str {
         ""
+    }
+
+    /// The host runs a program's MIR: compiles keep it for
+    /// [`CompiledExpansion::mir`].
+    fn runs_mir(&self) -> bool {
+        false
     }
 
     /// Call each `(entry, input)`: `entry` is the offset of a
@@ -401,7 +453,7 @@ pub trait MacroHost: Send + Sync {
         io: &ComptimeIo,
     ) -> Vec<MacroRun>;
 
-    /// Compute `consts` in order on a compile-time VM of `program`: call
+    /// Compute `consts` in order on a compile-time run of `program`: call
     /// each initializer, store its value to its static slot (later
     /// initializers may read earlier ones), then capture every value as one
     /// snapshot, so values shared between them stay shared. An explicit
@@ -410,7 +462,7 @@ pub trait MacroHost: Send + Sync {
     /// [`crate::ComptimeLimits::SILENT_MODULE_STEPS`] for all of them) and,
     /// when it fails, is left out instead of failing the rest.
     ///
-    /// Then, on the same VM (so a call can read the consts), each of
+    /// Then, on the same runtime (so a call can read the consts), each of
     /// `folds` runs within the silent tier; one that fails is `None`.
     ///
     /// An explicit item may do the IO `io[item.io]` grants; nothing else

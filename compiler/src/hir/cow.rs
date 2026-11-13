@@ -18,8 +18,9 @@
 //! A parameter a body writes through is the caller's place (an inferred
 //! `inout`, from the effects summary's `mutates`): the caller makes the
 //! argument unique and writes it back before the call, so the callee writes
-//! it in place, and stores of the parameter itself copy it eagerly. Class
-//! instances whose type has a `drop` are identities the VM never copies; a
+//! it in place, and stores of the parameter itself copy it eagerly. A
+//! coroutine's parameters are its own values: it writes them on `resume`. Class
+//! instances whose type has a `drop` are identities the runtime never copies; a
 //! `readonly class` is never written, so it needs neither op.
 //!
 //! The rewrite runs once per module, after the effects fixed point and
@@ -28,9 +29,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::escape::CallLookup;
-use super::{is_vec, pat_binds, Summary, VEC_MUTATORS};
-use crate::hir::lower::{children, pure_index};
-use crate::hir::{Builtin, Callee, HirBody, HirExpr, HirFlags, HirId, HirKind, HirLocal, HirModule, HirPat, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span};
+use super::{is_vec, Summary, VEC_MUTATORS};
+use crate::hir::query::pure_index;
+use crate::hir::{Builtin, Callee, HirBody, HirFlags, HirId, HirKind, HirModule, HirPat, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span};
 use crate::typechecking::infer::{Checker, ForInKind};
 use reporting::{ErrorCode, Message};
 use crate::typechecking::ty::{self as ty, Ty, strip_readonly};
@@ -50,10 +51,10 @@ pub(crate) fn cow_ty(checker: &Checker, ty: Option<&Ty>) -> bool {
     let Some(ty) = ty else { return false };
     let ty = crate::typechecking::subst::apply_ty_prune(checker.subst(), ty);
     let name = match strip_readonly(&ty) {
-        // A type parameter (#2161): its ops reach the VM only where the
+        // A type parameter (#2161): its ops reach the runtime only where the
         // value is an object word. A per-type clone at a scalar type holds
         // the scalar itself, which MIR passes through with no op; a shared
-        // body holds every `T` boxed, and the VM shares or copies only class
+        // body holds every `T` boxed, and the runtime shares or copies only class
         // instances and arrays.
         Ty::Var(_) => return true,
         Ty::Con(n) => n.as_str(),
@@ -142,34 +143,162 @@ struct Facts<'b> {
     bound: HashMap<LocalId, (HirId, HirId)>,
     /// Locals some lambda or `defer` captures.
     captured: HashSet<LocalId>,
-    /// Locals a `defer` captures: its body may not assign them, so a write
-    /// through one is made unique below the local only.
-    defer_captured: HashSet<LocalId>,
     /// The outer locals each lambda or `defer` node captures.
     capture_lists: HashMap<HirId, Vec<LocalId>>,
     /// Outer locals a lambda captures as `use (mut x)`, by lambda.
     borrow_captures: HashSet<(HirId, LocalId)>,
+    /// Of those, the ones the closure's body keeps, returns or hands to
+    /// code not known here: a holder of the object that may outlive a call.
+    loose_captures: HashSet<(HirId, LocalId)>,
     /// Parameters the body assigns.
     reassigned: HashSet<LocalId>,
     /// Assignments to a `use (mut x)` capture (#2072).
     capture_assigns: Vec<HirId>,
     /// Places a `new View(…)` borrows into a `mut` field: never shared.
     borrow_args: HashSet<HirId>,
+    /// `for` loops that may keep what they walk past the loop
+    /// ([`walk_keeps`]): the iterable is stored, as a kept argument is.
+    kept_walks: HashSet<HirId>,
+    /// Calls that may write a `static`: not known here, or a summary
+    /// with `statics`.
+    static_calls: HashSet<HirId>,
 }
+
+/// What a call in a body may do: [`CallLookup`] for the body given.
+pub(super) type BodyLookup<'c> = dyn Fn(&HirBody, &Callee, &[HirId]) -> Option<Summary> + 'c;
+
+/// A lambda's copy capture moved to a local of the body that makes it
+/// (#2843): the lambda `lambda` (a module body index) captures `to`, bound
+/// to a copy of `from` just before it, in place of `from`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureCopy {
+    pub lambda: usize,
+    pub from: LocalId,
+    pub to: LocalId,
+}
+
+/// What [`rewrite`] makes of a body: the body with its copy-on-write ops,
+/// when it needs any; warnings for writes that copy or are dropped; and the
+/// lambdas whose captures it moved, which the caller applies to the module.
+pub type Rewrite = (Option<HirBody>, Vec<Message>, Vec<CaptureCopy>);
 
 /// The body with its copy-on-write ops, when it needs any, and warnings
 /// for writes that copy or are dropped.
-pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, mutates: u64) -> (Option<HirBody>, Vec<Message>) {
-    let Some(root) = body.root else { return (None, Vec::new()) };
-    let facts = Facts::new(checker, module, body, lookup, root);
-    let mut plan = Plan::new(checker, body, &facts, mutates);
+pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &BodyLookup<'_>, mutates: u64) -> Rewrite {
+    if body.root.is_none() {
+        return (None, Vec::new(), Vec::new());
+    }
+    let analyse = |b: &HirBody| {
+        let bodies = lookup;
+        let lookup = |callee: &Callee, args: &[HirId]| lookup(b, callee, args);
+        let facts = Facts::new(checker, module, b, &lookup, bodies, b.root.expect("a body with a root"));
+        let plan = Plan::new(checker, b, &facts, mutates);
+        let next = view::round(checker, b, &facts, &plan, &lookup);
+        (plan, next)
+    };
+    let (mut plan, mut next) = analyse(body);
+    // Loop views ([`view`]): a view stands only if the rewrite of the
+    // viewed body draws no diagnostic the body did not and shares no view.
+    let mut viewed: Option<HirBody> = None;
+    let notes = plan.notes.len();
+    for _ in 0..view::ROUNDS {
+        let Some(b) = next.take() else { break };
+        let (p, n) = analyse(&b);
+        if p.notes.len() != notes || view::shares_view(&p, &b, body.locals.len()) {
+            break;
+        }
+        (plan, next, viewed) = (p, n, Some(b));
+    }
     let notes = std::mem::take(&mut plan.notes);
     if plan.is_empty() {
-        return (None, notes);
+        return (viewed, notes, Vec::new());
     }
-    let mut out = body.clone();
-    plan.apply(&mut out, checker);
-    (Some(out), notes)
+    let mut out = viewed.unwrap_or_else(|| body.clone());
+    let moved = plan.apply(&mut out, checker);
+    (Some(out), notes, moved)
+}
+
+#[path = "cow_view.rs"]
+mod view;
+
+/// What [`closure_life`] finds: the first holder, the span, every holder.
+type ClosureLife = (Option<LocalId>, (u32, u32), HashSet<LocalId>);
+
+/// How long the closure `lambda` makes lives in `body`: the local first
+/// holding it, and the evaluation-order span from the lambda to the last
+/// read of any local it reaches (`let f = …`, `let g = f`, another closure
+/// capturing one). `Err` with what the closure does when it outlives the
+/// body: it is returned, stored in a field, element or value, or passed to
+/// a call that may keep it. Third: the locals that hold it.
+fn closure_life(body: &HirBody, f: &Facts<'_>, lambda: HirId) -> Result<ClosureLife, &'static str> {
+    let start = f.order(lambda);
+    let mut end = f.end[lambda.0 as usize].saturating_sub(1).max(start);
+    let mut first: Option<LocalId> = None;
+    let mut holders: HashSet<LocalId> = HashSet::new();
+    let results: HashSet<HirId> = body.root.map(|r| super::escape::result_exprs(body, r)).unwrap_or_default().into_iter().collect();
+    let mut work = vec![lambda];
+    while let Some(v) = work.pop() {
+        // The node the value reaches: through block tails, branches, arms
+        // and named arguments.
+        let mut at = v;
+        let parent = loop {
+            let Some(&p) = f.parent.get(&at) else { break None };
+            match &body.expr(p).kind {
+                HirKind::Block { tail: Some(t), .. } if *t == at => at = p,
+                HirKind::If { cond, .. } if *cond != at => at = p,
+                HirKind::Match { scrutinee, .. } if *scrutinee != at => at = p,
+                HirKind::Named { .. } => at = p,
+                _ => break Some(p),
+            }
+        };
+        if results.contains(&at) && body.ret.is_some() {
+            return Err("is returned");
+        }
+        let Some(p) = parent else { continue };
+        let mut hold = |l: LocalId, from: HirId, work: &mut Vec<HirId>| {
+            if !holders.insert(l) {
+                return;
+            }
+            first.get_or_insert(l);
+            end = end.max(f.live_span(l, from).1);
+            work.extend(f.reads.get(&l).into_iter().flatten().copied());
+            // A closure or `defer` capturing the holder holds it too.
+            for (&c, outer) in &f.capture_lists {
+                if outer.contains(&l) {
+                    match body.expr(c).kind {
+                        HirKind::Lambda { .. } => work.push(c),
+                        _ => end = u32::MAX - 1,
+                    }
+                }
+            }
+        };
+        match &body.expr(p).kind {
+            HirKind::Let { local, init: Some(i) } if *i == at => hold(*local, p, &mut work),
+            HirKind::Assign { place, value } if *value == at => match body.expr(*place).kind {
+                HirKind::Local(l) => hold(l, p, &mut work),
+                _ => return Err("is stored"),
+            },
+            HirKind::Return(_) | HirKind::Yield { .. } | HirKind::Resume { .. } => return Err("is returned"),
+            HirKind::Append { .. } | HirKind::Make { .. } => return Err("is stored"),
+            HirKind::Call { callee, args } => {
+                if matches!(callee, Callee::Value(c) if *c == at) {
+                    continue;
+                }
+                let Some(j) = args.iter().position(|&a| a == at) else { continue };
+                let u = f.calls.get(&p).copied().unwrap_or_default();
+                let bit = if j < 64 { 1u64 << j } else { u64::MAX };
+                if (u.kept | u.opaque) & bit != 0 {
+                    return Err("is passed to a call that may keep it");
+                }
+                end = end.max(f.end[p.0 as usize].saturating_sub(1));
+                if u.returned & bit != 0 {
+                    work.push(p);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((first, (start, end), holders))
 }
 
 /// How a place reads in a message: `a`, `a.b`, `a[…]`.
@@ -188,7 +317,7 @@ fn place_text(body: &HirBody, v: HirId) -> Option<String> {
 }
 
 impl<'b> Facts<'b> {
-    fn new(checker: &Checker, module: &HirModule, body: &'b HirBody, lookup: &CallLookup<'_>, root: HirId) -> Self {
+    fn new(checker: &Checker, module: &HirModule, body: &'b HirBody, lookup: &CallLookup<'_>, bodies: &BodyLookup<'_>, root: HirId) -> Self {
         let n = body.exprs.len();
         let mut f = Facts {
             body,
@@ -205,10 +334,12 @@ impl<'b> Facts<'b> {
             captured: HashSet::new(),
             capture_lists: HashMap::new(),
             borrow_captures: HashSet::new(),
-            defer_captured: HashSet::new(),
+            loose_captures: HashSet::new(),
             reassigned: HashSet::new(),
             capture_assigns: Vec::new(),
             borrow_args: HashSet::new(),
+            kept_walks: HashSet::new(),
+            static_calls: HashSet::new(),
         };
         // Evaluation order: children in the order `children` lists them.
         let mut next = 0u32;
@@ -221,8 +352,7 @@ impl<'b> Facts<'b> {
             f.order[id.0 as usize] = next;
             next += 1;
             stack.push((id, true));
-            let kids = children(body, id);
-            for &k in kids.iter().rev() {
+            for k in body.children(id).rev() {
                 f.parent.insert(k, id);
                 stack.push((k, false));
             }
@@ -237,6 +367,15 @@ impl<'b> Facts<'b> {
         for w in &f.writes {
             if let Some(HirKind::Local(l)) = f.root_of(w.path).map(|r| &body.expr(r).kind) {
                 f.written_roots.insert(*l);
+            }
+        }
+        for &(lambda, o) in &f.borrow_captures {
+            let HirKind::Lambda { body: inner } = body.expr(lambda).kind else { continue };
+            let inner = &module.bodies[inner];
+            let Some(&(_, i)) = inner.captures.iter().find(|(x, _)| *x == o) else { continue };
+            let (kept, returned, opaque, _) = keeps_of(module, inner, &|c: &Callee, a: &[HirId]| bodies(inner, c, a), &[i], Some(checker));
+            if (kept | returned | opaque) & 1 != 0 {
+                f.loose_captures.insert((lambda, o));
             }
         }
         f
@@ -289,6 +428,13 @@ impl<'b> Facts<'b> {
                     used.opaque &= !1;
                     used.written |= 1;
                 }
+                // A call that yields a function may be a partial application
+                // (`g(q)`, `q.m(1)`), whose closure keeps the arguments given:
+                // each has a second name from here on (#2788), as `escape`
+                // counts it.
+                if matches!(body.expr(id).ty.as_ref().map(strip_readonly), Some(Ty::Fun(..))) {
+                    used.kept |= if args.len() >= 64 { u64::MAX } else { (1u64 << args.len()) - 1 };
+                }
                 if std::env::var("COIL_COW_TRACE").is_ok() {
                     eprintln!("cow:   {callee:?} written={:b} kept={:b} summary={:?}", used.written, used.kept, lookup(callee, args).map(|s| (s.mutates, s.keeps, s.returns)));
                 }
@@ -298,24 +444,33 @@ impl<'b> Facts<'b> {
                         self.writes.push(Write { at: id, path: a });
                     }
                 }
-                if lookup(callee, args).is_some_and(|s| !s.shared_ret) {
+                let summary = lookup(callee, args);
+                if summary.as_ref().is_some_and(|s| !s.shared_ret) {
                     self.fresh_calls.insert(id);
+                }
+                let structural = matches!(callee, Callee::Method { .. }) && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()));
+                let host = matches!(callee, Callee::Named { name, .. } if host_short(name).is_some());
+                if summary.as_ref().map_or(!structural && !host, |s| s.statics) {
+                    self.static_calls.insert(id);
                 }
                 self.calls.insert(id, used);
             }
             HirKind::Match { scrutinee, arms } => {
                 for arm in arms {
                     let mut ls = Vec::new();
-                    pat_binds(&arm.pat, &mut ls);
+                    arm.pat.for_each_bind(&mut |l| ls.push(l));
                     for l in ls {
                         self.bound.insert(l, (*scrutinee, arm.body));
                     }
                 }
             }
             HirKind::ForIn { pat, iterable, kind, .. } => {
+                if walk_keeps(module, body, lookup, id) {
+                    self.kept_walks.insert(id);
+                }
                 if matches!(kind, Some(ForInKind::Array)) {
                     let mut ls = Vec::new();
-                    pat_binds(pat, &mut ls);
+                    pat.for_each_bind(&mut |l| ls.push(l));
                     for l in ls {
                         self.bound.insert(l, (*iterable, id));
                     }
@@ -323,7 +478,7 @@ impl<'b> Facts<'b> {
             }
             HirKind::LetPat { pat, init } => {
                 let mut ls = Vec::new();
-                pat_binds(pat, &mut ls);
+                pat.for_each_bind(&mut |l| ls.push(l));
                 for l in ls {
                     self.bound.insert(l, (*init, id));
                 }
@@ -339,9 +494,12 @@ impl<'b> Facts<'b> {
                 self.captured.extend(outer.iter().copied());
                 self.capture_lists.insert(id, outer);
             }
+            // A `defer use (mut d)` reads and writes the variable `d` when it
+            // runs; `use (d)` captures a copy (`hir/build.rs`). Either way a
+            // write through it is a write to that local, made unique as any
+            // other (#2830): the copy is written back to the variable.
             HirKind::Defer { captures, .. } => {
                 let outer: Vec<LocalId> = captures.iter().flatten().copied().collect();
-                self.defer_captured.extend(outer.iter().copied());
                 self.captured.extend(outer.iter().copied());
                 self.capture_lists.insert(id, outer);
             }
@@ -451,13 +609,20 @@ fn named_value(body: &HirBody, a: HirId) -> HirId {
 /// Third: the parameters it hands, as themselves, to code not known
 /// here, which may keep them.
 pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> (u64, u64, u64, u64) {
+    keeps_of(module, body, lookup, &body.params, None)
+}
+
+/// [`keeps`] for the locals `seeds` (bit `i` for `seeds[i]`) in place of
+/// the parameters: a closure's captures. With `views`, a call that returns
+/// a view does not keep its receiver.
+fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: &[LocalId], views: Option<&Checker>) -> (u64, u64, u64, u64) {
     if body.is_coro {
         return (u64::MAX, u64::MAX, u64::MAX, 0);
     }
     let Some(root) = body.root else { return (0, 0, 0, 0) };
     // What each local may hold of the parameters, through `let x = p`.
     let mut holds: HashMap<LocalId, u64> = HashMap::new();
-    for (i, &p) in body.params.iter().enumerate().take(64) {
+    for (i, &p) in seeds.iter().enumerate().take(64) {
         holds.insert(p, 1 << i);
     }
     let mut copies: Vec<(LocalId, HirId)> = Vec::new();
@@ -526,7 +691,16 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
                 }
             }
             HirKind::Call { callee, args } => {
-                let used = arg_use(body, lookup, callee, args);
+                let mut used = arg_use(body, lookup, callee, args);
+                // A call that returns a view borrows its receiver, as
+                // `Facts::note` reads it: the view cannot outlive it (E0151).
+                if let Some(checker) = views
+                    && crate::hir::view_lint::is_view_ty(checker, body.expr(id).ty.as_ref())
+                    && args.first().is_some_and(|&r| cow_ty(checker, body.expr(r).ty.as_ref()))
+                {
+                    used.kept &= !1;
+                    used.opaque &= !1;
+                }
                 if std::env::var("COIL_COW_TRACE").is_ok() && used.kept != 0 {
                     eprintln!("keeps   {callee:?} kept={:b}", used.kept);
                 }
@@ -544,6 +718,8 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
                 inner |= inner_params(body, *v);
             }
             HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => kept |= of(&holds, *v),
+            // A walk whose iterator dies with the loop keeps nothing.
+            HirKind::ForIn { iterable, .. } if walk_keeps(module, body, lookup, id) => kept |= of(&holds, *iterable),
             HirKind::Lambda { body: inner } => {
                 for (o, _) in &module.bodies[*inner].captures {
                     kept |= holds.get(o).copied().unwrap_or(0);
@@ -698,6 +874,19 @@ fn from_summary(s: &Summary) -> ArgUse {
     }
 }
 
+/// A borrow as [`Plan::hold_borrowed`] reads it.
+struct Held {
+    root: LocalId,
+    path: Vec<Option<String>>,
+    /// The evaluation-order span over which it lives.
+    span: (u32, u32),
+    /// The node that makes it: nothing inside it is in the borrow's life.
+    within: Option<HirId>,
+    /// A `use (mut root)` capture whose closure body may let a holder of
+    /// the object outlive a call ([`Facts::loose_captures`]).
+    loose: bool,
+}
+
 /// Where the rewrite puts ops.
 #[derive(Default)]
 struct Plan {
@@ -711,22 +900,41 @@ struct Plan {
     /// them (pattern bindings) or before a node (captures).
     share_after: Vec<(HirId, LocalId)>,
     share_before: Vec<((HirId, HirId), LocalId)>,
+    /// Copy captures of a parameter written in place for the caller, by
+    /// the statement holding the lambda and the lambda's body (#2843): it
+    /// captures an eager copy bound before it, since the parameter's later
+    /// writes are never tested and would show in a shared object.
+    copy_before: Vec<((HirId, HirId), usize, LocalId)>,
     /// Locals to make unique as a statement before a node (borrowed
     /// captures).
     unique_before: Vec<((HirId, HirId), LocalId)>,
     /// Write paths to make unique before their node.
     unique: Vec<(Write, (HirId, HirId))>,
+    /// Borrows (`let w = mut a.f`, `use (mut a)`, views, `for mut`) by
+    /// their root, place steps, live span and the node that makes them.
+    borrows: Vec<Held>,
+    /// How many objects, from the root down, a write path leaves as they
+    /// are (#2816): the borrowed object and the ones holding it, while a
+    /// borrow of them lives. Keyed by the write's node and path.
+    held: HashMap<(HirId, HirId), usize>,
     /// Locals never shared and only ever given fresh objects.
     fresh_locals: HashSet<LocalId>,
+    /// Writes (node, path) in the body of a `for` over an iterator whose
+    /// iterable has the write's root: the iterator holds that object, so the
+    /// write keeps its unique on a fresh local too (#2819).
+    walked: HashSet<(HirId, HirId)>,
     /// Parameters written in place for the caller.
     inout: HashSet<LocalId>,
-    /// Locals a `defer` captures.
-    defer_captured: HashSet<LocalId>,
 }
 
 impl Plan {
     fn is_empty(&self) -> bool {
-        self.share.is_empty() && self.share_after.is_empty() && self.share_before.is_empty() && self.unique.is_empty() && self.unique_before.is_empty()
+        self.share.is_empty()
+            && self.share_after.is_empty()
+            && self.share_before.is_empty()
+            && self.copy_before.is_empty()
+            && self.unique.is_empty()
+            && self.unique_before.is_empty()
     }
 
     fn new(checker: &Checker, body: &HirBody, f: &Facts<'_>, mutates: u64) -> Self {
@@ -735,11 +943,17 @@ impl Plan {
         let cow_local = |l: LocalId| cow_ty(checker, body.local(l).ty.as_ref());
         // Parameters written in place for the caller: never copied as a
         // whole here, so sharing one copies it eagerly instead.
+        // A coroutine's frame outlives the call that starts it (#2662): its
+        // writes run on `resume`, after the caller has its value back, so
+        // a parameter is its own value, made unique where it is written.
+        // A parameter a closure or `defer` captures stays the caller's place
+        // (#2843): a copy capture takes an eager copy (`copy_before`), and a
+        // `use (mut p)` closure writes the caller's object in place.
         let inout: HashSet<LocalId> = body
             .params
             .iter()
             .enumerate()
-            .filter(|(i, l)| *i < 64 && mutates & (1 << i) != 0 && !f.reassigned.contains(l) && !f.captured.contains(l))
+            .filter(|(i, l)| !body.is_coro && *i < 64 && mutates & (1 << i) != 0 && !f.reassigned.contains(l))
             .map(|(_, l)| *l)
             .chain(body.locals.iter().enumerate().filter(|(_, x)| x.borrow).map(|(i, _)| LocalId(i as u32)))
             .collect();
@@ -856,10 +1070,17 @@ impl Plan {
                     let u = f.calls.get(&id).copied().unwrap_or_default();
                     let mut copy_result = false;
                     let mut share_result = false;
+                    let partial = matches!(body.expr(id).ty.as_ref().map(strip_readonly), Some(Ty::Fun(..)));
                     for (j, &a) in args.iter().enumerate().take(64) {
                         let bit = 1u64 << j;
                         let v = named_value(body, a);
-                        if u.kept & bit != 0 {
+                        if partial && u.written & bit != 0 && cow(v) {
+                            // A partial of a function that writes this
+                            // parameter writes on each later call: it takes a
+                            // copy of its own, as a `use (x)` capture is
+                            // (#2788).
+                            plan.share.push((v, true));
+                        } else if u.kept & bit != 0 {
                             plan.store(body, f, v, &cow, &inout, &borrowed);
                         } else if u.returned & bit != 0
                             && cow(id)
@@ -873,9 +1094,16 @@ impl Plan {
                             // Opaque code may write the argument as well,
                             // and is assumed to: its result is shared after
                             // the call instead (writes it made are done).
-                            if u.opaque & bit != 0 {
+                            // An argument written in place for the caller (a
+                            // borrow, an inout parameter) is never tested
+                            // before a write, so a result that may be it is
+                            // a copy, as `let r = w` copies it (#2818).
+                            // Only where the local is written after the call.
+                            let in_place = !read_only_result(f, body, id)
+                                && matches!(body.expr(v).kind, HirKind::Local(l) if inout.contains(&l) && written_after(f, body, l, id));
+                            if u.opaque & bit != 0 && !in_place {
                                 share_result = true;
-                            } else if u.written & bit != 0 {
+                            } else if u.written & bit != 0 || u.opaque & bit != 0 {
                                 copy_result = true;
                             } else {
                                 plan.store(body, f, v, &cow, &inout, &borrowed);
@@ -899,6 +1127,10 @@ impl Plan {
                     }
                 }
                 HirKind::Return(Some(v)) => plan.store_result(body, f, *v, &cow, &inout, &borrowed),
+                // A cast between byte arrays is the operand's object (#2823):
+                // the result is a second name for it.
+                HirKind::Cast { value } if cow(*value) && cow(id) => plan.store(body, f, *value, &cow, &inout, &borrowed),
+                HirKind::ForIn { iterable, .. } if f.kept_walks.contains(&id) => plan.store(body, f, *iterable, &cow, &inout, &borrowed),
                 HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => {
                     plan.store(body, f, *v, &cow, &inout, &borrowed)
                 }
@@ -912,6 +1144,10 @@ impl Plan {
                             if !inout.contains(&l) {
                                 plan.unique_before.push((f.statement_of(id), l));
                             }
+                        } else if inout.contains(&l)
+                            && let HirKind::Lambda { body: inner } = body.expr(id).kind
+                        {
+                            plan.copy_before.push((f.statement_of(id), inner, l));
                         } else {
                             plan.share_before.push((f.statement_of(id), l));
                         }
@@ -965,9 +1201,23 @@ impl Plan {
                 _ => None,
             })
             .collect();
+        // A borrow handed to a call that keeps it, hands it back or hands it
+        // to code not known here names its source's object there too.
+        let escaped_sources: HashSet<LocalId> = kept_locals
+            .iter()
+            .chain(&shared_locals)
+            .filter(|&&b| body.local(b).borrow)
+            .flat_map(|b| f.inits.get(b).into_iter().flatten().chain(f.bound.get(b).map(|(s, _)| s)))
+            .filter_map(|&v| f.root_of(v))
+            .filter_map(|r| match body.expr(r).kind {
+                HirKind::Local(l) => Some(l),
+                _ => None,
+            })
+            .collect();
         for (&l, inits) in &f.inits {
             let local = body.local(l);
             if matches!(local.kind, LocalKind::Param | LocalKind::Capture)
+                || escaped_sources.contains(&l)
                 || f.bound.contains_key(&l)
                 || f.captured.contains(&l)
                 || shared_locals.contains(&l)
@@ -981,6 +1231,36 @@ impl Plan {
             }
         }
 
+        // A `for` over a `Vec` or an array walks the value its iterable had
+        // when the loop began (#2827): where the body may write it, the
+        // loop takes a share of it at its start, so the first write copies
+        // it once, and the body's writes to it keep their unique on a fresh
+        // local too. A parameter written in place for the caller is never
+        // tested before a write: the loop walks an eager copy of it, over a
+        // `Vec` or an array or through an iterator, which would otherwise
+        // hold the object the body writes in place (#2826; a walk that keeps
+        // its iterable stores it, which copies it already). After
+        // `fresh_locals`: past the loop its other holder is dead.
+        let mut holding = HashSet::new();
+        for i in 0..body.exprs.len() {
+            let id = HirId(i as u32);
+            if f.order[i] == u32::MAX || !walk_written(body, f, id) {
+                continue;
+            }
+            let HirKind::ForIn { iterable, kind, .. } = &body.expr(id).kind else { continue };
+            let iterable = *iterable;
+            let eager = matches!(body.expr(iterable).kind, HirKind::Local(l) if inout.contains(&l));
+            if !cow(iterable) {
+                continue;
+            }
+            if matches!(kind, Some(ForInKind::Array)) {
+                plan.share.push((iterable, eager));
+                holding.insert(id);
+            } else if eager && !f.kept_walks.contains(&id) {
+                plan.share.push((iterable, true));
+            }
+        }
+
         // Writes: make each path unique top-down.
         for &w in &f.writes {
             if let Some(HirKind::Local(l)) = f.root_of(w.path).map(|r| &body.expr(r).kind)
@@ -990,11 +1270,14 @@ impl Plan {
                 // The parameter itself, written in place for the caller.
                 continue;
             }
+            if walked_write(body, f, w, &holding) {
+                plan.walked.insert((w.at, w.path));
+            }
             plan.unique.push((w, f.statement_of(w.at)));
         }
         plan.inout = inout;
-        plan.defer_captured = f.defer_captured.clone();
         plan.check_borrows(checker, body, f);
+        plan.hold_borrowed(body, f);
         plan.check_kept_views(checker, body, f);
         plan.note_copies(checker, body, f, &copied_from);
         plan
@@ -1047,11 +1330,19 @@ impl Plan {
             span: (u32, u32),
             /// The borrowing expression: nothing inside it conflicts.
             within: Option<HirId>,
+            /// A `use (mut x)` capture: `name` is the closure.
+            capture: bool,
+            /// The borrowing local (a `let`, a `for mut` binding, a view),
+            /// whose writes reach the borrowed object.
+            local: Option<LocalId>,
+            /// The locals holding a `use (mut x)` closure: calling one may
+            /// write the borrowed object.
+            holders: HashSet<LocalId>,
         }
         let mut borrows: Vec<Borrow> = Vec::new();
-        let mut add = |name: &str, src: HirId, span: (u32, u32), within: Option<HirId>| {
+        let mut add = |name: &str, local: LocalId, src: HirId, span: (u32, u32), within: Option<HirId>| {
             if let (Some((root, path)), Some(text)) = (place_path(body, f, src), place_text(body, src)) {
-                borrows.push(Borrow { name: name.to_string(), root, path, text, span, within });
+                borrows.push(Borrow { name: name.to_string(), root, path, text, span, within, capture: false, local: Some(local), holders: HashSet::new() });
             }
         };
         for (&l, inits) in &f.inits {
@@ -1064,7 +1355,7 @@ impl Plan {
                 let from = f.parent.get(&v).copied().unwrap_or(v);
                 let span = f.live_span(l, from);
                 if !view {
-                    add(&local.name, v, span, Some(v));
+                    add(&local.name, l, v, span, Some(v));
                     continue;
                 }
                 // A view borrows the places its `mut` fields were given, or
@@ -1074,7 +1365,7 @@ impl Plan {
                     match &body.expr(at).kind {
                         HirKind::Make { .. } => {
                             for a in crate::hir::view_lint::borrow_args(checker, body, at) {
-                                add(&local.name, a, span, Some(v));
+                                add(&local.name, l, a, span, Some(v));
                             }
                             break;
                         }
@@ -1084,7 +1375,7 @@ impl Plan {
                                 at = r;
                                 continue;
                             }
-                            add(&local.name, r, span, Some(v));
+                            add(&local.name, l, r, span, Some(v));
                             break;
                         }
                         _ => break,
@@ -1094,7 +1385,46 @@ impl Plan {
         }
         for (&l, &(src, binder)) in &f.bound {
             if body.local(l).borrow && cow_ty(checker, body.local(l).ty.as_ref()) {
-                add(&body.local(l).name, src, f.live_span(l, binder), Some(src));
+                add(&body.local(l).name, l, src, f.live_span(l, binder), Some(src));
+            }
+        }
+        // `for mut x in a` borrows an element of `a`, not `a`: a second name
+        // for an element is one for what `x` borrows.
+        for b in &mut borrows {
+            if b.local.is_some_and(|l| f.bound.get(&l).is_some_and(|&(_, binder)| matches!(body.expr(binder).kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. }))) {
+                b.path.push(None);
+                b.text.push_str("[…]");
+            }
+        }
+        // `use (mut a)`: the closure borrows `a`'s object for as long as it
+        // lives (#2787), as `let w = mut a` would. A closure that outlives
+        // the body (returned, stored, kept by a call) holds the borrow past
+        // `a`'s scope: the capture itself is the error.
+        let mut captures: Vec<(HirId, LocalId)> = f.borrow_captures.iter().copied().collect();
+        captures.sort_by_key(|&(at, l)| (f.order(at), l.0));
+        for (lambda, a) in captures {
+            if !cow_ty(checker, body.local(a).ty.as_ref()) {
+                continue;
+            }
+            let name = &body.local(a).name;
+            match closure_life(body, f, lambda) {
+                Ok((holder, span, holders)) => {
+                    let holder = holder
+                        .map(|h| body.local(h))
+                        .filter(|h| !h.name.starts_with('$') && h.kind != LocalKind::Temp)
+                        .map_or_else(String::new, |h| h.name.clone());
+                    borrows.push(Borrow { name: holder, root: a, path: Vec::new(), text: name.clone(), span, within: Some(lambda), capture: true, local: None, holders });
+                }
+                Err(why) => {
+                    let span = body.expr(lambda).span;
+                    let mut m = Message::error(
+                        ErrorCode::BorrowConflict,
+                        format!("this closure borrows `{name}` (`use (mut {name})`) and {why}: the borrow would outlive `{name}`"),
+                        span.0..span.1,
+                    );
+                    m.with_help(format!("capture a copy with `use ({name})` and hand the changed value back, or hold the shared state in a `Ref<T>`"));
+                    self.notes.push(m);
+                }
             }
         }
         // In a view's own method, each `mut` field is the borrowed object
@@ -1113,27 +1443,52 @@ impl Plan {
                         text: format!("self.{field}"),
                         span: (0, u32::MAX - 1),
                         within: None,
+                        capture: false,
+                        local: None,
+                        holders: HashSet::new(),
                     });
                 }
             }
         }
+        self.borrows = borrows
+            .iter()
+            .map(|b| Held {
+                root: b.root,
+                path: b.path.clone(),
+                span: b.span,
+                within: b.within,
+                loose: b.capture && b.within.is_some_and(|l| f.loose_captures.contains(&(l, b.root))),
+            })
+            .collect();
         if borrows.is_empty() {
             return;
         }
         // Every point that gives a place's object a second name, shared
-        // or moved: stores, and bindings other than borrows.
-        let mut shares: Vec<(HirId, HirId)> = self.stored.iter().map(|&v| (v, v)).collect();
+        // or moved: stores, and bindings other than borrows. Third: how many
+        // steps below the place the name is: a `for` over a `Vec` or an
+        // array binds an element, not the iterable (#2827).
+        let mut shares: Vec<(HirId, HirId, usize)> = self.stored.iter().map(|&v| (v, v, 0)).collect();
         for (&l, inits) in &f.inits {
             if !body.local(l).borrow {
-                shares.extend(inits.iter().map(|&v| (v, v)));
+                shares.extend(inits.iter().map(|&v| (v, v, 0)));
             }
         }
         for (&l, &(src, binder)) in &f.bound {
             if !body.local(l).borrow {
-                shares.push((src, binder));
+                let element = matches!(body.expr(binder).kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. });
+                shares.push((src, binder, usize::from(element)));
             }
         }
-        shares.sort_by_key(|&(v, _)| f.order(v));
+        shares.sort_by_key(|&(v, _, _)| f.order(v));
+        let mut calls: Vec<(HirId, ArgUse)> = f.calls.iter().map(|(&c, &u)| (c, u)).collect();
+        calls.sort_by_key(|&(c, _)| f.order(c));
+        // `for` loops over an iterator, a `Vec` or an array, in evaluation
+        // order: each walks the value its iterable had when it began.
+        let mut walks: Vec<HirId> = (0..body.exprs.len())
+            .map(|i| HirId(i as u32))
+            .filter(|&id| f.order(id) != u32::MAX && (iterator_loop(body, id) || matches!(body.expr(id).kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. })))
+            .collect();
+        walks.sort_by_key(|&id| f.order(id));
         let mut seen: HashSet<(HirId, String)> = HashSet::new();
         for b in &borrows {
             let (start, end) = b.span;
@@ -1141,32 +1496,171 @@ impl Plan {
                 let o = f.order(at);
                 o != u32::MAX && o > start && o <= end && !b.within.is_some_and(|w| f.contains(w, at))
             };
-            let covers = |v: HirId| place_path(body, f, v).is_some_and(|(r, p)| r == b.root && prefix_of(&p, &b.path));
-            let (bname, stext) = (&b.name, &b.text);
-            for &(v, at) in &shares {
-                if live(at) && covers(v) && !f.borrow_args.contains(&v) && seen.insert((v, stext.clone())) {
+            let covers_below = |v: HirId, below: usize| {
+                place_path(body, f, v).is_some_and(|(r, mut p)| {
+                    p.extend(std::iter::repeat_n(None, below));
+                    r == b.root && prefix_of(&p, &b.path)
+                })
+            };
+            let covers = |v: HirId| covers_below(v, 0);
+            let stext = &b.text;
+            let (bname, last) = match (b.capture, b.name.as_str()) {
+                (false, n) => (format!("`{n}`"), format!("use `{n}` for the last time")),
+                (true, "") => ("the closure".to_string(), "let the closure go".to_string()),
+                (true, n) => (format!("the closure `{n}`"), format!("call `{n}` for the last time")),
+            };
+            for &(v, at, below) in &shares {
+                if live(at) && covers_below(v, below) && !f.borrow_args.contains(&v) && seen.insert((v, stext.clone())) {
                     let span = body.expr(v).span;
                     let vtext = place_text(body, v).unwrap_or_else(|| stext.clone());
                     let mut m = Message::error(
                         ErrorCode::BorrowConflict,
-                        format!("`{vtext}` gets a second name while `{bname}` borrows `{stext}`: writes through `{bname}` would show through both"),
+                        format!("`{vtext}` gets a second name while {bname} borrows `{stext}`: writes through {bname} would show through both"),
                         span.0..span.1,
                     );
-                    m.with_help(format!("use `{bname}` for the last time before this, or hold the shared state in a `Ref<T>`"));
+                    m.with_help(format!("{last} before this, or hold the shared state in a `Ref<T>`"));
                     self.notes.push(m);
                 }
             }
-            for &(capture_at, l) in &self.share_before {
+            // A call result that may be the borrowed object or one holding
+            // it (#2818): bound, stored or passed on, it is a second name.
+            for &(c, u) in &calls {
+                if !live(c) || f.fresh_calls.contains(&c) {
+                    continue;
+                }
+                let HirKind::Call { args, .. } = &body.expr(c).kind else { continue };
+                let Some((named, steps)) = named_result(f, body, c) else { continue };
+                if !may_hold_objects(body.expr(named).ty.as_ref()) {
+                    continue;
+                }
+                let eager = self.share.contains(&(c, true));
+                let hit = args.iter().enumerate().take(64).any(|(j, &a)| {
+                    let bit = 1u64 << j;
+                    let v = named_value(body, a);
+                    let Some((r, p)) = place_path(body, f, v) else { return false };
+                    if r != b.root || !prefix_of(&p, &b.path) {
+                        return false;
+                    }
+                    // How far below the argument the named value is at the
+                    // least: the argument itself when the call may hand it
+                    // back (a copy of it, past the copy's own object), one
+                    // step when the result may be an object inside it.
+                    let below = if u.returned & bit != 0 && !self.stored.contains(&v) {
+                        usize::from(eager)
+                    } else if u.inner & bit != 0 && may_hold_objects(body.expr(v).ty.as_ref()) {
+                        1
+                    } else {
+                        return false;
+                    };
+                    p.len() + below + steps <= b.path.len()
+                });
+                if hit && seen.insert((c, stext.clone())) {
+                    let span = body.expr(c).span;
+                    let mut m = Message::error(
+                        ErrorCode::BorrowConflict,
+                        format!("this call's result may be `{stext}`'s object, so it gets a second name while {bname} borrows `{stext}`: writes through {bname} would show through both"),
+                        span.0..span.1,
+                    );
+                    m.with_help(format!("{last} before this, or hold the shared state in a `Ref<T>`"));
+                    self.notes.push(m);
+                }
+            }
+            // Code not known here given the borrowed object, a holder of it
+            // or the borrow itself may keep it (#2825): a second holder,
+            // which a later in-place write through the borrow (or the
+            // source's, which would copy the object away from the borrow)
+            // meets. Refused where such a write may run after the call while
+            // the borrow lives.
+            let start = b.span.0;
+            let written_after = |c: HirId| {
+                let loops: Vec<HirId> = f.loops_around(c).into_iter().filter(|&lp| !(f.order(lp) <= start && start < f.end[lp.0 as usize])).collect();
+                let after = |at: HirId| at != c && live(at) && (f.order(at) > f.order(c) || loops.iter().any(|&lp| f.contains(lp, at)));
+                f.writes.iter().any(|w| {
+                    after(w.at)
+                        && place_path(body, f, w.path).is_some_and(|(x, steps)| {
+                            Some(x) == b.local || (x == b.root && (prefix_of(&steps, &b.path) || prefix_of(&b.path, &steps)))
+                        })
+                }) || b.holders.iter().any(|h| f.reads.get(h).is_some_and(|rs| rs.iter().any(|&r| after(r))))
+            };
+            for &(c, u) in &calls {
+                if !live(c) || u.opaque == 0 {
+                    continue;
+                }
+                let HirKind::Call { args, .. } = &body.expr(c).kind else { continue };
+                let given = args.iter().enumerate().take(64).find(|&(j, &a)| {
+                    let v = named_value(body, a);
+                    u.opaque & (1u64 << j) != 0
+                        && may_hold_objects(body.expr(v).ty.as_ref())
+                        && place_path(body, f, v).is_some_and(|(r, p)| (r == b.root && prefix_of(&p, &b.path)) || (Some(r) == b.local && p.is_empty()))
+                });
+                let Some((_, &a)) = given else { continue };
+                if written_after(c) && seen.insert((c, stext.clone())) {
+                    let v = named_value(body, a);
+                    let span = body.expr(v).span;
+                    let vtext = place_text(body, v).unwrap_or_else(|| stext.clone());
+                    let mut m = Message::error(
+                        ErrorCode::BorrowConflict,
+                        format!("`{vtext}` is handed to code not known here, which may keep it, while {bname} borrows `{stext}`: a later write through {bname} would show through what it keeps"),
+                        span.0..span.1,
+                    );
+                    m.with_help(format!("make the borrow's writes before this call and {last} there, or hold the shared state in a `Ref<T>`"));
+                    self.notes.push(m);
+                }
+            }
+            let captured = self.share_before.iter().copied().chain(self.copy_before.iter().map(|&(at, _, l)| (at, l)));
+            for (capture_at, l) in captured {
                 let at = capture_at.1;
                 if l == b.root && b.path.iter().all(Option::is_some) && live(at) && seen.insert((at, stext.clone())) {
                     let span = body.expr(at).span;
                     let name = &body.local(l).name;
                     let mut m = Message::error(
                         ErrorCode::BorrowConflict,
-                        format!("this closure captures `{name}` while `{bname}` borrows `{stext}`: writes through `{bname}` would show in the closure's copy"),
+                        format!("this closure captures `{name}` while {bname} borrows `{stext}`: writes through {bname} would show in the closure's copy"),
                         span.0..span.1,
                     );
-                    m.with_help(format!("use `{bname}` for the last time before the closure, or capture with `use (mut {name})`"));
+                    m.with_help(format!("{last} before this closure, or capture with `use (mut {name})`"));
+                    self.notes.push(m);
+                }
+            }
+            // A `for` holds what it walks while the body runs (an iterator
+            // its iterable, #2819; a loop over a `Vec` or an array a share of
+            // it, #2827): over the borrowed object or one holding it, a write in
+            // the body to what the loop walks meets that second holder. A
+            // write through the source would copy it away from the borrow,
+            // one through the borrow would change what the loop walks.
+            for &l in &walks {
+                let HirKind::ForIn { iterable, body: lbody, .. } = &body.expr(l).kind else { continue };
+                // A loop's own `for mut` binding writes the element it is
+                // bound to, which the walk has already passed.
+                if b.local.is_some_and(|x| f.bound.get(&x).is_some_and(|&(_, binder)| binder == l)) {
+                    continue;
+                }
+                let Some((r, ip)) = place_path(body, f, *iterable) else { continue };
+                // The walked place from the borrow's root.
+                let walked = if r == b.root && prefix_of(&ip, &b.path) {
+                    ip
+                } else if Some(r) == b.local && ip.is_empty() {
+                    b.path.clone()
+                } else {
+                    continue;
+                };
+                let inside = |at: HirId| f.contains(*lbody, at) && live(at);
+                let written = f.writes.iter().any(|w| {
+                    inside(w.at)
+                        && place_path(body, f, w.path).is_some_and(|(x, steps)| {
+                            (x == b.root && (prefix_of(&steps, &walked) || prefix_of(&walked, &steps))) || Some(x) == b.local
+                        })
+                });
+                let called = b.holders.iter().any(|h| f.reads.get(h).is_some_and(|rs| rs.iter().any(|&r| inside(r))));
+                if (written || called) && seen.insert((l, stext.clone())) {
+                    let span = body.expr(*iterable).span;
+                    let itext = place_text(body, *iterable).unwrap_or_else(|| stext.clone());
+                    let mut m = Message::error(
+                        ErrorCode::BorrowConflict,
+                        format!("the `for` over `{itext}` holds its object while its body writes it and {bname} borrows `{stext}`: the loop and {bname} would see different objects"),
+                        span.0..span.1,
+                    );
+                    m.with_help(format!("{last} before the loop, or keep what the loop finds and write it after the loop"));
                     self.notes.push(m);
                 }
             }
@@ -1178,14 +1672,80 @@ impl Plan {
                     let ptext = place_text(body, *place).unwrap_or_else(|| stext.clone());
                     let mut m = Message::error(
                         ErrorCode::BorrowConflict,
-                        format!("`{ptext}` is replaced while `{bname}` borrows `{stext}`: writes through `{bname}` would go to the old object"),
+                        format!("`{ptext}` is replaced while {bname} borrows `{stext}`: writes through {bname} would go to the old object"),
                         span.0..span.1,
                     );
-                    m.with_help(format!("use `{bname}` for the last time before this, or borrow again after it"));
+                    let again = if b.capture { "make the closure after it" } else { "borrow again after it" };
+                    m.with_help(format!("{last} before this, or {again}"));
                     self.notes.push(m);
                 }
             }
         }
+    }
+
+    /// A write through a borrowed place while the borrow lives (#2816)
+    /// leaves the borrowed object, and each object holding it, as it is:
+    /// it is written in place, as it is through the borrow. The borrow made
+    /// them unique where it began and E0149 keeps every other name off them
+    /// while it lives, so a shared flag there was left by a call that kept
+    /// nothing (a callee walking the object: its iterator shared it and died
+    /// with the call). A unique would copy the object away from the borrow.
+    /// Not inside a loop over an iterator, which holds its iterable while
+    /// the loop runs.
+    fn hold_borrowed(&mut self, body: &HirBody, f: &Facts<'_>) {
+        let live = |b: &Held, at: HirId| {
+            let o = f.order(at);
+            o != u32::MAX && o > b.span.0 && o <= b.span.1 && !b.within.is_some_and(|w| f.contains(w, at))
+        };
+        // A call in the borrow's life that hands the borrowed object, or one
+        // holding it, to code not known here (which may keep it), or whose
+        // result may be an object inside a holder (the borrowed one), or a
+        // closure body that may keep its capture: the object may have a
+        // holder E0149 does not see, so writes keep their unique.
+        let open = |b: &Held| {
+            b.loose
+                || f.calls.iter().any(|(&c, u)| {
+                    let HirKind::Call { args, .. } = &body.expr(c).kind else { return false };
+                    live(b, c)
+                        && args.iter().enumerate().take(64).any(|(j, &a)| {
+                            let bit = 1u64 << j;
+                            if (u.opaque | u.inner) & bit == 0 {
+                                return false;
+                            }
+                            match place_path(body, f, named_value(body, a)) {
+                                Some((x, p)) if x == b.root => {
+                                    prefix_of(&p, &b.path) && (u.opaque & bit != 0 || p.len() < b.path.len())
+                                }
+                                Some((x, _)) => aliases(f, body, x, b.root),
+                                None => false,
+                            }
+                        })
+                })
+        };
+        // Any such call during one borrow of a root ends the others' too.
+        let open_roots: HashSet<LocalId> = self.borrows.iter().filter(|b| open(b)).map(|b| b.root).collect();
+        let borrows: Vec<&Held> = self.borrows.iter().filter(|b| !open_roots.contains(&b.root)).collect();
+        if borrows.is_empty() {
+            return;
+        }
+        let mut held = HashMap::new();
+        for &(w, _) in &self.unique {
+            let Some((root, steps)) = write_steps(body, w.path) else { continue };
+            if f.order(w.at) == u32::MAX || in_iterator_loop(body, f, w.at) {
+                continue;
+            }
+            let mut n = 0;
+            for b in &borrows {
+                if b.root == root && live(b, w.at) {
+                    let common = steps.iter().zip(&b.path).take_while(|(s, p)| s.is_some() && s == p).count();
+                    n = n.max(1 + common);
+                }
+            }
+            if n > 0 {
+                held.insert((w.at, w.path), n);
+            }
+        }
+        self.held = held;
     }
 
     /// E0141 where a write copies an object a binding shares with its
@@ -1391,6 +1951,50 @@ fn read_only_result(f: &Facts<'_>, body: &HirBody, call: HirId) -> bool {
     }
 }
 
+/// Whether a write through local `l` other than `call`'s own may run after
+/// `call`: later in the body, or anywhere in a loop around it.
+fn written_after(f: &Facts<'_>, body: &HirBody, l: LocalId, call: HirId) -> bool {
+    let loops = f.loops_around(call);
+    f.writes.iter().any(|w| {
+        w.at != call
+            && f.order(w.at) != u32::MAX
+            && f.root_of(w.path).is_some_and(|r| matches!(body.expr(r).kind, HirKind::Local(x) if x == l))
+            && (f.order(w.at) > f.order(call) || loops.iter().any(|&lp| f.contains(lp, w.at)))
+    })
+}
+
+/// Where a call's result is given a name (#2818): the node that is bound,
+/// stored or passed on, and how many field or element steps below the
+/// result it reads. `None` where the result is only read: dropped, an
+/// operand, or an argument a callee neither keeps nor hands back.
+fn named_result(f: &Facts<'_>, body: &HirBody, call: HirId) -> Option<(HirId, usize)> {
+    let mut at = call;
+    let mut steps = 0;
+    loop {
+        if read_only_result(f, body, at) {
+            return None;
+        }
+        let Some(&p) = f.parent.get(&at) else { return Some((at, steps)) };
+        match &body.expr(p).kind {
+            HirKind::Field { base, .. } | HirKind::Index { base, kind: IndexKind::Array, .. } if *base == at => {
+                // The place of a write: the write makes the temporary unique.
+                if matches!(f.parent.get(&p).map(|g| &body.expr(*g).kind), Some(HirKind::Assign { place, .. }) if *place == p) {
+                    return None;
+                }
+                steps += 1;
+                at = p;
+            }
+            HirKind::Call { args, .. } => {
+                let Some(j) = args.iter().position(|&a| named_value(body, a) == at) else { return Some((at, steps)) };
+                let u = f.calls.get(&p).copied().unwrap_or_default();
+                let bit = if j < 64 { 1u64 << j } else { u64::MAX };
+                return ((u.kept | u.opaque | u.returned | u.inner) & bit != 0).then_some((at, steps));
+            }
+            _ => return Some((at, steps)),
+        }
+    }
+}
+
 /// Whether argument `v` of `call` is moved into it (#2206): its place is
 /// not read again while the result may name its object. Either the last
 /// read of a local that owns its object, or `l = f(.., l, ..)` with `l`
@@ -1488,6 +2092,168 @@ fn place_path(body: &HirBody, f: &Facts<'_>, v: HirId) -> Option<(LocalId, Vec<O
     }
 }
 
+/// A write path as [`Plan::unique_path`] walks it (fields and array
+/// elements): its root local and the steps below it, `None` for an element.
+fn write_steps(body: &HirBody, path: HirId) -> Option<(LocalId, Vec<Option<String>>)> {
+    let mut steps = Vec::new();
+    let mut at = path;
+    loop {
+        match &body.expr(at).kind {
+            HirKind::Field { base, name } => {
+                steps.push(Some(name.clone()));
+                at = *base;
+            }
+            HirKind::Index { base, kind: IndexKind::Array, .. } => {
+                steps.push(None);
+                at = *base;
+            }
+            HirKind::Local(l) => {
+                steps.reverse();
+                return Some((*l, steps));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Whether the `for` at `id` may keep what it walks past the loop, other
+/// than in its iterator, which dies with the loop (#2821): its `into_iter`
+/// or `next` keeps what it is given somewhere other than its result, or
+/// hands it to code not known here, or `next` may hand back the walked
+/// object itself. A `for` is no `Call` in HIR, so this is the call's
+/// `kept` for it. An array, tuple, range or generator loop keeps nothing
+/// (a generator's own frame keeps what it was given).
+fn walk_keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, id: HirId) -> bool {
+    let HirKind::ForIn { pat, iterable, kind, .. } = &body.expr(id).kind else { return false };
+    let Some(ForInKind::Custom { into_iter_fqn, next_fqn, .. }) = kind else {
+        return kind.is_none();
+    };
+    // An instance method by the key the loop names: this module's body, or
+    // an earlier module's through the lookup.
+    let summary = |key: &str| {
+        let name = module.instance_fns.get(key).map_or_else(|| key.to_string(), |&i| module.bodies[i].name.clone());
+        lookup(&Callee::Named { name, def: None, overload: None }, &[])
+    };
+    let loose = |s: &Option<Summary>| s.is_none_or(|s| (s.escapes | s.opaque_args) & 1 != 0);
+    if into_iter_fqn.as_deref().is_some_and(|k| loose(&summary(k))) {
+        return true;
+    }
+    let Some(next) = next_fqn else { return false };
+    let s = summary(next);
+    if loose(&s) {
+        return true;
+    }
+    // An object inside the iterator handed back: the walked one itself
+    // when the item's type is the iterable's.
+    let s = s.unwrap_or_default();
+    let mut itself = false;
+    if (s.returns_inner | s.returns_arg) & 1 != 0 {
+        let walked = body.expr(*iterable).ty.as_ref();
+        pat.for_each_bind(&mut |l| itself |= may_be_same_type(body.local(l).ty.as_ref(), walked));
+    }
+    itself
+}
+
+/// Whether a value of type `a` may be one of type `b`: the same head, or
+/// either not known.
+fn may_be_same_type(a: Option<&Ty>, b: Option<&Ty>) -> bool {
+    let head = |t: &Ty| match strip_readonly(t) {
+        Ty::App(h, _) => Some(h.as_ref().clone()),
+        Ty::Var(_) => None,
+        t => Some(t.clone()),
+    };
+    match (a.and_then(head), b.and_then(head)) {
+        (Some(x), Some(y)) => x == y,
+        _ => true,
+    }
+}
+
+/// Whether `id` runs inside a `for` over an iterator (not an array, a
+/// tuple or a range), whose iterator holds the iterable while it runs.
+fn in_iterator_loop(body: &HirBody, f: &Facts<'_>, id: HirId) -> bool {
+    let mut at = id;
+    while let Some(&p) = f.parent.get(&at) {
+        if iterator_loop(body, p) && matches!(&body.expr(p).kind, HirKind::ForIn { body: b, .. } if *b == at) {
+            return true;
+        }
+        at = p;
+    }
+    false
+}
+
+/// Whether write `w` runs in the body of a `for` that holds its iterable
+/// (one over an iterator, or a `holding` one over a `Vec` or an array)
+/// whose iterable is a place with the write's root local.
+fn walked_write(body: &HirBody, f: &Facts<'_>, w: Write, holding: &HashSet<HirId>) -> bool {
+    let Some((root, _)) = place_path(body, f, w.path) else { return false };
+    let mut at = w.at;
+    while let Some(&p) = f.parent.get(&at) {
+        if let HirKind::ForIn { iterable, body: b, .. } = &body.expr(p).kind
+            && *b == at
+            && (iterator_loop(body, p) || holding.contains(&p))
+            && place_path(body, f, *iterable).is_some_and(|(r, _)| r == root)
+        {
+            return true;
+        }
+        at = p;
+    }
+    false
+}
+
+/// Whether the body of the `for` at `id` over a `Vec`, an array or an
+/// iterator may write the object it walks (#2827): a write through a path from the
+/// iterable's root that leads to it, below it or to an object holding it
+/// (a store into another field of a holder does not), a call that may
+/// write one of those (code not known here counts), or any write through
+/// a borrow of the root other than the loop's own `for mut` binding. Over a `static`, a write to it or a call that may
+/// write a `static`.
+fn walk_written(body: &HirBody, f: &Facts<'_>, id: HirId) -> bool {
+    let HirKind::ForIn { iterable, body: lbody, kind, .. } = &body.expr(id).kind else { return false };
+    if !matches!(kind, Some(ForInKind::Array)) && !iterator_loop(body, id) {
+        return false;
+    }
+    let inside = |at: HirId| f.contains(*lbody, at);
+    let Some((r, ip)) = place_path(body, f, *iterable) else {
+        let Some(HirKind::Global { name, .. }) = f.root_of(*iterable).map(|g| &body.expr(g).kind) else { return false };
+        let same = |w: &Write| f.root_of(w.path).is_some_and(|x| matches!(&body.expr(x).kind, HirKind::Global { name: n, .. } if n == name));
+        return f.writes.iter().any(|w| inside(w.at) && same(w)) || f.static_calls.iter().any(|&c| inside(c));
+    };
+    f.writes.iter().any(|&w| {
+        inside(w.at)
+            && write_reach(body, f, w).is_some_and(|(x, steps)| {
+                if x == r {
+                    prefix_of(&steps, &ip) || prefix_of(&ip, &steps)
+                } else {
+                    // The loop's own `for mut` binding writes the element it
+                    // is bound to, which the walk has already read.
+                    let own = f.bound.get(&x).is_some_and(|&(_, binder)| binder == id);
+                    !own && body.local(x).borrow && aliases(f, body, x, r)
+                }
+            })
+    })
+}
+
+/// The place write `w` changes: its root local and the steps to the object
+/// it writes, one step further for a store into a field or an element (a
+/// store into `r.n` changes `r`'s slot `n`, not what `r.m` holds).
+fn write_reach(body: &HirBody, f: &Facts<'_>, w: Write) -> Option<(LocalId, Vec<Option<String>>)> {
+    let (root, mut steps) = place_path(body, f, w.path)?;
+    if let HirKind::Assign { place, .. } = &body.expr(w.at).kind {
+        match &body.expr(*place).kind {
+            HirKind::Field { base, name } if *base == w.path => steps.push(Some(name.clone())),
+            HirKind::Index { base, .. } if *base == w.path => steps.push(None),
+            _ => {}
+        }
+    }
+    Some((root, steps))
+}
+
+/// Whether `id` is a `for` over an iterator (not an array, a tuple or a
+/// range): its iterator holds the iterable while the loop runs.
+fn iterator_loop(body: &HirBody, id: HirId) -> bool {
+    matches!(&body.expr(id).kind, HirKind::ForIn { kind, .. } if !matches!(kind, Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. })))
+}
+
 /// Whether place steps `a` lead to `b` or to an object holding it.
 /// Elements match any index.
 fn prefix_of(a: &[Option<String>], b: &[Option<String>]) -> bool {
@@ -1543,7 +2309,7 @@ fn twins_of(body: &HirBody, at: HirId, id: HirId) -> Vec<HirId> {
             continue;
         }
         if n != id {
-            work.extend(children(body, n));
+            work.extend(body.children(n));
         }
     }
     out
@@ -1552,7 +2318,7 @@ fn twins_of(body: &HirBody, at: HirId, id: HirId) -> Vec<HirId> {
 /// Whether code emission packs `id` as an existential (by node or span).
 fn pack_site(checker: &Checker, body: &HirBody, id: HirId) -> bool {
     let e = body.expr(id);
-    e.node.is_some_and(|n| checker.existential_pack_at(n).is_some()) || checker.existential_pack_span(e.span.0, e.span.1).is_some()
+    e.node.is_some_and(|n| checker.existential_pack_at(n).is_some()) || checker.existential_pack_for_span(e.span.0, e.span.1).is_some()
 }
 
 /// A value a constructor made just now: `new C(..)`, an array literal, an
@@ -1568,7 +2334,8 @@ fn fresh_ctor(body: &HirBody, v: HirId) -> bool {
 }
 
 impl Plan {
-    fn apply(&self, out: &mut HirBody, checker: &Checker) {
+    /// Put the ops in `out`; the captures it moved to a copy.
+    fn apply(&self, out: &mut HirBody, checker: &Checker) -> Vec<CaptureCopy> {
         let span_of = |b: &HirBody, id: HirId| b.expr(id).span;
         // Write paths first, on the nodes as built: shares below wrap
         // nodes in place, which a path must not look through.
@@ -1577,15 +2344,25 @@ impl Plan {
         // earlier changes nothing a program sees).
         let mut before = Before::default();
         for &(w, at) in &self.unique {
-            for s in self.unique_path(out, checker, w.path, w.at) {
+            let held = self.held.get(&(w.at, w.path)).copied().unwrap_or(0);
+            let walked = self.walked.contains(&(w.at, w.path));
+            for s in self.unique_path(out, checker, w.path, w.at, held, walked) {
                 before.add(at, s);
             }
         }
         before.apply(out);
-        // Pattern-bound and captured locals: a share statement.
+        // Pattern-bound and captured locals: a share statement. A `let`
+        // pattern binding more than one shares each after it (#2744).
+        let mut let_pats: HashSet<HirId> = HashSet::new();
         for &(binder, l) in &self.share_after {
             let span = span_of(out, binder);
             let stmt = share_local(out, l, span);
+            if let_pats.contains(&binder) {
+                if let HirKind::Block { stmts, .. } = &mut out.exprs[binder.0 as usize].kind {
+                    stmts.push(stmt);
+                }
+                continue;
+            }
             match out.expr(binder).kind.clone() {
                 HirKind::ForIn { pat, iterable, body: b, kind } => {
                     let inner = relocate(out, b);
@@ -1594,6 +2371,7 @@ impl Plan {
                     let _ = (pat, iterable, kind);
                 }
                 HirKind::LetPat { .. } => {
+                    let_pats.insert(binder);
                     let inner = relocate(out, binder);
                     let x = &mut out.exprs[binder.0 as usize];
                     x.kind = HirKind::Block { stmts: vec![inner, stmt], tail: None };
@@ -1617,9 +2395,27 @@ impl Plan {
         for &(at, l) in &self.unique_before {
             let span = span_of(out, at.1);
             let ty = out.local(l).ty.clone();
-            let read = push(out, HirKind::Local(l), ty, span);
+            let read = out.push_new(HirKind::Local(l), ty, span);
             let stmt = unique_stmt(out, read, span);
             before.add(at, stmt);
+        }
+        // `let $cap = share(unique(share(p)))` before the lambda, which
+        // captures `$cap` in place of `p`: every new name is the result of a
+        // share. The copy is shared in turn, as any capture is: a write in
+        // the closure's body copies it, so the closure's own value never
+        // changes between calls.
+        let mut moved = Vec::new();
+        for &(at, inner, l) in &self.copy_before {
+            let span = span_of(out, at.1);
+            let ty = out.local(l).ty.clone();
+            let shared = share_local(out, l, span);
+            let copy = out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![shared] }, ty.clone(), span);
+            let copy = out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: false }, args: vec![copy] }, ty.clone(), span);
+            let name = format!("$cap{}", out.locals.len());
+            let t = out.temp_named(name, ty);
+            out.locals[t.0 as usize].captured = true;
+            before.add(at, out.push_new(HirKind::Let { local: t, init: Some(copy) }, Some(ty::unit()), span));
+            moved.push(CaptureCopy { lambda: inner, from: l, to: t });
         }
         before.apply(out);
         for &(v, eager) in &self.share {
@@ -1638,11 +2434,15 @@ impl Plan {
                 x.kind = HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![shared] };
             }
         }
+        moved
     }
 
     /// The statements that make the objects on `path` writable, top-down,
-    /// writing each copy back where it was read.
-    fn unique_path(&self, out: &mut HirBody, checker: &Checker, path: HirId, stmt: HirId) -> Vec<HirId> {
+    /// writing each copy back where it was read. The first `held` objects
+    /// from the root are a borrow's, written in place ([`Self::hold_borrowed`]).
+    /// A `walked` write's root is held by a loop's iterator.
+    #[allow(clippy::too_many_arguments)]
+    fn unique_path(&self, out: &mut HirBody, checker: &Checker, path: HirId, stmt: HirId, held: usize, walked: bool) -> Vec<HirId> {
         // A copy of an existential pack site would share its span, and
         // code emission would pack the copy too.
         if pack_site(checker, out, path) {
@@ -1671,9 +2471,9 @@ impl Plan {
             && !pure_index(out, value)
             && chain.iter().all(|&st| twins_of(out, value, st).is_empty())
         {
-            let t = temp(out, out.expr(value).ty.clone(), "$cowv");
+            let t = out.temp("$cowv", out.expr(value).ty.clone());
             let moved = relocate(out, value);
-            stmts.push(push(out, HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
+            stmts.push(out.push_new(HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
             let x = &mut out.exprs[value.0 as usize];
             x.kind = HirKind::Local(t);
             x.node = None;
@@ -1684,7 +2484,7 @@ impl Plan {
             if let HirKind::Index { index, .. } = out.expr(step).kind.clone()
                 && !pure_index(out, index)
             {
-                let t = temp(out, out.expr(index).ty.clone(), "$cowi");
+                let t = out.temp("$cowi", out.expr(index).ty.clone());
                 // A compound assignment reads the place again through a
                 // twin of the index (same span and shape), which lowering
                 // pairs with this one: it reads the temporary too.
@@ -1695,7 +2495,7 @@ impl Plan {
                     x.kind = HirKind::Local(t);
                     x.node = None;
                 }
-                stmts.push(push(out, HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
+                stmts.push(out.push_new(HirKind::Let { local: t, init: Some(moved) }, Some(ty::unit()), span));
                 let x = &mut out.exprs[index.0 as usize];
                 x.kind = HirKind::Local(t);
                 x.node = None;
@@ -1706,7 +2506,7 @@ impl Plan {
         match &out.expr(root).kind {
             HirKind::Local(l) => {
                 let l = *l;
-                let skip = self.fresh_locals.contains(&l) || self.inout.contains(&l) || self.defer_captured.contains(&l) || !cow_ty(checker, out.local(l).ty.as_ref());
+                let skip = held > 0 || (self.fresh_locals.contains(&l) && !walked) || self.inout.contains(&l) || !cow_ty(checker, out.local(l).ty.as_ref());
                 if !skip {
                     stmts.push(unique_stmt(out, root, span));
                 }
@@ -1719,20 +2519,20 @@ impl Plan {
             _ if chain.len() == 1 && (fresh_ctor(out, root) || pack_site(checker, out, root) || !cow_ty(checker, out.expr(root).ty.as_ref())) => {}
             _ => {
                 let ty = out.expr(root).ty.clone();
-                let t = temp(out, ty.clone(), "$cowt");
+                let t = out.temp("$cowt", ty.clone());
                 let moved = relocate(out, root);
                 let init = if cow_ty(checker, ty.as_ref()) {
-                    push(out, HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![moved] }, ty.clone(), span)
+                    out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![moved] }, ty.clone(), span)
                 } else {
                     moved
                 };
-                stmts.push(push(out, HirKind::Let { local: t, init: Some(init) }, Some(ty::unit()), span));
+                stmts.push(out.push_new(HirKind::Let { local: t, init: Some(init) }, Some(ty::unit()), span));
                 let x = &mut out.exprs[root.0 as usize];
                 x.kind = HirKind::Local(t);
                 x.node = None;
             }
         }
-        for &step in &chain[1..] {
+        for &step in &chain[held.clamp(1, chain.len())..] {
             if cow_ty(checker, out.expr(step).ty.as_ref()) && !borrow_field(checker, out, step) {
                 stmts.push(unique_stmt(out, step, span));
             }
@@ -1758,9 +2558,9 @@ fn unique_stmt(out: &mut HirBody, place: HirId, span: Span) -> HirId {
     let read = dup(out, place);
     let ty = out.expr(place).ty.clone();
     let layout = out.expr(place).layout.clone();
-    let u = push(out, HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![read] }, ty, span);
+    let u = out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![read] }, ty, span);
     out.exprs[u.0 as usize].layout = layout;
-    push(out, HirKind::Assign { place: target, value: u }, Some(ty::unit()), span)
+    out.push_new(HirKind::Assign { place: target, value: u }, Some(ty::unit()), span)
 }
 
 /// A copy of the subtree at `id` with new nodes (a place: locals, fields,
@@ -1784,8 +2584,8 @@ fn dup(out: &mut HirBody, id: HirId) -> HirId {
 
 fn share_local(out: &mut HirBody, l: LocalId, span: Span) -> HirId {
     let ty = out.local(l).ty.clone();
-    let read = push(out, HirKind::Local(l), ty.clone(), span);
-    push(out, HirKind::Builtin { op: Builtin::Cow { unique: false }, args: vec![read] }, ty, span)
+    let read = out.push_new(HirKind::Local(l), ty.clone(), span);
+    out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: false }, args: vec![read] }, ty, span)
 }
 
 /// Statements to run before others, gathered per place: `(block, at)`
@@ -1845,31 +2645,6 @@ fn prepend(out: &mut HirBody, at: HirId, mut stmts: Vec<HirId>) {
     x.layout = layout;
 }
 
-fn push(out: &mut HirBody, kind: HirKind, ty: Option<Ty>, span: Span) -> HirId {
-    let id = HirId(out.exprs.len() as u32);
-    out.exprs.push(HirExpr {
-        kind,
-        ty,
-        layout: crate::layout::Layout::Word,
-        span,
-        node: None,
-        flags: HirFlags::default(),
-    });
-    id
-}
-
-fn temp(out: &mut HirBody, ty: Option<Ty>, prefix: &str) -> LocalId {
-    let id = LocalId(out.locals.len() as u32);
-    out.locals.push(HirLocal {
-        name: format!("{prefix}{}", id.0),
-        ty,
-        kind: LocalKind::Temp,
-        captured: false,
-        borrow: false,
-    });
-    id
-}
-
 /// Move node `id` to a new node and return it, so `id` can be rewritten
 /// while its parent still points at it.
 fn relocate(out: &mut HirBody, id: HirId) -> HirId {
@@ -1877,11 +2652,4 @@ fn relocate(out: &mut HirBody, id: HirId) -> HirId {
     let new = HirId(out.exprs.len() as u32);
     out.exprs.push(moved);
     new
-}
-
-#[allow(dead_code)]
-fn pat_locals(pat: &HirPat) -> Vec<LocalId> {
-    let mut out = Vec::new();
-    pat_binds(pat, &mut out);
-    out
 }

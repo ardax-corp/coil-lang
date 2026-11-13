@@ -3,14 +3,14 @@
 //! Bartlett-style. An object moves only when every reference to it is
 //! precise: a pointer-kind field / payload / tuple / array word, a
 //! `Member::Object`, a masked coroutine slot, or a must-pointer frame slot.
-//! Anything an ambiguous word can reach (the VM's non-must roots, unknown
+//! Anything an ambiguous word can reach (the runtime's non-must roots, unknown
 //! kinds, closure captures, `Member::Value`), `Root` / `Weak` targets, and
 //! every kind other than instances / payload enums / boxes / tuples / arrays
 //! stays put. See `docs/internals/gc-evacuation.md`.
 //!
-//! Three steps so the VM can rewrite its own roots in between:
+//! Three steps so the runtime can rewrite its own roots in between:
 //! [`Heap::evacuate_plan`] copies and rewrites the heap,
-//! the VM rewrites its must-pointer slots through [`EvacPlan::forward`], then
+//! the runtime rewrites its must-pointer slots through [`EvacPlan::forward`], then
 //! [`Heap::evacuate_finish`] poisons and frees the old slots and releases
 //! emptied chunks. Runs only between cycles (`GcPhase::Idle`) and outside a
 //! shared-heap epoch.
@@ -23,8 +23,8 @@ use common::Value;
 
 use super::super::AddrHashBuilder;
 use super::{
-    GcData, GcHeader, GcPhase, Heap, InstanceStorage, Member, ObjArray, ObjBoxed, ObjEnum,
-    ObjFn, ObjInstance, ObjTuple, Object,
+    GcData, GcHeader, GcPhase, Heap, Member, ObjArray, ObjEnum,
+    ObjFn, ObjInstance, Object, SlotVisitorMut,
 };
 
 type AddrSet = HashSet<u64, AddrHashBuilder>;
@@ -95,124 +95,54 @@ impl Object {
     pub(super) fn movable_layout(&self) -> Option<Layout> {
         Some(match self {
             Self::Instance(_) => Layout::new::<GcData<ObjInstance>>(),
-            // Unit variants are shared immortals.
+            // Unit variants and `()` are shared immortals.
             Self::Enum(e) if !e.as_ref().payload.is_empty() => Layout::new::<GcData<ObjEnum>>(),
-            Self::Boxed(_) => Layout::new::<GcData<ObjBoxed>>(),
-            // `()` is a shared immortal.
-            Self::Tuple(t) if !t.as_ref().elements().is_empty() => Layout::new::<GcData<ObjTuple>>(),
             Self::Array(_) => Layout::new::<GcData<ObjArray>>(),
             Self::Fn(_) => Layout::new::<GcData<ObjFn>>(),
             _ => return None,
         })
     }
 
-    /// Rewrite this object's precise references to moved objects. Mirrors
-    /// the precise cases of [`Object::for_each_reference`].
+    /// Rewrite this object's precise references to moved objects: the
+    /// precise slots of [`Object::for_each_reference`].
     #[cold]
     pub(super) fn rewrite_precise_refs(&self, heap: &Heap, fwd: &AddrMap) {
-        let fix = |v: &mut Value| {
-            if let Some(n) = forward(fwd, *v) {
-                *v = n;
-            }
-        };
-        let fix_kinded = |words: &mut [Value], kinds: u8| {
-            for (i, v) in words.iter_mut().enumerate() {
-                if common::packed_word_kind(kinds, i) == common::WORD_POINTER {
-                    fix(v);
-                }
-            }
-        };
-        let fix_member = |m: &mut Member| -> bool {
-            if let Member::Object(o) = m
-                && let Some(&to) = fwd.get(&o.addr())
-                && let Some(n) = heap.find_object_by_addr(to)
-            {
-                *m = Member::Object(n);
-                return true;
-            }
-            false
-        };
-        match self {
-            Self::Instance(i) => {
-                let inst = i.payload_mut();
-                match &mut inst.storage {
-                    InstanceStorage::Table(table) => {
-                        let updates: Vec<_> = table
-                            .iter()
-                            .filter_map(|(k, v)| {
-                                let mut m = v;
-                                fix_member(&mut m).then_some((k, m))
-                            })
-                            .collect();
-                        for (k, m) in updates {
-                            table.insert(k, m);
-                        }
-                    }
-                    storage => {
-                        let kinds = heap.class_field_kinds(inst.type_id);
-                        if let Some(words) = storage.as_mut_slice() {
-                            for (i, v) in words.iter_mut().enumerate() {
-                                if kinds.get(i).copied() == Some(common::WORD_POINTER) {
-                                    fix(v);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Self::Enum(e) => {
-                let payload = &mut e.payload_mut().payload;
-                let kinds = payload.kinds();
-                fix_kinded(payload.as_mut_slice(), kinds);
-            }
-            Self::Tuple(t) => {
-                let t = t.payload_mut();
-                let kinds = t.kinds();
-                fix_kinded(t.elements.as_mut_slice(), kinds);
-            }
-            Self::Array(a) => {
-                let a = a.payload_mut();
-                if a.may_hold_refs() && a.elem_kind() == common::WORD_POINTER {
-                    a.gc_words_mut().unwrap_or_default().iter_mut().for_each(fix);
-                }
-            }
-            Self::Coroutine(c) => {
-                let coro = c.payload_mut();
-                let mask = coro.saved_live_mask;
-                if mask != 0 {
-                    for (i, v) in coro.saved_stack.iter_mut().enumerate().take(64) {
-                        if mask & (1u64 << i) != 0 {
-                            fix(v);
-                        }
-                    }
-                }
-            }
-            Self::Boxed(b) => {
-                fix_member(&mut b.payload_mut().payload);
-            }
-            Self::Root(r) => {
-                if let Some(m) = &mut r.payload_mut().payload {
-                    fix_member(m);
-                }
-            }
-            Self::Fn(f) => {
-                for m in f.payload_mut().dicts.iter_mut().flatten().flatten() {
-                    fix_member(m);
-                }
-            }
-            _ => {}
+        struct Rewriter<'a> {
+            heap: &'a Heap,
+            fwd: &'a AddrMap,
         }
+        impl SlotVisitorMut for Rewriter<'_> {
+            #[inline(always)]
+            fn word(&mut self, v: &mut Value, kind: u8) {
+                if kind == common::WORD_POINTER
+                    && let Some(n) = forward(self.fwd, *v)
+                {
+                    *v = n;
+                }
+            }
+
+            #[inline(always)]
+            fn member(&mut self, m: &mut Member) {
+                if let Member::Object(o) = m
+                    && let Some(&to) = self.fwd.get(&o.addr())
+                    && let Some(n) = self.heap.find_object_by_addr(to)
+                {
+                    *m = Member::Object(n);
+                }
+            }
+        }
+        self.visit_slots_mut(heap, &mut Rewriter { heap, fwd });
     }
 }
 
 impl Heap {
     /// Copy the movable objects of sparse chunks (or, with `everything`, of
     /// every chunk — the stress mode) and rewrite the heap's precise
-    /// references. `vm_pins` are the VM roots it cannot rewrite; each pins
+    /// references. `pins` are the roots it cannot rewrite; each pins
     /// its target. `None` when nothing is worth moving. The old copies stay
     /// readable until [`Self::evacuate_finish`].
     #[cold]
-    pub fn evacuate_plan(&mut self, vm_pins: &[u64], everything: bool) -> Option<EvacPlan> {
+    pub fn evacuate_plan(&mut self, pins: &[u64], everything: bool) -> Option<EvacPlan> {
         if self.gc_phase != GcPhase::Idle || self.epoch_stw {
             return None;
         }
@@ -225,7 +155,7 @@ impl Heap {
         }
         let live = self.live_objects();
 
-        let mut pinned: AddrSet = vm_pins.iter().map(|a| a & !1).collect();
+        let mut pinned: AddrSet = pins.iter().map(|a| a & !1).collect();
         for obj in &live {
             match obj {
                 // FFI code may hold a rooted object's address; weak targets
@@ -500,6 +430,40 @@ mod tests {
             heap.evacuate_finish(plan);
         }
         assert!(matches!(heap.find_object_by_addr(target.addr()), Some(Object::Enum(_))));
+    }
+
+    /// A lane array's lane 0 moves and is rewritten where its element's
+    /// tag names a heap variant; under the other tag it is a scalar that
+    /// happens to look like an address and stays as written.
+    #[test]
+    fn lane_array_pointer_lanes_are_rewritten_by_tag() {
+        let mut heap = Heap::default();
+        let mut words = Vec::new();
+        let mut addrs = Vec::new();
+        for v in 0..32 {
+            let (e, _) = heap.alloc(ObjEnum::new(0, EnumPayload::one(Value::from(v)).with_kinds(1)), Object::Enum);
+            addrs.push(e.addr());
+            // Tag 1 (a heap payload) on even elements, tag 0 (a scalar) on odd.
+            words.extend([Value::from(e.addr()), Value::from(i64::from(v % 2 == 0))]);
+        }
+        let (arr, _) = heap.alloc(ObjArray::from_lanes(words, 2, 0b10), Object::Array);
+        full_collect(&mut heap, &[arr.addr()]);
+        let (_, moved) = evacuate(&mut heap, &[arr.addr()]);
+        let Some(Object::Array(a)) = heap.find_object_by_addr(arr.addr()) else {
+            panic!("array is a pinned root");
+        };
+        for (v, &addr) in addrs.iter().enumerate() {
+            let lanes = a.as_ref().get_lanes(v).expect("in bounds");
+            if v % 2 == 0 {
+                assert!(!moved.contains_key(&lanes[0].heap_addr()));
+                let Some(Object::Enum(e)) = heap.find_object_by_addr(lanes[0].heap_addr()) else {
+                    panic!("element {v} is not an enum");
+                };
+                assert_eq!(e.as_ref().payload[0].as_int(), v as i64);
+            } else {
+                assert_eq!(lanes[0].bits(), addr, "a scalar lane is never rewritten");
+            }
+        }
     }
 
     /// Pointer-kind array elements move and are rewritten, keeping the

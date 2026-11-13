@@ -1,0 +1,153 @@
+// Doc stubs for the builtin `prelude::thread` module (hover docs; never compiled).
+//
+// These are the lock primitives `thread::with_lock`, `with_read`,
+// `with_write`, `try_read` and `try_write` are written with (the embedded
+// `thread_locks` module). User code should not call them: a hold taken here
+// lasts until its release, so a missed release leaves the lock held, and a
+// release does not check its caller holds the lock. Use the `thread` lock
+// calls instead.
+
+/// Locks `m`, parking the running task while another holds it. Low-level: use `thread::with_lock`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{mutex, with_lock};
+///
+/// let m = mutex(1)?;
+/// let n = with_lock(m, fn (int x) => (x + 1, x))?;
+/// ```
+fn lock_acquire<T>(Mutex<T> m) {}
+
+/// Unlocks `m`; a no-op when it is not locked. It does not check who holds `m`: called from a task without the hold, it frees another task's hold. Low-level: use `thread::with_lock`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{mutex, with_lock};
+///
+/// let m = mutex(1)?;
+/// // `with_lock` releases the lock when its callback returns or panics.
+/// let _ = with_lock(m, fn (int x) => (x, 0))?;
+/// ```
+fn lock_release<T>(Mutex<T> m) {}
+
+/// A copy of the value `m` guards, read while the caller holds `m`. Low-level: use `thread::with_lock`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{mutex, with_lock};
+///
+/// let m = mutex("a")?;
+/// let s = with_lock(m, fn (string x) => (x, x))?;
+/// ```
+fn lock_load<T>(Mutex<T> m) -> Result<T, LockError> {}
+
+/// Makes `value` the value `m` guards, while the caller holds `m`. Low-level: use `thread::with_lock`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{mutex, with_lock};
+///
+/// let m = mutex(1)?;
+/// let _ = with_lock(m, fn (int x) => (x * 10, 0))?;
+/// ```
+fn lock_store<T>(Mutex<T> m, T value) -> Result<unit, LockError> {}
+
+/// A shared hold on `lock`, parking the task while a writer holds it. Low-level: use `thread::with_read`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{rwlock, with_read};
+///
+/// let rw = rwlock(3)?;
+/// let n = with_read(rw, fn (int x) => x)?;
+/// ```
+fn rw_acquire_read<T>(RwLock<T> lock) {}
+
+/// The exclusive hold on `lock`, parking the task while any holds it. Low-level: use `thread::with_write`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{rwlock, with_write};
+///
+/// let rw = rwlock(3)?;
+/// let _ = with_write(rw, fn (int x) => (x + 1, 0))?;
+/// ```
+fn rw_acquire_write<T>(RwLock<T> lock) {}
+
+/// A shared hold on `lock` if one is free now, without waiting. Low-level: use `thread::try_read`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{rwlock, try_read};
+///
+/// let rw = rwlock(3)?;
+/// let n = try_read(rw, fn (int x) => x)?;
+/// ```
+fn rw_try_read<T>(RwLock<T> lock) -> bool {}
+
+/// The exclusive hold on `lock` if it is free now, without waiting. Low-level: use `thread::try_write`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{rwlock, try_write};
+///
+/// let rw = rwlock(3)?;
+/// let _ = try_write(rw, fn (int x) => (x + 1, 0))?;
+/// ```
+fn rw_try_write<T>(RwLock<T> lock) -> bool {}
+
+/// Ends a shared hold on `lock`. It does not check who holds `lock`: called without a hold, it ends another task's. Low-level: use `thread::with_read`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{rwlock, with_read};
+///
+/// let rw = rwlock(3)?;
+/// let n = with_read(rw, fn (int x) => x)?;
+/// ```
+fn rw_release_read<T>(RwLock<T> lock) {}
+
+/// Ends the exclusive hold on `lock`. It does not check who holds `lock`: called without the hold, it frees another task's. Low-level: use `thread::with_write`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{rwlock, with_write};
+///
+/// let rw = rwlock(3)?;
+/// let _ = with_write(rw, fn (int x) => (x, 0))?;
+/// ```
+fn rw_release_write<T>(RwLock<T> lock) {}
+
+/// A copy of `lock`'s value, read while the caller holds `lock`. Low-level: use `thread::with_read`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{rwlock, with_read};
+///
+/// let rw = rwlock("a")?;
+/// let s = with_read(rw, fn (string x) => x)?;
+/// ```
+fn rw_load<T>(RwLock<T> lock) -> Result<T, LockError> {}
+
+/// Makes `value` `lock`'s value, while the caller holds it exclusive. Low-level: use `thread::with_write`.
+///
+/// # Examples
+///
+/// ```text
+/// use thread::{rwlock, with_write};
+///
+/// let rw = rwlock(1)?;
+/// let _ = with_write(rw, fn (int x) => (x * 10, 0))?;
+/// ```
+fn rw_store<T>(RwLock<T> lock, T value) -> Result<unit, LockError> {}

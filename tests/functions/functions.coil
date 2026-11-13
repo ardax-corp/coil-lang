@@ -57,7 +57,7 @@ test("nested calls") {
     assert!(add(add(1, 2), add(3, 4)) == 10);
 }
 
-// A refused inline attempt must leave no bytecode behind: leaked arg prep or a
+// A refused inline attempt must leave no code behind: leaked arg prep or a
 // partially copied body used to run *and* be followed by the real CALL, storing
 // into caller slots and clobbering an already-computed operand.
 test("call whose body wraps a call") {

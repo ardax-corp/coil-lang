@@ -1,0 +1,14 @@
+// @expected E0149 — a closure that borrows `a` (`use (mut a)`) called in a
+// `for` over `a` writes the object the loop walks (#2819).
+use collections::map::HashMap;
+
+fn main() {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    let f = fn () use (mut a) {
+        let _ = a.insert("b", 2);
+    };
+    for p in a {
+        f();
+    }
+}

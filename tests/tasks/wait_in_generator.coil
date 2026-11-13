@@ -1,0 +1,160 @@
+// A task that waits inside a generator it resumed suspends with the
+// generator, whatever stands between them: a `yield from`, a closure, a body
+// with no `yield`. Other tasks run meanwhile, the wake reaches the wait, and
+// a cancel unwinds the generator's frames.
+use tests::assert;
+use task::{scope, Scope, TaskError, Channel};
+
+static let LOG: int = 0;
+
+fn push(int d) {
+    LOG = LOG * 10 + d;
+}
+
+fn take(Channel<int> ch) -> int {
+    return match ch.recv() {
+        Result::Ok(v) => v,
+        Result::Err(_) => -1,
+    };
+}
+
+gen fn takes(Channel<int> ch) -> int {
+    yield 1;
+    yield take(ch);
+    return take(ch) + 1;
+}
+
+gen fn delegates(Channel<int> ch) -> int {
+    yield from takes(ch);
+    return 9;
+}
+
+gen fn no_yield(Channel<int> ch) -> int {
+    return take(ch);
+}
+
+gen fn through_closure(Channel<int> ch) -> int {
+    let f = fn () use (ch) => take(ch);
+    yield f();
+    return 0;
+}
+
+gen fn guarded(Channel<int> ch) -> int {
+    defer {
+        push(1);
+    }
+    let v = take(ch);
+    push(9);
+    yield v;
+    return 0;
+}
+
+test("a wait in a generator suspends only its task") {
+    let ch: Channel<int> = task::channel(1);
+    let total = scope(fn (Scope s) use (ch) {
+        let t = s.spawn(fn () use (ch) {
+            let g = takes(ch);
+            let a = resume g;
+            let b = resume g;
+            let c = resume g;
+            a * 100 + b * 10 + c
+        });
+        task::yield_now();
+        let _ = ch.send(2);
+        task::yield_now();
+        let _ = ch.send(3);
+        match t.join() {
+            Result::Ok(n) => n,
+            Result::Err(_) => -1,
+        }
+    });
+    assert!(total == Result::Ok(124));
+}
+
+test("the wake goes down a yield from") {
+    let ch: Channel<int> = task::channel(1);
+    let total = scope(fn (Scope s) use (ch) {
+        let t = s.spawn(fn () use (ch) {
+            let g = delegates(ch);
+            let a = resume g;
+            let b = resume g;
+            let c = resume g;
+            a * 100 + b * 10 + c
+        });
+        task::yield_now();
+        let _ = ch.send(2);
+        task::yield_now();
+        let _ = ch.send(3);
+        match t.join() {
+            Result::Ok(n) => n,
+            Result::Err(_) => -1,
+        }
+    });
+    assert!(total == Result::Ok(129));
+}
+
+test("a body with no yield waits too") {
+    let ch: Channel<int> = task::channel(1);
+    let got = scope(fn (Scope s) use (ch) {
+        let t = s.spawn(fn () use (ch) {
+            let g = no_yield(ch);
+            resume g
+        });
+        task::yield_now();
+        let _ = ch.send(5);
+        match t.join() {
+            Result::Ok(n) => n,
+            Result::Err(_) => -1,
+        }
+    });
+    assert!(got == Result::Ok(5));
+}
+
+test("a closure in a generator waits") {
+    let ch: Channel<int> = task::channel(1);
+    let got = scope(fn (Scope s) use (ch) {
+        let t = s.spawn(fn () use (ch) {
+            let g = through_closure(ch);
+            resume g
+        });
+        task::yield_now();
+        let _ = ch.send(6);
+        match t.join() {
+            Result::Ok(n) => n,
+            Result::Err(_) => -1,
+        }
+    });
+    assert!(got == Result::Ok(6));
+}
+
+test("a cancel unwinds the generator its task waits in") {
+    LOG = 0;
+    let ch: Channel<int> = task::channel(1);
+    let stopped = scope(fn (Scope s) use (ch) {
+        let t = s.spawn(fn () use (ch) {
+            let g = guarded(ch);
+            resume g
+        });
+        task::yield_now();
+        t.cancel();
+        match t.join() {
+            Result::Err(TaskError::Cancelled) => true,
+            default => false,
+        }
+    });
+    assert!(stopped == Result::Ok(true));
+    assert!(LOG == 1);
+}
+
+test("the root waits in a generator while a task runs") {
+    let ch: Channel<int> = task::channel(1);
+    let got = scope(fn (Scope s) use (ch) {
+        let _ = s.spawn(fn () use (ch) {
+            let _ = ch.send(8);
+            0
+        });
+        let g = no_yield(ch);
+        resume g
+    });
+    assert!(got == Result::Ok(8));
+}

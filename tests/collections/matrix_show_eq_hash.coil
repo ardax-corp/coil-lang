@@ -1,0 +1,139 @@
+// A `Matrix<D>` has the `Show`, `Eq` and `Hash` instances of its data `D`
+// (#2466): `%v`, `.show()`, `.hash()`, `Eq::eq`, a bound and an aggregate
+// holding one all go to the data's instance. The `==` operator on two
+// matrices stays element-wise (a `Matrix` of `byte`).
+use tests::assert;
+use string::format;
+use collections::map::HashMap;
+
+fn same<T: Eq>(T a, T b) -> bool {
+    return a == b;
+}
+
+fn differ<T: Eq>(T a, T b) -> bool {
+    return a != b;
+}
+
+fn shown<T: Show>(T a) -> string {
+    return format("%v", a);
+}
+
+fn hashed<T: Hash>(T a) -> int {
+    return a.hash();
+}
+
+fn key_of<T: Hash + Eq + Show>(T a) -> string {
+    return a.show();
+}
+
+class Frame {
+    pub m: Matrix<[[int; 2]; 2]>,
+    pub n: int,
+}
+
+test("a matrix shows as its rows") {
+    let m = matrix([[1, 2], [3, 4]]);
+    assert!(format("%v", m) == "[[1, 2], [3, 4]]");
+    assert!(m.show() == "[[1, 2], [3, 4]]");
+    assert!(Show::show(m) == "[[1, 2], [3, 4]]");
+    assert!(shown(m) == "[[1, 2], [3, 4]]");
+    assert!(format("%v", m) == format("%v", [[1, 2], [3, 4]]));
+    let f = matrix([[1.5, 2.0]]);
+    assert!(format("%v", f) == "[[1.5, 2.0]]");
+    assert!(shown(f) == "[[1.5, 2.0]]");
+    // The result of a matrix operator too.
+    let n = matrix([[1, 2], [3, 5]]);
+    assert!(format("%v", m * n) == "[[7, 12], [15, 26]]");
+    assert!(format("%v", m + n) == "[[2, 4], [6, 9]]");
+    assert!(format("%v", m == n) == "[[1, 1], [1, 0]]");
+    assert!(shown(m * n) == "[[7, 12], [15, 26]]");
+}
+
+test("Eq on a matrix compares the data; `==` stays element-wise") {
+    let m = matrix([[1, 2], [3, 4]]);
+    let n = matrix([[1, 2], [3, 5]]);
+    let k = matrix([[1, 2], [3, 4]]);
+    assert!(Eq::eq(m, m));
+    assert!(Eq::eq(m, k));
+    assert!(!Eq::eq(m, n));
+    assert!(m.eq(k));
+    assert!(!m.eq(n));
+    assert!(m.ne(n));
+    assert!(!m.ne(k));
+    assert!(same(m, k));
+    assert!(!same(m, n));
+    assert!(differ(m, n));
+    assert!(!differ(m, k));
+    // The operator: a `Matrix` of `byte`, one cell per test.
+    let cells = m == n;
+    assert!(cells[0][0] == 1 as byte);
+    assert!(cells[1][1] == 0 as byte);
+    let f = matrix([[1.5, 2.0]]);
+    assert!(same(f, matrix([[1.5, 2.0]])));
+    assert!(!same(f, matrix([[1.5, 2.5]])));
+}
+
+test("a matrix hashes as its data") {
+    let m = matrix([[1, 2], [3, 4]]);
+    let n = matrix([[1, 2], [3, 5]]);
+    let k = matrix([[1, 2], [3, 4]]);
+    assert!(m.hash() == [[1, 2], [3, 4]].hash());
+    assert!(m.hash() == k.hash());
+    assert!(m.hash() != n.hash());
+    assert!(hashed(m) == hashed(k));
+    assert!(hashed(m) == m.hash());
+    assert!(hashed(m) != hashed(n));
+    assert!(Hash::hash(m) == k.hash());
+}
+
+test("aggregates holding a matrix") {
+    let m = matrix([[1, 2], [3, 4]]);
+    let n = matrix([[1, 2], [3, 5]]);
+    assert!(format("%v", (m, 1)) == "([[1, 2], [3, 4]], 1)");
+    assert!(format("%v", Some(m)) == "Some([[1, 2], [3, 4]])");
+    assert!(format("%v", [m, n]) == "[[[1, 2], [3, 4]], [[1, 2], [3, 5]]]");
+    assert!(shown((m, n)) == "([[1, 2], [3, 4]], [[1, 2], [3, 5]])");
+    assert!(shown(Some(m)) == "Some([[1, 2], [3, 4]])");
+    assert!((m, 1).hash() == ([[1, 2], [3, 4]], 1).hash());
+    assert!(hashed((m, 1)) != hashed((n, 1)));
+    assert!(same((m, 1), (m, 1)));
+    assert!(!same((m, 1), (n, 1)));
+    assert!(same(Some(m), Some(m)));
+    assert!(!same(Some(m), Some(n)));
+    // Structural `==` of an aggregate, as before.
+    assert!((m, 1) == (m, 1));
+    assert!(Some(m) != Some(n));
+    let r = { a: m, b: 2 };
+    assert!(format("%v", r) == "{ a: [[1, 2], [3, 4]], b: 2 }");
+}
+
+test("a matrix as a map key, a bound of several traits and a field") {
+    let m = matrix([[1, 2], [3, 4]]);
+    let n = matrix([[1, 2], [3, 5]]);
+    let seen: HashMap<Matrix<[[int; 2]; 2]>, int> = HashMap::new();
+    seen.insert(m, 1);
+    seen.insert(n, 2);
+    seen.insert(matrix([[1, 2], [3, 4]]), 3);
+    assert!(seen.len() == 2);
+    assert!(seen.get(m) == Some(3));
+    assert!(seen.get(n) == Some(2));
+    assert!(seen.contains(matrix([[1, 2], [3, 5]])));
+    assert!(key_of(m) == "[[1, 2], [3, 4]]");
+    let fr = new Frame(m, 1);
+    assert!(format("%v", fr.m) == "[[1, 2], [3, 4]]");
+    assert!(same(fr.m, m));
+    assert!(fr.m.hash() == m.hash());
+}
+
+test("the matrix operators are what they were") {
+    let m = matrix([[1, 2], [3, 4]]);
+    let n = matrix([[1, 2], [3, 5]]);
+    let p = m * n;
+    assert!(p[0][0] == 7 && p[1][1] == 26);
+    let s = m + n;
+    assert!(s[1][1] == 9);
+    let lt = m < n;
+    assert!(lt[1][1] == 1 as byte && lt[0][0] == 0 as byte);
+    let ne = m != n;
+    assert!(ne[1][1] == 1 as byte && ne[0][0] == 0 as byte);
+}

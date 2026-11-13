@@ -1,0 +1,110 @@
+// @flags --clone-budget 0
+// The same through the shared generic bodies: a `for` over a value of a
+// type parameter bounded by `Iterator` calls the bound's `next` through its
+// dictionary (#2820).
+use tests::assert;
+
+class Up {
+    pub i: int,
+    pub n: int,
+}
+
+impl Iterator for Up {
+    type Item = int;
+    fn next(Up u) -> Option<int> {
+        if u.i >= u.n {
+            return None;
+        }
+        u.i += 1;
+        return Some(u.i);
+    }
+}
+
+class C {
+    pub x: int,
+}
+
+class Cs {
+    pub v: Vec<C>,
+    pub i: int,
+}
+
+impl Iterator for Cs {
+    type Item = C;
+    fn next(Cs c) -> Option<C> {
+        if c.i >= c.v.len() {
+            return None;
+        }
+        c.i += 1;
+        return Some(c.v[c.i - 1]);
+    }
+}
+
+fn collect<I: Iterator>(I it) -> Vec<I::Item> {
+    let out: Vec<I::Item> = Vec::new();
+    for x in it {
+        out.push(x);
+    }
+    return out;
+}
+
+fn skip_take<I: Iterator>(I it) -> Vec<I::Item> {
+    let out: Vec<I::Item> = Vec::new();
+    let k = 0;
+    for x in it {
+        k += 1;
+        if k == 2 {
+            continue;
+        }
+        if k == 4 {
+            break;
+        }
+        out.push(x);
+    }
+    return out;
+}
+
+fn advance<I: Iterator>(I it) -> int {
+    let n = 0;
+    for _ in it {
+        n += 1;
+        if n == 2 {
+            break;
+        }
+    }
+    let rest = 0;
+    for _ in it {
+        rest += 1;
+    }
+    return n * 100 + rest;
+}
+
+test("a for over an Iterator-bounded parameter collects every item") {
+    let a = collect(new Up(0, 3));
+    assert!(a.len() == 3);
+    assert!(a[0] == 1 && a[1] == 2 && a[2] == 3);
+    assert!(collect(new Up(0, 0)).len() == 0);
+}
+
+test("continue and break in the loop") {
+    let b = skip_take(new Up(0, 9));
+    assert!(b.len() == 2);
+    assert!(b[0] == 1 && b[1] == 3);
+}
+
+test("the loop advances the iterator it is given") {
+    assert!(advance(new Up(0, 5)) == 203);
+    assert!(advance(new Up(0, 1)) == 100);
+}
+
+test("object items are values") {
+    let v = [new C(1), new C(2)];
+    let cs = new Cs(Vec::new(), 0);
+    cs.v.push(v[0]);
+    cs.v.push(v[1]);
+    let got = collect(cs);
+    got[0].x = 100;
+    assert!(got[0].x == 100 && got[1].x == 2);
+    assert!(v[0].x == 1);
+    assert!(cs.v[0].x == 1);
+}

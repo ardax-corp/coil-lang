@@ -2,6 +2,7 @@
 // is only the loop, the same sum after an early return, a dot product, a
 // scaled copy, a max, a count of one value and an xor. Prints ns per call; the compiler runs each loop 8 lanes
 // at a time in one op (`mir/vec_loop.rs`).
+// @skip auto-par prints the nanoseconds each call took
 use clock::mono_nanos;
 use io::{stdout, write};
 use string::{format, to_bytes};

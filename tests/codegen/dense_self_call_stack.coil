@@ -1,5 +1,5 @@
-// Self-recursive bodies on the dense tier keep call results on the operand
-// stack where LIR does: each shape gives the same answer as plain code.
+// Self-recursive bodies keep call results live across
+// self calls: each shape gives the same answer as plain code.
 use tests::assert;
 
 enum Tree {

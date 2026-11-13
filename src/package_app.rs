@@ -7,9 +7,8 @@ use std::process::exit;
 
 use coil_cli::resolve_default_runner;
 use common::{
-    append_package_payload_with_natives, bytecode_uses_ffi, dload_request_stem,
-    ffi_library_names_from_bytecode,
-    is_packaged_executable, is_system_ffi_stem, ArchivedArchivedProgram, ArchivedProgram, Byte,
+    append_package_payload_with_natives, dload_request_stem,
+    is_packaged_executable, is_system_ffi_stem, linked_package, ArchivedProgram,
     NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
 use compiler::Pipeline;
@@ -20,36 +19,408 @@ use sha2::{Digest, Sha256};
 
 use crate::fail_and_exit;
 
-/// Compile `filename` to archive bytes at the pipeline's `-g` level
+/// Compile `filename` to an archive at the pipeline's `-g` level
 /// (`coil package` defaults to `-g1`; `--strip-debug` is `-g0`).
-fn compile_program_archive_bytes(pipeline: &mut Pipeline, filename: &str) -> Result<Vec<u8>, ()> {
-    let (bytecode, constants) = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
-    let mut program = ArchivedProgram {
-        version: ARCHIVE_VERSION,
-        static_slot_count: pipeline.static_slot_count(),
-        constants,
-        strings: pipeline.strings().to_vec(),
-        bytecode,
-        source_files: Vec::new(),
-        debug_locs: Vec::new(),
-        fn_symbols: Vec::new(),
-        struct_layouts: pipeline.archived_struct_layouts(),
-        operand_stack_slots: pipeline.operand_stack_slots(),
-        stack_maps: Vec::new(),
-        precise_frames: pipeline.precise_frames().to_vec(),
-        class_word_kinds: pipeline.class_word_kinds(),
-        static_word_kinds: pipeline.static_word_kinds(),
-        debug_lines: Vec::new(),
-        cleanup_ranges: Vec::new(),
-        line_table: Vec::new(),
-        span_table: Vec::new(),
-    };
+fn compile_program(pipeline: &mut Pipeline, filename: &str) -> Result<ArchivedProgram, ()> {
+    let constants = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
     // Cleanup ranges are behaviour (panics run `defer`s), not debug info:
     // `set_debug` keeps them at every level.
-    program.set_debug(pipeline.program_debug_full(), pipeline.debug_level());
-    rkyv::to_bytes::<Error>(&program)
-        .map(|b| b.as_slice().to_vec())
-        .map_err(|_| ())
+    // Native code locates its panics by byte span: an AOT payload keeps the
+    // spans with the lines.
+    Ok(pipeline.archive(constants, |_| Vec::new()))
+}
+
+/// The payload bytes of `program`.
+fn payload_bytes(pipeline: &mut Pipeline, program: &ArchivedProgram) -> Vec<u8> {
+    match rkyv::to_bytes::<Error>(program) {
+        Ok(b) => b.as_slice().to_vec(),
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("Unable to serialize archive: {e}")),
+    }
+}
+
+/// `program` with its native MIR, for the runner to JIT. The runner has no interpreter
+/// to run what does not compile, so that shows here and not on the target.
+#[cfg(not(target_family = "wasm"))]
+fn add_native_mir(pipeline: &mut Pipeline, program: &mut ArchivedProgram, bodies: &[compiler::native_mir::NativeBody]) {
+    let pcs = pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    // The inline scopes the `-g` level keeps.
+    let scopes = pipeline.program_debug().inline_scopes;
+    match coil_native::jit(bodies, &pcs) {
+        Ok(jitted) if jitted.refused.is_empty() => program.native_mir = coil_native::section::encode(bodies, &pcs, &scopes),
+        Ok(jitted) => refused_exit(&jitted.refused),
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("native code for the package failed ({e})")),
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn add_native_mir(_: &mut Pipeline, _: &mut ArchivedProgram, _: &[compiler::native_mir::NativeBody]) {}
+
+/// A package has no interpreter: a body native code refuses is an error.
+#[cfg(not(target_family = "wasm"))]
+fn refused_exit(refused: &[(String, String)]) -> ! {
+    for (name, why) in refused {
+        eprintln!("error: `{name}` cannot compile to native code: {why}");
+    }
+    eprintln!("  help: a package has no interpreter; `coil FILE` still runs the program");
+    exit(1);
+}
+
+/// Link an AOT executable for the program just compiled: its MIR through
+/// The object for the program: native code, its tables and `package`.
+/// `Err` when the backend fails; a body it refuses ends the run.
+#[cfg(not(target_family = "wasm"))]
+fn aot_object(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs, package: &[u8]) -> Result<coil_native::AotObject, String> {
+    let debug = pipeline.program_debug_full();
+    let mut pcs: std::collections::HashMap<String, u32> = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    if bodies.iter().any(|b| b.name == coil_native::START_NAME) {
+        pcs.insert(coil_native::START_NAME.to_string(), start_id(bodies));
+    }
+    let linked: Vec<(String, String)> = pipeline
+        .extern_symbols()
+        .into_iter()
+        .filter_map(|(lib, sym)| {
+            let stem = machine::dload_request_stem(&lib);
+            link.statics.iter().any(|s| s.stem == stem).then_some((stem, sym))
+        })
+        .collect();
+    for s in &link.statics {
+        if !linked.iter().any(|(stem, _)| *stem == s.stem) {
+            eprintln!("warning: `--link-static {}`: no `extern \"{}\"` block declares a function", s.path.display(), s.stem);
+        }
+    }
+    let object = coil_native::aot(bodies, &pcs, &linked, package).map_err(|e| format!("native code for the package failed ({e})"))?;
+    if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
+        for (name, why) in &object.refused {
+            eprintln!("  refused: {name}: {why}");
+        }
+    }
+    if !object.refused.is_empty() {
+        refused_exit(&object.refused);
+    }
+    Ok(object)
+}
+
+/// The body id of an AOT executable's `__start`: past every body's.
+#[cfg(not(target_family = "wasm"))]
+fn start_id(bodies: &[compiler::native_mir::NativeBody]) -> u32 {
+    bodies.iter().filter_map(|b| b.entry).map(|l| l.0 + 1).max().unwrap_or(0) + 1
+}
+
+/// What an AOT executable is made from: `bodies` with `__start`
+/// (`coil_native::start_body`), and `program` as data only, whose `main`
+/// is `__start` and whose startup is empty.
+#[cfg(not(target_family = "wasm"))]
+fn with_native_start(pipeline: &mut Pipeline, bodies: &[compiler::native_mir::NativeBody], program: &ArchivedProgram) -> (Vec<compiler::native_mir::NativeBody>, ArchivedProgram) {
+    let ids = pipeline.program_debug_full().fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    let start = match coil_native::start_body(bodies, &ids, &program.startup, program.main) {
+        Ok(b) => b,
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, format!("native start for the package failed ({e})")),
+    };
+    let id = start_id(bodies);
+    let mut all = bodies.to_vec();
+    all.push(start);
+    let mut data = program.clone();
+    data.startup = Vec::new();
+    data.main = Some(id);
+    // Past every other body: the symbols stay sorted by id.
+    data.fn_symbols.push(common::FnDebugSym { name: coil_native::START_NAME.to_string(), body_id: id });
+    (all, data)
+}
+
+#[cfg(target_family = "wasm")]
+fn with_native_start(_: &mut Pipeline, bodies: &[compiler::native_mir::NativeBody], program: &ArchivedProgram) -> (Vec<compiler::native_mir::NativeBody>, ArchivedProgram) {
+    (bodies.to_vec(), program.clone())
+}
+
+/// [`aot_object`], then `cc` with the runtime library (`libcoil_rt.a`
+/// beside `coil`, or `COIL_RT_LIB`). Returns the image, how many functions
+/// compiled and the runtime used; `None` (with a warning) when this host
+/// cannot link one, and the JIT runner is packaged instead.
+#[cfg(not(target_family = "wasm"))]
+fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs, package: &[u8]) -> Option<(Vec<u8>, usize, PathBuf)> {
+    let fallback = |why: String| {
+        // Static libraries link only into an AOT executable.
+        if !link.statics.is_empty() {
+            eprintln!("error: {why}; `--link-static` needs the AOT executable");
+            exit(1);
+        }
+        eprintln!("warning: {why}; packaging the JIT runner instead (pass `--no-aot` to skip linking)");
+        None
+    };
+    let object = match aot_object(pipeline, bodies, link, package) {
+        Ok(o) => o,
+        Err(e) => return fallback(e),
+    };
+    let rt = match runtime_library() {
+        Ok(p) => p,
+        Err(e) => return fallback(e),
+    };
+    match link_with_cc(&object.bytes, &rt, link) {
+        Ok(exe) => Some((exe, object.compiled.len(), rt)),
+        Err(e) => fallback(e),
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn link_aot_executable(_: &Pipeline, _: &[compiler::native_mir::NativeBody], _: &LinkInputs, _: &[u8]) -> Option<(Vec<u8>, usize, PathBuf)> {
+    None
+}
+
+/// `--emit obj` and `--emit lib`: write what the caller's own link takes,
+/// and say how to link it.
+#[cfg(not(target_family = "wasm"))]
+fn write_linkable(pipeline: &mut Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs, package: &[u8], output: &str) {
+    let object = match aot_object(pipeline, bodies, link, package) {
+        Ok(o) => o,
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, e),
+    };
+    let rt = match runtime_library() {
+        Ok(p) => p,
+        Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, e),
+    };
+    let bytes = match link.emit {
+        Emit::Lib => match static_library(&object.bytes, &rt) {
+            Ok(b) => b,
+            Err(e) => fail_and_exit(pipeline, ErrorCode::IoError, e),
+        },
+        _ => object.bytes,
+    };
+    if let Err(e) = fs::write(output, &bytes) {
+        fail_and_exit(pipeline, ErrorCode::IoError, format!("cannot write `{output}`: {e}"));
+    }
+    if let Err(e) = pipeline.finish_reporting() {
+        pipeline.emit_spanless_warning(ErrorCode::IoError, format!("failed to flush diagnostics: {e}"));
+        let _ = pipeline.finish_reporting();
+    }
+    eprintln!(
+        "wrote `{output}` for {}-{} ({} bytes; native code for {} functions)",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        bytes.len(),
+        object.compiled.len()
+    );
+    let statics: Vec<String> = link.statics.iter().map(|s| s.path.display().to_string()).collect();
+    let runtime = if link.emit == Emit::Lib { Vec::new() } else { vec![rt.display().to_string()] };
+    let line = [vec!["cc".to_string(), output.to_string()], statics, runtime, vec!["-o".to_string(), "app".to_string()], system_libs().iter().map(|l| (*l).to_string()).collect()].concat();
+    eprintln!("link it with: {}", line.join(" "));
+}
+
+#[cfg(target_family = "wasm")]
+fn write_linkable(pipeline: &mut Pipeline, _: &[compiler::native_mir::NativeBody], _: &LinkInputs, _: &[u8], _: &str) {
+    fail_and_exit(pipeline, ErrorCode::IoError, "`--emit` needs a native host".to_string())
+}
+
+/// How a package's executable is made.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LinkInputs {
+    /// Link native code for the program (an AOT executable); `false` with
+    /// `--no-aot` or `--runner`: the JIT runner runs it.
+    pub aot: bool,
+    /// What to write (`--emit`).
+    pub emit: Emit,
+    /// Static libraries for `extern` blocks (`--link-static`).
+    pub statics: Vec<StaticLink>,
+    /// Extra linker arguments, after the libraries (`--link-arg`).
+    pub args: Vec<String>,
+    /// What the linker strips from the executable (`--strip-symbols`).
+    pub strip: StripSymbols,
+}
+
+/// What `coil package` writes (`--emit`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Emit {
+    /// An executable.
+    #[default]
+    Exe,
+    /// A relocatable object holding the program, to link with the runtime.
+    Obj,
+    /// A static library holding the program and the runtime.
+    Lib,
+}
+
+/// What `coil package` strips from an AOT executable (`--strip-symbols`):
+/// the runtime's DWARF and symbol table. Coil's own backtraces come from
+/// the program's line table (`-g`), not from these.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum StripSymbols {
+    /// Keep everything (for a native debugger or profiler).
+    None,
+    /// Drop debug info, keep the symbol table (named frames in `perf`).
+    #[default]
+    Debug,
+    /// Drop debug info and the symbol table: the smallest executable.
+    All,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl StripSymbols {
+    /// The `cc` arguments that strip this much.
+    fn cc_args(self) -> &'static [&'static str] {
+        match (self, cfg!(target_os = "macos")) {
+            (StripSymbols::None, _) => &[],
+            (StripSymbols::Debug, false) => &["-Wl,--strip-debug"],
+            (StripSymbols::Debug, true) => &["-Wl,-S"],
+            (StripSymbols::All, false) => &["-s"],
+            (StripSymbols::All, true) => &["-Wl,-S", "-Wl,-x"],
+        }
+    }
+}
+
+/// What `rustc` names `coil-rt`'s static library for this target: Windows
+/// has two, and the GNU one, which releases build, is named as on Unix.
+#[cfg(not(target_family = "wasm"))]
+const RUNTIME_LIB: &str = if cfg!(target_env = "msvc") { "coil_rt.lib" } else { "libcoil_rt.a" };
+
+/// [`RUNTIME_LIB`]: `COIL_RT_LIB`, else the copy embedded in this binary
+/// (written to the cache on first use), else the file beside it.
+#[cfg(not(target_family = "wasm"))]
+fn runtime_library() -> Result<PathBuf, String> {
+    if let Some(p) = std::env::var_os("COIL_RT_LIB") {
+        return Ok(PathBuf::from(p));
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("cannot resolve current executable: {e}"))?;
+    if let Some(cache) = compiler::comptime_cache::user_cache_root()
+        && let Some(lib) = embedded_runtime(&exe, &cache.join("runtime"))?
+    {
+        return Ok(lib);
+    }
+    let lib = exe.with_file_name(RUNTIME_LIB);
+    if lib.is_file() {
+        Ok(lib)
+    } else {
+        Err(format!("the native runtime `{}` is not installed", lib.display()))
+    }
+}
+
+/// The trailer `scripts/embed_runtime.py` appends to `coil` after the
+/// runtime library: its length (u64 LE), then this magic.
+#[cfg(not(target_family = "wasm"))]
+pub const RUNTIME_MAGIC: &[u8; 8] = b"COILRT\x00\x01";
+
+/// The runtime library embedded at the end of `exe` (see
+/// [`RUNTIME_MAGIC`]), written once to `cache/<sha256 prefix>/` and reused
+/// from there; `None` when `exe` carries none.
+#[cfg(not(target_family = "wasm"))]
+pub fn embedded_runtime(exe: &Path, cache: &Path) -> Result<Option<PathBuf>, String> {
+    use std::io::{Seek, SeekFrom};
+    let read_err = |e: std::io::Error| format!("cannot read `{}`: {e}", exe.display());
+    let mut f = fs::File::open(exe).map_err(read_err)?;
+    let size = f.metadata().map_err(read_err)?.len();
+    if size < 16 {
+        return Ok(None);
+    }
+    let mut tail = [0u8; 16];
+    f.seek(SeekFrom::End(-16)).map_err(read_err)?;
+    f.read_exact(&mut tail).map_err(read_err)?;
+    if &tail[8..] != RUNTIME_MAGIC {
+        return Ok(None);
+    }
+    let len = u64::from_le_bytes(tail[..8].try_into().expect("8 bytes"));
+    if len > size - 16 {
+        return Err(format!("`{}`: the embedded runtime is truncated", exe.display()));
+    }
+    let mut lib = vec![0u8; len as usize];
+    f.seek(SeekFrom::Start(size - 16 - len)).map_err(read_err)?;
+    f.read_exact(&mut lib).map_err(read_err)?;
+    let digest = Sha256::digest(&lib);
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let dir = cache.join(hex);
+    let path = dir.join(RUNTIME_LIB);
+    if fs::metadata(&path).is_ok_and(|m| m.len() == len) {
+        return Ok(Some(path));
+    }
+    let write_err = |e: std::io::Error| format!("cannot write the runtime to `{}`: {e}", dir.display());
+    fs::create_dir_all(&dir).map_err(write_err)?;
+    // Another `coil package` may be writing the same file: write aside,
+    // then rename over.
+    let tmp = dir.join(format!(".tmp-{}", std::process::id()));
+    fs::write(&tmp, &lib).map_err(write_err)?;
+    fs::rename(&tmp, &path).map_err(write_err)?;
+    Ok(Some(path))
+}
+
+/// The system libraries the runtime needs, and dropping what nothing the
+/// program runs references.
+#[cfg(not(target_family = "wasm"))]
+fn system_libs() -> &'static [&'static str] {
+    if cfg!(target_os = "macos") {
+        &["-Wl,-dead_strip", "-liconv", "-lSystem", "-lc", "-lm"]
+    } else if cfg!(windows) {
+        &["-Wl,--gc-sections", "-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp"]
+    } else {
+        &["-Wl,--gc-sections", "-ldl", "-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-lc"]
+    }
+}
+
+/// A new directory for one link's files.
+#[cfg(not(target_family = "wasm"))]
+fn link_dir() -> Result<PathBuf, String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let dir = std::env::temp_dir().join(format!("coil-aot-{}-{nanos}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|e| format!("cannot create `{}`: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// `cc OBJECT STATIC-LIBS RUNTIME -o EXE LINK-ARGS` with the system
+/// libraries the runtime needs.
+#[cfg(not(target_family = "wasm"))]
+fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, String> {
+    let dir = link_dir()?;
+    let obj = dir.join("program.o");
+    // Named as the linker names it: gcc on Windows adds `.exe` to any other.
+    let exe = dir.join(format!("program{}", std::env::consts::EXE_SUFFIX));
+    let out = (|| {
+        fs::write(&obj, object).map_err(|e| format!("cannot write `{}`: {e}", obj.display()))?;
+        let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
+        let run = std::process::Command::new(&cc)
+            .arg(&obj)
+            .args(link.statics.iter().map(|s| &s.path))
+            .arg(rt)
+            .arg("-o")
+            .arg(&exe)
+            .args(&link.args)
+            .args(system_libs())
+            .args(link.strip.cc_args())
+            .output()
+            .map_err(|e| format!("cannot run `{}` to link ({e})", cc.to_string_lossy()))?;
+        if !run.status.success() {
+            let err = String::from_utf8_lossy(&run.stderr);
+            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output");
+            return Err(format!("linking with `{}` failed: {first}", cc.to_string_lossy()));
+        }
+        fs::read(&exe).map_err(|e| format!("cannot read `{}`: {e}", exe.display()))
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    out
+}
+
+/// The runtime library `rt` with `object` added (`ar`, or `AR`).
+#[cfg(not(target_family = "wasm"))]
+fn static_library(object: &[u8], rt: &Path) -> Result<Vec<u8>, String> {
+    let dir = link_dir()?;
+    let obj = dir.join("coil_program.o");
+    let lib = dir.join("libprogram.a");
+    let out = (|| {
+        fs::write(&obj, object).map_err(|e| format!("cannot write `{}`: {e}", obj.display()))?;
+        fs::copy(rt, &lib).map_err(|e| format!("cannot copy `{}`: {e}", rt.display()))?;
+        let ar = std::env::var_os("AR").unwrap_or_else(|| "ar".into());
+        let run = std::process::Command::new(&ar)
+            .arg("rs")
+            .arg(&lib)
+            .arg(&obj)
+            .output()
+            .map_err(|e| format!("cannot run `{}` ({e})", ar.to_string_lossy()))?;
+        if !run.status.success() {
+            let err = String::from_utf8_lossy(&run.stderr);
+            let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output");
+            return Err(format!("`{}` failed: {first}", ar.to_string_lossy()));
+        }
+        fs::read(&lib).map_err(|e| format!("cannot read `{}`: {e}", lib.display()))
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    out
 }
 
 fn resolve_runner_path(runner: Option<&Path>) -> Result<PathBuf, String> {
@@ -96,6 +467,32 @@ fn sha256_hex_file(path: &Path) -> Result<(String, u64), String> {
             .collect(),
         size,
     ))
+}
+
+/// A static library an AOT package links for an `extern` block (one
+/// `--link-static [STEM=]PATH` flag).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StaticLink {
+    /// The library stem `extern "STEM"` names.
+    pub stem: String,
+    /// The archive (`libSTEM.a`, `STEM.lib`).
+    pub path: PathBuf,
+}
+
+/// Parse `[STEM=]PATH`; without `STEM=`, the stem is the file name's
+/// (`libsum.a` and `sum.lib` are `sum`).
+pub fn parse_static_link(spec: &str) -> Result<StaticLink, String> {
+    if let Some((stem, path)) = spec.split_once('=')
+        && !stem.is_empty()
+        && !stem.contains(['/', '\\'])
+    {
+        return Ok(StaticLink { stem: stem.to_string(), path: PathBuf::from(path) });
+    }
+    let path = PathBuf::from(spec);
+    let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| format!("`{spec}` names no file"))?;
+    let base = name.strip_suffix(".a").or_else(|| name.strip_suffix(".lib")).ok_or_else(|| format!("`{spec}` is not a static library (`libNAME.a` or `NAME.lib`); give its stem as `STEM={spec}`"))?;
+    let stem = base.strip_prefix("lib").filter(|s| !s.is_empty()).unwrap_or(base);
+    Ok(StaticLink { stem: stem.to_string(), path })
 }
 
 /// A native library the packaged app loads (one `--ffi-native` flag).
@@ -165,26 +562,28 @@ pub fn parse_ffi_native(spec: &str) -> Result<FfiNative, String> {
     })
 }
 
-/// Build a [`NativeLock`] from bytecode `dload` stems and `--ffi-native` rows.
+/// Build a [`NativeLock`] from `dload` stems and `--ffi-native` rows.
 pub fn build_native_lock(
     natives: &[FfiNative],
-    bytecode: &[Byte],
-    strings: &[String],
+    libraries: &[String],
+    linked: &[StaticLink],
 ) -> Result<NativeLock, String> {
     // Reduce each literal to the stem the runtime dload gate uses
     // (`./native/libtls.so` → `tls`), so one `--ffi-native name=tls` row covers
     // every spelling of that library.
     let mut stems: Vec<(String, String)> = Vec::new();
-    for literal in ffi_library_names_from_bytecode(bytecode, strings) {
-        let stem = dload_request_stem(&literal);
+    for literal in libraries {
+        let stem = dload_request_stem(literal);
         if !stems.iter().any(|(s, _)| *s == stem) {
-            stems.push((stem, literal));
+            stems.push((stem, literal.clone()));
         }
     }
     let mut entries = Vec::new();
 
     for (stem, literal) in &stems {
-        if is_system_ffi_stem(stem) {
+        // System libraries, and ones linked into the executable, ship
+        // with no artifact.
+        if is_system_ffi_stem(stem) || linked.iter().any(|l| l.stem == *stem) {
             continue;
         }
         let decl = natives.iter().find(|n| n.name == *stem).ok_or_else(|| {
@@ -220,7 +619,7 @@ pub fn build_native_lock(
         });
     }
 
-    // Constant stems only: `--ffi-native` rows the bytecode never loads are ignored.
+    // Constant stems only: `--ffi-native` rows the program never loads are ignored.
 
     Ok(NativeLock {
         os: std::env::consts::OS.to_string(),
@@ -292,36 +691,54 @@ pub fn cmd_package(
     runner: Option<&Path>,
     natives: &[FfiNative],
     check_native: bool,
+    link: &LinkInputs,
 ) {
-    let archive_bytes = compile_program_archive_bytes(pipeline, filename);
+    let aot = link.aot;
+    if link.emit != Emit::Exe && !aot {
+        fail_and_exit(pipeline, ErrorCode::IoError, "`--emit` needs native code; it cannot be used with `--no-aot` or `--runner`".to_string());
+    }
+    if link.emit != Emit::Exe && !link.args.is_empty() {
+        fail_and_exit(pipeline, ErrorCode::IoError, "`--link-arg` goes to the link of an executable; `--emit` leaves that link to you".to_string());
+    }
+    if !aot && !link.statics.is_empty() {
+        fail_and_exit(
+            pipeline,
+            ErrorCode::IoError,
+            "`--link-static` links into the AOT executable; it cannot be used with `--no-aot` or `--runner`".to_string(),
+        );
+    }
+    // Both kinds of executable are made from this compile's MIR.
+    #[cfg(not(target_family = "wasm"))]
+    {
+        pipeline.set_runs_mir();
+        compiler::native_mir::start_native_capture();
+    }
+    let program = compile_program(pipeline, filename);
     // Notes below and errors go to a clean line.
     crate::end_compile_progress();
-    let archive_bytes = match archive_bytes {
-        Ok(b) => b,
+    let mut program = match program {
+        Ok(p) => p,
         Err(()) => {
             let _ = pipeline.finish_reporting();
             exit(1);
         }
     };
-
-    let program = rkyv::access::<ArchivedArchivedProgram, Error>(&archive_bytes)
-        .expect("freshly serialized archive");
-    let bytecode: Vec<Byte> =
-        rkyv::deserialize::<Vec<Byte>, Error>(&program.bytecode).expect("bytecode");
-    let strings: Vec<String> =
-        rkyv::deserialize::<Vec<String>, Error>(&program.strings).expect("strings");
-    let uses_ffi = bytecode_uses_ffi(&bytecode);
+    let bodies = compiler::native_mir::take_native_capture();
+    let (uses_ffi, libraries) = compiler::native_mir::ffi_use(&bodies, &program.strings);
     let mut flags = 0u32;
     if uses_ffi {
         flags |= PACKAGE_FLAG_USES_FFI;
     }
 
-    let native_lock = match build_native_lock(natives, &bytecode, &strings) {
+    let native_lock = match build_native_lock(natives, &libraries, &link.statics) {
         Ok(lock) => lock,
         Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),
     };
 
-    if uses_ffi && native_lock.entries.is_empty() {
+    if !link.statics.is_empty() {
+        let stems: Vec<&str> = link.statics.iter().map(|l| l.stem.as_str()).collect();
+        eprintln!("note: linking `{}` into the executable statically", stems.join("`, `"));
+    } else if uses_ffi && native_lock.entries.is_empty() {
         // FFI opcodes present but only system libs (or dynamic dload) — OK for libc-only.
         eprintln!(
             "note: this program uses FFI; only system libraries were detected. \
@@ -340,7 +757,7 @@ pub fn cmd_package(
         .parent()
         .filter(|p| !p.as_os_str().is_empty());
     if check_native && uses_ffi {
-        let libs = ffi_library_names_from_bytecode(&bytecode, &strings);
+        let libs = libraries;
     let mut gate = machine::DloadGate::from_consumer_trusted(
         &pipeline.dload_native_pins(),
         pipeline.dload_trusted_stems(),
@@ -352,7 +769,9 @@ pub fn cmd_package(
             let _ = gate.grant_file(stem, path);
         }
         let search = pipeline.ffi_search_path_bufs();
-        for name in &libs {
+        // A library linked statically has no file to find on the target.
+        let linked = |name: &str| link.statics.iter().any(|l| l.stem == machine::dload_request_stem(name));
+        for name in libs.iter().filter(|n| !linked(n)) {
             if let Err(e) = machine::resolve_library(name, base_dir, &search, &gate) {
                 fail_and_exit(
                     pipeline,
@@ -363,6 +782,43 @@ pub fn cmd_package(
         }
     }
 
+    // The executable the payload goes on: one linked from native code for
+    // the program, or the JIT runner (`--no-aot`, `--runner`, or when
+    // linking is not possible here).
+    // An AOT executable starts in its own code: `__start` runs the startup
+    // and `main`, and the payload is data only.
+    let start = aot.then(|| with_native_start(pipeline, &bodies, &program));
+    let aot_bodies = start.as_ref().map_or(&[][..], |(b, _)| b.as_slice());
+    let package = start.as_ref().map(|(_, data)| {
+        let archive = payload_bytes(pipeline, data);
+        let lock = (!native_lock.entries.is_empty()).then(|| native_lock.to_json());
+        linked_package(&archive, lock.as_deref().map(str::as_bytes), flags, ARCHIVE_VERSION)
+    });
+    if link.emit != Emit::Exe {
+        write_linkable(pipeline, aot_bodies, link, package.as_deref().unwrap_or_default(), output);
+        return;
+    }
+    let linked = package.as_deref().and_then(|p| link_aot_executable(pipeline, aot_bodies, link, p));
+    if let Some((packaged, compiled, rt)) = linked {
+        if let Err(e) = fs::write(output, &packaged) {
+            fail_and_exit(pipeline, ErrorCode::IoError, format!("cannot write packaged output `{}`: {e}", output));
+        }
+        make_executable(Path::new(output));
+        if let Err(e) = pipeline.finish_reporting() {
+            pipeline.emit_spanless_warning(ErrorCode::IoError, format!("failed to flush diagnostics: {e}"));
+            let _ = pipeline.finish_reporting();
+        }
+        eprintln!(
+            "packaged `{}` for {}-{} ({} bytes; native code for {} functions, runtime {})",
+            output,
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            packaged.len(),
+            compiled,
+            rt.display()
+        );
+        return;
+    }
     let runner_path = match resolve_runner_path(runner) {
         Ok(p) => p,
         Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),
@@ -399,6 +855,8 @@ pub fn cmd_package(
         );
     }
 
+    add_native_mir(pipeline, &mut program, &bodies);
+    let archive_bytes = payload_bytes(pipeline, &program);
     let lock_json = if native_lock.entries.is_empty() {
         None
     } else {
@@ -442,62 +900,45 @@ pub fn cmd_package(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coil_cli::{LoadErr, load_archive_bytes};
-    use common::{ArchivedProgram, Instruction, pack_archive_version};
 
     #[test]
-    fn load_archive_bytes_rejects_version() {
-        let too_new = ArchivedProgram {
-            version: pack_archive_version(0, 1),
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&too_new).unwrap();
-        assert!(matches!(
-            load_archive_bytes(bytes.as_slice()),
-            Err(LoadErr::Version(_))
-        ));
+    fn static_link_stem_comes_from_the_file_or_the_flag() {
+        let l = parse_static_link("deps/libsum.a").unwrap();
+        assert_eq!((l.stem.as_str(), l.path.as_path()), ("sum", Path::new("deps/libsum.a")));
+        assert_eq!(parse_static_link("sum.lib").unwrap().stem, "sum");
+        let l = parse_static_link("plugin=out/libplugin-x86.a").unwrap();
+        assert_eq!((l.stem.as_str(), l.path.as_path()), ("plugin", Path::new("out/libplugin-x86.a")));
+        assert!(parse_static_link("libsum.so").is_err());
+    }
 
-        let other_minor = ArchivedProgram {
-            version: pack_archive_version(1, 99),
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&other_minor).unwrap();
-        assert!(matches!(
-            load_archive_bytes(bytes.as_slice()),
-            Err(LoadErr::Version(_))
-        ));
+    /// A runtime appended to `coil` (`scripts/embed_runtime.py`'s layout) is
+    /// written to the cache once and found there after; a binary without
+    /// one has none, and a cut-off one is an error.
+    #[test]
+    fn embedded_runtime_is_cached_by_content() {
+        let dir = std::env::temp_dir().join(format!("coil_embedded_rt_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (exe, cache) = (dir.join("coil"), dir.join("cache"));
+        let lib = b"!<arch>\nruntime objects".to_vec();
+        let mut image = b"\x7fELF the compiler".to_vec();
+        fs::write(&exe, &image).unwrap();
+        assert_eq!(embedded_runtime(&exe, &cache).unwrap(), None);
+        image.extend_from_slice(&lib);
+        image.extend_from_slice(&(lib.len() as u64).to_le_bytes());
+        image.extend_from_slice(RUNTIME_MAGIC);
+        fs::write(&exe, &image).unwrap();
+        let path = embedded_runtime(&exe, &cache).unwrap().expect("embedded runtime");
+        assert!(path.starts_with(&cache));
+        assert_eq!(fs::read(&path).unwrap(), lib);
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(embedded_runtime(&exe, &cache).unwrap(), Some(path.clone()));
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified, "reused, not rewritten");
+        let mut cut = image[..4].to_vec();
+        cut.extend_from_slice(&image[image.len() - 16..]);
+        fs::write(&exe, &cut).unwrap();
+        assert!(embedded_runtime(&exe, &cache).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Project-mode `coil natives dump` lists a row whose local file is not
@@ -541,60 +982,4 @@ mod tests {
         assert!(odd.is_err(), "a directory at the library path must not pass");
     }
 
-    /// A `dload` path literal reduces to the stem the runtime gate uses, so
-    /// one `--ffi-native name=<stem>` row covers it (coil-lang#1656).
-    #[test]
-    fn build_native_lock_reduces_dload_path_to_stem() {
-        let dir = std::env::temp_dir().join(format!("coil_lock_stem_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        let filename = platform_shared_lib_filename("tls");
-        fs::write(dir.join(&filename), b"not really a library").unwrap();
-        let natives = vec![parse_ffi_native(&format!(
-            "name=tls,version=1.0.0,path={}",
-            dir.display()
-        ))
-        .unwrap()];
-        let strings = vec![format!("./native/{filename}"), "tls".to_string()];
-        let bytecode = vec![
-            Byte::new(Instruction::STRING).with_operand_u32(0),
-            Byte::new(Instruction::FfiLoad),
-            Byte::new(Instruction::STRING).with_operand_u32(1),
-            Byte::new(Instruction::FfiLoad),
-        ];
-        let lock = build_native_lock(&natives, &bytecode, &strings);
-        let _ = fs::remove_dir_all(&dir);
-        let lock = lock.expect("the `tls` row covers `./native/libtls.so`");
-        assert_eq!(lock.entries.len(), 1, "one entry per stem: {:?}", lock.entries);
-        assert_eq!(lock.entries[0].stem, "tls");
-        assert_eq!(lock.entries[0].filename, filename);
-    }
-
-    #[test]
-    fn load_archive_bytes_accepts_unaligned_prefix() {
-        let program = ArchivedProgram {
-            version: ARCHIVE_VERSION,
-            static_slot_count: 0,
-            constants: vec![],
-            strings: vec![],
-            bytecode: vec![Byte::new(Instruction::HALT)],
-            source_files: vec![],
-            debug_locs: vec![],
-            fn_symbols: Vec::new(),
-            struct_layouts: Vec::new(),
-            operand_stack_slots: 256,
-            stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
-            class_word_kinds: Vec::new(),
-            static_word_kinds: Vec::new(),
-            debug_lines: Vec::new(),
-            cleanup_ranges: Vec::new(),
-            line_table: Vec::new(),
-            span_table: Vec::new(),
-        };
-        let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
-        let mut prefixed = vec![0u8; 1];
-        prefixed.extend_from_slice(bytes.as_slice());
-        load_archive_bytes(&prefixed[1..]).expect("unaligned overlay slice");
-    }
 }

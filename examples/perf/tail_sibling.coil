@@ -1,10 +1,8 @@
 // CPU: force sibling TailCall (even↔odd cycle). Tree recursion is not this shape.
-// Parent emits CALL+RETURN; this rewrite emits TailCall. max_depth lets the
-// parent compile the same source without overflowing analysis.
+// The calls are in tail position, so each takes its caller's frame.
 use io::sync::print;
 use string::format;
 
-#[max_depth(256)]
 fn even(int n, int acc) -> int {
     if n == 0 {
         return acc;
@@ -12,7 +10,6 @@ fn even(int n, int acc) -> int {
     return odd(n - 1, acc + n);
 }
 
-#[max_depth(256)]
 fn odd(int n, int acc) -> int {
     if n == 0 {
         return acc;

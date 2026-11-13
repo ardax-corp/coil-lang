@@ -11,12 +11,12 @@ Evacuation runs **between** cycles, once a sweep has finished.
 An object moves only when every reference to it is **precise**, meaning
 one of:
 
-- a pointer-kind word: a class field (`ClassWordKinds`), a payload / tuple
-  word (`…K` construction kinds), or an element of a pointer-kind array
-  (`MakeArrayK`);
+- a pointer-kind word: a class field (`ClassWordKinds`; a tagged flat
+  field's first word while its tag says pointer), a payload / tuple
+  word, or an element of a pointer-kind array (construction kinds, `kinds` on
+  MIR `Alloc`);
 - a `Member::Object` (dict tables, boxes, roots, poly-fn dictionaries);
-- a masked coroutine slot;
-- a must-pointer frame slot (`PRECISE_SLOT_MUST`).
+- a masked coroutine slot.
 
 Only instances, payload enums, boxes, tuples, arrays and closures move.
 Strings, coroutines, streams, threads, immortal unit enums and the shared
@@ -24,13 +24,12 @@ empty tuple `()` stay put.
 
 These **pin** the object they reach:
 
-- every ambiguous word (unknown kinds, closure captures, `Member::Value`,
-  conservative frames, non-must slots, MIR stack-map slots);
+- every ambiguous word (unknown kinds, closure captures, `Member::Value`);
+- every word of a native frame or an interpreter activation
+  (`Runtime::for_each_native_root`), and the words of parked tasks;
 - statics of unknown kind (generic or compiler-allocated) and the steal join
   root; pointer-kind statics are precise and rewritten, scalar ones are no
   roots (archive minor 29);
-- `frame_pins` (Rust-held handles; the `dense_obj` index cache is not a root
-  and is cleared at every collection);
 - FFI library keys;
 - the targets of `Root` (FFI may hold the address) and `Weak` handles.
 
@@ -45,8 +44,8 @@ These **pin** the object they reach:
      `Vec`s move with their owner; the old copy is never dropped.
    - Rewrite every precise heap reference through the forwarding map. A
      `Result` `Err` word keeps its tag bit 0.
-2. The VM rewrites its must-pointer stack slots.
-3. `gc-stress` only: no heap word and no VM root may still name an old
+2. Pointer-kind statics are rewritten.
+3. `gc-stress` only: no heap word and no root may still name an old
    address (`Heap::verify_evacuation`).
 4. `Heap::evacuate_finish` poisons and frees the old slots and returns the
    parked slots. It releases emptied chunks at once, so their pages go
@@ -58,10 +57,8 @@ These **pin** the object they reach:
 - **Where:** after a finished sweep (the lazy sweep's last quantum, or
   `gc::collect`).
 - **When it skips:**
-  - while more than one `execute` is active (a host frame such as a native
-    re-entry or a finalizer may hold raw handles);
-  - in a shared-heap epoch;
-  - under the debugger.
+  - in a shared-heap epoch, or on a borrowed heap;
+  - while a collection cycle is open.
 - **How often:** outside stress mode, one attempt every 8 collections.
   Unproductive attempts back off up to every 256 collections.
 - **Worth-it bars:**
@@ -73,7 +70,7 @@ These **pin** the object they reach:
 - **Stress mode:** `gc-stress` builds collect at every allocation and move
   every movable object each time. CI runs the language harness (`coil-test`) that way.
 
-## Numbers (release, `examples/perf`)
+## Numbers (release, `examples/perf`, on the bytecode VM, since deleted)
 
 | Bench | Without | With evacuation |
 |-------|------:|-------------:|
@@ -86,10 +83,3 @@ unchanged on programs that never collect (fib, tak, nsieve, mandelbrot) and
 +0.4–0.6% on collection-heavy ones (the analysis walk). Wall-time
 differences on non-collecting programs are code layout, since the
 instruction counts are equal.
-
-## Not yet
-
-- Liveness in precise frame maps. Stale loop slots stay ambiguous and pin
-  what they hit.
-- A nursery with bump allocation. That needs a write barrier, a separate
-  decision.

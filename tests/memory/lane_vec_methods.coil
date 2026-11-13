@@ -1,0 +1,194 @@
+// The `Vec` methods on a lane array (a `Vec` of a closed two-word type)
+// work on its lanes: `pop`, `remove` and `insert` move element words in
+// place, `clear`, `reserve`, `capacity` and `Vec::from` take the array as
+// it is, and `Vec::new()` / `Vec::with_capacity(n)` of such a type make a
+// lane array. The array keeps working when generic code has turned it into
+// boxed elements first.
+use tests::assert;
+use string::format;
+use gc::collect;
+use task::{scope, Scope, TaskError};
+
+enum Shape {
+    Dot,
+    Circle(int),
+    Label(string),
+}
+
+fn shown(Vec<Option<int>> v) -> string {
+    let out = "";
+    for x in v {
+        out = out + match x {
+            Some(n) => format("%i ", n),
+            None => "_ ",
+        };
+    }
+    return out;
+}
+
+// Run `body` as a child task: its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return match scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }) {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+fn insert_at(int i) -> int {
+    let v: Vec<Option<int>> = [Some(1)];
+    v.insert(i, None);
+    return v.len();
+}
+
+fn count<T>(Vec<T> v) -> int {
+    return v.len();
+}
+
+test("pop takes the last element and leaves the rest") {
+    let v: Vec<Option<int>> = [Some(1), None, Some(3)];
+    assert!(v.pop() == Some(Some(3)));
+    assert!(v.pop() == Some(None));
+    assert!(v.len() == 1 && v[0] == Some(1));
+    assert!(v.pop() == Some(Some(1)));
+    assert!(v.pop() == None);
+    assert!(v.len() == 0);
+    v.push(Some(7));
+    assert!(shown(v) == "7 ");
+}
+
+test("a pop loop drains the array in reverse") {
+    let v: Vec<Option<int>> = [];
+    for i in 0..10 {
+        v.push(if i % 3 == 0 {
+            None
+        } else {
+            Some(i)
+        });
+    }
+    let t = 0;
+    let nones = 0;
+    while let Some(x) = v.pop() {
+        match x {
+            Some(n) => {
+                t = t * 10 + n;
+            },
+            None => {
+                nones += 1;
+            },
+        }
+    }
+    assert!(t == 875421 && nones == 4 && v.len() == 0);
+}
+
+test("remove takes element i and moves the rest down") {
+    let v: Vec<Option<int>> = [Some(0), Some(1), None, Some(3)];
+    assert!(v.remove(1) == Some(Some(1)));
+    assert!(shown(v) == "0 _ 3 ");
+    assert!(v.remove(2) == Some(Some(3)));
+    assert!(v.remove(0) == Some(Some(0)));
+    assert!(shown(v) == "_ ");
+    assert!(v.remove(1) == None);
+    assert!(v.remove(-1) == None);
+    assert!(v.remove(0) == Some(None));
+    assert!(v.remove(0) == None);
+}
+
+test("insert puts x at i and moves the rest up") {
+    let v: Vec<Option<int>> = [];
+    v.insert(0, Some(2));
+    v.insert(0, None);
+    v.insert(2, Some(4));
+    v.insert(2, Some(3));
+    v.insert(1, Some(1));
+    assert!(shown(v) == "_ 1 2 3 4 ");
+    assert!(v.len() == 5);
+}
+
+test("tuple lanes through pop, remove and insert") {
+    let ps: Vec<(int, float)> = [(1, 0.5), (2, 1.5), (3, 2.5)];
+    ps.insert(1, (9, 9.5));
+    assert!(ps.remove(0) == Some((1, 0.5)));
+    assert!(ps.pop() == Some((3, 2.5)));
+    let a = 0;
+    let b = 0.0;
+    for (i, f) in ps {
+        a += i;
+        b += f;
+    }
+    assert!(a == 11 && b == 11.0);
+}
+
+test("heap payloads stay alive across the moves") {
+    let rs: Vec<Result<int, string>> = [];
+    for i in 0..60 {
+        if i % 2 == 0 {
+            rs.insert(0, Err(format("e%i", i)));
+        } else {
+            rs.insert(rs.len(), Ok(i));
+        }
+        if i % 20 == 0 {
+            collect();
+        }
+    }
+    collect();
+    assert!(rs.len() == 60);
+    assert!(rs[0] == Err("e58") && rs[29] == Err("e0") && rs[30] == Ok(1));
+    let taken = rs.remove(29);
+    collect();
+    assert!(taken == Some(Err("e0")));
+    assert!(rs.pop() == Some(Ok(59)));
+    let shapes: Vec<Shape> = Vec::new();
+    shapes.push(Shape::Label(format("a%i", 1)));
+    shapes.insert(0, Shape::Circle(3));
+    shapes.insert(1, Shape::Label(format("b%i", 2)));
+    collect();
+    let s = "";
+    while let Some(x) = shapes.pop() {
+        s = s + match x {
+            Shape::Dot => ".",
+            Shape::Circle(r) => format("c%i", r),
+            Shape::Label(l) => l,
+        };
+    }
+    assert!(s == "a1b2c3");
+}
+
+test("new, with_capacity, reserve, capacity, clear and from") {
+    let v: Vec<Option<int>> = Vec::with_capacity(8);
+    assert!(v.capacity() >= 8 && v.len() == 0);
+    for i in 0..5 {
+        v.push(Some(i));
+    }
+    v.reserve(100);
+    assert!(v.capacity() >= 105);
+    assert!(shown(v) == "0 1 2 3 4 ");
+    v.clear();
+    assert!(v.len() == 0);
+    v.push(None);
+    assert!(shown(v) == "_ ");
+    let a: [Option<int>; 2] = [Some(5), None];
+    let fa = Vec::from(a);
+    fa.insert(1, Some(6));
+    assert!(shown(fa) == "5 6 _ ");
+}
+
+test("the methods work on an array generic code boxed first") {
+    let v: Vec<Option<int>> = [Some(1), Some(2), Some(3)];
+    assert!(count(v) == 3);
+    v.insert(1, None);
+    assert!(v.remove(0) == Some(Some(1)));
+    assert!(v.pop() == Some(Some(3)));
+    assert!(shown(v) == "_ 2 ");
+}
+
+test("insert out of range panics with the index and length") {
+    assert!(insert_at(1) == 2 && insert_at(0) == 2);
+    let m = outcome(fn () => insert_at(5));
+    assert!(m == "Vec::insert: index 5 out of bounds (len 1)", m);
+    let m = outcome(fn () => insert_at(-1));
+    assert!(m == "Vec::insert: index -1 out of bounds (len 1)", m);
+}

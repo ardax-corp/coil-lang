@@ -1,0 +1,41 @@
+// A `for mut x in a` binding borrows one element of `a` (#2827 follow-up):
+// a second name for that element while `x` lives is E0149
+// (compile_fail/for_mut_element_*), while other names stay legal and read
+// their own values.
+use tests::assert;
+
+class C {
+    pub x: int,
+}
+
+test("a copy of the vector made before the loop keeps its value") {
+    let a: Vec<C> = [new C(1), new C(2)];
+    let keep = a;
+    for mut x in a {
+        x.x += 10;
+    }
+    assert!(a[0].x == 11 && a[1].x == 12);
+    assert!(keep[0].x == 1 && keep[1].x == 2);
+}
+
+test("a second name made after the loop") {
+    let a: Vec<C> = [new C(1)];
+    for mut x in a {
+        x.x += 10;
+    }
+    let b = a[0];
+    b.x += 100;
+    assert!(a[0].x == 11);
+    assert!(b.x == 111);
+}
+
+test("an element read inside the loop") {
+    let a: Vec<C> = [new C(1), new C(2)];
+    let s = 0;
+    for mut x in a {
+        s += a[0].x;
+        x.x += 10;
+    }
+    assert!(s == 12);
+    assert!(a[1].x == 12);
+}
