@@ -162,6 +162,9 @@ struct Facts<'b> {
     /// `for` loops that may keep what they walk past the loop
     /// ([`walk_keeps`]): the iterable is stored, as a kept argument is.
     kept_walks: HashSet<HirId>,
+    /// Calls that may write a `static`: not known here, or a summary
+    /// with `statics`.
+    static_calls: HashSet<HirId>,
 }
 
 /// What a call in a body may do: [`CallLookup`] for the body given.
@@ -325,6 +328,7 @@ impl<'b> Facts<'b> {
             capture_assigns: Vec::new(),
             borrow_args: HashSet::new(),
             kept_walks: HashSet::new(),
+            static_calls: HashSet::new(),
         };
         // Evaluation order: children in the order `children` lists them.
         let mut next = 0u32;
@@ -429,8 +433,14 @@ impl<'b> Facts<'b> {
                         self.writes.push(Write { at: id, path: a });
                     }
                 }
-                if lookup(callee, args).is_some_and(|s| !s.shared_ret) {
+                let summary = lookup(callee, args);
+                if summary.as_ref().is_some_and(|s| !s.shared_ret) {
                     self.fresh_calls.insert(id);
+                }
+                let structural = matches!(callee, Callee::Method { .. }) && args.first().is_some_and(|r| is_vec(body.expr(*r).ty.as_ref()));
+                let host = matches!(callee, Callee::Named { name, .. } if host_short(name).is_some());
+                if summary.as_ref().map_or(!structural && !host, |s| s.statics) {
+                    self.static_calls.insert(id);
                 }
                 self.calls.insert(id, used);
             }
@@ -1178,6 +1188,28 @@ impl Plan {
             }
         }
 
+        // A `for` over a `Vec` or an array walks the value its iterable had
+        // when the loop began (#2827): where the body may write it, the
+        // loop takes a share of it at its start, so the first write copies
+        // it once, and the body's writes to it keep their unique on a fresh
+        // local too. A parameter written in place for the caller is never
+        // tested before a write: the loop walks an eager copy of it. After
+        // `fresh_locals`: past the loop its other holder is dead.
+        let mut holding = HashSet::new();
+        for i in 0..body.exprs.len() {
+            let id = HirId(i as u32);
+            if f.order[i] == u32::MAX || !array_walk_written(body, f, id) {
+                continue;
+            }
+            let HirKind::ForIn { iterable, .. } = body.expr(id).kind else { continue };
+            if !cow(iterable) {
+                continue;
+            }
+            let eager = matches!(body.expr(iterable).kind, HirKind::Local(l) if inout.contains(&l));
+            plan.share.push((iterable, eager));
+            holding.insert(id);
+        }
+
         // Writes: make each path unique top-down.
         for &w in &f.writes {
             if let Some(HirKind::Local(l)) = f.root_of(w.path).map(|r| &body.expr(r).kind)
@@ -1187,7 +1219,7 @@ impl Plan {
                 // The parameter itself, written in place for the caller.
                 continue;
             }
-            if walked_write(body, f, w) {
+            if walked_write(body, f, w, &holding) {
                 plan.walked.insert((w.at, w.path));
             }
             plan.unique.push((w, f.statement_of(w.at)));
@@ -1374,25 +1406,29 @@ impl Plan {
             return;
         }
         // Every point that gives a place's object a second name, shared
-        // or moved: stores, and bindings other than borrows.
-        let mut shares: Vec<(HirId, HirId)> = self.stored.iter().map(|&v| (v, v)).collect();
+        // or moved: stores, and bindings other than borrows. Third: how many
+        // steps below the place the name is: a `for` over a `Vec` or an
+        // array binds an element, not the iterable (#2827).
+        let mut shares: Vec<(HirId, HirId, usize)> = self.stored.iter().map(|&v| (v, v, 0)).collect();
         for (&l, inits) in &f.inits {
             if !body.local(l).borrow {
-                shares.extend(inits.iter().map(|&v| (v, v)));
+                shares.extend(inits.iter().map(|&v| (v, v, 0)));
             }
         }
         for (&l, &(src, binder)) in &f.bound {
             if !body.local(l).borrow {
-                shares.push((src, binder));
+                let element = matches!(body.expr(binder).kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. });
+                shares.push((src, binder, usize::from(element)));
             }
         }
-        shares.sort_by_key(|&(v, _)| f.order(v));
+        shares.sort_by_key(|&(v, _, _)| f.order(v));
         let mut calls: Vec<(HirId, ArgUse)> = f.calls.iter().map(|(&c, &u)| (c, u)).collect();
         calls.sort_by_key(|&(c, _)| f.order(c));
-        // `for` loops over an iterator, in evaluation order.
+        // `for` loops over an iterator, a `Vec` or an array, in evaluation
+        // order: each walks the value its iterable had when it began.
         let mut walks: Vec<HirId> = (0..body.exprs.len())
             .map(|i| HirId(i as u32))
-            .filter(|&id| f.order(id) != u32::MAX && iterator_loop(body, id))
+            .filter(|&id| f.order(id) != u32::MAX && (iterator_loop(body, id) || matches!(body.expr(id).kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. })))
             .collect();
         walks.sort_by_key(|&id| f.order(id));
         let mut seen: HashSet<(HirId, String)> = HashSet::new();
@@ -1402,15 +1438,21 @@ impl Plan {
                 let o = f.order(at);
                 o != u32::MAX && o > start && o <= end && !b.within.is_some_and(|w| f.contains(w, at))
             };
-            let covers = |v: HirId| place_path(body, f, v).is_some_and(|(r, p)| r == b.root && prefix_of(&p, &b.path));
+            let covers_below = |v: HirId, below: usize| {
+                place_path(body, f, v).is_some_and(|(r, mut p)| {
+                    p.extend(std::iter::repeat_n(None, below));
+                    r == b.root && prefix_of(&p, &b.path)
+                })
+            };
+            let covers = |v: HirId| covers_below(v, 0);
             let stext = &b.text;
             let (bname, last) = match (b.capture, b.name.as_str()) {
                 (false, n) => (format!("`{n}`"), format!("use `{n}` for the last time")),
                 (true, "") => ("the closure".to_string(), "let the closure go".to_string()),
                 (true, n) => (format!("the closure `{n}`"), format!("call `{n}` for the last time")),
             };
-            for &(v, at) in &shares {
-                if live(at) && covers(v) && !f.borrow_args.contains(&v) && seen.insert((v, stext.clone())) {
+            for &(v, at, below) in &shares {
+                if live(at) && covers_below(v, below) && !f.borrow_args.contains(&v) && seen.insert((v, stext.clone())) {
                     let span = body.expr(v).span;
                     let vtext = place_text(body, v).unwrap_or_else(|| stext.clone());
                     let mut m = Message::error(
@@ -1479,13 +1521,19 @@ impl Plan {
                     self.notes.push(m);
                 }
             }
-            // A `for` over an iterator holds its iterable while the body runs
-            // (#2819): over the borrowed object or one holding it, a write in
+            // A `for` holds what it walks while the body runs (an iterator
+            // its iterable, #2819; a loop over a `Vec` or an array a share of
+            // it, #2827): over the borrowed object or one holding it, a write in
             // the body to what the loop walks meets that second holder. A
             // write through the source would copy it away from the borrow,
             // one through the borrow would change what the loop walks.
             for &l in &walks {
                 let HirKind::ForIn { iterable, body: lbody, .. } = &body.expr(l).kind else { continue };
+                // A loop's own `for mut` binding writes the element it is
+                // bound to, which the walk has already passed.
+                if b.local.is_some_and(|x| f.bound.get(&x).is_some_and(|&(_, binder)| binder == l)) {
+                    continue;
+                }
                 let Some((r, ip)) = place_path(body, f, *iterable) else { continue };
                 // The walked place from the borrow's root.
                 let walked = if r == b.root && prefix_of(&ip, &b.path) {
@@ -2032,15 +2080,16 @@ fn in_iterator_loop(body: &HirBody, f: &Facts<'_>, id: HirId) -> bool {
     false
 }
 
-/// Whether write `w` runs in the body of a `for` over an iterator whose
-/// iterable is a place with the write's root local.
-fn walked_write(body: &HirBody, f: &Facts<'_>, w: Write) -> bool {
+/// Whether write `w` runs in the body of a `for` that holds its iterable
+/// (one over an iterator, or a `holding` one over a `Vec` or an array)
+/// whose iterable is a place with the write's root local.
+fn walked_write(body: &HirBody, f: &Facts<'_>, w: Write, holding: &HashSet<HirId>) -> bool {
     let Some((root, _)) = place_path(body, f, w.path) else { return false };
     let mut at = w.at;
     while let Some(&p) = f.parent.get(&at) {
         if let HirKind::ForIn { iterable, body: b, .. } = &body.expr(p).kind
             && *b == at
-            && iterator_loop(body, p)
+            && (iterator_loop(body, p) || holding.contains(&p))
             && place_path(body, f, *iterable).is_some_and(|(r, _)| r == root)
         {
             return true;
@@ -2048,6 +2097,48 @@ fn walked_write(body: &HirBody, f: &Facts<'_>, w: Write) -> bool {
         at = p;
     }
     false
+}
+
+/// Whether the body of the `for` over a `Vec` or an array at `id` may
+/// write the object it walks (#2827): a write through a path from the
+/// iterable's root that leads to it, below it or to an object holding it
+/// (a store into another field of a holder does not), a call that may
+/// write one of those (code not known here counts), or any write through
+/// a borrow of the root. Over a `static`, a write to it or a call that may
+/// write a `static`.
+fn array_walk_written(body: &HirBody, f: &Facts<'_>, id: HirId) -> bool {
+    let HirKind::ForIn { iterable, body: lbody, kind: Some(ForInKind::Array), .. } = &body.expr(id).kind else { return false };
+    let inside = |at: HirId| f.contains(*lbody, at);
+    let Some((r, ip)) = place_path(body, f, *iterable) else {
+        let Some(HirKind::Global { name, .. }) = f.root_of(*iterable).map(|g| &body.expr(g).kind) else { return false };
+        let same = |w: &Write| f.root_of(w.path).is_some_and(|x| matches!(&body.expr(x).kind, HirKind::Global { name: n, .. } if n == name));
+        return f.writes.iter().any(|w| inside(w.at) && same(w)) || f.static_calls.iter().any(|&c| inside(c));
+    };
+    f.writes.iter().any(|&w| {
+        inside(w.at)
+            && write_reach(body, f, w).is_some_and(|(x, steps)| {
+                if x == r {
+                    prefix_of(&steps, &ip) || prefix_of(&ip, &steps)
+                } else {
+                    body.local(x).borrow && aliases(f, body, x, r)
+                }
+            })
+    })
+}
+
+/// The place write `w` changes: its root local and the steps to the object
+/// it writes, one step further for a store into a field or an element (a
+/// store into `r.n` changes `r`'s slot `n`, not what `r.m` holds).
+fn write_reach(body: &HirBody, f: &Facts<'_>, w: Write) -> Option<(LocalId, Vec<Option<String>>)> {
+    let (root, mut steps) = place_path(body, f, w.path)?;
+    if let HirKind::Assign { place, .. } = &body.expr(w.at).kind {
+        match &body.expr(*place).kind {
+            HirKind::Field { base, name } if *base == w.path => steps.push(Some(name.clone())),
+            HirKind::Index { base, .. } if *base == w.path => steps.push(None),
+            _ => {}
+        }
+    }
+    Some((root, steps))
 }
 
 /// Whether `id` is a `for` over an iterator (not an array, a tuple or a
