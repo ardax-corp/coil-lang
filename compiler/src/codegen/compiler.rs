@@ -1816,14 +1816,17 @@ impl Compiler {
     }
 
     /// Whether the HIR of the method declared at `span`, at `vars`, has
-    /// ground parameter, local and return types.
+    /// ground parameter, local and return types. A local holding a
+    /// generic function's value (`let f = wrap;`) keeps that function's
+    /// own type variables, as in a free function's clone (#2770).
     fn inst_clone_ground(&self, span: (usize, usize), vars: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> bool {
         let (Some(module), Some(&index)) = (self.hir_module.as_ref(), self.hir_fns.get(&span)) else {
             return false;
         };
         let body = self.hir_instance(&module.bodies[index], vars);
+        let polyfn = |i: usize| crate::hir::query::polyfn_local(&body, &self.checker, crate::hir::LocalId(i as u32));
         body.ret.as_ref().is_some_and(|t| !Ty::has_var(t))
-            && body.locals.iter().all(|l| l.ty.as_ref().is_some_and(|t| !Ty::has_var(t)))
+            && body.locals.iter().enumerate().all(|(i, l)| l.ty.as_ref().is_some_and(|t| !Ty::has_var(t)) || polyfn(i))
     }
 
     /// The `Function` node of the `impl` method of this program whose
