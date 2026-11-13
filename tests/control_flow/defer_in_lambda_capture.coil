@@ -1,5 +1,7 @@
 // #1137: a `defer` inside a lambda body captures one of the lambda's own
-// captures.
+// captures. A `use (log)` capture is a copy, so the defer's write changes
+// the closure's copy only (#2830); through `use (mut log)` it reaches the
+// outer object.
 use tests::assert;
 
 class Log {
@@ -19,7 +21,7 @@ fn in_lambda(Log log) -> int {
 test("defer in a lambda") {
     let log = new Log(0);
     assert!(in_lambda(log) == 2);
-    assert!(log.n == 1);
+    assert!(log.n == 0);
 }
 
 test("defer in a lambda runs on each call") {
@@ -32,5 +34,14 @@ test("defer in a lambda runs on each call") {
     };
     assert!(f(2) == 6);
     assert!(f(3) == 9);
+    assert!(log.n == 10);
+    let g = fn (int y) use (mut log) {
+        defer use (mut log) {
+            log.n = log.n * 2;
+        }
+        y * 3
+    };
+    assert!(g(2) == 6);
+    assert!(g(3) == 9);
     assert!(log.n == 40);
 }
