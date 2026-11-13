@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 
 use common::EffectFlags;
 
-use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, LocalId, LocalKind, MakeKind, UnOp};
+use super::{BodyKind, Builtin, BinOp, Callee, HirBody, HirId, HirKind, HirModule, HirPat, IndexKind, LocalId, LocalKind, MakeKind, UnOp};
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::infer::{Checker, ForInKind};
 use crate::effects::classify_host_name;
@@ -1827,6 +1827,39 @@ struct Flat {
     dynamic: bool,
 }
 
+/// The tuple element `place` is or reaches through fields and elements
+/// (`t[0]`, `t[0].x`, `h.t[1][i]`), when it is a place inside a tuple.
+fn tuple_element(body: &HirBody, mut place: HirId) -> Option<HirId> {
+    loop {
+        match &body.expr(place).kind {
+            HirKind::Index { kind: IndexKind::Tuple, .. } => return Some(place),
+            HirKind::Field { base, .. } | HirKind::Index { base, .. } => place = *base,
+            _ => return None,
+        }
+    }
+}
+
+/// How to write what a write through tuple element `elem` meant: bind the
+/// element, change it, build a new tuple. Names the tuple and the element
+/// when they are a local and a literal index.
+fn tuple_rewrite_help(checker: &Checker, body: &HirBody, elem: HirId) -> String {
+    let generic = "bind the element, change it and build a new tuple: `let c = t[0]; c.x = 9; t = (c, t[1]);`".to_string();
+    let HirKind::Index { base, index, .. } = &body.expr(elem).kind else { return generic };
+    let (HirKind::Local(l), HirKind::Lit(super::Lit::Int(i))) = (&body.expr(*base).kind, &body.expr(*index).kind) else {
+        return generic;
+    };
+    let ty = body.expr(*base).ty.as_ref().map(|t| crate::typechecking::subst::apply_ty_prune(checker.subst(), t));
+    let Some(Ty::Tuple(items)) = ty.as_ref().map(crate::typechecking::ty::strip_readonly) else { return generic };
+    let t = &body.local(*l).name;
+    let n = if *i >= 0 { *i as usize } else { return generic };
+    if n >= items.len() {
+        return generic;
+    }
+    let e = if t == "e" { "x" } else { "e" };
+    let parts: Vec<String> = (0..items.len()).map(|k| if k == n { e.to_string() } else { format!("{t}[{k}]") }).collect();
+    format!("bind the element, change it and build a new tuple: `let {e} = {t}[{n}]; …change {e}…; {t} = ({});`", parts.join(", "))
+}
+
 /// Every parameter from `j` on.
 fn bits_from(j: usize) -> u64 {
     if j >= 64 { 0 } else { u64::MAX << j }
@@ -1987,7 +2020,8 @@ impl Cx<'_> {
                     }
                 });
             }
-            if w.ro_hits.is_none() || !readonly_at_top(self.checker, ty.as_ref()) {
+            let tuple = tuple_element(body, arg);
+            if w.ro_hits.is_none() || !(tuple.is_some() || readonly_at_top(self.checker, ty.as_ref())) {
                 continue;
             }
             // One error for the argument, at the first parameter it mutates.
@@ -2015,6 +2049,17 @@ impl Cx<'_> {
             let because = reason.map_or_else(String::new, |r| format!(" ({r})"));
             // A method call's receiver is what it is called on; any other
             // argument is passed to it, by name when it is a local (#1681).
+            if let Some(elem) = tuple {
+                let message = if trait_decl && j == 0 {
+                    format!("Cannot call `{shown}` on a tuple element: its trait does not declare {param} `readonly`, so it may change it")
+                } else if shown.starts_with('.') && j == 0 {
+                    format!("Cannot call `{shown}` on a tuple element: it mutates {param}{because}")
+                } else {
+                    format!("Cannot pass a tuple element to `{shown}`: it mutates {param}{because}")
+                };
+                self.push_tuple_hit(w, at, elem, message);
+                continue;
+            }
             let message = if shown.starts_with('.') && j == 0 {
                 format!("Cannot call `{shown}` on a `readonly` value: it mutates {param}{because}")
             } else if let Some(n) = name {
@@ -2346,6 +2391,7 @@ impl Cx<'_> {
         match &e.kind {
             HirKind::Call { callee, args } => self.call(w, id, callee, args),
             HirKind::Assign { place, value } => match &body.expr(*place).kind {
+                HirKind::Field { base, .. } | HirKind::Index { base, .. } if self.tuple_element_write(w, id, *base, || "Cannot assign through a tuple element".to_string()) => {}
                 HirKind::Field { base, name } if self.roots(w, *base) != 0 => {
                     let bits = self.roots(w, *base);
                     self.mutate(w, bits, None, || format!("writes field `{name}`"));
@@ -2379,13 +2425,21 @@ impl Cx<'_> {
                 }
                 _ => {}
             },
+            // `let w = mut place`: `w` writes the place's object.
+            HirKind::Let { local, init: Some(init) } if body.local(*local).borrow => {
+                self.tuple_element_write(w, id, *init, || "Cannot borrow a tuple element with `mut`".to_string());
+            }
             // `new View(mut place, …)`: the view writes the place's object.
             HirKind::Make { .. } => {
                 for a in crate::hir::view_lint::borrow_args(self.checker, body, id) {
+                    if self.tuple_element_write(w, a, a, || "Cannot borrow a tuple element with `mut`".to_string()) {
+                        continue;
+                    }
                     let bits = self.roots(w, a);
                     self.mutate(w, bits, None, || "borrows it in a view".to_string());
                 }
             }
+            HirKind::Append { base, .. } if self.tuple_element_write(w, id, *base, || "Cannot append through a tuple element".to_string()) => {}
             HirKind::Append { base, value } if !self.is_private(w, *base) => {
                 let bits = self.roots(w, *base);
                 self.mutate(w, bits, None, || "appends to an array".to_string());
@@ -2474,6 +2528,31 @@ impl Cx<'_> {
         }
     }
 
+    /// E0107 when `place` is a tuple element or reaches one through
+    /// fields and elements (#2791): a tuple cannot be changed in place, and
+    /// a write to what one of its elements holds is a change to the tuple.
+    /// True when it reported one.
+    fn tuple_element_write(&self, w: &mut Walk<'_>, at: HirId, place: HirId, message: impl FnOnce() -> String) -> bool {
+        if w.ro_hits.is_none() {
+            return false;
+        }
+        let body = &self.module.bodies[w.index];
+        let Some(elem) = tuple_element(body, place) else { return false };
+        self.push_tuple_hit(w, at, elem, message());
+        true
+    }
+
+    /// Record the tuple element write at `at` through element `elem`, with
+    /// the rewrite that does what it meant.
+    fn push_tuple_hit(&self, w: &mut Walk<'_>, at: HirId, elem: HirId, message: String) {
+        let body = &self.module.bodies[w.index];
+        let help = tuple_rewrite_help(self.checker, body, elem);
+        let span = body.expr(at).span;
+        if let Some(hits) = w.ro_hits.as_mut() {
+            hits.push(RoHit { span, message: format!("{message}; a tuple cannot be changed in place"), help });
+        }
+    }
+
     fn is_private(&self, w: &Walk<'_>, base: HirId) -> bool {
         let body = &self.module.bodies[w.index];
         let facts = &self.facts[w.index];
@@ -2513,6 +2592,9 @@ impl Cx<'_> {
                         return;
                     }
                     if VEC_MUTATORS.contains(&name.as_str()) {
+                        if self.tuple_element_write(w, at, recv, || format!("Cannot call `.{name}()` on a tuple element: it changes the `Vec`")) {
+                            return;
+                        }
                         let bits = self.roots(w, recv);
                         self.mutate(w, bits, None, || format!("calls `.{name}()` on a `Vec`"));
                         if !self.is_private(w, recv) {

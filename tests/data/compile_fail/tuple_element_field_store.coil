@@ -1,0 +1,11 @@
+// @expected E0107 — a field store through a tuple element changes the tuple,
+// and a tuple cannot be changed in place (#2791).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let c = new C(1);
+    let t = (c, 0);
+    t[0].x = 9;
+}

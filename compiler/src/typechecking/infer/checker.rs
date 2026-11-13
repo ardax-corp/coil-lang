@@ -8126,7 +8126,7 @@ impl Checker {
                         ErrorCode::InvalidAssignment,
                         "Invalid assignment target".to_string(),
                         range,
-                        Some("tuple elements are immutable".to_string()),
+                        Some("a tuple cannot be changed in place; build a new tuple: `t = (v, t[1]);`".to_string()),
                     ),
                     other if Self::is_string_ty(other) => self.error_with_help(
                         ErrorCode::InvalidAssignment,

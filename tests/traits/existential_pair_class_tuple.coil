@@ -6,7 +6,7 @@
 use tests::assert;
 
 trait Sum<S> {
-    fn get(S s) -> int {}
+    fn get(readonly S s) -> int {}
 }
 
 readonly class P2 {

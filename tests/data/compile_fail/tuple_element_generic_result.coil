@@ -1,0 +1,15 @@
+// @expected E0107 — a store through an element of the tuple a generic
+// function returns changes that tuple, and a tuple cannot be changed in place
+// (#2791).
+class C {
+    pub x: int,
+}
+
+fn twice<U>(U x) -> (U, int) {
+    return (x, 2);
+}
+
+fn main() {
+    let tw = twice(new C(1));
+    tw[0].x = 9;
+}
