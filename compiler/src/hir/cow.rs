@@ -203,13 +203,16 @@ pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, loo
 #[path = "cow_view.rs"]
 mod view;
 
+/// What [`closure_life`] finds: the first holder, the span, every holder.
+type ClosureLife = (Option<LocalId>, (u32, u32), HashSet<LocalId>);
+
 /// How long the closure `lambda` makes lives in `body`: the local first
 /// holding it, and the evaluation-order span from the lambda to the last
 /// read of any local it reaches (`let f = …`, `let g = f`, another closure
 /// capturing one). `Err` with what the closure does when it outlives the
 /// body: it is returned, stored in a field, element or value, or passed to
 /// a call that may keep it. Third: the locals that hold it.
-fn closure_life(body: &HirBody, f: &Facts<'_>, lambda: HirId) -> Result<(Option<LocalId>, (u32, u32), HashSet<LocalId>), &'static str> {
+fn closure_life(body: &HirBody, f: &Facts<'_>, lambda: HirId) -> Result<ClosureLife, &'static str> {
     let start = f.order(lambda);
     let mut end = f.end[lambda.0 as usize].saturating_sub(1).max(start);
     let mut first: Option<LocalId> = None;
