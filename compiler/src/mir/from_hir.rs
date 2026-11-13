@@ -2136,6 +2136,17 @@ impl Lower<'_> {
         self.hir.local(local).ty.as_ref().is_some_and(is_unit)
     }
 
+    /// `local` is a `for mut` binding of an array's object items at a
+    /// ground type, which the loop makes unique in place (#2782). An open
+    /// type's or an existential's item keeps the one word it has.
+    fn for_mut_item(&self, local: HirLocal, elem: MirTy, array: bool) -> bool {
+        let l = self.hir.local(local);
+        array
+            && l.borrow
+            && elem == MirTy::HeapRef
+            && l.ty.as_ref().map(strip_readonly).is_some_and(|t| !is_var(t) && !is_var_app(t) && !matches!(t, Ty::Existential { .. }))
+    }
+
     /// A local of a two-word type that HIR emission keeps boxed in one slot.
     fn boxed_local(&self, local: HirLocal) -> bool {
         self.pair_local_tys(local).is_none()
@@ -8116,6 +8127,18 @@ impl Lower<'_> {
         match (pat, parts) {
             (HirPat::Bind(local), _) if self.unit_local(*local) => {}
             (HirPat::Bind(local), _) => {
+                let item = if self.for_mut_item(*local, elem, into_iter.is_none() && matches!(items, Items::Array)) {
+                    // `for mut c in xs`: `c` names the item in `xs`, which
+                    // the plan made unique before the loop; an item another
+                    // name still shares is copied and stored back first, so
+                    // the writes through `c` reach `xs` only (#2782).
+                    let own = self.at_expr(id, |l| l.b.ins_cow(item, true).map_err(mir))?;
+                    let own = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![own]).map_err(mir)?;
+                    self.b.ins_store_index(arr, cur, own, pinned).map_err(mir)?;
+                    own
+                } else {
+                    item
+                };
                 let x = self.slot(*local)?;
                 self.b.def_local(x, item).map_err(mir)?;
             }
