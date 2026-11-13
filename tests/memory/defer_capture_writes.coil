@@ -1,0 +1,101 @@
+// A `defer use (mut d)` reads and writes the variable `d` when it runs, at
+// the end of its scope; a `defer use (d)` works on its own copy, taken when
+// the `defer` statement runs. A write through either is a write to that
+// value only (#2830): it never shows through another name that shared the
+// object. Before, a write to a captured local, in the deferred body or
+// after the `defer`, was made in place.
+use tests::assert;
+use string::format;
+
+class C {
+    pub x: int,
+}
+
+static let LOG: string = "";
+
+fn note(string s) {
+    LOG = LOG + s;
+}
+
+test("a defer use (mut d) write does not show through a name sharing d's object") {
+    let c = new C(1);
+    let d = c;
+    {
+        defer use (mut d) {
+            d.x = 7;
+        }
+    }
+    assert!(c.x == 1);
+    assert!(d.x == 7);
+}
+
+test("a write after the defer to the local it borrows") {
+    LOG = "";
+    let c = new C(1);
+    let d = c;
+    {
+        defer use (mut d) {
+            note(format("defer=%i;", d.x));
+        }
+        d.x = 7;
+    }
+    assert!(LOG == "defer=7;");
+    assert!(c.x == 1);
+    assert!(d.x == 7);
+}
+
+test("a defer use (e) write changes the defer's copy only") {
+    LOG = "";
+    let e = new C(1);
+    {
+        defer use (e) {
+            e.x = 5;
+            note(format("defer=%i;", e.x));
+        }
+    }
+    assert!(LOG == "defer=5;");
+    assert!(e.x == 1);
+}
+
+test("a defer in a closure writes the closure's copy") {
+    let c = new C(1);
+    let f = fn () use (c) {
+        defer use (mut c) {
+            c.x = 9;
+        }
+        return 0;
+    };
+    let _ = f();
+    let _ = f();
+    assert!(c.x == 1);
+}
+
+test("the defer reads the variable when it runs") {
+    LOG = "";
+    let d = new C(1);
+    {
+        defer use (mut d) {
+            note(format("defer=%i;", d.x));
+            d.x += 1;
+        }
+        d = new C(5);
+        let e = d;
+        e.x = 9;
+    }
+    assert!(LOG == "defer=5;");
+    assert!(d.x == 6);
+}
+
+test("a defer in a loop body writes each pass") {
+    let c = new C(0);
+    let d = c;
+    let i = 0;
+    while i < 3 {
+        defer use (mut d) {
+            d.x += 1;
+        }
+        i += 1;
+    }
+    assert!(d.x == 3);
+    assert!(c.x == 0);
+}
