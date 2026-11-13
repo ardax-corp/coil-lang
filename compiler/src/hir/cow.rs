@@ -150,6 +150,9 @@ struct Facts<'b> {
     capture_lists: HashMap<HirId, Vec<LocalId>>,
     /// Outer locals a lambda captures as `use (mut x)`, by lambda.
     borrow_captures: HashSet<(HirId, LocalId)>,
+    /// Of those, the ones the closure's body keeps, returns or hands to
+    /// code not known here: a holder of the object that may outlive a call.
+    loose_captures: HashSet<(HirId, LocalId)>,
     /// Parameters the body assigns.
     reassigned: HashSet<LocalId>,
     /// Assignments to a `use (mut x)` capture (#2072).
@@ -168,8 +171,9 @@ pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, loo
         return (None, Vec::new());
     }
     let analyse = |b: &HirBody| {
+        let bodies = lookup;
         let lookup = |callee: &Callee, args: &[HirId]| lookup(b, callee, args);
-        let facts = Facts::new(checker, module, b, &lookup, b.root.expect("a body with a root"));
+        let facts = Facts::new(checker, module, b, &lookup, bodies, b.root.expect("a body with a root"));
         let plan = Plan::new(checker, b, &facts, mutates);
         let next = view::round(checker, b, &facts, &plan, &lookup);
         (plan, next)
@@ -292,7 +296,7 @@ fn place_text(body: &HirBody, v: HirId) -> Option<String> {
 }
 
 impl<'b> Facts<'b> {
-    fn new(checker: &Checker, module: &HirModule, body: &'b HirBody, lookup: &CallLookup<'_>, root: HirId) -> Self {
+    fn new(checker: &Checker, module: &HirModule, body: &'b HirBody, lookup: &CallLookup<'_>, bodies: &BodyLookup<'_>, root: HirId) -> Self {
         let n = body.exprs.len();
         let mut f = Facts {
             body,
@@ -309,6 +313,7 @@ impl<'b> Facts<'b> {
             captured: HashSet::new(),
             capture_lists: HashMap::new(),
             borrow_captures: HashSet::new(),
+            loose_captures: HashSet::new(),
             defer_captured: HashSet::new(),
             reassigned: HashSet::new(),
             capture_assigns: Vec::new(),
@@ -340,6 +345,15 @@ impl<'b> Facts<'b> {
         for w in &f.writes {
             if let Some(HirKind::Local(l)) = f.root_of(w.path).map(|r| &body.expr(r).kind) {
                 f.written_roots.insert(*l);
+            }
+        }
+        for &(lambda, o) in &f.borrow_captures {
+            let HirKind::Lambda { body: inner } = body.expr(lambda).kind else { continue };
+            let inner = &module.bodies[inner];
+            let Some(&(_, i)) = inner.captures.iter().find(|(x, _)| *x == o) else { continue };
+            let (kept, returned, opaque, _) = keeps_of(module, inner, &|c: &Callee, a: &[HirId]| bodies(inner, c, a), &[i], Some(checker));
+            if (kept | returned | opaque) & 1 != 0 {
+                f.loose_captures.insert((lambda, o));
             }
         }
         f
@@ -561,13 +575,20 @@ fn named_value(body: &HirBody, a: HirId) -> HirId {
 /// Third: the parameters it hands, as themselves, to code not known
 /// here, which may keep them.
 pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> (u64, u64, u64, u64) {
+    keeps_of(module, body, lookup, &body.params, None)
+}
+
+/// [`keeps`] for the locals `seeds` (bit `i` for `seeds[i]`) in place of
+/// the parameters: a closure's captures. With `views`, a call that returns
+/// a view does not keep its receiver.
+fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: &[LocalId], views: Option<&Checker>) -> (u64, u64, u64, u64) {
     if body.is_coro {
         return (u64::MAX, u64::MAX, u64::MAX, 0);
     }
     let Some(root) = body.root else { return (0, 0, 0, 0) };
     // What each local may hold of the parameters, through `let x = p`.
     let mut holds: HashMap<LocalId, u64> = HashMap::new();
-    for (i, &p) in body.params.iter().enumerate().take(64) {
+    for (i, &p) in seeds.iter().enumerate().take(64) {
         holds.insert(p, 1 << i);
     }
     let mut copies: Vec<(LocalId, HirId)> = Vec::new();
@@ -636,7 +657,16 @@ pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>)
                 }
             }
             HirKind::Call { callee, args } => {
-                let used = arg_use(body, lookup, callee, args);
+                let mut used = arg_use(body, lookup, callee, args);
+                // A call that returns a view borrows its receiver, as
+                // `Facts::note` reads it: the view cannot outlive it (E0151).
+                if let Some(checker) = views
+                    && crate::hir::view_lint::is_view_ty(checker, body.expr(id).ty.as_ref())
+                    && args.first().is_some_and(|&r| cow_ty(checker, body.expr(r).ty.as_ref()))
+                {
+                    used.kept &= !1;
+                    used.opaque &= !1;
+                }
                 if std::env::var("COIL_COW_TRACE").is_ok() && used.kept != 0 {
                     eprintln!("keeps   {callee:?} kept={:b}", used.kept);
                 }
@@ -808,6 +838,19 @@ fn from_summary(s: &Summary) -> ArgUse {
     }
 }
 
+/// A borrow as [`Plan::hold_borrowed`] reads it.
+struct Held {
+    root: LocalId,
+    path: Vec<Option<String>>,
+    /// The evaluation-order span over which it lives.
+    span: (u32, u32),
+    /// The node that makes it: nothing inside it is in the borrow's life.
+    within: Option<HirId>,
+    /// A `use (mut root)` capture whose closure body may let a holder of
+    /// the object outlive a call ([`Facts::loose_captures`]).
+    loose: bool,
+}
+
 /// Where the rewrite puts ops.
 #[derive(Default)]
 struct Plan {
@@ -828,7 +871,7 @@ struct Plan {
     unique: Vec<(Write, (HirId, HirId))>,
     /// Borrows (`let w = mut a.f`, `use (mut a)`, views, `for mut`) by
     /// their root, place steps, live span and the node that makes them.
-    borrows: Vec<(LocalId, Vec<Option<String>>, (u32, u32), Option<HirId>)>,
+    borrows: Vec<Held>,
     /// How many objects, from the root down, a write path leaves as they
     /// are (#2816): the borrowed object and the ones holding it, while a
     /// borrow of them lives. Keyed by the write's node and path.
@@ -1279,7 +1322,16 @@ impl Plan {
                 }
             }
         }
-        self.borrows = borrows.iter().map(|b| (b.root, b.path.clone(), b.span, b.within)).collect();
+        self.borrows = borrows
+            .iter()
+            .map(|b| Held {
+                root: b.root,
+                path: b.path.clone(),
+                span: b.span,
+                within: b.within,
+                loose: b.capture && b.within.is_some_and(|l| f.loose_captures.contains(&(l, b.root))),
+            })
+            .collect();
         if borrows.is_empty() {
             return;
         }
@@ -1367,23 +1419,53 @@ impl Plan {
     /// Not inside a loop over an iterator, which holds its iterable while
     /// the loop runs.
     fn hold_borrowed(&mut self, body: &HirBody, f: &Facts<'_>) {
-        if self.borrows.is_empty() {
+        let live = |b: &Held, at: HirId| {
+            let o = f.order(at);
+            o != u32::MAX && o > b.span.0 && o <= b.span.1 && !b.within.is_some_and(|w| f.contains(w, at))
+        };
+        // A call in the borrow's life that hands the borrowed object, or one
+        // holding it, to code not known here (which may keep it), or whose
+        // result may be an object inside a holder (the borrowed one), or a
+        // closure body that may keep its capture: the object may have a
+        // holder E0149 does not see, so writes keep their unique.
+        let open = |b: &Held| {
+            b.loose
+                || f.calls.iter().any(|(&c, u)| {
+                    let HirKind::Call { args, .. } = &body.expr(c).kind else { return false };
+                    live(b, c)
+                        && args.iter().enumerate().take(64).any(|(j, &a)| {
+                            let bit = 1u64 << j;
+                            if (u.opaque | u.inner) & bit == 0 {
+                                return false;
+                            }
+                            match place_path(body, f, named_value(body, a)) {
+                                Some((x, p)) if x == b.root => {
+                                    prefix_of(&p, &b.path) && (u.opaque & bit != 0 || p.len() < b.path.len())
+                                }
+                                Some((x, _)) => aliases(f, body, x, b.root),
+                                None => false,
+                            }
+                        })
+                })
+        };
+        // Any such call during one borrow of a root ends the others' too.
+        let open_roots: HashSet<LocalId> = self.borrows.iter().filter(|b| open(b)).map(|b| b.root).collect();
+        let borrows: Vec<&Held> = self.borrows.iter().filter(|b| !open_roots.contains(&b.root)).collect();
+        if borrows.is_empty() {
             return;
         }
         let mut held = HashMap::new();
         for &(w, _) in &self.unique {
-            let at = f.order(w.at);
             let Some((root, steps)) = write_steps(body, w.path) else { continue };
-            if at == u32::MAX || in_iterator_loop(body, f, w.at) {
+            if f.order(w.at) == u32::MAX || in_iterator_loop(body, f, w.at) {
                 continue;
             }
             let mut n = 0;
-            for (r, path, (start, end), within) in &self.borrows {
-                if *r != root || at <= *start || at > *end || within.is_some_and(|x| f.contains(x, w.at)) {
-                    continue;
+            for b in &borrows {
+                if b.root == root && live(b, w.at) {
+                    let common = steps.iter().zip(&b.path).take_while(|(s, p)| s.is_some() && s == p).count();
+                    n = n.max(1 + common);
                 }
-                let common = steps.iter().zip(path).take_while(|(s, p)| s.is_some() && s == p).count();
-                n = n.max(1 + common);
             }
             if n > 0 {
                 held.insert((w.at, w.path), n);
