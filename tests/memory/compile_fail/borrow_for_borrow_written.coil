@@ -1,0 +1,13 @@
+// @expected E0149 — a write through `w` inside a `for` over the object `w`
+// borrows goes into the object the loop walks (#2819): before, each pass
+// added an entry the next one found, and the loop never ended.
+use collections::map::HashMap;
+
+fn main() {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    let w = mut a;
+    for p in a {
+        let _ = w.insert(p.key + "2", 2);
+    }
+}

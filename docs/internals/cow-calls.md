@@ -222,6 +222,36 @@ costs one copy at the first write after the borrow is done. Tests:
 `tests/memory/compile_fail/borrow_iterator_kept.coil`,
 `tests/memory/compile_fail/borrow_generator_walk.coil`.
 
+## Writing what a `for` walks
+
+A `for` over an iterator (`ForInKind::Custom`: `into_iter`, then `next`)
+walks the value its iterable had when the loop began: the iterator holds
+the collection (`into_iter` stores it, which shares it), so a write to it in
+the body copies it and the loop goes on over the old object (#2819). A
+write in such a loop whose root is the iterable's root keeps its unique on
+a fresh local too (`Plan::walked`; `fresh_locals` would skip it), or the
+write would go into the object the loop walks: a user iterator over a
+growing `Vec` never ended.
+
+While a borrow lives, the loop is a second holder of what it walks. A
+`for` over an iterator whose iterable is the borrowed place, one holding
+it, or the borrow itself (`for p in w`), whose body writes what the loop
+walks (a path from the source that leads to the walked object or below it,
+any write through the borrow, or a call of a `use (mut a)` closure that
+borrows it), is E0149 at the iterable: a write through the source would
+copy the object away from the borrow, and one through the borrow would
+change what the loop walks (before, `for p in a { w.insert(…) }` never
+ended). It is refused rather than given a meaning because the iterator's
+old object and the borrow's object cannot both be the one value. A walk of
+an object inside the borrowed one (`for p in a.m` while `w = mut a`) is a
+second name below the borrow, which writes make unique first, as for any
+other second name. A walk whose body writes nothing it walks, or one after
+the borrow's last use, is fine. Tests:
+`tests/memory/for_walk_writes_iterable.coil`,
+`tests/memory/compile_fail/borrow_for_*.coil`,
+`tests/memory/compile_fail/capture_borrow_for_written.coil`. Not covered: a
+walked `inout` parameter (#2826) and a `for` over a `Vec` (#2827).
+
 ## Loop views
 
 A write through a nested path, `f.blocks[b].insts[i] = v`, makes each
