@@ -5597,6 +5597,39 @@ impl Compiler {
         }
     }
 
+    /// [`Self::closed_value_ty`], also a function over closed types inside
+    /// a tuple, `Vec` or class instance (`(fn(string) -> Option<string>,
+    /// int)`): one word a method clone returns as ground code reads it
+    /// (#2767).
+    fn closed_holder_ty(ty: &Ty) -> bool {
+        match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::Fun(param, ret) => Self::closed_value_ty(param) && Self::closed_value_ty(ret),
+            ty if crate::layout::ty_is_closed(ty) => true,
+            Ty::Var(_) | Ty::Existential { .. } | Ty::Forall { .. } => false,
+            ty => !ty.has_var() && ty.all_children(Self::closed_holder_ty),
+        }
+    }
+
+    /// The parameters and result of method `lookup` called with `argc`
+    /// arguments (a receiver counted), as declared: a returned function's
+    /// parameters, which the curried scheme flattens onto the method's own,
+    /// curried back onto the result (`static fn lift<T>() -> fn(T) ->
+    /// Option<T>` takes nothing and returns one closure word, #2767).
+    fn hir_method_clone_sig(&self, lookup: &str, argc: usize) -> Option<(Vec<Ty>, Ty)> {
+        let mut params = self.hir_mono_param_tys(lookup, argc)?;
+        let mut ret = self.checker.fn_return_ty(lookup)?;
+        let declared = self.checker.fn_param_names(lookup).map(|names| names.len() + usize::from(self.checker.has_receiver(lookup)));
+        if declared == Some(argc) && params.len() > argc {
+            if argc == 0 && params.first().is_some_and(crate::layout::is_unit) {
+                params.remove(0);
+            }
+            for extra in params.split_off(argc).into_iter().rev() {
+                ret = Ty::Fun(Box::new(extra), Box::new(ret));
+            }
+        }
+        Some((params, ret))
+    }
+
     /// `call` of inherent method `key` sent to its clone at the call's
     /// ground type arguments ([`Compiler::instance_clone`]) instead of the
     /// shared body `shared` stands for: each argument in its own layout,
@@ -5642,11 +5675,10 @@ impl Compiler {
             }
             arg_tys.push(ty);
         }
-        let param_tys = self.hir_mono_param_tys(lookup, args.len())?;
+        let (param_tys, ret_ty) = self.hir_method_clone_sig(lookup, args.len())?;
         if param_tys.len() != args.len() || param_tys.len() != shared.params.len() {
             return None;
         }
-        let ret_ty = self.checker.fn_return_ty(lookup)?;
         let mut map = HashMap::new();
         for (param, arg) in param_tys.iter().zip(&arg_tys) {
             Self::bind_scheme_vars(param, arg, &mut map);
@@ -5683,7 +5715,7 @@ impl Compiler {
         // A parameter or result one word, in a layout the thunk converts
         // from the shared one's.
         let one = |ty: &Ty| {
-            Self::closed_value_ty(ty)
+            Self::closed_holder_ty(ty)
                 && (classify::classify(&self.checker, ty).is_some_and(classify::is_word)
                     || matches!(crate::layout::of_resolved(&self.checker, ty), crate::layout::Layout::Pair(_)))
         };
@@ -7844,7 +7876,7 @@ impl Compiler {
                     || crate::layout::nested_fn_var_result(&ty, true, &mut |_| true)
                     || crate::layout::nested_fn_field(&self.checker, &ty, &crate::layout::nested_open_look(&self.checker))
             })
-            || self.checker.fn_return_ty(fqn).is_some_and(|ty| crate::layout::nested_fn_in_result(&ty, true))
+            || self.checker.fn_declared_return_ty(fqn).is_some_and(|ty| crate::layout::nested_fn_in_result(&self.checker, &ty, true))
             || self.open_coroutine_callers.contains(fqn)
             || (self.coroutine_fns.contains(fqn)
                 && self.checker.fn_return_ty(fqn).is_some_and(|ty| crate::layout::open_coroutine(&apply_ty_prune(self.checker.subst(), &ty))))

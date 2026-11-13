@@ -692,17 +692,33 @@ pub fn nested_fn_var_result(ty: &Ty, top: bool, unit: &mut dyn FnMut(&Ty) -> boo
 /// adapter, so the call cannot rebuild the result in its ground layout:
 /// the signature takes a clone for every ground call, as one whose such
 /// function returns a bare type variable does ([`nested_fn_var_result`],
-/// #2664).
-pub fn nested_fn_in_result(ty: &Ty, top: bool) -> bool {
+/// #2664). So does a declared result that is itself a function over a type
+/// variable whose own signature is not plain words
+/// ([`crate::hir::classify::plain_sig`]: `fn(T) -> Option<T>`,
+/// `fn(Option<T>) -> T`): the shared body's closure takes and returns the
+/// open enum's object where a ground caller passes and reads its niche word
+/// (#2767).
+pub fn nested_fn_in_result(checker: &Checker, ty: &Ty, top: bool) -> bool {
     let ty = crate::typechecking::ty::strip_readonly(ty);
     if !ty.has_var() {
         return false;
     }
     if let Ty::Fun(param, ret) = ty {
-        return !top || nested_fn_in_result(param, top) || nested_fn_in_result(ret, top);
+        if top {
+            let mut params = vec![param.as_ref().clone()];
+            let mut result = ret.as_ref();
+            while let Ty::Fun(p, next) = crate::typechecking::ty::strip_readonly(result) {
+                params.push(p.as_ref().clone());
+                result = next;
+            }
+            if !crate::hir::classify::plain_sig(checker, &params, result) {
+                return true;
+            }
+        }
+        return !top || nested_fn_in_result(checker, param, top) || nested_fn_in_result(checker, ret, top);
     }
     let mut found = false;
-    ty.for_each_child(|child| found = found || nested_fn_in_result(child, false));
+    ty.for_each_child(|child| found = found || nested_fn_in_result(checker, child, false));
     found
 }
 
