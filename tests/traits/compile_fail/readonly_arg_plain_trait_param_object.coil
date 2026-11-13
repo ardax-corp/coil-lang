@@ -1,0 +1,20 @@
+// @expected E0107 — a `readonly` argument to the one parameter of several the trait does not declare `readonly`, through a trait object (#2845).
+class Pt {
+    pub a: int,
+}
+
+trait Tk<S> {
+    fn take(S s, readonly Pt a, Pt b, readonly Pt c) -> int {}
+}
+
+impl Tk for int {
+    fn take(int s, readonly Pt a, Pt b, readonly Pt c) -> int {
+        return s + a.a + b.a + c.a;
+    }
+}
+
+fn main() {
+    let p = readonly new Pt(8);
+    let e: Tk = 1;
+    let _ = e.take(p, p, p);
+}
