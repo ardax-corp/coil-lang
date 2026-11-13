@@ -1,0 +1,44 @@
+// A `static let` brought in with `use m::s` (or `use m::s as t`) is shared
+// mutable state: a function reading it is not computed while compiling
+// (call folding at -O2 and up), and a `static let` initialised from it
+// reads it after its own initializer ran at startup (#2862).
+// @output 26\n144\n55\n14\n15\n14\n
+use io::sync::println;
+use imported_static_counter::{counter, bump, doubled};
+use imported_static_counter::counter as cnt;
+
+fn peek(int n) -> int {
+    if n > 0 {
+        return peek(n - 1) + counter;
+    }
+    return counter * 10;
+}
+
+fn peek_alias(int n) -> int {
+    if n > 0 {
+        return peek_alias(n - 1) + cnt;
+    }
+    return cnt * 10;
+}
+
+static let mine: int = doubled + 0;
+
+static let next: int = doubled + 1;
+
+fn main() {
+    bump();
+    bump();
+    let _ = println(peek(3).show());
+    let t = 0;
+    let i = 0;
+    while i < 3 {
+        bump();
+        t = t + peek(2);
+        i = i + 1;
+    }
+    let _ = println(t.show());
+    let _ = println(peek_alias(1).show());
+    let _ = println(mine.show());
+    let _ = println(next.show());
+    let _ = println(doubled.show());
+}
