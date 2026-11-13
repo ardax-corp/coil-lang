@@ -1,0 +1,112 @@
+// A call's result is a second name for a borrowed object only when it may
+// be that object (#2818). These stay legal while the borrow lives, and the
+// borrow and its source stay one object.
+use tests::assert;
+
+class C {
+    pub x: int,
+}
+
+class Box {
+    pub c: C,
+}
+
+fn same(C c) -> C {
+    return c;
+}
+
+fn read(C c) -> int {
+    return c.x;
+}
+
+fn fresh(C c) -> C {
+    return new C(c.x);
+}
+
+fn inner(Box b) -> C {
+    return b.c;
+}
+
+fn name(C c) -> string {
+    return "c";
+}
+
+// Writes `p` for the caller and binds what code not known here hands back.
+fn bump_after(C p) -> int {
+    let g = same;
+    let r = g(p);
+    p.x += 10;
+    return r.x;
+}
+
+test("a result of code not known here that is only read") {
+    let a = new C(1);
+    let w = mut a;
+    let g = same;
+    let n = g(a).x;
+    w.x += 10;
+    assert!(n == 1);
+    assert!(a.x == 11);
+    assert!(w.x == 11);
+}
+
+test("a scalar or string result of code not known here") {
+    let a = new C(1);
+    let w = mut a;
+    let gi = read;
+    let gs = name;
+    let n = gi(a);
+    let s = gs(a);
+    w.x += 10;
+    assert!(n == 1);
+    assert!(s == "c");
+    assert!(a.x == 11);
+}
+
+test("a fresh result of a known callee") {
+    let a = new C(1);
+    let w = mut a;
+    let r = fresh(a);
+    w.x += 10;
+    a.x += 100;
+    assert!(r.x == 1);
+    assert!(a.x == 111);
+    assert!(w.x == 111);
+}
+
+test("an object inside the borrowed one is a copy at its first write") {
+    let d = new Box(new C(1));
+    let w = mut d;
+    let q = inner(d);
+    w.c.x += 10;
+    assert!(q.x == 1);
+    assert!(d.c.x == 11);
+}
+
+test("code not known here given the borrow itself hands back a copy") {
+    let a = new C(1);
+    let w = mut a;
+    let g = same;
+    let r = g(w);
+    w.x += 10;
+    assert!(r.x == 1);
+    assert!(a.x == 11);
+}
+
+test("a parameter written for the caller and handed to code not known here") {
+    let a = new C(1);
+    let n = bump_after(a);
+    assert!(n == 1);
+    assert!(a.x == 11);
+}
+
+test("a result that may be the object, bound after the borrow is done") {
+    let a = new C(1);
+    let w = mut a;
+    w.x += 10;
+    let g = same;
+    let r = g(a);
+    a.x += 100;
+    assert!(r.x == 11);
+    assert!(a.x == 111);
+}
