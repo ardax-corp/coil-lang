@@ -2768,17 +2768,18 @@ impl Object {
     #[inline]
     pub fn is_pinned(&self) -> bool {
         // SAFETY: every kind shares the `repr(C)` header at the slot start.
-        unsafe { &*(self.addr() as *const GcHeader) }.pinned.get()
+        unsafe { &*(self.addr() as *const GcHeader) }.kind.get() & COW_PIN_BIT != 0
     }
 
-    /// Set or clear the pin ([`Self::is_pinned`]): a byte at
-    /// [`COW_PINNED_OFFSET`], which native code's `CowPin` / `CowUnpin`
-    /// write the same way.
+    /// Set or clear the pin ([`Self::is_pinned`]): [`COW_PIN_BIT`] of the
+    /// kind byte, which native code's `CowPin` / `CowUnpin` write the same
+    /// way. A class instance or an array only.
     #[inline]
     pub fn set_pinned(&self, on: bool) {
-        // SAFETY: a live object's header; the bit is a `Cell<bool>` at
-        // [`COW_PINNED_OFFSET`].
-        unsafe { *((self.addr() + COW_PINNED_OFFSET as u64) as *mut u8) = if on { COW_PINNED_SET } else { 0 } };
+        debug_assert!(matches!(self, Self::Instance(_) | Self::Array(_)), "only an instance or an array is pinned");
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        let kind = &unsafe { &*(self.addr() as *const GcHeader) }.kind;
+        kind.set(if on { kind.get() | COW_PIN_BIT } else { kind.get() & !COW_PIN_BIT });
     }
 
     /// Point every word of this instance's slots or array's elements that
@@ -2866,7 +2867,8 @@ impl Object {
     /// current [`Heap::alloc`] result (non-moving); kind is the header byte.
     pub(crate) unsafe fn from_header(addr: u64) -> Option<Self> {
         let header = unsafe { &*(addr as *const GcHeader) };
-        Some(match header.kind.get() {
+        // The copy-on-write pin is the kind byte's high bit (`COW_PIN_BIT`).
+        Some(match header.kind.get() & !COW_PIN_BIT {
             1 => Self::String(unsafe { Gc::from_addr(addr) }),
             KIND_INSTANCE => Self::Instance(unsafe { Gc::from_addr(addr) }),
             3 => Self::Enum(unsafe { Gc::from_addr(addr) }),
@@ -5072,12 +5074,6 @@ struct GcHeader {
     /// An instance's or enum's `drop` has been claimed: it never runs
     /// twice ([`Object::claim_finalizer`]).
     finalized: Cell<bool>,
-    /// Copy-on-write: a name writes this object in place without a test
-    /// (an alias the compiler pinned it for, `CowPin`), so a share copies
-    /// it instead of setting [`Self::shared`] ([`Heap::cow_share`]). A
-    /// pinned object is never shared. Header state, like `shared`: no
-    /// barrier, and an evacuation copies it with the slot.
-    pinned: Cell<bool>,
     /// Debug / gc-stress: generation of the steal epoch the object was
     /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes a
     /// byte of what is header padding before an 8-aligned payload; release
@@ -5108,22 +5104,24 @@ pub const HEADER_KIND_OFFSET: i32 = std::mem::offset_of!(GcHeader, kind) as i32;
 pub const COW_SHARED_OFFSET: i32 = std::mem::offset_of!(GcHeader, shared) as i32;
 /// The byte a share stores at [`COW_SHARED_OFFSET`]: `true`.
 pub const COW_SHARED_SET: u8 = 1;
-/// Byte offset of a header's copy-on-write pin ([`GcHeader::pinned`]):
-/// what native code's inline share tests, and its `CowPin` / `CowUnpin`
-/// write ([`COW_PINNED_SET`] or `0`).
-pub const COW_PINNED_OFFSET: i32 = std::mem::offset_of!(GcHeader, pinned) as i32;
-/// The byte a pin stores at [`COW_PINNED_OFFSET`]: `true`.
-pub const COW_PINNED_SET: u8 = 1;
+/// Copy-on-write pin: the high bit of a class instance's or an array's
+/// kind byte ([`GcHeader::kind`], at [`HEADER_KIND_OFFSET`]). A name writes
+/// a pinned object in place without a test (an alias the compiler pinned
+/// it for, `CowPin`), so a share copies it instead of setting
+/// [`GcHeader::shared`] ([`Heap::cow_share`]): a pinned object is never
+/// shared. In the kind byte, native code's inline share compares against
+/// `KIND_INSTANCE` / `KIND_ARRAY` miss a pinned object with no added test,
+/// and only it leaves the fast path. Readers of the kind byte mask it off
+/// ([`Object::from_header`]); header state, like `shared`: no barrier, an
+/// evacuation copies it with the slot, a recycled slot's kind is `0`.
+pub const COW_PIN_BIT: u8 = 0x80;
 
 // The flag and the kind are one byte each, so native code reads and writes
 // them as bytes.
 const _: () = assert!(std::mem::size_of::<Cell<bool>>() == 1 && std::mem::size_of::<Cell<u8>>() == 1);
-const _: () = assert!(COW_SHARED_SET == true as u8 && COW_PINNED_SET == true as u8);
-// The pin takes a byte of what was padding before an 8-aligned payload: the
-// header stays within one word, so no slot grows.
-const _: () = assert!(std::mem::size_of::<GcHeader>() <= 8);
-const _: () = assert!(std::mem::offset_of!(GcData<u64>, data) == 8);
-const _: () = assert!(COW_PINNED_OFFSET != COW_SHARED_OFFSET && COW_PINNED_OFFSET != HEADER_KIND_OFFSET);
+const _: () = assert!(COW_SHARED_SET == true as u8);
+// No kind number reaches the pin bit (the highest is 18).
+const _: () = assert!(KIND_INSTANCE & COW_PIN_BIT == 0 && KIND_ARRAY & COW_PIN_BIT == 0 && 18 & COW_PIN_BIT == 0);
 
 #[repr(C)]
 pub struct GcData<T> {
@@ -5140,7 +5138,6 @@ impl GcHeader {
             generation: Cell::new(0),
             shared: Cell::new(false),
             finalized: Cell::new(false),
-            pinned: Cell::new(false),
             #[cfg(any(debug_assertions, feature = "gc-stress"))]
             epoch: Cell::new(0),
         }
@@ -5278,7 +5275,6 @@ impl<T> Gc<T> {
             (*p).header.fresh.set(false);
             (*p).header.generation.set(0);
             (*p).header.shared.set(false);
-            (*p).header.pinned.set(false);
         }
     }
 
@@ -5697,7 +5693,6 @@ mod tests {
         assert_eq!(slot_of(&heap, copy.heap_addr(), 0).as_int(), 2);
         // Not a class instance or an array: left alone.
         let (s, _) = heap.alloc(ObjString::from("x"), Object::String);
-        s.set_pinned(true);
         assert_eq!(heap.cow_share(Value::from(s.addr())), CowShare::Untouched);
     }
 
@@ -5760,8 +5755,8 @@ mod tests {
         unsafe { heap.sweep() };
         assert!(heap.find_object_by_addr(addr).is_none(), "swept");
         // SAFETY: a swept slot stays mapped.
-        let pin = unsafe { *((addr + COW_PINNED_OFFSET as u64) as *const u8) };
-        assert_eq!(pin, 0, "the recycled header holds no pin");
+        let kind = unsafe { *((addr + HEADER_KIND_OFFSET as u64) as *const u8) };
+        assert_eq!(kind & COW_PIN_BIT, 0, "the recycled header holds no pin");
     }
 
     fn live_object_addrs(heap: &Heap) -> std::collections::HashSet<u64> {
