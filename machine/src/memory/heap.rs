@@ -840,19 +840,26 @@ impl Heap {
     #[inline]
     pub fn cow_share(&mut self, v: Value) -> CowShare {
         match self.find_object_by_addr(v.heap_addr()) {
-            Some(obj @ (Object::Instance(_) | Object::Array(_))) if obj.is_pinned() => match self.cow_copy(obj, &mut HashMap::new()) {
-                Some(copy) => CowShare::Copied(copy),
-                // An identity class is never copied: marked as before.
-                None => {
-                    obj.set_shared();
-                    CowShare::Marked
-                }
-            },
+            Some(obj @ (Object::Instance(_) | Object::Array(_))) if obj.is_pinned() => self.cow_share_pinned(obj),
             Some(obj @ (Object::Instance(_) | Object::Array(_))) => {
                 obj.set_shared();
                 CowShare::Marked
             }
             _ => CowShare::Untouched,
+        }
+    }
+
+    /// [`Self::cow_share`] of a pinned object: a copy of it.
+    #[cold]
+    #[inline(never)]
+    fn cow_share_pinned(&mut self, obj: Object) -> CowShare {
+        match self.cow_copy(obj, &mut Vec::new()) {
+            Some(copy) => CowShare::Copied(copy),
+            // An identity class is never copied: marked as before.
+            None => {
+                obj.set_shared();
+                CowShare::Marked
+            }
         }
     }
 
@@ -867,16 +874,6 @@ impl Heap {
         if !obj.is_shared() {
             return None;
         }
-        self.cow_copy(obj, &mut HashMap::new())
-    }
-
-    /// A shallow copy of `obj` (a class instance or an array), whose
-    /// children both now name: each is marked shared, or, pinned, copied
-    /// in turn for the copy (deep through pinned objects; `done` maps what
-    /// this copy made already, so a child held twice is copied once).
-    /// `None` for an identity class or another kind of object. Allocates
-    /// and never collects, as the `Cow` helpers do.
-    fn cow_copy(&mut self, obj: Object, done: &mut HashMap<u64, u64>) -> Option<Value> {
         let copy = match obj {
             Object::Instance(gc) => {
                 let inst = gc.as_ref();
@@ -892,28 +889,93 @@ impl Heap {
             }
             _ => return None,
         };
-        done.insert(obj.addr(), copy.addr());
-        let mut pinned = Vec::new();
+        let mut pinned = false;
         copy.for_each_reference(self, &mut |addr, _| {
             if let Some(child @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(addr) {
                 if child.is_pinned() {
-                    pinned.push(child);
+                    pinned = true;
                 } else {
                     child.set_shared();
                 }
             }
         });
+        if pinned {
+            self.cow_copy_pinned_children(obj, copy, &mut Vec::new());
+        }
+        self.cow_copies += 1;
+        Some(Value::from(copy.addr()))
+    }
+
+    /// A shallow copy of `obj` (a class instance or an array), whose
+    /// children both now name: each is marked shared, or, pinned, copied
+    /// in turn for the copy (deep through pinned objects; `done` pairs what
+    /// this copy made already with its copy, so a child held twice is
+    /// copied once: written only below a pinned child, so a plain copy
+    /// allocates nothing more than it did).
+    /// `None` for an identity class or another kind of object. Allocates
+    /// and never collects, as the `Cow` helpers do.
+    fn cow_copy(&mut self, obj: Object, done: &mut Vec<(u64, u64)>) -> Option<Value> {
+        let copy = match obj {
+            Object::Instance(gc) => {
+                let inst = gc.as_ref();
+                if inst.type_id == 0 || self.is_identity_type(inst.type_id) {
+                    return None;
+                }
+                let slots = inst.storage.as_slice().to_vec();
+                self.alloc(ObjInstance::with_slots(inst.type_id, slots), Object::Instance).0
+            }
+            Object::Array(gc) => {
+                let copy = gc.as_ref().copy();
+                self.alloc(copy, Object::Array).0
+            }
+            _ => return None,
+        };
+        let mut pinned = false;
+        copy.for_each_reference(self, &mut |addr, _| {
+            if let Some(child @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(addr) {
+                if child.is_pinned() {
+                    pinned = true;
+                } else {
+                    child.set_shared();
+                }
+            }
+        });
+        if pinned {
+            self.cow_copy_pinned_children(obj, copy, done);
+        }
+        self.cow_copies += 1;
+        Some(Value::from(copy.addr()))
+    }
+
+    /// [`Self::cow_copy`] below a pinned child: each pinned child of `copy`
+    /// (a fresh copy of `obj`) is copied for it in turn.
+    #[cold]
+    #[inline(never)]
+    fn cow_copy_pinned_children(&mut self, obj: Object, copy: Object, done: &mut Vec<(u64, u64)>) {
+        let mut pinned = Vec::new();
+        copy.for_each_reference(self, &mut |addr, _| {
+            if let Some(child @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(addr)
+                && child.is_pinned()
+            {
+                pinned.push(child);
+            }
+        });
+        done.push((obj.addr(), copy.addr()));
         for child in pinned {
-            let to = match done.get(&child.addr()) {
-                Some(&to) => Some(Value::from(to)),
-                None => self.cow_copy(child, done),
+            let to = match done.iter().find(|&&(from, _)| from == child.addr()) {
+                Some(&(_, to)) => Some(Value::from(to)),
+                None => {
+                    let to = self.cow_copy(child, done);
+                    if let Some(to) = to {
+                        done.push((child.addr(), to.heap_addr()));
+                    }
+                    to
+                }
             };
             if let Some(to) = to {
                 copy.replace_reference(child.addr(), to);
             }
         }
-        self.cow_copies += 1;
-        Some(Value::from(copy.addr()))
     }
 
     /// How many objects [`Self::cow_unique`] copied.
