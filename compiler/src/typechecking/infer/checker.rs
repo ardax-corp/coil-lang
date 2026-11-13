@@ -4834,7 +4834,7 @@ impl Checker {
                         "cannot cast `string` to `Vec<byte>`: a cast does not encode a `string`".to_string(),
                         range,
                         Some(
-                            "use `to_bytes(s)` to encode a string as UTF-8 bytes (a cast does not UTF-8-encode)"
+                            "use `to_bytes(s)` to encode a string as UTF-8 bytes"
                                 .to_string(),
                         ),
                     );
@@ -4887,7 +4887,7 @@ impl Checker {
                 "cannot cast `string` to `byte`: only a one-byte string literal converts".to_string(),
                 range,
                 Some(
-                    "only a string literal whose UTF-8 encoding is exactly one byte coerces to `byte` (e.g. `\"/\"`, `\"\\n\"`)"
+                    "a literal whose UTF-8 encoding is one byte converts (`\"/\"`, `\"\\n\"`); for a byte of a string, index `to_bytes(s)`"
                         .to_string(),
                 ),
             ),
