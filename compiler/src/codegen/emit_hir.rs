@@ -4161,7 +4161,8 @@ impl Compiler {
                 return Err("lambda-body");
             }
             // Captures are one-word locals of this body, or two-slot ones
-            // the lambda takes as their two words.
+            // the lambda takes as their two words. A `()` local is the empty
+            // tuple object's word there (#2792).
             let pair_captures: Vec<Option<PairKind>> = lam
                 .captures
                 .iter()
@@ -4182,7 +4183,7 @@ impl Compiler {
                         .ty
                         .as_ref()
                         .and_then(|t| classify::classify(&self.checker, t))
-                        .is_some_and(classify::is_word);
+                        .is_some();
                 if !plain {
                     return Err("lambda-capture");
                 }
