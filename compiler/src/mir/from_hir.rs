@@ -1853,6 +1853,9 @@ fn lower_pad(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites,
         pad.switch(run);
         let captures: Vec<HirLocal> = captures_of(body).ok_or("pad defer")?.into_iter().flatten().collect();
         for &c in &captures {
+            if pad.unit_local(c) {
+                continue;
+            }
             let &(home, slot) = parts.homes.caps.get(&c.0).ok_or("pad capture")?;
             let v = pad.b.ins_home_load(home).map_err(mir)?;
             match slot {
@@ -1870,6 +1873,7 @@ fn lower_pad(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites,
                 && let HirKind::Local(l) = hir.expr(place).kind
                 && captures.contains(&l)
                 && !assigned.contains(&l)
+                && !hir.local(l).ty.as_ref().is_some_and(is_unit)
             {
                 assigned.push(l);
             }
@@ -2078,7 +2082,11 @@ impl Lower<'_> {
             stores.push((home, flag, MirTy::Bool));
         }
         for c in caps {
-            if self.pair_local(c).is_some() || self.unit_local(c) || self.defer_locals.contains_key(&c.0) {
+            // A `()` capture needs no home: the pad reads `()` (#2809).
+            if self.unit_local(c) {
+                continue;
+            }
+            if self.pair_local(c).is_some() || self.defer_locals.contains_key(&c.0) {
                 return None;
             }
             let ty = self.local_ty(c).ok()?;
