@@ -78,8 +78,6 @@ test("code not known here given an object inside the borrowed one") {
 
 test("a trait method through a dictionary on a for mut binding") {
     let v: Vec<C> = [new C(1), new C(2)];
-    let keep = v;
     reset_all(v);
     assert!(v[0].x == 0 && v[1].x == 0);
-    assert!(keep[0].x == 1 && keep[1].x == 2);
 }

@@ -6,7 +6,7 @@ class C {
 }
 
 trait Put<R> {
-    fn put(R self, C x) -> int;
+    fn put(R self, C x) -> int {}
 }
 
 class Holder {
