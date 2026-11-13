@@ -1,0 +1,138 @@
+// A parameter a closure captures is still written for the caller (#2843):
+// a `use (p)` capture is a copy taken at the lambda, so a write to `p` after
+// it reaches the caller's value and not the closure's; a `use (mut p)`
+// closure writes the caller's value. Before, a parameter any closure
+// captured was the callee's own value, and every write to it was lost.
+use tests::assert;
+use collections::map::HashMap;
+
+class C {
+    pub x: int,
+    pub v: Vec<int>,
+}
+
+fn seen_after_write(C p) -> int {
+    let f = fn () use (p) => p.x;
+    p.x += 10;
+    return f();
+}
+
+fn write_through_closure(C p) {
+    let g = fn () use (mut p) {
+        p.x += 10;
+        return 0;
+    };
+    let _ = g();
+}
+
+fn push_after_capture(Vec<int> v) -> int {
+    let n = fn () use (v) => v.len();
+    v.push(7);
+    return n();
+}
+
+fn grow_after_capture(HashMap<string, int> m) -> int {
+    let n = fn () use (m) => m.len();
+    let _ = m.insert("z", 26);
+    return n();
+}
+
+fn callf(fn() -> int g) -> int {
+    return g();
+}
+
+fn capture_passed(C p) -> int {
+    let f = fn () use (p) => p.x;
+    p.v.push(3);
+    p.x = 5;
+    return callf(f);
+}
+
+fn capture_per_pass(C p) -> int {
+    let total = 0;
+    let i = 0;
+    while i < 3 {
+        let f = fn () use (p) => p.x;
+        p.x += 1;
+        total += f();
+        i += 1;
+    }
+    return total;
+}
+
+fn nested_capture(C p) -> int {
+    let outer = fn () use (p) {
+        let inner = fn () use (p) => p.x;
+        return inner();
+    };
+    p.x += 100;
+    return outer();
+}
+
+fn deferred_copy(C p) -> int {
+    let r = 0;
+    {
+        defer use (p, mut r) {
+            r = p.x;
+        }
+        p.x += 10;
+    }
+    return r;
+}
+
+test("a write after a use (p) capture reaches the caller, not the closure") {
+    let a = new C(1, Vec::new());
+    let seen = seen_after_write(a);
+    assert!(seen == 1);
+    assert!(a.x == 11);
+}
+
+test("a use (mut p) closure writes the caller's value") {
+    let b = new C(1, Vec::new());
+    write_through_closure(b);
+    assert!(b.x == 11);
+}
+
+test("a Vec and a map parameter captured, then grown") {
+    let v = Vec::from([1, 2]);
+    assert!(push_after_capture(v) == 2);
+    assert!(v.len() == 3);
+    let m: HashMap<string, int> = HashMap::new();
+    let _ = m.insert("a", 1);
+    assert!(grow_after_capture(m) == 1);
+    assert!(m.len() == 2);
+}
+
+test("a captured parameter's closure passed on, then the parameter written") {
+    let a = new C(1, Vec::new());
+    assert!(capture_passed(a) == 1);
+    assert!(a.x == 5);
+    assert!(a.v.len() == 1);
+}
+
+test("a capture in a loop copies the value of its own pass") {
+    let a = new C(0, Vec::new());
+    assert!(capture_per_pass(a) == 0 + 1 + 2);
+    assert!(a.x == 3);
+}
+
+test("a nested capture of a parameter") {
+    let a = new C(1, Vec::new());
+    assert!(nested_capture(a) == 1);
+    assert!(a.x == 101);
+}
+
+test("a defer use (p) copy of a parameter") {
+    let a = new C(1, Vec::new());
+    assert!(deferred_copy(a) == 1);
+    assert!(a.x == 11);
+}
+
+test("the caller's other names keep their value") {
+    let a = new C(1, Vec::new());
+    let keep = a;
+    let _ = seen_after_write(a);
+    write_through_closure(a);
+    assert!(a.x == 21);
+    assert!(keep.x == 1);
+}
