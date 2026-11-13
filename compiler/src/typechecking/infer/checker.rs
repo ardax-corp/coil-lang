@@ -61,6 +61,10 @@ pub(super) mod weak_check;
 /// but its frames differ by node kind, so it stops at half (#2655).
 const INFER_RECURSION_LIMIT: u32 = if cfg!(target_family = "wasm") { 1000 } else { 2000 };
 
+/// Names of sized number types other languages cast to; coil has none
+/// (`x as i32` is told to use `int`, #2803).
+const SIZED_NUMBER_NAMES: [&str; 12] = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize", "f32", "f64"];
+
 /// What [`Checker::enter_node`] saved for [`Checker::exit_node`].
 struct EnteredNode {
     id: NodeId,
@@ -1651,7 +1655,11 @@ impl Checker {
         });
         for (name, range) in names {
             let mut msg = Message::error(ErrorCode::UnknownType, format!("Unknown type `{name}`"), range);
-            msg.with_help("declare it, import it with `use`, or check the spelling".to_string());
+            msg.with_help(if SIZED_NUMBER_NAMES.contains(&name.as_str()) {
+                "there are no sized number types: use `int`, `byte` or `float`".to_string()
+            } else {
+                "declare it, import it with `use`, or check the spelling".to_string()
+            });
             self.messages.push(msg);
         }
     }
@@ -4823,7 +4831,7 @@ impl Checker {
                 if Self::is_vec_byte_ty(&dst_ty) {
                     return self.error_with_help(
                         ErrorCode::TypeMismatch,
-                        "cannot cast `string` to `Vec<byte>`".to_string(),
+                        "cannot cast `string` to `Vec<byte>`: a cast does not encode a `string`".to_string(),
                         range,
                         Some(
                             "use `to_bytes(s)` to encode a string as UTF-8 bytes (a cast does not UTF-8-encode)"
@@ -4831,9 +4839,10 @@ impl Checker {
                         ),
                     );
                 }
+                let msg = format!("cannot cast `string` to `{}`: only a string literal of that many bytes converts", self.diag_ty(&dst_ty));
                 return self.error_with_help(
                     ErrorCode::TypeMismatch,
-                    "cannot cast `string` to fixed-length `[byte; N]`".to_string(),
+                    msg,
                     range,
                     Some(
                         "use a string literal of length N, or `to_bytes(s)` for a `Vec<byte>`"
@@ -4864,15 +4873,18 @@ impl Checker {
                 }
                 dst_ty
             }
-            (Some(from), Some(to)) => self.error_with_help(
-                ErrorCode::TypeMismatch,
-                format!("cannot cast `{from}` to `{to}`"),
-                range,
-                Some("allowed casts: int↔float, int↔byte, int↔bool; single-byte string literals → byte; string literals → `[byte; N]`".to_string()),
-            ),
+            // Both scalars, a pair the matrix does not convert (#2803).
+            (Some(from), Some(to)) => {
+                let help = if from == FLOAT && to == BOOL {
+                    "compare with zero instead: `x != 0.0`".to_string()
+                } else {
+                    format!("convert through `int`: `x as int as {to}`")
+                };
+                self.error_with_help(ErrorCode::TypeMismatch, format!("cannot cast `{from}` to `{to}`"), range, Some(help))
+            }
             (None, Some(BYTE)) if Self::is_string_ty(&src_ty) => self.error_with_help(
                 ErrorCode::TypeMismatch,
-                "cannot cast `string` to `byte`".to_string(),
+                "cannot cast `string` to `byte`: only a one-byte string literal converts".to_string(),
                 range,
                 Some(
                     "only a string literal whose UTF-8 encoding is exactly one byte coerces to `byte` (e.g. `\"/\"`, `\"\\n\"`)"
@@ -4882,13 +4894,53 @@ impl Checker {
             // The operand already failed: its error stands, a second one
             // on the target only adds noise.
             (None, Some(_)) if matches!(src_ty, Ty::Var(_)) && self.messages.len() > msg_len => dst_ty,
-            _ => self.error_with_help(
-                ErrorCode::TypeMismatch,
-                "cast target must be a primitive type (`int`, `float`, `byte`, or `bool`) or a byte array (`[byte; N]`)"
-                    .to_string(),
-                ty_ann.0.into_range(),
-                None,
-            ),
+            // The message names the side that is wrong (#2803): the target
+            // when it is no cast target, else the operand.
+            (_, None) if Self::is_byte_array_ty(&dst_ty).is_some() => {
+                let msg = format!("{}: only a byte array or a string converts to a byte array", self.cast_text(&src_ty, &dst_ty));
+                self.error_with_help(ErrorCode::TypeMismatch, msg, range, None)
+            }
+            (_, None) => {
+                let msg = format!(
+                    "{}: `{}` is not a cast target (`int`, `float`, `byte`, `bool` or a byte array `[byte; N]`)",
+                    self.cast_text(&src_ty, &dst_ty),
+                    self.diag_ty(&dst_ty)
+                );
+                let help = match &dst_ty {
+                    _ if Self::is_string_ty(&dst_ty) => Some("`x.show()` makes a string of a value (`format(\"%v\", x)` inside a template)".to_string()),
+                    Ty::Con(n) if crate::typechecking::ty::FFI_INTS.contains(&n.as_str()) || SIZED_NUMBER_NAMES.contains(&n.as_str()) => {
+                        Some("there are no sized number types to cast to: use `int`, `byte` or `float`".to_string())
+                    }
+                    _ => None,
+                };
+                self.error_with_help(ErrorCode::TypeMismatch, msg, ty_ann.0.into_range(), help)
+            }
+            (None, Some(to)) => {
+                let msg = format!("{}: only `int`, `float`, `byte` and `bool` values convert with `as`", self.cast_text(&src_ty, &dst_ty));
+                let help = if Self::is_string_ty(&src_ty) {
+                    match to {
+                        INT => Some("parse it: `conv::parse_int(s)` returns a `Result<int, string>`".to_string()),
+                        FLOAT => Some("parse it: `conv::parse_float(s)` returns a `Result<float, string>`".to_string()),
+                        BOOL => Some("compare it: `s == \"true\"`".to_string()),
+                        _ => None,
+                    }
+                } else if let Some(backing) = self.scalar_backing_ty_of(&src_ty) {
+                    let b = self.diag_ty(&backing);
+                    Some(format!("a scalar-backed enum value is its backing `{b}` where one is expected: `let n: {b} = e;`"))
+                } else {
+                    None
+                };
+                self.error_with_help(ErrorCode::TypeMismatch, msg, range, help)
+            }
+        }
+    }
+
+    /// `cannot cast `S` to `T``, or `cannot cast this value to `T`` when
+    /// the operand's type is not known.
+    fn cast_text(&self, src: &Ty, dst: &Ty) -> String {
+        match src {
+            Ty::Var(_) => format!("cannot cast this value to `{}`", self.diag_ty(dst)),
+            _ => format!("cannot cast `{}` to `{}`", self.diag_ty(src), self.diag_ty(dst)),
         }
     }
 
