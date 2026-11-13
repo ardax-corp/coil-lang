@@ -5691,16 +5691,12 @@ impl Lower<'_> {
         self.switch(op);
         let obj = self.b.ins_word_as(v, MirTy::HeapRef).map_err(mir)?;
         let out = self.at_expr(id, |l| l.b.ins_cow(obj, unique).map_err(mir))?;
-        // A share sets a flag on the object and gives it back: the word is
-        // the same, so nothing joins.
-        if !unique {
-            self.jump(join)?;
-            self.switch(skip);
-            self.jump(join)?;
-            self.switch(join);
-            return Ok(v);
-        }
-        let out = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
+        // A share sets a flag on the object and gives it back, or, for a
+        // pinned object, gives a copy of it (archive 8.2): its word joins as
+        // a unique's does. It allocates in a helper that never collects, so
+        // it takes no barrier: a body whose only op is a guarded share keeps
+        // no GC poll (#2506).
+        let out = if unique { self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)? } else { out };
         let out = self.b.ins_word_as(out, ty).map_err(mir)?;
         if let Some((arr, index, pinned)) = item {
             self.b.ins_store_index(arr, index, out, pinned).map_err(mir)?;
@@ -6053,14 +6049,9 @@ impl Lower<'_> {
         let value = self.b.ins_tuple_item(pack, 0, MirTy::HeapRef).map_err(mir)?;
         let out = self.at_expr(id, |l| l.b.ins_cow(value, unique).map_err(mir))?;
         let out = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?;
-        if !unique {
-            self.jump(join)?;
-            self.switch(skip);
-            self.jump(join)?;
-            self.switch(join);
-            return Ok(Val::V(pack));
-        }
-        // The copy is another object: the words differ (the op never collects).
+        // The copy is another object: the words differ (the op never
+        // collects). A share copies only a pinned object (archive 8.2); it
+        // takes a pack of its own then, as a unique's copy does.
         let (now, was) = (self.b.ins_word_as(out, MirTy::I64).map_err(mir)?, self.b.ins_word_as(value, MirTy::I64).map_err(mir)?);
         let same = self.b.ins_cmp(MirCmpOp::Eq, now, was).map_err(mir)?;
         let (copied, kept) = (self.b.create_block(), self.b.create_block());
