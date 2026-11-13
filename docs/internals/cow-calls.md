@@ -156,6 +156,33 @@ belongs in a `Ref<T>` or a `shared class`. Tests:
 `tests/memory/capture_borrow_in_step.coil`,
 `tests/memory/compile_fail/capture_borrow_*.coil`.
 
+## Call results that may be a borrowed object
+
+While a borrow lives, a call's result that may be the borrowed object, or an
+object holding it, is a second name like a `let` of the place (#2818), E0149
+where it is bound, stored or passed on (to a call that keeps it, hands it
+back or hands it to code not known here). Before, nothing recorded such a
+result as a store, so the borrow's in-place writes showed through it. A
+result may be the object when the call is given the borrowed place or a
+holder of it (a place rooted at the borrow's source whose steps lead to the
+borrowed one) and
+- the call may hand the argument back (`returned`: opaque code, or a known
+  callee whose summary has `returns_arg`), or
+- its result may be an object inside a holder (`inner`, `returns_inner`), or
+- it writes a holder and hands it back: the eager copy of the result still
+  holds the borrowed object.
+
+Reading a field or element of the result counts the steps: `g(d).c` may be
+`d.c`. A result that cannot be one is no second name: a scalar or `string`,
+a fresh result (the summary's `shared_ret` clear), a result only read
+(dropped, an operand, a receiver a call only reads), an object inside the
+borrowed one (the borrow makes it unique before writing it), and the eager
+copy of the borrowed object itself. Code not known here given the borrow
+local itself (`g(w)`), or an `inout` parameter, hands back a copy (an eager
+copy of the result, as `let r = w` copies), since a write through either is
+never tested. Tests: `tests/memory/borrow_call_results.coil`,
+`tests/memory/compile_fail/borrow_{opaque_result,inner_result,inner_result_stored,holder_returned_written}.coil`.
+
 ## Writes through a borrowed source
 
 The shared flag is sticky: nothing clears it when the second name dies. A
