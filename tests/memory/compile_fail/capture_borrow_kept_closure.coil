@@ -1,0 +1,22 @@
+// @expected E0149 — a `use (mut a)` closure passed to a function that keeps
+// it would hold its borrow of `a` past the call (#2787).
+class C {
+    pub x: int,
+}
+
+class Slot {
+    pub f: fn() -> int,
+}
+
+fn keep(fn() -> int f) -> Slot {
+    return new Slot(f);
+}
+
+fn main() {
+    let a = new C(0);
+    let s = keep(fn () use (mut a) {
+        a.x += 1;
+        return a.x;
+    });
+    let _ = s.f();
+}

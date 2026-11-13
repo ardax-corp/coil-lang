@@ -1,0 +1,70 @@
+// A `use (mut a)` closure borrows `a`'s object while it lives (#2787): the
+// closure and the outer name write the same object, so their values stay in
+// step. Once the closure is done, `a` is an ordinary value again.
+use tests::assert;
+
+class C {
+    pub x: int,
+}
+
+fn bump(C c) {
+    c.x += 1000;
+}
+
+fn twice(fn() -> int f) -> int {
+    let _ = f();
+    return f();
+}
+
+test("the closure and the outer name write one object") {
+    let a = new C(1);
+    let f = fn () use (mut a) {
+        a.x += 10;
+        return a.x;
+    };
+    assert!(f() == 11);
+    a.x += 100;
+    assert!(f() == 121 && a.x == 121);
+}
+
+test("a callee that writes but does not keep the name") {
+    let a = new C(1);
+    let f = fn () use (mut a) {
+        a.x += 10;
+        return a.x;
+    };
+    bump(a);
+    assert!(f() == 1011 && a.x == 1011);
+}
+
+test("passed to a call that only calls it") {
+    let a = new C(0);
+    assert!(twice(fn () use (mut a) {
+        a.x += 1;
+        return a.x;
+    }) == 2);
+    assert!(a.x == 2);
+}
+
+test("in a loop") {
+    let a = new C(0);
+    let f = fn () use (mut a) {
+        a.x += 2;
+    };
+    for _ in 0..3 {
+        f();
+        a.x += 1;
+    }
+    assert!(a.x == 9);
+}
+
+test("a second name after the closure's last call") {
+    let a = new C(1);
+    let f = fn () use (mut a) {
+        a.x += 1;
+    };
+    f();
+    let b = a;
+    a.x = 50;
+    assert!(b.x == 2 && a.x == 50);
+}

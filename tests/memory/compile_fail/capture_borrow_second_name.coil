@@ -1,0 +1,15 @@
+// @expected E0149 — `a` gets a second name while a `use (mut a)` closure
+// borrows it (#2787).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let a = new C(1);
+    let f = fn () use (mut a) {
+        a.x += 10;
+    };
+    let b = a;
+    f();
+    let _ = b.x;
+}
