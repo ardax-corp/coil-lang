@@ -468,6 +468,15 @@ same in debug and `gc-stress` builds. The interpreter keeps `coil_native_cow`,
 which also counts the share for `--cow-report`'s summary line; native code's
 inline shares are not in that count (the copies are).
 
+A pinned object (archive 8.2, [cow-calls.md](cow-calls.md), "Pinned objects") is
+never marked: after the kind byte the share loads the pin at `COW_PINNED_OFFSET`
+and, when it is set, branches to a cold block that calls `coil_native_cow`, whose
+copy is the share's result. That helper allocates and never collects, so the share
+stays no GC edge and allocates nothing as far as the body's `OpProps` go: a copy
+it makes is counted, and the next safepoint collects. `CowPin` and `CowUnpin`
+are inline byte operations on the same header byte, for a class instance or an
+array only (null and other kinds: `CowPin` gives `0`, `CowUnpin` does nothing).
+
 In-place stores are compiled only into release builds without `gc-stress`
 (`ProductSlots::inline_stores`): debug and `gc-stress` builds check epoch writes in
 `GcData::as_mut`, which native code would skip. Loads are in place in every build.

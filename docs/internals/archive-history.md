@@ -5,8 +5,8 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs` (17 today; a reader takes
-17 and 16 and refuses any other).
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (18 today; a reader takes
+18, 17 and 16 and refuses any other).
 
 ## Major 8
 
@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 1, below, is the
-current version, 8.1 with MIR section `FORMAT` 17). A runtime refuses a major
+only add something to the format raise the minor (minor 2, below, is the
+current version, 8.2 with MIR section `FORMAT` 18). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -92,6 +92,18 @@ with the scope (`DebugLoc::scope`, see [debug-info.md](debug-info.md)). The read
 takes format 16 too (no scopes). `debug_locs` is stored as `SpanLoc`, the same
 three words as before. Outside the archive, the code image (`FORMAT` 3) and an AOT
 object's site table (five words per site) carry the scope as well.
+
+Minor 2 (#2842 step 1) adds the copy-on-write pin, additively: MIR section
+`FORMAT` 18 has two more instructions, `CowPin` (tag 49: dest, src; `dest` is
+whether the object was pinned, and the op pins it) and `CowUnpin` (tag 50: dest,
+src, saved; clears the pin when `saved` is `false`). Its layout is format 17's
+otherwise, and the reader takes 17 and 16 too; a format 17 or 16 section that holds
+tag 49 or 50 is refused. The pin is a byte of the heap header beside the shared flag
+(`machine::COW_PINNED_OFFSET`), in what was padding: no slot grows. A share of a
+pinned object hands out a copy instead of setting the shared flag, and a copy's
+pinned children are copied for it ([cow-calls.md](cow-calls.md), "Pinned objects").
+The AOT layout fingerprint covers the pin's offset, so an object built against the
+old header is refused. An 8.1 archive loads and runs unchanged (no op of it pins).
 
 ## Major 7
 
