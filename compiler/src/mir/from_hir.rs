@@ -5924,8 +5924,10 @@ impl Lower<'_> {
         if let Some(&slot) = self.boxes.get(&local.0) {
             return self.b.use_local(slot, MirTy::HeapRef).map_err(mir);
         }
+        // A `()` local has no slot: the closure holds the empty tuple
+        // object, as anywhere a word is stored (#2792).
         if self.unit_local(local) {
-            return Err("capture unit".into());
+            return self.unit_object();
         }
         let ty = self.local_ty(local)?;
         let slot = self.slot(local)?;
