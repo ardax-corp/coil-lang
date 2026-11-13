@@ -1,0 +1,66 @@
+// A `match` (or `if let`) on a variant of a generic enum built in place
+// binds its payload at the instance's types, as on a local (#2786).
+use tests::assert;
+use string::format;
+
+enum Gen<T> {
+    G(T),
+    N,
+}
+
+enum Two<A, B> {
+    P(A, B),
+    Q(B),
+}
+
+fn name<T>(Gen<T> g) -> string {
+    return match g {
+        Gen::G(_) => "g",
+        Gen::N => "n",
+    };
+}
+
+test("a string payload") {
+    let s = match Gen::G("s") {
+        Gen::G(v) => v,
+        Gen::N => "n",
+    };
+    assert!(s == "s");
+}
+
+test("an int payload and the unit variant") {
+    let a = match Gen::G(3) {
+        Gen::G(v) => v + 1,
+        Gen::N => 0,
+    };
+    let b = match Gen::N {
+        Gen::G(v) => v + 1,
+        Gen::N => 0,
+    };
+    assert!(a == 4 && b == 0 && name(Gen::G(1.5)) == "g");
+}
+
+test("a nested Option payload") {
+    let f = fn (int k) => match Gen::G(Option::Some(k)) {
+        Gen::G(Option::Some(v)) => format("g%i", v),
+        Gen::G(Option::None) => "gn",
+        Gen::N => "n",
+    };
+    assert!(f(3) == "g3");
+}
+
+test("two type parameters") {
+    let r = match Two::P(2, "ab") {
+        Two::P(a, b) => a * 10 + b.len(),
+        Two::Q(b) => b.len(),
+    };
+    assert!(r == 22);
+}
+
+test("if let") {
+    let got = 0;
+    if let Gen::G(v) = Gen::G(7) {
+        got = v;
+    }
+    assert!(got == 7);
+}
