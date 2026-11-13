@@ -199,6 +199,83 @@ pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, loo
 #[path = "cow_view.rs"]
 mod view;
 
+/// How long the closure `lambda` makes lives in `body`: the local first
+/// holding it, and the evaluation-order span from the lambda to the last
+/// read of any local it reaches (`let f = …`, `let g = f`, another closure
+/// capturing one). `Err` with what the closure does when it outlives the
+/// body: it is returned, stored in a field, element or value, or passed to
+/// a call that may keep it.
+fn closure_life(body: &HirBody, f: &Facts<'_>, lambda: HirId) -> Result<(Option<LocalId>, (u32, u32)), &'static str> {
+    let start = f.order(lambda);
+    let mut end = f.end[lambda.0 as usize].saturating_sub(1).max(start);
+    let mut first: Option<LocalId> = None;
+    let mut holders: HashSet<LocalId> = HashSet::new();
+    let results: HashSet<HirId> = body.root.map(|r| super::escape::result_exprs(body, r)).unwrap_or_default().into_iter().collect();
+    let mut work = vec![lambda];
+    while let Some(v) = work.pop() {
+        // The node the value reaches: through block tails, branches, arms
+        // and named arguments.
+        let mut at = v;
+        let parent = loop {
+            let Some(&p) = f.parent.get(&at) else { break None };
+            match &body.expr(p).kind {
+                HirKind::Block { tail: Some(t), .. } if *t == at => at = p,
+                HirKind::If { cond, .. } if *cond != at => at = p,
+                HirKind::Match { scrutinee, .. } if *scrutinee != at => at = p,
+                HirKind::Named { .. } => at = p,
+                _ => break Some(p),
+            }
+        };
+        if results.contains(&at) && body.ret.is_some() {
+            return Err("is returned");
+        }
+        let Some(p) = parent else { continue };
+        let mut hold = |l: LocalId, from: HirId, work: &mut Vec<HirId>| {
+            if !holders.insert(l) {
+                return;
+            }
+            first.get_or_insert(l);
+            end = end.max(f.live_span(l, from).1);
+            work.extend(f.reads.get(&l).into_iter().flatten().copied());
+            // A closure or `defer` capturing the holder holds it too.
+            for (&c, outer) in &f.capture_lists {
+                if outer.contains(&l) {
+                    match body.expr(c).kind {
+                        HirKind::Lambda { .. } => work.push(c),
+                        _ => end = u32::MAX - 1,
+                    }
+                }
+            }
+        };
+        match &body.expr(p).kind {
+            HirKind::Let { local, init: Some(i) } if *i == at => hold(*local, p, &mut work),
+            HirKind::Assign { place, value } if *value == at => match body.expr(*place).kind {
+                HirKind::Local(l) => hold(l, p, &mut work),
+                _ => return Err("is stored"),
+            },
+            HirKind::Return(_) | HirKind::Yield { .. } | HirKind::Resume { .. } => return Err("is returned"),
+            HirKind::Append { .. } | HirKind::Make { .. } => return Err("is stored"),
+            HirKind::Call { callee, args } => {
+                if matches!(callee, Callee::Value(c) if *c == at) {
+                    continue;
+                }
+                let Some(j) = args.iter().position(|&a| a == at) else { continue };
+                let u = f.calls.get(&p).copied().unwrap_or_default();
+                let bit = if j < 64 { 1u64 << j } else { u64::MAX };
+                if (u.kept | u.opaque) & bit != 0 {
+                    return Err("is passed to a call that may keep it");
+                }
+                end = end.max(f.end[p.0 as usize].saturating_sub(1));
+                if u.returned & bit != 0 {
+                    work.push(p);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok((first, (start, end)))
+}
+
 /// How a place reads in a message: `a`, `a.b`, `a[…]`.
 fn place_text(body: &HirBody, v: HirId) -> Option<String> {
     match &body.expr(v).kind {
@@ -1090,11 +1167,13 @@ impl Plan {
             span: (u32, u32),
             /// The borrowing expression: nothing inside it conflicts.
             within: Option<HirId>,
+            /// A `use (mut x)` capture: `name` is the closure.
+            capture: bool,
         }
         let mut borrows: Vec<Borrow> = Vec::new();
         let mut add = |name: &str, src: HirId, span: (u32, u32), within: Option<HirId>| {
             if let (Some((root, path)), Some(text)) = (place_path(body, f, src), place_text(body, src)) {
-                borrows.push(Borrow { name: name.to_string(), root, path, text, span, within });
+                borrows.push(Borrow { name: name.to_string(), root, path, text, span, within, capture: false });
             }
         };
         for (&l, inits) in &f.inits {
@@ -1140,6 +1219,37 @@ impl Plan {
                 add(&body.local(l).name, src, f.live_span(l, binder), Some(src));
             }
         }
+        // `use (mut a)`: the closure borrows `a`'s object for as long as it
+        // lives (#2787), as `let w = mut a` would. A closure that outlives
+        // the body (returned, stored, kept by a call) holds the borrow past
+        // `a`'s scope: the capture itself is the error.
+        let mut captures: Vec<(HirId, LocalId)> = f.borrow_captures.iter().copied().collect();
+        captures.sort_by_key(|&(at, l)| (f.order(at), l.0));
+        for (lambda, a) in captures {
+            if !cow_ty(checker, body.local(a).ty.as_ref()) {
+                continue;
+            }
+            let name = &body.local(a).name;
+            match closure_life(body, f, lambda) {
+                Ok((holder, span)) => {
+                    let holder = holder
+                        .map(|h| body.local(h))
+                        .filter(|h| !h.name.starts_with('$') && h.kind != LocalKind::Temp)
+                        .map_or_else(String::new, |h| h.name.clone());
+                    borrows.push(Borrow { name: holder, root: a, path: Vec::new(), text: name.clone(), span, within: Some(lambda), capture: true });
+                }
+                Err(why) => {
+                    let span = body.expr(lambda).span;
+                    let mut m = Message::error(
+                        ErrorCode::BorrowConflict,
+                        format!("this closure borrows `{name}` (`use (mut {name})`) and {why}: the borrow would outlive `{name}`"),
+                        span.0..span.1,
+                    );
+                    m.with_help(format!("capture a copy with `use ({name})` and hand the changed value back, or hold the shared state in a `Ref<T>`"));
+                    self.notes.push(m);
+                }
+            }
+        }
         // In a view's own method, each `mut` field is the borrowed object
         // for the whole body.
         if let Some(&p) = body.params.first()
@@ -1156,6 +1266,7 @@ impl Plan {
                         text: format!("self.{field}"),
                         span: (0, u32::MAX - 1),
                         within: None,
+                        capture: false,
                     });
                 }
             }
@@ -1185,17 +1296,22 @@ impl Plan {
                 o != u32::MAX && o > start && o <= end && !b.within.is_some_and(|w| f.contains(w, at))
             };
             let covers = |v: HirId| place_path(body, f, v).is_some_and(|(r, p)| r == b.root && prefix_of(&p, &b.path));
-            let (bname, stext) = (&b.name, &b.text);
+            let stext = &b.text;
+            let (bname, last) = match (b.capture, b.name.as_str()) {
+                (false, n) => (format!("`{n}`"), format!("use `{n}` for the last time")),
+                (true, "") => ("the closure".to_string(), "let the closure go".to_string()),
+                (true, n) => (format!("the closure `{n}`"), format!("call `{n}` for the last time")),
+            };
             for &(v, at) in &shares {
                 if live(at) && covers(v) && !f.borrow_args.contains(&v) && seen.insert((v, stext.clone())) {
                     let span = body.expr(v).span;
                     let vtext = place_text(body, v).unwrap_or_else(|| stext.clone());
                     let mut m = Message::error(
                         ErrorCode::BorrowConflict,
-                        format!("`{vtext}` gets a second name while `{bname}` borrows `{stext}`: writes through `{bname}` would show through both"),
+                        format!("`{vtext}` gets a second name while {bname} borrows `{stext}`: writes through {bname} would show through both"),
                         span.0..span.1,
                     );
-                    m.with_help(format!("use `{bname}` for the last time before this, or hold the shared state in a `Ref<T>`"));
+                    m.with_help(format!("{last} before this, or hold the shared state in a `Ref<T>`"));
                     self.notes.push(m);
                 }
             }
@@ -1206,10 +1322,10 @@ impl Plan {
                     let name = &body.local(l).name;
                     let mut m = Message::error(
                         ErrorCode::BorrowConflict,
-                        format!("this closure captures `{name}` while `{bname}` borrows `{stext}`: writes through `{bname}` would show in the closure's copy"),
+                        format!("this closure captures `{name}` while {bname} borrows `{stext}`: writes through {bname} would show in the closure's copy"),
                         span.0..span.1,
                     );
-                    m.with_help(format!("use `{bname}` for the last time before the closure, or capture with `use (mut {name})`"));
+                    m.with_help(format!("{last} before this closure, or capture with `use (mut {name})`"));
                     self.notes.push(m);
                 }
             }
@@ -1221,10 +1337,11 @@ impl Plan {
                     let ptext = place_text(body, *place).unwrap_or_else(|| stext.clone());
                     let mut m = Message::error(
                         ErrorCode::BorrowConflict,
-                        format!("`{ptext}` is replaced while `{bname}` borrows `{stext}`: writes through `{bname}` would go to the old object"),
+                        format!("`{ptext}` is replaced while {bname} borrows `{stext}`: writes through {bname} would go to the old object"),
                         span.0..span.1,
                     );
-                    m.with_help(format!("use `{bname}` for the last time before this, or borrow again after it"));
+                    let again = if b.capture { "make the closure after it" } else { "borrow again after it" };
+                    m.with_help(format!("{last} before this, or {again}"));
                     self.notes.push(m);
                 }
             }

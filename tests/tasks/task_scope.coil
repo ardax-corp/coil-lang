@@ -3,6 +3,23 @@ use tests::assert;
 use task::{scope, Scope, Task, TaskError};
 use clock::sleep_ms;
 
+// What the tasks write, shared by every closure that names it: the spawns
+// keep their closures, so a `use (mut log)` of a copy-on-write `Vec` would
+// be E0149 (#2787).
+shared class Log<T> {
+    pub items: Vec<T>,
+}
+
+impl Log<T> {
+    pub fn push(T x) {
+        self.items.push(x);
+    }
+
+    pub fn len() -> int {
+        return self.items.len();
+    }
+}
+
 fn ok_or(Result<int, TaskError> r, int fallback) -> int {
     return match r {
         Result::Ok(v) => v,
@@ -11,13 +28,13 @@ fn ok_or(Result<int, TaskError> r, int fallback) -> int {
 }
 
 test("children run at the parent's first suspension, in spawn order") {
-    let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        s.spawn(fn () use (mut log) {
+    let log: Log<int> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (log) {
+        s.spawn(fn () use (log) {
             log.push(1);
             0
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (log) {
             log.push(2);
             0
         });
@@ -26,7 +43,7 @@ test("children run at the parent's first suspension, in spawn order") {
     });
     assert!(ok_or(r, -1) == 0);
     assert!(log.len() == 3);
-    assert!(log[0] == 0 && log[1] == 1 && log[2] == 2);
+    assert!(log.items[0] == 0 && log.items[1] == 1 && log.items[2] == 2);
 }
 
 test("join returns the child's value") {
@@ -42,19 +59,19 @@ test("join returns the child's value") {
 // and a loaded machine can hold the scheduler off the CPU for a while
 // between two starts (#2528).
 test("sleep orders tasks by deadline") {
-    let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        s.spawn(fn () use (mut log) {
+    let log: Log<int> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (log) {
+        s.spawn(fn () use (log) {
             task::sleep(300);
             log.push(300);
             0
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (log) {
             task::sleep(1);
             log.push(1);
             0
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (log) {
             task::sleep(150);
             log.push(150);
             0
@@ -63,19 +80,19 @@ test("sleep orders tasks by deadline") {
     });
     assert!(ok_or(r, -1) == 0);
     assert!(log.len() == 3);
-    assert!(log[0] == 1 && log[1] == 150 && log[2] == 300);
+    assert!(log.items[0] == 1 && log.items[1] == 150 && log.items[2] == 300);
 }
 
 test("yield_now interleaves ready tasks") {
-    let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        s.spawn(fn () use (mut log) {
+    let log: Log<int> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (log) {
+        s.spawn(fn () use (log) {
             log.push(1);
             task::yield_now();
             log.push(3);
             0
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (log) {
             log.push(2);
             task::yield_now();
             log.push(4);
@@ -84,7 +101,7 @@ test("yield_now interleaves ready tasks") {
         0
     });
     assert!(ok_or(r, -1) == 0);
-    assert!(log[0] == 1 && log[1] == 2 && log[2] == 3 && log[3] == 4);
+    assert!(log.items[0] == 1 && log.items[1] == 2 && log.items[2] == 3 && log.items[3] == 4);
 }
 
 test("nested scopes inside a child") {
@@ -119,10 +136,10 @@ test("join after the scope ended") {
 }
 
 test("a child panic fails the scope and drops its siblings") {
-    let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
+    let log: Log<int> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (log) {
         // Asleep far past the panic: only the cancel ends its sleep.
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (log) {
             task::sleep(600000);
             log.push(1);
             0
@@ -172,32 +189,32 @@ test("joining a panicked child reports it") {
 // The first task sleeps until the second ran: were `sleep_ms` to block the
 // thread, the second would never run and the loop never end.
 test("clock::sleep_ms inside a scope suspends the task") {
-    let log: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        s.spawn(fn () use (mut log) {
+    let log: Log<int> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (log) {
+        s.spawn(fn () use (log) {
             while log.len() == 0 {
                 sleep_ms(1);
             }
             log.push(2);
             0
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (log) {
             log.push(1);
             0
         });
         0
     });
     assert!(ok_or(r, -1) == 0);
-    assert!(log[0] == 1 && log[1] == 2);
+    assert!(log.items[0] == 1 && log.items[1] == 2);
 }
 
 test("many tasks") {
-    let total: Vec<int> = Vec::new();
-    let r = scope(fn (Scope s) use (mut total) {
+    let total: Log<int> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (total) {
         let i = 0;
         while i < 200 {
             let k = i;
-            s.spawn(fn () use (mut total, k) {
+            s.spawn(fn () use (total, k) {
                 task::yield_now();
                 total.push(k);
                 0
