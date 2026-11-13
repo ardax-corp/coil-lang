@@ -3226,7 +3226,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
 
     /// Payload types of `enum_name::variant` at the scrutinee's instance.
     fn variant_field_tys(&self, enum_name: &str, variant: &str, scrut_ty: Option<&Ty>) -> Vec<Ty> {
-        let scrut = scrut_ty.map(strip_readonly);
+        // A variant built in place (`match Gen::G("s")`) is typed by its
+        // constructor, whose owner is the instance (#2786).
+        let scrut = scrut_ty.map(strip_readonly).map(|t| match t {
+            Ty::Constructor { owner, .. } => strip_readonly(owner),
+            t => t,
+        });
         if let Some(t) = scrut {
             if is_option_ty(t) && variant == "Some" {
                 return option_inner(t).into_iter().collect();
