@@ -1342,6 +1342,14 @@ impl Plan {
                 add(&body.local(l).name, l, src, f.live_span(l, binder), Some(src));
             }
         }
+        // `for mut x in a` borrows an element of `a`, not `a`: a second name
+        // for an element is one for what `x` borrows.
+        for b in &mut borrows {
+            if b.local.is_some_and(|l| f.bound.get(&l).is_some_and(|&(_, binder)| matches!(body.expr(binder).kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. }))) {
+                b.path.push(None);
+                b.text.push_str("[…]");
+            }
+        }
         // `use (mut a)`: the closure borrows `a`'s object for as long as it
         // lives (#2787), as `let w = mut a` would. A closure that outlives
         // the body (returned, stored, kept by a call) holds the borrow past
