@@ -105,7 +105,7 @@ userland modules. Prelude is auto-injected.
 
 ## Coroutines
 
-`gen fn`, `yield`, `resume h`, `resume h with v`, `let x = yield e`, `yield from`, `done(h)`. Types: `coroutine<Y, S>`. Resume after done → default value.
+`gen fn`, `yield`, `resume h`, `resume h with v`, `let x = yield e`, `yield from`, `done(h)`. Types: `coroutine<Y, S>`. The `resume` that completes the body (falling off its end, or a bare `return;`) reads the value type's zero (`0`, `0.0`, `false`, `""`, `None`, an empty `Vec`, tuples of those); at a type with no zero (a class, `Result`, another enum, a function) it panics `the generator finished without a value of T`. A binding `yield` resumed without `with` reads the zero in the same way (`resumed without a value of T`). A `resume` after completion panics `resumed after completion`. A gen fn's bare `return;` is not `Ok`-wrapped. See `docs/internals/limitations.md` ("A generator's value nobody produced").
 
 Tutorial: [12-generators](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/tutorial/12-generators.md) (`/docs/manual/tutorial/12-generators`).
 
