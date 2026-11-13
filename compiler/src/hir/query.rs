@@ -1036,6 +1036,11 @@ pub fn polyfn_callee(body: &HirBody, checker: &Checker, f: HirId) -> bool {
     let HirKind::Local(local) = body.expr(f).kind else {
         return false;
     };
+    polyfn_local(body, checker, local)
+}
+
+/// [`polyfn_callee`] of a read of `local`.
+pub fn polyfn_local(body: &HirBody, checker: &Checker, local: LocalId) -> bool {
     let info = body.local(local);
     // A parameter is one only when declared `forall` (an open `T -> U`
     // parameter of a shared generic body is a plain closure).
@@ -1219,6 +1224,9 @@ fn indirect_callee_in(body: &HirBody, checker: &Checker, f: HirId, seen: &mut Ve
                     &t,
                     &mut Vec::new(),
                     info.kind == LocalKind::Param
+                        // A lambda's capture holds the enclosing body's word: in a
+                        // shared body, made where the enum is open (#2770).
+                        || info.kind == LocalKind::Capture
                         || info.kind == LocalKind::Let && let_init_is_lambda(body, local) && assigned.is_empty()
                         // An element of a shared body's `Vec<unit -> Result<T, E>>`:
                         // the closure word stored there (#2153).

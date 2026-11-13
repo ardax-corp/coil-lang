@@ -238,8 +238,9 @@ fn fun_words(checker: &Checker, ty: &Ty, seen: &mut Vec<String>) -> bool {
 /// word too: one boxed word, no niche or pair (#1520). That holds where
 /// every closure the body sees was made where the enum is open: a closure
 /// literal's own type, a function argument (its adapter boxes a niche
-/// result), and a value read from a nested open enum, whose generics are
-/// clone-only (#2153, #2493, #2509).
+/// result), a value read from a nested open enum, whose generics are
+/// clone-only (#2153, #2493, #2509), and a lambda's capture of the
+/// enclosing body's value (#2770).
 pub(super) fn fun_words_in(checker: &Checker, ty: &Ty, seen: &mut Vec<String>, open_enum: bool) -> bool {
     match strip_readonly(ty) {
         // `() -> T` takes a unit parameter, and `T -> ()` returns one.
