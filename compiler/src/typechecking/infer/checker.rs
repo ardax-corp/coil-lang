@@ -20546,11 +20546,23 @@ impl Checker {
         self.static_slots.get(fqn).map(|(_, c)| *c).unwrap_or(false)
     }
 
-    /// `name` (bare in the current module, or qualified) is a `static let`:
-    /// shared mutable state, unlike a `static const`.
+    /// `name` (bare in the current module, qualified, or brought in by a
+    /// `use`, aliased or not) is a `static let`: shared mutable state,
+    /// unlike a `static const`.
     pub(crate) fn is_mutable_static(&self, name: &str) -> bool {
         let is_let = |fqn: &str| self.static_slots.get(fqn).is_some_and(|(_, is_const)| !*is_const);
-        is_let(name) || is_let(&self.qualify_module_name(name))
+        is_let(name) || is_let(&self.qualify_module_name(name)) || self.imported_static_fqn(name).is_some_and(|fqn| is_let(&fqn))
+    }
+
+    /// The qualified name of the static another module declares that `name`
+    /// names here through a `use` (`use m::s;`, `use m::s as t;`).
+    fn imported_static_fqn(&self, name: &str) -> Option<String> {
+        let info = self.def_interner.info(self.def_id_of(name)?)?;
+        if info.kind != crate::typechecking::def_id::DefKind::Static || info.module == self.current_module_id {
+            return None;
+        }
+        let path = self.def_interner.module_path(info.module)?;
+        Some(if path.is_empty() { info.name.clone() } else { format!("{path}::{}", info.name) })
     }
 
     /// True for a `const` lifted to a static slot (its value is computed,
