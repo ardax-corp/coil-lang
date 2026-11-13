@@ -16,6 +16,23 @@ use io::sync::read_to_end;
 use io::sync::write_all;
 use string::to_bytes;
 
+// What the tasks write, shared by every closure that names it: the spawns
+// keep their closures, so a `use (mut log)` of a copy-on-write `Vec` would
+// be E0149 (#2787).
+shared class Log<T> {
+    pub items: Vec<T>,
+}
+
+impl Log<T> {
+    pub fn push(T x) {
+        self.items.push(x);
+    }
+
+    pub fn len() -> int {
+        return self.items.len();
+    }
+}
+
 fn ok_or(Result<int, TaskError> r, int fallback) -> int {
     return match r {
         Result::Ok(v) => v,
@@ -87,14 +104,14 @@ gen fn read_all(Stream c) -> int {
 test("an IO wait in one task lets another task run") {
     let listener = listen("127.0.0.1", 0)?;
     let port = local_addr(listener)?[1];
-    let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (listener, port, mut log) {
-        let server = s.spawn(fn () use (listener, mut log) {
+    let log: Log<string> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (listener, port, log) {
+        let server = s.spawn(fn () use (listener, log) {
             let conn = accept_one(listener);
             log.push("accepted");
             body_len(conn)
         });
-        s.spawn(fn () use (port, mut log) {
+        s.spawn(fn () use (port, log) {
             task::sleep(20);
             log.push("connecting");
             send_later(port, 0, "hello tasks")
@@ -102,7 +119,7 @@ test("an IO wait in one task lets another task run") {
         ok_or(server.join(), -100)
     });
     assert!(ok_or(r, -1) == 11);
-    assert!(log.len() == 2 && log[0] == "connecting" && log[1] == "accepted");
+    assert!(log.len() == 2 && log.items[0] == "connecting" && log.items[1] == "accepted");
 }
 
 test("IO inside a generator suspends the task, not the generator") {

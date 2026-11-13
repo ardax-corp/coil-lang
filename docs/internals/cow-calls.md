@@ -137,6 +137,25 @@ an operator operand.
 - A generic trait call whose result the caller then writes copies once
   per call (the result is shared because the dictionary call is opaque).
 
+## `use (mut x)` captures
+
+A `use (mut x)` capture of a copy-on-write value is a borrow of `x`'s
+object for as long as the closure lives (#2787), under the E0149 rule of
+`let w = mut x` (`Plan::check_borrows`): while it lives, `x` gets no second
+name (a `let`, a store, an argument a callee keeps) and is not replaced.
+The closure's life (`closure_life`) runs from the lambda to the last read of
+any local holding it (`let f = …`, copies of `f`, closures capturing `f`, to
+the end of the body for a `defer` capturing it) and through any call that
+takes it without keeping it. A closure that is returned, stored (a field,
+an element, a value built around it) or passed to a call that may keep it
+(`kept` or `opaque`: a spawned task, a partial application) holds the
+borrow past the body: the capture is E0149 itself. Before, a share during
+the closure's life went unreported, and the next write through `x` copied
+its object while the closure kept the old one. State a kept closure shares
+belongs in a `Ref<T>` or a `shared class`. Tests:
+`tests/memory/capture_borrow_in_step.coil`,
+`tests/memory/compile_fail/capture_borrow_*.coil`.
+
 ## Loop views
 
 A write through a nested path, `f.blocks[b].insts[i] = v`, makes each

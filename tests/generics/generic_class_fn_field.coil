@@ -115,7 +115,9 @@ enum Color {
     Rgb(int, int, int),
 }
 
-class Count {
+// Shared: the closures that count are stored, so a `use (n)` of a
+// copy-on-write object would be E0149 (#2787).
+shared class Count {
     pub n: int,
 }
 
@@ -289,7 +291,7 @@ test("closures with captures, kept across a collection") {
     assert!(t.run() == "<a");
     assert!(thrice(t, "") == "<<<");
     let n = new Count(0);
-    let e = new Slot(fn (int x) use (mut n) {
+    let e = new Slot(fn (int x) use (n) {
         n.n = n.n + 1;
         return x;
     }, 0);
@@ -314,7 +316,7 @@ test("every position of the parameter in a field's function") {
         fn () => 10,
         fn (int x) => x > 0,
         fn (int x, int y) => x + y,
-        fn (int x) use (mut n) {
+        fn (int x) use (n) {
             n.n = n.n + x;
         },
         inc,

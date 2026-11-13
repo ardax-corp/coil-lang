@@ -8,7 +8,9 @@
 // unit_fn_in_slot_shared.coil runs the same with no mono clones.
 use tests::assert;
 
-class Count {
+// Shared: the closures that count are stored, so a `use (n)` of a
+// copy-on-write object would be E0149 (#2787).
+shared class Count {
     pub n: int,
 }
 
@@ -116,7 +118,7 @@ test("a function in a generic class's field") {
     assert!(new Lazy(unit).both() == ((), ()));
     assert!(new Lazy(fn () {}).get() == Some(()));
     let c = new Count(0);
-    let l = new Lazy(fn () use (mut c) => c.bump());
+    let l = new Lazy(fn () use (c) => c.bump());
     assert!(l.get() == Some(()));
     assert!(c.n == 1);
     assert!(new Apply(ignore, 3).get() == Some(()));
