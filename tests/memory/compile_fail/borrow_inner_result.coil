@@ -1,0 +1,21 @@
+// @expected E0149 — `inner(d)` may return the object inside `d` that `wd`
+// borrows, so `q` is a second name for it while `wd` lives (#2818).
+class C {
+    pub x: int,
+}
+
+class Box {
+    pub c: C,
+}
+
+fn inner(Box b) -> C {
+    return b.c;
+}
+
+fn main() {
+    let d = new Box(new C(1));
+    let wd = mut d.c;
+    let q = inner(d);
+    wd.x += 10;
+    let _ = q.x;
+}

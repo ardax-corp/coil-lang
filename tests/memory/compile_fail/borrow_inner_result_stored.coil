@@ -1,0 +1,25 @@
+// @expected E0149 — an inner result passed straight on into a new object
+// is a second name for the borrowed object too (#2818).
+class C {
+    pub x: int,
+}
+
+class Box {
+    pub c: C,
+}
+
+class Holder {
+    pub c: C,
+}
+
+fn inner(Box b) -> C {
+    return b.c;
+}
+
+fn main() {
+    let d = new Box(new C(1));
+    let wd = mut d.c;
+    let h = new Holder(inner(d));
+    wd.x += 10;
+    let _ = h.c.x;
+}

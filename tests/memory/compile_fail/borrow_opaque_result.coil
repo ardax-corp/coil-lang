@@ -1,0 +1,19 @@
+// @expected E0149 — the result of code not known here that was given `a`
+// may be `a`'s object, so `r` is a second name while `w` borrows `a`
+// (#2818): writes through `w` would show through `r`.
+class C {
+    pub x: int,
+}
+
+fn same(C c) -> C {
+    return c;
+}
+
+fn main() {
+    let a = new C(1);
+    let w = mut a;
+    let g = same;
+    let r = g(a);
+    w.x += 10;
+    let _ = r.x;
+}

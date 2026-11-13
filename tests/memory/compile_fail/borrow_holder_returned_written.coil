@@ -1,0 +1,23 @@
+// @expected E0149 — a callee that writes `d` and returns it hands back a
+// copy of `d` that still holds the object `wd` borrows (#2818).
+class C {
+    pub x: int,
+}
+
+class Box {
+    pub c: C,
+    pub n: int,
+}
+
+fn touch(Box b) -> Box {
+    b.n += 1;
+    return b;
+}
+
+fn main() {
+    let d = new Box(new C(1), 0);
+    let wd = mut d.c;
+    let q = touch(d);
+    wd.x += 10;
+    let _ = q.c.x;
+}

@@ -1043,9 +1043,16 @@ impl Plan {
                             // Opaque code may write the argument as well,
                             // and is assumed to: its result is shared after
                             // the call instead (writes it made are done).
-                            if u.opaque & bit != 0 {
+                            // An argument written in place for the caller (a
+                            // borrow, an inout parameter) is never tested
+                            // before a write, so a result that may be it is
+                            // a copy, as `let r = w` copies it (#2818).
+                            // Only where the local is written after the call.
+                            let in_place = !read_only_result(f, body, id)
+                                && matches!(body.expr(v).kind, HirKind::Local(l) if inout.contains(&l) && written_after(f, body, l, id));
+                            if u.opaque & bit != 0 && !in_place {
                                 share_result = true;
-                            } else if u.written & bit != 0 {
+                            } else if u.written & bit != 0 || u.opaque & bit != 0 {
                                 copy_result = true;
                             } else {
                                 plan.store(body, f, v, &cow, &inout, &borrowed);
@@ -1349,6 +1356,8 @@ impl Plan {
             }
         }
         shares.sort_by_key(|&(v, _)| f.order(v));
+        let mut calls: Vec<(HirId, ArgUse)> = f.calls.iter().map(|(&c, &u)| (c, u)).collect();
+        calls.sort_by_key(|&(c, _)| f.order(c));
         let mut seen: HashSet<(HirId, String)> = HashSet::new();
         for b in &borrows {
             let (start, end) = b.span;
@@ -1370,6 +1379,49 @@ impl Plan {
                     let mut m = Message::error(
                         ErrorCode::BorrowConflict,
                         format!("`{vtext}` gets a second name while {bname} borrows `{stext}`: writes through {bname} would show through both"),
+                        span.0..span.1,
+                    );
+                    m.with_help(format!("{last} before this, or hold the shared state in a `Ref<T>`"));
+                    self.notes.push(m);
+                }
+            }
+            // A call result that may be the borrowed object or one holding
+            // it (#2818): bound, stored or passed on, it is a second name.
+            for &(c, u) in &calls {
+                if !live(c) || f.fresh_calls.contains(&c) {
+                    continue;
+                }
+                let HirKind::Call { args, .. } = &body.expr(c).kind else { continue };
+                let Some((named, steps)) = named_result(f, body, c) else { continue };
+                if !may_hold_objects(body.expr(named).ty.as_ref()) {
+                    continue;
+                }
+                let eager = self.share.contains(&(c, true));
+                let hit = args.iter().enumerate().take(64).any(|(j, &a)| {
+                    let bit = 1u64 << j;
+                    let v = named_value(body, a);
+                    let Some((r, p)) = place_path(body, f, v) else { return false };
+                    if r != b.root || !prefix_of(&p, &b.path) {
+                        return false;
+                    }
+                    // How far below the argument the named value is at the
+                    // least: the argument itself when the call may hand it
+                    // back (a copy of it, past the copy's own object), one
+                    // step when the result may be an object inside it.
+                    let below = if u.returned & bit != 0 && !self.stored.contains(&v) {
+                        usize::from(eager)
+                    } else if u.inner & bit != 0 && may_hold_objects(body.expr(v).ty.as_ref()) {
+                        1
+                    } else {
+                        return false;
+                    };
+                    p.len() + below + steps <= b.path.len()
+                });
+                if hit && seen.insert((c, stext.clone())) {
+                    let span = body.expr(c).span;
+                    let mut m = Message::error(
+                        ErrorCode::BorrowConflict,
+                        format!("this call's result may be `{stext}`'s object, so it gets a second name while {bname} borrows `{stext}`: writes through {bname} would show through both"),
                         span.0..span.1,
                     );
                     m.with_help(format!("{last} before this, or hold the shared state in a `Ref<T>`"));
@@ -1674,6 +1726,50 @@ fn read_only_result(f: &Facts<'_>, body: &HirBody, call: HirId) -> bool {
         HirKind::Let { local, .. } => body.local(*local).name == "_",
         HirKind::Bin { .. } | HirKind::Un { .. } => true,
         _ => false,
+    }
+}
+
+/// Whether a write through local `l` other than `call`'s own may run after
+/// `call`: later in the body, or anywhere in a loop around it.
+fn written_after(f: &Facts<'_>, body: &HirBody, l: LocalId, call: HirId) -> bool {
+    let loops = f.loops_around(call);
+    f.writes.iter().any(|w| {
+        w.at != call
+            && f.order(w.at) != u32::MAX
+            && f.root_of(w.path).is_some_and(|r| matches!(body.expr(r).kind, HirKind::Local(x) if x == l))
+            && (f.order(w.at) > f.order(call) || loops.iter().any(|&lp| f.contains(lp, w.at)))
+    })
+}
+
+/// Where a call's result is given a name (#2818): the node that is bound,
+/// stored or passed on, and how many field or element steps below the
+/// result it reads. `None` where the result is only read: dropped, an
+/// operand, or an argument a callee neither keeps nor hands back.
+fn named_result(f: &Facts<'_>, body: &HirBody, call: HirId) -> Option<(HirId, usize)> {
+    let mut at = call;
+    let mut steps = 0;
+    loop {
+        if read_only_result(f, body, at) {
+            return None;
+        }
+        let Some(&p) = f.parent.get(&at) else { return Some((at, steps)) };
+        match &body.expr(p).kind {
+            HirKind::Field { base, .. } | HirKind::Index { base, kind: IndexKind::Array, .. } if *base == at => {
+                // The place of a write: the write makes the temporary unique.
+                if matches!(f.parent.get(&p).map(|g| &body.expr(*g).kind), Some(HirKind::Assign { place, .. }) if *place == p) {
+                    return None;
+                }
+                steps += 1;
+                at = p;
+            }
+            HirKind::Call { args, .. } => {
+                let Some(j) = args.iter().position(|&a| named_value(body, a) == at) else { return Some((at, steps)) };
+                let u = f.calls.get(&p).copied().unwrap_or_default();
+                let bit = if j < 64 { 1u64 << j } else { u64::MAX };
+                return ((u.kept | u.opaque | u.returned | u.inner) & bit != 0).then_some((at, steps));
+            }
+            _ => return Some((at, steps)),
+        }
     }
 }
 
