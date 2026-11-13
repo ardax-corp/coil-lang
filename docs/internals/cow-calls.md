@@ -156,6 +156,44 @@ belongs in a `Ref<T>` or a `shared class`. Tests:
 `tests/memory/capture_borrow_in_step.coil`,
 `tests/memory/compile_fail/capture_borrow_*.coil`.
 
+## Writes through a borrowed source
+
+The shared flag is sticky: nothing clears it when the second name dies. A
+callee that only walks its parameter (`for p in m` over a map: `iter()`
+stores `m` in the iterator, which shares it) keeps nothing past the call,
+so its summary's `keeps` bit is clear and E0149 lets a borrowed object be
+passed to it, but the object comes back flagged. A write through the
+borrow writes in place (the borrow is in `inout`), while a write through
+the source (`a` after `let w = mut a`, or the outer `a` of a `use (mut a)`
+closure) made it unique, copied it and left the borrow on the old object
+(#2816).
+
+`Plan::hold_borrowed` treats the source as the borrow does: a write whose
+path runs through a borrowed place while the borrow lives (the span E0149
+checks) leaves the borrowed object, and each object holding it on the way
+from the root, without a unique; objects below the borrowed one are made
+unique as before, and the copy is written into the object both names
+share. This is sound for the reason a borrow's own in-place writes are:
+the borrow made those objects unique where it began, and while it lives
+E0149 refuses every second name for them (a `let`, a store, an argument a
+callee keeps or hands to code not known here, a capture), so a flag there
+can only come from a holder that died with the call that made it. The
+same reasoning already leaves a fresh local that nothing keeps without a
+unique (`fresh_locals`). Writes keep their unique where a holder E0149
+does not see may exist: inside a `for` over an iterator (not an array,
+tuple or range), whose iterator holds its iterable while the body runs;
+and for every borrow of a root when, during one of them, the borrowed
+object or one holding it is handed to code not known here (`opaque`), a
+holder of it is passed to a call whose result may be an object inside it
+(`inner`), or a `use (mut a)` closure's body keeps, returns or hands its
+capture to such code (`Facts::loose_captures`). An iterator or generator that outlives the
+call (`let it = a.iter()`, `let g = values(a)` for a `gen fn`) is kept,
+so it stays E0149 while the borrow lives. A flag left by a walk still
+costs one copy at the first write after the borrow is done. Tests:
+`tests/memory/borrow_iterating_callee.coil`,
+`tests/memory/compile_fail/borrow_iterator_kept.coil`,
+`tests/memory/compile_fail/borrow_generator_walk.coil`.
+
 ## Loop views
 
 A write through a nested path, `f.blocks[b].insts[i] = v`, makes each
