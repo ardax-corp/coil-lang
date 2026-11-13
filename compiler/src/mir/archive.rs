@@ -14,7 +14,8 @@
 //!
 //! Layout (little-endian): the magic `CNMIR`, a format byte, the inline
 //! scope table its op locations name (`common::write_inline_scopes`, from
-//! format 17), then the bodies. Each body is its name, entry ids (`u32::MAX`: none),
+//! format 17), then the bodies (format 18 adds the `CowPin` / `CowUnpin`
+//! ops and nothing else). Each body is its name, entry ids (`u32::MAX`: none),
 //! entry label, then the function. Labels are the compile's own `Label`
 //! numbers; a call names its callee by label.
 
@@ -31,9 +32,12 @@ use crate::mir::{
 };
 
 const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
-/// Bump when the layout changes. A reader takes this format and
-/// [`FORMAT_UNSCOPED`], and refuses any other.
-const FORMAT: u8 = common::MIR_SECTION_SCOPES_FORMAT;
+/// Bump when the layout changes. A reader takes this format,
+/// [`FORMAT_SCOPED`] and [`FORMAT_UNSCOPED`], and refuses any other.
+const FORMAT: u8 = common::MIR_SECTION_COW_PIN_FORMAT;
+/// The format before the pin ops (archive 8.1): the same layout, with no
+/// `CowPin` / `CowUnpin` in it.
+const FORMAT_SCOPED: u8 = common::MIR_SECTION_SCOPES_FORMAT;
 /// The format before inline scopes: no scope table, no scope in a location
 /// (each is `0`). Archives of minor 0 of major 8 have it.
 const FORMAT_UNSCOPED: u8 = 16;
@@ -68,15 +72,16 @@ fn encode_as(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[c
 
 /// The bodies of a section and their body ids.
 pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), String> {
-    let mut r = Reader { b: bytes, i: 0, scoped: false };
+    let mut r = Reader { b: bytes, i: 0, scoped: false, pins: false };
     if r.take(MAGIC.len())? != MAGIC {
         return Err("not a native MIR section".into());
     }
     let format = r.u8()?;
-    if format != FORMAT && format != FORMAT_UNSCOPED {
-        return Err(format!("native MIR format {format}, this coil reads {FORMAT_UNSCOPED} and {FORMAT}"));
+    if ![FORMAT, FORMAT_SCOPED, FORMAT_UNSCOPED].contains(&format) {
+        return Err(format!("native MIR format {format}, this coil reads {FORMAT_UNSCOPED} to {FORMAT}"));
     }
-    r.scoped = format == FORMAT;
+    r.scoped = format != FORMAT_UNSCOPED;
+    r.pins = format >= FORMAT;
     if r.scoped {
         common::read_inline_scopes(r.b, &mut r.i).ok_or("native MIR section has a bad inline scope table")?;
     }
@@ -189,6 +194,9 @@ const I_LANE_INDEX: u8 = 45;
 const I_LANE_STORE: u8 = 46;
 const I_LANE_PUSH: u8 = 47;
 const I_LANES_TO_WORDS: u8 = 48;
+// Format 18 (archive 8.2).
+const I_COW_PIN: u8 = 49;
+const I_COW_UNPIN: u8 = 50;
 
 const FFI_OPS: [MirFfiOp; 3] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -539,6 +547,17 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u8(*unique as u8);
             w.u32(field.unwrap_or(u32::MAX));
         }
+        MirInst::CowPin { dest, src } => {
+            w.u8(I_COW_PIN);
+            w.v(*dest);
+            w.v(*src);
+        }
+        MirInst::CowUnpin { dest, src, saved } => {
+            w.u8(I_COW_UNPIN);
+            w.v(*dest);
+            w.v(*src);
+            w.v(*saved);
+        }
         MirInst::Alloc { dest, kind, elems, kinds } => {
             w.u8(I_ALLOC);
             w.v(*dest);
@@ -877,6 +896,8 @@ struct Reader<'a> {
     i: usize,
     /// The section's locations have a scope word (format 17 on).
     scoped: bool,
+    /// The section may hold `CowPin` / `CowUnpin` (format 18 on).
+    pins: bool,
 }
 
 impl<'a> Reader<'a> {
@@ -1163,6 +1184,8 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             let field = Some(r.u32()?).filter(|&f| f != u32::MAX);
             MirInst::Cow { dest, src, unique, field }
         }
+        I_COW_PIN if r.pins => MirInst::CowPin { dest: r.v()?, src: r.v()? },
+        I_COW_UNPIN if r.pins => MirInst::CowUnpin { dest: r.v()?, src: r.v()?, saved: r.v()? },
         I_RESUME => MirInst::ResumeCoro { dest: r.v()?, handle: r.v()?, send: r.opt_v()? },
         I_DONE => MirInst::DoneCoro { dest: r.v()?, handle: r.v()? },
         I_YIELD => MirInst::Yield { dest: r.v()?, value: r.v()?, from: r.u8()? != 0, receive: r.u8()? != 0 },
@@ -1318,6 +1341,43 @@ mod tests {
         let (back, pcs) = decode(&old).expect("decode format 16");
         assert_eq!(pcs.get("f"), Some(&42));
         assert_eq!(back[0].mir.op_loc(ValueId(2)), DebugLoc { scope: 0, ..b.mir.op_loc(ValueId(2)) });
+    }
+
+    /// `f` with a copy-on-write pin pair around nothing: `v3 = cow.pin v0`,
+    /// `v4 = cow.unpin v0 v3`.
+    fn pinned_body() -> NativeBody {
+        let mut b = body();
+        b.mir.types.extend([MirTy::Bool, MirTy::Bool]);
+        b.mir.types[0] = MirTy::HeapRef;
+        let insts = &mut b.mir.blocks[0].insts;
+        insts.insert(1, MirInst::CowPin { dest: ValueId(3), src: ValueId(0) });
+        insts.insert(2, MirInst::CowUnpin { dest: ValueId(4), src: ValueId(0), saved: ValueId(3) });
+        b
+    }
+
+    #[test]
+    fn the_pin_ops_come_back() {
+        let b = pinned_body();
+        let bytes = bytes(&b);
+        assert_eq!(bytes[MAGIC.len()], 18, "archive 8.2 writes format 18");
+        let (back, _) = decode(&bytes).expect("decode");
+        assert_eq!(back[0].mir, b.mir);
+    }
+
+    /// A section of an 8.1 archive (format 17) reads; one that holds a pin
+    /// op is no section 8.1 wrote, and is refused.
+    #[test]
+    fn a_format_17_section_reads_and_holds_no_pin() {
+        let b = body();
+        let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), FORMAT_SCOPED);
+        assert_eq!(old[MAGIC.len()], 17);
+        assert_eq!(common::section_inline_scopes(&old), scopes());
+        let (back, pcs) = decode(&old).expect("decode format 17");
+        assert_eq!(pcs.get("f"), Some(&42));
+        assert_eq!(back[0].mir, b.mir);
+        let p = pinned_body();
+        let bad = encode_as(std::slice::from_ref(&p), &HashMap::new(), &scopes(), FORMAT_SCOPED);
+        assert!(decode(&bad).is_err());
     }
 
     #[test]

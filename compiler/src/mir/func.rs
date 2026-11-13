@@ -1084,6 +1084,16 @@ impl MirFunc {
                     return Err(format!("{dest} Cow type"));
                 }
             }
+            MirInst::CowPin { dest, src } => {
+                if self.ty(*dest) != MirTy::Bool || self.ty(*src) != MirTy::HeapRef {
+                    return Err(format!("{dest} CowPin type"));
+                }
+            }
+            MirInst::CowUnpin { dest, src, saved } => {
+                if self.ty(*dest) != MirTy::Bool || self.ty(*src) != MirTy::HeapRef || self.ty(*saved) != MirTy::Bool {
+                    return Err(format!("{dest} CowUnpin type"));
+                }
+            }
             MirInst::Stringify { dest, src, .. } => {
                 if self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} Stringify dest is not heapref"));
