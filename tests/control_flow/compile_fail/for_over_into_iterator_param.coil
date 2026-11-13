@@ -1,0 +1,46 @@
+// @expected E0119 — a `for` over a type parameter bounded by `IntoIterator`
+// is refused with one message (#2820): no bound says what `T::IntoIter`'s
+// `next` is. Before, the one `IntoIterator` instance in scope was picked
+// and the error said `T` was used as `Bag`.
+class Bag {
+    pub items: Vec<int>,
+}
+
+class BagIter {
+    pub bag: Bag,
+    pub i: int,
+}
+
+impl IntoIterator for Bag {
+    type Item = int;
+    type IntoIter = BagIter;
+    fn into_iter(Bag b) -> BagIter {
+        return new BagIter(b, 0);
+    }
+}
+
+impl Iterator for BagIter {
+    type Item = int;
+    fn next(BagIter it) -> Option<int> {
+        if it.i >= it.bag.items.len() {
+            return None;
+        }
+        let v = it.bag.items[it.i];
+        it.i += 1;
+        return Some(v);
+    }
+}
+
+fn walk<T: IntoIterator>(T xs) -> int {
+    let n = 0;
+    for x in xs {
+        n += 1;
+    }
+    return n;
+}
+
+fn main() {
+    let b = new Bag(Vec::new());
+    b.items.push(1);
+    let _ = walk(b);
+}
