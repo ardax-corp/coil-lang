@@ -1,0 +1,153 @@
+// A `for` over a parameter the body writes for the caller (an inferred
+// `inout`) walks the value the parameter had when the loop began (#2826):
+// the write reaches the caller's object, and the loop walks a copy. Before,
+// a map grown while walked this way never stopped growing. The same in a
+// generic body, which `--clone-budget 0` runs shared.
+use tests::assert;
+use string::format;
+use collections::map::HashMap;
+
+fn grow(HashMap<string, int> m) -> int {
+    let n = 0;
+    for p in m {
+        let _ = m.insert(p.key + "2", 2);
+        n += 1;
+        if n > 50 {
+            return n;
+        }
+    }
+    return n;
+}
+
+fn grow_keys<K: Eq + Hash>(HashMap<K, int> m, K k) -> int {
+    let n = 0;
+    for p in m {
+        let _ = m.insert(k, p.value + 1);
+        n += 1;
+        if n > 50 {
+            return n;
+        }
+    }
+    return n;
+}
+
+fn grow_vec<T>(Vec<T> v, T x) -> int {
+    let n = 0;
+    for y in v {
+        v.push(x);
+        n += 1;
+        if n > 50 {
+            return n;
+        }
+    }
+    return n;
+}
+
+class Bag {
+    pub items: Vec<int>,
+}
+
+class BagIter {
+    pub bag: Bag,
+    pub i: int,
+}
+
+impl IntoIterator for Bag {
+    type Item = int;
+    type IntoIter = BagIter;
+    fn into_iter(Bag b) -> BagIter {
+        return new BagIter(b, 0);
+    }
+}
+
+impl Iterator for BagIter {
+    type Item = int;
+    fn next(BagIter it) -> Option<int> {
+        if it.i >= it.bag.items.len() {
+            return None;
+        }
+        let v = it.bag.items[it.i];
+        it.i += 1;
+        return Some(v);
+    }
+}
+
+fn grow_bag(Bag b) -> int {
+    let n = 0;
+    for x in b {
+        b.items.push(x + 10);
+        n += 1;
+        if n > 50 {
+            return n;
+        }
+    }
+    return n;
+}
+
+class Reg {
+    pub m: HashMap<string, int>,
+}
+
+impl Reg {
+    pub fn grow() -> int {
+        let n = 0;
+        for p in self.m {
+            let _ = self.m.insert(p.key + "2", 2);
+            n += 1;
+        }
+        return n;
+    }
+}
+
+fn shm(HashMap<string, int> m) -> string {
+    let s = "{";
+    for p in m {
+        s = s + format("%s:%i,", p.key, p.value);
+    }
+    return s + "}";
+}
+
+test("a map parameter grown while it is walked") {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    assert!(grow(a) == 1);
+    assert!(shm(a) == "{a:1,a2:2,}");
+}
+
+test("the caller's other name keeps its value") {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    let b = a;
+    assert!(grow(a) == 1);
+    assert!(a.len() == 2);
+    assert!(b.len() == 1);
+}
+
+test("a generic map parameter grown while it is walked") {
+    let a: HashMap<int, int> = HashMap::new();
+    let _ = a.insert(1, 1);
+    assert!(grow_keys(a, 7) == 1);
+    assert!(a.len() == 2);
+    assert!(a.get(7) == Some(2));
+}
+
+test("a generic Vec parameter grown while it is walked") {
+    let v: Vec<int> = [1, 2];
+    assert!(grow_vec(v, 9) == 2);
+    assert!(v.len() == 4);
+    assert!(v[3] == 9);
+}
+
+test("a map field of self grown while it is walked") {
+    let r = new Reg(HashMap::new());
+    let _ = r.m.insert("a", 1);
+    assert!(r.grow() == 1);
+    assert!(shm(r.m) == "{a:1,a2:2,}");
+}
+
+test("a parameter with its own iterator grown while it is walked") {
+    let b = new Bag([1, 2]);
+    assert!(grow_bag(b) == 2);
+    assert!(b.items.len() == 4);
+    assert!(b.items[3] == 12);
+}
