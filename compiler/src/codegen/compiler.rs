@@ -4589,8 +4589,10 @@ impl Compiler {
                 self.emit_builtin_entry(&fqn, &params, boolean.clone(), false, |b, a| b.bin(op, a[0], a[1], boolean.clone()));
             }
         }
-        // Bitwise traits over the int lane (`byte` shares its tag, and its
-        // words: no byte wrap, as `int`).
+        // Bitwise traits over the int lane (`byte` shares its tag and its
+        // words). A `byte` `<<` keeps the low 8 bits, as `hir::build`'s
+        // `wrap_byte` makes the operator on a `byte` do (#2778); the others
+        // cannot leave `0..=255`.
         for ty in ["int", "byte"] {
             let params = [(int.clone(), true), (int.clone(), true)];
             for (class, method, op) in [
@@ -4601,7 +4603,15 @@ impl Compiler {
                 ("BitXor", "bitxor", BinOp::BitXor),
             ] {
                 let fqn = Generics::builtin_instance_fqn(class, ty, method);
-                self.emit_boxing_builtin_entry(&fqn, &params, int.clone(), true, |b, a| b.bin(op, a[0], a[1], int.clone()));
+                let wraps = ty == "byte" && op == BinOp::Shl;
+                self.emit_boxing_builtin_entry(&fqn, &params, int.clone(), true, |b, a| {
+                    let v = b.bin(op, a[0], a[1], int.clone());
+                    if !wraps {
+                        return v;
+                    }
+                    let mask = b.push(HirKind::Lit(Lit::Int(255)), int.clone());
+                    b.bin(BinOp::BitAnd, v, mask, int.clone())
+                });
             }
         }
         // `Neg` / `BitNot` take one operand (plus the ignored trailing dictionary).
