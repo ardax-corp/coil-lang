@@ -2466,7 +2466,13 @@ impl Cx<'_> {
             HirKind::Resume { .. } => {
                 self.note(w, id, EffectFlags::YIELD | EffectFlags::RESIZE, || "resumes a generator".into())
             }
-            HirKind::ForIn { kind, .. } => {
+            HirKind::ForIn { pat, iterable, kind, .. } => {
+                // `for mut x in place`: each `x` writes its item in place.
+                let mut borrows = false;
+                pat.for_each_bind(&mut |l| borrows |= body.local(l).borrow);
+                if borrows {
+                    self.tuple_element_write(w, id, *iterable, || "Cannot iterate a tuple element with `for mut`".to_string());
+                }
                 if !matches!(
                     kind,
                     Some(ForInKind::Array | ForInKind::Tuple { .. } | ForInKind::Range { .. })
