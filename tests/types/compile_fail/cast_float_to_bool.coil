@@ -1,0 +1,6 @@
+// @expected E0102 — `float` does not cast to `bool`; the help compares with
+// zero (#2803).
+fn main() {
+    let f = 1.5;
+    let t = f as bool;
+}

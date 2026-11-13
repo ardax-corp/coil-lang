@@ -1,0 +1,10 @@
+// @expected E0102 — an enum value is not cast to `int` (#2803).
+enum E {
+    A,
+    B,
+}
+
+fn main() {
+    let e = E::B;
+    let n = e as int;
+}

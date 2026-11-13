@@ -1,0 +1,9 @@
+// @expected E0102 — a class is not a cast target (#2803).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let n = 5;
+    let c = n as C;
+}

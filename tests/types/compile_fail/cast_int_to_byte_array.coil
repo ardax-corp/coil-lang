@@ -1,0 +1,6 @@
+// @expected E0102 — only a byte array or a string converts to a byte array
+// (#2803).
+fn main() {
+    let n = 5;
+    let b = n as [byte; 2];
+}
