@@ -157,7 +157,7 @@ let f = declare(lib, "strlen", (String,), Int)?;
 
 ## Iterator / for-in
 
-`for x in expr` uses `IntoIterator` / `Iterator` from prelude. Works on arrays, homogeneous tuples/dicts, numeric ranges (`int`/`byte`/`float`), coroutines, user `impl`s. Numeric ranges also have inherent `.to_vec() -> Vec<T>`.
+`for x in expr` uses `IntoIterator` / `Iterator` from prelude. Works on arrays, homogeneous tuples/dicts, numeric ranges (`int`/`byte`/`float`), coroutines, user `impl`s, and a value of a type parameter bounded by `Iterator` (`fn f<I: Iterator>(I it) { for x in it { … } }`, through the bound's dictionary; it advances `it`). A type parameter bounded only by `IntoIterator` is E0119: no bound says what `T::IntoIter`'s `next` is. Numeric ranges also have inherent `.to_vec() -> Vec<T>`.
 
 ## What does NOT exist
 

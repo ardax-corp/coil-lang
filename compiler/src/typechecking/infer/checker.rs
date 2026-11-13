@@ -21336,6 +21336,9 @@ impl Checker {
             );
             return None;
         }
+        if let Some(item) = self.bound_for_in(te, loop_id, iterable_range, loop_range) {
+            return item;
+        }
         if let Some((item, kind)) = self.builtin_for_in_kind(te, iterable_range) {
             self.record_for_in_info(
                 loop_id,
@@ -21491,6 +21494,55 @@ impl Checker {
         }
     }
 
+    /// `for x in it` over a value of a type parameter (#2820): through its
+    /// `Iterator` bound's `next`, as `it.next()` would call it. `None` when
+    /// the iterable is no type parameter, so the caller goes on to the
+    /// builtin shapes and instances; `Some(None)` after a diagnostic. An
+    /// instance search would pick the one instance in scope and report
+    /// that the parameter is used as that type.
+    fn bound_for_in(
+        &mut self,
+        te: &Ty,
+        loop_id: Option<NodeId>,
+        iterable_range: &Range<usize>,
+        loop_range: &Range<usize>,
+    ) -> Option<Option<Ty>> {
+        let var = Self::constraint_var_of_ty(&apply_ty_prune(&self.subst, te))?;
+        let name = self
+            .type_params_in_scope
+            .iter()
+            .rev()
+            .find_map(|frame| frame.iter().find(|(_, v)| **v == var).map(|(n, _)| n.clone()))?;
+        let of_trait = |cands: Vec<(usize, String, String, usize, Scheme)>, class: &str| -> Vec<(usize, String, String, usize, Scheme)> {
+            cands.into_iter().filter(|c| c.2 == class).collect()
+        };
+        let next = of_trait(self.bound_method_candidates("next", Some(var)), "Iterator");
+        if !next.is_empty() {
+            let candidate = self.select_bound_method(next, "next", iterable_range)?;
+            let result = self.apply_bound_method_call(candidate, Some(var), "next", std::slice::from_ref(te), &[], true, None, iterable_range);
+            let item = Ty::Var(self.counter.fresh());
+            let want = Ty::App(Box::new(Ty::Con(common::BUILTIN_OPTION_ENUM.to_string())), vec![item.clone()]);
+            self.unify(&result, &want, iterable_range, "for-in over an `Iterator` bound");
+            let item_ty = apply_ty_prune(&self.subst, &item);
+            self.record_for_in_info(loop_id, loop_range, ForInInfo { kind: ForInKind::Bound, item_ty: item_ty.clone() });
+            return Some(Some(item_ty));
+        }
+        let into = !of_trait(self.bound_method_candidates("into_iter", Some(var)), "IntoIterator").is_empty();
+        let (message, help) = if into {
+            (
+                format!("a `for` over `{name}` (bounded by `IntoIterator`) is not supported: no bound says what `{name}::IntoIter`'s `next` is"),
+                "bound the parameter by `Iterator` (`fn f<I: Iterator>(I it)`) and pass `xs.into_iter()` from where the type is known".to_string(),
+            )
+        } else {
+            (
+                format!("type parameter `{name}` is not iterable: a `for` over it needs a bound `{name}: Iterator`"),
+                format!("add `{name}: Iterator` to its bounds, or loop over a concrete collection"),
+            )
+        };
+        let _ = self.error_with_help(ErrorCode::GenericTypeError, message, iterable_range.clone(), Some(help));
+        Some(None)
+    }
+
     fn record_for_in_info(
         &mut self,
         loop_id: Option<NodeId>,
@@ -21555,7 +21607,7 @@ impl Checker {
             ForInKind::Array => ForInCounted::Array,
             ForInKind::Tuple { arity } => ForInCounted::Tuple { arity },
             ForInKind::Range { inclusive, float } => ForInCounted::Range { inclusive, float },
-            ForInKind::Coroutine | ForInKind::Custom { .. } => return None,
+            ForInKind::Coroutine | ForInKind::Custom { .. } | ForInKind::Bound => return None,
         };
         Some((item, counted))
     }

@@ -105,6 +105,11 @@ pub enum ForInKind {
         next_fqn: Option<String>,
         counted: Option<ForInCounted>,
     },
+    /// A value of a type parameter bounded by `Iterator` (#2820): the loop
+    /// calls the bound's `next` through its dictionary, as `it.next()` does
+    /// (a [`BoundMethodCall`] at the iterable's span). HIR build lowers it
+    /// to a `loop` over that call.
+    Bound,
 }
 
 /// Counted `IntoIter` shapes for user `into_iter` (C2b).
