@@ -173,7 +173,11 @@ words:
   `GenericFnSig::split` and `fn_sig_split`), as one whose result holds
   such a function below its top does (#2766, #2767). A method clone's
   signature is the declared one, the returned function's parameters not
-  flattened onto the method's (`hir_method_clone_sig`).
+  flattened onto the method's (`hir_method_clone_sig`). A returned function whose
+  signature is plain through every curried level (`fn(T) -> Vec<T>`,
+  `fn() -> fn(T) -> T`) is one closure word both sides call alike: a free
+  function's shared call hands it on as it is, as a method's does, with
+  no adapter (`hir_closure_adapt`, #2771).
 - A ground function passed where the shared body takes a function whose
   result is an open `Option` / `Result` (`T -> Result<U, E>` in
   `Result::and_then`) returns its niche word, but the body reads that
