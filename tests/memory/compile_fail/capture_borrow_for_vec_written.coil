@@ -1,0 +1,12 @@
+// @expected E0149 — a closure that borrows `v` (`use (mut v)`) called in a
+// `for` over `v` writes the object the loop walks (#2827).
+fn main() {
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    let f = fn () use (mut v) {
+        v.push(2);
+    };
+    for x in v {
+        f();
+    }
+}

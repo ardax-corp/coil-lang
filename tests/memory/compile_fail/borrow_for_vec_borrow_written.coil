@@ -1,0 +1,13 @@
+// @expected E0149 — a write through `w` inside a `for` over the `Vec` `w`
+// borrows: the loop walks the value `v` had when it began (#2827), and the
+// borrow writes the object both names share in place, so the loop and `w`
+// cannot both be one value.
+fn main() {
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    v.push(2);
+    let w = mut v;
+    for x in v {
+        w[1] = x + 10;
+    }
+}
