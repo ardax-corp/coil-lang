@@ -5,16 +5,18 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs`.
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (17 today; a reader takes
+17 and 16 and refuses any other).
 
 ## Major 8
 
 Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
-change the format again stay on major 8 minor 0 and list their change here.
-A runtime refuses a major 7 archive with its version error, as any other
-major.
+change the format again stay on major 8 and list their change here: those that
+only add something to the format raise the minor (minor 1, below, is the
+current version, 8.1 with MIR section `FORMAT` 17). A runtime refuses a major
+7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
   empty since `Deopt` went, #2343) or `call_fields` / `slot_fields`

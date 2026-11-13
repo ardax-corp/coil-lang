@@ -31,6 +31,7 @@ Release builds publish it as `coil-wasm32-wasip1.wasm` (edge and `v*` tags).
 | Files | Work against whatever the WASI host preopens. Symlinks are not supported. |
 | Terminal | `io::tty`: nothing is a terminal; raw mode fails with `NotATerminal`. |
 | stdio | WASI cannot `dup`, so a stdio stream owns descriptor 0/1/2; closing the stream never closes the process's own stdio. |
+| Nesting | The compiler runs on the host's call stack, which cannot grow, so the limits are lower than native (`parser::PARSE_NESTING_LIMIT`, `OPERATOR_CHAIN_LIMIT`, `INFER_RECURSION_LIMIT`): `E0125` past 400 nested brackets (native 4000), past 1000 levels in the checker (native 2000) and past 700 chained binary operators and `as` casts (native: none). Measurements are in [limitations.md](limitations.md), "Deep expressions". |
 | `coil test` | Runs the test runner in the `coil` binary (no `coil-test` to re-exec). `coil mutate` is not available. |
 | `coil dissect` | Runs in the `coil` binary too (`coil-dissect` is a library as well as a binary). The playground's Inspect panel uses it. Other helpers (`fmt`, `lsp`, `verify`, `debug`) are not in the wasm build. |
 | Child processes | The `process` module compiles, but starting a program fails (`ProcessError::Spawn(IoError::Other)`). |
