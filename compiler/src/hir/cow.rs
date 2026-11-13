@@ -159,6 +159,9 @@ struct Facts<'b> {
     capture_assigns: Vec<HirId>,
     /// Places a `new View(…)` borrows into a `mut` field: never shared.
     borrow_args: HashSet<HirId>,
+    /// `for` loops that may keep what they walk past the loop
+    /// ([`walk_keeps`]): the iterable is stored, as a kept argument is.
+    kept_walks: HashSet<HirId>,
 }
 
 /// What a call in a body may do: [`CallLookup`] for the body given.
@@ -321,6 +324,7 @@ impl<'b> Facts<'b> {
             reassigned: HashSet::new(),
             capture_assigns: Vec::new(),
             borrow_args: HashSet::new(),
+            kept_walks: HashSet::new(),
         };
         // Evaluation order: children in the order `children` lists them.
         let mut next = 0u32;
@@ -440,6 +444,9 @@ impl<'b> Facts<'b> {
                 }
             }
             HirKind::ForIn { pat, iterable, kind, .. } => {
+                if walk_keeps(module, body, lookup, id) {
+                    self.kept_walks.insert(id);
+                }
                 if matches!(kind, Some(ForInKind::Array)) {
                     let mut ls = Vec::new();
                     pat.for_each_bind(&mut |l| ls.push(l));
@@ -687,6 +694,8 @@ fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: 
                 inner |= inner_params(body, *v);
             }
             HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => kept |= of(&holds, *v),
+            // A walk whose iterator dies with the loop keeps nothing.
+            HirKind::ForIn { iterable, .. } if walk_keeps(module, body, lookup, id) => kept |= of(&holds, *iterable),
             HirKind::Lambda { body: inner } => {
                 for (o, _) in &module.bodies[*inner].captures {
                     kept |= holds.get(o).copied().unwrap_or(0);
@@ -1083,6 +1092,7 @@ impl Plan {
                     }
                 }
                 HirKind::Return(Some(v)) => plan.store_result(body, f, *v, &cow, &inout, &borrowed),
+                HirKind::ForIn { iterable, .. } if f.kept_walks.contains(&id) => plan.store(body, f, *iterable, &cow, &inout, &borrowed),
                 HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => {
                     plan.store(body, f, *v, &cow, &inout, &borrowed)
                 }
@@ -1954,6 +1964,58 @@ fn write_steps(body: &HirBody, path: HirId) -> Option<(LocalId, Vec<Option<Strin
     }
 }
 
+/// Whether the `for` at `id` may keep what it walks past the loop, other
+/// than in its iterator, which dies with the loop (#2821): its `into_iter`
+/// or `next` keeps what it is given somewhere other than its result, or
+/// hands it to code not known here, or `next` may hand back the walked
+/// object itself. A `for` is no `Call` in HIR, so this is the call's
+/// `kept` for it. An array, tuple, range or generator loop keeps nothing
+/// (a generator's own frame keeps what it was given).
+fn walk_keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, id: HirId) -> bool {
+    let HirKind::ForIn { pat, iterable, kind, .. } = &body.expr(id).kind else { return false };
+    let Some(ForInKind::Custom { into_iter_fqn, next_fqn, .. }) = kind else {
+        return kind.is_none();
+    };
+    // An instance method by the key the loop names: this module's body, or
+    // an earlier module's through the lookup.
+    let summary = |key: &str| {
+        let name = module.instance_fns.get(key).map_or_else(|| key.to_string(), |&i| module.bodies[i].name.clone());
+        lookup(&Callee::Named { name, def: None, overload: None }, &[])
+    };
+    let loose = |s: &Option<Summary>| s.is_none_or(|s| (s.escapes | s.opaque_args) & 1 != 0);
+    if into_iter_fqn.as_deref().is_some_and(|k| loose(&summary(k))) {
+        return true;
+    }
+    let Some(next) = next_fqn else { return false };
+    let s = summary(next);
+    if loose(&s) {
+        return true;
+    }
+    // An object inside the iterator handed back: the walked one itself
+    // when the item's type is the iterable's.
+    let s = s.unwrap_or_default();
+    let mut itself = false;
+    if (s.returns_inner | s.returns_arg) & 1 != 0 {
+        let walked = body.expr(*iterable).ty.as_ref();
+        pat.for_each_bind(&mut |l| itself |= may_be_same_type(body.local(l).ty.as_ref(), walked));
+    }
+    itself
+}
+
+/// Whether a value of type `a` may be one of type `b`: the same head, or
+/// either not known.
+fn may_be_same_type(a: Option<&Ty>, b: Option<&Ty>) -> bool {
+    let head = |t: &Ty| match strip_readonly(t) {
+        Ty::App(h, _) => Some(h.as_ref().clone()),
+        Ty::Var(_) => None,
+        t => Some(t.clone()),
+    };
+    match (a.and_then(head), b.and_then(head)) {
+        (Some(x), Some(y)) => x == y,
+        _ => true,
+    }
+}
+
 /// Whether `id` runs inside a `for` over an iterator (not an array, a
 /// tuple or a range), whose iterator holds the iterable while it runs.
 fn in_iterator_loop(body: &HirBody, f: &Facts<'_>, id: HirId) -> bool {
@@ -2370,4 +2432,3 @@ fn relocate(out: &mut HirBody, id: HirId) -> HirId {
     out.exprs.push(moved);
     new
 }
-

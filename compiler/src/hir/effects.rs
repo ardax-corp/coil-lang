@@ -250,6 +250,9 @@ pub struct ProgramEffects {
     /// of its `impl` and the key its calls name (the instance's
     /// `method_fqns`): what a later module's call of that instance runs.
     instance_bodies: HashMap<(String, String), String>,
+    /// The same by the key alone (`IntoIterator__Bag__into_iter`): the
+    /// instance a `for` loop's desugar names (#2821).
+    instance_by_key: HashMap<String, String>,
     /// A `drop` so far may change the length of an array or `Vec`.
     drop_resizes: bool,
 }
@@ -403,6 +406,11 @@ impl ProgramEffects {
         if let Some(&s) = self.by_name.get(name).or_else(|| self.by_name.get(format!("{module_path}::{name}").as_str())) {
             return Some(s);
         }
+        // A trait impl method by its instance key (a `for` loop's
+        // `into_iter` / `next`).
+        if let Some(&s) = self.instance_by_key.get(name).and_then(|n| self.by_name.get(n)) {
+            return Some(s);
+        }
         // An imported type's static (`Pool::with_capacity`), by the module
         // the type is in; never a host native of the same short name.
         if let Some((owner, m)) = name.rsplit_once("::")
@@ -426,7 +434,7 @@ impl ProgramEffects {
             });
         }
         let short = if current && let Some(export) = checker.scope_binding(name) {
-            export.short_name().to_string()
+            escape::fresh_registry(export).unwrap_or(export.short_name()).to_string()
         } else {
             name.to_string()
         };
@@ -463,6 +471,7 @@ impl ProgramEffects {
         self.traits.extend(module.trait_effects.iter().cloned());
         for (fqn, &i) in &module.instance_fns {
             self.instance_bodies.insert((module_path.to_string(), fqn.clone()), module.bodies[i].name.clone());
+            self.instance_by_key.insert(fqn.clone(), module.bodies[i].name.clone());
         }
         // The overloads of a name share it and its def: a later module's
         // call may run any of them.
@@ -3149,7 +3158,7 @@ impl Cx<'_> {
         let short = if self.checker.current_module_name() == self.module_path
             && let Some(export) = self.checker.scope_binding(name)
         {
-            export.short_name().to_string()
+            escape::fresh_registry(export).unwrap_or(export.short_name()).to_string()
         } else {
             name.to_string()
         };
@@ -3202,7 +3211,8 @@ impl Cx<'_> {
                 return Some(s);
             }
         }
-        None
+        // An earlier module's trait impl method by its instance key.
+        self.program.instance_by_key.get(name).and_then(|n| self.program.by_name.get(n)).copied()
     }
 
     /// The summary of `recv.name(..)` when the receiver is a user class or
