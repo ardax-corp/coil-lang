@@ -1,0 +1,9 @@
+// @expected E0102 — a class instance is not cast to `int` (#2803).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let c = new C(1);
+    let n = c as int;
+}

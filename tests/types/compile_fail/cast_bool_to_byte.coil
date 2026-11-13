@@ -1,0 +1,5 @@
+// @expected E0102 — `bool` does not cast to `byte` (#2803).
+fn main() {
+    let t = true;
+    let b = t as byte;
+}

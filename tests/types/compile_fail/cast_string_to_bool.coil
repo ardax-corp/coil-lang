@@ -1,0 +1,5 @@
+// @expected E0102 — a `string` is not cast to `bool` (#2803).
+fn main() {
+    let s: string = "true";
+    let t = s as bool;
+}
