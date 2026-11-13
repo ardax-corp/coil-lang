@@ -728,9 +728,17 @@ impl Inliner<'_> {
         shape.stmts.is_empty()
             && shape.result.is_some()
             && shape.heap_locals.iter().all(|l| callee.params.contains(l))
-            && callee.params.iter().zip(args).all(|(&p, &a)| {
-                matches!(self.body.expr(a).kind, HirKind::Lit(_) | HirKind::Local(_)) && !rebinds(callee, p)
-            })
+            && callee.params.iter().zip(args).all(|(&p, &a)| self.stands_in(callee, p, a))
+    }
+
+    /// A literal or local argument `a` stands in for its parameter `p` when
+    /// the callee never rebinds `p` and the argument is not packed into a
+    /// trait object there: the pack is keyed on the argument's node, which
+    /// a substitution drops (#2839).
+    fn stands_in(&self, callee: &HirBody, p: LocalId, a: HirId) -> bool {
+        let arg = self.body.expr(a);
+        let packed = existential(&callee.locals[p.0 as usize].ty) && !existential(&arg.ty);
+        matches!(arg.kind, HirKind::Lit(_) | HirKind::Local(_)) && !packed && !rebinds(callee, p)
     }
 
     /// Splice `callee` in for `call` as a block value in the call's place:
@@ -818,17 +826,13 @@ impl Inliner<'_> {
         let HirKind::Call { args, .. } = self.body.expr(call).kind.clone() else {
             unreachable!()
         };
-        // A literal or local argument stands in for its parameter when the
-        // callee never rebinds that parameter.
+        // A literal or local argument stands in for its parameter
+        // ([`Inliner::stands_in`]).
         let subst: Vec<Option<HirKind>> = callee
             .params
             .iter()
             .zip(&args)
-            .map(|(&p, &a)| {
-                let arg = &self.body.expr(a).kind;
-                let substitutable = matches!(arg, HirKind::Lit(_) | HirKind::Local(_));
-                (substitutable && !rebinds(callee, p)).then(|| arg.clone())
-            })
+            .map(|(&p, &a)| self.stands_in(callee, p, a).then(|| self.body.expr(a).kind.clone()))
             .collect();
         for l in &callee.locals {
             self.body.locals.push(HirLocal {
