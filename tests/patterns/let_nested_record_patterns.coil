@@ -3,26 +3,26 @@
 use tests::assert;
 
 test("a record pattern inside a record pattern") {
-    let r = {a: 1, c: {d: 4, e: "x"}};
-    let {c: {d}} = r;
-    let {a, c: {e, d: k}} = r;
+    let r = { a: 1, c: { d: 4, e: "x" } };
+    let { c: { d } } = r;
+    let { a, c: { e, d: k } } = r;
     assert!(d == 4 && a == 1 && e == "x" && k == 4);
 }
 
 test("a tuple pattern inside a record pattern") {
-    let r = {p: (1, (2, 3)), q: "s"};
-    let {p: (x, (y, z)), q} = r;
+    let r = { p: (1, (2, 3)), q: "s" };
+    let { p: (x, (y, z)), q } = r;
     assert!(x == 1 && y == 2 && z == 3 && q == "s");
 }
 
 test("a record pattern inside a tuple pattern") {
-    let t = (7, {u: 8, v: {w: 9}});
-    let (n, {u, v: {w}}) = t;
+    let t = (7, { u: 8, v: { w: 9 } });
+    let (n, { u, v: { w } }) = t;
     assert!(n == 7 && u == 8 && w == 9);
 }
 
 test("wildcards beside nested parts") {
-    let r = {a: {b: {c: 5}}, z: 0};
-    let {a: {b: {c}}, z: _} = r;
+    let r = { a: { b: { c: 5 } }, z: 0 };
+    let { a: { b: { c } }, z: _ } = r;
     assert!(c == 5);
 }
