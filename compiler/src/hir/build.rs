@@ -1389,7 +1389,22 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let init = self.expr(b, rhs);
                 let rhs_ty = self.ty_at(b, init);
                 let pat = self.let_pattern(b, pattern, rhs_ty.as_ref());
-                self.emit_ty(b, node, HirKind::LetPat { pat, init }, Some(coil_ty::unit()))
+                // A record pattern nested in a record or tuple pattern, or a
+                // tuple pattern in a record one, binds a temp that a `let` of
+                // its own destructures after this one (#2785).
+                let mut rest = Vec::new();
+                let pat = split_let_pattern(b, pat, rhs_ty.as_ref(), &mut rest);
+                let first = self.emit_ty(b, node, HirKind::LetPat { pat, init }, Some(coil_ty::unit()));
+                if rest.is_empty() {
+                    return first;
+                }
+                let span = span_of(node);
+                let mut stmts = vec![first];
+                for (pat, temp, ty) in rest {
+                    let read = self.synth(b, span, HirKind::Local(temp), ty);
+                    stmts.push(self.synth(b, span, HirKind::LetPat { pat, init: read }, Some(coil_ty::unit())));
+                }
+                self.synth(b, span, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()))
             }
             E::StaticDecl { name, init, .. } => {
                 self.static_init(name, init);
@@ -3518,6 +3533,61 @@ fn is_builtin_scalar(ty: &Ty) -> bool {
 
 fn is_byte(ty: Option<&Ty>) -> bool {
     matches!(ty.map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::BYTE)
+}
+
+/// `pat` (a `let` pattern of type `ty`) with each record pattern below the
+/// top, and each tuple pattern directly in a record pattern, replaced by a
+/// temp; `rest` gets each replaced pattern (split the same way) with its
+/// temp and type, in the order the `let`s that read them run. Lowering
+/// reads a record pattern's fields only into bindings, and a tuple
+/// pattern's items into bindings and tuple patterns (#2785).
+fn split_let_pattern(b: &mut BodyBuilder, pat: HirPat, ty: Option<&Ty>, rest: &mut Vec<(HirPat, LocalId, Option<Ty>)>) -> HirPat {
+    match (pat, ty.map(strip_readonly)) {
+        (HirPat::Record(parts), ty) => {
+            let fields: &[(String, Ty)] = match ty {
+                Some(Ty::Record { fields }) => fields,
+                _ => &[],
+            };
+            let parts = parts
+                .into_iter()
+                .map(|(name, p)| {
+                    let fty = fields.iter().find(|(n, _)| *n == name).map(|(_, t)| t);
+                    let p = match p {
+                        p @ (HirPat::Record(_) | HirPat::Tuple(_)) => lift_let_pattern(b, p, fty, rest),
+                        p => p,
+                    };
+                    (name, p)
+                })
+                .collect();
+            HirPat::Record(parts)
+        }
+        (HirPat::Tuple(items), ty) => {
+            let tys: &[Ty] = match ty {
+                Some(Ty::Tuple(tys)) => tys,
+                _ => &[],
+            };
+            let items = items
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| match p {
+                    p @ HirPat::Record(_) => lift_let_pattern(b, p, tys.get(i), rest),
+                    p @ HirPat::Tuple(_) => split_let_pattern(b, p, tys.get(i), rest),
+                    p => p,
+                })
+                .collect();
+            HirPat::Tuple(items)
+        }
+        (p, _) => p,
+    }
+}
+
+/// [`split_let_pattern`]'s temp for `pat`, of type `ty`.
+fn lift_let_pattern(b: &mut BodyBuilder, pat: HirPat, ty: Option<&Ty>, rest: &mut Vec<(HirPat, LocalId, Option<Ty>)>) -> HirPat {
+    let temp = b.temp("let$part", ty.cloned());
+    let at = rest.len();
+    rest.push((HirPat::Wild, temp, ty.cloned()));
+    rest[at].0 = split_let_pattern(b, pat, ty, rest);
+    HirPat::Bind(temp)
 }
 
 /// A pattern that matches every value.
