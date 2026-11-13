@@ -1,0 +1,14 @@
+// @expected E0149 — the `for` over `a` holds `a`'s object while its body
+// writes `a`, which `w` borrows (#2819): the write would copy `a` away
+// from `w` while the loop walks the old object.
+use collections::map::HashMap;
+
+fn main() {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    let w = mut a;
+    for p in a {
+        let _ = a.insert(p.key + "2", 2);
+    }
+    let _ = w.insert("q", 0);
+}

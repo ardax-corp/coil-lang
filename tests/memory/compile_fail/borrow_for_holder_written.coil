@@ -1,0 +1,39 @@
+// @expected E0149 — a `for` over the object that holds the borrowed one,
+// whose body writes through the borrow (#2819).
+class Bag {
+    pub items: Vec<int>,
+}
+
+class BagIter {
+    pub bag: Bag,
+    pub i: int,
+}
+
+impl IntoIterator for Bag {
+    type Item = int;
+    type IntoIter = BagIter;
+    fn into_iter(Bag b) -> BagIter {
+        return new BagIter(b, 0);
+    }
+}
+
+impl Iterator for BagIter {
+    type Item = int;
+    fn next(BagIter it) -> Option<int> {
+        if it.i >= it.bag.items.len() {
+            return None;
+        }
+        let v = it.bag.items[it.i];
+        it.i += 1;
+        return Some(v);
+    }
+}
+
+fn main() {
+    let b = new Bag(Vec::new());
+    b.items.push(1);
+    let w = mut b.items;
+    for x in b {
+        w.push(x + 1);
+    }
+}

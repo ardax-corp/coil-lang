@@ -1,0 +1,13 @@
+// @expected E0149 — a `for` over the borrow `w` whose body writes the
+// source `a` (#2819).
+use collections::map::HashMap;
+
+fn main() {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    let w = mut a;
+    for p in w {
+        let _ = a.insert(p.key + "2", 2);
+    }
+    let _ = w.insert("q", 0);
+}
