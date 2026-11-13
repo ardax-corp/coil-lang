@@ -1,0 +1,24 @@
+// @expected E0149 — code not known here (a function value) is given `a`
+// while `w` borrows it, and may keep it (#2825): the later write through
+// `w` would show through what it kept.
+class C {
+    pub x: int,
+}
+
+class Holder {
+    pub c: C,
+}
+
+fn keep(Holder h, C c) -> int {
+    h.c = c;
+    return 0;
+}
+
+fn main() {
+    let h = new Holder(new C(0));
+    let a = new C(1);
+    let w = mut a;
+    let k = keep;
+    let _ = k(h, a);
+    w.x += 10;
+}

@@ -184,6 +184,26 @@ copy of the result, as `let r = w` copies), since a write through either is
 never tested; a result only read is not copied. Tests: `tests/memory/borrow_call_results.coil`,
 `tests/memory/compile_fail/borrow_{opaque_result,inner_result,inner_result_stored,holder_returned_written}.coil`.
 
+## Code not known here given a borrowed object
+
+Code not known here (a function value, a trait method called through a
+dictionary or on an existential, a known callee that hands its parameter to
+such code: `ArgUse` `opaque`) given the borrowed object, a holder of it, or
+the borrow itself may keep it: a second holder, which shares the object
+where it stores it, while the borrow's writes are never tested (#2825). It
+is E0149 at the argument when a write through the borrow, a write through
+the source to the borrowed object or a holder of it, or a call of a
+`use (mut a)` closure that borrows it may run after the call while the
+borrow lives (later in the body, or in a loop around the call that does not
+also start the borrow; a `for mut` binding is a new borrow each pass).
+Before, `k(h, a); w.x += 10` with `k` a function value that stores `a` in
+`h` showed the write through `h`. With no write after the call nothing can
+show, so a generic body calling a mutating trait method on a `for mut`
+binding (`for mut t in v { t.reset(); }`) stays legal, as does an object
+inside the borrowed one (the borrow makes it unique before writing it).
+Tests: `tests/memory/borrow_opaque_args.coil`,
+`tests/memory/compile_fail/borrow_opaque_{kept,holder_kept,dict_kept}.coil`.
+
 ## Writes through a borrowed source
 
 The shared flag is sticky: nothing clears it when the second name dies. A

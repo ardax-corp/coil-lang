@@ -1515,6 +1515,48 @@ impl Plan {
                     self.notes.push(m);
                 }
             }
+            // Code not known here given the borrowed object, a holder of it
+            // or the borrow itself may keep it (#2825): a second holder,
+            // which a later in-place write through the borrow (or the
+            // source's, which would copy the object away from the borrow)
+            // meets. Refused where such a write may run after the call while
+            // the borrow lives.
+            let start = b.span.0;
+            let written_after = |c: HirId| {
+                let loops: Vec<HirId> = f.loops_around(c).into_iter().filter(|&lp| !(f.order(lp) <= start && start < f.end[lp.0 as usize])).collect();
+                let after = |at: HirId| at != c && live(at) && (f.order(at) > f.order(c) || loops.iter().any(|&lp| f.contains(lp, at)));
+                f.writes.iter().any(|w| {
+                    after(w.at)
+                        && place_path(body, f, w.path).is_some_and(|(x, steps)| {
+                            Some(x) == b.local || (x == b.root && (prefix_of(&steps, &b.path) || prefix_of(&b.path, &steps)))
+                        })
+                }) || b.holders.iter().any(|h| f.reads.get(h).is_some_and(|rs| rs.iter().any(|&r| after(r))))
+            };
+            for &(c, u) in &calls {
+                if !live(c) || u.opaque == 0 {
+                    continue;
+                }
+                let HirKind::Call { args, .. } = &body.expr(c).kind else { continue };
+                let given = args.iter().enumerate().take(64).find(|&(j, &a)| {
+                    let v = named_value(body, a);
+                    u.opaque & (1u64 << j) != 0
+                        && may_hold_objects(body.expr(v).ty.as_ref())
+                        && place_path(body, f, v).is_some_and(|(r, p)| (r == b.root && prefix_of(&p, &b.path)) || (Some(r) == b.local && p.is_empty()))
+                });
+                let Some((_, &a)) = given else { continue };
+                if written_after(c) && seen.insert((c, stext.clone())) {
+                    let v = named_value(body, a);
+                    let span = body.expr(v).span;
+                    let vtext = place_text(body, v).unwrap_or_else(|| stext.clone());
+                    let mut m = Message::error(
+                        ErrorCode::BorrowConflict,
+                        format!("`{vtext}` is handed to code not known here, which may keep it, while {bname} borrows `{stext}`: a later write through {bname} would show through what it keeps"),
+                        span.0..span.1,
+                    );
+                    m.with_help(format!("make the borrow's writes before this call and {last} there, or hold the shared state in a `Ref<T>`"));
+                    self.notes.push(m);
+                }
+            }
             for &(capture_at, l) in &self.share_before {
                 let at = capture_at.1;
                 if l == b.root && b.path.iter().all(Option::is_some) && live(at) && seen.insert((at, stext.clone())) {
