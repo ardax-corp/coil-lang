@@ -688,11 +688,20 @@ const FRESH_HOSTS: &[&str] = &[
     "format",
     "vec_with_capacity",
     "with_capacity",
+    // `key_index::table`: a new, empty table (`HashMap::new`, #2821).
+    "key_index_table",
 ];
 
 /// Host natives with effects that still keep nothing they are passed: the
 /// buffer of a `write` is read during the call only.
 const NON_RETAINING_HOSTS: &[&str] = &["write", "write_from", "write_all", "read", "print", "println", "eprint", "eprintln"];
+
+/// The registry name of a host function export that is in [`FRESH_HOSTS`]
+/// under it, where its surface name differs (`key_index::table` is
+/// `key_index_table`): what its escape facts are known by.
+pub(super) fn fresh_registry(export: &crate::typechecking::virtual_modules::BuiltinExport) -> Option<&'static str> {
+    export.host_registry().filter(|r| FRESH_HOSTS.contains(r))
+}
 
 /// Whether `name` is in [`FRESH_HOSTS`] or [`NON_RETAINING_HOSTS`].
 pub(super) fn is_listed_host(name: &str) -> bool {

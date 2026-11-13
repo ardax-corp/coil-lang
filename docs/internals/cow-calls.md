@@ -217,7 +217,8 @@ holder of it is passed to a call whose result may be an object inside it
 capture to such code (`Facts::loose_captures`). An iterator or generator that outlives the
 call (`let it = a.iter()`, `let g = values(a)` for a `gen fn`) is kept,
 so it stays E0149 while the borrow lives. A flag left by a walk still
-costs one copy at the first write after the borrow is done. Tests:
+costs one copy at the first write after the borrow is done, unless the
+source is a fresh local (below, "After a walk"). Tests:
 `tests/memory/borrow_iterating_callee.coil`,
 `tests/memory/compile_fail/borrow_iterator_kept.coil`,
 `tests/memory/compile_fail/borrow_generator_walk.coil`.
@@ -251,6 +252,51 @@ the borrow's last use, is fine. Tests:
 `tests/memory/compile_fail/borrow_for_*.coil`,
 `tests/memory/compile_fail/capture_borrow_for_written.coil`. Not covered: a
 walked `inout` parameter (#2826) and a `for` over a `Vec` (#2827).
+
+## After a walk
+
+A walk shares what it walks (`into_iter` stores it in the iterator) and the
+flag stays set when the iterator dies with the loop, so the next write
+copied: walking and growing a map was quadratic (#2821). Where the plan
+knows every name of the object, the write needs no test. That is
+`fresh_locals`: a local only ever given fresh objects (a constructor, a
+call whose summary has `shared_ret` clear), never shared, captured or bound
+from a place, and passed only to calls that neither keep it, hand it back
+nor hand it to code not known here. Its flag after a walk is one a dead
+holder left, in this body or in a callee that walked it and returned.
+
+That is sound only if a walk keeps nothing past the loop but its iterator.
+A `for` is no `Call` in HIR, so `walk_keeps` reads the loop's `into_iter`
+and `next` (the instance bodies its desugar names, `ForInKind::Custom`, by
+their key: `module.instance_fns` for this module, the recorded
+`ProgramEffects` instance keys for earlier ones): a walk keeps the
+iterable when either may keep what it is given other than in its result
+(`escapes`), hands it to code not known here, is not known, or when `next`
+may hand back an object inside the iterator whose type is the iterable's
+(the walked object itself). Such a loop counts as a call that keeps its
+iterable: `cow::keeps` sets the parameter's `keeps` bit, and the caller's
+`Plan` stores the iterable (shared, a second name under E0149, no fresh
+local). Before, a `for` was never a keep, so an `into_iter` that stored its
+collection elsewhere saw the caller's next write in place.
+
+`HashMap::new` / `with_capacity` are fresh calls since `key_index::table`
+(registry `key_index_table`) is in `escape::FRESH_HOSTS`: a host export is
+classified by its surface name (`table`), so a fresh host under another
+surface name is looked up by its registry name (`escape::fresh_registry`).
+
+Not covered (the flag is the only record, so a write after the walk still
+copies once): a walked object that is not a fresh local (a field such as
+`r.m`, a local copied from another name or bound from a call that may
+share its result, a captured local), and a collection whose iterator holds
+an object inside it (`new It(b.items)`) instead of the collection: the flag
+is then on that inner object. A run-time restore for those is designed on
+#2821. Tests: `tests/memory/cow_walk_holder_died.coil` (values for every
+escape: a second name, a keeping callee, a body that stores, passes or
+captures the collection or keeps an element, an iterator that keeps what
+it walks elsewhere, `break` / `return`, a generator suspended mid-walk, a
+task that panics mid-walk with a `defer`). Benches:
+`examples/perf/cow_walk_grow_map.coil`, `cow_walk_grow_vec.coil` (the
+control: a `Vec` walk is an index loop and shares nothing).
 
 ## Loop views
 
