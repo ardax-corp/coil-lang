@@ -412,6 +412,37 @@ mod tests {
         assert_eq!(walk(&heap, head), before);
     }
 
+    /// The copy-on-write pin is header state: an evacuation copies it with
+    /// the slot.
+    #[test]
+    fn evacuation_carries_the_cow_pin() {
+        let mut heap = Heap::default();
+        let mut keep = Vec::new();
+        for _ in 0..4 {
+            for i in 0..500 {
+                let (o, _) = heap.alloc(crate::memory::ObjInstance::with_slots(5, vec![Value::from(i as i64)]), Object::Instance);
+                o.set_pinned(i % 2 == 0);
+                keep.push(o.addr());
+            }
+            for i in 0..2000 {
+                let _ = heap.alloc(ObjString::from(format!("g{i}").as_str()), Object::String);
+            }
+        }
+        let mut words = ObjArray::new(keep.iter().map(|&a| Value::from(a)).collect());
+        words.set_elem_kind(common::WORD_POINTER);
+        let (holder, _) = heap.alloc(words, Object::Array);
+        let holder = holder.addr();
+        full_collect(&mut heap, &[holder]);
+        let (ev, moved) = evacuate(&mut heap, &[holder]);
+        assert!(ev.moved > 0, "{ev:?}");
+        let Some(Object::Array(arr)) = heap.find_object_by_addr(holder) else { panic!("the holder stays") };
+        for (i, &old) in keep.iter().enumerate() {
+            let now = arr.as_ref().get(i).expect("element").heap_addr();
+            let obj = heap.find_object_by_addr(now).expect("live");
+            assert_eq!(obj.is_pinned(), i % 500 % 2 == 0, "element {i} (moved: {})", moved.contains_key(&old));
+        }
+    }
+
     /// An object an ambiguous word references is pinned.
     #[test]
     fn ambiguously_referenced_object_stays_put() {

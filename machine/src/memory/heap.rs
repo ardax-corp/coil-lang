@@ -833,20 +833,29 @@ impl Heap {
 
     /// Copy-on-write: a second place now names `v`'s object, so the next
     /// write through either place copies it first. Anything but a class
-    /// instance or an array is left alone.
-    /// `true` when it marked an object.
+    /// instance or an array is left alone. A pinned object
+    /// ([`Object::is_pinned`]: a name writes it in place, untested) is
+    /// never marked: the new place gets a copy of it instead, made as
+    /// [`Self::cow_unique`] makes one. So a pinned object is never shared.
     #[inline]
-    pub fn cow_share(&self, v: Value) -> bool {
-        if let Some(obj @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(v.heap_addr()) {
-            obj.set_shared();
-            return true;
+    pub fn cow_share(&mut self, v: Value) -> CowShare {
+        match self.find_object_by_addr(v.heap_addr()) {
+            Some(obj @ (Object::Instance(_) | Object::Array(_))) if obj.is_pinned() => match self.cow_copy(obj, &mut HashMap::new()) {
+                Some(copy) => CowShare::Copied(copy),
+                None => CowShare::Untouched,
+            },
+            Some(obj @ (Object::Instance(_) | Object::Array(_))) => {
+                obj.set_shared();
+                CowShare::Marked
+            }
+            _ => CowShare::Untouched,
         }
-        false
     }
 
     /// Copy-on-write: before a write through `v`, a shallow copy of its
     /// object when another place may name it. The original and the copy
-    /// then both name the children, so those are marked shared in turn.
+    /// then both name the children, so those are marked shared in turn,
+    /// and a pinned child is copied for the copy instead.
     /// `None` when `v` can be written in place: not shared, an identity
     /// class, or not a class instance or array.
     pub fn cow_unique(&mut self, v: Value) -> Option<Value> {
@@ -854,6 +863,16 @@ impl Heap {
         if !obj.is_shared() {
             return None;
         }
+        self.cow_copy(obj, &mut HashMap::new())
+    }
+
+    /// A shallow copy of `obj` (a class instance or an array), whose
+    /// children both now name: each is marked shared, or, pinned, copied
+    /// in turn for the copy (deep through pinned objects; `done` maps what
+    /// this copy made already, so a child held twice is copied once).
+    /// `None` for an identity class or another kind of object. Allocates
+    /// and never collects, as the `Cow` helpers do.
+    fn cow_copy(&mut self, obj: Object, done: &mut HashMap<u64, u64>) -> Option<Value> {
         let copy = match obj {
             Object::Instance(gc) => {
                 let inst = gc.as_ref();
@@ -869,11 +888,26 @@ impl Heap {
             }
             _ => return None,
         };
+        done.insert(obj.addr(), copy.addr());
+        let mut pinned = Vec::new();
         copy.for_each_reference(self, &mut |addr, _| {
             if let Some(child @ (Object::Instance(_) | Object::Array(_))) = self.find_object_by_addr(addr) {
-                child.set_shared();
+                if child.is_pinned() {
+                    pinned.push(child);
+                } else {
+                    child.set_shared();
+                }
             }
         });
+        for child in pinned {
+            let to = match done.get(&child.addr()) {
+                Some(&to) => Some(Value::from(to)),
+                None => self.cow_copy(child, done),
+            };
+            if let Some(to) = to {
+                copy.replace_reference(child.addr(), to);
+            }
+        }
         self.cow_copies += 1;
         Some(Value::from(copy.addr()))
     }
@@ -2662,6 +2696,49 @@ impl Object {
         unsafe { *((self.addr() + COW_SHARED_OFFSET as u64) as *mut u8) = COW_SHARED_SET };
     }
 
+    /// Copy-on-write: whether a name writes this object in place without a
+    /// test while it is pinned, so a share hands out a copy of it instead
+    /// of marking it ([`Heap::cow_share`]).
+    #[inline]
+    pub fn is_pinned(&self) -> bool {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.pinned.get()
+    }
+
+    /// Set or clear the pin ([`Self::is_pinned`]): a byte at
+    /// [`COW_PINNED_OFFSET`], which native code's `CowPin` / `CowUnpin`
+    /// write the same way.
+    #[inline]
+    pub fn set_pinned(&self, on: bool) {
+        // SAFETY: a live object's header; the bit is a `Cell<bool>` at
+        // [`COW_PINNED_OFFSET`].
+        unsafe { *((self.addr() + COW_PINNED_OFFSET as u64) as *mut u8) = if on { COW_PINNED_SET } else { 0 } };
+    }
+
+    /// Point every word of this instance's slots or array's elements that
+    /// names `from` at `to` instead ([`Heap::cow_copy`]: a pinned child's
+    /// copy in a fresh copy of its holder). Writes go through the
+    /// payload's barrier.
+    fn replace_reference(&self, from: u64, to: Value) {
+        match self {
+            Self::Instance(gc) => {
+                let hits: Vec<usize> = gc.as_ref().storage.as_slice().iter().enumerate().filter(|(_, v)| v.heap_addr() == from).map(|(i, _)| i).collect();
+                let mut gc = *gc;
+                for i in hits {
+                    gc.as_mut().set_slot(i, to);
+                }
+            }
+            Self::Array(gc) => {
+                let hits: Vec<usize> = (0..gc.as_ref().word_count()).filter(|&i| gc.as_ref().word_at(i).is_some_and(|v| v.heap_addr() == from)).collect();
+                let mut gc = *gc;
+                for i in hits {
+                    gc.as_mut().set_word_at(i, to);
+                }
+            }
+            _ => {}
+        }
+    }
+
     #[must_use]
     #[inline]
     pub fn addr(&self) -> u64 {
@@ -3976,6 +4053,38 @@ impl ObjArray {
         self.words_vec().push(v);
     }
 
+    /// How many words the elements take: one per element, `k` per element
+    /// of a lane array, none for packed bytes ([`Self::word_at`]).
+    pub(crate) fn word_count(&self) -> usize {
+        match &self.data {
+            ArrayData::Words(w, ..) => w.len(),
+            ArrayData::Bytes(_) => 0,
+            ArrayData::Lanes { words } => words.len(),
+        }
+    }
+
+    /// Word `i` of the elements' storage, lanes included ([`Self::word_count`]).
+    pub(crate) fn word_at(&self, i: usize) -> Option<Value> {
+        match &self.data {
+            ArrayData::Words(w, ..) => w.get(i).copied(),
+            ArrayData::Bytes(_) => None,
+            ArrayData::Lanes { words } => words.get(i).copied(),
+        }
+    }
+
+    /// Overwrite word `i` of the elements' storage ([`Self::word_at`]).
+    pub(crate) fn set_word_at(&mut self, i: usize, v: Value) {
+        if i >= self.word_count() {
+            return;
+        }
+        if matches!(self.data, ArrayData::Words(..)) {
+            self.set(i, v);
+        } else if let ArrayData::Lanes { words } = &mut self.data {
+            words[i] = v;
+            self.note();
+        }
+    }
+
     /// Overwrite element `i` (caller checks bounds).
     #[inline]
     pub fn set(&mut self, i: usize, v: Value) {
@@ -4897,6 +5006,12 @@ struct GcHeader {
     /// An instance's or enum's `drop` has been claimed: it never runs
     /// twice ([`Object::claim_finalizer`]).
     finalized: Cell<bool>,
+    /// Copy-on-write: a name writes this object in place without a test
+    /// (an alias the compiler pinned it for, `CowPin`), so a share copies
+    /// it instead of setting [`Self::shared`] ([`Heap::cow_share`]). A
+    /// pinned object is never shared. Header state, like `shared`: no
+    /// barrier, and an evacuation copies it with the slot.
+    pinned: Cell<bool>,
     /// Debug / gc-stress: generation of the steal epoch the object was
     /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes a
     /// byte of what is header padding before an 8-aligned payload; release
@@ -4905,6 +5020,17 @@ struct GcHeader {
     epoch: Cell<u8>,
 }
 
+
+/// What [`Heap::cow_share`] did with a word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CowShare {
+    /// Not a class instance or an array: left as it is.
+    Untouched,
+    /// The object's shared flag is set; the word names it still.
+    Marked,
+    /// The object is pinned: the new name takes this copy of it.
+    Copied(Value),
+}
 
 /// Byte offset of a header's kind byte ([`GcHeader::kind`]): what
 /// [`Object::from_header`] reads, and native code's inline share
@@ -4916,11 +5042,22 @@ pub const HEADER_KIND_OFFSET: i32 = std::mem::offset_of!(GcHeader, kind) as i32;
 pub const COW_SHARED_OFFSET: i32 = std::mem::offset_of!(GcHeader, shared) as i32;
 /// The byte a share stores at [`COW_SHARED_OFFSET`]: `true`.
 pub const COW_SHARED_SET: u8 = 1;
+/// Byte offset of a header's copy-on-write pin ([`GcHeader::pinned`]):
+/// what native code's inline share tests, and its `CowPin` / `CowUnpin`
+/// write ([`COW_PINNED_SET`] or `0`).
+pub const COW_PINNED_OFFSET: i32 = std::mem::offset_of!(GcHeader, pinned) as i32;
+/// The byte a pin stores at [`COW_PINNED_OFFSET`]: `true`.
+pub const COW_PINNED_SET: u8 = 1;
 
 // The flag and the kind are one byte each, so native code reads and writes
 // them as bytes.
 const _: () = assert!(std::mem::size_of::<Cell<bool>>() == 1 && std::mem::size_of::<Cell<u8>>() == 1);
-const _: () = assert!(COW_SHARED_SET == true as u8);
+const _: () = assert!(COW_SHARED_SET == true as u8 && COW_PINNED_SET == true as u8);
+// The pin takes a byte of what was padding before an 8-aligned payload: the
+// header stays within one word, so no slot grows.
+const _: () = assert!(std::mem::size_of::<GcHeader>() <= 8);
+const _: () = assert!(std::mem::offset_of!(GcData<u64>, data) == 8);
+const _: () = assert!(COW_PINNED_OFFSET != COW_SHARED_OFFSET && COW_PINNED_OFFSET != HEADER_KIND_OFFSET);
 
 #[repr(C)]
 pub struct GcData<T> {
@@ -4937,6 +5074,7 @@ impl GcHeader {
             generation: Cell::new(0),
             shared: Cell::new(false),
             finalized: Cell::new(false),
+            pinned: Cell::new(false),
             #[cfg(any(debug_assertions, feature = "gc-stress"))]
             epoch: Cell::new(0),
         }
@@ -5074,6 +5212,7 @@ impl<T> Gc<T> {
             (*p).header.fresh.set(false);
             (*p).header.generation.set(0);
             (*p).header.shared.set(false);
+            (*p).header.pinned.set(false);
         }
     }
 
@@ -5465,6 +5604,99 @@ pub use snapshot::SnapRoot;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An instance of a class with no `drop` holding `slots`.
+    fn cow_instance(heap: &mut Heap, slots: Vec<Value>) -> Object {
+        heap.alloc(ObjInstance::with_slots(5, slots), Object::Instance).0
+    }
+
+    fn slot_of(heap: &Heap, obj: u64, i: usize) -> Value {
+        let Some(Object::Instance(gc)) = heap.find_object_by_addr(obj) else { panic!("an instance") };
+        gc.as_ref().slot(i).expect("a slot")
+    }
+
+    #[test]
+    fn a_share_marks_an_unpinned_object_and_copies_a_pinned_one() {
+        let mut heap = Heap::default();
+        let a = cow_instance(&mut heap, vec![Value::from(1i64)]);
+        assert_eq!(heap.cow_share(Value::from(a.addr())), CowShare::Marked);
+        assert!(a.is_shared());
+        let b = cow_instance(&mut heap, vec![Value::from(2i64)]);
+        b.set_pinned(true);
+        let CowShare::Copied(copy) = heap.cow_share(Value::from(b.addr())) else { panic!("a pinned object is copied") };
+        assert_ne!(copy.heap_addr(), b.addr());
+        assert!(!b.is_shared(), "a pinned object is never shared");
+        let c = heap.find_object_by_addr(copy.heap_addr()).expect("the copy");
+        assert!(!c.is_pinned() && !c.is_shared(), "the copy is the new name's own");
+        assert_eq!(slot_of(&heap, copy.heap_addr(), 0).as_int(), 2);
+        // Not a class instance or an array: left alone.
+        let (s, _) = heap.alloc(ObjString::from("x"), Object::String);
+        s.set_pinned(true);
+        assert_eq!(heap.cow_share(Value::from(s.addr())), CowShare::Untouched);
+    }
+
+    #[test]
+    fn a_pinned_objects_copy_copies_its_pinned_children_and_shares_the_rest() {
+        let mut heap = Heap::default();
+        let pinned_child = cow_instance(&mut heap, vec![Value::from(3i64)]);
+        pinned_child.set_pinned(true);
+        let (plain_child, _) = heap.alloc(ObjArray::new(vec![Value::from(4i64)]), Object::Array);
+        let grand = cow_instance(&mut heap, vec![Value::from(9i64)]);
+        grand.set_pinned(true);
+        let (pinned_arr, _) = heap.alloc(ObjArray::new(vec![Value::from(grand.addr()), Value::from(grand.addr())]), Object::Array);
+        pinned_arr.set_pinned(true);
+        let root = cow_instance(&mut heap, vec![Value::from(pinned_child.addr()), Value::from(plain_child.addr()), Value::from(pinned_arr.addr())]);
+        root.set_pinned(true);
+        let CowShare::Copied(copy) = heap.cow_share(Value::from(root.addr())) else { panic!("copied") };
+        let copy = copy.heap_addr();
+        let c0 = slot_of(&heap, copy, 0).heap_addr();
+        assert_ne!(c0, pinned_child.addr(), "a pinned child is copied for the copy");
+        assert_eq!(slot_of(&heap, c0, 0).as_int(), 3);
+        assert_eq!(slot_of(&heap, copy, 1).heap_addr(), plain_child.addr(), "an unpinned child is held by both");
+        assert!(plain_child.is_shared());
+        let arr = slot_of(&heap, copy, 2).heap_addr();
+        assert_ne!(arr, pinned_arr.addr());
+        let Some(Object::Array(a)) = heap.find_object_by_addr(arr) else { panic!("an array") };
+        let (g0, g1) = (a.as_ref().get(0).expect("0").heap_addr(), a.as_ref().get(1).expect("1").heap_addr());
+        assert_ne!(g0, grand.addr(), "pinned through a pinned array");
+        assert_eq!(g0, g1, "an object held twice is copied once");
+        for o in [root, pinned_child, pinned_arr, grand] {
+            assert!(o.is_pinned() && !o.is_shared(), "the originals stay pinned and unshared");
+        }
+        // The originals still hold the originals.
+        assert_eq!(slot_of(&heap, root.addr(), 0).heap_addr(), pinned_child.addr());
+    }
+
+    #[test]
+    fn unique_copies_a_shared_objects_pinned_children() {
+        let mut heap = Heap::default();
+        let pinned_child = cow_instance(&mut heap, vec![Value::from(3i64)]);
+        pinned_child.set_pinned(true);
+        let plain_child = cow_instance(&mut heap, vec![Value::from(4i64)]);
+        let root = cow_instance(&mut heap, vec![Value::from(pinned_child.addr()), Value::from(plain_child.addr())]);
+        assert_eq!(heap.cow_unique(Value::from(root.addr())), None, "not shared: written in place");
+        assert_eq!(heap.cow_share(Value::from(root.addr())), CowShare::Marked);
+        let copy = heap.cow_unique(Value::from(root.addr())).expect("a copy").heap_addr();
+        assert_ne!(slot_of(&heap, copy, 0).heap_addr(), pinned_child.addr(), "the copy gets its own pinned child");
+        assert!(!pinned_child.is_shared());
+        assert_eq!(slot_of(&heap, copy, 1).heap_addr(), plain_child.addr());
+        assert!(plain_child.is_shared());
+    }
+
+    #[test]
+    fn recycling_a_slot_clears_its_pin() {
+        let mut heap = Heap::default();
+        let a = cow_instance(&mut heap, vec![Value::from(1i64)]);
+        a.set_pinned(true);
+        let addr = a.addr();
+        heap.begin_mark(&[]);
+        while !heap.mark_quantum(usize::MAX) {}
+        unsafe { heap.sweep() };
+        assert!(heap.find_object_by_addr(addr).is_none(), "swept");
+        // SAFETY: a swept slot stays mapped.
+        let pin = unsafe { *((addr + COW_PINNED_OFFSET as u64) as *const u8) };
+        assert_eq!(pin, 0, "the recycled header holds no pin");
+    }
 
     fn live_object_addrs(heap: &Heap) -> std::collections::HashSet<u64> {
         let mut addrs = std::collections::HashSet::new();

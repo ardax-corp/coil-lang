@@ -1650,10 +1650,20 @@ pub unsafe extern "C" fn coil_native_cow(ctx: *mut NativeCtx, word: u64, unique:
     };
     let v = common::Value::from(word);
     if unique == 0 {
-        if heap.cow_share(v) {
-            heap.note_cow_share();
-        }
-        return word;
+        return match heap.cow_share(v) {
+            crate::memory::CowShare::Marked => {
+                heap.note_cow_share();
+                word
+            }
+            // A pinned object: the new name takes a copy (native code's
+            // inline share calls here only for one).
+            crate::memory::CowShare::Copied(copy) => {
+                heap.note_cow_share();
+                unsafe { note_alloc(ctx, heap) };
+                copy.bits()
+            }
+            crate::memory::CowShare::Untouched => word,
+        };
     }
     match heap.cow_unique(v) {
         Some(copy) => {
@@ -1661,6 +1671,44 @@ pub unsafe extern "C" fn coil_native_cow(ctx: *mut NativeCtx, word: u64, unique:
             copy.bits()
         }
         None => word,
+    }
+}
+
+/// `CowPin`: whether `word`'s object was pinned (`1` or `0`), and pin it
+/// ([`crate::memory::Object::is_pinned`]): a share of it copies from now
+/// on. `0` and no effect for anything but a class instance or an array,
+/// as a share leaves those. Native code does the same inline.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `word` is a heap word.
+pub unsafe fn cow_pin(ctx: *mut NativeCtx, word: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return 0;
+    };
+    match heap.find_object_by_addr(common::Value::from(word).heap_addr()) {
+        Some(obj @ (crate::memory::Object::Instance(_) | crate::memory::Object::Array(_))) => {
+            let was = obj.is_pinned();
+            obj.set_pinned(true);
+            u64::from(was)
+        }
+        _ => 0,
+    }
+}
+
+/// `CowUnpin`: unpin `word`'s object unless `saved` (what the `CowPin`
+/// that pinned it said) is nonzero, so a pin an outer region holds stays.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `word` is a heap word.
+pub unsafe fn cow_unpin(ctx: *mut NativeCtx, word: u64, saved: u64) {
+    if saved != 0 {
+        return;
+    }
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return;
+    };
+    if let Some(obj @ (crate::memory::Object::Instance(_) | crate::memory::Object::Array(_))) = heap.find_object_by_addr(common::Value::from(word).heap_addr()) {
+        obj.set_pinned(false);
     }
 }
 
@@ -2902,3 +2950,35 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
 }
 
 const HELPERS: usize = 41;
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    /// The interpreter's `CowPin` / `CowUnpin` ([`cow_pin`], [`cow_unpin`]):
+    /// the pin nests, and a share between them copies.
+    #[test]
+    fn the_pin_helpers_nest_and_a_pinned_share_copies() {
+        let mut heap = crate::memory::Heap::default();
+        let (obj, _) = heap.alloc(crate::memory::ObjInstance::with_slots(5, vec![common::Value::from(1i64)]), crate::memory::Object::Instance);
+        let mut ctx = NativeCtx::new(0);
+        ctx.heap = &mut heap;
+        let w = obj.addr();
+        // SAFETY: `ctx` names a live heap; `w` is one of its objects.
+        unsafe {
+            let outer = cow_pin(&mut ctx, w);
+            let inner = cow_pin(&mut ctx, w);
+            assert_eq!((outer, inner), (0, 1));
+            let copy = coil_native_cow(&mut ctx, w, 0);
+            assert_ne!(copy, w, "a share of a pinned object copies it");
+            assert!(!obj.is_shared());
+            cow_unpin(&mut ctx, w, inner);
+            assert!(obj.is_pinned(), "an inner unpin leaves the outer pin");
+            cow_unpin(&mut ctx, w, outer);
+            assert!(!obj.is_pinned());
+            assert_eq!(coil_native_cow(&mut ctx, w, 0), w, "unpinned, a share marks it");
+            assert!(obj.is_shared());
+            assert_eq!(cow_pin(&mut ctx, 0), 0, "no object: no pin");
+        }
+    }
+}
