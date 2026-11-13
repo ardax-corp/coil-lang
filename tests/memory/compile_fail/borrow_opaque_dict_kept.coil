@@ -1,0 +1,37 @@
+// @expected E0149 — a trait method called through a dictionary is code
+// not known here: given the borrow itself it may keep it (#2825), and the
+// loop writes through `w` after the call.
+class C {
+    pub x: int,
+}
+
+trait Put<R> {
+    fn put(R self, C x) -> int;
+}
+
+class Holder {
+    pub c: C,
+}
+
+impl Put for Holder {
+    fn put(Holder self, C x) -> int {
+        self.c = x;
+        return 0;
+    }
+}
+
+fn via<P: Put>(P p, C x) -> int {
+    return p.put(x);
+}
+
+fn main() {
+    let h = new Holder(new C(0));
+    let a = new C(1);
+    let w = mut a;
+    let i = 0;
+    while i < 2 {
+        w.x += 1;
+        let _ = via(h, w);
+        i += 1;
+    }
+}

@@ -1,0 +1,85 @@
+// Code not known here (a function value, a trait method called through a
+// dictionary) given a borrowed object may keep it (#2825). That is a
+// second holder only when the borrow, or its source, writes the object
+// after the call while the borrow lives (E0149, compile_fail/
+// borrow_opaque_*kept.coil). These stay legal, and every name reads its own
+// value.
+use tests::assert;
+
+class C {
+    pub x: int,
+}
+
+class Holder {
+    pub c: C,
+}
+
+class Box {
+    pub c: C,
+    pub n: int,
+}
+
+fn keep(Holder h, C c) -> int {
+    h.c = c;
+    return 0;
+}
+
+trait Reset<R> {
+    fn reset(R self) {}
+}
+
+impl Reset for C {
+    fn reset(C self) {
+        self.x = 0;
+    }
+}
+
+fn reset_all<T: Reset>(Vec<T> v) {
+    for mut t in v {
+        t.reset();
+    }
+}
+
+test("code not known here given a borrowed object nobody writes after") {
+    let h = new Holder(new C(0));
+    let a = new C(1);
+    let w = mut a;
+    w.x += 10;
+    let k = keep;
+    let _ = k(h, a);
+    assert!(a.x == 11);
+    assert!(h.c.x == 11);
+}
+
+test("code not known here given the source after the borrow's last use") {
+    let h = new Holder(new C(0));
+    let a = new C(1);
+    let w = mut a;
+    w.x += 10;
+    let k = keep;
+    let _ = k(h, a);
+    a.x += 100;
+    assert!(a.x == 111);
+    assert!(h.c.x == 11);
+}
+
+test("code not known here given an object inside the borrowed one") {
+    let h = new Holder(new C(0));
+    let b = new Box(new C(1), 0);
+    let w = mut b;
+    let k = keep;
+    let _ = k(h, b.c);
+    w.c.x += 10;
+    w.n += 1;
+    assert!(b.c.x == 11);
+    assert!(b.n == 1);
+    assert!(h.c.x == 1);
+}
+
+test("a trait method through a dictionary on a for mut binding") {
+    let v: Vec<C> = [new C(1), new C(2)];
+    let keep = v;
+    reset_all(v);
+    assert!(v[0].x == 0 && v[1].x == 0);
+    assert!(keep[0].x == 1 && keep[1].x == 2);
+}
