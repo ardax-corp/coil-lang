@@ -12,6 +12,11 @@ impl Q {
         return self.k * 100 + a * 10 + b;
     }
 
+    pub fn set(int k) -> int {
+        self.k = k;
+        return self.k;
+    }
+
     pub static fn s(Q q, int a) -> int {
         return q.k * 10 + a;
     }
@@ -23,6 +28,11 @@ fn g(Q q, int a) -> int {
 
 fn h(Vec<int> v, int a) -> int {
     return v.len() * 10 + a;
+}
+
+fn setk(Q q, int k) -> int {
+    q.k = k;
+    return q.k;
 }
 
 fn bump(Q q) {
@@ -64,4 +74,12 @@ test("the argument is unchanged by a write through the other name") {
     let p = g(q);
     r.k = 9;
     assert!(p(0) == 50 && q.k == 5);
+}
+
+test("a partial of a function that writes its parameter writes its own copy") {
+    let q = new Q(5);
+    let p = setk(q);
+    assert!(p(9) == 9 && p(7) == 7 && q.k == 5);
+    let m = q.set();
+    assert!(m(3) == 3 && q.k == 5);
 }

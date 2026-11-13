@@ -315,6 +315,13 @@ impl<'b> Facts<'b> {
                     used.opaque &= !1;
                     used.written |= 1;
                 }
+                // A call that yields a function may be a partial application
+                // (`g(q)`, `q.m(1)`), whose closure keeps the arguments given:
+                // each has a second name from here on (#2788), as `escape`
+                // counts it.
+                if matches!(body.expr(id).ty.as_ref().map(strip_readonly), Some(Ty::Fun(..))) {
+                    used.kept |= if args.len() >= 64 { u64::MAX } else { (1u64 << args.len()) - 1 };
+                }
                 if std::env::var("COIL_COW_TRACE").is_ok() {
                     eprintln!("cow:   {callee:?} written={:b} kept={:b} summary={:?}", used.written, used.kept, lookup(callee, args).map(|s| (s.mutates, s.keeps, s.returns)));
                 }
@@ -885,10 +892,17 @@ impl Plan {
                     let u = f.calls.get(&id).copied().unwrap_or_default();
                     let mut copy_result = false;
                     let mut share_result = false;
+                    let partial = matches!(body.expr(id).ty.as_ref().map(strip_readonly), Some(Ty::Fun(..)));
                     for (j, &a) in args.iter().enumerate().take(64) {
                         let bit = 1u64 << j;
                         let v = named_value(body, a);
-                        if u.kept & bit != 0 {
+                        if partial && u.written & bit != 0 && cow(v) {
+                            // A partial of a function that writes this
+                            // parameter writes on each later call: it takes a
+                            // copy of its own, as a `use (x)` capture is
+                            // (#2788).
+                            plan.share.push((v, true));
+                        } else if u.kept & bit != 0 {
                             plan.store(body, f, v, &cow, &inout, &borrowed);
                         } else if u.returned & bit != 0
                             && cow(id)
