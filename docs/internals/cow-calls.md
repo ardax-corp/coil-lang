@@ -298,6 +298,14 @@ task that panics mid-walk with a `defer`). Benches:
 `examples/perf/cow_walk_grow_map.coil`, `cow_walk_grow_vec.coil` (the
 control: a `Vec` walk is an index loop and shares nothing).
 
+## Casts
+
+A cast between byte arrays (`v as Vec<byte>`, `v as [byte; N]`, `a as
+Vec<byte>`) emits no op: the result is the operand's object (#2823). The
+rewrite stores the operand there (a share, unless it is moved), so a
+write through the result copies it; before, `let w = v as Vec<byte>;
+w.push(b)` grew `v` too. Test: `tests/types/byte_array_casts.coil`.
+
 ## Loop views
 
 A write through a nested path, `f.blocks[b].insts[i] = v`, makes each

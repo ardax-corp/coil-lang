@@ -1092,6 +1092,9 @@ impl Plan {
                     }
                 }
                 HirKind::Return(Some(v)) => plan.store_result(body, f, *v, &cow, &inout, &borrowed),
+                // A cast between byte arrays is the operand's object (#2823):
+                // the result is a second name for it.
+                HirKind::Cast { value } if cow(*value) && cow(id) => plan.store(body, f, *value, &cow, &inout, &borrowed),
                 HirKind::ForIn { iterable, .. } if f.kept_walks.contains(&id) => plan.store(body, f, *iterable, &cow, &inout, &borrowed),
                 HirKind::Yield { value: v, .. } | HirKind::Resume { value: Some(v), .. } => {
                     plan.store(body, f, *v, &cow, &inout, &borrowed)
