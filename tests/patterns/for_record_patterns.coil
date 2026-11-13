@@ -1,0 +1,51 @@
+// `for` destructures a record pattern as `let` does (#2784): at the top, in
+// a tuple pattern, and with records and tuples nested in it.
+use tests::assert;
+
+test("a record pattern over an array of records") {
+    let xs = [{ a: 1, b: 2 }, { a: 3, b: 4 }];
+    let sum = 0;
+    for { a, b } in xs {
+        sum += a * 10 + b;
+    }
+    assert!(sum == 46);
+}
+
+test("a renamed field and a field left out") {
+    let total = 0;
+    for { a: x } in [{ a: 5, b: 1 }, { a: 6, b: 2 }] {
+        total += x;
+    }
+    assert!(total == 11);
+}
+
+test("over a Vec of records") {
+    let rows = Vec::new();
+    rows.push({ n: 1, s: "a" });
+    rows.push({ n: 2, s: "b" });
+    let names = "";
+    let n = 0;
+    for { n: k, s } in rows {
+        names = names + s;
+        n += k;
+    }
+    assert!(names == "ab" && n == 3);
+}
+
+test("a record pattern in a tuple pattern") {
+    let ys = [(1, { c: "x", d: 5 }), (2, { c: "y", d: 6 })];
+    let out = "";
+    for (k, { c, d: e }) in ys {
+        out = out + c + (k * e).show();
+    }
+    assert!(out == "x5y12");
+}
+
+test("records and tuples nested in a record pattern") {
+    let zs = [{ p: { q: 7 }, r: (8, 9) }];
+    let got = 0;
+    for { p: { q }, r: (s, t) } in zs {
+        got = q * 100 + s * 10 + t;
+    }
+    assert!(got == 789);
+}
