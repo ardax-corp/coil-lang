@@ -1,0 +1,237 @@
+// An inout parameter handed to code not known here (a function value, a
+// dictionary call, an existential's method) that keeps it, and written after:
+// what that code kept is the value at the call, and the write reaches the
+// caller (#2842). The body pins the parameter, so the share where the code
+// keeps it gives a copy. Before, the kept object was the caller's, and the
+// later in-place write showed through it.
+use tests::assert;
+use collections::map::HashMap;
+
+class C {
+    pub x: int,
+    pub v: Vec<int>,
+}
+
+class Holder {
+    pub c: C,
+}
+
+fn keep(Holder h, C c) -> int {
+    h.c = c;
+    return 0;
+}
+
+fn bump_after(Holder h, C p) -> int {
+    let k = keep;
+    let _ = k(h, p);
+    p.x += 10;
+    return p.x;
+}
+
+trait Put<R> {
+    fn put(R self, C c) -> int {}
+}
+
+impl Put for Holder {
+    fn put(Holder self, C c) -> int {
+        self.c = c;
+        return 0;
+    }
+}
+
+fn via<P: Put>(P p, C c) -> int {
+    return p.put(c);
+}
+
+fn via_dyn(Put p, C c) -> int {
+    return p.put(c);
+}
+
+fn bump_dict(Holder h, C p) {
+    let _ = via(h, p);
+    p.x += 10;
+    p.v.push(3);
+}
+
+fn bump_dyn(Holder h, C p) {
+    let _ = via_dyn(h, p);
+    p.x += 10;
+}
+
+class VH {
+    pub v: Vec<int>,
+}
+
+fn keep_vec(VH h, Vec<int> v) -> int {
+    h.v = v;
+    return 0;
+}
+
+fn grow_after(VH h, Vec<int> v) {
+    let k = keep_vec;
+    let _ = k(h, v);
+    v.push(9);
+    v[0] = 100;
+}
+
+class MH {
+    pub m: HashMap<string, int>,
+}
+
+fn keep_map(MH h, HashMap<string, int> m) -> int {
+    h.m = m;
+    return 0;
+}
+
+fn insert_after(MH h, HashMap<string, int> m) {
+    let k = keep_map;
+    let _ = k(h, m);
+    let _ = m.insert("z", 26);
+}
+
+fn keep_each_pass(Vec<Holder> hs, C p) {
+    let k = keep;
+    let i = 0;
+    while i < hs.len() {
+        let _ = k(hs[i], p);
+        p.x += 1;
+        i += 1;
+    }
+}
+
+fn written_first(Holder h, C p) {
+    p.x += 10;
+    let k = keep;
+    let _ = k(h, p);
+}
+
+fn tail_kept(Holder h, C p) -> int {
+    let k = keep;
+    let _ = k(h, p);
+    p.x += 10;
+    return keep(h, p);
+}
+
+trait Bump<R> {
+    fn bump(R self) {}
+}
+
+impl Bump for C {
+    fn bump(C self) {
+        self.x += 1;
+    }
+}
+
+fn bump_twice<T: Bump>(T t) {
+    t.bump();
+    t.bump();
+}
+
+class A {
+    pub c: C,
+}
+
+class AH {
+    pub a: A,
+}
+
+fn keep_a(AH h, A a) -> int {
+    h.a = a;
+    return 0;
+}
+
+fn keep_holder_write_inner(AH h, A a, C c) {
+    let _ = keep_a(h, a);
+    c.x += 10;
+}
+
+fn keep_holder_write_inner_opaque(AH h, C c, A a) {
+    let k = keep_a;
+    let _ = k(h, a);
+    c.x += 10;
+}
+
+test("a call writing an object in place while it keeps the holder passed beside it") {
+    let h = new AH(new A(new C(0, Vec::new())));
+    let a = new A(new C(1, Vec::new()));
+    keep_holder_write_inner(h, a, a.c);
+    assert!(a.c.x == 11);
+    assert!(h.a.c.x == 1);
+    let g = new AH(new A(new C(0, Vec::new())));
+    let b = new A(new C(1, Vec::new()));
+    keep_holder_write_inner_opaque(g, b.c, b);
+    assert!(b.c.x == 11);
+    assert!(g.a.c.x == 1);
+}
+
+test("a function value keeps the parameter, which is written after") {
+    let h = new Holder(new C(0, Vec::new()));
+    let a = new C(1, Vec::new());
+    let n = bump_after(h, a);
+    assert!(n == 11);
+    assert!(a.x == 11);
+    assert!(h.c.x == 1);
+}
+
+test("a dictionary call and an existential keep the parameter") {
+    let h = new Holder(new C(0, Vec::new()));
+    let a = new C(1, Vec::from([1]));
+    bump_dict(h, a);
+    assert!(a.x == 11);
+    assert!(a.v.len() == 2);
+    assert!(h.c.x == 1);
+    assert!(h.c.v.len() == 1);
+    let g = new Holder(new C(0, Vec::new()));
+    let b = new C(1, Vec::new());
+    bump_dyn(g, b);
+    assert!(b.x == 11);
+    assert!(g.c.x == 1);
+}
+
+test("a Vec and a map parameter kept, then grown") {
+    let h = new VH(Vec::new());
+    let v = Vec::from([1, 2]);
+    grow_after(h, v);
+    assert!(v.len() == 3 && v[0] == 100);
+    assert!(h.v.len() == 2 && h.v[0] == 1);
+    let mh = new MH(HashMap::new());
+    let m: HashMap<string, int> = HashMap::new();
+    let _ = m.insert("a", 1);
+    insert_after(mh, m);
+    assert!(m.len() == 2);
+    assert!(mh.m.len() == 1);
+}
+
+test("each pass keeps the value of that pass") {
+    let hs = Vec::from([new Holder(new C(0, Vec::new())), new Holder(new C(0, Vec::new())), new Holder(new C(0, Vec::new()))]);
+    let a = new C(1, Vec::new());
+    keep_each_pass(hs, a);
+    assert!(a.x == 4);
+    assert!(hs[0].c.x == 1 && hs[1].c.x == 2 && hs[2].c.x == 3);
+}
+
+test("a write before the call is kept with it") {
+    let h = new Holder(new C(0, Vec::new()));
+    let a = new C(1, Vec::new());
+    written_first(h, a);
+    assert!(a.x == 11);
+    assert!(h.c.x == 11);
+}
+
+test("a pin a tail call leaves set costs a copy, not a value") {
+    let h = new Holder(new C(0, Vec::new()));
+    let a = new C(1, Vec::new());
+    let _ = tail_kept(h, a);
+    assert!(a.x == 11);
+    assert!(h.c.x == 11);
+    let b = a;
+    a.x = 5;
+    assert!(b.x == 11);
+    assert!(h.c.x == 11);
+}
+
+test("a generic body calling a mutating trait method twice") {
+    let a = new C(1, Vec::new());
+    bump_twice(a);
+    assert!(a.x == 3);
+}

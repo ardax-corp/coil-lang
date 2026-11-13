@@ -1272,6 +1272,22 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// [`MirInst::CowPin`] of `src`: whether its object was pinned.
+    pub fn ins_cow_pin(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+        let src = self.resolve(src);
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::CowPin { dest, src })?;
+        Ok(dest)
+    }
+
+    /// [`MirInst::CowUnpin`] of `src`, with what its pin gave (`saved`).
+    pub fn ins_cow_unpin(&mut self, src: ValueId, saved: ValueId) -> Result<ValueId, MirError> {
+        let (src, saved) = (self.resolve(src), self.resolve(saved));
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::CowUnpin { dest, src, saved })?;
+        Ok(dest)
+    }
+
     /// `STRINGIFY` of `src`, an immediate of static scalar type `tag`
     /// (`ValueTag`) or, with `None`, a word the runtime inspects.
     pub fn ins_stringify(&mut self, src: ValueId, tag: Option<u32>) -> Result<ValueId, MirError> {

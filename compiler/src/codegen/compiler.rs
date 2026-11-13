@@ -7336,6 +7336,22 @@ impl Compiler {
                     eprintln!("{}", crate::hir::print::body_to_string(&hir, &hir.bodies[i]));
                 }
             }
+            // A body that pins an object (#2842) writes object headers: it is
+            // no auto-par fork site or worker, and none of its loops is a
+            // loop site.
+            for b in &hir.bodies {
+                if !b.exprs.iter().any(|e| matches!(e.kind, crate::hir::HirKind::Builtin { op: crate::hir::Builtin::CowPin, .. })) {
+                    continue;
+                }
+                self.par_workers.remove(&b.name);
+                self.fork_fns.remove(&b.name);
+                self.par_shapes.retain(|_, site| site.qualified != b.name);
+                for e in &b.exprs {
+                    if matches!(e.kind, crate::hir::HirKind::Loop { .. } | crate::hir::HirKind::ForIn { .. }) {
+                        self.loop_par_sites.remove(&e.span);
+                    }
+                }
+            }
             // A copy capture the rewrite bound to a copy before its lambda
             // (#2843): the lambda, rewritten or not, captures the copy.
             for c in moved {

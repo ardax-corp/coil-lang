@@ -925,6 +925,15 @@ struct Plan {
     walked: HashSet<(HirId, HirId)>,
     /// Parameters written in place for the caller.
     inout: HashSet<LocalId>,
+    /// Parameters written in place for the caller that the body pins from
+    /// its entry ([`Self::pins`], #2842): a share of the object then gives
+    /// a copy, so code not known here that keeps it keeps a copy.
+    pin_params: Vec<LocalId>,
+    /// Calls that write an argument in place while another argument (or a
+    /// `static` the callee may read) reaches its root: the statement holding
+    /// the call, and the places from the root down to the argument, pinned
+    /// for the call.
+    pin_paths: Vec<((HirId, HirId), Vec<HirId>)>,
 }
 
 impl Plan {
@@ -935,6 +944,8 @@ impl Plan {
             && self.copy_before.is_empty()
             && self.unique.is_empty()
             && self.unique_before.is_empty()
+            && self.pin_params.is_empty()
+            && self.pin_paths.is_empty()
     }
 
     fn new(checker: &Checker, body: &HirBody, f: &Facts<'_>, mutates: u64) -> Self {
@@ -1280,7 +1291,84 @@ impl Plan {
         plan.hold_borrowed(body, f);
         plan.check_kept_views(checker, body, f);
         plan.note_copies(checker, body, f, &copied_from);
+        if pins_enabled() {
+            plan.pins(checker, body, f);
+        }
         plan
+    }
+
+    /// Where an object written in place may get a second name its writes
+    /// would show through, which only a pin turns into a copy (#2842,
+    /// `docs/internals/cow-calls.md`, "Pinned objects"):
+    ///
+    /// - a parameter written in place for the caller, handed to code not
+    ///   known here (which may keep it: a share there) with a write to it
+    ///   that may run after the call: pinned for the body;
+    /// - an argument a call writes in place while another argument of the
+    ///   call is the object or one holding it, or the argument is in a
+    ///   `static` and the call may read one: the path from its root pinned
+    ///   for the call, so what the callee keeps of the holder is a copy.
+    ///
+    /// A pin left set where an exit is not found costs copies, not values.
+    fn pins(&mut self, checker: &Checker, body: &HirBody, f: &Facts<'_>) {
+        if body.is_coro {
+            return;
+        }
+        let root_is = |path: HirId, p: LocalId| matches!(f.root_of(path).map(|r| &body.expr(r).kind), Some(HirKind::Local(x)) if *x == p);
+        let mut calls: Vec<(HirId, ArgUse)> = f.calls.iter().map(|(&c, &u)| (c, u)).collect();
+        calls.sort_by_key(|&(c, _)| f.order(c));
+        for &p in &body.params {
+            if !self.inout.contains(&p) || !cow_ty(checker, body.local(p).ty.as_ref()) {
+                continue;
+            }
+            let given: Vec<HirId> = calls
+                .iter()
+                .filter(|(c, u)| {
+                    let HirKind::Call { args, .. } = &body.expr(*c).kind else { return false };
+                    args.iter().enumerate().take(64).any(|(j, &a)| u.opaque & (1 << j) != 0 && matches!(body.expr(named_value(body, a)).kind, HirKind::Local(l) if l == p))
+                })
+                .map(|&(c, _)| c)
+                .collect();
+            if given.is_empty() {
+                continue;
+            }
+            // A `use (mut p)` closure or a `defer` that captures `p` may write
+            // it at any call or exit after.
+            let held = f.borrow_captures.iter().any(|&(_, l)| l == p)
+                || f.capture_lists.iter().any(|(&at, ls)| ls.contains(&p) && matches!(body.expr(at).kind, HirKind::Defer { .. }));
+            let written_after = |c: HirId| {
+                let loops = f.loops_around(c);
+                f.writes.iter().any(|w| root_is(w.path, p) && ((w.at != c && f.order(w.at) > f.order(c)) || loops.iter().any(|&lp| f.contains(lp, w.at))))
+            };
+            if held || given.iter().any(|&c| written_after(c)) {
+                self.pin_params.push(p);
+            }
+        }
+        for &(c, u) in &calls {
+            if u.written == 0 {
+                continue;
+            }
+            let HirKind::Call { args, .. } = &body.expr(c).kind else { continue };
+            for (j, &a) in args.iter().enumerate().take(64) {
+                let v = named_value(body, a);
+                if u.written & (1 << j) == 0 || !cow_ty(checker, body.expr(v).ty.as_ref()) {
+                    continue;
+                }
+                let Some(chain) = pin_chain(body, v) else { continue };
+                let reached = match &body.expr(chain[0]).kind {
+                    HirKind::Global { .. } => f.static_calls.contains(&c),
+                    _ => place_path(body, f, v).is_some_and(|(root, steps)| {
+                        args.iter().enumerate().any(|(k, &b)| {
+                            let w = named_value(body, b);
+                            k != j && may_hold_objects(body.expr(w).ty.as_ref()) && place_path(body, f, w).is_some_and(|(r, s)| r == root && prefix_of(&s, &steps))
+                        })
+                    }),
+                };
+                if reached {
+                    self.pin_paths.push((f.statement_of(c), chain));
+                }
+            }
+        }
     }
 
     /// E0151 (#2198): a view handed to a callee that keeps it (stores it,
@@ -2350,7 +2438,30 @@ impl Plan {
                 before.add(at, s);
             }
         }
+        // A call's pinned path, after the uniques that make it the objects
+        // the call writes: `let $pw = place; let $ps = pin($pw)` for each,
+        // root first, and the unpins after the statement, last first.
+        let mut after: Vec<((HirId, HirId), Vec<HirId>)> = Vec::new();
+        for (at, chain) in &self.pin_paths {
+            let span = span_of(out, at.1);
+            let mut unpins = Vec::new();
+            for &place in chain {
+                let read = dup(out, place);
+                let (word, stmt) = bind_temp(out, "$pw", read, span);
+                before.add(*at, stmt);
+                let read = out.push_new(HirKind::Local(word), out.local(word).ty.clone(), span);
+                let pin = pin_of(out, read, span);
+                let (saved, stmt) = bind_temp(out, "$ps", pin, span);
+                before.add(*at, stmt);
+                unpins.push(unpin_of(out, word, saved, span));
+            }
+            unpins.reverse();
+            after.push((*at, unpins));
+        }
         before.apply(out);
+        for ((block, at), unpins) in after {
+            insert_after(out, block, at, unpins);
+        }
         // Pattern-bound and captured locals: a share statement. A `let`
         // pattern binding more than one shares each after it (#2744).
         let mut let_pats: HashSet<HirId> = HashSet::new();
@@ -2434,7 +2545,72 @@ impl Plan {
                 x.kind = HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![shared] };
             }
         }
+        self.pin_body(out);
         moved
+    }
+
+    /// Pin [`Self::pin_params`] at the body's entry and unpin them before
+    /// each `return` of a plain value and at the end of the body. A body
+    /// with a `defer` (which runs after the `return`'s value) or a `return`
+    /// of anything else (a call, which may be a tail call) keeps the pin
+    /// there: the caller's later shares of the object copy it.
+    fn pin_body(&self, out: &mut HirBody) {
+        let Some(root) = out.root else { return };
+        if self.pin_params.is_empty() {
+            return;
+        }
+        let span = out.expr(root).span;
+        let mut pins = Vec::new();
+        let mut saved = Vec::new();
+        for &p in &self.pin_params {
+            let ty = out.local(p).ty.clone();
+            let word = out.push_new(HirKind::Local(p), ty, span);
+            let pin = pin_of(out, word, span);
+            let (flag, stmt) = bind_temp(out, "$pin", pin, span);
+            pins.push(stmt);
+            saved.push((p, flag));
+        }
+        let unpins = |out: &mut HirBody, at: Span| -> Vec<HirId> {
+            saved
+                .iter()
+                .map(|&(p, flag)| {
+                    let ty = out.local(p).ty.clone();
+                    let word = out.push_new(HirKind::Local(p), ty, at);
+                    unpin_local(out, word, flag, at)
+                })
+                .collect()
+        };
+        let has_defer = out.exprs.iter().any(|e| matches!(e.kind, HirKind::Defer { .. }));
+        if !has_defer {
+            let returns: Vec<HirId> = (0..out.exprs.len())
+                .map(|i| HirId(i as u32))
+                .filter(|&id| matches!(out.expr(id).kind, HirKind::Return(v) if v.is_none_or(|v| plain_value(out, v))))
+                .collect();
+            for r in returns {
+                let at = out.expr(r).span;
+                let stmts = unpins(out, at);
+                prepend(out, r, stmts);
+            }
+            // The end of the body: before a plain tail, or after the last
+            // statement when it can fall through.
+            if let HirKind::Block { stmts, tail } = &out.expr(root).kind {
+                let falls = match tail {
+                    Some(t) => plain_value(out, *t),
+                    None => stmts.last().is_none_or(|&l| !matches!(out.expr(l).kind, HirKind::Return(_) | HirKind::Break | HirKind::Continue)),
+                };
+                if falls {
+                    let stmts = unpins(out, span);
+                    if let HirKind::Block { stmts: list, .. } = &mut out.exprs[root.0 as usize].kind {
+                        list.extend(stmts);
+                    }
+                }
+            }
+        }
+        if let HirKind::Block { stmts, .. } = &mut out.exprs[root.0 as usize].kind {
+            stmts.splice(0..0, pins);
+        } else {
+            prepend(out, root, pins);
+        }
     }
 
     /// The statements that make the objects on `path` writable, top-down,
@@ -2541,6 +2717,49 @@ impl Plan {
     }
 }
 
+/// Whether the rewrite pins objects (#2842): on by default; `COIL_COW_PIN=0`
+/// leaves them out (to measure what the pins cost).
+fn pins_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| !matches!(std::env::var("COIL_COW_PIN").as_deref(), Ok("0" | "off")))
+}
+
+/// The places from the root of `v` down to `v` itself (a local's or a
+/// `static`'s fields and elements at pure indexes), root first: what a pin
+/// of `v`'s path pins. `None` for any other path.
+fn pin_chain(body: &HirBody, v: HirId) -> Option<Vec<HirId>> {
+    let mut chain = vec![v];
+    let mut at = v;
+    loop {
+        match &body.expr(at).kind {
+            HirKind::Field { base, .. } => at = *base,
+            HirKind::Index { base, index, kind: IndexKind::Array } if pure_index(body, *index) => at = *base,
+            HirKind::Local(_) | HirKind::Global { .. } => break,
+            _ => return None,
+        }
+        chain.push(at);
+    }
+    chain.reverse();
+    Some(chain)
+}
+
+/// Whether `v` reads nothing a call or a write could run in: locals,
+/// literals, fields, elements, operators and copy-on-write ops on them. An
+/// unpin may go before a `return` of it (a later share needs no pin: no
+/// write follows).
+fn plain_value(body: &HirBody, v: HirId) -> bool {
+    match &body.expr(v).kind {
+        HirKind::Lit(_) | HirKind::Local(_) | HirKind::Global { .. } => true,
+        HirKind::Field { base, .. } => plain_value(body, *base),
+        HirKind::Index { base, index, .. } => plain_value(body, *base) && plain_value(body, *index),
+        HirKind::Bin { lhs, rhs, .. } | HirKind::Logic { lhs, rhs, .. } => plain_value(body, *lhs) && plain_value(body, *rhs),
+        HirKind::Un { operand, .. } => plain_value(body, *operand),
+        HirKind::Cast { value } => plain_value(body, *value),
+        HirKind::Builtin { op: Builtin::Cow { .. }, args } => args.iter().all(|&a| plain_value(body, a)),
+        _ => false,
+    }
+}
+
 /// Whether `place` is a view's `mut` field: the object it borrows was made
 /// unique when the view was built, and nothing shares it while the view
 /// lives (E0149), so a write through it needs no copy check.
@@ -2580,6 +2799,42 @@ fn dup(out: &mut HirBody, id: HirId) -> HirId {
     let new = HirId(out.exprs.len() as u32);
     out.exprs.push(e);
     new
+}
+
+/// `let $tN = init` and the temp it binds, typed as `init`.
+fn bind_temp(out: &mut HirBody, prefix: &str, init: HirId, span: Span) -> (LocalId, HirId) {
+    let ty = out.expr(init).ty.clone();
+    let t = out.temp(prefix, ty);
+    (t, out.push_new(HirKind::Let { local: t, init: Some(init) }, Some(ty::unit()), span))
+}
+
+/// `pin(v)`: a `bool`, whether `v`'s object was pinned.
+fn pin_of(out: &mut HirBody, v: HirId, span: Span) -> HirId {
+    out.push_new(HirKind::Builtin { op: Builtin::CowPin, args: vec![v] }, Some(ty::boolean()), span)
+}
+
+/// `unpin(word, saved)` of the temps a pin bound.
+fn unpin_of(out: &mut HirBody, word: LocalId, saved: LocalId, span: Span) -> HirId {
+    let w = out.push_new(HirKind::Local(word), out.local(word).ty.clone(), span);
+    unpin_local(out, w, saved, span)
+}
+
+fn unpin_local(out: &mut HirBody, word: HirId, saved: LocalId, span: Span) -> HirId {
+    let s = out.push_new(HirKind::Local(saved), Some(ty::boolean()), span);
+    out.push_new(HirKind::Builtin { op: Builtin::CowUnpin, args: vec![word, s] }, Some(ty::unit()), span)
+}
+
+/// Run `stmts` after statement `at` of `block`; nothing where `at` is the
+/// block's tail, no statement of it, or leaves it (a stale pin is safe).
+fn insert_after(out: &mut HirBody, block: HirId, at: HirId, stmts: Vec<HirId>) {
+    if block == at || matches!(out.expr(at).kind, HirKind::Return(_) | HirKind::Break | HirKind::Continue) {
+        return;
+    }
+    if let HirKind::Block { stmts: list, .. } = &mut out.exprs[block.0 as usize].kind
+        && let Some(i) = list.iter().position(|&s| s == at)
+    {
+        list.splice(i + 1..i + 1, stmts);
+    }
 }
 
 fn share_local(out: &mut HirBody, l: LocalId, span: Span) -> HirId {

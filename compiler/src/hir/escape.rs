@@ -469,7 +469,7 @@ impl<'c, 'a> Escape<'c, 'a> {
                 }
             }
             HirKind::Builtin { op, args } => match op {
-                Builtin::Retype | Builtin::Relayout | Builtin::Stringify { .. } | Builtin::Cow { .. } | Builtin::Print | Builtin::Panic | Builtin::TypeOf => {}
+                Builtin::Retype | Builtin::Relayout | Builtin::Stringify { .. } | Builtin::Cow { .. } | Builtin::CowPin | Builtin::CowUnpin | Builtin::Print | Builtin::Panic | Builtin::TypeOf => {}
                 _ => {
                     for a in args {
                         let s = self.src(*a);

@@ -464,7 +464,7 @@ pub fn clobbers(body: &HirBody, stack: &HashMap<u32, usize>, id: HirId) -> bool 
         ) || matches!(
             // Boxing ops of compiler-made bodies store into no frame slot.
             &e.kind,
-            HirKind::Builtin { op, .. } if !matches!(op, Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. })
+            HirKind::Builtin { op, .. } if !matches!(op, Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::Cow { .. } | Builtin::CowPin | Builtin::CowUnpin)
         );
     });
     found

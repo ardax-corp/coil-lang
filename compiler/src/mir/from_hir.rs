@@ -1496,7 +1496,7 @@ fn opaque_moves_only(hir: &HirBody, cx: &dyn LowerCx, sites: &Sites) -> Result<(
             // A copy-on-write op on a type parameter's word passes it
             // through ([`FromHir::value`]): only a per-type clone knows
             // whether the word is an object (#2161).
-            HirKind::Builtin { op: Builtin::Cow { .. }, .. } => false,
+            HirKind::Builtin { op: Builtin::Cow { .. } | Builtin::CowPin | Builtin::CowUnpin, .. } => false,
             HirKind::Builtin { args, .. } => args.iter().any(var),
             // A `yield` hands the word as it is to the resumer, which reads
             // it in the ground type's word (#2673).
@@ -3783,6 +3783,36 @@ impl Lower<'_> {
                 let out = self.at_expr(id, |l| l.b.ins_cow(v, *unique).map_err(mir))?;
                 Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![out]).map_err(mir)?))
             }
+            // Copy-on-write pin (#2842): whether the operand's object was
+            // pinned, and pin it. A word that is no object (a scalar clone of
+            // a type parameter, a two-word value) has no pin: `false`. A
+            // shared generic body pins a type parameter's word where its
+            // `kinds` word says it is an object, as it shares one.
+            HirKind::Builtin { op: Builtin::CowPin, args } if let [inner] = args.as_slice() => {
+                let v = match self.value(*inner)? {
+                    Val::V(v) => v,
+                    Val::Never => return Ok(Val::Never),
+                    _ => return Ok(Val::V(self.b.ins_const(MirConst::Bool(false)).map_err(mir)?)),
+                };
+                match self.pin_word(*inner, v)? {
+                    Some((obj, guard)) => Ok(Val::V(self.guarded_pin(obj, guard)?)),
+                    None => Ok(Val::V(self.b.ins_const(MirConst::Bool(false)).map_err(mir)?)),
+                }
+            }
+            HirKind::Builtin { op: Builtin::CowUnpin, args } if let [inner, saved] = args.as_slice() => {
+                let v = match self.value(*inner)? {
+                    Val::V(v) => v,
+                    Val::Never => return Ok(Val::Never),
+                    _ => return Ok(Val::Unit),
+                };
+                let Some(saved) = self.word(*saved)? else {
+                    return Ok(Val::Never);
+                };
+                if let Some((obj, guard)) = self.pin_word(*inner, v)? {
+                    self.guarded_unpin(obj, saved, guard)?;
+                }
+                Ok(Val::Unit)
+            }
             // A primitive's text (compiler-made bodies).
             HirKind::Builtin { op: Builtin::Stringify { tag }, args } if let [inner] = args.as_slice() => {
                 let Some(v) = self.word(*inner)? else {
@@ -5685,6 +5715,82 @@ impl Lower<'_> {
         self.jump(join)?;
         self.switch(join);
         self.b.ins_stack_phi(vec![(op_from, out), (skip, v)]).map_err(mir)
+    }
+
+    /// The object word a pin op of `inner`'s value `v` acts on, and the
+    /// `kinds` bit it runs under in a shared generic body: `None` where the
+    /// value cannot be an object (a scalar, a clone at a scalar type, a type
+    /// parameter's word in a body with no bit for it).
+    fn pin_word(&mut self, inner: HirId, v: ValueId) -> Result<Option<(ValueId, Option<(ValueId, u32)>)>, Refusal> {
+        let open = self.expr_ty(inner).is_some_and(|t| is_var(t) || is_var_app(t));
+        if open {
+            if !matches!(self.b.value_ty(v), MirTy::I64 | MirTy::HeapRef) {
+                return Ok(None);
+            }
+            let Some(bit) = self.expr_ty(inner).cloned().and_then(|t| self.kinds_bit(&t)) else {
+                return Ok(None);
+            };
+            return Ok(Some((v, Some(bit))));
+        }
+        if self.b.value_ty(v) != MirTy::HeapRef {
+            return Ok(None);
+        }
+        // An existential's pack is no instance, and the value in it may be
+        // a scalar: it is not pinned (its share copies only by its own
+        // `kinds` bit, [`Self::existential_cow`]).
+        if matches!(self.expr_ty(inner).map(strip_readonly), Some(Ty::Existential { .. })) {
+            return Ok(None);
+        }
+        Ok(Some((v, None)))
+    }
+
+    /// `CowPin` of `obj`, under the `kinds` test `guard` (`false` where it
+    /// fails).
+    fn guarded_pin(&mut self, obj: ValueId, guard: Option<(ValueId, u32)>) -> Result<ValueId, Refusal> {
+        let Some((kinds, bit)) = guard else {
+            return self.b.ins_cow_pin(obj).map_err(mir);
+        };
+        let object = self.kinds_test(kinds, bit)?;
+        let (op, skip, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.branch(object, op, skip).map_err(mir)?;
+        self.switch(op);
+        let w = self.b.ins_word_as(obj, MirTy::HeapRef).map_err(mir)?;
+        let was = self.b.ins_cow_pin(w).map_err(mir)?;
+        let op_from = self.cur;
+        self.jump(join)?;
+        self.switch(skip);
+        let no = self.b.ins_const(MirConst::Bool(false)).map_err(mir)?;
+        self.jump(join)?;
+        self.switch(join);
+        self.b.ins_stack_phi(vec![(op_from, was), (skip, no)]).map_err(mir)
+    }
+
+    /// `CowUnpin` of `obj` with its pin's `saved`, under the `kinds` test
+    /// `guard`.
+    fn guarded_unpin(&mut self, obj: ValueId, saved: ValueId, guard: Option<(ValueId, u32)>) -> Result<(), Refusal> {
+        let saved = if self.b.value_ty(saved) == MirTy::Bool { saved } else { self.fit(saved, MirTy::Bool)? };
+        let Some((kinds, bit)) = guard else {
+            self.b.ins_cow_unpin(obj, saved).map_err(mir)?;
+            return Ok(());
+        };
+        let object = self.kinds_test(kinds, bit)?;
+        let (op, join) = (self.b.create_block(), self.b.create_block());
+        self.b.branch(object, op, join).map_err(mir)?;
+        self.switch(op);
+        let w = self.b.ins_word_as(obj, MirTy::HeapRef).map_err(mir)?;
+        self.b.ins_cow_unpin(w, saved).map_err(mir)?;
+        self.jump(join)?;
+        self.switch(join);
+        Ok(())
+    }
+
+    /// Whether `kinds`' bit `bit` is set: the type parameter is a
+    /// copy-on-write object at this call ([`Self::guarded_cow`]).
+    fn kinds_test(&mut self, kinds: ValueId, bit: u32) -> Result<ValueId, Refusal> {
+        let m = self.b.ins_const(MirConst::I64((1u64 << bit) as i64)).map_err(mir)?;
+        let set = self.b.ins_binop(MirBinOp::BitAnd, kinds, m).map_err(mir)?;
+        let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
+        self.b.ins_cmp(MirCmpOp::Ne, set, zero).map_err(mir)
     }
 
     /// Ground dictionary `ops` held in static `slot`: built and stored on

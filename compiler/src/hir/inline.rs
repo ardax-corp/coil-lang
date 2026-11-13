@@ -131,7 +131,7 @@ pub fn inlinable(callee: &HirBody, budget: usize) -> Result<Shape, &'static str>
             }
             // Copy-on-write ops splice with the body: they act on the
             // places they name, which the splice keeps (see `cow`).
-            HirKind::Builtin { op: Builtin::Cow { .. }, .. } => 1,
+            HirKind::Builtin { op: Builtin::Cow { .. } | Builtin::CowPin | Builtin::CowUnpin, .. } => 1,
             HirKind::Builtin { .. } => return Err("construct"),
             HirKind::Call { .. } => CALL_COST,
             // A loop's body splices whole (its `break` / `continue` still
