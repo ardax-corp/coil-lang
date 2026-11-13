@@ -27,7 +27,7 @@ fn uniques_in_loops(src: &str) -> Vec<usize> {
     let summaries = ModuleEffects::solve(&module, &checker, "", &program).summaries;
     program.record(&module, &checker, "", &summaries);
     let i = module.bodies.iter().position(|b| b.name == "f").expect("body `f`");
-    let (out, notes) = program.cow_rewrite(&checker, "", &module, &module.bodies[i], summaries[i].mutates);
+    let (out, notes, _) = program.cow_rewrite(&checker, "", &module, &module.bodies[i], summaries[i].mutates);
     assert!(notes.is_empty(), "{notes:?}");
     let body = out.unwrap_or_else(|| module.bodies[i].clone());
     let mut loops = Vec::new();

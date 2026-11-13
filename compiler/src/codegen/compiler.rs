@@ -7313,6 +7313,7 @@ impl Compiler {
             && let Some(mut hir) = self.hir_module.take()
         {
             let mut notes = Vec::new();
+            let mut moved = Vec::new();
             let rewritten: Vec<(usize, crate::hir::HirBody)> = hir
                 .bodies
                 .iter()
@@ -7322,8 +7323,9 @@ impl Compiler {
                     if std::env::var("COIL_COW_TRACE").is_ok() {
                         eprintln!("cow: {}", b.name);
                     }
-                    let (body, n) = self.program_effects.cow_rewrite(&self.checker, module, &hir, b, m);
+                    let (body, n, c) = self.program_effects.cow_rewrite(&self.checker, module, &hir, b, m);
                     notes.extend(n);
+                    moved.extend(c);
                     body.map(|n| (i, n))
                 })
                 .collect();
@@ -7332,6 +7334,15 @@ impl Compiler {
                 hir.bodies[i] = body;
                 if std::env::var("COIL_COW_DUMP").is_ok_and(|n| hir.bodies[i].name.contains(n.as_str())) {
                     eprintln!("{}", crate::hir::print::body_to_string(&hir, &hir.bodies[i]));
+                }
+            }
+            // A copy capture the rewrite bound to a copy before its lambda
+            // (#2843): the lambda, rewritten or not, captures the copy.
+            for c in moved {
+                for cap in &mut hir.bodies[c.lambda].captures {
+                    if cap.0 == c.from {
+                        cap.0 = c.to;
+                    }
                 }
             }
             self.hir_module = Some(hir);

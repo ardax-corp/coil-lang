@@ -167,11 +167,26 @@ struct Facts<'b> {
 /// What a call in a body may do: [`CallLookup`] for the body given.
 pub(super) type BodyLookup<'c> = dyn Fn(&HirBody, &Callee, &[HirId]) -> Option<Summary> + 'c;
 
+/// A lambda's copy capture moved to a local of the body that makes it
+/// (#2843): the lambda `lambda` (a module body index) captures `to`, bound
+/// to a copy of `from` just before it, in place of `from`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureCopy {
+    pub lambda: usize,
+    pub from: LocalId,
+    pub to: LocalId,
+}
+
+/// What [`rewrite`] makes of a body: the body with its copy-on-write ops,
+/// when it needs any; warnings for writes that copy or are dropped; and the
+/// lambdas whose captures it moved, which the caller applies to the module.
+pub type Rewrite = (Option<HirBody>, Vec<Message>, Vec<CaptureCopy>);
+
 /// The body with its copy-on-write ops, when it needs any, and warnings
 /// for writes that copy or are dropped.
-pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &BodyLookup<'_>, mutates: u64) -> (Option<HirBody>, Vec<Message>) {
+pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, lookup: &BodyLookup<'_>, mutates: u64) -> Rewrite {
     if body.root.is_none() {
-        return (None, Vec::new());
+        return (None, Vec::new(), Vec::new());
     }
     let analyse = |b: &HirBody| {
         let bodies = lookup;
@@ -196,11 +211,11 @@ pub(super) fn rewrite(checker: &Checker, module: &HirModule, body: &HirBody, loo
     }
     let notes = std::mem::take(&mut plan.notes);
     if plan.is_empty() {
-        return (viewed, notes);
+        return (viewed, notes, Vec::new());
     }
     let mut out = viewed.unwrap_or_else(|| body.clone());
-    plan.apply(&mut out, checker);
-    (Some(out), notes)
+    let moved = plan.apply(&mut out, checker);
+    (Some(out), notes, moved)
 }
 
 #[path = "cow_view.rs"]
@@ -885,6 +900,11 @@ struct Plan {
     /// them (pattern bindings) or before a node (captures).
     share_after: Vec<(HirId, LocalId)>,
     share_before: Vec<((HirId, HirId), LocalId)>,
+    /// Copy captures of a parameter written in place for the caller, by
+    /// the statement holding the lambda and the lambda's body (#2843): it
+    /// captures an eager copy bound before it, since the parameter's later
+    /// writes are never tested and would show in a shared object.
+    copy_before: Vec<((HirId, HirId), usize, LocalId)>,
     /// Locals to make unique as a statement before a node (borrowed
     /// captures).
     unique_before: Vec<((HirId, HirId), LocalId)>,
@@ -909,7 +929,12 @@ struct Plan {
 
 impl Plan {
     fn is_empty(&self) -> bool {
-        self.share.is_empty() && self.share_after.is_empty() && self.share_before.is_empty() && self.unique.is_empty() && self.unique_before.is_empty()
+        self.share.is_empty()
+            && self.share_after.is_empty()
+            && self.share_before.is_empty()
+            && self.copy_before.is_empty()
+            && self.unique.is_empty()
+            && self.unique_before.is_empty()
     }
 
     fn new(checker: &Checker, body: &HirBody, f: &Facts<'_>, mutates: u64) -> Self {
@@ -921,11 +946,14 @@ impl Plan {
         // A coroutine's frame outlives the call that starts it (#2662): its
         // writes run on `resume`, after the caller has its value back, so
         // a parameter is its own value, made unique where it is written.
+        // A parameter a closure or `defer` captures stays the caller's place
+        // (#2843): a copy capture takes an eager copy (`copy_before`), and a
+        // `use (mut p)` closure writes the caller's object in place.
         let inout: HashSet<LocalId> = body
             .params
             .iter()
             .enumerate()
-            .filter(|(i, l)| !body.is_coro && *i < 64 && mutates & (1 << i) != 0 && !f.reassigned.contains(l) && !f.captured.contains(l))
+            .filter(|(i, l)| !body.is_coro && *i < 64 && mutates & (1 << i) != 0 && !f.reassigned.contains(l))
             .map(|(_, l)| *l)
             .chain(body.locals.iter().enumerate().filter(|(_, x)| x.borrow).map(|(i, _)| LocalId(i as u32)))
             .collect();
@@ -1116,6 +1144,10 @@ impl Plan {
                             if !inout.contains(&l) {
                                 plan.unique_before.push((f.statement_of(id), l));
                             }
+                        } else if inout.contains(&l)
+                            && let HirKind::Lambda { body: inner } = body.expr(id).kind
+                        {
+                            plan.copy_before.push((f.statement_of(id), inner, l));
                         } else {
                             plan.share_before.push((f.statement_of(id), l));
                         }
@@ -1575,7 +1607,8 @@ impl Plan {
                     self.notes.push(m);
                 }
             }
-            for &(capture_at, l) in &self.share_before {
+            let captured = self.share_before.iter().copied().chain(self.copy_before.iter().map(|&(at, _, l)| (at, l)));
+            for (capture_at, l) in captured {
                 let at = capture_at.1;
                 if l == b.root && b.path.iter().all(Option::is_some) && live(at) && seen.insert((at, stext.clone())) {
                     let span = body.expr(at).span;
@@ -2301,7 +2334,8 @@ fn fresh_ctor(body: &HirBody, v: HirId) -> bool {
 }
 
 impl Plan {
-    fn apply(&self, out: &mut HirBody, checker: &Checker) {
+    /// Put the ops in `out`; the captures it moved to a copy.
+    fn apply(&self, out: &mut HirBody, checker: &Checker) -> Vec<CaptureCopy> {
         let span_of = |b: &HirBody, id: HirId| b.expr(id).span;
         // Write paths first, on the nodes as built: shares below wrap
         // nodes in place, which a path must not look through.
@@ -2365,6 +2399,24 @@ impl Plan {
             let stmt = unique_stmt(out, read, span);
             before.add(at, stmt);
         }
+        // `let $cap = share(unique(share(p)))` before the lambda, which
+        // captures `$cap` in place of `p`: every new name is the result of a
+        // share. The copy is shared in turn, as any capture is: a write in
+        // the closure's body copies it, so the closure's own value never
+        // changes between calls.
+        let mut moved = Vec::new();
+        for &(at, inner, l) in &self.copy_before {
+            let span = span_of(out, at.1);
+            let ty = out.local(l).ty.clone();
+            let shared = share_local(out, l, span);
+            let copy = out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![shared] }, ty.clone(), span);
+            let copy = out.push_new(HirKind::Builtin { op: Builtin::Cow { unique: false }, args: vec![copy] }, ty.clone(), span);
+            let name = format!("$cap{}", out.locals.len());
+            let t = out.temp_named(name, ty);
+            out.locals[t.0 as usize].captured = true;
+            before.add(at, out.push_new(HirKind::Let { local: t, init: Some(copy) }, Some(ty::unit()), span));
+            moved.push(CaptureCopy { lambda: inner, from: l, to: t });
+        }
         before.apply(out);
         for &(v, eager) in &self.share {
             // Code emission finds an existential pack by the value's node
@@ -2382,6 +2434,7 @@ impl Plan {
                 x.kind = HirKind::Builtin { op: Builtin::Cow { unique: true }, args: vec![shared] };
             }
         }
+        moved
     }
 
     /// The statements that make the objects on `path` writable, top-down,
