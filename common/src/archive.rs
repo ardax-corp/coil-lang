@@ -16,7 +16,7 @@ use crate::debug::{DebugLine, ProgramDebug, SpanLoc};
 pub const ARCHIVE_MAJOR: u16 = 8;
 
 /// Archive minor. Bump on an additive change to the format.
-pub const ARCHIVE_MINOR: u16 = 1;
+pub const ARCHIVE_MINOR: u16 = 2;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
