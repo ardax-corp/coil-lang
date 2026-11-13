@@ -940,6 +940,15 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 }
                 set_word(f, regs, *dest, w);
             }
+            MirInst::CowPin { dest, src } => {
+                let s = get!(*src);
+                set!(*dest, rt::cow_pin(ctx, s));
+            }
+            MirInst::CowUnpin { dest, src, saved } => {
+                let (s, saved) = (get!(*src), get!(*saved));
+                rt::cow_unpin(ctx, s, saved);
+                set!(*dest, 0);
+            }
         }
         Flow::Next
     }
