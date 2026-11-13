@@ -1047,7 +1047,9 @@ impl Plan {
                             // borrow, an inout parameter) is never tested
                             // before a write, so a result that may be it is
                             // a copy, as `let r = w` copies it (#2818).
-                            let in_place = matches!(body.expr(v).kind, HirKind::Local(l) if inout.contains(&l));
+                            // Only where the local is written after the call.
+                            let in_place = !read_only_result(f, body, id)
+                                && matches!(body.expr(v).kind, HirKind::Local(l) if inout.contains(&l) && written_after(f, body, l, id));
                             if u.opaque & bit != 0 && !in_place {
                                 share_result = true;
                             } else if u.written & bit != 0 || u.opaque & bit != 0 {
@@ -1725,6 +1727,18 @@ fn read_only_result(f: &Facts<'_>, body: &HirBody, call: HirId) -> bool {
         HirKind::Bin { .. } | HirKind::Un { .. } => true,
         _ => false,
     }
+}
+
+/// Whether a write through local `l` other than `call`'s own may run after
+/// `call`: later in the body, or anywhere in a loop around it.
+fn written_after(f: &Facts<'_>, body: &HirBody, l: LocalId, call: HirId) -> bool {
+    let loops = f.loops_around(call);
+    f.writes.iter().any(|w| {
+        w.at != call
+            && f.order(w.at) != u32::MAX
+            && f.root_of(w.path).is_some_and(|r| matches!(body.expr(r).kind, HirKind::Local(x) if x == l))
+            && (f.order(w.at) > f.order(call) || loops.iter().any(|&lp| f.contains(lp, w.at)))
+    })
 }
 
 /// Where a call's result is given a name (#2818): the node that is bound,

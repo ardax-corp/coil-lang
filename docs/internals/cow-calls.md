@@ -178,9 +178,10 @@ a fresh result (the summary's `shared_ret` clear), a result only read
 (dropped, an operand, a receiver a call only reads), an object inside the
 borrowed one (the borrow makes it unique before writing it), and the eager
 copy of the borrowed object itself. Code not known here given the borrow
-local itself (`g(w)`), or an `inout` parameter, hands back a copy (an eager
+local itself (`g(w)`), or an `inout` parameter, that is written after the
+call (later in the body, or in a loop around it) hands back a copy (an eager
 copy of the result, as `let r = w` copies), since a write through either is
-never tested. Tests: `tests/memory/borrow_call_results.coil`,
+never tested; a result only read is not copied. Tests: `tests/memory/borrow_call_results.coil`,
 `tests/memory/compile_fail/borrow_{opaque_result,inner_result,inner_result_stored,holder_returned_written}.coil`.
 
 ## Writes through a borrowed source
