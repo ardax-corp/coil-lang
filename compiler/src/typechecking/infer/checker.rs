@@ -6425,6 +6425,27 @@ impl Checker {
             .fold(0, |acc, (_, mask)| acc | mask)
     }
 
+    /// `fun_ty`, an instance of trait method `class::method`'s scheme,
+    /// with each parameter the trait declares `readonly` read as
+    /// `readonly`, for a call through the trait: a `readonly` argument fits
+    /// there, and a plain one fills the inner type (#2845). The scheme
+    /// itself keeps the plain types (#1558).
+    fn trait_readonly_view(&self, class: &str, method: &str, fun_ty: &Ty) -> Ty {
+        fn view(ty: &Ty, mask: u64) -> Ty {
+            match ty {
+                Ty::Fun(param, ret) if mask != 0 => {
+                    let param = match param.as_ref() {
+                        p if mask & 1 == 0 || matches!(p, Ty::Readonly(_)) => p.clone(),
+                        p => readonly_ty(p.clone()),
+                    };
+                    Ty::Fun(Box::new(param), Box::new(view(ret, mask >> 1)))
+                }
+                _ => ty.clone(),
+            }
+        }
+        view(fun_ty, self.trait_readonly_params(class, method))
+    }
+
     pub fn typeclass_method_scheme(&self, class: &str, method: &str) -> Option<&Scheme> {
         self.typeclass_method_schemes
             .get(&(class.to_string(), method.to_string()))
@@ -9597,6 +9618,7 @@ impl Checker {
     ) -> Ty {
         let (call_id, range) = at;
         let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(scheme);
+        let fun_ty = self.trait_readonly_view(class, method, &fun_ty);
         let result = self.apply_function(
             Some(&format!("{}::{}", class, method)),
             &fun_ty,
@@ -22113,6 +22135,7 @@ impl Checker {
             ));
         }
         let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
+        let fun_ty = self.trait_readonly_view(&class, method, &fun_ty);
         // The scheme's class parameter appears only in the result (or not at
         // all): pin it to the owner so the constraint discharges against the
         // owner's instance (or the active bound) instead of the first
@@ -22188,6 +22211,7 @@ impl Checker {
         let (dict_index, dict_class, class, method_slot, scheme) = candidate;
         self.bind_matching_abstract_constraints(receiver_var, &dict_class);
         let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
+        let fun_ty = self.trait_readonly_view(&class, method, &fun_ty);
         let hint = BoundMethodCall {
             dict_index,
             method_slot,
@@ -22223,6 +22247,7 @@ impl Checker {
         range: &Range<usize>,
     ) -> Ty {
         let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(scheme);
+        let fun_ty = self.trait_readonly_view(class, method, &fun_ty);
         let result = self.apply_function(
             Some(&format!("{}::{}", class, method)),
             &fun_ty,
