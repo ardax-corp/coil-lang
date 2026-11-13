@@ -366,6 +366,34 @@ task that panics mid-walk with a `defer`). Benches:
 `examples/perf/cow_walk_grow_map.coil`, `cow_walk_grow_vec.coil` (the
 control: a read-only `Vec` walk is an index loop and shares nothing).
 
+## Pinned objects
+
+The runtime has a second header bit beside the shared flag, the pin
+(`GcHeader::pinned`, archive 8.2). A pinned object is one some name writes
+in place without a test while the pin lasts (an `inout` parameter, a
+borrow), so it must never be shared: `Heap::cow_share` gives a pinned
+object's share a copy instead of setting its flag (native code's inline
+share tests the pin and calls the helper for it), and `Heap::cow_unique`'s
+loop over a copy's children copies a pinned child for the copy instead of
+flagging it. The copy is deep through pinned objects and shallow below the
+first unpinned one, which is flagged as before. So pinned implies not
+shared, and every new name of a pinned object is a copy made where the name
+was made: the shared flag's rule with the copy moved to the share.
+
+Two MIR ops set and clear it: `CowPin { dest, src }` gives whether the
+object was pinned and pins it; `CowUnpin { dest, src, saved }` clears it
+when `saved`, the `CowPin`'s result, is `false`, so pins nest. Both are
+header bytes and allocate nothing; for a word that is no class instance or
+array (null, another kind) `CowPin` gives `false` and `CowUnpin` does
+nothing. A pin left set is never wrong: it costs a copy at each later
+share. Nothing emits them yet (#2842 step 1). `Gc::recycle` clears the bit;
+an evacuation copies it with the slot.
+
+The pair has the shape #2821's run-time half needs for the shared flag (a
+save that reads the bit, a restore that clears it when the save read
+`false`); that save only reads, so #2821 would add its own op or a mode on
+these rather than reuse `CowPin` as it is.
+
 ## Casts
 
 A cast between byte arrays (`v as Vec<byte>`, `v as [byte; N]`, `a as
