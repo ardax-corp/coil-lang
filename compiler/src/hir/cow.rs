@@ -1169,9 +1169,23 @@ impl Plan {
                 _ => None,
             })
             .collect();
+        // A borrow handed to a call that keeps it, hands it back or hands it
+        // to code not known here names its source's object there too.
+        let escaped_sources: HashSet<LocalId> = kept_locals
+            .iter()
+            .chain(&shared_locals)
+            .filter(|&&b| body.local(b).borrow)
+            .flat_map(|b| f.inits.get(b).into_iter().flatten().chain(f.bound.get(b).map(|(s, _)| s)))
+            .filter_map(|&v| f.root_of(v))
+            .filter_map(|r| match body.expr(r).kind {
+                HirKind::Local(l) => Some(l),
+                _ => None,
+            })
+            .collect();
         for (&l, inits) in &f.inits {
             let local = body.local(l);
             if matches!(local.kind, LocalKind::Param | LocalKind::Capture)
+                || escaped_sources.contains(&l)
                 || f.bound.contains_key(&l)
                 || f.captured.contains(&l)
                 || shared_locals.contains(&l)
