@@ -1379,9 +1379,9 @@ impl Walk<'_> {
                     let Some(local) = cap else {
                         return Err("defer-capture");
                     };
-                    // A lambda's own capture is a frame slot too (#1137).
+                    // A lambda's own capture is a frame slot too (#1137). A
+                    // `()` local has no slot: the body reads `()` (#2809).
                     if !matches!(body.local(*local).kind, LocalKind::Let | LocalKind::Param | LocalKind::Capture)
-                        || is_unit_local(body, self.checker, *local)
                         || self.stack.contains_key(&local.0)
                     {
                         return Err("defer-capture");
