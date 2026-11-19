@@ -806,6 +806,23 @@ mod tests {
         assert_eq!(copy[0].generation() & GEN_YOUNG, 0);
     }
 
+    /// The copy-on-write pin is header state: a minor copies it with the
+    /// slot, as it does the shared flag.
+    #[test]
+    fn a_minor_carries_the_cow_pin_and_flag() {
+        let mut heap = nursery_heap();
+        let (a, _) = heap.alloc(crate::memory::ObjInstance::with_slots(5, vec![Value::from(1i64)]), Object::Instance);
+        let (b, _) = heap.alloc(crate::memory::ObjInstance::with_slots(5, vec![Value::from(2i64)]), Object::Instance);
+        a.set_pinned(true);
+        assert_eq!(heap.cow_share(Value::from(b.addr())), crate::memory::CowShare::Marked);
+        let mut roots = [a.addr(), b.addr()];
+        assert_eq!(minor(&mut heap, &[], &mut roots), 2);
+        assert_ne!(roots[0], a.addr(), "moved");
+        let (a2, b2) = (heap.find_object_by_addr(roots[0]).expect("a"), heap.find_object_by_addr(roots[1]).expect("b"));
+        assert!(a2.is_pinned() && !a2.is_shared());
+        assert!(b2.is_shared() && !b2.is_pinned());
+    }
+
     #[test]
     fn young_objects_are_allocated_in_the_nursery() {
         let mut heap = nursery_heap();

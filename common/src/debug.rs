@@ -257,6 +257,11 @@ pub const MIR_SECTION_MAGIC: &[u8; 5] = b"CNMIR";
 /// after the format byte (#2578).
 pub const MIR_SECTION_SCOPES_FORMAT: u8 = 17;
 
+/// The first MIR section format that may hold the copy-on-write pin ops,
+/// `CowPin` / `CowUnpin` (archive 8.2). Its layout is format 17's
+/// otherwise, so a reader takes 16, 17 and this one.
+pub const MIR_SECTION_COW_PIN_FORMAT: u8 = 18;
+
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and
 /// scope and an `at_call` byte; little-endian `u32`s.
