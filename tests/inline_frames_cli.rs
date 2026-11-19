@@ -118,7 +118,7 @@ fn an_inlined_callee_has_its_frame() {
     for opt in ["0", "1", "2", "3"] {
         for mir in [false, true] {
             let got = run_source(&file, opt, mir);
-            assert_eq!(got.replace(&format!("{}/", dir.display()), ""), want, "-O{opt} mir={mir}");
+            assert_eq!(got.replace(&format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR), ""), want, "-O{opt} mir={mir}");
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -397,7 +397,7 @@ fn main() {{
             cmd.arg("--mir");
         }
         let out = with_roots(&mut cmd).arg(file).output().expect("spawn coil");
-        report(&out.stderr).replace(&format!("{}/", dir.display()), "")
+        report(&out.stderr).replace(&format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR), "")
     };
     for (name, body, callee) in [
         ("function", "boom(i)", "in helper::boom at helper.coil:2:11"),
