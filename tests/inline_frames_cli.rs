@@ -105,6 +105,12 @@ fn main() {
 }
 ";
 
+/// Drops the scratch directory from the paths in a report, with the separator
+/// the platform prints after it (`\\` on Windows).
+fn strip_dir(report: &str, dir: &std::path::Path) -> String {
+    report.replace(&format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR), "")
+}
+
 /// The issue's program: `boom` is inlined into `run`'s loop from `-O1` on.
 #[test]
 fn an_inlined_callee_has_its_frame() {
@@ -118,7 +124,7 @@ fn an_inlined_callee_has_its_frame() {
     for opt in ["0", "1", "2", "3"] {
         for mir in [false, true] {
             let got = run_source(&file, opt, mir);
-            assert_eq!(got.replace(&format!("{}/", dir.display()), ""), want, "-O{opt} mir={mir}");
+            assert_eq!(strip_dir(&got, &dir), want, "-O{opt} mir={mir}");
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -397,7 +403,7 @@ fn main() {{
             cmd.arg("--mir");
         }
         let out = with_roots(&mut cmd).arg(file).output().expect("spawn coil");
-        report(&out.stderr).replace(&format!("{}/", dir.display()), "")
+        strip_dir(&report(&out.stderr), &dir)
     };
     for (name, body, callee) in [
         ("function", "boom(i)", "in helper::boom at helper.coil:2:11"),
