@@ -37,6 +37,16 @@ reason a coroutine's parameter is never the caller's place (#2662): its
 writes run on `resume`, after the caller has its value back, so the body
 makes the parameter unique where it writes it, as a local.
 
+A parameter written in place for the caller (an `inout`: `mutates`, not
+reassigned, not a coroutine's) is copied eagerly wherever the body stores
+it, so storing the parameter itself does not keep the caller's object:
+`cow::keeps` leaves its `keeps` bit clear for such a store
+(`copied_params`). The caller then passes its place and the callee's
+writes reach it (#2850; before, the caller treated the argument as a store
+and an `inout` argument was an eager copy, so a callee that kept and wrote
+it wrote the copy). A store through an alias (`let q = p`) or of a value a
+call hands back still counts as a keep.
+
 ### Shared generic bodies: the `kinds` word
 
 A shared generic body holds a value of a type parameter `T` (or `F<A>` over

@@ -1915,7 +1915,7 @@ impl Cx<'_> {
                 Callee::Value(f) => self.fn_value(&w, *f),
                 Callee::Resolved(_) => None,
             };
-            let k = cow::keeps(self.module, body, &lookup);
+            let k = cow::keeps(self.module, body, &lookup, w.out.mutates);
             if std::env::var("COIL_COW_TRACE").is_ok() {
                 eprintln!("keeps {} = {:b} returns {:b} opaque {:b}", body.name, k.0, k.1, k.2);
             }
