@@ -476,6 +476,10 @@ stays no GC edge and allocates nothing as far as the body's `OpProps` go: a copy
 it makes is counted, and the next safepoint collects. `CowPin` and `CowUnpin`
 are inline byte operations on the same header byte, for a class instance or an
 array only (null and other kinds: `CowPin` gives `0`, `CowUnpin` does nothing).
+The pin test and its cold call are emitted only when some body of the program
+has a `CowPin` (`Plan::pins`): with none, no object is ever pinned, and the share
+is the one above. The call alone made each body with a share a non-leaf (a
+stand-in `bbox` +14.5%, `bint` at `--clone-budget 0` +2.2%).
 
 In-place stores are compiled only into release builds without `gc-stress`
 (`ProductSlots::inline_stores`): debug and `gc-stress` builds check epoch writes in
