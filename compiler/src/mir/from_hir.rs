@@ -7853,6 +7853,12 @@ impl Lower<'_> {
             // A two-word value (`Option<int>`, a pair tuple) goes boxed, as
             // to a plain call's boxed parameter (#1414).
             match self.value(arg)? {
+                // A generic word edge (`thread::send`'s value) takes every
+                // argument as its Value word: a `float` goes as its bits,
+                // as to a shared generic body (#2851).
+                Val::V(v) if self.b.value_ty(v) == MirTy::F64 && super::host_allow::host_spec(native).is_none() => {
+                    words.push(self.b.ins_word(v).map_err(mir)?);
+                }
                 Val::V(v) => words.push(v),
                 Val::Never => return Ok(Val::Never),
                 // `weak(())`: the empty tuple object.
