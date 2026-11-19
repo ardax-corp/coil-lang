@@ -468,6 +468,30 @@ same in debug and `gc-stress` builds. The interpreter keeps `coil_native_cow`,
 which also counts the share for `--cow-report`'s summary line; native code's
 inline shares are not in that count (the copies are).
 
+A pinned object (archive 8.2, [cow-calls.md](cow-calls.md), "Pinned objects") is
+never marked: after the kind byte the share loads the pin at `COW_PINNED_OFFSET`
+and, when it is set, branches to a cold block that calls `coil_native_cow`, whose
+copy is the share's result. That helper allocates and never collects, so the share
+stays no GC edge and allocates nothing as far as the body's `OpProps` go: a copy
+it makes is counted, and the next safepoint collects. `CowPin` and `CowUnpin`
+are inline byte operations on the same header byte, for a class instance or an
+array only (null and other kinds: `CowPin` gives `0`, `CowUnpin` does nothing).
+The pin test and its cold call are emitted only in the bodies that may run
+while an object is pinned (`Plan::pins`, `pin_reach`): the bodies with a
+`CowPin` and what they run. That is their calls and the function values and code
+pointers they make. Once one of them calls a value, the host, a generator or
+foreign code, it is also every body whose code is taken, and the `drop`s
+when one allocates or frees. A pin is set and cleared by one body, on an object
+that body writes in place and its caller made unique, so no other body can name
+the object while the pin is set. A pin left set at an exit is stale: no in-place
+writer of it is live, so a share that ignores it is right. Every body tests the
+pin when the reach yields or calls a native that needs the runtime (the task
+may park, and any task may run), and in a program that starts a thread. Elsewhere
+the share is the one above. The call alone made each body with a share a non-leaf:
+a stand-in `bbox` +14.5%, and `bint` at `--clone-budget 0` +2.2%. With one
+`split` (which pins) in a `bbox` program, testing every body cost +14.2%. With
+the reach it costs +0.15%.
+
 In-place stores are compiled only into release builds without `gc-stress`
 (`ProductSlots::inline_stores`): debug and `gc-stress` builds check epoch writes in
 `GcData::as_mut`, which native code would skip. Loads are in place in every build.
