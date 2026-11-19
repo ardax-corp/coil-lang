@@ -668,6 +668,10 @@ struct Plan {
     /// and what they call there. It saves no registers across a call, so
     /// other bodies stay on the platform's.
     tail_conv: HashSet<usize>,
+    /// Some body of the program pins an object (`CowPin`, archive 8.2).
+    /// Without one no object is ever pinned, so the inline share leaves out
+    /// its pinned path and the copy helper call that path makes.
+    pins: bool,
 }
 
 /// What [`define_all`] made: the declared ids, the bodies defined, the
@@ -991,7 +995,8 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, body_i
     let speculative = speculative_reach(bodies, &by_label);
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
-    Plan { compile, by_label, refused, moves, may_gc, speculative, pcs, drops, runtime_reach, used_params, tail_sites, tail_conv }
+    let pins = bodies.iter().any(|b| std::iter::once(&b.mir).chain(b.mir.cleanup.as_deref()).any(|f| f.blocks.iter().flat_map(|bl| &bl.insts).any(|i| matches!(i, MirInst::CowPin { .. }))));
+    Plan { compile, by_label, refused, moves, may_gc, speculative, pcs, drops, runtime_reach, used_params, tail_sites, tail_conv, pins }
 }
 
 /// The labels `inst` names: a call's target, a function value's or code
@@ -3716,21 +3721,28 @@ impl<'a> Lower<'a> {
                 let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
                 let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
                 let either = self.b.ins().bor(inst, arr);
-                self.b.ins().brif(either, test, &[], join, &[s.into()]);
-                self.b.switch_to_block(test);
-                let pinned = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
-                self.b.ins().brif(pinned, copy, &[], mark, &[]);
+                if self.plan.pins {
+                    self.b.ins().brif(either, test, &[], join, &[s.into()]);
+                    self.b.switch_to_block(test);
+                    let pinned = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
+                    self.b.ins().brif(pinned, copy, &[], mark, &[]);
+                } else {
+                    // No body pins: no object is pinned, so no copy path.
+                    self.b.ins().brif(either, mark, &[], join, &[s.into()]);
+                }
                 self.b.switch_to_block(mark);
                 let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_SHARED_SET));
                 self.b.ins().store(flags, set, o, machine::COW_SHARED_OFFSET);
                 self.b.ins().jump(join, &[s.into()]);
-                self.b.set_cold_block(copy);
-                self.b.switch_to_block(copy);
-                let share = self.b.ins().iconst(types::I64, 0);
-                let call = self.b.ins().call(self.cow, &[self.ctx, s, share]);
-                let w = self.b.inst_results(call)[0];
-                self.bail_on_helper();
-                self.b.ins().jump(join, &[w.into()]);
+                if self.plan.pins {
+                    self.b.set_cold_block(copy);
+                    self.b.switch_to_block(copy);
+                    let share = self.b.ins().iconst(types::I64, 0);
+                    let call = self.b.ins().call(self.cow, &[self.ctx, s, share]);
+                    let w = self.b.inst_results(call)[0];
+                    self.bail_on_helper();
+                    self.b.ins().jump(join, &[w.into()]);
+                }
                 self.b.switch_to_block(join);
                 self.set_word(f, *dest, word);
                 self.view_of(f, *dest);
