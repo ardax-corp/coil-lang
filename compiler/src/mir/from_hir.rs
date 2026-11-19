@@ -2056,6 +2056,10 @@ fn retarget(term: &mut Terminator, from: BlockId, to: BlockId) {
     }
 }
 
+/// The `kinds` word and bit a pin op of a type parameter's word runs under in
+/// a shared generic body (`None` outside one).
+type KindsGuard = Option<(ValueId, u32)>;
+
 impl Lower<'_> {
     /// Give each `defer` flag and capture a home, written from here on at
     /// each definition (a parameter's now). `None` when a capture is not a
@@ -5743,7 +5747,7 @@ impl Lower<'_> {
     /// `kinds` bit it runs under in a shared generic body: `None` where the
     /// value cannot be an object (a scalar, a clone at a scalar type, a type
     /// parameter's word in a body with no bit for it).
-    fn pin_word(&mut self, inner: HirId, v: ValueId) -> Result<Option<(ValueId, Option<(ValueId, u32)>)>, Refusal> {
+    fn pin_word(&mut self, inner: HirId, v: ValueId) -> Result<Option<(ValueId, KindsGuard)>, Refusal> {
         let open = self.expr_ty(inner).is_some_and(|t| is_var(t) || is_var_app(t));
         if open {
             if !matches!(self.b.value_ty(v), MirTy::I64 | MirTy::HeapRef) {
@@ -5768,7 +5772,7 @@ impl Lower<'_> {
 
     /// `CowPin` of `obj`, under the `kinds` test `guard` (`false` where it
     /// fails).
-    fn guarded_pin(&mut self, obj: ValueId, guard: Option<(ValueId, u32)>) -> Result<ValueId, Refusal> {
+    fn guarded_pin(&mut self, obj: ValueId, guard: KindsGuard) -> Result<ValueId, Refusal> {
         let Some((kinds, bit)) = guard else {
             return self.b.ins_cow_pin(obj).map_err(mir);
         };
@@ -5789,7 +5793,7 @@ impl Lower<'_> {
 
     /// `CowUnpin` of `obj` with its pin's `saved`, under the `kinds` test
     /// `guard`.
-    fn guarded_unpin(&mut self, obj: ValueId, saved: ValueId, guard: Option<(ValueId, u32)>) -> Result<(), Refusal> {
+    fn guarded_unpin(&mut self, obj: ValueId, saved: ValueId, guard: KindsGuard) -> Result<(), Refusal> {
         let saved = if self.b.value_ty(saved) == MirTy::Bool { saved } else { self.fit(saved, MirTy::Bool)? };
         let Some((kinds, bit)) = guard else {
             self.b.ins_cow_unpin(obj, saved).map_err(mir)?;

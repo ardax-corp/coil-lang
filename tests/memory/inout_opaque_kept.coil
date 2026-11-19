@@ -203,7 +203,13 @@ test("a Vec and a map parameter kept, then grown") {
 }
 
 test("each pass keeps the value of that pass") {
-    let hs = Vec::from([new Holder(new C(0, Vec::new())), new Holder(new C(0, Vec::new())), new Holder(new C(0, Vec::new()))]);
+    let hs = Vec::from(
+        [
+            new Holder(new C(0, Vec::new())),
+            new Holder(new C(0, Vec::new())),
+            new Holder(new C(0, Vec::new())),
+        ],
+    );
     let a = new C(1, Vec::new());
     keep_each_pass(hs, a);
     assert!(a.x == 4);
