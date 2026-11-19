@@ -388,13 +388,30 @@ when `saved`, the `CowPin`'s result, is `false`, so pins nest. Both are
 header bytes and allocate nothing; for a word that is no class instance or
 array (null, another kind) `CowPin` gives `false` and `CowUnpin` does
 nothing. A pin left set is never wrong: it costs a copy at each later
-share. Nothing emits them yet (#2842 step 1). `Gc::recycle` clears the bit;
+share. `Gc::recycle` clears the bit;
 an evacuation copies it with the slot.
 
 The pair has the shape #2821's run-time half needs for the shared flag (a
 save that reads the bit, a restore that clears it when the save read
 `false`); that save only reads, so #2821 would add its own op or a mode on
 these rather than reuse `CowPin` as it is.
+
+`Plan::pins` in `hir/cow.rs` places them (#2842 step 2). It pins two kinds
+of object:
+
+- a parameter written in place for the caller that the body hands to code
+  not known here (which may keep it) with a write to it that may run after
+  that call: pinned from the body's entry, unpinned before each `return` of
+  a plain value and at the end of the body;
+- an argument a call writes in place while another argument of the same
+  call is that object or one holding it, or the argument is in a `static`
+  and the callee may read one: the path from its root pinned around the
+  call. The other argument is then a copy made at the call, so
+  `bump(c, c, out)` with `d` written reads the `c` from before the call
+  (`tests/codegen/licm_field_reads_past_element_stores.coil`).
+
+`COIL_COW_PIN=0` leaves the pins out, to measure what they cost. Test:
+`tests/memory/inout_opaque_kept.coil`.
 
 ## Casts
 
