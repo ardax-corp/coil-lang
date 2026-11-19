@@ -373,7 +373,7 @@ impl<'b> Facts<'b> {
             let HirKind::Lambda { body: inner } = body.expr(lambda).kind else { continue };
             let inner = &module.bodies[inner];
             let Some(&(_, i)) = inner.captures.iter().find(|(x, _)| *x == o) else { continue };
-            let (kept, returned, opaque, _) = keeps_of(module, inner, &|c: &Callee, a: &[HirId]| bodies(inner, c, a), &[i], Some(checker));
+            let (kept, returned, opaque, _) = keeps_of(module, inner, &|c: &Callee, a: &[HirId]| bodies(inner, c, a), &[i], Some(checker), 0);
             if (kept | returned | opaque) & 1 != 0 {
                 f.loose_captures.insert((lambda, o));
             }
@@ -608,14 +608,34 @@ fn named_value(body: &HirBody, a: HirId) -> HirId {
 /// Second: the parameters that may be its result, as themselves (#2206).
 /// Third: the parameters it hands, as themselves, to code not known
 /// here, which may keep them.
-pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>) -> (u64, u64, u64, u64) {
-    keeps_of(module, body, lookup, &body.params, None)
+pub(super) fn keeps(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, mutates: u64) -> (u64, u64, u64, u64) {
+    keeps_of(module, body, lookup, &body.params, None, copied_params(body, mutates))
+}
+
+/// The parameters (bit `i` for `body.params[i]`) written in place for the
+/// caller, as [`Plan::new`] takes them: a store of one in this body is an
+/// eager copy, so storing the parameter itself does not keep the caller's
+/// object (#2850). A coroutine's parameters are its own values (#2662).
+fn copied_params(body: &HirBody, mutates: u64) -> u64 {
+    if body.is_coro {
+        return 0;
+    }
+    let mut bits = 0u64;
+    for (i, &l) in body.params.iter().enumerate().take(64) {
+        let reassigned = body.exprs.iter().any(|e| matches!(&e.kind, HirKind::Assign { place, .. } if matches!(body.expr(*place).kind, HirKind::Local(x) if x == l)));
+        if mutates & (1 << i) != 0 && !reassigned && !body.local(l).borrow {
+            bits |= 1 << i;
+        }
+    }
+    bits
 }
 
 /// [`keeps`] for the locals `seeds` (bit `i` for `seeds[i]`) in place of
 /// the parameters: a closure's captures. With `views`, a call that returns
 /// a view does not keep its receiver.
-fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: &[LocalId], views: Option<&Checker>) -> (u64, u64, u64, u64) {
+/// With `copied`, bit `i` set for a seed whose stores are eager copies
+/// ([`copied_params`]): storing that seed itself keeps nothing.
+fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: &[LocalId], views: Option<&Checker>, copied: u64) -> (u64, u64, u64, u64) {
     if body.is_coro {
         return (u64::MAX, u64::MAX, u64::MAX, 0);
     }
@@ -662,6 +682,39 @@ fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: 
         }
         bits
     };
+    // What a store of `v` keeps: as `of`, less a copied seed stored as
+    // itself (not handed back by a call, which may return the caller's
+    // object as it is).
+    let stored = |holds: &HashMap<LocalId, u64>, v: HirId| -> u64 {
+        let mut bits = 0;
+        let mut work = vec![(v, false)];
+        while let Some((at, via_call)) = work.pop() {
+            match &body.expr(at).kind {
+                HirKind::Block { tail: Some(t), .. } => work.push((*t, via_call)),
+                HirKind::If { then, els, .. } => work.extend(std::iter::once(*then).chain(*els).map(|x| (x, via_call))),
+                HirKind::Match { arms, .. } => work.extend(arms.iter().map(|a| (a.body, via_call))),
+                HirKind::Named { value, .. } => work.push((*value, via_call)),
+                HirKind::Builtin { op: Builtin::Cow { .. }, args } => work.extend(args.iter().map(|&x| (x, via_call))),
+                HirKind::Local(l) => {
+                    let mut b = holds.get(l).copied().unwrap_or(0);
+                    if !via_call && let Some(i) = seeds.iter().take(64).position(|s| s == l) {
+                        b &= !(copied & (1 << i));
+                    }
+                    bits |= b;
+                }
+                HirKind::Call { callee, args } => {
+                    let used = arg_use(body, lookup, callee, args);
+                    for (j, &a) in args.iter().enumerate().take(64) {
+                        if used.returned & (1 << j) != 0 {
+                            work.push((named_value(body, a), true));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        bits
+    };
     loop {
         let mut changed = false;
         for &(l, v) in &copies {
@@ -683,11 +736,11 @@ fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: 
     for (i, e) in body.exprs.iter().enumerate() {
         let id = HirId(i as u32);
         match &e.kind {
-            HirKind::Assign { place, value } if !matches!(body.expr(*place).kind, HirKind::Local(_)) => kept |= of(&holds, *value),
-            HirKind::Append { value, .. } => kept |= of(&holds, *value),
+            HirKind::Assign { place, value } if !matches!(body.expr(*place).kind, HirKind::Local(_)) => kept |= stored(&holds, *value),
+            HirKind::Append { value, .. } => kept |= stored(&holds, *value),
             HirKind::Make { kind, args } if !matches!(kind, MakeKind::Range { .. }) => {
                 for &a in args {
-                    kept |= of(&holds, a);
+                    kept |= stored(&holds, a);
                 }
             }
             HirKind::Call { callee, args } => {
@@ -706,7 +759,7 @@ fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: 
                 }
                 for (j, &a) in args.iter().enumerate().take(64) {
                     if used.kept & (1 << j) != 0 {
-                        kept |= of(&holds, a);
+                        kept |= stored(&holds, a);
                     }
                     if used.opaque & (1 << j) != 0 {
                         opaque |= of(&holds, a);
