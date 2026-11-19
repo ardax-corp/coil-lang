@@ -668,10 +668,10 @@ struct Plan {
     /// and what they call there. It saves no registers across a call, so
     /// other bodies stay on the platform's.
     tail_conv: HashSet<usize>,
-    /// Some body of the program pins an object (`CowPin`, archive 8.2).
-    /// Without one no object is ever pinned, so the inline share leaves out
-    /// its pinned path and the copy helper call that path makes.
-    pins: bool,
+    /// The bodies that may run while an object is pinned (`CowPin`,
+    /// archive 8.2, [`pin_reach`]). The inline share of any other body leaves
+    /// out its pinned path and the copy helper call that path makes.
+    pins: HashSet<usize>,
 }
 
 /// What [`define_all`] made: the declared ids, the bodies defined, the
@@ -707,6 +707,7 @@ fn define_all<M: Module>(
                 let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, &body.mir);
                 lower.body_id = body_ids.get(&body.name).copied();
                 lower.body_index = Some(i);
+                lower.pins = plan.pins.contains(&i);
                 let r = lower.body(&body.mir);
                 if r.is_ok() {
                     lower.b.finalize(fcfg);
@@ -726,6 +727,7 @@ fn define_all<M: Module>(
                     let mut lower = Lower::new(module, &mut ctx.func, &mut fbc, &ids, plan, &mut sites, pad);
                     lower.body_id = body_ids.get(&body.name).copied();
                     lower.is_pad = true;
+                    lower.pins = plan.pins.contains(&i);
                     let r = lower.body(pad);
                     if r.is_ok() {
                         lower.b.finalize(fcfg);
@@ -995,7 +997,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, body_i
     let speculative = speculative_reach(bodies, &by_label);
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
-    let pins = bodies.iter().any(|b| std::iter::once(&b.mir).chain(b.mir.cleanup.as_deref()).any(|f| f.blocks.iter().flat_map(|bl| &bl.insts).any(|i| matches!(i, MirInst::CowPin { .. }))));
+    let pins = pin_reach(bodies, &by_label);
     Plan { compile, by_label, refused, moves, may_gc, speculative, pcs, drops, runtime_reach, used_params, tail_sites, tail_conv, pins }
 }
 
@@ -1042,6 +1044,71 @@ fn speculative_reach(bodies: &[NativeBody], by_label: &HashMap<Label, usize>) ->
             }
         }
         if !drops && insts(i).any(allocates) {
+            drops = true;
+            work.extend(bodies.iter().enumerate().filter(|(_, b)| b.name.ends_with("::drop")).map(|(j, _)| j));
+        }
+    }
+    reach
+}
+
+/// The bodies that may run while some object is pinned: a share elsewhere
+/// cannot meet a pinned object, so it needs no pin test (#2842). A pin is
+/// set and cleared by one body (a `CowPin` and its `CowUnpin`), and the
+/// object it pins is the one that body writes in place, made unique by the
+/// caller, so while it is set only that body and what it runs can name the
+/// object: its calls, the function values and code pointers it makes, any
+/// body whose code is taken anywhere once it calls a value, the host, a
+/// generator or foreign code (which may call one back), and the `drop`s an
+/// allocation or a free may run. A pin a body leaves set at its exit is
+/// never wrong to ignore: no in-place writer of it is live any more.
+///
+/// Every body, when what runs during a pin is not known from here: a body
+/// in the reach that yields (its resumer runs with the pin set) or calls a
+/// native that needs the runtime (which may park the task, so any task may
+/// run), and any program that starts a thread (one may run any body at the
+/// same time).
+fn pin_reach(bodies: &[NativeBody], by_label: &HashMap<Label, usize>) -> HashSet<usize> {
+    let insts = |i: usize| {
+        let f = &bodies[i].mir;
+        std::iter::once(f).chain(f.cleanup.as_deref()).flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
+    };
+    let mut work: Vec<usize> = (0..bodies.len()).filter(|&i| insts(i).any(|x| matches!(x, MirInst::CowPin { .. }))).collect();
+    if work.is_empty() {
+        return HashSet::new();
+    }
+    let hosts = machine::native::direct_host_natives();
+    let host = |id: u16| hosts.get(usize::from(id));
+    let everything = || (0..bodies.len()).collect::<HashSet<usize>>();
+    let threads = (0..bodies.len()).any(|i| {
+        insts(i).any(|x| matches!(x, MirInst::HostInvoke { native_id, .. } if host(*native_id).is_some_and(|h| h.name.starts_with("thread_spawn"))))
+    });
+    if threads {
+        return everything();
+    }
+    let mut reach: HashSet<usize> = HashSet::new();
+    let (mut values, mut drops) = (false, false);
+    while let Some(i) = work.pop() {
+        if !reach.insert(i) {
+            continue;
+        }
+        let unknown = insts(i).any(|x| match x {
+            MirInst::Yield { .. } => true,
+            MirInst::HostInvoke { native_id, .. } => host(*native_id).is_none_or(|h| h.collect || h.on_machine),
+            _ => false,
+        });
+        if unknown {
+            return everything();
+        }
+        work.extend(insts(i).flat_map(named_labels).filter_map(|l| by_label.get(&l).copied()));
+        if !values && insts(i).any(|x| matches!(x, MirInst::CallIndirect { .. } | MirInst::HostInvoke { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. })) {
+            values = true;
+            for b in bodies {
+                let f = &b.mir;
+                let taken = std::iter::once(f).chain(f.cleanup.as_deref()).flat_map(|f| f.blocks.iter().flat_map(|bb| &bb.insts)).filter(|x| !matches!(x, MirInst::Call { .. }));
+                work.extend(taken.flat_map(named_labels).filter_map(|l| by_label.get(&l).copied()));
+            }
+        }
+        if !drops && insts(i).any(|x| allocates(x) || matches!(x, MirInst::FreeEarly { .. })) {
             drops = true;
             work.extend(bodies.iter().enumerate().filter(|(_, b)| b.name.ends_with("::drop")).map(|(j, _)| j));
         }
@@ -1863,6 +1930,9 @@ struct Lower<'a> {
     panic: FuncRef,
     /// This body's index into the plan's bodies.
     body_index: Option<usize>,
+    /// The body may run while an object is pinned ([`pin_reach`]): its
+    /// inline share tests the pin.
+    pins: bool,
     /// Lowering a cleanup pad: its homes are behind its second parameter.
     is_pad: bool,
     /// Where the homes live: this frame's slot (`[next, n, words...]` is
@@ -2078,6 +2148,7 @@ impl<'a> Lower<'a> {
             collect,
             panic,
             body_index: None,
+            pins: false,
             is_pad: false,
             homes_slot: None,
             homes_ptr: None,
@@ -3721,7 +3792,7 @@ impl<'a> Lower<'a> {
                 let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
                 let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
                 let either = self.b.ins().bor(inst, arr);
-                if self.plan.pins {
+                if self.pins {
                     self.b.ins().brif(either, test, &[], join, &[s.into()]);
                     self.b.switch_to_block(test);
                     let pinned = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
@@ -3734,7 +3805,7 @@ impl<'a> Lower<'a> {
                 let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_SHARED_SET));
                 self.b.ins().store(flags, set, o, machine::COW_SHARED_OFFSET);
                 self.b.ins().jump(join, &[s.into()]);
-                if self.plan.pins {
+                if self.pins {
                     self.b.set_cold_block(copy);
                     self.b.switch_to_block(copy);
                     let share = self.b.ins().iconst(types::I64, 0);
