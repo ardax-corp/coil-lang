@@ -4009,7 +4009,7 @@ impl<'a> Lower<'a> {
     /// current block, on return) calls the helper, which refills.
     fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], join: Block) {
         use machine::native::{
-            BUMP_BYTES, BUMP_END, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
+            BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
             COUNTS_LIVE_COUNT, COUNTS_YOUNG_BYTES, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
         };
         let mem = MemFlagsData::trusted();
@@ -4040,13 +4040,29 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(bump);
         let bumps = self.b.ins().load(types::I64, mem, self.ctx, NATIVE_CTX_ALLOC_BUMPS);
         let cursor = self.b.ins().iadd_imm_s(bumps, i64::from(obj.class) * i64::from(BUMP_BYTES));
+        // A slot freed early since the last minor first (#2881), else the
+        // bump pointer.
+        let free = self.b.ins().load(types::I64, mem, cursor, BUMP_FREE);
+        let reuse = self.b.create_block();
+        let fresh = self.b.create_block();
+        self.b.append_block_param(fast, types::I64);
+        self.b.ins().brif(free, reuse, &[], fresh, &[]);
+        self.b.switch_to_block(reuse);
+        let link = self.b.ins().load(types::I64, mem, free, BUMP_FREE_LINK);
+        self.b.ins().store(mem, link, cursor, BUMP_FREE);
+        self.b.ins().jump(fast, &[free.into()]);
+        self.b.switch_to_block(fresh);
         let at = self.b.ins().load(types::I64, mem, cursor, BUMP_NEXT);
         let end = self.b.ins().load(types::I64, mem, cursor, BUMP_END);
         let next = self.b.ins().iadd_imm_s(at, i64::from(obj.slot));
         let fits = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, next, end);
-        self.b.ins().brif(fits, fast, &[], slow, &[]);
-        self.b.switch_to_block(fast);
+        let bumped = self.b.create_block();
+        self.b.ins().brif(fits, bumped, &[], slow, &[]);
+        self.b.switch_to_block(bumped);
         self.b.ins().store(mem, next, cursor, BUMP_NEXT);
+        self.b.ins().jump(fast, &[at.into()]);
+        self.b.switch_to_block(fast);
+        let at = self.b.block_params(fast)[0];
         let first = obj.words_at as usize;
         for (i, &img) in obj.image.iter().enumerate() {
             let x = match i.checked_sub(first).and_then(|k| words.get(k)) {

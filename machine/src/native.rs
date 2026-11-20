@@ -306,6 +306,10 @@ pub const COUNTS_YOUNG_BYTES: i32 = std::mem::offset_of!(crate::memory::HeapCoun
 pub const COUNTS_LIVE_COUNT: i32 = std::mem::offset_of!(crate::memory::HeapCounts, live_count) as i32;
 pub const BUMP_NEXT: i32 = std::mem::offset_of!(crate::memory::Bump, next) as i32;
 pub const BUMP_END: i32 = std::mem::offset_of!(crate::memory::Bump, end) as i32;
+/// Head of a nursery class's early-freed slots ([`crate::memory::Bump::free`]).
+pub const BUMP_FREE: i32 = std::mem::offset_of!(crate::memory::Bump, free) as i32;
+/// Where a freed young slot links the next one ([`crate::memory::FREE_LINK`]).
+pub const BUMP_FREE_LINK: i32 = crate::memory::FREE_LINK as i32;
 pub const BUMP_BYTES: i32 = std::mem::size_of::<crate::memory::Bump>() as i32;
 
 impl NativeCtx {

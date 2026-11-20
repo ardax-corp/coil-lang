@@ -247,6 +247,8 @@ pub fn layout_fingerprint() -> u64 {
         std::mem::offset_of!(HeapCounts, live_count),
         std::mem::offset_of!(super::super::slab::Bump, next),
         std::mem::offset_of!(super::super::slab::Bump, end),
+        std::mem::offset_of!(super::super::slab::Bump, free),
+        super::super::slab::FREE_LINK as usize,
         std::mem::size_of::<super::super::slab::Bump>(),
     ];
     counts.hash(&mut h);

@@ -328,13 +328,21 @@ pub const YOUNG_CLASSES: usize = 32;
 
 /// A nursery class's bump cursor: the next slot of the current chunk and
 /// the end of its last slot. `next == end` (both 0 at first and after a
-/// minor collection): the next allocation refills.
+/// minor collection): the next allocation refills. `free` heads the
+/// class's slots freed early since the last minor collection, linked
+/// through each slot's first payload word ([`FREE_LINK`]); allocation,
+/// native code's inline path too, takes those first (#2881).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Bump {
     pub next: u64,
     pub end: u64,
+    pub free: u64,
 }
+
+/// Byte offset in a freed young slot of the link to the next one: the
+/// first word after the header (every nursery slot is at least 16 bytes).
+pub const FREE_LINK: u64 = 8;
 
 /// One size class's nursery: the chunk being bump-allocated and the reset
 /// chunks waiting for reuse.
@@ -351,9 +359,6 @@ struct YoungClass {
     /// of their written slots: not allocated into until a minor finds them
     /// empty.
     held: Vec<(usize, u64)>,
-    /// Slots of the chunks in `used` freed early (`gc_free_early`), handed
-    /// out again before the bump pointer moves on.
-    freed: Vec<u64>,
 }
 
 /// Position of a walk over every slot of the resident chunks (sweep, heap
@@ -419,10 +424,14 @@ impl Slab {
         let (slot_size, align) = slot_dims(layout);
         let key = (slot_size as u32, align as u32);
         if let Some(class) = self.young.iter_mut().find(|c| c.key == key) {
-            if let Some(p) = class.freed.pop() {
+            let bump = &mut self.bumps[class.cursor];
+            if bump.free != 0 {
+                let p = bump.free;
+                // SAFETY: a freed young slot holds the next one's address
+                // at `FREE_LINK` (`free_young`).
+                bump.free = unsafe { *((p + FREE_LINK) as *const u64) };
                 return unsafe { NonNull::new_unchecked(p as *mut u8) };
             }
-            let bump = &mut self.bumps[class.cursor];
             if bump.next + slot_size as u64 <= bump.end {
                 let p = bump.next;
                 bump.next += slot_size as u64;
@@ -453,7 +462,6 @@ impl Slab {
             cursor,
             spare: Vec::new(),
             held: Vec::new(),
-            freed: Vec::new(),
         });
         cursor
     }
@@ -485,9 +493,11 @@ impl Slab {
         let slots = (CHUNK as u64 - u64::from(c.meta.first_off)) / slot_size as u64;
         let class = &mut self.young[at];
         class.used.push(i);
+        let free = self.bumps[class.cursor].free;
         self.bumps[class.cursor] = Bump {
             next: first + slot_size as u64,
             end: first + slots * slot_size as u64,
+            free,
         };
         unsafe { NonNull::new_unchecked(first as *mut u8) }
     }
@@ -527,10 +537,19 @@ impl Slab {
         let key = (meta.slot_size, meta.slot_align);
         let chunks = &self.chunks;
         // A held chunk is not allocated into; its hole waits for a reset.
-        if let Some(class) = self.young.iter_mut().find(|c| c.key == key)
-            && !class.held.iter().any(|&(i, _)| chunks.get(i).is_some_and(|c| c.ptr as u64 == start))
+        let cursor = self
+            .young
+            .iter()
+            .find(|c| c.key == key && !c.held.iter().any(|&(i, _)| chunks.get(i).is_some_and(|c| c.ptr as u64 == start)))
+            .map(|c| c.cursor);
+        if let Some(cursor) = cursor
+            && meta.slot_size as u64 >= FREE_LINK + 8
         {
-            class.freed.push(ptr.as_ptr() as u64);
+            let bump = &mut self.bumps[cursor];
+            // SAFETY: the slot is this class's, freed and poisoned; its
+            // first payload word is free to hold the link.
+            unsafe { *((ptr.as_ptr() as u64 + FREE_LINK) as *mut u64) = bump.free };
+            bump.free = ptr.as_ptr() as u64;
         }
     }
 
@@ -643,7 +662,6 @@ impl Slab {
                 }
             }
             self.bumps[class.cursor] = Bump::default();
-            class.freed.clear();
         }
         for &i in promoted {
             self.young_mask[i] = false;
