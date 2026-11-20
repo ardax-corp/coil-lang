@@ -1056,8 +1056,13 @@ impl<'a> Lower<'a> {
 }
 
 struct Loop {
-    /// Where `continue` goes: the loop head, or a `for` loop's step.
-    cont: BlockId,
+    /// The loop's head: which loop this is.
+    head: BlockId,
+    /// Where `continue` goes: the loop head, or a `for` loop's step, made at
+    /// the first `continue` (`None` until then). The step is made after the
+    /// body's blocks before it, so each value it reads is defined in a block
+    /// before it (#2856).
+    cont: Option<BlockId>,
     /// Whether a `continue` jumped to `cont`.
     cont_used: bool,
     /// Where `break` goes, made at the first one.
@@ -3313,7 +3318,7 @@ impl Lower<'_> {
         // come back here without passing the box): its object.
         let key = |l: &Self, v: ValueId| l.b.read_origin(v).map_or(PairWord::Value(l.b.resolved(v)), |(local, n)| PairWord::Read(local, n));
         let (lo_key, hi_key) = (key(self, lo), key(self, hi));
-        let in_loop = self.loops.last().map(|l| l.cont);
+        let in_loop = self.loops.last().map(|l| l.head);
         let found = self
             .pair_boxes
             .iter()
@@ -4477,7 +4482,8 @@ impl Lower<'_> {
                 self.jump(head)?;
                 self.switch(head);
                 self.loops.push(Loop {
-                    cont: head,
+                    head,
+                    cont: Some(head),
                     cont_used: false,
                     exit: None,
                     defers: self.defers.len(),
@@ -4519,7 +4525,14 @@ impl Lower<'_> {
                 self.run_defers_from(open)?;
                 let lp = self.loops.last_mut().ok_or("continue outside loop")?;
                 lp.cont_used = true;
-                let cont = lp.cont;
+                let cont = match lp.cont {
+                    Some(cont) => cont,
+                    None => {
+                        let step = self.b.create_block();
+                        self.loops.last_mut().expect("checked above").cont = Some(step);
+                        step
+                    }
+                };
                 self.jump(cont)?;
                 Ok(Val::Never)
             }
@@ -4731,7 +4744,8 @@ impl Lower<'_> {
             self.defers.push(Open::Coro(h));
         }
         self.loops.push(Loop {
-            cont: head,
+            head,
+            cont: Some(head),
             cont_used: false,
             exit: None,
             defers: self.defers.len(),
@@ -4832,7 +4846,8 @@ impl Lower<'_> {
         };
         self.bind(local, x)?;
         self.loops.push(Loop {
-            cont: head,
+            head,
+            cont: Some(head),
             cont_used: false,
             exit: Some(exit),
             defers: self.defers.len(),
@@ -4850,9 +4865,10 @@ impl Lower<'_> {
     /// step.
     #[allow(clippy::too_many_arguments)]
     fn counted_body(&mut self, body: HirId, head: BlockId, exit: BlockId, counter: LocalId, ty: MirTy, one: MirConst, last: Option<ValueId>) -> Result<Val, Refusal> {
-        let step = query::has_own_continue(self.hir, body).then(|| self.b.create_block());
+        let own = query::has_own_continue(self.hir, body);
         self.loops.push(Loop {
-            cont: step.unwrap_or(head),
+            head,
+            cont: (!own).then_some(head),
             cont_used: false,
             exit: Some(exit),
             defers: self.defers.len(),
@@ -4860,6 +4876,7 @@ impl Lower<'_> {
         let live = self.effect(body);
         let done = self.loops.pop().expect("loop pushed above");
         let live = live?;
+        let step = if own { done.cont.or_else(|| live.then(|| self.b.create_block())) } else { None };
         match step {
             Some(step) if live || done.cont_used => {
                 if live {
