@@ -105,15 +105,17 @@ pinned children are copied for it ([cow-calls.md](cow-calls.md), "Pinned objects
 The AOT layout fingerprint covers the pin's offset, so an object built against the
 old header is refused. An 8.1 archive loads and runs unchanged (no op of it pins).
 
-Minor 3 (direct extern calls, step 1) adds `ExternCall`, additively: MIR section
-`FORMAT` 19 has one more instruction (tag 51: dest, the C symbol, the declared
-parameters' tags, the result's tag, a variadic byte and, when it is set, the tags of
-the call's arguments, then the argument values: library, function id and the
-arguments' words). An `extern` block's call lowers to it instead of `Ffi` `invoke`
+Minor 3 (direct extern calls, steps 1 and 2) adds `ExternCall`, additively: MIR
+section `FORMAT` 19 has one more instruction (tag 51: dest, the C symbol, the
+declared parameters' tags, the result's tag, a variadic byte and, when it is set, the
+tags of the call's arguments, then the argument values: library, function id, the
+function's C address and the arguments' words), and FFI op index 3 of an `Ffi`
+instruction is `addr` (`common::FFI_OP_ADDR`, 4: a declared function's C address, as
+a `Result`), which module setup stores in a static beside each function id. An `extern` block's call lowers to it instead of `Ffi` `invoke`
 on an argument tuple with its `Result` unwrapped: the runtime's FFI op 3
 (`common::FFI_OP_CALL`) takes the words as they are, returns the C function's word
-and panics with a call's error. Format 18 is format 19 without tag 51, and the reader
-takes it (and 17 and 16); an older section that holds tag 51 is refused. An 8.2
+and panics with a call's error. Format 18 is format 19 without tag 51 and FFI op 3, and the
+reader takes it (and 17 and 16); an older section that holds tag 51 is refused. An 8.2
 archive loads and runs unchanged: its extern calls are `invoke`s.
 
 ## Major 7
