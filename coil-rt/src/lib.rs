@@ -34,6 +34,11 @@ unsafe extern "C" {
 #[unsafe(export_name = "coil_ffi_link")]
 static FFI_LINK: coil_cli::FfiLink = coil_cli::FFI_LINK;
 
+/// Which profile built this library, for `coil package` to warn about a
+/// debug runtime (it reads the archive's bytes for this text).
+#[used]
+pub static PROFILE_MARK: [u8; 25] = *if cfg!(debug_assertions) { b"coil-rt profile: debug;\0\0" } else { b"coil-rt profile: release;" };
+
 /// The executable's entry (the C runtime calls it).
 /// Left out of the libtest build, whose harness brings its own `main`.
 #[cfg(not(test))]
