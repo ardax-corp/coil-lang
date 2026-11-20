@@ -138,14 +138,17 @@ fn with_native_start(_: &mut Pipeline, bodies: &[compiler::native_mir::NativeBod
 /// cannot link one, and the JIT runner is packaged instead.
 #[cfg(not(target_family = "wasm"))]
 fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs, package: &[u8]) -> Option<(Vec<u8>, usize, PathBuf)> {
-    let fallback = |why: String| {
-        // Static libraries link only into an AOT executable.
-        if !link.statics.is_empty() {
-            eprintln!("error: {why}; `--link-static` needs the AOT executable");
-            exit(1);
+    // No silent JIT runner (Cranelift, several MB): a host that cannot
+    // link asks for it with `--no-aot`.
+    let fallback = |why: String| -> Option<(Vec<u8>, usize, PathBuf)> {
+        eprintln!("error: {why}");
+        if link.statics.is_empty() {
+            eprintln!("  help: pass `--no-aot` to package the JIT runner, which needs no `cc` or runtime library");
+        } else {
+            // Static libraries link only into an AOT executable.
+            eprintln!("  help: `--link-static` needs the AOT executable");
         }
-        eprintln!("warning: {why}; packaging the JIT runner instead (pass `--no-aot` to skip linking)");
-        None
+        exit(1);
     };
     let object = match aot_object(pipeline, bodies, link, package) {
         Ok(o) => o,
@@ -155,6 +158,12 @@ fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::Nati
         Ok(p) => p,
         Err(e) => return fallback(e),
     };
+    if is_debug_runtime(&rt) {
+        eprintln!(
+            "warning: `{}` is a debug build of the runtime: the executable is several times larger and slower (build `coil-rt` with `--release`, or set `COIL_RT_LIB`)",
+            rt.display()
+        );
+    }
     match link_with_cc(&object.bytes, &rt, link) {
         Ok(exe) => Some((exe, object.compiled.len(), rt)),
         Err(e) => fallback(e),
@@ -246,9 +255,9 @@ pub enum StripSymbols {
     /// Keep everything (for a native debugger or profiler).
     None,
     /// Drop debug info, keep the symbol table (named frames in `perf`).
-    #[default]
     Debug,
     /// Drop debug info and the symbol table: the smallest executable.
+    #[default]
     All,
 }
 
@@ -352,6 +361,35 @@ fn system_libs() -> &'static [&'static str] {
     }
 }
 
+/// What `coil-rt` holds in a debug build (`coil-rt/src/lib.rs`), so
+/// `coil package` can say it links one.
+#[cfg(not(target_family = "wasm"))]
+const DEBUG_RUNTIME_MARK: &[u8] = b"coil-rt: debug build";
+
+/// Whether the runtime library at `rt` is a debug build.
+#[cfg(not(target_family = "wasm"))]
+fn is_debug_runtime(rt: &Path) -> bool {
+    fs::read(rt).is_ok_and(|bytes| bytes.windows(DEBUG_RUNTIME_MARK.len()).any(|w| w == DEBUG_RUNTIME_MARK))
+}
+
+/// `-fuse-ld=lld` when `cc` takes it (probed once): lld lays the
+/// executable out tighter than GNU ld (about 40 KB on a hello world).
+/// Not on macOS or Windows, nor when `--link-arg` names a linker.
+#[cfg(not(target_family = "wasm"))]
+fn lld_args(cc: &std::ffi::OsStr, link: &LinkInputs) -> &'static [&'static str] {
+    static LLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if cfg!(any(target_os = "macos", windows)) || link.args.iter().any(|a| a.starts_with("-fuse-ld")) {
+        return &[];
+    }
+    let lld = *LLD.get_or_init(|| {
+        std::process::Command::new(cc)
+            .args(["-fuse-ld=lld", "-Wl,--version"])
+            .output()
+            .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("LLD"))
+    });
+    if lld { &["-fuse-ld=lld"] } else { &[] }
+}
+
 /// A new directory for one link's files.
 #[cfg(not(target_family = "wasm"))]
 fn link_dir() -> Result<PathBuf, String> {
@@ -383,6 +421,7 @@ fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, 
             .args(&link.args)
             .args(system_libs())
             .args(link.strip.cc_args())
+            .args(lld_args(&cc, link))
             .output()
             .map_err(|e| format!("cannot run `{}` to link ({e})", cc.to_string_lossy()))?;
         if !run.status.success() {

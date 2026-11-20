@@ -572,8 +572,8 @@ fn build_coil_rt_once(coil_bin: &Path) -> PathBuf {
     lib
 }
 
-/// `coil package` that fell back to the JIT runner still succeeds, so a test
-/// of an AOT executable has to say it wants one.
+/// `coil package` made an AOT executable (a failed link fails the package;
+/// this also checks it did not package the JIT runner).
 fn assert_linked_native_code(package: &std::process::Output) {
     let said = String::from_utf8_lossy(&package.stderr);
     assert!(package.status.success(), "package failed: {said}");
@@ -771,7 +771,7 @@ fn a_package_runs_a_body_of_many_parameters() {
 }
 
 /// `--strip-symbols` sets what the AOT executable keeps: `none` is the
-/// largest, the default (`debug`) drops debug info, `all` also the symbol
+/// largest, `debug` drops debug info, the default (`all`) also the symbol
 /// table. Each runs the same.
 #[test]
 fn aot_package_strips_symbols_as_asked() {
@@ -783,7 +783,7 @@ fn aot_package_strips_symbols_as_asked() {
     let entry = dir.join("app.coil");
     std::fs::write(&entry, "use io::sync::println;\nfn main() {\n    let _ = println(\"stripped\");\n}\n").unwrap();
     let mut sizes = Vec::new();
-    for extra in [&["--strip-symbols", "none"][..], &[], &["--strip-symbols", "all"]] {
+    for extra in [&["--strip-symbols", "none"][..], &["--strip-symbols", "debug"], &[]] {
         let out = dir.join(format!("app{}", sizes.len()));
         let mut cmd = Command::new(&bin);
         cmd.arg("package");

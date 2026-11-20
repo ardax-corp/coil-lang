@@ -28,6 +28,12 @@ unsafe extern "C" {
     static coil_aot_package_len: u64;
 }
 
+/// A debug build says so in its bytes: `coil package` warns when it links
+/// one (`src/package_app.rs`, `DEBUG_RUNTIME_MARK`).
+#[cfg(debug_assertions)]
+#[used]
+static DEBUG_RUNTIME_MARK: [u8; 20] = *b"coil-rt: debug build";
+
 /// The executable's entry (the C runtime calls it).
 /// Left out of the libtest build, whose harness brings its own `main`.
 #[cfg(not(test))]

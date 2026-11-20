@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Every way a program runs as native code, on this host: JIT, archive, the JIT
 # runner and the AOT executable. Each must print the same, and an AOT package
-# must be one: `coil package` succeeds when it falls back to the JIT runner.
+# must be one (a failed link fails `coil package`; this also checks what it wrote).
 #
 #   scripts/native_platform_smoke.sh TARGET_DIR STDLIB_SRC
 set -euo pipefail

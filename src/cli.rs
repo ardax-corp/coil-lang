@@ -262,9 +262,10 @@ enum RawCommand {
         /// libraries (repeatable; e.g. `-lm` for a static library's needs)
         #[arg(long = "link-arg", value_name = "ARG", allow_hyphen_values = true, action = clap::ArgAction::Append)]
         link_arg: Vec<String>,
-        /// What to strip from the AOT executable: `debug` (default) drops
-        /// the runtime's debug info, `all` also its symbol table, `none`
-        /// keeps both. Coil backtraces use `-g`, not these
+        /// What to strip from the AOT executable: `all` (default) drops
+        /// the runtime's debug info and its symbol table, `debug` only the
+        /// debug info (named frames in `perf`), `none` keeps both. Coil
+        /// backtraces use `-g`, not these
         #[arg(long = "strip-symbols", value_name = "WHAT", value_enum, default_value_t)]
         strip_symbols: crate::package_app::StripSymbols,
         /// Entry `.coil` file
@@ -1074,7 +1075,7 @@ mod tests {
         let stems: Vec<&str> = link.statics.iter().map(|l| l.stem.as_str()).collect();
         assert_eq!(stems, ["sum", "z"]);
         assert_eq!(link.args, ["-lm"]);
-        assert_eq!(link.strip, StripSymbols::Debug);
+        assert_eq!(link.strip, StripSymbols::All);
     }
 
     #[test]
