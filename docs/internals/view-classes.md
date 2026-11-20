@@ -34,7 +34,7 @@ let _ = c.slot(3).add(1).add(2); // writes c.vals[3] twice
 |------|------|-------|
 | E0150 `MisplacedMut` | `mut` marks only a `let` init, a `for` iterable or a view constructor's `mut` field argument; a `mut` field only in a `view class`; a `mut` field takes `mut place` and a plain field never does; no borrow of a scalar (the runtime has no interior pointers) | `hir/build.rs` (`stray_muts`), `typechecking` (`check_borrow_arg`) |
 | E0151 `ViewEscape` | A view is never stored (field, element, static, new object or variant), held inside another type (`Option<View>`, `Vec<View>`), captured by a lambda, or returned except by a method of the object it borrows: a view built over `mut self` (or below it), `self` in the view's own method, or another such call on `self`; a view argument a callee keeps | `hir/view_lint.rs`, `hir/cow.rs` (`check_kept_views`) |
-| E0149 `BorrowConflict` | While a borrow lives (a `mut` local, a view local, `for mut`, or a view method's `mut` fields for the whole body), the borrowed place is not shared, moved, captured or replaced; a place below it may be shared | `hir/cow.rs` (`check_borrows`) |
+| E0149 `BorrowConflict` | While a borrow lives (a `mut` local, a view local, `for mut`, or a view method's `mut` fields for the whole body), the borrowed place is not replaced, and a view's borrowed place is not shared, moved or captured (for any other borrow a second name is a copy, `docs/internals/cow-calls.md` "Pinned objects"); a place below it may be shared | `hir/cow.rs` (`check_borrows`) |
 
 The return rule is what makes method chains safe: a call that returns a
 view borrows its receiver, so `c.slot(i)` is treated as a write of `c`
