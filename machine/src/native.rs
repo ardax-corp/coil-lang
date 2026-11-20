@@ -2718,6 +2718,26 @@ pub unsafe extern "C" fn coil_native_ffi_struct_in(ctx: *mut NativeCtx, id: u64,
     unsafe { (c.host.ffi_struct)(c.machine, id as u32, word, buf, false) }.unwrap_or(0)
 }
 
+/// A direct call to a variadic C function on x86-64 System V goes through
+/// this: the C function's address is the sixth integer argument (`r9`,
+/// after zero words), and `al` must bound the vector registers the call
+/// uses, which Cranelift does not set. It sets `al` to 8 and jumps to the
+/// function, which returns to the caller. The callee reads no integer
+/// register past the ones its arguments took.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "C" fn coil_native_va_call() {
+    core::arch::naked_asm!("mov r11, r9", "mov al, 8", "jmp r11")
+}
+
+/// Only x86-64 System V calls through [`coil_native_va_call`] there.
+#[cfg(not(target_arch = "x86_64"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn coil_native_va_call() {
+    std::process::abort()
+}
+
 /// A direct extern call's struct result: a new record of struct `id`'s C
 /// bytes at `buf`.
 ///
@@ -3092,6 +3112,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_ffi_str", coil_native_ffi_str as *const u8),
         ("coil_native_ffi_struct_in", coil_native_ffi_struct_in as *const u8),
         ("coil_native_ffi_struct_out", coil_native_ffi_struct_out as *const u8),
+        ("coil_native_va_call", coil_native_va_call as *const u8),
         ("coil_native_defer", coil_native_defer as *const u8),
         ("coil_native_claim", coil_native_claim as *const u8),
         ("coil_native_collect", coil_native_collect as *const u8),
@@ -3101,7 +3122,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 46;
+const HELPERS: usize = 47;
 
 #[cfg(test)]
 mod pin_tests {

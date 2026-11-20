@@ -265,7 +265,18 @@ native code reloads its words.
   A result too large for registers comes back through a hidden pointer
   (`StructReturn`: `rdi` on x86-64, `x8` on AArch64; Windows x64 and an AArch64
   struct that would be split between registers and the stack go through the
-  runtime). Callbacks, sized integers (#2886) and variadics go through the runtime. So does every extern call
+  runtime). A variadic function's arguments after the declared ones (`...`) go
+  direct as C's default promotions make them (a `bool` as an `int`; no struct): as
+  declared ones on AArch64 Linux; on Windows x64 a `double` in the integer register
+  of its position, which is where the callee's `va_arg` reads it; on Apple arm64
+  each in an 8-byte stack slot, after zero words that use up the registers the
+  declared arguments leave; on x86-64 System V through `coil_native_va_call`, which
+  sets `al` (an upper bound of the vector registers used, which Cranelift does not
+  set) and jumps to the C function, whose address is the call's last integer
+  argument after zero words, in `r9` (a call that needs all six integer registers
+  goes through the runtime). A variadic call of more than seven arguments keeps its
+  argument tuple and goes through the runtime. Callbacks and sized integers (#2886)
+  go through the runtime. So does every extern call
   of a program that may make a C callback into coil (an extern function that takes
   a `Callback`, or any `ffi::declare` / `ffi::invoke`): a library may keep a callback
   and run it during a later call, and only the runtime's call roots the caller's
