@@ -119,7 +119,10 @@ Minor 3 (reference counts, plan step 2) widens a snapshot enum object's
 payload kinds additively: the header's 24-bit `aux` field holds the packed
 kinds of up to 12 payload words, where it held 4 words' kinds in its low byte.
 An 8.2 runtime reads the low byte, the first 4 words' kinds, which stay exact;
-an 8.2 archive's enums read the same as before.
+an 8.2 archive's enums read the same as before. A snapshot instance's `aux`
+field, `0` before, holds the packed kinds of its own slots that its class row
+leaves unknown (generic fields, `ObjInstance::own_kinds`); an 8.2 runtime
+ignores it and reads those slots as unknown, as it always has.
 
 ## Major 7
 
