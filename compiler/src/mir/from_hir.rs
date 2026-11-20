@@ -5201,7 +5201,9 @@ impl Lower<'_> {
             for i in 0..n as u32 {
                 items.push(self.b.use_local(LocalId(base + i), ty).map_err(mir)?);
             }
-            let arr = self.b.ins_alloc(MirAllocKind::Array, items).map_err(mir)?;
+            // Stamped as the literal it stands for: its element type's kind.
+            let stamp = self.hir.local(HirLocal(local)).ty.as_ref().and_then(array_elem).map_or(0, |e| self.cx.array_stamp(e));
+            let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, stamp.into()).map_err(mir)?;
             let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
             let slot = self.temp();
             self.b.def_local(slot, arr).map_err(mir)?;
