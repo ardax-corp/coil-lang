@@ -672,6 +672,10 @@ struct Plan {
     /// archive 8.2, [`pin_reach`]). The inline share of any other body leaves
     /// out its pinned path and the copy helper call that path makes.
     pins: HashSet<usize>,
+    /// The program may make a C callback into coil ([`may_call_back`]):
+    /// every extern call goes through the runtime, which roots the caller's
+    /// words and reports a panic in the callback.
+    ffi_callbacks: bool,
 }
 
 /// What [`define_all`] made: the declared ids, the bodies defined, the
@@ -998,7 +1002,8 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, body_i
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
     let pins = pin_reach(bodies, &by_label);
-    Plan { compile, by_label, refused, moves, may_gc, speculative, pcs, drops, runtime_reach, used_params, tail_sites, tail_conv, pins }
+    let ffi_callbacks = may_call_back(bodies);
+    Plan { compile, by_label, refused, moves, may_gc, speculative, pcs, drops, runtime_reach, used_params, tail_sites, tail_conv, pins, ffi_callbacks }
 }
 
 /// The labels `inst` names: a call's target, a function value's or code
@@ -1645,6 +1650,24 @@ struct Ids {
     panic: FuncId,
 }
 
+/// Whether C code may call back into coil while an extern call runs: an
+/// extern function takes a callback, or the program declares or invokes
+/// through `ffi::declare` / `ffi::invoke`, whose signatures only the run
+/// knows. A callback a library kept may run during any later call.
+fn may_call_back(bodies: &[NativeBody]) -> bool {
+    // Module setup declares each extern function: its callbacks are the
+    // extern calls'.
+    let setup = |b: &NativeBody| b.name.ends_with("__module_setup");
+    bodies.iter().any(|b| {
+        b.mir.blocks.iter().flat_map(|blk| &blk.insts).any(|i| match i {
+            MirInst::ExternCall { sig, .. } => sig.params.iter().any(|&t| t & 0xFFFF == common::tag::CALLBACK),
+            MirInst::Ffi { op: compiler::native_mir::MirFfiOp::Invoke, .. } => true,
+            MirInst::Ffi { op: compiler::native_mir::MirFfiOp::Declare, .. } => !setup(b),
+            _ => false,
+        })
+    })
+}
+
 /// The C types of an extern call a direct call can make: every parameter
 /// an `int`, `float` or `bool` and the result one of those, a `ptr` or
 /// `void` (`None` result). `None`: one is not (a string, buffer, struct,
@@ -1940,6 +1963,9 @@ struct Lower<'a> {
     entry_sig: cranelift_codegen::ir::SigRef,
     /// The platform's C calling convention, for a direct extern call.
     c_conv: CallConv,
+    /// Extern calls may be direct: no C callback can run coil code
+    /// ([`Plan::ffi_callbacks`]).
+    direct_externs: bool,
     cow: FuncRef,
     cow_field: FuncRef,
     alloc: FuncRef,
@@ -2160,6 +2186,7 @@ impl<'a> Lower<'a> {
             fn_entry_pair,
             entry_sig,
             c_conv: module.isa().default_call_conv(),
+            direct_externs: !plan.ffi_callbacks,
             cow,
             cow_field,
             alloc,
@@ -3355,7 +3382,7 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
-            MirInst::ExternCall { dest, sig, args } if direct_extern(sig).is_some() => {
+            MirInst::ExternCall { dest, sig, args } if self.direct_externs && direct_extern(sig).is_some() => {
                 let (params, ret) = direct_extern(sig).unwrap_or_default();
                 self.direct_extern_call(f, *dest, &args[2..], &params, ret);
             }
