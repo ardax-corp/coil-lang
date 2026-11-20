@@ -105,6 +105,11 @@ pub fn tag_from_variant_name(variant_name: &str) -> Option<u32> {
 pub const FFI_OP_LOAD: u8 = 0;
 pub const FFI_OP_DECLARE: u8 = 1;
 pub const FFI_OP_INVOKE: u8 = 2;
+/// An `extern` call on its words (`ExternCall`): library, function id,
+/// the `n` arguments (operand bits 0..16) and, with operand bit 16, the
+/// `n` arguments' type tags. The result is the C function's word; an error
+/// panics.
+pub const FFI_OP_CALL: u8 = 3;
 
 #[cfg(test)]
 mod tests {

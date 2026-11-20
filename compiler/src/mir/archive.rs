@@ -28,13 +28,17 @@ use crate::layout::MirLayout;
 use crate::mir::gc::LiveRootSet;
 use crate::mir::inst::LocalId;
 use crate::mir::{
-    BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
+    BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirExternSig, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
 };
 
 const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
 /// Bump when the layout changes. A reader takes this format,
-/// [`FORMAT_SCOPED`] and [`FORMAT_UNSCOPED`], and refuses any other.
-const FORMAT: u8 = common::MIR_SECTION_COW_PIN_FORMAT;
+/// [`FORMAT_PINS`], [`FORMAT_SCOPED`] and [`FORMAT_UNSCOPED`], and refuses
+/// any other.
+const FORMAT: u8 = common::MIR_SECTION_EXTERN_FORMAT;
+/// The format before `ExternCall` (archive 8.2): the same layout, with no
+/// extern call in it.
+const FORMAT_PINS: u8 = common::MIR_SECTION_COW_PIN_FORMAT;
 /// The format before the pin ops (archive 8.1): the same layout, with no
 /// `CowPin` / `CowUnpin` in it.
 const FORMAT_SCOPED: u8 = common::MIR_SECTION_SCOPES_FORMAT;
@@ -72,16 +76,17 @@ fn encode_as(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[c
 
 /// The bodies of a section and their body ids.
 pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), String> {
-    let mut r = Reader { b: bytes, i: 0, scoped: false, pins: false };
+    let mut r = Reader { b: bytes, i: 0, scoped: false, pins: false, externs: false };
     if r.take(MAGIC.len())? != MAGIC {
         return Err("not a native MIR section".into());
     }
     let format = r.u8()?;
-    if ![FORMAT, FORMAT_SCOPED, FORMAT_UNSCOPED].contains(&format) {
+    if ![FORMAT, FORMAT_PINS, FORMAT_SCOPED, FORMAT_UNSCOPED].contains(&format) {
         return Err(format!("native MIR format {format}, this coil reads {FORMAT_UNSCOPED} to {FORMAT}"));
     }
     r.scoped = format != FORMAT_UNSCOPED;
-    r.pins = format >= FORMAT;
+    r.pins = format >= FORMAT_PINS;
+    r.externs = format >= FORMAT;
     if r.scoped {
         common::read_inline_scopes(r.b, &mut r.i).ok_or("native MIR section has a bad inline scope table")?;
     }
@@ -197,6 +202,8 @@ const I_LANES_TO_WORDS: u8 = 48;
 // Format 18 (archive 8.2).
 const I_COW_PIN: u8 = 49;
 const I_COW_UNPIN: u8 = 50;
+// Format 19 (archive 8.3).
+const I_EXTERN_CALL: u8 = 51;
 
 const FFI_OPS: [MirFfiOp; 3] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -750,6 +757,27 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*dest);
             w.vs(args);
         }
+        MirInst::ExternCall { dest, sig, args } => {
+            w.u8(I_EXTERN_CALL);
+            w.v(*dest);
+            w.str(&sig.symbol);
+            w.u32(sig.params.len() as u32);
+            for &t in &sig.params {
+                w.u32(t);
+            }
+            w.u32(sig.ret);
+            match &sig.variadic {
+                Some(tags) => {
+                    w.u8(1);
+                    w.u32(tags.len() as u32);
+                    for &t in tags {
+                        w.u32(t);
+                    }
+                }
+                None => w.u8(0),
+            }
+            w.vs(args);
+        }
         MirInst::ByteScan { dest, from, bound, inclusive, backward, streams, scalars, expr } => {
             w.u8(I_BYTE_SCAN);
             w.v(*dest);
@@ -898,6 +926,8 @@ struct Reader<'a> {
     scoped: bool,
     /// The section may hold `CowPin` / `CowUnpin` (format 18 on).
     pins: bool,
+    /// The section may hold `ExternCall` (format 19 on).
+    externs: bool,
 }
 
 impl<'a> Reader<'a> {
@@ -1193,6 +1223,22 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             let (op, operand) = (r.pick(&FFI_OPS, "FFI op")?, r.u32()?);
             MirInst::Ffi { op, operand, dest: r.v()?, args: r.vs()? }
         }
+        I_EXTERN_CALL if r.externs => {
+            let dest = r.v()?;
+            let symbol = r.str()?;
+            let n = r.len()?;
+            let params = (0..n).map(|_| r.u32()).collect::<Result<Vec<_>, String>>()?;
+            let ret = r.u32()?;
+            let variadic = match r.u8()? {
+                0 => None,
+                _ => {
+                    let n = r.len()?;
+                    Some((0..n).map(|_| r.u32()).collect::<Result<Vec<_>, String>>()?)
+                }
+            };
+            let sig = Box::new(MirExternSig { symbol, params, ret, variadic });
+            MirInst::ExternCall { dest, sig, args: r.vs()? }
+        }
         I_BYTE_SCAN => {
             let (dest, from, bound, flags) = (r.v()?, r.v()?, r.v()?, r.u8()?);
             let n = r.len()?;
@@ -1359,7 +1405,7 @@ mod tests {
     fn the_pin_ops_come_back() {
         let b = pinned_body();
         let bytes = bytes(&b);
-        assert_eq!(bytes[MAGIC.len()], 18, "archive 8.2 writes format 18");
+        assert_eq!(bytes[MAGIC.len()], 19, "archive 8.3 writes format 19");
         let (back, _) = decode(&bytes).expect("decode");
         assert_eq!(back[0].mir, b.mir);
     }
@@ -1377,6 +1423,39 @@ mod tests {
         assert_eq!(back[0].mir, b.mir);
         let p = pinned_body();
         let bad = encode_as(std::slice::from_ref(&p), &HashMap::new(), &scopes(), FORMAT_SCOPED);
+        assert!(decode(&bad).is_err());
+    }
+
+    /// `f` with extern calls: `v3 = extern sum v0, v0, v0, v0`, and a
+    /// variadic one with its arguments' tags.
+    fn extern_body() -> NativeBody {
+        let mut b = body();
+        b.mir.types.extend([MirTy::I64, MirTy::F64]);
+        let sig = MirExternSig { symbol: "sum".into(), params: vec![1, 1], ret: 1, variadic: None };
+        let varargs = MirExternSig { symbol: "sum_n".into(), params: vec![1], ret: 2, variadic: Some(vec![1, 2 | 7 << 16]) };
+        let insts = &mut b.mir.blocks[0].insts;
+        insts.insert(1, MirInst::ExternCall { dest: ValueId(3), sig: Box::new(sig), args: vec![ValueId(0); 4] });
+        insts.insert(2, MirInst::ExternCall { dest: ValueId(4), sig: Box::new(varargs), args: vec![ValueId(0); 4] });
+        b
+    }
+
+    #[test]
+    fn the_extern_calls_come_back() {
+        let b = extern_body();
+        let (back, _) = decode(&bytes(&b)).expect("decode");
+        assert_eq!(back[0].mir, b.mir);
+    }
+
+    /// A section of an 8.2 archive (format 18) reads; one that holds an
+    /// extern call is no section 8.2 wrote, and is refused.
+    #[test]
+    fn a_format_18_section_reads_and_holds_no_extern_call() {
+        let p = pinned_body();
+        let old = encode_as(std::slice::from_ref(&p), &HashMap::new(), &scopes(), FORMAT_PINS);
+        assert_eq!(old[MAGIC.len()], 18);
+        assert_eq!(decode(&old).expect("decode format 18").0[0].mir, p.mir);
+        let e = extern_body();
+        let bad = encode_as(std::slice::from_ref(&e), &HashMap::new(), &scopes(), FORMAT_PINS);
         assert!(decode(&bad).is_err());
     }
 

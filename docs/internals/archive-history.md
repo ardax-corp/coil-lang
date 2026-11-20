@@ -5,8 +5,8 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs` (18 today; a reader takes
-18, 17 and 16 and refuses any other).
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (19 today; a reader takes
+19, 18, 17 and 16 and refuses any other).
 
 ## Major 8
 
@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 2, below, is the
-current version, 8.2 with MIR section `FORMAT` 18). A runtime refuses a major
+only add something to the format raise the minor (minor 3, below, is the
+current version, 8.3 with MIR section `FORMAT` 19). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -104,6 +104,17 @@ pinned object hands out a copy instead of setting the shared flag, and a copy's
 pinned children are copied for it ([cow-calls.md](cow-calls.md), "Pinned objects").
 The AOT layout fingerprint covers the pin's offset, so an object built against the
 old header is refused. An 8.1 archive loads and runs unchanged (no op of it pins).
+
+Minor 3 (direct extern calls, step 1) adds `ExternCall`, additively: MIR section
+`FORMAT` 19 has one more instruction (tag 51: dest, the C symbol, the declared
+parameters' tags, the result's tag, a variadic byte and, when it is set, the tags of
+the call's arguments, then the argument values: library, function id and the
+arguments' words). An `extern` block's call lowers to it instead of `Ffi` `invoke`
+on an argument tuple with its `Result` unwrapped: the runtime's FFI op 3
+(`common::FFI_OP_CALL`) takes the words as they are, returns the C function's word
+and panics with a call's error. Format 18 is format 19 without tag 51, and the reader
+takes it (and 17 and 16); an older section that holds tag 51 is refused. An 8.2
+archive loads and runs unchanged: its extern calls are `invoke`s.
 
 ## Major 7
 

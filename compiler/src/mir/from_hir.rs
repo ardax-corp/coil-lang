@@ -864,6 +864,9 @@ pub struct HirFfi {
     pub unwrap: bool,
     /// The niche word the result converts to.
     pub niche: Option<MirTy>,
+    /// An `extern` call on its words ([`MirInst::ExternCall`]): the
+    /// operands are its library, function id and arguments.
+    pub extern_sig: Option<super::inst::MirExternSig>,
 }
 
 /// How `Lower::pair_eq` compares two two-word values' words.
@@ -8028,6 +8031,11 @@ impl Lower<'_> {
                 return Ok(Val::Never);
             };
             words.push(w);
+        }
+        if let Some(sig) = &site.extern_sig {
+            let sig = sig.clone();
+            let w = self.at_expr(id, |l| l.b.ins_extern_call(sig, words, ret.unwrap_or(MirTy::I64)).map_err(mir))?;
+            return Ok(if ret.is_some() { Val::V(w) } else { Val::Unit });
         }
         let obj = self.at_expr(id, |l| l.b.ins_ffi(site.op, site.operand, words).map_err(mir))?;
         if !site.unwrap {

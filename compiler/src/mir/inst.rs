@@ -476,6 +476,17 @@ pub enum MirInst {
         operand: u32,
         args: Vec<ValueId>,
     },
+    /// A call of a function an `extern` block declares: `args` are its
+    /// library handle and function id (the module's statics), then the
+    /// arguments' words; `dest` is the C function's result word (`0` for
+    /// a `void` one). A call the runtime cannot make panics with its
+    /// error. `sig` is the declared signature, for a direct C-ABI call.
+    /// An effect barrier, as [`MirInst::Ffi`].
+    ExternCall {
+        dest: ValueId,
+        sig: Box<MirExternSig>,
+        args: Vec<ValueId>,
+    },
     /// `CALL` (COI-291 / B3). Args stay on the operand stack
     /// (LOAD / BinSlotImm convoy). One-word `Entry` uses `dest` only;
     /// two-slot `[payload, tag]` sets `dest_hi`. `STORE` only when a dest
@@ -985,6 +996,23 @@ impl VecLoopKind {
     }
 }
 
+/// The most words an [`MirInst::ExternCall`] passes the runtime: its
+/// library, function id and arguments, and a variadic call's tags (a
+/// host call's limit). A call with more keeps the argument tuple.
+pub const EXTERN_CALL_MAX_WORDS: usize = 16;
+
+/// The signature of an [`MirInst::ExternCall`]: the C symbol, the
+/// declared parameters' and the result's FFI type tags (each
+/// `encode_tag_operand(tag, aux)`) and, for a variadic function, the tags
+/// of every argument of this call.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MirExternSig {
+    pub symbol: String,
+    pub params: Vec<u32>,
+    pub ret: u32,
+    pub variadic: Option<Vec<u32>>,
+}
+
 /// The FFI opcode a [`MirInst::Ffi`] reconstructs.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirFfiOp {
@@ -1135,6 +1163,7 @@ impl MirInst {
             | Self::Phi { dest, .. }
             | Self::HostInvoke { dest, .. }
             | Self::Ffi { dest, .. }
+            | Self::ExternCall { dest, .. }
             | Self::Call { dest, .. }
             | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
@@ -1187,6 +1216,7 @@ impl MirInst {
             | Self::Phi { dest, .. }
             | Self::HostInvoke { dest, .. }
             | Self::Ffi { dest, .. }
+            | Self::ExternCall { dest, .. }
             | Self::Call { dest, .. }
             | Self::CallIndirect { dest, .. }
             | Self::MatchPayload { dest, .. }
@@ -1253,7 +1283,7 @@ impl MirInst {
             Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } | Self::StrEq { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
-            Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => args.clone(),
+            Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::ExternCall { args, .. } | Self::Call { args, .. } => args.clone(),
             Self::CallIndirect { callee, args, .. } => args.iter().copied().chain([*callee]).collect(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
             Self::ProductLoad { object, .. } => vec![*object],
@@ -1314,7 +1344,7 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::Call { args, .. } => {
+            Self::HostInvoke { args, .. } | Self::Ffi { args, .. } | Self::ExternCall { args, .. } | Self::Call { args, .. } => {
                 for v in args.iter_mut() {
                     *v = map(*v);
                 }
