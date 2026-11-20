@@ -168,3 +168,107 @@ const char *greeting(void) {
 const char *no_string(void) {
     return 0;
 }
+
+/// Structs by value (direct extern call tests): two doubles, an int and
+/// a double, three ints (passed in memory), and a nested struct.
+typedef struct {
+    double x;
+    double y;
+} Vec2;
+
+Vec2 vec2_add(Vec2 a, Vec2 b) {
+    Vec2 r = {a.x + b.x, a.y + b.y};
+    return r;
+}
+
+typedef struct {
+    int64_t id;
+    double w;
+} Tagged;
+
+Tagged tagged_scale(Tagged t, int64_t k) {
+    Tagged r = {t.id + 1, t.w * (double)k};
+    return r;
+}
+
+typedef struct {
+    int64_t a;
+    int64_t b;
+    int64_t c;
+} Triple;
+
+Triple triple_rot(Triple t) {
+    Triple r = {t.b, t.c, t.a};
+    return r;
+}
+
+int64_t triple_sum(int64_t k, Triple t) {
+    return k * (t.a + t.b + t.c);
+}
+
+Point point_swap(Point p) {
+    Point r = {p.y, p.x};
+    return r;
+}
+
+typedef struct {
+    Point at;
+    _Bool on;
+} Flag;
+
+Flag flag_flip(Flag f) {
+    Flag r = {{f.at.x + 1, f.at.y + 1}, !f.on};
+    return r;
+}
+
+Vec2 vec2_make(double x, double y) {
+    Vec2 r = {x, y};
+    return r;
+}
+
+Tagged tagged_make(int64_t id, double w) {
+    Tagged r = {id, w};
+    return r;
+}
+
+Triple triple_make(int64_t a, int64_t b, int64_t c) {
+    Triple r = {a, b, c};
+    return r;
+}
+
+Point point_make(int64_t x, int64_t y) {
+    Point r = {(int32_t)x, (int32_t)y};
+    return r;
+}
+
+Flag flag_make(int64_t x, int64_t y, _Bool on) {
+    Flag r = {{(int32_t)x, (int32_t)y}, on};
+    return r;
+}
+
+/// One number of each struct's fields, to check them from coil.
+double vec2_code(Vec2 v) {
+    return v.x * 100.0 + v.y;
+}
+
+double tagged_code(Tagged t) {
+    return (double)t.id * 100.0 + t.w;
+}
+
+int64_t triple_code(Triple t) {
+    return t.a * 100 + t.b * 10 + t.c;
+}
+
+int64_t point_code(Point p) {
+    return p.x * 10 + p.y;
+}
+
+int64_t flag_code(Flag f) {
+    return f.at.x * 100 + f.at.y * 10 + f.on;
+}
+
+/// Seven `int64_t`s, then a struct: the struct finds no registers left and
+/// goes on the stack (x86-64), after the seventh.
+int64_t late_vec2(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, Tagged t) {
+    return a + b + c + d + e + f + g + t.id;
+}

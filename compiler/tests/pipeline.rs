@@ -1634,6 +1634,18 @@ fn example_ffi_strings_prints_each_result() {
 
 #[cfg(unix)]
 #[test]
+fn example_ffi_structs_prints_each_result() {
+    let libsum = ensure_ffi_libsum_built();
+    if !libsum.exists() {
+        ffi_soft_skip(&format!("{} not built", libsum.display()));
+        return;
+    }
+    let output = run_ffi_example_with_lib("examples/ffi_structs.coil", &libsum);
+    assert_eq!(output, "2.0 3.0 42 5.0 231 12 43 8 9 true 891 203.0 56 70");
+}
+
+#[cfg(unix)]
+#[test]
 fn example_ffi_varargs_prints_60() {
     let libsum = ensure_ffi_libsum_built();
     if !libsum.exists() {
