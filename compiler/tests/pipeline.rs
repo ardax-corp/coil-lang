@@ -548,6 +548,35 @@ fn main() { let _ = add(1, 2); }
     );
 }
 
+/// A variadic argument held in an unannotated local is an `int` (#2892),
+/// and the call's tags say so.
+#[test]
+fn variadic_extern_argument_from_unannotated_local() {
+    let mut pipeline = test_pipeline();
+    pipeline.grant_dload_allow("plugin");
+    let compiled = compile_ok(
+        &mut pipeline,
+        r#"
+extern "plugin" {
+    fn sum_n(int n, ...) -> int;
+}
+fn main() {
+    let i = 0;
+    let x = 1.5;
+    let _ = sum_n(2, i, x);
+}
+"#,
+    );
+    let int = common::encode_tag_operand(common::tag::INT, 0);
+    let float = common::encode_tag_operand(common::tag::FLOAT, 0);
+    assert!(
+        compiled
+            .all_insts()
+            .any(|i| matches!(i, MirInst::ExternCall { sig, .. } if sig.variadic.as_deref() == Some(&[int, int, float][..]))),
+        "the variadic call's tags must be int, int, float"
+    );
+}
+
 #[test]
 fn granted_ffi_exec_extern_compiles() {
     let mut pipeline = test_pipeline();
