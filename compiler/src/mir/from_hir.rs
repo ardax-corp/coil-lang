@@ -7460,14 +7460,30 @@ impl Lower<'_> {
 
     /// `new C(..)`: every argument, then the object and each field's store
     /// (no argument sees the object, so none runs with it allocated).
+    /// The object records its arguments' word kinds, by slot, for the
+    /// fields its class row leaves unknown (generic ones,
+    /// `ObjInstance::own_kinds`); a shared body stamps those of its type
+    /// parameters from its `kinds` word.
     fn make_object(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
         let type_id = self.news(id).expect("new object").0;
         let Some(words) = self.object_words(id, args)? else {
             return Ok(Val::Never);
         };
+        // A flat two-word field's first word is the row's (its tail slot
+        // follows the fields).
+        let tails = self.new_fact(id).tails.clone();
+        let tys: Vec<Option<Ty>> = args
+            .iter()
+            .enumerate()
+            .map(|(i, &a)| if matches!(tails.get(i), Some(Some(_))) { None } else { self.expr_ty(a).cloned() })
+            .collect();
+        let kinds = common::pack_word_kinds(tys.iter().map(|t| t.as_ref().map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t))));
         let nfields = words.len() as u32;
-        let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+        let obj = self.b.ins_alloc_kinds(MirAllocKind::Object { type_id, nfields }, Vec::new(), kinds).map_err(mir)?;
         let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+        if self.kinds.is_some() {
+            self.stamp_product_from_kinds(obj, &tys)?;
+        }
         for (slot, v) in words.into_iter().enumerate() {
             self.b.ins_heap_field_store(obj, v, slot as u32).map_err(mir)?;
         }

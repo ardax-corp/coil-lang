@@ -37,7 +37,9 @@ pub fn alloc_call(
         MirAllocKind::Array => call(ALLOC_ARRAY, n, u64::from(kinds), None),
         MirAllocKind::Lanes { tag_mask } => call(ALLOC_LANES, n, tag_mask, None),
         MirAllocKind::Enum { tag } => call(ALLOC_ENUM, n, u64::from(tag) | (kinds_or_packed() << 32), None),
-        MirAllocKind::Object { type_id, nfields } => call(ALLOC_OBJECT, u64::from(nfields), u64::from(type_id), None),
+        MirAllocKind::Object { type_id, nfields } => {
+            call(ALLOC_OBJECT, u64::from(nfields), u64::from(type_id) | u64::from(kinds) << 32, None)
+        }
         MirAllocKind::DropEnum { tag, type_id } => {
             call(ALLOC_DROP_ENUM, n + 1, u64::from(tag) | (kinds_or_packed() << 32), Some(u64::from(type_id)))
         }

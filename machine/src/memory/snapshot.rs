@@ -129,8 +129,8 @@ impl Heap {
                 e.type_id = *type_id;
                 self.alloc(e, Object::Enum).0
             }
-            SnapObject::Instance { type_id, words } => {
-                self.alloc(ObjInstance::with_slots(*type_id, zeros(words.len())), Object::Instance).0
+            SnapObject::Instance { type_id, kinds, words } => {
+                self.alloc(ObjInstance::with_slots(*type_id, zeros(words.len())).with_own_kinds(*kinds), Object::Instance).0
             }
         }
     }
@@ -237,7 +237,7 @@ impl Capture<'_> {
                 let kinds = self.heap.class_field_kinds(inst.type_id);
                 let words = slots
                     .iter()
-                    .zip(common::class_slot_kinds(kinds, slots))
+                    .zip(common::class_slot_kinds(kinds, inst.own_kinds(), slots))
                     .enumerate()
                     .map(|(i, (v, kind))| {
                         self.word(*v, kind, parent(SnapStep::Field { type_id: inst.type_id, index: i }))
@@ -245,6 +245,7 @@ impl Capture<'_> {
                     .collect::<Result<_, _>>()?;
                 SnapObject::Instance {
                     type_id: inst.type_id,
+                    kinds: inst.own_kinds(),
                     words,
                 }
             }

@@ -81,11 +81,13 @@ pub fn push_tagged_entry(kinds: &mut Vec<u8>, tag_slot: u16, pointer_tags: u64) 
 
 /// The kind of each of an instance's `slots` under its class row `kinds`,
 /// with every [`WORD_TAGGED`] slot resolved by its current tag to
-/// [`WORD_POINTER`] or [`WORD_SCALAR`]. A slot past the row, or a tagged
-/// one whose entry is missing or names a slot out of range, is
-/// [`WORD_UNKNOWN`].
-pub fn class_slot_kinds<'a>(kinds: &'a [u8], slots: &'a [crate::Value]) -> impl Iterator<Item = u8> + 'a {
-    let mut walk = ClassSlotKinds::new(kinds, slots.len());
+/// [`WORD_POINTER`] or [`WORD_SCALAR`]. A slot the row leaves unknown (a
+/// generic field) or that is past the row takes its kind from the
+/// instance's own packed kinds `own` (its type arguments', recorded where
+/// it was made). A tagged slot whose entry is missing or names a slot out
+/// of range is [`WORD_UNKNOWN`].
+pub fn class_slot_kinds<'a>(kinds: &'a [u8], own: PackedKinds, slots: &'a [crate::Value]) -> impl Iterator<Item = u8> + 'a {
+    let mut walk = ClassSlotKinds::new(kinds, slots.len()).with_own(own);
     (0..slots.len()).map(move |_| walk.next_kind(slots))
 }
 
@@ -95,6 +97,7 @@ pub fn class_slot_kinds<'a>(kinds: &'a [u8], slots: &'a [crate::Value]) -> impl 
 pub struct ClassSlotKinds<'a> {
     kinds: &'a [u8],
     entries: std::slice::Iter<'a, [u8; TAGGED_ENTRY_BYTES]>,
+    own: PackedKinds,
     next: usize,
 }
 
@@ -103,7 +106,15 @@ impl<'a> ClassSlotKinds<'a> {
     #[inline]
     pub fn new(kinds: &'a [u8], n: usize) -> Self {
         let entries = kinds.get(n..).unwrap_or_default().as_chunks::<TAGGED_ENTRY_BYTES>().0.iter();
-        Self { kinds, entries, next: 0 }
+        Self { kinds, entries, own: 0, next: 0 }
+    }
+
+    /// The walk with the instance's own packed kinds for the slots its row
+    /// leaves unknown ([`class_slot_kinds`]).
+    #[inline]
+    pub fn with_own(mut self, own: PackedKinds) -> Self {
+        self.own = own;
+        self
     }
 
     /// The kind of the next slot, its tag (if it has one) read from `slots`.
@@ -122,8 +133,8 @@ impl<'a> ClassSlotKinds<'a> {
                     Some(if tag < 64 && mask >> tag & 1 == 1 { WORD_POINTER } else { WORD_SCALAR })
                 })
                 .unwrap_or(WORD_UNKNOWN),
+            Some(WORD_UNKNOWN) | None => packed_word_kind(self.own, i),
             Some(kind) => kind,
-            None => WORD_UNKNOWN,
         }
     }
 }
@@ -399,7 +410,7 @@ mod tests {
         push_tagged_entry(&mut kinds, 3, 0b10);
         let at = |tag: i64| {
             let slots = [crate::Value::from(0i64), crate::Value::from(8i64), crate::Value::from(1i64), crate::Value::from(tag)];
-            class_slot_kinds(&kinds, &slots).collect::<Vec<_>>()
+            class_slot_kinds(&kinds, 0, &slots).collect::<Vec<_>>()
         };
         assert_eq!(at(1), [WORD_POINTER, WORD_POINTER, WORD_SCALAR, WORD_SCALAR]);
         assert_eq!(at(0), [WORD_POINTER, WORD_SCALAR, WORD_SCALAR, WORD_SCALAR]);
@@ -407,7 +418,19 @@ mod tests {
         // No trailer, or a slot past the row: unknown.
         let bare = [WORD_TAGGED];
         let one = [crate::Value::from(1i64), crate::Value::from(1i64)];
-        assert_eq!(class_slot_kinds(&bare, &one).collect::<Vec<_>>(), [WORD_UNKNOWN, WORD_UNKNOWN]);
+        assert_eq!(class_slot_kinds(&bare, 0, &one).collect::<Vec<_>>(), [WORD_UNKNOWN, WORD_UNKNOWN]);
+    }
+
+    #[test]
+    fn a_generic_slot_takes_the_instance_s_own_kind() {
+        // Slots: [n, value: T, next: T]; the row knows only `n`.
+        let row = [WORD_SCALAR, WORD_UNKNOWN];
+        let own = pack_word_kinds([WORD_UNKNOWN, WORD_POINTER, WORD_SCALAR]);
+        let slots = [crate::Value::from(1i64); 3];
+        assert_eq!(class_slot_kinds(&row, own, &slots).collect::<Vec<_>>(), [WORD_SCALAR, WORD_POINTER, WORD_SCALAR]);
+        // A row kind wins over the instance's.
+        let own = pack_word_kinds([WORD_POINTER]);
+        assert_eq!(class_slot_kinds(&row, own, &slots).collect::<Vec<_>>(), [WORD_SCALAR, WORD_UNKNOWN, WORD_UNKNOWN]);
     }
 
     fn program(version: u32) -> Vec<u8> {

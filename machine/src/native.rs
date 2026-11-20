@@ -1752,8 +1752,9 @@ pub use common::native_alloc::{
 /// - [`ALLOC_ARRAY`]: `extra` is the element word kind (`0`: none);
 /// - [`ALLOC_ENUM`]: `extra` is `tag | kinds << 32`, a tuple's tag
 ///   [`common::PRODUCT_TAG`];
-/// - [`ALLOC_OBJECT`]: `extra` is the type id and `n` the field count
-///   (`words` unused: stores fill the fields);
+/// - [`ALLOC_OBJECT`]: `extra` is `type_id | kinds << 32`, `kinds` the
+///   packed kinds of its generic fields ([`ObjInstance::own_kinds`]), and
+///   `n` the field count (`words` unused: stores fill the fields);
 /// - [`ALLOC_FN`]: a function value, as `MakeFn`: `extra` is the entry id
 ///   `| operand << 32`, the words its captures and filled parameters, then
 ///   the filled mask;
@@ -1833,7 +1834,8 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             heap.alloc(ObjEnum::new(tag, payload), Object::Enum).0.addr()
         }
         ALLOC_OBJECT => {
-            let (_, r) = heap.alloc(ObjInstance::with_type_id_and_fields(extra as u32, n), Object::Instance);
+            let inst = ObjInstance::with_type_id_and_fields(extra as u32, n).with_own_kinds((extra >> 32) as u32);
+            let (_, r) = heap.alloc(inst, Object::Instance);
             r.as_ptr().addr() as u64
         }
         ALLOC_CORO => {

@@ -1,0 +1,72 @@
+// A generic class's fields of its type parameters take their word kinds
+// from the type arguments where the object is made (in ground code from
+// the static types, in a shared body from its `kinds` word), and wide
+// tuples carry the kinds of all their words: collections in between keep
+// every object and leave every number alone.
+// @flags --clone-budget 0
+use tests::assert;
+use gc::collect;
+
+class Node {
+    pub v: int,
+}
+
+class Pair<A, B> {
+    pub a: A,
+    pub b: B,
+    pub n: int,
+}
+
+fn pair<A, B>(A a, B b) -> Pair<A, B> {
+    return new Pair(a, b, 7);
+}
+
+fn wide<T>(T x) -> (int, int, int, int, int, T) {
+    return (1, 2, 3, 4, 5, x);
+}
+
+test("ground generic objects keep their objects and numbers") {
+    let ps: Vec<Pair<Node, int>> = Vec::new();
+    let i = 0;
+    while i < 200 {
+        ps.push(new Pair(new Node(i), i * 2, i));
+        i += 1;
+    }
+    collect();
+    let total = 0;
+    for p in ps {
+        total += p.a.v + p.b + p.n;
+    }
+    assert!(total == 4 * (199 * 200 / 2));
+}
+
+test("objects made in a shared body keep their objects and numbers") {
+    let ps: Vec<Pair<int, Node>> = Vec::new();
+    let i = 0;
+    while i < 200 {
+        ps.push(pair(i, new Node(i)));
+        i += 1;
+    }
+    collect();
+    let total = 0;
+    for p in ps {
+        total += p.a + p.b.v + p.n;
+    }
+    assert!(total == 2 * (199 * 200 / 2) + 7 * 200);
+}
+
+test("a wide tuple's last word is an object") {
+    let ts: Vec<(int, int, int, int, int, Node)> = Vec::new();
+    let i = 0;
+    while i < 100 {
+        ts.push(wide(new Node(i)));
+        i += 1;
+    }
+    collect();
+    let total = 0;
+    for t in ts {
+        let (a, _, _, _, e, n) = t;
+        total += a + e + n.v;
+    }
+    assert!(total == 6 * 100 + 99 * 100 / 2);
+}

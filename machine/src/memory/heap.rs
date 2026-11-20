@@ -2495,7 +2495,8 @@ macro_rules! walk_slots {
         match $obj {
             Object::Instance(i) => {
                 let inst = i.$get();
-                let mut kinds = common::ClassSlotKinds::new($heap.class_field_kinds(inst.type_id), inst.storage.as_slice().len());
+                let mut kinds = common::ClassSlotKinds::new($heap.class_field_kinds(inst.type_id), inst.storage.as_slice().len())
+                    .with_own(inst.storage.kinds());
                 let slots = & $($m)? *inst.storage.$slice();
                 for i in 0..slots.len() {
                     let kind = kinds.next_kind(slots);
@@ -2705,6 +2706,7 @@ impl Object {
             Self::Instance(i) => format!("class {}", i.as_ref().type_id),
             Self::Array(a) if a.as_ref().lanes() > 1 => "a lane array's pointer lane".into(),
             Self::Array(_) => "a pointer-kind array".into(),
+            Self::Enum(e) => format!("an enum payload / tuple (tag {}, {} words, kinds {:#x})", e.as_ref().tag, e.as_ref().payload.as_slice().len(), e.as_ref().payload.kinds()),
             _ => "an enum payload / tuple".into(),
         }
     }
@@ -3016,8 +3018,10 @@ pub const INSTANCE_INLINE_FIELDS: usize = ENUM_INLINE_ARITY;
 pub struct ObjInstance {
     /// Compile-time class identity (`0` = none).
     pub type_id: u32,
-    /// The fields' words; their kinds come from the class row, so the
-    /// store's own packed kinds stay `0`.
+    /// The fields' words. Their kinds come from the class row; the store's
+    /// own packed kinds are those of the slots the row leaves unknown
+    /// (generic fields), from the type arguments where the instance was
+    /// made (`common::ClassSlotKinds::with_own`).
     storage: EnumPayload,
 }
 
@@ -3059,6 +3063,24 @@ impl ObjInstance {
 
     pub fn slot_len(&self) -> usize {
         self.storage.as_slice().len()
+    }
+
+    /// Packed kinds of the slots the class row leaves unknown, by slot.
+    #[inline]
+    pub fn own_kinds(&self) -> common::PackedKinds {
+        self.storage.kinds()
+    }
+
+    /// `self` with own slot kinds `k` ([`Self::own_kinds`]).
+    #[must_use]
+    pub fn with_own_kinds(self, k: common::PackedKinds) -> Self {
+        Self { storage: self.storage.with_kinds(k), type_id: self.type_id }
+    }
+
+    /// Add own slot kinds `k` to those recorded (`vec_stamp`).
+    #[inline]
+    pub fn add_own_kinds(&mut self, k: common::PackedKinds) {
+        self.storage.add_kinds(k);
     }
 
     pub fn slots(&self) -> &[Value] {
