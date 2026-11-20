@@ -1903,6 +1903,7 @@ impl Checker {
         }
         self.check_duplicate_classes(ast);
         self.check_duplicate_consts(ast);
+        self.check_imports_against_local_items(ast);
         self.check_builtin_class_names(ast);
         self.pre_register_readonly_classes(ast);
         self.collect_variadic_templates(ast);
@@ -16204,6 +16205,46 @@ impl Checker {
     /// A second top-level `const` of a name already declared in this module
     /// would silently replace the first (#1960): report it. A `const` whose
     /// initializer runs at startup is a lifted static, the same declaration.
+    /// `use m::x` where this module also declares an item `x` (#2866):
+    /// one local name bound twice, E0133 as two imports of it are, rather
+    /// than the local item silently winning.
+    fn check_imports_against_local_items(&mut self, ast: &Output) {
+        fn walk<'a>(node: &'a Output<'a>, uses: &mut Vec<(String, String, Range<usize>)>, items: &mut HashSet<String>) {
+            let inner = Checker::pre_pass_unwrap_stmt(node);
+            match inner.1.as_ref() {
+                Expression::Use { path, name, alias } if name != "*" => {
+                    let local = alias.clone().unwrap_or_else(|| name.clone());
+                    uses.push((local, format!("{}::{name}", path.join("::")), node.0.into_range()));
+                }
+                Expression::Use { .. } => {}
+                Expression::Program(children) | Expression::Fragment(children) => {
+                    for child in children {
+                        walk(child, uses, items);
+                    }
+                }
+                _ => crate::typechecking::resolve::item_names(inner, items),
+            }
+        }
+        let mut uses = Vec::new();
+        let mut items = HashSet::new();
+        walk(ast, &mut uses, &mut items);
+        for (local, fqn, range) in uses {
+            if !items.contains(&local) {
+                continue;
+            }
+            let mut msg = Message::error(
+                ErrorCode::DuplicateImport,
+                format!("`{local}` is both imported (as `{fqn}`) and declared in this module"),
+                range,
+            );
+            msg.with_help(format!(
+                "rename the local `{local}`, or import the other one under another name, e.g. `use {} as other`",
+                fqn
+            ));
+            self.messages.push(msg);
+        }
+    }
+
     fn check_duplicate_consts(&mut self, ast: &Output) {
         fn const_name<'a>(node: &'a Expression<'a>) -> Option<&'a str> {
             match node {
