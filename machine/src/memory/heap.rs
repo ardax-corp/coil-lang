@@ -3647,6 +3647,13 @@ impl ObjArray {
         }
     }
 
+    /// `self` stamped with element kind `kind` ([`Self::set_elem_kind`]),
+    /// for arrays the runtime makes of words it knows.
+    pub fn of_kind(mut self, kind: u8) -> Self {
+        self.set_elem_kind(kind);
+        self
+    }
+
     pub fn with_capacity(n: usize) -> Self {
         Self {
             accounted: n * mem::size_of::<Value>(),

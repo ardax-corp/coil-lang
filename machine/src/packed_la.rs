@@ -163,12 +163,13 @@ fn pack_i64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<i64>
     true
 }
 
-fn alloc_aggregate(heap: &mut Heap, values: Vec<Value>, is_tuple: bool) -> Value {
+/// A tuple or an array of `values`, whose array words are `kind` (`common::WORD_*`).
+fn alloc_aggregate(heap: &mut Heap, values: Vec<Value>, is_tuple: bool, kind: u8) -> Value {
     let addr = if is_tuple {
         let (object, _) = heap.alloc(ObjEnum::tuple(&values, 0), Object::Enum);
         object.addr()
     } else {
-        let arr = ObjArray::from_values(values, heap);
+        let arr = ObjArray::from_values(values, heap).of_kind(kind);
         let (object, _) = heap.alloc(arr, Object::Array);
         object.addr()
     };
@@ -187,9 +188,9 @@ fn alloc_nested_matrix(
     for i in 0..m {
         let start = i * n;
         let row = cells[start..start + n].to_vec();
-        rows.push(alloc_aggregate(heap, row, row_is_tuple));
+        rows.push(alloc_aggregate(heap, row, row_is_tuple, common::WORD_SCALAR));
     }
-    alloc_aggregate(heap, rows, outer_is_tuple)
+    alloc_aggregate(heap, rows, outer_is_tuple, common::WORD_POINTER)
 }
 
 fn f64_to_values(cells: &[f64]) -> Vec<Value> {
@@ -610,7 +611,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
             wrap(&mut o);
             i64_to_values(&o[..len])
         };
-        return Ok(alloc_aggregate(heap, out, is_tuple));
+        return Ok(alloc_aggregate(heap, out, is_tuple, common::WORD_SCALAR));
     }
 
     if args.len() < 3 {
@@ -681,7 +682,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
             wrap(&mut o);
             i64_to_values(&o[..len])
         };
-        return Ok(alloc_aggregate(heap, out, is_tuple));
+        return Ok(alloc_aggregate(heap, out, is_tuple, common::WORD_SCALAR));
     }
 
     let out = if is_float {
@@ -732,7 +733,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Result<Value, IntTra
         wrap(&mut o);
         i64_to_values(&o[..len])
     };
-    Ok(alloc_aggregate(heap, out, is_tuple))
+    Ok(alloc_aggregate(heap, out, is_tuple, common::WORD_SCALAR))
 }
 
 /// Stable host-native names (also used by codegen `native_id` lookup).
@@ -749,24 +750,24 @@ mod tests {
 
     fn alloc_array(heap: &mut Heap, elems: Vec<i64>) -> Value {
         let values: Vec<Value> = elems.into_iter().map(Value::from).collect();
-        alloc_aggregate(heap, values, false)
+        alloc_aggregate(heap, values, false, common::WORD_SCALAR)
     }
 
     fn alloc_matrix2(heap: &mut Heap, rows: [[i64; 2]; 2]) -> Value {
         let r0 = alloc_array(heap, vec![rows[0][0], rows[0][1]]);
         let r1 = alloc_array(heap, vec![rows[1][0], rows[1][1]]);
-        alloc_aggregate(heap, vec![r0, r1], false)
+        alloc_aggregate(heap, vec![r0, r1], false, common::WORD_POINTER)
     }
 
     fn alloc_array_f(heap: &mut Heap, elems: Vec<f64>) -> Value {
         let values: Vec<Value> = elems.into_iter().map(Value::from).collect();
-        alloc_aggregate(heap, values, false)
+        alloc_aggregate(heap, values, false, common::WORD_SCALAR)
     }
 
     fn alloc_matrix2_f(heap: &mut Heap, rows: [[f64; 2]; 2]) -> Value {
         let r0 = alloc_array_f(heap, vec![rows[0][0], rows[0][1]]);
         let r1 = alloc_array_f(heap, vec![rows[1][0], rows[1][1]]);
-        alloc_aggregate(heap, vec![r0, r1], false)
+        alloc_aggregate(heap, vec![r0, r1], false, common::WORD_POINTER)
     }
 
     fn aggregate_elements(heap: &Heap, v: Value) -> Option<Vec<Value>> {

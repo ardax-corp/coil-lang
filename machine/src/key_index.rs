@@ -76,7 +76,7 @@ pub fn host_table(heap: &mut Heap, args: &[Value]) -> Value {
     let cap = cap_for(n);
     let mut cells = vec![Value::from(EMPTY); cap + 1];
     cells[cap] = Value::from(0i64);
-    let (obj, _) = heap.alloc(ObjArray::new(cells), Object::Array);
+    let (obj, _) = heap.alloc(ObjArray::new(cells).of_kind(common::WORD_SCALAR), Object::Array);
     Value::from(obj.addr())
 }
 

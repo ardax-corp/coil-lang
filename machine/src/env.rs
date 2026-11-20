@@ -85,7 +85,7 @@ fn alloc_string_array(heap: &mut Heap, strings: &[String]) -> Value {
             Value::from(gc.as_ptr() as *mut u8 as u64)
         })
         .collect();
-    let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
+    let (obj, _) = heap.alloc(ObjArray::new(elements).of_kind(common::WORD_POINTER), Object::Array);
     Value::from(obj.addr())
 }
 

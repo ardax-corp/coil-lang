@@ -257,7 +257,8 @@ pub fn take_pending_panic() -> Option<String> {
 pub enum PortableValue {
     Immediate(u64),
     String(String),
-    Array(Vec<PortableValue>),
+    /// An array's elements and its element kind (`common::WORD_*`).
+    Array(Vec<PortableValue>, u8),
     /// A packed byte array (`Vec<byte>` / `Vec<bool>`), kept packed.
     Bytes(Vec<u8>),
     /// A variant, or a tuple under [`common::PRODUCT_TAG`].
@@ -290,7 +291,7 @@ impl std::fmt::Debug for PortableValue {
         match self {
             Self::Immediate(v) => write!(f, "Immediate({v})"),
             Self::String(s) => write!(f, "String({s:?})"),
-            Self::Array(a) => f.debug_tuple("Array").field(a).finish(),
+            Self::Array(a, k) => f.debug_tuple("Array").field(a).field(k).finish(),
             Self::Bytes(b) => f.debug_tuple("Bytes").field(b).finish(),
             Self::Enum {
                 tag,
@@ -322,7 +323,7 @@ impl PartialEq for PortableValue {
         match (self, other) {
             (Self::Immediate(a), Self::Immediate(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
-            (Self::Array(a), Self::Array(b)) => a == b,
+            (Self::Array(a, ka), Self::Array(b, kb)) => a == b && ka == kb,
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
             (
                 Self::Enum {
@@ -1395,7 +1396,7 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
             for e in gc.as_ref().iter() {
                 out.push(encode_value(heap, e, cx)?);
             }
-            Ok(PortableValue::Array(out))
+            Ok(PortableValue::Array(out, gc.as_ref().elem_kind()))
         }
         Object::Enum(gc) => {
             let mut payload = Vec::with_capacity(gc.as_ref().payload.len());
@@ -1462,12 +1463,12 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             let gc = heap.alloc_string(s);
             Ok(Value::from(gc.as_ptr() as *mut u8 as u64))
         }
-        PortableValue::Array(elems) => {
+        PortableValue::Array(elems, kind) => {
             let mut elements = Vec::with_capacity(elems.len());
             for e in elems {
                 elements.push(decode_portable(heap, e)?);
             }
-            let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
+            let (obj, _) = heap.alloc(ObjArray::new(elements).of_kind(kind), Object::Array);
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Bytes(bytes) => {
