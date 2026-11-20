@@ -1645,6 +1645,33 @@ struct Ids {
     panic: FuncId,
 }
 
+/// The C types of an extern call a direct call can make: every parameter
+/// an `int`, `float` or `bool` and the result one of those, a `ptr` or
+/// `void` (`None` result). `None`: one is not (a string, buffer, struct,
+/// callback or pointer argument, or a variadic call), and the call goes
+/// through the runtime.
+fn direct_extern(sig: &compiler::native_mir::MirExternSig) -> Option<(Vec<Type>, Option<Type>)> {
+    use common::tag;
+    if sig.variadic.is_some() {
+        return None;
+    }
+    // The sized integers (`int32`, `uint8`, …) have no word type in an
+    // `extern` block yet: no call of one reaches native code.
+    let param = |t: u32| match t {
+        tag::INT => Some(types::I64),
+        tag::FLOAT => Some(types::F64),
+        tag::BOOL => Some(types::I8),
+        _ => None,
+    };
+    let params = sig.params.iter().map(|&t| param(t)).collect::<Option<Vec<_>>>()?;
+    let ret = match sig.ret {
+        tag::VOID => None,
+        tag::PTR => Some(types::I64),
+        t => Some(param(t)?),
+    };
+    Some((params, ret))
+}
+
 fn cl_ty(t: MirTy) -> Type {
     if t == MirTy::F64 { types::F64 } else { types::I64 }
 }
@@ -1911,6 +1938,8 @@ struct Lower<'a> {
     fn_entry_pair: FuncRef,
     /// [`entry_signature`], for a call of a body's entry by address.
     entry_sig: cranelift_codegen::ir::SigRef,
+    /// The platform's C calling convention, for a direct extern call.
+    c_conv: CallConv,
     cow: FuncRef,
     cow_field: FuncRef,
     alloc: FuncRef,
@@ -2130,6 +2159,7 @@ impl<'a> Lower<'a> {
             fn_entry,
             fn_entry_pair,
             entry_sig,
+            c_conv: module.isa().default_call_conv(),
             cow,
             cow_field,
             alloc,
@@ -3325,8 +3355,15 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
+            MirInst::ExternCall { dest, sig, args } if direct_extern(sig).is_some() => {
+                let (params, ret) = direct_extern(sig).unwrap_or_default();
+                self.direct_extern_call(f, *dest, &args[2..], &params, ret);
+            }
             MirInst::ExternCall { dest, sig, args } => {
-                // On the runtime's libffi call (`coil_native_ffi`).
+                // On the runtime's libffi call (`coil_native_ffi`), with no
+                // address.
+                let words: Vec<ValueId> = args.iter().take(2).chain(args.iter().skip(3)).copied().collect();
+                let args = &words;
                 let tags: Vec<i64> = sig.variadic.iter().flatten().map(|&t| i64::from(t)).collect();
                 let operand = (args.len() as u64 - 2) | if sig.variadic.is_some() { 1 << 16 } else { 0 };
                 let o = self.b.ins().iconst(types::I64, i64::from(common::FFI_OP_CALL));
@@ -4123,6 +4160,50 @@ impl<'a> Lower<'a> {
     /// [`Self::words_slot`] with the constant `last` after the words.
     fn words_slot_with(&mut self, f: &MirFunc, vs: &[ValueId], last: Option<i64>) -> cranelift_codegen::ir::Value {
         self.words_slot_consts(f, vs, last.as_slice())
+    }
+
+    /// An extern call straight to the C function at `args[0]` (its
+    /// address static), on the scalar words `args[1..]` as `params`. No
+    /// coil code runs and nothing allocates during it: no roots, no
+    /// runtime.
+    fn direct_extern_call(&mut self, f: &MirFunc, dest: ValueId, args: &[ValueId], params: &[Type], ret: Option<Type>) {
+        let mut sig = Signature::new(self.c_conv);
+        sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
+        if let Some(t) = ret {
+            sig.returns.push(AbiParam::new(t));
+        }
+        let sig = self.b.import_signature(sig);
+        let addr = self.get(f, args[0]);
+        let addr = self.coerce(addr, types::I64);
+        let mut words = Vec::with_capacity(params.len());
+        for (&a, &t) in args[1..].iter().zip(params) {
+            let w = self.get(f, a);
+            words.push(match t {
+                types::F64 => self.coerce(w, types::F64),
+                types::I64 => self.coerce(w, types::I64),
+                // A `bool` word is `0` or `1`: its low byte.
+                _ => {
+                    let w = self.coerce(w, types::I64);
+                    self.b.ins().ireduce(t, w)
+                }
+            });
+        }
+        let call = self.b.ins().call_indirect(sig, addr, &words);
+        let out = match ret {
+            None => self.b.ins().iconst(types::I64, 0),
+            Some(t) => {
+                let r = self.b.inst_results(call)[0];
+                if t == types::I8 {
+                    // A C `bool`: any nonzero byte is `true`.
+                    let b = self.b.ins().icmp_imm_u(IntCC::NotEqual, r, 0);
+                    self.b.ins().uextend(types::I64, b)
+                } else {
+                    r
+                }
+            }
+        };
+        let out = self.coerce(out, cl_ty(ty_of(f, dest)));
+        self.set(f, dest, out);
     }
 
     /// [`Self::words_slot`] with the constants `tail` after the words.
