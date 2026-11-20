@@ -1815,6 +1815,9 @@ struct Ids {
     collect: FuncId,
     /// Explicit `panic`.
     panic: FuncId,
+    ffi_arg: FuncId,
+    ffi_done: FuncId,
+    ffi_str: FuncId,
 }
 
 /// Whether C code may call back into coil while an extern call runs: an
@@ -1835,29 +1838,62 @@ fn may_call_back(bodies: &[NativeBody]) -> bool {
     })
 }
 
-/// The C types of an extern call a direct call can make: every parameter
-/// an `int`, `float` or `bool` and the result one of those, a `ptr` or
-/// `void` (`None` result). `None`: one is not (a string, buffer, struct,
-/// callback or pointer argument, or a variadic call), and the call goes
-/// through the runtime.
-fn direct_extern(sig: &compiler::native_mir::MirExternSig) -> Option<(Vec<Type>, Option<Type>)> {
+/// How a direct extern call passes one argument.
+#[derive(Clone, Copy)]
+enum CArg {
+    /// The word as this C type.
+    Word(Type),
+    /// The pointer [`machine::native::coil_native_ffi_arg`] makes of the word
+    /// (`FFI_ARG_*`).
+    Ptr(u64),
+}
+
+/// What a direct extern call's C result is.
+#[derive(Clone, Copy)]
+enum CRet {
+    Void,
+    /// A word of this C type (`int`, `float`, `ptr`).
+    Word(Type),
+    /// A C `bool`: any nonzero byte is `true`.
+    Bool,
+    /// A C string, made a coil string ([`machine::native::coil_native_ffi_str`]).
+    Str,
+}
+
+/// How a direct call passes an extern call's arguments and takes its
+/// result: `int`, `float`, `bool`, `string`, byte views and buffers and
+/// `ptr` arguments; `int`, `float`, `bool`, `ptr`, `string` and `void`
+/// results. `None`: it has a struct, callback or sized integer, or is
+/// variadic, and goes through the runtime.
+fn direct_extern(sig: &compiler::native_mir::MirExternSig) -> Option<(Vec<CArg>, CRet)> {
     use common::tag;
+    use machine::native::{FFI_ARG_BYTES, FFI_ARG_CONST_BYTES, FFI_ARG_CSTR, FFI_ARG_PTR};
     if sig.variadic.is_some() {
         return None;
     }
     // The sized integers (`int32`, `uint8`, …) have no word type in an
-    // `extern` block yet: no call of one reaches native code.
-    let param = |t: u32| match t {
-        tag::INT => Some(types::I64),
-        tag::FLOAT => Some(types::F64),
-        tag::BOOL => Some(types::I8),
-        _ => None,
-    };
-    let params = sig.params.iter().map(|&t| param(t)).collect::<Option<Vec<_>>>()?;
+    // `extern` block yet (#2886): no call of one reaches native code.
+    let params = sig
+        .params
+        .iter()
+        .map(|&t| match t {
+            tag::INT => Some(CArg::Word(types::I64)),
+            tag::FLOAT => Some(CArg::Word(types::F64)),
+            tag::BOOL => Some(CArg::Word(types::I8)),
+            tag::STRING => Some(CArg::Ptr(FFI_ARG_CSTR)),
+            tag::CONST_BYTES => Some(CArg::Ptr(FFI_ARG_CONST_BYTES)),
+            tag::BYTES => Some(CArg::Ptr(FFI_ARG_BYTES)),
+            tag::PTR => Some(CArg::Ptr(FFI_ARG_PTR)),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
     let ret = match sig.ret {
-        tag::VOID => None,
-        tag::PTR => Some(types::I64),
-        t => Some(param(t)?),
+        tag::VOID => CRet::Void,
+        tag::INT | tag::PTR => CRet::Word(types::I64),
+        tag::FLOAT => CRet::Word(types::F64),
+        tag::BOOL => CRet::Bool,
+        tag::STRING => CRet::Str,
+        _ => return None,
     };
     Some((params, ret))
 }
@@ -2013,6 +2049,9 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     s1v2.params.push(AbiParam::new(types::I64));
     let collect = trampoline(module, "coil_native_collect", &s1v2, &mut tramps)?;
     let panic = module.declare_function("coil_native_panic", Linkage::Import, &s2).map_err(e)?;
+    let ffi_arg = module.declare_function("coil_native_ffi_arg", Linkage::Import, &s4).map_err(e)?;
+    let ffi_done = module.declare_function("coil_native_ffi_done", Linkage::Import, &s1v2).map_err(e)?;
+    let ffi_str = module.declare_function("coil_native_ffi_str", Linkage::Import, &s2).map_err(e)?;
     Ok(Ids {
         tramps,
         imp,
@@ -2058,6 +2097,9 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         gen_yield,
         collect,
         panic,
+        ffi_arg,
+        ffi_done,
+        ffi_str,
     })
 }
 
@@ -2159,6 +2201,9 @@ struct Lower<'a> {
     gen_yield: FuncRef,
     collect: FuncRef,
     panic: FuncRef,
+    ffi_arg: FuncRef,
+    ffi_done: FuncRef,
+    ffi_str: FuncRef,
     /// This body's index into the plan's bodies.
     body_index: Option<usize>,
     /// The body may run while an object is pinned ([`pin_reach`]): its
@@ -2324,6 +2369,9 @@ impl<'a> Lower<'a> {
         let gen_yield = module.declare_func_in_func(ids.gen_yield, func);
         let collect = module.declare_func_in_func(ids.collect, func);
         let panic = module.declare_func_in_func(ids.panic, func);
+        let ffi_arg = module.declare_func_in_func(ids.ffi_arg, func);
+        let ffi_done = module.declare_func_in_func(ids.ffi_done, func);
+        let ffi_str = module.declare_func_in_func(ids.ffi_str, func);
         let defer = module.declare_func_in_func(ids.defer, func);
         let claim = module.declare_func_in_func(ids.claim, func);
         let pad_refs = ids.pad.iter().map(|(&i, &id)| (i, module.declare_func_in_func(id, func))).collect();
@@ -2387,6 +2435,9 @@ impl<'a> Lower<'a> {
         gen_yield,
             collect,
             panic,
+            ffi_arg,
+            ffi_done,
+            ffi_str,
             body_index: None,
             pins: false,
             is_pad: false,
@@ -3720,30 +3771,12 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
-            MirInst::ExternCall { dest, sig, args } if self.direct_externs && direct_extern(sig).is_some() => {
-                let (params, ret) = direct_extern(sig).unwrap_or_default();
-                self.direct_extern_call(f, *dest, &args[2..], &params, ret);
-            }
             MirInst::ExternCall { dest, sig, args } => {
-                // On the runtime's libffi call (`coil_native_ffi`), with no
-                // address.
-                let words: Vec<ValueId> = args.iter().take(2).chain(args.iter().skip(3)).copied().collect();
-                let args = &words;
-                let tags: Vec<i64> = sig.variadic.iter().flatten().map(|&t| i64::from(t)).collect();
-                let operand = (args.len() as u64 - 2) | if sig.variadic.is_some() { 1 << 16 } else { 0 };
-                let o = self.b.ins().iconst(types::I64, i64::from(common::FFI_OP_CALL));
-                let x = self.b.ins().iconst(types::I64, operand as i64);
-                let p = self.words_slot_consts(f, args, &tags);
-                let n = self.b.ins().iconst(types::I64, (args.len() + tags.len()) as i64);
-                let roots = self.push_roots(f);
-                let prev = self.push_call();
-                let call = self.b.ins().call(self.ffi, &[self.ctx, o, x, p, n]);
-                let w = self.b.inst_results(call)[0];
-                self.pop_call(prev);
-                self.pop_roots(roots);
-                self.bail_on_helper();
+                let w = match direct_extern(sig).filter(|_| self.direct_externs) {
+                    Some((params, ret)) => self.direct_extern_call(f, *dest, sig, args, &params, ret),
+                    None => self.runtime_extern_call(f, *dest, sig, args),
+                };
                 self.drop_views();
-                let w = self.coerce(w, cl_ty(ty_of(f, *dest)));
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
@@ -4548,48 +4581,137 @@ impl<'a> Lower<'a> {
         self.words_slot_consts(f, vs, last.as_slice())
     }
 
-    /// An extern call straight to the C function at `args[0]` (its
-    /// address static), on the scalar words `args[1..]` as `params`. No
-    /// coil code runs and nothing allocates during it: no roots, no
-    /// runtime.
-    fn direct_extern_call(&mut self, f: &MirFunc, dest: ValueId, args: &[ValueId], params: &[Type], ret: Option<Type>) {
-        let mut sig = Signature::new(self.c_conv);
-        sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
-        if let Some(t) = ret {
-            sig.returns.push(AbiParam::new(t));
+    /// An extern call on the runtime's libffi call (`coil_native_ffi`),
+    /// with no address: its result word.
+    fn runtime_extern_call(&mut self, f: &MirFunc, dest: ValueId, sig: &compiler::native_mir::MirExternSig, args: &[ValueId]) -> cranelift_codegen::ir::Value {
+        let words: Vec<ValueId> = args.iter().take(2).chain(args.iter().skip(3)).copied().collect();
+        let tags: Vec<i64> = sig.variadic.iter().flatten().map(|&t| i64::from(t)).collect();
+        let operand = (words.len() as u64 - 2) | if sig.variadic.is_some() { 1 << 16 } else { 0 };
+        let o = self.b.ins().iconst(types::I64, i64::from(common::FFI_OP_CALL));
+        let x = self.b.ins().iconst(types::I64, operand as i64);
+        let p = self.words_slot_consts(f, &words, &tags);
+        let n = self.b.ins().iconst(types::I64, (words.len() + tags.len()) as i64);
+        let roots = self.push_roots(f);
+        let prev = self.push_call();
+        let call = self.b.ins().call(self.ffi, &[self.ctx, o, x, p, n]);
+        let w = self.b.inst_results(call)[0];
+        self.pop_call(prev);
+        self.pop_roots(roots);
+        self.bail_on_helper();
+        self.coerce(w, cl_ty(ty_of(f, dest)))
+    }
+
+    /// An extern call straight to the C function at `args[2]` (its
+    /// address static), on `args[3..]` as `params`: its result word. No
+    /// coil code runs and nothing collects during it (the program makes no
+    /// callback), so it needs no roots. A pointer argument the runtime must
+    /// make (a copy) sends the call there instead.
+    fn direct_extern_call(&mut self, f: &MirFunc, dest: ValueId, sig: &compiler::native_mir::MirExternSig, args: &[ValueId], params: &[CArg], ret: CRet) -> cranelift_codegen::ir::Value {
+        let words = &args[3..];
+        let ptrs: Vec<usize> = (0..params.len()).filter(|&i| matches!(params[i], CArg::Ptr(_))).collect();
+        let want = cl_ty(ty_of(f, dest));
+        let (fast, join) = (self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(join, want);
+        let mut made = HashMap::new();
+        if !ptrs.is_empty() {
+            let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                (ptrs.len() * 8) as u32,
+                3,
+            ));
+            let mut ok = self.b.ins().iconst(types::I64, 1);
+            for (k, &i) in ptrs.iter().enumerate() {
+                let CArg::Ptr(kind) = params[i] else { continue };
+                let w = self.get(f, words[i]);
+                let w = self.coerce(w, types::I64);
+                let kind_v = self.b.ins().iconst(types::I64, kind as i64);
+                let out = self.b.ins().stack_addr(types::I64, slot, (k * 8) as i32);
+                let call = self.b.ins().call(self.ffi_arg, &[self.ctx, kind_v, w, out]);
+                let r = self.b.inst_results(call)[0];
+                ok = self.b.ins().band(ok, r);
+                made.insert(i, (slot, k));
+                // A buffer lent in place is no other argument too (the
+                // runtime copies each).
+                if kind == machine::native::FFI_ARG_CONST_BYTES || kind == machine::native::FFI_ARG_BYTES {
+                    for (j, &other) in words.iter().enumerate() {
+                        if j != i {
+                            let o = self.get(f, other);
+                            let o = self.coerce(o, types::I64);
+                            let differ = self.b.ins().icmp(IntCC::NotEqual, w, o);
+                            let differ = self.b.ins().uextend(types::I64, differ);
+                            ok = self.b.ins().band(ok, differ);
+                        }
+                    }
+                }
+            }
+            let slow = self.b.create_block();
+            self.b.ins().brif(ok, fast, &[], slow, &[]);
+            self.b.switch_to_block(slow);
+            let w = self.runtime_extern_call(f, dest, sig, args);
+            self.b.ins().jump(join, &[w.into()]);
+        } else {
+            self.b.ins().jump(fast, &[]);
         }
-        let sig = self.b.import_signature(sig);
-        let addr = self.get(f, args[0]);
+        self.b.switch_to_block(fast);
+        let mut csig = Signature::new(self.c_conv);
+        for p in params {
+            csig.params.push(AbiParam::new(match p {
+                CArg::Word(t) => *t,
+                CArg::Ptr(_) => types::I64,
+            }));
+        }
+        match ret {
+            CRet::Void => {}
+            CRet::Word(t) => csig.returns.push(AbiParam::new(t)),
+            CRet::Bool => csig.returns.push(AbiParam::new(types::I8)),
+            CRet::Str => csig.returns.push(AbiParam::new(types::I64)),
+        }
+        let csig = self.b.import_signature(csig);
+        let addr = self.get(f, args[2]);
         let addr = self.coerce(addr, types::I64);
-        let mut words = Vec::with_capacity(params.len());
-        for (&a, &t) in args[1..].iter().zip(params) {
-            let w = self.get(f, a);
-            words.push(match t {
-                types::F64 => self.coerce(w, types::F64),
-                types::I64 => self.coerce(w, types::I64),
-                // A `bool` word is `0` or `1`: its low byte.
-                _ => {
-                    let w = self.coerce(w, types::I64);
-                    self.b.ins().ireduce(t, w)
+        let mut cargs = Vec::with_capacity(params.len());
+        for (i, (&a, p)) in words.iter().zip(params).enumerate() {
+            cargs.push(match *p {
+                CArg::Ptr(_) => {
+                    let (slot, k) = made[&i];
+                    self.b.ins().stack_load(types::I64, types::I64, slot, (k * 8) as i32)
+                }
+                CArg::Word(t) => {
+                    let w = self.get(f, a);
+                    match t {
+                        types::F64 => self.coerce(w, types::F64),
+                        types::I64 => self.coerce(w, types::I64),
+                        // A `bool` word is `0` or `1`: its low byte.
+                        _ => {
+                            let w = self.coerce(w, types::I64);
+                            self.b.ins().ireduce(t, w)
+                        }
+                    }
                 }
             });
         }
-        let call = self.b.ins().call_indirect(sig, addr, &words);
-        let out = match ret {
-            None => self.b.ins().iconst(types::I64, 0),
-            Some(t) => {
-                let r = self.b.inst_results(call)[0];
-                if t == types::I8 {
-                    // A C `bool`: any nonzero byte is `true`.
-                    let b = self.b.ins().icmp_imm_u(IntCC::NotEqual, r, 0);
-                    self.b.ins().uextend(types::I64, b)
-                } else {
-                    r
-                }
+        let call = self.b.ins().call_indirect(csig, addr, &cargs);
+        let r = self.b.inst_results(call).first().copied();
+        let out = match (ret, r) {
+            (CRet::Bool, Some(r)) => {
+                let b = self.b.ins().icmp_imm_u(IntCC::NotEqual, r, 0);
+                self.b.ins().uextend(types::I64, b)
             }
+            (CRet::Str, Some(r)) => {
+                let call = self.call_checked(self.ffi_str, &[self.ctx, r]);
+                self.b.inst_results(call)[0]
+            }
+            (CRet::Word(_), Some(r)) => r,
+            _ => self.b.ins().iconst(types::I64, 0),
         };
-        let out = self.coerce(out, cl_ty(ty_of(f, dest)));
-        self.set(f, dest, out);
+        // A returned string may be an argument's copy: it is read first.
+        if params.iter().any(|p| matches!(p, CArg::Ptr(machine::native::FFI_ARG_CSTR))) {
+            self.b.ins().call(self.ffi_done, &[self.ctx]);
+        }
+        let out = self.coerce(out, want);
+        self.b.ins().jump(join, &[out.into()]);
+        self.b.switch_to_block(join);
+        self.b.block_params(join)[0]
     }
 
     /// [`Self::words_slot`] with the constants `tail` after the words.

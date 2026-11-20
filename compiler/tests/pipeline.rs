@@ -1622,6 +1622,18 @@ fn example_ffi_scalars_prints_each_result() {
 
 #[cfg(unix)]
 #[test]
+fn example_ffi_strings_prints_each_result() {
+    let libsum = ensure_ffi_libsum_built();
+    if !libsum.exists() {
+        ffi_soft_skip(&format!("{} not built", libsum.display()));
+        return;
+    }
+    let output = run_ffi_example_with_lib("examples/ffi_strings.coil", &libsum);
+    assert_eq!(output, "5 round trip hello from C 0|294 6 27 104 105");
+}
+
+#[cfg(unix)]
+#[test]
 fn example_ffi_varargs_prints_60() {
     let libsum = ensure_ffi_libsum_built();
     if !libsum.exists() {

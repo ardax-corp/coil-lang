@@ -2612,6 +2612,88 @@ pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: 
     unsafe { host_on_machine(ctx, ffi, op, operand, args, n) }
 }
 
+/// How a direct extern call passes an argument ([`coil_native_ffi_arg`]).
+pub const FFI_ARG_CSTR: u64 = 0;
+pub const FFI_ARG_CONST_BYTES: u64 = 1;
+pub const FFI_ARG_BYTES: u64 = 2;
+pub const FFI_ARG_PTR: u64 = 3;
+
+/// One argument of a direct extern call as the C pointer it passes, at
+/// `out`: a `string` as a NUL-terminated copy for this call
+/// ([`FFI_ARG_CSTR`], until [`coil_native_ffi_done`]), a byte view or
+/// buffer lent in place, or a `ptr` word. `0` when the runtime's call
+/// must make it instead (an interior NUL, a buffer it copies, an array a
+/// `ptr` copies), which then also reports any error.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `out` points at a word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi_arg(ctx: *mut NativeCtx, kind: u64, word: u64, out: *mut u64) -> u64 {
+    use crate::memory::Object;
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return 0;
+    };
+    let ptr = match kind {
+        FFI_ARG_CSTR => match heap.cstr_from_addr(word) {
+            Ok(Some(p)) => p as u64,
+            Ok(None) => match heap.intern_ffi_bytes(b"") {
+                Ok(p) => p as u64,
+                Err(_) => return 0,
+            },
+            Err(_) => return 0,
+        },
+        FFI_ARG_CONST_BYTES | FFI_ARG_BYTES => match heap.find_object_by_addr(word) {
+            Some(Object::String(gc)) if kind == FFI_ARG_CONST_BYTES && !gc.as_ref().data.is_empty() => gc.as_ref().data.as_ptr() as u64,
+            Some(Object::Array(mut gc)) => match gc.as_mut().bytes_mut() {
+                Some(b) if !b.is_empty() => b.as_mut_ptr() as u64,
+                _ => return 0,
+            },
+            _ => return 0,
+        },
+        FFI_ARG_PTR => match heap.find_object_by_addr(word) {
+            Some(Object::Array(gc)) if !gc.as_ref().is_empty() => return 0,
+            Some(Object::Enum(gc)) if gc.as_ref().is_tuple() && !gc.as_ref().elements().is_empty() => return 0,
+            _ => word,
+        },
+        _ => return 0,
+    };
+    // SAFETY: the caller passes a word to write.
+    unsafe { *out = ptr };
+    1
+}
+
+/// After a direct extern call that passed a `string`: drop the copies.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi_done(ctx: *mut NativeCtx) {
+    if let Some(heap) = unsafe { heap(ctx) } {
+        heap.reset_ffi_strings();
+    }
+}
+
+/// A direct extern call's `string` result: a new string of the C string
+/// at `ptr` (invalid UTF-8 replaced), or `0` for a null pointer, as the
+/// runtime's call makes it.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `ptr` is null or a C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi_str(ctx: *mut NativeCtx, ptr: u64) -> u64 {
+    if ptr == 0 {
+        return 0;
+    }
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    // SAFETY: C returned a NUL-terminated string.
+    let text = unsafe { std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char) }.to_string_lossy().into_owned();
+    let s = heap.alloc_string(text);
+    unsafe { note_alloc(ctx, heap) };
+    s.as_ptr() as *mut u8 as u64
+}
+
 /// [`coil_native_host`] of an ordinary native that is no plain function:
 /// the machine runs it in Rust ([`NativeHost::invoke`]), no interpreted body.
 /// `None`: it is no ordinary native.
@@ -2960,6 +3042,9 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_coro_done", coil_native_coro_done as *const u8),
         ("coil_native_yield", coil_native_yield as *const u8),
         ("coil_native_ffi", coil_native_ffi as *const u8),
+        ("coil_native_ffi_arg", coil_native_ffi_arg as *const u8),
+        ("coil_native_ffi_done", coil_native_ffi_done as *const u8),
+        ("coil_native_ffi_str", coil_native_ffi_str as *const u8),
         ("coil_native_defer", coil_native_defer as *const u8),
         ("coil_native_claim", coil_native_claim as *const u8),
         ("coil_native_collect", coil_native_collect as *const u8),
@@ -2969,7 +3054,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 41;
+const HELPERS: usize = 44;
 
 #[cfg(test)]
 mod pin_tests {
