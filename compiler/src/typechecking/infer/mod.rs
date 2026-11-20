@@ -681,9 +681,6 @@ pub struct Checker {
     /// C-layout struct declarations for FFI (`extern struct`).
     c_structs: Vec<CStructDef>,
 
-    /// Callback signature descriptors (index = aux id on `FFIType::Callback`).
-    callback_sigs: Vec<CallbackSigDef>,
-
     /// Return type recorded for `let id = declare(..., ret)` bindings so
     /// subsequent `invoke(..., id, ...)` can refine its result type.
     ffi_fn_ret_tys: HashMap<String, Ty>,
@@ -750,6 +747,10 @@ pub struct Checker {
     /// variadic, index)` per name: typed `readonly Vec<byte>`, they also
     /// take a `string`, lent in place as `invoke` lends it (#1665).
     extern_const_bytes: HashMap<String, Vec<(usize, bool, usize)>>,
+    /// The callback (`fn(...) -> T`) parameters of `extern` functions, by
+    /// index per name: each takes a named top-level function, whose entry
+    /// C calls.
+    extern_callbacks: HashMap<String, Vec<usize>>,
 
     /// Per-call-site FFI type tags for variadic FFI invokes (keyed by call span).
     /// Used by codegen because runtime `Value`s are untagged.
@@ -884,13 +885,6 @@ type OpenAssocProjections = HashMap<(TyVarId, String, Vec<String>), (TyVarId, Ve
 pub struct CStructDef {
     pub name: String,
     pub fields: Vec<(String, u32)>,
-}
-
-/// Callback signature registered for `FFIType::Callback` aux ids.
-#[derive(Clone, Debug)]
-pub struct CallbackSigDef {
-    pub args: Vec<u32>,
-    pub ret: u32,
 }
 
 /// An array literal of differently typed elements, checked once its
