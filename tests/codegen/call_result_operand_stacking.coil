@@ -22,7 +22,6 @@ fn right(int n) -> int {
     return s;
 }
 
-#[max_depth(16)]
 fn leaf(int n) -> int {
     if n <= 0 {
         return 1;

@@ -1,0 +1,104 @@
+// A lambda captures a two-word local by value as its two words: the
+// function value carries both and the lambda's frame holds them in two
+// slots, whatever the payload (a number, a heap word under some tags),
+// through nested lambdas, collections and calls through values.
+use tests::assert;
+use string::format;
+use gc::collect;
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+
+#[inline(never)]
+fn parse(int x) -> Result<int, string> {
+    if x >= 0 {
+        return Ok(x);
+    }
+    return Err(format("neg%i", -x));
+}
+
+enum Dir {
+    Up,
+    Down(int),
+}
+
+fn adder(int n) -> fn(int) -> int {
+    let o = half(n);
+    let p = (n, 0.5);
+    let d = if n > 3 {
+        Dir::Down(n)
+    } else {
+        Dir::Up
+    };
+    return fn (int k) use (o, p, d) {
+        let a = match o {
+            Some(v) => v,
+            None => 100,
+        };
+        let b = match d {
+            Dir::Up => 1,
+            Dir::Down(m) => m,
+        };
+        return a + p[0] + b + k;
+    };
+}
+
+test("captured Option, tuple and enum keep their words") {
+    assert!(adder(4)(1) == 2 + 4 + 4 + 1);
+    assert!(adder(3)(0) == 100 + 3 + 1);
+}
+
+test("a capture is a copy made when the lambda is") {
+    let o = half(2);
+    let f = fn () use (o) => o;
+    o = None;
+    assert!(f() == Some(1) && o == None);
+}
+
+test("a heap payload under some tags survives collections") {
+    let fs: Vec<fn() -> string> = Vec::new();
+    for i in -50..50 {
+        let r = parse(i);
+        fs.push(
+            fn () use (r) => match r {
+                Ok(v) => format("%i", v),
+                Err(e) => e,
+            },
+        );
+        if i % 10 == 0 {
+            collect();
+        }
+    }
+    collect();
+    assert!(fs[0]() == "neg50" && fs[49]() == "neg1" && fs[50]() == "0" && fs[99]() == "49");
+}
+
+test("nested lambdas pass the words on") {
+    let o = half(8);
+    let outer = fn (int k) use (o) {
+        let inner = fn () use (o, k) => match o {
+            Some(v) => v * k,
+            None => -1,
+        };
+        return inner();
+    };
+    assert!(outer(3) == 12);
+}
+
+fn apply<T>(T x, fn(T) -> int f) {
+    return f(x);
+}
+
+test("a lambda capturing a pair, called from a shared generic body") {
+    let o = half(10);
+    let f = fn (int k) use (o) => match o {
+        Some(v) => v + k,
+        None => k,
+    };
+    assert!(apply(1, f) == 6);
+}

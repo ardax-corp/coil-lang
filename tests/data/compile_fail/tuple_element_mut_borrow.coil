@@ -1,0 +1,11 @@
+// @expected E0107 — a `mut` borrow of a tuple element would write the tuple,
+// and a tuple cannot be changed in place (#2791).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let t = (new C(1), 0);
+    let w = mut t[0];
+    w.x = 9;
+}

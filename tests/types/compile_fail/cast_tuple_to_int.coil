@@ -1,0 +1,5 @@
+// @expected E0102 — a tuple is not cast to `int` (#2803).
+fn main() {
+    let t = (1, 2);
+    let n = t as int;
+}

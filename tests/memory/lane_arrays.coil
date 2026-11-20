@@ -1,0 +1,177 @@
+// A `Vec` (or array) of a closed two-word type keeps both words of each
+// element in place (a lane array). Element reads, stores, pushes, lengths
+// and `for` loops work on the two words; an array that goes on to code
+// reading one word per element (a generic body, a collection, a native)
+// turns into boxed elements in place first, and lane code still reads and
+// writes it after that, whichever form it is in.
+use tests::assert;
+use string::format;
+use gc::collect;
+use collections::map::HashMap;
+
+enum Shape {
+    Dot,
+    Circle(int),
+    Label(string),
+}
+
+#[inline(never)]
+fn half(int x) -> Option<int> {
+    if x % 2 == 0 {
+        return Some(x / 2);
+    }
+    return None;
+}
+
+fn total(Vec<Option<int>> v) -> int {
+    let t = 0;
+    for x in v {
+        match x {
+            Some(n) => {
+                t += n;
+            },
+            None => {
+                t += 100;
+            },
+        }
+    }
+    return t;
+}
+
+fn first<T>(Vec<T> v) -> T {
+    return v[0];
+}
+
+fn count<T>(Vec<T> v) -> int {
+    return v.len();
+}
+
+fn grow<T>(Vec<T> v, T x) -> Vec<T> {
+    v.push(x);
+    return v;
+}
+
+class Holder<V> {
+    pub vs: Vec<V>,
+}
+
+impl Holder<V> {
+    pub fn add(V x) {
+        self.vs.push(x);
+    }
+
+    pub fn at(int i) -> V {
+        return self.vs[i];
+    }
+}
+
+test("an Option element is read, stored and pushed as two words") {
+    let v: Vec<Option<int>> = [Some(1), None];
+    v.push(Some(3));
+    v[1] = Some(5);
+    assert!(v.len() == 3);
+    assert!(v[0] == Some(1) && v[1] == Some(5) && v[2] == Some(3));
+    assert!(total(v) == 9);
+}
+
+test("a loop over a two-item tuple array binds both items") {
+    let ps: Vec<(int, float)> = [(1, 0.5), (2, 1.5)];
+    ps.push((3, 2.0));
+    let a = 0;
+    let b = 0.0;
+    for (i, f) in ps {
+        a += i;
+        b += f;
+    }
+    assert!(a == 6 && b == 4.0);
+}
+
+test("a lane array passed to a generic body is still read after it") {
+    let v: Vec<Option<int>> = [None, Some(2)];
+    assert!(count(v) == 2);
+    assert!(first(v) == None);
+    v.push(half(8));
+    v[0] = Some(7);
+    let want: Vec<Option<int>> = [Some(7), Some(2), Some(4)];
+    assert!(v == want);
+    let w = grow(v, None);
+    assert!(w.len() == 4 && w[3] == None && w[2] == Some(4));
+}
+
+test("an array from a collection is written by lane code") {
+    let m: HashMap<string, Option<int>> = HashMap::new();
+    m.insert("a", Some(1));
+    let vs = m.values();
+    vs.push(None);
+    vs[0] = Some(9);
+    assert!(vs.len() == 2 && vs[0] == Some(9) && vs[1] == None);
+    assert!(total(vs) == 109);
+}
+
+test("a generic class field holds the array its methods read") {
+    let h = new Holder(Vec::new());
+    h.add(Some(4));
+    h.add(None);
+    assert!(h.at(0) == Some(4) && h.at(1) == None);
+    let v: Vec<Option<int>> = h.vs;
+    v.push(Some(1));
+    assert!(total(v) == 105);
+    h.add(Some(2));
+    assert!(h.at(2) == Some(2));
+}
+
+test("heap payload lanes survive collections") {
+    let rs: Vec<Result<int, string>> = [];
+    for i in 0..200 {
+        if i % 3 == 0 {
+            rs.push(Err(format("e%i", i)));
+        } else {
+            rs.push(Ok(i));
+        }
+        if i % 50 == 0 {
+            collect();
+        }
+    }
+    collect();
+    assert!(rs[3] == Err("e3") && rs[4] == Ok(4) && rs[198] == Err("e198"));
+    let shapes: Vec<Shape> = [Shape::Dot, Shape::Circle(2), Shape::Label(format("l%i", 1))];
+    collect();
+    let shown = "";
+    for s in shapes {
+        shown = shown + match s {
+            Shape::Dot => ".",
+            Shape::Circle(r) => format("c%i", r),
+            Shape::Label(l) => l,
+        };
+    }
+    assert!(shown == ".c2l1");
+}
+
+test("a unit payload crosses into a collection and back") {
+    let us: Vec<Result<(), int>> = [Ok(()), Err(3)];
+    let m: HashMap<int, Vec<Result<(), int>>> = HashMap::new();
+    m.insert(1, us);
+    let back = match m.get(1) {
+        Some(b) => b,
+        None => panic "missing",
+    };
+    back.push(Ok(()));
+    let shown = "";
+    for r in back {
+        shown = shown + match r {
+            Ok(_) => "ok ",
+            Err(e) => format("err%i ", e),
+        };
+    }
+    assert!(shown == "ok err3 ok ");
+}
+
+test("nested lane arrays") {
+    let rows: Vec<Vec<Option<int>>> = [[Some(1)], [None, Some(2)]];
+    rows[1].push(Some(3));
+    let t = 0;
+    for r in rows {
+        t += total(r);
+    }
+    assert!(t == 106);
+}

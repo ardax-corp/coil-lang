@@ -1,6 +1,6 @@
 // `show` of each scalar type prints by its static type, in ground code and
 // through a shared generic body's `Show` dictionary: a float stays a
-// float and a bool a bool without being boxed for the VM to read.
+// float and a bool a bool without being boxed for the runtime to read.
 // @flags --clone-budget 0
 // @output 7 2.5 true () 255\n-3 0.0 false\n7|2.5|true|255|\n
 use io::{stdout, write};

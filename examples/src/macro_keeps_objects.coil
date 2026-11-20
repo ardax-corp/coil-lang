@@ -1,0 +1,34 @@
+// A macro that keeps objects live while it allocates, for
+// `tests/macros/macro_keeps_objects.coil`.
+use macro::{Code, Expr, lit_int};
+
+class Node {
+    pub v: int,
+    pub next: Option<Node>,
+}
+
+macro churn(Expr e) -> Code {
+    let head: Option<Node> = Option::None;
+    let words: Vec<string> = Vec::new();
+    let i = 0;
+    while i < 2000 {
+        head = Option::Some(new Node(i, head));
+        words.push("w" + "x");
+        i += 1;
+    }
+    let sum = 0;
+    let at = head;
+    let more = true;
+    while more {
+        match at {
+            Option::Some(n) => {
+                sum += n.v;
+                at = n.next;
+            },
+            Option::None => {
+                more = false;
+            },
+        }
+    }
+    return lit_int(sum + words.len());
+}

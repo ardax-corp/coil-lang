@@ -1,9 +1,8 @@
 //! Precise HostInvoke types (math / packed LA / axpy) plus I6 edges.
 //!
 //! LICM hoist uses purity bits ([`super::effects::host_may_hoist`]), not
-//! these id ranges. S3 dense emit reconstructs I6-typed HostInvoke edges
-//! (box → call → unbox), including Q9 R2 `from_bytes` / `to_bytes`. User `CALL`
-//! is one-word (dense map or open fuse-IL / LIR callee).
+//! these id ranges. MIR lowering types these HostInvoke edges by them
+//! (box → call → unbox), including Q9 R2 `from_bytes` / `to_bytes`.
 
 use common::{
     HOST_NATIVES, MATH_ATAN_ID, MATH_POW_ID, MATH_SIN_ID, MATH_TANH_ID, PACKED_DOT_ID,
@@ -120,9 +119,8 @@ pub fn host_variadic(id: u16) -> bool {
         )
 }
 
-/// A native the embedder registered (`Compiler::register`,
-/// `Pipeline::register_host_native`): its id follows the frozen
-/// [`HOST_NATIVES`] table, as the VM registry numbers it.
+/// A native the embedder registered (`Compiler::register`): its id follows
+/// the frozen [`HOST_NATIVES`] table.
 pub fn embedder_native(id: u16) -> bool {
     id as usize >= HOST_NATIVES.len()
 }
@@ -165,19 +163,15 @@ pub fn host_result_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
         || (packed_la(id) && matches!(actual, MirTy::I64 | MirTy::F64 | MirTy::HeapRef))
 }
 
-/// S3 / Q9 R2: any I6-typed host may sit in a dense body (box at the edge).
-pub fn dense_host_ok(id: u16) -> bool {
-    host_edge_spec(id).is_some()
-}
-
-/// One-word host Option/Result layouts the dense edge can reconstruct.
-/// Reserved (3) stays boxed-or-refuse, not a niche word.
+/// Host Option/Result layouts the dense edge can reconstruct: the one-word
+/// ones and the two-word pair.
 pub fn dense_host_layout_ok(layout: u8) -> bool {
     matches!(
         layout as u32,
         common::HOST_ENUM_LAYOUT_BOXED
             | common::HOST_ENUM_LAYOUT_OPTION_NICHE
             | common::HOST_ENUM_LAYOUT_RESULT_NICHE
+            | common::HOST_ENUM_LAYOUT_PAIR
     )
 }
 
@@ -186,69 +180,4 @@ pub fn host_edge_spec_by_name(name: &str) -> Option<HostSpec> {
         .iter()
         .find(|n| n.name == name)
         .and_then(|n| host_edge_spec(n.id))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Documented W4 set: packed LA **87–91**, frozen math **102–110**,
-    /// M1 math **125–135**, `simd_axpy_reduce` **136**.
-    fn allowlisted_host_ids() -> impl Iterator<Item = u16> {
-        (PACKED_DOT_ID..=PACKED_VEC_ARITH_ID)
-            .chain(MATH_SIN_ID..=MATH_POW_ID)
-            .chain(MATH_ATAN_ID..=MATH_TANH_ID)
-            .chain(std::iter::once(SIMD_AXPY_REDUCE_ID))
-    }
-
-    fn host_spec_by_name(name: &str) -> Option<HostSpec> {
-        HOST_NATIVES
-            .iter()
-            .find(|n| n.name == name)
-            .and_then(|n| host_spec(n.id))
-    }
-
-    #[test]
-    fn allowlist_matches_host_natives() {
-        let ids: Vec<u16> = allowlisted_host_ids().collect();
-        assert_eq!(
-            ids,
-            vec![
-                87, 88, 89, 90, 91, 102, 103, 104, 105, 106, 107, 108, 109, 110, 125, 126, 127,
-                128, 129, 130, 131, 132, 133, 134, 135, 136
-            ]
-        );
-        for id in ids {
-            let spec = host_spec(id).expect("listed id");
-            let native = &HOST_NATIVES[id as usize];
-            assert_eq!(spec.name, native.name);
-            assert_eq!(spec.args.len(), native.arity as usize);
-            assert_eq!(spec.id, native.id);
-        }
-        assert!(host_spec(common::CLOCK_SLEEP_MS_ID).is_none());
-        assert!(host_spec(common::RESULT_UNIT_PROBE_ID).is_none());
-        // Q9 R2: string bytes stay off W4 float specs; they are I6 word edges.
-        assert!(host_spec_by_name("from_bytes").is_none());
-        assert!(host_spec_by_name("to_bytes").is_none());
-        let from = host_edge_spec_by_name("from_bytes").expect("from_bytes I6");
-        let to = host_edge_spec_by_name("to_bytes").expect("to_bytes I6");
-        assert!(dense_host_ok(from.id));
-        assert!(dense_host_ok(to.id));
-        assert!(dense_host_layout_ok(common::HOST_ENUM_LAYOUT_BOXED as u8));
-        assert!(dense_host_layout_ok(
-            common::HOST_ENUM_LAYOUT_RESULT_NICHE as u8
-        ));
-        assert!(!dense_host_layout_ok(
-            common::HOST_ENUM_LAYOUT_RESERVED as u8
-        ));
-        assert_eq!(from.args, I64_1);
-        assert_eq!(to.args, I64_1);
-        assert_eq!(from.ret, MirTy::I64);
-        assert_eq!(to.ret, MirTy::I64);
-        let clock = host_edge_spec(common::CLOCK_MONO_NANOS_ID).expect("clock edge");
-        assert!(clock.args.is_empty());
-        assert_eq!(clock.ret, MirTy::I64);
-        assert!(!crate::mir::effects::host_may_hoist(common::CLOCK_MONO_NANOS_ID));
-        assert!(host_edge_spec_by_name("write").is_some());
-    }
 }

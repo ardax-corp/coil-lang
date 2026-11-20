@@ -1,16 +1,18 @@
 # SIMD lanes and shapes (`feature/simd-lanes`)
 
+> **Status: landed.** The timings here were taken on the bytecode VM, since
+> deleted. `VLoop` and `VScan` were its ops; today MIR's `VecLoop` and
+> `ByteScan` run on `machine/src/lanes.rs`. See [simd.md](simd.md).
+
 Plan for the next round of loop vectorisation after `byte_scan` on
 `Vec<byte>` (#2075), `bulk_push` (#2077), `VLoop` anywhere (#2078) and the
 min / max / count / bit folds (#2080). The parser cursors in coil-json,
 coil-csv and coil-toml were moved to local-index scans first (json#19,
-csv#7, toml#14), so their runs now reach `VScan` and `vec_extend_range`.
+csv#7, toml#14), so their runs reached `VScan` and `vec_extend_range`.
 
 One PR per step into `feature/simd-lanes`; local verification gates the
 step PRs and full CI runs on the final squash-merged PR into `main`.
-No new opcodes: every step adds `VBin` kinds, a `VLoop` body word or a
-HostInvoke id, and bumps the archive minor when an old runtime would
-reject it.
+Each step added `VBin` kinds, a `VLoop` body word or a HostInvoke id.
 
 ## Where it stands (main `a0f9a69`, release, `COIL_AUTO_PAR=0`)
 
@@ -58,8 +60,7 @@ For scale, a `VLoop` store map is about 4 ns per element and a
    `shift_ascii` and every `out.push(f(a[i]))` with a body steps 1–3
    take.
 5. **Copy from a string.** `vec_extend_range` takes a `string` source,
-   so `out.push(s[i])` runs as one copy. An older runtime answers the
-   start for a source it does not copy, so the loop runs scalar there.
+   so `out.push(s[i])` runs as one copy.
 6. **Copy until a byte.** A loop that scans for a stop set and pushes
    every other byte becomes a scan to the stop (its test cloned into a
    loop `byte_scan` takes), then one `vec_extend_range` of the run, and
@@ -92,10 +93,9 @@ skipped to the block through the element iterator, so the loads were
 quadratic in the array's length. The body words now reuse a register
 once its last reader ran, so a 12-node body fits the 8 registers.
 
-Seen along the way: a `VLoop` body word costs about 9 ns per block of
-8 lanes (the interpreter loop in `machine::vm::vloop` copies registers
-per word), so a 6-word body runs at about 9 ns per element. Tuning that
-loop helps every step here and is a candidate after step 6.
+Seen along the way: a `VLoop` body word cost about 9 ns per block of
+8 lanes (`vloop` copied registers per word), so a 6-word body ran at about
+9 ns per element.
 
 ## Not in this plan
 

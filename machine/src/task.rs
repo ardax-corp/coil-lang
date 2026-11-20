@@ -1,4 +1,4 @@
-//! Task scheduler state (T1): one VM, one OS thread, FIFO run queue.
+//! Task scheduler state (T1): one runtime, one OS thread, FIFO run queue.
 //!
 //! A task is a coroutine the scheduler resumes (the embedded `task` module
 //! wraps each spawned closure in a `gen fn`). The root task is the code
@@ -7,7 +7,7 @@
 //! whenever they suspend. Switches happen only at suspension points: IO
 //! parks, `sleep`, `join`, the end of a scope, and `yield_now`.
 //!
-//! The VM side (switching, waking, panics) lives in `vm_task.rs`. See
+//! The runtime side (switching, waking, panics) lives in the drivers. See
 //! `docs/internals/tasks.md`.
 
 use std::cmp::Reverse;
@@ -116,8 +116,6 @@ pub(crate) struct TaskRec {
     /// Generators this task was resuming when it suspended:
     /// `(coroutine, base_sp offset, frame_depth offset)` from the task's base.
     pub inner: Vec<(RefCoroutine, usize, usize)>,
-    /// `resume_stack` index of the task's own coroutine while it runs.
-    pub ctx_index: usize,
     pub joiners: Vec<TaskId>,
     pub panic: Option<String>,
     /// It has run at least once (a task that never ran has nothing to unwind).
@@ -127,9 +125,6 @@ pub(crate) struct TaskRec {
     pub shield: u32,
     /// [`TaskState::Ending`]: the state it finishes in.
     pub ending: Option<TaskState>,
-    /// Root only: where it continues (it stays on the operand stack).
-    pub resume_ip: usize,
-    pub resume_sp: usize,
 }
 
 impl TaskRec {
@@ -142,15 +137,12 @@ impl TaskRec {
             wake: None,
             timer_seq: None,
             inner: Vec::new(),
-            ctx_index: 0,
             joiners: Vec::new(),
             panic: None,
             started: false,
             cancel: Cancel::None,
             shield: 0,
             ending: None,
-            resume_ip: 0,
-            resume_sp: 0,
         }
     }
 }
@@ -181,11 +173,9 @@ pub(crate) struct Scheduler {
     pub waker: std::sync::Arc<TaskWaker>,
     next_thread_key: u64,
     /// Readiness waits of this scheduler's tasks. Its own reactor: test cases
-    /// on pool workers share the VM's, and must not take each other's tokens.
+    /// on pool workers share the runtime's, and must not take each other's tokens.
     pub reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
     pub current: TaskId,
-    /// `nested_depth` the scheduler runs at; switches only happen there.
-    pub base_nested: u32,
     /// Child tasks not finished yet.
     pub live: usize,
     next_task: TaskId,
@@ -194,7 +184,36 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
-    pub(crate) fn new(base_nested: u32) -> Self {
+    /// The tasks a debugger lists: `(id, name, state)`, live ones only, by id.
+    pub(crate) fn debug_states(&self) -> Vec<(u64, String, String)> {
+        let mut ids: Vec<_> = self.tasks.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(|id| {
+                let rec = &self.tasks[&id];
+                if rec.state.finished() {
+                    return None;
+                }
+                let state = match (rec.state, rec.block) {
+                    (TaskState::Running, _) => "running".to_string(),
+                    (TaskState::Ready, _) => "ready".to_string(),
+                    (TaskState::Ending, _) => "ending".to_string(),
+                    (_, Some(Block::Io(..) | Block::IoRetry(_))) => "blocked (IO)".to_string(),
+                    (_, Some(Block::Join(t))) => format!("blocked (join task {t})"),
+                    (_, Some(Block::Scope(_))) => "blocked (end of scope)".to_string(),
+                    (_, Some(Block::Sleep)) => "blocked (sleep)".to_string(),
+                    (_, Some(Block::Cancel)) => "blocked (cancelling)".to_string(),
+                    (_, Some(Block::Cond(_))) => "blocked (channel)".to_string(),
+                    (_, Some(Block::Thread(_))) => "blocked (thread)".to_string(),
+                    _ => "blocked".to_string(),
+                };
+                let name = if id == ROOT { "main".to_string() } else { format!("task {id}") };
+                Some((id, name, state))
+            })
+            .collect()
+    }
+
+    pub(crate) fn new() -> Self {
         let mut tasks = HashMap::new();
         let mut root = TaskRec::new(None, 0);
         root.state = TaskState::Running;
@@ -211,7 +230,6 @@ impl Scheduler {
             next_thread_key: 1,
             reactor: crate::io_reactor::IoReactor::new(),
             current: ROOT,
-            base_nested,
             live: 0,
             next_task: 1,
             next_scope: 1,
@@ -219,7 +237,7 @@ impl Scheduler {
         }
     }
 
-    /// True when nothing is left to schedule (the VM can drop it).
+    /// True when nothing is left to schedule (the runtime can drop it).
     pub(crate) fn idle(&self) -> bool {
         self.live == 0 && self.scopes.is_empty() && self.current == ROOT
     }
@@ -367,6 +385,11 @@ impl Scheduler {
             .get(&owner)
             .is_some_and(|r| r.block == Some(Block::Scope(scope)))
         {
+            // A failed scope stays for `task_scope_error`; a finished one is
+            // done (the owner's `scope` returns without naming it again).
+            if status == STATUS_OK {
+                self.remove_scope(scope);
+            }
             self.make_ready(owner, Wake::Status(status));
         }
     }
@@ -516,7 +539,7 @@ pub struct ThreadWaiters(std::sync::Mutex<Vec<(std::sync::Arc<TaskWaker>, u64)>>
 impl ThreadWaiters {
     /// Register the running task, if the native runs under a scheduler that
     /// can switch tasks. True when it did: the native then returns
-    /// `Ok(None)` and the VM suspends the task, running the native again
+    /// `Ok(None)` and the interpreter suspends the task, running the native again
     /// once the key is posted. Call it while holding the lock that the
     /// releasing side takes before [`Self::wake_all`], so no wake is lost.
     pub(crate) fn park_current(&self) -> bool {
@@ -570,7 +593,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Around a native the VM runs where it can switch tasks: `Some` arms
+/// Around a native the runtime runs where it can switch tasks: `Some` arms
 /// [`tasks_active`] and [`ThreadWaiters::park_current`], `None` disarms.
 pub(crate) fn set_task_waiter(waiter: Option<(std::sync::Arc<TaskWaker>, u64, TaskId)>) {
     TASKS_ACTIVE.with(|c| c.set(waiter.is_some()));
@@ -581,7 +604,7 @@ pub(crate) fn set_task_waiter(waiter: Option<(std::sync::Arc<TaskWaker>, u64, Ta
     TASK_WAITER.with(|w| *w.borrow_mut() = waiter);
 }
 
-/// A TCP connect a task started without blocking the VM thread.
+/// A TCP connect a task started without blocking the thread.
 struct PendingConnect {
     host: String,
     port: i64,
@@ -609,7 +632,7 @@ struct Lookup {
 }
 
 /// Most resolver threads at once. `getaddrinfo` blocks on every platform,
-/// so lookups run on these instead of the VM thread. They start on demand
+/// so lookups run on these instead of the thread. They start on demand
 /// and stay for the process (one malloc arena each, not one per connect).
 const RESOLVER_THREADS: usize = 4;
 
@@ -826,6 +849,225 @@ pub(crate) fn tasks_active() -> bool {
     TASKS_ACTIVE.with(|c| c.get())
 }
 
+/// The scheduler rules every host that runs tasks shares (the runtime and the
+/// native driver): ending and cancelling tasks, waiting for events.
+impl crate::runtime::Runtime {
+    /// No task is ready: block until IO readiness, a timer or another OS
+    /// thread wakes one. `false` when nothing could ever wake a task.
+    pub(crate) fn task_wait_events(&mut self) -> bool {
+        use crate::task::{Block, Wake};
+        // How often IO polling looks for wakes from other threads.
+        const THREAD_SLICE: std::time::Duration = std::time::Duration::from_millis(2);
+        let s = self.sched.as_mut().expect("scheduler");
+        if s.take_posted() {
+            return true;
+        }
+        let deadline = s.next_deadline();
+        let has_io = !s.io_waits.is_empty();
+        let has_thread = !s.thread_waits.is_empty();
+        if !has_io && !has_thread && deadline.is_none() {
+            return false;
+        }
+        let mut timeout = deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+        let reactor = std::sync::Arc::clone(&s.reactor);
+        let waker = std::sync::Arc::clone(&s.waker);
+        if has_io && has_thread {
+            timeout = Some(timeout.map_or(THREAD_SLICE, |t| t.min(THREAD_SLICE)));
+            self.reactor.help_local_once();
+        }
+        if has_io {
+            reactor.wait_any(timeout);
+            let s = self.sched.as_mut().expect("scheduler");
+            for token in reactor.take_ready() {
+                if let Some(id) = s.io_waits.remove(&token) {
+                    let wake = match s.tasks.get(&id).and_then(|r| r.block) {
+                        Some(Block::IoRetry(_)) => Wake::Retry,
+                        Some(Block::Io(_, layout)) => Wake::Io(Ok(()), layout),
+                        _ => Wake::Io(Ok(()), Default::default()),
+                    };
+                    s.make_ready(id, wake);
+                }
+            }
+        } else if has_thread {
+            // The thread a task waits for may be a job queued on this very
+            // worker: run queued jobs before sleeping.
+            if !self.reactor.help_local_once() {
+                waker.wait(timeout.map_or(THREAD_SLICE, |t| t.min(THREAD_SLICE)).into());
+            }
+        } else if let Some(t) = timeout {
+            std::thread::sleep(t);
+        }
+        let s = self.sched.as_mut().expect("scheduler");
+        s.take_posted();
+        for (id, block) in s.expired_timers(std::time::Instant::now()) {
+            match block {
+                Some(Block::Io(_, layout)) => {
+                    s.drop_wait(id, block);
+                    let err = Err(crate::io::IoErrorTag::TimedOut);
+                    s.make_ready(id, Wake::Io(err, layout));
+                }
+                Some(Block::IoRetry(_)) => {
+                    // The native runs again and reports the timeout itself.
+                    s.drop_wait(id, block);
+                    s.make_ready(id, Wake::Retry);
+                }
+                Some(Block::Sleep) => s.make_ready(id, Wake::Unit),
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// Every task waits on another: wake the root with a deadlock status
+    /// (the `task` module panics on it).
+    pub(crate) fn task_deadlock(&mut self) {
+        use crate::task::{ROOT, STATUS_DEADLOCK, TaskState, Wake};
+        let s = self.sched.as_mut().expect("scheduler");
+        if let Some(rec) = s.tasks.get_mut(&ROOT) {
+            rec.state = TaskState::Blocked;
+        }
+        s.make_ready(ROOT, Wake::Status(STATUS_DEADLOCK));
+    }
+
+    /// Task `id` stopped running (its frames are gone) as `state`. A panic
+    /// fails its scope and cancels its siblings. The tasks of scopes it
+    /// opened are cancelled; it finishes once they have.
+    pub(crate) fn task_end(&mut self, id: crate::task::TaskId, state: crate::task::TaskState, panic: Option<String>) {
+        use crate::task::TaskState;
+        let s = self.sched.as_mut().expect("scheduler");
+        let Some(rec) = s.tasks.get_mut(&id) else {
+            return;
+        };
+        rec.state = TaskState::Ending;
+        rec.ending = Some(state);
+        let scope = rec.scope;
+        let mut cancel = Vec::new();
+        if let Some(msg) = panic {
+            rec.panic = Some(msg.clone());
+            if let Some(sc) = s.scopes.get_mut(&scope) {
+                sc.failed.get_or_insert(msg);
+                cancel.extend(sc.children.iter().copied().filter(|c| *c != id));
+            }
+        }
+        for owned in s.scopes_owned_by(id) {
+            if let Some(sc) = s.scopes.get_mut(&owned) {
+                sc.closed = true;
+                cancel.extend(sc.children.iter().copied());
+            }
+        }
+        for c in cancel {
+            self.task_request_cancel(c);
+        }
+        let s = self.sched.as_mut().expect("scheduler");
+        if s.tasks.get(&id).is_some_and(|r| r.state == TaskState::Ending)
+            && s.owned_children_finished(id)
+        {
+            s.finalize(id, state);
+        }
+    }
+
+    /// Cancel task `id` (`t.cancel()`, a failing sibling, a deadline). A
+    /// task that never ran is dropped; otherwise the cancel is delivered at
+    /// its next suspension point (now, if it is suspended), once it has left
+    /// every `shield`. Delivery unwinds the task, running its `defer`s; it
+    /// then ends as cancelled. A task already unwinding is not cancelled again.
+    pub(crate) fn task_request_cancel(&mut self, id: crate::task::TaskId) {
+        use crate::task::{Block, Cancel, ROOT, TaskState, Wake};
+        let Some(s) = self.sched.as_mut() else {
+            return;
+        };
+        let current = s.current;
+        let Some(rec) = s.tasks.get_mut(&id) else {
+            return;
+        };
+        if id == ROOT
+            || rec.state.finished()
+            || rec.state == TaskState::Ending
+            || rec.cancel != Cancel::None
+        {
+            return;
+        }
+        if !rec.started {
+            let coro = rec.coro;
+            s.run_queue.retain(|t| *t != id);
+            s.finalize(id, TaskState::Dropped);
+            if let Some(c) = coro {
+                crate::gen_fiber::finish(c);
+            }
+            return;
+        }
+        rec.cancel = Cancel::Requested;
+        if rec.shield > 0 || id == current || rec.state != TaskState::Blocked {
+            return;
+        }
+        let block = rec.block.take();
+        rec.timer_seq = None;
+        rec.state = TaskState::Ready;
+        // A thread wait left no result slot to write.
+        rec.wake = Some(match block {
+            Some(Block::Thread(_) | Block::IoRetry(_)) => Wake::Retry,
+            _ => Wake::Unit,
+        });
+        s.run_queue.push_back(id);
+        s.drop_wait(id, block);
+    }
+
+    /// Task `id` has a cancel to deliver but its scopes still have running
+    /// tasks: cancel those and block until they stop (so they unwind first).
+    pub(crate) fn task_cancel_waits_for_children(&mut self, id: crate::task::TaskId) -> bool {
+        use crate::task::{Block, Cancel, TaskState};
+        let s = self.sched.as_mut().expect("scheduler");
+        let Some(rec) = s.tasks.get(&id) else {
+            return false;
+        };
+        if rec.cancel != Cancel::Requested || rec.shield > 0 || s.owned_children_finished(id) {
+            return false;
+        }
+        let children: Vec<_> = s
+            .scopes
+            .values()
+            .filter(|sc| sc.owner == id)
+            .flat_map(|sc| sc.children.iter().copied())
+            .collect();
+        for c in children {
+            self.task_request_cancel(c);
+        }
+        let s = self.sched.as_mut().expect("scheduler");
+        if s.owned_children_finished(id) {
+            return false;
+        }
+        let rec = s.tasks.get_mut(&id).expect("task");
+        rec.state = TaskState::Blocked;
+        rec.block = Some(Block::Cancel);
+        true
+    }
+
+    /// The task just switched in has a cancel to deliver: mark it unwinding.
+    pub(crate) fn task_take_cancel(&mut self) -> bool {
+        use crate::task::Cancel;
+        let s = self.sched.as_mut().expect("scheduler");
+        let current = s.current;
+        let rec = s.tasks.get_mut(&current).expect("current task");
+        if rec.cancel != Cancel::Requested || rec.shield > 0 {
+            return false;
+        }
+        rec.cancel = Cancel::Unwinding;
+        true
+    }
+
+    /// Forget the scheduler once no scope or task is left.
+    pub(crate) fn task_drop_idle_scheduler(&mut self) {
+        if self.sched.as_ref().is_some_and(|s| s.idle()) {
+            self.sched = None;
+        }
+    }
+
+    pub(crate) fn task_string(&mut self, text: String) -> common::Value {
+        let s = self.heap.alloc_string(text);
+        common::Value::from(s.as_ptr() as *mut u8 as u64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,7 +1082,7 @@ mod tests {
     fn finishing_a_task_does_not_scan_its_finished_siblings() {
         // coil-lang#2135: each finish rescanned every child of the scope, so
         // N spawn + join pairs in one scope cost O(N^2).
-        let mut s = Scheduler::new(0);
+        let mut s = Scheduler::new();
         let scope = s.open_scope();
         let n = 20_000;
         let start = std::time::Instant::now();
@@ -859,7 +1101,7 @@ mod tests {
 
     #[test]
     fn a_scope_counts_only_its_unfinished_children() {
-        let mut s = Scheduler::new(0);
+        let mut s = Scheduler::new();
         let a = s.open_scope();
         let b = s.open_scope();
         let a1 = add_bare_task(&mut s, a);

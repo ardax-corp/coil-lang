@@ -475,7 +475,7 @@ impl SymbolIndex {
                 } => {
                     visit_path(index, file, source, enum_name, variant_name, &span);
                     match fields {
-                        EnumConstructPayload::Unit => {}
+                        EnumConstructPayload::Unit | EnumConstructPayload::Empty => {}
                         EnumConstructPayload::Tuple(parts) => visit_outputs(index, file, source, parts),
                         EnumConstructPayload::Record(fields) => {
                             for field in fields {

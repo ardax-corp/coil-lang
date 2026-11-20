@@ -65,7 +65,7 @@ class int {}
 /// assert!(-2.7 as int == -2);
 /// assert!(3 as float + x == 5.5);
 /// assert!(1.0 / 0.0 > 1000000.0);
-/// assert!(show(x) == "2.5");
+/// assert!(x.show() == "2.5");
 /// ```
 class float {}
 
@@ -86,7 +86,7 @@ class float {}
 /// assert!(ready);
 /// assert!(true as int == 1);
 /// assert!(!(0 as bool));
-/// assert!(show(ready) == "true");
+/// assert!(ready.show() == "true");
 /// ```
 class bool {}
 
@@ -147,7 +147,7 @@ class byte {}
 /// greeting += "!";
 /// assert!(greeting == "hi, there!");
 /// assert!("apple" < "banana" && "B" < "a");
-/// assert!(show(s) == "héllo");
+/// assert!(s.show() == "héllo");
 /// ```
 class string {}
 

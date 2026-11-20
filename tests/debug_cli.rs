@@ -344,6 +344,53 @@ fn debug_panic_stop_keeps_frames() {
     assert!(stdout.contains("n ($0) = 6"), "locals of the panicking frame: {stdout}");
 }
 
+/// The interpreter's stops: a closure called through a function value and a
+/// generator on its fiber show their callers, and reading a local before it
+/// is bound says so.
+const NESTED: &str = "gen fn evens(int n) {\n    let i = 0;\n    while i < n {\n        yield i * 2;\n        i = i + 1;\n    }\n}\n\nfn apply(int k, int -> int f) -> int {\n    return f(k);\n}\n\nfn main() {\n    let extra = 10;\n    let add = fn (int v) use (extra) {\n        let r = v + extra;\n        return r;\n    };\n    let got = apply(5, add);\n    let total = 0;\n    for e in evens(3) {\n        total = total + e;\n    }\n    let done = got + total;\n}\n";
+
+#[test]
+fn debug_stops_in_closures_and_generators() {
+    let (out, stdout) = debug_program(
+        NESTED,
+        "break 16\nbreak 4\nrun\nbt\nprint v\nprint r\ncontinue\nbt\nprint i\ndelete\nbreak 24\ncontinue\nprint total\nquit\n",
+        "nested",
+    );
+    assert!(out.status.success(), "{stdout}");
+    let frames: Vec<&str> = stdout.lines().filter(|l| l.starts_with('#')).collect();
+    assert_eq!(frames.len(), 5, "closure, apply, main; evens, main: {stdout}");
+    assert!(frames[0].contains("lambda") && frames[1].starts_with("#1  apply") && frames[2].starts_with("#2  main"), "{stdout}");
+    assert!(frames[3].starts_with("#0  evens") && frames[4].starts_with("#1  main"), "{stdout}");
+    assert!(stdout.contains("v ($1) = 5"), "{stdout}");
+    assert!(stdout.contains("r ($2) = <not set>"), "{stdout}");
+    assert!(stdout.contains("i ($1) = 0"), "{stdout}");
+    assert!(stdout.contains("total ($") && stdout.contains(") = 6"), "{stdout}");
+}
+
+/// A run stopped at a panic stays there, and `run` starts over.
+#[test]
+fn debug_restarts_after_a_panic() {
+    let (_, stdout) = debug_program(PANICS, "run\nrun\nbt\nquit\n", "panic_restart");
+    assert_eq!(stdout.matches("Program panicked").count(), 2, "{stdout}");
+    assert_eq!(stdout.lines().filter(|l| l.starts_with('#')).count(), 3, "{stdout}");
+}
+
+/// A body with hundreds of locals debugs like any other.
+#[test]
+fn debug_reads_a_body_with_hundreds_of_locals() {
+    let lets: String = (0..300).map(|i| format!("    let a{i} = make({i});\n")).collect();
+    // Statements: a chain of 300 `+` overflows a debug build's checker.
+    let sum: Vec<String> = (0..300).map(|i| format!("total = total + a{i}.n;")).collect();
+    let src = format!(
+        "class Box {{\n    pub n: int,\n}}\n\n#[inline(never)]\nfn make(int n) -> Box {{\n    return new Box(n);\n}}\n\nfn main() {{\n{lets}    let total = 0;\n    {}\n    let done = total + 1;\n}}\n",
+        sum.join(" ")
+    );
+    let (out, stdout) = debug_program(&src, "break 313\nrun\nprint a299.n\nprint total\ncontinue\nquit\n", "large");
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.contains(") = 299"), "{stdout}");
+    assert!(stdout.contains(") = 44850"), "{stdout}");
+}
+
 /// `break <loc> if <cond>` only stops when the condition holds.
 #[test]
 fn debug_conditional_breakpoint() {
@@ -381,7 +428,7 @@ const VARS: &str = "class Point {\n    pub x: int,\n    pub y: int,\n}\n\nfn sum
 /// into whatever slot or register holds it) or as `<optimized out>`, never a
 /// stale or foreign value. Split layouts render as a struct / array.
 #[test]
-fn debug_locals_are_accurate_under_optimization() {
+fn debug_locals_are_exact() {
     let (_out, stdout) = debug_program(
         VARS,
         "break 11\nrun\ninfo locals\nprint p\nprint xs[1]\ncontinue\ninfo locals\ncontinue\ninfo locals\nquit\n",
@@ -399,22 +446,22 @@ fn debug_locals_are_accurate_under_optimization() {
     assert_eq!(value_of("x"), ["1", "2", "3"], "{stdout}");
     for p in value_of("p") {
         assert!(p.starts_with("Point {") && p.contains("y: 4"), "p = {p}\n{stdout}");
-        assert!(p.contains("x: 5") || p.contains("x: <optimized out>"), "p = {p}");
+        assert!(p.contains("x: 5"), "p = {p}");
     }
     for xs in value_of("xs") {
         let elems: Vec<&str> = xs.trim_matches(['[', ']']).split(", ").collect();
         for (elem, want) in elems.iter().zip(["1", "2", "3"]) {
-            assert!(*elem == want || *elem == "<optimized out>", "xs = {xs}\n{stdout}");
+            assert!(*elem == want, "xs = {xs}\n{stdout}");
         }
     }
     let xs1 = value_of("xs[1]");
-    assert!(xs1.iter().all(|v| v == "2" || v == "<optimized out>"), "{stdout}");
+    assert!(xs1.iter().all(|v| v == "2"), "{stdout}");
 }
 
 const BINDS: &str = "enum Shape {\n    Circle(int),\n    Rect(int, int),\n}\n\nfn area(Shape s) -> int {\n    let k = 3;\n    match s {\n        Shape::Circle(r) => {\n            let a = r * r * k;\n            return a;\n        },\n        Shape::Rect(w, h) => {\n            let a = w * h;\n            return a;\n        },\n    }\n}\n\nfn main() {\n    let x = area(Shape::Rect(4, 5));\n}\n";
 
 /// Locals bound by `let` and by a `match` arm's pattern, recorded from
-/// the frame direct MIR plans: each shows its value or `<optimized out>`.
+/// the frame direct MIR plans: each shows its value.
 #[test]
 fn debug_locals_bound_by_match_arms() {
     let (_out, stdout) = debug_program(BINDS, "break 15\nrun\ninfo locals\nquit\n", "match_locals");
@@ -429,7 +476,7 @@ fn debug_locals_bound_by_match_arms() {
     for (name, want) in [("k", "3"), ("w", "4"), ("h", "5")] {
         let seen = value_of(name);
         assert!(!seen.is_empty(), "`{name}` listed: {stdout}");
-        assert!(seen.iter().all(|v| v == want || v == "<optimized out>"), "{name} = {seen:?}\n{stdout}");
+        assert!(seen.iter().all(|v| v == want), "{name} = {seen:?}\n{stdout}");
     }
 }
 

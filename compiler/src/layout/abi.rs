@@ -1,5 +1,5 @@
 //! How a value crosses a call edge: the two-slot direct `CALL`/`RETURN`
-//! width, the MIR ABI class, and the typed dense call signature. Each is a
+//! width, the MIR ABI class, and the typed call signature. Each is a
 //! view of [`super::rep::of_resolved`].
 //!
 //! ## Two-slot pairs
@@ -11,7 +11,7 @@
 //! payload enums with arity ≤1 fit in
 //! `[payload, tag]` without boxing an `ObjEnum`. A closed arity-2 tuple of
 //! immediates (`(int, int)`, `(int, float)`, …) uses the same CALL/RETURN
-//! width as `[a, b]` (second word on top) without boxing an `ObjTuple`.
+//! width as `[a, b]` (second word on top) without boxing a tuple object.
 //! Niched heap `Option<T>` / heap-heap `Result<T, E>` already use a
 //! strictly better one-word ABI and must stay there (never
 //! double-classified). Unbounded `T`, mixed heap products, and wider
@@ -19,46 +19,27 @@
 //!
 //! ## MIR layout
 //!
-//! Result/Option ABI layouts for MIR→LIR (COI-270) and I1 SSA word names.
+//! Result/Option ABI layouts for MIR lowering (COI-270) and I1 SSA word names.
 //!
 //! Matches [`two_word_kind`] and
 //! `docs/internals/layout.md` (COI-92). No new pair opcodes and no
 //! nursery: two-slot is `[payload, tag]` (or `[a, b]`) on direct
 //! `CALL`/`RETURN`; heap niches are one `Value` word.
 //!
-//! ## Dense call ABI
+//! ## Call ABI
 //!
-//! Typed dense call/return ABI (COI-291 M1).
-//!
-//! Dense bodies keep `i64` / `f64` / `bool` in frame slots.
-//! A dense→dense `CALL` uses the same one-word Value layout the VM already
-//! uses at CALL/RETURN — bits are typed slots, not boxed heap objects.
-//!
-//! ### Layout
-//!
-//! | Edge | Words | Slots / stack |
-//! |------|-------|----------------|
-//! | Args | `arity` | callee slots `0..arity` (same bits as caller `LOAD`s) |
-//! | Return | 1..=2 | TOS after `RETURN`; caller `STORE`s dests |
-//! | Niche Option/Result | 1 | Q8 word lane (match reconstructs as `Br`) |
-//! | Multi-word return | 2 | `[payload, tag]` / `[a, b]` (B3 / C1) |
-//!
-//! HostInvoke: LICM hoists scalar-pure math; S3 / Q9 R2 emit I6-typed hosts
-//! including `from_bytes` / `to_bytes`. User `CALL` uses this map when the callee is already
-//! dense, or an open one-word / two-slot ABI (S3 / B3). Q7 one-word
-//! self-`CALL` / `TailCall` use the open one-word ABI. **B7** sibling /
-//! mutual `TailCall` and **C1** self two-slot `CALL` / `RETURN` use the
-//! same open ABI. `CallIndirect` stays refuse.
-//! HeapRef and niche words are one-word lanes (Q8).
+//! [`CallAbi`] is a MIR callee's typed signature (COI-291 M1): one
+//! [`MirTy`] per parameter word and the returned word, plus `ret_hi`, the
+//! tag or second product word of a two-slot return (B3 / C1). Niche
+//! `Option` / `Result` and heap references are one-word lanes (Q8).
 //!
 //! SSA models at most dest + `dest_hi`. N>2 is the same `ret_words` field
 //! but needs extra dests + archive encoding — not a self-vs-helper wall.
 
-use std::collections::HashMap;
 
 use super::rep::{Layout, PairKind, is_immediate, of_resolved};
 use crate::typechecking::infer::Checker;
-use crate::mir::{MirFunc, MirTy};
+use crate::mir::MirTy;
 use crate::typechecking::ty::{Ty, range_app};
 
 /// Heap `Range` `InitTyped` id. High so user class ids (from 1) stay put.
@@ -73,6 +54,143 @@ pub fn range_heap_type_id(inclusive: bool) -> u32 {
         RANGE_INCLUSIVE_HEAP_TYPE_ID
     } else {
         RANGE_HEAP_TYPE_ID
+    }
+}
+
+/// Whether `split` holds for an open `Option` / `Result` (one whose
+/// payload still has a type variable) that a parameter or result of
+/// declared type `ty` holds below its top: an element of an array or
+/// `Vec`, a tuple item, a type argument, a payload of another enum. A
+/// shared generic body holds such a value as its enum object, and nothing
+/// converts it at a call (only the top of a parameter or result is,
+/// `docs/internals/layout.md`, "Open enums"); `split` says whether ground
+/// code holds that one differently. The parameter and result of a function
+/// type that is itself a top count as tops (a function argument's adapter
+/// converts them), except a function among the parameters, which nothing
+/// converts (`fn(fn(T) -> Option<T>) -> T`, #2591). A function below the
+/// top (an element of `Vec<unit -> Option<T>>`) has no adapter: its
+/// parameter and result are nested too (#2488).
+///
+/// A user class or enum over open arguments is read through its
+/// declaration, its parameters bound to the arguments, for each nominal
+/// instance `look` admits (its name and arguments; #2446, #2493, #2509,
+/// #2547): a class's field is a top
+/// (stored in its declared layout, `hir_field_rep`) unless it is a
+/// function, an enum's payload never is. So `W<T>` with a field `xs:
+/// Vec<Option<T>>`, `P<T>` with a payload `fn(T) -> Option<T>`, and a class
+/// holding either, are nested open enums wherever they are named.
+pub fn nested_open_enum(
+    checker: &Checker,
+    ty: &Ty,
+    top: bool,
+    look: &dyn Fn(&str, &[Ty]) -> bool,
+    split: &mut dyn FnMut(&Ty) -> bool,
+) -> bool {
+    NestedOpen { checker, look, split, seen: Vec::new() }.ty(ty, top)
+}
+
+/// The nominal types [`nested_open_enum`] reads through: every user enum
+/// and class, another module's too (#2547). A clone of another module's
+/// method or function whose signature holds one is compiled from that
+/// module's body, as one of this module's is (`fn_sig_split` in
+/// `codegen`), so a `pub` field this module fills holds the layout the
+/// class's methods read. A `Vec` is no user class.
+pub fn nested_open_look(checker: &Checker) -> impl Fn(&str, &[Ty]) -> bool + '_ {
+    move |name: &str, _: &[Ty]| name != common::BUILTIN_VEC_TYPE && (checker.enum_variants(name).is_some() || checker.is_class(name))
+}
+
+/// Whether `ty` is a nested open enum for any ground type, in the module
+/// the checker is on ([`nested_open_enum`], [`nested_open_look`]). A bare
+/// generic class name (a method body's `self`) stands for the class over
+/// its own parameters.
+pub fn nested_open_type(checker: &Checker, ty: &Ty) -> bool {
+    let own;
+    let ty = match crate::typechecking::ty::strip_readonly(ty) {
+        Ty::Con(name) if checker.type_ctor_params(name).is_some_and(|p| !p.is_empty()) => {
+            let n = checker.type_ctor_params(name).map_or(0, Vec::len);
+            let vars = (0..n).map(|i| Ty::Var(crate::typechecking::ty::TyVarId(u32::MAX - i as u32))).collect();
+            own = Ty::App(Box::new(Ty::Con(name.clone())), vars);
+            &own
+        }
+        ty => ty,
+    };
+    nested_open_enum(checker, ty, true, &nested_open_look(checker), &mut |_| true)
+}
+
+struct NestedOpen<'a, 'b> {
+    checker: &'a Checker,
+    look: &'a dyn Fn(&str, &[Ty]) -> bool,
+    split: &'b mut dyn FnMut(&Ty) -> bool,
+    /// The nominal instances on the walk, against recursive declarations.
+    seen: Vec<String>,
+}
+
+/// How many nominal declarations deep [`nested_open_enum`] reads: a
+/// polymorphically recursive type (`Nest<T>` holding `Nest<Nest<T>>`)
+/// meets new instances without end.
+const NESTED_OPEN_DEPTH: usize = 16;
+
+impl NestedOpen<'_, '_> {
+    fn ty(&mut self, ty: &Ty, top: bool) -> bool {
+        let ty = crate::typechecking::ty::strip_readonly(ty);
+        if !ty.has_var() {
+            return false;
+        }
+        let app = crate::typechecking::ty::builtin_enum_app(ty);
+        let ty = app.as_ref().unwrap_or(ty);
+        if !top && app.is_some() && (self.split)(ty) {
+            return true;
+        }
+        // A top function's parameters and result are converted by its
+        // adapter, but a function among its parameters is converted
+        // nowhere: its own parts are below the top (#2591).
+        if let Ty::Fun(param, ret) = ty {
+            let param_top = top && !matches!(crate::typechecking::ty::strip_readonly(param), Ty::Fun(..));
+            return self.ty(param, param_top) || self.ty(ret, top);
+        }
+        let mut found = false;
+        ty.for_each_child(|child| found = found || self.ty(child, false));
+        found || app.is_none() && self.declared(ty)
+    }
+
+    /// Whether user class or enum instance `ty` holds a nested open enum
+    /// in a field or payload, its parameters bound to `ty`'s arguments.
+    fn declared(&mut self, ty: &Ty) -> bool {
+        let Ty::App(head, args) = ty else {
+            return false;
+        };
+        let Ty::Con(name) = head.as_ref() else {
+            return false;
+        };
+        let key = format!("{ty}");
+        if self.seen.len() >= NESTED_OPEN_DEPTH || self.seen.contains(&key) || !(self.look)(name, args) {
+            return false;
+        }
+        let Some(params) = self.checker.type_ctor_params(name).cloned() else {
+            return false;
+        };
+        if params.len() != args.len() {
+            return false;
+        }
+        // A class's field is a top unless it is a function; an enum's
+        // payload is below the enum's top.
+        let fields: Vec<(Ty, bool)> = if let Some(variants) = self.checker.enum_variants(name) {
+            variants.into_iter().flat_map(|(_, _, payload)| payload).map(|t| (t, false)).collect()
+        } else if let Some(fields) = self.checker.class_fields(name) {
+            fields
+                .into_iter()
+                .map(|(_, t)| {
+                    let top = !matches!(crate::typechecking::ty::strip_readonly(&t), Ty::Fun(..));
+                    (t, top)
+                })
+                .collect()
+        } else {
+            return false;
+        };
+        self.seen.push(key);
+        let found = fields.iter().any(|(field, top)| self.ty(&super::bind_params(field, &params, args), *top));
+        self.seen.pop();
+        found
     }
 }
 
@@ -111,11 +229,10 @@ pub struct CalleeFacts {
     pub coroutine: bool,
     /// A host native: one packed `HostInvoke` word.
     pub host_native: bool,
-    /// A trait instance method: a dictionary entry (`CodePtr`), unless a
-    /// definition site pinned its result's pair.
+    /// A trait instance method whose direct calls take its dictionary entry
+    /// (`CodePtr`): not raw, and no definition site pinned its result's
+    /// pair. A raw one's `$dict` adapter boxes the pair instead.
     pub instance_method: bool,
-    /// An inherent method: its parameters stay one word.
-    pub inherent_method: bool,
     /// An overloaded or generic function: its parameters stay one word
     /// (a numeric range's two words excepted).
     pub overloaded_or_generic: bool,
@@ -130,11 +247,11 @@ pub fn convention_ret(checker: &Checker, facts: &CalleeFacts, ret: &Ty) -> Optio
 }
 
 /// The two-slot form of a callee's parameter of type `ty`, if any: a
-/// numeric range, or a pair enum `enum_pair` admits. Products and
-/// readonly classes stay one boxed word (a boxed tuple would split into
-/// `[a, b]` through a temp slot above live operands).
+/// numeric range, an arity-2 immediate tuple, a two-field readonly class,
+/// or a pair enum `enum_pair` admits. MIR passes the two words as two
+/// parameters, so the caller boxes nothing.
 pub fn convention_param(checker: &Checker, facts: &CalleeFacts, ty: &Ty, enum_pair: impl Fn(&PairKind) -> bool) -> Option<PairKind> {
-    if facts.escaped || facts.instance_method || facts.inherent_method {
+    if facts.escaped || facts.instance_method {
         return None;
     }
     if let Some(kind) = two_word_range_kind(ty) {
@@ -143,7 +260,7 @@ pub fn convention_param(checker: &Checker, facts: &CalleeFacts, ty: &Ty, enum_pa
     if facts.overloaded_or_generic || facts.coroutine {
         return None;
     }
-    two_word_kind(checker, ty).filter(|kind| !matches!(kind, PairKind::Product | PairKind::Class(_)) && (matches!(kind, PairKind::Range { .. }) || enum_pair(kind)))
+    two_word_kind(checker, ty).filter(|kind| matches!(kind, PairKind::Product | PairKind::Class(_)) || enum_pair(kind))
 }
 
 #[cfg(test)]
@@ -364,7 +481,7 @@ fn shape() -> Shape {
 /// How a Result/Option (or arity-2 immediate product) crosses a call edge.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum MirLayout {
-    /// One VM `Value` (boxed `ObjEnum`, scalar, or heap niche word).
+    /// One runtime `Value` (boxed `ObjEnum`, scalar, or heap niche word).
     #[default]
     Word,
     /// Direct `CALL`/`RETURN` width 2. Enums are `[payload, tag]`; products
@@ -372,7 +489,7 @@ pub enum MirLayout {
     TwoSlot,
     /// Heap `Option<T>` (`None` = `0`) or heap-heap `Result<T,E>`
     /// (`Ok` = aligned pointer, `Err` = `pointer | 1`). Host packs at the
-    /// HostInvoke edge; LIR uses `CONST 0` / `BITAND` / `BITOR` / `LogNot`.
+    /// HostInvoke edge; native code uses `CONST 0` / `BITAND` / `BITOR` / `LogNot`.
     /// SSA names the word [`crate::mir::MirTy::NicheOpt`] vs
     /// [`crate::mir::MirTy::NicheRes`]; this variant is the shared ABI.
     HeapNiche,
@@ -518,122 +635,189 @@ mod mir_layout_tests {
     }
 }
 
-/// Extra TOS words besides the first return (`ret_words >= 2`).
-#[inline]
-pub fn is_multi_word_ret(ret_words: u32) -> bool {
-    ret_words >= 2
-}
-
-/// Width from a pair dest (`dest_hi` present → 2).
-#[inline]
-pub fn ret_words_from_hi(dest_hi: Option<impl Sized>) -> u32 {
-    if dest_hi.is_some() { 2 } else { 1 }
-}
-
-/// One-word dense callee signature.
+/// A MIR callee's signature: one MIR type per parameter word and the
+/// returned word(s).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DenseAbi {
+pub struct CallAbi {
     pub params: Vec<MirTy>,
     pub ret: MirTy,
     /// Tag / second product word. `None` is the one-word ABI.
     pub ret_hi: Option<MirTy>,
 }
 
-/// Entry-label id → dense ABI. Built leaf-first during specialize.
-/// Q7 self-`CALL` uses the open one-word ABI until this map records the body.
-pub type DenseCallMap = HashMap<u32, DenseAbi>;
-
-impl DenseAbi {
-    /// Word-layout params + one- or two-slot specialized return.
-    pub fn from_func(func: &MirFunc) -> Option<Self> {
-        let ret = func.ret_ty?;
-        if !ret.is_word_lane() {
-            return None;
-        }
-        let ret_hi = match func.ret_layout {
-            MirLayout::Word | MirLayout::HeapNiche => None,
-            MirLayout::TwoSlot => {
-                let hi = func.ret_hi_ty?;
-                if !hi.is_word_lane() {
-                    return None;
-                }
-                Some(hi)
-            }
-        };
-        let params: Vec<MirTy> = func.params.iter().map(|p| func.ty(*p)).collect();
-        if params.iter().any(|t| !t.is_word_lane()) {
-            return None;
-        }
-        Some(Self {
-            params,
-            ret,
-            ret_hi,
-        })
+/// Whether `unit` holds for the bare type variable a function below the
+/// top of a parameter or result of declared type `ty` returns: an element
+/// of `Vec<unit -> T>`, a tuple item, a type argument, a payload of an enum.
+/// A ground `-> ()` function returns nothing a caller reads, while a shared
+/// body keeps the word its call gives as a `T`, and a `()` stored or passed
+/// is the empty tuple object. Only a function that is itself a top (a
+/// function argument) gets an adapter that returns that object (#2498);
+/// `unit` says whether ground code has `()` for the variable. The same for
+/// a `Vec` or array of a type variable such a function returns
+/// (`Vec<fn() -> Vec<T>>`): a ground function of a closed two-word element
+/// returns a lane array, which only a function argument's adapter turns
+/// into the one word per element a shared body reads (#2592); `unit` is
+/// asked with the `Vec` and says whether ground code has a lane array.
+pub fn nested_fn_var_result(ty: &Ty, top: bool, unit: &mut dyn FnMut(&Ty) -> bool) -> bool {
+    let ty = crate::typechecking::ty::strip_readonly(ty);
+    if !ty.has_var() {
+        return false;
     }
-
+    if let Ty::Fun(param, ret) = ty {
+        if !top {
+            let mut result = ret.as_ref();
+            while let Ty::Fun(_, next) = result {
+                result = next;
+            }
+            let result = crate::typechecking::ty::strip_readonly(result);
+            let lanes = match result {
+                Ty::Array { element, .. } => element.has_var(),
+                t => crate::typechecking::ty::vec_element_ty(t).is_some_and(Ty::has_var),
+            };
+            if (matches!(result, Ty::Var(_)) || lanes) && unit(result) {
+                return true;
+            }
+        }
+        return nested_fn_var_result(param, top, unit) || nested_fn_var_result(ret, top, unit);
+    }
+    let mut found = false;
+    ty.for_each_child(|child| found = found || nested_fn_var_result(child, false, unit));
+    found
 }
 
-#[cfg(test)]
-mod dense_tests {
-    use super::*;
-    use crate::mir::{MirBuilder, MirConst};
-
-    #[test]
-    fn from_func_records_word_abi() {
-        let mut b = MirBuilder::new("leaf");
-        let x = b.add_param(MirTy::F64).unwrap();
-        let y = b.add_param(MirTy::I64).unwrap();
-        let _ = y;
-        b.set_ret_ty(MirTy::F64);
-        b.ret(Some(x)).unwrap();
-        let f = b.finish().unwrap();
-        let abi = DenseAbi::from_func(&f).expect("word abi");
-        assert_eq!(abi.params, vec![MirTy::F64, MirTy::I64]);
-        assert_eq!(abi.ret, MirTy::F64);
+/// Whether result type `ty` holds a function over a type variable below its
+/// top (`Vec<T -> int>`, `(T -> int, int)`, `[T -> string; 1]`; a returned
+/// function's own parameters and result are tops too). The shared body
+/// makes that function, and only a function that is itself a top gets an
+/// adapter, so the call cannot rebuild the result in its ground layout:
+/// the signature takes a clone for every ground call, as one whose such
+/// function returns a bare type variable does ([`nested_fn_var_result`],
+/// #2664). So does a declared result that is itself a function over a type
+/// variable whose own signature is not plain words
+/// ([`crate::hir::classify::plain_sig`]: `fn(T) -> Option<T>`,
+/// `fn(Option<T>) -> T`): the shared body's closure takes and returns the
+/// open enum's object where a ground caller passes and reads its niche word
+/// (#2767).
+pub fn nested_fn_in_result(checker: &Checker, ty: &Ty, top: bool) -> bool {
+    let ty = crate::typechecking::ty::strip_readonly(ty);
+    if !ty.has_var() {
+        return false;
     }
-
-    #[test]
-    fn from_func_accepts_heapref_word() {
-        let mut b = MirBuilder::new("href");
-        let p = b.add_param(MirTy::HeapRef).unwrap();
-        b.set_ret_ty(MirTy::HeapRef);
-        b.ret(Some(p)).unwrap();
-        let f = b.finish().unwrap();
-        let abi = DenseAbi::from_func(&f).expect("S3 HeapRef is a word lane");
-        assert_eq!(abi.params, vec![MirTy::HeapRef]);
-        assert_eq!(abi.ret, MirTy::HeapRef);
+    if let Ty::Fun(param, ret) = ty {
+        if top {
+            let mut params = vec![param.as_ref().clone()];
+            let mut result = ret.as_ref();
+            while let Ty::Fun(p, next) = crate::typechecking::ty::strip_readonly(result) {
+                params.push(p.as_ref().clone());
+                result = next;
+            }
+            if !crate::hir::classify::plain_sig(checker, &params, result) {
+                return true;
+            }
+        }
+        return !top || nested_fn_in_result(checker, param, top) || nested_fn_in_result(checker, ret, top);
     }
+    let mut found = false;
+    ty.for_each_child(|child| found = found || nested_fn_in_result(checker, child, false));
+    found
+}
 
-    #[test]
-    fn from_func_accepts_niche_word() {
-        let mut b = MirBuilder::new("opt");
-        let p = b.add_param(MirTy::NicheOpt).unwrap();
-        b.set_ret_ty(MirTy::NicheOpt);
-        b.ret(Some(p)).unwrap();
-        let f = b.finish().unwrap();
-        let abi = DenseAbi::from_func(&f).expect("Q8 niche is a word lane");
-        assert_eq!(abi.params, vec![MirTy::NicheOpt]);
-        assert_eq!(abi.ret, MirTy::NicheOpt);
-    }
+/// Whether result type `ty` is a `coroutine<Y, S>` whose yield or receive
+/// type is open in the signature's type variables. That generator's shared
+/// body cannot tell a value nobody produced (an unsent binding `yield`, a
+/// completion with no value) from a word of a bare `T`, nor make the type's
+/// zero (#2738, `native.md`, "A value nobody produced"): every ground call
+/// takes its per-type clone, which decides by the type.
+pub fn open_coroutine(ty: &Ty) -> bool {
+    crate::typechecking::infer::Checker::coroutine_parts(crate::typechecking::ty::strip_readonly(ty))
+        .is_some_and(|(y, s)| y.has_var() || s.has_var())
+}
 
-    #[test]
-    fn from_func_accepts_two_slot() {
-        let mut b = MirBuilder::new("pair");
-        let lo = b.add_param(MirTy::I64).unwrap();
-        let hi = b.ins_const(MirConst::I64(1)).unwrap();
-        b.ret_pair(lo, hi).unwrap();
-        let f = b.finish().unwrap();
-        let abi = DenseAbi::from_func(&f).expect("B3 two-slot abi");
-        assert_eq!(abi.ret, MirTy::I64);
-        assert_eq!(abi.ret_hi, Some(MirTy::I64));
+/// Whether a parameter or result of declared type `ty` holds a function
+/// over a type variable in a user class's field or a user enum's payload,
+/// at any depth of the slot (`f: fn(T) -> T`, `fs: Vec<fn() -> T>`, a
+/// tuple item, `Box<fn() -> T>`), the type's parameters bound to its
+/// arguments (`Slot<T>` with `f: fn(T) -> T`, `G<T>` with `F(fn(T) ->
+/// T)`), for each nominal instance `look` admits (#2511). Such a function
+/// crosses a shared generic body inside the object: a ground function
+/// takes a `float` or `bool` as its own MIR type, a two-word value as two
+/// words and returns nothing for `()`, a function the shared body made or
+/// adapted takes and returns their words, and only a function that is
+/// itself an argument (or, for `()`, a slot's own function, filled through
+/// `HirPacks::unit_fns`) gets an adapter. So the signature takes a clone
+/// for every ground call, as a nested open enum does, and so do the
+/// type's own methods (`self` is such a parameter).
+pub fn nested_fn_field(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool) -> bool {
+    fn open_fun(ty: &Ty) -> bool {
+        match crate::typechecking::ty::strip_readonly(ty) {
+            Ty::Fun(..) => ty.has_var(),
+            t => t.any_child(open_fun),
+        }
     }
+    nominal_slot(checker, ty, look, &mut open_fun)
+}
 
-    #[test]
-    fn modeled_ret_width_is_one_or_two() {
-        assert!(!is_multi_word_ret(1));
-        assert!(is_multi_word_ret(2));
-        assert!(is_multi_word_ret(3));
-        assert_eq!(ret_words_from_hi(None::<u8>), 1);
-        assert_eq!(ret_words_from_hi(Some(0u8)), 2);
+/// Whether a parameter or result of declared type `ty` holds, in a user
+/// class's field or a user enum's payload (its parameters bound to its
+/// arguments, for each instance `look` admits), a function below the
+/// slot's top whose result is a bare type variable `unit` holds for
+/// ([`nested_fn_var_result`]): `fs: Vec<fn() -> T>` at `T = ()`. No adapter
+/// reaches it, so a call that takes a shared body there is refused (#2560).
+pub fn nested_fn_unit_slot(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool, unit: &mut dyn FnMut(&Ty) -> bool) -> bool {
+    nominal_slot(checker, ty, look, &mut |slot| nested_fn_var_result(slot, true, unit))
+}
+
+/// Whether `slot` holds for a field or payload type of a user class or
+/// enum instance named in `ty` (transitively, through recursive
+/// declarations, [`NESTED_OPEN_DEPTH`] deep), each slot's type with the
+/// type's parameters bound to the instance's arguments.
+fn nominal_slot(checker: &Checker, ty: &Ty, look: &dyn Fn(&str, &[Ty]) -> bool, slot: &mut dyn FnMut(&Ty) -> bool) -> bool {
+    fn walk(
+        checker: &Checker,
+        ty: &Ty,
+        look: &dyn Fn(&str, &[Ty]) -> bool,
+        slot: &mut dyn FnMut(&Ty) -> bool,
+        seen: &mut Vec<String>,
+    ) -> bool {
+        let ty = crate::typechecking::ty::strip_readonly(ty);
+        if !ty.has_var() {
+            return false;
+        }
+        let mut found = false;
+        ty.for_each_child(|child| found = found || walk(checker, child, look, slot, seen));
+        if found {
+            return true;
+        }
+        let Ty::App(head, args) = ty else {
+            return false;
+        };
+        let Ty::Con(name) = head.as_ref() else {
+            return false;
+        };
+        let key = format!("{ty}");
+        if seen.len() >= NESTED_OPEN_DEPTH || seen.contains(&key) || !look(name, args) {
+            return false;
+        }
+        let Some(params) = checker.type_ctor_params(name).cloned() else {
+            return false;
+        };
+        if params.len() != args.len() {
+            return false;
+        }
+        let slots: Vec<Ty> = if let Some(variants) = checker.enum_variants(name) {
+            variants.into_iter().flat_map(|(_, _, payload)| payload).collect()
+        } else if let Some(fields) = checker.class_fields(name) {
+            fields.into_iter().map(|(_, t)| t).collect()
+        } else {
+            return false;
+        };
+        seen.push(key);
+        let found = slots.iter().any(|s| {
+            let s = super::bind_params(s, &params, args);
+            s.has_var() && slot(&s) || walk(checker, &s, look, slot, seen)
+        });
+        seen.pop();
+        found
     }
+    walk(checker, ty, look, slot, &mut Vec::new())
 }

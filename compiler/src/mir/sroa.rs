@@ -1,8 +1,8 @@
 //! S2f / Q1: reuse the StoreIndex array instead of rematerializing `Alloc`.
 //!
 //! HIR lowering already keeps non-escaping `[T; N]` locals in slots. Dense /
-//! LIR emit can still see a second `Alloc` of the same elems
-//! after `StoreIndex` (dest is the stored *value*). VM mutates in place, so
+//! emit can still see a second `Alloc` of the same elems
+//! after `StoreIndex` (dest is the stored *value*). runtime mutates in place, so
 //! later `Index` must read that object — not a fresh `[0, 0, 0]`.
 
 use std::collections::HashMap;
@@ -27,7 +27,7 @@ pub fn sroa(func: &mut MirFunc) -> usize {
             match inst {
                 MirInst::Alloc {
                     dest,
-                    kind: MirAllocKind::Array | MirAllocKind::Tuple,
+                    kind: MirAllocKind::Array | MirAllocKind::TUPLE,
                     elems,
                     ..
                 } => {
@@ -46,7 +46,7 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                     pending_reuse = None;
                     pending_alloc = Some(*dest);
                 }
-                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } => {
+                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } | MirInst::LanePush { dest, .. } | MirInst::LanesToWords { dest, .. } => {
                     pending_alloc = Some(*dest);
                     pending_reuse = None;
                 }
@@ -85,26 +85,14 @@ pub fn sroa(func: &mut MirFunc) -> usize {
     if subst.is_empty() {
         return 0;
     }
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(|v| *subst.get(&v).unwrap_or(&v));
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(|v| *subst.get(&v).unwrap_or(&v));
-        }
-    }
-    func.rewrite_debug_slots(|v| *subst.get(&v).unwrap_or(&v));
+    func.map_values(|v| *subst.get(&v).unwrap_or(&v));
     let used = used_values(func);
     let mut removed = 0;
     for block in &mut func.blocks {
         let before = block.insts.len();
         block.insts.retain(|inst| {
-            if matches!(inst, MirInst::Alloc { .. } | MirInst::GcBarrier { .. })
-                && !used.contains(&inst.dest())
-            {
-                return false;
-            }
-            true
+            !matches!(inst, MirInst::Alloc { .. } | MirInst::GcBarrier { .. })
+                || used.contains(&inst.dest())
         });
         removed += before - block.insts.len();
     }
@@ -121,28 +109,7 @@ fn used_values(func: &MirFunc) -> std::collections::HashSet<ValueId> {
             }
         }
         if let Some(term) = &block.term {
-            match term {
-                super::inst::Terminator::Br { cond, .. } => {
-                    used.insert(*cond);
-                }
-                super::inst::Terminator::JumpIfMatch {
-                    scrutinee,
-                    payloads,
-                    ..
-                } => {
-                    used.insert(*scrutinee);
-                    used.extend(payloads.iter().copied());
-                }
-                super::inst::Terminator::Return { lo, hi } => {
-                    if let Some(v) = lo {
-                        used.insert(*v);
-                    }
-                    if let Some(v) = hi {
-                        used.insert(*v);
-                    }
-                }
-                _ => {}
-            }
+            used.extend(term.uses().chain(term.binds().iter().copied()));
         }
     }
     used

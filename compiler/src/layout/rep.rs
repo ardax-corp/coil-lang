@@ -171,6 +171,131 @@ pub(crate) fn readonly_pair_class(checker: &Checker, ty: &Ty) -> Option<String> 
     (fields.len() == 2 && fields.iter().all(|(_, t)| is_immediate(t))).then_some(key)
 }
 
+/// The word kinds of a closed two-word value's two slots when it sits flat
+/// in an object: the second word (a tag, or a product's second item) is
+/// always scalar; the first is scalar for a [`scalar_pair`] and otherwise
+/// a payload that is a heap pointer only for some tags, which the collector
+/// resolves by address ([`common::WORD_UNKNOWN`]).
+pub fn pair_word_kinds(checker: &Checker, ty: &Ty) -> Option<[u8; 2]> {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    if !matches!(of_resolved(checker, &ty), Layout::Pair(_)) {
+        return None;
+    }
+    let first = if scalar_pair(checker, &ty) { common::WORD_SCALAR } else { common::WORD_UNKNOWN };
+    Some([first, common::WORD_SCALAR])
+}
+
+/// The tags under which the first word of the closed two-word value `ty`
+/// is a heap pointer, as a mask (bit `t` for tag `t`), for a `Result` or
+/// a user enum whose payload words are each a scalar or a pointer by
+/// their type. `None` when a payload's word kind is unknown, a tag is 64
+/// or more, or `ty` is no tagged pair.
+pub fn pair_pointer_tags(checker: &Checker, ty: &Ty) -> Option<u64> {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    let variants: Vec<(u32, Vec<Ty>)> = match of_resolved(checker, &ty) {
+        Layout::Pair(PairKind::Result) => {
+            let (ok, err) = result_ok_err(strip_readonly(&ty))?;
+            checker
+                .enum_variants(common::BUILTIN_RESULT_ENUM)?
+                .into_iter()
+                .map(|(name, tag, _)| (tag, vec![if name == "Ok" { ok.clone() } else { err.clone() }]))
+                .collect()
+        }
+        Layout::Pair(PairKind::Enum(name)) => checker.enum_variants(&name)?.into_iter().map(|(_, tag, payload)| (tag, payload)).collect(),
+        _ => return None,
+    };
+    let mut mask = 0u64;
+    for (tag, payload) in variants {
+        let pointer = match payload.as_slice() {
+            [] => false,
+            [p] if is_unit(p) => false,
+            [p] => match word_kind(checker, p) {
+                common::WORD_SCALAR => false,
+                common::WORD_POINTER => true,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if pointer {
+            mask |= 1u64.checked_shl(tag)?;
+        }
+    }
+    Some(mask)
+}
+
+/// How a closed two-word value `ty` sits in a lane array and is boxed out
+/// of one: `(tag_mask, payload_mask, unit_mask)` as
+/// `crate::mir::MirLaneShape` holds them (the tags whose first word is a
+/// heap pointer, the tags that carry a payload word, the tags whose
+/// payload is `()`), all `0` for an arity-2 tuple. `None` for a range, a
+/// readonly pair class, an enum with `drop`, or a payload whose word kind
+/// or `()`-ness is open.
+pub fn pair_lane_shape(checker: &Checker, ty: &Ty) -> Option<(u64, u64, u64)> {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    let variants: Vec<(u32, Vec<Ty>)> = match of_resolved(checker, &ty) {
+        Layout::Pair(PairKind::Product) => return Some((0, 0, 0)),
+        Layout::Pair(PairKind::Option) => {
+            let inner = option_inner(strip_readonly(&ty))?;
+            checker
+                .enum_variants(common::BUILTIN_OPTION_ENUM)?
+                .into_iter()
+                .map(|(name, tag, _)| (tag, if name == "Some" { vec![inner.clone()] } else { Vec::new() }))
+                .collect()
+        }
+        Layout::Pair(PairKind::Result) => {
+            let (ok, err) = result_ok_err(strip_readonly(&ty))?;
+            checker
+                .enum_variants(common::BUILTIN_RESULT_ENUM)?
+                .into_iter()
+                .map(|(name, tag, _)| (tag, vec![if name == "Ok" { ok.clone() } else { err.clone() }]))
+                .collect()
+        }
+        Layout::Pair(PairKind::Enum(name)) if !checker.enum_has_drop(&name) => {
+            checker.enum_variants(&name)?.into_iter().map(|(_, tag, payload)| (tag, payload)).collect()
+        }
+        _ => return None,
+    };
+    let (mut tags, mut payloads, mut units) = (0u64, 0u64, 0u64);
+    for (tag, payload) in variants {
+        let bit = 1u64.checked_shl(tag)?;
+        match payload.as_slice() {
+            [] => {}
+            [p] if is_unit(p) => {
+                payloads |= bit;
+                units |= bit;
+            }
+            [p] => {
+                payloads |= bit;
+                match word_kind(checker, p) {
+                    common::WORD_SCALAR => {}
+                    common::WORD_POINTER => tags |= bit,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        }
+    }
+    // An enum with no payload is one word, never a pair.
+    (payloads != 0).then_some((tags, payloads, units))
+}
+
+/// A two-word value neither of whose words is ever a heap pointer
+/// (`Option<int>`, `(int, float)`, a numeric range, `Result<int, int>`, a
+/// readonly pair class, an enum of immediate payloads): a field of it can
+/// sit flat in two scalar slots with no tag-aware word kind.
+pub fn scalar_pair(checker: &Checker, ty: &Ty) -> bool {
+    let ty = apply_ty_prune(checker.subst(), ty);
+    let word = |t: &Ty| is_immediate(t) || is_unit(t);
+    match of_resolved(checker, &ty) {
+        Layout::Pair(PairKind::Range { .. } | PairKind::Product | PairKind::Option | PairKind::Class(_)) => true,
+        Layout::Pair(PairKind::Result) => result_ok_err(strip_readonly(&ty)).is_some_and(|(ok, err)| word(&ok) && word(&err)),
+        Layout::Pair(PairKind::Enum(name)) => checker
+            .enum_variants(&name)
+            .is_some_and(|vs| vs.iter().all(|(_, _, payload)| payload.iter().all(|p| word(p) || is_scalar_enum_ty(checker, p)))),
+        _ => false,
+    }
+}
+
 /// `int`, `float`, `bool` or `byte`.
 pub(crate) fn is_immediate(ty: &Ty) -> bool {
     matches!(strip_readonly(ty), Ty::Con(n) if n == INT || n == FLOAT || n == BOOL || n == BYTE)
@@ -289,61 +414,51 @@ pub fn niche_heap_only(checker: &Checker, ty: &Ty) -> bool {
             }
             checker.is_class(name) && args.iter().all(ty_is_closed)
         }
-        Ty::Sum { name, .. }
-            if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) =>
-        {
-            false
-        }
-        Ty::Tuple(items) => items.iter().all(ty_is_closed),
-        Ty::Record { fields } => fields.iter().all(|(_, field)| ty_is_closed(field)),
-        Ty::Sum { variants, .. } => variants
-            .iter()
-            .all(|(_, payload)| payload.field_types().into_iter().all(ty_is_closed)),
+        Ty::Tuple(_) | Ty::Record { .. } | Ty::Sum { .. } => ty.all_children(ty_is_closed),
         _ => false,
     }
 }
 
-/// No unresolved type variables anywhere in `ty`.
+/// No unresolved type variables anywhere in `ty`. A function or a
+/// rank-n type is never closed, nor an existential; an application's head
+/// is not looked at. A user enum is closed with a function in a payload
+/// too, when the function's type is ([`user_sum_closed`]).
 pub fn ty_is_closed(ty: &Ty) -> bool {
-    let ty = strip_readonly(ty);
-    match ty {
+    match strip_readonly(ty) {
         Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-        Ty::Constructor { owner: inner, .. } => ty_is_closed(inner),
+        Ty::Sum { name, variants } if is_user_sum(name) => user_sum_closed(variants, ty_is_closed),
         // A `thread` handle is one host word whatever it carries (#1905).
-        Ty::App(..) if crate::typechecking::ty::opaque_handle_name(ty).is_some() => true,
+        t @ Ty::App(..) if crate::typechecking::ty::opaque_handle_name(t).is_some() => true,
         Ty::App(_, args) => args.iter().all(ty_is_closed),
-        Ty::Tuple(items) => items.iter().all(ty_is_closed),
-        Ty::Record { fields } => fields.iter().all(|(_, f)| ty_is_closed(f)),
-        Ty::Array { element, .. } => ty_is_closed(element),
-        Ty::Sum { variants, .. } => variants
-            .iter()
-            .all(|(_, p)| p.field_types().into_iter().all(ty_is_closed)),
-        Ty::Con(_) | Ty::Never => true,
-        Ty::Readonly(_) => unreachable!("stripped"),
+        t => t.all_children(ty_is_closed),
     }
+}
+
+/// A user enum's structural type, not the prelude's `Option` / `Result`
+/// (whose payload is laid out in the value's own words).
+pub fn is_user_sum(name: &str) -> bool {
+    !common::is_builtin_option_enum(name) && !common::is_builtin_result_enum(name)
+}
+
+/// Whether every payload field of a user enum's `variants` is `closed`, or
+/// a function type with no type variable: the payload is a field of the
+/// enum's object, one closure word there, and says nothing of the enum
+/// value's own word (#2460).
+pub fn user_sum_closed(variants: &[(String, crate::typechecking::ty::EnumVariantPayloadTy)], closed: fn(&Ty) -> bool) -> bool {
+    variants.iter().all(|(_, payload)| {
+        payload.field_types().into_iter().all(|f| closed(f) || (matches!(strip_readonly(f), Ty::Fun(..)) && !f.has_free_var()))
+    })
 }
 
 /// `ty` with each named type parameter in `params` replaced by the matching
 /// type in `args` (a generic declaration's field at one instance).
 pub fn bind_params(ty: &Ty, params: &[String], args: &[Ty]) -> Ty {
-    let bind = |t: &Ty| bind_params(t, params, args);
     match ty {
         Ty::Con(name) => match params.iter().position(|p| p == name) {
             Some(i) => args.get(i).cloned().unwrap_or_else(|| ty.clone()),
             None => ty.clone(),
         },
-        Ty::App(head, items) => Ty::App(Box::new(bind(head)), items.iter().map(bind).collect()),
-        Ty::Fun(a, b) => Ty::Fun(Box::new(bind(a)), Box::new(bind(b))),
-        Ty::Readonly(inner) => Ty::Readonly(Box::new(bind(inner))),
-        Ty::Tuple(items) => Ty::Tuple(items.iter().map(bind).collect()),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(bind(element)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields.iter().map(|(n, f)| (n.clone(), bind(f))).collect(),
-        },
-        _ => ty.clone(),
+        _ => ty.map_children(|t| bind_params(t, params, args)),
     }
 }
 
@@ -403,17 +518,16 @@ impl From<&Layout> for ValueLayout {
 
 /// How a heap word of static type `ty` reads (`common::WORD_*`): a number /
 /// bool / scalar enum is never a reference; a ground heap object or a niche
-/// word is `0` or an object address (bit 0 set for a `Result` `Err`);
-/// anything generic or unresolved stays unknown.
+/// word is `0` or an object address (bit 0 set for a `Result` `Err`), and
+/// so is a stored `()`, the empty tuple object (#2507); anything generic or
+/// unresolved stays unknown.
 pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     let ty = apply_ty_prune(checker.subst(), ty);
     let ty = strip_readonly(&ty);
-    if let Ty::Con(name) = ty
-        && matches!(
-            name.as_str(),
-            crate::typechecking::ty::INT | crate::typechecking::ty::FLOAT | crate::typechecking::ty::BOOL | crate::typechecking::ty::BYTE | UNIT
-        )
-    {
+    if is_unit(ty) {
+        return common::WORD_POINTER;
+    }
+    if is_immediate(ty) {
         return common::WORD_SCALAR;
     }
     if is_scalar_enum_ty(checker, ty) {
@@ -501,7 +615,8 @@ mod word_tests {
         assert_eq!(kind(int()), common::WORD_SCALAR);
         assert_eq!(kind(Ty::Con("float".into())), common::WORD_SCALAR);
         assert_eq!(kind(Ty::Con("bool".into())), common::WORD_SCALAR);
-        assert_eq!(kind(unit()), common::WORD_SCALAR);
+        // A stored `()` is the empty tuple object (#2507).
+        assert_eq!(kind(unit()), common::WORD_POINTER);
         assert_eq!(kind(string()), common::WORD_POINTER);
         assert_eq!(kind(option_ty(string())), common::WORD_POINTER);
         assert_eq!(kind(result_ty(string(), string())), common::WORD_POINTER);
@@ -546,3 +661,61 @@ mod word_tests {
 #[cfg(test)]
 #[path = "rep.tests.rs"]
 mod tests;
+
+/// What a generator hands out for a value nobody produced: the completing
+/// `resume` of a body that ends without `return e`, and a binding `yield`
+/// resumed without `with` (#2717). Both read the word `0`; the type decides
+/// what that is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zero {
+    /// The type's zero is the word `0`: a number, `byte`, `bool`, `()`, a
+    /// niche `Option`'s `None`.
+    Word,
+    /// The type's zero is an object made where the `0` is read (`""`, an
+    /// empty `Vec`, a boxed `None`, a tuple, record or fixed array of
+    /// zeros); `0` is no value of the type.
+    Built,
+    /// No zero: a class, `Result`, an enum other than `Option`, a function,
+    /// an existential, a range, or a product holding one. A value read there
+    /// panics.
+    None,
+    /// A type variable (a shared generic body): its word moves as it is.
+    Open,
+}
+
+/// The structural zero of `ty`, as [`Zero`] classes it.
+pub fn zero_of(checker: &Checker, ty: &Ty) -> Zero {
+    let ty = strip_readonly(ty);
+    if !ty_is_closed(ty) {
+        return Zero::Open;
+    }
+    if is_immediate(ty) || is_unit(ty) {
+        return Zero::Word;
+    }
+    let items = |tys: &mut dyn Iterator<Item = &Ty>| {
+        let mut out = Zero::Built;
+        for t in tys {
+            match zero_of(checker, t) {
+                Zero::None => return Zero::None,
+                Zero::Open => out = Zero::Open,
+                Zero::Word | Zero::Built => {}
+            }
+        }
+        out
+    };
+    match ty {
+        Ty::Con(n) if n == crate::typechecking::ty::STRING => Zero::Built,
+        _ if crate::typechecking::ty::vec_element_ty(ty).is_some() => Zero::Built,
+        _ if is_option_ty(ty) => match of_resolved(checker, ty) {
+            Layout::NicheOption => Zero::Word,
+            _ => Zero::Built,
+        },
+        Ty::Tuple(tys) => items(&mut tys.iter()),
+        Ty::Record { fields } => items(&mut fields.iter().map(|(_, t)| t)),
+        Ty::Array {
+            element,
+            length: crate::typechecking::ty::ArrayLength::Static(_),
+        } => items(&mut std::iter::once(element.as_ref())),
+        _ => Zero::None,
+    }
+}

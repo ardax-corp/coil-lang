@@ -1,0 +1,142 @@
+// A generic function's value read at a ground function type is called by
+// code that knows only that type: its arguments and result are in the
+// ground layout, as a direct call's are (coil-lang#2755). A shared body
+// holds an `Option<T>` / `Result<T, E>` at its top as the enum object, a
+// niche word at `string` or a class; the value is an adapter calling the
+// function at the read's types (its clone, or the shared body with the
+// call's conversions). Passed to a parameter, bound to an annotated local
+// and passed on, stored in a field or a `Vec`, and returned; a generic
+// method's partial application (`m.take()`, a generic class's `c.put()`)
+// is its adapter over the receiver.
+use tests::assert;
+use string::format;
+
+#[derive(Show, Eq)]
+class Pt {
+    pub a: int,
+}
+
+fn wrap<T>(T x) -> Option<T> {
+    return Some(x);
+}
+
+fn ok<T: Show>(T x) -> Result<T, string> {
+    if x.show() == "" {
+        return Err("empty");
+    }
+    return Ok(x);
+}
+
+fn deep<T>(T x) -> Option<Option<T>> {
+    return Some(Some(x));
+}
+
+fn unwrap_or_panic<T>(Option<T> o) -> T {
+    return match o {
+        Some(v) => v,
+        None => panic "absent",
+    };
+}
+
+fn tagged<T>(T x) -> (T, int) {
+    return (x, 7);
+}
+
+class M {
+    pub k: int,
+}
+
+impl M {
+    pub fn take<T>(Result<T, string> r) -> Option<T> {
+        return match r {
+            Ok(v) => Some(v),
+            Err(_) => None,
+        };
+    }
+
+    pub static fn some<T>(T x) -> Option<T> {
+        return Some(x);
+    }
+}
+
+class Cell<T> {
+    pub k: int,
+}
+
+impl Cell<T> {
+    pub fn put(T x) -> Option<T> {
+        return Some(x);
+    }
+}
+
+class H {
+    pub f: fn(string) -> Option<string>,
+}
+
+fn run(fn(string) -> Option<string> f) -> string {
+    return format("%v", f("w"));
+}
+
+fn run_pt(fn(Pt) -> Result<Pt, string> f) -> string {
+    return format("%v", f(new Pt(3)));
+}
+
+fn run_deep(fn((int, int)) -> Option<Option<(int, int)>> f) -> string {
+    return format("%v", f((1, 2)));
+}
+
+fn run_unwrap(fn(Option<string>) -> string f) -> string {
+    return f(Some("u"));
+}
+
+fn run_tagged(fn(string) -> (string, int) f) -> string {
+    return format("%v", f("t"));
+}
+
+fn run_pick(fn(Result<Pt, string>) -> Option<Pt> f) -> string {
+    return format("%v", f(Ok(new Pt(5))));
+}
+
+fn get() -> fn(string) -> Option<Option<string>> {
+    return deep;
+}
+
+test("passed to a parameter of a ground function type") {
+    assert!(run(wrap) == "Some(w)");
+    assert!(run_pt(ok) == "Ok(Pt { a: 3 })");
+    assert!(run_deep(deep) == "Some(Some((1, 2)))");
+    assert!(run_unwrap(unwrap_or_panic) == "u");
+    assert!(run_tagged(tagged) == "(t, 7)");
+    assert!(run(M::some) == "Some(w)");
+}
+
+test("bound to an annotated local and passed on") {
+    let g: fn(string) -> Option<string> = wrap;
+    assert!(run(g) == "Some(w)");
+    let k: fn(Pt) -> Result<Pt, string> = ok;
+    let h = k;
+    assert!(run_pt(h) == "Ok(Pt { a: 3 })");
+}
+
+test("stored in a field and a Vec") {
+    let h = new H(wrap);
+    let f = h.f;
+    assert!(f("v") == Some("v"));
+    let fs: Vec<fn(Pt) -> Result<Pt, string>> = Vec::new();
+    fs.push(ok);
+    let g = fs[0];
+    assert!(g(new Pt(4)) == Ok(new Pt(4)));
+}
+
+test("returned") {
+    let g = get();
+    assert!(g("r") == Some(Some("r")));
+}
+
+test("a generic method partially applied") {
+    let m = new M(1);
+    let f: fn(Result<Pt, string>) -> Option<Pt> = m.take();
+    assert!(run_pick(f) == "Some(Pt { a: 5 })");
+    let c: Cell<string> = new Cell(0);
+    assert!(run(c.put()) == "Some(w)");
+}

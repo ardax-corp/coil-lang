@@ -1,0 +1,208 @@
+// A loop whose fold has one sign only for some values of what it reads
+// from outside (a parameter it scales by, a start read at run time) is
+// split behind a test of those values, made once as the loop starts: it
+// runs chunked when the test holds and sequentially when it fails. Where
+// either sign of a capture gives terms of that one sign, there is no test.
+// Results and panics are checked against the same fold written with
+// `break`, which always runs sequentially, with values on both sides of
+// each test, also from one call to the next.
+use task::{scope, Scope, TaskError};
+use tests::assert;
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// `body` as a child task: its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+static let ZERO: int = 0;
+
+// `x`, as a value no call can be computed from at compile time.
+fn vary(int x) -> int {
+    return x + ZERO;
+}
+
+fn sq(int i) -> int {
+    return i * i;
+}
+
+// `i * k` has the sign of `k` for every `i >= 0`: no test.
+fn scaled(int n, int k) -> int {
+    let total = 1;
+    for i in 0..n {
+        total = total + i * k;
+    }
+    return total;
+}
+
+fn scaled_seq(int n, int k) -> int {
+    let total = 1;
+    let i = 0;
+    while true {
+        if i >= n {
+            break;
+        }
+        total = total + i * k;
+        i = i + 1;
+    }
+    return total;
+}
+
+// A product of `base`: chunked when `base >= 1`; a `0` or `-1` could bring
+// a product back into range.
+fn power(int base, int e) -> int {
+    let r = 1;
+    for _ in 0..e {
+        r = r * base;
+    }
+    return r;
+}
+
+fn power_seq(int base, int e) -> int {
+    let r = 1;
+    let i = 0;
+    while true {
+        if i >= e {
+            break;
+        }
+        r = r * base;
+        i = i + 1;
+    }
+    return r;
+}
+
+// From a start read at run time: chunked when `lo >= 0`, where `x % 7`
+// is never negative.
+fn from(int lo, int hi) -> int {
+    let acc = 3;
+    for x in lo..hi {
+        acc = acc + x % 7;
+    }
+    return acc;
+}
+
+fn from_seq(int lo, int hi) -> int {
+    let acc = 3;
+    let x = lo;
+    while true {
+        if x >= hi {
+            break;
+        }
+        acc = acc + x % 7;
+        x = x + 1;
+    }
+    return acc;
+}
+
+// `k - i * i` is never positive when `k <= 0`.
+fn below(int n, int k) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < n {
+        acc = acc + (k - sq(i));
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn below_seq(int n, int k) -> int {
+    let acc = 0;
+    let i = 0;
+    while true {
+        if i >= n {
+            break;
+        }
+        acc = acc + (k - sq(i));
+        i = i + 1;
+    }
+    return acc;
+}
+
+test("a capture whose sign decides the terms' sign needs no test") {
+    for k in [3, 0, 0 - 3, 1, 0 - 1] {
+        for n in [400000, 21, 1, 0, 0 - 4] {
+            assert!(scaled(vary(n), k) == scaled_seq(n, k));
+        }
+    }
+    // Past `MAX` and past `MIN`, each with the sequential loop's panic.
+    let big = 100000000000000;
+    let n = vary(400000);
+    assert!(
+        outcome(fn () use (n, big) => scaled(n, big)) ==
+        outcome(fn () use (n, big) => scaled_seq(n, big)),
+    );
+    assert!(
+        outcome(fn () use (n, big) => scaled(n, 0 - big)) ==
+        outcome(fn () use (n, big) => scaled_seq(n, 0 - big)),
+    );
+    assert!(outcome(fn () use (n, big) => scaled(n, big)) != "ok");
+}
+
+test("a product runs chunked only for a base of 1 or more") {
+    for base in [1, 2, 0, 0 - 1, 0 - 2, 3, 1, 0] {
+        for e in [62, 40, 21, 20, 1, 0, 0 - 3] {
+            let b = vary(base);
+            let x = vary(e);
+            let seq = outcome(fn () use (b, x) => power_seq(b, x));
+            assert!(outcome(fn () use (b, x) => power(b, x)) == seq);
+            if seq == "ok" {
+                assert!(power(b, x) == power_seq(b, x));
+            }
+        }
+    }
+    // A long product of ones, then a long one of a test that fails.
+    assert!(power(vary(1), vary(400000)) == 1);
+    assert!(power(vary(0 - 1), vary(400000)) == 1);
+    assert!(power(vary(0 - 1), vary(399999)) == 0 - 1);
+    assert!(power(vary(0), vary(400000)) == 0);
+    // `2^63` traps on both sides of the test.
+    assert!(outcome(fn () => power(vary(2), vary(63))) == outcome(fn () => power_seq(2, 63)));
+    assert!(power(vary(0 - 2), vary(63)) == 0 - 9223372036854775807 - 1);
+    assert!(
+        outcome(fn () => power(vary(0 - 2), vary(64))) == outcome(fn () => power_seq(0 - 2, 64)),
+    );
+}
+
+test("a start read at run time is tested as the loop starts") {
+    for lo in [0, 1000, 0 - 1000, 0 - 400000, 7, 0 - 7] {
+        for hi in [400000, 1000, 0, 0 - 990] {
+            assert!(from(vary(lo), vary(hi)) == from_seq(lo, hi));
+        }
+    }
+}
+
+test("a test that holds for one call and fails for the next") {
+    let n = vary(300000);
+    let i = 0;
+    while i < 6 {
+        let k = if i % 2 == 0 {
+            0 - i
+        } else {
+            i
+        };
+        assert!(below(n, k) == below_seq(n, k));
+        i = i + 1;
+    }
+    // The sum of `-i * i` passes `MIN`; with `k > 0` the terms start
+    // positive, and the sequential loop's panic is the one reported.
+    let long = vary(3100000);
+    assert!(
+        outcome(fn () use (long) => below(long, 0)) ==
+        outcome(fn () use (long) => below_seq(long, 0)),
+    );
+    assert!(
+        outcome(fn () use (long) => below(long, 9)) ==
+        outcome(fn () use (long) => below_seq(long, 9)),
+    );
+    assert!(outcome(fn () use (long) => below(long, 0)) != "ok");
+}

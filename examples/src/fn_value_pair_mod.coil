@@ -1,0 +1,74 @@
+// Helper module for tests/modules/module_fn_value_pair_adapter.coil and
+// examples/perf/module_fn_value_pair.coil: functions with two-word
+// results, used as values both here and there, and called directly in both.
+
+enum Sign {
+    Neg(int),
+    Zero,
+    Pos(int),
+}
+
+fn half(int x) -> Option<int> {
+    if x % 2 != 0 {
+        return None;
+    }
+    return Some(x / 2);
+}
+
+fn split(int x) -> (int, int) {
+    return (x / 10, x % 10);
+}
+
+fn checked_div(int a, int b) -> Result<int, string> {
+    if b == 0 {
+        return Err("div by zero");
+    }
+    return Ok(a / b);
+}
+
+fn sign(int x) -> Sign {
+    if x < 0 {
+        return Sign::Neg(-x);
+    }
+    if x == 0 {
+        return Sign::Zero;
+    }
+    return Sign::Pos(x);
+}
+
+fn add_opt(int a, int b) -> Option<int> {
+    if a + b < 0 {
+        return None;
+    }
+    return Some(a + b);
+}
+
+/// This module's own value of `half`, called through.
+#[inline(never)]
+fn halves(Vec<int> xs) -> int {
+    let f = half;
+    let s = 0;
+    for x in xs {
+        s += f(x) ?? -1;
+    }
+    return s;
+}
+
+/// This module's own direct calls.
+fn direct_sum(int x) -> int {
+    let (a, b) = split(x);
+    let q = match checked_div(x, 2) {
+        Ok(v) => v,
+        Err(_) => 0,
+    };
+    return (half(x) ?? 0) + a + b + q;
+}
+
+/// The bench's callee: never inlined, so each direct call is a call.
+#[inline(never)]
+fn step(int x) -> Option<int> {
+    if x % 3 == 0 {
+        return None;
+    }
+    return Some(x + 1);
+}

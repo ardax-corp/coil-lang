@@ -1,4 +1,4 @@
-//! Append-only HostInvoke catalog shared by compiler and VM.
+//! Append-only HostInvoke catalog shared by compiler and runtime.
 //!
 //! Ids are the table index. New natives go at the end. Do not reorder or
 //! reuse slots. Frozen: 119 = `stream_attach`, 120 = `stream_park`.
@@ -64,1591 +64,356 @@ const EXEC_CAP: Caps = Caps::EXEC;
 const EXIT_CAP: Caps = Caps::EXIT;
 const ATTACH_CAP: Caps = Caps::ATTACH;
 
-/// Standard host natives in HostInvoke id order.
-pub const HOST_NATIVES: &[HostNative] = &[
-    HostNative {
-        name: "stdin",
-        arity: 0,
-        id: 0,
-        effects: READ,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "stdout",
-        arity: 0,
-        id: 1,
-        effects: WRITE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "stderr",
-        arity: 0,
-        id: 2,
-        effects: WRITE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "open",
-        arity: 2,
-        id: 3,
-        effects: READ_WRITE,
-        caps: OPEN,
-    },
-    HostNative {
-        name: "close",
-        arity: 1,
-        id: 4,
-        effects: WRITE_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "read",
-        arity: 2,
-        id: 5,
-        effects: READ,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "write",
-        arity: 2,
-        id: 6,
-        effects: WRITE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "await_readable",
-        arity: 1,
-        id: 7,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "await_writable",
-        arity: 1,
-        id: 8,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "drive",
-        arity: 0,
-        id: 9,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "from_bytes",
-        arity: 1,
-        id: 10,
-        effects: TEXT,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "to_bytes",
-        arity: 1,
-        id: 11,
-        effects: TEXT,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tcp_connect",
-        arity: 2,
-        id: 12,
-        effects: NET,
-        caps: NET_CAP,
-    },
-    HostNative {
-        name: "tcp_connect_timeout",
-        arity: 3,
-        id: 13,
-        effects: NET,
-        caps: NET_CAP,
-    },
-    HostNative {
-        name: "tcp_listen",
-        arity: 2,
-        id: 14,
-        effects: NET,
-        caps: NET_CAP,
-    },
-    HostNative {
-        name: "tcp_accept",
-        arity: 1,
-        id: 15,
-        effects: NET,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tcp_peer_addr",
-        arity: 1,
-        id: 16,
-        effects: NET,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tcp_local_addr",
-        arity: 1,
-        id: 17,
-        effects: NET,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tcp_set_nodelay",
-        arity: 2,
-        id: 18,
-        effects: NET,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tcp_shutdown",
-        arity: 2,
-        id: 19,
-        effects: NET,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "udp_bind",
-        arity: 2,
-        id: 20,
-        effects: NET,
-        caps: NET_CAP,
-    },
-    HostNative {
-        name: "udp_connect",
-        arity: 2,
-        id: 21,
-        effects: NET,
-        caps: NET_CAP,
-    },
-    HostNative {
-        name: "udp_send_to",
-        arity: 4,
-        id: 22,
-        effects: NET,
-        caps: NET_CAP,
-    },
-    HostNative {
-        name: "udp_recv_from",
-        arity: 2,
-        id: 23,
-        effects: NET,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "udp_local_port",
-        arity: 1,
-        id: 24,
-        effects: NET,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "fs_exists",
-        arity: 1,
-        id: 25,
-        effects: READ,
-        caps: READ_FS,
-    },
-    HostNative {
-        name: "fs_is_file",
-        arity: 1,
-        id: 26,
-        effects: READ,
-        caps: READ_FS,
-    },
-    HostNative {
-        name: "fs_is_dir",
-        arity: 1,
-        id: 27,
-        effects: READ,
-        caps: READ_FS,
-    },
-    HostNative {
-        name: "fs_is_symlink",
-        arity: 1,
-        id: 28,
-        effects: READ,
-        caps: READ_FS,
-    },
-    HostNative {
-        name: "fs_metadata",
-        arity: 1,
-        id: 29,
-        effects: READ,
-        caps: READ_FS,
-    },
-    HostNative {
-        name: "fs_create_dir",
-        arity: 1,
-        id: 30,
-        effects: WRITE_R,
-        caps: WRITE_FS,
-    },
-    HostNative {
-        name: "fs_create_dir_all",
-        arity: 1,
-        id: 31,
-        effects: WRITE_R,
-        caps: WRITE_FS,
-    },
-    HostNative {
-        name: "fs_remove_file",
-        arity: 1,
-        id: 32,
-        effects: WRITE_R,
-        caps: WRITE_FS,
-    },
-    HostNative {
-        name: "fs_remove_dir",
-        arity: 1,
-        id: 33,
-        effects: WRITE_R,
-        caps: WRITE_FS,
-    },
-    HostNative {
-        name: "fs_remove_dir_all",
-        arity: 1,
-        id: 34,
-        effects: WRITE_R,
-        caps: WRITE_FS,
-    },
-    HostNative {
-        name: "fs_rename",
-        arity: 2,
-        id: 35,
-        effects: WRITE_R,
-        caps: WRITE_FS,
-    },
-    HostNative {
-        name: "fs_copy",
-        arity: 2,
-        id: 36,
-        effects: WRITE_R,
-        caps: COPY_FS,
-    },
-    HostNative {
-        name: "fs_read_link",
-        arity: 1,
-        id: 37,
-        effects: READ,
-        caps: READ_FS,
-    },
-    HostNative {
-        name: "fs_symlink",
-        arity: 2,
-        id: 38,
-        effects: WRITE_R,
-        caps: WRITE_FS,
-    },
-    HostNative {
-        name: "fs_list_dir",
-        arity: 1,
-        id: 39,
-        effects: READ,
-        caps: READ_FS,
-    },
-    HostNative {
-        name: "fs_realpath",
-        arity: 1,
-        id: 40,
-        effects: READ,
-        caps: READ_FS,
-    },
-    HostNative {
-        name: "time_timestamp",
-        arity: 0,
-        id: 41,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_sleep_ms",
-        arity: 1,
-        id: 42,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_instant_now",
-        arity: 0,
-        id: 43,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_elapsed_nanos",
-        arity: 1,
-        id: 44,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_elapsed_millis",
-        arity: 1,
-        id: 45,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_period",
-        arity: 9,
-        id: 46,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_add",
-        arity: 2,
-        id: 47,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_sub",
-        arity: 2,
-        id: 48,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_period_add",
-        arity: 2,
-        id: 49,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_period_sub",
-        arity: 2,
-        id: 50,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_date",
-        arity: 0,
-        id: 51,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_date_from_period",
-        arity: 1,
-        id: 52,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_date_from_epoch_period",
-        arity: 1,
-        id: 53,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_epoch",
-        arity: 0,
-        id: 54,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_format",
-        arity: 2,
-        id: 55,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "time_parse",
-        arity: 2,
-        id: 56,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "env_args",
-        arity: 0,
-        id: 57,
-        effects: ENV,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "env_var",
-        arity: 1,
-        id: 58,
-        effects: ENV,
-        caps: ENV_CAP,
-    },
-    HostNative {
-        name: "env_set_var",
-        arity: 2,
-        id: 59,
-        effects: ENV,
-        caps: ENV_CAP,
-    },
-    HostNative {
-        name: "env_remove_var",
-        arity: 1,
-        id: 60,
-        effects: ENV,
-        caps: ENV_CAP,
-    },
-    HostNative {
-        name: "env_cwd",
-        arity: 0,
-        id: 61,
-        effects: ENV,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "env_set_cwd",
-        arity: 1,
-        id: 62,
-        effects: ENV,
-        caps: ENV_CAP,
-    },
-    HostNative {
-        name: "env_exit",
-        arity: 1,
-        id: 63,
-        effects: EXEC,
-        caps: EXIT_CAP,
-    },
+/// The HostInvoke catalog, one row per native:
+///
+/// ```text
+/// id "name" (arity) effects, caps [=> ID_CONST[, NATIVE_CONST]];
+/// ```
+///
+/// Emits [`HOST_NATIVES`] in row order, plus `pub const ID_CONST: u16 = id`
+/// and `pub const NATIVE_CONST: &str = "name"` for a row that names them
+/// (`_` for no id const). The row's doc comments go on its consts. Ids are
+/// literal and frozen: a row's id is its index, checked at compile time.
+macro_rules! host_natives {
+    ($( $(#[$doc:meta])* $id:literal $name:literal ($arity:literal) $fx:expr, $caps:expr $(=> $idc:tt $(, $nc:ident)?)? ; )*) => {
+        /// Standard host natives in HostInvoke id order.
+        pub const HOST_NATIVES: &[HostNative] = &[
+            $( HostNative { name: $name, arity: $arity, id: $id, effects: $fx, caps: $caps }, )*
+        ];
+        $( host_natives!(@consts [$(#[$doc])*] $id, $name $(, $idc $(, $nc)?)?); )*
+    };
+    (@consts [$($doc:tt)*] $id:literal, $name:literal) => {};
+    (@consts [$($doc:tt)*] $id:literal, $name:literal, _, $nc:ident) => {
+        $($doc)* pub const $nc: &str = $name;
+    };
+    (@consts [$($doc:tt)*] $id:literal, $name:literal, $idc:ident) => {
+        $($doc)* pub const $idc: u16 = $id;
+    };
+    (@consts [$($doc:tt)*] $id:literal, $name:literal, $idc:ident, $nc:ident) => {
+        $($doc)* pub const $idc: u16 = $id;
+        $($doc)* pub const $nc: &str = $name;
+    };
+}
+
+host_natives! {
+    0 "stdin" (0) READ, NO_CAP;
+    1 "stdout" (0) WRITE, NO_CAP;
+    2 "stderr" (0) WRITE, NO_CAP;
+    /// `io::open` (frozen row 3): on `TooManyOpenFiles` the runtime collects and
+    /// tries once more, as for [`TCP_ACCEPT_ID`].
+    3 "open" (2) READ_WRITE, OPEN => IO_OPEN_ID;
+    4 "close" (1) WRITE_R, NO_CAP;
+    5 "read" (2) READ, NO_CAP;
+    6 "write" (2) WRITE, NO_CAP;
+    7 "await_readable" (1) SUSPEND, NO_CAP;
+    8 "await_writable" (1) SUSPEND, NO_CAP;
+    9 "drive" (0) SUSPEND, NO_CAP;
+    10 "from_bytes" (1) TEXT, NO_CAP;
+    11 "to_bytes" (1) TEXT, NO_CAP;
+    12 "tcp_connect" (2) NET, NET_CAP;
+    13 "tcp_connect_timeout" (3) NET, NET_CAP;
+    14 "tcp_listen" (2) NET, NET_CAP;
+    /// `tcp_accept` (frozen row 15).
+    15 "tcp_accept" (1) NET, NO_CAP => TCP_ACCEPT_ID;
+    16 "tcp_peer_addr" (1) NET, NO_CAP;
+    17 "tcp_local_addr" (1) NET, NO_CAP;
+    18 "tcp_set_nodelay" (2) NET, NO_CAP;
+    19 "tcp_shutdown" (2) NET, NO_CAP;
+    20 "udp_bind" (2) NET, NET_CAP;
+    21 "udp_connect" (2) NET, NET_CAP;
+    22 "udp_send_to" (4) NET, NET_CAP;
+    23 "udp_recv_from" (2) NET, NO_CAP;
+    24 "udp_local_port" (1) NET, NO_CAP;
+    25 "fs_exists" (1) READ, READ_FS;
+    26 "fs_is_file" (1) READ, READ_FS;
+    27 "fs_is_dir" (1) READ, READ_FS;
+    28 "fs_is_symlink" (1) READ, READ_FS;
+    29 "fs_metadata" (1) READ, READ_FS;
+    30 "fs_create_dir" (1) WRITE_R, WRITE_FS;
+    31 "fs_create_dir_all" (1) WRITE_R, WRITE_FS;
+    32 "fs_remove_file" (1) WRITE_R, WRITE_FS;
+    33 "fs_remove_dir" (1) WRITE_R, WRITE_FS;
+    34 "fs_remove_dir_all" (1) WRITE_R, WRITE_FS;
+    35 "fs_rename" (2) WRITE_R, WRITE_FS;
+    36 "fs_copy" (2) WRITE_R, COPY_FS;
+    37 "fs_read_link" (1) READ, READ_FS;
+    38 "fs_symlink" (2) WRITE_R, WRITE_FS;
+    39 "fs_list_dir" (1) READ, READ_FS;
+    40 "fs_realpath" (1) READ, READ_FS;
+    41 "time_timestamp" (0) HOST_R, NO_CAP;
+    42 "time_sleep_ms" (1) HOST_R, NO_CAP;
+    43 "time_instant_now" (0) HOST_R, NO_CAP;
+    44 "time_elapsed_nanos" (1) HOST_R, NO_CAP;
+    45 "time_elapsed_millis" (1) HOST_R, NO_CAP;
+    46 "time_period" (9) HOST_R, NO_CAP;
+    47 "time_add" (2) HOST_R, NO_CAP;
+    48 "time_sub" (2) HOST_R, NO_CAP;
+    49 "time_period_add" (2) HOST_R, NO_CAP;
+    50 "time_period_sub" (2) HOST_R, NO_CAP;
+    51 "time_date" (0) HOST_R, NO_CAP;
+    52 "time_date_from_period" (1) HOST_R, NO_CAP;
+    53 "time_date_from_epoch_period" (1) HOST_R, NO_CAP;
+    54 "time_epoch" (0) HOST_R, NO_CAP;
+    55 "time_format" (2) HOST_R, NO_CAP;
+    56 "time_parse" (2) HOST_R, NO_CAP;
+    57 "env_args" (0) ENV, NO_CAP;
+    58 "env_var" (1) ENV, ENV_CAP;
+    59 "env_set_var" (2) ENV, ENV_CAP;
+    60 "env_remove_var" (1) ENV, ENV_CAP;
+    61 "env_cwd" (0) ENV, NO_CAP;
+    62 "env_set_cwd" (1) ENV, ENV_CAP;
+    63 "env_exit" (1) EXEC, EXIT_CAP;
     // Removed slot: `env::exec` (now the `process` module, ids 180–188). Kept so
     // later ids do not slide; nothing exports it and the runtime panics.
-    HostNative {
-        name: "env_exec",
-        arity: 2,
-        id: 64,
-        effects: EXEC,
-        caps: Caps::NONE,
-    },
-    HostNative {
-        name: "ord",
-        arity: 1,
-        id: 65,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "char",
-        arity: 1,
-        id: 66,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "hash_string",
-        arity: 1,
-        id: 67,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_spawn",
-        arity: 1,
-        id: 68,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_join",
-        arity: 1,
-        id: 69,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_detach",
-        arity: 1,
-        id: 70,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_channel",
-        arity: 0,
-        id: 71,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_send",
-        arity: 2,
-        id: 72,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_recv",
-        arity: 1,
-        id: 73,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_try_send",
-        arity: 2,
-        id: 74,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_try_recv",
-        arity: 1,
-        id: 75,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_close",
-        arity: 1,
-        id: 76,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_mutex",
-        arity: 1,
-        id: 77,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_with_lock",
-        arity: 2,
-        id: 78,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_lock",
-        arity: 1,
-        id: 79,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_try_lock",
-        arity: 1,
-        id: 80,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_unlock",
-        arity: 1,
-        id: 81,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_rwlock",
-        arity: 1,
-        id: 82,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_with_read",
-        arity: 2,
-        id: 83,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_with_write",
-        arity: 2,
-        id: 84,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_try_read",
-        arity: 2,
-        id: 85,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_try_write",
-        arity: 2,
-        id: 86,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "packed_dot",
-        arity: 3,
-        id: 87,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "packed_matmul",
-        arity: 3,
-        id: 88,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "packed_matrix_zip",
-        arity: 3,
-        id: 89,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "packed_matrix_neg",
-        arity: 2,
-        id: 90,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "packed_vec_arith",
-        arity: 3,
-        id: 91,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "wait_ready",
-        arity: 0,
-        id: 92,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "write_from",
-        arity: 3,
-        id: 93,
-        effects: WRITE_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "gc_root",
-        arity: 1,
-        id: 94,
-        effects: GC_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "gc_unroot",
-        arity: 1,
-        id: 95,
-        effects: GC_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "gc_get",
-        arity: 1,
-        id: 96,
-        effects: GC_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "gc_weak",
-        arity: 1,
-        id: 97,
-        effects: GC_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "gc_upgrade",
-        arity: 1,
-        id: 98,
-        effects: GC_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "gc_heap_bytes",
-        arity: 0,
-        id: 99,
-        effects: GC_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "gc_collect",
-        arity: 0,
-        id: 100,
-        effects: GC_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "gc_register_finalizer",
-        arity: 2,
-        id: 101,
-        effects: GC_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_sin",
-        arity: 1,
-        id: 102,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_cos",
-        arity: 1,
-        id: 103,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_tan",
-        arity: 1,
-        id: 104,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_sqrt",
-        arity: 1,
-        id: 105,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_floor",
-        arity: 1,
-        id: 106,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_ceil",
-        arity: 1,
-        id: 107,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_exp",
-        arity: 1,
-        id: 108,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_ln",
-        arity: 1,
-        id: 109,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_pow",
-        arity: 2,
-        id: 110,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "vec_with_capacity",
-        arity: 1,
-        id: 111,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "vec_capacity",
-        arity: 1,
-        id: 112,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "vec_reserve",
-        arity: 2,
-        id: 113,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "vec_clear",
-        arity: 1,
-        id: 114,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "vec_pop",
-        arity: 1,
-        id: 115,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "vec_insert",
-        arity: 3,
-        id: 116,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "vec_remove",
-        arity: 2,
-        id: 117,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "vec_from_array",
-        arity: 1,
-        id: 118,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "stream_attach",
-        arity: 6,
-        id: 119,
-        effects: PARK_R,
-        caps: ATTACH_CAP,
-    },
-    HostNative {
-        name: "stream_park",
-        arity: 1,
-        id: 120,
-        effects: PARK_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "clock_wall_nanos",
-        arity: 0,
-        id: 121,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "clock_mono_nanos",
-        arity: 0,
-        id: 122,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "clock_sleep_ms",
-        arity: 1,
-        id: 123,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "result_unit_probe",
-        arity: 1,
-        id: 124,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_atan",
-        arity: 1,
-        id: 125,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_atan2",
-        arity: 2,
-        id: 126,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_asin",
-        arity: 1,
-        id: 127,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_acos",
-        arity: 1,
-        id: 128,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_log10",
-        arity: 1,
-        id: 129,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_log2",
-        arity: 1,
-        id: 130,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_cbrt",
-        arity: 1,
-        id: 131,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_rem",
-        arity: 2,
-        id: 132,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_sinh",
-        arity: 1,
-        id: 133,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_cosh",
-        arity: 1,
-        id: 134,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "math_tanh",
-        arity: 1,
-        id: 135,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "simd_axpy_reduce",
-        arity: 5,
-        id: 136,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "thread_spawn_shared",
-        arity: 1,
-        id: 137,
-        effects: THREAD_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "stream_fd",
-        arity: 1,
-        id: 138,
-        effects: PARK_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "string_byte_at",
-        arity: 2,
-        id: 139,
-        effects: TEXT_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "string_slice_bytes",
-        arity: 3,
-        id: 140,
-        effects: TEXT_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "string_find_from",
-        arity: 3,
-        id: 141,
-        effects: TEXT_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "string_rfind",
-        arity: 2,
-        id: 142,
-        effects: TEXT_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "string_match_at",
-        arity: 3,
-        id: 143,
-        effects: TEXT_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_scope_open",
-        arity: 0,
-        id: 144,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_scope_close",
-        arity: 1,
-        id: 145,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_scope_error",
-        arity: 1,
-        id: 146,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_spawn",
-        arity: 2,
-        id: 147,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_join",
-        arity: 1,
-        id: 148,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_error",
-        arity: 1,
-        id: 149,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_sleep",
-        arity: 1,
-        id: 150,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_yield",
-        arity: 0,
-        id: 151,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "unwind_resume",
-        arity: 0,
-        id: 152,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_cancel",
-        arity: 1,
-        id: 153,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_shield_enter",
-        arity: 0,
-        id: 154,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_shield_exit",
-        arity: 0,
-        id: 155,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_cond_new",
-        arity: 0,
-        id: 156,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_cond_wait",
-        arity: 1,
-        id: 157,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "task_cond_notify",
-        arity: 1,
-        id: 158,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "contract_fail",
-        arity: 1,
-        id: 159,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "ffi_read_ints",
-        arity: 3,
-        id: 160,
-        effects: FFI_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "values_eq_shaped",
-        arity: 3,
-        id: 161,
-        effects: TEXT,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "string_compare",
-        arity: 2,
-        id: 162,
-        effects: TEXT,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "black_box",
-        arity: 1,
-        id: 163,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "io_capture_begin",
-        arity: 0,
-        id: 164,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "io_capture_end",
-        arity: 0,
-        id: 165,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tty_is_tty",
-        arity: 1,
-        id: 166,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tty_size",
-        arity: 1,
-        id: 167,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tty_enter_raw",
-        arity: 3,
-        id: 168,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tty_leave_raw",
-        arity: 1,
-        id: 169,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tty_is_raw",
-        arity: 1,
-        id: 170,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tty_read_timeout",
-        arity: 3,
-        id: 171,
-        effects: READ,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tty_resized",
-        arity: 0,
-        id: 172,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "tty_enable_vt",
-        arity: 1,
-        id: 173,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "vec_extend_range",
-        arity: 4,
-        id: 174,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "vec_fill",
-        arity: 3,
-        id: 175,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "from_bytes_take",
-        arity: 1,
-        id: 176,
-        effects: TEXT,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "gc_region_enter",
-        arity: 0,
-        id: 177,
-        effects: GC_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "gc_region_exit",
-        arity: 0,
-        id: 178,
-        effects: GC_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "symbol_next_id",
-        arity: 0,
-        id: 179,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "process_spawn",
-        arity: 6,
-        id: 180,
-        effects: EXEC,
-        caps: EXEC_CAP,
-    },
-    HostNative {
-        name: "process_take_pipe",
-        arity: 2,
-        id: 181,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "process_wait",
-        arity: 1,
-        id: 182,
-        effects: EXEC,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "process_try_wait",
-        arity: 1,
-        id: 183,
-        effects: EXEC,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "process_output",
-        arity: 1,
-        id: 184,
-        effects: EXEC,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "process_kill",
-        arity: 1,
-        id: 185,
-        effects: EXEC,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "process_signal",
-        arity: 2,
-        id: 186,
-        effects: EXEC,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "process_pid",
-        arity: 1,
-        id: 187,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "process_release",
-        arity: 1,
-        id: 188,
-        effects: HOST,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "coro_close",
-        arity: 1,
-        id: 189,
-        effects: SUSPEND,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "entropy_bytes",
-        arity: 1,
-        id: 190,
-        effects: HOST_ALLOC,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "key_index_table",
-        arity: 1,
-        id: 191,
-        effects: TEXT_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "key_index_probe",
-        arity: 4,
-        id: 192,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "key_index_insert",
-        arity: 4,
-        id: 193,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "key_index_remove",
-        arity: 4,
-        id: 194,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "key_index_compact",
-        arity: 3,
-        id: 195,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "key_index_retain",
-        arity: 2,
-        id: 196,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "key_index_clear",
-        arity: 3,
-        id: 197,
-        effects: HEAP_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "key_index_find",
-        arity: 6,
-        id: 198,
-        effects: HOST_R,
-        caps: NO_CAP,
-    },
-    HostNative {
-        name: "key_index_eq_mode",
-        arity: 1,
-        id: 199,
-        effects: PURE,
-        caps: NO_CAP,
-    },
-];
+    64 "env_exec" (2) EXEC, Caps::NONE;
+    65 "ord" (1) HOST_R, NO_CAP;
+    66 "char" (1) HOST_R, NO_CAP;
+    67 "hash_string" (1) HOST_R, NO_CAP;
+    68 "thread_spawn" (1) THREAD_R, NO_CAP;
+    69 "thread_join" (1) THREAD_R, NO_CAP;
+    70 "thread_detach" (1) THREAD_R, NO_CAP;
+    71 "thread_channel" (0) THREAD_R, NO_CAP;
+    72 "thread_send" (2) THREAD_R, NO_CAP;
+    73 "thread_recv" (1) THREAD_R, NO_CAP;
+    74 "thread_try_send" (2) THREAD_R, NO_CAP;
+    75 "thread_try_recv" (1) THREAD_R, NO_CAP;
+    76 "thread_close" (1) THREAD_R, NO_CAP;
+    77 "thread_mutex" (1) THREAD_R, NO_CAP;
+    78 "thread_with_lock" (2) THREAD_R, NO_CAP;
+    79 "thread_lock" (1) THREAD_R, NO_CAP;
+    80 "thread_try_lock" (1) THREAD_R, NO_CAP;
+    81 "thread_unlock" (1) THREAD_R, NO_CAP;
+    82 "thread_rwlock" (1) THREAD_R, NO_CAP;
+    83 "thread_with_read" (2) THREAD_R, NO_CAP;
+    84 "thread_with_write" (2) THREAD_R, NO_CAP;
+    85 "thread_try_read" (2) THREAD_R, NO_CAP;
+    86 "thread_try_write" (2) THREAD_R, NO_CAP;
+    /// First packed-LA HostInvoke (`packed_dot`).
+    87 "packed_dot" (3) PURE, NO_CAP => PACKED_DOT_ID;
+    88 "packed_matmul" (3) PURE, NO_CAP => PACKED_MATMUL_ID;
+    89 "packed_matrix_zip" (3) PURE, NO_CAP => PACKED_MATRIX_ZIP_ID;
+    90 "packed_matrix_neg" (2) PURE, NO_CAP => PACKED_MATRIX_NEG_ID;
+    /// Last packed-LA HostInvoke (`packed_vec_arith`).
+    91 "packed_vec_arith" (3) PURE, NO_CAP => PACKED_VEC_ARITH_ID;
+    92 "wait_ready" (0) SUSPEND, NO_CAP;
+    93 "write_from" (3) WRITE_R, NO_CAP;
+    /// `gc::root` (its id in the table above).
+    94 "gc_root" (1) GC_R, NO_CAP => GC_ROOT_ID;
+    95 "gc_unroot" (1) GC_R, NO_CAP;
+    96 "gc_get" (1) GC_R, NO_CAP;
+    97 "gc_weak" (1) GC_R, NO_CAP;
+    98 "gc_upgrade" (1) GC_R, NO_CAP;
+    99 "gc_heap_bytes" (0) GC_R, NO_CAP;
+    100 "gc_collect" (0) GC_R, NO_CAP => _, GC_COLLECT_NATIVE;
+    101 "gc_register_finalizer" (2) GC_R, NO_CAP => _, GC_REGISTER_FINALIZER_NATIVE;
+    /// Frozen HostInvoke id for `math_sin` (first frozen prelude math).
+    102 "math_sin" (1) PURE, NO_CAP => MATH_SIN_ID;
+    103 "math_cos" (1) PURE, NO_CAP;
+    104 "math_tan" (1) PURE, NO_CAP;
+    105 "math_sqrt" (1) PURE, NO_CAP;
+    106 "math_floor" (1) PURE, NO_CAP;
+    107 "math_ceil" (1) PURE, NO_CAP;
+    108 "math_exp" (1) PURE, NO_CAP;
+    109 "math_ln" (1) PURE, NO_CAP;
+    /// Frozen HostInvoke id for `math_pow` (last frozen prelude math).
+    110 "math_pow" (2) PURE, NO_CAP => MATH_POW_ID;
+    111 "vec_with_capacity" (1) HEAP_R, NO_CAP;
+    112 "vec_capacity" (1) HEAP_R, NO_CAP;
+    113 "vec_reserve" (2) HEAP_R, NO_CAP;
+    114 "vec_clear" (1) HEAP_R, NO_CAP;
+    115 "vec_pop" (1) HEAP_R, NO_CAP;
+    116 "vec_insert" (3) HEAP_R, NO_CAP;
+    117 "vec_remove" (2) HEAP_R, NO_CAP;
+    118 "vec_from_array" (1) HEAP_R, NO_CAP;
+    /// Frozen HostInvoke id for `stream_attach`.
+    119 "stream_attach" (6) PARK_R, ATTACH_CAP => STREAM_ATTACH_ID, STREAM_ATTACH_NATIVE;
+    /// Frozen HostInvoke id for `stream_park`.
+    120 "stream_park" (1) PARK_R, NO_CAP => STREAM_PARK_ID, STREAM_PARK_NATIVE;
+    /// HostInvoke id for `clock_wall_nanos`.
+    121 "clock_wall_nanos" (0) HOST, NO_CAP => CLOCK_WALL_NANOS_ID, CLOCK_WALL_NANOS_NATIVE;
+    /// HostInvoke id for `clock_mono_nanos`.
+    122 "clock_mono_nanos" (0) HOST, NO_CAP => CLOCK_MONO_NANOS_ID, CLOCK_MONO_NANOS_NATIVE;
+    /// HostInvoke id for `clock_sleep_ms`.
+    123 "clock_sleep_ms" (1) HOST, NO_CAP => CLOCK_SLEEP_MS_ID, CLOCK_SLEEP_MS_NATIVE;
+    /// HostInvoke id for `result_unit_probe` (`Result<(), IoError>` pack helper).
+    124 "result_unit_probe" (1) HOST_R, NO_CAP => RESULT_UNIT_PROBE_ID, RESULT_UNIT_PROBE_NATIVE;
+    /// First HostInvoke id of the M1 `prelude::math` expansion (`math_atan`).
+    125 "math_atan" (1) PURE, NO_CAP => MATH_ATAN_ID;
+    126 "math_atan2" (2) PURE, NO_CAP;
+    127 "math_asin" (1) PURE, NO_CAP;
+    128 "math_acos" (1) PURE, NO_CAP;
+    129 "math_log10" (1) PURE, NO_CAP;
+    130 "math_log2" (1) PURE, NO_CAP;
+    131 "math_cbrt" (1) PURE, NO_CAP;
+    132 "math_rem" (2) PURE, NO_CAP;
+    133 "math_sinh" (1) PURE, NO_CAP;
+    134 "math_cosh" (1) PURE, NO_CAP;
+    /// HostInvoke id for `math_tanh` (last M1 math native).
+    135 "math_tanh" (1) PURE, NO_CAP => MATH_TANH_ID;
+    /// Compiler-only HostInvoke id for MIR saxpy-reduce packs (COI-286).
+    136 "simd_axpy_reduce" (5) PURE, NO_CAP => SIMD_AXPY_REDUCE_ID, SIMD_AXPY_REDUCE_NATIVE;
+    137 "thread_spawn_shared" (1) THREAD_R, NO_CAP => THREAD_SPAWN_SHARED_ID, THREAD_SPAWN_SHARED_NATIVE;
+    138 "stream_fd" (1) PARK_R, NO_CAP => STREAM_FD_ID, STREAM_FD_NATIVE;
+    /// First byte-offset `string` native (`string_byte_at`); the block runs
+    /// through [`STRING_MATCH_AT_ID`] (archive minor 31).
+    139 "string_byte_at" (2) TEXT_R, NO_CAP => STRING_BYTE_AT_ID;
+    140 "string_slice_bytes" (3) TEXT_R, NO_CAP;
+    141 "string_find_from" (3) TEXT_R, NO_CAP;
+    142 "string_rfind" (2) TEXT_R, NO_CAP;
+    /// Last byte-offset `string` native (`string_match_at`).
+    143 "string_match_at" (3) TEXT_R, NO_CAP => STRING_MATCH_AT_ID;
+    /// First task-scheduler native (`task_scope_open`); the block runs through
+    /// [`TASK_YIELD_ID`] (archive minor 32). The runtime handles these itself
+    /// (`HostOp::Task`): they can switch tasks.
+    144 "task_scope_open" (0) SUSPEND, NO_CAP => TASK_SCOPE_OPEN_ID;
+    145 "task_scope_close" (1) SUSPEND, NO_CAP;
+    146 "task_scope_error" (1) SUSPEND, NO_CAP;
+    147 "task_spawn" (2) SUSPEND, NO_CAP;
+    148 "task_join" (1) SUSPEND, NO_CAP;
+    149 "task_error" (1) SUSPEND, NO_CAP;
+    150 "task_sleep" (1) SUSPEND, NO_CAP;
+    /// Last task-scheduler native (`task_yield`).
+    151 "task_yield" (0) SUSPEND, NO_CAP => TASK_YIELD_ID;
+    /// Ends a `defer` cleanup pad: the runtime unwinder takes the frame back
+    /// (archive minor 33, `HostOp::Unwind`). Compiler-emitted only.
+    152 "unwind_resume" (0) PURE, NO_CAP => UNWIND_RESUME_ID, UNWIND_RESUME_NATIVE;
+    /// First cancellation native (`task_cancel`); the block runs through
+    /// [`TASK_SHIELD_EXIT_ID`] (archive minor 33). `HostOp::Task`, like the
+    /// scheduler block.
+    153 "task_cancel" (1) SUSPEND, NO_CAP => TASK_CANCEL_ID;
+    154 "task_shield_enter" (0) SUSPEND, NO_CAP;
+    /// Last cancellation native (`task_shield_exit`).
+    155 "task_shield_exit" (0) SUSPEND, NO_CAP => TASK_SHIELD_EXIT_ID;
+    /// First wait-condition native (`task_cond_new`); the block runs through
+    /// [`TASK_COND_NOTIFY_ID`] (archive minor 34). `HostOp::Task`: a wait
+    /// suspends the task until a notify (`task::channel`).
+    156 "task_cond_new" (0) SUSPEND, NO_CAP => TASK_COND_NEW_ID;
+    157 "task_cond_wait" (1) SUSPEND, NO_CAP;
+    /// Last wait-condition native (`task_cond_notify`).
+    158 "task_cond_notify" (1) SUSPEND, NO_CAP => TASK_COND_NOTIFY_ID;
+    /// A failed `requires` (archive minor 35). `HostOp::Task`: panics with the
+    /// message plus the caller's location (the frame below), never returns.
+    159 "contract_fail" (1) PURE, NO_CAP => CONTRACT_FAIL_ID, CONTRACT_FAIL_NATIVE;
+    /// `ffi::read_ints(lib, ptr, count)` (archive minor 36): copy `count` C
+    /// `int64_t`s from a pointer a native returned (an ovector, an out array).
+    160 "ffi_read_ints" (3) FFI_R, NO_CAP => FFI_READ_INTS_ID, FFI_READ_INTS_NATIVE;
+    /// `==` on an aggregate with `float` leaves, by its static shape
+    /// (coil-lang#1253, archive minor 39). No longer emitted: such an `==`
+    /// calls compiler-made glue (`codegen::eq_glue`). Kept for archives that
+    /// still call it; a panic stub at the next major.
+    161 "values_eq_shaped" (3) TEXT, NO_CAP => VALUES_EQ_SHAPED_ID, VALUES_EQ_SHAPED_NATIVE;
+    /// `<` / `<=` / `>` / `>=` on `string`: `-1` / `0` / `1` by UTF-8 bytes
+    /// (coil-stdlib#48, archive minor 41).
+    162 "string_compare" (2) TEXT, NO_CAP => STRING_COMPARE_ID, STRING_COMPARE_NATIVE;
+    /// `black_box(x)` (archive minor 43): returns `x`, which the optimizer
+    /// cannot see through. Its `HOST` effect keeps it from being folded at
+    /// compile time, hoisted or removed.
+    163 "black_box" (1) HOST, NO_CAP => BLACK_BOX_ID, BLACK_BOX_NATIVE;
+    /// `io::capture_begin()` / `io::capture_end()` (archive minor 44): keep
+    /// this thread's stdout and stderr writes in memory instead of writing them,
+    /// and hand them back as `(stdout, stderr)` strings.
+    164 "io_capture_begin" (0) HOST, NO_CAP => IO_CAPTURE_BEGIN_ID, IO_CAPTURE_BEGIN_NATIVE;
+    165 "io_capture_end" (0) HOST, NO_CAP => IO_CAPTURE_END_ID, IO_CAPTURE_END_NATIVE;
+    /// `io::tty` (archive minor 47): terminal queries, raw mode, a timed read
+    /// and resize notices on a stream. Ungated like `stdin` / `stdout`.
+    166 "tty_is_tty" (1) HOST, NO_CAP => TTY_IS_TTY_ID, TTY_IS_TTY_NATIVE;
+    167 "tty_size" (1) HOST, NO_CAP => _, TTY_SIZE_NATIVE;
+    168 "tty_enter_raw" (3) HOST, NO_CAP => _, TTY_ENTER_RAW_NATIVE;
+    169 "tty_leave_raw" (1) HOST, NO_CAP => _, TTY_LEAVE_RAW_NATIVE;
+    170 "tty_is_raw" (1) HOST, NO_CAP => _, TTY_IS_RAW_NATIVE;
+    171 "tty_read_timeout" (3) READ, NO_CAP => _, TTY_READ_TIMEOUT_NATIVE;
+    172 "tty_resized" (0) HOST, NO_CAP => _, TTY_RESIZED_NATIVE;
+    173 "tty_enable_vt" (1) HOST, NO_CAP => TTY_ENABLE_VT_ID, TTY_ENABLE_VT_NATIVE;
+    /// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
+    /// rewrite only): append `src[from..to]` to `dst` and return `to`; the
+    /// compiler has checked `0 <= from < to <= src.len()`. When `dst` is
+    /// `src` it appends nothing and returns `from` (the loop runs scalar).
+    174 "vec_extend_range" (4) HEAP_R, NO_CAP => VEC_EXTEND_RANGE_ID, VEC_EXTEND_RANGE_NATIVE;
+    /// `vec_fill(dst, v, n)` (archive minor 1, compiler rewrite only): push
+    /// `v` onto `dst` `n` times (`n >= 1`); returns `0`.
+    175 "vec_fill" (3) HEAP_R, NO_CAP => VEC_FILL_ID, VEC_FILL_NATIVE;
+    /// `from_bytes` of a buffer the compiler proved dead after the call (archive
+    /// 6.4): the string takes the buffer's bytes. Never named in source; the
+    /// compiler swaps it in for `from_bytes`.
+    176 "from_bytes_take" (1) TEXT, NO_CAP => FROM_BYTES_TAKE_ID, FROM_BYTES_TAKE_NATIVE;
+    /// HostInvoke ids around a `region { ... }` block (escape step 5, archive
+    /// 6.2): enter starts a fresh nursery for the block, exit collects it.
+    /// Never named in source; the compiler emits them for `region`.
+    177 "gc_region_enter" (0) GC_R, NO_CAP => GC_REGION_ENTER_ID, GC_REGION_ENTER_NATIVE;
+    178 "gc_region_exit" (0) GC_R, NO_CAP => GC_REGION_EXIT_ID, GC_REGION_EXIT_NATIVE;
+    /// `symbol::next_id()` (archive 6.9): the next value of one process-wide
+    /// atomic counter. Its `HOST` effect keeps it from being folded at compile
+    /// time, hoisted or removed.
+    179 "symbol_next_id" (0) HOST, NO_CAP => SYMBOL_NEXT_ID_ID, SYMBOL_NEXT_ID_NATIVE;
+    /// The embedded `process` module's natives (archive 6.10, ids 180–188):
+    /// spawn a program, take its pipes as streams, wait, kill, signal. Only
+    /// `process_spawn` needs a grant (`--allow-exec`); the rest act on a child
+    /// it started.
+    180 "process_spawn" (6) EXEC, EXEC_CAP => PROCESS_SPAWN_ID, PROCESS_SPAWN_NATIVE;
+    181 "process_take_pipe" (2) HOST_R, NO_CAP => _, PROCESS_TAKE_PIPE_NATIVE;
+    182 "process_wait" (1) EXEC, NO_CAP => _, PROCESS_WAIT_NATIVE;
+    183 "process_try_wait" (1) EXEC, NO_CAP => _, PROCESS_TRY_WAIT_NATIVE;
+    184 "process_output" (1) EXEC, NO_CAP => _, PROCESS_OUTPUT_NATIVE;
+    185 "process_kill" (1) EXEC, NO_CAP => _, PROCESS_KILL_NATIVE;
+    186 "process_signal" (2) EXEC, NO_CAP => _, PROCESS_SIGNAL_NATIVE;
+    187 "process_pid" (1) HOST, NO_CAP => _, PROCESS_PID_NATIVE;
+    188 "process_release" (1) HOST, NO_CAP => PROCESS_RELEASE_ID, PROCESS_RELEASE_NATIVE;
+    /// Closes a generator a `for` loop leaves early (archive 6.14,
+    /// `HostOp::Task`): runs its armed `defer`s. Compiler-emitted only.
+    189 "coro_close" (1) SUSPEND, NO_CAP => CORO_CLOSE_ID, CORO_CLOSE_NATIVE;
+    /// `entropy::bytes(n)` (archive 6.15): `n` fresh bytes from the OS CSPRNG.
+    /// No capability: like the clock, it reads host state and touches nothing.
+    190 "entropy_bytes" (1) HOST_ALLOC, NO_CAP => ENTROPY_BYTES_ID, ENTROPY_BYTES_NATIVE;
+    /// The key index natives (archive 6.19, `key_index::*`): an
+    /// insertion-ordered hash index over parallel `Vec`s that any collection
+    /// keyed by a `Hash + Eq` type builds on. See
+    /// `docs/internals/key-index.md`.
+    191 "key_index_table" (1) TEXT_R, NO_CAP => KEY_INDEX_TABLE_ID, KEY_INDEX_TABLE_NATIVE;
+    192 "key_index_probe" (4) HOST_R, NO_CAP => _, KEY_INDEX_PROBE_NATIVE;
+    193 "key_index_insert" (4) HEAP_R, NO_CAP => _, KEY_INDEX_INSERT_NATIVE;
+    194 "key_index_remove" (4) HEAP_R, NO_CAP => _, KEY_INDEX_REMOVE_NATIVE;
+    195 "key_index_compact" (3) HEAP_R, NO_CAP => _, KEY_INDEX_COMPACT_NATIVE;
+    196 "key_index_retain" (2) HEAP_R, NO_CAP => _, KEY_INDEX_RETAIN_NATIVE;
+    197 "key_index_clear" (3) HEAP_R, NO_CAP => KEY_INDEX_CLEAR_ID, KEY_INDEX_CLEAR_NATIVE;
+    /// `key_index::find(table, hashes, keys, h, k, mode)`: the slot whose key
+    /// equals `k` by `mode` (one of the `KEY_EQ_*` below), or `-1`.
+    198 "key_index_find" (6) HOST_R, NO_CAP => _, KEY_INDEX_FIND_NATIVE;
+    /// `key_index::eq_mode(k)`: how `find` may compare keys of `k`'s type. The
+    /// compiler folds it to a constant in every body it plans; the native
+    /// answers [`KEY_EQ_COIL`].
+    199 "key_index_eq_mode" (1) PURE, NO_CAP => KEY_INDEX_EQ_MODE_ID, KEY_INDEX_EQ_MODE_NATIVE;
+    /// `prelude::thread::lock_acquire`, the first lock primitive (archive 6.21).
+    200 "lock_acquire" (1) THREAD_R, NO_CAP => LOCK_ACQUIRE_ID;
+    201 "lock_release" (1) THREAD_R, NO_CAP;
+    202 "lock_load" (1) THREAD_R, NO_CAP;
+    203 "lock_store" (2) THREAD_R, NO_CAP;
+    204 "rw_acquire_read" (1) THREAD_R, NO_CAP;
+    205 "rw_acquire_write" (1) THREAD_R, NO_CAP;
+    206 "rw_try_read" (1) THREAD_R, NO_CAP;
+    207 "rw_try_write" (1) THREAD_R, NO_CAP;
+    208 "rw_release_read" (1) THREAD_R, NO_CAP;
+    209 "rw_release_write" (1) THREAD_R, NO_CAP;
+    210 "rw_load" (1) THREAD_R, NO_CAP;
+    /// `prelude::thread::rw_store`, the last lock primitive.
+    211 "rw_store" (2) THREAD_R, NO_CAP => RW_STORE_ID;
+    /// `vec_drain(v, from, to)` (archive 7 minor 3, compiler lowering only):
+    /// drop elements `from..to` of array `v`, the ones after them moving down;
+    /// the compiler has checked `0 <= from <= to <= v.len()`. Any array form,
+    /// a lane array's included: lane code's `pop` and `remove` take the element
+    /// out with it.
+    212 "vec_drain" (3) HEAP_R, NO_CAP => VEC_DRAIN_ID, VEC_DRAIN_NATIVE;
+    /// `vec_rotate_in(v, i)` (archive 7 minor 3, compiler lowering only): move
+    /// the last element of array `v` to `i`, elements `i..` moving up one; the
+    /// compiler has checked `0 <= i < v.len()`. Any array form: lane code's
+    /// `insert` pushes and then rotates the element in.
+    213 "vec_rotate_in" (2) HEAP_R, NO_CAP => VEC_ROTATE_IN_ID, VEC_ROTATE_IN_NATIVE;
+    /// Restores the snapshot at a constant-pool index (archive 7 minor 4,
+    /// `HostOp::Restore`): an AOT executable's native `__start` runs it where
+    /// the startup restored a snapshot. Compiler-emitted only.
+    214 "startup_restore" (1) SUSPEND, NO_CAP => STARTUP_RESTORE_ID, STARTUP_RESTORE_NATIVE;
+}
 
-/// `vec_extend_range(dst, src, from, to)` (archive minor 1, compiler
-/// rewrite only): append `src[from..to]` to `dst` and return `to`; the
-/// compiler has checked `0 <= from < to <= src.len()`. When `dst` is
-/// `src` it appends nothing and returns `from` (the loop runs scalar).
-pub const VEC_EXTEND_RANGE_ID: u16 = 174;
-pub const VEC_EXTEND_RANGE_NATIVE: &str = "vec_extend_range";
-/// `vec_fill(dst, v, n)` (archive minor 1, compiler rewrite only): push
-/// `v` onto `dst` `n` times (`n >= 1`); returns `0`.
-pub const VEC_FILL_ID: u16 = 175;
-pub const VEC_FILL_NATIVE: &str = "vec_fill";
-
-/// First packed-LA HostInvoke (`packed_dot`).
-pub const PACKED_DOT_ID: u16 = 87;
-pub const PACKED_MATMUL_ID: u16 = 88;
-pub const PACKED_MATRIX_ZIP_ID: u16 = 89;
-pub const PACKED_MATRIX_NEG_ID: u16 = 90;
-/// Last packed-LA HostInvoke (`packed_vec_arith`).
-pub const PACKED_VEC_ARITH_ID: u16 = 91;
-/// Frozen HostInvoke id for `math_sin` (first frozen prelude math).
-pub const MATH_SIN_ID: u16 = 102;
-/// Frozen HostInvoke id for `math_pow` (last frozen prelude math).
-pub const MATH_POW_ID: u16 = 110;
-/// Frozen HostInvoke id for `stream_attach`.
-pub const STREAM_ATTACH_ID: u16 = 119;
-/// Frozen HostInvoke id for `stream_park`.
-pub const STREAM_PARK_ID: u16 = 120;
-/// HostInvoke id for `clock_wall_nanos`.
-pub const CLOCK_WALL_NANOS_ID: u16 = 121;
-/// HostInvoke id for `clock_mono_nanos`.
-pub const CLOCK_MONO_NANOS_ID: u16 = 122;
-/// HostInvoke id for `clock_sleep_ms`.
-pub const CLOCK_SLEEP_MS_ID: u16 = 123;
-/// HostInvoke id for `result_unit_probe` (`Result<(), IoError>` pack helper).
-pub const RESULT_UNIT_PROBE_ID: u16 = 124;
-/// First HostInvoke id of the M1 `prelude::math` expansion (`math_atan`).
-pub const MATH_ATAN_ID: u16 = 125;
-/// HostInvoke id for `math_tanh` (last M1 math native).
-pub const MATH_TANH_ID: u16 = 135;
-/// Compiler-only HostInvoke id for MIR saxpy-reduce packs (COI-286).
-pub const SIMD_AXPY_REDUCE_ID: u16 = 136;
-pub const SIMD_AXPY_REDUCE_NATIVE: &str = "simd_axpy_reduce";
-pub const THREAD_SPAWN_SHARED_ID: u16 = 137;
-pub const THREAD_SPAWN_SHARED_NATIVE: &str = "thread_spawn_shared";
-pub const STREAM_FD_ID: u16 = 138;
-pub const STREAM_FD_NATIVE: &str = "stream_fd";
-/// First byte-offset `string` native (`string_byte_at`); the block runs
-/// through [`STRING_MATCH_AT_ID`] (archive minor 31).
-pub const STRING_BYTE_AT_ID: u16 = 139;
-/// Last byte-offset `string` native (`string_match_at`).
-pub const STRING_MATCH_AT_ID: u16 = 143;
-/// First task-scheduler native (`task_scope_open`); the block runs through
-/// [`TASK_YIELD_ID`] (archive minor 32). The VM handles these itself
-/// (`HostOp::Task`): they can switch tasks.
-pub const TASK_SCOPE_OPEN_ID: u16 = 144;
-/// Last task-scheduler native (`task_yield`).
-pub const TASK_YIELD_ID: u16 = 151;
-/// Ends a `defer` cleanup pad: the VM unwinder takes the frame back
-/// (archive minor 33, `HostOp::Unwind`). Compiler-emitted only.
-pub const UNWIND_RESUME_ID: u16 = 152;
-pub const UNWIND_RESUME_NATIVE: &str = "unwind_resume";
-/// First cancellation native (`task_cancel`); the block runs through
-/// [`TASK_SHIELD_EXIT_ID`] (archive minor 33). `HostOp::Task`, like the
-/// scheduler block.
-pub const TASK_CANCEL_ID: u16 = 153;
-/// Last cancellation native (`task_shield_exit`).
-pub const TASK_SHIELD_EXIT_ID: u16 = 155;
-/// First wait-condition native (`task_cond_new`); the block runs through
-/// [`TASK_COND_NOTIFY_ID`] (archive minor 34). `HostOp::Task`: a wait
-/// suspends the task until a notify (`task::channel`).
-pub const TASK_COND_NEW_ID: u16 = 156;
-/// Last wait-condition native (`task_cond_notify`).
-pub const TASK_COND_NOTIFY_ID: u16 = 158;
-/// A failed `requires` (archive minor 35). `HostOp::Task`: panics with the
-/// message plus the caller's location (the frame below), never returns.
-pub const CONTRACT_FAIL_ID: u16 = 159;
-pub const CONTRACT_FAIL_NATIVE: &str = "contract_fail";
-/// `ffi::read_ints(lib, ptr, count)` (archive minor 36): copy `count` C
-/// `int64_t`s from a pointer a native returned (an ovector, an out array).
-pub const FFI_READ_INTS_ID: u16 = 160;
-pub const FFI_READ_INTS_NATIVE: &str = "ffi_read_ints";
-/// `==` on an aggregate with `float` leaves, by its static shape
-/// (coil-lang#1253, archive minor 39).
-pub const VALUES_EQ_SHAPED_ID: u16 = 161;
-pub const VALUES_EQ_SHAPED_NATIVE: &str = "values_eq_shaped";
-/// `<` / `<=` / `>` / `>=` on `string`: `-1` / `0` / `1` by UTF-8 bytes
-/// (coil-stdlib#48, archive minor 41).
-pub const STRING_COMPARE_ID: u16 = 162;
-pub const STRING_COMPARE_NATIVE: &str = "string_compare";
-/// `black_box(x)` (archive minor 43): returns `x`, which the optimizer
-/// cannot see through. Its `HOST` effect keeps it from being folded at
-/// compile time, hoisted or removed.
-pub const BLACK_BOX_ID: u16 = 163;
-pub const BLACK_BOX_NATIVE: &str = "black_box";
-/// `io::capture_begin()` / `io::capture_end()` (archive minor 44): keep
-/// this thread's stdout and stderr writes in memory instead of writing them,
-/// and hand them back as `(stdout, stderr)` strings.
-pub const IO_CAPTURE_BEGIN_ID: u16 = 164;
-pub const IO_CAPTURE_BEGIN_NATIVE: &str = "io_capture_begin";
-pub const IO_CAPTURE_END_ID: u16 = 165;
-pub const IO_CAPTURE_END_NATIVE: &str = "io_capture_end";
-/// `io::tty` (archive minor 47): terminal queries, raw mode, a timed read
-/// and resize notices on a stream. Ungated like `stdin` / `stdout`.
-pub const TTY_IS_TTY_ID: u16 = 166;
-pub const TTY_ENABLE_VT_ID: u16 = 173;
-pub const TTY_IS_TTY_NATIVE: &str = "tty_is_tty";
-pub const TTY_SIZE_NATIVE: &str = "tty_size";
-pub const TTY_ENTER_RAW_NATIVE: &str = "tty_enter_raw";
-pub const TTY_LEAVE_RAW_NATIVE: &str = "tty_leave_raw";
-pub const TTY_IS_RAW_NATIVE: &str = "tty_is_raw";
-pub const TTY_READ_TIMEOUT_NATIVE: &str = "tty_read_timeout";
-pub const TTY_RESIZED_NATIVE: &str = "tty_resized";
-pub const TTY_ENABLE_VT_NATIVE: &str = "tty_enable_vt";
-/// `from_bytes` of a buffer the compiler proved dead after the call (archive
-/// 6.4): the string takes the buffer's bytes. Never named in source; the
-/// compiler swaps it in for `from_bytes`.
-pub const FROM_BYTES_TAKE_ID: u16 = 176;
-pub const FROM_BYTES_TAKE_NATIVE: &str = "from_bytes_take";
-/// HostInvoke ids around a `region { ... }` block (escape step 5, archive
-/// 6.2): enter starts a fresh nursery for the block, exit collects it.
-/// Never named in source; the compiler emits them for `region`.
-pub const GC_REGION_ENTER_ID: u16 = 177;
-pub const GC_REGION_ENTER_NATIVE: &str = "gc_region_enter";
-pub const GC_REGION_EXIT_ID: u16 = 178;
-pub const GC_REGION_EXIT_NATIVE: &str = "gc_region_exit";
-/// `symbol::next_id()` (archive 6.9): the next value of one process-wide
-/// atomic counter. Its `HOST` effect keeps it from being folded at compile
-/// time, hoisted or removed.
-pub const SYMBOL_NEXT_ID_ID: u16 = 179;
-pub const SYMBOL_NEXT_ID_NATIVE: &str = "symbol_next_id";
-/// The embedded `process` module's natives (archive 6.10, ids 180–188):
-/// spawn a program, take its pipes as streams, wait, kill, signal. Only
-/// `process_spawn` needs a grant (`--allow-exec`); the rest act on a child
-/// it started.
-pub const PROCESS_SPAWN_ID: u16 = 180;
-pub const PROCESS_SPAWN_NATIVE: &str = "process_spawn";
-pub const PROCESS_TAKE_PIPE_NATIVE: &str = "process_take_pipe";
-pub const PROCESS_WAIT_NATIVE: &str = "process_wait";
-pub const PROCESS_TRY_WAIT_NATIVE: &str = "process_try_wait";
-pub const PROCESS_OUTPUT_NATIVE: &str = "process_output";
-pub const PROCESS_KILL_NATIVE: &str = "process_kill";
-pub const PROCESS_SIGNAL_NATIVE: &str = "process_signal";
-pub const PROCESS_PID_NATIVE: &str = "process_pid";
-pub const PROCESS_RELEASE_ID: u16 = 188;
-pub const PROCESS_RELEASE_NATIVE: &str = "process_release";
-/// `io::open` (frozen row 3): on `TooManyOpenFiles` the VM collects and
-/// tries once more, as for [`TCP_ACCEPT_ID`].
-pub const IO_OPEN_ID: u16 = 3;
-/// `tcp_accept` (frozen row 15).
-pub const TCP_ACCEPT_ID: u16 = 15;
-/// Closes a generator a `for` loop leaves early (archive 6.14,
-/// `HostOp::Task`): runs its armed `defer`s. Compiler-emitted only.
-pub const CORO_CLOSE_ID: u16 = 189;
-pub const CORO_CLOSE_NATIVE: &str = "coro_close";
-/// `entropy::bytes(n)` (archive 6.15): `n` fresh bytes from the OS CSPRNG.
-/// No capability: like the clock, it reads host state and touches nothing.
-pub const ENTROPY_BYTES_ID: u16 = 190;
-pub const ENTROPY_BYTES_NATIVE: &str = "entropy_bytes";
-/// The key index natives (archive 6.19, `key_index::*`): an
-/// insertion-ordered hash index over parallel `Vec`s that any collection
-/// keyed by a `Hash + Eq` type builds on. See
-/// `docs/internals/key-index.md`.
-pub const KEY_INDEX_TABLE_ID: u16 = 191;
-pub const KEY_INDEX_TABLE_NATIVE: &str = "key_index_table";
-pub const KEY_INDEX_PROBE_NATIVE: &str = "key_index_probe";
-pub const KEY_INDEX_INSERT_NATIVE: &str = "key_index_insert";
-pub const KEY_INDEX_REMOVE_NATIVE: &str = "key_index_remove";
-pub const KEY_INDEX_COMPACT_NATIVE: &str = "key_index_compact";
-pub const KEY_INDEX_RETAIN_NATIVE: &str = "key_index_retain";
-pub const KEY_INDEX_CLEAR_ID: u16 = 197;
-pub const KEY_INDEX_CLEAR_NATIVE: &str = "key_index_clear";
-/// `key_index::find(table, hashes, keys, h, k, mode)`: the slot whose key
-/// equals `k` by `mode` (one of the `KEY_EQ_*` below), or `-1`.
-pub const KEY_INDEX_FIND_NATIVE: &str = "key_index_find";
-/// `key_index::eq_mode(k)`: how `find` may compare keys of `k`'s type. The
-/// compiler folds it to a constant in every body it plans; the native
-/// answers [`KEY_EQ_COIL`].
-pub const KEY_INDEX_EQ_MODE_ID: u16 = 199;
-pub const KEY_INDEX_EQ_MODE_NATIVE: &str = "key_index_eq_mode";
-/// `eq_mode`: the type's `==` is not one the VM runs; the caller compares
+/// `eq_mode`: the type's `==` is not one the runtime runs; the caller compares
 /// candidates from `probe` itself.
 pub const KEY_EQ_COIL: i64 = 0;
 /// `eq_mode`: `==` compares the words (`int`).
@@ -1658,18 +423,11 @@ pub const KEY_EQ_STRING: i64 = 2;
 
 /// Set on the `type_id` argument of `gc_register_finalizer` when the
 /// type's `drop` keeps nothing of `self` (the compiler's escape facts):
-/// the VM may run it where an object of the type is freed early, then free
+/// the runtime may run it where an object of the type is freed early, then free
 /// the object. An archive without it leaves every `drop` to the collector.
 /// The argument is a 16-bit `CONST` immediate: a type id at or above the
 /// flag is never flagged.
 pub const EARLY_DROP_FLAG: u32 = 1 << 15;
-
-pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
-pub const STREAM_PARK_NATIVE: &str = "stream_park";
-pub const CLOCK_WALL_NANOS_NATIVE: &str = "clock_wall_nanos";
-pub const CLOCK_MONO_NANOS_NATIVE: &str = "clock_mono_nanos";
-pub const CLOCK_SLEEP_MS_NATIVE: &str = "clock_sleep_ms";
-pub const RESULT_UNIT_PROBE_NATIVE: &str = "result_unit_probe";
 
 /// Low 16 bits of a `HostInvoke` operand are the argument count.
 pub const HOST_INVOKE_ARITY_MASK: u32 = 0xFFFF;
@@ -1682,8 +440,10 @@ pub const HOST_ENUM_LAYOUT_BOXED: u32 = 0;
 pub const HOST_ENUM_LAYOUT_OPTION_NICHE: u32 = 1;
 /// Heap-heap `Result` (`Ok` = aligned pointer, `Err` = `pointer | 1`).
 pub const HOST_ENUM_LAYOUT_RESULT_NICHE: u32 = 2;
-/// Reserved operand code. Decoders treat this as boxed (not a niche).
-pub const HOST_ENUM_LAYOUT_RESERVED: u32 = 3;
+/// Two words: the native returns the variant's payload word (`0` when it
+/// has none) and leaves its tag in the native context's second return
+/// word, with no enum object made (`Option<int>`, `Result<int, E>`).
+pub const HOST_ENUM_LAYOUT_PAIR: u32 = 3;
 
 /// Pack `HostInvoke` arity and host-edge Option/Result layout into one operand.
 pub const fn pack_host_invoke_operand(arity: u32, layout: u32) -> u32 {
@@ -1706,55 +466,15 @@ pub const PACKED_MATRIX_ZIP: &str = "packed_matrix_zip";
 pub const PACKED_MATRIX_NEG: &str = "packed_matrix_neg";
 pub const PACKED_VEC_ARITH: &str = "packed_vec_arith";
 
-pub const GC_COLLECT_NATIVE: &str = "gc_collect";
-pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
-
+// Every row's id is its index (so its consts name their row), and the
+// table only grows.
 const _: () = {
-    assert!(HOST_NATIVES.len() == 200);
-    assert!(HOST_NATIVES[KEY_INDEX_EQ_MODE_ID as usize].id == KEY_INDEX_EQ_MODE_ID);
-    assert!(HOST_NATIVES[CORO_CLOSE_ID as usize].id == CORO_CLOSE_ID);
-    assert!(HOST_NATIVES[KEY_INDEX_TABLE_ID as usize].id == KEY_INDEX_TABLE_ID);
-    assert!(HOST_NATIVES[KEY_INDEX_CLEAR_ID as usize].id == KEY_INDEX_CLEAR_ID);
-    assert!(HOST_NATIVES[ENTROPY_BYTES_ID as usize].id == ENTROPY_BYTES_ID);
-    assert!(HOST_NATIVES[IO_OPEN_ID as usize].id == IO_OPEN_ID);
-    assert!(HOST_NATIVES[TCP_ACCEPT_ID as usize].id == TCP_ACCEPT_ID);
-    assert!(HOST_NATIVES[PROCESS_SPAWN_ID as usize].id == PROCESS_SPAWN_ID);
-    assert!(HOST_NATIVES[PROCESS_RELEASE_ID as usize].id == PROCESS_RELEASE_ID);
-    assert!(HOST_NATIVES[SYMBOL_NEXT_ID_ID as usize].id == SYMBOL_NEXT_ID_ID);
-    assert!(HOST_NATIVES[VEC_EXTEND_RANGE_ID as usize].id == VEC_EXTEND_RANGE_ID);
-    assert!(HOST_NATIVES[VEC_FILL_ID as usize].id == VEC_FILL_ID);
-    assert!(HOST_NATIVES[GC_REGION_ENTER_ID as usize].id == GC_REGION_ENTER_ID);
-    assert!(HOST_NATIVES[GC_REGION_EXIT_ID as usize].id == GC_REGION_EXIT_ID);
-    assert!(HOST_NATIVES[FROM_BYTES_TAKE_ID as usize].id == FROM_BYTES_TAKE_ID);
-    assert!(HOST_NATIVES[TTY_IS_TTY_ID as usize].id == TTY_IS_TTY_ID);
-    assert!(HOST_NATIVES[TTY_ENABLE_VT_ID as usize].id == TTY_ENABLE_VT_ID);
-    assert!(HOST_NATIVES[BLACK_BOX_ID as usize].id == BLACK_BOX_ID);
-    assert!(HOST_NATIVES[IO_CAPTURE_BEGIN_ID as usize].id == IO_CAPTURE_BEGIN_ID);
-    assert!(HOST_NATIVES[IO_CAPTURE_END_ID as usize].id == IO_CAPTURE_END_ID);
-    assert!(HOST_NATIVES[FFI_READ_INTS_ID as usize].id == FFI_READ_INTS_ID);
-    assert!(HOST_NATIVES[STRING_COMPARE_ID as usize].id == STRING_COMPARE_ID);
-    assert!(HOST_NATIVES[VALUES_EQ_SHAPED_ID as usize].id == VALUES_EQ_SHAPED_ID);
-    assert!(HOST_NATIVES[TASK_COND_NEW_ID as usize].id == TASK_COND_NEW_ID);
-    assert!(HOST_NATIVES[TASK_COND_NOTIFY_ID as usize].id == TASK_COND_NOTIFY_ID);
-    assert!(HOST_NATIVES[CONTRACT_FAIL_ID as usize].id == CONTRACT_FAIL_ID);
-    assert!(HOST_NATIVES[UNWIND_RESUME_ID as usize].id == UNWIND_RESUME_ID);
-    assert!(HOST_NATIVES[TASK_CANCEL_ID as usize].id == TASK_CANCEL_ID);
-    assert!(HOST_NATIVES[TASK_SHIELD_EXIT_ID as usize].id == TASK_SHIELD_EXIT_ID);
-    assert!(HOST_NATIVES[TASK_SCOPE_OPEN_ID as usize].id == TASK_SCOPE_OPEN_ID);
-    assert!(HOST_NATIVES[TASK_YIELD_ID as usize].id == TASK_YIELD_ID);
-    assert!(HOST_NATIVES[119].id == STREAM_ATTACH_ID);
-    assert!(HOST_NATIVES[120].id == STREAM_PARK_ID);
-    assert!(HOST_NATIVES[121].id == CLOCK_WALL_NANOS_ID);
-    assert!(HOST_NATIVES[122].id == CLOCK_MONO_NANOS_ID);
-    assert!(HOST_NATIVES[123].id == CLOCK_SLEEP_MS_ID);
-    assert!(HOST_NATIVES[124].id == RESULT_UNIT_PROBE_ID);
-    assert!(HOST_NATIVES[125].id == MATH_ATAN_ID);
-    assert!(HOST_NATIVES[135].id == MATH_TANH_ID);
-    assert!(HOST_NATIVES[136].id == SIMD_AXPY_REDUCE_ID);
-    assert!(HOST_NATIVES[137].id == THREAD_SPAWN_SHARED_ID);
-    assert!(HOST_NATIVES[138].id == STREAM_FD_ID);
-    assert!(HOST_NATIVES[139].id == STRING_BYTE_AT_ID);
-    assert!(HOST_NATIVES[143].id == STRING_MATCH_AT_ID);
+    assert!(HOST_NATIVES.len() == 215);
+    let mut i = 0;
+    while i < HOST_NATIVES.len() {
+        assert!(HOST_NATIVES[i].id as usize == i, "a host native's id is not its index");
+        i += 1;
+    }
 };
 
 /// HostInvoke id for a standard native name.
@@ -1765,9 +485,9 @@ pub fn host_native_id(name: &str) -> Option<usize> {
         .map(|e| e.id as usize)
 }
 
-/// Natives the compiler may call with [`crate::Instruction::DenseHostCall`]:
+/// Natives the compiler may call with a direct host call:
 /// plain functions of their arguments that always return a value and never
-/// park, open descriptors or switch tasks. The VM registers each of them
+/// park, open descriptors or switch tasks. The runtime registers each of them
 /// with a direct function (`NativeFn::direct`; a machine test checks it).
 pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "ord",
@@ -1788,6 +508,8 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "vec_from_array",
     "vec_extend_range",
     "vec_fill",
+    VEC_DRAIN_NATIVE,
+    VEC_ROTATE_IN_NATIVE,
     "symbol_next_id",
     "key_index_table",
     "key_index_probe",
@@ -1904,6 +626,14 @@ mod tests {
         assert_eq!(HOST_NATIVES[24].name, "udp_local_port");
         for (i, e) in HOST_NATIVES.iter().enumerate() {
             assert_eq!(e.id as usize, i, "{} id drifted", e.name);
+        }
+    }
+
+    /// A name lookup finds its own row: no two natives share a name.
+    #[test]
+    fn host_native_names_are_unique() {
+        for e in HOST_NATIVES {
+            assert_eq!(host_native_id(e.name), Some(e.id as usize), "{} is not unique", e.name);
         }
     }
 

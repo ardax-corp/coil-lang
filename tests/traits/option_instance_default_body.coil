@@ -1,0 +1,135 @@
+// A trait's default body called directly on an `Option` / `Result` value
+// whose instance has a generic head (`impl Keep for Option<T>`) holds
+// every value of the trait's parameter as the receiver is passed
+// (coil-lang#2490): where the receiver goes as its enum object, a second
+// argument and the result do too, since the body hands them to the same
+// dictionary's methods.
+use tests::assert;
+
+trait Keep<T> {
+    fn tag(T x) -> int {}
+
+    fn same(T x) -> T {
+        return x;
+    }
+
+    fn other(T x, T y) -> T {
+        return y;
+    }
+
+    fn second(T x, T y) -> int {
+        return y.tag();
+    }
+
+    fn sum(T x, T y, int k) -> int {
+        return x.tag() + y.tag() * 10 + k;
+    }
+
+    fn pick(T x, T y) -> T {
+        if x.tag() > 0 {
+            return x;
+        }
+        return y;
+    }
+}
+
+impl Keep for Option<T> {
+    fn tag(Option<T> o) -> int {
+        return match o {
+            Some(_) => 1,
+            None => 0,
+        };
+    }
+}
+
+impl Keep for Result<T, E> {
+    fn tag(Result<T, E> r) -> int {
+        return match r {
+            Ok(_) => 1,
+            Err(_) => 2,
+        };
+    }
+}
+
+impl Keep for int {
+    fn tag(int x) -> int {
+        return x;
+    }
+}
+
+fn text(Option<string> o) -> string {
+    return match o {
+        Some(v) => v,
+        None => "none",
+    };
+}
+
+fn told(Result<string, string> r) -> string {
+    return match r {
+        Ok(v) => "ok " + v,
+        Err(e) => "err " + e,
+    };
+}
+
+test("a one-word Option through a default body") {
+    let a: Option<string> = Some("one");
+    let b: Option<string> = Some("two");
+    let n: Option<string> = None;
+    assert!(text(a.same()) == "one");
+    assert!(text(n.same()) == "none");
+    assert!(text(a.other(b)) == "two");
+    assert!(text(a.other(n)) == "none");
+    assert!(n.second(a) == 1);
+    assert!(a.second(n) == 0);
+    assert!(a.sum(n, 100) == 101);
+    assert!(n.sum(a, 100) == 110);
+    assert!(text(a.pick(b)) == "one");
+    assert!(text(n.pick(b)) == "two");
+    assert!(text(n.pick(n)) == "none");
+}
+
+test("the trait-qualified spelling") {
+    let a: Option<string> = Some("one");
+    let b: Option<string> = Some("two");
+    let n: Option<string> = None;
+    assert!(text(Keep::same(a)) == "one");
+    assert!(text(Keep::other(a, b)) == "two");
+    assert!(Keep::second(n, a) == 1);
+    assert!(Keep::sum(n, a, 100) == 110);
+    assert!(text(Keep::pick(n, b)) == "two");
+}
+
+test("a Result, a two-word Option and an int") {
+    let ok: Result<string, string> = Ok("x");
+    let err: Result<string, string> = Err("y");
+    assert!(told(ok.same()) == "ok x");
+    assert!(told(err.same()) == "err y");
+    assert!(told(ok.other(err)) == "err y");
+    assert!(ok.second(err) == 2);
+    assert!(err.sum(ok, 0) == 12);
+    assert!(told(err.pick(ok)) == "err y");
+    let i: Option<int> = Some(4);
+    let z: Option<int> = None;
+    assert!(i.same() == Some(4));
+    assert!(i.other(z) == None);
+    assert!(z.second(i) == 1);
+    assert!(z.pick(i) == Some(4));
+    assert!(3.same() == 3);
+    assert!(3.other(4) == 4);
+    assert!(3.second(4) == 4);
+    assert!(0.pick(9) == 9);
+}
+
+test("a result used where it is made") {
+    let a: Option<string> = Some("one");
+    let n: Option<string> = None;
+    let total = 0;
+    for _ in 0..3 {
+        if let Some(v) = n.pick(a) {
+            total = total + v.len();
+        }
+    }
+    assert!(total == 9);
+    assert!(text(a.same().same().other(n.same())) == "none");
+    assert!(text(n.pick(a).pick(n)) == "one");
+}

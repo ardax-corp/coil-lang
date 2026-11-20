@@ -43,5 +43,5 @@ fn main() {
     for e in m {
         total += e.value;
     }
-    println(show(total))?;
+    println(total.show())?;
 }

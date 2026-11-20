@@ -9,8 +9,22 @@ Read when you need syntax detail beyond SKILL.md. User docs live in [coil-websit
 - `never` from `return`/`raise`/`panic` and proven-infinite loops absorbs in joins.
 - Path completeness: concrete non-unit returns need all paths to exit (`E0111`).
 - Casts: `expr as T` — see [casts](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/casts.md) (`/docs/language/casts`).
-- Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status::Ok`, `Status::Ok + 1`). Show of a scalar case is the backing (`Status::Ok` shows as `200`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
-- Payload enums are not heap-only: heap `Option<T>` / heap-heap `Result<T,E>` are pointer niches; `Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums use two-slot `[payload, tag]` on a *direct* `CALL`/`RETURN`. Arity-2 immediate products use `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)). Nested, `CallIndirect`, and unsure consumers stay boxed `ObjEnum`.
+- Cast matrix (`expr as T`; `T` is `int`, `float`, `byte`, `bool` or a byte array; no sized integer types, no `string` / `char` target). `int` to `float` converts; `float` to `int` truncates toward zero, saturates at the `int` range and gives `0` for `NaN`; `int` to `byte` keeps the low 8 bits (`300` is `44`, `-1` is `255`); `int` to `bool` is `x != 0`; `byte` to `int` and `bool` to `int` widen (`true` is `1`). These pairs are `E0102`: `byte` to `float`, `byte` to `bool`, `float` to `byte`, `float` to `bool`, `bool` to `byte`, `bool` to `float`; go through `int` (`b as int as float`). A literal `int` outside `0..=255` `as byte` is a compile error. Byte arrays convert both ways (`v as [byte; N]` of a `Vec<byte>`, `a as Vec<byte>` of a `[byte; N]`); a `Vec<byte>` whose length is not `N` panics (`cannot cast a \`Vec<byte>\` of 3 bytes to \`[byte; 2]\``), and the result is a value of its own (a write through it never shows in the operand). `Into` has the same pairs (`let f: float = n.into()`).
+- Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status::Ok`, `Status::Ok + 1`). Every operator the backing type takes works on the backing value and gives the backing type: arithmetic, bitwise, shift, string `+`, unary `-` / `~` / `!`, `&&` / `||`, a condition, and `x += Status::Ok` on an `int` `x`. `s += 1` on a `Status` is an error (the result is an `int`). Two values of one enum that has the operator's instance (`impl Mul for Bit`) use the instance. Show of a scalar case is the backing (`Status::Ok` shows as `200`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
+- Payload enums are not heap-only: heap `Option<T>` / heap-heap `Result<T,E>` are pointer niches; `Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums use two words `[payload, tag]` on a *direct* call and return. Arity-2 immediate products use `[a, b]` ([#302](https://github.com/ardax-corp/coil-lang/pull/302)). Nested, `CallIndirect`, and unsure consumers stay boxed `ObjEnum`.
+
+## Function values and calls that look alike
+
+- A bare `Owner::m` is the static method's function value (`let f = Src::inc; f(4)`); the call needs `()` (`Src::inc(4)`). A bare trait method (`T::make`, `Make::make`) has no value: `E0119`. `let c: Counter = Counter::fresh;` is `E0102` (add `()`).
+- `o.f(x)` on a field `f` of function type calls the function, unless the type has a method `f` (the method wins). `o.n(4)` on a field that is not a function is `E0104`.
+- A ground annotation on a `let` of a generic function fixes its type: `let f: int -> int = id;` (`fn id<T>(T x) -> T`); `f("a")` is then a type error. Without an annotation, or with a `forall` one, `f` keeps its generic type.
+- `==` on two bare-trait existentials (`let x: Tr = …`) needs an `Eq` the trait gives its values (`trait Tr<S: Eq>`); without it `E0119`. Values of different types are never equal.
+- `coil test` takes `.coil` files and directories, several at once (`coil test a.coil dir/`).
+- Nesting: `E0125` past 4000 nested brackets, or 2000 levels in the checker (a parenthesised group counts about two; `f(f(…))` one per call). On wasm the limits are 400 and 1000, and 700 chained operators.
+
+## Show output (`%v`, `x.show()`, `Show::show(x)`)
+
+One rule: a `string` is never quoted or escaped, alone or inside anything, and `%s` and `%v` print a string the same. So `(1, "a")` shows as `(1, a)`, `["a", "b"]` as `[a, b]`, `Some("a")` as `Some(a)`, `{x: 1, s: "a"}` as `{ s: a, x: 1 }` (fields in name order), and a derived `Show` class `Person { name, age }` as `Person { name: Ann, age: 3 }` (fields in declaration order). A payload enum shows as `Tok::Word(hi)`, `Tok::Pair(hi, 2)`. Output cannot tell `"1"` from `1`; build the quotes yourself (`"\"" + s + "\""`) when it matters. A bare `show(x)` is `E0153`.
 
 ## Expression forms
 
@@ -35,11 +49,23 @@ range       0..10, 0..=10
 for         for x in iter { … }
 ```
 
-## Pattern forms (match / let)
+## Pattern forms
 
-- Literals, identifiers, `_` (nested wildcard only), `default` (whole-arm catch-all), tuple `(a,b)`, record `{ x, y }`, enum `E::A`, `E::B(x)`.
-- Nested record patterns on enum variants use slot-based unpack (compiler detail).
-- `let` destructuring: tuples and records only (no enum ctor patterns in `let`).
+`match` and `if let` / `while let` take the same patterns; `let` and `for` take another set.
+
+| Pattern | `match`, `if let`, `while let` | `let`, `for` |
+|---------|-------------------------------|--------------|
+| Identifier (binds) | yes (`k => …` is a catch-all arm) | yes |
+| `_` | only nested (`E::B(_)`); a whole arm `_ =>` is `E0216`, use `default` | yes, also nested (`let (a, _) = t`) |
+| `default` | whole-arm catch-all, `match` only | no |
+| Int literal, negative too (`3`, `-3`, `E::B(3)`) | yes | no |
+| String, bool, range (`1..5`), or-pattern (`1 \| 3`), guard (`x if x > 2`) | no (a bool is `if` / `else`) | no |
+| Enum case `E::A`, `E::B(p, q)`, nested (`Option::Some(Option::Some(x))`) | yes | no (`let E::B(x) = e` is a parse error) |
+| Record variant `E::R { x, y }`, `E::R { x: 1, y: b }`, `{ f: pattern }` | yes | no |
+| Tuple `(a, b)`, nested `(a, (b, c))` | **no**, top level or inside a case's payload | yes |
+| Record `{ x, y }`, `{ x: px, y }` | **no** | yes, an anonymous record only (a `class` is `E0119`) |
+
+Matching a tuple or an anonymous record is a `let`: `let (a, b) = t;` and then `match` on `a` and `b`, or `match` on an enum that holds them. A bare `Some(x)` / `None` pattern works where it is unambiguous (`Option::Some(x)` always).
 
 ## IO patterns
 
@@ -131,8 +157,8 @@ let f = declare(lib, "strlen", (String,), Int)?;
 
 ## Iterator / for-in
 
-`for x in expr` uses `IntoIterator` / `Iterator` from prelude. Works on arrays, homogeneous tuples/dicts, numeric ranges (`int`/`byte`/`float`), coroutines, user `impl`s. Numeric ranges also have inherent `.to_vec() -> Vec<T>`.
+`for x in expr` uses `IntoIterator` / `Iterator` from prelude. Works on arrays, homogeneous tuples/dicts, numeric ranges (`int`/`byte`/`float`), coroutines, user `impl`s, and a value of a type parameter bounded by `Iterator` (`fn f<I: Iterator>(I it) { for x in it { … } }`, through the bound's dictionary; it advances `it`). A type parameter bounded only by `IntoIterator` is E0119: no bound says what `T::IntoIter`'s `next` is. Numeric ranges also have inherent `.to_vec() -> Vec<T>`.
 
 ## What does NOT exist
 
-See [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/not-builtins.md) (`/docs/language/not-builtins`): no general `sort`, string slice/trim builtins, HTTP in VM, manual alloc/free.
+See [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/language/not-builtins.md) (`/docs/language/not-builtins`): no general `sort`, string slice/trim builtins, HTTP in the runtime, manual alloc/free.

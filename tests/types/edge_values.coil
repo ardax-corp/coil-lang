@@ -1,4 +1,4 @@
-// Edge / boundary values that exercise VM encoding and GC-adjacent paths.
+// Edge / boundary values that exercise value encoding and GC-adjacent paths.
 use tests::assert;
 
 fn countdown(int n) -> int {

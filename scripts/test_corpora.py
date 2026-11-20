@@ -151,22 +151,32 @@ def main():
             summary = f"timed out after {args.timeout:.0f}s"
         else:
             summary = f"{m.group(2)} passed, {m.group(3)} failed" if m else "no summary"
+        # Files that failed as their `// @xfail` line for the run's `--cell` says.
+        k = re.search(r"; (\d+) known failures? \(", text)
+        known = int(k.group(1)) if k else 0
+        if known:
+            summary += f", {known} known"
+        sk = re.search(r"; (\d+) skipped \(", text)
+        if sk:
+            summary += f", {sk.group(1)} skipped"
         ok = code == 0 and m is not None and m.group(1) == "ok"
-        print(f"{'ok    ' if ok else 'FAILED'} {name:<13} {summary:<24} {secs:6.1f}s", flush=True)
-        return name, ok, text
+        print(f"{'ok    ' if ok else 'FAILED'} {name:<13} {summary:<34} {secs:6.1f}s", flush=True)
+        return name, ok, text, (int(m.group(2)), int(m.group(3)), known) if m else (0, 0, 0)
 
     start = time.monotonic()
     with ThreadPoolExecutor(max_workers=parallel) as pool:
         results = list(pool.map(run, names))
     failed = [r for r in results if not r[1]]
-    for name, _, text in failed:
+    for name, _, text, _ in failed:
         print(f"\n===== {name} (tests/{name}) =====")
         lines = [l for l in text.splitlines() if not l.startswith("ok ")]
         print("\n".join(lines[-200:]))
     total = time.monotonic() - start
     verdict = "FAILED" if failed else "ok"
+    passed, failures, known = (sum(r[3][i] for r in results) for i in range(3))
+    cases = f"cases: {passed} passed; {failures} failed" + (f"; {known} known failures" if known else "")
     print(f"\ncorpora: {verdict}. {len(results) - len(failed)} passed; "
-          f"{len(failed)} failed; {total:.1f}s (logs in {args.logs})")
+          f"{len(failed)} failed; {cases}; {total:.1f}s (logs in {args.logs})")
     return 1 if failed else 0
 
 

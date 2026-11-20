@@ -10,7 +10,7 @@ use crate::memory::Heap;
 use crate::HostValueFn;
 
 /// The value the next `next_id()` returns. Shared by every thread, task and
-/// VM in the process, so no two calls ever see the same id.
+/// runtime in the process, so no two calls ever see the same id.
 static NEXT_ID: AtomicI64 = AtomicI64::new(1);
 
 /// The next id: `1`, `2`, `3`, … in the order the calls happen.

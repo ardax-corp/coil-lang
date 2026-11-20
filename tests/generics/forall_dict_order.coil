@@ -1,0 +1,161 @@
+// A generic function passed as a value where its type parameters stay open
+// (a `forall` parameter, a local bound from it) gets each of its bounds'
+// dictionaries from the call, whatever order the `forall` lists its
+// constraints in (coil-lang#2636).
+use tests::assert;
+
+trait Name<T> {
+    fn name(T x) -> string {}
+}
+
+trait Tag<T> {
+    fn tag(T x) -> string {}
+}
+
+// A trait with a superclass.
+trait Loud<T: Name> {
+    fn loud(T x) -> string {}
+}
+
+impl Name for int {
+    fn name(int x) -> string {
+        return "int";
+    }
+}
+
+impl Name for string {
+    fn name(string x) -> string {
+        return "string";
+    }
+}
+
+impl Name for bool {
+    fn name(bool x) -> string {
+        return "bool";
+    }
+}
+
+impl Tag for int {
+    fn tag(int x) -> string {
+        return "#i";
+    }
+}
+
+impl Tag for string {
+    fn tag(string x) -> string {
+        return "#s";
+    }
+}
+
+impl Loud for int {
+    fn loud(int x) -> string {
+        return "INT";
+    }
+}
+
+impl Loud for string {
+    fn loud(string x) -> string {
+        return "STRING";
+    }
+}
+
+fn names<B: Name, A: Name>(B b, A a) -> string {
+    return b.name() + " " + a.name();
+}
+
+fn run(forall A: Name, B: Name. B -> A -> string g) -> string {
+    return g(1, "s");
+}
+
+fn run_same(forall B: Name, A: Name. B -> A -> string g) -> string {
+    return g(1, "s");
+}
+
+// Passed on to `run`, which lists the constraints the other way round.
+fn relay(forall B: Name, A: Name. B -> A -> string g) -> string {
+    return run(g);
+}
+
+fn names3<A: Name, B: Name, C: Name>(A a, B b, C c) -> string {
+    return a.name() + " " + b.name() + " " + c.name();
+}
+
+fn run3_cba(forall A: Name, B: Name, C: Name. C -> B -> A -> string g) -> string {
+    return g(1, "s", true);
+}
+
+fn run3_bca(forall C: Name, A: Name, B: Name. B -> C -> A -> string g) -> string {
+    return g(1, "s", true);
+}
+
+fn run3_abc(forall B: Name, C: Name, A: Name. A -> B -> C -> string g) -> string {
+    return g(1, "s", true);
+}
+
+// Two bounds on one type parameter.
+fn two<B: Tag + Name, A: Name>(B b, A a) -> string {
+    return b.name() + b.tag() + " " + a.name();
+}
+
+fn run_two(forall A: Name, B: Name + Tag. B -> A -> string g) -> string {
+    return g(1, "s");
+}
+
+fn loud2<B: Loud, A: Name>(B b, A a) -> string {
+    return b.loud() + b.name() + " " + a.name();
+}
+
+fn run_loud(forall A: Name, B: Loud. B -> A -> string g) -> string {
+    return g(1, "s");
+}
+
+// The `forall` has a constraint the function does not.
+fn first_name<A: Name, B>(A a, B b) -> string {
+    return a.name();
+}
+
+fn run_extra(forall A: Tag, B: Name. B -> A -> string g) -> string {
+    return g(1, "s");
+}
+
+// A body with dictionaries of its own makes the value.
+fn outer<T: Tag>(T t) -> string {
+    return run(names) + t.tag();
+}
+
+test("two constraints listed in the other order") {
+    assert!(run(names) == "int string");
+    assert!(run_same(names) == "int string");
+}
+
+test("three constraints in several orders") {
+    assert!(run3_cba(names3) == "int string bool");
+    assert!(run3_bca(names3) == "int string bool");
+    assert!(run3_abc(names3) == "int string bool");
+}
+
+test("two bounds on one type parameter") {
+    assert!(run_two(two) == "int#i string");
+}
+
+test("a bound with a superclass") {
+    assert!(run_loud(loud2) == "INTint string");
+}
+
+test("a forall constraint the function does not have") {
+    assert!(run_extra(first_name) == "int");
+}
+
+test("a value passed on to a forall listing its constraints in another order") {
+    assert!(relay(names) == "int string");
+}
+
+test("a local bound from the function") {
+    let h = names;
+    assert!(h(1, "s") == "int string");
+    assert!(run(h) == "int string");
+}
+
+test("a value made in a body with dictionaries of its own") {
+    assert!(outer(3) == "int string#i");
+}

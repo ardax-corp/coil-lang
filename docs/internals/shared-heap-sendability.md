@@ -12,24 +12,21 @@ stays isolate + `PortableValue`.
 **C2 status (E7 / F1):** expression IPA parameterized workers emit the same
 `thread_spawn_shared`. Eligible arms (C0 whitelist args — fib/tak immediates)
 allocate and publish pointers on the shared Heap; join reconstructs
-`Value` bits without a `PortableValue` graph walk. Refuse (maps missing for
-non-immediates, debugger attached, non-whitelist args)
+`Value` bits without a `PortableValue` graph walk. Refuse (non-whitelist args)
 keeps isolate + copy. No region bump (Q5 conservative). Do **not** merge
 [#403](https://github.com/ardax-corp/coil-lang/pull/403).
 
 Related: [auto-par.md](auto-par.md), [gc-incremental.md](gc-incremental.md),
-[mir-stack-maps.md](mir-stack-maps.md), [heap-identity.md](heap-identity.md),
+[native.md](native.md#calls-and-collections), [heap-identity.md](heap-identity.md),
 [io-reactor.md](io-reactor.md). Findings that ranked the ladder:
 PR [#403](https://github.com/ardax-corp/coil-lang/pull/403) (do **not** merge
 that PR; use the writeup only). Isolate-tax cuts that this note builds on:
-COI-360 E2 (#413). Maps that make
-multi-stack GC honest: COI-359 E1
-(archive minor 14).
+COI-360 E2 (#413).
 
 ## Goal
 
-True steal means several reactor mutators run Coil bytecode against **one**
-[`Heap`](../../machine/src/memory/heap.rs) and **several** operand stacks.
+True steal means several reactor mutators run Coil code against **one**
+[`Heap`](../../machine/src/memory/heap.rs) and **several** stacks.
 Crossing a job boundary must not deep-copy the live heap graph through
 [`PortableValue`](../../machine/src/thread.rs).
 
@@ -38,7 +35,7 @@ C0 answers four questions:
 1. Which values may appear as live roots on more than one stack at once
    (**share whitelist**).
 2. What a mutator may do to a shared object (**freeze / disjoint write / refuse**).
-3. How GC sees every stack (**STW safepoints**; **maps mandatory**).
+3. How GC sees every stack (**STW safepoints**; exact roots from every engine).
 4. Where stacks live (**TLS stacks on that one Heap** — not a private Heap
    per help steal).
 
@@ -54,12 +51,12 @@ C0 answers four questions:
   keeps today’s `PortableValue` copy + `NotSendable`. Shared-heap is an
   **auto-par / loop-chunk** path first.
 - Merging #403.
-- A language-level `Send` trait or new opcodes.
+- A language-level `Send` trait.
 
 ## Today (isolate) — what C replaces
 
-CPU jobs are [`reactor::Job`](../../machine/src/reactor.rs): isolated
-`call_function` on a worker `Machine`. Args and results cross via
+CPU jobs are [`reactor::Job`](../../machine/src/reactor.rs), run by
+`worker::run_native_job` on a driver over a worker `Runtime`. Args and results cross via
 `value_to_portable` / `portable_to_value`. Cycles, streams, threads,
 coroutines, `Fn` (closures and generic function values), libraries, `Root`, and `Weak` return
 `ThreadErrorTag::NotSendable`. Channel / lock objects share the host
@@ -69,12 +66,12 @@ E2 (on `main`) already cut isolate tax **without** sharing a Heap:
 
 | Piece | Behavior |
 |---|---|
-| Bytecode | `load_shared_program` pins `Arc` code / constants / strings |
-| Join-help | TLS `HELP_VMS` checkout instead of `Box::new` per steal |
-| After job | `reset_isolate_heap`: drop frames, collect or unmap extra 64KiB slabs |
+| Program | `ThreadProgram` shares constants / strings by `Arc` |
+| Join-help | TLS `RUNTIMES` checkout (`machine/src/worker.rs`) instead of a new `Runtime` per steal |
+| After job | `Runtime::reset_isolate`: what the job set up goes, and the heap is reset |
 
 Each helper / pool worker still **owns** a `Heap`. Join-help nested on
-`COIL_MAX_WORKER_THREADS=1` is several Machines on one OS thread, each with
+`COIL_MAX_WORKER_THREADS=1` is several runtimes on one OS thread, each with
 its own slab. That is the RSS cliff C exists to remove.
 
 Typecheck `is_thread_sendable_ty` is the **copy** gate (immediates, strings,
@@ -91,15 +88,15 @@ a share-by-pointer gate. C0 does not widen user `spawn` types.
                          │  alloc + STW collect
      ┌───────────────────┼───────────────────┐
      ▼                   ▼                   ▼
- root Machine      pool worker           TLS help stack
+ root runtime      pool worker           TLS help stack
  (frames+stack)    (frames+stack)        (frames+stack)
 ```
 
-- **One Heap** per root `Machine` / reactor world (same lifetime as today’s
+- **One Heap** per root `Runtime` / reactor world (same lifetime as today’s
   isolate root, not per job).
 - **N mutator stacks**: root + each pool worker that is inside a shared-heap
-  job + each nested TLS help stack. Stacks are `Machine` frames / operand
-  storage / `frame_pins` only.
+  job + each nested TLS help stack. A stack is native frames (or interpreter
+  activations) only.
 - A stolen job receives **raw `Value`s** that are either immediates or
   pointers into that Heap. It returns the same. No `PortableValue` graph
   walk on the hot path.
@@ -126,13 +123,12 @@ object identity.
 cyclic heap graphs, any object another mutator may grow or field-store
 without a disjoint-write proof.
 
-C1 does **not** need to share `Fn` objects: loop-chunk workers already take an
-entry PC (`Job.entry`) plus immediates / array pointers, same as AlwaysPar
+C1 does **not** need to share `Fn` objects: loop-chunk workers already take a
+body entry (`Job.entry`) plus immediates / array pointers, same as AlwaysPar
 `MakeFn` + spawn today.
 
 Interned strings are **not** immortal. The intern table is a cache; unmarked
-literals are swept and `program_string_cache` is not a GC root
-(`Machine::gc_collect`). Sharing a `RefString` pointer is allowed only while
+literals are swept and `program_string_cache` is not a GC root. Sharing a `RefString` pointer is allowed only while
 some stack or frozen graph roots it. Do not treat intern identity as a
 lifetime.
 
@@ -147,9 +143,8 @@ a steal epoch. Mixing them on one object is a refuse.
   (purity already refuses index/field stores in loop IPA).
 - Runtime: no `StoreIndex` / `SetField` / grow / `vec` host mutation on that
   object until `end_steal`.
-- Any mutator may **read** (including `ArrayPin` / `IndexPin*` on a frozen
-  array). Pins cache `Object` (`Copy` `Gc`); that is valid because objects
-  do not move.
+- Any mutator may **read**. Nothing moves in an epoch: minor collections and
+  evacuation do not run there.
 - Optional defense (open): a header frozen bit that panics on write. C1
   may skip the bit if the compiler proof is closed and the chunk worker is
   a compiler-emitted body.
@@ -186,25 +181,13 @@ next mark — not required for C1 int reduce.
 
 ## Multi-worker GC handshake
 
-### Why maps are mandatory
+### How the collector sees every stack
 
-Frame maps persist on `.ccoil` / embed: S2b maps from archive **minor 14**
-(E1), precise frame maps from **minor 21**, the only kind the compiler emits
-now. Shared-heap steal of heap pointers is allowed only when the
-`ThreadProgram` has **real** maps of either kind (`program_has_real_maps` /
-`wire_thread_program_with_maps`).
-Layer A C1 **immediate-only** loop chunks may steal without maps because
-collect is forbidden in-epoch (abort instead). Pre-14 archives and unmapped
-**allocating** bodies stay **isolate**.
-
-Conservative operand-stack scanning on one mutator is the current fallback
-when maps are empty. With several mutators it is not a contract: a stolen
-numeric kernel can leave immediate bit-patterns that look like heap addrs,
-and C must not keep a second root story. Maps plus STW are the one story.
-
-`ArrayPin` tables are extra roots (`collect_vm_root_addrs` already walks
-`frame_pins`). Handshake must visit **every** mutator’s pins, frames,
-operand stack, statics, resume/coro stacks, and mapped slots.
+Every engine reports exact roots: native frames through stack maps and root
+records, interpreter activations through a `ROOTS_SCAN` record
+([native.md](native.md#calls-and-collections)). Layer A forbids a collect
+in-epoch (abort instead). A Layer B handshake must visit **every** mutator's
+frames, records, statics and generators' saved words.
 
 ### Incremental S4 vs steal
 
@@ -215,8 +198,8 @@ C0 rule: **no mutator runs while the shared Heap is Marking or Sweeping.**
 
 Before `begin_steal`:
 
-1. Finish any in-flight incremental cycle on the root (`gc_collect` drain,
-   same as explicit `gc::collect`).
+1. Finish any in-flight incremental cycle on the root (same drain as an
+   explicit `gc::collect`).
 2. Raise / ignore the incremental threshold for the epoch **or** switch the
    Heap to epoch-STW (below). Do not start a new incremental slice on a
    worker.
@@ -246,8 +229,8 @@ Cooperative stop:
 2. Every shared-heap mutator arrives at a **safepoint** (below), increments
    `arrived`, and waits.
 3. When `arrived == mutator_count`, the leader concatenates roots from every
-   stack (maps + pins + immortals) and runs one mark-sweep (existing
-   `gc_collect` logic, roots generalized). Finalizers run on the **leader**
+   stack (root records + immortals) and runs one mark-sweep (existing
+   collection logic, roots generalized). Finalizers run on the **leader**
    with other mutators still stopped. Weaks clear at mark→sweep as today.
 4. Release; `gc_requested` clear; mutators resume.
 
@@ -281,13 +264,13 @@ shape for C.
 
 | | E2 isolate (now) | C shared heap |
 |---|---|---|
-| Checkout | `HELP_VMS` pop / push, truncate idle to 1 | Same TLS pool of **stack** Machines |
-| Heap | Each Machine owns one; `reset_isolate_heap` unmaps extra slabs | Heap is **not** on the helper; borrow the epoch Heap |
-| After job | Collect or replace `Heap` | Drop frames / pins / seek 0; **do not** unmap the shared slab |
-| Nested steal | Extra helper Machines, each with a Heap | Extra stacks, still one Heap |
-| Pool worker loop | `worker_loop` keeps one Machine + Heap for sequential isolate jobs | Isolate jobs keep today’s private Heap **or** bind the shared Heap only while a C job runs |
+| Checkout | `RUNTIMES` pop / push, truncate idle to 1 | Same TLS pool of runtimes, heap borrowed |
+| Heap | Each `Runtime` owns one; `Runtime::reset_isolate` resets it | Heap is **not** on the helper; borrow the epoch Heap |
+| After job | Collect or replace `Heap` | Drop frames; **do not** unmap the shared slab |
+| Nested steal | Extra helper runtimes, each with a Heap | Extra stacks, still one Heap |
+| Pool worker loop | `worker_loop` reuses one `Runtime` + Heap for sequential isolate jobs | Isolate jobs keep today’s private Heap **or** bind the shared Heap only while a C job runs |
 
-C1 may keep isolate Machines for ordinary `thread::spawn` jobs and only
+C1 may keep isolate runtimes for ordinary `thread::spawn` jobs and only
 bind the shared Heap for proven loop chunks. Do not reset the root Heap
 between C jobs.
 
@@ -297,8 +280,8 @@ restores them around help). They are not Heap state.
 Static slots: one `statics` array on the **root** (or Heap-side table).
 Worker stacks must not each `init_static_slots` into a private copy that
 then aliases interned pointers from another Heap. A shared-heap job starts
-with a copy of the spawning VM's statics (#1561: `ThreadSpawnContext::statics`,
-`Machine::load_shared_statics`): their words name objects of the one Heap
+with a copy of the spawner's statics (#1561: `ThreadSpawnContext::statics`,
+`JobStatics::Shared`, read in `worker::run_on`): their words name objects of the one Heap
 the job is bound to, so a loop chunk reads a module `const` set at startup.
 A slot the job fills (a local `const` table built on first use, a ground
 dictionary) lands only in its copy, which the job drops when it ends;
@@ -320,14 +303,13 @@ stolen jobs on one Heap.
 
 Eligibility (all must hold):
 
-1. `ThreadProgram` has real frame maps (E1; precise frame maps since minor 21).
-2. Body matches loop IPA independence / purity / int reduction **or**
+1. Body matches loop IPA independence / purity / int reduction **or**
    disjoint `out[i]` stores with stable length.
-3. Args are whitelist: induction bounds (immediates), frozen inputs,
+2. Args are whitelist: induction bounds (immediates), frozen inputs,
    disjoint `out`, Arc handles only if the body does not need them (C1
    should not need channels).
-4. No `gc::collect`, grow, yield, FFI, spawn, IO park in the worker.
-5. Combine is associative fold of **private** partials on the joiner after
+3. No `gc::collect`, grow, yield, FFI, spawn, IO park in the worker.
+4. Combine is associative fold of **private** partials on the joiner after
    join (same `ADD` / `MUL` as today).
 
 Runtime sketch (C1 / E6):
@@ -335,7 +317,7 @@ Runtime sketch (C1 / E6):
 1. `begin_steal` on the root Heap; register mutator stacks as they enter.
 2. Submit a job that carries `Value` args (`SpawnArg::Shared`). Skip
    `value_to_portable` for those args.
-3. Worker `call_function` on a TLS stack bound to the Heap.
+3. Worker runs the body on a driver over a runtime bound to the Heap.
 4. Store an immediate (or shared pointer bits) into `JoinState` without
    encoding a graph.
 5. `end_steal`; joiner folds; Layer A collect if needed.
@@ -397,8 +379,6 @@ Mark **Q** items that E6 must not guess silently.
    arrived when it help-steals). Layer A avoids this.
 9. **Static / intern races.** Confirm C1 workers never intern without the
    Heap lock.
-10. **Pin across join.** A pin table is per-stack and dies at job reset.
-    Do not persist coro pins (already refused in heap-identity).
 
 ## Refuse / later
 
@@ -406,5 +386,5 @@ Mark **Q** items that E6 must not guess silently.
 - Sharing `Fn` / coroutine / stream graphs.
 - Growing a shared array during steal.
 - Conservative-stack shared-heap GC.
-- Starting the reactor at `Machine` construct.
+- Starting the reactor when a `Runtime` is built.
 - Per-help private Heap “just for temps” — that is E2 isolate, not C.

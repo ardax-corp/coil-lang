@@ -194,7 +194,7 @@ fn main() {
 
     // `ConstBytes` lends a string's bytes in place and copies a `Vec<byte>`
     // without writing it back. The argument string is a temporary, so only
-    // the VM's in-flight argument roots keep it alive while the callback
+    // the runtime's in-flight argument roots keep it alive while the callback
     // allocates enough to collect.
     let const_bytes = tmp.join("const_bytes.coil");
     std::fs::write(

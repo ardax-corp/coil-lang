@@ -1,0 +1,55 @@
+// A borrow of a fresh local handed to a call that may keep it or hand it
+// back gives the local's object a second name, though the call never sees
+// the local itself: a write through the local after the borrow is done
+// copies it (a fresh local's writes skip the test only while nothing else
+// names its object).
+use tests::assert;
+
+class C {
+    pub x: int,
+}
+
+class Holder {
+    pub c: C,
+}
+
+fn same(C c) -> C {
+    return c;
+}
+
+fn keep(Holder h, C c) -> int {
+    h.c = c;
+    return 0;
+}
+
+test("code not known here hands the borrow back") {
+    let a = new C(1);
+    let w = mut a;
+    w.x += 10;
+    let g = same;
+    let r = g(w);
+    a.x += 100;
+    assert!(r.x == 11);
+    assert!(a.x == 111);
+}
+
+test("a known callee hands the borrow back") {
+    let a = new C(1);
+    let w = mut a;
+    w.x += 10;
+    let r = same(w);
+    a.x += 100;
+    assert!(r.x == 11);
+    assert!(a.x == 111);
+}
+
+test("a callee keeps the borrow") {
+    let h = new Holder(new C(0));
+    let a = new C(1);
+    let w = mut a;
+    w.x += 10;
+    let _ = keep(h, w);
+    a.x += 100;
+    assert!(h.c.x == 11);
+    assert!(a.x == 111);
+}

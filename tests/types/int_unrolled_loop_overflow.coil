@@ -1,0 +1,81 @@
+// A short counted loop that the optimizer unrolls keeps its `int` overflow:
+// `while i <= MAX { i += 1; }` traps on the last bump, as the loop it
+// replaces does, and a loop that ends exactly on a limit does not (#2793).
+use tests::assert;
+use task::{scope, Scope, TaskError};
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task: its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+// Each loop is in a named function: lambda bodies are not unrolled.
+fn up_to_max() -> int {
+    let i = 9223372036854775804;
+    let cnt = 0;
+    while i <= 9223372036854775807 {
+        cnt += 1;
+        i += 1;
+    }
+    return cnt;
+}
+
+fn up_to_bound() -> int {
+    let n = 9223372036854775807;
+    let i = 9223372036854775806;
+    while i <= n {
+        i += 1;
+    }
+    return 0;
+}
+
+fn down_to_min() -> int {
+    let i = -9223372036854775805;
+    let lo = -9223372036854775807 - 1;
+    let cnt = 0;
+    while lo <= i {
+        cnt += 1;
+        i -= 1;
+    }
+    return cnt;
+}
+
+fn below_max() -> int {
+    let i = 9223372036854775803;
+    let cnt = 0;
+    while i < 9223372036854775807 {
+        cnt += 1;
+        i += 1;
+    }
+    return cnt * 10 + (i - 9223372036854775800);
+}
+
+test("an unrolled `<=` loop up to int max traps on its last bump") {
+    let r = outcome(fn () => up_to_max());
+    assert!(r == "integer overflow", "got " + r);
+}
+
+test("a bound local at int max traps too") {
+    let r = outcome(fn () => up_to_bound());
+    assert!(r == "integer overflow", "got " + r);
+}
+
+test("a loop counting down to int min traps on its last step") {
+    let r = outcome(fn () => down_to_min());
+    assert!(r == "integer overflow", "got " + r);
+}
+
+test("an unrolled `<` loop that ends on int max does not trap") {
+    assert!(below_max() == 47);
+}

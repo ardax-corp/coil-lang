@@ -1,0 +1,4 @@
+// @expected E0101 — `ord` / `char` moved from the prelude to coil-stdlib's `text` module.
+fn main() {
+    let b = ord("a");
+}

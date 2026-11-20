@@ -1,0 +1,220 @@
+// A scalar-backed enum without an instance of an operator's trait is its
+// backing value under every operator the backing type takes, and the result
+// has the backing type (#2463): bitwise, shift, string `+`, unary and
+// compound assignment as `+ - * / %` and the comparisons already were. Where
+// its primitive is expected as a condition or a logical operand it is that
+// primitive too. An enum with the operator's instance keeps it for two of its
+// own values (#2452).
+use tests::assert;
+
+#[repr(int)]
+enum Flag {
+    A = 5,
+    B = 7,
+    Big = 1024,
+}
+
+#[repr(string)]
+enum Tone {
+    Hi = "hi",
+    Lo = "lo",
+}
+
+#[repr(bool)]
+enum Sw {
+    Off = false,
+    On = true,
+}
+
+#[repr(float)]
+enum Ratio {
+    Half = 0.5,
+    Full = 1.0,
+}
+
+// An enum with its own `BitAnd` and `Neg`: two of its values use them.
+#[repr(int)]
+enum Bit {
+    Zero = 0,
+    One = 1,
+}
+
+impl BitAnd for Bit {
+    pub fn bitand(Bit a, Bit b) -> Bit {
+        return Bit::One;
+    }
+}
+
+impl Neg for Bit {
+    pub fn neg(Bit a) -> Bit {
+        return Bit::Zero;
+    }
+}
+
+fn is_one(Bit b) -> bool {
+    return match b {
+        Bit::One => true,
+        default => false,
+    };
+}
+
+fn mask(Flag f, int m) -> int {
+    return f & m;
+}
+
+fn any<T: BitOr>(T a, T b) -> T {
+    return a | b;
+}
+
+test("bitwise operators on the backing int") {
+    assert!(Flag::A & Flag::B == 5);
+    assert!(Flag::A ^ Flag::B == 2);
+    assert!(Flag::A | Flag::B == 7);
+    assert!(Flag::A | 8 == 13);
+    assert!(8 | Flag::A == 13);
+    assert!(Flag::B & 3 == 3);
+    assert!(6 ^ Flag::A == 3);
+    let a = Flag::A;
+    let b = Flag::B;
+    assert!(a & b == 5);
+    assert!((a ^ b) | (a & 1) == 3);
+    let n: int = a | b;
+    assert!(n == 7);
+    assert!(mask(Flag::B, 6) == 6);
+    assert!(any(Flag::A | 0, 8) == 13);
+}
+
+test("shifts on the backing int") {
+    assert!(Flag::A << 2 == 20);
+    assert!(Flag::Big >> 3 == 128);
+    assert!(1 << Flag::A == 32);
+    assert!(Flag::Big >> Flag::A == 32);
+    let a = Flag::A;
+    assert!(a << a == 160);
+    assert!(a >> 1 == 2);
+}
+
+test("string concatenation on the backing string") {
+    assert!(Tone::Hi + Tone::Lo == "hilo");
+    assert!(Tone::Hi + "x" == "hix");
+    assert!("x" + Tone::Hi == "xhi");
+    let t = Tone::Lo;
+    assert!(t + t + "!" == "lolo!");
+    assert!("<" + t + ">" == "<lo>");
+    let s: string = t + Tone::Hi;
+    assert!(s.len() == 4);
+}
+
+test("unary operators give the backing type") {
+    assert!(-Flag::A == 0 - 5);
+    assert!(~Flag::A == 0 - 6);
+    assert!(-Ratio::Half == 0.0 - 0.5);
+    let a = Flag::B;
+    let n: int = -a;
+    assert!(n == 0 - 7);
+    assert!(~a & 15 == 8);
+    assert!(-a + a == 0);
+    let r = Ratio::Full;
+    let f: float = -r;
+    assert!(f == 0.0 - 1.0);
+}
+
+test("compound assignment into the backing type") {
+    let x = 3;
+    x += Flag::A;
+    assert!(x == 8);
+    x -= Flag::B;
+    assert!(x == 1);
+    x *= Flag::A;
+    assert!(x == 5);
+    x |= Flag::B;
+    assert!(x == 7);
+    x &= Flag::A;
+    assert!(x == 5);
+    x ^= Flag::B;
+    assert!(x == 2);
+    x <<= Flag::A;
+    assert!(x == 64);
+    x >>= Flag::A;
+    assert!(x == 2);
+    x %= Flag::A;
+    assert!(x == 2);
+    let a = Flag::Big;
+    x += a;
+    assert!(x == 1026);
+    x /= a;
+    assert!(x == 1);
+    let t = "a";
+    t += Tone::Hi;
+    assert!(t == "ahi");
+    let f = 1.5;
+    f *= Ratio::Half;
+    assert!(f == 0.75);
+    f += Ratio::Full;
+    assert!(f == 1.75);
+    let xs = [1, 2];
+    xs[1] += Flag::A;
+    assert!(xs[1] == 7);
+}
+
+test("a bool-backed enum as a condition and a logical operand") {
+    let on = Sw::On;
+    let off = Sw::Off;
+    assert!(!off);
+    assert!(!(!on));
+    assert!(on && Sw::On);
+    assert!(!(on && off));
+    assert!(on || off);
+    assert!(off || true);
+    assert!(!(off || false));
+    let n = 0;
+    if on {
+        n = n + 1;
+    }
+    if off {
+        n = n + 10;
+    } else if Sw::On {
+        n = n + 100;
+    }
+    assert!(n == 101);
+    let left = 3;
+    let more = Sw::On;
+    while more && left > 0 {
+        left = left - 1;
+    }
+    assert!(left == 0);
+    let b: bool = !on;
+    assert!(!b);
+}
+
+test("the arithmetic and comparisons that already were on the backing") {
+    assert!(Flag::A + 1 == 6);
+    assert!(Flag::A * Flag::B == 35);
+    assert!(Flag::B % Flag::A == 2);
+    assert!(Flag::Big / Flag::A == 204);
+    assert!(Ratio::Half + Ratio::Full == 1.5);
+    assert!(Flag::A < 6);
+    assert!(Tone::Hi == "hi");
+}
+
+test("an enum's own instance is still the operator of two of its values") {
+    let z = Bit::Zero;
+    let o = Bit::One;
+    // `Bit & Bit` is the instance (always `One`); next to an `int` the
+    // backing word.
+    assert!(is_one(z & z));
+    assert!(z & 1 == 0);
+    assert!(1 & o == 1);
+    // `-Bit` is the instance (always `Zero`).
+    assert!(!is_one(-o));
+    // No `BitOr` instance: the backing word.
+    assert!(z | o == 1);
+    assert!(~o == 0 - 2);
+    // The instance takes the compound assignment of two `Bit`s.
+    let m = Bit::Zero;
+    m &= Bit::Zero;
+    assert!(is_one(m));
+    let k = 6;
+    k &= Bit::One;
+    assert!(k == 0);
+}

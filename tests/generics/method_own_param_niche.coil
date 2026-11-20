@@ -1,0 +1,207 @@
+// A method's own type parameter at a heap `Option` / `Result` takes the
+// niche word as itself, as a free generic function's does, and returns it
+// so: a value of it carried out in a tuple, `Vec`, `Option` or `yield` is
+// the value passed (coil-lang#2716).
+use tests::assert;
+use string::format;
+
+#[derive(Show)]
+class Pt {
+    pub a: int,
+}
+
+class Src {
+    pub n: int,
+}
+
+impl Src {
+    pub fn id<U>(U x) -> U {
+        return x;
+    }
+
+    pub fn tup<U>(U x) -> (U, int) {
+        return (x, self.n);
+    }
+
+    pub fn vec<U>(U x) -> Vec<U> {
+        return Vec::from([x]);
+    }
+
+    pub fn opt<U>(U x) -> Option<U> {
+        return Option::Some(x);
+    }
+
+    pub fn first<U>((U, int) t) -> U {
+        let (a, _) = t;
+        return a;
+    }
+
+    pub fn nest<U>(U x) -> (U, int) {
+        return self.tup(x);
+    }
+
+    pub fn pick<U>(Option<U> o, U d) -> U {
+        return o ?? d;
+    }
+
+    pub fn shown<U: Show>(U x) -> (U, string) {
+        return (x, x.show());
+    }
+
+    pub static fn stat<U>(U x) -> (U, int) {
+        return (x, 2);
+    }
+
+    pub static fn stat_id<U>(U x) -> U {
+        return x;
+    }
+
+    pub gen fn two<U>(U x, U y) {
+        yield x;
+        yield y;
+    }
+}
+
+class Bx<T> {
+    pub t: T,
+}
+
+impl Bx<T> {
+    pub fn both<U>(U x) -> (T, U) {
+        return (self.t, x);
+    }
+
+    pub gen fn each<U>(U x) {
+        yield (self.t, x);
+    }
+}
+
+trait Wrap<S> {
+    fn wrap<U>(S s, U x) -> (U, int) {}
+    fn back<U>(S s, U x) -> U {}
+}
+
+impl Wrap for Src {
+    pub fn wrap<U>(Src s, U x) -> (U, int) {
+        return (x, s.n);
+    }
+
+    pub fn back<U>(Src s, U x) -> U {
+        return x;
+    }
+}
+
+fn via_wrap<W: Wrap, U>(W w, U x) -> (U, int) {
+    return w.wrap(x);
+}
+
+fn via_back<W: Wrap, U>(W w, U x) -> U {
+    return w.back(x);
+}
+
+fn outer<T>(Src s, T x) -> (T, int) {
+    return s.tup(x);
+}
+
+fn apply<A, B>(fn(A) -> B f, A a) -> B {
+    return f(a);
+}
+
+fn show<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+test("a method's own parameter at Option<string> out of a tuple, Vec and Option") {
+    let a: Option<string> = Option::Some("s");
+    let s = new Src(1);
+    assert!(show(s.tup(a)) == "(Some(s), 1)");
+    assert!(show(s.vec(a)) == "[Some(s)]");
+    assert!(show(s.opt(a)) == "Some(Some(s))");
+    assert!(show(s.id(a)) == "Some(s)");
+    assert!(show(s.first((a, 3))) == "Some(s)");
+    assert!(show(s.nest(a)) == "(Some(s), 1)");
+    assert!(show(outer(s, a)) == "(Some(s), 1)");
+    let n: Option<string> = Option::None;
+    assert!(show(s.tup(n)) == "(None, 1)");
+    assert!(show(s.vec(n)) == "[None]");
+}
+
+test("a class, a Result and a unit Result at a method's own parameter") {
+    let s = new Src(1);
+    let c: Option<Pt> = Option::Some(new Pt(4));
+    assert!(show(s.tup(c)) == "(Some(Pt { a: 4 }), 1)");
+    assert!(show(s.vec(c)) == "[Some(Pt { a: 4 })]");
+    let r: Result<string, string> = Result::Ok("ok");
+    let e: Result<string, string> = Result::Err("no");
+    assert!(show(s.tup(r)) == "(Ok(ok), 1)");
+    assert!(show(s.vec(e)) == "[Err(no)]");
+    let u: Result<(), string> = Result::Err("u");
+    assert!(show(s.tup(u)) == "(Err(u), 1)");
+    assert!(show(s.id(u)) == "Err(u)");
+}
+
+test("an open Option parameter beside the bare one") {
+    let a: Option<string> = Option::Some("s");
+    let s = new Src(1);
+    assert!(show(s.pick(Option::None, a)) == "Some(s)");
+    assert!(show(s.pick(Option::Some(a), Option::None)) == "Some(s)");
+}
+
+test("a bounded, a static and a generic class's method") {
+    let a: Option<string> = Option::Some("s");
+    let s = new Src(1);
+    assert!(show(s.shown(a)) == "(Some(s), Some(s))");
+    assert!(show(Src::stat(a)) == "(Some(s), 2)");
+    assert!(show(Src::stat_id(a)) == "Some(s)");
+    let b = new Bx(Option::Some("t"));
+    assert!(show(b.both(a)) == "(Some(t), Some(s))");
+}
+
+test("a trait method's own parameter, direct and through a dictionary") {
+    let a: Option<string> = Option::Some("s");
+    let s = new Src(1);
+    assert!(show(s.wrap(a)) == "(Some(s), 1)");
+    assert!(show(s.back(a)) == "Some(s)");
+    assert!(show(Wrap::wrap(s, a)) == "(Some(s), 1)");
+    assert!(show(via_wrap(s, a)) == "(Some(s), 1)");
+    assert!(show(via_back(s, a)) == "Some(s)");
+}
+
+test("a method's value and a partial application") {
+    let a: Option<string> = Option::Some("s");
+    let s = new Src(1);
+    let f = s.tup();
+    assert!(show(f(a)) == "(Some(s), 1)");
+    assert!(show(apply(s.id(), a)) == "Some(s)");
+    let g = fn (Option<string> x) => Src::stat_id(x);
+    assert!(show(apply(g, a)) == "Some(s)");
+}
+
+test("a generator method's own parameter") {
+    let a: Option<string> = Option::Some("s");
+    let s = new Src(1);
+    let h = s.two(a, Option::None);
+    let x = resume h;
+    let y = resume h;
+    assert!(show(x) == "Some(s)");
+    assert!(show(y) == "None");
+    let seen = Vec::new();
+    for v in s.two(a, a) {
+        seen.push(show(v));
+    }
+    assert!(seen.len() == 2 && seen[0] == "Some(s)" && seen[1] == "Some(s)");
+    let b = new Bx(7);
+    let k = b.each(a);
+    assert!(show(resume k) == "(7, Some(s))");
+}
+
+test("the method's own parameter at immediate and two-word types") {
+    let s = new Src(1);
+    let o: Option<int> = Option::Some(5);
+    assert!(show(s.tup(o)) == "(Some(5), 1)");
+    assert!(show(s.vec(o)) == "[Some(5)]");
+    assert!(show(s.id(o)) == "Some(5)");
+    assert!(show(s.tup("w")) == "(w, 1)");
+    assert!(show(s.tup(2.5)) == "(2.5, 1)");
+    assert!(show(s.vec((1, 2))) == "[(1, 2)]");
+}

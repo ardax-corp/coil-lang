@@ -1,0 +1,10 @@
+// @expected E0107 — `--` through a tuple element changes the tuple, and a
+// tuple cannot be changed in place (#2791).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let t = (0, new C(1));
+    --t[1].x;
+}

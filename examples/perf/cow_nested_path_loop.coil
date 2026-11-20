@@ -1,0 +1,49 @@
+// CPU: a loop that writes through a nested path, `f.blocks[b].insts[i] =
+// …` (#2351), the shape of a compiler pass editing its blocks. Each write
+// makes every object on the path unique before it writes; nothing in the
+// inner loop can share or replace them, so that runs once per loop, as a
+// `let xs = mut f.blocks[b].insts` view written before it would.
+use io::sync::println;
+use string::format;
+
+class Block {
+    pub insts: Vec<int>,
+}
+
+class Func {
+    pub blocks: Vec<Block>,
+}
+
+fn pass(Func f) {
+    let b = 0;
+    while b < f.blocks.len() {
+        let i = 0;
+        while i < f.blocks[b].insts.len() {
+            f.blocks[b].insts[i] = f.blocks[b].insts[i] * 2 + 1;
+            i = i + 1;
+        }
+        f.blocks[b].insts.push(7);
+        b = b + 1;
+    }
+}
+
+fn main() {
+    let f = new Func(Vec::new());
+    let b = 0;
+    while b < 2000 {
+        let xs: Vec<int> = Vec::new();
+        let i = 0;
+        while i < 500 {
+            xs.push(i);
+            i = i + 1;
+        }
+        f.blocks.push(new Block(xs));
+        b = b + 1;
+    }
+    let k = 0;
+    while k < 20 {
+        pass(f);
+        k = k + 1;
+    }
+    let _ = println(format("len=%i first=%i", f.blocks[3].insts.len(), f.blocks[3].insts[1]));
+}

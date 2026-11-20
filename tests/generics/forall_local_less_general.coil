@@ -1,0 +1,88 @@
+// A local bound from a generic function, passed to a `forall` parameter
+// less general than the function (fewer type variables), is the function's
+// value made for that `forall` (coil-lang#2637): a copy its shared body
+// writes through is its own, and each bound gets its dictionary.
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+trait Bump<T> {
+    fn bump(T x) {}
+}
+
+impl Bump for Box {
+    fn bump(Box b) {
+        b.n = b.n + 1;
+    }
+}
+
+impl Bump for int {
+    fn bump(int x) {}
+}
+
+trait Name<T> {
+    fn name(T x) -> string {}
+}
+
+impl Name for int {
+    fn name(int x) -> string {
+        return "int";
+    }
+}
+
+impl Name for string {
+    fn name(string x) -> string {
+        return "string";
+    }
+}
+
+fn bump_second<B, A: Bump>(B b, A a) -> A {
+    let y = a;
+    y.bump();
+    return a;
+}
+
+fn run_ground(forall X: Bump. int -> X -> X g, Box x) -> Box {
+    return g(0, x);
+}
+
+fn run_same(forall X: Bump. X -> X -> X g, Box x) -> Box {
+    return g(new Box(9), x);
+}
+
+fn names<B: Name, A: Name>(B b, A a) -> string {
+    return b.name() + " " + a.name();
+}
+
+fn run_names_ground(forall A: Name. int -> A -> string g) -> string {
+    return g(1, "s");
+}
+
+fn run_names_same(forall A: Name. A -> A -> string g) -> string {
+    return g("s", "t");
+}
+
+test("a local through a forall that grounds one type parameter") {
+    let h = bump_second;
+    let b = new Box(1);
+    let r = run_ground(h, b);
+    assert!(b.n == 1);
+    assert!(r.n == 1);
+}
+
+test("a local through a forall that names two type parameters as one") {
+    let h = bump_second;
+    let b = new Box(2);
+    let r = run_same(h, b);
+    assert!(b.n == 2);
+    assert!(r.n == 2);
+}
+
+test("a local's bounds through a less general forall") {
+    let h = names;
+    assert!(run_names_ground(h) == "int string");
+    assert!(run_names_same(h) == "string string");
+    assert!(h(1, "s") == "int string");
+}

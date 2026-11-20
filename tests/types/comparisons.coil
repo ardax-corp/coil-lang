@@ -54,7 +54,7 @@ test("comparison of computed values") {
 
 // The literal cases above fold at compile time (`assert(1 < 2)` compiles to
 // a constant). `opaque` hides a value from the optimizer (it round-trips
-// through a `Vec`), so the cases below run the VM's comparison instructions.
+// through a `Vec`), so the cases below run the comparison ops.
 fn opaque(int x) -> int {
     let v: Vec<int> = Vec::new();
     v.push(x);

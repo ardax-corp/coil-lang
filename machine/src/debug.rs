@@ -1,4 +1,4 @@
-//! GDB-style debug stop controller for the VM.
+//! GDB-style debug stop controller for the runtime.
 //!
 //! Checks run only when a controller is attached (`unlikely`), so the normal
 //! dispatch path stays cold when unused.
@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use crate::AddrHashBuilder;
 
-/// Why the VM paused for the debugger.
+/// Why the runtime paused for the debugger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
     Breakpoint { pc: usize },
@@ -46,7 +46,7 @@ pub enum StepMode {
     },
 }
 
-/// Attached to a [`crate::Machine`] for interactive / scripted debugging.
+/// Attached to the MIR interpreter for interactive / scripted debugging.
 #[derive(Debug, Clone, Default)]
 pub struct DebugController {
     breakpoints: HashSet<usize, AddrHashBuilder>,
@@ -69,12 +69,13 @@ impl DebugController {
         self.breakpoints.insert(pc)
     }
 
-    pub fn remove_breakpoint(&mut self, pc: usize) -> bool {
-        self.breakpoints.remove(&pc)
-    }
-
     pub fn clear_breakpoints(&mut self) {
         self.breakpoints.clear();
+    }
+
+    /// Stop before the next instruction, the first one of a run.
+    pub fn stop_at_next(&mut self) {
+        self.step_mode = StepMode::Stepi { armed: true };
     }
 
     pub fn set_stepi(&mut self) {
@@ -103,10 +104,6 @@ impl DebugController {
 
     pub fn clear_step(&mut self) {
         self.step_mode = StepMode::None;
-    }
-
-    pub fn clear_skip_bp(&mut self) {
-        self.skip_bp_pc = None;
     }
 
     pub fn skip_breakpoint_once(&mut self, pc: usize) {
@@ -277,8 +274,6 @@ pub enum DebugObject {
     Array(Vec<common::Value>),
     Tuple(Vec<common::Value>),
     Enum { tag: u32, payload: Vec<common::Value> },
-    /// Boxed scalar (`int` / `float` / `bool` payload word).
-    Boxed(common::Value),
     /// Some other object kind (stream, thread, …).
     Other(&'static str),
 }
@@ -297,9 +292,39 @@ pub struct DebugTask {
 /// Where a task's call chain is.
 #[derive(Clone, Debug)]
 pub enum DebugTaskFrames {
-    /// Live frames on the VM stack (machine frame indices, bottom first):
+    /// Live frames on the stack (machine frame indices, bottom first):
     /// the running task, and the root task while a child runs above it.
     Live(std::ops::Range<usize>),
     /// A suspended child task's saved frames: their pcs, bottom first.
     Saved(Vec<usize>),
+}
+
+/// The heap object at `v` (a bare or `| 1`-tagged address), if any.
+pub fn object_view(heap: &crate::memory::Heap, v: common::Value) -> Option<DebugObject> {
+    use crate::memory::Object;
+    let addr = v.bits() & !1;
+    if addr == 0 {
+        return None;
+    }
+    Some(match heap.find_object_by_addr(addr)? {
+        Object::String(gc) => DebugObject::Str(gc.as_ref().data.to_string()),
+        Object::Instance(gc) => {
+            let inst = gc.as_ref();
+            DebugObject::Instance { type_id: inst.type_id, fields: inst.slots().to_vec() }
+        }
+        Object::Array(gc) => DebugObject::Array(gc.as_ref().to_vec()),
+        Object::Enum(gc) if gc.as_ref().is_tuple() => DebugObject::Tuple(gc.as_ref().elements().to_vec()),
+        Object::Enum(gc) => {
+            let e = gc.as_ref();
+            DebugObject::Enum { tag: e.tag, payload: e.payload.to_vec() }
+        }
+        Object::Coroutine(_) => DebugObject::Other("coroutine"),
+        Object::Fn(_) => DebugObject::Other("fn"),
+        _ => DebugObject::Other("object"),
+    })
+}
+
+/// `v` as `print` shows a word of no known type.
+pub fn format_word(heap: &crate::memory::Heap, v: common::Value) -> String {
+    crate::format::stringify_value(heap, v)
 }

@@ -1,4 +1,4 @@
-// Structured concurrency on one VM: `task::scope`, `spawn`, `join`,
+// Structured concurrency on one runtime: `task::scope`, `spawn`, `join`,
 // `sleep`, `yield_now`, `channel`, `blocking`. Embedded in the compiler as
 // module `task`.
 //

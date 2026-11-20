@@ -20,9 +20,9 @@ test("generated impl of a package trait resolves as a method") {
     assert!(p.summary() == "Point x=1 y=2");
 }
 
-test("generated impl of a package trait resolves function-style") {
+test("generated impl of a package trait resolves trait-qualified") {
     let p = new Point(3, 4);
-    assert!(summary(p) == "Point x=3 y=4");
+    assert!(Summary::summary(p) == "Point x=3 y=4");
 }
 
 test("user derive on a generic type (bounded instance)") {

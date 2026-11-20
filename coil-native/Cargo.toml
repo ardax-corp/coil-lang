@@ -1,0 +1,21 @@
+[package]
+name = "coil-native"
+version = "0.1.0"
+edition = "2024"
+description = "Native code for Coil: MIR to Cranelift (JIT now, AOT objects later)"
+
+[dependencies]
+compiler = { path = "../compiler", default-features = false }
+common = { path = "../common" }
+machine = { path = "../machine", default-features = false }
+
+# No native code on wasm (the playground runs the MIR interpreter): the crate
+# is empty there.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+sha2 = "0.10"
+cranelift-codegen = "0.137"
+cranelift-frontend = "0.137"
+cranelift-jit = "0.137"
+cranelift-module = "0.137"
+cranelift-object = "0.137"
+cranelift-native = "0.137"

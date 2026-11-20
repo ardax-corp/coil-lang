@@ -1,0 +1,10 @@
+// A module that imports one of its own items: `tests/modules/compile_fail/import_self.coil`.
+use compile_fail::self_import::other;
+
+fn one() -> int {
+    return other() + 1;
+}
+
+fn other() -> int {
+    return 41;
+}

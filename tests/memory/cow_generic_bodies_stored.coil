@@ -1,0 +1,282 @@
+// A shared generic body stores a type parameter's word (coil-lang#2506):
+// into an Option, a tuple or a Result it returns, into a field, through
+// `b.set(a.get())`, or into a Vec. The word may be a scalar, so HIR cannot
+// name its kind; the body shares it conservatively and the runtime ignores
+// a word that is no object. A write to the stored value never reaches the
+// value it came from. Past the clone budget, where every generic call
+// reaches the shared body.
+// @flags --clone-budget 0
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+class Cell<T> {
+    pub value: T,
+}
+
+impl Cell<T> {
+    pub fn get() -> T {
+        return self.value;
+    }
+
+    pub fn set(T v) {
+        self.value = v;
+    }
+
+    pub fn opt() -> Option<T> {
+        return Some(self.value);
+    }
+
+    pub fn pair() -> (T, int) {
+        return (self.value, 1);
+    }
+
+    pub fn res() -> Result<T, int> {
+        return Result::Ok(self.value);
+    }
+}
+
+fn copy_over<T>(Cell<T> a, Cell<T> b) {
+    b.set(a.get());
+}
+
+fn push_value<T>(Vec<T> xs, Cell<T> c) {
+    xs.push(c.value);
+}
+
+fn some_of<T>(Cell<T> c) -> Option<T> {
+    return c.opt();
+}
+
+fn open<T>(Option<T> o, T fallback) -> T {
+    return match o {
+        Some(x) => x,
+        None => fallback,
+    };
+}
+
+fn open_res<T>(Result<T, int> r, T fallback) -> T {
+    return match r {
+        Result::Ok(x) => x,
+        Result::Err(_) => fallback,
+    };
+}
+
+// At `Box`, a class.
+
+test("Some(self.value) at Box") {
+    let c = new Cell(new Box(1));
+    let b = open(c.opt(), new Box(0));
+    b.n = 9;
+    assert!(c.value.n == 1);
+    let d = open(some_of(c), new Box(0));
+    d.n = 8;
+    assert!(c.value.n == 1);
+}
+
+test("a tuple holding self.value at Box") {
+    let c = new Cell(new Box(1));
+    let (b, k) = c.pair();
+    b.n = 9;
+    assert!(k == 1);
+    assert!(c.value.n == 1);
+}
+
+test("Ok(self.value) at Box") {
+    let c = new Cell(new Box(1));
+    let b = open_res(c.res(), new Box(0));
+    b.n = 9;
+    assert!(c.value.n == 1);
+}
+
+test("b.set(a.get()) at Box") {
+    let a = new Cell(new Box(1));
+    let b = new Cell(new Box(0));
+    copy_over(a, b);
+    b.value.n = 9;
+    assert!(a.value.n == 1);
+}
+
+test("a field store at Box") {
+    let c = new Cell(new Box(0));
+    let v = new Box(1);
+    c.set(v);
+    v.n = 9;
+    assert!(c.value.n == 1);
+    c.value.n = 5;
+    assert!(v.n == 9);
+}
+
+test("a Vec push at Box") {
+    let c = new Cell(new Box(1));
+    let xs: Vec<Box> = [];
+    push_value(xs, c);
+    xs[0].n = 9;
+    assert!(c.value.n == 1);
+}
+
+// At `Vec<int>`, an array.
+
+fn vi(int a, int b) -> Vec<int> {
+    let v: Vec<int> = [a, b];
+    return v;
+}
+
+test("Some(self.value) at Vec<int>") {
+    let v = vi(1, 2);
+    let c = new Cell(v);
+    let w = open(c.opt(), vi(0, 0));
+    w[0] = 9;
+    assert!(c.value[0] == 1);
+    assert!(v[0] == 1);
+}
+
+test("a tuple holding self.value at Vec<int>") {
+    let c = new Cell(vi(1, 2));
+    let (w, k) = c.pair();
+    w[0] = 9;
+    assert!(k == 1);
+    assert!(c.value[0] == 1);
+}
+
+test("Ok(self.value) at Vec<int>") {
+    let c = new Cell(vi(1, 2));
+    let w = open_res(c.res(), vi(0, 0));
+    w[0] = 9;
+    assert!(c.value[0] == 1);
+}
+
+test("b.set(a.get()) at Vec<int>") {
+    let a = new Cell(vi(1, 2));
+    let b = new Cell(vi(0, 0));
+    copy_over(a, b);
+    b.value[0] = 9;
+    assert!(a.value[0] == 1);
+}
+
+test("a field store at Vec<int>") {
+    let c = new Cell(vi(0, 0));
+    let v = vi(1, 2);
+    c.set(v);
+    v[0] = 9;
+    assert!(c.value[0] == 1);
+}
+
+test("a Vec push at Vec<int>") {
+    let c = new Cell(vi(1, 2));
+    let xs: Vec<Vec<int>> = [];
+    push_value(xs, c);
+    xs[0][0] = 9;
+    assert!(c.value[0] == 1);
+}
+
+// At `int` and `string`, words that are no copy-on-write object: the
+// value stays right.
+
+test("every stored shape at int") {
+    let c = new Cell(41);
+    assert!(open(c.opt(), 0) == 41);
+    let (x, k) = c.pair();
+    assert!(x == 41 && k == 1);
+    assert!(open_res(c.res(), 0) == 41);
+    let d = new Cell(0);
+    copy_over(c, d);
+    assert!(d.value == 41);
+    d.set(7);
+    assert!(d.value == 7 && c.value == 41);
+    let xs: Vec<int> = [];
+    push_value(xs, c);
+    assert!(xs[0] == 41);
+}
+
+test("every stored shape at int equal to a live object's address") {
+    let b = new Box(1);
+    let c = new Cell(1099511627776);
+    let d = new Cell(0);
+    copy_over(c, d);
+    assert!(d.value == 1099511627776);
+    assert!(open(c.opt(), 0) == 1099511627776);
+    assert!(b.n == 1);
+}
+
+test("every stored shape at string") {
+    let c = new Cell("abc");
+    assert!(open(c.opt(), "") == "abc");
+    let (x, k) = c.pair();
+    assert!(x == "abc" && k == 1);
+    assert!(open_res(c.res(), "") == "abc");
+    let d = new Cell("");
+    copy_over(c, d);
+    assert!(d.value == "abc");
+    d.set("xyz");
+    assert!(d.value == "xyz" && c.value == "abc");
+    let xs: Vec<string> = [];
+    push_value(xs, c);
+    assert!(xs[0] == "abc");
+}
+
+// At `Option<Box>`.
+
+fn bump(Option<Box> o) {
+    match o {
+        Some(b) => {
+            b.n = 9;
+        },
+        None => {},
+    }
+}
+
+fn seen(Option<Box> o) -> int {
+    return match o {
+        Some(b) => b.n,
+        None => 0 - 1,
+    };
+}
+
+test("Some(self.value) at Option<Box>") {
+    let c = new Cell(Some(new Box(1)));
+    let o = open(c.opt(), None);
+    bump(o);
+    assert!(seen(c.value) == 1);
+}
+
+test("a tuple holding self.value at Option<Box>") {
+    let c = new Cell(Some(new Box(1)));
+    let (o, k) = c.pair();
+    bump(o);
+    assert!(k == 1);
+    assert!(seen(c.value) == 1);
+}
+
+test("Ok(self.value) at Option<Box>") {
+    let c = new Cell(Some(new Box(1)));
+    let o = open_res(c.res(), None);
+    bump(o);
+    assert!(seen(c.value) == 1);
+}
+
+test("b.set(a.get()) at Option<Box>") {
+    let a = new Cell(Some(new Box(1)));
+    let b = new Cell(None);
+    copy_over(a, b);
+    bump(b.value);
+    assert!(seen(a.value) == 1);
+}
+
+test("a field store at Option<Box>") {
+    let c = new Cell(None);
+    let v = Some(new Box(1));
+    c.set(v);
+    bump(v);
+    assert!(seen(c.value) == 1);
+}
+
+test("a Vec push at Option<Box>") {
+    let c = new Cell(Some(new Box(1)));
+    let xs: Vec<Option<Box>> = [];
+    push_value(xs, c);
+    bump(xs[0]);
+    assert!(seen(c.value) == 1);
+}

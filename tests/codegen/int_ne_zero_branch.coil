@@ -1,4 +1,4 @@
-// An int `x != 0` branch emitted from MIR as stack IL must compare the
+// An int `x != 0` branch lowered from MIR must compare the
 // word with zero: `JMPF` tests a bool word, so branching on `x` itself is
 // only right when `x` is 0 or 1 (as `i & 1` is).
 use tests::assert;

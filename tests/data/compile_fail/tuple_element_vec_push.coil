@@ -1,0 +1,7 @@
+// @expected E0107 — `.push()` on a tuple element changes the tuple, and a
+// tuple cannot be changed in place (#2791).
+fn main() {
+    let xs: Vec<int> = Vec::new();
+    let t = (xs, 0);
+    t[0].push(1);
+}

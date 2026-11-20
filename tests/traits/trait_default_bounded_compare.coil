@@ -27,8 +27,8 @@ impl Pick for float {
 }
 
 test("bounded default compares two T values") {
-    assert!(larger(3, 7) == 7);
-    assert!(larger(9, 2) == 9);
-    assert!(larger(0, -5) == 0);
-    assert!(larger(1.5, -2.5) == 1.5);
+    assert!(3.larger(7) == 7);
+    assert!(9.larger(2) == 9);
+    assert!(0.larger(-5) == 0);
+    assert!((1.5).larger(-2.5) == 1.5);
 }

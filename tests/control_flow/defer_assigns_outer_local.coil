@@ -1,0 +1,98 @@
+// A `defer` assigns a `use (mut x)` local of an outer block: the variable is
+// alive when the defer runs, so the write reaches it, on a normal exit and
+// while a panic unwinds, where the outer block's defers read the new value
+// (#2308).
+use string::format;
+use task::{scope, Scope, TaskError};
+use tests::assert;
+
+static let LOG: int = 0;
+
+fn add(int n) {
+    LOG = LOG + n;
+}
+
+fn after_block() -> int {
+    let v = 1;
+    {
+        defer use (mut v) {
+            v = v + 10;
+        }
+        v = 5;
+    }
+    return v;
+}
+
+fn every_iteration() -> int {
+    let count = 0;
+    let i = 0;
+    while i < 4 {
+        defer use (mut count) {
+            count += 1;
+        }
+        i += 1;
+    }
+    return count;
+}
+
+fn nested() -> string {
+    let s = "";
+    {
+        defer use (mut s) {
+            s = s + "outer";
+        }
+
+        {
+            defer use (mut s) {
+                s = s + "inner,";
+            }
+        }
+    }
+    return s;
+}
+
+fn unwinds() -> int {
+    let v = 1;
+    defer use (mut v) {
+        add(v);
+    }
+    {
+        defer use (mut v) {
+            v = v + 10;
+        }
+        v = 5;
+        if v > 0 {
+            panic "unwinds";
+        }
+    }
+    return v;
+}
+
+fn failed(Result<int, TaskError> r) -> bool {
+    return match r {
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    };
+}
+
+test("a write reaches the outer local after its block") {
+    assert!(after_block() == 15);
+}
+
+test("a loop body's defer counts every iteration") {
+    assert!(every_iteration() == 4);
+}
+
+test("inner defers write before outer ones") {
+    assert!(nested() == "inner,outer", nested());
+}
+
+test("an unwound defer's write reaches the outer block's defer") {
+    LOG = 0;
+    let r = scope(fn (Scope s) {
+        let _ = s.spawn(unwinds);
+        0
+    });
+    assert!(failed(r));
+    assert!(LOG == 15, format("%i", LOG));
+}

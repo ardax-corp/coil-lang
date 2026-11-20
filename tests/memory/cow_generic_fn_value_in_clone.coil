@@ -1,0 +1,243 @@
+// A generic body makes a value of another generic function at its own type
+// parameter (`U = T`): passed to a function-typed parameter, made in a
+// lambda, stored in a class field, returned. The function copies its
+// argument and writes the copy. In `outer`'s per-type clone (default flags)
+// and in its shared body (`--clone-budget 0`) the value runs the function's
+// shared body, whose `kinds` bit for `U` comes from where the value is made
+// (coil-lang#2506, #2621): the copy is made unique before the write, so the
+// original keeps its state at a class type and an `int` passes through.
+// A local bound from the function, and a `forall` parameter, called at the
+// body's own type parameter pass the body's dictionary and bit for it
+// (coil-lang#2652).
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+trait Bump<T> {
+    fn bump(T x) {}
+    fn val(T x) -> int {}
+}
+
+impl Bump for Box {
+    fn bump(Box b) {
+        b.n = b.n + 1;
+    }
+
+    fn val(Box b) -> int {
+        return b.n;
+    }
+}
+
+impl Bump for int {
+    fn bump(int x) {}
+
+    fn val(int x) -> int {
+        return x;
+    }
+}
+
+// The original's value * 100 + the written copy's.
+fn peek<U: Bump>(U x) -> int {
+    let y = x;
+    y.bump();
+    return x.val() * 100 + y.val();
+}
+
+// The written copy.
+fn bumped<U: Bump>(U x) -> U {
+    let y = x;
+    y.bump();
+    return y;
+}
+
+// The same with the object at the second type parameter.
+fn peek2<A, B: Bump>(A k, B x) -> int {
+    let y = x;
+    y.bump();
+    return x.val() * 100 + y.val();
+}
+
+fn call<T>(T -> int f, T x) -> int {
+    return f(x);
+}
+
+fn call2<S, T>(S -> T -> int f, S k, T x) -> int {
+    return f(k, x);
+}
+
+fn apply<T>(T -> T f, T x) -> T {
+    return f(x);
+}
+
+class Holder<T> {
+    pub f: T -> int,
+}
+
+fn by_name<T: Bump>(T x) -> int {
+    return call(peek, x) * 1000 + x.val();
+}
+
+fn by_name_two<T: Bump>(T x) -> int {
+    return call2(peek2, 5, x) * 1000 + x.val();
+}
+
+fn by_name_result<T: Bump>(T x) -> int {
+    let r = apply(bumped, x);
+    return x.val() * 1000 + r.val();
+}
+
+fn in_lambda<T: Bump>(T x) -> int {
+    let h = fn (T y) => call(peek, y);
+    return h(x) * 1000 + x.val();
+}
+
+fn lambda_value<T: Bump>(T x) -> int {
+    let h = fn (T y) => peek(y);
+    return call(h, x) * 1000 + x.val();
+}
+
+fn holder<T: Bump>(T x) -> Holder<T> {
+    return new Holder(peek);
+}
+
+fn stored<T: Bump>(T x) -> int {
+    let h = holder(x);
+    let f = h.f;
+    return f(x) * 1000 + x.val();
+}
+
+fn returned<T: Bump>(T x) -> T -> int {
+    return peek;
+}
+
+fn chain<S: Bump>(S x) -> int {
+    return by_name(x);
+}
+
+fn local_value<T: Bump>(T x) -> int {
+    let f = peek;
+    return f(x) * 1000 + x.val();
+}
+
+fn local_annotated<T: Bump>(T x) -> int {
+    let f: T -> int = peek;
+    return f(x) * 1000 + x.val();
+}
+
+fn local_result<T: Bump>(T x) -> int {
+    let f = bumped;
+    let r = f(x);
+    return x.val() * 1000 + r.val();
+}
+
+fn local_in_lambda<T: Bump>(T x) -> int {
+    let h = fn (T y) {
+        let g = peek;
+        g(y)
+    };
+    return h(x) * 1000 + x.val();
+}
+
+fn run_own<V: Bump>(forall U: Bump. U -> int g, V x) -> int {
+    return g(x);
+}
+
+fn run_own_result<V: Bump>(forall U: Bump. U -> U g, V x) -> int {
+    let r = g(x);
+    return x.val() * 1000 + r.val();
+}
+
+fn forall_own<T: Bump>(T x) -> int {
+    return run_own(peek, x) * 1000 + x.val();
+}
+
+fn forall_own_result<T: Bump>(T x) -> int {
+    return run_own_result(bumped, x);
+}
+
+test("by name to a function-typed parameter") {
+    let b = new Box(1);
+    assert!(by_name(b) == 102001);
+    assert!(b.n == 1);
+    assert!(by_name(7) == 707007);
+}
+
+test("by name at the second type parameter") {
+    let b = new Box(1);
+    assert!(by_name_two(b) == 102001);
+    assert!(b.n == 1);
+    assert!(by_name_two(7) == 707007);
+}
+
+test("by name, the written copy handed back") {
+    let b = new Box(1);
+    assert!(by_name_result(b) == 1002);
+    assert!(b.n == 1);
+    assert!(by_name_result(7) == 7007);
+}
+
+test("made in a lambda") {
+    let b = new Box(1);
+    assert!(in_lambda(b) == 102001);
+    assert!(lambda_value(b) == 102001);
+    assert!(b.n == 1);
+    assert!(in_lambda(7) == 707007);
+    assert!(lambda_value(7) == 707007);
+}
+
+test("stored in a class field and called later") {
+    let b = new Box(1);
+    assert!(stored(b) == 102001);
+    let h = holder(b);
+    let f = h.f;
+    assert!(f(b) == 102);
+    assert!(b.n == 1);
+    assert!(stored(7) == 707007);
+    let hi = holder(7);
+    let fi = hi.f;
+    assert!(fi(7) == 707);
+}
+
+test("returned and called by the caller") {
+    let b = new Box(1);
+    let g = returned(b);
+    assert!(g(b) == 102);
+    assert!(b.n == 1);
+    let gi = returned(7);
+    assert!(gi(7) == 707);
+}
+
+test("from a generic caller forwarding its own bit") {
+    let b = new Box(1);
+    assert!(chain(b) == 102001);
+    assert!(b.n == 1);
+    assert!(chain(7) == 707007);
+}
+
+test("a local bound from the function, called at the body's type parameter") {
+    let b = new Box(1);
+    assert!(local_value(b) == 102001);
+    assert!(local_annotated(b) == 102001);
+    assert!(local_result(b) == 1002);
+    assert!(local_in_lambda(b) == 102001);
+    assert!(b.n == 1);
+    assert!(local_value(7) == 707007);
+    assert!(local_annotated(7) == 707007);
+    assert!(local_result(7) == 7007);
+    assert!(local_in_lambda(7) == 707007);
+}
+
+test("a forall parameter called at the body's type parameter") {
+    let b = new Box(1);
+    assert!(run_own(peek, b) == 102);
+    assert!(run_own_result(bumped, b) == 1002);
+    assert!(forall_own(b) == 102001);
+    assert!(forall_own_result(b) == 1002);
+    assert!(b.n == 1);
+    assert!(run_own(peek, 7) == 707);
+    assert!(run_own_result(bumped, 7) == 7007);
+    assert!(forall_own(7) == 707007);
+    assert!(forall_own_result(7) == 7007);
+}

@@ -14,7 +14,7 @@ fn unique_tmp(label: &str) -> PathBuf {
 
 fn options(root: &Path, fail_fast: bool) -> TestOptions {
     TestOptions {
-        root: root.to_path_buf(),
+        paths: vec![root.to_path_buf()],
         fail_fast,
         order: Order::Sorted,
         jobs: 2,
@@ -34,17 +34,19 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         report: Report::Human,
         doc_tests: DocTests::On,
         wall_timeout: None,
+        engine: Default::default(),
+        cell: None,
     }
 }
 
 #[test]
 fn collect_test_files_errors_and_discovers_nested() {
     let missing = unique_tmp("no_tests");
-    assert!(collect_test_files(&missing).is_err());
+    assert!(collect_test_files(std::slice::from_ref(&missing)).is_err());
 
     let empty = unique_tmp("empty_tests");
     std::fs::create_dir_all(&empty).unwrap();
-    assert!(collect_test_files(&empty).is_err());
+    assert!(collect_test_files(std::slice::from_ref(&empty)).is_err());
 
     let root = unique_tmp("nested_tests");
     let nested = root.join("more");
@@ -52,7 +54,7 @@ fn collect_test_files_errors_and_discovers_nested() {
     std::fs::write(root.join("b.coil"), b"fn main() {}").unwrap();
     std::fs::write(nested.join("a.coil"), b"fn main() {}").unwrap();
     std::fs::write(root.join("ignore.txt"), b"x").unwrap();
-    let files = collect_test_files(&root).expect("files");
+    let files = collect_test_files(std::slice::from_ref(&root)).expect("files");
     assert_eq!(files.len(), 2);
     assert!(files[0].ends_with("a.coil") || files[0].ends_with("b.coil"));
     // Sorted lexicographically by full path.
@@ -67,6 +69,7 @@ fn needs_header_names_platform_features() {
     // Native targets have every feature a file can name.
     assert_eq!(missing_platform_feature("// @needs sockets symlinks\n// @needs ffi processes\nfn main() {}\n"), Ok(()));
     assert_eq!(missing_platform_feature("// @needs unix\nfn main() {}\n").is_ok(), cfg!(unix));
+    assert_eq!(missing_platform_feature("// @needs wasm\nfn main() {}\n").is_ok(), cfg!(target_family = "wasm"));
     let err = missing_platform_feature("// @needs gpu\nfn main() {}\n").unwrap_err();
     assert!(err.starts_with("unknown `// @needs` feature `gpu`"), "{err}");
 }
@@ -165,7 +168,7 @@ fn run_test_suite_fail_fast_stops_after_unexpected_compile_ok() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// Fresh VM per case: soft-fail / panic in earlier cases must not skip later ones.
+/// Fresh runtime per case: soft-fail / panic in earlier cases must not skip later ones.
 #[test]
 fn harness_isolates_cases_and_continues_after_failures() {
     let root = unique_tmp("isolates_cases");
@@ -372,9 +375,10 @@ fn coverage_reports_project_lines() {
         "use mathx::{clamp};\n\ntest(\"clamps low\") {\n    if !(clamp(-5, 0, 10) == 0) { raise \"assertion failed\"; }\n}\n\ntest(\"passes through\") {\n    if !(clamp(5, 0, 10) == 5) { raise \"assertion failed\"; }\n}\n",
     )
     .unwrap();
-    for jobs in [1, 2] {
+    for (jobs, engine) in [(1, Engine::Native), (2, Engine::Native), (1, Engine::Mir), (2, Engine::Mir)] {
         let opts = TestOptions {
             jobs,
+            engine,
             extra_roots: vec![root.join("src")],
             coverage: Some(CoverageOptions {
                 lcov_out: root.join("unused.info"),
@@ -389,7 +393,7 @@ fn coverage_reports_project_lines() {
         assert_eq!(
             cov.lcov(),
             "TN:\nSF:src/mathx.coil\nDA:2,2\nDA:3,1\nDA:5,1\nDA:6,0\nDA:8,1\nDA:12,0\nDA:13,0\nLF:7\nLH:4\nend_of_record\n",
-            "jobs={jobs}"
+            "jobs={jobs} engine={engine:?}"
         );
         let json = cov.per_test_json().unwrap();
         assert!(
@@ -402,7 +406,7 @@ fn coverage_reports_project_lines() {
 
 /// A line whose code constant folding would erase (`255 as byte` only
 /// reaches the return as a constant) still counts as covered: a coverage
-/// compile keeps each line's code, in a LIR body (`top`) and in a body
+/// compile keeps each line's code, in a MIR body (`top`) and in a body
 /// with the arithmetic dense pays for (`topd`, #1494).
 #[test]
 fn coverage_keeps_a_line_folding_would_erase() {
@@ -685,4 +689,67 @@ fn flags_header_adds_to_the_run_grants() {
     assert!(declared_flags("fn main() {}\n// @flags --allow-read\n").unwrap().is_none());
     let bad = declared_flags("// @flags --comptime-steps lots\n").unwrap_err();
     assert!(bad.contains("bad `// @flags` header"), "{bad}");
+}
+
+#[test]
+fn xfail_lines_name_a_cell_and_an_issue() {
+    let src = "// @xfail clone-budget-0 #2510 rest arguments\n// @xfail mir-verify (#7): licm\nfn main() {}\n";
+    assert_eq!(known_failure(src, "clone-budget-0"), Ok(Some("#2510 rest arguments".to_string())));
+    assert_eq!(known_failure(src, "mir-verify"), Ok(Some("(#7): licm".to_string())));
+    assert_eq!(known_failure(src, "clone-budget"), Ok(None));
+    let err = known_failure("// @xfail auto-par flaky\n", "auto-par").unwrap_err();
+    assert!(err.contains("names no issue"), "{err}");
+    assert!(known_failure("// @xfail auto-par #x1\n", "auto-par").is_err());
+}
+
+/// In its cell a known failure must fail: it is not counted as a failure
+/// there, a pass is one, and outside the cell the line does nothing.
+#[test]
+fn a_known_failure_must_fail_in_its_cell() {
+    let root = unique_tmp("xfail");
+    std::fs::create_dir_all(&root).unwrap();
+    let failing = "test(\"no\") {\n  raise \"no\";\n}\ntest(\"yes\") {}\n";
+    std::fs::write(root.join("fails.coil"), format!("// @xfail slow #1 raises\n{failing}")).unwrap();
+    std::fs::write(root.join("fixed.coil"), "// @xfail slow #2 was broken\ntest(\"ok\") {}\n").unwrap();
+    std::fs::write(root.join("other.coil"), "// @xfail fast #3 another cell\ntest(\"ok\") {}\n").unwrap();
+    std::fs::write(root.join("bare.coil"), "// @xfail slow no issue\ntest(\"ok\") {}\n").unwrap();
+
+    let in_cell = TestOptions { cell: Some("slow".to_string()), ..options(&root, false) };
+    let result = run_test_suite(ReportConfig::default(), &in_cell).expect("suite runs");
+    assert_eq!(result.known_failures, 1, "fails.coil");
+    // fails.coil's passing case, other.coil, bare.coil's case and fixed.coil's.
+    assert_eq!(result.passed, 4);
+    assert_eq!(result.failed, 2, "fixed.coil passes and bare.coil names no issue");
+    let text = result.failures.join("\n");
+    assert!(text.contains("fixed.coil") && text.contains("remove that line"), "{text}");
+    assert!(text.contains("bare.coil") && text.contains("names no issue"), "{text}");
+    assert!(!text.contains("fails.coil"), "{text}");
+
+    let plain = run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
+    assert_eq!((plain.known_failures, plain.failed), (0, 1), "only fails.coil's raise");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `// @skip <cell> <why>` keeps a file out of its cell: not compiled, not
+/// counted, and run as usual elsewhere.
+#[test]
+fn a_skip_line_keeps_a_file_out_of_its_cell() {
+    assert_eq!(skipped_in("// @skip auto-par prints timings\n", "auto-par"), Ok(Some("prints timings".to_string())));
+    assert_eq!(skipped_in("// @skip auto-par prints timings\n", "mir-verify"), Ok(None));
+    assert!(skipped_in("// @skip auto-par\n", "auto-par").unwrap_err().contains("gives no reason"));
+
+    let root = unique_tmp("skip_cell");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("broken.coil"), "// @skip slow #1 does not compile there\ntest(\"no\") {\n  let x: int = \"s\";\n}\n").unwrap();
+    std::fs::write(root.join("fine.coil"), "test(\"ok\") {}\n").unwrap();
+    std::fs::write(root.join("bare.coil"), "// @skip slow\ntest(\"ok\") {}\n").unwrap();
+
+    let in_cell = TestOptions { cell: Some("slow".to_string()), ..options(&root, false) };
+    let result = run_test_suite(ReportConfig::default(), &in_cell).expect("suite runs");
+    assert_eq!((result.passed, result.failed, result.skipped), (1, 1, 1), "fine passes, bare has no reason, broken is skipped");
+    assert!(result.failures.join("\n").contains("gives no reason"));
+
+    let plain = run_test_suite(ReportConfig::default(), &options(&root, false)).expect("suite runs");
+    assert_eq!((plain.passed, plain.failed, plain.skipped), (2, 1, 0), "broken.coil does not compile");
+    let _ = std::fs::remove_dir_all(&root);
 }

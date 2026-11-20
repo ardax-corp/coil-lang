@@ -1,0 +1,110 @@
+// Generic classes whose `pub` fields hold an open `Option` / `Result`
+// below their top, which another module fills and reads itself
+// (`tests/generics/nested_open_foreign_field.coil`, coil-lang#2547).
+
+/// A point: a class this module knows, so its bags clone here.
+class Pt {
+    pub x: int,
+}
+
+/// Slots, each filled or empty.
+class Bag<T> {
+    pub xs: Vec<Option<T>>,
+}
+
+impl Bag<T> {
+    /// No slots.
+    pub static fn empty() -> Bag<T> {
+        return new Bag(Vec::new());
+    }
+
+    /// Adds a filled slot for `x`, then an empty one.
+    pub fn put(T x) {
+        self.xs.push(Option::Some(x));
+        self.xs.push(Option::None);
+    }
+
+    /// The number of filled slots.
+    pub fn count() -> int {
+        let n = 0;
+        for x in self.xs {
+            match x {
+                Option::Some(_) => {
+                    n = n + 1;
+                },
+                Option::None => {},
+            }
+        }
+        return n;
+    }
+
+    /// The last filled slot's value.
+    pub fn last() -> Option<T> {
+        let i = self.xs.len() - 1;
+        while i >= 0 {
+            match self.xs[i] {
+                Option::Some(v) => {
+                    return Option::Some(v);
+                },
+                Option::None => {},
+            }
+            i = i - 1;
+        }
+        return Option::None;
+    }
+}
+
+/// Outcomes, each a value or an error message.
+class Tally<T> {
+    pub rs: Vec<Result<T, string>>,
+}
+
+impl Tally<T> {
+    /// Adds `x` as a success, then a failure.
+    pub fn put(T x) {
+        self.rs.push(Result::Ok(x));
+        self.rs.push(Result::Err("no"));
+    }
+
+    /// The number of successes.
+    pub fn oks() -> int {
+        let n = 0;
+        for r in self.rs {
+            match r {
+                Result::Ok(_) => {
+                    n = n + 1;
+                },
+                Result::Err(_) => {},
+            }
+        }
+        return n;
+    }
+
+    /// The first success's value.
+    pub fn first() -> Option<T> {
+        for r in self.rs {
+            match r {
+                Result::Ok(v) => {
+                    return Option::Some(v);
+                },
+                Result::Err(_) => {},
+            }
+        }
+        return Option::None;
+    }
+}
+
+/// The number of filled slots of `v`: a free generic whose parameter holds
+/// the open enum below its top.
+fn count_some<T>(Vec<Option<T>> v) -> int {
+    let n = 0;
+    for x in v {
+        match x {
+            Option::Some(_) => {
+                n = n + 1;
+            },
+            Option::None => {},
+        }
+    }
+    return n;
+}

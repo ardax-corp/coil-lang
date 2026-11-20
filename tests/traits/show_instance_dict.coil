@@ -1,0 +1,112 @@
+// A `%v` argument whose `Show` instance takes a dictionary is shown by
+// that instance (coil-lang#2479): a bounded generic instance's shared
+// entry (`impl Show for Duo<T: Show>`, a derived `Show` of a generic
+// type), with the dictionary of its context, in ground code and in a
+// generic body where the type is still open.
+use string::format;
+use tests::assert;
+
+class Duo<T> {
+    pub a: T,
+    pub b: T,
+}
+
+impl Show for Duo<T: Show> {
+    pub fn show(Duo<T> d) -> string {
+        return format("<%v|%v>", d.a, d.b);
+    }
+}
+
+#[derive(Show)]
+class Box<T> {
+    pub item: T,
+}
+
+#[derive(Show)]
+enum Tree<T> {
+    Leaf(T),
+    Node(Tree<T>, Tree<T>),
+}
+
+#[derive(Show)]
+class Pair<A, B> {
+    pub a: A,
+    pub b: B,
+}
+
+class Name {
+    pub text: string,
+}
+
+impl Show for Name {
+    pub fn show(Name n) -> string {
+        return "#" + n.text;
+    }
+}
+
+// The open goal `Show<Duo<T>>`, from the bound's dictionary.
+fn twin<T: Show>(T x) -> string {
+    return format("%v", new Duo(x, x));
+}
+
+fn boxed<T: Show>(T x) -> string {
+    return format("[%v] %v", new Box(x), x);
+}
+
+// `nest` instantiates itself at a growing type: `nest2`'s call takes the
+// shared body at any clone budget.
+fn nest<T: Show>(T x, int n) -> string {
+    if n == 0 {
+        return format("%v", new Duo(x, x));
+    }
+    return nest2(x, n);
+}
+
+fn nest2<T: Show>(T x, int n) -> string {
+    return nest(new Duo(x, x), n - 1);
+}
+
+test("a bounded instance at ground types") {
+    let d = new Duo(3, 4);
+    assert!(format("%v", d) == "<3|4>");
+    assert!(format("%v", new Duo("x", "y")) == "<x|y>");
+    assert!(
+        format("%v and %v", new Duo(1.5, 2.5), new Duo(true, false)) == "<1.5|2.5> and <true|false>",
+    );
+    assert!(format("%v", new Duo(new Duo(1, 2), new Duo(3, 4))) == "<<1|2>|<3|4>>");
+    assert!(format("%v", new Duo(new Name("a"), new Name("b"))) == "<#a|#b>");
+    assert!(format("%v: %v!", 7, d) == "7: <3|4>!");
+}
+
+test("a derived Show of a generic type") {
+    assert!(format("%v", new Box(3)) == "Box { item: 3 }");
+    assert!(format("%v", new Box("s")) == "Box { item: s }");
+    assert!(format("%v", new Box(new Box(1))) == "Box { item: Box { item: 1 } }");
+    assert!(format("%v", new Pair(1, "x")) == "Pair { a: 1, b: x }");
+    assert!(
+        format("%v", new Pair(new Box(1), new Duo(2, 3))) == "Pair { a: Box { item: 1 }, b: <2|3> }",
+    );
+    let t: Tree<int> = Tree::Node(Tree::Leaf(1), Tree::Node(Tree::Leaf(2), Tree::Leaf(3)));
+    assert!(
+        format("%v", t) == "Tree::Node(Tree::Leaf(1), Tree::Node(Tree::Leaf(2), Tree::Leaf(3)))",
+    );
+    assert!(t.show() == format("%v", t));
+    let s: Tree<string> = Tree::Leaf("x");
+    assert!(format("%v", s) == "Tree::Leaf(x)");
+}
+
+test("in a tuple and a record") {
+    assert!(format("%v", (new Duo(1, 2), 3)) == "(<1|2>, 3)");
+    assert!(format("%v", { d: new Duo(1, 2), n: 3 }) == "{ d: <1|2>, n: 3 }");
+}
+
+test("an open type in a generic body") {
+    assert!(twin(1) == "<1|1>");
+    assert!(twin("s") == "<s|s>");
+    assert!(twin(new Duo(1, 2)) == "<<1|2>|<1|2>>");
+    assert!(boxed(2) == "[Box { item: 2 }] 2");
+    assert!(boxed(new Name("n")) == "[Box { item: #n }] #n");
+    assert!(nest(1, 0) == "<1|1>");
+    assert!(nest(1, 2) == "<<<1|1>|<1|1>>|<<1|1>|<1|1>>>");
+    assert!(nest("a", 1) == "<<a|a>|<a|a>>");
+}

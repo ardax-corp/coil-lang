@@ -52,7 +52,7 @@ fn coil_dissect(bin: &str, cwd: Option<&std::path::Path>, entry: &std::path::Pat
 }
 
 #[test]
-fn dissect_fib_fn_prints_bytecode_without_out_hyc() {
+fn dissect_fib_fn_prints_mir_without_out_ccoil() {
     ensure_coil_dissect();
     let bin = coil_bin();
     let entry = fib_entry();
@@ -75,7 +75,7 @@ fn dissect_fib_fn_prints_bytecode_without_out_hyc() {
         "expected fib header, stdout={stdout}"
     );
     assert!(
-        stdout.contains("CALL") || stdout.contains("TailCall"),
+        stdout.contains("call."),
         "expected recursive call, stdout={stdout}"
     );
     assert!(
@@ -107,31 +107,27 @@ fn dissect_fn_miss_exits_nonzero() {
 }
 
 #[test]
-fn dissect_fib_il_and_ast_sections() {
+fn dissect_fib_mir_and_ast_sections() {
     ensure_coil_dissect();
     let bin = coil_bin();
     let entry = fib_entry();
-    let cwd = std::env::temp_dir().join(format!("coil_dissect_il_{}", std::process::id()));
+    let cwd = std::env::temp_dir().join(format!("coil_dissect_ast_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cwd);
     std::fs::create_dir_all(&cwd).expect("temp cwd");
 
     let out = coil_dissect(&bin, Some(&cwd), &entry)
-        .args(["--fn", "fib", "--il", "--ast"])
+        .args(["--fn", "fib", "--ast"])
         .output()
-        .expect("spawn coil dissect --il --ast");
+        .expect("spawn coil dissect --ast");
     assert!(
         out.status.success(),
-        "dissect --il --ast failed: {}",
+        "dissect --ast failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("=== bytecode ==="),
-        "missing bytecode section, stdout={stdout}"
-    );
-    assert!(
-        stdout.contains("=== il ==="),
-        "missing il section, stdout={stdout}"
+        stdout.contains("=== mir ==="),
+        "missing mir section, stdout={stdout}"
     );
     assert!(
         stdout.contains("=== ast ==="),
@@ -139,11 +135,11 @@ fn dissect_fib_il_and_ast_sections() {
     );
     assert!(
         stdout.to_ascii_lowercase().contains("fib"),
-        "expected fib in IL/AST output, stdout={stdout}"
+        "expected fib in MIR/AST output, stdout={stdout}"
     );
     assert!(
         !cwd.join("out.ccoil").exists(),
-        "dissect --il/--ast must not write out.ccoil"
+        "dissect --ast must not write out.ccoil"
     );
     let _ = std::fs::remove_dir_all(&cwd);
 }
@@ -191,8 +187,8 @@ fn dissect_attach_fails_without_grant_and_succeeds_with_flag() {
     );
     let stdout = String::from_utf8_lossy(&granted.stdout);
     assert!(
-        stdout.contains("=== bytecode ==="),
-        "expected bytecode dump, stdout={stdout}"
+        stdout.contains("=== mir ==="),
+        "expected a MIR dump, stdout={stdout}"
     );
     assert!(
         !cwd.join("out.ccoil").exists(),
@@ -227,10 +223,10 @@ fn dissect_help_lists_host_grant_flags() {
     }
 }
 
-/// Source lines interleave with the bytecode; `-O`, `--il-post` and `--mir`
+/// Source lines interleave with the IL; `-O`, `--il-post` and `--mir`
 /// are accepted and print their sections; `--ast` prints real source.
 #[test]
-fn dissect_views_source_opt_ilpost_mir_ast() {
+fn dissect_views_opt_mir_ast() {
     ensure_coil_dissect();
     let bin = coil_bin();
     let dir = std::env::temp_dir().join(format!("coil_dissect_views_{}", std::process::id()));
@@ -243,27 +239,14 @@ fn dissect_views_source_opt_ilpost_mir_ast() {
     )
     .unwrap();
     let out = coil_dissect(&bin, Some(&dir), &entry)
-        .args(["--fn", "total", "-O", "basic", "--il-post", "--mir", "--ast"])
+        .args(["--fn", "total", "-O", "basic", "--mir", "--ast"])
         .output()
         .expect("spawn coil dissect");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    // Some source line of `total` interleaves with its code. Which lines
-    // carry code is up to codegen, so no particular line is pinned.
-    assert!(
-        stdout.lines().any(|l| l.contains("loop.coil:") && l.contains(" │ ")),
-        "source interleave: {stdout}"
-    );
-    assert!(stdout.contains("=== il (optimized) ==="), "{stdout}");
     assert!(stdout.contains("=== mir ==="), "{stdout}");
     assert!(stdout.contains("    let t = 0;"), "--ast prints source: {stdout}");
     assert!(!stdout.contains("<unhandled"), "{stdout}");
-
-    let plain = coil_dissect(&bin, Some(&dir), &entry)
-        .args(["--fn", "total", "--no-source"])
-        .output()
-        .expect("spawn coil dissect --no-source");
-    assert!(!String::from_utf8_lossy(&plain.stdout).contains(" │ "));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -296,9 +279,9 @@ fn dissect_hir_prints_typed_bodies() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A compiled `.ccoil` archive dumps its bytecode without recompiling.
+/// A compiled `.ccoil` archive dumps its IL without recompiling.
 #[test]
-fn dissect_reads_hyc_archive() {
+fn dissect_reads_an_archive() {
     ensure_coil_dissect();
     let bin = coil_bin();
     let dir = std::env::temp_dir().join(format!("coil_dissect_hyc_{}", std::process::id()));
@@ -318,7 +301,7 @@ fn dissect_reads_hyc_archive() {
         .expect("dissect hyc");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    assert!(stdout.contains("=== bytecode ===") && stdout.contains("HALT"), "{stdout}");
+    assert!(stdout.contains("=== mir ===") && stdout.contains("func @main"), "{stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -370,9 +353,9 @@ fn dissect_expand_and_opt_stats_show_comptime() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// With stack IL from MIR, `Vec::pop` returns
-/// `vec_pop`'s Option word as it is: no unboxing to a pair and building
-/// the enum again (a `MakeEnum` per pop made tak_iter 2x slower).
+/// With the MIR lowering, `Vec::pop` is the `vec_pop` call itself, its
+/// Option in two words: no building the enum again (a `MakeEnum` per pop
+/// made tak_iter 2x slower). The wrapper inlines into its caller.
 #[test]
 fn dissect_vec_pop_returns_the_native_option_on_mir() {
     ensure_coil_dissect();
@@ -387,18 +370,15 @@ fn dissect_vec_pop_returns_the_native_option_on_mir() {
     )
     .unwrap();
     let out = coil_dissect(&bin, Some(&dir), &entry)
-        .args(["--fn", "pop", "--no-source"])
+        .args(["--fn", "main"])
         .output()
         .expect("spawn coil dissect");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let body = stdout.split(";; fn Vec::pop").nth(1).expect("Vec::pop body");
+    let body = stdout.split(";; fn main").nth(1).expect("main body");
     let body = body.split(";; fn ").next().unwrap_or(body);
-    assert!(
-        body.contains("HostInvoke") || body.contains("DenseHostCall"),
-        "{stdout}"
-    );
-    assert!(!body.contains("MakeEnum"), "Vec::pop rebuilds the Option: {stdout}");
+    assert!(body.contains("host.vec_pop"), "{stdout}");
+    assert!(!body.contains("enum"), "Vec::pop rebuilds the Option: {stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

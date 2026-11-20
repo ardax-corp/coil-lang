@@ -19,10 +19,13 @@ members = [
     "coil-lsp",
     "coil-simd",
     "comptime",
+    "coil-native",
+    "coil-mir-interp",
+    "coil-rt",
 ]
 # Plain `cargo build` / `cargo test` at the repo root builds all CLI binaries
 # (coil + helpers), not only the root package.
-default-members = [".", "coil-embed", "coil-debug", "coil-dissect", "coil-fmt", "coil-lsp", "coil-test", "coil-verify"]
+default-members = [".", "coil-embed", "coil-rt", "coil-debug", "coil-dissect", "coil-fmt", "coil-lsp", "coil-test", "coil-verify"]
 
 [package]
 name = "coil"
@@ -39,6 +42,8 @@ coil-cli = { path = "coil-cli", default-features = false }
 coil-args = { path = "coil-args" }
 comptime = { path = "comptime" }
 coil-host = { path = "coil-host" }
+coil-native = { path = "coil-native" }
+coil-mir-interp = { path = "coil-mir-interp" }
 coil-build-id = { path = "coil-build-id" }
 clap = { version = "4.5", features = ["derive"] }
 rkyv = "0.8.12"
@@ -50,17 +55,8 @@ sha2 = "0.10"
 coil-test = { path = "coil-test" }
 coil-dissect = { path = "coil-dissect" }
 
-[dev-dependencies]
-criterion = { version = "^0.8", features = ["html_reports"] }
-
-[[bench]]
-name = "fib"
-harness = false
-
 [features]
 default = []
-gc-stress = ["machine/gc-stress"]
-gc-stats = ["machine/gc-stats"]
 
 [profile.release]
 opt-level=3

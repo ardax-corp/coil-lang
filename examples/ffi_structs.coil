@@ -1,0 +1,71 @@
+// ffi_structs.coil — `extern` functions that take and return C structs by
+// value. A struct value is a record: build one with `{ field: value, … }`
+// and read its fields with `.field`. Native code passes each one the way
+// the platform's C calling convention does (in registers, or in memory
+// when it is large).
+//
+// Uses examples/sum.c (see ffi_extern.coil for building and granting it).
+//
+// @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
+
+use io::sync::print;
+use string::format;
+
+extern struct Vec2 {
+    x: float,
+    y: float,
+};
+
+extern struct Tagged {
+    id: int,
+    w: float,
+};
+
+extern struct Triple {
+    a: int,
+    b: int,
+    c: int,
+};
+
+extern struct Point {
+    x: int32,
+    y: int32,
+};
+
+extern struct Flag {
+    at: Point,
+    on: bool,
+};
+
+extern "sum" {
+    fn vec2_make(float x, float y) -> Vec2;
+    fn vec2_add(Vec2 a, Vec2 b) -> Vec2;
+    fn vec2_code(Vec2 v) -> float;
+    fn tagged_make(int id, float w) -> Tagged;
+    fn tagged_scale(Tagged t, int k) -> Tagged;
+    fn tagged_code(Tagged t) -> float;
+    fn triple_make(int a, int b, int c) -> Triple;
+    fn triple_rot(Triple t) -> Triple;
+    fn triple_sum(int k, Triple t) -> int;
+    fn triple_code(Triple t) -> int;
+    fn point_make(int x, int y) -> Point;
+    fn point_swap(Point p) -> Point;
+    fn point_code(Point p) -> int;
+    fn flag_make(int x, int y, bool on) -> Flag;
+    fn flag_flip(Flag f) -> Flag;
+    fn flag_code(Flag f) -> int;
+    fn late_vec2(int a, int b, int c, int d, int e, int f, int g, Tagged t) -> int;
+}
+
+fn main() {
+    let v = vec2_add({ x: 1.5, y: 2.0 }, vec2_make(0.5, 1.0));
+    let t = tagged_scale({ id: 41, w: 1.25 }, 4);
+    let r = triple_rot({ a: 1, b: 2, c: 3 });
+    let p = point_swap({ x: 3, y: 4 });
+    let g = flag_flip({ at: { x: 7, y: 8 }, on: false });
+    let _ = print(format("%f %f %i %f ", v.x, v.y, t.id, t.w));
+    let _ = print(format("%i%i%i %i %i%i ", r.a, r.b, r.c, triple_sum(2, r), p.x, p.y));
+    let _ = print(format("%i %i %v %i ", g.at.x, g.at.y, g.on, flag_code(g)));
+    let _ = print(format("%f %i ", vec2_code(v), point_code(point_make(5, 6))));
+    let _ = print(format("%i", late_vec2(1, 2, 3, 4, 5, 6, 7, t)));
+}

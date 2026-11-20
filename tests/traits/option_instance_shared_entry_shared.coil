@@ -1,0 +1,193 @@
+// A call on an `Option` / `Result` value whose instance has a generic head
+// (`impl Pick for Option<T>`) passes and returns the value as the entry it
+// reaches holds it (coil-lang#2475): the instance's clone takes the type's
+// own word (`Option<string>` in one word), its shared entry the enum
+// object, for the receiver, the arguments after it and the result alike.
+// Here past the clone budget, where every call reaches the shared entry.
+// @flags --clone-budget 0
+use tests::assert;
+
+trait Pick<T> {
+    fn id(T x) -> T {}
+
+    fn pick(T x, T y, bool first) -> T {}
+
+    fn both(T x, T y) -> int {}
+}
+
+impl Pick for Option<T> {
+    fn id(Option<T> o) -> Option<T> {
+        return o;
+    }
+
+    fn pick(Option<T> x, Option<T> y, bool first) -> Option<T> {
+        if first {
+            return x;
+        }
+        return y;
+    }
+
+    fn both(Option<T> x, Option<T> y) -> int {
+        let n = 0;
+        if let Some(_) = x {
+            n = n + 1;
+        }
+        if let Some(_) = y {
+            n = n + 10;
+        }
+        return n;
+    }
+}
+
+impl Pick for Result<T, E> {
+    fn id(Result<T, E> r) -> Result<T, E> {
+        return r;
+    }
+
+    fn pick(Result<T, E> x, Result<T, E> y, bool first) -> Result<T, E> {
+        if first {
+            return x;
+        }
+        return y;
+    }
+
+    fn both(Result<T, E> x, Result<T, E> y) -> int {
+        let n = 0;
+        if let Ok(_) = x {
+            n = n + 1;
+        }
+        if let Ok(_) = y {
+            n = n + 10;
+        }
+        return n;
+    }
+}
+
+class Name {
+    pub text: string,
+}
+
+fn text(Option<string> o) -> string {
+    return match o {
+        Some(v) => v,
+        None => "none",
+    };
+}
+
+fn named(Option<Name> o) -> string {
+    return match o {
+        Some(n) => n.text,
+        None => "none",
+    };
+}
+
+fn told(Result<string, string> r) -> string {
+    return match r {
+        Ok(v) => "ok " + v,
+        Err(e) => "err " + e,
+    };
+}
+
+// Its clone (a function value's has no shared fallback) calls the
+// instance on an `Option<E>` it holds at its own type.
+fn wrap<E>(E e) -> Option<E> {
+    let o: Option<E> = Some(e);
+    return o.id();
+}
+
+fn wrap_none<E>(E e) -> Option<E> {
+    let o: Option<E> = None;
+    return Pick::pick(o, Some(e), true);
+}
+
+test("a one-word Option through the instance") {
+    let o: Option<string> = Some("c");
+    let n: Option<string> = None;
+    assert!(text(o.id()) == "c");
+    assert!(text(n.id()) == "none");
+    assert!(text(Pick::id(o)) == "c");
+    assert!(text(Pick::id(n)) == "none");
+    assert!(text(o.pick(n, true)) == "c");
+    assert!(text(o.pick(n, false)) == "none");
+    assert!(text(n.pick(o, false)) == "c");
+    assert!(text(Pick::pick(n, o, true)) == "none");
+    assert!(text(Pick::pick(n, o, false)) == "c");
+    assert!(text(o.pick(Some("d"), false)) == "d");
+    assert!(o.both(n) == 1);
+    assert!(n.both(o) == 10);
+    assert!(Pick::both(o, o) == 11);
+}
+
+test("an Option of a class") {
+    let a: Option<Name> = Some(new Name("a"));
+    let n: Option<Name> = None;
+    assert!(named(a.id()) == "a");
+    assert!(named(n.id()) == "none");
+    assert!(named(n.pick(a, false)) == "a");
+    assert!(named(a.pick(n, false)) == "none");
+    assert!(a.both(n) == 1);
+}
+
+test("a two-word Option") {
+    let i: Option<int> = Some(4);
+    let n: Option<int> = None;
+    assert!(i.id() == Some(4));
+    assert!(n.id() == None);
+    assert!(i.pick(n, false) == None);
+    assert!(n.pick(i, false) == Some(4));
+    assert!(i.both(n) == 1);
+    assert!(n.both(i) == 10);
+}
+
+test("a one-word and a two-word Result") {
+    let r: Result<string, string> = Ok("r");
+    let e: Result<string, string> = Err("e");
+    assert!(told(r.id()) == "ok r");
+    assert!(told(e.id()) == "err e");
+    assert!(told(r.pick(e, false)) == "err e");
+    assert!(told(Pick::pick(e, r, false)) == "ok r");
+    assert!(r.both(e) == 1);
+    assert!(e.both(r) == 10);
+    let k: Result<int, string> = Ok(3);
+    let b: Result<int, string> = Err("bad");
+    assert!(k.id() == Ok(3));
+    assert!(b.pick(k, true) == Err("bad"));
+    assert!(b.pick(k, false) == Ok(3));
+    assert!(k.both(b) == 1);
+}
+
+test("from a generic function's clone and its shared body") {
+    let f = wrap;
+    assert!(text(f("b")) == "b");
+    assert!(f(2) == Some(2));
+    assert!(text(wrap("a")) == "a");
+    let g = wrap_none;
+    assert!(text(g("b")) == "none");
+    assert!(g(2) == None);
+    assert!(wrap(1.5) == Some(1.5));
+}
+
+test("a result used where it is made") {
+    let o: Option<string> = Some("c");
+    let n: Option<string> = None;
+    let total = 0;
+    for _ in 0..3 {
+        if let Some(v) = o.pick(n, true) {
+            total = total + v.len();
+        }
+        match n.pick(o, true) {
+            Some(_) => {
+                total = total + 100;
+            },
+            None => {
+                total = total + 10;
+            },
+        }
+    }
+    assert!(total == 33);
+    let xs = [o.id(), n.id(), o.pick(n, true)];
+    assert!(text(xs[0]) == "c");
+    assert!(text(xs[1]) == "none");
+    assert!(text(xs[2]) == "c");
+    assert!(text(o.id().id().pick(n.id(), true)) == "c");
+}

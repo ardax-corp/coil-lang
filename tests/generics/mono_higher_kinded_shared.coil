@@ -22,7 +22,7 @@ impl Pointer for Option {
 }
 
 fn get<P: * -> *, Pointer, A>(P<A> ptr, A fallback) -> P::Ref<A> {
-    return deref(ptr, fallback);
+    return ptr.deref(fallback);
 }
 
 trait Convert<A, B> {
@@ -36,7 +36,7 @@ impl Convert<int> for int {
 }
 
 fn apply_cast<A, B>(A x) -> B where Convert<A, B> {
-    return cast(x);
+    return x.cast();
 }
 
 test("a higher-kinded P and a P::Ref<A> result") {

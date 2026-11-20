@@ -304,9 +304,11 @@ impl Checker {
             if default.is_some() {
                 self.clear_bare_result_modes(&shield);
             }
+            self.last_body_dicts.clear();
             let _ = self.infer(m);
             if let Some(mname) = default {
                 let fqn = Generics::default_method_fqn(name, mname);
+                self.record_trait_body_dicts(&fqn, active_len);
                 if self.result_mode_fns.contains(mname) {
                     self.result_mode_fns.insert(fqn.clone());
                 }
@@ -534,29 +536,26 @@ impl Checker {
             .generics
             .find_overlapping_instance(class, &arg_tys)
             .cloned();
-        let existing_idx = self.generics.instances.iter().position(|inst| {
-            inst.class == class && inst.defined_module == self.current_module && inst.range == range
-        });
+        let existing_idx = self
+            .generics
+            .class_instances_at(class, &range)
+            .find(|(_, inst)| inst.defined_module == self.current_module)
+            .map(|(idx, _)| idx);
+        // Else the stub the pre-pass registered for this very impl: not
+        // another impl's of the same trait, whose head this one's would
+        // then replace (#2480).
         let existing_idx = existing_idx.or_else(|| {
-            overlapping.as_ref().and_then(|existing| {
-                if existing.defined_module == self.current_module
-                    && existing.range.start == usize::MAX
-                {
-                    self.generics.instances.iter().position(|inst| {
-                        inst.class == existing.class
-                            && inst.defined_module == existing.defined_module
-                            && inst.range.start == usize::MAX
-                    })
-                } else {
-                    None
-                }
+            let stubs = self.impl_stubs.get(&(self.current_module.clone(), class.to_string(), range.start, range.end))?;
+            stubs.iter().copied().find(|&idx| {
+                let inst = &self.generics.instances()[idx];
+                inst.class == class && inst.defined_module == self.current_module && inst.range.start == usize::MAX
             })
         });
         let same_decl = overlapping.as_ref().is_some_and(|existing| {
             existing_idx.is_some_and(|idx| {
-                self.generics.instances[idx].defined_module == existing.defined_module
-                    && (self.generics.instances[idx].range == existing.range
-                        || self.generics.instances[idx].range.start == usize::MAX)
+                let inst = &self.generics.instances()[idx];
+                inst.defined_module == existing.defined_module
+                    && (inst.range == existing.range || inst.range.start == usize::MAX)
             })
         });
         if let Some(existing) = overlapping.as_ref()
@@ -619,7 +618,7 @@ impl Checker {
         let stub_idx = if let Some(idx) = existing_idx {
             Some(idx)
         } else if class_def.is_some() && !orphaned && overlapping.is_none() {
-            self.generics.instances.push(InstanceDef {
+            Some(self.generics.push_instance(InstanceDef {
                 class: class.to_string(),
                 defined_module: self.current_module.clone(),
                 range: range.clone(),
@@ -627,8 +626,7 @@ impl Checker {
                 method_fqns: stub_fqns,
                 assoc_tys: HashMap::new(),
                 context: context.clone(),
-            });
-            Some(self.generics.instances.len() - 1)
+            }))
         } else {
             None
         };
@@ -767,9 +765,9 @@ impl Checker {
                             ty: resolved,
                         };
                         if let Some(idx) = stub_idx {
-                            self.generics.instances[idx]
-                                .assoc_tys
-                                .insert(aname.to_string(), value.clone());
+                            self.generics.update_instance(idx, |inst| {
+                                inst.assoc_tys.insert(aname.to_string(), value.clone());
+                            });
                         }
                         assoc_tys.insert(aname.to_string(), value);
                     }
@@ -878,6 +876,7 @@ impl Checker {
                         let shield = self.shield_bare_names([mname]);
                         self.clear_bare_result_modes(&shield);
                         let outer_method = self.current_instance_method.replace(mname.to_string());
+                        self.last_body_dicts.clear();
                         self.infer_function(super::infer_fn::InferFunctionArgs {
                             name: mname,
                             type_params: mparams,
@@ -895,6 +894,7 @@ impl Checker {
                         });
                         self.current_instance_method = outer_method;
                         self.record_instance_method_under_fqn(mname, &fqn);
+                        self.record_trait_body_dicts(&fqn, prev_active_len);
                         // Checked once every `type X = ...` of the impl is
                         // collected, whichever side of the method it is on.
                         pending_signature_checks.push((mname.to_string(), fqn.clone(), m.0.into_range()));
@@ -1032,31 +1032,35 @@ impl Checker {
         // the stub in place when invalid instead.
         if let Some(idx) = stub_idx {
             if invalid_instance {
-                self.generics.instances[idx].method_fqns.clear();
-                self.generics.instances[idx].assoc_tys.clear();
-                self.generics.instances[idx].args.clear();
-                self.generics.instances[idx].class.clear();
+                self.generics.update_instance(idx, |inst| {
+                    inst.method_fqns.clear();
+                    inst.assoc_tys.clear();
+                    inst.args.clear();
+                    inst.class.clear();
+                });
             } else {
-                self.generics.instances[idx].method_fqns = method_fqns;
-                self.generics.instances[idx].assoc_tys = assoc_tys;
                 // A goal met before this body was checked freshened the
                 // earlier registration's head variables (#1670).
                 let (mut was, mut now) = (Vec::new(), Vec::new());
-                for a in &self.generics.instances[idx].args {
-                    Checker::collect_ty_vars(a, &mut was);
+                for a in &self.generics.instances()[idx].args {
+                    a.collect_vars(&mut was);
                 }
                 for a in &arg_tys {
-                    Checker::collect_ty_vars(a, &mut now);
+                    a.collect_vars(&mut now);
                 }
                 if was.len() == now.len() {
                     self.weak_checks.alias(&was, &now);
                 }
-                self.generics.instances[idx].args = arg_tys.clone();
-                self.generics.instances[idx].range = range.clone();
-                self.generics.instances[idx].context = context.clone();
+                self.generics.update_instance(idx, |inst| {
+                    inst.method_fqns = method_fqns;
+                    inst.assoc_tys = assoc_tys;
+                    inst.args = arg_tys.clone();
+                    inst.range = range.clone();
+                    inst.context = context.clone();
+                });
             }
         } else if !invalid_instance {
-            self.generics.instances.push(InstanceDef {
+            self.generics.push_instance(InstanceDef {
                 class: class.to_string(),
                 defined_module: self.current_module.clone(),
                 range: range.clone(),
@@ -1113,10 +1117,10 @@ impl Checker {
         type_params: &[parser::ast::TypeParam<'_>],
         range: &Range<usize>,
     ) -> bool {
-        const PRIMITIVES: &[&str] = &["int", "float", "string", "bool", "void", "unit", "byte"];
         let Some(tp) = type_params.iter().find(|tp| {
             let key = self.qualify_module_name(tp.name);
-            PRIMITIVES.contains(&tp.name)
+            crate::typechecking::ty::is_builtin_scalar(tp.name)
+                || tp.name == "void"
                 || self.classes.contains_key(&key)
                 || self.enums.contains_key(&key)
         }) else {

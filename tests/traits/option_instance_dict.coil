@@ -1,0 +1,185 @@
+// A bound's dictionary for an instance with a generic head over `Option`
+// / `Result` (`impl Sz for Option<T>`) at a type with a niche
+// (`Option<string>`, one word) holds methods that take that word
+// (coil-lang#2477): a shared `fn size<W: Sz>(W w)` holds `w` as its own
+// word, where the instance's shared entry takes the enum object. The
+// entry's own dictionary, which a direct call passes with the value
+// converted, holds the shared entries.
+use tests::assert;
+
+trait Sz<T> {
+    fn sz(T x) -> int {}
+
+    fn twice(T x) -> int {
+        return x.sz() * 2;
+    }
+
+    fn same(T x) -> T {
+        return x;
+    }
+}
+
+impl Sz for int {
+    fn sz(int x) -> int {
+        return x;
+    }
+}
+
+impl Sz for Option<T> {
+    fn sz(Option<T> o) -> int {
+        return match o {
+            Some(_) => 1,
+            None => 0,
+        };
+    }
+}
+
+impl Sz for Result<T, E> {
+    fn sz(Result<T, E> r) -> int {
+        return match r {
+            Ok(_) => 1,
+            Err(_) => -1,
+        };
+    }
+}
+
+// A bounded instance: its context is the payload's dictionary.
+trait Deep<T> {
+    fn depth(T x) -> int {}
+}
+
+impl Deep for int {
+    fn depth(int x) -> int {
+        return 0;
+    }
+}
+
+impl Deep for string {
+    fn depth(string s) -> int {
+        return 0;
+    }
+}
+
+impl Deep for Option<T: Deep> {
+    fn depth(Option<T> o) -> int {
+        return match o {
+            Some(v) => 1 + v.depth(),
+            None => 1,
+        };
+    }
+}
+
+class Name {
+    pub text: string,
+}
+
+fn size<W: Sz>(W w) -> int {
+    return w.sz();
+}
+
+fn twice_of<W: Sz>(W w) -> int {
+    return w.twice();
+}
+
+fn same_of<W: Sz>(W w) -> W {
+    return w.same();
+}
+
+fn depth_of<W: Deep>(W w) -> int {
+    return w.depth();
+}
+
+fn hashed<W: Hash>(W w) -> int {
+    return w.hash();
+}
+
+// An open goal: `Sz<Option<E>>`, the value an enum object here.
+fn wrapped<E>(E e) -> int {
+    return size(Some(e)) + twice_of(Some(e));
+}
+
+fn text(Option<string> o) -> string {
+    return match o {
+        Some(v) => v,
+        None => "none",
+    };
+}
+
+test("a one-word Option through a bound") {
+    let a: Option<string> = Some("one");
+    let n: Option<string> = None;
+    assert!(size(a) == 1);
+    assert!(size(n) == 0);
+    assert!(twice_of(a) == 2);
+    assert!(twice_of(n) == 0);
+    assert!(text(same_of(a)) == "one");
+    assert!(text(same_of(n)) == "none");
+    let c: Option<Name> = Some(new Name("c"));
+    assert!(size(c) == 1);
+    assert!(twice_of(c) == 2);
+}
+
+test("a Result and a two-word Option through a bound") {
+    let ok: Result<string, string> = Ok("x");
+    let err: Result<string, string> = Err("x");
+    assert!(size(ok) == 1);
+    assert!(size(err) == -1);
+    assert!(twice_of(err) == -2);
+    let i: Option<int> = Some(4);
+    let z: Option<int> = None;
+    assert!(size(i) == 1);
+    assert!(size(z) == 0);
+    assert!(twice_of(i) == 2);
+    assert!(same_of(i) == Some(4));
+    let k: Result<int, string> = Err("bad");
+    assert!(size(k) == -1);
+    assert!(size(7) == 7);
+    assert!(twice_of(7) == 14);
+}
+
+test("a bounded instance and the prelude's Hash") {
+    let a: Option<string> = Some("one");
+    let n: Option<string> = None;
+    assert!(depth_of(a) == 1);
+    assert!(depth_of(n) == 1);
+    let nested: Option<Option<string>> = Some(Some("x"));
+    assert!(depth_of(nested) == 2);
+    let i: Option<int> = Some(1);
+    assert!(depth_of(i) == 1);
+    let b: Option<string> = Some("one");
+    let c: Option<string> = Some("two");
+    assert!(hashed(a) == hashed(b));
+    assert!(hashed(a) != hashed(c));
+    assert!(hashed(a) == (31 ^ "one".hash()));
+    assert!(hashed(n) == 0);
+    let ok: Result<string, string> = Ok("x");
+    let err: Result<string, string> = Err("x");
+    assert!(hashed(ok) == "x".hash());
+    assert!(hashed(err) == (31 ^ "x".hash()));
+}
+
+test("direct calls and the entry's own dictionary") {
+    let a: Option<string> = Some("one");
+    let n: Option<string> = None;
+    assert!(a.sz() == 1);
+    assert!(a.twice() == 2);
+    assert!(n.twice() == 0);
+    assert!(Sz::twice(a) == 2);
+    let i: Option<int> = Some(1);
+    assert!(i.twice() == 2);
+    let err: Result<string, string> = Err("x");
+    assert!(err.twice() == -2);
+    assert!(Sz::twice(err) == -2);
+}
+
+test("an open goal and a function value") {
+    assert!(wrapped("a") == 3);
+    assert!(wrapped(1) == 3);
+    assert!(wrapped(new Name("n")) == 3);
+    let f = size;
+    let a: Option<string> = Some("one");
+    assert!(f(a) == 1);
+    assert!(f(3) == 3);
+    let g = twice_of;
+    assert!(g(a) == 2);
+}

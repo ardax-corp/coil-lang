@@ -1,0 +1,9 @@
+// @expected E0403 — a C callback names a top-level function; a closure has
+// no C entry of its own.
+extern "sum" {
+    fn apply_cb(fn(int x) -> int cb, int x) -> int;
+}
+
+fn main() {
+    let _ = apply_cb(fn (int x) => x * 3, 2);
+}

@@ -1,4 +1,4 @@
-// COI-291: typed dense→dense CALL (leaf kernel + looping caller).
+// COI-291: typed call between dense loops (leaf kernel + looping caller).
 use tests::assert;
 
 fn kernel(float x, int k) -> float {

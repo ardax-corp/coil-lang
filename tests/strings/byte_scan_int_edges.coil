@@ -1,0 +1,86 @@
+// Byte scans whose index runs up to the end of `int`: the lanes past the
+// loop's bound are never read, also where the index plus a block's width
+// is past `MAX` (#2522). Each scan is checked against the same loop
+// written with an index that starts at zero.
+use tests::assert;
+
+const TOP = 9223372036854775807;
+
+/// The first `i` in `[from, n)` with `s[i + o] == 'x'`, else `n`.
+fn find_x(string s, int from, int o, int n) -> int {
+    let i = from;
+    while i < n {
+        if s[i + o] == 120 {
+            break;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+/// The same, `s[i + o] != 'a'`.
+fn find_not_a(string s, int from, int o, int n) -> int {
+    let i = from;
+    while i < n {
+        if s[i + o] != 97 {
+            break;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+fn marked(int n, int at) -> string {
+    let s = "";
+    let i = 0;
+    while i < n {
+        s = s + if i == at {
+            "x"
+        } else {
+            "a"
+        };
+        i = i + 1;
+    }
+    return s;
+}
+
+test("a scan up to MAX stops at its bound") {
+    let s = marked(200, 12);
+    // From `MAX - 5`, reading `s[5..10]`: the mark at 12 is past the bound.
+    assert!(find_x(s, TOP - 5, 0 - (TOP - 10), TOP) == TOP);
+    assert!(find_not_a(s, TOP - 5, 0 - (TOP - 10), TOP) == TOP);
+    // From `MAX - 20`, reading `s[0..20]`: the mark is found.
+    assert!(find_x(s, TOP - 20, 0 - (TOP - 20), TOP) == TOP - 8);
+    assert!(find_not_a(s, TOP - 20, 0 - (TOP - 20), TOP) == TOP - 8);
+}
+
+test("a scan near MAX finds what a scan from zero finds") {
+    let sizes = [1, 15, 16, 17, 63, 64, 65, 130];
+    for n in sizes {
+        let at = 0;
+        while at <= n {
+            // Bytes past the window: a lane there must not be read.
+            let s = marked(n, at) + marked(80, 3);
+            let from = 0;
+            while from < n {
+                let want = find_x(s, from, 0, n);
+                // The same window, shifted to end at `MAX`.
+                let shift = TOP - n;
+                assert!(find_x(s, from + shift, 0 - shift, TOP) == want + shift);
+                assert!(
+                    find_not_a(s, from + shift, 0 - shift, TOP) == find_not_a(s, from, 0, n) + shift,
+                );
+                from = from + if from < 3 || from > n - 3 {
+                    1
+                } else {
+                    5
+                };
+            }
+            at = at + if at < 3 || at > n - 3 {
+                1
+            } else {
+                7
+            };
+        }
+    }
+}

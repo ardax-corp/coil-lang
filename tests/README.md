@@ -37,9 +37,17 @@ Inside a corpus:
   error codes on the file's `// @expected E0102 — why` header lines;
 - a `// @flags` header line adds grant and compile-time limit flags for that
   file only (`// @flags --comptime-steps 1000000 --allow-read`), on top of the
-  ones the run passes.
+  ones the run passes;
+- a `// @xfail <cell> #<issue> <why>` header line lists the file as a known
+  failure of one CI configuration (`coil test --cell <cell>`, such as
+  `clone-budget-0`): there it must fail, and it fails the cell once it
+  passes. Elsewhere the line does nothing
+  ([test-runner](../docs/internals/test-runner.md#configuration-cells-and-known-failures));
+- a `// @skip <cell> <why>` header line keeps the file out of that
+  configuration altogether (a crash or hang there, or, for `auto-par`,
+  output that depends on time or scheduling).
 
-Header directives (`@output`, `@expected`, `@flags`) sit in the file's leading
+Header directives (`@output`, `@expected`, `@flags`, `@needs`, `@xfail`, `@skip`) sit in the file's leading
 comment lines; their names are case-insensitive and the colon after the name
 is optional (`// @Output: 3`). A header still using the old `// Output:`
 spelling fails, so it cannot silently stop being checked.

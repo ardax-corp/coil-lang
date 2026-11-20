@@ -1,0 +1,104 @@
+// A generic class's method passes a value of its class's `T` to a
+// generic function (`one<U>(U x) -> Vec<U>`, `idt<U>(U x) -> U`): its own
+// body is a shared body over `T`, which hands `T`'s word on as a generic
+// function's does (#2633).
+use tests::assert;
+
+class Cell {
+    pub c: int,
+}
+
+#[inline(never)]
+fn one<U>(U x) -> Vec<U> {
+    let v: Vec<U> = Vec::new();
+    v.push(x);
+    return v;
+}
+
+#[inline(never)]
+fn idt<U>(U x) -> U {
+    return x;
+}
+
+#[inline(never)]
+fn wrap<U>(U x) -> Option<U> {
+    return Some(x);
+}
+
+class Hold<T> {
+    pub o: Option<Vec<T>>,
+}
+
+class C<T> {
+    pub f: int,
+}
+
+impl C<T> {
+    #[inline(never)]
+    pub fn count(T x) -> int {
+        let v = one(x);
+        v.push(x);
+        return v.len() + self.f;
+    }
+
+    #[inline(never)]
+    pub fn listed(T x) -> Vec<T> {
+        return one(x);
+    }
+
+    #[inline(never)]
+    pub fn same(T x) -> T {
+        return idt(x);
+    }
+
+    #[inline(never)]
+    pub fn wrapped(T x) -> Option<T> {
+        return wrap(x);
+    }
+
+    #[inline(never)]
+    pub fn held(T x) -> int {
+        let h = new Hold(Some(one(x)));
+        return match h.o {
+            Some(v) => v.len(),
+            None => 0,
+        };
+    }
+}
+
+test("a method passes its class's T to a function returning Vec<U>") {
+    let c: C<int> = new C(1);
+    assert!(c.count(5) == 3);
+    assert!(c.listed(5)[0] == 5);
+    let s: C<string> = new C(0);
+    assert!(s.count("a") == 2);
+    assert!(s.listed("a")[0] == "a");
+    let p: C<Cell> = new C(0);
+    assert!(p.listed(new Cell(7))[0].c == 7);
+}
+
+test("the same at an Option, a tuple, () and a Vec") {
+    let o: C<Option<string>> = new C(0);
+    assert!(o.listed(Some("q"))[0] == Some("q"));
+    let t: C<(int, int)> = new C(0);
+    assert!(t.count((1, 2)) == 2);
+    let u: C<()> = new C(0);
+    assert!(u.count(()) == 2);
+    let v: C<Vec<int>> = new C(0);
+    let xs: Vec<int> = [1, 2];
+    let got = v.listed(xs);
+    got[0].push(9);
+    assert!(xs.len() == 2 && got[0].len() == 3);
+}
+
+test("a function returning U or Option<U>, and a field built from one(x)") {
+    let c: C<float> = new C(0);
+    assert!(c.same(2.5) == 2.5);
+    assert!(c.wrapped(2.5) == Some(2.5));
+    let s: C<string> = new C(0);
+    assert!(s.same("z") == "z");
+    assert!(s.wrapped("z").is_some());
+    assert!(s.held("z") == 1);
+    let b: C<bool> = new C(0);
+    assert!(b.held(true) == 1);
+}

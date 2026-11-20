@@ -53,8 +53,8 @@ with one copy; writes and `from_bytes` take `to_byte_vec` (one copy when
 packed). FFI `Bytes` (tag 15) and `ConstBytes` (tag 16, read-only) share
 one path (`byte_arg_from_value` in `machine/src/ffi/call.rs`): a `string`
 (`ConstBytes` only) is lent in place (its bytes never move or change; the
-VM roots in-flight FFI arguments until the call returns), and so is a packed
-array, when the VM has no callback closure (no coil code can run during the
+runtime roots in-flight FFI arguments until the call returns), and so is a packed
+array, when the call has no callback closure (no coil code can run during the
 call to grow, unpack or free it) and no other argument of the call is the
 same array (so C sees no aliasing a copy would not have). Anything else (a
 word-stored array, a byte tuple, an empty array) is copied in, and a

@@ -1,0 +1,69 @@
+// `==` / `!=` on niche `Option` / `Result` words compare the words: the
+// same variant, then the payloads' structural equality, with no enum
+// object made for either side.
+use string::format;
+use tests::assert;
+
+class P {
+    pub x: int,
+}
+
+#[inline(never)]
+fn pick(int i) -> Option<string> {
+    if i == 0 {
+        return None;
+    }
+    return Some(format("s%i", i));
+}
+
+#[inline(never)]
+fn parse(int i) -> Result<string, string> {
+    if i < 0 {
+        return Err("neg");
+    }
+    return Ok(format("%i", i));
+}
+
+#[inline(never)]
+fn maybe_unit(bool fail) -> Result<(), string> {
+    if fail {
+        return Err("bad");
+    }
+    return Ok(());
+}
+
+test("option of string") {
+    assert!(pick(1) == Some("s1"));
+    assert!(pick(1) != Some("s2"));
+    assert!(pick(0) == None);
+    assert!(pick(0) != pick(3));
+    assert!(pick(3) != None);
+    assert!(!(pick(2) != pick(2)));
+}
+
+test("result of strings") {
+    assert!(parse(4) == Ok("4"));
+    assert!(parse(-1) == Err("neg"));
+    assert!(parse(4) != Err("4"));
+    assert!(parse(-1) != Ok("neg"));
+    assert!(parse(5) != parse(6));
+}
+
+test("result of unit") {
+    assert!(maybe_unit(false) == Ok(()));
+    assert!(maybe_unit(true) == Err("bad"));
+    assert!(maybe_unit(true) != maybe_unit(false));
+    assert!(maybe_unit(true) != Err("worse"));
+}
+
+test("option of a class compares its payload as `==` on the class does") {
+    let p = new P(1);
+    let a: Option<P> = Some(p);
+    let b: Option<P> = Some(p);
+    let other: Option<P> = Some(new P(1));
+    let c: Option<P> = None;
+    assert!(a == b);
+    assert!(a != other);
+    assert!(a != c);
+    assert!(c == None);
+}

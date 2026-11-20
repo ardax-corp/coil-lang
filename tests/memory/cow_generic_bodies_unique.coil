@@ -1,0 +1,170 @@
+// A shared generic body writes through a copy of a type parameter's value
+// it hands to code it does not know (coil-lang#2506): a function value or
+// a call of another shared body. The copy is made unique before that
+// write, so the value it came from keeps its own state. The body cannot
+// name the type, so the call passes a `kinds` word that says which type
+// parameters are copy-on-write objects. Past the clone budget, where every
+// generic call reaches the shared body.
+// @flags --clone-budget 0
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+class Cell<T> {
+    pub value: T,
+}
+
+impl Cell<T> {
+    pub fn apply_copy(T -> unit f) -> T {
+        let y = self.value;
+        f(y);
+        return self.value;
+    }
+}
+
+fn inc(Box q) {
+    q.n = q.n + 1;
+}
+
+fn zero(Box q) {
+    q.n = 0;
+}
+
+fn inc_vec(Vec<int> v) {
+    v[0] = v[0] + 1;
+}
+
+fn bump_int(int x) {
+    let _ = x / 2;
+}
+
+fn apply_copy<T>(T x, T -> unit f) -> T {
+    let y = x;
+    f(y);
+    return x;
+}
+
+fn each<T>(Vec<T> xs, T -> unit f) {
+    for x in xs {
+        f(x);
+    }
+}
+
+fn twice<T>(T x, T -> unit f) -> T {
+    let a = apply_copy(x, f);
+    return apply_copy(a, f);
+}
+
+fn pick<T>(Option<T> o, T fallback, T -> unit f) -> T {
+    match o {
+        Some(v) => {
+            f(v);
+            return fallback;
+        },
+        None => {
+            return fallback;
+        },
+    }
+}
+
+fn keep<T>(T x) -> T {
+    return x;
+}
+
+test("a copy written through a function value is its own value") {
+    let b = new Box(1);
+    let c = apply_copy(b, inc);
+    assert!(b.n == 1);
+    assert!(c.n == 1);
+}
+
+test("a for binding written through a function value is its own value") {
+    let xs: Vec<Box> = [new Box(1), new Box(2)];
+    each(xs, zero);
+    assert!(xs[0].n == 1);
+    assert!(xs[1].n == 2);
+}
+
+test("through two shared bodies the copy is still its own value") {
+    let b = new Box(5);
+    let c = twice(b, inc);
+    assert!(b.n == 5);
+    assert!(c.n == 5);
+}
+
+test("a match binding written through a function value is its own value") {
+    let b = new Box(3);
+    let o: Option<Box> = Some(b);
+    let r = pick(o, new Box(0), zero);
+    assert!(b.n == 3);
+    assert!(r.n == 0);
+}
+
+test("a Vec type argument is a copy-on-write object too") {
+    let v: Vec<int> = [1, 2];
+    let w = apply_copy(v, inc_vec);
+    assert!(v[0] == 1);
+    assert!(w[0] == 1);
+}
+
+test("an int type argument holding a large value is left as it is") {
+    let b = new Box(1);
+    let xs: Vec<Box> = [b];
+    let big = 9223372036854775807;
+    let k = apply_copy(big, bump_int);
+    assert!(k == big);
+    let ks: Vec<int> = [big, 140737488355328, 4096];
+    each(ks, bump_int);
+    assert!(ks[0] == big);
+    assert!(ks[1] == 140737488355328);
+    assert!(keep(xs[0]).n == 1);
+}
+
+test("an inherent method of a generic class copies before the write") {
+    let c = new Cell(new Box(4));
+    let r = c.apply_copy(inc);
+    assert!(c.value.n == 4);
+    assert!(r.n == 4);
+}
+
+impl Cell<T> {
+    pub fn copy_with(T -> unit f, T x) -> T {
+        let y = x;
+        f(y);
+        return x;
+    }
+}
+
+test("a partial application of a shared method passes its kinds word") {
+    let c = new Cell(new Box(0));
+    let g = c.copy_with(inc);
+    let b = new Box(1);
+    let r = g(b);
+    assert!(b.n == 1);
+    assert!(r.n == 1);
+}
+
+trait Bump<T> {
+    fn bump(T x) {}
+}
+
+impl Bump for Box {
+    fn bump(Box b) {
+        b.n = b.n + 1;
+    }
+}
+
+fn bump_copy<T: Bump>(T x) -> T {
+    let y = x;
+    y.bump();
+    return y;
+}
+
+test("a copy written through a bound's method is its own value") {
+    let b = new Box(1);
+    let c = bump_copy(b);
+    assert!(b.n == 1);
+    assert!(c.n == 2);
+}

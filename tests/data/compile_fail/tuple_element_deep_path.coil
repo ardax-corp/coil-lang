@@ -1,0 +1,14 @@
+// @expected E0107 — a store at any depth below a tuple element changes the
+// tuple, and a tuple cannot be changed in place (#2791).
+class C {
+    pub x: int,
+}
+
+class H {
+    pub c: C,
+}
+
+fn main() {
+    let t = (new H(new C(1)), 0);
+    t[0].c.x = 9;
+}

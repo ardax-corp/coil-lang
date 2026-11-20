@@ -1,0 +1,58 @@
+// A method called on a generic class's open `Option` / `Result` field at
+// a ground type whose layout is a niche word (`Opt<string>`'s `o`, an
+// `Option<string>`): the field is stored as its enum object and read as
+// the niche word the method takes (#2634).
+use tests::assert;
+
+class Opt<T> {
+    pub o: Option<T>,
+}
+
+class Res<T> {
+    pub r: Result<T, string>,
+}
+
+class Holder {
+    pub h: int,
+}
+
+#[inline(never)]
+fn opt<T>(T x) -> Opt<T> {
+    return new Opt(Some(x));
+}
+
+#[inline(never)]
+fn none<T>(T _x) -> Opt<T> {
+    return new Opt(None);
+}
+
+test("is_none / is_some on an open Option field at a niche type") {
+    let a = new Opt(Some("s"));
+    assert!(!a.o.is_none());
+    assert!(a.o.is_some());
+    let h = new Opt(Some(new Holder(4)));
+    assert!(h.o.is_some());
+    let e: Opt<string> = new Opt(None);
+    assert!(e.o.is_none());
+}
+
+test("the same through a generic function's result") {
+    assert!(opt("x").o.is_some());
+    assert!(none("x").o.is_none());
+    assert!(opt(new Holder(1)).o.is_some());
+    assert!(none(3).o.is_none());
+}
+
+test("a method of an open Result field at a niche type") {
+    let ok = new Res(Ok("v"));
+    assert!(ok.r.is_ok());
+    let err: Res<string> = new Res(Err("bad"));
+    assert!(err.r.is_err());
+}
+
+test("a field read as another call's argument") {
+    let a = new Opt(Some("s"));
+    assert!(a.o.unwrap_or("d") == "s");
+    let e: Opt<string> = new Opt(None);
+    assert!(e.o.unwrap_or("d") == "d");
+}

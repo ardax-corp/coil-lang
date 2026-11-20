@@ -1,0 +1,18 @@
+// @expected E0801 — `Bag<Late>` is another module's class whose field `xs`
+// holds `Option<Late>` below its top, and `Late` is declared after that
+// module, so `Bag`'s methods run as its shared bodies there, which hold the
+// field's enums as objects. This module would write niche words into the
+// field, so the write is refused (coil-lang#2547). Needs `--root
+// examples/src` (nested_open_fields).
+use io::sync::println;
+use nested_open_fields::Bag;
+
+class Late {
+    pub n: int,
+}
+
+fn main() {
+    let b: Bag<Late> = new Bag(Vec::new());
+    b.xs.push(Option::Some(new Late(1)));
+    let _ = println(b.count().show());
+}

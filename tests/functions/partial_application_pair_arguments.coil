@@ -1,0 +1,60 @@
+// A partial application may fill a parameter of a two-word immediate
+// product (`(int, int)`, `(int, float)`): the closure holds it boxed, as
+// the parameter takes it (#2790).
+use tests::assert;
+
+fn f2((int, int) a, int b) -> int {
+    return a[0] * 100 + a[1] * 10 + b;
+}
+
+fn g3((int, float) a, int b, (int, int) c) -> float {
+    return (a[0] + b + c[0] + c[1]) as float + a[1];
+}
+
+class Q {
+    pub k: int,
+}
+
+impl Q {
+    pub fn m((int, int) a, int b) -> int {
+        return self.k * 1000 + a[0] * 100 + a[1] * 10 + b;
+    }
+
+    pub static fn s((int, int) a, int b) -> int {
+        return a[0] * 100 + a[1] * 10 + b;
+    }
+}
+
+fn pair() -> (int, int) {
+    return (4, 5);
+}
+
+test("a pair literal") {
+    let p = f2((1, 2));
+    assert!(p(3) == 123);
+}
+
+test("a pair from a call and from a local") {
+    let p = f2(pair());
+    let t = (7, 8);
+    let q = f2(t);
+    assert!(p(6) == 456 && q(9) == 789);
+}
+
+test("an int and float pair, then a second pair") {
+    let p = g3((1, 0.5));
+    let q = g3((1, 0.5), 2);
+    assert!(p(2, (3, 4)) == 10.5 && q((3, 4)) == 10.5);
+}
+
+test("a method and a static method") {
+    let q = new Q(9);
+    let m = q.m((1, 2));
+    let s = Q::s((1, 2));
+    assert!(m(3) == 9123 && s(3) == 123);
+}
+
+test("stored in a vector") {
+    let ps: Vec<fn(int) -> int> = [f2((1, 2)), f2((3, 4))];
+    assert!(ps[0](5) == 125 && ps[1](6) == 346);
+}

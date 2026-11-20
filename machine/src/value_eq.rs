@@ -2,37 +2,49 @@
 //!
 //! Immediates and non-aggregate heap objects compare by machine word.
 //! Arrays (and nested arrays) compare by length and element-wise recursion.
-//! Strings compare by UTF-8 content (interned or not). Tuples compare
-//! element-wise like arrays. Boxed `ObjEnum` values compare by tag and payload
-//! (so `Result::Ok(x) == Result::Ok(x)` holds when the constructs still box).
-//! Records (instances whose type id [`common::is_record_type_id`]) compare
-//! slot by slot; class instances compare by identity.
+//! Strings compare by UTF-8 content (interned or not). A product compares
+//! slot by slot ([`product_slots`]): a boxed `ObjEnum` of the same tag (so
+//! `Result::Ok(x) == Result::Ok(x)` holds when the constructs still box; a
+//! tuple is one of `PRODUCT_TAG`) or a record (an instance whose type id
+//! [`common::is_record_type_id`]). Class instances compare by identity.
 //! Heap-heap Result `Err` (`pointer | 1`) never equals an `Ok`; two `Err`s
 //! compare their payloads.
 //!
-//! Cyclic graphs use a bijection of addresses already assumed equal: revisiting
-//! `a` must pair with the same `b` (and vice versa). A 1-cycle is therefore not
-//! equal to a 2-cycle.
+//! Cyclic graphs use a bijection of the addresses on the walk's current
+//! path: a back edge from `a` must reach the `b` it is paired with there
+//! (and vice versa), so a 1-cycle is not equal to a 2-cycle. An object
+//! reached again off the path (shared, not cyclic: `[t, t]` holding one
+//! tuple twice) is compared again, so it equals two equal copies (#2681);
+//! a pair already found equal is not walked twice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use common::Value;
 
-use crate::memory::{Heap, Member, ObjInstance, Object};
+use crate::memory::{Heap, Object};
 
-/// Deep / structural equality for VM values.
+/// Deep / structural equality for values.
 pub fn values_eq(heap: &Heap, a: Value, b: Value) -> bool {
     if let Some(eq) = flat_eq(heap, a, b) {
         return eq;
     }
-    let mut fwd = HashMap::new();
-    let mut rev = HashMap::new();
-    values_eq_rec(heap, a, b, &mut fwd, &mut rev)
+    values_eq_rec(heap, a, b, &mut Walk::default())
+}
+
+/// [`values_eq_rec`]'s state: the pairs on the current path, both ways,
+/// and the pairs found equal. Every comparison is a conjunction, so a
+/// pair found equal under a path pair's assumption stays equal: were the
+/// assumption wrong, the whole answer is `false`.
+#[derive(Default)]
+struct Walk {
+    fwd: HashMap<u64, u64>,
+    rev: HashMap<u64, u64>,
+    equal: HashSet<(u64, u64)>,
 }
 
 /// Answer without the cycle maps when no address can be visited twice:
-/// identical words, non-heap words, strings, and enums whose payload is at
-/// most one word that is itself flat (`Some(x)`, `Ok("s")`, `Err(e)`).
+/// identical words, non-heap words, strings, and products of at most one
+/// slot that is itself flat (`Some(x)`, `Ok("s")`, `Err(e)`).
 /// `None` means the value needs the full walk.
 fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
     if a.bits() == b.bits() {
@@ -49,34 +61,19 @@ fn flat_eq(heap: &Heap, a: Value, b: Value) -> Option<bool> {
     let (Some(oa), Some(ob)) = (heap.find_object_by_addr(aa), heap.find_object_by_addr(bb)) else {
         return Some(false);
     };
-    match (oa, ob) {
+    match (&oa, &ob) {
         (Object::String(ga), Object::String(gb)) => Some(ga.as_ref().data == gb.as_ref().data),
-        (Object::Enum(ga), Object::Enum(gb)) => {
-            let (ea, eb) = (ga.as_ref(), gb.as_ref());
-            if ea.tag != eb.tag || ea.payload.len() != eb.payload.len() {
-                return Some(false);
-            }
-            match ea.payload.len() {
-                0 => Some(true),
-                1 => flat_eq(heap, ea.payload[0], eb.payload[0]),
-                _ => None,
-            }
-        }
-        (Object::Array(_) | Object::Tuple(_) | Object::Boxed(_), _) => None,
-        (Object::Instance(ga), Object::Instance(gb)) => {
-            if record_slots(ga.as_ref(), gb.as_ref()).is_some() { None } else { Some(false) }
-        }
-        _ => Some(false),
+        (Object::Array(_), _) => None,
+        _ => match product_slots(&oa, &ob) {
+            Some(([], _)) => Some(true),
+            Some(([x], [y])) => flat_eq(heap, *x, *y),
+            Some(_) => None,
+            None => Some(false),
+        },
     }
 }
 
-fn values_eq_rec(
-    heap: &Heap,
-    a: Value,
-    b: Value,
-    fwd: &mut HashMap<u64, u64>,
-    rev: &mut HashMap<u64, u64>,
-) -> bool {
+fn values_eq_rec(heap: &Heap, a: Value, b: Value, walk: &mut Walk) -> bool {
     if a.bits() == b.bits() {
         return true;
     }
@@ -92,183 +89,80 @@ fn values_eq_rec(
         return false;
     }
     if (aa & 1) != 0 {
-        return values_eq_rec(heap, Value::from(aa & !1), Value::from(bb & !1), fwd, rev);
+        return values_eq_rec(heap, Value::from(aa & !1), Value::from(bb & !1), walk);
     }
-    if let Some(&mapped) = fwd.get(&aa) {
+    if let Some(&mapped) = walk.fwd.get(&aa) {
         return mapped == bb;
     }
-    if let Some(&mapped) = rev.get(&bb) {
+    if let Some(&mapped) = walk.rev.get(&bb) {
         return mapped == aa;
     }
-    fwd.insert(aa, bb);
-    rev.insert(bb, aa);
+    if walk.equal.contains(&(aa, bb)) {
+        return true;
+    }
     let Some(oa) = heap.find_object_by_addr(aa) else {
         return false;
     };
     let Some(ob) = heap.find_object_by_addr(bb) else {
         return false;
     };
-    match (oa, ob) {
+    walk.fwd.insert(aa, bb);
+    walk.rev.insert(bb, aa);
+    let eq = match (&oa, &ob) {
         (Object::Array(ga), Object::Array(gb)) => {
             let (ea, eb) = (ga.as_ref(), gb.as_ref());
             if ea.len() != eb.len() {
-                return false;
+                false
+            } else if let (Some(x), Some(y)) = (ea.bytes(), eb.bytes()) {
+                x == y
+            } else {
+                ea.iter().zip(eb.iter()).all(|(x, y)| values_eq_rec(heap, x, y, walk))
             }
-            if let (Some(x), Some(y)) = (ea.bytes(), eb.bytes()) {
-                return x == y;
-            }
-            ea.iter()
-                .zip(eb.iter())
-                .all(|(x, y)| values_eq_rec(heap, x, y, fwd, rev))
-        }
-        (Object::Tuple(ga), Object::Tuple(gb)) => {
-            let ea = &ga.as_ref().elements();
-            let eb = &gb.as_ref().elements();
-            if ea.len() != eb.len() {
-                return false;
-            }
-            ea.iter()
-                .zip(eb.iter())
-                .all(|(x, y)| values_eq_rec(heap, *x, *y, fwd, rev))
         }
         (Object::String(ga), Object::String(gb)) => ga.as_ref().data == gb.as_ref().data,
-        (Object::Enum(ga), Object::Enum(gb)) => {
-            let ea = ga.as_ref();
-            let eb = gb.as_ref();
-            if ea.tag != eb.tag || ea.payload.len() != eb.payload.len() {
-                return false;
-            }
-            ea.payload
-                .iter()
-                .zip(eb.payload.iter())
-                .all(|(a, b)| values_eq_rec(heap, *a, *b, fwd, rev))
-        }
-        (Object::Boxed(ga), Object::Boxed(gb)) => {
-            members_eq(heap, &ga.as_ref().payload, &gb.as_ref().payload, fwd, rev)
-        }
-        (Object::Instance(ga), Object::Instance(gb)) => match record_slots(ga.as_ref(), gb.as_ref()) {
-            Some((sa, sb)) => sa.iter().zip(sb).all(|(x, y)| values_eq_rec(heap, *x, *y, fwd, rev)),
+        _ => match product_slots(&oa, &ob) {
+            Some((sa, sb)) => sa.iter().zip(sb).all(|(x, y)| values_eq_rec(heap, *x, *y, walk)),
             None => false,
         },
-        _ => false,
+    };
+    walk.fwd.remove(&aa);
+    walk.rev.remove(&bb);
+    if eq {
+        walk.equal.insert((aa, bb));
     }
+    eq
 }
 
-/// The slots of two records of one shape: both instances' type ids name a
-/// record and they hold the same number of slots. `==` compares a value
-/// only with one of its own static type, so equal counts mean one record
-/// type (a host-built record and a compiled one can differ in id alone).
-fn record_slots<'a>(a: &'a ObjInstance, b: &'a ObjInstance) -> Option<(&'a [Value], &'a [Value])> {
-    if !common::is_record_type_id(a.type_id) || !common::is_record_type_id(b.type_id) {
-        return None;
-    }
-    let (sa, sb) = (a.slots()?, b.slots()?);
-    (sa.len() == sb.len()).then_some((sa, sb))
-}
-
-/// The static shape of an aggregate whose leaves include `float`s, as the
-/// compiler encodes it for [`values_eq_shaped`]: `f` a float word, `w` any
-/// other value (compared by [`values_eq`]), `a` then the element shape of
-/// an array or `Vec`, `t` then a count digit and each element's shape of a
-/// tuple, `r` then a count digit and each slot's shape of a record.
-enum Shape {
-    Float,
-    Word,
-    Array(Box<Shape>),
-    Tuple(Vec<Shape>),
-    Record(Vec<Shape>),
-}
-
-fn parse_shape(bytes: &[u8], pos: &mut usize) -> Option<Shape> {
-    let c = *bytes.get(*pos)?;
-    *pos += 1;
-    Some(match c {
-        b'f' => Shape::Float,
-        b'w' => Shape::Word,
-        b'a' => Shape::Array(Box::new(parse_shape(bytes, pos)?)),
-        b't' => {
-            let n = bytes.get(*pos)?.checked_sub(b'0')?;
-            *pos += 1;
-            Shape::Tuple((0..n).map(|_| parse_shape(bytes, pos)).collect::<Option<_>>()?)
+/// The slots of two products of one shape: enum objects of one tag
+/// (variants, or tuples) or records, with the same number of slots. Both
+/// instances' type ids must name a record; `==` compares a value only with
+/// one of its own static type, so equal counts mean one record type (a
+/// host-built record and a compiled one can differ in id alone).
+fn product_slots<'a>(a: &'a Object, b: &'a Object) -> Option<(&'a [Value], &'a [Value])> {
+    let (sa, sb) = match (a, b) {
+        (Object::Enum(ga), Object::Enum(gb)) => {
+            let (ea, eb) = (ga.as_ref(), gb.as_ref());
+            if ea.tag != eb.tag {
+                return None;
+            }
+            (&ea.payload[..], &eb.payload[..])
         }
-        b'r' => {
-            let n = bytes.get(*pos)?.checked_sub(b'0')?;
-            *pos += 1;
-            Shape::Record((0..n).map(|_| parse_shape(bytes, pos)).collect::<Option<_>>()?)
+        (Object::Instance(ga), Object::Instance(gb)) => {
+            let (ia, ib) = (ga.as_ref(), gb.as_ref());
+            if !common::is_record_type_id(ia.type_id) || !common::is_record_type_id(ib.type_id) {
+                return None;
+            }
+            (ia.slots(), ib.slots())
         }
         _ => return None,
-    })
-}
-
-/// `==` on values of a static type whose `float` leaves compare by IEEE
-/// 754 (`NaN != NaN`, `0.0 == -0.0`), as scalar `float` `==` does; every
-/// other part compares as [`values_eq`] (coil-lang#1253). An unreadable
-/// shape compares as [`values_eq`].
-pub fn values_eq_shaped(heap: &Heap, a: Value, b: Value, shape: &[u8]) -> bool {
-    let mut pos = 0;
-    match parse_shape(shape, &mut pos) {
-        Some(parsed) if pos == shape.len() => shaped_eq(heap, a, b, &parsed),
-        _ => values_eq(heap, a, b),
-    }
-}
-
-fn shaped_eq(heap: &Heap, a: Value, b: Value, shape: &Shape) -> bool {
-    match shape {
-        Shape::Float => f64::from_bits(a.bits()) == f64::from_bits(b.bits()),
-        Shape::Word => values_eq(heap, a, b),
-        Shape::Array(elem) => match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
-            (Some(Object::Array(ga)), Some(Object::Array(gb))) => {
-                let (ea, eb) = (ga.as_ref(), gb.as_ref());
-                ea.len() == eb.len() && ea.iter().zip(eb.iter()).all(|(x, y)| shaped_eq(heap, x, y, elem))
-            }
-            _ => values_eq(heap, a, b),
-        },
-        Shape::Tuple(items) => match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
-            (Some(Object::Tuple(ga)), Some(Object::Tuple(gb))) => {
-                let (ea, eb) = (ga.as_ref().elements(), gb.as_ref().elements());
-                ea.len() == items.len()
-                    && eb.len() == items.len()
-                    && ea.iter().zip(eb.iter()).zip(items).all(|((x, y), s)| shaped_eq(heap, *x, *y, s))
-            }
-            _ => values_eq(heap, a, b),
-        },
-        Shape::Record(slots) => match (heap.find_object_by_addr(a.bits()), heap.find_object_by_addr(b.bits())) {
-            (Some(Object::Instance(ga)), Some(Object::Instance(gb))) => match record_slots(ga.as_ref(), gb.as_ref()) {
-                Some((sa, sb)) => {
-                    sa.len() == slots.len() && sa.iter().zip(sb).zip(slots).all(|((x, y), s)| shaped_eq(heap, *x, *y, s))
-                }
-                None => values_eq(heap, a, b),
-            },
-            _ => values_eq(heap, a, b),
-        },
-    }
-}
-
-fn members_eq(
-    heap: &Heap,
-    a: &Member,
-    b: &Member,
-    fwd: &mut HashMap<u64, u64>,
-    rev: &mut HashMap<u64, u64>,
-) -> bool {
-    match (a, b) {
-        (Member::Value(va), Member::Value(vb)) => values_eq_rec(heap, *va, *vb, fwd, rev),
-        (Member::Object(oa), Member::Object(ob)) => {
-            values_eq_rec(heap, Value::from(oa.addr()), Value::from(ob.addr()), fwd, rev)
-        }
-        (Member::Value(va), Member::Object(ob)) => {
-            values_eq_rec(heap, *va, Value::from(ob.addr()), fwd, rev)
-        }
-        (Member::Object(oa), Member::Value(vb)) => {
-            values_eq_rec(heap, Value::from(oa.addr()), *vb, fwd, rev)
-        }
-    }
+    };
+    (sa.len() == sb.len()).then_some((sa, sb))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjInstance, ObjString, ObjTuple, Object};
+    use crate::memory::{EnumPayload, ObjArray, ObjEnum, ObjInstance, ObjString, Object};
 
     fn set_array_elem(heap: &Heap, addr: u64, index: usize, value: Value) {
         let Some(Object::Array(gc)) = heap.find_object_by_addr(addr) else {
@@ -367,8 +261,6 @@ mod tests {
         let (c1, c2) = (inst(&mut heap, 1, sa.addr(), 1), inst(&mut heap, 1, sa.addr(), 1));
         assert!(!values_eq(&heap, c1, c2));
         assert!(values_eq(&heap, c1, c1));
-        assert!(values_eq_shaped(&heap, r1, r2, b"r2ww"));
-        assert!(!values_eq_shaped(&heap, r1, r3, b"r2ww"));
     }
 
     #[test]
@@ -387,14 +279,8 @@ mod tests {
     #[test]
     fn tuple_deep_eq() {
         let mut heap = Heap::default();
-        let (ta, _) = heap.alloc(
-            ObjTuple::new(vec![Value::from(3_i64), Value::from(4_i64)]),
-            Object::Tuple,
-        );
-        let (tb, _) = heap.alloc(
-            ObjTuple::new(vec![Value::from(3_i64), Value::from(4_i64)]),
-            Object::Tuple,
-        );
+        let (ta, _) = heap.alloc(ObjEnum::tuple(&[Value::from(3_i64), Value::from(4_i64)], 0), Object::Enum);
+        let (tb, _) = heap.alloc(ObjEnum::tuple(&[Value::from(3_i64), Value::from(4_i64)], 0), Object::Enum);
         assert!(values_eq(
             &heap,
             Value::from(ta.addr()),
@@ -446,6 +332,23 @@ mod tests {
             Value::from(oa.addr()),
             Value::from(ob.addr())
         ));
+    }
+
+    /// One object held twice equals two equal copies: sharing is not a
+    /// cycle (#2681).
+    #[test]
+    fn shared_element_eq_two_copies() {
+        let mut heap = Heap::default();
+        let (inner, _) = heap.alloc(ObjArray::new(vec![Value::from(7_i64)]), Object::Array);
+        let (c1, _) = heap.alloc(ObjArray::new(vec![Value::from(7_i64)]), Object::Array);
+        let (c2, _) = heap.alloc(ObjArray::new(vec![Value::from(7_i64)]), Object::Array);
+        let shared = Value::from(inner.addr());
+        let (oa, _) = heap.alloc(ObjArray::new(vec![shared, shared]), Object::Array);
+        let (ob, _) = heap.alloc(ObjArray::new(vec![Value::from(c1.addr()), Value::from(c2.addr())]), Object::Array);
+        assert!(values_eq(&heap, Value::from(oa.addr()), Value::from(ob.addr())));
+        assert!(values_eq(&heap, Value::from(ob.addr()), Value::from(oa.addr())));
+        set_array_elem(&heap, c2.addr(), 0, Value::from(8_i64));
+        assert!(!values_eq(&heap, Value::from(oa.addr()), Value::from(ob.addr())));
     }
 
     #[test]

@@ -29,8 +29,8 @@ use std::collections::{HashMap, HashSet};
 
 use common::VEC_EXTEND_RANGE_ID;
 
-use super::byte_scan::{const_i64, defs, header_test, relayout, retarget, Builder, PhiArgs};
-use super::func::MirFunc;
+use super::byte_scan::{header_test, relayout, retarget, Builder, PhiArgs};
+use super::func::{const_i64, MirFunc};
 use super::inst::{BlockId, MirBinOp, MirCmpOp, MirConst, MirInst, Terminator, ValueId};
 use super::licm::{natural_loops, LoopInfo};
 use super::ty::MirTy;
@@ -89,7 +89,7 @@ fn plan_loop(func: &MirFunc, lp: &LoopInfo, byte_at: u16) -> Option<Plan> {
     let Some(Terminator::Br { cond, taken, not_taken }) = func.block(h).term else {
         return None;
     };
-    let defs = defs(func);
+    let defs = func.defs();
     let invariant = |v: ValueId| defs.get(&v).is_none_or(|(b, _)| !lp.blocks.contains(b));
 
     // Exactly two φs: the induction variable and the array pushed to.
@@ -269,7 +269,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
         let mut insts = b.func.block(m).insts.clone();
         for inst in &mut insts {
             let old = inst.dest();
-            set_dest(inst, map(old));
+            *inst.dest_mut() = map(old);
             inst.rewrite_values(map);
             if let MirInst::Phi { args, .. } = inst {
                 for (from, _) in args.iter_mut() {
@@ -302,7 +302,7 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
     // X: the run `i0 .. j` in one copy.
     let layout = common::HOST_ENUM_LAYOUT_BOXED as u8;
     let i1 = b.value(MirTy::I64);
-    b.push(sx, MirInst::HostInvoke { dest: i1, native_id: VEC_EXTEND_RANGE_ID, layout, args: vec![out, plan.src, i0, j] });
+    b.push(sx, MirInst::HostInvoke { dest: i1, dest_hi: None, native_id: VEC_EXTEND_RANGE_ID, layout, args: vec![out, plan.src, i0, j] });
     b.func.block_mut(sx).term = Some(Terminator::Jump { dest: join });
     b.func.block_mut(skip).term = Some(Terminator::Jump { dest: join });
 
@@ -322,15 +322,3 @@ fn apply(func: &mut MirFunc, lp: &LoopInfo, plan: &Plan) -> Vec<BlockId> {
     run
 }
 
-/// Give a cloned test instruction the dest `d`.
-fn set_dest(inst: &mut MirInst, d: ValueId) {
-    match inst {
-        MirInst::Const { dest, .. }
-        | MirInst::Bin { dest, .. }
-        | MirInst::Cmp { dest, .. }
-        | MirInst::Phi { dest, .. }
-        | MirInst::Index { dest, .. }
-        | MirInst::HostInvoke { dest, .. } => *dest = d,
-        _ => unreachable!("a test holds no {inst:?}"),
-    }
-}

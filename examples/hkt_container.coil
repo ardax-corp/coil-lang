@@ -19,7 +19,7 @@ impl Container for Option {
 }
 
 fn get<F: Container, A>(F<A> xs, A fallback) -> A {
-    return first(xs, fallback);
+    return xs.first(fallback);
 }
 
 fn main() {

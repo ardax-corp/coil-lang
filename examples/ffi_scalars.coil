@@ -1,0 +1,32 @@
+// ffi_scalars.coil — `extern` functions over ints, floats, bools and
+// pointers, and `void` ones: native code calls such a function directly,
+// with the platform's C calling convention.
+//
+// Uses examples/sum.c (see ffi_extern.coil for building and granting it).
+//
+// @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
+
+use io::sync::print;
+use string::format;
+
+extern "sum" {
+    fn scale(float x, int k) -> float;
+    fn is_even(int x) -> bool;
+    fn pick(bool b, int x, int y) -> int;
+    fn sum_reset();
+    fn sum_noted() -> int;
+    fn get_doubler() -> ptr;
+}
+
+fn main() {
+    sum_reset();
+    let _ = print(format("%f %v %v ", scale(1.5, 4), is_even(10), is_even(7)));
+    let _ = print(
+        format(
+            "%i %i %v",
+            pick(true, 1, 2) + pick(false, 10, 20),
+            sum_noted(),
+            get_doubler() != get_doubler(),
+        ),
+    );
+}

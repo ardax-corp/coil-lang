@@ -1,0 +1,41 @@
+// ffi_strings.coil — `extern` functions over strings, byte views and byte
+// buffers: native code passes a string as a NUL-terminated copy for the
+// call, lends a byte view or buffer in place (C's writes land in the
+// `Vec<byte>`), and makes a returned C string a coil string.
+//
+// Uses examples/sum.c (see ffi_extern.coil for building and granting it).
+//
+// @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
+
+use io::sync::print;
+use string::format;
+
+extern "sum" {
+    fn str_len(string s) -> int;
+    fn echo(string s) -> string;
+    fn greeting() -> string;
+    fn no_string() -> string;
+    fn sum_bytes(constbytes b, int n) -> int;
+    fn fill_bytes(bytes b, int n, int v);
+    fn copy_bytes(bytes dst, constbytes src, int n);
+}
+
+fn main() {
+    let b: Vec<byte> = Vec::new();
+    b.push(1 as byte);
+    b.push(2 as byte);
+    b.push(3 as byte);
+    let before = sum_bytes(b, 3);
+    fill_bytes(b, 3, 9);
+    let after = sum_bytes(b, 3);
+    let dst: Vec<byte> = Vec::new();
+    dst.push(0 as byte);
+    dst.push(0 as byte);
+    copy_bytes(dst, "hi", 2);
+    let _ = print(
+        format("%i %s %s %i|", str_len("hello"), echo("round trip"), greeting(), no_string().len()),
+    );
+    let _ = print(
+        format("%i %i %i %i %i", sum_bytes("abc", 3), before, after, dst[0] as int, dst[1] as int),
+    );
+}

@@ -1,4 +1,4 @@
-// A body with more values than frame words shares LIR registers between
+// A body with more values than frame words shares registers between
 // values never live at once. The phi coalescing that follows must not alias
 // two values onto a register another live value holds: two scalar-replaced
 // 20-element arrays plus indexed loops overwrote the loop bound and read

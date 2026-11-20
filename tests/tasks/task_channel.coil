@@ -5,6 +5,23 @@ use task::{scope, Scope, TaskError, Channel, ChannelError};
 use thread::{spawn, join, send, recv, mutex, with_lock, lock, unlock, channel as thread_channel};
 use clock::sleep_ms;
 
+// What the tasks write, shared by every closure that names it: the spawns
+// keep their closures, so a `use (mut log)` of a copy-on-write `Vec` would
+// be E0149 (#2787).
+shared class Log<T> {
+    pub items: Vec<T>,
+}
+
+impl Log<T> {
+    pub fn push(T x) {
+        self.items.push(x);
+    }
+
+    pub fn len() -> int {
+        return self.items.len();
+    }
+}
+
 fn ok_or(Result<int, TaskError> r, int fallback) -> int {
     return match r {
         Result::Ok(v) => v,
@@ -33,9 +50,11 @@ fn put(Channel<int> ch, int v) {
     }
 }
 
-fn slow_square(int n) -> int {
-    sleep_ms(30);
-    return n * n;
+// Waits until another task says go, so it cannot finish before that task
+// ran, however the threads are scheduled.
+fn square_after((Receiver, int) a) -> int {
+    let _ = recv(a[0]);
+    return a[1] * a[1];
 }
 
 fn slow_seven() -> int {
@@ -44,10 +63,10 @@ fn slow_seven() -> int {
 }
 
 test("a full channel suspends the sender until the receiver takes a value") {
-    let log: Vec<string> = Vec::new();
+    let log: Log<string> = new Log(Vec::new());
     let ch: Channel<int> = task::channel(1);
-    let r = scope(fn (Scope s) use (ch, mut log) {
-        s.spawn(fn () use (ch, mut log) {
+    let r = scope(fn (Scope s) use (ch, log) {
+        s.spawn(fn () use (ch, log) {
             put(ch, 1);
             log.push("sent 1");
             put(ch, 2);
@@ -72,7 +91,7 @@ test("a full channel suspends the sender until the receiver takes a value") {
         total
     });
     assert!(ok_or(r, -1) == 3);
-    assert!(log[0] == "sent 1" && log[1] == "receiving" && log[2] == "sent 2");
+    assert!(log.items[0] == "sent 1" && log.items[1] == "receiving" && log.items[2] == "sent 2");
 }
 
 test("try_send and try_recv do not wait") {
@@ -121,18 +140,20 @@ test("a sent value is the receiver's own copy") {
 }
 
 test("blocking runs on a worker while other tasks keep going") {
-    let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        let b = s.spawn(fn () use (mut log) {
-            let n = match task::blocking_with(slow_square, 6) {
+    let log: Log<string> = new Log(Vec::new());
+    let (go_tx, go_rx) = thread_channel()?;
+    let r = scope(fn (Scope s) use (go_tx, go_rx, log) {
+        let b = s.spawn(fn () use (go_rx, log) {
+            let n = match task::blocking_with(square_after, (go_rx, 6)) {
                 Result::Ok(v) => v,
                 Result::Err(_) => -1,
             };
             log.push("blocking done");
             n
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (go_tx, log) {
             log.push("other task ran");
+            let _ = send(go_tx, 1);
             0
         });
         let seven = match task::blocking(slow_seven) {
@@ -142,7 +163,7 @@ test("blocking runs on a worker while other tasks keep going") {
         ok_or(b.join(), -100) + seven
     });
     assert!(ok_or(r, -1) == 43);
-    assert!(log[0] == "other task ran" && log[1] == "blocking done");
+    assert!(log.items[0] == "other task ran" && log.items[1] == "blocking done");
 }
 
 // Sends nothing until the ticker task says go, so the reader's first
@@ -159,15 +180,15 @@ test("a thread channel recv suspends only the receiving task") {
     let (tx, rx) = thread_channel()?;
     let (go_tx, go_rx) = thread_channel()?;
     let worker = spawn(produce, (tx, go_rx))?;
-    let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (rx, go_tx, mut log) {
-        let reader = s.spawn(fn () use (rx, mut log) {
+    let log: Log<string> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (rx, go_tx, log) {
+        let reader = s.spawn(fn () use (rx, log) {
             let a = got(recv(rx));
             log.push("got first");
             let b = got(recv(rx));
             a + b
         });
-        s.spawn(fn () use (go_tx, mut log) {
+        s.spawn(fn () use (go_tx, log) {
             log.push("ticker");
             let _ = send(go_tx, 1);
             0
@@ -176,7 +197,7 @@ test("a thread channel recv suspends only the receiving task") {
     });
     join(worker)?;
     assert!(ok_or(r, -1) == 11);
-    assert!(log[0] == "ticker" && log[1] == "got first");
+    assert!(log.items[0] == "ticker" && log.items[1] == "got first");
 }
 
 fn bump(int n) -> (int, int) {
@@ -186,14 +207,14 @@ fn bump(int n) -> (int, int) {
 test("a contended with_lock suspends only the waiting task") {
     let m = mutex(10)?;
     lock(m)?;
-    let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (m, mut log) {
-        let locker = s.spawn(fn () use (m, mut log) {
+    let log: Log<string> = new Log(Vec::new());
+    let r = scope(fn (Scope s) use (m, log) {
+        let locker = s.spawn(fn () use (m, log) {
             let before = got(with_lock(m, bump));
             log.push("locked");
             before
         });
-        s.spawn(fn () use (m, mut log) {
+        s.spawn(fn () use (m, log) {
             log.push("unlocking");
             let _ = unlock(m);
             0
@@ -201,26 +222,28 @@ test("a contended with_lock suspends only the waiting task") {
         ok_or(locker.join(), -100)
     });
     assert!(ok_or(r, -1) == 10);
-    assert!(log[0] == "unlocking" && log[1] == "locked");
+    assert!(log.items[0] == "unlocking" && log.items[1] == "locked");
 }
 
 test("join on a running thread suspends only the joining task") {
-    let log: Vec<string> = Vec::new();
-    let r = scope(fn (Scope s) use (mut log) {
-        let joiner = s.spawn(fn () use (mut log) {
-            let n = match spawn(slow_square, 4) {
+    let log: Log<string> = new Log(Vec::new());
+    let (go_tx, go_rx) = thread_channel()?;
+    let r = scope(fn (Scope s) use (go_tx, go_rx, log) {
+        let joiner = s.spawn(fn () use (go_rx, log) {
+            let n = match spawn(square_after, (go_rx, 4)) {
                 Result::Ok(t) => got(join(t)),
                 Result::Err(_) => -1,
             };
             log.push("joined");
             n
         });
-        s.spawn(fn () use (mut log) {
+        s.spawn(fn () use (go_tx, log) {
             log.push("ticker");
+            let _ = send(go_tx, 1);
             0
         });
         ok_or(joiner.join(), -100)
     });
     assert!(ok_or(r, -1) == 16);
-    assert!(log[0] == "ticker" && log[1] == "joined");
+    assert!(log.items[0] == "ticker" && log.items[1] == "joined");
 }

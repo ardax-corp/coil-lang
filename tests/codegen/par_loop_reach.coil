@@ -1,0 +1,187 @@
+// Counted loops in the places the loop analysis did not look before it
+// read HIR: a trait's methods (an instance's and a default body), under
+// `if let` and `while let`, up to a local `const`, and with `_` for an
+// index. Each is split like any other loop, and each result is checked
+// against the same fold written with `break`, which always runs
+// sequentially.
+use tests::assert;
+
+static let ZERO: int = 0;
+
+// `x`, as a value no call can be computed from at compile time.
+fn vary(int x) -> int {
+    return x + ZERO;
+}
+
+fn weight(int i) -> int {
+    return i % 7;
+}
+
+// The sum of `weight(i) * scale` over `0..n`, never split.
+fn expected(int n, int scale) -> int {
+    let total = 0;
+    let i = 0;
+    while true {
+        if i >= n {
+            break;
+        }
+        total = total + weight(i) * scale;
+        i = i + 1;
+    }
+    return total;
+}
+
+trait Tally<A> {
+    fn tally(A self, int n) -> int {}
+
+    // A default body.
+    fn twice(A self, int n) -> int {
+        let acc = 0;
+        for i in 0..n {
+            acc = acc + weight(i) * 2;
+        }
+        return acc;
+    }
+}
+
+impl Tally for int {
+    fn tally(int self, int n) -> int {
+        let acc = 0;
+        let i = 0;
+        while i < n {
+            acc = acc + weight(i);
+            i = i + 1;
+        }
+        return acc + self;
+    }
+}
+
+class Bag {
+    pub k: int,
+}
+
+impl Tally for Bag {
+    fn tally(Bag self, int n) -> int {
+        let acc = 0;
+        for i in 0..n {
+            acc = acc + weight(i) * 3;
+        }
+        return acc + self.k;
+    }
+}
+
+fn const_bound() -> int {
+    const N = 300000;
+    let acc = 0;
+    let i = 0;
+    while i < N {
+        acc = acc + weight(i);
+        i = i + 1;
+    }
+    return acc;
+}
+
+fn const_range(int scale) -> int {
+    const N = 300001;
+    if scale < 0 {
+        return 0;
+    }
+    let acc = 0;
+    for i in 0..N {
+        acc = acc + weight(i) * scale;
+    }
+    return acc;
+}
+
+fn repeated(int n, int k) -> int {
+    let acc = 0;
+    for _ in 0..n {
+        acc = acc ^ k;
+    }
+    return acc;
+}
+
+// A capture with the name the compiler gives the unnamed index.
+fn repeated_item(int n, int item) -> int {
+    let acc = 0;
+    for _ in 0..n {
+        acc = acc ^ item;
+    }
+    return acc;
+}
+
+fn under_if_let(Option<int> o, int n) -> int {
+    let acc = 0;
+    if let Option::Some(v) = o {
+        for i in 0..n {
+            acc = acc + weight(i);
+        }
+        acc = acc + v;
+    } else {
+        for i in 0..n {
+            acc = acc + weight(i) * 2;
+        }
+    }
+    return acc;
+}
+
+fn pick(int at) -> Option<int> {
+    if at < 3 {
+        return Option::Some(at + 1);
+    }
+    return Option::None;
+}
+
+fn under_while_let(int n) -> int {
+    let total = 0;
+    let at = 0;
+    while let Option::Some(v) = pick(at) {
+        let acc = 0;
+        for i in 0..n {
+            acc = acc + weight(i);
+        }
+        total = total + acc * v;
+        at = at + 1;
+    }
+    return total;
+}
+
+test("a loop in an instance's method") {
+    for n in [300000, 21, 20, 0] {
+        assert!(Tally::tally(5, n) == expected(n, 1) + 5);
+        assert!(new Bag(9).tally(n) == expected(n, 3) + 9);
+    }
+}
+
+test("a loop in a trait's default body") {
+    for n in [300000, 21, 0] {
+        assert!(Tally::twice(5, n) == expected(n, 2));
+        assert!(new Bag(9).twice(n) == expected(n, 2));
+    }
+}
+
+test("a loop up to a local const") {
+    assert!(const_bound() == expected(vary(300000), 1));
+    assert!(const_range(vary(4)) == expected(vary(300001), 4));
+    assert!(const_range(vary(0 - 4)) == 0);
+}
+
+test("a loop with no name for its index") {
+    assert!(repeated(vary(300000), 13) == 0);
+    assert!(repeated(vary(300001), 13) == 13);
+    assert!(repeated(vary(0), 13) == 0);
+    assert!(repeated_item(vary(300001), 13) == 13);
+}
+
+test("a loop under if let") {
+    for n in [300000, 21, 0] {
+        assert!(under_if_let(Option::Some(4), n) == expected(n, 1) + 4);
+        assert!(under_if_let(Option::None, n) == expected(n, 2));
+    }
+}
+
+test("a loop under while let") {
+    for n in [300000, 21, 0] {
+        assert!(under_while_let(n) == expected(n, 1) * 6);
+    }
+}

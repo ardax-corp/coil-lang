@@ -13,7 +13,7 @@
 //! - `live`: `1` while the slot holds an entry, `0` once it is removed.
 //!
 //! Equality stays with the caller: [`host_probe`] returns the slots whose
-//! hash matches, and the caller's `==` decides. For keys whose `==` the VM
+//! hash matches, and the caller's `==` decides. For keys whose `==` the runtime
 //! runs itself (`int`, `string`: what `eq_mode` answers), [`host_find`]
 //! compares them too and finds a key in one call. Slots never move on their
 //! own: only [`host_compact`], which the owner calls after it compacts its

@@ -311,12 +311,29 @@ pub struct Slab {
     young_mask: Vec<bool>,
     /// Nursery state per size class.
     young: Vec<YoungClass>,
+    /// Each nursery class's bump cursor, at [`YoungClass::cursor`]. Boxed so
+    /// native code bumps it in place ([`super::heap::InlineLayout`]).
+    bumps: Box<[Bump; YOUNG_CLASSES]>,
     /// Nursery chunks handed out since the last [`Self::young_chunks`] reset.
     young_in_use: usize,
     /// Nursery chunks held by a minor collection for a pinned survivor.
     young_held: usize,
     /// [`super::heap::quiet_overflows`] when this slab last relogged.
     quiet_epoch: u64,
+}
+
+/// Nursery size classes a slab can have: one per nursery object type at
+/// most.
+pub const YOUNG_CLASSES: usize = 32;
+
+/// A nursery class's bump cursor: the next slot of the current chunk and
+/// the end of its last slot. `next == end` (both 0 at first and after a
+/// minor collection): the next allocation refills.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Bump {
+    pub next: u64,
+    pub end: u64,
 }
 
 /// One size class's nursery: the chunk being bump-allocated and the reset
@@ -326,9 +343,8 @@ struct YoungClass {
     /// Chunks of this class allocated into since the last minor collection,
     /// the current one last.
     used: Vec<usize>,
-    /// Next slot of the current chunk, and the end of its last slot.
-    next: u64,
-    end: u64,
+    /// Index of this class's cursor in [`Slab::bumps`].
+    cursor: usize,
     /// Reset nursery chunks of this class (every slot poisoned).
     spare: Vec<usize>,
     /// Chunks a minor collection kept for a pinned survivor, with the end
@@ -388,6 +404,7 @@ impl Slab {
             released_mask: Vec::new(),
             young_mask: Vec::new(),
             young: Vec::new(),
+            bumps: Box::new([Bump::default(); YOUNG_CLASSES]),
             young_in_use: 0,
             young_held: 0,
             quiet_epoch: 0,
@@ -405,33 +422,50 @@ impl Slab {
             if let Some(p) = class.freed.pop() {
                 return unsafe { NonNull::new_unchecked(p as *mut u8) };
             }
-            if class.next + slot_size as u64 <= class.end {
-                let p = class.next;
-                class.next += slot_size as u64;
+            let bump = &mut self.bumps[class.cursor];
+            if bump.next + slot_size as u64 <= bump.end {
+                let p = bump.next;
+                bump.next += slot_size as u64;
                 return unsafe { NonNull::new_unchecked(p as *mut u8) };
             }
         }
         self.young_refill(slot_size, align)
     }
 
+    /// The nursery class of `layout`, made if new: its index in
+    /// [`Self::bumps`]. A new slab makes the classes of the objects native
+    /// code allocates inline first, so their indexes are fixed.
+    pub fn young_class(&mut self, layout: Layout) -> usize {
+        let (slot_size, align) = slot_dims(layout);
+        self.young_class_at(slot_size, align)
+    }
+
+    fn young_class_at(&mut self, slot_size: usize, align: usize) -> usize {
+        let key = (slot_size as u32, align as u32);
+        if let Some(at) = self.young.iter().position(|c| c.key == key) {
+            return at;
+        }
+        let cursor = self.young.len();
+        assert!(cursor < YOUNG_CLASSES, "more than {YOUNG_CLASSES} nursery size classes");
+        self.young.push(YoungClass {
+            key,
+            used: Vec::new(),
+            cursor,
+            spare: Vec::new(),
+            held: Vec::new(),
+            freed: Vec::new(),
+        });
+        cursor
+    }
+
+    /// The nursery cursors, indexed by [`Self::young_class`].
+    pub fn bumps_ptr(&mut self) -> *mut Bump {
+        self.bumps.as_mut_ptr()
+    }
+
     #[inline(never)]
     fn young_refill(&mut self, slot_size: usize, align: usize) -> NonNull<u8> {
-        let key = (slot_size as u32, align as u32);
-        let at = match self.young.iter().position(|c| c.key == key) {
-            Some(at) => at,
-            None => {
-                self.young.push(YoungClass {
-                    key,
-                    used: Vec::new(),
-                    next: 0,
-                    end: 0,
-                    spare: Vec::new(),
-                    held: Vec::new(),
-                    freed: Vec::new(),
-                });
-                self.young.len() - 1
-            }
-        };
+        let at = self.young_class_at(slot_size, align);
         let i = match self.young[at].spare.pop() {
             Some(i) => i,
             None => self.map_young_chunk(slot_size, align),
@@ -451,8 +485,10 @@ impl Slab {
         let slots = (CHUNK as u64 - u64::from(c.meta.first_off)) / slot_size as u64;
         let class = &mut self.young[at];
         class.used.push(i);
-        class.next = first + slot_size as u64;
-        class.end = first + slots * slot_size as u64;
+        self.bumps[class.cursor] = Bump {
+            next: first + slot_size as u64,
+            end: first + slots * slot_size as u64,
+        };
         unsafe { NonNull::new_unchecked(first as *mut u8) }
     }
 
@@ -564,7 +600,7 @@ impl Slab {
                 let size = u64::from(c.meta.slot_size);
                 let first = c.ptr as u64 + u64::from(c.meta.first_off);
                 let end = if n + 1 == last {
-                    class.next
+                    self.bumps[class.cursor].next
                 } else {
                     first + (CHUNK as u64 - u64::from(c.meta.first_off)) / size * size
                 };
@@ -606,8 +642,7 @@ impl Slab {
                     None => class.spare.push(i),
                 }
             }
-            class.next = 0;
-            class.end = 0;
+            self.bumps[class.cursor] = Bump::default();
             class.freed.clear();
         }
         for &i in promoted {
@@ -791,6 +826,13 @@ impl Slab {
         self.chunks.may_contain(addr)
     }
 
+    /// `[lo, hi)` of every chunk address, for a scan that tests many
+    /// words while no chunk is mapped ([`Self::may_contain`] per word
+    /// reloads them).
+    pub fn bounds(&self) -> (u64, u64) {
+        (self.chunks.lo.load(Ordering::Acquire), self.chunks.hi.load(Ordering::Acquire))
+    }
+
     /// `(chunk index, slot size, slots in that chunk)` for a slot address.
     #[cfg(feature = "gc-stats")]
     pub fn slot_meta(&self, addr: u64) -> Option<(usize, usize, usize)> {
@@ -807,6 +849,7 @@ impl Slab {
 
     /// True when `addr` is a slot origin in a mapped chunk (not necessarily
     /// live — poison is the header kind).
+    #[inline]
     pub fn contains_slot(&self, addr: u64) -> bool {
         self.chunk_for(addr).is_some_and(|(start, meta)| {
             let off = (addr - start) as u32;

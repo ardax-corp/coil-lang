@@ -1,4 +1,4 @@
-// COI-283: `(i as float) * 7.0` → add induction on dense SSA.
+// COI-283: `(i as float) * 7.0` → add induction in a dense loop.
 use tests::assert;
 
 fn hot(int n) -> float {

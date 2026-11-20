@@ -6,13 +6,13 @@
 //! [`HostEnumMismatch`] (fail closed).
 //!
 //! The layout for a given invoke is the `HostInvoke` operand bits
-//! (`common::host_invoke_enum_layout`); the VM installs it for the duration
+//! (`common::host_invoke_enum_layout`); the runtime installs it for the duration
 //! of `NativeFn::invoke` via [`with_host_enum_layout`].
 
 use std::cell::Cell;
 
 use common::{
-    host_invoke_enum_layout, Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE,
+    Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE, HOST_ENUM_LAYOUT_PAIR,
     HOST_ENUM_LAYOUT_RESULT_NICHE,
 };
 
@@ -21,6 +21,40 @@ use crate::memory::{Heap, Object};
 
 thread_local! {
     static HOST_ENUM_LAYOUT: Cell<u32> = const { Cell::new(HOST_ENUM_LAYOUT_BOXED) };
+    /// The tag a [`HostEnumLayout::Pair`] pack left for its call.
+    static PAIR_TAG: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// A two-word result's payload word, its tag left for the call to take.
+fn pack_pair(tag: u64, payload: Option<Value>) -> Value {
+    PAIR_TAG.with(|t| t.set(Some(tag)));
+    payload.unwrap_or_default()
+}
+
+/// The tag the last [`HostEnumLayout::Pair`] pack left, taken.
+pub fn take_pair_tag() -> Option<u64> {
+    PAIR_TAG.with(Cell::take)
+}
+
+/// A [`HostEnumLayout::Pair`] call's two words: the payload and the tag
+/// its pack left, or, for a native that built its enum object anyway, the
+/// object's first payload word and tag. `None` when the word is no enum
+/// object of at most one payload word.
+pub fn split_pair_result(heap: &Heap, word: Value) -> Option<(u64, u64)> {
+    if let Some(tag) = take_pair_tag() {
+        return Some((word.bits(), tag));
+    }
+    match heap.find_object_by_addr(word.bits())? {
+        Object::Enum(e) => {
+            let e = e.as_ref();
+            if e.payload.len() > 1 {
+                return None;
+            }
+            let payload = if e.payload.is_empty() { 0 } else { e.payload[0].bits() };
+            Some((payload, u64::from(e.tag)))
+        }
+        _ => None,
+    }
 }
 
 /// How Option/Result crosses one HostInvoke.
@@ -33,22 +67,21 @@ pub enum HostEnumLayout {
     OptionNiche,
     /// `Ok` = aligned heap pointer, `Err` = `pointer | 1`.
     ResultNiche,
+    /// The payload word, its tag the call's second word ([`take_pair_tag`]).
+    Pair,
 }
 
 impl HostEnumLayout {
-    pub fn from_operand(operand: u32) -> Self {
-        Self::from_u32(host_invoke_enum_layout(operand))
-    }
-
-    /// Decode operand bits. `0` is Boxed; `1`/`2` are niches.
+    /// Decode operand bits. `0` is Boxed; `1`/`2` are niches; `3` is the
+    /// two-word pair.
     ///
-    /// Reserved value `3` (and any other code) maps to [`Self::Boxed`] on
-    /// purpose: an unknown layout must not select a niche (immediates would
-    /// panic in pack). It is not a third niche ABI.
+    /// Any other code maps to [`Self::Boxed`] on purpose: an unknown layout
+    /// must not select a niche (immediates would panic in pack).
     pub fn from_u32(bits: u32) -> Self {
         match bits {
             HOST_ENUM_LAYOUT_OPTION_NICHE => Self::OptionNiche,
             HOST_ENUM_LAYOUT_RESULT_NICHE => Self::ResultNiche,
+            HOST_ENUM_LAYOUT_PAIR => Self::Pair,
             HOST_ENUM_LAYOUT_BOXED => Self::Boxed,
             _ => Self::Boxed,
         }
@@ -59,6 +92,7 @@ impl HostEnumLayout {
             Self::Boxed => HOST_ENUM_LAYOUT_BOXED,
             Self::OptionNiche => HOST_ENUM_LAYOUT_OPTION_NICHE,
             Self::ResultNiche => HOST_ENUM_LAYOUT_RESULT_NICHE,
+            Self::Pair => HOST_ENUM_LAYOUT_PAIR,
         }
     }
 }
@@ -117,6 +151,10 @@ pub fn pack_option(
         HostEnumLayout::ResultNiche => Err(HostEnumMismatch(
             "pack_option called with ResultNiche layout",
         )),
+        HostEnumLayout::Pair => Ok(match value {
+            None => pack_pair(0, None),
+            Some(payload) => pack_pair(1, Some(payload)),
+        }),
     }
 }
 
@@ -133,6 +171,7 @@ pub fn unpack_option(
         HostEnumLayout::ResultNiche => Err(HostEnumMismatch(
             "unpack_option called with ResultNiche layout",
         )),
+        HostEnumLayout::Pair => Err(HostEnumMismatch("unpack_option called with Pair layout")),
     }
 }
 
@@ -161,6 +200,10 @@ pub fn pack_result(
             }
             Err(payload) => Err(payload),
         }),
+        HostEnumLayout::Pair => Ok(match value {
+            Ok(payload) => pack_pair(0, Some(payload)),
+            Err(payload) => pack_pair(1, Some(payload)),
+        }),
     }
 }
 
@@ -174,6 +217,7 @@ pub fn unpack_result(
         HostEnumLayout::Boxed => unpack_boxed_result(heap, value),
         HostEnumLayout::ResultNiche => unpack_result_niche(heap, value),
         HostEnumLayout::OptionNiche => unpack_result_unit_niche(heap, value),
+        HostEnumLayout::Pair => Err(HostEnumMismatch("unpack_result called with Pair layout")),
     }
 }
 
@@ -197,6 +241,7 @@ pub fn pack_result_unit(
         HostEnumLayout::ResultNiche => Err(HostEnumMismatch(
             "pack_result_unit called with ResultNiche layout",
         )),
+        HostEnumLayout::Pair => pack_result(heap, HostEnumLayout::Pair, value.map(|()| Value::default())),
     }
 }
 
@@ -495,11 +540,25 @@ mod tests {
     }
 
     #[test]
-    fn reserved_layout_3_decodes_as_boxed() {
-        assert_eq!(
-            HostEnumLayout::from_u32(common::HOST_ENUM_LAYOUT_RESERVED),
-            HostEnumLayout::Boxed
-        );
+    fn pair_layout_packs_payload_and_leaves_tag() {
+        let mut heap = Heap::default();
+        let live = heap.live_object_count();
+        let some = pack_option(&mut heap, HostEnumLayout::Pair, Some(Value::from(7i64))).unwrap();
+        assert_eq!(split_pair_result(&heap, some), Some((7, 1)));
+        let none = pack_option(&mut heap, HostEnumLayout::Pair, None).unwrap();
+        assert_eq!(split_pair_result(&heap, none), Some((0, 0)));
+        let err = pack_result(&mut heap, HostEnumLayout::Pair, Err(Value::from(3i64))).unwrap();
+        assert_eq!(split_pair_result(&heap, err), Some((3, 1)));
+        assert_eq!(heap.live_object_count(), live, "a pair pack makes no object");
+        // A native that built its enum object anyway: read off the object.
+        let boxed = alloc_option_some(&mut heap, Value::from(9i64));
+        assert_eq!(split_pair_result(&heap, boxed), Some((9, 1)));
+        assert_eq!(split_pair_result(&heap, Value::from(12i64)), None);
+    }
+
+    #[test]
+    fn layout_3_decodes_as_pair() {
+        assert_eq!(HostEnumLayout::from_u32(common::HOST_ENUM_LAYOUT_PAIR), HostEnumLayout::Pair);
         assert_eq!(HostEnumLayout::from_u32(99), HostEnumLayout::Boxed);
     }
 

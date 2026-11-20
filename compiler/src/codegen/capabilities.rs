@@ -62,7 +62,7 @@ fn shown_fn(name: &str) -> String {
         return format!("the initializer of static `{static_name}`");
     }
     let base = name.split('$').next().unwrap_or(name);
-    format!("`{base}`")
+    format!("`{}`", crate::variadic::copied_from(base))
 }
 
 impl Compiler {
@@ -112,37 +112,25 @@ impl Compiler {
         if missing.is_empty() {
             return Vec::new();
         }
-        let roots = vec!["main".to_string()];
-        let test_pcs: Vec<usize> = if self.include_tests {
-            self.test_cases.iter().map(|&(_, pc)| pc as usize).collect()
-        } else {
-            Vec::new()
-        };
-        if test_pcs.is_empty() && !roots.iter().any(|r| self.functions.contains_key(r)) {
+        let tests_on = self.include_tests;
+        let mut roots = vec!["main".to_string()];
+        if tests_on {
+            roots.extend(self.test_body_names());
+        }
+        if !roots.iter().any(|r| self.functions.contains_key(r)) {
             return Vec::new();
         }
-        let (parent, spans) = crate::il::reachable_functions(
-            &self.bytecode,
-            &self.functions,
-            &self.fn_entry_labels,
-            &roots,
-            &test_pcs,
-            &[self.static_init.ops(), self.ffi_init.ops()],
-            // A `const` is computed while compiling, under the build's
-            // `--comptime-*` grants; its initializer does not run in the program.
-            &|name| {
-                name.strip_prefix(super::compiler::STATIC_INIT_FN_PREFIX)
-                    .is_some_and(|fqn| self.checker.is_const_static(fqn))
-            },
-        );
+        // Static initializers run; a `const` is computed while compiling,
+        // under the build's `--comptime-*` grants, and does not.
+        roots.extend(self.setup_inits().filter(|name| {
+            !name.strip_prefix(super::compiler::STATIC_INIT_FN_PREFIX).is_some_and(|fqn| self.checker.is_const_static(fqn))
+        }));
+        let parent = self.reachable_bodies(roots);
         // Test bodies by their description: `test "parses"`.
-        let tests: HashMap<&str, &str> = self
+        let tests: HashMap<String, &str> = self
             .test_cases
             .iter()
-            .filter_map(|(desc, pc)| {
-                let name = spans.iter().find(|(_, span)| span.0 == *pc as usize)?.0;
-                Some((name.as_str(), desc.as_str()))
-            })
+            .filter_map(|(desc, offset)| Some((self.body_at_offset(*offset as usize)?, desc.as_str())))
             .collect();
         let shown = |name: &str| match tests.get(name) {
             Some(desc) => format!("test \"{desc}\""),
@@ -160,20 +148,6 @@ impl Compiler {
             }
             chain.reverse();
             chain
-        };
-        // Raw op ranges of every body, to find the function an op is in.
-        let ops = self.bytecode.ops();
-        let mut bodies: Vec<(usize, usize, &str)> = spans
-            .iter()
-            .map(|(n, &(s, e))| {
-                let (rs, re) = crate::il::opt::emitting_range_to_raw(ops, s, e);
-                (rs, re, n.as_str())
-            })
-            .collect();
-        bodies.sort();
-        let owner = |i: usize| -> Option<&str> {
-            let at = bodies.partition_point(|&(s, _, _)| s <= i);
-            bodies[..at].iter().rev().find(|&&(s, e, _)| s <= i && i < e).map(|&(_, _, n)| n)
         };
         let mut found: Vec<CapViolation> = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -209,25 +183,9 @@ impl Compiler {
                 chain,
             });
         };
-        for (i, op) in ops.iter().enumerate() {
-            let chain = match owner(i) {
-                Some(name) if parent.contains_key(name) => Some(chain_to(name)),
-                Some(_) => None,
-                None => Some(Vec::new()),
-            };
-            if let IlOp::HostInvoke { loc, .. } = op {
-                visit(*loc, chain);
-            }
-        }
-        for op in self.static_init.ops().iter().chain(self.ffi_init.ops()) {
-            if let IlOp::HostInvoke { loc, .. } = op {
-                visit(*loc, Some(Vec::new()));
-            }
-        }
-        // A body emitted from its direct MIR: its `HostInvoke`s, by the
-        // loc each carries.
-        for f in self.bytecode.funcs() {
-            let Some(mir) = f.hir_mir.as_deref() else { continue };
+        // Each body's `HostInvoke`s, by the loc each carries.
+        for f in self.bodies.funcs() {
+            let Some(mir) = f.mir.as_deref() else { continue };
             let chain = parent.contains_key(&f.name).then(|| chain_to(&f.name));
             for block in &mir.blocks {
                 for inst in &block.insts {
@@ -241,5 +199,51 @@ impl Compiler {
         }
         found.sort_by(|a, b| (&a.file, a.range.start).cmp(&(&b.file, b.range.start)));
         found
+    }
+
+    /// Each body reachable from `roots` through MIR, with the body it was
+    /// first reached from (`None` for a root).
+    pub(super) fn reachable_bodies(&self, roots: impl IntoIterator<Item = String>) -> HashMap<String, Option<String>> {
+        let funcs = self.bodies.funcs();
+        let mut by_label: HashMap<u32, &str> = self.fn_entry_labels.iter().map(|(n, l)| (l.0, n.as_str())).collect();
+        by_label.extend(funcs.iter().filter_map(|f| Some((f.entry?.0, f.name.as_str()))));
+        let bodies: HashMap<&str, &crate::mir::MirFunc> =
+            funcs.iter().filter_map(|f| Some((f.name.as_str(), f.mir.as_deref()?))).collect();
+        let mut parent: HashMap<String, Option<String>> = HashMap::new();
+        let mut work = std::collections::VecDeque::new();
+        for name in roots {
+            if self.functions.contains_key(&name) && parent.insert(name.clone(), None).is_none() {
+                work.push_back(name);
+            }
+        }
+        while let Some(name) = work.pop_front() {
+            let Some(mir) = bodies.get(name.as_str()) else { continue };
+            for target in mir.code_targets() {
+                let Some(callee) = by_label.get(&target.0) else { continue };
+                if !parent.contains_key(*callee) {
+                    parent.insert((*callee).to_string(), Some(name.clone()));
+                    work.push_back((*callee).to_string());
+                }
+            }
+        }
+        parent
+    }
+
+    /// The body at emit offset `offset`.
+    fn body_at_offset(&self, offset: usize) -> Option<String> {
+        self.functions.iter().find(|&(_, &at)| at == offset).map(|(name, _)| name.clone())
+    }
+
+    /// The bodies of this compile's test cases.
+    pub(super) fn test_body_names(&self) -> Vec<String> {
+        self.test_cases.iter().filter_map(|&(_, offset)| self.body_at_offset(offset as usize)).collect()
+    }
+
+    /// The static initializers module setup calls.
+    fn setup_inits(&self) -> impl Iterator<Item = String> + '_ {
+        self.setup_steps.iter().filter_map(|s| match s {
+            super::compiler::module_setup::SetupStep::Static { init, .. } => Some(init.clone()),
+            _ => None,
+        })
     }
 }

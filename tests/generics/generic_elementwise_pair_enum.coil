@@ -1,0 +1,343 @@
+// A generic body's element-wise operator cloned at a two-word class (a
+// `readonly` class of two fields), at an enum, at a `#[repr(int)]` or
+// `#[repr(string)]` enum and at a generic class calls the type's operator
+// instance once per element: zip, negation, broadcast on either side, 3 and
+// 9 elements, tuples and `Vec`.
+use tests::assert;
+
+readonly class V2 {
+    pub x: int,
+    pub y: int,
+}
+
+impl Add for V2 {
+    pub fn add(V2 a, V2 b) -> V2 {
+        return new V2(a.x + b.x, a.y + b.y);
+    }
+}
+
+impl Sub for V2 {
+    pub fn sub(V2 a, V2 b) -> V2 {
+        return new V2(a.x - b.x, a.y - b.y);
+    }
+}
+
+impl Mul for V2 {
+    pub fn mul(V2 a, V2 b) -> V2 {
+        return new V2(a.x * b.x, a.y * b.y);
+    }
+}
+
+impl Neg for V2 {
+    pub fn neg(V2 a) -> V2 {
+        return new V2(0 - a.x, 0 - a.y);
+    }
+}
+
+enum Sign {
+    Pos,
+    Neg,
+}
+
+impl Mul for Sign {
+    pub fn mul(Sign a, Sign b) -> Sign {
+        let same = match a {
+            Sign::Pos => match b {
+                Sign::Pos => true,
+                Sign::Neg => false,
+            },
+            Sign::Neg => match b {
+                Sign::Pos => false,
+                Sign::Neg => true,
+            },
+        };
+        if same {
+            return Sign::Pos;
+        }
+        return Sign::Neg;
+    }
+}
+
+impl Neg for Sign {
+    pub fn neg(Sign a) -> Sign {
+        return match a {
+            Sign::Pos => Sign::Neg,
+            Sign::Neg => Sign::Pos,
+        };
+    }
+}
+
+#[repr(int)]
+enum Bit {
+    Zero = 0,
+    One = 1,
+}
+
+impl Mul for Bit {
+    pub fn mul(Bit a, Bit b) -> Bit {
+        return match a {
+            Bit::Zero => Bit::Zero,
+            Bit::One => b,
+        };
+    }
+}
+
+impl Neg for Bit {
+    pub fn neg(Bit a) -> Bit {
+        return match a {
+            Bit::Zero => Bit::One,
+            Bit::One => Bit::Zero,
+        };
+    }
+}
+
+#[repr(string)]
+enum Tone {
+    Hi = "hi",
+    Lo = "lo",
+}
+
+impl Mul for Tone {
+    pub fn mul(Tone a, Tone b) -> Tone {
+        if a == b {
+            return Tone::Hi;
+        }
+        return Tone::Lo;
+    }
+}
+
+class Box<T> {
+    pub v: T,
+}
+
+impl Add for Box<T: Add> {
+    pub fn add(Box<T> a, Box<T> b) -> Box<T> {
+        return new Box(a.v + b.v);
+    }
+}
+
+readonly class P<T> {
+    pub a: T,
+    pub b: T,
+}
+
+impl Mul for P<T: Mul> {
+    pub fn mul(P<T> x, P<T> y) -> P<T> {
+        return new P(x.a * y.a, x.b * y.b);
+    }
+}
+
+readonly class F2 {
+    pub x: float,
+    pub n: int,
+}
+
+impl Add for F2 {
+    pub fn add(F2 a, F2 b) -> F2 {
+        return new F2(a.x + b.x, a.n + b.n);
+    }
+}
+
+fn v(int x, int y) -> V2 {
+    return new V2(x, y);
+}
+
+fn sg(Sign s) -> int {
+    return match s {
+        Sign::Pos => 1,
+        Sign::Neg => -1,
+    };
+}
+
+fn bit(Bit b) -> int {
+    return match b {
+        Bit::Zero => 0,
+        Bit::One => 1,
+    };
+}
+
+fn add<T: Add>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return a + b;
+}
+
+fn mixed<T: Add + Sub + Mul>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return (a - b) * a + b;
+}
+
+fn mul<T: Mul>([T; 3] a, [T; 3] b) -> [T; 3] {
+    return a * b;
+}
+
+fn neg<T: Neg>([T; 3] a) -> [T; 3] {
+    return -a;
+}
+
+fn scale<T: Mul>([T; 3] a, T k) -> [T; 3] {
+    return a * k;
+}
+
+fn shift<T: Add>([T; 3] a, T k) -> [T; 3] {
+    return a + k;
+}
+
+fn from<T: Sub>(T k, [T; 3] a) -> [T; 3] {
+    return k - a;
+}
+
+fn lscale<T: Mul>(T k, [T; 3] a) -> [T; 3] {
+    return k * a;
+}
+
+fn wide<T: Add>([T; 9] a, [T; 9] b) -> [T; 9] {
+    return a + b;
+}
+
+fn wide_mul<T: Mul>([T; 9] a, [T; 9] b) -> [T; 9] {
+    return a * b;
+}
+
+fn triple<T: Sub>((T, T, T) a, (T, T, T) b) -> (T, T, T) {
+    return a - b;
+}
+
+fn triple_mul<T: Mul>((T, T, T) a, (T, T, T) b) -> (T, T, T) {
+    return a * b;
+}
+
+fn vec_scale<T: Mul>(Vec<T> v, T k) -> Vec<T> {
+    return v * k;
+}
+
+fn vec_neg<T: Neg>(Vec<T> v) -> Vec<T> {
+    return -v;
+}
+
+test("a two-word class: zip and negation") {
+    let a = add([v(1, 2), v(3, 4), v(5, 6)], [v(10, 20), v(30, 40), v(50, 60)]);
+    assert!(
+        a[0].x == 11 && a[0].y == 22 && a[1].x == 33 && a[1].y == 44 && a[2].x == 55 && a[2].y == 66,
+    );
+    let x = mixed([v(8, 1), v(9, 2), v(10, 3)], [v(2, 1), v(3, 1), v(1, 1)]);
+    assert!(
+        x[0].x == 50 && x[0].y == 1 && x[1].x == 57 && x[1].y == 3 && x[2].x == 91 && x[2].y == 7,
+    );
+    let n = neg([v(1, -1), v(-2, 2), v(3, -3)]);
+    assert!(
+        n[0].x == -1 && n[0].y == 1 && n[1].x == 2 && n[1].y == -2 && n[2].x == -3 && n[2].y == 3,
+    );
+}
+
+test("a two-word class: broadcast on either side") {
+    let s = scale([v(1, 2), v(3, 4), v(5, 6)], v(3, 10));
+    assert!(
+        s[0].x == 3 && s[0].y == 20 && s[1].x == 9 && s[1].y == 40 && s[2].x == 15 && s[2].y == 60,
+    );
+    let f = from(v(10, 100), [v(1, 2), v(3, 4), v(5, 6)]);
+    assert!(
+        f[0].x == 9 && f[0].y == 98 && f[1].x == 7 && f[1].y == 96 && f[2].x == 5 && f[2].y == 94,
+    );
+}
+
+test("a two-word class: 9 elements, a tuple and a Vec") {
+    let one = [v(1, 1), v(2, 2), v(3, 3), v(4, 4), v(5, 5), v(6, 6), v(7, 7), v(8, 8), v(9, 9)];
+    let w = wide(one, one);
+    assert!(w[0].x == 2 && w[4].y == 10 && w[8].x == 18 && w[8].y == 18);
+    let t = triple((v(1, 5), v(2, 5), v(3, 5)), (v(3, 1), v(2, 2), v(1, 3)));
+    assert!(
+        t[0].x == -2 && t[0].y == 4 && t[1].x == 0 && t[1].y == 3 && t[2].x == 2 && t[2].y == 2,
+    );
+    let s = vec_scale(Vec::from([v(1, 2), v(3, 4)]), v(5, 7));
+    assert!(s.len() == 2 && s[0].x == 5 && s[0].y == 14 && s[1].x == 15 && s[1].y == 28);
+    let vn = vec_neg(Vec::from([v(1, 2), v(3, 4)]));
+    assert!(vn[0].x == -1 && vn[0].y == -2 && vn[1].x == -3 && vn[1].y == -4);
+}
+
+test("an enum: zip, negation and broadcast") {
+    let m = mul([Sign::Pos, Sign::Neg, Sign::Neg], [Sign::Neg, Sign::Neg, Sign::Pos]);
+    assert!(sg(m[0]) == -1 && sg(m[1]) == 1 && sg(m[2]) == -1);
+    let n = neg([Sign::Pos, Sign::Neg, Sign::Pos]);
+    assert!(sg(n[0]) == -1 && sg(n[1]) == 1 && sg(n[2]) == -1);
+    let s = scale([Sign::Pos, Sign::Neg, Sign::Pos], Sign::Neg);
+    assert!(sg(s[0]) == -1 && sg(s[1]) == 1 && sg(s[2]) == -1);
+    let l = lscale(Sign::Neg, [Sign::Neg, Sign::Neg, Sign::Pos]);
+    assert!(sg(l[0]) == 1 && sg(l[1]) == 1 && sg(l[2]) == -1);
+}
+
+test("an enum: 9 elements, a tuple and a Vec") {
+    let p = Sign::Pos;
+    let q = Sign::Neg;
+    let w = wide_mul([p, q, p, q, p, q, p, q, p], [q, q, q, q, p, p, p, p, q]);
+    assert!(sg(w[0]) == -1 && sg(w[1]) == 1 && sg(w[4]) == 1 && sg(w[5]) == -1 && sg(w[8]) == -1);
+    let t = triple_mul((p, q, q), (q, q, p));
+    assert!(sg(t[0]) == -1 && sg(t[1]) == 1 && sg(t[2]) == -1);
+    let s = vec_scale(Vec::from([p, q]), q);
+    assert!(s.len() == 2 && sg(s[0]) == -1 && sg(s[1]) == 1);
+    let vn = vec_neg(Vec::from([p, q]));
+    assert!(sg(vn[0]) == -1 && sg(vn[1]) == 1);
+}
+
+test("a repr(int) enum") {
+    let z = Bit::Zero;
+    let o = Bit::One;
+    let m = mul([o, o, z], [o, z, o]);
+    assert!(bit(m[0]) == 1 && bit(m[1]) == 0 && bit(m[2]) == 0);
+    let n = neg([o, z, o]);
+    assert!(bit(n[0]) == 0 && bit(n[1]) == 1 && bit(n[2]) == 0);
+    let s = scale([o, z, o], o);
+    assert!(bit(s[0]) == 1 && bit(s[1]) == 0 && bit(s[2]) == 1);
+    let l = lscale(z, [o, z, o]);
+    assert!(bit(l[0]) == 0 && bit(l[1]) == 0 && bit(l[2]) == 0);
+    let w = wide_mul([o, o, o, o, o, z, z, z, z], [o, z, o, z, o, z, o, z, o]);
+    assert!(bit(w[0]) == 1 && bit(w[1]) == 0 && bit(w[4]) == 1 && bit(w[6]) == 0 && bit(w[8]) == 0);
+    let t = triple_mul((o, o, z), (o, z, o));
+    assert!(bit(t[0]) == 1 && bit(t[1]) == 0 && bit(t[2]) == 0);
+    let v = vec_scale(Vec::from([o, z]), o);
+    assert!(v.len() == 2 && bit(v[0]) == 1 && bit(v[1]) == 0);
+    let vn = vec_neg(Vec::from([o, z]));
+    assert!(bit(vn[0]) == 0 && bit(vn[1]) == 1);
+}
+
+test("a repr(string) enum") {
+    let m = mul([Tone::Hi, Tone::Lo, Tone::Lo], [Tone::Hi, Tone::Hi, Tone::Lo]);
+    assert!(m[0] == Tone::Hi && m[1] == Tone::Lo && m[2] == Tone::Hi);
+    let s = scale([Tone::Hi, Tone::Lo, Tone::Hi], Tone::Lo);
+    assert!(s[0] == Tone::Lo && s[1] == Tone::Hi && s[2] == Tone::Lo);
+}
+
+test("a generic class, one word and two") {
+    let b = add([new Box(1), new Box(2), new Box(3)], [new Box(10), new Box(20), new Box(30)]);
+    assert!(b[0].v == 11 && b[1].v == 22 && b[2].v == 33);
+    let k = shift([new Box(1.5), new Box(2.5), new Box(3.5)], new Box(0.25));
+    assert!(k[0].v == 1.75 && k[1].v == 2.75 && k[2].v == 3.75);
+    let p = mul(
+        [new P(1, 2), new P(3, 4), new P(5, 6)],
+        [new P(10, 20), new P(30, 40), new P(50, 60)],
+    );
+    assert!(
+        p[0].a == 10 &&
+        p[0].b == 40 &&
+        p[1].a == 90 &&
+        p[1].b == 160 &&
+        p[2].a == 250 &&
+        p[2].b == 360,
+    );
+    let q = scale([new P(1, 2), new P(3, 4), new P(5, 6)], new P(2, 3));
+    assert!(q[0].a == 2 && q[0].b == 6 && q[2].a == 10 && q[2].b == 18);
+}
+
+test("a two-word class of a float and an int") {
+    let f = shift([new F2(1.5, 2), new F2(3.5, 4), new F2(5.5, 6)], new F2(0.25, 100));
+    assert!(
+        f[0].x == 1.75 &&
+        f[0].n == 102 &&
+        f[1].x == 3.75 &&
+        f[1].n == 104 &&
+        f[2].x == 5.75 &&
+        f[2].n == 106,
+    );
+    let g = add(
+        [new F2(1.5, 2), new F2(3.5, 4), new F2(5.5, 6)],
+        [new F2(0.5, 1), new F2(0.5, 1), new F2(0.5, 1)],
+    );
+    assert!(g[0].x == 2.0 && g[0].n == 3 && g[2].x == 6.0 && g[2].n == 7);
+}

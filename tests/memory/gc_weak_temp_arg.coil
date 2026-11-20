@@ -70,9 +70,13 @@ test("a call's result stays alive while it is bound") {
     assert!(n.v == 5);
 }
 
-test("a local passed to a call stays alive after its last use") {
+// An object lives until its last use: native frames free it there, the interpreter
+// may keep it longer, so only a local still used after the collect is
+// checked.
+test("a local used after a collect stays alive") {
     let n = new Node(6);
     let w = weak(n);
     collect();
     assert!(!gone(w));
+    assert!(n.v == 6);
 }

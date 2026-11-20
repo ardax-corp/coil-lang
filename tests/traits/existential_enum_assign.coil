@@ -1,0 +1,78 @@
+// A local of a bare-trait type assigned an enum value again: each
+// assignment packs the enum, as the `let` does, and the local holds the
+// pack's one word (coil-lang#2719, after #2322's `let`).
+use tests::assert;
+
+trait Tr<S> {
+    fn get(S s) -> int {}
+}
+
+enum Ek {
+    K(int),
+    Z,
+}
+
+impl Tr for Ek {
+    pub fn get(Ek e) -> int {
+        return match e {
+            Ek::K(v) => v,
+            Ek::Z => 0,
+        };
+    }
+}
+
+enum Name {
+    N(string),
+    Anon,
+}
+
+impl Tr for Name {
+    pub fn get(Name n) -> int {
+        return match n {
+            Name::N(s) => s.len(),
+            Name::Anon => -1,
+        };
+    }
+}
+
+class A {
+    pub n: int,
+}
+
+impl Tr for A {
+    pub fn get(A a) -> int {
+        return a.n;
+    }
+}
+
+test("a two-word enum assigned again") {
+    let e: Tr = Ek::K(3);
+    assert!(e.get() == 3);
+    e = Ek::Z;
+    assert!(e.get() == 0);
+    e = Ek::K(7);
+    assert!(e.get() == 7);
+}
+
+test("a niche enum assigned again") {
+    let e: Tr = Name::N("abc");
+    assert!(e.get() == 3);
+    e = Name::Anon;
+    assert!(e.get() == -1);
+}
+
+test("another type assigned in a loop") {
+    let e: Tr = Ek::K(1);
+    let total = 0;
+    let i = 0;
+    while i < 3 {
+        total = total + e.get();
+        if i % 2 == 0 {
+            e = new A(10);
+        } else {
+            e = Ek::K(i);
+        }
+        i = i + 1;
+    }
+    assert!(total == 1 + 10 + 1, total.show());
+}

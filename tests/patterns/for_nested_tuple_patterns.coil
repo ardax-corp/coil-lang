@@ -1,0 +1,43 @@
+// `for` takes the `let` patterns: a tuple pattern may nest tuple patterns
+// and wildcards at any depth (#2783).
+use tests::assert;
+
+class C {
+    pub x: int,
+}
+
+test("a pair of an int and a pair") {
+    let xs: Vec<(int, (int, int))> = [(1, (2, 3)), (4, (5, 6))];
+    let s = 0;
+    for (a, (b, c)) in xs {
+        s = s * 1000 + a * 100 + b * 10 + c;
+    }
+    assert!(s == 123456);
+}
+
+test("wildcards inside the nested pattern") {
+    let xs: Vec<(string, (int, string))> = [("a", (1, "x")), ("b", (2, "y"))];
+    let out = "";
+    for (k, (_, v)) in xs {
+        out = out + k + v;
+    }
+    assert!(out == "axby");
+}
+
+test("three levels and a class item") {
+    let xs: Vec<((C, int), (int, (int, int)))> = [((new C(7), 1), (2, (3, 4)))];
+    let s = 0;
+    for ((c, a), (b, (d, e))) in xs {
+        s = c.x * 10000 + a * 1000 + b * 100 + d * 10 + e;
+    }
+    assert!(s == 71234);
+}
+
+test("a fixed array of nested tuples") {
+    let xs = [(1, (2, 3)), (4, (5, 6))];
+    let s = 0;
+    for (a, (_, c)) in xs {
+        s += a * c;
+    }
+    assert!(s == 27);
+}

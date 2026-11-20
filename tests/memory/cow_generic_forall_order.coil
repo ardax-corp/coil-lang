@@ -1,0 +1,228 @@
+// A generic function of several type parameters, passed as a value where
+// its type parameters stay open (a `forall` parameter, a local bound from
+// it), runs its shared body, which writes through a copy of a type
+// parameter's value (coil-lang#2621). The copy is made unique before the
+// write, so the value it came from keeps its own state, whatever order the
+// `forall` names its type parameters in. Default flags: a function value
+// always runs the shared body.
+use tests::assert;
+
+class Box {
+    pub n: int,
+}
+
+trait Bump<T> {
+    fn bump(T x) {}
+}
+
+impl Bump for Box {
+    fn bump(Box b) {
+        b.n = b.n + 1;
+    }
+}
+
+impl Bump for int {
+    fn bump(int x) {}
+}
+
+// The issue's repro: the `forall` names the parameters in the function's order.
+fn bump_first<A: Bump, B>(A a, B b) -> A {
+    let y = a;
+    y.bump();
+    return a;
+}
+
+fn run_first(forall A: Bump, B. A -> B -> A g, Box x) -> Box {
+    return g(x, 0);
+}
+
+// The function's order is `B, A`; the `forall`'s `A, B`.
+fn bump_second<B, A: Bump>(B b, A a) -> A {
+    let y = a;
+    y.bump();
+    return a;
+}
+
+fn run_second(forall A: Bump, B. B -> A -> A g, Box x) -> Box {
+    return g(0, x);
+}
+
+fn run_second_int(forall A: Bump, B. B -> A -> A g, int k) -> int {
+    return g(k, k);
+}
+
+// The same type declared the other way round, passed on to `run_second`.
+fn relay_second(forall B, A: Bump. B -> A -> A g, Box x) -> Box {
+    return run_second(g, x);
+}
+
+// Three type parameters, met in the order `C, A, B`: the `forall` passes
+// which are objects in that order, the function reads them in its own.
+fn bump3<A: Bump, B: Bump, C: Bump>(C c, A a, B b) -> int {
+    let x = a;
+    x.bump();
+    let y = b;
+    y.bump();
+    let z = c;
+    z.bump();
+    return 0;
+}
+
+fn run3_bbi(forall A: Bump, B: Bump, C: Bump. C -> A -> B -> int g, Box p, Box q, int k) -> int {
+    return g(p, q, k);
+}
+
+fn run3_ibi(forall A: Bump, B: Bump, C: Bump. C -> A -> B -> int g, int j, Box p, int k) -> int {
+    return g(j, p, k);
+}
+
+fn run3_iib(forall A: Bump, B: Bump, C: Bump. C -> A -> B -> int g, int j, int k, Box p) -> int {
+    return g(j, k, p);
+}
+
+fn run3_iii(forall A: Bump, B: Bump, C: Bump. C -> A -> B -> int g, int j, int k, int m) -> int {
+    return g(j, k, m);
+}
+
+// Fewer binders than the function has type parameters.
+fn run_same(forall X: Bump. X -> X -> X g, Box x) -> Box {
+    return g(x, new Box(9));
+}
+
+fn run_ground(forall X: Bump. int -> X -> X g, Box x) -> Box {
+    return g(0, x);
+}
+
+// A shared body makes the value: the bit of its own type parameter comes
+// from its word, the other from the call.
+fn bump_left<A: Bump, B>(A a, B b) -> A {
+    let x = a;
+    x.bump();
+    return a;
+}
+
+fn run_mixed<T>(forall X: Bump. X -> T -> X g, Box p, T t) -> Box {
+    return g(p, t);
+}
+
+fn make_in_shared<T>(Box p, T t) -> Box {
+    return run_mixed(bump_left, p, t);
+}
+
+class Runner {
+    pub k: int,
+}
+
+impl Runner {
+    pub fn run(forall A: Bump, B. B -> A -> A g, Box x) -> Box {
+        return g(self.k, x);
+    }
+}
+
+class Holder {
+    pub g: int -> Box -> Box,
+}
+
+test("the issue's repro: a forall in the function's order") {
+    let b = new Box(1);
+    let r = run_first(bump_first, b);
+    assert!(b.n == 1);
+    assert!(r.n == 1);
+}
+
+test("a forall naming the parameters in another order") {
+    let b = new Box(1);
+    let r = run_second(bump_second, b);
+    assert!(b.n == 1);
+    assert!(r.n == 1);
+}
+
+test("scalars only: the body copies nothing") {
+    let big = 9223372036854775807;
+    assert!(run_second_int(bump_second, big) == big);
+    assert!(run_second_int(bump_second, 4096) == 4096);
+}
+
+test("a forall value passed on to a forall declared in another order") {
+    let b = new Box(2);
+    let r = relay_second(bump_second, b);
+    assert!(b.n == 2);
+    assert!(r.n == 2);
+}
+
+test("three parameters, objects and scalars in every position") {
+    let p = new Box(1);
+    let q = new Box(5);
+    assert!(run3_bbi(bump3, p, q, 7) == 0);
+    assert!(p.n == 1);
+    assert!(q.n == 5);
+    assert!(run3_ibi(bump3, 3, p, 9223372036854775807) == 0);
+    assert!(p.n == 1);
+    assert!(run3_iib(bump3, 3, 4, q) == 0);
+    assert!(q.n == 5);
+    assert!(run3_iii(bump3, 1, 2, 9223372036854775807) == 0);
+}
+
+test("a forall of fewer binders than the function's type parameters") {
+    let b = new Box(1);
+    let r = run_same(bump_first, b);
+    assert!(b.n == 1);
+    assert!(r.n == 1);
+    let r2 = run_ground(bump_second, b);
+    assert!(b.n == 1);
+    assert!(r2.n == 1);
+}
+
+test("a value made in a shared body") {
+    let p = new Box(1);
+    let t = new Box(10);
+    let r = make_in_shared(p, t);
+    assert!(p.n == 1);
+    assert!(r.n == 1);
+    let r2 = make_in_shared(p, 9223372036854775807);
+    assert!(p.n == 1);
+    assert!(r2.n == 1);
+}
+
+test("a lambda makes the value") {
+    let b = new Box(3);
+    let f = fn (Box x) => run_second(bump_second, x);
+    let r = f(b);
+    assert!(b.n == 3);
+    assert!(r.n == 3);
+}
+
+test("a method takes the forall value") {
+    let b = new Box(4);
+    let u = new Runner(0);
+    let r = u.run(bump_second, b);
+    assert!(b.n == 4);
+    assert!(r.n == 4);
+}
+
+test("a local bound from the function") {
+    let h = bump_second;
+    let b = new Box(5);
+    let r = h(0, b);
+    assert!(b.n == 5);
+    assert!(r.n == 5);
+    let r2 = run_second(h, b);
+    assert!(b.n == 5);
+    assert!(r2.n == 5);
+}
+
+test("a local of a forall type") {
+    let l: forall A: Bump, B. B -> A -> A = bump_second;
+    let b = new Box(6);
+    let r = l(0, b);
+    assert!(b.n == 6);
+    assert!(r.n == 6);
+}
+
+test("a class field holds the value") {
+    let h = new Holder(bump_second);
+    let b = new Box(7);
+    let r = (h.g)(0, b);
+    assert!(b.n == 7);
+    assert!(r.n == 7);
+}

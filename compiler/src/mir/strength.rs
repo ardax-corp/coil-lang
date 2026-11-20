@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::cse::dce;
-use super::func::MirFunc;
+use super::func::{Defs, MirFunc};
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirConst, MirInst, ValueId,
 };
@@ -72,7 +72,8 @@ fn strength_reduce_once(func: &mut MirFunc) -> bool {
 
 fn find_candidate(func: &MirFunc, lp: &LoopInfo) -> Option<Candidate> {
     let defined = values_defined_in(func, &lp.blocks);
-    let ivs = find_inductions(func, lp, &defined);
+    let defs = func.defs();
+    let ivs = find_inductions(func, lp, &defined, &defs);
     if ivs.is_empty() {
         return None;
     }
@@ -104,22 +105,22 @@ fn find_candidate(func: &MirFunc, lp: &LoopInfo) -> Option<Candidate> {
                 continue;
             }
             let (iv_use, factor) = match (
-                iv_operand(func, &ivs, lhs),
-                iv_operand(func, &ivs, rhs),
+                iv_operand(&defs, &ivs, lhs),
+                iv_operand(&defs, &ivs, rhs),
             ) {
                 (Some(_), Some(_)) => continue,
                 (Some(iv), None) => (iv, rhs),
                 (None, Some(iv)) => (iv, lhs),
                 (None, None) => continue,
             };
-            if !is_invariant(func, &defined, factor) {
+            if !is_invariant(&defs, &defined, factor) {
                 continue;
             }
-            if !factor_ok(func, ty, factor) {
+            if !factor_ok(&defs, ty, factor) {
                 continue;
             }
             let iv = ivs.get(&iv_use)?;
-            if ty.is_float() && iv.ty.is_float() && !integer_valued_value(func, iv.step) {
+            if ty.is_float() && iv.ty.is_float() && !integer_valued_value(&defs, iv.step) {
                 continue;
             }
             if ty.is_int() && !iv.ty.is_int() {
@@ -136,11 +137,11 @@ fn find_candidate(func: &MirFunc, lp: &LoopInfo) -> Option<Candidate> {
     None
 }
 
-fn iv_operand(func: &MirFunc, ivs: &HashMap<ValueId, Induction>, v: ValueId) -> Option<ValueId> {
+fn iv_operand(defs: &Defs, ivs: &HashMap<ValueId, Induction>, v: ValueId) -> Option<ValueId> {
     if ivs.contains_key(&v) {
         return Some(v);
     }
-    match def_inst(func, v) {
+    match defs.get(&v).map(|&(_, i)| i) {
         Some(MirInst::Cast {
             kind: MirCastKind::IntToFloat,
             src,
@@ -154,6 +155,7 @@ fn find_inductions(
     func: &MirFunc,
     lp: &LoopInfo,
     defined: &HashSet<ValueId>,
+    defs: &Defs,
 ) -> HashMap<ValueId, Induction> {
     let mut out = HashMap::new();
     let header = func.block(lp.header);
@@ -172,11 +174,11 @@ fn find_inductions(
                 continue;
             }
             saw_back = true;
-            let Some(s) = add_step_of(func, *val, *dest) else {
+            let Some(s) = add_step_of(defs, *val, *dest) else {
                 ok = false;
                 break;
             };
-            if !is_invariant(func, defined, s) {
+            if !is_invariant(defs, defined, s) {
                 ok = false;
                 break;
             }
@@ -204,8 +206,8 @@ fn find_inductions(
     out
 }
 
-fn add_step_of(func: &MirFunc, val: ValueId, iv: ValueId) -> Option<ValueId> {
-    match def_inst(func, val)? {
+fn add_step_of(defs: &Defs, val: ValueId, iv: ValueId) -> Option<ValueId> {
+    match defs.get(&val)?.1 {
         MirInst::Bin {
             op: MirBinOp::Add,
             lhs,
@@ -226,7 +228,7 @@ fn add_step_of(func: &MirFunc, val: ValueId, iv: ValueId) -> Option<ValueId> {
 
 fn apply_sr(func: &mut MirFunc, lp: &LoopInfo, cand: Candidate) -> bool {
     let defined = values_defined_in(func, &lp.blocks);
-    let ivs = find_inductions(func, lp, &defined);
+    let ivs = find_inductions(func, lp, &defined, &func.defs());
     let Some(iv) = ivs.get(&cand.iv).cloned() else {
         return false;
     };
@@ -286,16 +288,7 @@ fn apply_sr(func: &mut MirFunc, lp: &LoopInfo, cand: Candidate) -> bool {
         );
     }
 
-    let map = |v: ValueId| if v == cand.mul_dest { new_phi } else { v };
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(map);
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(map);
-        }
-    }
-    func.rewrite_debug_slots(map);
+    func.map_values(|v| if v == cand.mul_dest { new_phi } else { v });
     for block in &mut func.blocks {
         block.insts.retain(|i| i.dest() != cand.mul_dest);
     }
@@ -326,8 +319,8 @@ fn materialize_product(
 ) -> Option<ValueId> {
     let a = coerce_to(func, pre, a, ty)?;
     let b = coerce_to(func, pre, b, ty)?;
-    if let (Some(ca), Some(cb)) = (const_of(func, a), const_of(func, b))
-        && let Some(c) = fold_mul(ty, ca, cb) {
+    if let (Some(ca), Some(cb)) = (func.const_of(a), func.const_of(b))
+        && let Some(c) = super::instcombine::eval_bin(MirBinOp::Mul, ty, ca, cb) {
             return Some(insert_const(func, pre, c));
         }
     if is_one_const(func, a) {
@@ -356,7 +349,7 @@ fn materialize_product(
 
 fn coerce_to(func: &mut MirFunc, pre: BlockId, v: ValueId, ty: MirTy) -> Option<ValueId> {
     let from = func.ty(v);
-    if let Some(c) = const_of(func, v)
+    if let Some(c) = func.const_of(v)
         && let Some(folded) = cast_const(c, ty) {
             return Some(insert_const(func, pre, folded));
         }
@@ -417,26 +410,19 @@ fn values_defined_in(func: &MirFunc, blocks: &HashSet<BlockId>) -> HashSet<Value
     out
 }
 
-fn is_invariant(func: &MirFunc, defined: &HashSet<ValueId>, v: ValueId) -> bool {
+fn is_invariant(defs: &Defs, defined: &HashSet<ValueId>, v: ValueId) -> bool {
     if !defined.contains(&v) {
         return true;
     }
-    matches!(def_inst(func, v), Some(MirInst::Const { .. }))
+    matches!(defs.get(&v), Some((_, MirInst::Const { .. })))
 }
 
-fn factor_ok(func: &MirFunc, mul_ty: MirTy, factor: ValueId) -> bool {
-    !mul_ty.is_int() && integer_valued_value(func, factor)
+fn factor_ok(defs: &Defs, mul_ty: MirTy, factor: ValueId) -> bool {
+    !mul_ty.is_int() && integer_valued_value(defs, factor)
 }
 
-fn integer_valued_value(func: &MirFunc, v: ValueId) -> bool {
-    const_of(func, v).is_some_and(is_integer_valued)
-}
-
-fn const_of(func: &MirFunc, v: ValueId) -> Option<MirConst> {
-    match def_inst(func, v) {
-        Some(MirInst::Const { c, .. }) => Some(*c),
-        _ => None,
-    }
+fn integer_valued_value(defs: &Defs, v: ValueId) -> bool {
+    matches!(defs.get(&v), Some((_, MirInst::Const { c, .. })) if is_integer_valued(*c))
 }
 
 fn is_integer_valued(c: MirConst) -> bool {
@@ -451,7 +437,7 @@ fn is_integer_valued(c: MirConst) -> bool {
 }
 
 fn is_one_const(func: &MirFunc, v: ValueId) -> bool {
-    match const_of(func, v) {
+    match func.const_of(v) {
         Some(MirConst::I64(1)) => true,
         Some(MirConst::F64(b)) => b == 1.0f64.to_bits(),
         _ => false,
@@ -459,7 +445,7 @@ fn is_one_const(func: &MirFunc, v: ValueId) -> bool {
 }
 
 fn is_zero_const(func: &MirFunc, v: ValueId) -> bool {
-    match const_of(func, v) {
+    match func.const_of(v) {
         Some(MirConst::I64(0)) => true,
         Some(MirConst::F64(b)) => b == 0.0f64.to_bits(),
         _ => false,
@@ -472,23 +458,6 @@ fn zero_const(ty: MirTy) -> MirConst {
         MirTy::F64 => MirConst::f64(0.0),
         _ => MirConst::I64(0),
     }
-}
-
-fn fold_mul(ty: MirTy, a: MirConst, b: MirConst) -> Option<MirConst> {
-    match (ty, a, b) {
-        (MirTy::I64, MirConst::I64(x), MirConst::I64(y)) => Some(MirConst::I64(x.checked_mul(y)?)),
-        (MirTy::F64, MirConst::F64(x), MirConst::F64(y)) => {
-            Some(MirConst::f64(f64::from_bits(x) * f64::from_bits(y)))
-        }
-        _ => None,
-    }
-}
-
-fn def_inst(func: &MirFunc, v: ValueId) -> Option<&MirInst> {
-    func.blocks
-        .iter()
-        .flat_map(|b| b.insts.iter())
-        .find(|i| i.dest() == v)
 }
 
 #[cfg(test)]

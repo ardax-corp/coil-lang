@@ -1,18 +1,16 @@
 # Locality and loop optimizations
 
-`feature/locality`: transforms that change which work the VM runs and which
+`feature/locality`: transforms that change which work a program does and which
 memory it touches, without changing what a program computes. Step PRs go
 into the feature branch; the branch merges into `main` when every step is
 in. Assessment and probes: the "Reordering and locality optimizations for
 Coil" doc (2026-10-28).
 
-## Why these, on a bytecode VM
+## Why these
 
-The CPU runs the interpreter, not Coil's instructions, so reordering
-bytecode for latency or pipeline slots buys nothing. What pays is fewer
-dispatches, fewer heap accesses, and data laid out in the order it is
-read. Native-style scheduling, tiling, partial unrolling and field
-reordering measured as no gain and are out of scope.
+The steps were chosen and measured on the bytecode VM, since deleted, where
+fewer instructions, fewer heap accesses and data laid out in read order paid.
+Every time on this page comes from that VM. The passes below run in `mir::specialize::optimize_mir`.
 
 ## Steps
 
@@ -21,9 +19,9 @@ reordering measured as no gain and are out of scope.
 | 1 | Vectorize inner loops that index `a[base + j]` with a base the inner loop does not change (flattened 2D arrays in a nest) | `nested.coil`: `a[row + j]` 274 ms vs `r[j]` on a row 19 ms (14x), 1024² x 20 | done |
 | 2 | Vectorize one loop that both stores a map and folds a reduction | `fusion.coil`: fused 417 ms vs split 162 ms (2.6x) | done |
 | 3 | Field-sensitive mod/ref summaries (which fields a call may read or write) | lets step 4 keep a field across a call that cannot touch it; `promocall.coil`: 1327 vs 985 ms | done |
-| 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.coil`: 3.1x (8 vs 3 dispatches per iteration) | done |
+| 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.coil`: 3.1x (8 vs 3 VM instructions per iteration) | the pass exists; nothing runs it (see below) |
 | 5 | Copy the objects a pointer array holds in index order when the nursery promotes them | `objorder.coil`: 24 vs 147 ns per object (6.2x); `young_shuffle.coil` | done (minor collections) |
-| 6 | Prefetch the object behind `a[i + k]` in counted scans of pointer arrays | part of step 5's gap; `scattered_scan.coil` | done |
+| 6 | Prefetch the object behind `a[i + k]` in counted scans of pointer arrays | part of step 5's gap; `scattered_scan.coil` | marked in MIR; no engine reads the mark (see below) |
 | 7 | Loop interchange for affine nests | `interchange.coil`: rows 277 ms vs columns 749 ms (2.7x); `fmapcols.coil` | done (non-trapping map bodies) |
 
 Probes: `/mnt/project-files/reordering/probes/` (project files). Numbers are
@@ -63,15 +61,16 @@ Numbers land here as each step merges.
   the fold). The same store-loop rules hold (reads before the first store,
   one store offset, no read behind it), and each trapping instruction must
   come after as many stores as the vector body runs before it
-  (`vectorize::traps_in_store_order`). The VM now defers a block's stores
+  (`vectorize::traps_in_store_order`). The lane code defers a block's stores
   until its other words ran; a block that traps restores its fold slots
-  and runs again one lane at a time (`machine::vm::vloop_lanes`), so the
-  stores before the panic are exactly the scalar loop's. On `main` a plain
-  map loop that overflowed mid-block stored nothing of that block
-  (`tests/collections/vec_loop_panic_stores.coil`: 16 stores instead of 18).
+  and runs again one lane at a time (`machine::lanes::vloop_lanes`), so the
+  stores before the panic are exactly the scalar loop's
+  (`tests/collections/vec_loop_panic_stores.coil`).
   `fusion.coil` 4M x 5: fused loop 417 → 167 ms, equal to the two split loops
   (161 ms, unchanged).
-- **Step 4** (`mir::promote_fields`, dense tier, last MIR pass): a field
+- **Step 4** (`mir::promote_fields`, since removed: no capture ever ran it,
+  since neither Cranelift nor the interpreter could honour its
+  `MirInst::PanicStore`s). The pass did this: a field
   a loop writes, touched only through one object made before the loop and
   holding an `int` or `float`, is read once before the loop, carried in a
   φ and stored once on each exit. The loop may hold arithmetic, compares,
@@ -79,14 +78,9 @@ Numbers land here as each step merges.
   natives; a call, allocation, yield or any other effect refuses it, as
   does a second object value touching the slot. Before each instruction
   that may trap the pass places `MirInst::PanicStore`s naming the word each
-  field holds there. Dense emission opens a label at each run of them and
-  gives the stretch up to the next label a cleanup range whose pad stores
-  those registers and calls `unwind_resume` (`emit::PanicPads`); runs with
-  the same registers share a pad. A trapping op writes no register, so
-  the pad reads the words as the source left them
-  (`tests/collections/field_promotion_panic.coil`). `promo.coil` 1M x 20:
-  field accumulation 820 → 270 ms, equal to the hand-written locals
-  (265-300 ms); the loop body went from 8 ops to 4.
+  field holds there, which a backend must store before the unwind goes on.
+  `promo.coil` 1M x 20 on the VM: field accumulation 820 → 270 ms, equal to the
+  hand-written locals (265-300 ms); the loop body went from 8 ops to 4.
 - **Step 5** (GC copy order): a minor collection copies the young objects
   an array reached first, in the array's index order, then the rest in
   nursery (allocation) order as before (`Heap::minor_plan`). Marking pushes
@@ -121,37 +115,20 @@ Numbers land here as each step merges.
   order; so does a column reduction (`interchange.coil`), whose partial
   sums would overflow in a different order. Those would need a proof
   that no overflow happens (range analysis), which is not planned.
-- **Step 3** (field summaries): the HIR effect summary of each body
-  gains `fields`, the fields of any object it or its callees may read or
-  write, as one bit per field name (a hash into 64 bits, so names may
-  share a bit). Reading or writing `x.f`, or a record pattern naming `f`,
-  sets `f`'s bit. Everything that may touch a field it cannot name sets
-  every bit: unknown code, a trait or function-value call, `==` or an
-  ordering on objects, a builtin or native given an object, resuming a
-  generator, a custom iterator. MIR keeps the bits per call
-  (`MirFunc::call_fields`) and the names this body uses at each heap slot
-  (`MirFunc::slot_fields`; an access lowered without a name makes the
-  slot unknown). `promote_fields` now accepts a loop with direct calls
-  and keeps a slot in a register when none of the calls' bits meet the
-  slot's names; a call may panic, so a `PanicStore` goes before it like
-  any trap. A finalizer can run at any allocation, so every call also
-  carries the bits of every `fn drop()` in the program
-  (`ProgramEffects::drop_fields`). Modules compile in dependency order:
-  one compiled while a later module (or the entry) still declares a drop
-  treats every call as touching every field
-  (`Compiler::set_pending_finalizers`).
+- **Step 3** (field summaries, removed): the HIR effect summary of each
+  body carried `fields`, one bit per field name it or its callees might
+  touch, and MIR kept the bits per call and per heap slot for
+  `promote_fields`, which kept a slot in a register across calls that
+  could not touch it. The pass went in #2343 and the summaries, the MIR
+  tables and their archive encoding with archive major 8.
   `promocall.coil` (the step 4 probe with a non-inlined recursive call in
-  the loop, 1M x 20, three alternating runs): 1250-1370 → 930-1020 ms,
-  the same as hand-written locals (910-1010 ms).
+  the loop, 1M x 20) measured 1250-1370 → 930-1020 ms while it ran.
 - **Step 6** (prefetch): `mir::mark_prefetch_scans` marks each `Index`
   that reads a heap word from an array made before its loop, at a header
-  φ the loop steps up by a positive constant. Dense emission sets the
-  `DenseIndex` flag `HEAP_PREFETCH` on those (no new opcode; a VM that
-  ignores the bit reads the same value). The VM then issues a read
-  prefetch for the word `PREFETCH_DISTANCE` (8) elements ahead, when that
-  element exists (`prfm` on aarch64, `prefetcht0` on x86_64, nothing
-  elsewhere). The word is not checked to be an address: a prefetch never
-  faults. `examples/perf/scattered_scan.coil` (1M old objects walked 10
+  φ the loop steps up by a positive constant (`MirFunc::prefetch_loads`).
+  Neither engine reads the mark, and nothing calls `ObjArray::prefetch_ahead`,
+  so no prefetch is issued. On the VM it read ahead by 8 elements:
+  `examples/perf/scattered_scan.coil` (1M old objects walked 10
   times in a scattered order): 1190-1290 → 910-1060 ms end to end, about
   840 → 540 ms for the walks alone. The ordered walk and an int-array
   scan with a branch are unchanged. A distance of 8, 16 or 32 measured

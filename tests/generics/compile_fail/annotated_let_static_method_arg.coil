@@ -1,0 +1,15 @@
+// @expected E0102 — `g` is annotated `fn(string) -> Option<string>`, so it is the generic static method `M::wrap` at `string` and `g(1)` passes an `int` (#2760).
+class M {
+    pub k: int,
+}
+
+impl M {
+    pub static fn wrap<T>(T x) -> Option<T> {
+        return Option::Some(x);
+    }
+}
+
+fn main() {
+    let g: fn(string) -> Option<string> = M::wrap;
+    let _ = g(1);
+}

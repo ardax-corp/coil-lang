@@ -1,0 +1,117 @@
+// A copy of a bare-trait existential is its own value: a write through a
+// trait method on the copy (a local copy, a parameter's copy, a field, a
+// `Vec` item) leaves the original as it was, as a copy of the class
+// itself does (coil-lang#2715). A scalar or an enum packs as is, and its
+// existential copies too.
+use tests::assert;
+
+trait Cell<S> {
+    fn get(S s) -> int {}
+    fn put(S s, int v) {}
+}
+
+class A {
+    pub n: int,
+}
+
+impl Cell for A {
+    pub fn get(A a) -> int {
+        return a.n;
+    }
+
+    pub fn put(A a, int v) {
+        a.n = v;
+    }
+}
+
+class G<T> {
+    pub t: T,
+    pub n: int,
+}
+
+impl Cell for G<T> {
+    pub fn get(G<T> g) -> int {
+        return g.n;
+    }
+
+    pub fn put(G<T> g, int v) {
+        g.n = v;
+    }
+}
+
+impl Cell for int {
+    pub fn get(int x) -> int {
+        return x;
+    }
+
+    pub fn put(int x, int v) {}
+}
+
+class H {
+    pub c: Cell,
+}
+
+fn written(Cell c) -> int {
+    let d = c;
+    d.put(9);
+    return d.get();
+}
+
+test("a local copy") {
+    let a = new A(3);
+    let b = a;
+    b.put(9);
+    assert!(a.get() == 3 && b.get() == 9);
+    let e: Cell = new A(3);
+    let f = e;
+    f.put(9);
+    assert!(e.get() == 3, e.get().show());
+    assert!(f.get() == 9);
+    let g: Cell = new G("t", 4);
+    let k = g;
+    k.put(8);
+    assert!(g.get() == 4, g.get().show());
+    assert!(k.get() == 8);
+}
+
+test("the original written after the copy") {
+    let e: Cell = new A(1);
+    let f = e;
+    e.put(2);
+    assert!(e.get() == 2 && f.get() == 1);
+    f.put(5);
+    assert!(e.get() == 2 && f.get() == 5);
+}
+
+test("a parameter's copy") {
+    let e: Cell = new A(3);
+    assert!(written(e) == 9);
+    assert!(e.get() == 3, e.get().show());
+}
+
+test("a field and a Vec item") {
+    let e: Cell = new A(3);
+    let h = new H(e);
+    h.c.put(7);
+    assert!(e.get() == 3, e.get().show());
+    assert!(h.c.get() == 7);
+    let es: Vec<Cell> = Vec::new();
+    es.push(e);
+    es[0].put(6);
+    assert!(e.get() == 3, e.get().show());
+    assert!(es[0].get() == 6);
+}
+
+test("a packed scalar") {
+    let e: Cell = 4;
+    let f = e;
+    f.put(9);
+    assert!(e.get() == 4 && f.get() == 4);
+    let es: Vec<Cell> = Vec::new();
+    es.push(e);
+    es.push(new A(1));
+    for c in es {
+        c.put(2);
+    }
+    assert!(es[0].get() == 4 && es[1].get() == 1);
+}

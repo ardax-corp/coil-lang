@@ -1,0 +1,5 @@
+// @expected E0102 — a tuple type is not a cast target (#2803).
+fn main() {
+    let n = 5;
+    let t = n as (int, int);
+}

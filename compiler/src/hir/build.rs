@@ -29,7 +29,7 @@ use super::{
     HirLocal, HirModule, HirPat, HirPatFields, IndexKind, Lit, LocalId, LocalKind, MakeKind, Span,
     UnOp,
 };
-use crate::typechecking::infer::{Checker, TypedSidecar};
+use crate::typechecking::infer::{Checker, ForInKind, TypedSidecar};
 use crate::typechecking::def_id::{DefId, DefKind};
 use crate::typechecking::ty::{
     self as coil_ty, Ty, is_option_ty, option_inner, result_ok_err, result_ty, strip_readonly,
@@ -63,7 +63,7 @@ pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: 
             None,
         );
         top.body.root = Some(root);
-        let body = top.finish();
+        let body = top.finish(checker);
         module.bodies.insert(0, body);
         // Lambdas and trait instance methods name their body by index;
         // the top body now comes first.
@@ -78,10 +78,53 @@ pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: 
             }
         }
     }
+    relay_capture_types(&mut module);
     if module_path.is_empty() {
         proved_bounds(&mut module);
     }
     module
+}
+
+/// Type each lambda's capture that has no type of its own from the local
+/// it captures, enclosing lambdas first. A capture is typed by its reads,
+/// or, one the lambda only calls, by the local it captures when the
+/// lambda is built; a lambda that only relays a capture to a lambda inside
+/// it has none yet then, so that inner capture stays untyped until its
+/// enclosing lambda's capture is typed (#2671).
+fn relay_capture_types(module: &mut HirModule) {
+    let edges: Vec<(usize, usize)> = module
+        .bodies
+        .iter()
+        .enumerate()
+        .flat_map(|(parent, body)| {
+            body.exprs.iter().filter_map(move |e| match e.kind {
+                HirKind::Lambda { body } => Some((parent, body)),
+                _ => None,
+            })
+        })
+        .collect();
+    loop {
+        let mut changed = false;
+        for &(parent, child) in &edges {
+            for (outer, inner) in module.bodies[child].captures.clone() {
+                if module.bodies[child].local(inner).ty.is_some() {
+                    continue;
+                }
+                let Some(ty) = module.bodies[parent].local(outer).ty.clone() else { continue };
+                let body = &mut module.bodies[child];
+                for e in &mut body.exprs {
+                    if matches!(e.kind, HirKind::Local(l) if l == inner) && e.ty.is_none() {
+                        e.ty = Some(ty.clone());
+                    }
+                }
+                body.locals[inner.0 as usize].ty = Some(ty);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
 }
 
 /// Mark the `Vec` and array indexes `coil verify` proved in bounds, when it
@@ -253,6 +296,7 @@ impl BodyBuilder {
                 aliased_fn_values: Vec::new(),
                 fn_key_sites: Vec::new(),
                 stray_muts: Vec::new(),
+                inline_scopes: Vec::new(),
             },
             scopes: vec![HashMap::new()],
             outer: Vec::new(),
@@ -280,6 +324,8 @@ impl BodyBuilder {
             span,
             node,
             flags: HirFlags::default(),
+            scope: 0,
+            src: None,
         });
         id
     }
@@ -300,15 +346,7 @@ impl BodyBuilder {
     }
 
     fn temp(&mut self, name: &str, ty: Option<Ty>) -> LocalId {
-        let id = LocalId(self.body.locals.len() as u32);
-        self.body.locals.push(HirLocal {
-            name: name.to_string(),
-            ty,
-            kind: LocalKind::Temp,
-            captured: false,
-            borrow: false,
-        });
-        id
+        self.body.temp_named(name.to_string(), ty)
     }
 
     fn lookup(&mut self, name: &str) -> Option<LocalId> {
@@ -336,14 +374,15 @@ impl BodyBuilder {
         None
     }
 
-    fn finish(mut self) -> HirBody {
+    fn finish(mut self, checker: &Checker) -> HirBody {
+        runtime_types(&mut self.body, checker);
         // `let x = mut place` and `for mut x in xs` bind borrows.
         if !self.mut_marks.is_empty() {
             let mut borrows = Vec::new();
             for e in &self.body.exprs {
                 match &e.kind {
                     HirKind::Let { local, init: Some(v) } if self.mut_marks.contains(v) => borrows.push(*local),
-                    HirKind::ForIn { pat, iterable, .. } if self.mut_marks.contains(iterable) => super::effects::pat_binds(pat, &mut borrows),
+                    HirKind::ForIn { pat, iterable, .. } if self.mut_marks.contains(iterable) => pat.for_each_bind(&mut |l| borrows.push(l)),
                     _ => {}
                 }
             }
@@ -386,7 +425,7 @@ impl BodyBuilder {
                 if let Some(ty) = &local.ty
                     && matches!(
                         crate::typechecking::ty::strip_readonly(ty),
-                        Ty::Con(n) if matches!(n.as_str(), "int" | "float" | "bool" | "byte" | "char" | "f32" | "f64" | "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64")
+                        Ty::Con(n) if crate::typechecking::ty::BuiltinScalar::named(n).is_some_and(|s| s.word)
                     )
                 {
                     let ty = ty.to_string();
@@ -395,7 +434,7 @@ impl BodyBuilder {
                         HirKind::ForIn { iterable, .. } if consumed.contains(iterable) => {
                             let mut binds = Vec::new();
                             if let HirKind::ForIn { pat, .. } = &e.kind {
-                                super::effects::pat_binds(pat, &mut binds);
+                                pat.for_each_bind(&mut |l| binds.push(l));
                             }
                             binds.contains(&l).then(|| self.body.exprs[iterable.0 as usize].span)
                         }
@@ -648,17 +687,17 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     .map(|a| a.1.to_string())
                     .unwrap_or_default();
                 let span = node.0.into_range();
-                let instances = &self.checker.generics().instances;
+                let generics = self.checker.generics();
                 // A package trait's instances are keyed by its path.
                 let class = self.checker.impl_trait_key(class);
-                let instance = instances
-                    .iter()
-                    .find(|inst| inst.class == *class && inst.range == span)
+                let instance = generics
+                    .class_instances_at(class, &span)
+                    .map(|(_, inst)| inst)
+                    .next()
                     .or_else(|| {
                         // Derive-generated impls carry a synthetic span.
-                        let mut by_head = instances.iter().filter(|inst| {
-                            inst.class == *class
-                                && inst.args.first().is_some_and(|a| head_name(a) == head_str(&owner))
+                        let mut by_head = generics.class_instances(class).map(|(_, inst)| inst).filter(|inst| {
+                            inst.args.first().is_some_and(|a| head_name(a) == head_str(&owner))
                         });
                         let first = by_head.next();
                         if by_head.next().is_some() { None } else { first }
@@ -708,7 +747,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let root = self.expr(&mut tb, body);
                 self.implicit_ok_return(&mut tb, root);
                 tb.body.root = Some(root);
-                let mut body = tb.finish();
+                let mut body = tb.finish(self.checker);
                 alias_generic_fn_calls(&mut body, self.checker);
                 self.module.bodies.push(body);
             }
@@ -755,7 +794,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let value = self.expr(&mut b, init);
         let root = b.push(HirKind::Return(Some(value)), Some(coil_ty::never()), span_of(init), None);
         b.body.root = Some(root);
-        self.module.bodies.push(b.finish());
+        self.module.bodies.push(b.finish(self.checker));
     }
 
     /// Build one function body. `owner` is set for inherent methods, whose
@@ -820,7 +859,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             .map_or(Layout::Word, |ty| layout::of_resolved(self.checker, ty));
         b.body.ret = ret;
         // Inherent methods take their result mode from the bare method name,
-        // as the AST's `compile_function_decl_into` reads it.
+        // as `Compiler::compile_function_decl_into` reads it.
         let bare = full.rsplit("::").next().unwrap_or(full).to_string();
         let mode_keys = if owner.is_some() { std::slice::from_ref(&bare) } else { keys };
         b.body.result_mode = mode_keys.iter().any(|k| self.checker.fn_is_result_mode(k));
@@ -885,7 +924,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         // a `match self` sees the payloads.
         if let Some(owner) = owner
             && !is_static
-            && crate::hir::lower::is_generic_class(self.checker, owner)
+            && crate::hir::classify::is_generic_class(self.checker, owner)
             && self.checker.enum_variants(owner).is_none()
             && let Some(&this) = b.body.params.first()
         {
@@ -896,7 +935,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 }
             }
         }
-        let mut body = b.finish();
+        let mut body = b.finish(self.checker);
         alias_generic_fn_calls(&mut body, self.checker);
         self.module.bodies.push(body);
     }
@@ -933,7 +972,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     /// `if !(cond) { panic "contract violated: …" }` for one clause. A
-    /// `requires` panic blames the caller (`contract_fail` in the VM); an
+    /// `requires` panic blames the caller (`contract_fail` in the runtime); an
     /// `ensures` panic is reported at its clause.
     fn contract_check(&mut self, b: &mut BodyBuilder, c: &Contract<'_>, fname: &str) -> HirId {
         let span = (c.span.start, c.span.end);
@@ -981,7 +1020,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     /// `{ panic text }`; `blame_caller` reports the caller's location
-    /// (`contract_fail` in the VM) instead of the clause's.
+    /// (`contract_fail` in the runtime) instead of the clause's.
     fn contract_panic(&mut self, b: &mut BodyBuilder, span: Span, text: String, blame_caller: bool) -> HirId {
         let msg = self.synth(b, span, HirKind::Lit(Lit::Str(text)), Some(coil_ty::string()));
         let mut args = vec![msg];
@@ -1153,7 +1192,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     fn implicit_ok_return(&self, b: &mut BodyBuilder, root: HirId) {
-        if !b.body.result_mode {
+        // A gen fn falling off its end completes with no value, as a bare
+        // `return;` there does (#2717).
+        if !b.body.result_mode || b.body.is_coro {
             return;
         }
         let Some((ok, _)) = b.body.ret.as_ref().and_then(result_ok_err) else {
@@ -1249,6 +1290,10 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     fn expr(&mut self, b: &mut BodyBuilder, node: &Output<'_>) -> HirId {
+        common::deep_stack(|| self.expr_inner(b, node))
+    }
+
+    fn expr_inner(&mut self, b: &mut BodyBuilder, node: &Output<'_>) -> HirId {
         use Expression as E;
         match node.1.as_ref() {
             E::Integer(n) => self.emit_ty(b, node, HirKind::Lit(Lit::Int(*n)), self.ty_of(node).or(Some(coil_ty::int()))),
@@ -1257,7 +1302,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::String(s) => {
                 let ty = self.ty_of(node).or(Some(coil_ty::string()));
                 // A literal typed `[byte; N]` is its bytes, an array literal
-                // (the AST keeps it in frame slots, as `let a = [..]`).
+                // (kept in frame slots, as `let a = [..]`).
                 if let Some(Ty::Array {
                     element,
                     length: coil_ty::ArrayLength::Static(n),
@@ -1282,7 +1327,8 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             }
             E::Noop(_) => self.emit_ty(b, node, HirKind::Lit(Lit::Unit), Some(coil_ty::unit())),
 
-            E::Expr(inner) | E::Group(inner) | E::Statement(inner) => self.expr(b, inner),
+            E::Expr(inner) | E::Statement(inner) => self.expr(b, inner),
+            E::Group(inner) => self.expr(b, inner),
             E::ExprStatement(inner) => self.expr(b, inner),
             E::NamedArg(name, value) => {
                 let value = self.expr(b, value);
@@ -1343,7 +1389,22 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let init = self.expr(b, rhs);
                 let rhs_ty = self.ty_at(b, init);
                 let pat = self.let_pattern(b, pattern, rhs_ty.as_ref());
-                self.emit_ty(b, node, HirKind::LetPat { pat, init }, Some(coil_ty::unit()))
+                // A record pattern nested in a record or tuple pattern, or a
+                // tuple pattern in a record one, binds a temp that a `let` of
+                // its own destructures after this one (#2785).
+                let mut rest = Vec::new();
+                let pat = split_let_pattern(b, pat, rhs_ty.as_ref(), &mut rest);
+                let first = self.emit_ty(b, node, HirKind::LetPat { pat, init }, Some(coil_ty::unit()));
+                if rest.is_empty() {
+                    return first;
+                }
+                let span = span_of(node);
+                let mut stmts = vec![first];
+                for (pat, temp, ty) in rest {
+                    let read = self.synth(b, span, HirKind::Local(temp), ty);
+                    stmts.push(self.synth(b, span, HirKind::LetPat { pat, init: read }, Some(coil_ty::unit())));
+                }
+                self.synth(b, span, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()))
             }
             E::StaticDecl { name, init, .. } => {
                 self.static_init(name, init);
@@ -1387,7 +1448,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::And(l, r) | E::Or(l, r) => {
                 let and = matches!(node.1.as_ref(), E::And(..));
                 let lhs = self.expr(b, l);
+                let lhs = self.backing(b, lhs);
                 let rhs = self.expr(b, r);
+                let rhs = self.backing(b, rhs);
                 self.emit_ty(b, node, HirKind::Logic { and, lhs, rhs }, Some(coil_ty::boolean()))
             }
             E::Negate(e) => self.unary(b, node, e, UnOp::Neg),
@@ -1396,6 +1459,9 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Positive(e) => self.expr(b, e),
             E::Cast(value, _) => {
                 let value = self.expr(b, value);
+                if let Some(cast) = self.vec_to_byte_array(b, node, value) {
+                    return cast;
+                }
                 self.emit(b, node, HirKind::Cast { value })
             }
 
@@ -1416,17 +1482,32 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let args = fields.iter().map(|f| self.expr(b, &f.value)).collect();
                 self.emit(b, node, HirKind::Make { kind: MakeKind::Record(names), args })
             }
-            // `m::F(args)` / `C::f(args)` of a `const` or `static` function
-            // value: a call of the value it reads (#1705).
-            E::Construct { enum_name, variant_name, fields: EnumConstructPayload::Tuple(items) }
+            // `m::F(args)` / `C::f(args)` / `C::f()` of a `const` or
+            // `static` function value: a call of the value it reads (#1705,
+            // #2752).
+            E::Construct { enum_name, variant_name, fields: fields @ (EnumConstructPayload::Tuple(_) | EnumConstructPayload::Empty) }
                 if self.checker.qualified_value_call_at(node.0.start, node.0.end).is_some() =>
             {
+                let items = match fields {
+                    EnumConstructPayload::Tuple(items) => items.as_slice(),
+                    _ => &[],
+                };
                 self.qualified_value_call(b, node, enum_name, variant_name, items)
             }
-            // `Trait::m(args)` is the free call `m(args)` the checker
-            // resolved within `Trait`.
+            // A bare `C::f` naming a static method: its function value, a
+            // read of the function as a free function's name is (#2746).
             E::Construct {
-                fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Tuple(_)),
+                enum_name,
+                variant_name,
+                fields: EnumConstructPayload::Unit,
+            } if self.checker.static_method_value_at(node.0.start, node.0.end).is_some() => {
+                let def = self.node_id(node).and_then(|id| self.sidecar.def_id(id));
+                self.global(b, node, format!("{enum_name}::{variant_name}"), def)
+            }
+            // `Trait::m(args)`: the call the checker resolved within
+            // `Trait`, under the name `qualified_trait_call_at` gives it.
+            E::Construct {
+                fields: fields @ (EnumConstructPayload::Empty | EnumConstructPayload::Tuple(_)),
                 ..
             } if self.checker.qualified_trait_call_at(node.0.start, node.0.end).is_some() => {
                 let args = match fields {
@@ -1435,12 +1516,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 };
                 self.qualified_trait_call(b, node, args)
             }
-            // `C::f(args)` on a class is a static method call (a bare
-            // `C::f` names a static field first, as in codegen).
+            // `C::f(args)` / `C::f()` on a class is a static method call (a
+            // bare `C::f` names a static field first, as in codegen).
             E::Construct {
                 enum_name,
                 variant_name,
-                fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Tuple(_)),
+                fields: fields @ (EnumConstructPayload::Unit | EnumConstructPayload::Empty | EnumConstructPayload::Tuple(_)),
             } if self.static_call(enum_name, variant_name, matches!(fields, EnumConstructPayload::Unit), node) => {
                 let id = self.node_id(node);
                 let overload = id.and_then(|i| self.sidecar.overload(i)).map(|o| o.candidate_id);
@@ -1471,7 +1552,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             }
             E::Construct { enum_name, variant_name, fields } => {
                 let (args, names) = match fields {
-                    EnumConstructPayload::Unit => (Vec::new(), None),
+                    EnumConstructPayload::Unit | EnumConstructPayload::Empty => (Vec::new(), None),
                     EnumConstructPayload::Tuple(items) => (self.exprs(b, items), None),
                     EnumConstructPayload::Record(fields) => {
                         let src: Vec<HirId> = fields.iter().map(|f| self.expr(b, &f.value)).collect();
@@ -1532,6 +1613,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Branch(cond, body) => match cond {
                 Some(cond) => {
                     let cond = self.expr(b, cond);
+                    let cond = self.backing(b, cond);
                     let then = self.expr(b, body);
                     self.emit(b, node, HirKind::If { cond, then, els: None })
                 }
@@ -1595,12 +1677,21 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             E::Yield(value) | E::YieldFrom(value) => {
                 let from = matches!(node.1.as_ref(), E::YieldFrom(_));
                 let value = self.expr(b, value);
-                self.emit(b, node, HirKind::Yield { value, from })
+                // A yield's span is its operand's, so the span lookup would
+                // give the yielded type: its value is what the next resume
+                // sends (#2309).
+                let ty = self
+                    .node_id(node)
+                    .and_then(|id| self.sidecar.ty(id).cloned().or_else(|| self.checker.lookup_at(id)))
+                    .or_else(|| self.ty_of(node));
+                let zero = if from { None } else { ty.as_ref().and_then(|t| self.zero_value(b, t)) };
+                self.emit_ty(b, node, HirKind::Yield { value, from, zero }, ty)
             }
             E::Resume(handle, value) => {
                 let handle = self.expr(b, handle);
                 let value = value.as_ref().map(|v| self.expr(b, v));
-                self.emit(b, node, HirKind::Resume { handle, value })
+                let zero = self.ty_of(node).and_then(|t| self.zero_value(b, &t));
+                self.emit(b, node, HirKind::Resume { handle, value, zero })
             }
 
             E::TypeOf(inner) => self.builtin(b, node, Builtin::TypeOf, std::slice::from_ref(inner)),
@@ -1647,7 +1738,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let pack = e
             .node
             .and_then(|n| self.checker.existential_pack_at(n))
-            .or_else(|| self.checker.existential_pack_span(e.span.0, e.span.1))?;
+            .or_else(|| self.checker.existential_pack_for_span(e.span.0, e.span.1))?;
         let subst = self.checker.subst();
         // `readonly` has no runtime form: a `readonly P` packs as a `P` (#1558).
         let ty = crate::typechecking::subst::apply_ty_prune(subst, e.ty.as_ref()?);
@@ -1832,7 +1923,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 HirKind::Break | HirKind::Continue if !in_loop => exits.push(at),
                 HirKind::Loop { body } => work.push((*body, true)),
                 HirKind::ForIn { iterable, body, .. } => work.extend([(*iterable, in_loop), (*body, true)]),
-                _ => work.extend(super::lower::children(&b.body, at).into_iter().map(|k| (k, in_loop))),
+                _ => work.extend(b.body.children(at).map(|k| (k, in_loop))),
             }
         }
         for at in exits {
@@ -1928,6 +2019,11 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             let value = self.synth(b, span, HirKind::Lit(Lit::Bool(op == "==")), Some(coil_ty::boolean()));
             return self.emit_ty(b, node, HirKind::Block { stmts: vec![lhs, rhs], tail: Some(value) }, Some(coil_ty::boolean()));
         }
+        // A scalar-backed enum whose operator the checker typed as its
+        // backing's (no instance of its own takes these operands) is that
+        // primitive here: the operator is the backing type's (#2463).
+        let primitive = !matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=") && self.ty_of(node).as_ref().is_some_and(is_builtin_scalar);
+        let (lhs, rhs) = if primitive { (self.backing(b, lhs), self.backing(b, rhs)) } else { (lhs, rhs) };
         let op = resolve_bin(op, self.ty_at(b, lhs).as_ref(), self.ty_at(b, rhs).as_ref());
         let ty = self.ty_of(node).or_else(|| match op {
             BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(coil_ty::boolean()),
@@ -1942,8 +2038,22 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
 
     fn unary(&mut self, b: &mut BodyBuilder, node: &Output<'_>, e: &Output<'_>, op: UnOp) -> HirId {
         let operand = self.expr(b, e);
+        // As `binary`: `-Status::Ok` the checker typed `int` is on the
+        // backing word; with an instance the node has the enum's type.
+        let operand = if self.ty_of(node).as_ref().is_some_and(is_builtin_scalar) { self.backing(b, operand) } else { operand };
         let id = self.emit(b, node, HirKind::Un { op, operand });
         self.wrap_byte(b, id)
+    }
+
+    /// `id` as its backing word when it is a scalar-backed enum standing
+    /// where its primitive is expected (an operand, a condition): the same
+    /// word, typed as the backing.
+    fn backing(&self, b: &mut BodyBuilder, id: HirId) -> HirId {
+        let Some(backing) = self.ty_at(b, id).and_then(|ty| self.checker.scalar_backing_ty_of(&ty)) else {
+            return id;
+        };
+        let span = b.body.exprs[id.0 as usize].span;
+        self.synth(b, span, HirKind::Builtin { op: Builtin::Retype, args: vec![id] }, Some(backing))
     }
 
     /// `byte` `+ - * <<` and negation keep the low 8 bits of the int result
@@ -2035,6 +2145,8 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let read = self.expr(b, target);
         let rhs = self.expr(b, value);
         let lhs_ty = self.ty_at(b, read);
+        // `x += Status::Ok` on an `int` `x` adds the backing word.
+        let rhs = if lhs_ty.as_ref().is_some_and(is_builtin_scalar) { self.backing(b, rhs) } else { rhs };
         let bin_op = resolve_bin(sym, lhs_ty.as_ref(), self.ty_at(b, rhs).as_ref());
         let bin = if bin_op == BinOp::IntPow && is_byte(lhs_ty.as_ref()) {
             self.byte_pow(b, span_of(node), read, rhs)
@@ -2149,6 +2261,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             b.mut_marks.insert(v);
             return v;
         }
+        // `__data(e)` is `e`: only its type differs, and a body's types hold
+        // a `Matrix` as its data already.
+        if let E::Identifier("__data") = callee_node.1.as_ref()
+            && let [arg] = args
+        {
+            return self.expr(b, arg);
+        }
         match callee_node.1.as_ref() {
             E::Identifier(n) if b.lookup(n).is_none() => {
                 // `symbol::fn_key()`: this body's key, as a literal, so
@@ -2260,7 +2379,19 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 let call = self.split_over_application(b, call, &[&format!("{owner}::{member}"), member]);
                 self.after(b, span_of(node), stmts, call)
             }
-            E::Access(recv, method) => {
+            // `recv.f(args)` of a field holding a function, with no method
+            // `f`: a call of the field's value, as `(recv.f)(args)` is
+            // (#2752).
+            E::Access(..) if let Some(ty) = self.checker.field_value_call_at(node.0.start, node.0.end).cloned() => {
+                let callee = self.expr(b, name);
+                b.body.exprs[callee.0 as usize].ty = Some(ty);
+                let args = self.exprs(b, args);
+                self.emit(b, node, HirKind::Call { callee: Callee::Value(callee), args })
+            }
+            // `recv.method(args)`. A parenthesized `(recv.field)(args)` is
+            // not one: it calls the function the field holds, as the checker
+            // typed it (#2472), and takes the last arm.
+            E::Access(recv, method) if matches!(name.1.as_ref(), E::Access(..)) => {
                 let mut recv = self.expr(b, recv);
                 let mut args = self.exprs(b, args);
                 let mut stmts = self.named_args_in_source_order(b, span_of(node), &mut args);
@@ -2287,8 +2418,8 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         }
     }
 
-    /// `Trait::m(args)`: the same call as the free `m(args)` (the checker
-    /// recorded its dictionary or instance at this node).
+    /// `Trait::m(args)`: a named call of the method (the checker recorded
+    /// its dictionary or instance at this node).
     fn qualified_trait_call(&mut self, b: &mut BodyBuilder, node: &Output<'_>, args: &[Output<'_>]) -> HirId {
         let (start, end) = span_of(node);
         let name = self.checker.qualified_trait_call_at(start, end).unwrap_or_default().to_string();
@@ -2349,15 +2480,15 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             let (start, end) = (node.0.start, node.0.end);
             return self.node_id(node).is_some_and(|id| {
                 self.checker.bound_method_call_at(id).is_some() || self.checker.call_dicts_at(id).is_some()
-            }) || self.checker.bound_method_call_span(start, end).is_some()
-                || self.checker.call_dicts_span(start, end).is_some();
+            }) || self.checker.bound_method_call_for_span(start, end).is_some()
+                || self.checker.call_dicts_for_span(start, end).is_some();
         }
         let key = self.checker.resolve_class_key(owner).unwrap_or_else(|| owner.to_string());
         !(bare && self.checker.static_slot_index(&format!("{key}::{member}")).is_some())
     }
 
-    /// `E::V { f: a, .. }`: the payload is in declaration order, as the
-    /// AST's construct emits it, whatever order the call site names the
+    /// `E::V { f: a, .. }`: the payload is in declaration order, whatever
+    /// order the call site names the
     /// fields in. Shuffled arguments with effects still run in source order,
     /// through temps.
     fn record_variant(&mut self, b: &mut BodyBuilder, node: &Output<'_>, enum_name: &str, variant: &str, src: Vec<HirId>, names: Vec<String>) -> HirId {
@@ -2474,6 +2605,13 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         )
     }
 
+    /// The zero of `ty` where it is an object (#2717): see
+    /// [`super::synth::zero_value`].
+    fn zero_value(&self, b: &mut BodyBuilder, ty: &Ty) -> Option<HirId> {
+        let ty = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), ty);
+        super::synth::zero_value(self.checker, &mut b.body.exprs, &ty)
+    }
+
     fn synth_variant(&self, b: &mut BodyBuilder, span: Span, enum_name: &str, variant: &str, args: Vec<HirId>, ty: Option<Ty>) -> HirId {
         let tag = self.checker.tag_for(enum_name, variant);
         self.synth(
@@ -2508,6 +2646,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 Expression::Branch(Some(cond), body) => {
                     b.scopes.push(HashMap::new());
                     let cond = self.expr(b, cond);
+                    let cond = self.backing(b, cond);
                     let then = self.expr(b, body);
                     b.scopes.pop();
                     let kind = HirKind::If { cond, then, els };
@@ -2540,6 +2679,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         if identifier.is_none() && pattern.is_none() {
             // `while cond { body }` is `loop { if cond { body } else { break } }`.
             let cond = self.expr(b, iterable);
+            let cond = self.backing(b, cond);
             b.scopes.push(HashMap::new());
             let then = self.expr(b, body);
             b.scopes.pop();
@@ -2554,7 +2694,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let info = self
             .node_id(node)
             .and_then(|id| self.sidecar.for_in(id).cloned())
-            .or_else(|| self.checker.for_in_info_span(node.0.start, node.0.end).cloned());
+            .or_else(|| self.checker.for_in_info_for_span(node.0.start, node.0.end).cloned());
         let item_ty = info.as_ref().map(|i| i.item_ty.clone());
         b.scopes.push(HashMap::new());
         let pat = match (identifier, pattern) {
@@ -2572,12 +2712,32 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             HirPat::Wild => HirPat::Bind(b.temp("item", item_ty.clone())),
             pat => pat,
         };
+        // A record pattern anywhere in it (`for {a, b} in xs`): the loop
+        // binds a temp, and the body starts with the `let` that destructures
+        // it, as `let` does (#2784).
+        let mut lets = Vec::new();
+        let pat = if has_record_pattern(&pat) {
+            let item = b.temp("for$item", item_ty.clone());
+            let mut rest = Vec::new();
+            let top = split_let_pattern(b, pat, item_ty.as_ref(), &mut rest);
+            for (pat, temp, ty) in std::iter::once((top, item, item_ty.clone())).chain(rest) {
+                let read = self.synth(b, span, HirKind::Local(temp), ty);
+                lets.push(self.synth(b, span, HirKind::LetPat { pat, init: read }, Some(coil_ty::unit())));
+            }
+            HirPat::Bind(item)
+        } else {
+            pat
+        };
         let mut body = self.expr(b, body);
         b.scopes.pop();
-        if !checks.is_empty() {
-            let mut stmts = checks.to_vec();
+        if !checks.is_empty() || !lets.is_empty() {
+            let mut stmts = lets;
+            stmts.extend_from_slice(checks);
             stmts.push(body);
             body = self.synth(b, span, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()));
+        }
+        if matches!(info.as_ref().map(|i| &i.kind), Some(ForInKind::Bound)) {
+            return self.bound_for_in(b, node, pat, iter, body, item_ty);
         }
         self.emit_ty(
             b,
@@ -2587,15 +2747,82 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         )
     }
 
+    /// `v as [byte; N]` of a `Vec<byte>` (#2823): the same array once its
+    /// length is checked, `{ let $c = v; if $c.len() != N { panic … }; $c as [byte; N] }`.
+    fn vec_to_byte_array(&mut self, b: &mut BodyBuilder, node: &Output<'_>, value: HirId) -> Option<HirId> {
+        let to = self.ty_of(node)?;
+        let Ty::Array { element, length: coil_ty::ArrayLength::Static(n) } = strip_readonly(&to) else { return None };
+        let from = self.ty_at(b, value)?;
+        if !super::classify::is_byte(element) || !super::classify::is_byte_vec(&from) || matches!(strip_readonly(&from), Ty::Array { .. }) {
+            return None;
+        }
+        let n = *n;
+        let span = span_of(node);
+        let c = b.temp("cast", Some(from.clone()));
+        let bind = self.synth(b, span, HirKind::Let { local: c, init: Some(value) }, Some(coil_ty::unit()));
+        let read = |this: &Self, b: &mut BodyBuilder| this.synth(b, span, HirKind::Local(c), Some(from.clone()));
+        let len_of = |this: &Self, b: &mut BodyBuilder| {
+            let r = read(this, b);
+            this.synth(b, span, HirKind::Call { callee: Callee::Method { name: "len".to_string() }, args: vec![r] }, Some(coil_ty::int()))
+        };
+        let len = len_of(self, b);
+        let want = self.synth(b, span, HirKind::Lit(Lit::Int(n as i64)), Some(coil_ty::int()));
+        let differs = self.synth(b, span, HirKind::Bin { op: BinOp::Ne, lhs: len, rhs: want }, Some(coil_ty::boolean()));
+        let text = format!("cannot cast a `Vec<byte>` of %i bytes to `[byte; {n}]`");
+        let fmt = self.synth(b, span, HirKind::Lit(Lit::Str(text)), Some(coil_ty::string()));
+        let got = len_of(self, b);
+        let callee = Callee::Named { name: "string::format".into(), def: None, overload: None };
+        let msg = self.synth(b, span, HirKind::Call { callee, args: vec![fmt, got] }, Some(coil_ty::string()));
+        let panic = self.synth(b, span, HirKind::Builtin { op: Builtin::Panic, args: vec![msg] }, Some(coil_ty::never()));
+        let check = self.synth(b, span, HirKind::If { cond: differs, then: panic, els: None }, Some(coil_ty::unit()));
+        let operand = read(self, b);
+        let cast = self.synth(b, span, HirKind::Cast { value: operand }, Some(to.clone()));
+        Some(self.emit_ty(b, node, HirKind::Block { stmts: vec![bind, check], tail: Some(cast) }, Some(to)))
+    }
+
+    /// `for pat in it` over a type parameter's `Iterator` bound (#2820):
+    /// `loop { match it.next() { Some(pat) => body, _ => break } }`, the
+    /// `next` a dictionary call the checker recorded at the iterable's span.
+    /// A local iterable is the iterator the loop advances, as in a `for`
+    /// over any iterator; another value is bound to a temporary first.
+    fn bound_for_in(&mut self, b: &mut BodyBuilder, node: &Output<'_>, pat: HirPat, iter: HirId, body: HirId, item_ty: Option<Ty>) -> HirId {
+        let span = b.body.expr(iter).span;
+        let it_ty = self.ty_at(b, iter);
+        let mut stmts = Vec::new();
+        let it = match b.body.expr(iter).kind {
+            HirKind::Local(l) => l,
+            _ => {
+                let t = b.temp("for$it", it_ty.clone());
+                stmts.push(self.synth(b, span, HirKind::Let { local: t, init: Some(iter) }, Some(coil_ty::unit())));
+                t
+            }
+        };
+        let recv = self.synth(b, span, HirKind::Local(it), it_ty);
+        let opt = item_ty.map(coil_ty::option_ty);
+        let next = self.synth(b, span, HirKind::Call { callee: Callee::Method { name: "next".to_string() }, args: vec![recv] }, opt);
+        let stop = self.synth(b, span, HirKind::Break, Some(coil_ty::never()));
+        let arms = vec![
+            HirArm { pat: self.variant_pat(common::BUILTIN_OPTION_ENUM, "Some", HirPatFields::Tuple(vec![pat])), body },
+            HirArm { pat: HirPat::Wild, body: stop },
+        ];
+        let step = self.synth(b, span, HirKind::Match { scrutinee: next, arms }, Some(coil_ty::unit()));
+        stmts.push(self.synth(b, span, HirKind::Loop { body: step }, Some(coil_ty::unit())));
+        self.emit_ty(b, node, HirKind::Block { stmts, tail: None }, Some(coil_ty::unit()))
+    }
+
     fn return_(&mut self, b: &mut BodyBuilder, node: &Output<'_>, value: &Output<'_>) -> HirId {
         let is_unit = matches!(peel(value).1.as_ref(), Expression::Noop(_));
+        // A gen fn's bare `return;` (the parser's `()`) completes it with no
+        // value, whatever its yield type (#2717): nothing to wrap in `Ok`.
+        let bare_coro = b.body.is_coro && (is_unit || matches!(peel(value).1.as_ref(), Expression::Tuple(items) if items.is_empty()));
         let wrap = b.body.result_mode
+            && !bare_coro
             && !is_result_construct(value, b.ok_is_result)
             && !self.checker.returns_whole_result(value.0.start, value.0.end)
             && miss_ret(b).as_ref().and_then(result_ok_err).is_some();
         // `return e?` (re-wrapped in Ok by result mode) and `return Ok(e?)` /
-        // `return Some(e?)` of the function's own type return `e` as is, as
-        // the AST's `expr_try_return_src` forwards the pair.
+        // `return Some(e?)` of the function's own type return `e` as is,
+        // forwarding the pair.
         if let Some(src) = self.try_forward_src(b, value, wrap) {
             let v = self.expr(b, src);
             return self.emit_ty(b, node, HirKind::Return(Some(v)), Some(coil_ty::never()));
@@ -2606,7 +2833,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         // is Ok-wrapped as well: the final value is the yielded `Result`.
         let wrap = wrap
             || (b.body.is_coro
-                && !is_unit
+                && !bare_coro
                 && miss_ret(b).as_ref().and_then(result_ok_err).is_some()
                 && self
                     .ty_at(b, v)
@@ -2704,8 +2931,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         let x = b.temp("ok", ok_ty.clone());
         let hit_pat = self.variant_pat(enum_name, hit, HirPatFields::Tuple(vec![HirPat::Bind(x)]));
         let hit_body = self.synth(b, span, HirKind::Local(x), ok_ty);
-        // In a test body the miss arm fails the case with a message, as
-        // the AST's `emit_test_try` (#628).
+        // In a test body the miss arm fails the case with a message (#628).
         let test_try = self.checker.test_try_at(span.0, span.1).cloned();
         // The miss arm re-wraps the error in the function's own return type.
         let (miss_pat, miss_val) = if let Some(kind) = test_try {
@@ -2836,7 +3062,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
     }
 
     /// Whether a `match` on `ty` lowers as a dispatch: an `int`, or an
-    /// enum (a scalar one included), as `lower::is_scalar_match` and
+    /// enum (a scalar one included), as `query::is_scalar_match` and
     /// `Walk::match_` take it.
     fn dispatchable(&self, ty: &Ty) -> bool {
         let ty = strip_readonly(ty);
@@ -2847,7 +3073,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         };
         scalar_enum
             || matches!(ty, Ty::Con(n) if n == coil_ty::INT)
-            || super::lower::classify(self.checker, ty) == Some(super::lower::ValueClass::Enum)
+            || super::classify::classify(self.checker, ty) == Some(super::classify::ValueClass::Enum)
     }
 
     /// Regroup arms with nested payload patterns into one arm per outer
@@ -3069,7 +3295,12 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
 
     /// Payload types of `enum_name::variant` at the scrutinee's instance.
     fn variant_field_tys(&self, enum_name: &str, variant: &str, scrut_ty: Option<&Ty>) -> Vec<Ty> {
-        let scrut = scrut_ty.map(strip_readonly);
+        // A variant built in place (`match Gen::G("s")`) is typed by its
+        // constructor, whose owner is the instance (#2786).
+        let scrut = scrut_ty.map(strip_readonly).map(|t| match t {
+            Ty::Constructor { owner, .. } => strip_readonly(owner),
+            t => t,
+        });
         if let Some(t) = scrut {
             if is_option_ty(t) && variant == "Some" {
                 return option_inner(t).into_iter().collect();
@@ -3082,17 +3313,20 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                 };
             }
         }
-        // A ground instance of a generic user enum binds its parameters.
+        // An instance of a generic user enum binds its parameters, one type
+        // per field in field order: open in a generic body's own type
+        // variables (`Pick<T>`), as `Option<T>`'s is, which its clones bind
+        // (#2358).
         if let Some(Ty::App(_, args)) = scrut
-            && let Some(payload) = super::lower::generic_enum_payload(self.checker, enum_name, variant, args)
+            && let Some(payload) = super::classify::generic_enum_payload(self.checker, enum_name, variant, args)
         {
-            return payload.into_iter().filter(layout::ty_is_closed).collect();
+            return payload;
         }
         self.checker
             .enum_variants(enum_name)
             .and_then(|vars| vars.into_iter().find(|(n, _, _)| n == variant))
             .map(|(_, _, payload)| payload)
-            .filter(|payload| payload.iter().all(layout::ty_is_closed))
+            .filter(|payload| payload.iter().all(|t| super::classify::closed_field(self.checker, t, &mut Vec::new())))
             .unwrap_or_default()
     }
 
@@ -3192,7 +3426,7 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
             }
         }
         let index = self.module.bodies.len();
-        self.module.bodies.push(inner.finish());
+        self.module.bodies.push(inner.finish(self.checker));
         self.emit(b, node, HirKind::Lambda { body: index })
     }
 }
@@ -3257,6 +3491,39 @@ fn join(prefix: &str, name: &str) -> String {
     } else {
         format!("{prefix}::{name}")
     }
+}
+
+/// HIR carries run-time types: `Matrix<D>` is its data `D` at run time, at
+/// any depth of a node's or a local's type, so every later pass and the
+/// lowering see the data's own shape (a tuple, an array, a `Vec`). The
+/// checker keeps the wrapper: it picked the linear-algebra operators by
+/// node, and `typeof` names its operand's checked type.
+fn runtime_types(body: &mut HirBody, checker: &Checker) {
+    use crate::typechecking::aggregate_arith::{erase_matrix_ty, is_matrix_ty};
+    let erase = |ty: &mut Option<Ty>| {
+        let Some(t) = ty.as_ref().filter(|t| t.any(|t| matches!(t, Ty::Var(_)) || is_matrix_ty(t))) else {
+            return;
+        };
+        let pruned = crate::typechecking::subst::apply_ty_prune(checker.subst(), t);
+        if pruned.any(is_matrix_ty) {
+            *ty = Some(erase_matrix_ty(&pruned));
+        }
+    };
+    let mut named: HashSet<HirId> = HashSet::new();
+    for e in &body.exprs {
+        if let HirKind::Builtin { op: Builtin::TypeOf, args } = &e.kind {
+            named.extend(args.iter().copied());
+        }
+    }
+    for (i, e) in body.exprs.iter_mut().enumerate() {
+        if !named.contains(&HirId(i as u32)) {
+            erase(&mut e.ty);
+        }
+    }
+    for local in &mut body.locals {
+        erase(&mut local.ty);
+    }
+    erase(&mut body.ret);
 }
 
 fn index_kind(ty: Option<&Ty>) -> IndexKind {
@@ -3350,8 +3617,77 @@ pub(crate) fn resolve_bin(op: &'static str, l: Option<&Ty>, r: Option<&Ty>) -> B
     BinOp::Overloaded(op)
 }
 
+/// `int`, `float`, `bool`, `byte` or `string`.
+fn is_builtin_scalar(ty: &Ty) -> bool {
+    matches!(strip_readonly(ty), Ty::Con(n) if [coil_ty::INT, coil_ty::FLOAT, coil_ty::BOOL, coil_ty::BYTE, coil_ty::STRING].contains(&n.as_str()))
+}
+
 fn is_byte(ty: Option<&Ty>) -> bool {
     matches!(ty.map(strip_readonly), Some(Ty::Con(n)) if n == coil_ty::BYTE)
+}
+
+/// Whether `pat` holds a record pattern at any depth.
+fn has_record_pattern(pat: &HirPat) -> bool {
+    match pat {
+        HirPat::Record(_) => true,
+        HirPat::Tuple(items) => items.iter().any(has_record_pattern),
+        _ => false,
+    }
+}
+
+/// `pat` (a `let` pattern of type `ty`) with each record pattern below the
+/// top, and each tuple pattern directly in a record pattern, replaced by a
+/// temp; `rest` gets each replaced pattern (split the same way) with its
+/// temp and type, in the order the `let`s that read them run. Lowering
+/// reads a record pattern's fields only into bindings, and a tuple
+/// pattern's items into bindings and tuple patterns (#2785).
+fn split_let_pattern(b: &mut BodyBuilder, pat: HirPat, ty: Option<&Ty>, rest: &mut Vec<(HirPat, LocalId, Option<Ty>)>) -> HirPat {
+    match (pat, ty.map(strip_readonly)) {
+        (HirPat::Record(parts), ty) => {
+            let fields: &[(String, Ty)] = match ty {
+                Some(Ty::Record { fields }) => fields,
+                _ => &[],
+            };
+            let parts = parts
+                .into_iter()
+                .map(|(name, p)| {
+                    let fty = fields.iter().find(|(n, _)| *n == name).map(|(_, t)| t);
+                    let p = match p {
+                        p @ (HirPat::Record(_) | HirPat::Tuple(_)) => lift_let_pattern(b, p, fty, rest),
+                        p => p,
+                    };
+                    (name, p)
+                })
+                .collect();
+            HirPat::Record(parts)
+        }
+        (HirPat::Tuple(items), ty) => {
+            let tys: &[Ty] = match ty {
+                Some(Ty::Tuple(tys)) => tys,
+                _ => &[],
+            };
+            let items = items
+                .into_iter()
+                .enumerate()
+                .map(|(i, p)| match p {
+                    p @ HirPat::Record(_) => lift_let_pattern(b, p, tys.get(i), rest),
+                    p @ HirPat::Tuple(_) => split_let_pattern(b, p, tys.get(i), rest),
+                    p => p,
+                })
+                .collect();
+            HirPat::Tuple(items)
+        }
+        (p, _) => p,
+    }
+}
+
+/// [`split_let_pattern`]'s temp for `pat`, of type `ty`.
+fn lift_let_pattern(b: &mut BodyBuilder, pat: HirPat, ty: Option<&Ty>, rest: &mut Vec<(HirPat, LocalId, Option<Ty>)>) -> HirPat {
+    let temp = b.temp("let$part", ty.cloned());
+    let at = rest.len();
+    rest.push((HirPat::Wild, temp, ty.cloned()));
+    rest[at].0 = split_let_pattern(b, pat, ty, rest);
+    HirPat::Bind(temp)
 }
 
 /// A pattern that matches every value.
@@ -3380,7 +3716,7 @@ fn shareable_catch_all(body: &HirBody, arm: &HirArm) -> bool {
         _ => return false,
     };
     let mut ok = true;
-    super::lower::visit(body, arm.body, &mut |e| {
+    body.visit(arm.body, &mut |e| {
         ok &= !matches!(
             &e.kind,
             HirKind::Lambda { .. }

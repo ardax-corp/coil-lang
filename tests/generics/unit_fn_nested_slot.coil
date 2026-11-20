@@ -1,0 +1,130 @@
+// A generic class or enum that holds a function returning its parameter
+// below a field's or payload's top (`fs: Vec<fn() -> T>`, a tuple item,
+// `Holder<fn() -> T>`, `Option<fn(T) -> T>`) is clone-only: its methods and
+// every generic over it run as per-type clones, past the clone budget too.
+// So at `T = ()` a clone calls a ground `-> ()` function as the ground call
+// it is, and no adapter is needed where the function is stored
+// (coil-lang#2560, which refused these with E0801 `unit-fn-nested`).
+//
+// unit_fn_nested_slot_shared.coil runs the same with no mono clones.
+use tests::assert;
+
+class Holder<U> {
+    pub item: U,
+}
+
+class Outer<T> {
+    pub h: Holder<fn() -> T>,
+}
+
+impl Outer<T> {
+    pub fn run() -> Option<T> {
+        let f = self.h.item;
+        return Some(f());
+    }
+}
+
+class Many<T> {
+    pub fs: Vec<fn() -> T>,
+}
+
+impl Many<T> {
+    pub fn first() -> Option<T> {
+        return Some(self.fs[0]());
+    }
+
+    pub fn all() -> Vec<T> {
+        let out: Vec<T> = [];
+        for f in self.fs {
+            out.push(f());
+        }
+        return out;
+    }
+}
+
+class Tagged<T> {
+    pub p: (fn() -> T, int),
+}
+
+impl Tagged<T> {
+    pub fn get() -> (T, int) {
+        let (f, n) = self.p;
+        return (f(), n);
+    }
+}
+
+enum Steps<T> {
+    Many(Vec<fn() -> T>),
+    Pair((fn() -> T, int)),
+    Maybe(Option<fn(T) -> T>),
+}
+
+impl Steps<T> {
+    pub fn first() -> Option<T> {
+        return match self {
+            Steps::Many(fs) => Some(fs[0]()),
+            Steps::Pair(p) => {
+                let (f, _) = p;
+                Some(f())
+            },
+            Steps::Maybe(_) => None,
+        };
+    }
+}
+
+fn apply<T>(Steps<T> s, T x) -> T {
+    return match s {
+        Steps::Maybe(o) => match o {
+            Some(f) => f(x),
+            None => x,
+        },
+        default => x,
+    };
+}
+
+fn firsts<T>(Many<T> m) -> Vec<T> {
+    return m.all();
+}
+
+fn unit() -> () {}
+
+fn same(() u) -> () {
+    return u;
+}
+
+fn two() -> int {
+    return 2;
+}
+
+test("a function in another class's type argument at ()") {
+    assert!(new Outer(new Holder(unit)).run() == Some(()));
+    assert!(new Outer(new Holder(two)).run() == Some(2));
+}
+
+test("a Vec of functions in a field at ()") {
+    let fs: Vec<fn() -> ()> = [unit, unit];
+    let m = new Many(fs);
+    assert!(m.first() == Some(()));
+    assert!(m.all().len() == 2 && m.all()[1] == ());
+    assert!(firsts(m).len() == 2 && firsts(m)[0] == ());
+    let gs: Vec<fn() -> ()> = [unit];
+    m.fs = gs;
+    assert!(m.all().len() == 1 && m.all()[0] == ());
+    let ns: Vec<fn() -> int> = [two];
+    assert!(new Many(ns).first() == Some(2));
+}
+
+test("a tuple item in a field at ()") {
+    assert!(new Tagged((unit, 3)).get() == ((), 3));
+    assert!(new Tagged((two, 3)).get() == (2, 3));
+}
+
+test("payloads at ()") {
+    let fs: Vec<fn() -> ()> = [unit];
+    assert!(Steps::Many(fs).first() == Some(()));
+    assert!(Steps::Pair((unit, 1)).first() == Some(()));
+    assert!(apply(Steps::Maybe(Some(same)), ()) == ());
+    let none: Steps<()> = Steps::Maybe(None);
+    assert!(apply(none, ()) == ());
+    assert!(apply(Steps::Maybe(Some(fn (int x) => x + 1)), 1) == 2);
+}

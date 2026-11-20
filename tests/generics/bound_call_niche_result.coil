@@ -59,7 +59,7 @@ fn checked<T: Named>(T s, Result<string, string> r) -> string {
 }
 
 fn peeked<F: Holder>(F<string> xs) -> string {
-    return match peek(xs) {
+    return match xs.peek() {
         Option::Some(v) => v,
         Option::None => "none",
     };

@@ -5,10 +5,9 @@ use std::cell::Cell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use common::{BUILTIN_ENV_ERROR_VARIANTS, BUILTIN_RESULT_VARIANTS, Value};
+use common::{BUILTIN_ENV_ERROR_VARIANTS, Value};
 
 use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
-use crate::io::alloc_result_err;
 use crate::memory::{Heap, ObjArray, Object};
 
 pub use common::is_ffi_exec_symbol;
@@ -30,12 +29,6 @@ fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<crate::EnumPayload>)
 pub fn alloc_env_error(heap: &mut Heap, tag: EnvErrorTag) -> Value {
     let _ = BUILTIN_ENV_ERROR_VARIANTS;
     alloc_enum(heap, tag as u32, vec![])
-}
-
-pub fn alloc_result_env_err(heap: &mut Heap, tag: EnvErrorTag) -> Value {
-    let _ = BUILTIN_RESULT_VARIANTS;
-    let err = alloc_env_error(heap, tag);
-    alloc_result_err(heap, err)
 }
 
 pub fn as_result_value(heap: &mut Heap, r: Result<Value, EnvErrorTag>) -> Value {
@@ -63,10 +56,7 @@ fn contains_nul(s: &str) -> bool {
 }
 
 fn heap_string(heap: &Heap, v: Value) -> Result<String, EnvErrorTag> {
-    match heap.find_object_by_addr(v.bits()) {
-        Some(Object::String(gc)) => Ok(gc.as_ref().data.to_string()),
-        _ => Err(EnvErrorTag::InvalidInput),
-    }
+    crate::io::heap_string(heap, v).ok_or(EnvErrorTag::InvalidInput)
 }
 
 #[cfg(test)]
@@ -219,7 +209,7 @@ fn try_host_set_cwd(heap: &mut Heap, args: &[Value]) -> Result<(), EnvErrorTag> 
 
 /// Terminates the process (`std::process::exit`). Never returns.
 ///
-/// Compile-time `--allow-exit` is the grant; archived bytecode with this op
+/// Compile-time `--allow-exit` is the grant; archived code with this op
 /// runs it. Under [`trap_exit`] the wired native is [`try_host_exit`]
 /// instead, which does return.
 pub fn host_exit(_heap: &mut Heap, args: &[Value]) -> Value {
@@ -236,7 +226,7 @@ thread_local! {
     static EXIT_REQUEST: Cell<Option<i32>> = const { Cell::new(None) };
 }
 
-/// Make `env::exit` a VM panic of the calling job (for every machine in this
+/// Make `env::exit` a runtime panic of the calling job (for every machine in this
 /// process) instead of a process exit. The panic runs the job's `defer`s;
 /// [`take_exit_request`] then tells the job's runner it was an exit.
 pub fn trap_exit(on: bool) {

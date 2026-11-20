@@ -1,0 +1,28 @@
+// @expected E0801 — a `forall` parameter passed on to a less general `forall`
+// (coil-lang#2637): calls through the second pass the `kinds` bits and
+// dictionaries of its type, which the value cannot read in its own order.
+trait Name<T> {
+    fn name(T x) -> string {}
+}
+
+impl Name for string {
+    fn name(string x) -> string {
+        return "string";
+    }
+}
+
+fn names<B: Name, A: Name>(B b, A a) -> string {
+    return b.name() + " " + a.name();
+}
+
+fn run_same(forall A: Name. A -> A -> string g) -> string {
+    return g("s", "t");
+}
+
+fn pass(forall A: Name, B: Name. B -> A -> string g) -> string {
+    return run_same(g);
+}
+
+fn main() {
+    let s = pass(names);
+}

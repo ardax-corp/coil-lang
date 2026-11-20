@@ -99,7 +99,8 @@ fn hyc_panic_output_at_each_debug_level() {
         // `coil compile` defaults to `-g2`.
         let size = |p: &Path| std::fs::metadata(p).unwrap().len();
         assert_eq!(size(&default), size(&g2), "-O{opt}: default is -g2");
-        assert!(size(&g0) < size(&g1) && size(&g1) < size(&g2), "-O{opt}: sizes {} {} {}", size(&g0), size(&g1), size(&g2));
+        // A location is found by its byte span, so `-g1` keeps them.
+        assert!(size(&g0) < size(&g1), "-O{opt}: sizes {} {}", size(&g0), size(&g1));
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

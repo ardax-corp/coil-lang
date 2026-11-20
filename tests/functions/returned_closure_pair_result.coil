@@ -1,0 +1,69 @@
+// A function that returns a closure whose result is two words (`Option`,
+// `Result`, a pair) returns one word, the function value: the call
+// lowers as any other, and calling the closure gives the pair (#2310).
+use tests::assert;
+
+fn adder(int k) -> fn(int x) -> Option<int> {
+    return fn (int x) use (k) {
+        if x < 0 {
+            return None;
+        }
+        return Some(x + k);
+    };
+}
+
+fn checker(int k) -> fn(int x) -> Result<int, string> {
+    return fn (int x) use (k) {
+        if x < k {
+            return Err("small");
+        }
+        return Ok(x - k);
+    };
+}
+
+fn pairer(int k) -> int -> (int, int) {
+    return fn (int x) use (k) {
+        return (x, x * k);
+    };
+}
+
+fn nothing_in() -> fn(int x) -> Result<int, int> {
+    return fn (int x) {
+        return Ok(x);
+    };
+}
+
+test("a returned closure gives its Option") {
+    let f = adder(10);
+    assert!(f(5) == Some(15));
+    assert!(f(-1) == None);
+}
+
+test("a returned closure gives its Result") {
+    let f = checker(3);
+    let ok = match f(5) {
+        Ok(v) => v,
+        Err(_) => -1,
+    };
+    assert!(ok == 2);
+    let err = match f(1) {
+        Ok(_) => "",
+        Err(e) => e,
+    };
+    assert!(err == "small");
+}
+
+test("a returned closure gives its pair") {
+    let (a, b) = pairer(4)(3);
+    assert!(a == 3);
+    assert!(b == 12);
+}
+
+test("a nullary function returns a closure") {
+    let f = nothing_in();
+    assert!(f(9) == Ok(9));
+}
+
+test("the call alone, its value unused") {
+    let _ = adder(1);
+}

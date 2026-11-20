@@ -1,6 +1,6 @@
 # Q6 — MIR-friendly iterator protocol (near-term)
 
-> **Status: historical.** Written while stack-lowered (fuse-IL) bodies were the default. Since M5 (2026-10-15) every body lowers through MIR and emits dense or LIR. Today's pipeline: [pipeline.md](pipeline.md).
+> **Status: historical.** Written while stack-lowered (fuse-IL) bodies were the default. The tiers it discusses (fuse-IL, dense, LIR) and the bytecode VM that ran them have been deleted: every body now lowers from HIR to MIR and runs as native code or on the MIR interpreter. Today's pipeline: [pipeline.md](pipeline.md).
 
 Linear: COI-328.
 Not a permanent fuse-IL ceiling. Not a full `Iterator` trait rewrite.
@@ -49,7 +49,6 @@ type level). Runtime lowering:
 5. **Tuple** — temp array, then (1).
 6. **Record** — not iterable: a record is a fixed set of named fields
    (a checker error, E0119, that points to `collections::map::HashMap`).
-   The VM keeps `DictEntries` for older archives only.
 7. **User `Iterator::next`** (C2b rung 2) keeps
    `into_iter` then `next` → `Option` (Q8 two-slot / niche match + B3
    CALL) when `IntoIter` is not a counted builtin. If `IntoIter` is

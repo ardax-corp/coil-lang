@@ -1,0 +1,81 @@
+// `as` between byte arrays (#2823): a `Vec<byte>` and a `[byte; N]` convert
+// both ways, and a cast to `[byte; N]` from a `Vec<byte>` of another length
+// panics. The result is a value of its own: a write through it never shows
+// in the operand.
+use tests::assert;
+use task::{scope, Scope, TaskError};
+
+fn message(Result<int, TaskError> r) -> string {
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(TaskError::Panicked(m)) => m,
+        Result::Err(_) => "other",
+    };
+}
+
+// Run `body` as a child task: its panic message, or "ok".
+fn outcome(unit -> int body) -> string {
+    return message(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+fn bytes(int n) -> Vec<byte> {
+    let v: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < n {
+        v.push((97 + i) as byte);
+        i += 1;
+    }
+    return v;
+}
+
+fn to_pair(Vec<byte> v) -> [byte; 2] {
+    return v as [byte; 2];
+}
+
+test("a Vec<byte> of the array's length casts to [byte; N]") {
+    let v = bytes(2);
+    let a = v as [byte; 2];
+    assert!(a.len() == 2);
+    assert!(a[0] as int == 97 && a[1] as int == 98);
+    let b = to_pair(bytes(2));
+    assert!(b[1] as int == 98);
+}
+
+test("a Vec<byte> of another length panics") {
+    assert!(
+        outcome(fn () => to_pair(bytes(3))[0] as int) ==
+        "cannot cast a `Vec<byte>` of 3 bytes to `[byte; 2]`",
+    );
+    assert!(
+        outcome(fn () => to_pair(bytes(0))[0] as int) ==
+        "cannot cast a `Vec<byte>` of 0 bytes to `[byte; 2]`",
+    );
+    assert!(outcome(fn () => to_pair(bytes(2))[0] as int) == "ok");
+}
+
+test("a [byte; N] casts to Vec<byte> and to itself") {
+    let a: [byte; 2] = "ab";
+    let v = a as Vec<byte>;
+    assert!(v.len() == 2 && v[1] as int == 98);
+    let b = a as [byte; 2];
+    assert!(b[0] as int == 97);
+}
+
+test("the result of a cast is a value of its own") {
+    let a: [byte; 2] = "ab";
+    let v = a as Vec<byte>;
+    v.push(99 as byte);
+    v[0] = 120 as byte;
+    assert!(v.len() == 3);
+    assert!(a.len() == 2 && a[0] as int == 97);
+    let w = bytes(2);
+    let x = w as Vec<byte>;
+    x.push(1 as byte);
+    assert!(w.len() == 2 && x.len() == 3);
+    let p = w as [byte; 2];
+    w[0] = 65 as byte;
+    assert!(p[0] as int == 97 && w[0] as int == 65);
+}

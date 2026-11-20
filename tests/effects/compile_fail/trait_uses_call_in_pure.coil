@@ -14,7 +14,7 @@ impl Load for Src {
 }
 
 pure fn total(Load a) -> int {
-    return load(a);
+    return a.load();
 }
 
 fn main() {

@@ -1,0 +1,243 @@
+// A generator's yielded and sent values follow a returned value's layout
+// rules (#2680): a heap tuple or boxed enum moves as its object, a
+// two-slot value boxed, a niche word as itself. Each shape is resumed by
+// hand, read by `for`, sent with `resume .. with`, and yielded by a
+// generic generator at that type.
+use tests::assert;
+
+class Pt {
+    pub x: int,
+}
+
+enum Two {
+    Both(int, string),
+    Neither,
+}
+
+enum One {
+    Num(int),
+    Off,
+}
+
+readonly class P2 {
+    pub a: int,
+    pub b: int,
+}
+
+gen fn heap_tuples() {
+    yield ("a", 1);
+    yield ("b", 2);
+}
+
+gen fn class_tuples() {
+    yield (new Pt(3), 4);
+}
+
+gen fn nested() {
+    yield Option::Some(Option::Some(9));
+    yield Option::Some(Option::None);
+    yield Option::None;
+}
+
+gen fn mixed() {
+    yield Option::Some((1, 2));
+    yield Option::None;
+}
+
+gen fn triples() {
+    yield (1, 2, 3);
+}
+
+gen fn twos() {
+    yield Two::Both(5, "q");
+    yield Two::Neither;
+}
+
+gen fn ones() {
+    yield One::Num(6);
+    yield One::Off;
+}
+
+gen fn niches() {
+    yield Option::Some("n");
+    yield Option::None;
+}
+
+gen fn results() {
+    yield Result::Ok("ok");
+    yield Result::Err("bad");
+}
+
+gen fn unit_results() {
+    yield Result::Ok(());
+    yield Result::Err("e");
+}
+
+gen fn pairs() {
+    yield (7, 8);
+    yield (9, 10);
+}
+
+gen fn float_pairs() {
+    yield (1, 0.5);
+}
+
+gen fn options() {
+    yield Option::Some(11);
+    yield Option::None;
+}
+
+gen fn int_results() {
+    yield Result::Ok(12);
+    yield Result::Err("no");
+}
+
+gen fn points() {
+    yield new P2(13, 14);
+}
+
+gen fn spans() {
+    yield 0..3;
+}
+
+gen fn vecs() {
+    yield Vec::from([1, 2]);
+}
+
+gen fn echo_tuple() {
+    let got = yield ("first", 0);
+    let (s, n) = got;
+    yield (s, n + 1);
+}
+
+gen fn echo_nested() {
+    let got = yield Option::None;
+    yield got;
+}
+
+gen fn repeat<T>(T x) {
+    yield x;
+    yield x;
+}
+
+test("heap tuples resumed by hand and by for") {
+    let g = heap_tuples();
+    let (s, i) = resume g;
+    assert!(s == "a" && i == 1);
+    let p = resume g;
+    assert!(p == ("b", 2));
+    let total = 0;
+    for t in heap_tuples() {
+        let (_, n) = t;
+        total = total + n;
+    }
+    assert!(total == 3);
+    let h = class_tuples();
+    let (pt, k) = resume h;
+    assert!(pt.x == 3 && k == 4);
+    let t3 = triples();
+    assert!((resume t3) == (1, 2, 3));
+}
+
+test("boxed and nested enums") {
+    let g = nested();
+    assert!((resume g) == Option::Some(Option::Some(9)));
+    assert!((resume g) == Option::Some(Option::None));
+    assert!((resume g) == Option::None);
+    let m = mixed();
+    assert!((resume m) == Option::Some((1, 2)));
+    assert!((resume m) == Option::None);
+    let w = twos();
+    let first = match resume w {
+        Two::Both(n, s) => n + s.len(),
+        Two::Neither => 0,
+    };
+    assert!(first == 6);
+    let seen = 0;
+    for v in nested() {
+        seen = seen + 1;
+    }
+    assert!(seen == 3);
+}
+
+test("niche and two-slot values") {
+    let n = niches();
+    assert!((resume n) == Option::Some("n"));
+    assert!((resume n) == Option::None);
+    let r = results();
+    assert!((resume r) == Result::Ok("ok"));
+    assert!((resume r) == Result::Err("bad"));
+    let u = unit_results();
+    assert!((resume u) == Result::Ok(()));
+    assert!((resume u) == Result::Err("e"));
+    let p = pairs();
+    let (a, b) = resume p;
+    assert!(a == 7 && b == 8);
+    assert!((resume p) == (9, 10));
+    let f = float_pairs();
+    assert!((resume f) == (1, 0.5));
+    let o = options();
+    assert!((resume o) == Option::Some(11));
+    let ir = int_results();
+    assert!((resume ir) == Result::Ok(12));
+    assert!((resume ir) == Result::Err("no"));
+    let on = ones();
+    let num = match resume on {
+        One::Num(v) => v,
+        One::Off => 0,
+    };
+    assert!(num == 6);
+    let pt = points();
+    let q = resume pt;
+    assert!(q.a == 13 && q.b == 14);
+    let sp = spans();
+    let sum = 0;
+    for i in resume sp {
+        sum = sum + i;
+    }
+    assert!(sum == 3);
+    let vs = vecs();
+    assert!((resume vs) == Vec::from([1, 2]));
+}
+
+test("values sent with resume .. with") {
+    let g = echo_tuple();
+    let first = resume g;
+    assert!(first == ("first", 0));
+    let back = resume g with ("sent", 4);
+    assert!(back == ("sent", 5));
+    let h = echo_nested();
+    resume h;
+    let got = resume h with Option::Some(Option::Some(2));
+    assert!(got == Option::Some(Option::Some(2)));
+}
+
+test("a generic generator at each shape") {
+    let a = repeat(("s", 1));
+    assert!((resume a) == ("s", 1));
+    let (s, n) = resume a;
+    assert!(s == "s" && n == 1);
+    let b = repeat((new Pt(2), 3));
+    let (p, k) = resume b;
+    assert!(p.x == 2 && k == 3);
+    let c = repeat(Option::Some(Option::Some(1)));
+    assert!((resume c) == Option::Some(Option::Some(1)));
+    let d = repeat(Option::Some((4, 5)));
+    assert!((resume d) == Option::Some((4, 5)));
+    let e = repeat(Two::Both(1, "x"));
+    let is_both = match resume e {
+        Two::Both(_, _) => true,
+        Two::Neither => false,
+    };
+    assert!(is_both);
+    let f = repeat(Result::Ok("r"));
+    assert!((resume f) == Result::Ok("r"));
+    let g = repeat((1, 2, 3));
+    assert!((resume g) == (1, 2, 3));
+    let total = 0;
+    for t in repeat(("z", 2)) {
+        let (_, m) = t;
+        total = total + m;
+    }
+    assert!(total == 4);
+}

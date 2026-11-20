@@ -1,16 +1,13 @@
-//! Operand stack, call frames, and mark-and-sweep heap.
+//! The heap: allocation, collection, and the run-time switches for both.
 
 mod addr_hash;
-mod frame;
 mod heap;
 mod slab;
-mod stack;
 mod strbuf;
 
 pub use addr_hash::*;
-pub use frame::*;
 pub use heap::*;
-pub use stack::*;
+pub use slab::Bump;
 pub use strbuf::StrData;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -31,7 +28,7 @@ static NURSERY: AtomicBool = AtomicBool::new(true);
 static EARLY_FREE: AtomicU8 = AtomicU8::new(0);
 
 /// Allocate young objects in a copying nursery (`--nursery on|off`, on by
-/// default). Read when a VM starts, so set it before running.
+/// default). Read when a runtime starts, so set it before running.
 pub fn set_nursery(on: bool) {
     NURSERY.store(on, Ordering::Relaxed);
 }

@@ -1,0 +1,18 @@
+// @expected E0149 — a `use (mut a)` closure stored in a field would hold its
+// borrow of `a` past the statement (#2787).
+class C {
+    pub x: int,
+}
+
+class Slot {
+    pub f: fn() -> int,
+}
+
+fn main() {
+    let a = new C(0);
+    let s = new Slot(fn () use (mut a) {
+        a.x += 1;
+        return a.x;
+    });
+    let _ = s.f();
+}

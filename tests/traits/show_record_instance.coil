@@ -18,7 +18,7 @@ impl Show for Point {
 }
 
 fn shown<T: Show>(T x) -> string {
-    return show(x);
+    return x.show();
 }
 
 fn shown_method<T: Show>(T x) -> string {
@@ -26,18 +26,18 @@ fn shown_method<T: Show>(T x) -> string {
 }
 
 test("show of a record") {
-    assert!(show({ a: 1 }) == "{ a: 1 }", show({ a: 1 }));
-    assert!(show({ b: 2, a: "x" }) == format("%v", { b: 2, a: "x" }), show({ b: 2, a: "x" }));
+    assert!({ a: 1 }.show() == "{ a: 1 }", { a: 1 }.show());
+    assert!({ b: 2, a: "x" }.show() == format("%v", { b: 2, a: "x" }), { b: 2, a: "x" }.show());
     assert!({ a: 1.5 }.show() == "{ a: 1.5 }", { a: 1.5 }.show());
     let r = { b: 3, a: "s" };
-    assert!(show(r) == "{ a: s, b: 3 }", show(r));
+    assert!(r.show() == "{ a: s, b: 3 }", r.show());
 }
 
 test("show of records with tuple, record and user fields") {
-    assert!(show({ u: ((), 2), n: 1 }) == "{ n: 1, u: ((), 2) }", show({ u: ((), 2), n: 1 }));
-    assert!(show({ t: (1, 2) }) == "{ t: (1, 2) }", show({ t: (1, 2) }));
-    assert!(show({ r: { z: true } }) == "{ r: { z: true } }", show({ r: { z: true } }));
-    assert!(show({ p: new Point(3, 4) }) == "{ p: <3 4> }", show({ p: new Point(3, 4) }));
+    assert!({ u: ((), 2), n: 1 }.show() == "{ n: 1, u: ((), 2) }", { u: ((), 2), n: 1 }.show());
+    assert!({ t: (1, 2) }.show() == "{ t: (1, 2) }", { t: (1, 2) }.show());
+    assert!({ r: { z: true } }.show() == "{ r: { z: true } }", { r: { z: true } }.show());
+    assert!({ p: new Point(3, 4) }.show() == "{ p: <3 4> }", { p: new Point(3, 4) }.show());
 }
 
 test("a record meets a Show bound") {
@@ -57,6 +57,6 @@ test("a record meets a Show bound through a shared body") {
 }
 
 test("a tuple of records and a record in a tuple") {
-    assert!(show(({ a: 1 }, 2)) == "({ a: 1 }, 2)", show(({ a: 1 }, 2)));
+    assert!(({ a: 1 }, 2).show() == "({ a: 1 }, 2)", ({ a: 1 }, 2).show());
     assert!(shown(({ a: 1 }, { b: ((),) })) == "({ a: 1 }, { b: ((),) })");
 }

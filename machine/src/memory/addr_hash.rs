@@ -1,4 +1,4 @@
-//! Fast hasher for integer-keyed VM tables (heap addresses, enum tags).
+//! Fast hasher for integer-keyed tables (heap addresses, enum tags).
 //!
 //! `Heap::live` is probed on every `Index` / `GetField` / `ArrayPush`, and
 //! the default SipHash accounted for ~30% of retired instructions on the nsieve

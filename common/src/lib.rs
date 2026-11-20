@@ -1,47 +1,44 @@
-//! Shared types for the coil compiler and VM.
+//! Shared types for the coil compiler and runtime.
 
 mod archive;
 mod array_vec;
 mod builtins;
 mod caps;
 mod debug;
-mod line_table;
+mod deep;
 mod effects;
 pub mod ext;
 mod ffi;
-mod frame_bound;
 mod host;
 mod interner;
 pub mod int_arith;
-mod opcode;
+mod lane;
+pub mod native_alloc;
 mod package;
 mod seekable_iter;
 mod snapshot;
 mod source_pos;
-mod stack_map;
+mod startup;
 mod value;
-mod verify;
 
 pub use archive::*;
 pub use array_vec::*;
 pub use builtins::*;
 pub use caps::{Caps, open_mode_caps};
 pub use debug::*;
-pub use line_table::*;
+pub use deep::deep_stack;
+pub use startup::{NATIVE_START_NAME, PAR_FORK_PREFIX, PAR_LOOP_FORK_PREFIX, PAR_LOOP_WORKER_PREFIX, ParLoopFn, StartupOp, par_fork_fn, par_loop_fn};
 pub use effects::EffectFlags;
 pub use ffi::tag;
 pub use ffi::*;
-pub use frame_bound::{FrameReserve, frame_reserve, frame_roots, jump_targets};
 pub use host::*;
 pub use interner::*;
-pub use opcode::*;
+pub use lane::*;
 pub use package::*;
 pub use seekable_iter::*;
 pub use snapshot::*;
 pub use source_pos::*;
-pub use stack_map::*;
 pub use value::*;
-pub use verify::*;
 
 #[macro_export]
 macro_rules! promise {

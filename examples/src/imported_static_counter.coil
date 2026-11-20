@@ -1,0 +1,12 @@
+// A `static let` that another module reads through `use` (by its own name
+// and by an alias), and one initialised from another static at startup
+// (tests/modules/imported_static_reads.coil).
+static let counter: int = 0;
+
+fn bump() {
+    counter = counter + 1;
+}
+
+static let seed: int = 7;
+
+static let doubled: int = seed * 2;

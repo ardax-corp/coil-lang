@@ -361,6 +361,25 @@
         }
     }
 
+    /// `Owner::m` and `Owner::m()` are two shapes: a static method's value
+    /// and its call with no arguments (#2746).
+    #[test]
+    fn bare_path_and_empty_parens_parse_apart() {
+        fn fields(ast: Expression<'_>) -> EnumConstructPayload<'_> {
+            let inner = match ast {
+                Expression::Expr(e) => e.1.as_ref().clone(),
+                other => other,
+            };
+            match inner {
+                Expression::Construct { enum_name: "Counter", variant_name: "fresh", fields } => fields,
+                other => panic!("expected Construct(Counter::fresh), got {other:?}"),
+            }
+        }
+        assert_eq!(fields(expr_ast!("Counter::fresh")), EnumConstructPayload::Unit);
+        assert_eq!(fields(expr_ast!("Counter::fresh()")), EnumConstructPayload::Empty);
+        assert_eq!(fields(expr_ast!("Counter::fresh( )")), EnumConstructPayload::Empty);
+    }
+
     /// `Statement(ExprStatement)` must not append a second `;` (Display regression).
     #[test]
     fn statement_wrapping_expr_statement_display_has_one_semicolon() {

@@ -1,0 +1,29 @@
+// @expected E0119 — a `for` over a type parameter with no `Iterator` bound
+// says so (#2820), not that the parameter is used as the one iterator type
+// in scope.
+class Up {
+    pub i: int,
+}
+
+impl Iterator for Up {
+    type Item = int;
+    fn next(Up u) -> Option<int> {
+        if u.i >= 3 {
+            return None;
+        }
+        u.i += 1;
+        return Some(u.i);
+    }
+}
+
+fn walk<T>(T xs) -> int {
+    let n = 0;
+    for x in xs {
+        n += 1;
+    }
+    return n;
+}
+
+fn main() {
+    let _ = walk(new Up(0));
+}

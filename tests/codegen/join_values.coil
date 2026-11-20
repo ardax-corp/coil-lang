@@ -1,0 +1,47 @@
+// Values that meet at a join: a local set by a chain of separate `if`s takes
+// the value of the last taken branch, and two locals carried round a loop
+// stay distinct when one is copied into the other.
+use tests::assert;
+
+fn pick(int n) -> int {
+    let nb = 0;
+    if n == 1 {
+        nb = 1;
+    }
+    if n == 2 {
+        nb = 2;
+    }
+    if n >= 5 {
+        nb = 5;
+    }
+    return nb;
+}
+
+fn fib_iter(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    let prev = 1;
+    let curr = 1;
+    let sum = 0;
+    let i = 2;
+    while i < n {
+        sum = prev + curr;
+        prev = curr;
+        curr = sum;
+        i = i + 1;
+    }
+    return curr;
+}
+
+test("an if chain keeps the taken branch") {
+    assert!(pick(black_box(0)) == 0);
+    assert!(pick(black_box(1)) == 1);
+    assert!(pick(black_box(2)) == 2);
+    assert!(pick(black_box(7)) == 5);
+}
+
+test("a loop-carried pair stays two values") {
+    assert!(fib_iter(black_box(5)) == 5);
+    assert!(fib_iter(black_box(10)) == 55);
+}

@@ -1,0 +1,187 @@
+// A bound's method whose trait signature spells an `Option` / `Result`
+// through an associated type (`Iterator::next -> Option<Item>`) passes and
+// returns the enum object to a shared generic body, whatever the instance
+// holds it as (coil-lang#2478): one niche word for `Option<string>`, two
+// words for `Option<int>`.
+// Here past the clone budget, where the generic functions are shared
+// bodies calling through the dictionary.
+// @flags --clone-budget 0
+use tests::assert;
+
+class Count {
+    pub n: int,
+}
+
+impl Iterator for Count {
+    type Item = int;
+
+    pub fn next(Count c) -> Option<int> {
+        if c.n >= 2 {
+            return Option::None;
+        }
+        c.n = c.n + 1;
+        return Option::Some(c.n);
+    }
+}
+
+class Once {
+    pub done: bool,
+}
+
+impl Iterator for Once {
+    type Item = string;
+
+    pub fn next(Once o) -> Option<string> {
+        if o.done {
+            return Option::None;
+        }
+        o.done = true;
+        return Option::Some("once");
+    }
+}
+
+// A user trait: the associated type in a result, a `Result` and a
+// parameter.
+trait Source<S> {
+    type Elem;
+
+    fn take(S s) -> Option<Elem> {}
+
+    fn try_take(S s) -> Result<Elem, string> {}
+
+    fn give(S s, Option<Elem> x) -> int {}
+
+    fn text(S s, Elem e) -> string {}
+}
+
+class Words {
+    pub items: Vec<string>,
+}
+
+impl Source for Words {
+    type Elem = string;
+
+    pub fn take(Words w) -> Option<string> {
+        return w.items.pop();
+    }
+
+    pub fn try_take(Words w) -> Result<string, string> {
+        return match w.items.pop() {
+            Some(s) => Ok(s),
+            None => Err("empty"),
+        };
+    }
+
+    pub fn give(Words w, Option<string> x) -> int {
+        return match x {
+            Some(s) => s.len(),
+            None => -1,
+        };
+    }
+
+    pub fn text(Words w, string e) -> string {
+        return "<" + e + ">";
+    }
+}
+
+class Nums {
+    pub items: Vec<int>,
+}
+
+impl Source for Nums {
+    type Elem = int;
+
+    pub fn take(Nums n) -> Option<int> {
+        return n.items.pop();
+    }
+
+    pub fn try_take(Nums n) -> Result<int, string> {
+        return match n.items.pop() {
+            Some(v) => Ok(v),
+            None => Err("empty"),
+        };
+    }
+
+    pub fn give(Nums n, Option<int> x) -> int {
+        return match x {
+            Some(v) => v,
+            None => -1,
+        };
+    }
+
+    pub fn text(Nums n, int e) -> string {
+        return e.show();
+    }
+}
+
+fn first<I: Iterator>(I it) -> int {
+    return match it.next() {
+        Option::Some(_) => 1,
+        Option::None => 0,
+    };
+}
+
+fn count<I: Iterator>(I it) -> int {
+    let n = 0;
+    while let Option::Some(_) = it.next() {
+        n = n + 1;
+    }
+    return n;
+}
+
+fn drain<S: Source>(S s) -> string {
+    let out = "";
+    while let Some(v) = s.take() {
+        out = out + s.text(v);
+    }
+    return out;
+}
+
+fn tried<S: Source>(S s) -> string {
+    return match s.try_take() {
+        Ok(v) => "ok " + s.text(v),
+        Err(e) => "err " + e,
+    };
+}
+
+fn given<S: Source>(S s) -> int {
+    let got = s.take();
+    return s.give(got) * 10 + s.give(None);
+}
+
+test("the prelude's Iterator through a bound") {
+    assert!(first(new Count(0)) == 1);
+    assert!(first(new Count(2)) == 0);
+    assert!(count(new Count(0)) == 2);
+    assert!(first(new Once(false)) == 1);
+    assert!(first(new Once(true)) == 0);
+    assert!(count(new Once(false)) == 1);
+}
+
+test("a one-word associated Option and Result") {
+    assert!(drain(new Words(["a", "bc"])) == "<bc><a>");
+    assert!(drain(new Words(Vec::new())) == "");
+    assert!(tried(new Words(["x"])) == "ok <x>");
+    assert!(tried(new Words(Vec::new())) == "err empty");
+    assert!(given(new Words(["abc"])) == 29);
+    assert!(given(new Words(Vec::new())) == -11);
+}
+
+test("a two-word associated Option and Result") {
+    assert!(drain(new Nums([1, 2, 3])) == "321");
+    assert!(tried(new Nums([7])) == "ok 7");
+    assert!(tried(new Nums(Vec::new())) == "err empty");
+    assert!(given(new Nums([4])) == 39);
+    assert!(given(new Nums(Vec::new())) == -11);
+}
+
+test("the same calls at ground types") {
+    let w = new Words(["a", "bc"]);
+    assert!(w.take() == Some("bc"));
+    assert!(w.try_take() == Ok("a"));
+    assert!(w.try_take() == Err("empty"));
+    assert!(w.give(Some("four")) == 4);
+    let o = new Once(false);
+    assert!(o.next() == Some("once"));
+    assert!(o.next() == None);
+}

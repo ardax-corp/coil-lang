@@ -1,0 +1,11 @@
+// @expected E0153 — under `T: Area` the bare `size(x)` is still not a trait
+// call: write `x.size()` or `Area::size(x)`.
+trait Area<T> {
+    fn size(T s) -> int {}
+}
+
+fn twice<T: Area>(T x) -> int {
+    return size(x) * 2;
+}
+
+fn main() {}

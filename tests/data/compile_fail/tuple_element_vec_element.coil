@@ -1,0 +1,8 @@
+// @expected E0107 — an element store in a `Vec` a tuple element holds changes
+// the tuple, and a tuple cannot be changed in place (#2791).
+fn main() {
+    let xs: Vec<int> = Vec::from([1, 2]);
+    let t = (0, xs);
+    let i = 1;
+    t[1][i] = 5;
+}

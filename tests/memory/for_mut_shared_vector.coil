@@ -1,0 +1,86 @@
+// `for mut item in xs` changes the items of `xs` only: an item, or the
+// vector, that another name shares is copied before the loop writes it, so
+// the other name keeps its value (#2782).
+use tests::assert;
+
+class C {
+    pub x: int,
+    pub v: Vec<int>,
+}
+
+class Bag {
+    pub cs: Vec<C>,
+}
+
+fn bump_all(Vec<C> xs) {
+    for mut c in xs {
+        c.x += 100;
+    }
+}
+
+fn mk() -> Vec<C> {
+    return [new C(1, [1]), new C(2, [2])];
+}
+
+test("a vector shared by `let`") {
+    let a = mk();
+    let b = a;
+    for mut c in a {
+        c.x += 100;
+    }
+    assert!(a[0].x == 101 && a[1].x == 102);
+    assert!(b[0].x == 1 && b[1].x == 2);
+}
+
+test("the other name loops") {
+    let a = mk();
+    let b = a;
+    for mut c in b {
+        c.v.push(9);
+    }
+    assert!(a[0].v.len() == 1 && b[0].v.len() == 2 && b[1].v[1] == 9);
+}
+
+test("an item another vector holds") {
+    let one = new C(5, Vec::new());
+    let a: Vec<C> = [one];
+    for mut c in a {
+        c.x = 6;
+    }
+    assert!(one.x == 5 && a[0].x == 6);
+}
+
+test("nested vectors") {
+    let a: Vec<Vec<int>> = [[1], [2, 3]];
+    let b = a;
+    for mut r in a {
+        r.push(0);
+    }
+    assert!(a[0].len() == 2 && a[1].len() == 3);
+    assert!(b[0].len() == 1 && b[1].len() == 2);
+}
+
+test("through a field") {
+    let bag = new Bag(mk());
+    let saved = bag.cs;
+    for mut c in bag.cs {
+        c.x = 0;
+    }
+    assert!(bag.cs[0].x == 0 && bag.cs[1].x == 0);
+    assert!(saved[0].x == 1 && saved[1].x == 2);
+}
+
+test("in a callee, the caller's other name keeps its value") {
+    let a = mk();
+    let b = a;
+    bump_all(a);
+    assert!(a[0].x == 101 && b[0].x == 1);
+}
+
+test("an unshared vector is written in place") {
+    let a = mk();
+    for mut c in a {
+        c.x *= 3;
+    }
+    assert!(a[0].x == 3 && a[1].x == 6);
+}

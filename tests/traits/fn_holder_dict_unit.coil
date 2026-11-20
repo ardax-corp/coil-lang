@@ -1,0 +1,236 @@
+// A trait instance on a generic class or enum holding a function over its
+// parameter (`f: fn() -> T`, `fs: Vec<fn() -> T>`, `Option<fn(T) -> T>`),
+// called through a bound at `T = ()`. Such a type is clone-only
+// (`layout::nested_fn_field`, #2610), so its dictionary holds the
+// instance's per-type clones, which call a ground `-> ()` function as the
+// ground call it is: the `()` each method gets is the empty tuple object,
+// never word 0. `Show`, `Eq`, `Hash`, a user trait, a bounded instance's
+// context, a builtin shape's structural instance over such an item, and a
+// shared body building the goal from its own function argument.
+//
+// fn_holder_dict_unit_shared.coil runs the same with no mono clones.
+use tests::assert;
+
+class One<T> {
+    pub f: fn() -> T,
+    pub x: T,
+}
+
+class Many<T> {
+    pub fs: Vec<fn() -> T>,
+    pub x: T,
+}
+
+class Wrap<T> {
+    pub w: T,
+}
+
+enum Op<T> {
+    May(Option<fn(T) -> T>, T),
+    Nil,
+}
+
+trait Again<S> {
+    fn again(S s) -> S {}
+}
+
+trait Peek<S> {
+    fn peek(S s) -> bool {}
+}
+
+impl Again for One<T> {
+    fn again(One<T> s) -> One<T> {
+        let f = s.f;
+        return new One(f, f());
+    }
+}
+
+impl Again for Many<T> {
+    fn again(Many<T> s) -> Many<T> {
+        return new Many(s.fs, s.fs[0]());
+    }
+}
+
+impl Peek for Op<T> {
+    fn peek(Op<T> a) -> bool {
+        return match a {
+            Op::May(g, x) => match g {
+                Some(h) => Some(Some(h(x))) == Some(Some(x)),
+                None => false,
+            },
+            Op::Nil => true,
+        };
+    }
+}
+
+impl Show for Many<T: Show> {
+    fn show(Many<T> s) -> string {
+        return "Many" + (s.fs[0](), s.x).show();
+    }
+}
+
+impl Eq for Many<T: Eq> {
+    fn eq(Many<T> a, Many<T> b) -> bool {
+        return Some(a.fs[0]()) == Some(b.x) && (a.fs[0](), 1) == (b.x, 1);
+    }
+}
+
+impl Hash for Many<T: Hash> {
+    fn hash(Many<T> a) -> int {
+        return Some(a.fs[0]()).hash() - Some(a.x).hash();
+    }
+}
+
+impl Eq for One<T: Eq> {
+    fn eq(One<T> a, One<T> b) -> bool {
+        let f = a.f;
+        return Some(f()) == Some(b.x);
+    }
+}
+
+impl Show for Wrap<T: Show> {
+    fn show(Wrap<T> s) -> string {
+        return "Wrap(" + s.w.show() + ")";
+    }
+}
+
+impl Hash for Wrap<T: Hash> {
+    fn hash(Wrap<T> s) -> int {
+        return s.w.hash() + 1;
+    }
+}
+
+impl Show for Op<T: Show> {
+    fn show(Op<T> a) -> string {
+        return match a {
+            Op::May(g, x) => match g {
+                Some(h) => "May" + Some(h(x)).show(),
+                None => "None",
+            },
+            Op::Nil => "Nil",
+        };
+    }
+}
+
+impl Eq for Op<T: Eq> {
+    fn eq(Op<T> a, Op<T> b) -> bool {
+        return match a {
+            Op::May(g, x) => match g {
+                Some(h) => Some(h(x)) == Some(x),
+                None => false,
+            },
+            Op::Nil => true,
+        };
+    }
+}
+
+impl Hash for Op<T: Hash> {
+    fn hash(Op<T> a) -> int {
+        return match a {
+            Op::May(g, x) => match g {
+                Some(h) => Some(h(x)).hash() - Some(x).hash() + 7,
+                None => 0,
+            },
+            Op::Nil => 1,
+        };
+    }
+}
+
+fn via<P: Again>(P p) -> P {
+    return p.again();
+}
+
+fn pk<P: Peek>(P a) -> bool {
+    return a.peek();
+}
+
+fn shw<P: Show>(P p) -> string {
+    return p.show();
+}
+
+fn same<P: Eq>(P a, P b) -> bool {
+    return a == b;
+}
+
+fn hsh<P: Hash>(P a) -> int {
+    return a.hash();
+}
+
+fn shw_items<A: Show>(A a) -> string {
+    return Some(a).show() + (a, 1).show();
+}
+
+fn eq_items<A: Eq>(A a) -> bool {
+    return (a, 1) == (a, 1) && Some(a) == Some(a);
+}
+
+fn hash_items<A: Hash>(A a) -> int {
+    return (a, 1).hash() - (a, 1).hash();
+}
+
+fn outer<T: Show>(fn() -> T f, T x) -> string {
+    let fs: Vec<fn() -> T> = [f];
+    return shw(new Wrap(new Many(fs, x)));
+}
+
+fn unit() -> () {}
+
+fn same_u(() u) -> () {
+    return u;
+}
+
+fn two() -> int {
+    return 2;
+}
+
+fn inc(int n) -> int {
+    return n + 1;
+}
+
+test("a user trait returning the instance's type at ()") {
+    let fs: Vec<fn() -> ()> = [unit];
+    assert!(Some(via(new One(unit, ())).x) == Some(()));
+    assert!(Some(via(new Many(fs, ())).x) == Some(()));
+    assert!(Some(new Many(fs, ()).again().x) == Some(()));
+    let ns: Vec<fn() -> int> = [two];
+    assert!(via(new Many(ns, 0)).x == 2);
+}
+
+test("a user trait over an enum's Option<fn(T) -> T> payload at ()") {
+    assert!(pk(Op::May(Some(same_u), ())));
+    assert!(pk(Op::May(Some(inc), 1)) == false);
+    assert!(Op::May(Some(same_u), ()).peek());
+}
+
+test("Show, Eq and Hash through a bound at ()") {
+    let fs: Vec<fn() -> ()> = [unit];
+    let m = new Many(fs, ());
+    assert!(shw(m) == "Many((), ())");
+    assert!(same(m, m) && m == m);
+    assert!(same(new One(unit, ()), new One(unit, ())));
+    assert!(hsh(m) == 0 && m.hash() == 0);
+    let op = Op::May(Some(same_u), ());
+    assert!(shw(op) == "MaySome(())");
+    assert!(same(op, Op::Nil));
+    assert!(hsh(op) == 7 && op.hash() == 7);
+}
+
+test("a bounded instance's context and a shared body's own goal at ()") {
+    let fs: Vec<fn() -> ()> = [unit];
+    assert!(shw(new Wrap(new Many(fs, ()))) == "Wrap(Many((), ()))");
+    assert!(hsh(new Wrap(new Many(fs, ()))) == 1);
+    assert!(outer(unit, ()) == "Wrap(Many((), ()))");
+    assert!(outer(two, 2) == "Wrap(Many(2, 2))");
+}
+
+test("a builtin shape over such an item at ()") {
+    let fs: Vec<fn() -> ()> = [unit];
+    let m = new Many(fs, ());
+    let op = Op::May(Some(same_u), ());
+    assert!(shw_items(m) == "Some(Many((), ()))(Many((), ()), 1)");
+    assert!(shw_items(op) == "Some(MaySome(()))(MaySome(()), 1)");
+    assert!(eq_items(m) && eq_items(op));
+    assert!(hash_items(m) == 0 && hash_items(op) == 0);
+    assert!((m, 1).hash() == (m, 1).hash() && Some(m).show() == "Some(Many((), ()))");
+    assert!((op, 1) == (op, 1) && [op, op].hash() == [op, op].hash());
+}

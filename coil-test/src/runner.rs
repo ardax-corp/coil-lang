@@ -7,17 +7,18 @@ use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex};
 
 use coil_host::{
-    ExecutePipelineArgs, bind_cli_roots, execute_pipeline, wire_pipeline_threads, wire_pipeline_vm,
+    ExecutePipelineArgs, bind_cli_roots, execute_pipeline,
 };
-use common::{Byte, Instruction, ProgramDebug};
+use common::ProgramDebug;
 use compiler::{HostGrants, OptLevel, Pipeline};
-use machine::Machine;
 use machine::reactor::{Reactor, TestCase, TestHandle, TestReport};
 use machine::thread::ThreadSpawnContext;
 use parser::doc_examples::{self, ExampleMode};
 use parser::test_headers;
 use reporting::progress::{Progress, paint};
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
+
+use compiler::native_mir::coverage::Probes;
 
 use crate::coverage::{Coverage, CoverageOptions, ProgramLines, project_filter, test_fn_ranges};
 use crate::events::{self, Event};
@@ -39,8 +40,9 @@ pub enum Report {
 /// What to run and how to compile it.
 #[derive(Debug, Clone)]
 pub struct TestOptions {
-    /// Test root (a directory walked for `.coil` files).
-    pub root: PathBuf,
+    /// What to run: directories walked for `.coil` files, and `.coil`
+    /// files, each run as when its directory is (#2731).
+    pub paths: Vec<PathBuf>,
     /// Stop after the first failed case.
     pub fail_fast: bool,
     /// File and case order (`--seed` / `--no-shuffle`).
@@ -78,6 +80,124 @@ pub struct TestOptions {
     /// `--wall-timeout`: a case that runs this long ends the run
     /// (`crate::watchdog`); `None` never does.
     pub wall_timeout: Option<std::time::Duration>,
+    /// What runs the compiled code (`--engine`).
+    pub engine: Engine,
+    /// `--cell`: the name of this run's configuration, which selects the
+    /// `// @xfail` header lines that apply ([`known_failure`]).
+    pub cell: Option<String>,
+}
+
+/// `--engine`: native code (`docs/internals/native.md`) or the MIR
+/// interpreter. A suite that passes on both shows a pass or the backend
+/// changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Engine {
+    #[default]
+    Native,
+    /// The MIR interpreter (`docs/internals/mir-interp.md`).
+    Mir,
+}
+
+impl Engine {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "native" => Ok(Self::Native),
+            "mir" => Ok(Self::Mir),
+            _ => Err(format!("invalid --engine `{text}` (expected native|mir)")),
+        }
+    }
+
+    /// What runs a suite unless asked otherwise: native code where there
+    /// is any.
+    pub fn host_default() -> Self {
+        if cfg!(target_family = "wasm") { Self::Mir } else { Self::Native }
+    }
+
+    /// Open the capture this engine runs from at `level`: at `-O 0` the
+    /// interpreter takes MIR as lowered, the reference the rest is compared
+    /// against; otherwise it takes what native code compiles.
+    fn start_capture(self, level: compiler::OptLevel) {
+        if self == Self::Mir && level == compiler::OptLevel::None {
+            compiler::native_mir::start_raw_capture();
+        } else {
+            compiler::native_mir::start_native_capture();
+        }
+    }
+}
+
+/// Make what this compile captured runnable. `None` when nothing compiles
+/// or the backend fails (the file then fails to run).
+fn native_code(pipeline: &Pipeline, file: &str, engine: Engine, coverage: bool) -> (Option<Arc<machine::native::NativeCode>>, Option<Probes>) {
+    let mut bodies = compiler::native_mir::take_native_capture();
+    let probes = coverage.then(|| compiler::native_mir::coverage::instrument(&mut bodies));
+    let code = compiled_code(pipeline, bodies, file, engine);
+    let probes = probes.filter(|_| code.is_some());
+    (code, probes)
+}
+
+/// Make `bodies` runnable on `engine`; a host with no native code interprets.
+fn compiled_code(pipeline: &Pipeline, bodies: Vec<compiler::native_mir::NativeBody>, file: &str, engine: Engine) -> Option<Arc<machine::native::NativeCode>> {
+    let debug = pipeline.program_debug_full();
+    let pcs = debug.fn_symbols.iter().map(|s| (s.name.clone(), s.body_id)).collect();
+    if engine == Engine::Mir || cfg!(target_family = "wasm") {
+        let program = coil_mir_interp::prepare(bodies, &pcs);
+        inventory(&format!("file\t{file}\t{}\t{}", program.compiled.len(), program.refused.len()));
+        for (name, why) in &program.refused {
+            inventory(&format!("refused\t{file}\t{name}\t{why}"));
+        }
+        let complete = program.refused.is_empty();
+        let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete).with_keep(program.keep);
+        return (!code.is_empty()).then(|| Arc::new(code));
+    }
+    jitted_code(&bodies, &pcs, file)
+}
+
+#[cfg(target_family = "wasm")]
+fn jitted_code(_: &[compiler::native_mir::NativeBody], _: &std::collections::HashMap<String, u32>, _: &str) -> Option<Arc<machine::native::NativeCode>> {
+    None
+}
+
+/// JIT `bodies`.
+#[cfg(not(target_family = "wasm"))]
+fn jitted_code(bodies: &[compiler::native_mir::NativeBody], pcs: &std::collections::HashMap<String, u32>, file: &str) -> Option<Arc<machine::native::NativeCode>> {
+    let program = match coil_native::jit(bodies, pcs) {
+        Ok(p) => p,
+        Err(e) => {
+            inventory(&format!("failed\t{file}\t{e}"));
+            return None;
+        }
+    };
+    inventory(&format!("file\t{file}\t{}\t{}", program.compiled.len(), program.refused.len()));
+    for (name, why) in &program.refused {
+        inventory(&format!("refused\t{file}\t{name}\t{why}"));
+    }
+    if std::env::var_os("COIL_NATIVE_STATS").is_some() {
+        eprintln!("{} ({} bodies)", coil_native::describe(&program), bodies.len());
+        if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
+            for (name, why) in &program.refused {
+                eprintln!("  refused: {name}: {why}");
+            }
+        }
+    }
+    let complete = program.refused.is_empty();
+    let code = machine::native::NativeCode::new(program.entries, program.sites).with_complete(complete).with_keep(program.keep);
+    (!code.is_empty()).then(|| Arc::new(code))
+}
+
+/// Append one line to the native inventory file, `COIL_NATIVE_INVENTORY`
+/// (`scripts/native_inventory.py` sums them): what a `--engine native` run
+/// left on the runtime. Tab-separated: `file`, `refused`, `failed` per compile,
+/// `counts` once per run. No variable: nothing is written.
+fn inventory(line: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("COIL_NATIVE_INVENTORY") else {
+        return;
+    };
+    // One `write` per line on an append-mode file, so the compile threads
+    // and the corpus processes sharing it never interleave a line.
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = f.write_all(format!("{}\n", line.replace('\n', " ")).as_bytes());
+    }
 }
 
 /// Whether a run includes doc-tests (the code examples in `///` comments).
@@ -102,10 +222,7 @@ pub(crate) fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
 }
 
 /// Every `.coil` file under `dir`, recursively, sorted by full path.
-pub fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    if !dir.is_dir() {
-        return Err(format!("tests directory `{}` not found", dir.display()));
-    }
+pub fn collect_test_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
         let entries = std::fs::read_dir(dir)
@@ -121,15 +238,52 @@ pub fn collect_test_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
         }
         Ok(())
     }
-    walk(dir, &mut files)?;
-    files.sort();
-    if files.is_empty() {
-        return Err(format!(
-            "no `.coil` test files found under `{}`",
-            dir.display()
-        ));
+    for path in paths {
+        if path.is_dir() {
+            let before = files.len();
+            walk(path, &mut files)?;
+            if files.len() == before {
+                return Err(format!("no `.coil` test files found under `{}`", path.display()));
+            }
+        } else if path.is_file() && common::ext::is_source_path(path) {
+            files.push(path.clone());
+        } else if path.exists() {
+            return Err(format!("test path `{}` is neither a directory nor a `.coil` file", path.display()));
+        } else {
+            return Err(format!("test path `{}` not found", path.display()));
+        }
     }
+    files.sort();
+    // A file named twice, or under a directory also named, runs once.
+    let mut seen = std::collections::HashSet::new();
+    files.retain(|f| seen.insert(canonical(f)));
     Ok(files)
+}
+
+impl TestOptions {
+    /// The test root of each path: a directory itself, a file's directory,
+    /// so a file runs as when its directory is.
+    pub(crate) fn root_dirs(&self) -> Vec<PathBuf> {
+        self.paths
+            .iter()
+            .map(|p| match p.parent() {
+                Some(dir) if !p.is_dir() => if dir.as_os_str().is_empty() { PathBuf::from(".") } else { dir.to_path_buf() },
+                _ => p.clone(),
+            })
+            .collect()
+    }
+
+    /// The deepest test root holding `path` (the first one when none does).
+    fn root_of(&self, path: &Path) -> PathBuf {
+        let file = canonical(path);
+        let dirs = self.root_dirs();
+        dirs.iter()
+            .filter(|d| file.starts_with(canonical(d)))
+            .max_by_key(|d| canonical(d).components().count())
+            .or(dirs.first())
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 /// Negative syntax / type tests live under any path segment named `compile_fail`.
@@ -168,6 +322,8 @@ pub fn missing_platform_feature(src: &str) -> Result<(), String> {
             // behaviour only Unix has (signals, Unix paths).
             "sockets" | "symlinks" | "ffi" | "processes" => !cfg!(target_family = "wasm"),
             "unix" => cfg!(unix),
+            // A file about the wasm build's own limits (its fixed stack).
+            "wasm" => cfg!(target_family = "wasm"),
             other => return Err(format!("unknown `// @needs` feature `{other}`")),
         };
         if !has {
@@ -175,6 +331,52 @@ pub fn missing_platform_feature(src: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Why a file is a known failure in the configuration `cell` names: the
+/// text after the name on its `// @xfail <cell> #<issue> <why>` header line.
+/// `Ok(None)` when no line names `cell`; `Err` when the line has no issue
+/// number, so every known failure points at one.
+pub fn known_failure(src: &str, cell: &str) -> Result<Option<String>, String> {
+    for line in test_headers::values(src, "xfail") {
+        let (name, why) = line.trim().split_once(char::is_whitespace).unwrap_or((line.trim(), ""));
+        if name != cell {
+            continue;
+        }
+        let issue = why.split(|c: char| !(c == '#' || c.is_ascii_digit())).any(|w| {
+            w.strip_prefix('#').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        });
+        if !issue {
+            return Err(format!("`// @xfail {cell}` names no issue: write `// @xfail {cell} #<issue> <why>`"));
+        }
+        return Ok(Some(why.trim().to_string()));
+    }
+    Ok(None)
+}
+
+/// Why a file is not run in the configuration `cell` names: the text after
+/// the name on its `// @skip <cell> <why>` header line (a failure the runner
+/// does not survive there, or output that the cell cannot compare).
+/// `Ok(None)` when no line names `cell`; `Err` when the line gives no reason.
+pub fn skipped_in(src: &str, cell: &str) -> Result<Option<String>, String> {
+    for line in test_headers::values(src, "skip") {
+        let (name, why) = line.trim().split_once(char::is_whitespace).unwrap_or((line.trim(), ""));
+        if name != cell {
+            continue;
+        }
+        if why.trim().is_empty() {
+            return Err(format!("`// @skip {cell}` gives no reason: write `// @skip {cell} <why>`"));
+        }
+        return Ok(Some(why.trim().to_string()));
+    }
+    Ok(None)
+}
+
+/// [`skipped_in`] for `path` in this run's `--cell`.
+fn cell_skip(options: &TestOptions, path: &Path) -> Option<Result<String, String>> {
+    let cell = options.cell.as_deref()?;
+    let src = std::fs::read_to_string(path).ok()?;
+    skipped_in(&src, cell).transpose()
 }
 
 /// The stdout a `fn main()`-only file declares on the `// @output` line of
@@ -262,6 +464,10 @@ pub struct SuiteResult {
     pub failures: Vec<String>,
     /// Passing files whose compiler warnings were not shown.
     pub quiet_diagnostics: usize,
+    /// Files that failed as their `// @xfail` line for this `--cell` says.
+    pub known_failures: usize,
+    /// Files their `// @skip` line keeps out of this `--cell`.
+    pub skipped: usize,
 }
 
 /// One case's verdict, as `coil mutate` needs it from the baseline run.
@@ -271,7 +477,7 @@ pub struct CaseOutcome {
     pub file: PathBuf,
     pub name: String,
     pub passed: bool,
-    /// Step-budget charges (see `Machine::set_step_budget`).
+    /// Step-budget charges (see `Isolate::set_step_budget`).
     pub steps: u64,
     /// Covered project lines per canonical source path (with `--coverage`).
     pub covered: Vec<(PathBuf, Vec<u32>)>,
@@ -516,10 +722,44 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
             Report::Silent => {}
         }
     }
+    // A known failure of this `--cell` (`// @xfail`): the file must fail.
+    // Its failing cases are not counted, and a file that passes fails, so
+    // the line goes when its issue is fixed.
+    let skipped = matches!(cell_skip(run.options, &file.path), Some(Ok(_)));
+    if skipped {
+        result.skipped += 1;
+    }
+    let known = run.options.cell.as_deref().filter(|_| !skipped && !is_compile_fail(&file.path)).and_then(|cell| {
+        let src = std::fs::read_to_string(&file.path).unwrap_or_default();
+        known_failure(&src, cell).map(|why| why.map(|why| (cell, why))).transpose()
+    });
+    let mut xfail = None;
+    match known {
+        Some(Ok((_, why))) if failed != 0 => {
+            failed = 0;
+            blocks.clear();
+            result.known_failures += 1;
+            xfail = Some(why);
+        }
+        Some(Ok((cell, why))) => {
+            failed = 1;
+            let m = format!("passes, but `// @xfail {cell} {why}` lists it as a known failure: remove that line");
+            blocks.push(failure_block(&file.display, None, Some(&m), b"", b""));
+            message = Some(m);
+        }
+        Some(Err(why)) => {
+            failed = failed.max(1);
+            blocks.insert(0, failure_block(&file.display, None, Some(&why), b"", b""));
+            message = Some(why);
+        }
+        None => {}
+    }
     match report {
         Report::Human => {
             let verbose = run.options.verbose || run.options.show_output;
-            if pretty && !diagnostics.is_empty() {
+            if xfail.is_some() {
+                // Expected diagnostics and prints: nothing to show.
+            } else if pretty && !diagnostics.is_empty() {
                 let text = String::from_utf8_lossy(&diagnostics).trim_end().to_string();
                 if failed != 0 {
                     // With the file's first failure: they are often why.
@@ -533,7 +773,9 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
                     result.quiet_diagnostics += 1;
                 }
             }
-            let line = if failed == 0 {
+            let line = if let Some(why) = &xfail {
+                verbose.then(|| format!("{} {} ({why})", paint("xfail", true), file.display))
+            } else if failed == 0 {
                 verbose.then(|| format!("{}   {}", paint("ok", true), file.display))
             } else {
                 Some(format!("{} {}", paint("FAILED", false), file.display))
@@ -562,6 +804,7 @@ fn finish_file(run: &Run<'_>, file: PendingFile, result: &mut SuiteResult) -> us
                 .num("passed", passed)
                 .num("failed", failed)
                 .opt_str("message", message.as_deref())
+                .opt_str("xfail", xfail.as_deref())
                 .opt_str(
                     "diagnostics",
                     (!diagnostics.is_empty()).then_some(&*diagnostics),
@@ -619,18 +862,6 @@ fn push_stream(block: &mut String, name: &str, bytes: &[u8]) {
     block.push_str(&format!("\n{name}:\n{}", text.trim_end_matches('\n')));
 }
 
-/// Replace the first `JMP target` at or after `from` with `HALT` (the static-init
-/// prologue's jump into `main`), like [`Machine::halt_first_jump_to`] on a copy.
-fn halt_first_jump_in(code: &mut [Byte], from: usize, target: u32) -> bool {
-    for b in code.iter_mut().skip(from) {
-        if matches!(b.bytecode(), Instruction::JMP) && b.operand_u32() == target {
-            *b = Byte::new(Instruction::HALT);
-            return true;
-        }
-    }
-    false
-}
-
 /// Queue cases on the pool, or run them right here (`--jobs 1`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Dispatch {
@@ -644,22 +875,66 @@ pub(crate) struct Prepared {
     /// `(name, entry)` in run order. A file without cases runs `main` once
     /// as a single case named after the file.
     pub cases: Vec<(String, u32)>,
-    pub init_ip: Option<u32>,
     /// See [`TestCase::expect_ok_result`].
     pub expect_ok_result: bool,
     pub debug: ProgramDebug,
+    /// Native code's coverage probes; `None` counts PCs on the runtime.
+    pub probes: Option<Probes>,
 }
 
 impl Prepared {
     pub fn case(&self, entry: u32, coverage: bool, step_budget: Option<u64>) -> TestCase {
         TestCase {
             entry,
-            init_ip: self.init_ip,
             expect_ok_result: self.expect_ok_result,
-            coverage,
+            coverage: coverage && self.probes.is_none(),
+            probes: self.probes.as_ref().filter(|_| coverage).map_or(0, |p| p.locs.len() as u32),
             step_budget,
         }
     }
+
+    /// What this file's coverage counts by: its probes' locations and the
+    /// ranges of them in test bodies, else its PCs'.
+    fn coverage_map(&self) -> (std::borrow::Cow<'_, ProgramDebug>, Vec<std::ops::Range<usize>>) {
+        let entries = self.cases.iter().map(|(_, entry)| *entry);
+        let Some(probes) = &self.probes else {
+            return (std::borrow::Cow::Borrowed(&self.debug), test_fn_ranges(&self.debug, entries));
+        };
+        let names: Vec<&str> = entries
+            .filter_map(|e| self.debug.fn_symbols.iter().find(|s| s.body_id == e).map(|s| s.name.as_str()))
+            .collect();
+        let tests = probes.bodies.iter().filter(|(name, _)| names.contains(&name.as_str())).map(|(_, r)| r.clone()).collect();
+        let mut debug = ProgramDebug::default();
+        debug.source_files = self.debug.source_files.clone();
+        debug.debug_locs = probes.locs.clone();
+        (std::borrow::Cow::Owned(debug), tests)
+    }
+}
+
+thread_local! {
+    /// The file this thread is compiling, for [`note_compiler_panics`].
+    static COMPILING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Make a panic inside a compile name the file being compiled. A release
+/// harness aborts on a panic (`panic = "abort"`), so the run's log ends at
+/// the panic message, which names a pass or a function at best (a
+/// `COIL_MIR_VERIFY` violation: `MIR verify failed after licm in main`).
+fn note_compiler_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            previous(info);
+            COMPILING.with(|c| {
+                if let Ok(c) = c.try_borrow()
+                    && let Some(file) = c.as_deref()
+                {
+                    eprintln!("note: the compiler panicked while compiling {file}");
+                }
+            });
+        }));
+    });
 }
 
 /// A test file's compile result.
@@ -739,9 +1014,24 @@ pub(crate) fn compile_test_file(
     // catch_unwind isolates a compiler ICE from aborting the whole
     // harness under panic=unwind. Release builds use panic=abort, so
     // compile_fail fixtures must reject via Ok(Err(_)), not panic.
+    let native = !expect_compile_fail;
+    if native {
+        options.engine.start_capture(options.opt_level);
+    }
+    note_compiler_panics();
+    COMPILING.with(|c| *c.borrow_mut() = Some(display.clone()));
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&display)
     }));
+    COMPILING.with(|c| *c.borrow_mut() = None);
+    let native = match &compiled {
+        Ok(Ok(_)) if native => native_code(&pipeline, &display, options.engine, options.coverage.is_some()),
+        _ => {
+            let _ = compiler::native_mir::take_native_capture();
+            (None, None)
+        }
+    };
+    let (native, probes) = native;
     let mut cases: Vec<(String, u32)> = pipeline.test_cases().to_vec();
     if contract_source {
         cases.retain(|(name, _)| name.starts_with(compiler::CONTRACT_CASE_PREFIX));
@@ -753,7 +1043,7 @@ pub(crate) fn compile_test_file(
             lock(&sources.docs).extend(found.into_iter().filter(|f| has_examples(f)));
         }
     }
-    options.order.order_cases(&options.root, path, &mut cases);
+    options.order.order_cases(&options.root_of(path), path, &mut cases);
     let _ = pipeline.finish_reporting();
 
     if expect_compile_fail {
@@ -771,7 +1061,7 @@ pub(crate) fn compile_test_file(
         let message = why.map(|why| format!("> Test \"{display}\" failed ({why})"));
         return Compiled::Decided(ok, message);
     }
-    let (bytecode, constants) = match compiled {
+    let constants = match compiled {
         Err(_) => {
             let m = format!("> Test \"{display}\" failed (compiler panicked)");
             return Compiled::Decided(false, Some(m));
@@ -790,23 +1080,24 @@ pub(crate) fn compile_test_file(
         let strings = pipeline.strings().to_vec();
         // No cases and no `main` entry: run the program from the top, as
         // `coil <file>` would, on this thread.
+        if let Some(code) = &native {
+            machine::native::install_shared_for_next_run(Arc::clone(code));
+        }
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             execute_pipeline(ExecutePipelineArgs {
                 pipeline: &pipeline,
-                bytecode: &bytecode,
                 constants: &constants,
                 strings: &strings,
                 static_slots: pipeline.static_slot_count(),
                 debug: pipeline.program_debug(),
                 entry: Some(path),
-                operand_stack_slots: pipeline.operand_stack_slots(),
-            })
+                })
         }));
         let ok = matches!(result, Ok(false));
         return Compiled::Decided(ok, (!ok).then(|| format!("> Test \"{display}\" failed")));
     }
 
-    let Some((ctx, init_ip, debug)) = wire_program(pipeline, bytecode, constants, path, reactor) else {
+    let Some((ctx, debug)) = wire_program(pipeline, constants, path, reactor, native) else {
         let m = format!("> Test \"{display}\" failed (no thread program)");
         return Compiled::Decided(false, Some(m));
     };
@@ -819,9 +1110,9 @@ pub(crate) fn compile_test_file(
         (cases, true)
     };
     Compiled::Ready(Box::new(Prepared {
+        probes,
         ctx,
         cases,
-        init_ip,
         expect_ok_result,
         debug,
     }))
@@ -832,6 +1123,7 @@ pub(crate) fn compile_test_file(
 fn run_pipeline(config: &ReportConfig, options: &TestOptions, reporter: Box<dyn Write + Send>) -> Pipeline {
     let mut pipeline = Pipeline::with_reporter(config.clone(), reporter);
     pipeline.set_opt_level(options.opt_level);
+    pipeline.set_runs_mir();
     if let Some(level) = options.debug_level {
         pipeline.set_debug_level(level);
     } else if options.coverage.is_some() {
@@ -876,33 +1168,28 @@ fn search_roots(options: &TestOptions) -> Vec<PathBuf> {
 /// and the debug info. `None` when the program has no thread context.
 fn wire_program(
     pipeline: Pipeline,
-    bytecode: Vec<Byte>,
     constants: Vec<u64>,
     path: &Path,
     reactor: &Arc<Reactor>,
-) -> Option<(ThreadSpawnContext, Option<u32>, ProgramDebug)> {
+    native: Option<Arc<machine::native::NativeCode>>,
+) -> Option<(ThreadSpawnContext, ProgramDebug)> {
     let strings = pipeline.strings().to_vec();
-    let main = pipeline.main_offset();
-    // Stop the static-init prologue before it jumps into `main`; each job
-    // runs it on a fresh VM, then calls its case.
-    let mut code = bytecode;
-    let init_ip = main.and_then(|main| {
-        let setup = pipeline.prologue_jmp_target();
-        (setup != main && halt_first_jump_in(&mut code, setup as usize, main)).then_some(setup)
-    });
     let debug = pipeline.program_debug();
-    let ctx = {
-        let mut root = Machine::<256>::default();
-        wire_pipeline_vm(&pipeline, &mut root, Some(path));
-        // The same precise frame / class / static word maps as `coil <file>`,
-        // so a case's `collect()` exercises production GC roots (#555).
-        wire_pipeline_threads(&pipeline, &mut root, &code, &constants, &strings);
-        root.set_program_debug(debug.clone());
-        root.set_reactor(Arc::clone(reactor));
-        root.thread_spawn_context()
-    };
+    let start = coil_host::native_start(&pipeline, &pipeline.archived_struct_layouts(), Some(path));
+    // The same word maps as `coil <file>`, so a case's `collect()` exercises
+    // production GC roots (#555).
+    let program = coil_host::thread_program(
+        &pipeline,
+        coil_host::CompiledProgram {
+            constants: &constants,
+            strings: &strings,
+            static_slots: pipeline.static_slot_count(),
+            debug: debug.clone(),
+        },
+    );
+    let ctx = machine::spawn_context(Arc::new(program), start, Arc::clone(reactor), native);
     drop(pipeline);
-    Some((ctx?, init_ip, debug))
+    Some((ctx?, debug))
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -912,18 +1199,19 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// True when `path` is not under the test root: a project source compiled
 /// for its contract tests.
 fn is_contract_source(options: &TestOptions, path: &Path) -> bool {
-    !canonical(path).starts_with(canonical(&options.root))
+    let file = canonical(path);
+    !options.root_dirs().iter().any(|r| file.starts_with(canonical(r)))
 }
 
 /// The files of `found` that are project sources: under the current
 /// directory, outside the test root and `.deps/`.
 fn project_sources(options: &TestOptions, found: &[PathBuf]) -> Vec<PathBuf> {
     let Ok(cwd) = std::env::current_dir().map(|d| canonical(&d)) else { return Vec::new() };
-    let root = canonical(&options.root);
+    let roots: Vec<PathBuf> = options.root_dirs().iter().map(|r| canonical(r)).collect();
     found
         .iter()
         .map(|f| canonical(f))
-        .filter(|f| f.is_file() && f.starts_with(&cwd) && !f.starts_with(&root))
+        .filter(|f| f.is_file() && f.starts_with(&cwd) && !roots.iter().any(|r| f.starts_with(r)))
         .filter(|f| !f.strip_prefix(&cwd).is_ok_and(|rel| rel.components().any(|c| c.as_os_str() == ".deps")))
         .map(|f| f.strip_prefix(&cwd).map(Path::to_path_buf).unwrap_or(f))
         .collect()
@@ -933,6 +1221,22 @@ fn project_sources(options: &TestOptions, found: &[PathBuf]) -> Vec<PathBuf> {
 /// doc examples.
 fn start_file(run: &Run<'_>, dispatch: Dispatch, target: &Target) -> PendingFile {
     let path = target.path.as_path();
+    // `// @skip <cell>`: nothing of the file runs in this cell.
+    match cell_skip(run.options, path) {
+        Some(Ok(_)) => {
+            return PendingFile {
+                path: path.to_path_buf(),
+                display: path.display().to_string(),
+                diagnostics: Captured::default(),
+                verdict: None,
+                cases: Vec::new(),
+                lines: None,
+                expected_output: None,
+            };
+        }
+        Some(Err(why)) => return PendingFile::decided(path, Captured::default(), (false, Some(why))),
+        None => {}
+    }
     let mut file = if target.compile {
         compile_and_start(run, dispatch, path)
     } else {
@@ -982,13 +1286,10 @@ fn compile_and_start(run: &Run<'_>, dispatch: Dispatch, path: &Path) -> PendingF
         Compiled::Ready(prepared) => prepared,
     };
     let lines = run.coverage.map(|cov| {
-        let tests = test_fn_ranges(
-            &prepared.debug,
-            prepared.cases.iter().map(|(_, entry)| *entry),
-        );
+        let (debug, tests) = prepared.coverage_map();
         cov.lock()
             .unwrap_or_else(|e| e.into_inner())
-            .register_program(&prepared.debug, &tests)
+            .register_program(&debug, &tests)
     });
     let cases = prepared
         .cases
@@ -1125,7 +1426,7 @@ fn doc_cases(run: &Run<'_>, dispatch: Dispatch, path: &Path, report_parse_error:
             found.push((name, line, example.mode, example.program()));
         }
     }
-    run.options.order.order_cases(&run.options.root, path, &mut found);
+    run.options.order.order_cases(&run.options.root_of(path), path, &mut found);
     found
         .into_iter()
         .map(|(name, line, mode, program)| start_doc_case(run, dispatch, path, name, line, mode, program))
@@ -1154,11 +1455,19 @@ fn start_doc_case(
     let diagnostics = Captured::default();
     let mut pipeline = run_pipeline(run.config, run.options, Box::new(diagnostics.clone()));
     pipeline.set_file_text(entry.clone(), program);
+    run.options.engine.start_capture(run.options.opt_level);
     let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         pipeline.compile_src_from_file(&entry.display().to_string())
     }));
+    let native = match &compiled {
+        Ok(Ok(_)) => native_code(&pipeline, &entry.display().to_string(), run.options.engine, false).0,
+        _ => {
+            let _ = compiler::native_mir::take_native_capture();
+            None
+        }
+    };
     let _ = pipeline.finish_reporting();
-    let (bytecode, constants) = match compiled {
+    let constants = match compiled {
         Ok(Ok(ok)) => ok,
         Ok(Err(_)) => {
             let why = "example does not compile".to_string();
@@ -1176,7 +1485,7 @@ fn start_doc_case(
         let why = "example has no `main` to run".to_string();
         return decided_case(name, false, Some(why), Vec::new(), kind_failed);
     };
-    let Some((ctx, init_ip, _debug)) = wire_program(pipeline, bytecode, constants, &entry, run.reactor) else {
+    let Some((ctx, _debug)) = wire_program(pipeline, constants, &entry, run.reactor, native) else {
         let why = "no thread program".to_string();
         return decided_case(name, false, Some(why), Vec::new(), kind_failed);
     };
@@ -1184,9 +1493,9 @@ fn start_doc_case(
     // `assert!` in the example fails it.
     let case = TestCase {
         entry: main,
-        init_ip,
         expect_ok_result: false,
         coverage: false,
+        probes: 0,
         step_budget: None,
     };
     start_case(run, dispatch, &display, name, ctx, case, kind)
@@ -1198,7 +1507,8 @@ fn start_doc_case(
 fn module_path(options: &TestOptions, path: &Path) -> String {
     let file = canonical(path);
     let cwd = std::env::current_dir().unwrap_or_default();
-    let mut roots = vec![options.root.clone(), cwd.join("src")];
+    let mut roots = options.root_dirs();
+    roots.push(cwd.join("src"));
     roots.extend(options.extra_roots.iter().map(|r| cwd.join(r)));
     let rel = roots
         .iter()
@@ -1214,11 +1524,11 @@ fn module_path(options: &TestOptions, path: &Path) -> String {
         .join("::")
 }
 
-/// Run the harness over `options.root` without exiting.
+/// Run the harness over `options.paths` without exiting.
 pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<SuiteResult, String> {
     // Every case runs in this process: `env::exit` ends its case, not the run (#1401).
     machine::env::trap_exit(true);
-    let mut files = collect_test_files(&options.root)?;
+    let mut files = collect_test_files(&options.paths)?;
     options.order.order_files(&mut files);
     let jobs = options.jobs.max(1);
     match options.report {
@@ -1301,6 +1611,8 @@ pub fn run_test_suite(config: ReportConfig, options: &TestOptions) -> Result<Sui
         result.cases.extend(more.cases);
         result.failures.extend(more.failures);
         result.quiet_diagnostics += more.quiet_diagnostics;
+        result.known_failures += more.known_failures;
+        result.skipped += more.skipped;
     }
     reactor.shutdown();
     result.coverage = coverage.map(|c| c.into_inner().unwrap_or_else(|e| e.into_inner()));
@@ -1449,6 +1761,8 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
         coverage,
         failures,
         quiet_diagnostics,
+        known_failures,
+        skipped,
         ..
     } = match run_test_suite(config.clone(), &options) {
         Ok(result) => result,
@@ -1474,8 +1788,15 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
             );
         }
         eprintln!();
+        let mut known = match known_failures {
+            0 => String::new(),
+            n => format!(" {n} known failure{} (`// @xfail`);", if n == 1 { "" } else { "s" }),
+        };
+        if skipped != 0 {
+            known.push_str(&format!(" {skipped} skipped (`// @skip`);"));
+        }
         eprintln!(
-            "test result: {}. {passed} passed; {failed} failed; {} total; finished in {:.2}s",
+            "test result: {}. {passed} passed; {failed} failed; {} total;{known} finished in {:.2}s",
             if failed == 0 { "ok" } else { "FAILED" },
             passed + failed,
             started.elapsed().as_secs_f64()
@@ -1531,6 +1852,8 @@ pub fn cmd_test(config: ReportConfig, options: TestOptions) -> i32 {
             .num("passed", passed)
             .num("failed", failed)
             .num("total", passed + failed)
+            .num("known_failures", known_failures)
+            .num("skipped", skipped)
             .opt_str("seed", seed_of(options.order).as_deref())
             .raw("coverage", &coverage_event)
             .emit();

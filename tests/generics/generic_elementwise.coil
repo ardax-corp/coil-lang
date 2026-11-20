@@ -30,3 +30,18 @@ test("broadcast") {
     let s = scale((1, 2), 3);
     assert!(s[0] == 3 && s[1] == 6);
 }
+
+fn sum_with<T: Num>(T a, T b) -> T {
+    return a + b;
+}
+
+fn twice<T: Num>(T a) -> T {
+    return sum_with(a, a);
+}
+
+test("a clone calls another generic at the aggregate") {
+    let t = twice((3, 4));
+    assert!(t[0] == 6 && t[1] == 8);
+    let a = twice([0.5, 1.5]);
+    assert!(a[1] == 3.0);
+}

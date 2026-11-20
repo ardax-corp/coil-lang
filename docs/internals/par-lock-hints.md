@@ -27,6 +27,17 @@ user lock; claiming deadlock freedom; boiling every FFI type.
 Diagnostic **E0805** (`ParLockHint`), severity **info** (not an error).
 Emitted only when `--auto-par` is on (same as IPA codegen).
 
+The hints come from `HirModule::par_escape_hints`
+([`hir/par/par_hint.rs`](../../compiler/src/hir/par/par_hint.rs)), over the
+module's HIR as built. A call bag is a fork site of
+[`par_profit`](auto-par.md) with every user function taken as an arm. The
+walk reads calls as they are written: a host is classified by the short name
+of a bare call (`write(…)`) or of a lower-case module path (`io::write(…)`),
+and a resource is named by the local or the factory at the call (`f`,
+`stdout`). A method call (`f.write(…)`), a call through a trait and
+`Type::f(…)` name no host. Nothing under `if let`, `while let` or the
+arguments of `new` is looked at.
+
 Unlocked (the user has not taken a covering lock). The resource list is
 comma-separated **all** named escapes, for example
 `` `stdout` (FD), `f` (FD), `invoke` (FFI handle) ``:
@@ -53,14 +64,15 @@ Help:
 the compiler does not auto-fork on a covering lock yet; a later hold check / runtime assert may admit shared steal
 ```
 
-A covering bag that lives only in a lambda is detected on the AST. Lambdas
+A covering bag that lives only in a lambda is detected too (the walk enters
+a lambda's body). Lambdas
 may **CALL** in-scope named `fn`s without `use (…)` (empty captures). Outer
 **locals** still need `use`, and capturing lambdas are not host-sendable
 (`with_lock` / spawn refuse `ObjFn` with captures). A typechecking covering
 example that also names outer locals therefore still needs `use` on those
 locals (and then cannot be passed to `with_lock`). The compile smoke uses an
 unlocked mutex on the named-fn bag instead. The covering wording is covered
-by the AST unit test.
+by the unit tests.
 
 No hint when:
 
@@ -93,7 +105,7 @@ First cut does **not** treat a held mutex as making the body pure, and does
 behavior intact for pure boards and avoids I/O reordering / deadlock from
 compiler-inserted forks.
 
-Compile-time coverage is structural (AST). It is not a proof that every
+Compile-time coverage is structural. It is not a proof that every
 dynamic path holds `R`, and it is not deadlock-free.
 
 ## Runtime check story (not shipped)

@@ -1,6 +1,6 @@
 // `declare` and `invoke` lower on direct MIR: the signature's tags are
 // constants, an argument naming a function is its code pointer, and the
-// boxed `Result` the VM pushes is matched as it comes back. With no
+// boxed `Result` the runtime returns is matched as it comes back. With no
 // library loaded (a `dload` needs a grant), both fail with `InvalidHandle`.
 use tests::assert;
 use ffi::declare;

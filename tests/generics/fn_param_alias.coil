@@ -1,0 +1,55 @@
+// A generic body's own function parameter copied into a `let` (`let g =
+// f;`) is the same closure word, so a call through the copy is a plain
+// closure call, as `f(x)` is (coil-lang#2555): an alias, an alias of an
+// alias, one captured by a lambda, one stored in a tuple and read back.
+// The `_shared` twin runs the same at `--clone-budget 0`;
+// `fn_param_alias_option.coil` holds an open `Option` result.
+use tests::assert;
+
+class C {
+    pub n: int,
+}
+
+fn alias<T>(T -> T f, T x) -> T {
+    let g = f;
+    return g(x);
+}
+
+fn alias2<T>(T -> T f, T x) -> T {
+    let g = f;
+    let h = g;
+    return h(h(x));
+}
+
+fn captured<T>(T -> T f, T x) -> T {
+    let g = f;
+    let k = fn (T y) use (g) => g(y);
+    return k(x);
+}
+
+fn in_tuple<T>(T -> T f, T x) -> T {
+    let g = f;
+    let t = (g, 1);
+    let (h, _) = t;
+    return h(x);
+}
+
+test("an alias of a function parameter, at int and string") {
+    assert!(alias(fn (int x) => x + 1, 1) == 2);
+    assert!(alias(fn (string s) => s + "!", "a") == "a!");
+}
+
+test("an alias of an alias, at float and a class") {
+    assert!(alias2(fn (float x) => x * 2.0, 1.5) == 6.0);
+    assert!(alias2(fn (C c) => new C(c.n + 1), new C(1)).n == 3);
+}
+
+test("an alias captured by a lambda") {
+    assert!(captured(fn (int x) => x * 3, 2) == 6);
+    assert!(captured(fn (string s) => s + s, "ab") == "abab");
+}
+
+test("an alias stored in a tuple and read back") {
+    assert!(in_tuple(fn (int x) => x - 1, 5) == 4);
+    assert!(in_tuple(fn (C c) => new C(c.n * 2), new C(4)).n == 8);
+}

@@ -1,0 +1,66 @@
+// `thread::with_lock`, `with_read`, `with_write`, `try_read` and
+// `try_write`, in Coil. Embedded in the compiler as module `thread_locks`;
+// a `use thread::with_lock` (and so on) imports from here
+// (`macros::forward_thread_uses`). The lock primitives are in
+// `prelude::thread` (`machine/src/thread.rs`): an acquire parks the
+// running task while the lock is held, and a hold lasts until its release,
+// which each function `defer`s right after the acquire, so a panic or a
+// cancel in the callback releases the lock too.
+use prelude::thread::{lock_acquire, lock_release, lock_load, lock_store, rw_acquire_read, rw_acquire_write, rw_try_read, rw_try_write, rw_release_read, rw_release_write, rw_load, rw_store};
+use thread::{LockError, Mutex, RwLock};
+
+/// Lock `m`, call `f` with its value, keep the first value `f` returns and
+/// return the second.
+fn with_lock<T, R>(Mutex<T> m, T -> (T, R) f) -> Result<R, LockError> {
+    lock_acquire(m);
+    defer use (m) {
+        lock_release(m);
+    }
+    let (next, out) = f(lock_load(m)?);
+    lock_store(m, next)?;
+    return Ok(out);
+}
+
+/// Call `f` with a copy of `lock`'s value, read under a shared hold that
+/// ends before `f` runs.
+fn with_read<T, R>(RwLock<T> lock, T -> R f) -> Result<R, LockError> {
+    rw_acquire_read(lock);
+    let value = rw_load(lock);
+    rw_release_read(lock);
+    return Ok(f(value?));
+}
+
+/// `with_read`, or `Err(LockError::WouldBlock)` when a writer holds `lock`.
+fn try_read<T, R>(RwLock<T> lock, T -> R f) -> Result<R, LockError> {
+    if !rw_try_read(lock) {
+        raise LockError::WouldBlock;
+    }
+    let value = rw_load(lock);
+    rw_release_read(lock);
+    return Ok(f(value?));
+}
+
+/// Hold `lock` exclusive, call `f` with its value, keep the first value
+/// `f` returns and return the second.
+fn with_write<T, R>(RwLock<T> lock, T -> (T, R) f) -> Result<R, LockError> {
+    rw_acquire_write(lock);
+    defer use (lock) {
+        rw_release_write(lock);
+    }
+    let (next, out) = f(rw_load(lock)?);
+    rw_store(lock, next)?;
+    return Ok(out);
+}
+
+/// `with_write`, or `Err(LockError::WouldBlock)` when any holds `lock`.
+fn try_write<T, R>(RwLock<T> lock, T -> (T, R) f) -> Result<R, LockError> {
+    if !rw_try_write(lock) {
+        raise LockError::WouldBlock;
+    }
+    defer use (lock) {
+        rw_release_write(lock);
+    }
+    let (next, out) = f(rw_load(lock)?);
+    rw_store(lock, next)?;
+    return Ok(out);
+}

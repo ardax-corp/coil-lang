@@ -1,0 +1,25 @@
+// A user class whose name the HIR passes once took for a scalar (`char`,
+// `f32`) is an object like any other: a `mut` borrow names it, not a copy.
+use tests::assert;
+
+class char {
+    pub x: int,
+}
+
+class f32 {
+    pub x: int,
+}
+
+test("a mut borrow of a class named char writes the object") {
+    let m = new char(1);
+    let c = mut m;
+    c.x += 1;
+    assert!(m.x == 2);
+}
+
+test("a mut borrow of a class named f32 writes the object") {
+    let f = new f32(3);
+    let g = mut f;
+    g.x = 7;
+    assert!(f.x == 7);
+}

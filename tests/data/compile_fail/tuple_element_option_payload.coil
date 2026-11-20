@@ -1,0 +1,12 @@
+// @expected E0107 — a store through a tuple bound from an `Option` payload
+// changes that tuple, and a tuple cannot be changed in place (#2791).
+class C {
+    pub x: int,
+}
+
+fn main() {
+    let o = Option::Some((new C(1), 0));
+    if let Option::Some(p) = o {
+        p[0].x = 7;
+    }
+}

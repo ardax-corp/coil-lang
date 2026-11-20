@@ -10,25 +10,30 @@ the same flags with the same output.
 cargo build              # coil + coil-test (+ other helpers)
 coil test                # ./tests
 coil test tests/patterns --fail-fast -O0
+coil test tests/tasks/gen_fn_method.coil tests/patterns   # files and directories
 coil test --root examples/src --root .deps/coil-stdlib/src
 coil-test --help         # same flags as `coil test --help`
 ```
 
 ## Why a separate binary
 
-Test-only VM mechanisms (coverage maps, per-test output capture) are Cargo
-features on `machine`. Only `coil-test` enables them, so
-`coil` and `coil-embed` never compile them: no runtime flags or `Option`
-checks in the plain VM. `coil-test` also forwards `gc-stress` / `gc-stats`.
-The step budget (`Machine::set_step_budget`) is not one of them: the VM has
-it anyway (it also bounds compile-time evaluation); a test job sets it per case
-(`TestCase::step_budget`) and reports `steps` / `timed_out`.
+Test-only code (coverage, mutation testing, the harness itself) lives in `coil-test`,
+so `coil` and `coil-embed` never carry it. `coil-test` also forwards `gc-stress` /
+`gc-stats`. The step budget is the runtime's (`Runtime::set_step_budget`, which also
+bounds compile-time evaluation), and only the interpreter charges it; a test job sets
+it per case (`TestCase::step_budget`) and reports `steps` / `timed_out`.
 
-Host wiring (`Pipeline` → `Machine`: FFI paths, dload gate, thread program)
+Host wiring (`Pipeline` → `Runtime`: FFI paths, dload gate, thread program)
 lives in the `coil-host` crate, shared by `coil` and `coil-test`.
 `coil-embed` runs archives only and does not link it.
 
 ## What it runs
+
+Each `PATH` is a directory, walked for `.coil` files, or a `.coil` file
+(several may be given; a file named twice, or under a named directory, runs
+once). A file runs as when its directory is: its headers, its cells' `@xfail`
+and `@skip` lines and the module roots are the same, and its directory is
+its test root (doc-test names, project sources, case order) (#2731).
 
 | Path | Expectation |
 |------|-------------|
@@ -44,7 +49,7 @@ Every case runs inside the harness process, so `env::exit` (granted with
 `--allow-exit`) must not exit it: an `exit(0)` would end the run early with
 status 0 and green CI (#1401). `run_test_suite` calls
 `machine::env::trap_exit(true)`; from then on the `env_exit` native records
-its code on the thread and raises a VM panic
+its code on the thread and raises a panic
 (`env::exit(N) ends only this job under the test harness`), so the job's
 `defer`s run and the harness goes on with the next case.
 
@@ -52,12 +57,12 @@ its code on the thread and raises a VM panic
 |----------------------|---------|
 | a `test` case (or its static init) | fails, whatever `N`: the rest of the body never ran |
 | a case-less file's `main` | passes when `N == 0` (a program's clean end), fails otherwise |
-| a `thread::spawn` job the case started | that job panics on its own VM (its join fails); the case sees only the failed join |
+| a `thread::spawn` job the case started | that job panics on its own runtime (its join fails); the case sees only the failed join |
 
 A test that needs a real exit status runs the program as a subprocess.
 
 Outside `coil test` (`coil --include-tests tests/foo.coil`), a test file
-with no `main` gets one that runs every case in one VM, prints
+with no `main` gets one that runs every case in one run, prints
 `> Test "<name>" failed` for each `Err`, and panics with `tests failed` if
 any did. The compiler builds that `main` as HIR
 ([`hir::synth`](../../compiler/src/hir/synth.rs)) and lowers it like any
@@ -150,7 +155,7 @@ The shuffle is two-level: files first, then each file's cases with a seed
 derived from the run seed and the file's path under the test root. A file
 keeps its case order when rerun alone with the same seed. Files are shuffled
 rather than a flat list of all cases so only one compiled file is in memory at
-a time (the leak smoke runs under `ulimit -v 65536`). splitmix64 +
+a time (the leak smoke caps each process's address space). splitmix64 +
 Fisher–Yates live in `coil-test/src/order.rs`; there is no `rand` dependency.
 
 ## Report
@@ -194,8 +199,8 @@ carry each shown case's `stdout` and `stderr` next to the combined `output`.
 ## Parallel runs
 
 Each case runs as a job on the CPU reactor (`machine/src/reactor.rs`,
-[IO reactor](io-reactor.md)): `Reactor::submit_test` queues it, a worker VM
-runs the file's static-init prologue (its `JMP main` patched to `HALT`), then
+[IO reactor](io-reactor.md)): `Reactor::submit_test` queues it, a worker
+runs the file's startup (`StartupOp`s, not `main`), then
 calls the case; `TestHandle::wait` returns a `TestReport` (passed, and the
 `Err` text of a failing `assert`). `-j N` (default: available CPUs) sets the
 worker count and the number of compile threads.
@@ -211,8 +216,8 @@ worker count and the number of compile threads.
   the threads a case spawns are captured too) and never reach the terminal
   while the run goes. Passing cases' output and passing files' compiler
   warnings are hidden unless `--show-output` / `--verbose`.
-- **Isolation.** A worker VM is reused across jobs. Statics are reset and
-  re-initialized per case, and the heap, finalizer registry (drop PCs), C
+- **Isolation.** A worker's `Runtime` is reused across jobs. Statics are reset and
+  re-initialized per case, and the heap, finalizer registry, C
   struct layouts and thread program are replaced per job, so a case never sees
   another program's state.
 - **`--fail-fast`** stops at once with `-j 1`; with `-j N` files already
@@ -223,16 +228,20 @@ worker count and the number of compile threads.
   says when a pool case is done; an inline case is on the list while it
   runs) and, once one is past the limit, prints the stuck cases with their
   file, elapsed time and output so far, plus the `--seed` that reruns the
-  order, then exits 124 (an `error` event under `--json`). A VM that never
+  order, then exits 124 (an `error` event under `--json`). A case that never
   comes back to a safepoint cannot be stopped from outside, so the process
   ends, not the case; in CI that fails the harness cell with a named
   culprit instead of holding it until the job limit. Where no thread can be
   spawned (wasm32-wasip1) the run goes unwatched, with a warning.
-- **Leak smoke** runs `-j 1`: under `ulimit -v 65536` every extra thread's
-  glibc malloc arena (64 MiB of address space) alone exceeds the cap.
-- **GC mode.** Cases run with the same precise frame / class / static word
-  maps as `coil <file>` (`wire_pipeline_threads`), so a `collect()` in a test
-  exercises production roots.
+- **Leak smoke** (CI's `harness` leak-smoke cell) runs `-j 1` with
+  `MALLOC_ARENA_MAX=1` under `scripts/test_corpora.py --limit-as-kb` (the
+  code size plus 256 MiB), on `--engine mir` with `COIL_NO_FIBERS=1`: one
+  malloc arena, and no fiber stacks reserving address space with nothing
+  behind it.
+- **GC mode.** Cases run with the same class / static word maps and the
+  same root scanning (stack maps on native code) as `coil <file>`
+  (`coil_host::thread_program`), so a `collect()` in a test exercises
+  production roots.
 - Cases that call `thread::spawn` put their jobs on the same reactor.
 - **Cases never nest.** A queued case sits in the reactor's own case queue
   (`Reactor::submit_test`), which only an idle worker drains, after every
@@ -271,13 +280,135 @@ when a cell fails or is cut off by its job limit.
 CI builds the binaries once per OS and build (`harness-build-debug`,
 `harness-build-release`, `harness-build-gc-stress`: the GC-stress
 `coil-test` is release only, #2131) and runs every setting (default, `-O 0`,
-leak smoke in debug and release, GC stress in release) as separate `harness`
-cells, side by side. Each group of Linux cells waits only for its own build.
+leak smoke in debug and release, GC stress in release, the
+[configuration cells](#configuration-cells-and-known-failures) in release)
+as separate `harness` cells, side by side. Each group of Linux cells waits only for its own build.
 macOS (`harness-build-macos`, `harness-macos`) and Windows run in CI's second
 stage, after every Linux job is green and, on a pull request, once it is out
 of draft (`.github/workflows/ci.yml` header). The same corpus must pass in both
 modes, so a build-mode difference (optimizer, overflow checks, debug
 assertions) fails one of them.
+
+### Configuration cells and known failures
+
+Some cells run the corpus under a configuration the default run never
+reaches. Each has a name, which `// @xfail` and `// @skip` header lines
+refer to; a `coil test` cell passes it as `--cell NAME`:
+
+| Cell | Flags (after `scripts/test_corpora.py --release --`) | What it reaches |
+|------|-------------------------------------------------------|-----------------|
+| `clone-budget-0` | `--engine native --clone-budget 0 --cell clone-budget-0 …`, then `--engine mir` | shared generic bodies: no per-type clone is made, so every generic call passes dictionaries and boxed words |
+| `mir-verify` | `COIL_MIR_VERIFY=1` with `--engine native --cell mir-verify …`, then `--engine mir` (and on the `mir-opt` cell's `-O 1 2 3 s g` runs) | the MIR verifier on every body as lowered and after each pass, in a release build |
+| `auto-par` | `scripts/auto_par_diff.py --release -- …` (its own script, not `coil test`) | auto-par on against off: every program with a `main`, both ways, on 8 workers |
+
+```bash
+scripts/test_corpora.py --release -- --engine native --clone-budget 0 --cell clone-budget-0 \
+  --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src
+```
+
+`--clone-budget` is one of the grant and limit flags, so `coil test` passes
+it to every file's compile. A file's own `// @flags --clone-budget N` replaces
+the run's value for that file (capabilities and lists add up; a limit given
+in the header wins).
+
+**`COIL_MIR_VERIFY=1`** (any value but `0`) makes the compiler check every
+body with `MirFunc::verify` and `verify_dominance` as an engine gets it from
+lowering, after each pass of `optimize_mir`, and after `native_expand`
+(dominance only: an expansion's join block is laid out after the block
+that uses its result, which `verify` reads as a use before its
+definition). Debug builds already check after each pass; release builds do
+only under the variable, at about 1% of the corpus time (95.3 s against
+96.3 s of CPU on native, 2026-11-10). It works for any command that
+compiles (`coil`, `coil compile`, `coil test`):
+
+```bash
+COIL_MIR_VERIFY=1 scripts/test_corpora.py --release -- --engine native \
+  --allow-read --allow-write --allow-net --allow-env --root examples/src --root .deps/coil-stdlib/src
+```
+
+A violation is a compiler bug and panics: `MIR verify failed after licm in
+main: value v7 defined twice`, then, from the harness, `note: the compiler
+panicked while compiling tests/…coil`. A release build aborts on a panic,
+so that corpus's process ends there (`no summary` in `test_corpora.py`,
+with the panic at the end of its log). An `// @xfail` line cannot list
+such a file, since the run does not survive it: fix the pass, or file the
+issue and keep the file out with `// @skip mir-verify #<issue> <why>`
+(the `mir-verify` and `mir-opt` runs pass `--cell mir-verify`; no file
+needs the line today).
+
+**`auto-par`: on against off.** The rule is that a program's stdout,
+stderr and exit code with automatic fork-join are those of
+`--auto-par off` ([auto-par](auto-par.md)). `tests/auto_par_cli.rs` checks
+it on a handful of programs written for it; `scripts/auto_par_diff.py`
+checks it on every file with a `fn main` under `tests/` (not
+`compile_fail/`), `examples/*.coil` and `examples/perf/*.coil`:
+
+```bash
+scripts/auto_par_diff.py --release -- --allow-read --allow-write --allow-net --allow-env \
+  --root examples/src --root .deps/coil-stdlib/src
+scripts/auto_par_diff.py --release --engine native tests/codegen examples/perf/fib.coil -- …
+```
+
+Each program is its own `coil <file>` process, once with `--auto-par off`
+and once with `on` per engine (`--engine native|mir`, default both), with
+`--contracts all --fold-calls off --no-build-cache` (a call folded at
+compile time never forks), the flags after `--`, the file's own
+`// @flags`, and `COIL_MAX_WORKER_THREADS=8` (`--workers N`), which
+overrides the one worker cargo's environment sets. `-p N` programs run at
+once and `--timeout S` (120) bounds one run. When the two ways differ, the
+sequential run is repeated twice to tell a bug from a program that does
+not print the same thing every time:
+
+| Verdict | Meaning | Fails the run |
+|---------|---------|---------------|
+| `same` | equal both ways on every engine (a program refused the same way both times counts) | no |
+| `differs` | `off` three times the same, `on` different: an auto-par bug. File it, then list the file with `// @xfail auto-par #<issue> <why>` | yes |
+| `unstable` | two of the `--auto-par off` runs differ: the output depends on time or scheduling. Add `// @skip auto-par <why>` | yes |
+| `timed out` | a run went past `--timeout` | yes |
+| `xfail` | listed, and it differs | no |
+| `fixed` | listed, and the same both ways: remove the line | yes |
+| `skip` | `// @skip auto-par`, or a `// @needs` the platform lacks | no |
+
+About 30 of the 840 programs compile to different code with auto-par on
+(the perf benches and `tests/codegen` mostly); the rest are the same
+program twice. The six skipped today are perf benches that print
+nanoseconds (`grep -rn '@skip auto-par' examples tests`).
+
+**Known failures.** A file that fails in a cell for a filed bug says so in
+its header, one line per cell:
+
+```coil
+// @xfail clone-budget-0 #2510 E0801 (callee-arity): a generic rest parameter has no shared-body path
+```
+
+The first word is the cell, and the rest must name an issue (`#N`); a line
+without one fails the file. The line does nothing in a run without
+`--cell`, or with another cell's name. In its cell the file **must fail**
+(not compile, or have a failing case):
+
+| The file | Verdict in its cell |
+|----------|---------------------|
+| fails | not counted as a failure; its passing cases still count. `-v` lists it as `xfail`, the summary says ``N known failures (`// @xfail`)`` and `test_corpora.py` adds `N known` to the corpus line |
+| passes | fails: ``passes, but `// @xfail …` lists it as a known failure: remove that line``. The list can only shrink |
+
+So a cell fails on a new failure and on a fixed one. The verdict is per
+file (`runner::known_failure`, applied in `finish_file`); `--json` carries
+the reason in the file event's `xfail` and the count in the summary's
+`known_failures`. Files under `compile_fail/` ignore the line. A failure
+the runner does not survive (a crash of the process, a case past
+`--wall-timeout`) cannot be listed this way: fix it, or keep the file out
+of the cell until it is.
+
+To list a new failure: file the issue with a minimal repro, then add the
+line to every file that fails for it. `grep -rn '@xfail' tests` is the list.
+
+**Skipped files.** `// @skip <cell> <why>` keeps a file out of a cell: it
+is not compiled or run there, and the summary counts it (`N skipped
+(`// @skip`)`, `skipped` under `--json`). It is for what `@xfail` cannot
+hold: a failure that ends the process or never returns, and (in the
+`auto-par` cell) output that is not the same twice. The reason is
+required; give the issue number when there is one. A skipped file is no
+longer watched in that cell, so prefer `@xfail` wherever the run survives.
 
 On four cores the whole corpus takes ~14 s this way against ~31 s for one
 `coil test` process on a release build (2026-10-15).
@@ -297,15 +428,13 @@ test result: ok. 721 passed; 0 failed; 721 total
 coverage: lcov written to target/coverage/lcov.info
 ```
 
-- **VM.** `machine` feature `coverage` (only `coil-test` enables it) adds a
-  hit counter per PC, filled at the main dispatch while a job asks for it;
-  dense streaks are off while counting, as under the debugger. Test jobs
-  (`TestJob::coverage`) return the counts in `TestReport::hits`. Threads a case
-  spawns run on other VMs and are not counted. Off, it costs nothing per
-  instruction: the dispatch loop runs its hook-free instantiation
-  (`execute::<false>`) unless a collector is attached (#558).
-- **Lines.** Each PC's `DebugLoc` start gives its line (a statement's first
-  line). A line is coverable when some instruction carries it; counts are
+- **Probes.** A coverage build's captured bodies get a `Probe` per source location
+  in every block that runs it (`mir::coverage`), on either engine, and `coil_native_probe`
+  counts it. Test jobs (`TestJob::coverage`) return the counts in `TestReport::hits`.
+  Threads a case spawns are not counted. A build without coverage has no probes, so
+  it costs nothing.
+- **Lines.** Each probe's `DebugLoc` start gives its line (a statement's first
+  line). A line is coverable when some op carries it; counts are
   summed over every test program that contains it.
 - **What counts.** Sources under the current directory, outside `.deps/`.
   Test case bodies are left out unless the line also has code elsewhere, so
@@ -315,18 +444,15 @@ coverage: lcov written to target/coverage/lcov.info
   a tree-shake root, so an unused function is emitted and reports as uncovered
   instead of vanishing. Generic functions never instantiated have no code and
   do not appear.
-- **Opt level.** Coverage runs at the tests' `-O` (default Standard). Rewrites (HIR inlining,
-  MIR / dense) can still move a few lines: on the repo suite -O2 reports 8 of
+- **Opt level.** Coverage runs at the tests' `-O` (default Standard). Rewrites (HIR inlining) can still move a few lines: on the repo suite -O2 reports 8 of
   1326 lines uncovered that `-Og` covers.
-- **Release builds** build `coil` / `coil-embed` in their own cargo invocation:
-  a workspace-wide build unifies helper-only `machine` features (`debugger`,
-  `coverage`) into every binary.
 
 ## Mutation testing
 
 `coil mutate` (re-execs `coil-test mutate`) changes project sources one small
 edit at a time and checks that some test notices. It reuses the runner: same
-test root, `-O`, `--root`, grants, `--seed`, `-j`.
+test root, `-O`, `--root`, grants, `--seed`, `-j`. It always runs on the interpreter
+(`Engine::Mir`, whatever the options say): only that engine charges the step budget.
 
 ```text
 $ coil mutate --root src
@@ -385,7 +511,7 @@ clamps low)`, `no coverage …`) as it finishes.
    and the run stops instead of reporting every mutant as survived.
 5. **Isolation.** Each mutant runs in a child `coil-test __mutant-worker`
    (same flags; the job on stdin, the verdict on stdout), `-j` at a time.
-   A mutant can crash the VM (see the arithmetic row in
+   A mutant can crash the process (see the arithmetic row in
    [limitations](limitations.md)) or block outside the step budget (threads,
    host waits): a crash counts as `killed`, and `--wall-timeout` (60 s) kills
    a stuck worker as `timeout`.
@@ -418,9 +544,9 @@ render them. `--json` cannot be combined with `--log-json` / `--log-lsp`.
 | `event` | Fields |
 |---------|--------|
 | `start` | `files`, `seed` (`"0x…"`, `null` with `--no-shuffle`), `jobs` |
-| `file` | `file`, `ok`, `passed`, `failed`, `message` (file-level verdict or `null`), `diagnostics` (compiler output or `null`), `cases`: `[{name, ok, timed_out, reason, output}]` (`output` only for failures or with `--show-output`) |
+| `file` | `file`, `ok`, `passed`, `failed`, `message` (file-level verdict or `null`), `xfail` (why it is a known failure of the run's `--cell`, or `null`), `diagnostics` (compiler output or `null`), `cases`: `[{name, ok, timed_out, reason, output}]` (`output` only for failures or with `--show-output`) |
 | `error` | `message` (harness error; the run then exits 1) |
-| `summary` | `ok`, `passed`, `failed`, `total`, `seed`, `coverage`: `null` or `{hit, total, lcov, files: [{file, hit, total}]}` |
+| `summary` | `ok`, `passed`, `failed`, `total`, `known_failures`, `seed`, `coverage`: `null` or `{hit, total, lcov, files: [{file, hit, total}]}` |
 
 Files are reported in start order, as in the text report.
 
@@ -444,15 +570,15 @@ serialized to `.ccoil`, so test-only data never touches the archive format.
 
 | File | Role |
 |------|------|
-| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--wall-timeout`, `--show-output`, `--coverage*`, `--no-doc-tests`, `--doc-tests-only`, `-O`, `--root`, host grants, `--log-*`; `mutate` flags) |
+| `coil-test/src/args.rs` | argv (`--fail-fast`, `--seed`, `--no-shuffle`, `-j`, `--wall-timeout`, `--show-output`, `--coverage*`, `--no-doc-tests`, `--doc-tests-only`, `--cell`, `-O`, `--root`, host grants, `--log-*`; `mutate` flags) |
 | `coil-test/src/watchdog.rs` | `--wall-timeout`: the cases in flight, the thread that ends a run with a stuck one |
 | `parser/src/doc_examples.rs` | doc example rules: fences, hidden lines, the doc-test program, documented items |
 | `coil-test/src/order.rs` | seeded file / case order |
 | `machine/src/reactor.rs` | `TestJob` (incl. `step_budget`), `submit_test` / `run_test_here`, `TestHandle` |
-| `coil-test/src/coverage.rs` | PC → line maps, summing, lcov / summary / per-test JSON |
-| `coil-test/src/runner.rs` | discovery, per-file compile, per-case VM, summary |
+| `coil-test/src/coverage.rs` | Location → line maps, summing, lcov / summary / per-test JSON |
+| `coil-test/src/runner.rs` | discovery, per-file compile, per-case jobs, summary |
 | `coil-test/src/mutate/` | `coil mutate`: sites, baseline / plan / report (`mod.rs`), per-mutant job and worker process (`job.rs`) |
-| `coil-host/src/lib.rs` | `wire_pipeline_vm`, `wire_pipeline_threads`, `execute_pipeline` |
+| `coil-host/src/lib.rs` | `native_start`, `thread_program`, `execute_pipeline` |
 
 Plan for parallel runs, coverage and mutation testing: the *coil-test:
 Coverage, Parallel Runner & Mutation Testing* design doc.

@@ -132,9 +132,9 @@ test("methods have their own keys") {
     let d = new Counter(2);
     assert!(c.key() == d.key());
     assert!(c.key() != Counter::make_key());
-    assert!(keyed(1) == keyed(2));
-    assert!(keyed(1) != keyed("a"));
-    assert!(keyed(1) != c.key());
+    assert!(1.keyed() == 2.keyed());
+    assert!(1.keyed() != "a".keyed());
+    assert!(1.keyed() != c.key());
 }
 
 test("a test body has a key too") {

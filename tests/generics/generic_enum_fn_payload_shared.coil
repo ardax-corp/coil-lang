@@ -1,0 +1,621 @@
+// A generic enum may carry a function over its type parameter (#2473):
+// `F(fn(T) -> T)` is a monomorphic function at a ground instance and a
+// function of boxed words in a shared body, one closure word in the enum's
+// object either way. Built, matched, called, stored and kept across a
+// collection, at ground types and through generic functions.
+//
+// The same cases as generic_enum_fn_payload.coil with no mono clones: every
+// generic function here runs its shared body.
+// @flags --clone-budget 0
+use tests::assert;
+use gc::collect;
+
+enum G<T> {
+    F(fn(T) -> T),
+    N,
+}
+
+impl G<T> {
+    pub fn apply(T x) -> T {
+        return match self {
+            G::F(f) => f(x),
+            G::N => x,
+        };
+    }
+
+    pub fn is_fn() -> bool {
+        return match self {
+            G::F(_) => true,
+            G::N => false,
+        };
+    }
+}
+
+// Every position a parameter takes in a payload function.
+enum Act<T> {
+    Map(fn(T) -> T),
+    Make(fn() -> T),
+    Test(fn(T) -> bool),
+    Fold(fn(T, T) -> T),
+    Named { f: fn(T) -> T, seed: T },
+    With(T, fn(T) -> T),
+    Fixed(fn(int) -> int),
+    Sink(fn(T) -> ()),
+    Idle,
+}
+
+enum Conv<A, B> {
+    To(fn(A) -> B),
+    Back(fn(B) -> A),
+    Neither,
+}
+
+// Functions whose types hold the parameter below the top: called where the
+// instance is ground.
+enum Deep<T> {
+    Find(fn(T) -> Option<T>),
+    Pair(fn(T) -> (T, T)),
+    Many(fn(Vec<T>) -> T),
+    Nest(fn(fn(T) -> T) -> T),
+    Step(fn(Deep<T>) -> int),
+    Empty,
+}
+
+// A `Vec`, `Option` or `Result` of functions over the parameter: built and
+// called where the instance is ground.
+enum Held<T> {
+    Many(Vec<fn(T) -> T>),
+    Maybe(Option<fn(T) -> T>),
+    Tried(Result<fn(T) -> T, string>),
+    Nothing,
+}
+
+// A recursive generic enum of functions.
+enum Chain<T> {
+    Link(fn(T) -> T, Chain<T>),
+    End,
+}
+
+fn fold<T>(Chain<T> c, T x) -> T {
+    return match c {
+        Chain::Link(f, rest) => fold(rest, f(x)),
+        Chain::End => x,
+    };
+}
+
+fn depth<T>(Chain<T> c) -> int {
+    return match c {
+        Chain::Link(_, rest) => 1 + depth(rest),
+        Chain::End => 0,
+    };
+}
+
+fn positive(int x) -> Option<int> {
+    if x > 0 {
+        return Some(x);
+    }
+    return None;
+}
+
+class Point {
+    pub x: int,
+    pub y: int,
+}
+
+enum Color {
+    Red,
+    Rgb(int, int, int),
+}
+
+fn inc(int x) -> int {
+    return x + 1;
+}
+
+fn half(float x) -> float {
+    return x / 2.0;
+}
+
+fn shout(string s) -> string {
+    return s + "!";
+}
+
+fn flip(Point p) -> Point {
+    return new Point(p.y, p.x);
+}
+
+fn darker(Color c) -> Color {
+    return match c {
+        Color::Red => Color::Rgb(128, 0, 0),
+        Color::Rgb(r, g, b) => Color::Rgb(r / 2, g / 2, b / 2),
+    };
+}
+
+fn red_of(Color c) -> int {
+    return match c {
+        Color::Red => 255,
+        Color::Rgb(r, _, _) => r,
+    };
+}
+
+fn run<T>(G<T> g, T x) -> T {
+    return match g {
+        G::F(f) => f(x),
+        G::N => x,
+    };
+}
+
+fn wrap<T>(fn(T) -> T f) -> G<T> {
+    return G::F(f);
+}
+
+fn twice<T>(G<T> g, T x) -> T {
+    return run(g, run(g, x));
+}
+
+fn run_all<T>(Vec<G<T>> gs, T x) -> T {
+    let acc = x;
+    for g in gs {
+        acc = run(g, acc);
+    }
+    return acc;
+}
+
+fn count_fns<T>(Vec<G<T>> gs) -> int {
+    let n = 0;
+    for g in gs {
+        match g {
+            G::F(_) => {
+                n = n + 1;
+            },
+            G::N => {},
+        }
+    }
+    return n;
+}
+
+fn act<T>(Act<T> a, T x) -> T {
+    return match a {
+        Act::Map(f) => f(x),
+        Act::Make(f) => f(),
+        Act::Test(f) => {
+            if f(x) {
+                x
+            } else {
+                x
+            }
+        },
+        Act::Fold(f) => f(x, x),
+        Act::Named { f, seed } => f(seed),
+        Act::With(v, f) => f(v),
+        Act::Fixed(_) => x,
+        Act::Sink(f) => {
+            f(x);
+            x
+        },
+        Act::Idle => x,
+    };
+}
+
+fn passes<T>(Act<T> a, T x) -> bool {
+    return match a {
+        Act::Test(f) => f(x),
+        default => false,
+    };
+}
+
+fn fixed<T>(Act<T> a, int n) -> int {
+    return match a {
+        Act::Fixed(f) => f(n),
+        default => -1,
+    };
+}
+
+fn convert<A, B>(Conv<A, B> c, A a, B fallback) -> B {
+    return match c {
+        Conv::To(f) => f(a),
+        default => fallback,
+    };
+}
+
+fn round_trip<A, B>(Conv<A, B> to, Conv<A, B> back, A a) -> A {
+    return match to {
+        Conv::To(f) => match back {
+            Conv::Back(g) => g(f(a)),
+            default => a,
+        },
+        default => a,
+    };
+}
+
+fn adder(int k) -> G<int> {
+    return G::F(fn (int x) use (k) => x + k);
+}
+
+fn suffix(string s) -> G<string> {
+    return G::F(fn (string x) use (s) => x + s);
+}
+
+// A closure made in a generic body, stored in the enum it returns.
+fn ident<T>() -> G<T> {
+    return G::F(fn (T x) => x);
+}
+
+// The enum built, held in a tuple and a Vec, and matched inside one
+// generic body.
+fn through_tuple<T>(fn(T) -> T f, T x) -> T {
+    let p = (G::F(f), x);
+    let (g, y) = p;
+    return run(g, y);
+}
+
+fn through_vec<T>(fn(T) -> T f, T x) -> T {
+    let gs: Vec<G<T>> = Vec::new();
+    gs.push(G::F(f));
+    gs.push(G::N);
+    gs.push(wrap(f));
+    collect();
+    let acc = x;
+    for g in gs {
+        acc = match g {
+            G::F(h) => h(acc),
+            G::N => acc,
+        };
+    }
+    return acc;
+}
+
+fn through_option<T>(fn(T) -> T f, T x) -> T {
+    let m: Option<G<T>> = Some(G::F(f));
+    return match m {
+        Some(g) => g.apply(x),
+        None => x,
+    };
+}
+
+test("the issue's program") {
+    let g: G<int> = G::F(inc);
+    let n = match g {
+        G::F(f) => f(1),
+        G::N => 0,
+    };
+    assert!(n == 2);
+    let none: G<int> = G::N;
+    let m = match none {
+        G::F(f) => f(1),
+        G::N => 0,
+    };
+    assert!(m == 0);
+}
+
+test("ground instances: scalars, a string, a class, an enum") {
+    let gi: G<int> = G::F(inc);
+    let gf: G<float> = G::F(half);
+    let gs: G<string> = G::F(shout);
+    let gp: G<Point> = G::F(flip);
+    let gc: G<Color> = G::F(darker);
+    let gb: G<bool> = G::F(fn (bool b) => !b);
+    let call_f = match gf {
+        G::F(f) => f(3.0),
+        G::N => 0.0,
+    };
+    assert!(call_f == 1.5);
+    let call_s = match gs {
+        G::F(f) => f("hi"),
+        G::N => "",
+    };
+    assert!(call_s == "hi!");
+    let call_p = match gp {
+        G::F(f) => f(new Point(1, 2)),
+        G::N => new Point(0, 0),
+    };
+    assert!(call_p.x == 2 && call_p.y == 1);
+    let call_c = match gc {
+        G::F(f) => f(Color::Rgb(200, 100, 50)),
+        G::N => Color::Red,
+    };
+    assert!(red_of(call_c) == 100);
+    let call_b = match gb {
+        G::F(f) => f(false),
+        G::N => false,
+    };
+    assert!(call_b);
+    assert!(gi.is_fn());
+}
+
+test("a generic function matches and calls the payload") {
+    let gi: G<int> = G::F(inc);
+    let gf: G<float> = G::F(half);
+    let gs: G<string> = G::F(shout);
+    let gp: G<Point> = G::F(flip);
+    let gc: G<Color> = G::F(darker);
+    assert!(run(gi, 1) == 2);
+    assert!(run(gf, 3.0) == 1.5);
+    assert!(run(gs, "hi") == "hi!");
+    assert!(run(gp, new Point(3, 4)).x == 4);
+    assert!(red_of(run(gc, Color::Red)) == 128);
+    assert!(twice(gi, 1) == 3);
+    assert!(twice(gf, 8.0) == 2.0);
+    assert!(twice(gs, "a") == "a!!");
+    let n: G<int> = G::N;
+    assert!(run(n, 9) == 9);
+}
+
+test("a generic function builds the enum") {
+    let w = wrap(inc);
+    assert!(run(w, 4) == 5);
+    let ws = wrap(shout);
+    assert!(run(ws, "x") == "x!");
+    let wf = wrap(fn (float x) => x + 0.5);
+    assert!(run(wf, 1.0) == 1.5);
+    let direct = match wrap(inc) {
+        G::F(f) => f(10),
+        G::N => 0,
+    };
+    assert!(direct == 11);
+}
+
+test("the enum's own methods") {
+    let gi: G<int> = G::F(inc);
+    let gs: G<string> = G::F(shout);
+    let gf: G<float> = G::F(half);
+    assert!(gi.apply(1) == 2);
+    assert!(gs.apply("a") == "a!");
+    assert!(gf.apply(5.0) == 2.5);
+    assert!(gi.is_fn());
+    let n: G<string> = G::N;
+    assert!(!n.is_fn());
+    assert!(n.apply("same") == "same");
+}
+
+test("closures with captures, kept across a collection") {
+    let a = adder(10);
+    let s = suffix("?");
+    collect();
+    assert!(run(a, 1) == 11);
+    assert!(run(s, "why") == "why?");
+    assert!(a.apply(5) == 15);
+    let k = 2.5;
+    let scaled: G<float> = G::F(fn (float x) use (k) => x * k);
+    collect();
+    assert!(run(scaled, 2.0) == 5.0);
+}
+
+test("stored in a Vec and kept across a collection") {
+    let gs: Vec<G<int>> = Vec::new();
+    for i in 0..5 {
+        gs.push(adder(i));
+    }
+    gs.push(G::N);
+    gs.push(G::F(inc));
+    collect();
+    assert!(gs.len() == 7);
+    assert!(count_fns(gs) == 6);
+    assert!(run_all(gs, 0) == 11);
+    let total = 0;
+    for g in gs {
+        total = total + match g {
+            G::F(f) => f(100),
+            G::N => 0,
+        };
+    }
+    assert!(total == 611);
+    let first = gs[0];
+    assert!(run(first, 7) == 7);
+    let words: Vec<G<string>> = [suffix("a"), suffix("b"), G::N, G::F(shout)];
+    collect();
+    assert!(run_all(words, "") == "ab!");
+    assert!(count_fns(words) == 3);
+}
+
+test("every position of the parameter in a payload function") {
+    let m: Act<int> = Act::Map(inc);
+    assert!(act(m, 1) == 2);
+    let mk: Act<string> = Act::Make(fn () => "made");
+    assert!(act(mk, "x") == "made");
+    let mkf: Act<float> = Act::Make(fn () => 0.25);
+    assert!(act(mkf, 9.0) == 0.25);
+    let t: Act<int> = Act::Test(fn (int x) => x > 3);
+    assert!(passes(t, 4));
+    assert!(!passes(t, 3));
+    assert!(act(t, 4) == 4);
+    let fo: Act<int> = Act::Fold(fn (int a, int b) => a * b);
+    assert!(act(fo, 6) == 36);
+    let fs: Act<string> = Act::Fold(fn (string a, string b) => a + b);
+    assert!(act(fs, "ab") == "abab");
+    let nm: Act<float> = Act::Named { f: half, seed: 9.0 };
+    assert!(act(nm, 0.0) == 4.5);
+    let wi: Act<string> = Act::With("w", shout);
+    assert!(act(wi, "") == "w!");
+    let fx: Act<string> = Act::Fixed(inc);
+    assert!(fixed(fx, 41) == 42);
+    assert!(act(fx, "same") == "same");
+    let sk: Act<int> = Act::Sink(fn (int x) {});
+    assert!(act(sk, 5) == 5);
+    let idle: Act<int> = Act::Idle;
+    assert!(act(idle, 3) == 3);
+    assert!(fixed(idle, 1) == -1);
+}
+
+test("two parameters") {
+    let to: Conv<int, string> = Conv::To(fn (int n) => n.show());
+    let back: Conv<int, string> = Conv::Back(fn (string s) => s.len());
+    assert!(convert(to, 42, "") == "42");
+    assert!(convert(back, 42, "none") == "none");
+    assert!(round_trip(to, back, 12345) == 5);
+    let fi: Conv<float, int> = Conv::To(fn (float f) => f as int);
+    assert!(convert(fi, 2.75, 0) == 2);
+    let neither: Conv<int, int> = Conv::Neither;
+    assert!(convert(neither, 1, 7) == 7);
+}
+
+test("as a field, a tuple item, an Option payload and a result") {
+    let pair = (G::F(inc), 3);
+    let (g, n) = pair;
+    assert!(run(g, n) == 4);
+    let maybe: Option<G<string>> = Some(G::F(shout));
+    let got = match maybe {
+        Some(h) => run(h, "o"),
+        None => "",
+    };
+    assert!(got == "o!");
+    let made = adder(1);
+    assert!(run(made, 1) == 2);
+}
+
+test("instances whose argument is itself an enum, a pair or a Vec") {
+    let go: G<Option<int>> = G::F(
+        fn (Option<int> o) => match o {
+            Some(v) => Some(v + 1),
+            None => Some(0),
+        },
+    );
+    assert!(run(go, Some(1)) == Some(2));
+    assert!(run(go, None) == Some(0));
+    assert!(twice(go, None) == Some(1));
+    assert!(go.apply(Some(9)) == Some(10));
+    let gn: G<Option<string>> = G::F(
+        fn (Option<string> o) => match o {
+            Some(v) => None,
+            None => Some("was none"),
+        },
+    );
+    assert!(run(gn, None) == Some("was none"));
+    assert!(run(gn, Some("x")) == None);
+    assert!(twice(gn, Some("x")) == Some("was none"));
+    let gr: G<Result<int, string>> = G::F(
+        fn (Result<int, string> r) => match r {
+            Ok(v) => Err(v.show()),
+            Err(e) => Ok(e.len()),
+        },
+    );
+    assert!(run(gr, Ok(12)) == Err("12"));
+    assert!(twice(gr, Ok(123)) == Ok(3));
+    let gt: G<(int, float)> = G::F(fn ((int, float) p) => (p[0] + 1, p[1] * 2.0));
+    let (a, b) = run(gt, (1, 1.5));
+    assert!(a == 2 && b == 3.0);
+    let (c, d) = twice(gt, (0, 1.0));
+    assert!(c == 2 && d == 4.0);
+    let gv: G<Vec<int>> = G::F(
+        fn (Vec<int> v) {
+            let w: Vec<int> = Vec::new();
+            w.push(v.len());
+            w.push(v[0]);
+            return w;
+        },
+    );
+    let out = run(gv, [7, 8, 9]);
+    assert!(out[0] == 3 && out[1] == 7);
+    let many: Vec<G<Option<int>>> = [go, G::N, go];
+    collect();
+    assert!(run_all(many, None) == Some(1));
+}
+
+test("the enum built and held inside a generic body") {
+    assert!(through_tuple(inc, 1) == 2);
+    assert!(through_tuple(shout, "t") == "t!");
+    assert!(through_tuple(half, 1.0) == 0.5);
+    assert!(through_vec(inc, 1) == 3);
+    assert!(through_vec(shout, "v") == "v!!");
+    assert!(through_vec(half, 8.0) == 2.0);
+    assert!(through_option(inc, 1) == 2);
+    assert!(through_option(shout, "o") == "o!");
+}
+
+test("a closure made in a generic body") {
+    let i: G<int> = ident();
+    assert!(run(i, 7) == 7);
+    let s: G<string> = ident();
+    assert!(run(s, "id") == "id");
+    let f: G<float> = ident();
+    let direct = match f {
+        G::F(g) => g(2.5),
+        G::N => 0.0,
+    };
+    assert!(direct == 2.5);
+    let o: G<Option<int>> = ident();
+    assert!(run(o, Some(3)) == Some(3));
+}
+
+test("a recursive generic enum of functions") {
+    let ch: Chain<int> = Chain::Link(
+        inc,
+        Chain::Link(fn (int x) => x * 10, Chain::Link(inc, Chain::End)),
+    );
+    collect();
+    assert!(fold(ch, 1) == 21);
+    assert!(depth(ch) == 3);
+    let cs: Chain<string> = Chain::Link(fn (string s) => s + "a", Chain::Link(shout, Chain::End));
+    assert!(fold(cs, "") == "a!");
+    assert!(depth(cs) == 2);
+    let cf: Chain<float> = Chain::Link(half, Chain::Link(half, Chain::End));
+    assert!(fold(cf, 8.0) == 2.0);
+    let empty: Chain<int> = Chain::End;
+    assert!(fold(empty, 4) == 4);
+}
+
+test("functions holding the parameter below the top, at ground instances") {
+    let find: Deep<int> = Deep::Find(positive);
+    let found = match find {
+        Deep::Find(f) => f(3),
+        default => None,
+    };
+    assert!(found == Some(3));
+    let pair: Deep<string> = Deep::Pair(fn (string s) => (s, s + s));
+    let (one, two) = match pair {
+        Deep::Pair(f) => f("x"),
+        default => ("", ""),
+    };
+    assert!(one == "x" && two == "xx");
+    let many: Deep<int> = Deep::Many(fn (Vec<int> v) => v.len());
+    let n = match many {
+        Deep::Many(f) => f([1, 2, 3]),
+        default => 0,
+    };
+    assert!(n == 3);
+    let nest: Deep<int> = Deep::Nest(fn (fn(int) -> int g) => g(10));
+    let m = match nest {
+        Deep::Nest(f) => f(inc),
+        default => 0,
+    };
+    assert!(m == 11);
+    let step: Deep<int> = Deep::Step(
+        fn (Deep<int> d) => match d {
+            Deep::Empty => 1,
+            default => 2,
+        },
+    );
+    let k = match step {
+        Deep::Step(f) => f(Deep::Empty) * 10 + f(many),
+        default => 0,
+    };
+    assert!(k == 12);
+}
+
+test("a Vec, an Option and a Result of functions, at ground instances") {
+    let fns: Vec<fn(int) -> int> = [inc, fn (int x) => x * 3];
+    let many: Held<int> = Held::Many(fns);
+    collect();
+    let a = match many {
+        Held::Many(fs) => fs[1](fs[0](1)),
+        default => 0,
+    };
+    assert!(a == 6);
+    let maybe: Held<string> = Held::Maybe(Some(shout));
+    let b = match maybe {
+        Held::Maybe(Some(f)) => f("m"),
+        default => "",
+    };
+    assert!(b == "m!");
+    let tried: Held<float> = Held::Tried(Ok(half));
+    let c = match tried {
+        Held::Tried(Ok(f)) => f(1.0),
+        default => 0.0,
+    };
+    assert!(c == 0.5);
+    let failed: Held<float> = Held::Tried(Err("no"));
+    let d = match failed {
+        Held::Tried(Err(e)) => e,
+        default => "",
+    };
+    assert!(d == "no");
+}

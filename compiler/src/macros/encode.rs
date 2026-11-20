@@ -4,7 +4,7 @@
 //! (`<len>:<bytes>`, lists as a count then their items) in the order the
 //! model's constructors take them. `macro::Reader` rebuilds the objects, so
 //! the compiled expansion program depends only on the providers and no heap
-//! layout is shared between the compiler and the VM.
+//! layout is shared between the compiler and the runtime.
 
 use parser::ast::{AttrArgs, AttrLit, Attribute, ContractKind, EnumVariantPayload, Expression, Output};
 
@@ -526,7 +526,7 @@ pub fn expr_value(e: &Output<'_>) -> (&'static str, String, i64) {
 }
 
 /// `f` as `digits * 10^exp` with both exact as floats (the shortest digits
-/// that print `f`; `|exp| <= 22`, `|digits| < 2^53`), so the macro VM
+/// that print `f`; `|exp| <= 22`, `|digits| < 2^53`), so the macro interpreter
 /// rebuilds `f` with one correctly rounded multiply or divide.
 fn float_parts(f: f64) -> Option<(String, i64)> {
     if !f.is_finite() {

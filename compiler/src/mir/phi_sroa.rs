@@ -16,7 +16,7 @@
 //! 2. A `HeapRef` φ whose every incoming value is a fresh `alloc.object`
 //!    (seen through `Word` casts to and from the niche word), used for
 //!    nothing but `heapsetfield` in its own block, and whose own uses are
-//!    all `heaploadfield`, becomes one φ per read field.
+//!    all `productload`, becomes one φ per read field.
 //!
 //! An object that escapes or is stored to after the φ keeps its
 //! allocation. The passes run before the deopt sites are drawn from the
@@ -25,7 +25,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::cse::dce;
-use super::func::MirFunc;
+use super::func::{Defs, MirFunc};
 use super::inst::{BlockId, MirAllocKind, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator, ValueId};
 use super::ty::MirTy;
 
@@ -45,14 +45,6 @@ pub fn phi_sroa(func: &mut MirFunc) -> usize {
         dce(func);
     }
     threaded + split
-}
-
-/// Where each value is defined: its block and the instruction.
-fn defs(func: &MirFunc) -> HashMap<ValueId, (BlockId, &MirInst)> {
-    func.blocks
-        .iter()
-        .flat_map(|b| b.insts.iter().map(move |i| (i.dest(), (b.id, i))))
-        .collect()
 }
 
 /// Drop removed values from the sidecars that name them.
@@ -97,7 +89,7 @@ fn term_reads(term: &Terminator, v: ValueId) -> bool {
 
 /// What a niche `Option` word is known to hold: `Some(true)` for `None`
 /// (the zero word), `Some(false)` for a fresh object.
-fn niche_is_none(defs: &HashMap<ValueId, (BlockId, &MirInst)>, v: ValueId) -> Option<bool> {
+fn niche_is_none(defs: &Defs, v: ValueId) -> Option<bool> {
     match defs.get(&v)?.1 {
         MirInst::Cast {
             kind: MirCastKind::Word,
@@ -163,7 +155,7 @@ fn thread_one(func: &mut MirFunc) -> bool {
         let Some(opt_phi) = phis.iter().find(|i| i.dest() == opt) else {
             continue;
         };
-        let d = defs(func);
+        let d = func.defs();
         let known: Option<Vec<bool>> = from
             .iter()
             .map(|&p| incoming(opt_phi, p).and_then(|v| niche_is_none(&d, v)))
@@ -242,7 +234,7 @@ fn reachable(func: &MirFunc) -> HashSet<BlockId> {
 
 /// `Word` casts heap → niche → heap read the heap word itself.
 fn forward_word_round_trips(func: &mut MirFunc) {
-    let d = defs(func);
+    let d = func.defs();
     let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
     for (&v, (_, inst)) in &d {
         if let MirInst::Cast { kind: MirCastKind::Word, to: MirTy::HeapRef, src, .. } = inst
@@ -255,15 +247,7 @@ fn forward_word_round_trips(func: &mut MirFunc) {
     if subst.is_empty() {
         return;
     }
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            inst.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-        }
-        if let Some(term) = &mut block.term {
-            term.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-        }
-    }
-    func.rewrite_debug_slots(|v| subst.get(&v).copied().unwrap_or(v));
+    func.map_values(|v| subst.get(&v).copied().unwrap_or(v));
 }
 
 /// One fresh object reaching a φ: its allocation and the value each field
@@ -300,7 +284,7 @@ fn fresh_object(func: &MirFunc, alloc: ValueId, phi: ValueId) -> Option<Fresh> {
                     if b.id != block || !seen_alloc || *value == alloc {
                         return None;
                     }
-                    // The store's own value (the VM leaves it on the stack)
+                    // The store's own value (the runtime leaves it on the stack)
                     // must be unused: it goes with the object.
                     if !user_blocks(func, *dest).is_empty() {
                         return None;
@@ -350,7 +334,7 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
         for b in &func.blocks {
             for inst in &b.insts {
                 match inst {
-                    MirInst::HeapFieldLoad { dest, object, index } if *object == phi => loads.push((*dest, *index)),
+                    MirInst::ProductLoad { dest, object, slot } if *object == phi => loads.push((*dest, *slot)),
                     MirInst::Phi { dest, .. } if *dest == phi => {}
                     MirInst::GcBarrier { .. } => {}
                     _ if inst.operands().contains(&phi) => ok = false,
@@ -421,13 +405,8 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
                 let d = i.dest();
                 d != phi && !allocs.contains(&d) && !dead_stores.contains(&d) && !subst.contains_key(&d)
             });
-            for inst in &mut b.insts {
-                inst.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-            }
-            if let Some(term) = &mut b.term {
-                term.rewrite_values(|v| subst.get(&v).copied().unwrap_or(v));
-            }
         }
+        func.map_values(|v| subst.get(&v).copied().unwrap_or(v));
         let mut new_phis: Vec<(u32, MirInst)> = field_phis
             .into_iter()
             .map(|(i, (dest, args))| (i, MirInst::Phi { dest, ty: func.ty(dest), args }))
@@ -437,7 +416,6 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
         for (k, (_, inst)) in new_phis.into_iter().enumerate() {
             at.insts.insert(k, inst);
         }
-        func.rewrite_debug_slots(|v| subst.get(&v).copied().unwrap_or(v));
         for env in func.slot_env.values_mut() {
             for (_, v) in env.iter_mut() {
                 *v = subst.get(v).copied().unwrap_or(*v);

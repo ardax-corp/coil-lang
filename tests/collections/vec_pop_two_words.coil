@@ -1,0 +1,62 @@
+// `Vec::pop` / `Vec::remove` of a scalar element return their `Option` as
+// two words from the host native (payload and tag), with no enum object:
+// matched, stored, passed on, compared and dropped.
+use tests::assert;
+
+fn first_or(Option<int> o, int d) -> int {
+    return match o {
+        Some(x) => x,
+        None => d,
+    };
+}
+
+test("pop of ints matched to empty") {
+    let v = Vec::from([1, 2, 3]);
+    let s = 0;
+    let more = true;
+    while more {
+        match v.pop() {
+            Some(x) => {
+                s += x;
+            },
+            None => {
+                more = false;
+            },
+        }
+    }
+    assert!(s == 6);
+    assert!(v.pop() == None);
+}
+
+test("pop and remove of floats keep their bits") {
+    let v = Vec::from([0.5, -2.25, 4.0]);
+    let last = match v.pop() {
+        Some(f) => f,
+        None => 0.0,
+    };
+    assert!(last == 4.0);
+    assert!(v.remove(0) == Some(0.5));
+    assert!(v.remove(3) == None);
+    assert!(v.len() == 1);
+}
+
+test("a popped option stored, passed and kept") {
+    let v = Vec::from([10, 20]);
+    let a = v.pop();
+    let b = v.pop();
+    let c = v.pop();
+    assert!(first_or(a, 0) == 20);
+    assert!(first_or(b, 0) == 10);
+    assert!(first_or(c, -1) == -1);
+    let kept: Vec<Option<int>> = Vec::new();
+    kept.push(a);
+    kept.push(c);
+    assert!(kept[0] == Some(20) && kept[1] == None);
+}
+
+test("a dropped pop still shrinks") {
+    let v = Vec::from([true, false, true]);
+    v.pop();
+    assert!(v.len() == 2);
+    assert!(v.pop() == Some(false));
+}

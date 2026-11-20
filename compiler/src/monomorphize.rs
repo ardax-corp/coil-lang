@@ -1,7 +1,7 @@
 //! Monomorphization planning for ground generic call sites.
 //!
 //! This module is intentionally analysis-first. It decides which generic calls
-//! are safe and small enough to specialize; `Compiler` owns the bytecode
+//! are safe and small enough to specialize; `Compiler` owns the code
 //! emission for each accepted specialization.
 
 use std::collections::{BTreeSet, HashMap};
@@ -55,42 +55,27 @@ impl TyInterner {
     pub fn get(&self, id: TyId) -> Option<&Ty> {
         self.tys.get(id.0 as usize)
     }
+
+    /// The id `ty` was interned under, if it was.
+    fn id_of(&self, ty: &Ty) -> Option<TyId> {
+        self.ids.get(&mono_key_ty(ty)).copied()
+    }
 }
 
 /// The type a mono key names for `ty`: an enum value's type as its applied
 /// enum type, as an annotation spells it. A variant's constructor type
 /// (`Option::Some(1)`, `Pick::Zero`) is its owner's, and a structural sum
-/// is `Option<T>` / `Result<T, E>` for the builtins and the enum's name
-/// otherwise, so `f(Option::Some(1))`, `f(Option::None)` at `Option<int>`
-/// and `f(x)` with `Option<int> x` share one clone (#1477).
+/// is the enum's name, so `f(Option::Some(1))`, `f(Option::None)` at
+/// `Option<int>` and `f(x)` with `Option<int> x` share one clone (#1477).
 pub fn mono_key_ty(ty: &Ty) -> Ty {
-    use crate::typechecking::ty::{option_app_ty, option_inner, result_app_ty, result_ok_err};
-    let rec = |items: &[Ty]| items.iter().map(mono_key_ty).collect::<Vec<_>>();
     match ty {
         Ty::Constructor { owner, .. } => mono_key_ty(owner),
-        Ty::Sum { name, .. } if common::is_builtin_option_enum(name) => match option_inner(ty) {
-            Some(inner) => option_app_ty(mono_key_ty(&inner)),
-            None => ty.clone(),
-        },
-        Ty::Sum { name, .. } if common::is_builtin_result_enum(name) => match result_ok_err(ty) {
-            Some((ok, err)) => result_app_ty(mono_key_ty(&ok), mono_key_ty(&err)),
-            None => ty.clone(),
-        },
         Ty::Sum { name, .. } => Ty::Con(name.clone()),
-        Ty::App(head, args) => Ty::App(Box::new(mono_key_ty(head)), rec(args)),
-        Ty::Fun(a, b) => Ty::Fun(Box::new(mono_key_ty(a)), Box::new(mono_key_ty(b))),
-        Ty::Tuple(items) => Ty::Tuple(rec(items)),
-        Ty::Array { element, length } => Ty::Array {
-            element: Box::new(mono_key_ty(element)),
-            length: *length,
-        },
-        Ty::Record { fields } => Ty::Record {
-            fields: fields.iter().map(|(n, t)| (n.clone(), mono_key_ty(t))).collect(),
-        },
         // `readonly` is a type-checking qualifier with no runtime form, so
         // `f(x)` and `f(readonly x)` share one clone (#1555).
         Ty::Readonly(inner) => mono_key_ty(inner),
-        Ty::Var(_) | Ty::Con(_) | Ty::Existential { .. } | Ty::Forall { .. } | Ty::Never => ty.clone(),
+        Ty::Forall { .. } => ty.clone(),
+        _ => ty.map_children(mono_key_ty),
     }
 }
 
@@ -133,7 +118,9 @@ pub enum MonoCapReason {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MonoPlan {
     pub intern: TyInterner,
-    pub specializations: Vec<MonoSpecialization>,
+    /// In plan order; set once, with [`Self::index`] built from it.
+    specializations: Vec<MonoSpecialization>,
+    index: MonoIndex,
     pub retargets: Vec<MonoRetarget>,
     pub escaped_generic_fns: BTreeSet<String>,
     pub cap_hits: Vec<MonoCapHit>,
@@ -142,9 +129,38 @@ pub struct MonoPlan {
     pub keyed_values: Vec<(String, parser::SimpleSpan)>,
 }
 
+/// [`MonoPlan::specializations`] positions by what lookups ask for, each
+/// list ascending; a map to one position keeps the first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct MonoIndex {
+    by_fn: HashMap<String, Vec<usize>>,
+    by_def: HashMap<DefId, Vec<usize>>,
+    by_subst: HashMap<(String, Vec<TyId>), usize>,
+    by_args: HashMap<(String, Vec<TyId>), usize>,
+}
+
+impl MonoIndex {
+    fn of(specializations: &[MonoSpecialization]) -> Self {
+        let mut index = Self::default();
+        for (i, spec) in specializations.iter().enumerate() {
+            index.by_fn.entry(spec.fn_name.clone()).or_default().push(i);
+            index.by_def.entry(spec.key.def_id).or_default().push(i);
+            index.by_subst.entry((spec.fn_name.clone(), spec.key.subst.clone())).or_insert(i);
+            index.by_args.entry((spec.fn_name.clone(), spec.arg_types.clone())).or_insert(i);
+        }
+        index
+    }
+}
+
 impl MonoPlan {
     pub fn is_empty(&self) -> bool {
         self.specializations.is_empty()
+    }
+
+    /// The spec at `index[key]`, the key's types interned.
+    fn spec_at(&self, index: &HashMap<(String, Vec<TyId>), usize>, fn_name: &str, tys: &[Ty]) -> Option<&MonoSpecialization> {
+        let ids = tys.iter().map(|ty| self.intern.id_of(ty)).collect::<Option<Vec<_>>>()?;
+        index.get(&(fn_name.to_string(), ids)).map(|&i| &self.specializations[i])
     }
 
     /// Intern lookup used by monomorphize tests; codegen uses `intern.get`.
@@ -158,40 +174,26 @@ impl MonoPlan {
         fn_name: &str,
         arg_types: &[Ty],
     ) -> Option<&MonoSpecialization> {
-        self.specializations.iter().find(|spec| {
-            spec.fn_name == fn_name
-                && spec.arg_types.len() == arg_types.len()
-                && spec
-                    .arg_types
-                    .iter()
-                    .zip(arg_types)
-                    .all(|(id, ty)| self.intern.get(*id) == Some(&mono_key_ty(ty)))
-        })
+        self.spec_at(&self.index.by_args, fn_name, arg_types)
     }
 
     /// The specialization of `fn_name` at type arguments `subst` (one per
     /// type parameter, in declaration order).
     pub fn specialization_for_subst(&self, fn_name: &str, subst: &[Ty]) -> Option<&MonoSpecialization> {
-        self.specializations.iter().find(|spec| {
-            spec.fn_name == fn_name
-                && spec.key.subst.len() == subst.len()
-                && spec.key.subst.iter().zip(subst).all(|(id, ty)| self.intern.get(*id) == Some(&mono_key_ty(ty)))
-        })
+        self.spec_at(&self.index.by_subst, fn_name, subst)
     }
 
     pub fn specializations_for_fn<'a>(
         &'a self,
         fn_name: &'a str,
     ) -> impl Iterator<Item = &'a MonoSpecialization> + 'a {
-        self.specializations
-            .iter()
-            .filter(move |spec| spec.fn_name == fn_name)
+        let list = self.index.by_fn.get(fn_name).map_or(&[][..], Vec::as_slice);
+        list.iter().map(|&i| &self.specializations[i])
     }
 
     pub fn specializations_for_def(&self, def_id: DefId) -> impl Iterator<Item = &MonoSpecialization> {
-        self.specializations
-            .iter()
-            .filter(move |spec| spec.key.def_id == def_id)
+        let list = self.index.by_def.get(&def_id).map_or(&[][..], Vec::as_slice);
+        list.iter().map(|&i| &self.specializations[i])
     }
 }
 
@@ -217,6 +219,20 @@ struct GenericFnSig {
     /// every ground call gets its clone, past the clone budget
     /// (`docs/internals/opt-hints.md`).
     hot: bool,
+    /// A parameter or the result holds an open `Option` / `Result` below
+    /// its top (`Vec<Option<T>>`): the shared body and ground code hold
+    /// that value differently where it is a niche word, so every ground
+    /// call gets its clone, past the clone budget (#2441,
+    /// `docs/internals/layout.md`, "Open enums"). The same for a function
+    /// below the top whose result is a bare type parameter
+    /// (`Vec<unit -> T>`), which no adapter reaches at `T = ()` (#2498).
+    /// And for a generator over its type parameters
+    /// ([`crate::layout::open_coroutine`]), or a function calling one by
+    /// name: its shared body cannot make a value nobody produced (#2738).
+    split: bool,
+    /// A `gen fn`: a read of it as a value at ground types makes its
+    /// coroutine through an adapter calling its clone (#2747).
+    coro: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -248,6 +264,7 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
     collect_generic_fn_aliases(ast, checker, &mut sigs);
     mark_keyed(checker, &mut sigs);
     mark_hot(ast, &mut sigs);
+    mark_open_coroutines(checker, &mut sigs);
 
     let mut candidates = Vec::new();
     collect_candidates(ast, checker, &|e| ground_ty(checker, e), &sigs, &mut intern, &mut candidates);
@@ -259,6 +276,7 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
     collect_keyed_values(ast, &sigs, false, &mut keyed_values);
     MonoPlan {
         intern,
+        index: MonoIndex::of(&specializations),
         specializations,
         retargets,
         escaped_generic_fns: escaped,
@@ -296,7 +314,7 @@ fn collect_transitive(
         let Some(sig) = sigs.get(&spec.fn_name) else {
             continue;
         };
-        if seen.len() > budget && !sig.hot {
+        if seen.len() > budget && !sig.hot && !sig.split {
             continue;
         }
         let Some(params) = checker.fn_param_tys(&spec.fn_name) else {
@@ -363,23 +381,33 @@ fn ground_ty_at(checker: &Checker, expr: &Output, map: &HashMap<crate::typecheck
 }
 
 /// Run `f` on the body of the function named `name`; whether it was found.
+/// A method of that name is not it (#2548).
 fn with_fn_body(node: &Output, name: &str, f: &mut dyn FnMut(&Output)) -> bool {
-    if let Expression::Function { name: n, body, .. } = node.1.as_ref() {
-        let Some(body) = body else {
-            return false;
-        };
-        if *n == name {
-            f(body);
-            return true;
-        }
-        return with_fn_body(body, name, f);
-    }
     let mut found = false;
-    walk_children(node, &mut |child| {
-        if !found {
-            found = with_fn_body(child, name, f);
+    match node.1.as_ref() {
+        Expression::Function { name: n, body, .. } => {
+            let Some(body) = body else {
+                return false;
+            };
+            if *n == name {
+                f(body);
+                return true;
+            }
+            return with_fn_body(body, name, f);
         }
-    });
+        Expression::Implementation { .. } | Expression::TypeClass { .. } | Expression::TypeClassImpl { .. } => {
+            for_each_method_body(node, &mut |body| {
+                if !found {
+                    found = with_fn_body(body, name, f);
+                }
+            });
+        }
+        _ => walk_children(node, &mut |child| {
+            if !found {
+                found = with_fn_body(child, name, f);
+            }
+        }),
+    }
     found
 }
 
@@ -402,6 +430,7 @@ fn collect_generic_functions(
             type_params,
             args,
             body,
+            is_coro,
             ..
         } => {
             if !type_params.is_empty()
@@ -415,6 +444,18 @@ fn collect_generic_functions(
                     }
                     sig.def_id = def_id;
                     sig.fn_name = (*name).to_string();
+                    sig.coro = *is_coro && body.is_some();
+                    sig.split = checker
+                        .fn_param_tys(name)
+                        .into_iter()
+                        .flatten()
+                        .chain(checker.fn_return_ty(name))
+                        .any(|ty| {
+                            crate::layout::nested_open_enum(checker, &ty, true, &crate::layout::nested_open_look(checker), &mut |_| true)
+                                || crate::layout::nested_fn_var_result(&ty, true, &mut |_| true)
+                                || crate::layout::nested_fn_field(checker, &ty, &crate::layout::nested_open_look(checker))
+                        })
+                        || checker.fn_declared_return_ty(name).is_some_and(|ty| crate::layout::nested_fn_in_result(checker, &ty, true));
                     sigs.insert(name.to_string(), sig.clone());
                     if !module.is_empty() {
                         sigs.insert(format!("{module}::{name}"), sig);
@@ -424,10 +465,30 @@ fn collect_generic_functions(
                 collect_generic_functions(module, body, checker, sigs);
             }
         }
+        // A method is no free function: its bare name may be one's, whose
+        // sig it must not replace (#2548). Its body may call or declare one.
+        Expression::Implementation { .. } | Expression::TypeClass { .. } | Expression::TypeClassImpl { .. } => {
+            for_each_method_body(node, &mut |body| collect_generic_functions(module, body, checker, sigs));
+        }
         _ => walk_children(node, &mut |child| {
             collect_generic_functions(module, child, checker, sigs)
         }),
     }
+}
+
+/// Run `f` on the body of each method of the `impl` / trait block `node`.
+fn for_each_method_body(node: &Output, f: &mut dyn FnMut(&Output)) {
+    walk_children(node, &mut |child| {
+        let child = match child.1.as_ref() {
+            Expression::Method(_, inner) => inner,
+            _ => child,
+        };
+        match child.1.as_ref() {
+            Expression::Function { body: Some(body), .. } => f(body),
+            Expression::Function { body: None, .. } => {}
+            _ => f(child),
+        }
+    });
 }
 
 fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> GenericFnSig {
@@ -460,6 +521,8 @@ fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> Gene
         calls: BTreeSet::new(),
         keyed: false,
         hot: false,
+        split: false,
+        coro: false,
     }
 }
 
@@ -473,31 +536,71 @@ fn call_names(node: &Output, out: &mut BTreeSet<String>) {
     walk_children(node, &mut |child| call_names(child, out));
 }
 
+/// [`call_names`], with each method called on `self` (`self.m(..)`) as
+/// `Owner::m` (`owner` the `impl`'s class key): what a method body calls by
+/// name.
+pub(crate) fn method_call_names(node: &Output, owner: &str, out: &mut BTreeSet<String>) {
+    if let Expression::Call { name, .. } = node.1.as_ref() {
+        match name.1.as_ref() {
+            Expression::Identifier(n) => {
+                out.insert((*n).to_string());
+            }
+            Expression::Access(recv, method) if matches!(peel(recv).1.as_ref(), Expression::Identifier("self")) => {
+                out.insert(format!("{owner}::{method}"));
+            }
+            _ => {}
+        }
+    }
+    walk_children(node, &mut |child| method_call_names(child, owner, out));
+}
+
+/// The generic functions in `seed`, and those calling one of them by name,
+/// directly or through another.
+fn callers_of(sigs: &HashMap<String, GenericFnSig>, mut seed: BTreeSet<String>) -> BTreeSet<String> {
+    loop {
+        let more: Vec<String> = sigs
+            .iter()
+            .filter(|(name, sig)| !seed.contains(*name) && sig.calls.iter().any(|c| seed.contains(c)))
+            .map(|(name, _)| name.clone())
+            .collect();
+        if more.is_empty() {
+            return seed;
+        }
+        seed.extend(more);
+    }
+}
+
 /// Mark the generic functions that call `symbol::fn_key()`, directly or
 /// through another keyed generic function.
 fn mark_keyed(checker: &Checker, sigs: &mut HashMap<String, GenericFnSig>) {
     let fn_key = checker
         .prelude_fn_in_scope("fn_key")
         .is_some_and(|k| k == crate::typechecking::PreludeFn::FnKey);
-    let mut keyed: BTreeSet<String> = sigs
+    let seed = sigs
         .iter()
         .filter(|(_, sig)| fn_key && sig.calls.contains("fn_key"))
         .map(|(name, _)| name.clone())
         .collect();
-    loop {
-        let more: Vec<String> = sigs
-            .iter()
-            .filter(|(name, sig)| !keyed.contains(*name) && sig.calls.iter().any(|c| keyed.contains(c)))
-            .map(|(name, _)| name.clone())
-            .collect();
-        if more.is_empty() {
-            break;
-        }
-        keyed.extend(more);
-    }
-    for name in keyed {
+    for name in callers_of(sigs, seed) {
         if let Some(sig) = sigs.get_mut(&name) {
             sig.keyed = true;
+        }
+    }
+}
+
+/// Mark clone-only ([`GenericFnSig::split`]) the generic generators over
+/// their type parameters, and the generic functions calling one by name: a
+/// shared body there would make the value nobody produced from a word
+/// (#2738).
+fn mark_open_coroutines(checker: &Checker, sigs: &mut HashMap<String, GenericFnSig>) {
+    let seed = sigs
+        .keys()
+        .filter(|name| checker.fn_return_ty(name).is_some_and(|ty| crate::layout::open_coroutine(&apply_ty_prune(checker.subst(), &ty))))
+        .cloned()
+        .collect();
+    for name in callers_of(sigs, seed) {
+        if let Some(sig) = sigs.get_mut(&name) {
+            sig.split = true;
         }
     }
 }
@@ -516,6 +619,29 @@ fn mark_hot(ast: &Output, sigs: &mut HashMap<String, GenericFnSig>) {
                     call_names(body, hot);
                 }
             }
+        }
+        // A method is no free function: a hint on it must not reach a free
+        // function of the same bare name (#2570). What a hot method calls by
+        // name stays hot, and its body may declare functions.
+        if matches!(node.1.as_ref(), Expression::Implementation { .. } | Expression::TypeClass { .. } | Expression::TypeClassImpl { .. }) {
+            walk_children(node, &mut |child| {
+                let child = match child.1.as_ref() {
+                    Expression::Method(_, inner) => inner,
+                    _ => child,
+                };
+                match child.1.as_ref() {
+                    Expression::Function { attrs, body, .. } => {
+                        if let Some(body) = body {
+                            if attrs.iter().any(|a| a.name == "hot") && !attrs.iter().any(|a| a.name == "cold") {
+                                call_names(body, hot);
+                            }
+                            walk(body, hot, cold);
+                        }
+                    }
+                    _ => walk(child, hot, cold),
+                }
+            });
+            return;
         }
         walk_children(node, &mut |child| walk(child, hot, cold));
     }
@@ -553,7 +679,7 @@ fn collect_candidates(
             out.push(MonoCandidate {
                 span: node.0,
                 specialization,
-                value: sig.alias || sig.keyed || sig.hot,
+                value: sig.alias || sig.keyed || sig.hot || sig.split,
                 recursive: false,
             });
         }
@@ -569,9 +695,78 @@ fn collect_candidates(
         return;
     }
 
+    // A generic function read as a value at ground types whose value is its
+    // adapter there (a generator, #2747; one whose shared body's words are
+    // not the ground ones, #2755): the adapter calls it at those types, so
+    // its clone there is planned here as a call's is. A generator's past
+    // the clone budget as an alias's call is; another's where a call's
+    // would be.
+    if let Expression::Identifier(fn_name) = node.1.as_ref()
+        && let Some(sig) = sigs.get(*fn_name).filter(|sig| if sig.coro { !sig.alias } else { !crate::hir::classify::plain_generic_fn(checker, fn_name) })
+        && let Some(specialization) = candidate_for_value(fn_name, sig, node, checker, ty_of, intern)
+    {
+        out.push(MonoCandidate {
+            span: node.0,
+            specialization,
+            value: sig.coro || sig.alias || sig.keyed || sig.hot || sig.split,
+            recursive: false,
+        });
+        return;
+    }
+
     walk_children(node, &mut |child| {
         collect_candidates(child, checker, ty_of, sigs, intern, out)
     });
+}
+
+/// The clone a read of generic `fn_name` as a value at the ground function
+/// type of `node` takes: its type arguments bound from that type's
+/// parameters and result.
+fn candidate_for_value(
+    fn_name: &str,
+    sig: &GenericFnSig,
+    node: &Output,
+    checker: &Checker,
+    ty_of: &dyn Fn(&Output) -> Option<Ty>,
+    intern: &mut TyInterner,
+) -> Option<MonoSpecialization> {
+    if sig.type_params.is_empty() || sig.param_is_rest.iter().any(|&r| r) {
+        return None;
+    }
+    let mut read = mono_key_ty(&ty_of(node)?);
+    let arity = sig.param_type_params.len();
+    let mut arg_types = Vec::with_capacity(arity);
+    for _ in 0..arity.max(1) {
+        let Ty::Fun(param, ret) = read else {
+            return None;
+        };
+        arg_types.push(*param);
+        read = *ret;
+    }
+    if arity == 0 {
+        arg_types.clear();
+    }
+    let vars = checker.fn_type_param_vars(fn_name, sig.type_params.len())?;
+    let (params, ret) = checker.fn_call_sig(fn_name, arity)?;
+    if params.len() != arg_types.len() {
+        return None;
+    }
+    let mut map = HashMap::new();
+    for (param, ty) in params.iter().zip(&arg_types) {
+        crate::Compiler::bind_scheme_vars(param, ty, &mut map);
+    }
+    crate::Compiler::bind_scheme_vars(&ret, &read, &mut map);
+    let subst = vars.iter().map(|v| map.get(v).and_then(type_arg)).collect::<Option<Vec<_>>>()?;
+    let subst_ids: Vec<TyId> = subst.into_iter().map(|ty| intern.intern(ty)).collect();
+    let arg_ids: Vec<TyId> = arg_types.into_iter().map(|ty| intern.intern(ty)).collect();
+    Some(MonoSpecialization {
+        key: MonoKey {
+            def_id: sig.def_id,
+            subst: subst_ids,
+        },
+        fn_name: if sig.fn_name.is_empty() { fn_name.to_string() } else { sig.fn_name.clone() },
+        arg_types: arg_ids,
+    })
 }
 
 /// `let g = wrap;` for a generic `wrap` with a type parameter nested in its
@@ -714,8 +909,10 @@ fn candidate_for_call(
     // A type parameter no bare formal names (only inside `Vec<T>` or
     // `Option<T>`, or only in the result): bound by matching the signature
     // against the ground argument and call types.
+    // A `let g = wrap;` alias's signature is `wrap`'s (#2447).
     if !has_rest && subst.iter().any(Option::is_none) {
-        bind_from_signature(fn_name, &mut subst, &fixed_tys, call, checker, ty_of);
+        let name = if sig.alias { sig.fn_name.as_str() } else { fn_name };
+        bind_from_signature(name, &mut subst, &fixed_tys, call, checker, ty_of);
     }
     let subst = subst.into_iter().collect::<Option<Vec<_>>>()?;
     let subst_ids: Vec<TyId> = subst.into_iter().map(|ty| intern.intern(ty)).collect();
@@ -908,7 +1105,7 @@ pub fn ground_ty(checker: &Checker, expr: &Output) -> Option<Ty> {
 /// A ground type: no type variable left. A ground function type is one
 /// (an argument `fn (int x) => ..` keys its call like any other).
 fn concrete_ty(ty: &Ty) -> Option<Ty> {
-    if contains_var(ty) {
+    if ty.has_var() {
         return None;
     }
     Some(ty.clone())
@@ -920,29 +1117,6 @@ fn type_arg(ty: &Ty) -> Option<Ty> {
     concrete_ty(ty).filter(|ty| !matches!(ty, Ty::Fun(..)))
 }
 
-fn contains_var(ty: &Ty) -> bool {
-    match ty {
-        Ty::Var(_) => true,
-        Ty::Fun(a, b) => contains_var(a) || contains_var(b),
-        Ty::App(head, args) => contains_var(head) || args.iter().any(contains_var),
-        Ty::Sum { variants, .. } => variants.iter().any(|(_, payload)| match payload {
-            crate::typechecking::ty::EnumVariantPayloadTy::Unit => false,
-            crate::typechecking::ty::EnumVariantPayloadTy::Tuple(items) => {
-                items.iter().any(contains_var)
-            }
-            crate::typechecking::ty::EnumVariantPayloadTy::Record(fields) => {
-                fields.iter().any(|(_, ty)| contains_var(ty))
-            }
-        }),
-        Ty::Constructor { owner, .. } => contains_var(owner),
-        Ty::Tuple(items) => items.iter().any(contains_var),
-        Ty::Array { element, .. } => contains_var(element),
-        Ty::Record { fields } => fields.iter().any(|(_, ty)| contains_var(ty)),
-        Ty::Forall { body, .. } => contains_var(body),
-        Ty::Readonly(inner) => contains_var(inner),
-        Ty::Con(_) | Ty::Existential { .. } | Ty::Never => false,
-    }
-}
 
 fn apply_caps(
     candidates: Vec<MonoCandidate>,
@@ -1047,6 +1221,14 @@ fn collect_keyed_values(
 }
 
 fn walk_children<F>(node: &Output, f: &mut F)
+where
+    F: FnMut(&Output),
+{
+    // Walks recurse through here once per level of the tree.
+    common::deep_stack(|| visit_children(node, f));
+}
+
+fn visit_children<F>(node: &Output, f: &mut F)
 where
     F: FnMut(&Output),
 {
@@ -1262,7 +1444,7 @@ where
             }
         }
         Expression::Construct { fields, .. } => match fields {
-            parser::ast::EnumConstructPayload::Unit => {}
+            parser::ast::EnumConstructPayload::Unit | parser::ast::EnumConstructPayload::Empty => {}
             parser::ast::EnumConstructPayload::Tuple(items) => {
                 for item in items {
                     f(item);
@@ -1355,6 +1537,32 @@ mod tests {
         let mut checker = Checker::new();
         let _ = checker.check_program(&ast);
         plan_monomorphization("", &ast, &checker)
+    }
+
+    /// Whether the planner marks the generic function `name` hot.
+    fn hot_of(src: &str, name: &str) -> bool {
+        let ast = Pratt::default().parse(src).expect("parse failed");
+        let mut checker = Checker::new();
+        let _ = checker.check_program(&ast);
+        let mut sigs = HashMap::new();
+        collect_generic_functions("", &ast, &checker, &mut sigs);
+        mark_hot(&ast, &mut sigs);
+        sigs.get(name).unwrap_or_else(|| panic!("no generic fn {name}")).hot
+    }
+
+    #[test]
+    fn a_hot_method_does_not_heat_a_same_named_free_function() {
+        let free = "fn wrap<T>(T a) -> int { return 2; } fn side<T>(T a) -> int { return 3; } ";
+        let hot_method = "class K { pub k: int, } impl K { #[hot] pub fn wrap<T>(T a) -> int { return side(a); } } ";
+        assert!(!hot_of(&format!("{free}{hot_method}"), "wrap"));
+        assert!(!hot_of(&format!("{hot_method}{free}"), "wrap"));
+        // What a hot method calls by name is hot, as a hot function's.
+        assert!(hot_of(&format!("{free}{hot_method}"), "side"));
+        // A cold method does not cool a free function that is hot.
+        let cold_method = "class K { pub k: int, } impl K { #[cold] pub fn wrap<T>(T a) -> int { return 1; } } ";
+        assert!(hot_of(&format!("#[hot] fn wrap<T>(T a) -> int {{ return 2; }} {cold_method}"), "wrap"));
+        // The free function's own hint still marks it.
+        assert!(hot_of("#[hot] fn wrap<T>(T a) -> int { return 2; } ", "wrap"));
     }
 
     #[test]

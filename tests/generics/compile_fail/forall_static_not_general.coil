@@ -1,0 +1,12 @@
+// @expected E0102 — a `static` of type `forall T. T -> T` takes a value as a `forall` parameter does: `inc` is only `int -> int` (#2762).
+fn inc(int x) -> int {
+    return x + 1;
+}
+
+class K {
+    pub static g: forall T. T -> T = inc,
+}
+
+fn main() {
+    let _ = K::g(1);
+}

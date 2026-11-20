@@ -1,0 +1,240 @@
+// More parameters than a call passes in registers, or the 16 words a host
+// call used to take. A package has no interpreter to run such a body instead.
+use tests::assert;
+use gc::collect;
+
+class Box {
+    pub n: int,
+}
+
+static let cleaned: int = 0;
+
+#[inline(never)]
+fn wide(
+    Box a0,
+    Box a1,
+    Box a2,
+    Box a3,
+    Box a4,
+    Box a5,
+    Box a6,
+    Box a7,
+    Box a8,
+    Box a9,
+    Box a10,
+    Box a11,
+    Box a12,
+    Box a13,
+    Box a14,
+    Box a15,
+    Box a16,
+    Box a17,
+) -> int {
+    collect();
+    let extra = new Box(1);
+    collect();
+    return a0.n + a1.n + a2.n + a3.n + a4.n + a5.n + a6.n + a7.n + a8.n + a9.n + a10.n + a11.n +
+           a12.n + a13.n + a14.n + a15.n + a16.n + a17.n + extra.n;
+}
+
+#[inline(never)]
+fn relay(
+    Box a0,
+    Box a1,
+    Box a2,
+    Box a3,
+    Box a4,
+    Box a5,
+    Box a6,
+    Box a7,
+    Box a8,
+    Box a9,
+    Box a10,
+    Box a11,
+    Box a12,
+    Box a13,
+    Box a14,
+    Box a15,
+    Box a16,
+    Box a17,
+) -> int {
+    return wide(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17);
+}
+
+#[inline(never)]
+fn cleans(
+    Box a0,
+    Box a1,
+    Box a2,
+    Box a3,
+    Box a4,
+    Box a5,
+    Box a6,
+    Box a7,
+    Box a8,
+    Box a9,
+    Box a10,
+    Box a11,
+    Box a12,
+    Box a13,
+    Box a14,
+    Box a15,
+    Box a16,
+    Box a17,
+) -> int {
+    defer use (a17) {
+        cleaned = cleaned + a17.n;
+    }
+    collect();
+    return a0.n + a17.n;
+}
+
+gen fn steps(
+    Box a0,
+    Box a1,
+    Box a2,
+    Box a3,
+    Box a4,
+    Box a5,
+    Box a6,
+    Box a7,
+    Box a8,
+    Box a9,
+    Box a10,
+    Box a11,
+    Box a12,
+    Box a13,
+    Box a14,
+    Box a15,
+    Box a16,
+    Box a17,
+) {
+    yield a0.n;
+    collect();
+    yield a17.n;
+}
+
+test("objects in stack arguments survive collections") {
+    assert!(
+        relay(
+            new Box(0),
+            new Box(1),
+            new Box(2),
+            new Box(3),
+            new Box(4),
+            new Box(5),
+            new Box(6),
+            new Box(7),
+            new Box(8),
+            new Box(9),
+            new Box(10),
+            new Box(11),
+            new Box(12),
+            new Box(13),
+            new Box(14),
+            new Box(15),
+            new Box(16),
+            new Box(17),
+        ) == 154,
+    );
+}
+
+test("a defer reads a late parameter") {
+    cleaned = 0;
+    assert!(
+        cleans(
+            new Box(0),
+            new Box(1),
+            new Box(2),
+            new Box(3),
+            new Box(4),
+            new Box(5),
+            new Box(6),
+            new Box(7),
+            new Box(8),
+            new Box(9),
+            new Box(10),
+            new Box(11),
+            new Box(12),
+            new Box(13),
+            new Box(14),
+            new Box(15),
+            new Box(16),
+            new Box(17),
+        ) == 17,
+    );
+    assert!(cleaned == 17);
+}
+
+test("a generator starts with many parameters") {
+    let sum = 0;
+    for x in steps(
+        new Box(0),
+        new Box(1),
+        new Box(2),
+        new Box(3),
+        new Box(4),
+        new Box(5),
+        new Box(6),
+        new Box(7),
+        new Box(8),
+        new Box(9),
+        new Box(10),
+        new Box(11),
+        new Box(12),
+        new Box(13),
+        new Box(14),
+        new Box(15),
+        new Box(16),
+        new Box(17),
+    ) {
+        sum = sum + x;
+    }
+    assert!(sum == 17);
+}
+
+test("a closure holds many captures") {
+    let c0 = new Box(0);
+    let c1 = new Box(1);
+    let c2 = new Box(2);
+    let c3 = new Box(3);
+    let c4 = new Box(4);
+    let c5 = new Box(5);
+    let c6 = new Box(6);
+    let c7 = new Box(7);
+    let c8 = new Box(8);
+    let c9 = new Box(9);
+    let c10 = new Box(10);
+    let c11 = new Box(11);
+    let c12 = new Box(12);
+    let c13 = new Box(13);
+    let c14 = new Box(14);
+    let c15 = new Box(15);
+    let c16 = new Box(16);
+    let c17 = new Box(17);
+    let total = fn () use (
+        c0,
+        c1,
+        c2,
+        c3,
+        c4,
+        c5,
+        c6,
+        c7,
+        c8,
+        c9,
+        c10,
+        c11,
+        c12,
+        c13,
+        c14,
+        c15,
+        c16,
+        c17,
+    ) {
+        collect();
+        return c0.n + c1.n + c2.n + c3.n + c4.n + c5.n + c6.n + c7.n + c8.n + c9.n + c10.n + c11.n +
+               c12.n + c13.n + c14.n + c15.n + c16.n + c17.n;
+    };
+    assert!(total() == 153);
+}

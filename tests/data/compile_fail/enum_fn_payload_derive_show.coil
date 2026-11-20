@@ -1,0 +1,12 @@
+// @expected E0300 — a function value has no `Show`: an enum carrying one keeps its default `Show` (the variant name), but `#[derive(Show)]` prints each payload and cannot (#2460).
+use string::format;
+
+#[derive(Show)]
+enum Step {
+    Map(fn(int) -> int),
+    Stop,
+}
+
+fn main() {
+    let _ = format("%v", Step::Stop);
+}

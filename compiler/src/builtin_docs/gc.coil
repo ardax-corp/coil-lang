@@ -93,8 +93,12 @@ fn unroot<T>(Root<T> pin) -> Option<T> {}
 /// Makes a handle to `value` that does not keep it alive.
 ///
 /// Values that are not heap objects (`int`, `bool`, `float`, ...) are never
-/// collected, so their `Weak` always upgrades. `value` can be of any type:
-/// a `weak` of an `Option` or a `Result` refers to the heap object it holds.
+/// collected, so their `Weak` always upgrades. A `weak` of an `Option` or a
+/// `Result` of a heap value refers to the heap object it holds. A two-word
+/// value (an `Option<int>`, a `Result<int, E>`, an `(int, float)`, a range,
+/// a small enum) and a readonly class instance are refused (`E0119`): they
+/// are held in their words, with no object to observe. This holds through
+/// generics too, at the call that sets a type parameter to such a type.
 ///
 /// # Examples
 ///
@@ -138,7 +142,7 @@ fn upgrade<T>(Weak<T> handle) -> Option<T> {}
 
 /// Returns the size of the managed heap in bytes.
 ///
-/// This counts only memory the VM's garbage collector manages: not native
+/// This counts only memory the garbage collector manages: not native
 /// libraries, stacks or other process memory.
 ///
 /// # Examples

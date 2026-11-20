@@ -1,0 +1,211 @@
+// A shared generic body that calls a function value returning `Vec<T>`
+// gets the elements one word each, whatever the ground function
+// returns. A ground function of a `Vec` of a closed two-word type
+// (`Option<int>`, `(int, int)`) returns a lane array, which the body would
+// read one word per element (coil-lang#2592): a function argument's
+// adapter turns it into boxed elements, as any lane array is where it
+// reaches a one-word use, and a function below a signature's top
+// (`Vec<fn() -> Vec<T>>`) makes the signature clone-only. A `Vec` inside
+// the result (a tuple item, an `Option`, a class field) left its lanes
+// where the ground function built the object.
+//
+// The same cases as fn_result_lanes.coil with no mono clones: each call
+// runs the shared body, or the clone a clone-only signature takes.
+// @flags --clone-budget 0
+use gc::collect;
+use tests::assert;
+
+class Pt {
+    pub a: int,
+}
+
+impl Eq for Pt {
+    fn eq(Pt x, Pt y) -> bool {
+        return x.a == y.a;
+    }
+}
+
+class Bag<T> {
+    pub items: Vec<T>,
+}
+
+impl Bag<T> {
+    pub fn refill(fn() -> Vec<T> f) -> T {
+        self.items = f();
+        return self.items[1];
+    }
+}
+
+fn third<T>(fn() -> Vec<T> f) -> T {
+    let v = f();
+    return v[2];
+}
+
+fn pick<T>(fn(int) -> Vec<T> f, int n) -> T {
+    return f(n)[n];
+}
+
+fn later<T>(fn() -> Vec<T> f) -> T {
+    let g = f;
+    collect();
+    let v = g();
+    collect();
+    let n = 0;
+    for x in v {
+        n = n + 1;
+    }
+    return v[n - 1];
+}
+
+fn grow<T>(fn() -> Vec<T> f, T x) -> Vec<T> {
+    let v = f();
+    v.push(x);
+    return v;
+}
+
+fn in_tuple<T>(fn() -> (Vec<T>, int) f) -> T {
+    let (v, n) = f();
+    return v[n];
+}
+
+fn in_option<T>(fn() -> Option<Vec<T>> f, T d) -> T {
+    return match f() {
+        Some(v) => v[1],
+        None => d,
+    };
+}
+
+fn in_field<T>(fn() -> Bag<T> f) -> T {
+    return f().items[0];
+}
+
+fn from_vec<T>(Vec<fn() -> Vec<T>> fs) -> T {
+    let f = fs[0];
+    return f()[2];
+}
+
+fn from_opt<T>(Option<fn() -> Vec<T>> o, T d) -> T {
+    return match o {
+        Some(f) => f()[2],
+        None => d,
+    };
+}
+
+fn from_pair<T>((fn() -> Vec<T>, int) p) -> T {
+    let (f, n) = p;
+    return f()[n];
+}
+
+fn opts() -> Vec<Option<int>> {
+    let v: Vec<Option<int>> = [Some(1), None];
+    v.push(Some(5));
+    return v;
+}
+
+fn opts_at(int n) -> Vec<Option<int>> {
+    let v: Vec<Option<int>> = [None, Some(n), Some(n + 1)];
+    return v;
+}
+
+fn pairs() -> Vec<(int, int)> {
+    let v: Vec<(int, int)> = [(1, 2), (3, 4), (5, 6)];
+    return v;
+}
+
+fn floats() -> Vec<float> {
+    let v: Vec<float> = [0.5, 1.5, 2.5];
+    return v;
+}
+
+fn strings() -> Vec<string> {
+    let v: Vec<string> = ["a", "b", "c"];
+    return v;
+}
+
+fn pts() -> Vec<Pt> {
+    let v: Vec<Pt> = [new Pt(1), new Pt(2), new Pt(3)];
+    return v;
+}
+
+fn units() -> Vec<()> {
+    let v: Vec<()> = [(), (), ()];
+    return v;
+}
+
+fn opt_tuple() -> (Vec<Option<int>>, int) {
+    let v: Vec<Option<int>> = [None, Some(7)];
+    return (v, 1);
+}
+
+fn opt_some() -> Option<Vec<Option<int>>> {
+    let v: Vec<Option<int>> = [None, Some(8)];
+    return Some(v);
+}
+
+fn opt_bag() -> Bag<Option<int>> {
+    let v: Vec<Option<int>> = [Some(9)];
+    return new Bag(v);
+}
+
+test("fn() -> Vec<T> at two-word elements") {
+    assert!(third(opts) == Some(5));
+    assert!(third(pairs) == (5, 6));
+    assert!(later(opts) == Some(5));
+    assert!(later(pairs) == (5, 6));
+}
+
+test("fn() -> Vec<T> at one-word elements") {
+    assert!(third(floats) == 2.5);
+    assert!(third(strings) == "c");
+    assert!(third(pts) == new Pt(3));
+    assert!(third(units) == ());
+    assert!(later(strings) == "c");
+    assert!(later(units) == ());
+}
+
+test("fn(int) -> Vec<T>") {
+    assert!(pick(opts_at, 1) == Some(1));
+    assert!(pick(opts_at, 2) == Some(3));
+    assert!(pick(fn (int n) => pairs(), 1) == (3, 4));
+    assert!(pick(fn (int n) => strings(), 2) == "c");
+}
+
+test("a lambda returning a lane array") {
+    let f = fn () {
+        let v: Vec<Option<int>> = [None, None, Some(6)];
+        v
+    };
+    assert!(third(f) == Some(6));
+    assert!(third(fn () => pairs()) == (5, 6));
+    assert!(third(fn () => units()) == ());
+}
+
+test("the body pushes onto the result and returns it") {
+    let v = grow(opts, None);
+    assert!(v.len() == 4 && v[2] == Some(5) && v[3] == None);
+    v.push(Some(2));
+    assert!(v[4] == Some(2) && v[0] == Some(1));
+    let w = grow(pairs, (7, 8));
+    assert!(w[3] == (7, 8) && w[0] == (1, 2));
+}
+
+test("a Vec inside the result") {
+    assert!(in_tuple(opt_tuple) == Some(7));
+    assert!(in_option(opt_some, None) == Some(8));
+    assert!(in_field(opt_bag) == Some(9));
+}
+
+test("a method's function parameter") {
+    let b = new Bag(opts());
+    assert!(b.refill(opts) == None);
+    assert!(b.items[2] == Some(5));
+}
+
+test("a function below the top") {
+    let fs: Vec<fn() -> Vec<Option<int>>> = [opts];
+    assert!(from_vec(fs) == Some(5));
+    assert!(from_opt(Some(opts), None) == Some(5));
+    assert!(from_pair((pairs, 1)) == (3, 4));
+    let ss: Vec<fn() -> Vec<string>> = [strings];
+    assert!(from_vec(ss) == "c");
+}

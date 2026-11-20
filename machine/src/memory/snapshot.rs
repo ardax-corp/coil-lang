@@ -1,6 +1,6 @@
 //! Capture a heap object graph as a [`HeapSnapshot`] and rebuild it.
 //!
-//! Capture runs on the compile-time VM after a `const` initializer returns;
+//! Capture runs on the compile-time runtime after a `const` initializer returns;
 //! restore runs once at startup (`RestoreSnapshot`). A word is a reference
 //! exactly when the collector would treat it as one: pointer kinds always,
 //! unknown kinds when they name a live object (bit 0 masked, as
@@ -10,7 +10,7 @@
 use common::{HeapSnapshot, SnapObject, SnapStep, SnapWord, SnapshotError, Value};
 
 use super::super::AddrHashBuilder;
-use super::{EnumPayload, Heap, Member, ObjArray, ObjBoxed, ObjEnum, ObjInstance, ObjString, ObjTuple, Object};
+use super::{EnumPayload, Heap, ObjArray, ObjEnum, ObjInstance, ObjString, Object};
 
 /// A root to capture: the static slot it is stored to, its value, and the
 /// slot's word kind (`common::WORD_*`).
@@ -77,13 +77,16 @@ impl Heap {
             .collect();
         for (object, snap) in objects.iter().zip(&snapshot.objects) {
             match (object, snap) {
+                (Object::Array(gc), SnapObject::Lanes { words, k, .. }) => {
+                    let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
+                    let a = gc.payload_mut();
+                    for (i, lanes) in values.chunks(usize::from(*k)).enumerate() {
+                        a.set_lanes(i, lanes);
+                    }
+                }
                 (Object::Array(gc), SnapObject::Array { words, .. }) => {
                     let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
                     gc.payload_mut().words_mut().copy_from_slice(&values);
-                }
-                (Object::Tuple(gc), SnapObject::Tuple { words, .. }) => {
-                    let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
-                    gc.payload_mut().elements.as_mut_slice().copy_from_slice(&values);
                 }
                 (Object::Enum(gc), SnapObject::Enum { words, .. }) => {
                     let values: Vec<Value> = words.iter().map(|w| self.snapshot_value(&objects, *w)).collect();
@@ -94,12 +97,6 @@ impl Heap {
                         let v = self.snapshot_value(&objects, *w);
                         gc.payload_mut().set_slot(i, v);
                     }
-                }
-                (Object::Boxed(gc), SnapObject::Boxed { word, .. }) => {
-                    gc.payload_mut().payload = match *word {
-                        SnapWord::Ref { index, err_bit: false } => Member::Object(objects[index as usize]),
-                        w => Member::Value(self.snapshot_value(&objects, w)),
-                    };
                 }
                 _ => {}
             }
@@ -124,8 +121,8 @@ impl Heap {
                 }
                 self.alloc(array, Object::Array).0
             }
-            SnapObject::Tuple { kinds, words } => {
-                self.alloc(ObjTuple::new(zeros(words.len())).with_kinds(*kinds), Object::Tuple).0
+            SnapObject::Lanes { k, tag_mask, words } => {
+                self.alloc(ObjArray::from_lanes(zeros(words.len()), usize::from(*k), *tag_mask), Object::Array).0
             }
             SnapObject::Enum { tag, type_id, kinds, words } => {
                 let mut e = ObjEnum::new(*tag, EnumPayload::from_vec(zeros(words.len())).with_kinds(*kinds));
@@ -135,13 +132,6 @@ impl Heap {
             SnapObject::Instance { type_id, words } => {
                 self.alloc(ObjInstance::with_slots(*type_id, zeros(words.len())), Object::Instance).0
             }
-            SnapObject::Boxed { tag, .. } => {
-                let boxed = ObjBoxed {
-                    tag: *tag,
-                    payload: Member::Value(Value::from(0u64)),
-                };
-                self.alloc(boxed, Object::Boxed).0
-            }
         }
     }
 
@@ -150,7 +140,6 @@ impl Heap {
             SnapWord::Raw(raw) => Value::from(raw),
             SnapWord::Ref { index, err_bit } => Value::from(objects[index as usize].addr() | u64::from(err_bit)),
             SnapWord::UnitEnum { tag, err_bit } => Value::from(self.immortal_unit_enum(tag).addr() | u64::from(err_bit)),
-            SnapWord::EmptyTuple { err_bit } => Value::from(self.immortal_empty_tuple().addr() | u64::from(err_bit)),
         }
     }
 }
@@ -178,7 +167,6 @@ impl Capture<'_> {
                     err_bit,
                 });
             }
-            Object::Tuple(gc) if gc.as_ref().elements().is_empty() => return Ok(SnapWord::EmptyTuple { err_bit }),
             _ => {}
         }
         if let Some(what) = unsupported(&object) {
@@ -203,6 +191,19 @@ impl Capture<'_> {
         Ok(match object {
             Object::String(gc) => SnapObject::String(gc.as_ref().data.to_string()),
             Object::Array(gc) if gc.as_ref().is_packed() => SnapObject::Bytes(gc.as_ref().to_byte_vec()),
+            Object::Array(gc) if gc.as_ref().lanes() > 1 => {
+                let a = gc.as_ref();
+                let words = a
+                    .kinded_words()
+                    .enumerate()
+                    .map(|(i, (v, kind))| self.word(v, kind, parent(SnapStep::Element(i / a.lanes()))))
+                    .collect::<Result<_, _>>()?;
+                SnapObject::Lanes {
+                    k: a.lanes() as u8,
+                    tag_mask: a.tag_mask(),
+                    words,
+                }
+            }
             Object::Array(gc) => {
                 let a = gc.as_ref();
                 let kind = a.elem_kind();
@@ -218,16 +219,11 @@ impl Capture<'_> {
                     words,
                 }
             }
-            Object::Tuple(gc) => {
-                let t = gc.as_ref();
-                let kinds = t.kinds();
-                let words = self.kinded(t.elements(), kinds, |i| parent(SnapStep::TupleElement(i)))?;
-                SnapObject::Tuple { kinds, words }
-            }
             Object::Enum(gc) => {
                 let e = gc.as_ref();
                 let kinds = e.payload.kinds();
-                let words = self.kinded(&e.payload, kinds, |i| parent(SnapStep::Payload(i)))?;
+                let step = if e.is_tuple() { SnapStep::TupleElement } else { SnapStep::Payload };
+                let words = self.kinded(&e.payload, kinds, |i| parent(step(i)))?;
                 SnapObject::Enum {
                     tag: e.tag,
                     type_id: e.type_id,
@@ -237,15 +233,13 @@ impl Capture<'_> {
             }
             Object::Instance(gc) => {
                 let inst = gc.as_ref();
-                let Some(slots) = inst.slots() else {
-                    return Err(self.error_at(at, "an untyped instance"));
-                };
+                let slots = inst.slots();
                 let kinds = self.heap.class_field_kinds(inst.type_id);
                 let words = slots
                     .iter()
+                    .zip(common::class_slot_kinds(kinds, slots))
                     .enumerate()
-                    .map(|(i, v)| {
-                        let kind = kinds.get(i).copied().unwrap_or(common::WORD_UNKNOWN);
+                    .map(|(i, (v, kind))| {
                         self.word(*v, kind, parent(SnapStep::Field { type_id: inst.type_id, index: i }))
                     })
                     .collect::<Result<_, _>>()?;
@@ -253,14 +247,6 @@ impl Capture<'_> {
                     type_id: inst.type_id,
                     words,
                 }
-            }
-            Object::Boxed(gc) => {
-                let b = gc.as_ref();
-                let word = match b.payload {
-                    Member::Object(o) => self.object_word(o, false, parent(SnapStep::Boxed))?,
-                    Member::Value(v) => self.word(v, common::WORD_UNKNOWN, parent(SnapStep::Boxed))?,
-                };
-                SnapObject::Boxed { tag: b.tag, word }
             }
             _ => unreachable!("unsupported objects are refused before they are recorded"),
         })
@@ -295,10 +281,6 @@ impl Capture<'_> {
             }
         }
     }
-
-    fn error_at(&self, object: u32, what: &'static str) -> SnapshotError {
-        self.error(self.found[object as usize].1, what)
-    }
 }
 
 /// Why `object` cannot be part of a snapshot, if it can't.
@@ -306,10 +288,8 @@ fn unsupported(object: &Object) -> Option<&'static str> {
     Some(match object {
         Object::String(_)
         | Object::Array(_)
-        | Object::Tuple(_)
         | Object::Enum(_)
-        | Object::Instance(_)
-        | Object::Boxed(_) => return None,
+        | Object::Instance(_) => return None,
         Object::Fn(_) => "a function value",
         Object::Coroutine(_) => "a coroutine",
         Object::Stream(_) => "a stream",

@@ -1,0 +1,25 @@
+// Functions with effects, for `tests/codegen/imported_fn_named_like_a_method.coil`
+// (#2436): the importer has methods of the same short names that have none.
+static let CALLS: int = 0;
+
+#[inline(never)]
+fn bump(int n) -> int {
+    CALLS = CALLS + 1;
+    return n;
+}
+
+#[inline(never)]
+fn trim(Vec<int> v) -> int {
+    while v.len() > 1 {
+        v.pop();
+    }
+    return v.len();
+}
+
+fn calls() -> int {
+    return CALLS;
+}
+
+fn reset() {
+    CALLS = 0;
+}

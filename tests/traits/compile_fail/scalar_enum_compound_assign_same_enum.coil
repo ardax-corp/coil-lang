@@ -1,0 +1,12 @@
+// @expected E0102 — `s |= Status::NotFound`: two values of a scalar-backed
+// enum with no `BitOr` instance give an `int`, not a `Status` (#2463).
+#[repr(int)]
+enum Status {
+    Ok = 200,
+    NotFound = 404,
+}
+
+fn main() {
+    let s = Status::Ok;
+    s |= Status::NotFound;
+}

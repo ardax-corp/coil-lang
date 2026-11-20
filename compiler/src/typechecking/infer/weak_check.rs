@@ -1,4 +1,4 @@
-//! `gc::weak` on readonly class instances (#1644, #1670).
+//! `gc::weak` on readonly class instances (#1644, #1670) and two-word values.
 //!
 //! A weak handle observes an instance's identity and the moment it is
 //! collected, so a readonly class instance (a value, #1562) may never be
@@ -193,17 +193,15 @@ impl Checker {
                 self.require_weakable(v, arg.ctx, &arg.range, &module);
                 continue;
             }
-            if !self.is_readonly_class_ty(&resolved) {
+            let Some(what) = self.unweakable(&resolved) else {
                 continue;
-            }
+            };
             let shown = self.diag_ty(&resolved);
             self.error_with_help(
                 ErrorCode::GenericTypeError,
-                format!("`weak()` is not allowed on `{shown}`, an instance of a readonly class"),
+                format!("`weak()` is not allowed on `{shown}`, {}", what.noun()),
                 arg.range,
-                Some(format!(
-                    "a readonly class instance is a value, with no identity or lifetime to observe; keep the `{shown}` itself, or make it a plain `class` if you need a weak handle"
-                )),
+                Some(what.help(&shown)),
             );
         }
 
@@ -226,10 +224,10 @@ impl Checker {
                         let resolved = apply_ty_prune(&self.subst, &Ty::Var(fresh));
                         if let Ty::Var(v) = resolved {
                             changed |= self.require_weakable(v, inst.ctx, &req.origin, &req.module);
-                        } else if self.is_readonly_class_ty(&resolved)
+                        } else if let Some(what) = self.unweakable(&resolved)
                             && reported.insert((inst.range.start, inst.range.end))
                         {
-                            self.report_weak_instantiation(&resolved, inst.range.clone(), &req, &module);
+                            self.report_weak_instantiation(&resolved, what, inst.range.clone(), &req, &module);
                         }
                     }
                 }
@@ -237,12 +235,22 @@ impl Checker {
         }
     }
 
-    fn report_weak_instantiation(&mut self, ty: &Ty, range: Range<usize>, req: &Requirement, module: &str) {
+    /// Why a value of `ty` may not be weakened: a readonly class instance
+    /// or a two-word value, which have no object of their own to observe.
+    fn unweakable(&self, ty: &Ty) -> Option<Unweakable> {
+        if self.is_readonly_class_ty(ty) {
+            return Some(Unweakable::ReadonlyClass);
+        }
+        matches!(crate::layout::of_resolved(self, ty), crate::layout::Layout::Pair(_)).then_some(Unweakable::TwoWord)
+    }
+
+    fn report_weak_instantiation(&mut self, ty: &Ty, what: Unweakable, range: Range<usize>, req: &Requirement, module: &str) {
         let shown = self.diag_ty(ty);
         let mut msg = Message::error(
             ErrorCode::GenericTypeError,
             format!(
-                "`weak()` is not allowed on `{shown}`, an instance of a readonly class: this call passes it to a generic that calls `weak()` on it"
+                "`weak()` is not allowed on `{shown}`, {}: this call passes it to a generic that calls `weak()` on it",
+                what.noun()
             ),
             range.clone(),
         );
@@ -253,9 +261,45 @@ impl Checker {
                 req.origin.clone(),
             ));
         }
-        msg.with_help(format!(
-            "a readonly class instance is a value, with no identity or lifetime to observe; keep the `{shown}` out of this generic, or make it a plain `class` if you need a weak handle"
-        ));
+        msg.with_help(match what {
+            Unweakable::ReadonlyClass => format!(
+                "a readonly class instance is a value, with no identity or lifetime to observe; keep the `{shown}` out of this generic, or make it a plain `class` if you need a weak handle"
+            ),
+            Unweakable::TwoWord => format!(
+                "a value of type `{shown}` is held in its two words, with no object whose identity or lifetime a weak handle could observe; keep it out of this generic, or put it in a `class` field if you need a weak handle"
+            ),
+        });
         self.messages.push(msg);
+    }
+}
+
+/// A value [`Checker::unweakable`] refuses to `weak()`.
+#[derive(Clone, Copy)]
+enum Unweakable {
+    /// A readonly class instance (#1644).
+    ReadonlyClass,
+    /// A two-word value (`Option<int>`, `(int, float)`, a range, a small
+    /// enum): held in its two words, with no box whose identity a weak
+    /// handle could observe.
+    TwoWord,
+}
+
+impl Unweakable {
+    fn noun(self) -> &'static str {
+        match self {
+            Self::ReadonlyClass => "an instance of a readonly class",
+            Self::TwoWord => "a two-word value",
+        }
+    }
+
+    fn help(self, shown: &str) -> String {
+        match self {
+            Self::ReadonlyClass => format!(
+                "a readonly class instance is a value, with no identity or lifetime to observe; keep the `{shown}` itself, or make it a plain `class` if you need a weak handle"
+            ),
+            Self::TwoWord => format!(
+                "a value of type `{shown}` is held in its two words, with no object whose identity or lifetime a weak handle could observe; keep the value itself, or put it in a `class` field if you need a weak handle"
+            ),
+        }
     }
 }

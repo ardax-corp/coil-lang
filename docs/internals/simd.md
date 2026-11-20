@@ -6,13 +6,12 @@ for dense numeric and byte kernels. Coil does **not** use nightly
 
 ## Why a workspace crate
 
-HostInvoke packed linear algebra (`machine/src/packed_la.rs`) already batches
-matrix work off the opcode dispatcher. Contiguous `f64` / `i64` loops are the
-right place for SIMD — not new bytecode ops (see AGENTS.md: prefer kernel
-tuning over benchmark-shaped opcodes).
+HostInvoke packed linear algebra (`machine/src/packed_la.rs`) batches matrix
+work into one host call. Contiguous `f64` / `i64` loops are the right place
+for SIMD.
 
-`coil-simd` keeps the unsafe ISA details out of the VM and exposes a small
-safe API:
+`coil-simd` keeps the unsafe ISA details out of the runtime and exposes a
+small safe API:
 
 | API | Role |
 |-----|------|
@@ -21,7 +20,7 @@ safe API:
 | `matmul_f64` / `matmul_i64` | Row-major GEMM (`C = A·B`) |
 | `zip_{add,sub,mul,neg}_{f64,i64}` | Element-wise zip / negate (`zip_div_f64` too) |
 | `scale_f64` / `scale_i64` | Broadcast multiply (`out[i] = a[i] * s`) |
-| `axpy_reduce_f64` | Counted `s = (s + a*x) + y; x += dx` (P12 HostInvoke) |
+| `axpy_reduce_f64` | Counted `s = (s + a*x) + y; x += dx` (the `simd_axpy_reduce` native) |
 | `lanes::fold_add_*` / `fmadd_*` | V1 horizontal left-fold add; conservative mul-then-add FMA |
 | `bytes::eq` / `bytes::xor` | Byte equality and XOR |
 | `zip_i64_op` / `zip_i64_not` / `zip_f64_mask` | Matrix cell compares, bitwise ops, intersect, and diff |
@@ -61,29 +60,34 @@ beat Rust/`memcmp` slice equality.
 
 ## Callers today
 
+The MIR rewrites below run on the runtime's lane code (`machine/src/lanes.rs`)
+or call a host native. Their timings were taken on the bytecode VM, since
+deleted.
+
 - `machine::packed_la` — `packed_dot` / `packed_matmul` / `packed_matrix_zip` /
   `packed_matrix_neg` / **`packed_vec_arith`** (1-D aggregate `+ - * /` zip,
   broadcast, and unary `-` when static length ≥ 8; smaller shapes still unroll)
-- MIR P12 — `simd_axpy_reduce` HostInvoke (**136**) from specialized counted
-  saxpy-reduce loops (`compiler/src/mir/pack.rs`). Compiler rewrite only.
-- MIR `vec_loops` (`compiler/src/mir/vec_loop.rs`, dense tier) — a
+- `simd_axpy_reduce` host native (**136**). No MIR pass emits it now.
+- MIR `vec_loops` (`compiler/src/mir/vec_loop.rs`) — a
   counted stride-1 store loop (`a[i + k] = value(i)`) or add / mul
   reduction (`s = s ⊕ term(i)`) over `i64` / `f64`, anywhere in a
-  function, becomes one `VecLoop` MIR instruction and one `VLoop` op
-  (archive 6.2). `vectorize.rs` matches the loop and reads its body as a
+  function, becomes one `VecLoop` MIR instruction.
+  Native code compiles a reduce with no stores to a loop of its own
+  (`native_reduce`); every other `VecLoop` goes through
+  `coil_native_vector` to `machine::lanes::vloop`, as it does on the MIR
+  interpreter. `vectorize.rs` matches the loop and reads its body as a
   tree: loads `a[i + k]`, splats of invariants, the index, `+ - * /`,
   negation, casts between int and float lanes (`VBin` `I2F` / `F2I`,
   archive 6.11; a cast of an invariant is done once in front), selects
   (`VBin` `SELECT`, archive 6.11, below), and `VFma`
   (mul-then-add, two IEEE roundings). A guard in front of the loop checks
-  every read and write of lanes `i0 .. n` is in range; `VLoop` runs the
+  every read and write of lanes `i0 .. n` is in range; `vloop` runs the
   8-lane blocks with its body words (`VLoad` / `VStore` / `VBin` /
-  `VFma` / `VReduce`) decoded once and no dispatch per block, and since
-  archive 6.16 the last lanes too (a block cut short at `n`; before, the
-  scalar loop took them, a dozen dispatched ops per lane). A body of
+  `VFma` / `VReduce`) decoded once, and the last lanes too (a block cut
+  short at `n`). A body of
   lane-wise words only (no `VFma` / `VReduce`) runs up to 64 lanes per
-  block (`machine::vm::VloopWide`, `simd::eval_vbin_wide`), so each body
-  word is decoded and dispatched once per 64 lanes instead of per 8; a
+  block (`machine::lanes::VloopWide`, `simd::eval_vbin_wide`), so each body
+  word is decoded once per 64 lanes instead of per 8; a
   wide block that traps stores nothing and runs again 8 lanes at a time.
   Word count's `to_lower` (lines of ~42 bytes): 20.2k → 12.3k
   instructions per line on top of reading the lines. A failed guard runs the loop as
@@ -92,9 +96,16 @@ beat Rust/`memcmp` slice equality.
   fold in one body (`feature/locality` step 2): the stores run before the
   fold. A block stores only once its other words ran; a block that traps
   runs again lane by lane, so a panic leaves the scalar loop's stores.
+  The panic is reported at the `VecLoop` op's location, which
+  `vec_loop::trap_loc` takes from the loop body's outermost op that can
+  trap. That is the scalar loop's own site when one op can trap or the
+  others are its operands (`100 / (i - k)`, #2539). When a body has
+  several independent trapping ops, the report names the first of them,
+  whichever lane op trapped. A callee inlined into the loop has no frame
+  of its own, as at `-O1`.
   Store loops keep the
   scalar order however the arrays alias: every read before the first
-  store, one store offset `S`, no read at an offset below `S`. VM glue
+  store, one store offset `S`, no read at an offset below `S`. Runtime glue
   in `machine/src/simd.rs` calls `coil_simd::lanes` only.
   `examples/perf/vec_reduce.coil`, 8192 elements, release, ns per call
   (main `435021f` → after): `sum` (the function is only the loop, which
@@ -128,14 +139,14 @@ beat Rust/`memcmp` slice equality.
   arm keeps the loop scalar. The mask
   is the compare as written (`0` / `1` lanes, `&&` of compares as
   `IAND64`), so a NaN takes the side the scalar branch takes. A body
-  word computes each distinct node once (`emit::vec_loop_body`) and
+  word computes each distinct node once (`vector_body::vec_loop_body`) and
   reuses a register after its last reader, falling back to the tree
   when that still needs more than the eight registers.
   `examples/perf/vec_lanes.coil`, 8192 elements: abs 170 → 76 µs, clamp
   with a store per arm 178 → 72 µs.
 - Archive 6.11 also runs a counted loop whose body is one
   `out.push(value(i))`, or a push in each arm of an `if` (a select of the
-  two values), as a `VLoop` append (`vectorize::match_push_on`, `VStore`
+  two values), as a lane append (`vectorize::match_push_on`, `VStore`
   flag `STORE_PUSH`): each block appends its 8 lanes once its other words
   ran, and a block that traps runs again lane by lane, so a panic leaves
   the pushes before it. The guard also checks `out` is none of the
@@ -162,7 +173,7 @@ beat Rust/`memcmp` slice equality.
   AVX2 and AVX-512 hosts; `>>` and float masks stay scalar and match IEEE
   / arithmetic shift. Shift counts use the low 6 bits.
 
-- MIR `bulk_push` (`compiler/src/mir/bulk.rs`, both tiers) — a counted
+- MIR `bulk_push` (`compiler/src/mir/bulk.rs`) — a counted
   loop whose whole body is `out.push(src[i])` or `out.push(k)` becomes
   one HostInvoke, `vec_extend_range` (**174**) or `vec_fill` (**175**),
   archive 6.1. A guard in front of the loop checks
@@ -177,12 +188,10 @@ beat Rust/`memcmp` slice equality.
   2 156 000 → 267 000.
   `src` may also be a `string` (`out.push(s[i])`, or `s[i] as int`):
   its read is a block of its own (`string_byte_at` and the branch to its
-  panic), and the call appends the bytes. A runtime that does not copy a
-  string source answers `i0`, so the loop runs scalar there and no
-  archive bump is needed. Copy 1 MiB of a string 32 000 000 → about
+  panic), and the call appends the bytes. Copy 1 MiB of a string 32 000 000 → about
   150 000 (`feature/simd-lanes` step 5).
-- MIR `copy_until` (`compiler/src/mir/copy_until.rs`, dense tier,
-  before `byte_scan`) — a loop that pushes each byte it reads until a
+- MIR `copy_until` (`compiler/src/mir/copy_until.rs`, before
+  `byte_scan`) — a loop that pushes each byte it reads until a
   byte stops it (`if c == "," || c == "\n" { break; } out.push(c);`)
   gets a guarded scan and copy in front of it: the test's blocks cloned
   into a loop that changes nothing but its index (so `byte_scan` takes

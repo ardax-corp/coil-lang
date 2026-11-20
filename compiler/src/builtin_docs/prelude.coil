@@ -423,49 +423,6 @@ trait IntoIterator<T> {
     fn into_iter(T value) -> IntoIter {}
 }
 
-/// Returns the code of the single character in `s` as a `byte`.
-///
-/// `s` must hold exactly one character whose Unicode code point is at most
-/// 255 (ASCII or Latin-1, so `ord("é")` is `233`). Otherwise the result is
-/// `Err` with a message: `"empty string"`, `"expected single character"` or
-/// `"character code out of byte range"`. The inverse is `char`.
-///
-/// # Examples
-///
-/// ```
-/// # use tests::assert;
-/// let code = match ord("A") {
-///     Result::Ok(b) => b as int,
-///     Result::Err(_) => -1,
-/// };
-/// assert!(code == 65);
-/// let err = match ord("AB") {
-///     Result::Ok(_) => "",
-///     Result::Err(e) => e,
-/// };
-/// assert!(err == "expected single character");
-/// ```
-fn ord(string s) -> Result<byte, string> {}
-
-/// Returns the one-character string whose code point is `b`.
-///
-/// Values `0..=127` give an ASCII character; `128..=255` give the Latin-1
-/// character with that code point (two bytes of UTF-8, so `char(233)` is
-/// `"é"`). The result is `Err("byte out of range")` only if the value is
-/// outside `0..=255`, which a well-typed `byte` never is. The inverse is `ord`.
-///
-/// # Examples
-///
-/// ```
-/// # use tests::assert;
-/// let s = match char(66 as byte) {
-///     Result::Ok(c) => c,
-///     Result::Err(_) => "",
-/// };
-/// assert!(s == "B");
-/// ```
-fn char(byte b) -> Result<string, string> {}
-
 /// Returns `x` unchanged, through a call the optimizer cannot see into.
 ///
 /// Use it in benchmarks: at `-O2` and above a pure function called with

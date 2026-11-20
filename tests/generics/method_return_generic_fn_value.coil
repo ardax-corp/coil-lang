@@ -1,0 +1,202 @@
+// A method with a type parameter of its own (static or with `self`) and a
+// generic class's method (over the class's `T`, its own `U`, or both)
+// return a generic function's value made at that parameter: directly, as
+// a lambda, one level down, in a tuple, a `Vec` or a field. The caller
+// gets a function of its ground type, whose results are the direct call's,
+// at heap, immediate, unit and two-word types (coil-lang#2767).
+use tests::assert;
+use string::format;
+
+#[derive(Show, Eq)]
+class Pt {
+    pub a: int,
+}
+
+fn wrap<T>(T x) -> Option<T> {
+    return Option::Some(x);
+}
+
+fn take<T>(Option<T> x) -> T {
+    return match x {
+        Option::Some(v) => v,
+        Option::None => panic "absent",
+    };
+}
+
+fn dup<T>(T x) -> (T, T) {
+    return (x, x);
+}
+
+fn twice<T>(T x) -> Vec<T> {
+    return Vec::from([x, x]);
+}
+
+fn first<T>((T, int) x) -> Result<T, string> {
+    return Result::Ok(x[0]);
+}
+
+class Box<T> {
+    pub f: fn(T) -> Option<T>,
+}
+
+class M {
+    pub k: int,
+}
+
+impl M {
+    pub static fn wrapper<T>() -> fn(T) -> Option<T> {
+        return wrap;
+    }
+
+    pub static fn taker<T>() -> fn(Option<T>) -> T {
+        return take;
+    }
+
+    pub static fn lam<T>() -> fn(T) -> (T, T) {
+        return fn (T x) => dup(x);
+    }
+
+    pub static fn pair<T>() -> (fn(T) -> Vec<T>, int) {
+        return (twice, 1);
+    }
+
+    pub static fn nested<T>() -> fn() -> fn((T, int)) -> Result<T, string> {
+        return fn () => first;
+    }
+
+    pub fn iwrapper<T>() -> fn(T) -> Option<T> {
+        return fn (T x) => wrap(x);
+    }
+
+    pub fn itaker<T>() -> fn(Option<T>) -> T {
+        return take;
+    }
+
+    pub fn ifirsts<T>() -> Vec<fn((T, int)) -> Result<T, string>> {
+        let v: Vec<fn((T, int)) -> Result<T, string>> = Vec::new();
+        v.push(first);
+        return v;
+    }
+
+    pub fn boxed<T>() -> Box<T> {
+        return new Box(wrap);
+    }
+}
+
+class G<T> {
+    pub k: int,
+}
+
+impl G<T> {
+    pub fn wrapper() -> fn(T) -> Option<T> {
+        return wrap;
+    }
+
+    pub static fn taker() -> fn(Option<T>) -> T {
+        return take;
+    }
+
+    pub fn own<U>() -> fn(U) -> Option<U> {
+        return wrap;
+    }
+
+    pub fn own_vec<U>() -> Vec<fn(U) -> (U, U)> {
+        let v: Vec<fn(U) -> (U, U)> = Vec::new();
+        v.push(dup);
+        return v;
+    }
+
+    pub fn both<U>(U u) -> fn((T, int)) -> Result<T, string> {
+        let _u = u;
+        return first;
+    }
+}
+
+test("a static method returning fn(T) -> Option<T>") {
+    let s: fn(string) -> Option<string> = M::wrapper();
+    assert!(s("s") == Option::Some("s"));
+    let p: fn(Pt) -> Option<Pt> = M::wrapper();
+    assert!(format("%v", p(new Pt(3))) == "Some(Pt { a: 3 })");
+    let i: fn(int) -> Option<int> = M::wrapper();
+    assert!(i(4) == Option::Some(4));
+    let o: fn(Option<int>) -> Option<Option<int>> = M::wrapper();
+    assert!(format("%v", o(Option::Some(5))) == "Some(Some(5))");
+    let u: fn(()) -> Option<()> = M::wrapper();
+    assert!(format("%v", u(())) == "Some(())");
+    let t: fn((int, int)) -> Option<(int, int)> = M::wrapper();
+    assert!(format("%v", t((1, 2))) == "Some((1, 2))");
+}
+
+test("a static method returning fn(Option<T>) -> T") {
+    let s: fn(Option<string>) -> string = M::taker();
+    assert!(s(Option::Some("s")) == "s");
+    let p: fn(Option<Pt>) -> Pt = M::taker();
+    assert!(p(Option::Some(new Pt(3))).a == 3);
+    let i: fn(Option<int>) -> int = M::taker();
+    assert!(i(Option::Some(4)) == 4);
+    let o: fn(Option<Option<int>>) -> Option<int> = M::taker();
+    assert!(o(Option::Some(Option::Some(5))) == Option::Some(5));
+    let t: fn(Option<(int, int)>) -> (int, int) = M::taker();
+    assert!(t(Option::Some((1, 2))) == (1, 2));
+}
+
+test("a static method returning a lambda, a tuple, a function one level down") {
+    let d: fn(string) -> (string, string) = M::lam();
+    assert!(d("s") == ("s", "s"));
+    let dp: fn((int, int)) -> ((int, int), (int, int)) = M::lam();
+    assert!(dp((1, 2)) == ((1, 2), (1, 2)));
+    let v: (fn(string) -> Vec<string>, int) = M::pair();
+    let tw = v[0];
+    assert!(format("%v", tw("s")) == "[s, s]");
+    let vo: (fn(Option<int>) -> Vec<Option<int>>, int) = M::pair();
+    let two = vo[0];
+    assert!(format("%v", two(Option::Some(1))) == "[Some(1), Some(1)]");
+    let n: fn() -> fn((string, int)) -> Result<string, string> = M::nested();
+    let f = n();
+    assert!(f(("s", 2)) == Result::Ok("s"));
+    let nu: fn() -> fn(((), int)) -> Result<(), string> = M::nested();
+    let fu = nu();
+    assert!(format("%v", fu(((), 2))) == "Ok(())");
+}
+
+test("an instance method with a type parameter of its own") {
+    let m = new M(1);
+    let s: fn(string) -> Option<string> = m.iwrapper();
+    assert!(s("s") == Option::Some("s"));
+    let p: fn(Option<Pt>) -> Pt = m.itaker();
+    assert!(p(Option::Some(new Pt(3))).a == 3);
+    let fs: Vec<fn((Pt, int)) -> Result<Pt, string>> = m.ifirsts();
+    let f = fs[0];
+    assert!(format("%v", f((new Pt(7), 1))) == "Ok(Pt { a: 7 })");
+    let ft: Vec<fn(((int, int), int)) -> Result<(int, int), string>> = m.ifirsts();
+    let g = ft[0];
+    assert!(g(((1, 2), 3)) == Result::Ok((1, 2)));
+    let b: Box<string> = m.boxed();
+    let h = b.f;
+    assert!(h("s") == Option::Some("s"));
+    let bi: Box<int> = m.boxed();
+    let hi = bi.f;
+    assert!(hi(2) == Option::Some(2));
+}
+
+test("a generic class's methods over its T, their own U and both") {
+    let g: G<string> = new G(1);
+    let w = g.wrapper();
+    assert!(w("s") == Option::Some("s"));
+    let t: fn(Option<Pt>) -> Pt = G::taker();
+    assert!(t(Option::Some(new Pt(3))).a == 3);
+    let gi: G<int> = new G(1);
+    let o: fn(string) -> Option<string> = gi.own();
+    assert!(o("s") == Option::Some("s"));
+    let ou: fn(()) -> Option<()> = gi.own();
+    assert!(format("%v", ou(())) == "Some(())");
+    let vs: Vec<fn(Pt) -> (Pt, Pt)> = gi.own_vec();
+    let d = vs[0];
+    assert!(format("%v", d(new Pt(2))) == "(Pt { a: 2 }, Pt { a: 2 })");
+    let gp: G<Pt> = new G(1);
+    let b = gp.both(true);
+    assert!(format("%v", b((new Pt(4), 1))) == "Ok(Pt { a: 4 })");
+    let go: G<Option<int>> = new G(1);
+    let bo = go.both("u");
+    assert!(bo((Option::Some(6), 1)) == Result::Ok(Option::Some(6)));
+}

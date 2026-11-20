@@ -8,12 +8,12 @@ use string::to_bytes;
 
 trait Pass<S> {
     fn third<W: Show>(S s, W w) -> string {
-        return shout(w) + " " + show(w) + " " + w.show();
+        return shout(w) + " " + Show::show(w) + " " + w.show();
     }
 }
 
 fn shout<X: Show>(X x) -> string {
-    return show(x) + "!";
+    return Show::show(x) + "!";
 }
 
 class Pt {

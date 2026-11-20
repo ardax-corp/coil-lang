@@ -1,0 +1,126 @@
+// A generic enum whose payload is a `Vec` or an array of functions over
+// its type parameter (`Many(Vec<fn(T) -> T>)`) is built, matched and
+// called in a generic function too (coil-lang#2493): each element is one
+// closure word, called with each `T` as its own word, in a shared body as
+// in ground code.
+use tests::assert;
+
+enum Held<T> {
+    Many(Vec<fn(T) -> T>),
+    Two([fn(T) -> T; 2]),
+    Test(Vec<fn(T) -> bool>),
+    N,
+}
+
+class Name {
+    pub text: string,
+}
+
+fn inc(int x) -> int {
+    return x + 1;
+}
+
+fn bang(string s) -> string {
+    return s + "!";
+}
+
+fn half(float x) -> float {
+    return x / 2.0;
+}
+
+fn loud(Name n) -> Name {
+    return new Name(n.text + "!");
+}
+
+fn first<T>(Held<T> h, T x) -> T {
+    return match h {
+        Held::Many(fs) => fs[0](x),
+        Held::Two(fs) => fs[1](fs[0](x)),
+        Held::Test(_) => x,
+        Held::N => x,
+    };
+}
+
+fn all<T>(Held<T> h, T x) -> T {
+    let v = x;
+    if let Held::Many(fs) = h {
+        for f in fs {
+            v = f(v);
+        }
+    }
+    return v;
+}
+
+fn passes<T>(Held<T> h, T x) -> int {
+    let n = 0;
+    if let Held::Test(fs) = h {
+        for f in fs {
+            if f(x) {
+                n = n + 1;
+            }
+        }
+    }
+    return n;
+}
+
+fn many<T>(fn(T) -> T f, fn(T) -> T g) -> Held<T> {
+    let fs: Vec<fn(T) -> T> = Vec::new();
+    fs.push(f);
+    fs.push(g);
+    return Held::Many(fs);
+}
+
+test("a Vec of functions in a generic enum, through generic functions") {
+    let hv: Vec<fn(int) -> int> = Vec::new();
+    hv.push(inc);
+    hv.push(fn (int x) => x * 2);
+    let h: Held<int> = Held::Many(hv);
+    assert!(first(h, 3) == 4);
+    assert!(all(h, 3) == 8);
+    let sv: Vec<fn(string) -> string> = Vec::new();
+    sv.push(bang);
+    sv.push(bang);
+    let s: Held<string> = Held::Many(sv);
+    assert!(first(s, "a") == "a!");
+    assert!(all(s, "a") == "a!!");
+    let fv: Vec<fn(float) -> float> = Vec::new();
+    fv.push(half);
+    fv.push(half);
+    let f: Held<float> = Held::Many(fv);
+    assert!(first(f, 3.0) == 1.5);
+    assert!(all(f, 8.0) == 2.0);
+    let nv: Vec<fn(Name) -> Name> = Vec::new();
+    nv.push(loud);
+    let n: Held<Name> = Held::Many(nv);
+    assert!(all(n, new Name("n")).text == "n!");
+}
+
+test("an array of functions and a Vec of predicates") {
+    let t: Held<string> = Held::Two([bang, bang]);
+    assert!(first(t, "a") == "a!!");
+    let i: Held<int> = Held::Two([inc, fn (int x) => x * 10]);
+    assert!(first(i, 1) == 20);
+    let pv: Vec<fn(int) -> bool> = Vec::new();
+    pv.push(fn (int x) => x > 0);
+    pv.push(fn (int x) => x > 10);
+    pv.push(fn (int x) => x > 2);
+    let p: Held<int> = Held::Test(pv);
+    assert!(passes(p, 5) == 2);
+    assert!(passes(p, 50) == 3);
+    assert!(first(p, 5) == 5);
+    let e: Held<float> = Held::N;
+    assert!(first(e, 1.5) == 1.5);
+    assert!(passes(e, 1.5) == 0);
+}
+
+test("built in a generic function, matched at ground types") {
+    let h = many(inc, fn (int x) => x * 3);
+    assert!(all(h, 1) == 6);
+    let total = match h {
+        Held::Many(fs) => fs[0](10) + fs[1](10),
+        default => 0,
+    };
+    assert!(total == 41);
+    let s = many(bang, fn (string s) => s + "?");
+    assert!(all(s, "a") == "a!?");
+}

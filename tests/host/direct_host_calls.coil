@@ -5,6 +5,7 @@
 // computing it.
 use tests::assert;
 use string::{slice_bytes, format};
+use text::{ord, char};
 
 fn hash_sum<T: Hash>(Vec<T> xs) -> int {
     let acc = 0;

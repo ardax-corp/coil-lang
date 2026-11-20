@@ -71,6 +71,10 @@ pub const PRELUDE_TASK_MODULE: &str = "prelude::task";
 /// Child-process natives behind the embedded `process` module.
 pub const PRELUDE_PROCESS_MODULE: &str = "prelude::process";
 
+/// Lock primitives the embedded `thread_locks` module (`thread::with_lock`
+/// and kin, in Coil) builds on: raw holds and value loads / stores.
+pub const PRELUDE_THREAD_MODULE: &str = "prelude::thread";
+
 /// Which userland FFI builtin a virtual export names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FfiBuiltin {
@@ -110,10 +114,6 @@ pub enum PreludeFn {
     Intersect,
     /// Cells present in the left matrix and absent from the right → `byte` mask.
     Diff,
-    /// Construct a single UTF-8 code unit as `Result<string, string>`.
-    Char,
-    /// First code unit of a `string` as `Result<byte, string>`.
-    Ord,
     /// The identity, through the `black_box` host native the optimizer
     /// cannot see through.
     BlackBox,
@@ -131,8 +131,6 @@ impl PreludeFn {
             Self::Matrix => "matrix",
             Self::Intersect => "intersect",
             Self::Diff => "diff",
-            Self::Char => "char",
-            Self::Ord => "ord",
             Self::BlackBox => "black_box",
             Self::FnKey => "fn_key",
         }
@@ -146,8 +144,6 @@ impl PreludeFn {
             "matrix" => Some(Self::Matrix),
             "intersect" => Some(Self::Intersect),
             "diff" => Some(Self::Diff),
-            "char" => Some(Self::Char),
-            "ord" => Some(Self::Ord),
             "black_box" => Some(Self::BlackBox),
             "fn_key" => Some(Self::FnKey),
             _ => None,
@@ -164,6 +160,10 @@ pub const REMOVED_MATH_FNS: &[&str] = &[
 /// [`REMOVED_MATH_FNS`] are coil-stdlib's `math` module now.
 const REMOVED_MATH_HELP: &str =
     "the float functions moved from `prelude::math` to coil-stdlib's `math` module: write `use math::{sin, sqrt};` (any of `sin` … `tanh`)";
+
+/// `ord` / `char` left the prelude for coil-stdlib's `text` module (host
+/// natives 65 / 66 stay for older archives).
+pub const REMOVED_PRELUDE_TEXT_FNS: &[&str] = &["ord", "char"];
 
 /// `prelude::math::pow` was removed in favour of the `**` operator.
 const REMOVED_POW_HELP: &str =
@@ -397,7 +397,7 @@ impl IoBuiltin {
 
 /// String helpers exported from virtual `string`.
 ///
-/// `format` is a compiler intrinsic that lowers to [`common::Instruction::FORMAT`];
+/// `format` is a compiler intrinsic that lowers to the `FORMAT` host call;
 /// byte conversion helpers use the `from_bytes` / `to_bytes` host-native rows.
 /// Byte reads and search are `s[i]` and plain loops (`text::` in coil-stdlib),
 /// which the compiler vectorises (`docs/internals/byte-simd.md`); the
@@ -680,12 +680,6 @@ impl VirtualModules {
                 BuiltinExport::TypeClass { name: "Iterator" },
                 BuiltinExport::TypeClass {
                     name: "IntoIterator",
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Ord,
-                },
-                BuiltinExport::Fn {
-                    kind: PreludeFn::Char,
                 },
                 BuiltinExport::Fn {
                     kind: PreludeFn::BlackBox,
@@ -974,6 +968,24 @@ impl VirtualModules {
         );
 
         modules.insert(
+            PRELUDE_THREAD_MODULE,
+            host_exports(&[
+                ("lock_acquire", "lock_acquire"),
+                ("lock_release", "lock_release"),
+                ("lock_load", "lock_load"),
+                ("lock_store", "lock_store"),
+                ("rw_acquire_read", "rw_acquire_read"),
+                ("rw_acquire_write", "rw_acquire_write"),
+                ("rw_try_read", "rw_try_read"),
+                ("rw_try_write", "rw_try_write"),
+                ("rw_release_read", "rw_release_read"),
+                ("rw_release_write", "rw_release_write"),
+                ("rw_load", "rw_load"),
+                ("rw_store", "rw_store"),
+            ]),
+        );
+
+        modules.insert(
             PRELUDE_PROCESS_MODULE,
             host_exports(&[
                 ("process_spawn", common::PROCESS_SPAWN_NATIVE),
@@ -997,21 +1009,6 @@ impl VirtualModules {
         self.modules
             .iter()
             .flat_map(|(path, exports)| exports.iter().map(move |e| (*path, e)))
-    }
-
-    pub fn is_virtual_module(&self, module_path: &str) -> bool {
-        self.modules.contains_key(module_path)
-    }
-
-    /// Join `use` path segments (+ optional final item that is not `*`) into a module path.
-    pub fn module_path_of(path: &[String], name: &str) -> String {
-        if name == "*" {
-            path.join("::")
-        } else if path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{}::{}", path.join("::"), name)
-        }
     }
 
     /// Resolve a concrete `use path::name` (not glob) against virtual modules.
@@ -1072,41 +1069,6 @@ impl VirtualModules {
         out
     }
 
-    /// Look up a typeclass by qualified path (`prelude::ops::Eq` → `"Eq"`).
-    pub fn resolve_typeclass_path(&self, segments: &[&str]) -> Option<&'static str> {
-        if segments.len() < 2 {
-            return None;
-        }
-        let (module_segs, name) = segments.split_at(segments.len() - 1);
-        let module = module_segs.join("::");
-        match self
-            .modules
-            .get(module.as_str())?
-            .iter()
-            .find(|e| matches!(e, BuiltinExport::TypeClass { name: n } if n == &name[0]))?
-        {
-            BuiltinExport::TypeClass { name } => Some(*name),
-            _ => None,
-        }
-    }
-
-    /// Look up an enum by qualified path (`prelude::Option` → `"Option"`).
-    pub fn resolve_enum_path(&self, segments: &[&str]) -> Option<&'static str> {
-        if segments.len() < 2 {
-            return None;
-        }
-        let (module_segs, name) = segments.split_at(segments.len() - 1);
-        let module = module_segs.join("::");
-        match self
-            .modules
-            .get(module.as_str())?
-            .iter()
-            .find(|e| matches!(e, BuiltinExport::Enum { name: n } if n == &name[0]))?
-        {
-            BuiltinExport::Enum { name } => Some(*name),
-            _ => None,
-        }
-    }
 }
 
 #[cfg(test)]

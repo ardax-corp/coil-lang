@@ -42,5 +42,5 @@ test("a string literal cast to Vec<byte>") {
 
 test("byte has a Show instance") {
     let b: byte = 42;
-    assert!(show(b) == "42");
+    assert!(b.show() == "42");
 }

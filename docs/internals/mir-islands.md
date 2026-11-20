@@ -1,7 +1,7 @@
 # MIR language islands (COI-292 I0)
 # MIR language islands (COI-292 I0)
 
-> **Status: historical.** This ladder grew MIR coverage while stack IL was still the production lowering. Since M4 and M5 (2026-10) every body lowers from HIR to MIR and emits dense or LIR; there is no IL→MIR lift, no fuse-IL tier and no stack-lowering fallback. Today's pipeline: [pipeline.md](pipeline.md) and [mir.md](mir.md).
+> **Status: historical.** This ladder grew MIR coverage while stack IL was still the production lowering. The tiers it discusses (fuse-IL, dense, LIR) and the bytecode VM that ran them have been deleted: every body now lowers from HIR to MIR and runs as native code or on the MIR interpreter. There is no stack IL. Today's pipeline: [pipeline.md](pipeline.md) and [mir.md](mir.md).
 
 MIR is a **typed SSA sidecar** that grows **island by island**. It is not a
 wholesale rewrite of the compiler, and it is not a second semantic language
@@ -101,10 +101,6 @@ HostInvoke. **Q9 R3** maps `FORMAT` / `STRINGIFY`. Unicode / regex stay out unti
 | `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); **B5** first-class `let r = 0..n` locals (`for_in_range_value`); **C2** free-fn param / returned numeric Range (`for_in_range_param` / `for_in_range_ret`); **C2b rung 1** heap-field / array-held Range (`for_in_range_field` / `for_in_range_array`); **C2b rung 2** user `Iterator::next` (`for_in_iter`) and counted `into_iter` Range (`for_in_iter_range`); **C2b rung 4** coro for-in (`for_in_coro`, `ResumeCoro` / `DoneCoro`); `main` + format stays fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | stay unless a later island has a regular reason |
 | Cranelift / native | parked (P5) | not an island delivery vehicle |
-
-Dense refuse rows that stay current: [specialize-refuse.md](specialize-refuse.md).
-Post-C3 denser leftovers (D0 `nsieve` keep, class field, D3 multi-payload match):
-[mir-dense-leftovers.md](mir-dense-leftovers.md).
 
 ## A/B rules (every island PR)
 

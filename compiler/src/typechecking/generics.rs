@@ -117,12 +117,6 @@ impl TypeClassDef {
         self.kind_at(i).is_constructor_kind()
     }
 
-    /// Constructor arity of parameter `i`, if it is constructor-kinded.
-    pub fn constructor_arity_at(&self, i: usize) -> Option<usize> {
-        let kind = self.kind_at(i);
-        kind.is_constructor_kind().then(|| kind.arity())
-    }
-
     pub fn assoc_type(&self, name: &str) -> Option<&AssocTypeDecl> {
         self.assoc_types.iter().find(|decl| decl.name == name)
     }
@@ -211,15 +205,306 @@ pub struct InstanceDef {
     pub context: Vec<Constraint>,
 }
 
+/// A builtin trait the registry starts with.
+struct BuiltinTrait {
+    name: &'static str,
+    module: &'static str,
+    params: &'static [&'static str],
+    superclasses: &'static [&'static str],
+    methods: &'static [&'static str],
+    /// Its methods are called as `T::m()` (`Default::default`).
+    static_methods: bool,
+    assoc_types: &'static [&'static str],
+    /// A prelude trait ([`crate::typechecking::infer::Checker::is_builtin_class`]):
+    /// the core prelude may redeclare it with default bodies, and a
+    /// `use prelude… as Alias` frees its name. `Into` and the io traits are not.
+    prelude: bool,
+}
+
+const fn op_trait(name: &'static str, methods: &'static [&'static str]) -> BuiltinTrait {
+    BuiltinTrait {
+        name,
+        module: PRELUDE_OPS_MODULE,
+        params: &["T"],
+        superclasses: &[],
+        methods,
+        static_methods: false,
+        assoc_types: &[],
+        prelude: true,
+    }
+}
+
+const fn bundle(name: &'static str, superclasses: &'static [&'static str]) -> BuiltinTrait {
+    BuiltinTrait { superclasses, ..op_trait(name, &[]) }
+}
+
+const fn prelude_trait(name: &'static str, methods: &'static [&'static str]) -> BuiltinTrait {
+    BuiltinTrait { module: PRELUDE_MODULE, ..op_trait(name, methods) }
+}
+
+/// The builtin traits. Each arithmetic, bitwise and ordering operator has
+/// its own trait so a type can implement only the operations it supports;
+/// `Num`, `Integral` and `Ord` are method-less bundles over them (`Ord`
+/// takes `Eq` too, so `==` in a `T: Ord` body uses `T`'s `Eq`, #1716).
+const BUILTIN_TRAITS: [BuiltinTrait; 32] = [
+    op_trait("Add", &["add"]),
+    op_trait("Sub", &["sub"]),
+    op_trait("Mul", &["mul"]),
+    op_trait("Div", &["div"]),
+    op_trait("Neg", &["neg"]),
+    op_trait("Rem", &["rem"]),
+    op_trait("Pow", &["pow"]),
+    op_trait("Shl", &["shl"]),
+    op_trait("Shr", &["shr"]),
+    op_trait("BitAnd", &["bitand"]),
+    op_trait("BitOr", &["bitor"]),
+    op_trait("BitXor", &["bitxor"]),
+    op_trait("BitNot", &["bitnot"]),
+    bundle("Num", &["Add", "Sub", "Mul", "Div", "Neg", "Rem", "Pow"]),
+    // `float` is Num but not Integral.
+    bundle("Integral", &["Num", "Shl", "Shr", "BitAnd", "BitOr", "BitXor", "BitNot"]),
+    op_trait("Lt", &["lt"]),
+    op_trait("Le", &["le"]),
+    op_trait("Gt", &["gt"]),
+    op_trait("Ge", &["ge"]),
+    bundle("Ord", &["Lt", "Le", "Gt", "Ge", "Eq"]),
+    op_trait("Eq", &["eq", "ne"]),
+    op_trait("Show", &["show"]),
+    op_trait("Length", &["len"]),
+    // `#[derive]` targets (compiler/src/attrs.rs); `static fn default() -> T`.
+    BuiltinTrait { static_methods: true, ..prelude_trait("Default", &["default"]) },
+    prelude_trait("Hash", &["hash"]),
+    prelude_trait("Send", &[]),
+    prelude_trait("Sensitive", &[]),
+    // Multi-param conversion: `impl Into<T> for Self` → instance args
+    // `[Self, T]`. Prefer `x.into()` with an expected type over a reverse
+    // `From` encoding.
+    BuiltinTrait { params: &["Self", "T"], prelude: false, ..op_trait("Into", &["into"]) },
+    BuiltinTrait { module: "io", params: &["S"], prelude: false, ..op_trait("Read", &["read"]) },
+    BuiltinTrait { module: "io", params: &["S"], prelude: false, ..op_trait("Write", &["write"]) },
+    // Carrier as first type param (same shape as Collect). Builtin arrays,
+    // tuples, dicts and coroutines are synthesised at for-in sites without
+    // a ground instance per T; users write ordinary `impl`.
+    BuiltinTrait { params: &["I"], assoc_types: &["Item"], ..prelude_trait("Iterator", &["next"]) },
+    BuiltinTrait { assoc_types: &["Item", "IntoIter"], ..prelude_trait("IntoIterator", &["into_iter"]) },
+];
+
+/// Whether `class` is a builtin prelude trait ([`BuiltinTrait::prelude`]).
+pub fn is_prelude_trait(class: &str) -> bool {
+    BUILTIN_TRAITS.iter().any(|t| t.prelude && t.name == class)
+}
+
 //  Generics registry
+
+/// What an instance argument's outermost constructor can unify with
+/// ([`head_key`]): two types whose keys differ never unify, so a lookup
+/// tries only the instances under its goal's key and those whose head is
+/// open (a variable).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum HeadKey {
+    /// A nominal head: `Con`, a `Sum`, an `App` of a `Con`, a constructor's
+    /// owner.
+    Named(String),
+    /// `unit` and `()`, one type.
+    Unit,
+    Fun,
+    Tuple(usize),
+    Array,
+    /// A record, by its field names in name order.
+    Record(Vec<String>),
+    Existential(String),
+    Forall,
+}
+
+/// The [`HeadKey`] of `ty`, or `None` when it can unify with any head (a
+/// variable, `never`, an application of a variable). Follows
+/// [`unify_with`]: `Con(n)` meets a `Sum` or a constructor of `n`,
+/// `readonly T` meets `T`, `unit` meets `()`.
+fn head_key(ty: &Ty) -> Option<HeadKey> {
+    Some(match ty {
+        Ty::Var(_) | Ty::Never => return None,
+        Ty::Readonly(inner) => return head_key(inner),
+        Ty::Constructor { owner, .. } => return head_key(owner),
+        Ty::App(head, _) => return head_key(head),
+        Ty::Con(name) if name == super::ty::UNIT => HeadKey::Unit,
+        Ty::Con(name) | Ty::Sum { name, .. } => HeadKey::Named(name.clone()),
+        Ty::Tuple(items) if items.is_empty() => HeadKey::Unit,
+        Ty::Tuple(items) => HeadKey::Tuple(items.len()),
+        Ty::Fun(..) => HeadKey::Fun,
+        Ty::Array { .. } => HeadKey::Array,
+        Ty::Record { fields } => {
+            let mut names: Vec<String> = fields.iter().map(|(name, _)| name.clone()).collect();
+            names.sort();
+            HeadKey::Record(names)
+        }
+        Ty::Existential { class } => HeadKey::Existential(class.clone()),
+        Ty::Forall { .. } => HeadKey::Forall,
+    })
+}
+
+/// `ty` with what [`unify_with`] does not tell apart erased, when it has
+/// no variable, `never` or `forall` in it: two such types unify only if
+/// their keys are equal. A `Sum` is its name (`Con`), `readonly T` is `T`,
+/// a constructor its owner, `()` is `unit`, an array has no length and a
+/// record's fields are in name order.
+fn ground_key(ty: &Ty) -> Option<Ty> {
+    let all = |tys: &[Ty]| tys.iter().map(ground_key).collect::<Option<Vec<_>>>();
+    Some(match ty {
+        Ty::Var(_) | Ty::Never | Ty::Forall { .. } => return None,
+        Ty::Readonly(inner) => return ground_key(inner),
+        Ty::Constructor { owner, .. } => return ground_key(owner),
+        Ty::Con(name) | Ty::Sum { name, .. } => Ty::Con(name.clone()),
+        Ty::Tuple(items) if items.is_empty() => Ty::Con(super::ty::UNIT.into()),
+        Ty::Tuple(items) => Ty::Tuple(all(items)?),
+        Ty::Fun(a, b) => Ty::Fun(Box::new(ground_key(a)?), Box::new(ground_key(b)?)),
+        Ty::App(head, args) => Ty::App(Box::new(ground_key(head)?), all(args)?),
+        Ty::Array { element, .. } => Ty::Array {
+            element: Box::new(ground_key(element)?),
+            length: super::ty::ArrayLength::Dynamic,
+        },
+        Ty::Record { fields } => {
+            let mut fields = fields
+                .iter()
+                .map(|(name, ty)| Some((name.clone(), ground_key(ty)?)))
+                .collect::<Option<Vec<_>>>()?;
+            fields.sort_by(|a, b| a.0.cmp(&b.0));
+            Ty::Record { fields }
+        }
+        Ty::Existential { class } => Ty::Existential { class: class.clone() },
+    })
+}
+
+/// One class's instances, by position in [`Generics::instances`], each
+/// list ascending. An instance is in `all` and in one of `open`,
+/// `by_head` or `ground` (and then `ground_by_head`), by its first
+/// argument.
+#[derive(Clone, Debug, Default)]
+struct ClassInstances {
+    all: Vec<usize>,
+    /// The first argument's head is open (or there is no argument).
+    open: Vec<usize>,
+    /// The head is known and the argument has no [`ground_key`].
+    by_head: HashMap<HeadKey, Vec<usize>>,
+    /// The argument has a [`ground_key`]: by that key.
+    ground: HashMap<Ty, Vec<usize>>,
+    /// Those of `ground`, by head.
+    ground_by_head: HashMap<HeadKey, Vec<usize>>,
+    /// By the span of their `impl` ([`InstanceDef::range`]).
+    by_range: HashMap<(usize, usize), Vec<usize>>,
+}
+
+/// Where an instance argument (or a goal's) files in a [`ClassInstances`].
+enum Slot {
+    Open,
+    Head(HeadKey),
+    Ground(HeadKey, Ty),
+}
+
+fn slot_of(first: Option<&Ty>) -> Slot {
+    match first.and_then(|ty| Some((ty, head_key(ty)?))) {
+        None => Slot::Open,
+        Some((ty, head)) => match ground_key(ty) {
+            Some(key) => Slot::Ground(head, key),
+            None => Slot::Head(head),
+        },
+    }
+}
+
+/// Indexes over [`Generics::instances`], kept in step with it by every
+/// method that changes it. Lookups walk positions in ascending order, so
+/// they see instances in declaration order as a scan of the vector does.
+#[derive(Clone, Debug, Default)]
+struct InstanceIndex {
+    by_class: HashMap<String, ClassInstances>,
+    /// Method FQN → the instances that list it.
+    by_method: HashMap<String, Vec<usize>>,
+}
+
+fn insert_sorted(list: &mut Vec<usize>, idx: usize) {
+    if let Err(at) = list.binary_search(&idx) {
+        list.insert(at, idx);
+    }
+}
+
+fn remove_sorted(list: &mut Vec<usize>, idx: usize) {
+    if let Ok(at) = list.binary_search(&idx) {
+        list.remove(at);
+    }
+}
+
+impl InstanceIndex {
+    fn add(&mut self, idx: usize, inst: &InstanceDef) {
+        let class = self.by_class.entry(inst.class.clone()).or_default();
+        insert_sorted(&mut class.all, idx);
+        insert_sorted(class.by_range.entry((inst.range.start, inst.range.end)).or_default(), idx);
+        match slot_of(inst.args.first()) {
+            Slot::Open => insert_sorted(&mut class.open, idx),
+            Slot::Head(head) => insert_sorted(class.by_head.entry(head).or_default(), idx),
+            Slot::Ground(head, key) => {
+                insert_sorted(class.ground_by_head.entry(head).or_default(), idx);
+                insert_sorted(class.ground.entry(key).or_default(), idx);
+            }
+        }
+        for fqn in inst.method_fqns.values() {
+            insert_sorted(self.by_method.entry(fqn.clone()).or_default(), idx);
+        }
+    }
+
+    fn remove(&mut self, idx: usize, inst: &InstanceDef) {
+        if let Some(class) = self.by_class.get_mut(&inst.class) {
+            remove_sorted(&mut class.all, idx);
+            if let Some(list) = class.by_range.get_mut(&(inst.range.start, inst.range.end)) {
+                remove_sorted(list, idx);
+            }
+            let from = |lists: &mut HashMap<_, Vec<usize>>, key| {
+                if let Some(list) = lists.get_mut(&key) {
+                    remove_sorted(list, idx);
+                }
+            };
+            match slot_of(inst.args.first()) {
+                Slot::Open => remove_sorted(&mut class.open, idx),
+                Slot::Head(head) => from(&mut class.by_head, head),
+                Slot::Ground(head, key) => {
+                    from(&mut class.ground_by_head, head);
+                    if let Some(list) = class.ground.get_mut(&key) {
+                        remove_sorted(list, idx);
+                    }
+                }
+            }
+        }
+        for fqn in inst.method_fqns.values() {
+            if let Some(list) = self.by_method.get_mut(fqn) {
+                remove_sorted(list, idx);
+            }
+        }
+    }
+}
+
+/// Positions from ascending, disjoint lists, in ascending order.
+struct MergedPositions<'a> {
+    lists: [&'a [usize]; 3],
+}
+
+impl Iterator for MergedPositions<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        let list = self.lists.iter_mut().filter(|l| !l.is_empty()).min_by_key(|l| l[0])?;
+        let (&first, rest) = list.split_first()?;
+        *list = rest;
+        Some(first)
+    }
+}
 
 /// Registry of typeclasses and their instances, owned by [`Checker`].
 #[derive(Clone, Debug, Default)]
 pub struct Generics {
     /// All declared typeclasses.
     pub typeclasses: HashMap<String, TypeClassDef>,
-    /// All registered instances (in declaration order).
-    pub instances: Vec<InstanceDef>,
+    /// All registered instances (in declaration order). Changed only
+    /// through the methods that keep [`Self::index`] in step.
+    instances: Vec<InstanceDef>,
+    index: InstanceIndex,
     /// Generic type constructors: enum/class/alias name → type param names.
     pub generic_type_ctors: HashMap<String, Vec<String>>,
     /// Nominal type ownership: enum/class/alias name → defining module path.
@@ -289,12 +574,111 @@ impl Generics {
         self.typeclasses.get(name)
     }
 
+    /// Every registered instance, in declaration order.
+    pub fn instances(&self) -> &[InstanceDef] {
+        &self.instances
+    }
+
+    /// Register `inst`; its position in [`Self::instances`].
+    pub fn push_instance(&mut self, inst: InstanceDef) -> usize {
+        let idx = self.instances.len();
+        self.index.add(idx, &inst);
+        self.instances.push(inst);
+        idx
+    }
+
+    /// Replace the instance at `idx`.
+    pub fn replace_instance(&mut self, idx: usize, inst: InstanceDef) {
+        self.update_instance(idx, |slot| *slot = inst);
+    }
+
+    /// Change the instance at `idx` in place.
+    pub fn update_instance(&mut self, idx: usize, change: impl FnOnce(&mut InstanceDef)) {
+        self.index.remove(idx, &self.instances[idx]);
+        change(&mut self.instances[idx]);
+        self.index.add(idx, &self.instances[idx]);
+    }
+
+    /// Drop every instance (unit tests start from an empty registry).
+    pub fn clear_instances(&mut self) {
+        self.instances.clear();
+        self.index = InstanceIndex::default();
+    }
+
+    /// The instances of `class`, in declaration order.
+    pub fn class_instances<'a>(&'a self, class: &str) -> impl Iterator<Item = (usize, &'a InstanceDef)> + 'a {
+        let all = self.index.by_class.get(class).map_or(&[][..], |c| c.all.as_slice());
+        all.iter().map(|&idx| (idx, &self.instances[idx]))
+    }
+
+    /// The instances of `class` whose `impl` spans `range` (in any module),
+    /// in declaration order.
+    pub fn class_instances_at<'a>(
+        &'a self,
+        class: &str,
+        range: &Range<usize>,
+    ) -> impl Iterator<Item = (usize, &'a InstanceDef)> + 'a {
+        let at = self
+            .index
+            .by_class
+            .get(class)
+            .and_then(|c| c.by_range.get(&(range.start, range.end)))
+            .map_or(&[][..], Vec::as_slice);
+        at.iter().map(|&idx| (idx, &self.instances[idx]))
+    }
+
+    /// The instances of `class` whose first argument could unify with
+    /// `first`, in declaration order: those with an open head, the others
+    /// under its [`head_key`] and, for a goal with a [`ground_key`], only
+    /// the ground ones at that key. Every instance of `class` when `first`
+    /// is open or absent. A superset of the instances that unify.
+    pub fn instance_candidates<'a>(
+        &'a self,
+        class: &str,
+        first: Option<&Ty>,
+    ) -> impl Iterator<Item = (usize, &'a InstanceDef)> + 'a {
+        fn get<'a, K: std::hash::Hash + Eq>(lists: &'a HashMap<K, Vec<usize>>, key: &K) -> &'a [usize] {
+            lists.get(key).map_or(&[], Vec::as_slice)
+        }
+        let lists = match (self.index.by_class.get(class), slot_of(first)) {
+            (None, _) => [&[][..]; 3],
+            (Some(c), Slot::Open) => [&c.all[..], &[], &[]],
+            // A ground goal meets a ground instance only at its own key.
+            (Some(c), Slot::Ground(head, key)) => [&c.open, get(&c.by_head, &head), get(&c.ground, &key)],
+            (Some(c), Slot::Head(head)) => [&c.open, get(&c.by_head, &head), get(&c.ground_by_head, &head)],
+        };
+        let merged = MergedPositions { lists };
+        merged.map(|idx| (idx, &self.instances[idx]))
+    }
+
+    /// The instances one of whose methods is `fqn`, in declaration order.
+    pub fn instances_of_method<'a>(&'a self, fqn: &str) -> impl Iterator<Item = &'a InstanceDef> + 'a {
+        let list = self.index.by_method.get(fqn).map_or(&[][..], Vec::as_slice);
+        list.iter().map(|&idx| &self.instances[idx])
+    }
+
+    /// The first instance one of whose methods is `fqn`.
+    pub fn instance_of_method(&self, fqn: &str) -> Option<&InstanceDef> {
+        self.instances_of_method(fqn).next()
+    }
+
     /// Find an instance for `class` applied to `args` (exact type match).
+    /// The arguments a `Show`, `Eq` or `Hash` goal is looked up by: a
+    /// `Matrix<D>` in them is its data `D`, at any depth (#2466). A matrix
+    /// is its data at run time and shows, compares and hashes as it does;
+    /// no instance of these traits has a `Matrix` head (both are builtin).
+    pub fn matrix_data_args<'a>(class: &str, args: &'a [Ty]) -> std::borrow::Cow<'a, [Ty]> {
+        use crate::typechecking::aggregate_arith::{erase_matrix_ty, is_matrix_ty};
+        if matches!(class, "Show" | "Eq" | "Hash") && args.iter().any(|ty| ty.any(is_matrix_ty)) {
+            return std::borrow::Cow::Owned(args.iter().map(erase_matrix_ty).collect());
+        }
+        std::borrow::Cow::Borrowed(args)
+    }
+
     pub fn find_instance(&self, class: &str, args: &[Ty]) -> Option<&InstanceDef> {
-        self.instances.iter().find(|inst| {
-            inst.class == class
-                && inst.args.len() == args.len()
-                && inst.args.iter().zip(args.iter()).all(|(a, b)| a == b)
+        let args = &*Self::matrix_data_args(class, args);
+        self.instance_candidates(class, args.first()).map(|(_, inst)| inst).find(|inst| {
+            inst.args.len() == args.len() && inst.args.iter().zip(args.iter()).all(|(a, b)| a == b)
         })
     }
 
@@ -302,8 +686,9 @@ impl Generics {
     /// Constructor type against `impl Collect for Option<int>`). Does not mutate
     /// any global substitution.
     pub fn find_unifying_instances(&self, class: &str, args: &[Ty]) -> Vec<&InstanceDef> {
-        self.instances
-            .iter()
+        let args = &*Self::matrix_data_args(class, args);
+        self.instance_candidates(class, args.first())
+            .map(|(_, inst)| inst)
             .filter(|inst| Self::instances_unify(class, args, inst))
             .collect()
     }
@@ -324,8 +709,8 @@ impl Generics {
     }
 
     pub fn find_overlapping_instance(&self, class: &str, args: &[Ty]) -> Option<&InstanceDef> {
-        self.instances
-            .iter()
+        self.instance_candidates(class, args.first())
+            .map(|(_, inst)| inst)
             .find(|inst| Self::instances_unify(class, args, inst))
     }
 
@@ -473,686 +858,91 @@ impl Generics {
 
     /// Register the built-in typeclasses and their builtin instances.
     fn register_builtins(&mut self) {
-        use super::ty::{INT, Ty, boolean, byte, float, int, string, unit};
+        use super::ty::{BUILTIN_SCALARS, BuiltinScalar, STREAM};
 
         self.register_builtin_type_ctors();
 
-        // Individual arithmetic traits so a type can implement only the
-        // operations it supports. `Num` is a convenience supertrait that
-        // implies all of them (see below); `Neg` is unary `-`, `Rem` is `%`
-        // and `Pow` is `**`.
-        for (name, method) in [
-            ("Add", "add"),
-            ("Sub", "sub"),
-            ("Mul", "mul"),
-            ("Div", "div"),
-            ("Neg", "neg"),
-            ("Rem", "rem"),
-            ("Pow", "pow"),
-            // Integer-only: shifts, bitwise and / or / xor, unary `~`.
-            ("Shl", "shl"),
-            ("Shr", "shr"),
-            ("BitAnd", "bitand"),
-            ("BitOr", "bitor"),
-            ("BitXor", "bitxor"),
-            ("BitNot", "bitnot"),
-        ] {
+        for t in &BUILTIN_TRAITS {
             self.typeclasses.insert(
-                name.into(),
+                t.name.into(),
                 TypeClassDef {
-                    name: name.into(),
-                    defined_module: PRELUDE_OPS_MODULE.into(),
-                    type_params: vec!["T".into()],
-                    param_kinds: vec![Kind::Type],
-                    superclasses: vec![],
-                    assoc_types: vec![],
-                    methods: vec![TypeClassMethodDef {
-                        name: method.into(),
-                        has_default: false,
-                        is_static: false,
-                    }],
+                    name: t.name.into(),
+                    defined_module: t.module.into(),
+                    type_params: t.params.iter().map(|p| (*p).into()).collect(),
+                    param_kinds: vec![Kind::Type; t.params.len()],
+                    superclasses: t.superclasses.iter().map(|c| (*c).into()).collect(),
+                    assoc_types: t.assoc_types.iter().map(|a| AssocTypeDecl::new(*a, vec![], vec![])).collect(),
+                    methods: t
+                        .methods
+                        .iter()
+                        .map(|m| TypeClassMethodDef {
+                            name: (*m).into(),
+                            has_default: false,
+                            is_static: t.static_methods,
+                        })
+                        .collect(),
                 },
             );
         }
 
-        // Convenience bundle: `T: Num` implies Add + Sub + Mul + Div + Neg +
-        // Rem + Pow via the flattened superclass dictionary layout. Num itself has no
-        // methods; call sites resolve operators through the op traits.
-        self.typeclasses.insert(
-            "Num".into(),
-            TypeClassDef {
-                name: "Num".into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: ["Add", "Sub", "Mul", "Div", "Neg", "Rem", "Pow"].map(Into::into).to_vec(),
-                assoc_types: vec![],
-                methods: vec![],
-            },
-        );
-
-        // Convenience bundle for integers: `T: Integral` implies Num and the
-        // bitwise traits (`float` is Num but not Integral).
-        self.typeclasses.insert(
-            "Integral".into(),
-            TypeClassDef {
-                name: "Integral".into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: ["Num", "Shl", "Shr", "BitAnd", "BitOr", "BitXor", "BitNot"].map(Into::into).to_vec(),
-                assoc_types: vec![],
-                methods: vec![],
-            },
-        );
-
-        // Individual ordering traits so a type can implement only the
-        // comparisons it supports. `Ord` is a convenience supertrait that
-        // implies all four (see below).
-        for (name, method) in [("Lt", "lt"), ("Le", "le"), ("Gt", "gt"), ("Ge", "ge")] {
-            self.typeclasses.insert(
-                name.into(),
-                TypeClassDef {
-                    name: name.into(),
-                    defined_module: PRELUDE_OPS_MODULE.into(),
-                    type_params: vec!["T".into()],
-                    param_kinds: vec![Kind::Type],
-                    superclasses: vec![],
-                    assoc_types: vec![],
-                    methods: vec![TypeClassMethodDef {
-                        name: method.into(),
-                        has_default: false,
-                        is_static: false,
-                    }],
-                },
-            );
-        }
-
-        // Convenience bundle: `T: Ord` implies Lt + Le + Gt + Ge and Eq via
-        // the flattened superclass dictionary layout. Ord itself has no
-        // methods. With Eq a superclass, `==` in a `T: Ord` body uses `T`'s
-        // `Eq` from the `Ord` dictionary, in a shared body as in a mono
-        // clone (#1716), and an `Ord` instance needs an `Eq` one.
-        self.typeclasses.insert(
-            "Ord".into(),
-            TypeClassDef {
-                name: "Ord".into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec!["Lt".into(), "Le".into(), "Gt".into(), "Ge".into(), "Eq".into()],
-                assoc_types: vec![],
-                methods: vec![],
-            },
-        );
-
-        self.typeclasses.insert(
-            "Eq".into(),
-            TypeClassDef {
-                name: "Eq".into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![
-                    TypeClassMethodDef {
-                        name: "eq".into(),
-                        has_default: false,
-                        is_static: false,
-                    },
-                    TypeClassMethodDef {
-                        name: "ne".into(),
-                        has_default: false,
-                        is_static: false,
-                    },
-                ],
-            },
-        );
-
-        self.typeclasses.insert(
-            "Show".into(),
-            TypeClassDef {
-                name: "Show".into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![TypeClassMethodDef {
-                    name: "show".into(),
-                    has_default: false,
-                    is_static: false,
-                }],
-            },
-        );
-
-        // `x.len()` resolves through this trait for custom types; arrays,
-        // tuples, and dicts keep a structural fast path in the checker.
-        self.typeclasses.insert(
-            "Length".into(),
-            TypeClassDef {
-                name: "Length".into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![TypeClassMethodDef {
-                    name: "len".into(),
-                    has_default: false,
-                    is_static: false,
-                }],
-            },
-        );
-
-        // (#[derive] targets; see compiler/src/attrs.rs)
-        self.typeclasses.insert(
-            "Default".into(),
-            TypeClassDef {
-                name: "Default".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                // `static fn default() -> T`: called as `T::default()`.
-                methods: vec![TypeClassMethodDef {
-                    name: "default".into(),
-                    has_default: false,
-                    is_static: true,
-                }],
-            },
-        );
-        self.typeclasses.insert(
-            "Hash".into(),
-            TypeClassDef {
-                name: "Hash".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![TypeClassMethodDef {
-                    name: "hash".into(),
-                    has_default: false,
-                    is_static: false,
-                }],
-            },
-        );
-        self.typeclasses.insert(
-            "Send".into(),
-            TypeClassDef {
-                name: "Send".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![],
-            },
-        );
-        self.typeclasses.insert(
-            "Sensitive".into(),
-            TypeClassDef {
-                name: "Sensitive".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![],
-            },
-        );
-
-        // Multi-param conversion trait (auto-imported via prelude::ops).
-        // `impl Into<T> for Self` → instance args [Self, T]; method
-        // `into` has type `Self → T`. No builtin instances — users write
-        // the impls they need. Prefer `x.into()` with an expected type
-        // (`let y: T = x.into();`) over a reverse `From` encoding.
-        self.typeclasses.insert(
-            "Into".into(),
-            TypeClassDef {
-                name: "Into".into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                type_params: vec!["Self".into(), "T".into()],
-                param_kinds: vec![Kind::Type, Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![TypeClassMethodDef {
-                    name: "into".into(),
-                    has_default: false,
-                    is_static: false,
-                }],
-            },
-        );
-
-        self.typeclasses.insert(
-            "Read".into(),
-            TypeClassDef {
-                name: "Read".into(),
-                defined_module: "io".into(),
-                type_params: vec!["S".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![TypeClassMethodDef {
-                    name: "read".into(),
-                    has_default: false,
-                    is_static: false,
-                }],
-            },
-        );
-        self.typeclasses.insert(
-            "Write".into(),
-            TypeClassDef {
-                name: "Write".into(),
-                defined_module: "io".into(),
-                type_params: vec!["S".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![],
-                methods: vec![TypeClassMethodDef {
-                    name: "write".into(),
-                    has_default: false,
-                    is_static: false,
-                }],
-            },
-        );
-
-        // Helper: build method_fqns map for an instance.
-        let make_fqns = |class: &str, ty_str: &str, methods: &[&str]| -> HashMap<String, String> {
-            methods
-                .iter()
-                .map(|m| (m.to_string(), Self::builtin_instance_fqn(class, ty_str, m)))
-                .collect()
-        };
-
-        for ty in [int(), float()] {
-            let ty_str = match &ty {
-                Ty::Con(n) if n == INT => "int",
-                _ => "float",
-            };
-            for (class, method) in [
-                ("Add", "add"),
-                ("Sub", "sub"),
-                ("Mul", "mul"),
-                ("Div", "div"),
-                ("Neg", "neg"),
-                ("Rem", "rem"),
-                ("Pow", "pow"),
-                ("Lt", "lt"),
-                ("Le", "le"),
-                ("Gt", "gt"),
-                ("Ge", "ge"),
-            ] {
-                self.instances.push(InstanceDef {
-                    class: class.into(),
-                    defined_module: PRELUDE_OPS_MODULE.into(),
-                    range: 0..0,
-                    args: vec![ty.clone()],
-                    method_fqns: make_fqns(class, ty_str, &[method]),
-                    assoc_tys: HashMap::new(),
-                    context: Vec::new(),
-                });
-            }
-            // Num / Ord instances: no own methods; dict emission pulls
-            // superclass slots via the flattened layout.
-            for class in ["Num", "Ord"] {
-                self.instances.push(InstanceDef {
-                    class: class.into(),
-                    defined_module: PRELUDE_OPS_MODULE.into(),
-                    range: 0..0,
-                    args: vec![ty.clone()],
-                    method_fqns: HashMap::new(),
-                    assoc_tys: HashMap::new(),
-                    context: Vec::new(),
-                });
+        // Each scalar's instances; Num / Ord / Integral have no own methods
+        // (dict emission pulls superclass slots via the flattened layout).
+        for scalar in &BUILTIN_SCALARS {
+            for class in scalar.traits {
+                self.push_builtin_instance(class, Ty::Con(scalar.name.into()), scalar.name);
             }
         }
-
-        // Bitwise traits: `int` has all of them (and so `Integral`); `byte`
-        // has the binary ones (`~` on a byte is not defined).
-        for (ty, ty_str, unary) in [(int(), "int", true), (byte(), "byte", false)] {
-            for (class, method) in [
-                ("Shl", "shl"),
-                ("Shr", "shr"),
-                ("BitAnd", "bitand"),
-                ("BitOr", "bitor"),
-                ("BitXor", "bitxor"),
-                ("BitNot", "bitnot"),
-            ] {
-                if class == "BitNot" && !unary {
-                    continue;
-                }
-                self.instances.push(InstanceDef {
-                    class: class.into(),
-                    defined_module: PRELUDE_OPS_MODULE.into(),
-                    range: 0..0,
-                    args: vec![ty.clone()],
-                    method_fqns: make_fqns(class, ty_str, &[method]),
-                    assoc_tys: HashMap::new(),
-                    context: Vec::new(),
-                });
-            }
-        }
-        self.instances.push(InstanceDef {
-            class: "Integral".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![int()],
-            method_fqns: HashMap::new(),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-
-        self.instances.push(InstanceDef {
-            class: "Eq".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![int()],
-            method_fqns: make_fqns("Eq", "int", &["eq", "ne"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        self.instances.push(InstanceDef {
-            class: "Show".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![int()],
-            method_fqns: make_fqns("Show", "int", &["show"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        self.instances.push(InstanceDef {
-            class: "Eq".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![float()],
-            method_fqns: make_fqns("Eq", "float", &["eq", "ne"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        self.instances.push(InstanceDef {
-            class: "Show".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![float()],
-            method_fqns: make_fqns("Show", "float", &["show"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-
-        self.instances.push(InstanceDef {
-            class: "Eq".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![string()],
-            method_fqns: make_fqns("Eq", "string", &["eq", "ne"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        self.instances.push(InstanceDef {
-            class: "Show".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![string()],
-            method_fqns: make_fqns("Show", "string", &["show"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        // Strings order by their UTF-8 bytes (coil-stdlib#48).
-        for (class, method) in [("Lt", "lt"), ("Le", "le"), ("Gt", "gt"), ("Ge", "ge")] {
-            self.instances.push(InstanceDef {
-                class: class.into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                range: 0..0,
-                args: vec![string()],
-                method_fqns: make_fqns(class, "string", &[method]),
-                assoc_tys: HashMap::new(),
-                context: Vec::new(),
-            });
-        }
-        self.instances.push(InstanceDef {
-            class: "Ord".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![string()],
-            method_fqns: HashMap::new(),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        self.instances.push(InstanceDef {
-            class: "Length".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![string()],
-            method_fqns: make_fqns("Length", "string", &["len"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-
-        self.instances.push(InstanceDef {
-            class: "Eq".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![boolean()],
-            method_fqns: make_fqns("Eq", "bool", &["eq", "ne"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        self.instances.push(InstanceDef {
-            class: "Show".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![boolean()],
-            method_fqns: make_fqns("Show", "bool", &["show"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-
-        // `()` equals `()` (#1450).
-        self.instances.push(InstanceDef {
-            class: "Eq".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![unit()],
-            method_fqns: make_fqns("Eq", "unit", &["eq", "ne"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        self.instances.push(InstanceDef {
-            class: "Show".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![unit()],
-            method_fqns: make_fqns("Show", "unit", &["show"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-
         // The builtin error enums render as their variant name (`NotFound`).
         for name in Self::BUILTIN_SHOW_ENUMS.iter().map(|(name, _)| *name) {
-            self.instances.push(InstanceDef {
-                class: "Show".into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                range: 0..0,
-                args: vec![Ty::Con(name.into())],
-                method_fqns: make_fqns("Show", name, &["show"]),
-                assoc_tys: HashMap::new(),
-                context: Vec::new(),
-            });
+            self.push_builtin_instance("Show", Ty::Con(name.into()), name);
+        }
+        // `Into` follows the primitive casts (`int` ↔ `float`, …).
+        for scalar in &BUILTIN_SCALARS {
+            for to in scalar.casts_to {
+                let to_ty = BuiltinScalar::named(to).map(|s| Ty::Con(s.name.into())).expect("a scalar");
+                self.push_instance(InstanceDef {
+                    class: "Into".into(),
+                    defined_module: PRELUDE_OPS_MODULE.into(),
+                    range: 0..0,
+                    args: vec![Ty::Con(scalar.name.into()), to_ty],
+                    method_fqns: HashMap::from([("into".to_string(), format!("Into__{}__to_{}__into", scalar.name, to))]),
+                    assoc_tys: HashMap::new(),
+                    context: Vec::new(),
+                });
+            }
+        }
+        for class in ["Read", "Write"] {
+            self.push_builtin_instance(class, Ty::Con(STREAM.into()), STREAM);
         }
 
-        for (ty, ty_str) in [
-            (int(), "int"),
-            (float(), "float"),
-            (string(), "string"),
-            (boolean(), "bool"),
-            (unit(), "unit"),
-            (super::ty::byte(), "byte"),
-        ] {
-            self.instances.push(InstanceDef {
-                class: "Hash".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                range: 0..0,
-                args: vec![ty],
-                method_fqns: make_fqns("Hash", ty_str, &["hash"]),
-                assoc_tys: HashMap::new(),
-                context: Vec::new(),
-            });
-        }
-
-        // `Default` for the primitives (`0`, `0.0`, `false`, `""`), so a
-        // derived `Default for Box<T: Default>` applies to `Box<int>` (#552).
-        for (ty, ty_str) in [
-            (int(), "int"),
-            (float(), "float"),
-            (string(), "string"),
-            (boolean(), "bool"),
-            (super::ty::byte(), "byte"),
-        ] {
-            self.instances.push(InstanceDef {
-                class: "Default".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                range: 0..0,
-                args: vec![ty],
-                method_fqns: make_fqns("Default", ty_str, &["default"]),
-                assoc_tys: HashMap::new(),
-                context: Vec::new(),
-            });
-        }
-
-        self.instances.push(InstanceDef {
-            class: "Eq".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![super::ty::byte()],
-            method_fqns: make_fqns("Eq", "byte", &["eq", "ne"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        self.instances.push(InstanceDef {
-            class: "Show".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![super::ty::byte()],
-            method_fqns: make_fqns("Show", "byte", &["show"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        for (class, method) in [("Lt", "lt"), ("Le", "le"), ("Gt", "gt"), ("Ge", "ge")] {
-            self.instances.push(InstanceDef {
-                class: class.into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                range: 0..0,
-                args: vec![super::ty::byte()],
-                method_fqns: make_fqns(class, "byte", &[method]),
-                assoc_tys: HashMap::new(),
-                context: Vec::new(),
-            });
-        }
-        self.instances.push(InstanceDef {
-            class: "Ord".into(),
-            defined_module: PRELUDE_OPS_MODULE.into(),
-            range: 0..0,
-            args: vec![super::ty::byte()],
-            method_fqns: HashMap::new(),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-
-        let into_pairs: [(&str, Ty, &str, Ty); 6] = [
-            ("int", int(), "float", float()),
-            ("float", float(), "int", int()),
-            ("int", int(), "byte", super::ty::byte()),
-            ("byte", super::ty::byte(), "int", int()),
-            ("int", int(), "bool", boolean()),
-            ("bool", boolean(), "int", int()),
-        ];
-        for (from_s, from_ty, to_s, to_ty) in into_pairs {
-            let mut method_fqns = HashMap::new();
-            method_fqns.insert(
-                "into".to_string(),
-                format!("Into__{}__to_{}__into", from_s, to_s),
-            );
-            self.instances.push(InstanceDef {
-                class: "Into".into(),
-                defined_module: PRELUDE_OPS_MODULE.into(),
-                range: 0..0,
-                args: vec![from_ty.clone(), to_ty.clone()],
-                method_fqns,
-                assoc_tys: HashMap::new(),
-                context: Vec::new(),
-            });
-        }
-
-        self.instances.push(InstanceDef {
-            class: "Read".into(),
-            defined_module: "io".into(),
-            range: 0..0,
-            args: vec![super::ty::stream_ty()],
-            method_fqns: make_fqns("Read", "Stream", &["read"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-        self.instances.push(InstanceDef {
-            class: "Write".into(),
-            defined_module: "io".into(),
-            range: 0..0,
-            args: vec![super::ty::stream_ty()],
-            method_fqns: make_fqns("Write", "Stream", &["write"]),
-            assoc_tys: HashMap::new(),
-            context: Vec::new(),
-        });
-
-        // Carrier as first type param (same shape as Collect). Builtin
-        // arrays/tuples/dicts/coroutines are synthesised at for-in sites
-        // without a ground InstanceDef per T; users write ordinary `impl`.
-        self.typeclasses.insert(
-            "Iterator".into(),
-            TypeClassDef {
-                name: "Iterator".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                type_params: vec!["I".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![AssocTypeDecl::new("Item", vec![], vec![])],
-                methods: vec![TypeClassMethodDef {
-                    name: "next".into(),
-                    has_default: false,
-                    is_static: false,
-                }],
-            },
-        );
-        self.typeclasses.insert(
-            "IntoIterator".into(),
-            TypeClassDef {
-                name: "IntoIterator".into(),
-                defined_module: PRELUDE_MODULE.into(),
-                type_params: vec!["T".into()],
-                param_kinds: vec![Kind::Type],
-                superclasses: vec![],
-                assoc_types: vec![
-                    AssocTypeDecl::new("Item", vec![], vec![]),
-                    AssocTypeDecl::new("IntoIter", vec![], vec![]),
-                ],
-                methods: vec![TypeClassMethodDef {
-                    name: "into_iter".into(),
-                    has_default: false,
-                    is_static: false,
-                }],
-            },
-        );
         // Opaque prelude iterator state type (arrays materialise as this
         // conceptually; codegen fast-paths never allocate a real class).
         self.register_nominal_type("ArrayIter", PRELUDE_MODULE);
     }
 
+    /// Register builtin `class`'s instance for `ty` (spelled `ty_str` in
+    /// its methods' names), in the class's module.
+    fn push_builtin_instance(&mut self, class: &str, ty: Ty, ty_str: &str) {
+        let def = &self.typeclasses[class];
+        let method_fqns =
+            def.methods.iter().map(|m| (m.name.clone(), Self::builtin_instance_fqn(class, ty_str, &m.name))).collect();
+        self.push_instance(InstanceDef {
+            class: class.into(),
+            defined_module: def.defined_module.clone(),
+            range: 0..0,
+            args: vec![ty],
+            method_fqns,
+            assoc_tys: HashMap::new(),
+            context: Vec::new(),
+        });
+    }
+
     /// Register the structural instance of `class` for the ground tuple,
     /// record, array, `Option` or `Result` `ty` (#1451, #1479): `Show` as `%v` shows it, `Eq`
     /// as `==` compares it, `Hash` combining its items', and a tuple's
-    /// `Lt` / `Le` / `Gt` / `Ge` / `Ord` ordering it lexicographically (#1721). The checker adds
+    /// `Lt` / `Le` / `Gt` / `Ge` / `Ord` ordering it lexicographically (#1721), and a
+    /// homogeneous aggregate's `Add` .. `Pow`, `Neg` and `Num` as its
+    /// element-wise operators compute them (#2513). The checker adds
     /// one the first time a goal asks for it
     /// (`Checker::ensure_structural_instance`); codegen emits its thunks
     /// ([`Self::structural_instances`]).
@@ -1168,10 +958,20 @@ impl Generics {
             "Gt" => &["gt"],
             "Ge" => &["ge"],
             "Ord" => &[],
+            // An aggregate's element-wise arithmetic (#2513); `Num` has no
+            // methods.
+            "Add" => &["add"],
+            "Sub" => &["sub"],
+            "Mul" => &["mul"],
+            "Div" => &["div"],
+            "Rem" => &["rem"],
+            "Pow" => &["pow"],
+            "Neg" => &["neg"],
+            "Num" => &[],
             _ => return,
         };
         let ty_str = ty.to_string();
-        self.instances.push(InstanceDef {
+        self.push_instance(InstanceDef {
             class: class.into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
             range: 0..0,
@@ -1182,6 +982,19 @@ impl Generics {
         });
     }
 
+    /// Add the ground structural instances [`Self::register_structural_instance`]
+    /// registered in `other` that this one lacks. They are program-wide, as
+    /// the prelude's: a later module's goal (`Eq<Option<int>>`) registers
+    /// one that a clone compiled in an earlier module's context needs (#2354).
+    pub fn adopt_structural_instances(&mut self, other: &Generics) {
+        for inst in &other.instances {
+            if Self::is_structural_ground(inst) && self.find_instance(&inst.class, &inst.args).is_none()
+            {
+                self.push_instance(inst.clone());
+            }
+        }
+    }
+
     /// The method of `class`'s structural instance for tuples of `arity`
     /// with open items (#1479): `Show__(_, _)__show`.
     pub fn structural_tuple_fqn(class: &str, arity: usize, method: &str) -> String {
@@ -1190,43 +1003,77 @@ impl Generics {
         Self::builtin_instance_fqn(class, &shape, method)
     }
 
-    /// Register `class`'s structural instance for every tuple of `arity`
-    /// (#1479): head `(a, b, ..)` over the fresh variables `vars`, context
-    /// `class<a>`, `class<b>`, .. (one dictionary per item), so a tuple with
-    /// a type-parameter item meets the class inside a generic body. Its
-    /// thunk reads each item's dictionary from its own. A no-op when one is
-    /// registered.
-    pub fn register_structural_tuple(&mut self, class: &str, vars: Vec<TyVarId>) {
-        let fqn = Self::structural_tuple_fqn(class, vars.len(), "show");
-        if class != "Show" || self.instances.iter().any(|inst| inst.method_fqns.values().any(|f| *f == fqn)) {
+    /// The method of `class`'s structural instance for the open shape
+    /// `head` ([`Self::register_structural_open`]), its variables spelled
+    /// `_`: `Show__(_, _)__show`, `Eq__Option<_>__eq`, `Show__[_]__show`.
+    pub fn structural_open_fqn(class: &str, head: &Ty, method: &str) -> String {
+        match head {
+            Ty::Tuple(items) => Self::structural_tuple_fqn(class, items.len(), method),
+            _ => Self::builtin_instance_fqn(class, &head.subst_vars(&|_| Some(Ty::Con("_".into()))).to_string(), method),
+        }
+    }
+
+    /// The structural instances with open items: `Show` of a tuple,
+    /// record, `Option`, `Result`, `Vec` or array, `Eq` of those, `Hash` of
+    /// a tuple, record or array, a tuple's `Lt` .. `Ge` / `Ord` (#1479,
+    /// #2554, #2631). Head `head` is the shape over fresh variables
+    /// (`(a, b)`, `{ x: a, y: b }` in name order, `Option<a>`, `[a]`,
+    /// which a fixed array matches), context `context<a>`, .. (one
+    /// dictionary per variable, in the head's order; `context` is `class`,
+    /// or `Ord` for an order, whose items compare with `<` and `<=`), so
+    /// a goal on the shape at a type parameter (`Show<Option<T>>`) meets
+    /// the class inside a generic body with the frame's `Show<T>`. Its
+    /// thunks read each variable's dictionary from their own. A no-op when
+    /// one is registered.
+    pub fn register_structural_open(&mut self, class: &str, head: Ty, context: &str) {
+        let methods: &[&str] = match class {
+            "Show" => &["show"],
+            "Eq" => &["eq", "ne"],
+            "Hash" => &["hash"],
+            "Lt" => &["lt"],
+            "Le" => &["le"],
+            "Gt" => &["gt"],
+            "Ge" => &["ge"],
+            "Ord" => &[],
+            _ => return,
+        };
+        if self.has_structural_open(class, &head) {
             return;
         }
-        let items: Vec<Ty> = vars.iter().map(|v| Ty::Var(*v)).collect();
-        let context = items
+        let mut vars = Vec::new();
+        head.collect_vars(&mut vars);
+        let context = vars
             .iter()
-            .map(|item| Constraint {
-                class: class.into(),
-                args: vec![item.clone()],
+            .map(|&v| Constraint {
+                class: context.into(),
+                args: vec![Ty::Var(v)],
             })
             .collect();
-        self.instances.push(InstanceDef {
+        let method_fqns = methods.iter().map(|m| (m.to_string(), Self::structural_open_fqn(class, &head, m))).collect();
+        self.push_instance(InstanceDef {
             class: class.into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
             range: 0..0,
-            args: vec![Ty::Tuple(items)],
-            method_fqns: HashMap::from([("show".to_string(), fqn)]),
+            args: vec![head],
+            method_fqns,
             assoc_tys: HashMap::new(),
             context,
         });
     }
 
-    /// Whether `inst` is a structural instance for tuples with open items
-    /// ([`Self::register_structural_tuple`]).
-    pub fn is_structural_tuple(inst: &InstanceDef) -> bool {
+    /// Whether `inst` is a structural instance for a shape with open items
+    /// ([`Self::register_structural_open`]).
+    pub fn is_structural_open(inst: &InstanceDef) -> bool {
+        inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE && !inst.context.is_empty() && inst.args.len() == 1
+    }
+
+    /// Whether `inst` is a ground structural instance
+    /// ([`Self::register_structural_instance`] at a type with no variable).
+    pub fn is_structural_ground(inst: &InstanceDef) -> bool {
         inst.range == (0..0)
             && inst.defined_module == PRELUDE_OPS_MODULE
-            && !inst.context.is_empty()
-            && matches!(inst.args.as_slice(), [Ty::Tuple(_)])
+            && inst.context.is_empty()
+            && inst.args.iter().all(|a| super::ty::ftv_ty(a).is_empty())
     }
 
     /// Whether `inst` is a structural instance for a shape with open
@@ -1240,13 +1087,30 @@ impl Generics {
             && inst.args.iter().any(|a| !super::ty::ftv_ty(a).is_empty())
     }
 
-    /// `(class, arity, method fqn)` of each instance
-    /// [`Self::register_structural_tuple`] registered.
-    pub fn structural_tuples(&self) -> impl Iterator<Item = (&str, usize, &str)> {
-        self.instances.iter().filter(|inst| Self::is_structural_tuple(inst)).filter_map(|inst| match inst.args.as_slice() {
-            [Ty::Tuple(items)] => Some((inst.class.as_str(), items.len(), inst.method_fqns.get("show")?.as_str())),
-            _ => None,
+    /// `(class, head, method, method fqn)` of each method of each instance
+    /// [`Self::register_structural_open`] registered, an instance's methods
+    /// by name: codegen reserves their entries in this order (#2675).
+    pub fn structural_opens(&self) -> impl Iterator<Item = (&str, &Ty, &str, &str)> {
+        self.instances.iter().filter(|inst| Self::is_structural_open(inst)).flat_map(|inst| {
+            let mut methods: Vec<(&String, &String)> = inst.method_fqns.iter().collect();
+            methods.sort();
+            methods.into_iter().map(move |(m, f)| (inst.class.as_str(), &inst.args[0], m.as_str(), f.as_str()))
         })
+    }
+
+    /// Whether `class` has the structural instance for the shape of `head`
+    /// ([`Self::register_structural_open`]; its variables or holes match
+    /// any).
+    pub fn has_structural_open(&self, class: &str, head: &Ty) -> bool {
+        let key = Self::structural_open_fqn(class, head, "");
+        self.class_instances(class)
+            .any(|(_, inst)| Self::is_structural_open(inst) && Self::structural_open_fqn(class, &inst.args[0], "") == key)
+    }
+
+    /// Whether `fqn` is a method of an instance
+    /// [`Self::register_structural_open`] registered.
+    pub fn is_structural_open_fqn(&self, fqn: &str) -> bool {
+        self.instances_of_method(fqn).any(Self::is_structural_open)
     }
 
     /// The `(class, type)` of each instance
@@ -1257,8 +1121,9 @@ impl Generics {
             .filter(|inst| inst.range == (0..0) && inst.defined_module == PRELUDE_OPS_MODULE && inst.context.is_empty())
             .filter_map(|inst| match inst.args.as_slice() {
                 [ty @ (Ty::Tuple(_) | Ty::Record { .. } | Ty::Array { .. })] => Some((inst.class.as_str(), ty)),
-                // `Length` of a `Vec` (#1536), its `Eq` (#1629) and `Show` (#1848).
-                [ty] if matches!(inst.class.as_str(), "Length" | "Eq" | "Show") && super::ty::vec_element_ty(ty).is_some() => Some((inst.class.as_str(), ty)),
+                // `Length` of a `Vec` (#1536), its `Eq` (#1629), `Show` (#1848)
+                // and `Neg` (#2564).
+                [ty] if matches!(inst.class.as_str(), "Length" | "Eq" | "Show" | "Neg") && super::ty::vec_element_ty(ty).is_some() => Some((inst.class.as_str(), ty)),
                 [ty @ Ty::App(head, _)]
                     if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_OPTION_ENUM || n == common::BUILTIN_RESULT_ENUM) =>
                 {
@@ -1278,32 +1143,19 @@ impl Generics {
     /// head unifies with `args`: the fallback after an exact
     /// [`Self::find_instance`] miss. Concrete instances are never returned.
     pub fn find_generic_instance(&self, class: &str, args: &[Ty]) -> Option<&InstanceDef> {
-        self.instances.iter().find(|inst| {
-            inst.args.iter().any(ty_has_var) && Self::instances_unify(class, args, inst)
+        let args = &*Self::matrix_data_args(class, args);
+        self.instance_candidates(class, args.first()).map(|(_, inst)| inst).find(|inst| {
+            inst.args.iter().any(Ty::has_var) && Self::instances_unify(class, args, inst)
         })
     }
 }
 
-fn ty_has_var(ty: &Ty) -> bool {
-    match ty {
-        Ty::Var(_) => true,
-        Ty::Fun(a, b) => ty_has_var(a) || ty_has_var(b),
-        Ty::App(h, args) => ty_has_var(h) || args.iter().any(ty_has_var),
-        Ty::Tuple(items) => items.iter().any(ty_has_var),
-        Ty::Readonly(inner) => ty_has_var(inner),
-        Ty::Array { element, .. } => ty_has_var(element),
-        Ty::Constructor { owner, .. } => ty_has_var(owner),
-        // A record shape's (`Length<{ x: a }>`, #1542).
-        Ty::Record { fields } => fields.iter().any(|(_, t)| ty_has_var(t)),
-        _ => false,
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::typechecking::ty::{
-        TyVarId, boolean, byte, float, int, option_app_ty, string, unit,
+        TyVarId, boolean, byte, float, int, option_ty, string, unit,
     };
 
     fn method(name: &str, has_default: bool) -> TypeClassMethodDef {
@@ -1373,8 +1225,8 @@ mod tests {
     #[test]
     fn has_overlapping_instance_detects_exact_class_and_args() {
         let mut generics = Generics::new();
-        generics.instances.clear();
-        generics.instances.push(InstanceDef {
+        generics.clear_instances();
+        generics.push_instance(InstanceDef {
             class: "Num".to_string(),
             defined_module: "test".to_string(),
             range: 0..0,
@@ -1392,19 +1244,19 @@ mod tests {
     #[test]
     fn has_overlapping_instance_detects_unifying_args() {
         let mut generics = Generics::new();
-        generics.instances.clear();
-        generics.instances.push(InstanceDef {
+        generics.clear_instances();
+        generics.push_instance(InstanceDef {
             class: "Collect".to_string(),
             defined_module: "test".to_string(),
             range: 0..0,
-            args: vec![option_app_ty(int())],
+            args: vec![option_ty(int())],
             method_fqns: HashMap::new(),
             assoc_tys: HashMap::new(),
             context: Vec::new(),
         });
 
         assert!(
-            generics.has_overlapping_instance("Collect", &[option_app_ty(Ty::Var(TyVarId(999)))])
+            generics.has_overlapping_instance("Collect", &[option_ty(Ty::Var(TyVarId(999)))])
         );
     }
 
@@ -1486,9 +1338,31 @@ mod tests {
     }
 
     #[test]
+    fn builtin_scalar_instances_follow_the_tables() {
+        use crate::typechecking::ty::BUILTIN_SCALARS;
+        let g = Generics::new();
+        for scalar in &BUILTIN_SCALARS {
+            let ty = [Ty::Con(scalar.name.into())];
+            for class in scalar.traits {
+                let inst = g.find_instance(class, &ty).unwrap_or_else(|| panic!("{class} for {}", scalar.name));
+                assert_eq!(inst.method_fqns.len(), g.typeclass(class).unwrap().methods.len());
+            }
+            for to in scalar.casts_to {
+                assert!(g.find_instance("Into", &[ty[0].clone(), Ty::Con((*to).into())]).is_some());
+            }
+        }
+        assert_eq!(
+            g.find_instance("Eq", &[int()]).unwrap().method_fqns["ne"],
+            "Eq__int__ne",
+        );
+        assert!(g.find_instance("BitNot", &[byte()]).is_none());
+        assert!(is_prelude_trait("Iterator") && !is_prelude_trait("Into") && !is_prelude_trait("Read"));
+    }
+
+    #[test]
     fn find_instance_matches_multi_arg_class() {
         let mut generics = Generics::new();
-        generics.instances.push(InstanceDef {
+        generics.push_instance(InstanceDef {
             class: "Convert".to_string(),
             defined_module: "test".to_string(),
             range: 0..0,
@@ -1508,5 +1382,94 @@ mod tests {
                 .is_none()
         );
         assert!(generics.find_instance("Convert", &[int()]).is_none());
+    }
+
+    fn show_instance(arg: Ty, fqn: &str) -> InstanceDef {
+        InstanceDef {
+            class: "Show".to_string(),
+            defined_module: "test".to_string(),
+            range: 0..0,
+            args: vec![arg],
+            method_fqns: HashMap::from([("show".to_string(), fqn.to_string())]),
+            assoc_tys: HashMap::new(),
+            context: Vec::new(),
+        }
+    }
+
+    /// The instance index hands a lookup the instances under its goal's
+    /// head and the open-headed ones, in declaration order, and follows
+    /// an instance changed in place.
+    #[test]
+    fn instance_index_follows_heads_and_updates() {
+        let mut generics = Generics::new();
+        generics.clear_instances();
+        let a = generics.push_instance(show_instance(Ty::Con("A".into()), "Show__A__show"));
+        let open = generics.push_instance(show_instance(Ty::Var(TyVarId(7)), "Show__T__show"));
+        let opt = generics.push_instance(show_instance(option_ty(int()), "Show__Option<int>__show"));
+        let b = generics.push_instance(show_instance(Ty::Con("B".into()), "Show__B__show"));
+        let positions = |g: &Generics, ty: Option<&Ty>| g.instance_candidates("Show", ty).map(|(i, _)| i).collect::<Vec<_>>();
+
+        assert_eq!(positions(&generics, Some(&Ty::Con("A".into()))), vec![a, open]);
+        assert_eq!(positions(&generics, Some(&Ty::Readonly(Box::new(Ty::Con("B".into()))))), vec![open, b]);
+        assert_eq!(positions(&generics, Some(&option_ty(Ty::Var(TyVarId(9))))), vec![open, opt]);
+        assert_eq!(positions(&generics, Some(&Ty::Var(TyVarId(9)))), vec![a, open, opt, b]);
+        assert_eq!(positions(&generics, None), vec![a, open, opt, b]);
+        assert!(generics.instance_candidates("Eq", Some(&Ty::Con("A".into()))).next().is_none());
+        assert_eq!(generics.find_unifying_instance("Show", &[Ty::Con("B".into())]).map(|i| i.method_fqns["show"].as_str()), Some("Show__T__show"));
+
+        // `A`'s instance becomes `C`'s, with another method name.
+        generics.update_instance(a, |inst| {
+            inst.args = vec![Ty::Con("C".into())];
+            inst.method_fqns = HashMap::from([("show".to_string(), "Show__C__show".to_string())]);
+        });
+        assert_eq!(positions(&generics, Some(&Ty::Con("A".into()))), vec![open]);
+        assert_eq!(positions(&generics, Some(&Ty::Con("C".into()))), vec![a, open]);
+        assert!(generics.instance_of_method("Show__A__show").is_none());
+        assert_eq!(generics.instance_of_method("Show__C__show").map(|i| &i.args), Some(&vec![Ty::Con("C".into())]));
+        assert_eq!(generics.class_instances("Show").map(|(i, _)| i).collect::<Vec<_>>(), vec![a, open, opt, b]);
+
+        // Ground tuples: a ground goal meets only its own key's (a `Sum`
+        // goal item is its name), an open one every tuple of the arity.
+        let tup = |items: Vec<Ty>| Ty::Tuple(items);
+        let named = |n: &str| Ty::Con(n.into());
+        let is = generics.push_instance(show_instance(tup(vec![int(), string()]), "Show__(int, string)__show"));
+        let e = generics.push_instance(show_instance(tup(vec![int(), named("E")]), "Show__(int, E)__show"));
+        let ti = generics.push_instance(show_instance(tup(vec![Ty::Var(TyVarId(8)), int()]), "Show__(T, int)__show"));
+        let sum_e = Ty::Sum { name: "E".into(), variants: Vec::new() };
+        assert_eq!(positions(&generics, Some(&tup(vec![int(), string()]))), vec![open, is, ti]);
+        assert_eq!(positions(&generics, Some(&tup(vec![int(), sum_e]))), vec![open, e, ti]);
+        assert_eq!(positions(&generics, Some(&tup(vec![Ty::Var(TyVarId(9)), string()]))), vec![open, is, e, ti]);
+        assert_eq!(positions(&generics, Some(&tup(vec![int(), int(), int()]))), vec![open]);
+    }
+
+    /// The instances of a trait by the span of their `impl`, in
+    /// declaration order, follow an instance whose span changes in place.
+    #[test]
+    fn class_instances_at_follows_spans() {
+        let mut generics = Generics::new();
+        generics.clear_instances();
+        let at = |range: Range<usize>, arg: &str| InstanceDef {
+            range,
+            ..show_instance(Ty::Con(arg.into()), &format!("Show__{arg}__show"))
+        };
+        let a = generics.push_instance(at(10..20, "A"));
+        let b = generics.push_instance(at(30..40, "B"));
+        let other = generics.push_instance(InstanceDef {
+            defined_module: "other".to_string(),
+            ..at(10..20, "C")
+        });
+        let spans = |g: &Generics, class: &str, range: Range<usize>| {
+            g.class_instances_at(class, &range).map(|(i, _)| i).collect::<Vec<_>>()
+        };
+        assert_eq!(spans(&generics, "Show", 10..20), vec![a, other]);
+        assert_eq!(spans(&generics, "Show", 30..40), vec![b]);
+        assert!(spans(&generics, "Show", 10..21).is_empty());
+        assert!(spans(&generics, "Eq", 10..20).is_empty());
+
+        // A stub (`usize::MAX..usize::MAX`) claimed by its `impl`.
+        let stub = generics.push_instance(at(usize::MAX..usize::MAX, "D"));
+        generics.update_instance(stub, |inst| inst.range = 50..60);
+        assert!(spans(&generics, "Show", usize::MAX..usize::MAX).is_empty());
+        assert_eq!(spans(&generics, "Show", 50..60), vec![stub]);
     }
 }

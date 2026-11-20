@@ -1,0 +1,57 @@
+// Several types' derives in one file, one expansion round, with an
+// attribute macro between them: each type gets each derive's items, a
+// `Show` derive replaces the type's default, and the attribute macro's
+// output lands where it is (#2690).
+use tests::assert;
+use derive_macros::{FieldNames, Tagged, Loud, with_describe};
+
+#[derive(FieldNames, Loud, Tagged)]
+class First {
+    pub a: int,
+}
+
+#[derive(Tagged, FieldNames)]
+class Second {
+    pub b: int,
+    pub c: string,
+}
+
+#[with_describe(prefix = "W")]
+class Middle {
+    pub m: int,
+}
+
+#[derive(Loud)]
+class Third {
+    pub d: bool,
+}
+
+class Plain {
+    pub e: int,
+}
+
+#[derive(FieldNames, Tagged, Loud)]
+class Fourth {
+    pub f: int,
+    pub g: int,
+}
+
+test("each type gets every derive's items") {
+    assert!(First::field_names().len() == 1);
+    assert!(First::tag().label == "tag:First");
+    assert!(Second::field_names()[1] == "c");
+    assert!(Second::tag().label == "tag:Second");
+    assert!(Fourth::field_names()[0] == "f");
+    assert!(Fourth::tag().label == "tag:Fourth");
+}
+
+test("a Show derive replaces only its own type's default") {
+    assert!(new First(1).show() == "LOUD First");
+    assert!(new Third(true).show() == "LOUD Third");
+    assert!(new Fourth(1, 2).show() == "LOUD Fourth");
+    assert!(new Plain(3).show() != "LOUD Plain");
+}
+
+test("an attribute macro between derived types keeps its output") {
+    assert!(new Middle(4).describe() == "W:Middle");
+}

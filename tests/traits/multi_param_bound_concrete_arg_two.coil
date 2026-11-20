@@ -11,18 +11,18 @@ trait Wrap<A, B> {
 
 impl Wrap<string> for int {
     fn wrap(int x, int b) -> string {
-        return "<" + show(x + b) + ">";
+        return "<" + (x + b).show() + ">";
     }
 }
 
 impl Wrap<string> for bool {
     fn wrap(bool x, int b) -> string {
-        return "b" + show(b);
+        return "b" + b.show();
     }
 }
 
 fn wrapped<T>(T s, int b) -> string where Wrap<T, string> {
-    return wrap(s, b);
+    return s.wrap(b);
 }
 
 fn wrapped_method<T>(T s, int b) -> string where Wrap<T, string> {

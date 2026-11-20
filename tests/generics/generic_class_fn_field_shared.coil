@@ -1,0 +1,451 @@
+// A generic class's function field over its type parameter (`f: fn(T) -> T`)
+// is called inside generic bodies (#2485): the class's own methods and
+// generic functions over `Slot<T>`, as `(s.f)(x)` and through a `let`. The
+// field is one closure word in the object, a monomorphic function at a ground
+// instance and a function of the parameter's words in a generic body.
+//
+// The same cases as generic_class_fn_field.coil with no mono clones: every
+// generic function and method here runs its shared body.
+// @flags --clone-budget 0
+use tests::assert;
+use gc::collect;
+
+class Slot<T> {
+    pub f: fn(T) -> T,
+    pub v: T,
+}
+
+impl Slot<T> {
+    pub fn run() -> T {
+        let g = self.f;
+        return g(self.v);
+    }
+
+    pub fn run_in_place() -> T {
+        return (self.f)(self.v);
+    }
+
+    pub fn apply(T x) -> T {
+        return (self.f)(x);
+    }
+
+    pub fn twice(T x) -> T {
+        let g = self.f;
+        return g(g(x));
+    }
+
+    pub fn get() -> fn(T) -> T {
+        return self.f;
+    }
+
+    pub fn set(fn(T) -> T g) {
+        self.f = g;
+    }
+
+    pub fn step() {
+        self.v = (self.f)(self.v);
+    }
+
+    // Closures made in the class's own body.
+    pub fn same() -> fn(T) -> T {
+        return fn (T x) => x;
+    }
+
+    pub fn konst() -> fn() -> T {
+        let v = self.v;
+        return fn () use (v) => v;
+    }
+
+    pub fn doubled() -> fn(T) -> T {
+        let g = self.f;
+        return fn (T x) use (g) => g(g(x));
+    }
+
+    pub fn reset() {
+        self.f = fn (T x) => x;
+    }
+}
+
+// Every position the parameter takes in a field's function.
+class Acts<T> {
+    pub map: fn(T) -> T,
+    pub make: fn() -> T,
+    pub test: fn(T) -> bool,
+    pub fold: fn(T, T) -> T,
+    pub sink: fn(T) -> (),
+    pub fixed: fn(int) -> int,
+    pub seed: T,
+}
+
+impl Acts<T> {
+    pub fn all() -> T {
+        let made = (self.make)();
+        (self.sink)(made);
+        if (self.test)(self.seed) {
+            return (self.fold)((self.map)(self.seed), made);
+        }
+        return self.seed;
+    }
+
+    pub fn fixed_of(int x) -> int {
+        let g = self.fixed;
+        return g(x);
+    }
+}
+
+class Conv<A, B> {
+    pub to: fn(A) -> B,
+    pub back: fn(B) -> A,
+}
+
+impl Conv<A, B> {
+    pub fn round(A x) -> A {
+        return (self.back)((self.to)(x));
+    }
+
+    pub fn there(A x) -> B {
+        let g = self.to;
+        return g(x);
+    }
+}
+
+class Point {
+    pub x: int,
+    pub y: int,
+}
+
+enum Color {
+    Red,
+    Rgb(int, int, int),
+}
+
+// Shared: the closures that count are stored, so a `use (n)` of a
+// copy-on-write object would be E0149 (#2787).
+shared class Count {
+    pub n: int,
+}
+
+fn inc(int x) -> int {
+    return x + 1;
+}
+
+fn half(float x) -> float {
+    return x / 2.0;
+}
+
+fn shout(string s) -> string {
+    return s + "!";
+}
+
+fn not(bool b) -> bool {
+    return !b;
+}
+
+fn flip(Point p) -> Point {
+    return new Point(p.y, p.x);
+}
+
+fn darker(Color c) -> Color {
+    return match c {
+        Color::Red => Color::Rgb(128, 0, 0),
+        Color::Rgb(r, g, b) => Color::Rgb(r / 2, g / 2, b / 2),
+    };
+}
+
+fn red_of(Color c) -> int {
+    return match c {
+        Color::Red => 255,
+        Color::Rgb(r, _, _) => r,
+    };
+}
+
+fn run_slot<T>(Slot<T> s, T x) -> T {
+    let g = s.f;
+    return g(x);
+}
+
+fn run_in_place<T>(Slot<T> s, T x) -> T {
+    return (s.f)(x);
+}
+
+fn run_own<T>(Slot<T> s) -> T {
+    return (s.f)(s.v);
+}
+
+fn thrice<T>(Slot<T> s, T x) -> T {
+    let g = s.f;
+    let y = g(x);
+    return (s.f)(g(y));
+}
+
+fn run_all<T>(Vec<Slot<T>> ss, T x) -> T {
+    let acc = x;
+    for s in ss {
+        acc = (s.f)(acc);
+    }
+    return acc;
+}
+
+fn there_and_back<A, B>(Conv<A, B> c, A x) -> A {
+    return (c.back)((c.to)(x));
+}
+
+fn reset_slot<T>(Slot<T> s) {
+    s.f = fn (T x) => x;
+}
+
+test("the issue's programs") {
+    let a = new Slot(inc, 1);
+    assert!(a.run() == 2);
+    assert!(run_slot(a, 5) == 6);
+    let g = a.get();
+    assert!(g(1) == 2);
+}
+
+test("the class's methods at scalars, a string, a class and an enum") {
+    let i = new Slot(inc, 1);
+    assert!(i.run() == 2);
+    assert!(i.run_in_place() == 2);
+    assert!(i.apply(40) == 41);
+    assert!(i.twice(40) == 42);
+    let f = new Slot(half, 3.0);
+    assert!(f.run() == 1.5);
+    assert!(f.apply(5.0) == 2.5);
+    assert!(f.twice(8.0) == 2.0);
+    let s = new Slot(shout, "hi");
+    assert!(s.run() == "hi!");
+    assert!(s.twice("yo") == "yo!!");
+    let b = new Slot(not, true);
+    assert!(!b.run());
+    assert!(b.twice(true));
+    let p = new Slot(flip, new Point(1, 2));
+    assert!(p.run().x == 2);
+    assert!(p.apply(new Point(3, 4)).y == 3);
+    let c = new Slot(darker, Color::Rgb(200, 100, 50));
+    assert!(red_of(c.run()) == 100);
+    assert!(red_of(c.apply(Color::Red)) == 128);
+}
+
+test("generic functions over the class") {
+    let i = new Slot(inc, 1);
+    assert!(run_slot(i, 5) == 6);
+    assert!(run_in_place(i, 5) == 6);
+    assert!(run_own(i) == 2);
+    assert!(thrice(i, 0) == 3);
+    let f = new Slot(half, 3.0);
+    assert!(run_slot(f, 5.0) == 2.5);
+    assert!(run_in_place(f, 1.0) == 0.5);
+    assert!(run_own(f) == 1.5);
+    assert!(thrice(f, 8.0) == 1.0);
+    let s = new Slot(shout, "hi");
+    assert!(run_slot(s, "a") == "a!");
+    assert!(run_own(s) == "hi!");
+    assert!(thrice(s, "") == "!!!");
+    let b = new Slot(not, false);
+    assert!(run_in_place(b, false));
+    let p = new Slot(flip, new Point(1, 2));
+    assert!(run_own(p).y == 1);
+    let c = new Slot(darker, Color::Red);
+    assert!(red_of(run_own(c)) == 128);
+}
+
+test("the field's function returned, stored and replaced") {
+    let i = new Slot(inc, 1);
+    let g = i.get();
+    assert!(g(1) == 2);
+    assert!(g(g(1)) == 3);
+    let f = new Slot(half, 3.0);
+    let h = f.get();
+    assert!(h(1.0) == 0.5);
+    let s = new Slot(shout, "hi");
+    let k = s.get();
+    assert!(k("x") == "x!");
+    i.set(fn (int x) => x * 10);
+    assert!(i.run() == 10);
+    assert!(run_slot(i, 4) == 40);
+    i.step();
+    i.step();
+    assert!(i.v == 100);
+    f.set(fn (float x) => x + 0.25);
+    assert!(f.run() == 3.25);
+}
+
+test("closures with captures, kept across a collection") {
+    let scale = 3;
+    let c = new Slot(fn (int x) use (scale) => x * scale, 5);
+    let tag = "<";
+    let t = new Slot(fn (string s) use (tag) => tag + s, "a");
+    collect();
+    assert!(c.run() == 15);
+    assert!(run_slot(c, 2) == 6);
+    assert!(t.run() == "<a");
+    assert!(thrice(t, "") == "<<<");
+    let n = new Count(0);
+    let e = new Slot(fn (int x) use (n) {
+        n.n = n.n + 1;
+        return x;
+    }, 0);
+    assert!(thrice(e, 7) == 7);
+    assert!(n.n == 3);
+}
+
+test("a Vec of the class folded by a generic function") {
+    let ss: Vec<Slot<int>> = [new Slot(inc, 0), new Slot(fn (int x) => x * 2, 0), new Slot(inc, 0)];
+    collect();
+    assert!(run_all(ss, 1) == 5);
+    let ts: Vec<Slot<string>> = [new Slot(shout, ""), new Slot(shout, "")];
+    assert!(run_all(ts, "a") == "a!!");
+    let fs: Vec<Slot<float>> = [new Slot(half, 0.0), new Slot(half, 0.0)];
+    assert!(run_all(fs, 8.0) == 2.0);
+}
+
+test("every position of the parameter in a field's function") {
+    let n = new Count(0);
+    let a = new Acts(
+        inc,
+        fn () => 10,
+        fn (int x) => x > 0,
+        fn (int x, int y) => x + y,
+        fn (int x) use (n) {
+            n.n = n.n + x;
+        },
+        inc,
+        1,
+    );
+    assert!(a.all() == 12);
+    assert!(n.n == 10);
+    assert!(a.fixed_of(4) == 5);
+    let s = new Acts(
+        shout,
+        fn () => "m",
+        fn (string x) => x.len() > 0,
+        fn (string x, string y) => x + y,
+        fn (string x) => (),
+        inc,
+        "s",
+    );
+    assert!(s.all() == "s!m");
+    let f = new Acts(
+        half,
+        fn () => 1.0,
+        fn (float x) => x > 0.0,
+        fn (float x, float y) => x + y,
+        fn (float x) => (),
+        inc,
+        3.0,
+    );
+    assert!(f.all() == 2.5);
+}
+
+test("two parameters") {
+    let c = new Conv(
+        fn (int x) => x > 0,
+        fn (bool b) {
+            if b {
+                return 1;
+            }
+            return 0;
+        },
+    );
+    assert!(c.round(5) == 1);
+    assert!(c.round(0 - 5) == 0);
+    assert!(c.there(3));
+    assert!(there_and_back(c, 9) == 1);
+    let d = new Conv(fn (string s) => s.len(), fn (int n) => "x");
+    assert!(d.round("abc") == "x");
+    assert!(d.there("abcd") == 4);
+    assert!(there_and_back(d, "q") == "x");
+    let e = new Conv(fn (int x) => 1.5, fn (float y) => 2);
+    assert!(e.there(2) == 1.5);
+    assert!(e.round(7) == 2);
+}
+
+test("instances whose argument is itself an enum, a pair or a Vec") {
+    let o = new Slot(
+        fn (Option<int> x) {
+            return match x {
+                Some(n) => Some(n + 1),
+                None => Some(0),
+            };
+        },
+        Some(1),
+    );
+    assert!(o.run() == Some(2));
+    assert!(run_slot(o, None) == Some(0));
+    let n = new Slot(
+        fn (Option<string> x) {
+            return match x {
+                Some(s) => None,
+                None => Some("made"),
+            };
+        },
+        None,
+    );
+    assert!(n.run() == Some("made"));
+    assert!(run_in_place(n, Some("x")) == None);
+    let r = new Slot(
+        fn (Result<int, string> x) {
+            return match x {
+                Ok(k) => Err("was ok"),
+                Err(e) => Ok(e.len()),
+            };
+        },
+        Ok(1),
+    );
+    assert!(r.run() == Err("was ok"));
+    assert!(run_slot(r, Err("abc")) == Ok(3));
+    let t = new Slot(fn ((int, float) p) => (p[0] + 1, p[1] * 2.0), (1, 1.5));
+    let tr = t.run();
+    assert!(tr[0] == 2 && tr[1] == 3.0);
+    let tt = thrice(t, (0, 1.0));
+    assert!(tt[0] == 3 && tt[1] == 8.0);
+    let v = new Slot(fn (Vec<int> xs) {
+        xs.push(xs.len());
+        return xs;
+    }, [7]);
+    assert!(v.run().len() == 2);
+    let w: Vec<int> = [];
+    assert!(thrice(v, w).len() == 3);
+}
+
+test("closures made in the class's methods, called by ground code") {
+    let f = new Slot(half, 3.0);
+    let same = f.same();
+    let k = f.konst();
+    let d = f.doubled();
+    assert!(same(1.5) == 1.5);
+    assert!(k() == 3.0);
+    assert!(d(8.0) == 2.0);
+    let i = new Slot(inc, 3);
+    let same = i.same();
+    let k = i.konst();
+    let d = i.doubled();
+    collect();
+    assert!(same(1) == 1);
+    assert!(k() == 3);
+    assert!(d(8) == 10);
+    let o = new Slot(fn (Option<int> x) => x, Some(2));
+    let same = o.same();
+    let k = o.konst();
+    assert!(same(Some(1)) == Some(1));
+    assert!(k() == Some(2));
+    let s = new Slot(shout, "s");
+    let d = s.doubled();
+    assert!(d("a") == "a!!");
+}
+
+test("a generic body replaces the field's function") {
+    let f = new Slot(half, 3.0);
+    f.reset();
+    assert!(f.run() == 3.0);
+    assert!((f.f)(4.0) == 4.0);
+    assert!(run_slot(f, 5.0) == 5.0);
+    let s = new Slot(shout, "s");
+    reset_slot(s);
+    assert!(s.run() == "s");
+    assert!((s.f)("q") == "q");
+    let t = new Slot(fn ((int, float) p) => (p[0] + 1, p[1]), (1, 1.5));
+    reset_slot(t);
+    let r = t.run();
+    assert!(r[0] == 1 && r[1] == 1.5);
+}

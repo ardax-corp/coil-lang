@@ -1,0 +1,19 @@
+// @expected E0153 — `size(s)` names only a trait method: write `s.size()` or
+// `Area::size(s)`.
+trait Area<T> {
+    fn size(T s) -> int {}
+}
+
+class Sq {
+    pub w: int,
+}
+
+impl Area for Sq {
+    pub fn size(Sq s) -> int {
+        return s.w * s.w;
+    }
+}
+
+fn main() {
+    let n = size(new Sq(2));
+}

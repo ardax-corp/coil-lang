@@ -1,0 +1,215 @@
+// A `Matrix` named in a declared type (a class field, a `static`, an enum
+// payload, a record field, a generic argument) is its data at run time
+// there too (coil-lang#2427), over arrays and over tuples. A class or
+// record field holding a fixed array of heap words (rows, strings) is the
+// array's heap object.
+use tests::assert;
+use string::format;
+
+class Holder {
+    pub m: Matrix<[[int; 2]; 2]>,
+}
+
+class Floats {
+    pub m: Matrix<[[float; 2]; 2]>,
+    pub n: int,
+}
+
+class Rows {
+    pub m: Matrix<((int, int), (int, int))>,
+    pub k: int,
+}
+
+class Mixed {
+    pub some: Option<Matrix<[[int; 2]; 2]>>,
+    pub all: Vec<Matrix<((int, int), (int, int))>>,
+    pub pair: (Matrix<[[int; 2]; 2]>, int),
+}
+
+class Wrap<T> {
+    pub m: Matrix<[[T; 2]; 2]>,
+    pub k: T,
+}
+
+class Box<T> {
+    pub v: T,
+}
+
+class Plain {
+    pub rows: [[int; 2]; 2],
+    pub names: [string; 2],
+}
+
+enum Shape {
+    Grid(Matrix<[[int; 2]; 2]>),
+    Rows(Matrix<((int, int), (int, int))>, int),
+    Named { m: Matrix<[[int; 2]; 2]>, k: int },
+    Empty,
+}
+
+// A heap tuple beside another payload.
+enum Tagged {
+    Pair((int, int), int),
+    Named((string, int), int),
+    Wide((int, int, int), float),
+    None,
+}
+
+fn tagged(Tagged t) -> int {
+    return match t {
+        Tagged::Pair(p, k) => p[0] + p[1] + k,
+        Tagged::Named(p, k) => p[0].len() + p[1] + k,
+        Tagged::Wide(p, f) => p[2] + f as int,
+        Tagged::None => 0,
+    };
+}
+
+static let GRID: Matrix<[[int; 2]; 2]> = matrix([[1, 2], [3, 4]]);
+
+static let ROWS: Matrix<((int, int), (int, int))> = matrix(((1, 2), (3, 4)));
+
+impl Holder {
+    pub static fn unit() -> Holder {
+        return new Holder(matrix([[1, 0], [0, 1]]));
+    }
+
+    pub fn times(Matrix<[[int; 2]; 2]> o) -> Matrix<[[int; 2]; 2]> {
+        return self.m * o;
+    }
+
+    pub fn set(Matrix<[[int; 2]; 2]> o) {
+        self.m = o;
+    }
+}
+
+fn keep(Holder h) -> Holder {
+    return h;
+}
+
+fn keep_rows(Rows r) -> Rows {
+    return r;
+}
+
+fn keep_box<T>(Box<T> b) -> Box<T> {
+    return b;
+}
+
+fn keep_wrap<T>(Wrap<T> w) -> Wrap<T> {
+    return w;
+}
+
+fn corner(Shape s) -> int {
+    return match s {
+        Shape::Grid(m) => m[1][0],
+        Shape::Rows(m, k) => m[1][1] + k,
+        Shape::Named { m, k } => m[0][1] + k,
+        Shape::Empty => 0,
+    };
+}
+
+test("a class field over arrays") {
+    // The object stays in the frame.
+    let h = new Holder(matrix([[1, 2], [3, 4]]));
+    let c = h.m;
+    assert!(c[1][0] == 3 && h.m[0][1] == 2);
+    // It escapes.
+    let e = keep(new Holder(matrix([[1, 2], [3, 4]])));
+    assert!(e.m[1][0] == 3);
+    let p = e.m * e.m;
+    assert!(p[0][0] == 7 && p[1][1] == 22);
+    let f = new Floats(matrix([[1.0, 2.0], [3.0, 4.0]]), 1);
+    f.m = f.m * f.m;
+    f.n = 2;
+    assert!(f.m[0][0] == 7.0 && f.m[1][1] == 22.0 && f.n == 2);
+}
+
+test("a class field over tuples") {
+    let r = keep_rows(new Rows(matrix(((1, 2), (3, 4))), 7));
+    assert!(r.m[1][0] == 3 && r.k == 7);
+    let s = new Rows(matrix(((5, 6), (7, 8))), 8);
+    let row = s.m[1];
+    assert!(row[0] == 7 && row[1] == 8 && s.k == 8);
+    let p = r.m * s.m;
+    assert!(p[0][0] == 19 && p[1][1] == 50);
+}
+
+test("methods take and return the field's type") {
+    let h = Holder::unit();
+    h.set(matrix([[1, 2], [3, 4]]));
+    let p = h.times(h.m);
+    assert!(h.m[1][0] == 3 && p[1][1] == 22);
+}
+
+test("a matrix inside a field's type") {
+    let m = new Mixed(
+        Option::Some(matrix([[1, 2], [3, 4]])),
+        Vec::from([matrix(((5, 6), (7, 8)))]),
+        (matrix([[9, 8], [7, 6]]), 5),
+    );
+    let got = match m.some {
+        Option::Some(g) => g[1][0],
+        Option::None => 0,
+    };
+    assert!(got == 3 && m.all[0][1][1] == 8);
+    let (g, k) = m.pair;
+    assert!(g[0][0] == 9 && k == 5);
+    m.all.push(m.all[0] * m.all[0]);
+    assert!(m.all.len() == 2 && m.all[1][0][0] == 67);
+}
+
+test("a generic class") {
+    let w = keep_wrap(new Wrap(matrix([[1, 2], [3, 4]]), 9));
+    assert!(w.m[1][0] == 3 && w.k == 9);
+    let b = keep_box(new Box(matrix([[1, 2], [3, 4]])));
+    let p = b.v * b.v;
+    assert!(b.v[1][0] == 3 && p[1][1] == 22);
+    let a: Box<Matrix<[[int; 2]; 2]>> = new Box(matrix([[1, 2], [3, 4]]));
+    assert!(a.v[1][1] == 4);
+    let t: Box<Matrix<((int, int), (int, int))>> = new Box(matrix(((1, 2), (3, 4))));
+    assert!(t.v[1][0] == 3);
+    // A class parameter at a tuple of tuples.
+    let n = new Box(((1, 2), (3, 4)));
+    assert!(n.v[1][0] == 3);
+}
+
+test("an enum payload, a static and a record field") {
+    assert!(corner(Shape::Grid(matrix([[1, 2], [3, 4]]))) == 3);
+    assert!(corner(Shape::Rows(matrix(((1, 2), (3, 4))), 10)) == 14);
+    assert!(corner(Shape::Named { m: matrix([[1, 2], [3, 4]]), k: 10 }) == 12);
+    assert!(corner(Shape::Empty) == 0);
+    let p = GRID * GRID;
+    assert!(GRID[1][0] == 3 && p[0][0] == 7);
+    let q = ROWS * ROWS;
+    assert!(ROWS[1][1] == 4 && q[1][1] == 22);
+    let r = { m: matrix([[1, 2], [3, 4]]), k: 3 };
+    let rp = r.m * r.m;
+    assert!(r.m[1][0] == 3 && rp[0][0] == 7 && r.k == 3);
+}
+
+test("a field holding an array of heap words") {
+    let p = new Plain([[1, 2], [3, 4]], ["a", "b"]);
+    assert!(p.rows[1][0] == 3 && p.names[1] == "b");
+    let b = keep_box(new Box([[1, 2], [3, 4]]));
+    assert!(b.v[1][1] == 4);
+    let r = { rows: [[1, 2], [3, 4]], names: ["a", "b"], k: 3 };
+    assert!(r.rows[1][0] == 3 && r.names[0] == "a" && r.k == 3);
+}
+
+test("a tuple payload beside another payload") {
+    assert!(tagged(Tagged::Pair((1, 2), 10)) == 13);
+    assert!(tagged(Tagged::Named(("abc", 2), 10)) == 15);
+    assert!(tagged(Tagged::Wide((1, 2, 3), 4.5)) == 7);
+    assert!(tagged(Tagged::None) == 0);
+    // Kept alive across collections.
+    let all: Vec<Tagged> = Vec::new();
+    let i = 0;
+    while i < 20000 {
+        all.push(Tagged::Named((format("n%v", i), i), 1));
+        i = i + 1;
+    }
+    let sum = 0;
+    for t in all {
+        sum = sum + tagged(t);
+    }
+    assert!(sum == 199990000 + 20000 + 108890);
+}

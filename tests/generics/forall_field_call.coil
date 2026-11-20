@@ -1,0 +1,163 @@
+// A field or `static` of a `forall` type called in place, `(h.g)(x)`,
+// `h.g(x)`, `K::g(x)` and a module `static`'s `G(x)`, is the call a `forall`
+// parameter's is: the shared body with the `forall`'s dictionaries and
+// `kinds` word, its result converted to the call's types
+// (coil-lang#2762). A `forall` static takes its value as a `forall` field
+// does.
+use tests::assert;
+use string::format;
+
+#[derive(Show, Eq)]
+class Pt {
+    pub a: int,
+}
+
+fn keep<T>(T x) -> T {
+    return x;
+}
+
+fn other<T>(T x) -> T {
+    let y = x;
+    return y;
+}
+
+fn wrap<T>(T x) -> Option<T> {
+    return Option::Some(x);
+}
+
+fn twice<T>(T x) -> (T, T) {
+    return (x, x);
+}
+
+fn shown<T: Show>(T x) -> string {
+    return x.show() + "!";
+}
+
+fn second<A, B>(A a, B b) -> B {
+    return b;
+}
+
+class H {
+    pub g: forall T. T -> T,
+    pub w: forall T. T -> Option<T>,
+    pub t: forall T. T -> (T, T),
+    pub s: forall T: Show. T -> string,
+    pub b: forall A, B. A -> B -> B,
+}
+
+impl H {
+    pub fn both<T>(T x) -> T {
+        return self.g(self.g(x));
+    }
+
+    pub fn run() -> string {
+        return (self.g)("r");
+    }
+}
+
+class Outer {
+    pub h: H,
+}
+
+readonly class F {
+    pub g: forall T. T -> T,
+}
+
+class G<U> {
+    pub u: U,
+    pub g: forall T. T -> T,
+}
+
+class K {
+    pub static g: forall T. T -> T = keep,
+    pub static w: forall T. T -> Option<T> = wrap,
+    pub static s: forall T: Show. T -> string = shown,
+}
+
+static let GLOBAL: forall T. T -> T = keep;
+
+fn make() -> H {
+    return new H(keep, wrap, twice, shown, second);
+}
+
+fn through<T>(H h, T x) -> T {
+    return h.g(x);
+}
+
+fn apply(forall T. T -> T f, int x) -> int {
+    return f(x);
+}
+
+fn show<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+test("an instance field of a forall type called in place at every type") {
+    let h = make();
+    assert!((h.g)(2) == 2);
+    assert!((h.g)("s") == "s");
+    assert!(h.g(3) == 3);
+    assert!(h.g(new Pt(1)).a == 1);
+    assert!(show(h.g(Option::Some("o"))) == "Some(o)");
+    assert!(show(h.g((1, 2))) == "(1, 2)");
+    assert!(h.g(1.5) == 1.5);
+    assert!(h.g(true));
+    assert!(show(h.g(())) == "()");
+    assert!(show(h.g(Option::Some(4))) == "Some(4)");
+}
+
+test("a forall field whose result holds its type parameter") {
+    let h = make();
+    assert!(show(h.w("w")) == "Some(w)");
+    assert!(show((h.w)(4)) == "Some(4)");
+    assert!(show(h.w(new Pt(5))) == "Some(Pt { a: 5 })");
+    assert!(show(h.t("t")) == "(t, t)");
+    assert!(show(h.t(6)) == "(6, 6)");
+}
+
+test("a bounded and a two-parameter forall field") {
+    let h = make();
+    assert!(h.s(5) == "5!");
+    assert!((h.s)(new Pt(2)) == "Pt { a: 2 }!");
+    assert!(h.b(1, "b") == "b");
+    assert!(h.b("a", 7) == 7);
+}
+
+test("through self, a nested field, a readonly class and a generic class") {
+    let h = make();
+    assert!(h.both("x") == "x");
+    assert!(h.both(8) == 8);
+    assert!(h.run() == "r");
+    let o = new Outer(h);
+    assert!(o.h.g(7) == 7);
+    assert!((o.h.g)("n") == "n");
+    let f = new F(keep);
+    assert!(f.g(9) == 9);
+    let c = new G(1, keep);
+    assert!(c.g("gc") == "gc");
+}
+
+test("in a generic body, a lambda, and after a store") {
+    let h = make();
+    assert!(through(h, "th") == "th");
+    assert!(through(h, 3) == 3);
+    let k = fn () use (h) => h.g("lam");
+    assert!(k() == "lam");
+    h.g = other;
+    assert!(h.g("o") == "o");
+    assert!(h.g(10) == 10);
+    assert!(apply(h.g, 11) == 11);
+}
+
+test("a class static and a module static of a forall type") {
+    assert!(K::g(8) == 8);
+    assert!(K::g("k") == "k");
+    assert!(show(K::w("kw")) == "Some(kw)");
+    assert!(show(K::w(3)) == "Some(3)");
+    assert!(K::s(new Pt(4)) == "Pt { a: 4 }!");
+    assert!(GLOBAL(12) == 12);
+    assert!(GLOBAL("gl") == "gl");
+    let f: forall T. T -> T = K::g;
+    assert!(f(13) == 13);
+    assert!(apply(K::g, 14) == 14);
+}

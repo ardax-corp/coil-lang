@@ -13,7 +13,7 @@ impl Sink for Null {
 }
 
 pure fn feed(Sink s) {
-    put(s, 1);
+    s.put(1);
 }
 
 fn main() {

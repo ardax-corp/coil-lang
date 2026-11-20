@@ -10,14 +10,23 @@ fn add(int a, int b) -> int {
     return a + b;
 }
 
+fn seven() -> int {
+    return 7;
+}
+
 const TWICE = twice;
+
+const SEVEN = seven;
 
 const ADD = add;
 
 static let HOOK: fn(int) -> int = twice;
 
+static let NOW: fn() -> int = seven;
+
 class Ops {
     pub static triple: fn(int) -> int = fn (int x) => x * 3,
+    pub static zero: fn() -> int = fn () => 0,
 }
 
 // Not a function: tests/functions/compile_fail/call_non_function_module_const.coil

@@ -79,7 +79,9 @@ test("a method knows its class; a static method is marked") {
         Meter::read_info() ==
         "read(int scale) -> int tparams= pub=y static=n gen=n owner=Meter args=scale",
     );
-    assert!(Meter::zero_info() == "zero() -> Meter tparams= pub=y static=y gen=n owner=Meter args=");
+    assert!(
+        Meter::zero_info() == "zero() -> Meter tparams= pub=y static=y gen=n owner=Meter args=",
+    );
     assert!(new Meter(2).read(5) == 10);
     assert!(Meter::zero().n == 0);
 }

@@ -30,7 +30,7 @@ trait Make<T> {
     static fn from_pair(int a, int b) -> T {}
 
     static fn from_one(int a) -> T {
-        return from_pair(a, a);
+        return Make::from_pair(a, a);
     }
 }
 

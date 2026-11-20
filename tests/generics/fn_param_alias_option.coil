@@ -1,0 +1,20 @@
+// A let copy of a generic body's own function parameter whose result is an
+// open `Option` (`let g = f;` with `f: T -> Option<T>`) is the closure word
+// `f` is, so the call through it returns the open enum's object as `f(x)`
+// does (coil-lang#2555).
+use tests::assert;
+
+class C {
+    pub n: int,
+}
+
+fn opt<T>(T -> Option<T> f, T x) -> Option<T> {
+    let g = f;
+    return g(x);
+}
+
+test("an alias whose result is an open Option") {
+    assert!((opt(fn (string s) => Option::Some(s + "?"), "q") ?? "") == "q?");
+    assert!((opt(fn (int x) => Option::None, 1) ?? 7) == 7);
+    assert!((opt(fn (C c) => Option::Some(new C(c.n + 5)), new C(1)) ?? new C(0)).n == 6);
+}

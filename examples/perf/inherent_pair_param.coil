@@ -1,0 +1,34 @@
+// An inherent method's `Option<int>` parameter: two words on the call, no
+// `Option` boxed per call.
+use io::sync::print;
+use string::format;
+
+class H {
+    pub d: int,
+}
+
+impl H {
+    #[inline(never)]
+    pub fn get(Option<int> o) -> int {
+        return match o {
+            Some(v) => v,
+            None => self.d,
+        };
+    }
+}
+
+fn main() {
+    let h = new H(1);
+    let s = 0;
+    let i = 0;
+    while i < 20000000 {
+        let o = if i % 3 == 0 {
+            None
+        } else {
+            Some(i / 2)
+        };
+        s += h.get(o);
+        i += 1;
+    }
+    let _ = print(format("%i", s));
+}

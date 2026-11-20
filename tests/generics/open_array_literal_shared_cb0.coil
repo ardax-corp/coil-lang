@@ -1,0 +1,96 @@
+// The twin of open_array_literal_shared.coil with no mono clones: every
+// generic function runs its shared body, where an array literal of a type
+// parameter's values is an array object, not frame slots (coil-lang#2581).
+// @flags --clone-budget 0
+use tests::assert;
+
+fn takes<T: Show>(Vec<T> v) -> string {
+    return v.show();
+}
+
+fn one<T: Show>(T x) -> string {
+    let v: Vec<T> = [x];
+    return v[0].show();
+}
+
+fn two<T: Show>(T x, T y) -> string {
+    let a: [T; 2] = [x, y];
+    let v = [y, x];
+    return a.show() + v[0].show();
+}
+
+fn tuple<T: Show>(T x) -> string {
+    let a = [(x, 1)];
+    return a[0].show();
+}
+
+fn wrapped<T: Show>(T x) -> string {
+    let a = [Some(x), None];
+    return a.show();
+}
+
+fn nested<T: Show>(T x) -> string {
+    let a = [[x], [x]];
+    return a[1][0].show() + a.len().show();
+}
+
+fn each<T: Show>(T x, T y) -> string {
+    let out = "";
+    for e in [x, y] {
+        out = out + e.show();
+    }
+    return out;
+}
+
+fn passed<T: Show>(T x, T y) -> string {
+    let v: Vec<T> = [x, y];
+    return takes(v) + takes([y]);
+}
+
+fn copied<T: Show>(T x, T y) -> string {
+    let a = [x, y];
+    let b = a;
+    b[0] = y;
+    return a.show() + b.show();
+}
+
+fn arith<T: Num>(T x, T y) -> [T; 2] {
+    let a = [x, y];
+    let b = -a;
+    return a + b + a * x;
+}
+
+class P {
+    pub v: int,
+}
+
+impl Show for P {
+    fn show(P p) -> string {
+        return "P" + p.v.show();
+    }
+}
+
+test("an array literal of a type parameter's values in a shared body") {
+    assert!(one(1) == "1");
+    assert!(one("a") == "a");
+    assert!(one(new P(2)) == "P2");
+    assert!(two(1, 2) == "[1, 2]2");
+    assert!(two(1.5, 2.5) == "[1.5, 2.5]2.5");
+    assert!(two(new P(1), new P(2)) == "[P1, P2]P2");
+    assert!(tuple(3) == "(3, 1)");
+    assert!(tuple("t") == "(t, 1)");
+    assert!(wrapped(4) == "[Some(4), None]");
+    assert!(wrapped("w") == "[Some(w), None]");
+    assert!(nested(5) == "52");
+    assert!(each(1, 2) == "12");
+    assert!(each(true, false) == "truefalse");
+    assert!(passed(1, 2) == "[1, 2][2]");
+    assert!(passed(new P(1), new P(2)) == "[P1, P2][P2]");
+    assert!(copied(1, 2) == "[1, 2][2, 2]");
+    assert!(copied("a", "b") == "[a, b][b, b]");
+}
+
+test("an element-wise operator on an array literal in a shared body") {
+    assert!(arith(3, 2) == [9, 6]);
+    assert!(arith(2.0, 0.5) == [4.0, 1.0]);
+}
