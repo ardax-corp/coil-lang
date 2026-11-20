@@ -1008,6 +1008,52 @@ mod linked {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// On ELF hosts an AOT executable links an `extern` block's shared
+    /// library by name: the loader finds it in the executable's `lib/`, a
+    /// rebuilt copy is trusted at start, a missing one stops the start, and
+    /// a library that does not match its pin fails the package.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn an_aot_executable_links_its_shared_libraries_by_name() {
+        let dir = temp_dir("aot_shared_link");
+        let lib_dir = dir.join("deps");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let c = dir.join("sum.c");
+        std::fs::write(&c, "long long sum_add(long long a, long long b) { return a + b; }\n").unwrap();
+        build_shared_library(&c, &lib_dir, "sum");
+        let src = "use io::sync::println;\nuse string::format;\nextern \"sum\" {\n    fn sum_add(int a, int b) -> int;\n}\nfn main() { let _ = println(format(\"%i\", sum_add(40, 2))); }\n";
+        let exe = dir.join("app");
+        let row = format!("name=sum,version=1.0.0,path={}", lib_dir.display());
+        let zeros = format!("sum={}", "0".repeat(64));
+        let o = package_to(&dir, &exe, src, &["--allow-dload", "sum", "--dload-pin", &zeros, "--ffi-native", &row]);
+        assert!(!o.status.success());
+        assert!(String::from_utf8_lossy(&o.stderr).contains("is pinned to"), "{}", String::from_utf8_lossy(&o.stderr));
+        let o = package_to(&dir, &exe, src, &["--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-native", &row]);
+        assert_linked_native_code(&o);
+        let lib = machine::platform_shared_lib_filename("sum");
+        let run_app = || {
+            let mut run = Command::new(&exe);
+            run.current_dir(std::env::temp_dir());
+            run_command_with_timeout(run, 60)
+        };
+        // The library is not beside it, in its `lib/` or on the system path.
+        let run = run_app();
+        assert_ne!(run.status.code(), Some(0));
+        assert!(run.stdout.is_empty());
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        std::fs::copy(lib_dir.join(&lib), dir.join("lib").join(&lib)).unwrap();
+        let run = run_app();
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+        // Another build of the library: the loader binds it by name, with no
+        // hash check at start.
+        let mut bytes = std::fs::read(dir.join("lib").join(&lib)).unwrap();
+        bytes.push(0);
+        std::fs::write(dir.join("lib").join(&lib), bytes).unwrap();
+        let run = run_app();
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn emit_refuses_what_it_cannot_do() {
         let dir = temp_dir("emit_refuses");

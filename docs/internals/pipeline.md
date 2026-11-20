@@ -107,7 +107,13 @@ hash) and `--dload-trusted STEM` (no hash check); `coil package` / `coil
 natives dump` take `--ffi-native name=…,version=…,path=…` per native
 library. A packaged app looks for each library in the
 natives cache, beside the executable and in `lib/` there; getting it there is
-the user's job.
+the user's job. On ELF hosts an AOT executable links each library an `extern`
+block names by name instead (`package_app::shared_links`: `-L DIR -l:FILE`,
+run path `$ORIGIN:$ORIGIN/lib`), checks its sha256 against the `--dload-pin`
+at that link, and records its functions in `coil_static_syms` as
+`--link-static` does, so the runtime opens no file for it at start and the
+loader's binding is trusted by soname. macOS and Windows keep the start-time
+`dload` gate.
 
 ## Archives (`out.ccoil`)
 

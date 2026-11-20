@@ -80,7 +80,7 @@ fn aot_object(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], 
         .into_iter()
         .filter_map(|(lib, sym)| {
             let stem = machine::dload_request_stem(&lib);
-            link.statics.iter().any(|s| s.stem == stem).then_some((stem, sym))
+            (link.statics.iter().any(|s| s.stem == stem) || link.shared.iter().any(|s| s.stem == stem)).then_some((stem, sym))
         })
         .collect();
     for s in &link.statics {
@@ -208,7 +208,8 @@ fn write_linkable(pipeline: &mut Pipeline, bodies: &[compiler::native_mir::Nativ
     );
     let statics: Vec<String> = link.statics.iter().map(|s| s.path.display().to_string()).collect();
     let runtime = if link.emit == Emit::Lib { Vec::new() } else { vec![rt.display().to_string()] };
-    let line = [vec!["cc".to_string(), output.to_string()], statics, runtime, vec!["-o".to_string(), "app".to_string()], system_libs().iter().map(|l| (*l).to_string()).collect()].concat();
+    let shared = shared_cc_args(&link.shared);
+    let line = [vec!["cc".to_string(), output.to_string()], statics, shared, runtime, vec!["-o".to_string(), "app".to_string()], system_libs().iter().map(|l| (*l).to_string()).collect()].concat();
     eprintln!("link it with: {}", line.join(" "));
 }
 
@@ -227,6 +228,9 @@ pub struct LinkInputs {
     pub emit: Emit,
     /// Static libraries for `extern` blocks (`--link-static`).
     pub statics: Vec<StaticLink>,
+    /// Shared libraries for `extern` blocks, linked by name (`--ffi-native`
+    /// rows an `extern` block's library names; see [`shared_links`]).
+    pub shared: Vec<SharedLink>,
     /// Extra linker arguments, after the libraries (`--link-arg`).
     pub args: Vec<String>,
     /// What the linker strips from the executable (`--strip-symbols`).
@@ -393,6 +397,7 @@ fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, 
             std::process::Command::new(&cc)
                 .arg(&obj)
                 .args(link.statics.iter().map(|s| &s.path))
+                .args(shared_cc_args(&link.shared))
                 .arg(rt)
                 .arg("-o")
                 .arg(&exe)
@@ -518,6 +523,75 @@ pub fn parse_static_link(spec: &str) -> Result<StaticLink, String> {
     let base = name.strip_suffix(".a").or_else(|| name.strip_suffix(".lib")).ok_or_else(|| format!("`{spec}` is not a static library (`libNAME.a` or `NAME.lib`); give its stem as `STEM={spec}`"))?;
     let stem = base.strip_prefix("lib").filter(|s| !s.is_empty()).unwrap_or(base);
     Ok(StaticLink { stem: stem.to_string(), path })
+}
+
+/// A shared library an AOT executable links by name for an `extern` block
+/// (an `--ffi-native` row): the OS loader binds its functions at start
+/// (`DT_NEEDED`), so no `dload`, pin check or `dlsym` runs for it there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SharedLink {
+    /// The library stem `extern "STEM"` names.
+    pub stem: String,
+    /// The library file linked against (`libSTEM.so`).
+    pub path: PathBuf,
+}
+
+/// Whether this host links an `extern` block's shared library at link
+/// time: ELF hosts, where `$ORIGIN` lets the executable find it beside
+/// itself. macOS (an install name the library chose) and Windows keep
+/// opening it at start through the `dload` gate.
+pub const LINKS_SHARED_LIBRARIES: bool = cfg!(all(unix, not(target_os = "macos")));
+
+/// The shared libraries an AOT executable links: each library an `extern`
+/// block names that has an `--ffi-native` row (not a system library, not
+/// `--link-static`). The hash is checked here, at link time: a library
+/// whose sha256 differs from its pin (`--dload-pin`, `coil.lock`) is an
+/// error. At start the loader finds it by name (its soname) beside the
+/// executable, in its `lib/` or on the system's path, and it is trusted.
+pub fn shared_links(lock: &NativeLock, natives: &[FfiNative], externs: &[(String, String)], statics: &[StaticLink], pins: &[(String, String)]) -> Result<Vec<SharedLink>, String> {
+    let mut out: Vec<SharedLink> = Vec::new();
+    if !LINKS_SHARED_LIBRARIES {
+        return Ok(out);
+    }
+    for (lib, _) in externs {
+        let stem = dload_request_stem(lib);
+        if out.iter().any(|s| s.stem == stem) || statics.iter().any(|s| s.stem == stem) || is_system_ffi_stem(&stem) {
+            continue;
+        }
+        let (Some(row), Some(entry)) = (natives.iter().find(|n| n.name == stem), lock.entries.iter().find(|e| e.stem == stem)) else {
+            continue;
+        };
+        if let Some((_, pin)) = pins.iter().find(|(s, _)| *s == stem)
+            && !pin.eq_ignore_ascii_case(&entry.sha256)
+        {
+            return Err(format!(
+                "`{}`: its sha256 is {}, but `{stem}` is pinned to {pin}; the library changed since it was locked",
+                row.path.join(&entry.filename).display(),
+                entry.sha256
+            ));
+        }
+        out.push(SharedLink { stem, path: row.path.join(&entry.filename) });
+    }
+    Ok(out)
+}
+
+/// The `cc` arguments that link `shared` by name: each one's directory and
+/// file (`-L DIR -l:FILE`, so `DT_NEEDED` is its soname, or its file name
+/// when it has none), and a run path to the executable's directory and its
+/// `lib/`.
+#[cfg_attr(target_family = "wasm", allow(dead_code))]
+fn shared_cc_args(shared: &[SharedLink]) -> Vec<String> {
+    let mut args = Vec::new();
+    for s in shared {
+        let dir = s.path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let file = s.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        args.push(format!("-L{}", dir.display()));
+        args.push(format!("-l:{file}"));
+    }
+    if !shared.is_empty() {
+        args.push("-Wl,-rpath,$ORIGIN:$ORIGIN/lib".to_string());
+    }
+    args
 }
 
 /// A native library the packaged app loads (one `--ffi-native` flag).
@@ -760,6 +834,25 @@ pub fn cmd_package(
         Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),
     };
 
+    let mut with_shared;
+    let link = if aot {
+        let shared = match shared_links(&native_lock, natives, &pipeline.extern_symbols(), &link.statics, &pipeline.dload_native_pins()) {
+            Ok(s) => s,
+            Err(msg) => fail_and_exit(pipeline, ErrorCode::IoError, msg),
+        };
+        with_shared = link.clone();
+        with_shared.shared = shared;
+        &with_shared
+    } else {
+        link
+    };
+    if !link.shared.is_empty() {
+        let names: Vec<String> = link.shared.iter().map(|l| l.path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()).collect();
+        eprintln!(
+            "note: linking `{}` by name: the target's loader finds it beside {output}, in its lib/ or on the system's library path",
+            names.join("`, `")
+        );
+    }
     if !link.statics.is_empty() {
         let stems: Vec<&str> = link.statics.iter().map(|l| l.stem.as_str()).collect();
         eprintln!("note: linking `{}` into the executable statically", stems.join("`, `"));
@@ -769,12 +862,12 @@ pub fn cmd_package(
             "note: this program uses FFI; only system libraries were detected. \
              Userland natives need `--ffi-native` and the library on the target."
         );
-    } else if !native_lock.entries.is_empty() {
+    } else if let opened = native_lock.entries.iter().filter(|e| !link.shared.iter().any(|s| s.stem == e.stem)).count()
+        && opened > 0
+    {
         eprintln!(
-            "note: {} native artifact(s) declared; the target needs them in the natives \
-             cache, beside {} or in its lib/",
-            native_lock.entries.len(),
-            output
+            "note: {opened} native artifact(s) declared; the target needs them in the natives \
+             cache, beside {output} or in its lib/"
         );
     }
 

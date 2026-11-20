@@ -782,6 +782,23 @@ archive is the build tool's job (spool); the compiler takes paths only.
   table. Calls go as for a shared library: direct for scalar signatures, libffi
   otherwise.
 - The native lock and `--check-native` skip linked stems.
+- A declare of a symbol the table does not hold (an `ffi::declare` of a library an
+  `extern` block also names) looks it up in the process.
+
+### Shared `extern` libraries
+
+On ELF hosts (`package_app::LINKS_SHARED_LIBRARIES`) an AOT executable links each shared
+library an `extern` block names that has an `--ffi-native` row (not a system library,
+not `--link-static`) at link time:
+`package_app::shared_links` picks them and checks each file's sha256
+(the native lock's) against its `--dload-pin`, failing the package on a mismatch, and
+`cc` gets `-L DIR -l:FILE` (so `DT_NEEDED` is the soname, or the file name when there is
+none) and the run path `$ORIGIN:$ORIGIN/lib`. Their functions go into `coil_static_syms`
+like a static archive's, so at start the loader binds them, the runtime opens no file and
+checks no pin for them (trusted by soname), and the natives cache is not searched. The
+lock keeps their rows, for `coil natives dump` and the tools that ship the files. macOS
+(the install name is the library's choice) and Windows keep opening them at start
+through the `dload` gate, as does a library only `ffi::dload` opens.
 
 ## Where the pieces are
 
@@ -799,5 +816,5 @@ archive is the build tool's job (spool); the compiler takes paths only.
 | Machine stacks | `machine/src/stacks.rs` |
 | Stack maps, frame walk | `coil-native` (`stack_maps`, `define_trampolines`), `machine::native` (`register_stack_maps`, `install_aot_stack_maps`, `for_each_frame_root`) |
 | Inline allocation | `machine/src/memory/inline.rs` (`inline_object`, `layout_fingerprint`), `HeapCounts` |
-| Static `extern` libraries | `--link-static` in `src/cli.rs`, `src/package_app.rs` (`LinkInputs`), `coil-native` `static_symbol_table`, `machine/src/ffi/static_libs.rs` |
+| Static and shared `extern` libraries | `--link-static` in `src/cli.rs`, `src/package_app.rs` (`LinkInputs`, `shared_links`), `coil-native` `static_symbol_table`, `machine/src/ffi/static_libs.rs` |
 | Tests | `tests/native_jit_cli.rs`, `tests/package_cli.rs` (`aot_package_links_extern_libraries_statically`) |
