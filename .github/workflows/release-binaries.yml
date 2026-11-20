@@ -135,7 +135,9 @@ jobs:
         run: |
           cargo build --release -p coil
           cargo build --release -p coil-embed
-          cargo build --release -p coil-rt
+          # Linux: std rebuilt for the runtime (no backtrace symbolizer,
+          # size-optimized std, no unwind tables); plain elsewhere.
+          scripts/build_runtime.sh
           cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
 
       - name: Build release binaries (musl / Alpine)

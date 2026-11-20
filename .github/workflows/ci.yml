@@ -346,7 +346,7 @@ jobs:
       # native cell packages one for the inventory (interpreter symbols).
       - name: Build the native runtime
         if: matrix.mode == 'release'
-        run: cargo build --release -p coil-rt
+        run: scripts/build_runtime.sh
 
       # `coil test` re-execs `coil-test`; the GC-stress cells run this
       # harness directly. Release only: the debug GC-stress cells are off
