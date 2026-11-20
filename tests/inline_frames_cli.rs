@@ -275,6 +275,144 @@ fn main() {
     );
 }
 
+/// Two splices of one method at two calls: the panic names the call that
+/// panicked, not the first one (#2868; the interpreter shared one site per
+/// span and lost the second splice's scope).
+#[test]
+fn a_method_inlined_at_two_calls_names_the_second_call() {
+    same_trace_everywhere(
+        "twocalls",
+        "use io::sync::println;
+
+class Ring {
+    items: Vec<int>,
+}
+
+impl Ring {
+    pub fn strict(int i) -> int {
+        return self.items[i];
+    }
+}
+
+fn main() {
+    let r = new Ring([1, 2]);
+    let _ = println(r.strict(1).show());
+    let _ = println(r.strict(5).show());
+}
+",
+        &["Ring::strict", "main"],
+    );
+}
+
+/// An index out of bounds inside a call's argument reports the index's
+/// own column at every level, as a division does (#2858).
+#[test]
+fn an_index_in_a_call_argument_reports_its_own_column() {
+    let dir = scratch("oobcol");
+    let file = dir.join("oobcol.coil");
+    std::fs::write(&file, "use io::sync::println;\nuse string::format;\n\nfn main() {\n    let v = [1, 2, 3];\n    let k = v.len();\n    let _ = println(format(\"%i\", v[k]));\n}\n").expect("write source");
+    for opt in ["0", "2"] {
+        for mir in [false, true] {
+            let got = run_source(&file, opt, mir);
+            assert!(got.starts_with("panic: index out of bounds at ") && got.lines().next().unwrap().ends_with("oobcol.coil:7:33"), "-O{opt} mir={mir}:\n{got}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A resume of a finished generator inside a call's argument reports the
+/// `resume`'s column at every level (#2858).
+#[test]
+fn a_resume_in_a_call_argument_reports_its_own_column() {
+    let dir = scratch("resumecol");
+    let file = dir.join("resumecol.coil");
+    std::fs::write(&file, "use io::sync::println;\nuse string::format;\n\ngen fn g(int n) -> int {\n    yield n;\n}\n\nfn main() {\n    let h = g(3);\n    let _ = println(format(\"%i\", resume h));\n    let _ = resume h;\n    let _ = println(format(\"%i\", resume h));\n}\n").expect("write source");
+    for opt in ["0", "2"] {
+        for mir in [false, true] {
+            let got = run_source(&file, opt, mir);
+            assert!(got.lines().next().unwrap().ends_with("resumecol.coil:12:33"), "-O{opt} mir={mir}:\n{got}");
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A generic's per-type clone is named by its source item in the trace,
+/// at every level (#2867: `-O0` printed `nth$mono$84$0`).
+#[test]
+fn a_generic_clone_frame_has_its_source_name() {
+    same_trace_everywhere(
+        "clonename",
+        "use io::sync::println;
+
+fn nth<T>(Vec<T> xs, int i) -> T {
+    return xs[i];
+}
+
+fn main() {
+    let _ = println(nth([1, 2], 1).show());
+    let _ = println(nth([1, 2], 5).show());
+}
+",
+        &["nth", "main"],
+    );
+}
+
+/// Another module's generic method at a type that module does not know
+/// runs through a stub that calls the shared body: the trace has one frame
+/// for it, named as written, the trace `--clone-budget 0` prints (#2867).
+#[test]
+fn a_clone_stub_adds_no_frame() {
+    let dir = scratch("stub");
+    std::fs::write(
+        dir.join("s3m_r.coil"),
+        "class Ring<T> {
+    items: Vec<T>,
+}
+
+impl Ring<T> {
+    pub static fn of(Vec<T> xs) -> Ring<T> {
+        return new Ring(xs);
+    }
+
+    pub fn strict(int i) -> T {
+        return self.items[i];
+    }
+}
+",
+    )
+    .expect("write module");
+    let file = dir.join("stub.coil");
+    std::fs::write(
+        &file,
+        "use io::sync::println;
+use s3m_r::Ring;
+
+class Loc {
+    pub k: int,
+}
+
+fn main() {
+    let r = Ring::of([new Loc(1), new Loc(2)]);
+    let _ = println(r.strict(1).k.show());
+    let _ = println(r.strict(5).k.show());
+}
+",
+    )
+    .expect("write main");
+    let run = |extra: &[&str]| {
+        let mut cmd = coil();
+        cmd.args(["--no-build-cache", "--root"]).arg(&dir).args(extra);
+        let out = with_roots(&mut cmd).arg(&file).output().expect("spawn coil");
+        report(&out.stderr).replace(&format!("{}{}", dir.display(), std::path::MAIN_SEPARATOR), "")
+    };
+    let want = run(&["--clone-budget", "0"]);
+    assert_eq!(want.lines().skip(1).map(|l| l.trim_start().split(" at ").next().unwrap_or("")).collect::<Vec<_>>(), ["in s3m_r::Ring::strict", "in main"], "{want}");
+    for extra in [&[][..], &["--mir"], &["-O", "0"]] {
+        assert_eq!(run(extra), want, "{extra:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn an_explicit_panic_in_a_callee_has_its_frame() {
     same_trace_everywhere(
@@ -401,8 +539,8 @@ fn main() {{
     };
     for (name, body, callee) in [
         ("function", "boom(i)", "in helper::boom at helper.coil:2:11"),
-        ("clone", "pick(v, i)", "in helper::pick$inst$int at helper.coil:6:4"),
-        ("method", "c.get(i)", "in helper::Cell::get$inst$int at helper.coil:15:8"),
+        ("clone", "pick(v, i)", "in helper::pick at helper.coil:6:11"),
+        ("method", "c.get(i)", "in helper::Cell::get at helper.coil:15:15"),
     ] {
         let file = dir.join(format!("{name}.coil"));
         std::fs::write(&file, main(body)).expect("write main");

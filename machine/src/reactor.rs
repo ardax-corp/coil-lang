@@ -550,7 +550,10 @@ fn worker_loop(reactor: Arc<Reactor>) {
         };
         if let Some(job) = job {
             if crate::worker::runs_natively(&job) {
-                crate::worker::run_native_job(job);
+                match crate::worker::job_runner() {
+                    Some(run) => run(job),
+                    None => refuse_job(job),
+                }
                 continue;
             }
             refuse_job(job);
@@ -576,7 +579,10 @@ fn run_help_job(reactor: &Reactor, job: Job) {
 /// it, else on a helper runtime.
 fn run_job_here(job: Job) {
     if crate::worker::runs_natively(&job) {
-        return crate::worker::run_native_job(job);
+        return match crate::worker::job_runner() {
+            Some(run) => run(job),
+            None => refuse_job(job),
+        };
     }
     refuse_job(job);
 }

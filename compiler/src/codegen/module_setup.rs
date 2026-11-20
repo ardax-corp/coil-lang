@@ -34,8 +34,9 @@ pub(crate) enum SetupStep {
     Load { name: u32, slot: u32 },
     /// Declare symbol `name` of the library in `lib_slot` with argument
     /// type words `args` and return type word `ret` (`DeclareFFI`'s
-    /// `operand`); its function id to `slot`.
-    Declare { lib_slot: u32, name: u32, args: Vec<u32>, ret: u32, operand: u32, slot: u32 },
+    /// `operand`); its function id to `slot` and its C address to
+    /// `addr_slot` (an extern call's direct call).
+    Declare { lib_slot: u32, name: u32, args: Vec<u32>, ret: u32, operand: u32, slot: u32, addr_slot: u32 },
 }
 
 impl Compiler {
@@ -186,7 +187,7 @@ impl Compiler {
                     let handle = Self::setup_ffi(&mut b, MirFfiOp::Load, 0, vec![name])?;
                     b.ins_store_static(*slot, handle).map_err(mir)?;
                 }
-                SetupStep::Declare { lib_slot, name, args, ret, operand, slot } => {
+                SetupStep::Declare { lib_slot, name, args, ret, operand, slot, addr_slot } => {
                     let lib = b.ins_load_static(*lib_slot, MirTy::I64).map_err(mir)?;
                     let name = b.ins_string(*name).map_err(mir)?;
                     let tags = args
@@ -199,6 +200,9 @@ impl Compiler {
                     let ret = b.ins_const(MirConst::I64(i64::from(*ret))).map_err(mir)?;
                     let id = Self::setup_ffi(&mut b, MirFfiOp::Declare, *operand, vec![lib, name, tuple, ret])?;
                     b.ins_store_static(*slot, id).map_err(mir)?;
+                    let lib = b.ins_load_static(*lib_slot, MirTy::I64).map_err(mir)?;
+                    let addr = Self::setup_ffi(&mut b, MirFfiOp::Addr, 0, vec![lib, id])?;
+                    b.ins_store_static(*addr_slot, addr).map_err(mir)?;
                 }
             }
         }

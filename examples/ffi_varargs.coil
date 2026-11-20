@@ -1,6 +1,7 @@
 // ffi_varargs.coil — C-style varargs: a bare trailing `...` on an extern
 // declaration (not a coil rest parameter `T... xs`). The call is prepared
-// per call, and the variadic arguments get C's default promotions.
+// per call, and the variadic arguments get C's default promotions (a
+// `bool` is passed as a C `int`).
 //
 // Uses `sum_n` from examples/sum.c (`int64_t sum_n(int64_t n, ...)`); build
 // and grant the library as in ffi_extern.coil:
@@ -17,8 +18,16 @@ use string::format;
 
 extern "sum" {
     fn sum_n(int n, ...) -> int;
+    fn va_mix(string kinds, ...) -> float;
+    fn va_scaled(float k, int n, ...) -> float;
 }
 
 fn main() {
-    let _ = print(format("%i", sum_n(3, 10, 20, 30)));
+    let _ = print(format("%i ", sum_n(3, 10, 20, 30)));
+    // Floats, ints, a string and a bool after the declared argument.
+    let _ = print(format("%f ", va_mix("dddddd", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)));
+    let _ = print(format("%f ", va_mix("iiii", 1, 2, 3, 4)));
+    let _ = print(format("%f ", va_mix("iiiii", 1, 2, 3, 4, 5)));
+    let _ = print(format("%f ", va_mix("idsb", 7, 2.5, "hello", true)));
+    let _ = print(format("%f", va_scaled(0.5, 3, 1.0, 2.0, 3.0)));
 }

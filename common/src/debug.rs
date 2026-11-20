@@ -187,7 +187,7 @@ impl ProgramDebug {
         // ends. The bound guards a table that is not well formed.
         while at.scope != 0 && frames.len() <= self.inline_scopes.len() {
             let Some(scope) = self.inline_scopes.get(at.scope as usize - 1) else { break };
-            frames.push((scope.callee.as_str(), (!scope.at_call).then_some(at.unscoped())));
+            frames.push((source_fn_name(&scope.callee), (!scope.at_call).then_some(at.unscoped())));
             at = scope.call;
         }
         (frames, at.unscoped())
@@ -244,6 +244,14 @@ impl ProgramDebug {
 pub const COLD_HELPER_SEP: &str = "$cold";
 
 /// The function cold helper `name` was cut out of, if it is one.
+/// The source item a body named `name` is a per-type clone of: `nth` for
+/// `nth$mono$84$0`, `m::Ring::strict` for `m::Ring::strict$inst$Loc`
+/// (#2867). A panic trace names the function as it is written, the same in
+/// every configuration, as the shared body (`--clone-budget 0`) is named.
+pub fn source_fn_name(name: &str) -> &str {
+    ["$mono$", "$inst$"].iter().filter_map(|sep| name.find(sep)).min().map_or(name, |at| &name[..at])
+}
+
 pub fn cold_helper_of(name: &str) -> Option<&str> {
     let (base, k) = name.rsplit_once(COLD_HELPER_SEP)?;
     (!k.is_empty() && k.bytes().all(|b| b.is_ascii_digit())).then_some(base)
@@ -262,11 +270,21 @@ pub const MIR_SECTION_SCOPES_FORMAT: u8 = 17;
 /// otherwise.
 pub const MIR_SECTION_COW_PIN_FORMAT: u8 = 18;
 
+/// The first MIR section format that may hold `ExternCall` (archive 8.3).
+/// Its layout is format 18's otherwise.
+pub const MIR_SECTION_EXTERN_FORMAT: u8 = 19;
+
+/// The first MIR section format whose `ExternCall` signatures carry the C
+/// layout of each struct they pass by value (archive 8.4). Its layout is
+/// format 19's otherwise.
+pub const MIR_SECTION_EXTERN_STRUCT_FORMAT: u8 = 20;
+
 /// The first MIR section format whose `kinds` words hold two bits per type
-/// parameter (copy-on-write, heap reference; reference counts plan step 2).
-/// Its layout is format 18's; a reader refuses older sections, whose
-/// constant `kinds` words mean otherwise.
-pub const MIR_SECTION_KINDS2_FORMAT: u8 = 19;
+/// parameter (copy-on-write, heap reference) and whose `Alloc` carries
+/// 12 words' packed kinds (`common::PackedKinds`; reference counts plan
+/// step 2, archive 8.5). Its layout is format 20's otherwise; a reader
+/// refuses older sections, whose constant `kinds` words mean otherwise.
+pub const MIR_SECTION_KINDS2_FORMAT: u8 = 21;
 
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and

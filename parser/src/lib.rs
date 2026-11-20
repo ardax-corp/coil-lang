@@ -4593,28 +4593,44 @@ impl<'pratt> Pratt<'pratt> {
                     .iter()
                     .find(|err| is_duplicate_field_parse_error(err))
                     .or(errs.first());
-                let primary = primary_err
-                    .map(|err| shift(error_range(input, err)))
-                    .unwrap_or_default();
-                let title = primary_err
-                    .map(|err| format_parse_error_title(input, err))
-                    .unwrap_or_else(|| "Parse error".to_string());
+                // A string the input never closes reads to the end of the
+                // file, so the parser fails there; point at its opening `"`.
+                let unclosed = primary_err
+                    .filter(|err| err.found().is_none())
+                    .and_then(|_| unclosed_string_start(input));
+                let primary = match unclosed {
+                    Some(at) => shift(at..at + 1),
+                    None => primary_err
+                        .map(|err| shift(error_range(input, err)))
+                        .unwrap_or_default(),
+                };
+                let title = match unclosed {
+                    Some(_) => "unterminated string literal: it has no closing `\"`".to_string(),
+                    None => primary_err
+                        .map(|err| format_parse_error_title(input, err))
+                        .unwrap_or_else(|| "Parse error".to_string()),
+                };
                 let code = if errs.iter().any(is_duplicate_field_parse_error) {
                     ErrorCode::DuplicateField
                 } else {
                     ErrorCode::ParseError
                 };
-                let mut message = Message::error(code, title, primary);
+                let mut message = Message::error(code, title, primary.clone());
 
-                errs.iter().for_each(|err| {
-                    message.push(Label::new(
-                        format_parse_error_label(input, err),
-                        shift(error_range(input, err)),
-                    ));
-                });
+                if unclosed.is_some() {
+                    message.push(Label::new("this string runs to the end of the file".to_string(), primary.clone()));
+                    message.with_help("close the string with `\"`; write a `\"` inside a string as `\\\"`".to_string());
+                } else {
+                    errs.iter().for_each(|err| {
+                        message.push(Label::new(
+                            format_parse_error_label(input, err),
+                            shift(error_range(input, err)),
+                        ));
+                    });
 
-                if let Some(help) = primary_err.and_then(|err| parse_error_help(input, err)) {
-                    message.with_help(help);
+                    if let Some(help) = primary_err.and_then(|err| parse_error_help(input, err)) {
+                        message.with_help(help);
+                    }
                 }
 
                 Err(message)
@@ -4894,6 +4910,52 @@ fn nesting_past(input: &str, limit: usize, ops_limit: usize) -> Option<(usize, N
             _ => {}
         }
         i += 1;
+    }
+    None
+}
+
+/// Where a `"…"` literal opens that the input never closes: a scan of
+/// the text that skips `//` and nested `/* */` comments and the escapes in
+/// strings (`\"` does not close one). Only asked after the parser stopped
+/// at the end of the input.
+fn unclosed_string_start(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                i = input[i..].find('\n').map_or(bytes.len(), |n| i + n);
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let mut depth = 1usize;
+                i += 2;
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                        depth -= 1;
+                        i += 2;
+                    } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                        depth += 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+            b'"' => {
+                let open = i;
+                i += 1;
+                loop {
+                    match bytes.get(i) {
+                        None => return Some(open),
+                        Some(b'\\') => i += 2,
+                        Some(b'"') => break,
+                        Some(_) => i += 1,
+                    }
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
     }
     None
 }

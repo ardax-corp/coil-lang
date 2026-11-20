@@ -1,0 +1,92 @@
+// Element reads and writes after an op that may move an array's storage
+// (a push, a call that allocates and may collect, a vector loop) see the
+// array as it is now: native code takes its view again.
+use tests::assert;
+
+fn churn(int n) -> int {
+    let parts: Vec<string> = Vec::new();
+    let i = 0;
+    while i < n {
+        parts.push("x");
+        i = i + 1;
+    }
+    return parts.len();
+}
+
+// Grows the array it reads, so every read follows a push.
+fn grow_and_read(int n) -> int {
+    let xs: Vec<int> = [1];
+    let s = 0;
+    let i = 0;
+    while i < n {
+        xs.push(i * 3);
+        s = s + xs[0] + xs[xs.len() - 1];
+        xs[0] = xs[0] + 1;
+        i = i + 1;
+    }
+    return s;
+}
+
+// A call that allocates between reads and writes of the same array.
+fn call_between(int n) -> int {
+    let xs: Vec<int> = Vec::new();
+    let i = 0;
+    while i < n {
+        xs.push(i);
+        i = i + 1;
+    }
+    let s = 0;
+    let j = 0;
+    while j < n {
+        s = s + churn(64) + xs[j];
+        xs[j] = xs[j] * 2;
+        j = j + 1;
+    }
+    let k = 0;
+    while k < xs.len() {
+        s = s + xs[k];
+        k = k + 1;
+    }
+    return s;
+}
+
+// A copy loop (one vector loop), then scalar reads and writes after it.
+fn copy_then_index(int n) -> int {
+    let a: Vec<int> = Vec::new();
+    let b: Vec<int> = Vec::new();
+    let i = 0;
+    while i < n {
+        a.push(i + 1);
+        b.push(0);
+        i = i + 1;
+    }
+    let j = 0;
+    while j < n {
+        b[j] = a[j] * 5;
+        j = j + 1;
+    }
+    let s = 0;
+    let k = 0;
+    while k < n {
+        b[k] = b[k] + 1;
+        s = s + b[k] + a[k];
+        k = k + 1;
+    }
+    return s;
+}
+
+test("reads after a push see the grown array") {
+    // s = sum over i of (1 + i) + 3i
+    assert!(grow_and_read(100) == 100 + 4950 + 3 * 4950);
+}
+
+test("reads and writes after an allocating call") {
+    // 64 per call, then xs[j] before doubling, then the doubled sum
+    assert!(call_between(500) == 500 * 64 + 124750 + 2 * 124750);
+}
+
+test("index ops after a copy loop") {
+    let n = 1000;
+    // b[k] = 5(k + 1) + 1, a[k] = k + 1
+    assert!(copy_then_index(n) == 6 * (n * (n + 1) / 2) + n);
+}

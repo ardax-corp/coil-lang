@@ -573,6 +573,21 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// A call of an `extern` function: `args` are its library and function
+    /// id words, then its arguments; the result is a `ret` word.
+    pub fn ins_extern_call(&mut self, sig: super::inst::MirExternSig, args: Vec<ValueId>, ret: MirTy) -> Result<ValueId, MirError> {
+        let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
+        for (i, &a) in args.iter().enumerate() {
+            if !self.resolve_ty(a).is_word_lane() {
+                return Err(MirError::msg(format!("extern {} arg {i} is {}", sig.symbol, self.resolve_ty(a))));
+            }
+        }
+        let dest = self.alloc(ret);
+        self.push(MirInst::ExternCall { dest, sig: Box::new(sig), args })?;
+        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
     pub fn ins_call(
         &mut self,
         target: crate::bodies::Label,

@@ -85,6 +85,23 @@ check "archive run" "$coil" run "$work/app.ccoil"
 "$coil" package --no-aot --root "$stdlib" "$work/app.coil" -o "$work/runner$ext"
 check "JIT runner" "$work/runner$ext"
 
+# A direct extern call follows this host's C calling convention (registers,
+# stack, structs by value): each FFI example must print what the MIR
+# interpreter's libffi call prints.
+case "$(uname)" in
+    Darwin) so="libsum.dylib" so_flags=(-dynamiclib) ;;
+    MINGW* | MSYS* | CYGWIN*) so="sum.dll" so_flags=(-shared) ;;
+    *) so="libsum.so" so_flags=(-shared -fPIC) ;;
+esac
+"$(command -v cc || command -v gcc)" "${so_flags[@]}" -O2 -o "$work/$so" examples/sum.c
+for ex in ffi_scalars ffi_strings ffi_structs ffi_varargs; do
+    ffi=(--no-build-cache --root "$stdlib" --ffi-search-path "$work" --allow-dload sum --dload-trusted sum)
+    want="$("$coil" "${ffi[@]}" --mir "examples/$ex.coil")"
+    echo "MIR interpreter, $ex: $want"
+    check "$ex, direct extern calls" "$coil" "${ffi[@]}" "examples/$ex.coil"
+done
+want="$("$coil" --no-build-cache --mir --root "$stdlib" "$work/app.coil")"
+
 aot() {
     local out="$1" said
     shift

@@ -236,7 +236,55 @@ native code reloads its words.
   parks.
 - `task_*` ops go to `Driver::task_op`. A failed `requires` (`contract_fail`) names
   the caller.
-- FFI ops (`Load`, `Declare`, `Invoke`) run through `coil_native_ffi`.
+- FFI ops (`Load`, `Declare`, `Invoke`, `Addr`) run through `coil_native_ffi`.
+- An `extern` block's call is an `ExternCall` with the declared signature. When its
+  parameters are `int`, `float`, `bool`, `string`, `constbytes`, `bytes` or `ptr` and
+  its result is `int`, `float`, `bool`, `ptr`, `string` or `void`, native code calls
+  the C function directly at the address module setup stored (`FFI_OP_ADDR`), with
+  the platform's C calling convention: no runtime call and no libffi. A `bool` goes
+  as its byte and comes back as `true` for any nonzero byte. Each pointer argument
+  comes from `coil_native_ffi_arg`: a `string` as a NUL-terminated copy for the call
+  (dropped by `coil_native_ffi_done` once the result is read), a byte view or a
+  `Vec<byte>` buffer lent in place (C's writes land in it), a `ptr` word as it is. When
+  the runtime's call must make one instead (an interior NUL, an empty or word
+  buffer it copies, a buffer that is also another argument, an array a `ptr`
+  copies), the call goes there (`FFI_OP_CALL`), which also reports the error. A
+  returned C string becomes a coil string (`coil_native_ffi_str`). Nothing collects
+  during native code, so a lent buffer stays put. An `extern struct` argument or
+  result (a record) goes direct too when its fields are numbers and bools: the
+  signature carries each struct's C layout (`MirExternSig::structs`, MIR format 20),
+  `coil_native_ffi_struct_in` writes a record's C bytes into a stack buffer (a field
+  the runtime must make, such as a string, sends the call there) and
+  `coil_native_ffi_struct_out` makes a record of a result's bytes. Where the bytes
+  travel follows the platform: x86-64 System V passes a struct of up to 16 bytes as
+  its eightbytes in general-purpose or SSE registers (all of them, or the whole
+  struct on the stack, a Cranelift `StructArgument`) and a larger one on the stack;
+  AArch64 passes a homogeneous float aggregate in `d` registers, others up to 16
+  bytes in `x` registers and larger ones as a pointer to a copy; Windows x64 passes
+  a struct of 1, 2, 4 or 8 bytes in a register and any other as a pointer to a copy.
+  A result too large for registers comes back through a hidden pointer
+  (`StructReturn`: `rdi` on x86-64, `x8` on AArch64; Windows x64 and an AArch64
+  struct that would be split between registers and the stack go through the
+  runtime). A variadic function's arguments after the declared ones (`...`) go
+  direct as C's default promotions make them (a `bool` as an `int`; no struct): as
+  declared ones on AArch64 Linux; on Windows x64 a `double` in the integer register
+  of its position, which is where the callee's `va_arg` reads it; on Apple arm64
+  each in an 8-byte stack slot, after zero words that use up the registers the
+  declared arguments leave; on x86-64 System V through `coil_native_va_call`, which
+  sets `al` (an upper bound of the vector registers used, which Cranelift does not
+  set) and jumps to the C function, whose address is the call's last integer
+  argument after zero words, in `r9` (a call that needs all six integer registers
+  goes through the runtime). A variadic call of more than seven arguments keeps its
+  argument tuple and goes through the runtime. Callbacks and sized integers (#2886)
+  go through the runtime. So does every extern call
+  of a program that may make a C callback into coil (an extern function that takes
+  a `Callback`, or any `ffi::declare` / `ffi::invoke`): a library may keep a callback
+  and run it during a later call, and only the runtime's call roots the caller's
+  words and reports a panic in it (`may_call_back`). A call into `sum` costs about
+  3.5 ns this way against 270 ns through `invoke` on a tuple; one passing a
+  12-byte string about 40 ns against 315 ns; one passing a 16-byte struct about
+  18 ns against 400 ns through the runtime's call, and one that also returns one
+  (a new record) about 60 ns against 760 ns.
 
 `CallIndirect` runs through `coil_native_call_value` and `Driver::call_value`, which
 handles exact calls, partial and over-application and dictionaries. A function value
@@ -568,10 +616,14 @@ functions and a runtime lifecycle, which do not exist yet. `extern` blocks named
 A body native code refuses is an error naming it and why, at package time on both kinds
 of executable. No source program reaches one today: parameters, captures, generator
 arguments and live words have no limit in native code, and the corpus reports no
-refusal. If the object or the link fails (no `cc`, no `libcoil_rt.a`) the package warns
-and falls back to the runner. On Windows `cc` is a mingw toolchain's, so without one a
-package is the runner. `.github/workflows/native-platforms.yml` runs every way a program
-starts on macOS and Windows, and a fallback fails it.
+refusal. If the object or the link fails (no `cc`, no `libcoil_rt.a`) the package fails
+and says so: the runner is several times larger, so it is packaged only with `--no-aot`.
+On Windows `cc` is a mingw toolchain's. A runtime library built in debug carries
+`coil-rt profile: debug;` (`coil_rt::PROFILE_MARK`), and `coil package` warns when it
+links one. On Linux the link uses lld when `cc -fuse-ld=lld` works (about 40 KB
+smaller), else the default linker; a `--link-arg` naming `-fuse-ld` picks it instead.
+`.github/workflows/native-platforms.yml` runs every way a program starts on macOS and
+Windows.
 
 ## Compiling in parallel
 
@@ -632,6 +684,28 @@ on feature/native 7e00bc9 (2026-11-08), from 1.53 MB, and its start runs 0.83M
 instructions instead of 2.33M (callgrind), as it builds ~25 natives instead of 213 (twice:
 the runtime's table and native code's).
 
+On feature/native 6e9943a (2026-11-20) a hello world was 1,107 KB with `--strip-symbols
+all`. Two changes take it to 675 KB (-39%) with the same instruction counts:
+
+- **FFI link gate** (-131 KB): `Driver::HOST.ffi` reaches the FFI hook only through
+  `NativeStart::ffi` (`machine::FFI_HOOK`), and `run_package` reads the native lock and
+  builds the `dload` gate only through `coil_cli::FfiLink`. `coil-rt` exports the full
+  link as `coil_ffi_link`, and the AOT object's `coil_aot_ffi` holds its address when a
+  body has a `MirInst::Ffi`, else null (`coil_native::ffi_link_table`). Without that
+  reference the link drops libffi, `libloading`, the FFI registry, the `dload` gate and
+  `sha2`. Every other start (`coil FILE`, `coil run`, the JIT runner, `coil debug`)
+  passes the hook. A program with no FFI op whose package still says it uses FFI exits
+  with "linked without FFI"; `coil package` makes neither.
+- **Size-trimmed std** (-300 KB): `scripts/build_runtime.sh` builds the release
+  `libcoil_rt.a` on Linux with std rebuilt (`-Zbuild-std`, `RUSTC_BOOTSTRAP=1`
+  on stable, needs `rust-src`): without std's backtrace symbolizer (`gimli`,
+  `addr2line`, demangling; Coil backtraces come from the program's line table), std
+  optimized for size, and `-C force-unwind-tables=no` (the runtime is
+  `panic = "abort"`). A Rust-level panic in the runtime prints its message without a
+  Rust backtrace, and `perf` / `gdb` unwind runtime frames by frame pointer only.
+  macOS and Windows keep a plain build until it is measured there. `COIL_RT_PLAIN=1`
+  skips it.
+
 ### Per-program host natives
 
 `machine::host_natives` builds the host table from groups (`STANDARD_HOST_GROUPS`, in id
@@ -641,8 +715,8 @@ its own closure). `host_groups!` also exports each group as a symbol,
 `coil_host_group_K`, that holds its `HostPush`.
 
 - `coil_native::aot` lists the groups the program's `HostInvoke`s name, with the
-  groups every runtime calls (`core_host_groups`: the task scheduler, `unwind_resume`,
-  `contract_fail`, `coro_close`, the collector's and `region`'s hooks), as
+  groups every runtime calls (`core_host_groups`: `unwind_resume`, the collector's and
+  `region`'s hooks), as
   `coil_aot_host_groups` (`machine::AotHostGroup`: the symbol's address, first id,
   count) and `coil_aot_host_group_count`. The link keeps those groups and drops the
   rest.
@@ -652,6 +726,13 @@ its own closure). `host_groups!` also exports each group as a symbol,
 - The start names no default table: `NativeStart::host_natives` is the table, and each
   host passes `machine::standard_host_natives()` (built once per process) or the AOT
   one. A default would name every group, and the link would keep them all.
+- Pushing a group links the runtime part its natives run on, so a table without them
+  leaves it out: the task natives, `contract_fail` and `coro_close` link the scheduler
+  (`driver::link_tasks`: `HostOp::Task` and `HostEnv::park` go through `TASKS`), the
+  thread spawns link the job runner (`worker::link_jobs`: the reactor runs a job
+  through `job_runner`, and refuses it with none), and `startup_restore` links the
+  snapshot restore (`driver::link_restore`). The standard table pushes every group,
+  so every other start links them all. On a hello world this leaves out about 110 KB.
 - Native code calls a host native through the runtime's table (`Natives::host_call`,
   a `HostCall` per id), not a process-wide one, so an absent id bails as an unknown
   one did. `direct_host_natives` (the standard table, by name) is what `coil-native`
@@ -681,7 +762,8 @@ archive is the build tool's job (spool); the compiler takes paths only.
   gate (no file to open, pin or grant at run time; compiling the `extern` block took
   `--allow-dload`), and an FFI load marks the library object
   (`ObjLibrary::static_symbols`), so a declare takes each function's address from the
-  table. Calls go through libffi as for a shared library.
+  table. Calls go as for a shared library: direct for scalar signatures, libffi
+  otherwise.
 - The native lock and `--check-native` skip linked stems.
 
 ## Where the pieces are

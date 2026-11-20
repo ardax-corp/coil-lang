@@ -8,7 +8,7 @@ use common::{
     ARCHIVE_VERSION, ArchiveDecodeError, ArchivedArchivedProgram, NativeLock, ProgramDebug,
     archive_version_compatible, decode_archived_program, default_natives_root,
     embedded_archive_slice, format_archive_version, read_embedded_native_lock,
-    read_package_trailer,
+    read_package_trailer, PackageTrailer,
 };
 use machine::DloadGate;
 
@@ -82,6 +82,7 @@ pub fn execute_archived_program(
     ffi_search_paths: Vec<PathBuf>,
     dload_gate: Option<DloadGate>,
     host_natives: Vec<std::sync::Arc<dyn machine::NativeFn>>,
+    ffi: Option<machine::native::MachineHostFn>,
 ) -> bool {
     let base_dir = entry.and_then(|p| p.parent()).map(PathBuf::from);
     // Native code that covers every body (an AOT executable's) runs the
@@ -103,6 +104,7 @@ pub fn execute_archived_program(
         struct_layouts: loaded.struct_layouts.iter().map(machine::CStructLayout::from_archive).collect(),
         shared_print: None,
         host_natives,
+        ffi,
     };
     if let Some(panicked) = machine::run_natively(program, start) {
         return panicked;
@@ -129,12 +131,60 @@ fn native_cache_dirs(lock: &NativeLock) -> Vec<PathBuf> {
     dirs
 }
 
+/// What an executable links for FFI: the runtime's hook and the start of
+/// a package's FFI (its native lock: search paths and `dload` gate). An AOT
+/// executable links it only when its program makes an FFI call
+/// (`coil_aot_ffi`), so the others leave out libffi, `dload` and the gate.
+pub struct FfiLink {
+    pub hook: machine::native::MachineHostFn,
+    /// The package's `dload` gate, with the natives-cache directories its
+    /// lock names pushed to `search`; exits on a lock for another host.
+    pub lock: fn(data: &[u8], trailer: PackageTrailer, search: &mut Vec<PathBuf>) -> Option<DloadGate>,
+}
+
+/// The full [`FfiLink`].
+pub const FFI_LINK: FfiLink = FfiLink { hook: machine::FFI_HOOK, lock: native_lock_start };
+
+/// [`FfiLink::lock`].
+fn native_lock_start(data: &[u8], trailer: PackageTrailer, search: &mut Vec<PathBuf>) -> Option<DloadGate> {
+    if let Err(msg) = machine::packaged_app_ffi_startup_check(trailer.uses_ffi()) {
+        eprintln!("error: {msg}");
+        exit(1);
+    }
+    match read_embedded_native_lock(data, trailer) {
+        Ok(Some(lock)) if !lock.entries.is_empty() => {
+            if lock.os != std::env::consts::OS || lock.arch != std::env::consts::ARCH {
+                eprintln!(
+                    "error: native lock is for {}-{}, this host is {}-{}",
+                    lock.os,
+                    lock.arch,
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                );
+                exit(1);
+            }
+            search.extend(native_cache_dirs(&lock));
+            let pins: Vec<(String, String)> = lock
+                .entries
+                .iter()
+                .map(|e| (e.stem.clone(), e.sha256.clone()))
+                .collect();
+            Some(DloadGate::from_consumer(&pins))
+        }
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("error: corrupt native lock: {e}");
+            exit(1);
+        }
+    }
+}
+
 /// Run the package linked into this executable on the host natives its
-/// object links (`machine::native::aot_host_natives`): `Some(panicked)`,
-/// `None` when it cannot be read.
-pub fn run_linked_package(package: &[u8]) -> Option<bool> {
+/// object links (`machine::native::aot_host_natives`) and the FFI it
+/// links, if any: `Some(panicked)`, `None` when it cannot be read.
+pub fn run_linked_package(package: &[u8], ffi: Option<&FfiLink>) -> Option<bool> {
     let exe = std::env::current_exe().ok()?;
-    run_package(package, exe, machine::native::aot_host_natives(), |_| Ok(()))
+    run_package(package, exe, machine::native::aot_host_natives(), ffi, |_| Ok(()))
 }
 
 /// If this process is a packaged JIT runner, run the program appended to it,
@@ -144,7 +194,7 @@ pub fn run_linked_package(package: &[u8]) -> Option<bool> {
 pub fn try_run_embedded_with(prepare: impl FnOnce(&[u8]) -> Result<(), String>) -> Option<bool> {
     let exe = std::env::current_exe().ok()?;
     let data = std::fs::read(&exe).ok()?;
-    run_package(&data, exe, machine::standard_host_natives(), prepare)
+    run_package(&data, exe, machine::standard_host_natives(), Some(&FFI_LINK), prepare)
 }
 
 /// Run the package that ends `data`; `exe` is the running executable.
@@ -152,10 +202,9 @@ fn run_package(
     data: &[u8],
     exe: PathBuf,
     host_natives: Vec<std::sync::Arc<dyn machine::NativeFn>>,
+    ffi: Option<&FfiLink>,
     prepare: impl FnOnce(&[u8]) -> Result<(), String>,
 ) -> Option<bool> {
-    use machine::packaged_app_ffi_startup_check;
-
     let trailer = read_package_trailer(data)?;
     let archive = embedded_archive_slice(data, trailer)?;
 
@@ -184,39 +233,16 @@ fn run_package(
         }
     };
 
-    if let Err(msg) = packaged_app_ffi_startup_check(trailer.uses_ffi()) {
-        eprintln!("error: {msg}");
-        exit(1);
-    }
-
     let mut ffi_search_paths = Vec::new();
-    let mut dload_gate = None;
-    match read_embedded_native_lock(data, trailer) {
-        Ok(Some(lock)) if !lock.entries.is_empty() => {
-            if lock.os != std::env::consts::OS || lock.arch != std::env::consts::ARCH {
-                eprintln!(
-                    "error: native lock is for {}-{}, this host is {}-{}",
-                    lock.os,
-                    lock.arch,
-                    std::env::consts::OS,
-                    std::env::consts::ARCH
-                );
-                exit(1);
-            }
-            ffi_search_paths = native_cache_dirs(&lock);
-            let pins: Vec<(String, String)> = lock
-                .entries
-                .iter()
-                .map(|e| (e.stem.clone(), e.sha256.clone()))
-                .collect();
-            dload_gate = Some(DloadGate::from_consumer(&pins));
-        }
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("error: corrupt native lock: {e}");
+    let dload_gate = match ffi {
+        Some(ffi) => (ffi.lock)(data, trailer, &mut ffi_search_paths),
+        // `coil package` links FFI whenever the program makes an FFI call.
+        None if trailer.uses_ffi() || trailer.has_native_lock() => {
+            eprintln!("error: this executable was linked without FFI, but its package uses FFI");
             exit(1);
         }
-    }
+        None => None,
+    };
 
     // Prefer cache dirs, then $ORIGIN and $ORIGIN/lib.
     if let Some(parent) = exe.parent() {
@@ -229,7 +255,7 @@ fn run_package(
         exit(1);
     }
     let panicked =
-        execute_archived_program(&loaded, Some(exe.as_path()), ffi_search_paths, dload_gate, host_natives);
+        execute_archived_program(&loaded, Some(exe.as_path()), ffi_search_paths, dload_gate, host_natives, ffi.map(|f| f.hook));
     Some(panicked)
 }
 

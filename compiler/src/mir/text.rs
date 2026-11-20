@@ -189,6 +189,13 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
+        MirInst::ExternCall { dest, sig, args } => {
+            write!(f, "{dest} = extern {}", sig.symbol)?;
+            for a in args {
+                write!(f, ", {a}")?;
+            }
+            Ok(())
+        }
         MirInst::Call {
             dest,
             dest_hi,

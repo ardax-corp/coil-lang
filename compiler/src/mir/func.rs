@@ -362,7 +362,7 @@ impl MirFunc {
         self.blocks.iter().any(|b| {
             b.insts.iter().any(|i| match i {
                 MirInst::HostInvoke { native_id, .. } => !super::effects::host_is_pure(*native_id),
-                MirInst::Ffi { .. } => true,
+                MirInst::Ffi { .. } | MirInst::ExternCall { .. } => true,
                 _ => false,
             })
         })
@@ -775,6 +775,14 @@ impl MirFunc {
                 }
                 if args.iter().any(|a| !self.ty(*a).is_word_lane()) {
                     return Err(format!("{dest} ffi arg is not a word lane"));
+                }
+            }
+            MirInst::ExternCall { dest, sig, args } => {
+                if args.len() != 3 + sig.variadic.as_ref().map_or(sig.params.len(), Vec::len) {
+                    return Err(format!("{dest} extern call arity"));
+                }
+                if args.iter().chain([dest]).any(|a| !self.ty(*a).is_word_lane()) {
+                    return Err(format!("{dest} extern call word is not a word lane"));
                 }
             }
             MirInst::CallIndirect { dest, callee, args, dicts, pair } => {

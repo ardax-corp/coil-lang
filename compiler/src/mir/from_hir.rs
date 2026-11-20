@@ -864,6 +864,9 @@ pub struct HirFfi {
     pub unwrap: bool,
     /// The niche word the result converts to.
     pub niche: Option<MirTy>,
+    /// An `extern` call on its words ([`MirInst::ExternCall`]): the
+    /// operands are its library, function id and arguments.
+    pub extern_sig: Option<super::inst::MirExternSig>,
 }
 
 /// How `Lower::pair_eq` compares two two-word values' words.
@@ -4237,7 +4240,8 @@ impl Lower<'_> {
                     let Some(idx) = self.index_word(*index)? else {
                         return Ok(Val::Never);
                     };
-                    return Ok(Val::V(self.stack_select_checked(slot, n, idx, ty)?));
+                    // Its bounds check at the index's own span (#2858).
+                    return Ok(Val::V(self.at_expr(id, |l| l.stack_select_checked(slot, n, idx, ty))?));
                 }
                 let Some(k) = self.stack_index(id, *index, n)? else {
                     return Ok(Val::Never);
@@ -6574,7 +6578,8 @@ impl Lower<'_> {
         let Some(h) = self.word(handle)? else {
             return Ok(Val::Never);
         };
-        let out = self.b.ins_resume_coro(h, send, dest_ty).map_err(mir)?;
+        // A resume of a finished generator panics at the `resume` (#2858).
+        let out = self.at_expr(id, |l| l.b.ins_resume_coro(h, send, dest_ty).map_err(mir))?;
         if !read {
             return Ok(Val::Unit);
         }
@@ -7230,7 +7235,10 @@ impl Lower<'_> {
         // A boxed stack array's read is always checked, as HIR emission's.
         let proven = self.hir.expr(id).flags.contains(HirFlags::IN_BOUNDS) && self.boxed(base).is_none();
         let byte = self.expr_ty(base).and_then(array_elem).is_some_and(is_byte);
-        let v = self.b.ins_index(arr, idx, ty, proven).map_err(mir)?;
+        // At the index's own span, as a division is at its operator: inside
+        // a call's argument the statement's or the call's would be reported
+        // (#2858), and an inlined callee's index would lose its frame.
+        let v = self.at_expr(id, |l| l.b.ins_index(arr, idx, ty, proven).map_err(mir))?;
         if byte {
             self.b.mark_byte_load(v);
         }
@@ -8147,6 +8155,11 @@ impl Lower<'_> {
                 return Ok(Val::Never);
             };
             words.push(w);
+        }
+        if let Some(sig) = &site.extern_sig {
+            let sig = sig.clone();
+            let w = self.at_expr(id, |l| l.b.ins_extern_call(sig, words, ret.unwrap_or(MirTy::I64)).map_err(mir))?;
+            return Ok(if ret.is_some() { Val::V(w) } else { Val::Unit });
         }
         let obj = self.at_expr(id, |l| l.b.ins_ffi(site.op, site.operand, words).map_err(mir))?;
         if !site.unwrap {

@@ -523,6 +523,60 @@ fn main() { let _ = dload("plugin"); }
     );
 }
 
+/// A call of an `extern` function is an extern call on its words, with
+/// no `invoke` on an argument tuple.
+#[test]
+fn extern_call_lowers_to_extern_call() {
+    let mut pipeline = test_pipeline();
+    pipeline.grant_dload_allow("plugin");
+    let compiled = compile_ok(
+        &mut pipeline,
+        r#"
+extern "plugin" {
+    fn add(int a, int b) -> int;
+}
+fn main() { let _ = add(1, 2); }
+"#,
+    );
+    assert!(
+        compiled.all_insts().any(|i| matches!(i, MirInst::ExternCall { sig, args, .. } if sig.symbol == "add" && args.len() == 5)),
+        "an extern call must be an ExternCall"
+    );
+    assert!(
+        !compiled.all_insts().any(|i| matches!(i, MirInst::Ffi { op: MirFfiOp::Invoke, .. })),
+        "an extern call must not invoke on a tuple"
+    );
+}
+
+/// A variadic argument held in an unannotated local is an `int` (#2892),
+/// and the call's tags say so.
+#[test]
+fn variadic_extern_argument_from_unannotated_local() {
+    let mut pipeline = test_pipeline();
+    pipeline.grant_dload_allow("plugin");
+    let compiled = compile_ok(
+        &mut pipeline,
+        r#"
+extern "plugin" {
+    fn sum_n(int n, ...) -> int;
+}
+fn main() {
+    let i = 0;
+    let x = 1.5;
+    let _ = sum_n(2, i, x);
+}
+"#,
+    );
+    let int = common::encode_tag_operand(common::tag::INT, 0);
+    let float = common::encode_tag_operand(common::tag::FLOAT, 0);
+    assert!(
+        compiled
+            .all_insts()
+            .any(|i| matches!(i, MirInst::ExternCall { sig, .. } if sig.variadic.as_deref() == Some(&[int, int, float][..]))),
+        "the variadic call's tags must be int, int, float"
+    );
+}
+
 #[test]
 fn granted_ffi_exec_extern_compiles() {
     let mut pipeline = test_pipeline();
@@ -1585,14 +1639,50 @@ fn example_ffi_extern_prints_42() {
 
 #[cfg(unix)]
 #[test]
-fn example_ffi_varargs_prints_60() {
+fn example_ffi_scalars_prints_each_result() {
+    let libsum = ensure_ffi_libsum_built();
+    if !libsum.exists() {
+        ffi_soft_skip(&format!("{} not built", libsum.display()));
+        return;
+    }
+    let output = run_ffi_example_with_lib("examples/ffi_scalars.coil", &libsum);
+    assert_eq!(output, "6.0 true false 21 0 false");
+}
+
+#[cfg(unix)]
+#[test]
+fn example_ffi_strings_prints_each_result() {
+    let libsum = ensure_ffi_libsum_built();
+    if !libsum.exists() {
+        ffi_soft_skip(&format!("{} not built", libsum.display()));
+        return;
+    }
+    let output = run_ffi_example_with_lib("examples/ffi_strings.coil", &libsum);
+    assert_eq!(output, "5 round trip hello from C 0|294 6 27 104 105");
+}
+
+#[cfg(unix)]
+#[test]
+fn example_ffi_structs_prints_each_result() {
+    let libsum = ensure_ffi_libsum_built();
+    if !libsum.exists() {
+        ffi_soft_skip(&format!("{} not built", libsum.display()));
+        return;
+    }
+    let output = run_ffi_example_with_lib("examples/ffi_structs.coil", &libsum);
+    assert_eq!(output, "2.0 3.0 42 5.0 231 12 43 8 9 true 891 203.0 56 70");
+}
+
+#[cfg(unix)]
+#[test]
+fn example_ffi_varargs_prints_each_sum() {
     let libsum = ensure_ffi_libsum_built();
     if !libsum.exists() {
         ffi_soft_skip(&format!("{} not built", libsum.display()));
         return;
     }
     let output = run_ffi_example_with_lib("examples/ffi_varargs.coil", &libsum);
-    assert_eq!(output, "60");
+    assert_eq!(output, "60 91.0 30.0 55.0 31.0 3.0");
 }
 
 

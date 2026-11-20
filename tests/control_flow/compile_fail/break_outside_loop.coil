@@ -1,4 +1,4 @@
-// @expected E0801 — break outside loop.
+// @expected E0155 — break outside loop.
 fn main() {
     break;
 }

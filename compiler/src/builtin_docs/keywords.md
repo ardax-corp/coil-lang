@@ -1210,9 +1210,11 @@ gen fn outer() {
 
 Declares a C struct layout for FFI: `extern struct Name { field: type, … };`.
 
-The struct can be passed to and returned from C functions by value; a
-returned struct is read with `.field`. Field types are C scalar names such as
-`int32`, `int` or `float`. There are no Coil structs: use `class`.
+The struct can be passed to and returned from C functions by value. In Coil
+its value is a record with the same fields: build one with a record literal,
+`{ x: 3, y: 4 }`, and read a field with `.field`. Field types are C scalar names
+such as `int32`, `int` or `float`, or another `extern struct` (a nested record).
+There are no Coil structs: use `class`.
 
 ```coil
 extern struct Point {

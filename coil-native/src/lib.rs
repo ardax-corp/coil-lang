@@ -341,6 +341,7 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         words("coil_aot_stack_map_count", map_count.to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
         host_group_table(&mut module, bodies)?;
+        ffi_link_table(&mut module, bodies)?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });
     }
@@ -435,6 +436,28 @@ fn host_group_table(module: &mut cranelift_object::ObjectModule, bodies: &[Nativ
     d.set_align(8);
     let id = module.declare_data("coil_aot_host_group_count", Linkage::Export, false, false).map_err(e)?;
     module.define_data(id, &d).map_err(e)
+}
+
+/// `coil_aot_ffi`: the address of the runtime's `coil_ffi_link` when
+/// `bodies` make an FFI call (`MirInst::Ffi`), else null. A link without
+/// the reference drops libffi, `dload` and its gate from the executable.
+fn ffi_link_table(module: &mut cranelift_object::ObjectModule, bodies: &[NativeBody]) -> Result<(), String> {
+    let e = |e: cranelift_module::ModuleError| e.to_string();
+    let mut d = cranelift_module::DataDescription::new();
+    d.define(vec![0u8; 8].into_boxed_slice());
+    d.set_align(8);
+    if uses_ffi(bodies) {
+        let link = module.declare_data("coil_ffi_link", Linkage::Import, false, false).map_err(e)?;
+        let gv = module.declare_data_in_data(link, &mut d);
+        d.write_data_addr(0, gv, 0);
+    }
+    let id = module.declare_data("coil_aot_ffi", Linkage::Export, false, false).map_err(e)?;
+    module.define_data(id, &d).map_err(e)
+}
+
+/// Whether `bodies` make an FFI call.
+pub fn uses_ffi(bodies: &[NativeBody]) -> bool {
+    bodies.iter().flat_map(|b| b.mir.blocks.iter().flat_map(|b| &b.insts)).any(|i| matches!(i, MirInst::Ffi { .. }))
 }
 
 /// The host-native groups (by number) `bodies` call, with the core ones, in order.
@@ -674,6 +697,10 @@ struct Plan {
     /// archive 8.2, [`pin_reach`]). The inline share of any other body leaves
     /// out its pinned path and the copy helper call that path makes.
     pins: HashSet<usize>,
+    /// The program may make a C callback into coil ([`may_call_back`]):
+    /// every extern call goes through the runtime, which roots the caller's
+    /// words and reports a panic in the callback.
+    ffi_callbacks: bool,
 }
 
 /// What [`define_all`] made: the declared ids, the bodies defined, the
@@ -809,6 +836,11 @@ fn compile_job(isa: &dyn cranelift_codegen::isa::TargetIsa, ctx: &mut cranelift_
 /// Functions a thread should have to itself before another is worth starting.
 const JOBS_PER_THREAD: usize = 16;
 
+/// A word view's state after an op that may have moved its array's storage:
+/// not `0` (no view: not a word array), [`machine::VIEW_PLAIN`] or
+/// [`machine::VIEW_TRACKED`]. The next element access takes the view again.
+const VIEW_UNKNOWN: i64 = -1;
+
 /// Past this, lowering is what compiling waits for: more threads only contend.
 const MAX_COMPILE_THREADS: usize = 8;
 
@@ -924,7 +956,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, body_i
                 bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
                     matches!(
                         inst,
-                        MirInst::ArrayPush { .. } | MirInst::LanePush { .. } | MirInst::LanesToWords { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. } | MirInst::VecLoop { .. }
+                        MirInst::ArrayPush { .. } | MirInst::LanePush { .. } | MirInst::LanesToWords { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. } | MirInst::ExternCall { .. } | MirInst::VecLoop { .. }
                     )
                 })
         })
@@ -1000,7 +1032,8 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, body_i
     let mut compile: Vec<usize> = ok.into_keys().collect();
     compile.sort_unstable();
     let pins = pin_reach(bodies, &by_label);
-    Plan { compile, by_label, refused, moves, may_gc, speculative, pcs, drops, runtime_reach, used_params, tail_sites, tail_conv, pins }
+    let ffi_callbacks = may_call_back(bodies);
+    Plan { compile, by_label, refused, moves, may_gc, speculative, pcs, drops, runtime_reach, used_params, tail_sites, tail_conv, pins, ffi_callbacks }
 }
 
 /// The labels `inst` names: a call's target, a function value's or code
@@ -1102,7 +1135,7 @@ fn pin_reach(bodies: &[NativeBody], by_label: &HashMap<Label, usize>) -> HashSet
             return everything();
         }
         work.extend(insts(i).flat_map(named_labels).filter_map(|l| by_label.get(&l).copied()));
-        if !values && insts(i).any(|x| matches!(x, MirInst::CallIndirect { .. } | MirInst::HostInvoke { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. })) {
+        if !values && insts(i).any(|x| matches!(x, MirInst::CallIndirect { .. } | MirInst::HostInvoke { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. } | MirInst::ExternCall { .. })) {
             values = true;
             for b in bodies {
                 let f = &b.mir;
@@ -1122,7 +1155,7 @@ fn pin_reach(bodies: &[NativeBody], by_label: &HashMap<Label, usize>) -> HashSet
 /// (in a program with `drop`s) or collection that may run `drop`s.
 fn reaches_runtime(inst: &MirInst, drops: bool) -> bool {
     match inst {
-        MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. } => true,
+        MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. } | MirInst::ExternCall { .. } => true,
         MirInst::FreeEarly { .. } => drops,
         MirInst::HostInvoke { native_id, .. } => {
             machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.on_machine)
@@ -1163,6 +1196,145 @@ fn tail_sites(bodies: &[NativeBody], ok: &HashMap<usize, Vec<usize>>, by_label: 
 }
 
 /// Whether any instruction or terminator of `f` reads `v`.
+/// The arrays a word `VecLoop` reads (`false`) or stores (`true`) lanes
+/// of, a push's output left out (it moves).
+/// Whether `inst` may drop word views ([`Lower::drop_views`]) on its hot
+/// path or in a collection it may run: anything but the ops known not to.
+fn may_drop_views(inst: &MirInst) -> bool {
+    !matches!(
+        inst,
+        MirInst::Const { .. }
+            | MirInst::Bin { .. }
+            | MirInst::Cmp { .. }
+            | MirInst::Unary { .. }
+            | MirInst::Cast { .. }
+            | MirInst::Phi { .. }
+            | MirInst::Index { .. }
+            | MirInst::StoreIndex { .. }
+            | MirInst::ArrayLen { .. }
+            | MirInst::ProductLoad { .. }
+            | MirInst::MatchPayload { .. }
+            | MirInst::HeapFieldStore { .. }
+            | MirInst::LaneIndex { .. }
+            | MirInst::LaneStore { .. }
+            | MirInst::HomeLoad { .. }
+            | MirInst::HomeStore { .. }
+            | MirInst::ClearWord { .. }
+            | MirInst::KeepAlive { .. }
+    )
+}
+
+/// [`views_dropped_in`]'s step over `inst`: after an op that may drop
+/// views, every viewed array; a phi takes its view at once; an element
+/// access leaves its array's view taken.
+fn drop_transfer(inst: &MirInst, viewed: &HashSet<ValueId>, set: &mut HashSet<ValueId>) {
+    if may_drop_views(inst) {
+        set.extend(viewed.iter().copied());
+    }
+    match inst {
+        MirInst::Phi { dest, .. } => {
+            set.remove(dest);
+        }
+        MirInst::Index { array, .. } | MirInst::StoreIndex { array, .. } | MirInst::ArrayLen { array, .. } => {
+            set.remove(array);
+        }
+        _ => {}
+    }
+}
+
+/// For each block, the viewed arrays whose view some path into it may have
+/// dropped since it was taken (a forward union to a fixed point). An access
+/// to any other array reads through its view as it is, or through the
+/// helpers when it is not one.
+fn views_dropped_in(f: &MirFunc, viewed: &HashSet<ValueId>) -> HashMap<BlockId, HashSet<ValueId>> {
+    let mut ins: HashMap<BlockId, HashSet<ValueId>> = HashMap::new();
+    if viewed.is_empty() {
+        return ins;
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for blk in &f.blocks {
+            let mut set = ins.get(&blk.id).cloned().unwrap_or_default();
+            for inst in &blk.insts {
+                drop_transfer(inst, viewed, &mut set);
+            }
+            for s in blk.term.as_ref().map(|t| t.succs()).unwrap_or_default() {
+                let into = ins.entry(s).or_default();
+                let n = into.len();
+                into.extend(set.iter().copied());
+                changed |= into.len() != n;
+            }
+        }
+    }
+    ins
+}
+
+/// Every `(array, off, false)` load of `e`.
+fn lane_refs(e: &compiler::native_mir::VecExpr, store: bool, out: &mut Vec<(ValueId, ValueId, bool)>) {
+    use compiler::native_mir::VecExpr;
+    match e {
+        VecExpr::Splat { .. } | VecExpr::Index => {}
+        VecExpr::Load { array, off, .. } => out.push((*array, *off, store)),
+        VecExpr::Bin { lhs, rhs, .. } => {
+            lane_refs(lhs, store, out);
+            lane_refs(rhs, store, out);
+        }
+        VecExpr::Unary { src, .. } => lane_refs(src, store, out),
+        VecExpr::Select { mask, then, els } => {
+            lane_refs(mask, store, out);
+            lane_refs(then, store, out);
+            lane_refs(els, store, out);
+        }
+        VecExpr::Fma { a, b, c, .. } => {
+            lane_refs(a, store, out);
+            lane_refs(b, store, out);
+            lane_refs(c, store, out);
+        }
+    }
+}
+
+fn vec_loop_arrays(kind: &compiler::native_mir::VecLoopKind, out: &mut Vec<(ValueId, bool)>) {
+    use compiler::native_mir::{VecExpr, VecLoopKind};
+    fn reads(e: &VecExpr, out: &mut Vec<(ValueId, bool)>) {
+        match e {
+            VecExpr::Splat { .. } | VecExpr::Index => {}
+            VecExpr::Load { array, .. } => out.push((*array, false)),
+            VecExpr::Bin { lhs, rhs, .. } => {
+                reads(lhs, out);
+                reads(rhs, out);
+            }
+            VecExpr::Unary { src, .. } => reads(src, out),
+            VecExpr::Select { mask, then, els } => {
+                reads(mask, out);
+                reads(then, out);
+                reads(els, out);
+            }
+            VecExpr::Fma { a, b, c, .. } => {
+                reads(a, out);
+                reads(b, out);
+                reads(c, out);
+            }
+        }
+    }
+    match kind {
+        VecLoopKind::Reduce { term, stores, .. } => {
+            reads(term, out);
+            for (array, _, _, value) in stores {
+                reads(value, out);
+                out.push((*array, true));
+            }
+        }
+        VecLoopKind::Store { stores } => {
+            for (array, _, _, value) in stores {
+                reads(value, out);
+                out.push((*array, true));
+            }
+        }
+        VecLoopKind::Push { value, .. } => reads(value, out),
+    }
+}
+
 fn value_used(f: &MirFunc, v: ValueId) -> bool {
     f.blocks.iter().any(|b| {
         b.insts.iter().any(|i| i.operands().contains(&v))
@@ -1461,6 +1633,16 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             return Err("FFI op of more than 16 words".into());
                         }
                     }
+                    MirInst::ExternCall { dest, sig, args } => {
+                        need(dest)?;
+                        for a in args {
+                            need(a)?;
+                        }
+                        // The runtime's call takes all but the address.
+                        if args.len() - 1 + sig.variadic.as_ref().map_or(0, Vec::len) > 16 {
+                            return Err("extern call of more than 16 words".into());
+                        }
+                    }
                     // A generator body: it runs on a fiber of its own and a
                     // yield suspends it (`machine::native_gen`).
                     MirInst::Yield { dest, value, from, .. } => {
@@ -1636,6 +1818,297 @@ struct Ids {
     collect: FuncId,
     /// Explicit `panic`.
     panic: FuncId,
+    ffi_arg: FuncId,
+    ffi_done: FuncId,
+    ffi_str: FuncId,
+    ffi_struct_in: FuncId,
+    ffi_struct_out: FuncId,
+    va_call: FuncId,
+}
+
+/// Whether C code may call back into coil while an extern call runs: an
+/// extern function takes a callback, or the program declares or invokes
+/// through `ffi::declare` / `ffi::invoke`, whose signatures only the run
+/// knows. A callback a library kept may run during any later call.
+fn may_call_back(bodies: &[NativeBody]) -> bool {
+    // Module setup declares each extern function: its callbacks are the
+    // extern calls'.
+    let setup = |b: &NativeBody| b.name.ends_with("__module_setup");
+    bodies.iter().any(|b| {
+        b.mir.blocks.iter().flat_map(|blk| &blk.insts).any(|i| match i {
+            MirInst::ExternCall { sig, .. } => sig.params.iter().any(|&t| t & 0xFFFF == common::tag::CALLBACK),
+            MirInst::Ffi { op: compiler::native_mir::MirFfiOp::Invoke, .. } => true,
+            MirInst::Ffi { op: compiler::native_mir::MirFfiOp::Declare, .. } => !setup(b),
+            _ => false,
+        })
+    })
+}
+
+/// How a direct extern call passes one argument.
+#[derive(Clone, Copy)]
+enum CArg {
+    /// The word as this C type.
+    Word(Type),
+    /// The pointer [`machine::native::coil_native_ffi_arg`] makes of the word
+    /// (`FFI_ARG_*`).
+    Ptr(u64),
+    /// A struct by value: struct `id`'s C bytes
+    /// ([`machine::native::coil_native_ffi_struct_in`]) passed `how`, from a
+    /// buffer of `size` bytes (a multiple of 8).
+    Struct { id: u32, size: u32, how: SPass },
+}
+
+/// Where a struct argument's bytes go.
+#[derive(Clone, Copy)]
+enum SPass {
+    /// In registers: its first `n` eightbytes, each loaded as that type.
+    Regs([Type; 4], u8),
+    /// Copied onto the stack by the call (x86-64 System V's memory class).
+    Stack,
+    /// A pointer to the caller's copy (AArch64 and Windows x64, when large).
+    Ref,
+}
+
+/// What a direct extern call's C result is.
+#[derive(Clone, Copy)]
+enum CRet {
+    Void,
+    /// A word of this C type (`int`, `float`, `ptr`).
+    Word(Type),
+    /// A C `bool`: any nonzero byte is `true`.
+    Bool,
+    /// A C string, made a coil string ([`machine::native::coil_native_ffi_str`]).
+    Str,
+    /// A struct by value, made a record of struct `id`
+    /// ([`machine::native::coil_native_ffi_struct_out`]): in registers (the
+    /// eightbytes as these types), or (`n` `0`) written through a hidden
+    /// pointer to a buffer of `size` bytes.
+    Struct { id: u32, size: u32, regs: [Type; 4], n: u8 },
+}
+
+/// How a direct call to a variadic C function passes the arguments after
+/// the declared ones (`...`), beyond what a fixed call does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CVa {
+    /// As declared ones: AArch64's AAPCS64, and Windows x64 with `float`
+    /// arguments in the integer registers (the `CArg`s say so).
+    Plain,
+    /// x86-64 System V: `al` holds an upper bound of the vector registers
+    /// used. The call goes through [`machine::native::coil_native_va_call`],
+    /// which sets it, with `pad` zero words and the C function's address
+    /// after the arguments (so the address is in `r9`).
+    Thunk { pad: u8 },
+    /// Apple arm64: every variadic argument in an 8-byte stack slot. `gpad`
+    /// integer and `fpad` floating-point zero words after the declared
+    /// arguments use up the registers left.
+    Stack { gpad: u8, fpad: u8 },
+}
+
+/// The C calling convention a direct extern call follows, as far as
+/// passing structs by value and variadic arguments differs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CAbi {
+    /// x86-64 System V (Linux, macOS, the BSDs).
+    SysV64,
+    /// Windows x64.
+    Win64,
+    /// AArch64 (AAPCS64, and Apple's variant of it, which passes structs
+    /// the same way and variadic arguments on the stack).
+    Arm64 { apple: bool },
+    /// Anything else: struct calls go through the runtime.
+    Other,
+}
+
+impl CAbi {
+    fn of(isa: &dyn cranelift_codegen::isa::TargetIsa) -> Self {
+        match (isa.name(), isa.default_call_conv()) {
+            ("x64", CallConv::SystemV) => Self::SysV64,
+            ("x64", CallConv::WindowsFastcall) => Self::Win64,
+            ("aarch64", CallConv::SystemV) => Self::Arm64 { apple: false },
+            ("aarch64", CallConv::AppleAarch64) => Self::Arm64 { apple: true },
+            _ => Self::Other,
+        }
+    }
+
+    /// Argument registers: general purpose and floating point.
+    fn arg_regs(self) -> (usize, usize) {
+        match self {
+            Self::SysV64 => (6, 8),
+            Self::Arm64 { .. } => (8, 8),
+            Self::Win64 | Self::Other => (4, 4),
+        }
+    }
+}
+
+/// A struct's C shape for a call: its eightbytes' types when it travels in
+/// registers (`float` eightbytes in floating-point ones), and whether it is
+/// a homogeneous float aggregate (AArch64: one `double` register per
+/// field). `None`: a field a direct call does not place (a string, a
+/// pointer, a callback) or an empty struct.
+fn c_struct_shape(st: &compiler::native_mir::MirCStruct) -> Option<(Vec<Type>, bool)> {
+    use common::tag;
+    if st.size == 0 || st.fields.is_empty() {
+        return None;
+    }
+    let plain = |t: u32| matches!(t, tag::INT | tag::FLOAT | tag::BOOL | tag::INT8 | tag::INT16 | tag::INT32 | tag::UINT8 | tag::UINT16 | tag::UINT32 | tag::UINT64);
+    if !st.fields.iter().all(|&(_, t)| plain(t)) {
+        return None;
+    }
+    let words = st.size.div_ceil(8) as usize;
+    let eightbytes = (0..words)
+        .map(|w| {
+            let lo = (w * 8) as u32;
+            let all_float = st.fields.iter().filter(|&&(off, _)| off >= lo && off < lo + 8).all(|&(_, t)| t == tag::FLOAT);
+            if all_float { types::F64 } else { types::I64 }
+        })
+        .collect();
+    let hfa = st.fields.len() <= 4 && st.fields.iter().all(|&(_, t)| t == tag::FLOAT);
+    Some((eightbytes, hfa))
+}
+
+fn regs_of(tys: &[Type]) -> [Type; 4] {
+    let mut out = [types::I64; 4];
+    out[..tys.len()].copy_from_slice(tys);
+    out
+}
+
+/// How a direct call passes an extern call's arguments and takes its
+/// result: `int`, `float`, `bool`, `string`, byte views and buffers, `ptr`
+/// and (on x86-64 and AArch64) structs of numbers and bools by value;
+/// `int`, `float`, `bool`, `ptr`, `string`, such structs and `void`
+/// results; a variadic function's arguments after the declared ones
+/// (`...`) as C's default promotions make them, but for structs, with the
+/// [`CVa`] the convention needs. `None`: it has another struct, a
+/// callback or a sized integer, or (x86-64) a variadic call uses every
+/// integer register, and goes through the runtime.
+fn direct_extern(sig: &compiler::native_mir::MirExternSig, abi: CAbi) -> Option<(Vec<CArg>, CRet, Option<CVa>)> {
+    use common::tag;
+    use machine::native::{FFI_ARG_BYTES, FFI_ARG_CONST_BYTES, FFI_ARG_CSTR, FFI_ARG_PTR};
+    // A variadic call's tags name every argument; the declared ones first.
+    let tail = match &sig.variadic {
+        Some(tags) => Some(tags.get(sig.params.len()..)?),
+        None => None,
+    };
+    let ret = match common::decode_tag_operand(sig.ret) {
+        (tag::VOID, _) => CRet::Void,
+        (tag::INT | tag::PTR, _) => CRet::Word(types::I64),
+        (tag::FLOAT, _) => CRet::Word(types::F64),
+        (tag::BOOL, _) => CRet::Bool,
+        (tag::STRING, _) => CRet::Str,
+        (tag::STRUCT, id) => {
+            let st = sig.struct_layout(id)?;
+            let (words, hfa) = c_struct_shape(st)?;
+            let size = st.size.next_multiple_of(8);
+            let regs = match abi {
+                CAbi::SysV64 if st.size <= 16 => words,
+                CAbi::Arm64 { .. } if hfa => vec![types::F64; st.fields.len()],
+                CAbi::Arm64 { .. } if st.size <= 16 => vec![types::I64; words.len()],
+                CAbi::Win64 if matches!(st.size, 1 | 2 | 4 | 8) => vec![types::I64],
+                CAbi::SysV64 | CAbi::Arm64 { .. } => Vec::new(),
+                _ => return None,
+            };
+            CRet::Struct { id, size, regs: regs_of(&regs), n: regs.len() as u8 }
+        }
+        _ => return None,
+    };
+    // The registers left as the arguments take them, for a struct that
+    // must have all its eightbytes in registers or none.
+    let (mut gprs, mut fprs) = abi.arg_regs();
+    if matches!(ret, CRet::Struct { n: 0, .. }) && abi == CAbi::SysV64 {
+        // The hidden result pointer (AArch64 has x8 for it).
+        gprs -= 1;
+    }
+    // The sized integers (`int32`, `uint8`, …) have no word type in an
+    // `extern` block yet (#2886): no call of one reaches native code.
+    let mut params = Vec::with_capacity(sig.params.len());
+    for &t in &sig.params {
+        let take = |gprs: &mut usize, fprs: &mut usize, ty: Type| {
+            let r = if ty == types::F64 { fprs } else { gprs };
+            *r = r.saturating_sub(1);
+        };
+        let p = match common::decode_tag_operand(t) {
+            (tag::INT, _) => CArg::Word(types::I64),
+            (tag::FLOAT, _) => CArg::Word(types::F64),
+            (tag::BOOL, _) => CArg::Word(types::I8),
+            (tag::STRING, _) => CArg::Ptr(FFI_ARG_CSTR),
+            (tag::CONST_BYTES, _) => CArg::Ptr(FFI_ARG_CONST_BYTES),
+            (tag::BYTES, _) => CArg::Ptr(FFI_ARG_BYTES),
+            (tag::PTR, _) => CArg::Ptr(FFI_ARG_PTR),
+            (tag::STRUCT, id) => {
+                let st = sig.struct_layout(id)?;
+                let (words, hfa) = c_struct_shape(st)?;
+                let size = st.size.next_multiple_of(8);
+                let regs = |tys: &[Type], gprs: &mut usize, fprs: &mut usize| {
+                    let ints = tys.iter().filter(|&&t| t != types::F64).count();
+                    let floats = tys.len() - ints;
+                    (ints <= *gprs && floats <= *fprs).then(|| {
+                        *gprs -= ints;
+                        *fprs -= floats;
+                        SPass::Regs(regs_of(tys), tys.len() as u8)
+                    })
+                };
+                let how = match abi {
+                    // All of a small struct's eightbytes in registers, or
+                    // the whole of it on the stack.
+                    CAbi::SysV64 if st.size <= 16 => regs(&words, &mut gprs, &mut fprs).unwrap_or(SPass::Stack),
+                    CAbi::SysV64 => SPass::Stack,
+                    // One that does not fit in the registers left would
+                    // go on the stack, which this path does not lay out.
+                    CAbi::Arm64 { .. } if hfa => regs(&vec![types::F64; st.fields.len()], &mut gprs, &mut fprs)?,
+                    CAbi::Arm64 { .. } if st.size <= 16 => regs(&vec![types::I64; words.len()], &mut gprs, &mut fprs)?,
+                    CAbi::Win64 if matches!(st.size, 1 | 2 | 4 | 8) => SPass::Regs(regs_of(&[types::I64]), 1),
+                    CAbi::Arm64 { .. } | CAbi::Win64 => {
+                        gprs = gprs.saturating_sub(1);
+                        SPass::Ref
+                    }
+                    CAbi::Other => return None,
+                };
+                params.push(CArg::Struct { id, size, how });
+                continue;
+            }
+            _ => return None,
+        };
+        match p {
+            CArg::Word(ty) => take(&mut gprs, &mut fprs, ty),
+            _ => take(&mut gprs, &mut fprs, types::I64),
+        }
+        params.push(p);
+    }
+    let Some(tail) = tail else {
+        return Some((params, ret, None));
+    };
+    // Apple arm64: the registers the declared arguments leave are padded.
+    let (gpad, fpad) = (gprs as u8, fprs as u8);
+    for &t in tail {
+        let p = match common::decode_tag_operand(t) {
+            // A `bool` is promoted to `int`.
+            (tag::INT | tag::BOOL, _) => CArg::Word(types::I64),
+            // Windows x64 reads a variadic `double` from the integer
+            // register of its position.
+            (tag::FLOAT, _) if abi == CAbi::Win64 => CArg::Word(types::I64),
+            (tag::FLOAT, _) => CArg::Word(types::F64),
+            (tag::STRING, _) => CArg::Ptr(FFI_ARG_CSTR),
+            (tag::CONST_BYTES, _) => CArg::Ptr(FFI_ARG_CONST_BYTES),
+            (tag::BYTES, _) => CArg::Ptr(FFI_ARG_BYTES),
+            (tag::PTR, _) => CArg::Ptr(FFI_ARG_PTR),
+            _ => return None,
+        };
+        let ty = match p {
+            CArg::Word(ty) => ty,
+            _ => types::I64,
+        };
+        let r = if ty == types::F64 { &mut fprs } else { &mut gprs };
+        *r = r.saturating_sub(1);
+        params.push(p);
+    }
+    let va = match abi {
+        // The C function's address takes an integer register of its own.
+        CAbi::SysV64 if gprs >= 1 => CVa::Thunk { pad: gprs as u8 - 1 },
+        CAbi::Arm64 { apple: true } => CVa::Stack { gpad, fpad },
+        CAbi::Arm64 { apple: false } | CAbi::Win64 => CVa::Plain,
+        CAbi::SysV64 | CAbi::Other => return None,
+    };
+    Some((params, ret, Some(va)))
 }
 
 fn cl_ty(t: MirTy) -> Type {
@@ -1789,6 +2262,13 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     s1v2.params.push(AbiParam::new(types::I64));
     let collect = trampoline(module, "coil_native_collect", &s1v2, &mut tramps)?;
     let panic = module.declare_function("coil_native_panic", Linkage::Import, &s2).map_err(e)?;
+    let ffi_arg = module.declare_function("coil_native_ffi_arg", Linkage::Import, &s4).map_err(e)?;
+    let ffi_done = module.declare_function("coil_native_ffi_done", Linkage::Import, &s1v2).map_err(e)?;
+    let ffi_str = module.declare_function("coil_native_ffi_str", Linkage::Import, &s2).map_err(e)?;
+    let ffi_struct_in = module.declare_function("coil_native_ffi_struct_in", Linkage::Import, &s4).map_err(e)?;
+    let ffi_struct_out = module.declare_function("coil_native_ffi_struct_out", Linkage::Import, &s3).map_err(e)?;
+    // Its signature is each call's own (it jumps to the C function).
+    let va_call = module.declare_function("coil_native_va_call", Linkage::Import, &module.make_signature()).map_err(e)?;
     Ok(Ids {
         tramps,
         imp,
@@ -1834,6 +2314,12 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         gen_yield,
         collect,
         panic,
+        ffi_arg,
+        ffi_done,
+        ffi_str,
+        ffi_struct_in,
+        ffi_struct_out,
+        va_call,
     })
 }
 
@@ -1904,6 +2390,13 @@ struct Lower<'a> {
     fn_entry_pair: FuncRef,
     /// [`entry_signature`], for a call of a body's entry by address.
     entry_sig: cranelift_codegen::ir::SigRef,
+    /// The platform's C calling convention, for a direct extern call.
+    c_conv: CallConv,
+    /// How that convention passes structs by value.
+    c_abi: CAbi,
+    /// Extern calls may be direct: no C callback can run coil code
+    /// ([`Plan::ffi_callbacks`]).
+    direct_externs: bool,
     cow: FuncRef,
     cow_field: FuncRef,
     alloc: FuncRef,
@@ -1930,6 +2423,12 @@ struct Lower<'a> {
     gen_yield: FuncRef,
     collect: FuncRef,
     panic: FuncRef,
+    ffi_arg: FuncRef,
+    ffi_done: FuncRef,
+    ffi_str: FuncRef,
+    ffi_struct_in: FuncRef,
+    ffi_struct_out: FuncRef,
+    va_call: FuncRef,
     /// This body's index into the plan's bodies.
     body_index: Option<usize>,
     /// The body may run while an object is pinned ([`pin_reach`]): its
@@ -1937,6 +2436,13 @@ struct Lower<'a> {
     pins: bool,
     /// Lowering a cleanup pad: its homes are behind its second parameter.
     is_pad: bool,
+    /// Inside a native lane loop whose every element access was checked in
+    /// front of it ([`Lower::lanes_guard`]): loads read in place unchecked.
+    lanes_checked: bool,
+    /// The arrays whose word view an op before this one may have dropped
+    /// ([`views_dropped_in`]): only their element accesses take a dropped
+    /// view again.
+    maybe_dropped: HashSet<ValueId>,
     /// Where the homes live: this frame's slot (`[next, n, words...]` is
     /// not needed: they are copied out at a panic), or the pad's pointer.
     homes_slot: Option<cranelift_codegen::ir::StackSlot>,
@@ -2088,6 +2594,12 @@ impl<'a> Lower<'a> {
         let gen_yield = module.declare_func_in_func(ids.gen_yield, func);
         let collect = module.declare_func_in_func(ids.collect, func);
         let panic = module.declare_func_in_func(ids.panic, func);
+        let ffi_arg = module.declare_func_in_func(ids.ffi_arg, func);
+        let ffi_done = module.declare_func_in_func(ids.ffi_done, func);
+        let ffi_str = module.declare_func_in_func(ids.ffi_str, func);
+        let ffi_struct_in = module.declare_func_in_func(ids.ffi_struct_in, func);
+        let ffi_struct_out = module.declare_func_in_func(ids.ffi_struct_out, func);
+        let va_call = module.declare_func_in_func(ids.va_call, func);
         let defer = module.declare_func_in_func(ids.defer, func);
         let claim = module.declare_func_in_func(ids.claim, func);
         let pad_refs = ids.pad.iter().map(|(&i, &id)| (i, module.declare_func_in_func(id, func))).collect();
@@ -2123,6 +2635,9 @@ impl<'a> Lower<'a> {
             fn_entry,
             fn_entry_pair,
             entry_sig,
+            c_conv: module.isa().default_call_conv(),
+            c_abi: CAbi::of(module.isa()),
+            direct_externs: !plan.ffi_callbacks,
             cow,
             cow_field,
             alloc,
@@ -2149,9 +2664,17 @@ impl<'a> Lower<'a> {
         gen_yield,
             collect,
             panic,
+            ffi_arg,
+            ffi_done,
+            ffi_str,
+            ffi_struct_in,
+            ffi_struct_out,
+        va_call,
             body_index: None,
             pins: false,
             is_pad: false,
+            lanes_checked: false,
+            maybe_dropped: HashSet::new(),
             homes_slot: None,
             homes_ptr: None,
             heap_homes: Vec::new(),
@@ -2357,10 +2880,19 @@ impl<'a> Lower<'a> {
     /// call), when other values may name the same array: every view reads
     /// through the helpers until its value is defined again.
     fn drop_views(&mut self) {
-        let views: Vec<_> = self.views.values().chain(self.str_views.values()).chain(self.lane_views.values()).map(|v| v.0).collect();
+        let views: Vec<_> = self.str_views.values().chain(self.lane_views.values()).map(|v| v.0).collect();
         let zero = self.b.ins().iconst(types::I64, 0);
         for ok in views {
             self.b.def_var(ok, zero);
+        }
+        // A word view is taken again at its next element access
+        // ([`Self::ensure_view`]), not read through the helpers from here on.
+        let words: Vec<_> = self.views.values().map(|v| v.0).collect();
+        if !words.is_empty() {
+            let unknown = self.b.ins().iconst(types::I64, VIEW_UNKNOWN);
+            for ok in words {
+                self.b.def_var(ok, unknown);
+            }
         }
     }
 
@@ -2405,6 +2937,9 @@ impl<'a> Lower<'a> {
         let hi = self.coerce(hi, types::I64);
         let acc0 = self.get(f, *init);
         let acc0 = self.coerce(acc0, lane_ty);
+        let mut refs = Vec::new();
+        lane_refs(term, false, &mut refs);
+        self.lanes_guard(f, &refs, lo, hi, slow);
         self.b.ins().jump(lp, &[lo.into(), acc0.into()]);
         self.b.switch_to_block(lp);
         let p = self.b.block_params(lp)[0];
@@ -2412,7 +2947,9 @@ impl<'a> Lower<'a> {
         let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, hi);
         self.b.ins().brif(done, exit, &[acc.into()], body, &[]);
         self.b.switch_to_block(body);
+        self.lanes_checked = true;
         let x = self.lane(f, term, p, slow);
+        self.lanes_checked = false;
         let x = self.coerce(x, lane_ty);
         let next = match *fold {
             simd::REDUCE_ADD if float => self.b.ins().fadd(acc, x),
@@ -2450,6 +2987,123 @@ impl<'a> Lower<'a> {
             self.set(f, *p, zero);
         }
         Ok(true)
+    }
+
+    /// A `VecLoop` of stores as a native loop, one lane at a time: every
+    /// value of lane `p` is read and computed first, then each store's
+    /// element is checked in its view, then all are stored, which is the
+    /// scalar loop's order (`vec_loop` takes only bodies whose reads come
+    /// before their stores). A trap, or an element outside its view, leaves
+    /// with lane `p` untouched and runs the rest, from `p`, on the runtime's
+    /// lane code. `false`: not such a loop (nothing emitted).
+    fn native_store(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
+        use compiler::native_mir::VecLoopKind;
+        use common::dense;
+        let MirInst::VecLoop { dest, pos, from, to, kind: VecLoopKind::Store { stores } } = inst else {
+            return Ok(false);
+        };
+        if stores.is_empty() || pos.is_some_and(|p| value_used(f, p)) {
+            return Ok(false);
+        }
+        for (array, _, ty, value) in stores {
+            if !matches!(*ty, dense::TY_I64 | dense::TY_F64) || !self.views.contains_key(array) || !self.lanes_native(value, 0) {
+                return Ok(false);
+            }
+        }
+        let lp = self.b.create_block();
+        self.b.append_block_param(lp, types::I64);
+        let body = self.b.create_block();
+        let slow = self.b.create_block();
+        let whole = self.b.create_block();
+        let exit = self.b.create_block();
+        let lo = self.get(f, *from);
+        let lo = self.coerce(lo, types::I64);
+        let hi = self.get(f, *to);
+        let hi = self.coerce(hi, types::I64);
+        let mut refs = Vec::new();
+        for (array, off, _, value) in stores {
+            lane_refs(value, false, &mut refs);
+            refs.push((*array, *off, true));
+        }
+        self.lanes_guard(f, &refs, lo, hi, whole);
+        self.b.ins().jump(lp, &[lo.into()]);
+        self.b.switch_to_block(lp);
+        let p = self.b.block_params(lp)[0];
+        let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, hi);
+        self.b.ins().brif(done, exit, &[], body, &[]);
+        self.b.switch_to_block(body);
+        self.lanes_checked = true;
+        let mut values = Vec::with_capacity(stores.len());
+        for (_, _, _, value) in stores {
+            let x = self.lane(f, value, p, slow);
+            values.push(self.coerce(x, types::I64));
+        }
+        self.lanes_checked = false;
+        for ((array, off, _, _), w) in stores.iter().zip(values) {
+            let o = self.get(f, *off);
+            let o = self.coerce(o, types::I64);
+            let i = self.b.ins().iadd(p, o);
+            let at = self.element(*array, i);
+            self.b.ins().store(MemFlagsData::trusted(), w, at, 0);
+        }
+        let p1 = self.b.ins().iadd_imm_s(p, 1);
+        self.b.ins().jump(lp, &[p1.into()]);
+        // A trap in lane `p`: the runtime's lane code from `p` on.
+        self.b.switch_to_block(slow);
+        self.vector_lanes_at(f, inst, Some(p));
+        self.drop_views();
+        self.b.ins().jump(exit, &[]);
+        // An access the guard could not show in place: the whole op there.
+        self.b.switch_to_block(whole);
+        self.vector_lanes_at(f, inst, None);
+        self.drop_views();
+        self.b.ins().jump(exit, &[]);
+        self.b.switch_to_block(exit);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.set(f, *dest, zero);
+        if let Some(p) = pos {
+            self.set(f, *p, zero);
+        }
+        Ok(true)
+    }
+
+    /// In front of a native lane loop over lanes `lo .. hi`: take each
+    /// array's view and check that every access `(array, off, store)` of
+    /// every lane is in it (a store's through a plain view), or branch to
+    /// `fail`. The loop's body then reads and stores in place unchecked.
+    fn lanes_guard(&mut self, f: &MirFunc, refs: &[(ValueId, ValueId, bool)], lo: cranelift_codegen::ir::Value, hi: cranelift_codegen::ir::Value, fail: Block) {
+        let mut seen = HashSet::new();
+        for &(array, _, _) in refs {
+            if seen.insert(array) {
+                self.ensure_view(f, array);
+            }
+        }
+        let mut all = self.b.ins().iconst(types::I8, 1);
+        for &(array, off, store) in refs {
+            let (ok, _, len) = self.views[&array];
+            let ok = self.b.use_var(ok);
+            let len = self.b.use_var(len);
+            let has = if store {
+                self.b.ins().icmp_imm_s(IntCC::Equal, ok, machine::VIEW_PLAIN as i64)
+            } else {
+                self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0)
+            };
+            let o = self.get(f, off);
+            let o = self.coerce(o, types::I64);
+            let (first, of1) = self.b.ins().sadd_overflow(lo, o);
+            let (last, of2) = self.b.ins().sadd_overflow(hi, o);
+            let of = self.b.ins().bor(of1, of2);
+            let fine = self.b.ins().icmp_imm_s(IntCC::Equal, of, 0);
+            let ge = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, first, 0);
+            let le = self.b.ins().icmp(IntCC::SignedLessThanOrEqual, last, len);
+            let a = self.b.ins().band(has, fine);
+            let b = self.b.ins().band(ge, le);
+            let c = self.b.ins().band(a, b);
+            all = self.b.ins().band(all, c);
+        }
+        let go = self.b.create_block();
+        self.b.ins().brif(all, go, &[], fail, &[]);
+        self.b.switch_to_block(go);
     }
 
     /// Whether every node of `e` lowers to native lane code: word loads of
@@ -2495,12 +3149,20 @@ impl<'a> Lower<'a> {
                 self.coerce(x, if *ty == dense::TY_F64 { types::F64 } else { types::I64 })
             }
             VecExpr::Index => p,
+            VecExpr::Load { array, off, ty } if self.lanes_checked => {
+                let o = self.get(f, *off);
+                let o = int(self, o);
+                let i = self.b.ins().iadd(p, o);
+                let at = self.element(*array, i);
+                let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                if *ty == dense::TY_F64 { flt(self, w) } else { w }
+            }
             VecExpr::Load { array, off, ty } => {
                 let o = self.get(f, *off);
                 let o = int(self, o);
                 let (i, of) = self.b.ins().sadd_overflow(p, o);
                 self.leave_if(of, slow);
-                let (fast, out, _join) = self.in_view(*array, i, false);
+                let (fast, out, _join) = self.in_view(f, *array, i, false);
                 self.b.switch_to_block(out);
                 self.b.ins().jump(slow, &[]);
                 self.b.switch_to_block(fast);
@@ -2813,6 +3475,25 @@ impl<'a> Lower<'a> {
                     }
                     self.lane_views.insert(array, vars);
                 }
+                // A word `VecLoop`'s arrays: its native loop reads and
+                // stores in place (`native_reduce`, `native_store`).
+                if let MirInst::VecLoop { kind, .. } = inst {
+                    let mut arrays = Vec::new();
+                    vec_loop_arrays(kind, &mut arrays);
+                    for (array, store) in arrays {
+                        if store {
+                            self.stored.insert(array);
+                            if !self.view_cards.contains_key(&array) {
+                                let v = self.b.declare_var(types::I64);
+                                self.view_cards.insert(array, v);
+                            }
+                        }
+                        if !self.views.contains_key(&array) {
+                            let vars = (self.b.declare_var(types::I64), self.b.declare_var(types::I64), self.b.declare_var(types::I64));
+                            self.views.insert(array, vars);
+                        }
+                    }
+                }
                 let array = match inst {
                     MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } => *array,
                     MirInst::StoreIndex { array, .. } => {
@@ -2917,10 +3598,13 @@ impl<'a> Lower<'a> {
         };
         let first = self.blocks[&f.entry];
         self.b.ins().jump(first, &[]);
+        let viewed: HashSet<ValueId> = self.views.keys().copied().collect();
+        let dropped_in = views_dropped_in(f, &viewed);
 
         for (bi, blk) in f.blocks.iter().enumerate() {
             let cl = self.blocks[&blk.id];
             self.b.switch_to_block(cl);
+            self.maybe_dropped = dropped_in.get(&blk.id).cloned().unwrap_or_default();
             if spins.contains(&blk.id) {
                 let sp = self.b.ins().get_stack_pointer(types::I64);
                 // An atomic load: another thread writes the limit, and a
@@ -2970,6 +3654,7 @@ impl<'a> Lower<'a> {
                 }
                 self.inst(f, inst)?;
                 self.op_words.clear();
+                drop_transfer(inst, &viewed, &mut self.maybe_dropped);
             }
             self.live = None;
             self.at(None);
@@ -3279,7 +3964,7 @@ impl<'a> Lower<'a> {
             MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
                 // A pure reduce compiles to a native loop; the rest runs the
                 // runtime's `VScan` / `VLoop` kernels (`coil_native_vector`).
-                if self.native_reduce(f, inst)? {
+                if self.native_reduce(f, inst)? || self.native_store(f, inst)? {
                     return Ok(());
                 }
                 if let (MirInst::ByteScan { dest, .. }, Some(w)) = (inst, self.scan_in_place(f, inst)) {
@@ -3314,6 +3999,15 @@ impl<'a> Lower<'a> {
                 self.pop_call(prev);
                 self.pop_roots(roots);
                 self.bail_on_helper();
+                self.drop_views();
+                self.set(f, *dest, w);
+                self.view_of(f, *dest);
+            }
+            MirInst::ExternCall { dest, sig, args } => {
+                let w = match direct_extern(sig, self.c_abi).filter(|_| self.direct_externs) {
+                    Some((params, ret, va)) => self.direct_extern_call(f, *dest, sig, args, &params, ret, va),
+                    None => self.runtime_extern_call(f, *dest, sig, args),
+                };
                 self.drop_views();
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
@@ -3385,7 +4079,7 @@ impl<'a> Lower<'a> {
             MirInst::Index { dest, array, index, .. } => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
-                let (fast, slow, join) = self.in_view(*array, i, true);
+                let (fast, slow, join) = self.in_view(f, *array, i, true);
                 self.b.switch_to_block(fast);
                 let at = self.element(*array, i);
                 let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
@@ -3401,8 +4095,10 @@ impl<'a> Lower<'a> {
             }
             MirInst::ArrayLen { dest, array } => {
                 let a = self.get(f, *array);
-                let (ok, _, len) = self.views[array];
-                let mut ok = self.b.use_var(ok);
+                let (ok_var, _, len) = self.views[array];
+                let ok = self.b.use_var(ok_var);
+                let ok = self.view_known(ok);
+                let mut ok = self.b.ins().uextend(types::I64, ok);
                 let mut n = self.b.use_var(len);
                 // A lane array's element count, from its lane view.
                 if let Some(&(lane_ok, _, lane_len)) = self.lane_views.get(array) {
@@ -3420,7 +4116,26 @@ impl<'a> Lower<'a> {
                 self.b.ins().brif(ok, fast, &[], slow, &[]);
                 self.b.switch_to_block(fast);
                 self.b.ins().jump(join, &[n.into()]);
+                // A word view dropped since it was taken: take it again.
                 self.b.switch_to_block(slow);
+                let (refill, helper) = (self.b.create_block(), self.b.create_block());
+                if !self.maybe_dropped.contains(array) {
+                    self.b.ins().jump(helper, &[]);
+                    self.b.switch_to_block(refill);
+                    self.b.ins().jump(helper, &[]);
+                } else {
+                let state = self.b.use_var(ok_var);
+                let unknown = self.b.ins().icmp_imm_s(IntCC::Equal, state, VIEW_UNKNOWN);
+                self.b.ins().brif(unknown, refill, &[], helper, &[]);
+                self.b.set_cold_block(refill);
+                self.b.switch_to_block(refill);
+                self.fill_view(f, *array);
+                let state = self.b.use_var(ok_var);
+                let known = self.view_known(state);
+                let n = self.b.use_var(len);
+                self.b.ins().brif(known, join, &[n.into()], helper, &[]);
+                }
+                self.b.switch_to_block(helper);
                 let call = self.b.ins().call(self.len, &[a]);
                 let w = self.b.inst_results(call)[0];
                 self.b.ins().jump(join, &[w.into()]);
@@ -3439,7 +4154,7 @@ impl<'a> Lower<'a> {
                 let i = self.get(f, *index);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
-                let (fast, slow, join) = self.in_view_as(*array, i, false, true);
+                let (fast, slow, join) = self.in_view_as(f, *array, i, false, true);
                 // In place.
                 self.b.switch_to_block(fast);
                 let at = self.element(*array, i);
@@ -4117,7 +4832,223 @@ impl<'a> Lower<'a> {
 
     /// [`Self::words_slot`] with the constant `last` after the words.
     fn words_slot_with(&mut self, f: &MirFunc, vs: &[ValueId], last: Option<i64>) -> cranelift_codegen::ir::Value {
-        let n = vs.len() + usize::from(last.is_some());
+        self.words_slot_consts(f, vs, last.as_slice())
+    }
+
+    /// An extern call on the runtime's libffi call (`coil_native_ffi`),
+    /// with no address: its result word.
+    fn runtime_extern_call(&mut self, f: &MirFunc, dest: ValueId, sig: &compiler::native_mir::MirExternSig, args: &[ValueId]) -> cranelift_codegen::ir::Value {
+        let words: Vec<ValueId> = args.iter().take(2).chain(args.iter().skip(3)).copied().collect();
+        let tags: Vec<i64> = sig.variadic.iter().flatten().map(|&t| i64::from(t)).collect();
+        let operand = (words.len() as u64 - 2) | if sig.variadic.is_some() { 1 << 16 } else { 0 };
+        let o = self.b.ins().iconst(types::I64, i64::from(common::FFI_OP_CALL));
+        let x = self.b.ins().iconst(types::I64, operand as i64);
+        let p = self.words_slot_consts(f, &words, &tags);
+        let n = self.b.ins().iconst(types::I64, (words.len() + tags.len()) as i64);
+        let roots = self.push_roots(f);
+        let prev = self.push_call();
+        let call = self.b.ins().call(self.ffi, &[self.ctx, o, x, p, n]);
+        let w = self.b.inst_results(call)[0];
+        self.pop_call(prev);
+        self.pop_roots(roots);
+        self.bail_on_helper();
+        self.coerce(w, cl_ty(ty_of(f, dest)))
+    }
+
+    /// An extern call straight to the C function at `args[2]` (its
+    /// address static), on `args[3..]` as `params`: its result word. No
+    /// coil code runs and nothing collects during it (the program makes no
+    /// callback), so it needs no roots. A pointer or struct argument the
+    /// runtime must make (a copy) sends the call there instead.
+    #[allow(clippy::too_many_arguments)]
+    fn direct_extern_call(
+        &mut self,
+        f: &MirFunc,
+        dest: ValueId,
+        sig: &compiler::native_mir::MirExternSig,
+        args: &[ValueId],
+        params: &[CArg],
+        ret: CRet,
+        va: Option<CVa>,
+    ) -> cranelift_codegen::ir::Value {
+        use cranelift_codegen::ir::{ArgumentPurpose, StackSlotData, StackSlotKind};
+        let words = &args[3..];
+        let ptrs: Vec<usize> = (0..params.len()).filter(|&i| matches!(params[i], CArg::Ptr(_))).collect();
+        let structs: Vec<usize> = (0..params.len()).filter(|&i| matches!(params[i], CArg::Struct { .. })).collect();
+        let want = cl_ty(ty_of(f, dest));
+        let (fast, join) = (self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(join, want);
+        let mut made = HashMap::new();
+        let mut packed = HashMap::new();
+        if !ptrs.is_empty() || !structs.is_empty() {
+            let mut ok = self.b.ins().iconst(types::I64, 1);
+            if !ptrs.is_empty() {
+                let slot = self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (ptrs.len() * 8) as u32, 3));
+                for (k, &i) in ptrs.iter().enumerate() {
+                    let CArg::Ptr(kind) = params[i] else { continue };
+                    let w = self.get(f, words[i]);
+                    let w = self.coerce(w, types::I64);
+                    let kind_v = self.b.ins().iconst(types::I64, kind as i64);
+                    let out = self.b.ins().stack_addr(types::I64, slot, (k * 8) as i32);
+                    let call = self.b.ins().call(self.ffi_arg, &[self.ctx, kind_v, w, out]);
+                    let r = self.b.inst_results(call)[0];
+                    ok = self.b.ins().band(ok, r);
+                    made.insert(i, (slot, k));
+                    // A buffer lent in place is no other argument too (the
+                    // runtime copies each).
+                    if kind == machine::native::FFI_ARG_CONST_BYTES || kind == machine::native::FFI_ARG_BYTES {
+                        for (j, &other) in words.iter().enumerate() {
+                            if j != i {
+                                let o = self.get(f, other);
+                                let o = self.coerce(o, types::I64);
+                                let differ = self.b.ins().icmp(IntCC::NotEqual, w, o);
+                                let differ = self.b.ins().uextend(types::I64, differ);
+                                ok = self.b.ins().band(ok, differ);
+                            }
+                        }
+                    }
+                }
+            }
+            // Each struct argument's C bytes, in a buffer of its own
+            // (16-byte aligned, as Windows x64 wants a copy it is lent).
+            for &i in &structs {
+                let CArg::Struct { id, size, .. } = params[i] else { continue };
+                let slot = self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size, 4));
+                let w = self.get(f, words[i]);
+                let w = self.coerce(w, types::I64);
+                let id_v = self.b.ins().iconst(types::I64, i64::from(id));
+                let at = self.b.ins().stack_addr(types::I64, slot, 0);
+                let call = self.b.ins().call(self.ffi_struct_in, &[self.ctx, id_v, w, at]);
+                let r = self.b.inst_results(call)[0];
+                ok = self.b.ins().band(ok, r);
+                packed.insert(i, slot);
+            }
+            let slow = self.b.create_block();
+            self.b.ins().brif(ok, fast, &[], slow, &[]);
+            self.b.switch_to_block(slow);
+            let w = self.runtime_extern_call(f, dest, sig, args);
+            self.b.ins().jump(join, &[w.into()]);
+        } else {
+            self.b.ins().jump(fast, &[]);
+        }
+        self.b.switch_to_block(fast);
+        let mut csig = Signature::new(self.c_conv);
+        let mut cargs = Vec::with_capacity(params.len() + 1);
+        // A struct result too large for registers: C writes it through a
+        // hidden pointer, the first argument (x8 on AArch64).
+        let ret_slot = match ret {
+            CRet::Struct { size, .. } => Some(self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size.max(32), 4))),
+            _ => None,
+        };
+        if let (CRet::Struct { n: 0, .. }, Some(slot)) = (ret, ret_slot) {
+            csig.params.push(AbiParam::special(types::I64, ArgumentPurpose::StructReturn));
+            cargs.push(self.b.ins().stack_addr(types::I64, slot, 0));
+        }
+        let zero_words = |b: &mut FunctionBuilder, csig: &mut Signature, cargs: &mut Vec<_>, ty: Type, n: u8| {
+            for _ in 0..n {
+                csig.params.push(AbiParam::new(ty));
+                cargs.push(if ty == types::F64 { b.ins().f64const(0.0) } else { b.ins().iconst(types::I64, 0) });
+            }
+        };
+        for (i, (&a, p)) in words.iter().zip(params).enumerate() {
+            if let (Some(CVa::Stack { gpad, fpad }), true) = (va, i == sig.params.len()) {
+                zero_words(&mut self.b, &mut csig, &mut cargs, types::I64, gpad);
+                zero_words(&mut self.b, &mut csig, &mut cargs, types::F64, fpad);
+            }
+            match *p {
+                CArg::Ptr(_) => {
+                    csig.params.push(AbiParam::new(types::I64));
+                    let (slot, k) = made[&i];
+                    cargs.push(self.b.ins().stack_load(types::I64, types::I64, slot, (k * 8) as i32));
+                }
+                CArg::Word(t) => {
+                    csig.params.push(AbiParam::new(t));
+                    let w = self.get(f, a);
+                    cargs.push(match t {
+                        types::F64 => self.coerce(w, types::F64),
+                        types::I64 => self.coerce(w, types::I64),
+                        // A `bool` word is `0` or `1`: its low byte.
+                        _ => {
+                            let w = self.coerce(w, types::I64);
+                            self.b.ins().ireduce(t, w)
+                        }
+                    });
+                }
+                CArg::Struct { size, how, .. } => {
+                    let slot = packed[&i];
+                    match how {
+                        SPass::Regs(tys, n) => {
+                            for (k, &t) in tys.iter().take(n as usize).enumerate() {
+                                csig.params.push(AbiParam::new(t));
+                                cargs.push(self.b.ins().stack_load(types::I64, t, slot, (k * 8) as i32));
+                            }
+                        }
+                        SPass::Stack => {
+                            csig.params.push(AbiParam::special(types::I64, ArgumentPurpose::StructArgument(size)));
+                            cargs.push(self.b.ins().stack_addr(types::I64, slot, 0));
+                        }
+                        SPass::Ref => {
+                            csig.params.push(AbiParam::new(types::I64));
+                            cargs.push(self.b.ins().stack_addr(types::I64, slot, 0));
+                        }
+                    }
+                }
+            }
+        }
+        match ret {
+            CRet::Void => {}
+            CRet::Word(t) => csig.returns.push(AbiParam::new(t)),
+            CRet::Bool => csig.returns.push(AbiParam::new(types::I8)),
+            CRet::Str => csig.returns.push(AbiParam::new(types::I64)),
+            CRet::Struct { regs, n, .. } => csig.returns.extend(regs.iter().take(n as usize).map(|&t| AbiParam::new(t))),
+        }
+        let addr = self.get(f, args[2]);
+        let mut addr = self.coerce(addr, types::I64);
+        if let Some(CVa::Thunk { pad }) = va {
+            zero_words(&mut self.b, &mut csig, &mut cargs, types::I64, pad);
+            csig.params.push(AbiParam::new(types::I64));
+            cargs.push(addr);
+            addr = self.b.ins().func_addr(types::I64, self.va_call);
+        }
+        let csig = self.b.import_signature(csig);
+        let call = self.b.ins().call_indirect(csig, addr, &cargs);
+        let results: Vec<_> = self.b.inst_results(call).to_vec();
+        let r = results.first().copied();
+        let out = match (ret, r) {
+            (CRet::Bool, Some(r)) => {
+                let b = self.b.ins().icmp_imm_u(IntCC::NotEqual, r, 0);
+                self.b.ins().uextend(types::I64, b)
+            }
+            (CRet::Str, Some(r)) => {
+                let call = self.call_checked(self.ffi_str, &[self.ctx, r]);
+                self.b.inst_results(call)[0]
+            }
+            (CRet::Word(_), Some(r)) => r,
+            (CRet::Struct { id, .. }, _) => {
+                let slot = ret_slot.expect("a struct result has its buffer");
+                for (k, &w) in results.iter().enumerate() {
+                    self.b.ins().stack_store(types::I64, w, slot, (k * 8) as i32);
+                }
+                let id_v = self.b.ins().iconst(types::I64, i64::from(id));
+                let at = self.b.ins().stack_addr(types::I64, slot, 0);
+                let call = self.call_checked(self.ffi_struct_out, &[self.ctx, id_v, at]);
+                self.b.inst_results(call)[0]
+            }
+            _ => self.b.ins().iconst(types::I64, 0),
+        };
+        // A returned string may be an argument's copy: it is read first.
+        if params.iter().any(|p| matches!(p, CArg::Ptr(machine::native::FFI_ARG_CSTR))) {
+            self.b.ins().call(self.ffi_done, &[self.ctx]);
+        }
+        let out = self.coerce(out, want);
+        self.b.ins().jump(join, &[out.into()]);
+        self.b.switch_to_block(join);
+        self.b.block_params(join)[0]
+    }
+
+    /// [`Self::words_slot`] with the constants `tail` after the words.
+    fn words_slot_consts(&mut self, f: &MirFunc, vs: &[ValueId], tail: &[i64]) -> cranelift_codegen::ir::Value {
+        let n = vs.len() + tail.len();
         let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (n.max(1) * 8) as u32,
@@ -4128,9 +5059,9 @@ impl<'a> Lower<'a> {
             let x = self.coerce(x, types::I64);
             self.b.ins().stack_store(types::I64, x, slot, (i * 8) as i32);
         }
-        if let Some(c) = last {
+        for (i, &c) in tail.iter().enumerate() {
             let x = self.b.ins().iconst(types::I64, c);
-            self.b.ins().stack_store(types::I64, x, slot, (vs.len() * 8) as i32);
+            self.b.ins().stack_store(types::I64, x, slot, ((vs.len() + i) * 8) as i32);
         }
         self.b.ins().stack_addr(types::I64, slot, 0)
     }
@@ -4163,6 +5094,27 @@ impl<'a> Lower<'a> {
     /// Fill `v`'s view right after `v` is defined, when the body indexes it.
     fn view_of(&mut self, f: &MirFunc, v: ValueId) {
         self.lane_view_of(f, v);
+        self.fill_view(f, v);
+    }
+
+    /// Take `array`'s word view again when it was dropped (an op that may
+    /// move its storage ran since it was taken), in a cold block, so the
+    /// element accesses after a call or a push stay in place.
+    fn ensure_view(&mut self, f: &MirFunc, array: ValueId) {
+        let (ok, _, _) = self.views[&array];
+        let state = self.b.use_var(ok);
+        let unknown = self.b.ins().icmp_imm_s(IntCC::Equal, state, VIEW_UNKNOWN);
+        let (fill, have) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(unknown, fill, &[], have, &[]);
+        self.b.set_cold_block(fill);
+        self.b.switch_to_block(fill);
+        self.fill_view(f, array);
+        self.b.ins().jump(have, &[]);
+        self.b.switch_to_block(have);
+    }
+
+    /// `v`'s word view, from the runtime ([`machine::native::coil_native_view`]).
+    fn fill_view(&mut self, f: &MirFunc, v: ValueId) {
         let Some(&(ok, ptr, len)) = self.views.get(&v) else {
             return;
         };
@@ -4460,14 +5412,45 @@ impl<'a> Lower<'a> {
 
     /// Branch on whether `array[i]` is in its view: `(in view, otherwise,
     /// join)`. The join block takes one word when the caller passes one.
-    fn in_view(&mut self, array: ValueId, i: cranelift_codegen::ir::Value, word: bool) -> (Block, Block, Block) {
-        self.in_view_as(array, i, word, false)
+    fn in_view(&mut self, f: &MirFunc, array: ValueId, i: cranelift_codegen::ir::Value, word: bool) -> (Block, Block, Block) {
+        self.in_view_as(f, array, i, word, false)
     }
 
     /// [`Self::in_view`]; a `store` is in place only through a plain view
     /// (`machine::VIEW_PLAIN`): a tracked one's stores go through
     /// the runtime, which marks the array's card table.
-    fn in_view_as(&mut self, array: ValueId, i: cranelift_codegen::ir::Value, word: bool, store: bool) -> (Block, Block, Block) {
+    fn in_view_as(&mut self, f: &MirFunc, array: ValueId, i: cranelift_codegen::ir::Value, word: bool, store: bool) -> (Block, Block, Block) {
+        let fast = self.b.create_block();
+        let slow = self.b.create_block();
+        let join = self.b.create_block();
+        if word {
+            self.b.append_block_param(join, types::I64);
+        }
+        let c = self.view_has(array, i, store);
+        if !self.maybe_dropped.contains(&array) {
+            self.b.ins().brif(c, fast, &[], slow, &[]);
+            return (fast, slow, join);
+        }
+        let (miss, refill) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(c, fast, &[], miss, &[]);
+        // Not in the view: a view dropped since it was taken (a call or a
+        // push ran) is taken again, in a cold block, and checked once more.
+        self.b.switch_to_block(miss);
+        let (ok, _, _) = self.views[&array];
+        let state = self.b.use_var(ok);
+        let unknown = self.b.ins().icmp_imm_s(IntCC::Equal, state, VIEW_UNKNOWN);
+        self.b.ins().brif(unknown, refill, &[], slow, &[]);
+        self.b.set_cold_block(refill);
+        self.b.switch_to_block(refill);
+        self.fill_view(f, array);
+        let c = self.view_has(array, i, store);
+        self.b.ins().brif(c, fast, &[], slow, &[]);
+        (fast, slow, join)
+    }
+
+    /// Whether element `i` of `array` is in its word view (for a store:
+    /// a plain view's).
+    fn view_has(&mut self, array: ValueId, i: cranelift_codegen::ir::Value, store: bool) -> cranelift_codegen::ir::Value {
         let (ok, _, len) = self.views[&array];
         let ok = self.b.use_var(ok);
         let len = self.b.use_var(len);
@@ -4475,17 +5458,15 @@ impl<'a> Lower<'a> {
         let has = if store {
             self.b.ins().icmp_imm_s(IntCC::Equal, ok, machine::VIEW_PLAIN as i64)
         } else {
-            self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0)
+            self.view_known(ok)
         };
-        let c = self.b.ins().band(inb, has);
-        let fast = self.b.create_block();
-        let slow = self.b.create_block();
-        let join = self.b.create_block();
-        if word {
-            self.b.append_block_param(join, types::I64);
-        }
-        self.b.ins().brif(c, fast, &[], slow, &[]);
-        (fast, slow, join)
+        self.b.ins().band(inb, has)
+    }
+
+    /// Whether word-view state `ok` is a view ([`machine::VIEW_PLAIN`] or
+    /// [`machine::VIEW_TRACKED`]): above `0` (none) and [`VIEW_UNKNOWN`].
+    fn view_known(&mut self, ok: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, ok, 0)
     }
 
     /// Where slot `index` of `o` is when `o` is a product object that has

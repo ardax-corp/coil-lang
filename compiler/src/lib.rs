@@ -27,7 +27,7 @@ pub mod native_mir {
     pub use crate::mir::archive;
     pub use crate::mir::coverage;
     pub use crate::mir::{
-        BlockId, LaneExpr, LaneVal, MirAllocKind, MirBlock, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy,
+        BlockId, LaneExpr, LaneVal, MirAllocKind, MirBlock, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirCStruct, MirExternSig, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy,
         MirUnaryOp, NativeBody, Terminator, ValueId, VectorOp, start_native_capture, start_raw_capture, vector_op,
         VecExpr, VecLoopKind, liveness, spin_headers,
         take_native_capture, ffi_use,
