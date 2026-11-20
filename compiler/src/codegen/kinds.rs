@@ -238,9 +238,13 @@ impl Compiler {
         match head_var(&ty) {
             // A variable the caller has no bit for: no op, as before.
             Some(v) => frame.and_then(|f| f.bit(v)).map_or(Bit::Const { cow: false, ptr: false }, Bit::From),
+            // A type parameter's word in a shared body is one word: a type
+            // that is no number, bool or scalar enum arrives as an object
+            // (boxed, when its own layout is two words) or a niche word,
+            // so a heap reference whatever `word_kind` can tell of it.
             None => Bit::Const {
                 cow: crate::hir::effects::cow::cow_ty(&self.checker, Some(&ty)),
-                ptr: crate::layout::word_kind(&self.checker, &ty) == common::WORD_POINTER,
+                ptr: crate::layout::word_kind(&self.checker, &ty) != common::WORD_SCALAR,
             },
         }
     }
