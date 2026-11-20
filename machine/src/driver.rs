@@ -34,6 +34,36 @@ thread_local! {
     static TASK_YIELDER: std::cell::Cell<*const ()> = const { std::cell::Cell::new(std::ptr::null()) };
 }
 
+/// The task scheduler's entry points. The task natives' groups link it
+/// ([`link_tasks`], when their natives are pushed), so an AOT executable
+/// whose program names no task native leaves the scheduler out.
+#[derive(Clone, Copy)]
+struct TaskLink {
+    /// A scheduler native (`HostOp::Task`).
+    op: for<'a, 'b> fn(&'b mut Driver<'a>, *mut NativeCtx, usize, &[Value]) -> Invoked,
+    /// [`HostEnv::park`].
+    park: for<'a, 'b> fn(&'b mut Driver<'a>, *mut NativeCtx, Option<crate::task::Block>, bool) -> Option<Value>,
+}
+
+static TASKS: std::sync::OnceLock<TaskLink> = std::sync::OnceLock::new();
+
+/// Link the task scheduler ([`TaskLink`]).
+pub(crate) fn link_tasks() {
+    let _ = TASKS.set(TaskLink {
+        op: |d, ctx, fn_id, args| d.scheduler_op(ctx, fn_id, args),
+        park: |d, ctx, block, result_slot| d.suspend(ctx, block, result_slot),
+    });
+}
+
+/// `startup_restore`'s snapshot restore. Its group links it
+/// ([`link_restore`]): only a program whose start restores a snapshot has it.
+static RESTORE: std::sync::OnceLock<for<'a, 'b> fn(&'b mut Driver<'a>, usize)> = std::sync::OnceLock::new();
+
+/// Link the snapshot restore ([`RESTORE`]).
+pub(crate) fn link_restore() {
+    let _ = RESTORE.set(|d, at| d.restore_snapshot(at));
+}
+
 /// A child task parked at a wait ([`crate::native::parks`]).
 struct ParkedTask {
     call: crate::native::ParkedCall,
@@ -149,6 +179,10 @@ pub(crate) struct Driver<'a> {
     panic_message: String,
 }
 
+/// The FFI hook ([`crate::NativeStart::ffi`]): `FfiLoad`, `DeclareFFI`
+/// and `FfiInvoke` on the runtime, through libffi.
+pub const FFI_HOOK: crate::native::MachineHostFn = Driver::run_ffi;
+
 impl<'a> Driver<'a> {
     const HOST: NativeHost = NativeHost {
         print: Driver::host_print,
@@ -259,7 +293,7 @@ impl<'a> Driver<'a> {
                         *s = word;
                     }
                 }
-                Op::Restore { at } => self.restore_snapshot(at as usize),
+                Op::Restore { at } => self.restore_linked(at as usize),
             }
         }
     }
@@ -269,6 +303,14 @@ impl<'a> Driver<'a> {
         self.run_startup();
         if let Some(main) = self.program.main.filter(|_| !self.panicked) {
             let _ = self.call(main as usize, &[]);
+        }
+    }
+
+    /// [`Self::restore_snapshot`], when this executable links it.
+    fn restore_linked(&mut self, at: usize) {
+        match RESTORE.get() {
+            Some(restore) => restore(self, at),
+            None => self.report("this executable was linked without `startup_restore`", None, Vec::new(), false),
         }
     }
 
@@ -797,7 +839,24 @@ impl<'a> Driver<'a> {
         freed && !fresh
     }
 
+    /// [`NativeHost::ffi`]: the FFI hook this executable links
+    /// ([`crate::start::linked_ffi`]). An AOT executable whose program has
+    /// no FFI links none, which leaves out libffi, `dload` and its gate.
     unsafe fn host_ffi(raw: *mut c_void, ctx: *mut NativeCtx, op: u64, operand: u64, args: &[Value], panicked: &mut bool) -> Option<u64> {
+        match crate::start::linked_ffi() {
+            // SAFETY: the caller's.
+            Some(hook) => unsafe { hook(raw, ctx, op, operand, args, panicked) },
+            // `coil package` links the hook whenever the program has an FFI op.
+            None => {
+                let _ = (raw, ctx, op, operand, args, panicked);
+                eprintln!("coil: this executable was linked without FFI, but its program made an FFI call");
+                std::process::exit(1)
+            }
+        }
+    }
+
+    /// The FFI op itself ([`FFI_HOOK`]).
+    unsafe fn run_ffi(raw: *mut c_void, ctx: *mut NativeCtx, op: u64, operand: u64, args: &[Value], panicked: &mut bool) -> Option<u64> {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
         let arg = |i: usize| args.get(i).copied().unwrap_or_default();
@@ -877,14 +936,14 @@ impl<'a> Driver<'a> {
                 let ((), fresh) = d.fresh_panic(|d| d.rooted(ctx, |d| crate::collect::region(d, op == crate::HostOp::RegionEnter)));
                 Some(if fresh { Invoked::Unwound } else { Invoked::Value(0) })
             }
-            crate::HostOp::Task if fn_id == common::TASK_SCOPE_OPEN_ID as usize + GEN_CLOSE_OP => {
-                let handle = args.first().copied().unwrap_or_default();
-                Some(if d.rooted(ctx, |d| d.close_now(handle)) { Invoked::Value(0) } else { Invoked::Unwound })
-            }
-            crate::HostOp::Task => Some(d.task_op(ctx, fn_id, args)),
+            crate::HostOp::Task => Some(match TASKS.get() {
+                Some(tasks) => (tasks.op)(d, ctx, fn_id, args),
+                // Pushing a task native links the scheduler.
+                None => Invoked::Panic("this executable was linked without the task scheduler".into()),
+            }),
             crate::HostOp::Restore => {
                 let at = args.first().map_or(0, |v| v.as_int() as usize);
-                d.rooted(ctx, |d| d.restore_snapshot(at));
+                d.rooted(ctx, |d| d.restore_linked(at));
                 Some(if d.panicked { Invoked::Unwound } else { Invoked::Value(0) })
             }
             _ => Some(Invoked::Panic("native driver: unknown host op".into())),
@@ -898,6 +957,15 @@ impl Driver<'_> {
     /// generator's body too: its fiber stays where it is, under the task's).
     fn tasks_can_switch(&self) -> bool {
         self.rt.sched.as_ref().is_some_and(|s| s.live > 0)
+    }
+
+    /// [`TaskLink::op`]: `gen_close` or a scheduler native.
+    fn scheduler_op(&mut self, ctx: *mut NativeCtx, fn_id: usize, args: &[Value]) -> Invoked {
+        if fn_id == common::TASK_SCOPE_OPEN_ID as usize + GEN_CLOSE_OP {
+            let handle = args.first().copied().unwrap_or_default();
+            return if self.rooted(ctx, |d| d.close_now(handle)) { Invoked::Value(0) } else { Invoked::Unwound };
+        }
+        self.task_op(ctx, fn_id, args)
     }
 
     /// Scheduler native `fn_id` (`HostOp::Task`) on `args`.
@@ -1519,7 +1587,8 @@ impl HostEnv for Driver<'_> {
     }
 
     fn park(&mut self, ctx: *mut NativeCtx, block: Option<crate::task::Block>, result_slot: bool) -> Option<Value> {
-        self.suspend(ctx, block, result_slot)
+        // Only a live scheduler switches, and only a linked one is live.
+        TASKS.get().and_then(|tasks| (tasks.park)(self, ctx, block, result_slot))
     }
 
     fn collect(&mut self, ctx: *mut NativeCtx) -> bool {

@@ -339,6 +339,7 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         words("coil_aot_stack_map_count", map_count.to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
         host_group_table(&mut module, bodies)?;
+        ffi_link_table(&mut module, bodies)?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });
     }
@@ -433,6 +434,28 @@ fn host_group_table(module: &mut cranelift_object::ObjectModule, bodies: &[Nativ
     d.set_align(8);
     let id = module.declare_data("coil_aot_host_group_count", Linkage::Export, false, false).map_err(e)?;
     module.define_data(id, &d).map_err(e)
+}
+
+/// `coil_aot_ffi`: the address of the runtime's `coil_ffi_link` when
+/// `bodies` make an FFI call (`MirInst::Ffi`), else null. A link without
+/// the reference drops libffi, `dload` and its gate from the executable.
+fn ffi_link_table(module: &mut cranelift_object::ObjectModule, bodies: &[NativeBody]) -> Result<(), String> {
+    let e = |e: cranelift_module::ModuleError| e.to_string();
+    let mut d = cranelift_module::DataDescription::new();
+    d.define(vec![0u8; 8].into_boxed_slice());
+    d.set_align(8);
+    if uses_ffi(bodies) {
+        let link = module.declare_data("coil_ffi_link", Linkage::Import, false, false).map_err(e)?;
+        let gv = module.declare_data_in_data(link, &mut d);
+        d.write_data_addr(0, gv, 0);
+    }
+    let id = module.declare_data("coil_aot_ffi", Linkage::Export, false, false).map_err(e)?;
+    module.define_data(id, &d).map_err(e)
+}
+
+/// Whether `bodies` make an FFI call.
+pub fn uses_ffi(bodies: &[NativeBody]) -> bool {
+    bodies.iter().flat_map(|b| b.mir.blocks.iter().flat_map(|b| &b.insts)).any(|i| matches!(i, MirInst::Ffi { .. }))
 }
 
 /// The host-native groups (by number) `bodies` call, with the core ones, in order.
@@ -811,6 +834,11 @@ fn compile_job(isa: &dyn cranelift_codegen::isa::TargetIsa, ctx: &mut cranelift_
 /// Functions a thread should have to itself before another is worth starting.
 const JOBS_PER_THREAD: usize = 16;
 
+/// A word view's state after an op that may have moved its array's storage:
+/// not `0` (no view: not a word array), [`machine::VIEW_PLAIN`] or
+/// [`machine::VIEW_TRACKED`]. The next element access takes the view again.
+const VIEW_UNKNOWN: i64 = -1;
+
 /// Past this, lowering is what compiling waits for: more threads only contend.
 const MAX_COMPILE_THREADS: usize = 8;
 
@@ -1166,6 +1194,145 @@ fn tail_sites(bodies: &[NativeBody], ok: &HashMap<usize, Vec<usize>>, by_label: 
 }
 
 /// Whether any instruction or terminator of `f` reads `v`.
+/// The arrays a word `VecLoop` reads (`false`) or stores (`true`) lanes
+/// of, a push's output left out (it moves).
+/// Whether `inst` may drop word views ([`Lower::drop_views`]) on its hot
+/// path or in a collection it may run: anything but the ops known not to.
+fn may_drop_views(inst: &MirInst) -> bool {
+    !matches!(
+        inst,
+        MirInst::Const { .. }
+            | MirInst::Bin { .. }
+            | MirInst::Cmp { .. }
+            | MirInst::Unary { .. }
+            | MirInst::Cast { .. }
+            | MirInst::Phi { .. }
+            | MirInst::Index { .. }
+            | MirInst::StoreIndex { .. }
+            | MirInst::ArrayLen { .. }
+            | MirInst::ProductLoad { .. }
+            | MirInst::MatchPayload { .. }
+            | MirInst::HeapFieldStore { .. }
+            | MirInst::LaneIndex { .. }
+            | MirInst::LaneStore { .. }
+            | MirInst::HomeLoad { .. }
+            | MirInst::HomeStore { .. }
+            | MirInst::ClearWord { .. }
+            | MirInst::KeepAlive { .. }
+    )
+}
+
+/// [`views_dropped_in`]'s step over `inst`: after an op that may drop
+/// views, every viewed array; a phi takes its view at once; an element
+/// access leaves its array's view taken.
+fn drop_transfer(inst: &MirInst, viewed: &HashSet<ValueId>, set: &mut HashSet<ValueId>) {
+    if may_drop_views(inst) {
+        set.extend(viewed.iter().copied());
+    }
+    match inst {
+        MirInst::Phi { dest, .. } => {
+            set.remove(dest);
+        }
+        MirInst::Index { array, .. } | MirInst::StoreIndex { array, .. } | MirInst::ArrayLen { array, .. } => {
+            set.remove(array);
+        }
+        _ => {}
+    }
+}
+
+/// For each block, the viewed arrays whose view some path into it may have
+/// dropped since it was taken (a forward union to a fixed point). An access
+/// to any other array reads through its view as it is, or through the
+/// helpers when it is not one.
+fn views_dropped_in(f: &MirFunc, viewed: &HashSet<ValueId>) -> HashMap<BlockId, HashSet<ValueId>> {
+    let mut ins: HashMap<BlockId, HashSet<ValueId>> = HashMap::new();
+    if viewed.is_empty() {
+        return ins;
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for blk in &f.blocks {
+            let mut set = ins.get(&blk.id).cloned().unwrap_or_default();
+            for inst in &blk.insts {
+                drop_transfer(inst, viewed, &mut set);
+            }
+            for s in blk.term.as_ref().map(|t| t.succs()).unwrap_or_default() {
+                let into = ins.entry(s).or_default();
+                let n = into.len();
+                into.extend(set.iter().copied());
+                changed |= into.len() != n;
+            }
+        }
+    }
+    ins
+}
+
+/// Every `(array, off, false)` load of `e`.
+fn lane_refs(e: &compiler::native_mir::VecExpr, store: bool, out: &mut Vec<(ValueId, ValueId, bool)>) {
+    use compiler::native_mir::VecExpr;
+    match e {
+        VecExpr::Splat { .. } | VecExpr::Index => {}
+        VecExpr::Load { array, off, .. } => out.push((*array, *off, store)),
+        VecExpr::Bin { lhs, rhs, .. } => {
+            lane_refs(lhs, store, out);
+            lane_refs(rhs, store, out);
+        }
+        VecExpr::Unary { src, .. } => lane_refs(src, store, out),
+        VecExpr::Select { mask, then, els } => {
+            lane_refs(mask, store, out);
+            lane_refs(then, store, out);
+            lane_refs(els, store, out);
+        }
+        VecExpr::Fma { a, b, c, .. } => {
+            lane_refs(a, store, out);
+            lane_refs(b, store, out);
+            lane_refs(c, store, out);
+        }
+    }
+}
+
+fn vec_loop_arrays(kind: &compiler::native_mir::VecLoopKind, out: &mut Vec<(ValueId, bool)>) {
+    use compiler::native_mir::{VecExpr, VecLoopKind};
+    fn reads(e: &VecExpr, out: &mut Vec<(ValueId, bool)>) {
+        match e {
+            VecExpr::Splat { .. } | VecExpr::Index => {}
+            VecExpr::Load { array, .. } => out.push((*array, false)),
+            VecExpr::Bin { lhs, rhs, .. } => {
+                reads(lhs, out);
+                reads(rhs, out);
+            }
+            VecExpr::Unary { src, .. } => reads(src, out),
+            VecExpr::Select { mask, then, els } => {
+                reads(mask, out);
+                reads(then, out);
+                reads(els, out);
+            }
+            VecExpr::Fma { a, b, c, .. } => {
+                reads(a, out);
+                reads(b, out);
+                reads(c, out);
+            }
+        }
+    }
+    match kind {
+        VecLoopKind::Reduce { term, stores, .. } => {
+            reads(term, out);
+            for (array, _, _, value) in stores {
+                reads(value, out);
+                out.push((*array, true));
+            }
+        }
+        VecLoopKind::Store { stores } => {
+            for (array, _, _, value) in stores {
+                reads(value, out);
+                out.push((*array, true));
+            }
+        }
+        VecLoopKind::Push { value, .. } => reads(value, out),
+    }
+}
+
 fn value_used(f: &MirFunc, v: ValueId) -> bool {
     f.blocks.iter().any(|b| {
         b.insts.iter().any(|i| i.operands().contains(&v))
@@ -1999,6 +2166,13 @@ struct Lower<'a> {
     pins: bool,
     /// Lowering a cleanup pad: its homes are behind its second parameter.
     is_pad: bool,
+    /// Inside a native lane loop whose every element access was checked in
+    /// front of it ([`Lower::lanes_guard`]): loads read in place unchecked.
+    lanes_checked: bool,
+    /// The arrays whose word view an op before this one may have dropped
+    /// ([`views_dropped_in`]): only their element accesses take a dropped
+    /// view again.
+    maybe_dropped: HashSet<ValueId>,
     /// Where the homes live: this frame's slot (`[next, n, words...]` is
     /// not needed: they are copied out at a panic), or the pad's pointer.
     homes_slot: Option<cranelift_codegen::ir::StackSlot>,
@@ -2216,6 +2390,8 @@ impl<'a> Lower<'a> {
             body_index: None,
             pins: false,
             is_pad: false,
+            lanes_checked: false,
+            maybe_dropped: HashSet::new(),
             homes_slot: None,
             homes_ptr: None,
             heap_homes: Vec::new(),
@@ -2421,10 +2597,19 @@ impl<'a> Lower<'a> {
     /// call), when other values may name the same array: every view reads
     /// through the helpers until its value is defined again.
     fn drop_views(&mut self) {
-        let views: Vec<_> = self.views.values().chain(self.str_views.values()).chain(self.lane_views.values()).map(|v| v.0).collect();
+        let views: Vec<_> = self.str_views.values().chain(self.lane_views.values()).map(|v| v.0).collect();
         let zero = self.b.ins().iconst(types::I64, 0);
         for ok in views {
             self.b.def_var(ok, zero);
+        }
+        // A word view is taken again at its next element access
+        // ([`Self::ensure_view`]), not read through the helpers from here on.
+        let words: Vec<_> = self.views.values().map(|v| v.0).collect();
+        if !words.is_empty() {
+            let unknown = self.b.ins().iconst(types::I64, VIEW_UNKNOWN);
+            for ok in words {
+                self.b.def_var(ok, unknown);
+            }
         }
     }
 
@@ -2469,6 +2654,9 @@ impl<'a> Lower<'a> {
         let hi = self.coerce(hi, types::I64);
         let acc0 = self.get(f, *init);
         let acc0 = self.coerce(acc0, lane_ty);
+        let mut refs = Vec::new();
+        lane_refs(term, false, &mut refs);
+        self.lanes_guard(f, &refs, lo, hi, slow);
         self.b.ins().jump(lp, &[lo.into(), acc0.into()]);
         self.b.switch_to_block(lp);
         let p = self.b.block_params(lp)[0];
@@ -2476,7 +2664,9 @@ impl<'a> Lower<'a> {
         let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, hi);
         self.b.ins().brif(done, exit, &[acc.into()], body, &[]);
         self.b.switch_to_block(body);
+        self.lanes_checked = true;
         let x = self.lane(f, term, p, slow);
+        self.lanes_checked = false;
         let x = self.coerce(x, lane_ty);
         let next = match *fold {
             simd::REDUCE_ADD if float => self.b.ins().fadd(acc, x),
@@ -2514,6 +2704,123 @@ impl<'a> Lower<'a> {
             self.set(f, *p, zero);
         }
         Ok(true)
+    }
+
+    /// A `VecLoop` of stores as a native loop, one lane at a time: every
+    /// value of lane `p` is read and computed first, then each store's
+    /// element is checked in its view, then all are stored, which is the
+    /// scalar loop's order (`vec_loop` takes only bodies whose reads come
+    /// before their stores). A trap, or an element outside its view, leaves
+    /// with lane `p` untouched and runs the rest, from `p`, on the runtime's
+    /// lane code. `false`: not such a loop (nothing emitted).
+    fn native_store(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
+        use compiler::native_mir::VecLoopKind;
+        use common::dense;
+        let MirInst::VecLoop { dest, pos, from, to, kind: VecLoopKind::Store { stores } } = inst else {
+            return Ok(false);
+        };
+        if stores.is_empty() || pos.is_some_and(|p| value_used(f, p)) {
+            return Ok(false);
+        }
+        for (array, _, ty, value) in stores {
+            if !matches!(*ty, dense::TY_I64 | dense::TY_F64) || !self.views.contains_key(array) || !self.lanes_native(value, 0) {
+                return Ok(false);
+            }
+        }
+        let lp = self.b.create_block();
+        self.b.append_block_param(lp, types::I64);
+        let body = self.b.create_block();
+        let slow = self.b.create_block();
+        let whole = self.b.create_block();
+        let exit = self.b.create_block();
+        let lo = self.get(f, *from);
+        let lo = self.coerce(lo, types::I64);
+        let hi = self.get(f, *to);
+        let hi = self.coerce(hi, types::I64);
+        let mut refs = Vec::new();
+        for (array, off, _, value) in stores {
+            lane_refs(value, false, &mut refs);
+            refs.push((*array, *off, true));
+        }
+        self.lanes_guard(f, &refs, lo, hi, whole);
+        self.b.ins().jump(lp, &[lo.into()]);
+        self.b.switch_to_block(lp);
+        let p = self.b.block_params(lp)[0];
+        let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, hi);
+        self.b.ins().brif(done, exit, &[], body, &[]);
+        self.b.switch_to_block(body);
+        self.lanes_checked = true;
+        let mut values = Vec::with_capacity(stores.len());
+        for (_, _, _, value) in stores {
+            let x = self.lane(f, value, p, slow);
+            values.push(self.coerce(x, types::I64));
+        }
+        self.lanes_checked = false;
+        for ((array, off, _, _), w) in stores.iter().zip(values) {
+            let o = self.get(f, *off);
+            let o = self.coerce(o, types::I64);
+            let i = self.b.ins().iadd(p, o);
+            let at = self.element(*array, i);
+            self.b.ins().store(MemFlagsData::trusted(), w, at, 0);
+        }
+        let p1 = self.b.ins().iadd_imm_s(p, 1);
+        self.b.ins().jump(lp, &[p1.into()]);
+        // A trap in lane `p`: the runtime's lane code from `p` on.
+        self.b.switch_to_block(slow);
+        self.vector_lanes_at(f, inst, Some(p));
+        self.drop_views();
+        self.b.ins().jump(exit, &[]);
+        // An access the guard could not show in place: the whole op there.
+        self.b.switch_to_block(whole);
+        self.vector_lanes_at(f, inst, None);
+        self.drop_views();
+        self.b.ins().jump(exit, &[]);
+        self.b.switch_to_block(exit);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.set(f, *dest, zero);
+        if let Some(p) = pos {
+            self.set(f, *p, zero);
+        }
+        Ok(true)
+    }
+
+    /// In front of a native lane loop over lanes `lo .. hi`: take each
+    /// array's view and check that every access `(array, off, store)` of
+    /// every lane is in it (a store's through a plain view), or branch to
+    /// `fail`. The loop's body then reads and stores in place unchecked.
+    fn lanes_guard(&mut self, f: &MirFunc, refs: &[(ValueId, ValueId, bool)], lo: cranelift_codegen::ir::Value, hi: cranelift_codegen::ir::Value, fail: Block) {
+        let mut seen = HashSet::new();
+        for &(array, _, _) in refs {
+            if seen.insert(array) {
+                self.ensure_view(f, array);
+            }
+        }
+        let mut all = self.b.ins().iconst(types::I8, 1);
+        for &(array, off, store) in refs {
+            let (ok, _, len) = self.views[&array];
+            let ok = self.b.use_var(ok);
+            let len = self.b.use_var(len);
+            let has = if store {
+                self.b.ins().icmp_imm_s(IntCC::Equal, ok, machine::VIEW_PLAIN as i64)
+            } else {
+                self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0)
+            };
+            let o = self.get(f, off);
+            let o = self.coerce(o, types::I64);
+            let (first, of1) = self.b.ins().sadd_overflow(lo, o);
+            let (last, of2) = self.b.ins().sadd_overflow(hi, o);
+            let of = self.b.ins().bor(of1, of2);
+            let fine = self.b.ins().icmp_imm_s(IntCC::Equal, of, 0);
+            let ge = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, first, 0);
+            let le = self.b.ins().icmp(IntCC::SignedLessThanOrEqual, last, len);
+            let a = self.b.ins().band(has, fine);
+            let b = self.b.ins().band(ge, le);
+            let c = self.b.ins().band(a, b);
+            all = self.b.ins().band(all, c);
+        }
+        let go = self.b.create_block();
+        self.b.ins().brif(all, go, &[], fail, &[]);
+        self.b.switch_to_block(go);
     }
 
     /// Whether every node of `e` lowers to native lane code: word loads of
@@ -2559,12 +2866,20 @@ impl<'a> Lower<'a> {
                 self.coerce(x, if *ty == dense::TY_F64 { types::F64 } else { types::I64 })
             }
             VecExpr::Index => p,
+            VecExpr::Load { array, off, ty } if self.lanes_checked => {
+                let o = self.get(f, *off);
+                let o = int(self, o);
+                let i = self.b.ins().iadd(p, o);
+                let at = self.element(*array, i);
+                let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                if *ty == dense::TY_F64 { flt(self, w) } else { w }
+            }
             VecExpr::Load { array, off, ty } => {
                 let o = self.get(f, *off);
                 let o = int(self, o);
                 let (i, of) = self.b.ins().sadd_overflow(p, o);
                 self.leave_if(of, slow);
-                let (fast, out, _join) = self.in_view(*array, i, false);
+                let (fast, out, _join) = self.in_view(f, *array, i, false);
                 self.b.switch_to_block(out);
                 self.b.ins().jump(slow, &[]);
                 self.b.switch_to_block(fast);
@@ -2877,6 +3192,25 @@ impl<'a> Lower<'a> {
                     }
                     self.lane_views.insert(array, vars);
                 }
+                // A word `VecLoop`'s arrays: its native loop reads and
+                // stores in place (`native_reduce`, `native_store`).
+                if let MirInst::VecLoop { kind, .. } = inst {
+                    let mut arrays = Vec::new();
+                    vec_loop_arrays(kind, &mut arrays);
+                    for (array, store) in arrays {
+                        if store {
+                            self.stored.insert(array);
+                            if !self.view_cards.contains_key(&array) {
+                                let v = self.b.declare_var(types::I64);
+                                self.view_cards.insert(array, v);
+                            }
+                        }
+                        if !self.views.contains_key(&array) {
+                            let vars = (self.b.declare_var(types::I64), self.b.declare_var(types::I64), self.b.declare_var(types::I64));
+                            self.views.insert(array, vars);
+                        }
+                    }
+                }
                 let array = match inst {
                     MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } => *array,
                     MirInst::StoreIndex { array, .. } => {
@@ -2981,10 +3315,13 @@ impl<'a> Lower<'a> {
         };
         let first = self.blocks[&f.entry];
         self.b.ins().jump(first, &[]);
+        let viewed: HashSet<ValueId> = self.views.keys().copied().collect();
+        let dropped_in = views_dropped_in(f, &viewed);
 
         for (bi, blk) in f.blocks.iter().enumerate() {
             let cl = self.blocks[&blk.id];
             self.b.switch_to_block(cl);
+            self.maybe_dropped = dropped_in.get(&blk.id).cloned().unwrap_or_default();
             if spins.contains(&blk.id) {
                 let sp = self.b.ins().get_stack_pointer(types::I64);
                 // An atomic load: another thread writes the limit, and a
@@ -3034,6 +3371,7 @@ impl<'a> Lower<'a> {
                 }
                 self.inst(f, inst)?;
                 self.op_words.clear();
+                drop_transfer(inst, &viewed, &mut self.maybe_dropped);
             }
             self.live = None;
             self.at(None);
@@ -3343,7 +3681,7 @@ impl<'a> Lower<'a> {
             MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
                 // A pure reduce compiles to a native loop; the rest runs the
                 // runtime's `VScan` / `VLoop` kernels (`coil_native_vector`).
-                if self.native_reduce(f, inst)? {
+                if self.native_reduce(f, inst)? || self.native_store(f, inst)? {
                     return Ok(());
                 }
                 if let (MirInst::ByteScan { dest, .. }, Some(w)) = (inst, self.scan_in_place(f, inst)) {
@@ -3476,7 +3814,7 @@ impl<'a> Lower<'a> {
             MirInst::Index { dest, array, index, .. } => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
-                let (fast, slow, join) = self.in_view(*array, i, true);
+                let (fast, slow, join) = self.in_view(f, *array, i, true);
                 self.b.switch_to_block(fast);
                 let at = self.element(*array, i);
                 let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
@@ -3492,8 +3830,10 @@ impl<'a> Lower<'a> {
             }
             MirInst::ArrayLen { dest, array } => {
                 let a = self.get(f, *array);
-                let (ok, _, len) = self.views[array];
-                let mut ok = self.b.use_var(ok);
+                let (ok_var, _, len) = self.views[array];
+                let ok = self.b.use_var(ok_var);
+                let ok = self.view_known(ok);
+                let mut ok = self.b.ins().uextend(types::I64, ok);
                 let mut n = self.b.use_var(len);
                 // A lane array's element count, from its lane view.
                 if let Some(&(lane_ok, _, lane_len)) = self.lane_views.get(array) {
@@ -3511,7 +3851,26 @@ impl<'a> Lower<'a> {
                 self.b.ins().brif(ok, fast, &[], slow, &[]);
                 self.b.switch_to_block(fast);
                 self.b.ins().jump(join, &[n.into()]);
+                // A word view dropped since it was taken: take it again.
                 self.b.switch_to_block(slow);
+                let (refill, helper) = (self.b.create_block(), self.b.create_block());
+                if !self.maybe_dropped.contains(array) {
+                    self.b.ins().jump(helper, &[]);
+                    self.b.switch_to_block(refill);
+                    self.b.ins().jump(helper, &[]);
+                } else {
+                let state = self.b.use_var(ok_var);
+                let unknown = self.b.ins().icmp_imm_s(IntCC::Equal, state, VIEW_UNKNOWN);
+                self.b.ins().brif(unknown, refill, &[], helper, &[]);
+                self.b.set_cold_block(refill);
+                self.b.switch_to_block(refill);
+                self.fill_view(f, *array);
+                let state = self.b.use_var(ok_var);
+                let known = self.view_known(state);
+                let n = self.b.use_var(len);
+                self.b.ins().brif(known, join, &[n.into()], helper, &[]);
+                }
+                self.b.switch_to_block(helper);
                 let call = self.b.ins().call(self.len, &[a]);
                 let w = self.b.inst_results(call)[0];
                 self.b.ins().jump(join, &[w.into()]);
@@ -3530,7 +3889,7 @@ impl<'a> Lower<'a> {
                 let i = self.get(f, *index);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
-                let (fast, slow, join) = self.in_view_as(*array, i, false, true);
+                let (fast, slow, join) = self.in_view_as(f, *array, i, false, true);
                 // In place.
                 self.b.switch_to_block(fast);
                 let at = self.element(*array, i);
@@ -4281,6 +4640,27 @@ impl<'a> Lower<'a> {
     /// Fill `v`'s view right after `v` is defined, when the body indexes it.
     fn view_of(&mut self, f: &MirFunc, v: ValueId) {
         self.lane_view_of(f, v);
+        self.fill_view(f, v);
+    }
+
+    /// Take `array`'s word view again when it was dropped (an op that may
+    /// move its storage ran since it was taken), in a cold block, so the
+    /// element accesses after a call or a push stay in place.
+    fn ensure_view(&mut self, f: &MirFunc, array: ValueId) {
+        let (ok, _, _) = self.views[&array];
+        let state = self.b.use_var(ok);
+        let unknown = self.b.ins().icmp_imm_s(IntCC::Equal, state, VIEW_UNKNOWN);
+        let (fill, have) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(unknown, fill, &[], have, &[]);
+        self.b.set_cold_block(fill);
+        self.b.switch_to_block(fill);
+        self.fill_view(f, array);
+        self.b.ins().jump(have, &[]);
+        self.b.switch_to_block(have);
+    }
+
+    /// `v`'s word view, from the runtime ([`machine::native::coil_native_view`]).
+    fn fill_view(&mut self, f: &MirFunc, v: ValueId) {
         let Some(&(ok, ptr, len)) = self.views.get(&v) else {
             return;
         };
@@ -4578,14 +4958,45 @@ impl<'a> Lower<'a> {
 
     /// Branch on whether `array[i]` is in its view: `(in view, otherwise,
     /// join)`. The join block takes one word when the caller passes one.
-    fn in_view(&mut self, array: ValueId, i: cranelift_codegen::ir::Value, word: bool) -> (Block, Block, Block) {
-        self.in_view_as(array, i, word, false)
+    fn in_view(&mut self, f: &MirFunc, array: ValueId, i: cranelift_codegen::ir::Value, word: bool) -> (Block, Block, Block) {
+        self.in_view_as(f, array, i, word, false)
     }
 
     /// [`Self::in_view`]; a `store` is in place only through a plain view
     /// (`machine::VIEW_PLAIN`): a tracked one's stores go through
     /// the runtime, which marks the array's card table.
-    fn in_view_as(&mut self, array: ValueId, i: cranelift_codegen::ir::Value, word: bool, store: bool) -> (Block, Block, Block) {
+    fn in_view_as(&mut self, f: &MirFunc, array: ValueId, i: cranelift_codegen::ir::Value, word: bool, store: bool) -> (Block, Block, Block) {
+        let fast = self.b.create_block();
+        let slow = self.b.create_block();
+        let join = self.b.create_block();
+        if word {
+            self.b.append_block_param(join, types::I64);
+        }
+        let c = self.view_has(array, i, store);
+        if !self.maybe_dropped.contains(&array) {
+            self.b.ins().brif(c, fast, &[], slow, &[]);
+            return (fast, slow, join);
+        }
+        let (miss, refill) = (self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(c, fast, &[], miss, &[]);
+        // Not in the view: a view dropped since it was taken (a call or a
+        // push ran) is taken again, in a cold block, and checked once more.
+        self.b.switch_to_block(miss);
+        let (ok, _, _) = self.views[&array];
+        let state = self.b.use_var(ok);
+        let unknown = self.b.ins().icmp_imm_s(IntCC::Equal, state, VIEW_UNKNOWN);
+        self.b.ins().brif(unknown, refill, &[], slow, &[]);
+        self.b.set_cold_block(refill);
+        self.b.switch_to_block(refill);
+        self.fill_view(f, array);
+        let c = self.view_has(array, i, store);
+        self.b.ins().brif(c, fast, &[], slow, &[]);
+        (fast, slow, join)
+    }
+
+    /// Whether element `i` of `array` is in its word view (for a store:
+    /// a plain view's).
+    fn view_has(&mut self, array: ValueId, i: cranelift_codegen::ir::Value, store: bool) -> cranelift_codegen::ir::Value {
         let (ok, _, len) = self.views[&array];
         let ok = self.b.use_var(ok);
         let len = self.b.use_var(len);
@@ -4593,17 +5004,15 @@ impl<'a> Lower<'a> {
         let has = if store {
             self.b.ins().icmp_imm_s(IntCC::Equal, ok, machine::VIEW_PLAIN as i64)
         } else {
-            self.b.ins().icmp_imm_s(IntCC::NotEqual, ok, 0)
+            self.view_known(ok)
         };
-        let c = self.b.ins().band(inb, has);
-        let fast = self.b.create_block();
-        let slow = self.b.create_block();
-        let join = self.b.create_block();
-        if word {
-            self.b.append_block_param(join, types::I64);
-        }
-        self.b.ins().brif(c, fast, &[], slow, &[]);
-        (fast, slow, join)
+        self.b.ins().band(inb, has)
+    }
+
+    /// Whether word-view state `ok` is a view ([`machine::VIEW_PLAIN`] or
+    /// [`machine::VIEW_TRACKED`]): above `0` (none) and [`VIEW_UNKNOWN`].
+    fn view_known(&mut self, ok: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, ok, 0)
     }
 
     /// Where slot `index` of `o` is when `o` is a product object that has
