@@ -723,6 +723,7 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
         pipeline.ffi_search_path_bufs(),
         Some(pipeline_dload_gate(pipeline)),
         machine::standard_host_natives(),
+        Some(machine::FFI_HOOK),
     ) {
         exit(1);
     }

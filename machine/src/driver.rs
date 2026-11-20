@@ -149,6 +149,10 @@ pub(crate) struct Driver<'a> {
     panic_message: String,
 }
 
+/// The FFI hook ([`crate::NativeStart::ffi`]): `FfiLoad`, `DeclareFFI`
+/// and `FfiInvoke` on the runtime, through libffi.
+pub const FFI_HOOK: crate::native::MachineHostFn = Driver::run_ffi;
+
 impl<'a> Driver<'a> {
     const HOST: NativeHost = NativeHost {
         print: Driver::host_print,
@@ -797,7 +801,24 @@ impl<'a> Driver<'a> {
         freed && !fresh
     }
 
+    /// [`NativeHost::ffi`]: the FFI hook this executable links
+    /// ([`crate::start::linked_ffi`]). An AOT executable whose program has
+    /// no FFI links none, which leaves out libffi, `dload` and its gate.
     unsafe fn host_ffi(raw: *mut c_void, ctx: *mut NativeCtx, op: u64, operand: u64, args: &[Value], panicked: &mut bool) -> Option<u64> {
+        match crate::start::linked_ffi() {
+            // SAFETY: the caller's.
+            Some(hook) => unsafe { hook(raw, ctx, op, operand, args, panicked) },
+            // `coil package` links the hook whenever the program has an FFI op.
+            None => {
+                let _ = (raw, ctx, op, operand, args, panicked);
+                eprintln!("coil: this executable was linked without FFI, but its program made an FFI call");
+                std::process::exit(1)
+            }
+        }
+    }
+
+    /// The FFI op itself ([`FFI_HOOK`]).
+    unsafe fn run_ffi(raw: *mut c_void, ctx: *mut NativeCtx, op: u64, operand: u64, args: &[Value], panicked: &mut bool) -> Option<u64> {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
         let arg = |i: usize| args.get(i).copied().unwrap_or_default();

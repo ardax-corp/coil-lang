@@ -134,18 +134,19 @@ fn with_native_start(_: &mut Pipeline, bodies: &[compiler::native_mir::NativeBod
 
 /// [`aot_object`], then `cc` with the runtime library (`libcoil_rt.a`
 /// beside `coil`, or `COIL_RT_LIB`). Returns the image, how many functions
-/// compiled and the runtime used; `None` (with a warning) when this host
-/// cannot link one, and the JIT runner is packaged instead.
+/// compiled and the runtime used. A host that cannot link one fails the
+/// package: the JIT runner is several times larger, so it is packaged only
+/// when asked for (`--no-aot`).
 #[cfg(not(target_family = "wasm"))]
 fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], link: &LinkInputs, package: &[u8]) -> Option<(Vec<u8>, usize, PathBuf)> {
-    let fallback = |why: String| {
+    let fallback = |why: String| -> Option<(Vec<u8>, usize, PathBuf)> {
         // Static libraries link only into an AOT executable.
         if !link.statics.is_empty() {
             eprintln!("error: {why}; `--link-static` needs the AOT executable");
-            exit(1);
+        } else {
+            eprintln!("error: {why}; pass `--no-aot` to package the JIT runner instead");
         }
-        eprintln!("warning: {why}; packaging the JIT runner instead (pass `--no-aot` to skip linking)");
-        None
+        exit(1);
     };
     let object = match aot_object(pipeline, bodies, link, package) {
         Ok(o) => o,
@@ -155,6 +156,12 @@ fn link_aot_executable(pipeline: &Pipeline, bodies: &[compiler::native_mir::Nati
         Ok(p) => p,
         Err(e) => return fallback(e),
     };
+    if runtime_is_debug_build(&rt) {
+        eprintln!(
+            "warning: `{}` is a debug build of the runtime: the executable is several times larger and slower (build it with `cargo build --release -p coil-rt`)",
+            rt.display()
+        );
+    }
     match link_with_cc(&object.bytes, &rt, link) {
         Ok(exe) => Some((exe, object.compiled.len(), rt)),
         Err(e) => fallback(e),
@@ -292,6 +299,14 @@ fn runtime_library() -> Result<PathBuf, String> {
     }
 }
 
+/// Whether the runtime library at `rt` is a debug build: it carries
+/// `coil_rt::PROFILE_MARK` with `debug`.
+#[cfg(not(target_family = "wasm"))]
+fn runtime_is_debug_build(rt: &Path) -> bool {
+    const MARK: &[u8] = b"coil-rt profile: debug;";
+    fs::read(rt).is_ok_and(|lib| lib.windows(MARK.len()).any(|w| w == MARK))
+}
+
 /// The trailer `scripts/embed_runtime.py` appends to `coil` after the
 /// runtime library: its length (u64 LE), then this magic.
 #[cfg(not(target_family = "wasm"))]
@@ -374,17 +389,27 @@ fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, 
     let out = (|| {
         fs::write(&obj, object).map_err(|e| format!("cannot write `{}`: {e}", obj.display()))?;
         let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
-        let run = std::process::Command::new(&cc)
-            .arg(&obj)
-            .args(link.statics.iter().map(|s| &s.path))
-            .arg(rt)
-            .arg("-o")
-            .arg(&exe)
-            .args(&link.args)
-            .args(system_libs())
-            .args(link.strip.cc_args())
-            .output()
-            .map_err(|e| format!("cannot run `{}` to link ({e})", cc.to_string_lossy()))?;
+        let cc_run = |linker: &[&str]| {
+            std::process::Command::new(&cc)
+                .arg(&obj)
+                .args(link.statics.iter().map(|s| &s.path))
+                .arg(rt)
+                .arg("-o")
+                .arg(&exe)
+                .args(linker)
+                .args(&link.args)
+                .args(system_libs())
+                .args(link.strip.cc_args())
+                .output()
+                .map_err(|e| format!("cannot run `{}` to link ({e})", cc.to_string_lossy()))
+        };
+        // lld where `cc` can use it: a smaller executable (about 40 KB),
+        // else the default linker.
+        let lld = cfg!(target_os = "linux") && !link.args.iter().any(|a| a.contains("-fuse-ld"));
+        let run = match lld.then(|| cc_run(&["-fuse-ld=lld"])) {
+            Some(Ok(run)) if run.status.success() => run,
+            _ => cc_run(&[])?,
+        };
         if !run.status.success() {
             let err = String::from_utf8_lossy(&run.stderr);
             let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output");

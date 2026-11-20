@@ -568,10 +568,14 @@ functions and a runtime lifecycle, which do not exist yet. `extern` blocks named
 A body native code refuses is an error naming it and why, at package time on both kinds
 of executable. No source program reaches one today: parameters, captures, generator
 arguments and live words have no limit in native code, and the corpus reports no
-refusal. If the object or the link fails (no `cc`, no `libcoil_rt.a`) the package warns
-and falls back to the runner. On Windows `cc` is a mingw toolchain's, so without one a
-package is the runner. `.github/workflows/native-platforms.yml` runs every way a program
-starts on macOS and Windows, and a fallback fails it.
+refusal. If the object or the link fails (no `cc`, no `libcoil_rt.a`) the package fails
+and says so: the runner is several times larger, so it is packaged only with `--no-aot`.
+On Windows `cc` is a mingw toolchain's. A runtime library built in debug carries
+`coil-rt profile: debug;` (`coil_rt::PROFILE_MARK`), and `coil package` warns when it
+links one. On Linux the link uses lld when `cc -fuse-ld=lld` works (about 40 KB
+smaller), else the default linker; a `--link-arg` naming `-fuse-ld` picks it instead.
+`.github/workflows/native-platforms.yml` runs every way a program starts on macOS and
+Windows.
 
 ## Compiling in parallel
 
@@ -631,6 +635,28 @@ the table names. The executable now links a per-program table (below): 1.09 MB s
 on feature/native 7e00bc9 (2026-11-08), from 1.53 MB, and its start runs 0.83M
 instructions instead of 2.33M (callgrind), as it builds ~25 natives instead of 213 (twice:
 the runtime's table and native code's).
+
+On feature/native 6e9943a (2026-11-20) a hello world was 1,107 KB with `--strip-symbols
+all`. Two changes take it to 675 KB (-39%) with the same instruction counts:
+
+- **FFI link gate** (-131 KB): `Driver::HOST.ffi` reaches the FFI hook only through
+  `NativeStart::ffi` (`machine::FFI_HOOK`), and `run_package` reads the native lock and
+  builds the `dload` gate only through `coil_cli::FfiLink`. `coil-rt` exports the full
+  link as `coil_ffi_link`, and the AOT object's `coil_aot_ffi` holds its address when a
+  body has a `MirInst::Ffi`, else null (`coil_native::ffi_link_table`). Without that
+  reference the link drops libffi, `libloading`, the FFI registry, the `dload` gate and
+  `sha2`. Every other start (`coil FILE`, `coil run`, the JIT runner, `coil debug`)
+  passes the hook. A program with no FFI op whose package still says it uses FFI exits
+  with "linked without FFI"; `coil package` makes neither.
+- **Size-trimmed std** (-300 KB): `scripts/build_runtime.sh` builds the release
+  `libcoil_rt.a` on Linux with std rebuilt (`-Zbuild-std`, `RUSTC_BOOTSTRAP=1`
+  on stable, needs `rust-src`): without std's backtrace symbolizer (`gimli`,
+  `addr2line`, demangling; Coil backtraces come from the program's line table), std
+  optimized for size, and `-C force-unwind-tables=no` (the runtime is
+  `panic = "abort"`). A Rust-level panic in the runtime prints its message without a
+  Rust backtrace, and `perf` / `gdb` unwind runtime frames by frame pointer only.
+  macOS and Windows keep a plain build until it is measured there. `COIL_RT_PLAIN=1`
+  skips it.
 
 ### Per-program host natives
 
