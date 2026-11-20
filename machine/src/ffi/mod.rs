@@ -52,11 +52,12 @@ pub fn register_on_library(
 ) -> Result<usize, FfiError> {
     let prepared = match obj_lib.static_symbols {
         // A library linked into the executable: the address it recorded.
+        // A symbol no `extern` block names is looked up in the process,
+        // which holds a library linked by name.
         #[cfg(not(target_family = "wasm"))]
-        Some(linked) => {
-            let addr = *linked.get(&sig.name).ok_or_else(|| FfiError::SymbolNotFound { name: sig.name.clone() })?;
+        Some(linked) if linked.contains_key(&sig.name) => {
             let mut prepared = prepare_cif(&sig, layouts)?;
-            prepared.addr = libffi::middle::CodePtr::from_ptr(addr as *mut std::ffi::c_void);
+            prepared.addr = libffi::middle::CodePtr::from_ptr(linked[&sig.name] as *mut std::ffi::c_void);
             prepared
         }
         _ => prepare_cif_for_symbol(&sig, &obj_lib.library, &sig.name, layouts)?,

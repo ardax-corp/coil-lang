@@ -681,7 +681,7 @@ impl RawCli {
                         Command::Package {
                             filename,
                             output: out,
-                            link: LinkInputs { aot: !no_aot && runner.is_none(), emit, statics: link_static, args: link_arg, strip: strip_symbols },
+                            link: LinkInputs { aot: !no_aot && runner.is_none(), emit, statics: link_static, shared: Vec::new(), args: link_arg, strip: strip_symbols },
                             runner,
                             natives: ffi_native,
                             check_native,
