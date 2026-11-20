@@ -1004,13 +1004,35 @@ pub const EXTERN_CALL_MAX_WORDS: usize = 16;
 /// The signature of an [`MirInst::ExternCall`]: the C symbol, the
 /// declared parameters' and the result's FFI type tags (each
 /// `encode_tag_operand(tag, aux)`) and, for a variadic function, the tags
-/// of every argument of this call.
+/// of every argument of this call, and the C layout of each `extern struct`
+/// they pass by value.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MirExternSig {
     pub symbol: String,
     pub params: Vec<u32>,
     pub ret: u32,
     pub variadic: Option<Vec<u32>>,
+    /// One per struct id the tags name (MIR format 20); empty before.
+    pub structs: Vec<MirCStruct>,
+}
+
+impl MirExternSig {
+    /// The layout of struct `id`, when the signature carries it.
+    pub fn struct_layout(&self, id: u32) -> Option<&MirCStruct> {
+        self.structs.iter().find(|s| s.id == id)
+    }
+}
+
+/// An `extern struct`'s C layout as a call passes it by value: its id (the
+/// tag's aux), its size and alignment in bytes, and its scalar fields,
+/// nested structs flattened, as `(byte offset, FFI tag)` in offset order.
+/// What a native direct call needs to place it in registers or memory.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MirCStruct {
+    pub id: u32,
+    pub size: u32,
+    pub align: u32,
+    pub fields: Vec<(u32, u32)>,
 }
 
 /// The FFI opcode a [`MirInst::Ffi`] reconstructs.

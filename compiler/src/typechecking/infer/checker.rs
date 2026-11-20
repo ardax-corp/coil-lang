@@ -4250,6 +4250,8 @@ impl Checker {
             Some(common::tag::CONST_BYTES) => {
                 readonly_ty(crate::typechecking::ty::vec_app_ty(crate::typechecking::ty::byte()))
             }
+            // An `extern struct` by value: the record `invoke` gives too.
+            Some(common::tag::STRUCT) => self.ty_from_ffi_type_expr(t),
             _ => self.parse_type_name(t),
         }
     }
@@ -4312,7 +4314,10 @@ impl Checker {
             let ret_ty = decl
                 .returns
                 .as_ref()
-                .map(|r| self.parse_type_name(r))
+                .map(|r| match self.ffi_type_tag_from_output(r) {
+                    Some((common::tag::STRUCT, _)) => self.ty_from_ffi_type_expr(r),
+                    _ => self.parse_type_name(r),
+                })
                 .unwrap_or_else(unit_ty);
             // Register the fixed-prefix function type (extra `...` args
             // are accepted at call sites via `extern_variadic`).
@@ -14502,6 +14507,34 @@ impl Checker {
         }
     }
 
+    /// The structural record of `extern struct` `id`: its fields by name, a
+    /// nested struct as its own record (`int` past a nesting no C layout has).
+    fn c_struct_record_ty(&self, id: u32, depth: u32) -> Ty {
+        use common::tag;
+        let Some(def) = self.c_structs.get(id as usize).filter(|_| depth < 64) else {
+            return int();
+        };
+        let fields = def
+            .fields
+            .iter()
+            .map(|(name, enc)| {
+                let (t, aux) = common::decode_tag_operand(*enc);
+                let fty = match t {
+                    tag::STRUCT => self.c_struct_record_ty(aux, depth + 1),
+                    tag::FLOAT => float(),
+                    tag::STRING => string(),
+                    tag::BOOL => boolean(),
+                    tag::VOID => unit_ty(),
+                    // int / int32 / ptr / …, treat as int at the
+                    // language level (narrow C widths are ABI-only).
+                    _ => int(),
+                };
+                (name.clone(), fty)
+            })
+            .collect();
+        crate::typechecking::ty::record(fields)
+    }
+
     /// Map an FFI type tag expression to the language `Ty` used for
     /// `invoke` result typing (void → unit, structs → structural record).
     fn ty_from_ffi_type_expr(&self, expr: &Output) -> Ty {
@@ -14511,34 +14544,7 @@ impl Checker {
             Some((t, _)) if t == tag::FLOAT => float(),
             Some((t, _)) if t == tag::STRING => string(),
             Some((t, _)) if t == tag::BOOL => boolean(),
-            Some((t, id)) if t == tag::STRUCT => {
-                if let Some(def) = self.c_structs.get(id as usize) {
-                    let fields = def
-                        .fields
-                        .iter()
-                        .map(|(name, enc)| {
-                            let tag = if *enc <= tag::LAST {
-                                *enc
-                            } else {
-                                *enc & 0xFFFF
-                            };
-                            let fty = match tag {
-                                t if t == tag::FLOAT => float(),
-                                t if t == tag::STRING => string(),
-                                t if t == tag::BOOL => boolean(),
-                                t if t == tag::VOID => unit_ty(),
-                                // int / int32 / ptr / …, treat as int at the
-                                // language level (narrow C widths are ABI-only).
-                                _ => int(),
-                            };
-                            (name.clone(), fty)
-                        })
-                        .collect();
-                    crate::typechecking::ty::record(fields)
-                } else {
-                    int()
-                }
-            }
+            Some((t, id)) if t == tag::STRUCT => self.c_struct_record_ty(id, 0),
             _ => int(),
         }
     }

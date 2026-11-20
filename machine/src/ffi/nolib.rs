@@ -139,3 +139,13 @@ pub fn make_int_callback(
 ) -> Result<OwnedClosure, FfiError> {
     Err(unsupported())
 }
+
+/// No C calls here: nothing packs.
+pub fn pack_struct_into(_heap: &mut Heap, _value: Value, _id: u32, _layouts: &[CStructLayout], _out: &mut [u8]) -> bool {
+    false
+}
+
+/// No C calls here: nothing unpacks.
+pub fn unpack_struct_from(_heap: &mut Heap, _id: u32, _layouts: &[CStructLayout], _buf: &[u8]) -> Option<Value> {
+    None
+}

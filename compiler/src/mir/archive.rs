@@ -28,14 +28,16 @@ use crate::layout::MirLayout;
 use crate::mir::gc::LiveRootSet;
 use crate::mir::inst::LocalId;
 use crate::mir::{
-    BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirExternSig, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
+    BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirCStruct, MirExternSig, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
 };
 
 const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
 /// Bump when the layout changes. A reader takes this format,
-/// [`FORMAT_PINS`], [`FORMAT_SCOPED`] and [`FORMAT_UNSCOPED`], and refuses
+/// [`FORMAT_EXTERN`], [`FORMAT_PINS`], [`FORMAT_SCOPED`] and [`FORMAT_UNSCOPED`], and refuses
 /// any other.
-const FORMAT: u8 = common::MIR_SECTION_EXTERN_FORMAT;
+const FORMAT: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
+/// The format before [`FORMAT`]: `ExternCall` without struct layouts.
+const FORMAT_EXTERN: u8 = common::MIR_SECTION_EXTERN_FORMAT;
 /// The format before `ExternCall` (archive 8.2): the same layout, with no
 /// extern call in it.
 const FORMAT_PINS: u8 = common::MIR_SECTION_COW_PIN_FORMAT;
@@ -57,7 +59,7 @@ pub fn encode(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[
 /// section of an older archive has none.
 fn encode_as(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[common::InlineScope], format: u8) -> Vec<u8> {
     let scoped = format != FORMAT_UNSCOPED;
-    let mut w = Writer(Vec::new(), scoped);
+    let mut w = Writer(Vec::new(), scoped, format >= FORMAT);
     w.0.extend_from_slice(MAGIC);
     w.u8(format);
     if scoped {
@@ -76,17 +78,18 @@ fn encode_as(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[c
 
 /// The bodies of a section and their body ids.
 pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), String> {
-    let mut r = Reader { b: bytes, i: 0, scoped: false, pins: false, externs: false };
+    let mut r = Reader { b: bytes, i: 0, scoped: false, pins: false, externs: false, structs: false };
     if r.take(MAGIC.len())? != MAGIC {
         return Err("not a native MIR section".into());
     }
     let format = r.u8()?;
-    if ![FORMAT, FORMAT_PINS, FORMAT_SCOPED, FORMAT_UNSCOPED].contains(&format) {
+    if ![FORMAT, FORMAT_EXTERN, FORMAT_PINS, FORMAT_SCOPED, FORMAT_UNSCOPED].contains(&format) {
         return Err(format!("native MIR format {format}, this coil reads {FORMAT_UNSCOPED} to {FORMAT}"));
     }
     r.scoped = format != FORMAT_UNSCOPED;
     r.pins = format >= FORMAT_PINS;
-    r.externs = format >= FORMAT;
+    r.externs = format >= FORMAT_EXTERN;
+    r.structs = format >= FORMAT;
     if r.scoped {
         common::read_inline_scopes(r.b, &mut r.i).ok_or("native MIR section has a bad inline scope table")?;
     }
@@ -219,8 +222,9 @@ const T_MATCH: u8 = 4;
 /// No result type ([`Writer::opt_ty`]), or a return without that word.
 const NONE: u8 = 0xff;
 
-/// The bytes, and whether a location has its scope word.
-struct Writer(Vec<u8>, bool);
+/// The bytes, whether a location has its scope word, and whether an
+/// `ExternCall` writes its struct layouts (format 20).
+struct Writer(Vec<u8>, bool, bool);
 
 impl Writer {
     fn u8(&mut self, x: u8) {
@@ -776,6 +780,19 @@ fn inst(w: &mut Writer, inst: &MirInst) {
                 }
                 None => w.u8(0),
             }
+            if w.2 {
+                w.u32(sig.structs.len() as u32);
+                for st in &sig.structs {
+                    w.u32(st.id);
+                    w.u32(st.size);
+                    w.u32(st.align);
+                    w.u32(st.fields.len() as u32);
+                    for &(off, tag) in &st.fields {
+                        w.u32(off);
+                        w.u32(tag);
+                    }
+                }
+            }
             w.vs(args);
         }
         MirInst::ByteScan { dest, from, bound, inclusive, backward, streams, scalars, expr } => {
@@ -928,6 +945,8 @@ struct Reader<'a> {
     pins: bool,
     /// The section may hold `ExternCall` (format 19 on).
     externs: bool,
+    /// `ExternCall` signatures carry their struct layouts (format 20).
+    structs: bool,
 }
 
 impl<'a> Reader<'a> {
@@ -1236,7 +1255,16 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
                     Some((0..n).map(|_| r.u32()).collect::<Result<Vec<_>, String>>()?)
                 }
             };
-            let sig = Box::new(MirExternSig { symbol, params, ret, variadic });
+            let mut structs = Vec::new();
+            if r.structs {
+                for _ in 0..r.len()? {
+                    let (id, size, align) = (r.u32()?, r.u32()?, r.u32()?);
+                    let n = r.len()?;
+                    let fields = (0..n).map(|_| Ok((r.u32()?, r.u32()?))).collect::<Result<Vec<_>, String>>()?;
+                    structs.push(MirCStruct { id, size, align, fields });
+                }
+            }
+            let sig = Box::new(MirExternSig { symbol, params, ret, variadic, structs });
             MirInst::ExternCall { dest, sig, args: r.vs()? }
         }
         I_BYTE_SCAN => {
@@ -1405,7 +1433,7 @@ mod tests {
     fn the_pin_ops_come_back() {
         let b = pinned_body();
         let bytes = bytes(&b);
-        assert_eq!(bytes[MAGIC.len()], 19, "archive 8.3 writes format 19");
+        assert_eq!(bytes[MAGIC.len()], 20, "archive 8.4 writes format 20");
         let (back, _) = decode(&bytes).expect("decode");
         assert_eq!(back[0].mir, b.mir);
     }
@@ -1426,13 +1454,14 @@ mod tests {
         assert!(decode(&bad).is_err());
     }
 
-    /// `f` with extern calls: `v3 = extern sum v0, v0, v0, v0`, and a
-    /// variadic one with its arguments' tags.
+    /// `f` with extern calls: `v3 = extern sum v0, v0, v0, v0` on a struct
+    /// of two doubles, and a variadic one with its arguments' tags.
     fn extern_body() -> NativeBody {
         let mut b = body();
         b.mir.types.extend([MirTy::I64, MirTy::F64]);
-        let sig = MirExternSig { symbol: "sum".into(), params: vec![1, 1], ret: 1, variadic: None };
-        let varargs = MirExternSig { symbol: "sum_n".into(), params: vec![1], ret: 2, variadic: Some(vec![1, 2 | 7 << 16]) };
+        let vec2 = MirCStruct { id: 0, size: 16, align: 8, fields: vec![(0, 1), (8, 1)] };
+        let sig = MirExternSig { symbol: "sum".into(), params: vec![1, 14], ret: 14, variadic: None, structs: vec![vec2] };
+        let varargs = MirExternSig { symbol: "sum_n".into(), params: vec![1], ret: 2, variadic: Some(vec![1, 2 | 7 << 16]), structs: Vec::new() };
         let insts = &mut b.mir.blocks[0].insts;
         insts.insert(1, MirInst::ExternCall { dest: ValueId(3), sig: Box::new(sig), args: vec![ValueId(0); 5] });
         insts.insert(2, MirInst::ExternCall { dest: ValueId(4), sig: Box::new(varargs), args: vec![ValueId(0); 5] });
@@ -1457,6 +1486,25 @@ mod tests {
         let e = extern_body();
         let bad = encode_as(std::slice::from_ref(&e), &HashMap::new(), &scopes(), FORMAT_PINS);
         assert!(decode(&bad).is_err());
+    }
+
+    /// A section of an 8.3 archive (format 19) reads: its extern calls come
+    /// back without struct layouts, so a struct argument takes the runtime's
+    /// call.
+    #[test]
+    fn a_format_19_section_reads_without_struct_layouts() {
+        let e = extern_body();
+        let old = encode_as(std::slice::from_ref(&e), &HashMap::new(), &scopes(), FORMAT_EXTERN);
+        assert_eq!(old[MAGIC.len()], 19);
+        let back = decode(&old).expect("decode format 19").0;
+        let sigs: Vec<&MirExternSig> = back[0].mir.blocks[0]
+            .insts
+            .iter()
+            .filter_map(|i| if let MirInst::ExternCall { sig, .. } = i { Some(&**sig) } else { None })
+            .collect();
+        assert_eq!(sigs.len(), 2);
+        assert!(sigs.iter().all(|s| s.structs.is_empty()));
+        assert_eq!(sigs[0].params, vec![1, 14]);
     }
 
     #[test]

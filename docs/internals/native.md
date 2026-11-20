@@ -250,14 +250,30 @@ native code reloads its words.
   buffer it copies, a buffer that is also another argument, an array a `ptr`
   copies), the call goes there (`FFI_OP_CALL`), which also reports the error. A
   returned C string becomes a coil string (`coil_native_ffi_str`). Nothing collects
-  during native code, so a lent buffer stays put. Structs, callbacks, sized
-  integers (#2886) and variadics go through the runtime. So does every extern call
+  during native code, so a lent buffer stays put. An `extern struct` argument or
+  result (a record) goes direct too when its fields are numbers and bools: the
+  signature carries each struct's C layout (`MirExternSig::structs`, MIR format 20),
+  `coil_native_ffi_struct_in` writes a record's C bytes into a stack buffer (a field
+  the runtime must make, such as a string, sends the call there) and
+  `coil_native_ffi_struct_out` makes a record of a result's bytes. Where the bytes
+  travel follows the platform: x86-64 System V passes a struct of up to 16 bytes as
+  its eightbytes in general-purpose or SSE registers (all of them, or the whole
+  struct on the stack, a Cranelift `StructArgument`) and a larger one on the stack;
+  AArch64 passes a homogeneous float aggregate in `d` registers, others up to 16
+  bytes in `x` registers and larger ones as a pointer to a copy; Windows x64 passes
+  a struct of 1, 2, 4 or 8 bytes in a register and any other as a pointer to a copy.
+  A result too large for registers comes back through a hidden pointer
+  (`StructReturn`: `rdi` on x86-64, `x8` on AArch64; Windows x64 and an AArch64
+  struct that would be split between registers and the stack go through the
+  runtime). Callbacks, sized integers (#2886) and variadics go through the runtime. So does every extern call
   of a program that may make a C callback into coil (an extern function that takes
   a `Callback`, or any `ffi::declare` / `ffi::invoke`): a library may keep a callback
   and run it during a later call, and only the runtime's call roots the caller's
   words and reports a panic in it (`may_call_back`). A call into `sum` costs about
   3.5 ns this way against 270 ns through `invoke` on a tuple; one passing a
-  12-byte string about 40 ns against 315 ns.
+  12-byte string about 40 ns against 315 ns; one passing a 16-byte struct about
+  18 ns against 400 ns through the runtime's call, and one that also returns one
+  (a new record) about 60 ns against 760 ns.
 
 `CallIndirect` runs through `coil_native_call_value` and `Driver::call_value`, which
 handles exact calls, partial and over-application and dictionaries. A function value

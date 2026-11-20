@@ -274,6 +274,11 @@ pub const MIR_SECTION_COW_PIN_FORMAT: u8 = 18;
 /// Its layout is format 18's otherwise.
 pub const MIR_SECTION_EXTERN_FORMAT: u8 = 19;
 
+/// The first MIR section format whose `ExternCall` signatures carry the C
+/// layout of each struct they pass by value (archive 8.4). Its layout is
+/// format 19's otherwise.
+pub const MIR_SECTION_EXTERN_STRUCT_FORMAT: u8 = 20;
+
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and
 /// scope and an `at_call` byte; little-endian `u32`s.
