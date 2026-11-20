@@ -133,3 +133,16 @@ int64_t sum_n(int64_t n, ...) {
     va_end(args);
     return total;
 }
+
+/// Floating and bool scalars (direct extern call tests).
+double scale(double x, int64_t k) {
+    return x * (double)k;
+}
+
+_Bool is_even(int64_t x) {
+    return (x & 1) == 0;
+}
+
+int64_t pick(_Bool b, int64_t x, int64_t y) {
+    return b ? x : y;
+}
