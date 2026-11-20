@@ -94,7 +94,7 @@ case "$(uname)" in
     *) so="libsum.so" so_flags=(-shared -fPIC) ;;
 esac
 "$(command -v cc || command -v gcc)" "${so_flags[@]}" -O2 -o "$work/$so" examples/sum.c
-for ex in ffi_scalars ffi_strings ffi_structs; do
+for ex in ffi_scalars ffi_strings ffi_structs ffi_varargs; do
     ffi=(--no-build-cache --root "$stdlib" --ffi-search-path "$work" --allow-dload sum --dload-trusted sum)
     want="$("$coil" "${ffi[@]}" --mir "examples/$ex.coil")"
     echo "MIR interpreter, $ex: $want"

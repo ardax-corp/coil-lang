@@ -29,6 +29,7 @@
 /// that name `sum` to it.
 #include <stdarg.h>
 #include <stdint.h>
+#include <string.h>
 
 int64_t sum(int64_t a, int64_t b) {
     return a + b;
@@ -271,4 +272,37 @@ int64_t flag_code(Flag f) {
 /// goes on the stack (x86-64), after the seventh.
 int64_t late_vec2(int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f, int64_t g, Tagged t) {
     return a + b + c + d + e + f + g + t.id;
+}
+
+/// C varargs of each kind, named in order by `kinds`: 'i' an `int64_t`, 'd'
+/// a `double`, 'b' a promoted `_Bool`, 's' a string (its length). Each
+/// counts times its position, so an argument read from the wrong place
+/// shows.
+double va_mix(const char *kinds, ...) {
+    va_list args;
+    va_start(args, kinds);
+    double total = 0;
+    int k = 1;
+    for (const char *p = kinds; *p; p++, k++) {
+        switch (*p) {
+        case 'i': total += k * (double)va_arg(args, int64_t); break;
+        case 'd': total += k * va_arg(args, double); break;
+        case 'b': total += k * (double)va_arg(args, int); break;
+        case 's': total += k * (double)strlen(va_arg(args, const char *)); break;
+        }
+    }
+    va_end(args);
+    return total;
+}
+
+/// A declared `double` and count, then that many `double`s, scaled.
+double va_scaled(double k, int64_t n, ...) {
+    va_list args;
+    va_start(args, n);
+    double total = 0;
+    for (int64_t i = 0; i < n; i++) {
+        total += va_arg(args, double);
+    }
+    va_end(args);
+    return total * k;
 }
