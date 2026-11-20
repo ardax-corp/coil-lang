@@ -535,8 +535,12 @@ the [JIT runner](#jit-runner) instead):
    else the copy embedded at the end of `coil` (`scripts/embed_runtime.py`, which the
    release workflow runs: the library, its length, `COILRT\0\1`), written once to
    `<cache>/runtime/<sha256 prefix>/` (`package_app::embedded_runtime`), else the file
-   beside `coil` (a cargo build). `--strip-symbols` (`debug` by default, `none`, `all`)
-   sets what the linker strips: the runtime's DWARF, then its symbol table. Coil's
+   beside `coil` (a cargo build). `--strip-symbols` (`all` by default, `debug`, `none`)
+   sets what the linker strips: the runtime's DWARF, then its symbol table (`debug`
+   keeps named frames for `perf`). On Linux the link uses lld when `cc -fuse-ld=lld`
+   works (probed once; not when `--link-arg` names a linker). A debug `libcoil_rt.a`
+   (a dev `cargo build`) is marked (`coil-rt: debug build`), and `coil package` warns
+   when it links one. Coil's
    backtraces read the program's line table (`-g`), so stripping keeps them. `coil-rt`'s
    `main` calls `machine::native::install_aot` with those symbols, then hands
    `coil_aot_package` to `coil_cli::run_linked_package`, and the driver runs it
@@ -568,10 +572,11 @@ functions and a runtime lifecycle, which do not exist yet. `extern` blocks named
 A body native code refuses is an error naming it and why, at package time on both kinds
 of executable. No source program reaches one today: parameters, captures, generator
 arguments and live words have no limit in native code, and the corpus reports no
-refusal. If the object or the link fails (no `cc`, no `libcoil_rt.a`) the package warns
-and falls back to the runner. On Windows `cc` is a mingw toolchain's, so without one a
-package is the runner. `.github/workflows/native-platforms.yml` runs every way a program
-starts on macOS and Windows, and a fallback fails it.
+refusal. If the object or the link fails (no `cc`, no `libcoil_rt.a`) the package
+fails, with `--no-aot` as the help: the JIT runner carries Cranelift (several MB), so it
+is never packaged unasked. On Windows `cc` is a mingw toolchain's.
+`.github/workflows/native-platforms.yml` runs every way a program starts on macOS and
+Windows.
 
 ## Compiling in parallel
 
@@ -632,6 +637,12 @@ on feature/native 7e00bc9 (2026-11-08), from 1.53 MB, and its start runs 0.83M
 instructions instead of 2.33M (callgrind), as it builds ~25 natives instead of 213 (twice:
 the runtime's table and native code's).
 
+With the per-program FFI, the release runtime (both below) and lld, a hello world is
+666 KB (feature/native 6e9943a, 2026-11-20, from 1,107 KB): FFI -98 KB, lld -13 KB,
+the rebuilt std -330 KB. binary_trees, dict_count, nbody and coro_ping went from
+1.13-1.25 MB to 0.70-0.80 MB, print the same and run the same or fewer instructions
+(callgrind: binary_trees 72.68M -> 72.47M, coro_ping 1.92M -> 1.78M).
+
 ### Per-program host natives
 
 `machine::host_natives` builds the host table from groups (`STANDARD_HOST_GROUPS`, in id
@@ -660,6 +671,32 @@ its own closure). `host_groups!` also exports each group as a symbol,
 Across the 18 cross-language benches, an AOT executable took 0.37x the wall time of the
 `--no-aot` runner as it was then, the bytecode VM's since deleted (geomean, best of 5),
 and 2.7x Rust's (Go: 1.4-1.5x).
+
+### Per-program FFI
+
+`Driver::HOST.ffi` (`NativeHost::ffi`, what `MirInst::Ffi` calls: `dload`, declares and
+`extern` calls) names no FFI code: each driver takes the process's FFI host
+(`native::ffi_host`), which a start sets from `NativeStart::ffi`. Every host passes
+`machine::native::standard_ffi()`; an AOT executable passes its own:
+
+- `coil_native::aot` writes `coil_aot_ffi`, the address of `machine`'s exported
+  `coil_ffi_host` when a body has a `MirInst::Ffi` (`coil_native::uses_ffi`), else null.
+- `coil-rt`'s `main` installs it (`install_aot_ffi`), and `run_linked_package` starts on
+  `aot_ffi()`. Without it the link drops libffi, `libloading`, the FFI registry and the
+  dload gate with `sha2` (about 123 KB of a hello world). An FFI op there would abort
+  with an internal error: native code only emits one for a `MirInst::Ffi`.
+
+### Release runtime
+
+`scripts/build_runtime.sh` builds the release `libcoil_rt.a` (the release workflow and
+CI's release harness use it). On Linux it rebuilds std for it (`-Zbuild-std=std,panic_abort
+-Zbuild-std-features=optimize_for_size`, `-C force-unwind-tables=no`, through
+`RUSTC_BOOTSTRAP=1` on stable, with `rust-src`): no backtrace symbolizer (`gimli`,
+`addr2line`, `rustc_demangle`, `miniz_oxide`; a Rust panic in the runtime prints its
+message without a Rust backtrace, and Coil backtraces read the program's line table), std
+optimized for size (measured instruction-neutral), and no unwind tables (`panic =
+"abort"`). Elsewhere, or with `COIL_RT_PLAIN=1`, it is a plain `cargo build --release -p
+coil-rt`.
 
 ### Static `extern` libraries
 
