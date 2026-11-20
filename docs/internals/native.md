@@ -667,8 +667,8 @@ its own closure). `host_groups!` also exports each group as a symbol,
 `coil_host_group_K`, that holds its `HostPush`.
 
 - `coil_native::aot` lists the groups the program's `HostInvoke`s name, with the
-  groups every runtime calls (`core_host_groups`: the task scheduler, `unwind_resume`,
-  `contract_fail`, `coro_close`, the collector's and `region`'s hooks), as
+  groups every runtime calls (`core_host_groups`: `unwind_resume`, the collector's and
+  `region`'s hooks), as
   `coil_aot_host_groups` (`machine::AotHostGroup`: the symbol's address, first id,
   count) and `coil_aot_host_group_count`. The link keeps those groups and drops the
   rest.
@@ -678,6 +678,13 @@ its own closure). `host_groups!` also exports each group as a symbol,
 - The start names no default table: `NativeStart::host_natives` is the table, and each
   host passes `machine::standard_host_natives()` (built once per process) or the AOT
   one. A default would name every group, and the link would keep them all.
+- Pushing a group links the runtime part its natives run on, so a table without them
+  leaves it out: the task natives, `contract_fail` and `coro_close` link the scheduler
+  (`driver::link_tasks`: `HostOp::Task` and `HostEnv::park` go through `TASKS`), the
+  thread spawns link the job runner (`worker::link_jobs`: the reactor runs a job
+  through `job_runner`, and refuses it with none), and `startup_restore` links the
+  snapshot restore (`driver::link_restore`). The standard table pushes every group,
+  so every other start links them all. On a hello world this leaves out about 110 KB.
 - Native code calls a host native through the runtime's table (`Natives::host_call`,
   a `HostCall` per id), not a process-wide one, so an absent id bails as an unknown
   one did. `direct_host_natives` (the standard table, by name) is what `coil-native`

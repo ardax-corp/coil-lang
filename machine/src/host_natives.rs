@@ -262,19 +262,12 @@ pub fn host_group_of(id: usize) -> Option<usize> {
 }
 
 /// Groups every program's runtime may call whether or not its code names
-/// them: the task scheduler, `unwind_resume`, `contract_fail`, `coro_close`,
-/// the collector's and `region`'s hooks, `startup_restore`.
+/// them: `unwind_resume`, the collector's and `region`'s hooks. The task
+/// natives, `contract_fail`, `coro_close` and `startup_restore` are linked
+/// only when the program's code names them: pushing them links the
+/// scheduler, the job runner and the snapshot restore they run on.
 pub fn core_host_groups() -> Vec<usize> {
-    let ids = [
-        common::TASK_SCOPE_OPEN_ID as usize,
-        common::TASK_CANCEL_ID as usize,
-        common::TASK_COND_NEW_ID as usize,
-        common::UNWIND_RESUME_ID as usize,
-        common::CONTRACT_FAIL_ID as usize,
-        common::CORO_CLOSE_ID as usize,
-        common::GC_REGION_ENTER_ID as usize,
-        common::STARTUP_RESTORE_ID as usize,
-    ];
+    let ids = [common::UNWIND_RESUME_ID as usize, common::GC_REGION_ENTER_ID as usize];
     let names = [crate::GC_COLLECT_NATIVE, crate::GC_REGISTER_FINALIZER_NATIVE, GC_WIRING[0].0];
     let mut groups: Vec<usize> = ids
         .into_iter()
@@ -484,6 +477,8 @@ fn push_thread_spawn_shared(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut dyn FnMut(&str, usize),
 ) {
+    // A spawn queues a job: its table links the job runner.
+    crate::worker::link_jobs();
     let id = out.len();
     register_id(common::THREAD_SPAWN_SHARED_NATIVE, id);
     out.push(spawn_shared_native(crate::thread::thread_spawn_shared));
@@ -613,6 +608,8 @@ fn push_task_natives(
     register_id: &mut dyn FnMut(&str, usize),
     ids: std::ops::RangeInclusive<u16>,
 ) {
+    // Their table links the scheduler they run on.
+    crate::driver::link_tasks();
     for id in ids {
         assert_eq!(out.len(), id as usize);
         let name = common::HOST_NATIVES[id as usize].name;
@@ -629,6 +626,7 @@ fn push_task_natives(
 /// runs it (`HostOp::Restore`).
 fn push_startup_restore(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     assert_eq!(out.len(), common::STARTUP_RESTORE_ID as usize);
+    crate::driver::link_restore();
     register(out, register_id, common::STARTUP_RESTORE_NATIVE, FfiType::Int, |sig| {
         HostClosureFn::new(sig, |_heap, _args| Err(FfiError::Unsupported("startup_restore is HostOp::Restore (runtime hook only)".into())))
             .with_host_op(HostOp::Restore)
@@ -1053,6 +1051,8 @@ impl ThreadKind {
 fn push_thread_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     use crate::thread;
 
+    // A spawn queues a job: its table links the job runner.
+    crate::worker::link_jobs();
     for &kind in ThreadKind::all() {
         let name = common::HOST_NATIVES[out.len()].name;
         let closure = move |heap: &mut crate::Heap, args: &[Value]| {
