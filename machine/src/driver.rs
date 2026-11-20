@@ -805,6 +805,34 @@ impl<'a> Driver<'a> {
         let out = match op as u8 {
             common::FFI_OP_LOAD => d.rt.ffi_load(arg(0)),
             common::FFI_OP_DECLARE => d.rt.ffi_declare(operand as u32, arg(0), arg(1), arg(2), arg(3)),
+            common::FFI_OP_CALL => {
+                let n = (operand & 0xFFFF) as usize;
+                let (lib, func) = (arg(0).bits(), arg(1).as_int() as usize);
+                let call_args = args.get(2..2 + n).unwrap_or_default();
+                let tags = (operand & (1 << 16) != 0).then(|| args.get(2 + n..).unwrap_or_default().iter().map(|v| crate::runtime_ffi::ffi_type_from_value(v, &d.rt.heap)).collect::<Vec<_>>());
+                let out = d.rooted(ctx, |d| {
+                    let me = std::ptr::from_mut(d).cast::<c_void>();
+                    let layouts = Arc::clone(&d.rt.ffi.struct_layouts);
+                    let mut callback = |offset: u32| {
+                        let cif = crate::ffi::callback_cif(&[crate::memory::FfiType::Int], crate::memory::FfiType::Int, &layouts)?;
+                        crate::ffi::make_int_callback(me, offset, Driver::ffi_callback, cif)
+                    };
+                    d.rt.ffi_call(lib, func, call_args, tags.as_deref(), &mut callback)
+                });
+                *panicked = d.panicked;
+                d.panicked |= was;
+                return match out {
+                    Ok(v) => Some(v.bits()),
+                    Err((_, message)) => {
+                        // SAFETY: native code passes its live context.
+                        let c = unsafe { &mut *ctx };
+                        c.trap = crate::native::TRAP_MESSAGE;
+                        // SAFETY: the call set `message` for it.
+                        unsafe { *c.message = message };
+                        None
+                    }
+                };
+            }
             _ => {
                 let call = crate::runtime_ffi::FfiCall::from_words(&d.rt.heap, args);
                 d.rooted(ctx, |d| {
