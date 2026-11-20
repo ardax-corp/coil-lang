@@ -649,13 +649,14 @@ all`. Two changes take it to 675 KB (-39%) with the same instruction counts:
   passes the hook. A program with no FFI op whose package still says it uses FFI exits
   with "linked without FFI"; `coil package` makes neither.
 - **Size-trimmed std** (-300 KB): `scripts/build_runtime.sh` builds the release
-  `libcoil_rt.a` on Linux and macOS with std rebuilt (`-Zbuild-std`, `RUSTC_BOOTSTRAP=1`
+  `libcoil_rt.a` on Linux with std rebuilt (`-Zbuild-std`, `RUSTC_BOOTSTRAP=1`
   on stable, needs `rust-src`): without std's backtrace symbolizer (`gimli`,
   `addr2line`, demangling; Coil backtraces come from the program's line table), std
   optimized for size, and `-C force-unwind-tables=no` (the runtime is
   `panic = "abort"`). A Rust-level panic in the runtime prints its message without a
   Rust backtrace, and `perf` / `gdb` unwind runtime frames by frame pointer only.
-  Windows keeps a plain build. `COIL_RT_PLAIN=1` skips it.
+  macOS and Windows keep a plain build until it is measured there. `COIL_RT_PLAIN=1`
+  skips it.
 
 ### Per-program host natives
 

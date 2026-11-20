@@ -2,13 +2,14 @@
 # Build the release `libcoil_rt.a` that `coil package` links AOT executables
 # with, and copy it to target/release/ (or $CARGO_TARGET_DIR/release/).
 #
-# On Linux and macOS std is rebuilt for it (`-Zbuild-std`, through
+# On Linux std is rebuilt for it (`-Zbuild-std`, through
 # RUSTC_BOOTSTRAP=1 on a stable toolchain): without std's backtrace
 # symbolizer (Coil prints its own backtraces from the program's line table),
 # std optimized for size, and no unwind tables (the runtime is
 # `panic = "abort"`). A hello world shrinks by about 300 KB with the same
 # instruction counts (docs/internals/native.md, "Size and speed").
-# Elsewhere, or with COIL_RT_PLAIN=1, it is a plain `cargo build`.
+# Elsewhere (macOS and Windows until it is measured there), or with
+# COIL_RT_PLAIN=1, it is a plain `cargo build`.
 #
 # Needs `rustup component add rust-src` for the rebuilt std.
 set -eu
@@ -17,7 +18,7 @@ target_dir="${CARGO_TARGET_DIR:-target}"
 host="$(rustc -vV | sed -n 's/^host: //p')"
 
 case "$host" in
-  *-linux-gnu | *-linux-musl | *-apple-darwin) small=1 ;;
+  *-linux-gnu | *-linux-musl) small=1 ;;
   *) small=0 ;;
 esac
 if [ "${COIL_RT_PLAIN:-0}" = 1 ]; then
