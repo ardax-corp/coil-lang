@@ -146,3 +146,25 @@ _Bool is_even(int64_t x) {
 int64_t pick(_Bool b, int64_t x, int64_t y) {
     return b ? x : y;
 }
+
+/// Strings (direct extern call tests): a length, the argument back, and a
+/// constant.
+int64_t str_len(const char *s) {
+    int64_t n = 0;
+    while (s[n]) {
+        n++;
+    }
+    return n;
+}
+
+const char *echo(const char *s) {
+    return s;
+}
+
+const char *greeting(void) {
+    return "hello from C";
+}
+
+const char *no_string(void) {
+    return 0;
+}
