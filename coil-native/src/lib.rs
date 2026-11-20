@@ -339,6 +339,7 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         words("coil_aot_stack_map_count", map_count.to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
         host_group_table(&mut module, bodies)?;
+        ffi_table(&mut module, bodies)?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });
     }
@@ -433,6 +434,29 @@ fn host_group_table(module: &mut cranelift_object::ObjectModule, bodies: &[Nativ
     d.set_align(8);
     let id = module.declare_data("coil_aot_host_group_count", Linkage::Export, false, false).map_err(e)?;
     module.define_data(id, &d).map_err(e)
+}
+
+/// `coil_aot_ffi`: the address of `machine`'s `coil_ffi_host` when a body
+/// runs an FFI op (`MirInst::Ffi`: an `extern` block or a `dload`), else
+/// null, so the link keeps libffi and the dload gate only for those
+/// programs (`machine::native::install_aot_ffi`).
+fn ffi_table(module: &mut cranelift_object::ObjectModule, bodies: &[NativeBody]) -> Result<(), String> {
+    let e = |e: cranelift_module::ModuleError| e.to_string();
+    let mut table = cranelift_module::DataDescription::new();
+    table.define(vec![0u8; 8].into_boxed_slice());
+    table.set_align(8);
+    if uses_ffi(bodies) {
+        let id = module.declare_data("coil_ffi_host", Linkage::Import, false, false).map_err(e)?;
+        let gv = module.declare_data_in_data(id, &mut table);
+        table.write_data_addr(0, gv, 0);
+    }
+    let id = module.declare_data("coil_aot_ffi", Linkage::Export, false, false).map_err(e)?;
+    module.define_data(id, &table).map_err(e)
+}
+
+/// Whether any of `bodies` runs an FFI op.
+pub fn uses_ffi(bodies: &[NativeBody]) -> bool {
+    bodies.iter().flat_map(|b| b.mir.blocks.iter().flat_map(|b| &b.insts)).any(|i| matches!(i, MirInst::Ffi { .. }))
 }
 
 /// The host-native groups (by number) `bodies` call, with the core ones, in order.

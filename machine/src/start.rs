@@ -27,6 +27,11 @@ pub struct NativeStart {
     /// names no default, so a link that never starts the standard table
     /// drops the natives its program does not call.
     pub host_natives: Vec<Arc<dyn crate::ffi::NativeFn>>,
+    /// The FFI the program's `extern` blocks and `dload`s run on:
+    /// [`crate::native::standard_ffi`], or an AOT executable's own
+    /// ([`crate::native::aot_ffi`], `None` when its program has none, so
+    /// its link drops libffi and the dload gate).
+    pub ffi: Option<crate::native::MachineHostFn>,
 }
 
 /// Every standard host native, by id (built once per process).
@@ -101,6 +106,9 @@ pub fn spawn_context(
 /// The runtime `program` runs over: the standard host natives, its FFI
 /// paths and layouts, its statics, strings and word kinds.
 fn runtime_for(program: &ThreadProgram, start: NativeStart) -> Runtime {
+    if let Some(ffi) = start.ffi {
+        crate::native::set_ffi_host(ffi);
+    }
     let mut rt = Runtime::new();
     for native in start.host_natives {
         rt.natives.register(native);

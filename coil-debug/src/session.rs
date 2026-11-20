@@ -314,6 +314,7 @@ impl Launch {
             struct_layouts: self.struct_layouts,
             shared_print: self.shared_print,
             host_natives: machine::standard_host_natives(),
+            ffi: Some(machine::native::standard_ffi()),
         };
         machine::run_natively(self.program, start).unwrap_or(true)
     }

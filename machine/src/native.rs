@@ -219,6 +219,62 @@ pub fn aot_host_natives() -> Vec<std::sync::Arc<dyn crate::ffi::NativeFn>> {
     crate::host_natives::host_natives_of_groups(AOT_HOST_GROUPS.get().map_or(&[], Vec::as_slice))
 }
 
+/// The FFI host every driver of this process runs `MirInst::Ffi` on
+/// ([`NativeHost::ffi`]): set by the first native start that links one
+/// ([`crate::NativeStart::ffi`]), [`unlinked_ffi`] until then.
+static FFI_HOST: std::sync::OnceLock<MachineHostFn> = std::sync::OnceLock::new();
+
+/// [`FFI_HOST`], or [`unlinked_ffi`].
+pub(crate) fn ffi_host() -> MachineHostFn {
+    FFI_HOST.get().copied().unwrap_or(unlinked_ffi)
+}
+
+/// Make `ffi` this process's FFI host (the first one set stays).
+pub(crate) fn set_ffi_host(ffi: MachineHostFn) {
+    let _ = FFI_HOST.set(ffi);
+}
+
+/// The runtime's FFI (libffi, `dload`, the dload gate): what every start
+/// but an AOT executable without FFI links ([`crate::NativeStart::ffi`]).
+pub fn standard_ffi() -> MachineHostFn {
+    crate::driver::Driver::host_ffi
+}
+
+/// The FFI host of an executable linked without FFI: its program has no
+/// `extern` block and no `dload`, so native code never gets here.
+pub(crate) unsafe fn unlinked_ffi(_: *mut std::ffi::c_void, _: *mut NativeCtx, _: u64, _: u64, _: &[common::Value], _: &mut bool) -> Option<u64> {
+    eprintln!("coil: internal error: an FFI op ran in an executable linked without FFI");
+    std::process::abort()
+}
+
+// An AOT executable's object names `coil_ffi_host` only when its program
+// runs FFI ops (`coil_aot_ffi`), so the link drops the FFI otherwise
+// (`docs/internals/native.md`, "Per-program host natives").
+const _: () = {
+    #[unsafe(export_name = "coil_ffi_host")]
+    static FFI: MachineHostFn = crate::driver::Driver::host_ffi;
+};
+
+/// The FFI host an AOT executable links ([`install_aot_ffi`]).
+static AOT_FFI: std::sync::OnceLock<Option<MachineHostFn>> = std::sync::OnceLock::new();
+
+/// Install the FFI host an AOT executable's object names
+/// (`coil_aot_ffi`): null when its program runs no FFI op.
+///
+/// # Safety
+/// `host` is null or points at the `coil_ffi_host` symbol.
+pub unsafe fn install_aot_ffi(host: *const std::ffi::c_void) {
+    // SAFETY: the caller's.
+    let host = (!host.is_null()).then(|| unsafe { *host.cast::<MachineHostFn>() });
+    let _ = AOT_FFI.set(host);
+}
+
+/// The FFI host of an AOT executable ([`install_aot_ffi`]): `None` when it
+/// links none.
+pub fn aot_ffi() -> Option<MachineHostFn> {
+    AOT_FFI.get().copied().flatten()
+}
+
 /// A `defer` cleanup pad: called with its frame's homes.
 pub type NativePadFn = unsafe extern "C" fn(ctx: *mut NativeCtx, homes: *const u64) -> u64;
 

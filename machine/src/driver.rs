@@ -160,7 +160,8 @@ impl<'a> Driver<'a> {
         collect: Driver::host_collect,
         gc: Driver::host_gc,
         free: Driver::host_free,
-        ffi: Driver::host_ffi,
+        // Per process (`native::ffi_host`): an AOT link may leave it out.
+        ffi: crate::native::unlinked_ffi,
         invoke: Driver::host_invoke,
     };
 
@@ -302,7 +303,7 @@ impl<'a> Driver<'a> {
             statics: self.rt.statics.as_mut_ptr(),
             statics_len: self.rt.statics.len(),
             machine: std::ptr::from_mut(self).cast(),
-            host: Self::HOST,
+            host: NativeHost { ffi: crate::native::ffi_host(), ..Self::HOST },
             fuel: &raw mut self.rt.fuel,
             natives: &raw const self.rt.natives,
             probes: &raw mut self.rt.probes,
@@ -797,7 +798,7 @@ impl<'a> Driver<'a> {
         freed && !fresh
     }
 
-    unsafe fn host_ffi(raw: *mut c_void, ctx: *mut NativeCtx, op: u64, operand: u64, args: &[Value], panicked: &mut bool) -> Option<u64> {
+    pub(crate) unsafe fn host_ffi(raw: *mut c_void, ctx: *mut NativeCtx, op: u64, operand: u64, args: &[Value], panicked: &mut bool) -> Option<u64> {
         // SAFETY: native code passes back the driver it was given.
         let d = unsafe { Self::from_raw(raw) };
         let arg = |i: usize| args.get(i).copied().unwrap_or_default();

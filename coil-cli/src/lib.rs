@@ -82,6 +82,7 @@ pub fn execute_archived_program(
     ffi_search_paths: Vec<PathBuf>,
     dload_gate: Option<DloadGate>,
     host_natives: Vec<std::sync::Arc<dyn machine::NativeFn>>,
+    ffi: Option<machine::native::MachineHostFn>,
 ) -> bool {
     let base_dir = entry.and_then(|p| p.parent()).map(PathBuf::from);
     // Native code that covers every body (an AOT executable's) runs the
@@ -103,6 +104,7 @@ pub fn execute_archived_program(
         struct_layouts: loaded.struct_layouts.iter().map(machine::CStructLayout::from_archive).collect(),
         shared_print: None,
         host_natives,
+        ffi,
     };
     if let Some(panicked) = machine::run_natively(program, start) {
         return panicked;
@@ -134,7 +136,7 @@ fn native_cache_dirs(lock: &NativeLock) -> Vec<PathBuf> {
 /// `None` when it cannot be read.
 pub fn run_linked_package(package: &[u8]) -> Option<bool> {
     let exe = std::env::current_exe().ok()?;
-    run_package(package, exe, machine::native::aot_host_natives(), |_| Ok(()))
+    run_package(package, exe, machine::native::aot_host_natives(), machine::native::aot_ffi(), |_| Ok(()))
 }
 
 /// If this process is a packaged JIT runner, run the program appended to it,
@@ -144,7 +146,7 @@ pub fn run_linked_package(package: &[u8]) -> Option<bool> {
 pub fn try_run_embedded_with(prepare: impl FnOnce(&[u8]) -> Result<(), String>) -> Option<bool> {
     let exe = std::env::current_exe().ok()?;
     let data = std::fs::read(&exe).ok()?;
-    run_package(&data, exe, machine::standard_host_natives(), prepare)
+    run_package(&data, exe, machine::standard_host_natives(), Some(machine::native::standard_ffi()), prepare)
 }
 
 /// Run the package that ends `data`; `exe` is the running executable.
@@ -152,6 +154,7 @@ fn run_package(
     data: &[u8],
     exe: PathBuf,
     host_natives: Vec<std::sync::Arc<dyn machine::NativeFn>>,
+    ffi: Option<machine::native::MachineHostFn>,
     prepare: impl FnOnce(&[u8]) -> Result<(), String>,
 ) -> Option<bool> {
     use machine::packaged_app_ffi_startup_check;
@@ -229,7 +232,7 @@ fn run_package(
         exit(1);
     }
     let panicked =
-        execute_archived_program(&loaded, Some(exe.as_path()), ffi_search_paths, dload_gate, host_natives);
+        execute_archived_program(&loaded, Some(exe.as_path()), ffi_search_paths, dload_gate, host_natives, ffi);
     Some(panicked)
 }
 
