@@ -778,7 +778,7 @@ impl MirFunc {
                 }
             }
             MirInst::ExternCall { dest, sig, args } => {
-                if args.len() != 2 + sig.variadic.as_ref().map_or(sig.params.len(), Vec::len) {
+                if args.len() != 3 + sig.variadic.as_ref().map_or(sig.params.len(), Vec::len) {
                     return Err(format!("{dest} extern call arity"));
                 }
                 if args.iter().chain([dest]).any(|a| !self.ty(*a).is_word_lane()) {

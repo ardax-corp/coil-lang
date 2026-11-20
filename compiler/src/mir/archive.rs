@@ -205,7 +205,7 @@ const I_COW_UNPIN: u8 = 50;
 // Format 19 (archive 8.3).
 const I_EXTERN_CALL: u8 = 51;
 
-const FFI_OPS: [MirFfiOp; 3] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke];
+const FFI_OPS: [MirFfiOp; 4] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke, MirFfiOp::Addr];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
 /// cannot recurse without bound).
 const MAX_TREE_DEPTH: u32 = 64;
@@ -1434,8 +1434,8 @@ mod tests {
         let sig = MirExternSig { symbol: "sum".into(), params: vec![1, 1], ret: 1, variadic: None };
         let varargs = MirExternSig { symbol: "sum_n".into(), params: vec![1], ret: 2, variadic: Some(vec![1, 2 | 7 << 16]) };
         let insts = &mut b.mir.blocks[0].insts;
-        insts.insert(1, MirInst::ExternCall { dest: ValueId(3), sig: Box::new(sig), args: vec![ValueId(0); 4] });
-        insts.insert(2, MirInst::ExternCall { dest: ValueId(4), sig: Box::new(varargs), args: vec![ValueId(0); 4] });
+        insts.insert(1, MirInst::ExternCall { dest: ValueId(3), sig: Box::new(sig), args: vec![ValueId(0); 5] });
+        insts.insert(2, MirInst::ExternCall { dest: ValueId(4), sig: Box::new(varargs), args: vec![ValueId(0); 5] });
         b
     }
 

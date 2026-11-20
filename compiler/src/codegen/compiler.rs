@@ -6993,14 +6993,18 @@ impl Compiler {
                     }
                     self.extern_symbols
                         .push((unescape_coil_string(library), unescape_coil_string(sym)));
+                    let addr_slot = self.checker.alloc_synthetic_static_slot(
+                        format!("__ext_addr_{}", table_name),
+                        crate::typechecking::ty::int(),
+                    );
                     self.extern_signatures.insert(
                         fn_id_slot,
-                        crate::mir::MirExternSig {
+                        (crate::mir::MirExternSig {
                             symbol: unescape_coil_string(sym),
                             params: tag_words.clone(),
                             ret: encode_tag_operand(ret_tag, ret_aux),
                             variadic: decl.variadic.then(Vec::new),
-                        },
+                        }, addr_slot),
                     );
                     self.setup_steps.push(module_setup::SetupStep::Declare {
                         lib_slot,
@@ -7009,6 +7013,7 @@ impl Compiler {
                         ret: encode_tag_operand(ret_tag, ret_aux),
                         operand,
                         slot: fn_id_slot,
+                        addr_slot,
                     });
                     self.extern_runtime_functions
                         .insert(table_name, (lib_slot, fn_id_slot));

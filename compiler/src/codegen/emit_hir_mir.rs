@@ -870,7 +870,7 @@ impl Compiler {
                 // An extern call on its words: no argument tuple, no
                 // `Result` (the runtime panics with a call's error). One with
                 // more words than a host call takes keeps the tuple.
-                if let Some(mut sig) = self.extern_signatures.get(&func).cloned() {
+                if let Some((mut sig, addr)) = self.extern_signatures.get(&func).cloned() {
                     if let Some(def) = variadic {
                         let tags = self.hir_variadic_tags(def, hir.expr(id).span, args.len())?;
                         sig.variadic = Some(tags.into_iter().map(|(t, aux)| encode_tag_operand(t, aux)).collect());
@@ -878,7 +878,7 @@ impl Compiler {
                     let tags = sig.variadic.as_ref().map_or(0, Vec::len);
                     let arity_ok = if variadic.is_some() { tags == args.len() } else { sig.variadic.is_none() && sig.params.len() == args.len() };
                     if arity_ok && 2 + items.len() + tags <= crate::mir::EXTERN_CALL_MAX_WORDS {
-                        let mut operands = vec![O::Static(lib), O::Static(func)];
+                        let mut operands = vec![O::Static(lib), O::Static(func), O::Static(addr)];
                         operands.extend(items);
                         return Some(crate::mir::HirFfi { op: MirFfiOp::Invoke, operand: 0, operands, unwrap: true, niche: None, extern_sig: Some(sig) });
                     }
