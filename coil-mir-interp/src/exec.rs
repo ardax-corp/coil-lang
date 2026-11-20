@@ -784,10 +784,12 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 set!(*dest, w);
             }
             MirInst::ExternCall { dest, sig, args } => {
-                let operand = (args.len() as u64 - 2) | if sig.variadic.is_some() { 1 << 16 } else { 0 };
+                let operand = (args.len() as u64 - 3) | if sig.variadic.is_some() { 1 << 16 } else { 0 };
                 let s = &mut (*act).scratch;
                 s.clear();
-                s.extend(args.iter().map(|v| get!(*v)));
+                // Library and function id, then the arguments: the address
+                // is for native code.
+                s.extend(args.iter().take(2).chain(args.iter().skip(3)).map(|v| get!(*v)));
                 s.extend(sig.variadic.iter().flatten().map(|&t| u64::from(t)));
                 let w = rt::coil_native_ffi(ctx, u64::from(common::FFI_OP_CALL), operand, s.as_ptr(), s.len() as u64);
                 check!();

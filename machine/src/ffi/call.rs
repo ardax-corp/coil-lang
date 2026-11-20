@@ -14,6 +14,13 @@ pub struct PreparedCall {
     pub addr: CodePtr,
 }
 
+impl PreparedCall {
+    /// The C function's address, for a direct call.
+    pub fn address(&self) -> u64 {
+        self.addr.as_ptr() as u64
+    }
+}
+
 pub struct InvokeContext {
     heap: *mut Heap,
     struct_layouts: *const CStructLayout,

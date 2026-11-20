@@ -864,6 +864,7 @@ impl<'a> Driver<'a> {
         let out = match op as u8 {
             common::FFI_OP_LOAD => d.rt.ffi_load(arg(0)),
             common::FFI_OP_DECLARE => d.rt.ffi_declare(operand as u32, arg(0), arg(1), arg(2), arg(3)),
+            common::FFI_OP_ADDR => d.rt.ffi_addr(arg(0), arg(1)),
             common::FFI_OP_CALL => {
                 let n = (operand & 0xFFFF) as usize;
                 let (lib, func) = (arg(0).bits(), arg(1).as_int() as usize);

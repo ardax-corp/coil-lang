@@ -539,7 +539,7 @@ fn main() { let _ = add(1, 2); }
 "#,
     );
     assert!(
-        compiled.all_insts().any(|i| matches!(i, MirInst::ExternCall { sig, args, .. } if sig.symbol == "add" && args.len() == 4)),
+        compiled.all_insts().any(|i| matches!(i, MirInst::ExternCall { sig, args, .. } if sig.symbol == "add" && args.len() == 5)),
         "an extern call must be an ExternCall"
     );
     assert!(
@@ -1606,6 +1606,18 @@ fn example_ffi_extern_prints_42() {
     }
     let output = run_ffi_example_with_lib("examples/ffi_extern.coil", &libsum);
     assert_eq!(output, "42");
+}
+
+#[cfg(unix)]
+#[test]
+fn example_ffi_scalars_prints_each_result() {
+    let libsum = ensure_ffi_libsum_built();
+    if !libsum.exists() {
+        ffi_soft_skip(&format!("{} not built", libsum.display()));
+        return;
+    }
+    let output = run_ffi_example_with_lib("examples/ffi_scalars.coil", &libsum);
+    assert_eq!(output, "6.0 true false 21 0 false");
 }
 
 #[cfg(unix)]

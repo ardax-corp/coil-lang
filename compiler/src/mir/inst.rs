@@ -477,8 +477,8 @@ pub enum MirInst {
         args: Vec<ValueId>,
     },
     /// A call of a function an `extern` block declares: `args` are its
-    /// library handle and function id (the module's statics), then the
-    /// arguments' words; `dest` is the C function's result word (`0` for
+    /// library handle, function id and C address (the module's statics),
+    /// then the arguments' words; `dest` is the C function's result word (`0` for
     /// a `void` one). A call the runtime cannot make panics with its
     /// error. `sig` is the declared signature, for a direct C-ABI call.
     /// An effect barrier, as [`MirInst::Ffi`].
@@ -1023,6 +1023,8 @@ pub enum MirFfiOp {
     /// `FfiInvoke`: library, function id, argument tuple, and a variadic
     /// call's tag tuple.
     Invoke,
+    /// The C address of a declared function: library, function id.
+    Addr,
 }
 
 impl MirFfiOp {
@@ -1031,6 +1033,7 @@ impl MirFfiOp {
             Self::Load => "load",
             Self::Declare => "declare",
             Self::Invoke => "invoke",
+            Self::Addr => "addr",
         }
     }
 
@@ -1040,6 +1043,7 @@ impl MirFfiOp {
             Self::Load => common::FFI_OP_LOAD,
             Self::Declare => common::FFI_OP_DECLARE,
             Self::Invoke => common::FFI_OP_INVOKE,
+            Self::Addr => common::FFI_OP_ADDR,
         }
     }
 }

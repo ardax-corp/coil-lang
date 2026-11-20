@@ -110,6 +110,10 @@ pub const FFI_OP_INVOKE: u8 = 2;
 /// `n` arguments' type tags. The result is the C function's word; an error
 /// panics.
 pub const FFI_OP_CALL: u8 = 3;
+/// The C address of a declared function: library and function id. Its
+/// `Result` holds the address word (module setup stores it for a direct
+/// call).
+pub const FFI_OP_ADDR: u8 = 4;
 
 #[cfg(test)]
 mod tests {
