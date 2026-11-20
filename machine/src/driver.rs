@@ -195,6 +195,7 @@ impl<'a> Driver<'a> {
         gc: Driver::host_gc,
         free: Driver::host_free,
         ffi: Driver::host_ffi,
+        ffi_struct: Driver::host_ffi_struct,
         invoke: Driver::host_invoke,
     };
 
@@ -910,6 +911,24 @@ impl<'a> Driver<'a> {
         *panicked = d.panicked;
         d.panicked |= was;
         Some(out.bits())
+    }
+
+    /// [`NativeHost::ffi_struct`]: pack the record `word` into struct `id`'s
+    /// bytes at `buf`, or (`unpack`) make a record of them.
+    unsafe fn host_ffi_struct(raw: *mut c_void, id: u32, word: u64, buf: *mut u8, unpack: bool) -> Option<u64> {
+        // SAFETY: native code passes back the driver it was given.
+        let d = unsafe { Self::from_raw(raw) };
+        let rt = &mut *d.rt;
+        let layouts = &rt.ffi.struct_layouts;
+        let size = layouts.get(id as usize)?.size;
+        // SAFETY: native code passes a buffer of the struct's size.
+        let bytes = unsafe { std::slice::from_raw_parts_mut(buf, size) };
+        let heap = rt.heap.get_mut();
+        if unpack {
+            crate::ffi::unpack_struct_from(heap, id, layouts, bytes).map(|v| v.bits())
+        } else {
+            Some(u64::from(crate::ffi::pack_struct_into(heap, Value::from(word), id, layouts, bytes)))
+        }
     }
 
     /// An FFI callback into the body at `offset` on `len` words at `args`.

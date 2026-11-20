@@ -205,8 +205,10 @@ impl Drop for FfiStringReset {
 /// The slot of `layout`'s field `i` in a record: records are slotted
 /// objects whose slots are their fields sorted by name.
 fn struct_record_slot(layout: &CStructLayout, i: usize) -> usize {
-    let name = &layout.fields[i].0;
-    layout.fields.iter().filter(|(f, _)| f < name).count()
+    layout.slots.get(i).copied().unwrap_or_else(|| {
+        let name = &layout.fields[i].0;
+        layout.fields.iter().filter(|(f, _)| f < name).count()
+    })
 }
 
 fn instance_field(heap: &mut Heap, addr: u64, layout: &CStructLayout, i: usize) -> Result<Value, FfiError> {
@@ -297,6 +299,68 @@ fn pack_struct(
         write_field_at(out, off, &val, *fty, heap, layouts)?;
     }
     Ok(())
+}
+
+/// Struct `id`'s C bytes of the record `value` into `out` (at least the
+/// layout's size), for a direct extern call; `false` when it cannot be
+/// packed here (the runtime's call then packs it and reports the error).
+pub fn pack_struct_into(heap: &mut Heap, value: Value, id: u32, layouts: &[CStructLayout], out: &mut [u8]) -> bool {
+    /// The record at `addr` as `layout`'s bytes at `base`: numbers and
+    /// bools only, nested records in place, no allocation.
+    fn put(heap: &Heap, addr: u64, layout: &CStructLayout, layouts: &[CStructLayout], out: &mut [u8], base: usize, depth: u32) -> Option<()> {
+        let Some(Object::Instance(gc)) = heap.find_object_by_addr(addr) else { return None };
+        for (i, ((_, fty), &off)) in layout.fields.iter().zip(&layout.offsets).enumerate() {
+            let v = gc.as_ref().slot(struct_record_slot(layout, i))?;
+            let at = base + off;
+            let mut put_bytes = |b: &[u8]| out.get_mut(at..at + b.len()).map(|d| d.copy_from_slice(b));
+            match *fty {
+                FfiType::Int | FfiType::UInt64 => put_bytes(&v.as_int().to_ne_bytes())?,
+                FfiType::Int32 | FfiType::UInt32 => put_bytes(&(v.as_int() as i32).to_ne_bytes())?,
+                FfiType::Int16 | FfiType::UInt16 => put_bytes(&(v.as_int() as i16).to_ne_bytes())?,
+                FfiType::Int8 | FfiType::UInt8 => put_bytes(&[v.as_int() as u8])?,
+                FfiType::Float => put_bytes(&v.as_float().to_ne_bytes())?,
+                FfiType::Bool => put_bytes(&[u8::from(v.as_bool())])?,
+                FfiType::Struct(sub) if depth < 64 => put(heap, v.bits(), layouts.get(sub as usize)?, layouts, out, at, depth + 1)?,
+                _ => return None,
+            }
+        }
+        Some(())
+    }
+    layouts.get(id as usize).is_some_and(|layout| put(heap, value.bits(), layout, layouts, out, 0, 0).is_some())
+}
+
+/// A new record of struct `id` from its C bytes `buf`, as a direct extern
+/// call's result; `None` when the layout is unknown.
+pub fn unpack_struct_from(heap: &mut Heap, id: u32, layouts: &[CStructLayout], buf: &[u8]) -> Option<Value> {
+    /// A record of `layout`'s bytes at `base`: numbers and bools, nested
+    /// records made the same way.
+    fn take(heap: &mut Heap, layout: &CStructLayout, layouts: &[CStructLayout], buf: &[u8], base: usize, depth: u32) -> Option<Value> {
+        use crate::memory::ObjInstance;
+        let mut slots = vec![Value::default(); layout.fields.len()];
+        for (i, ((_, fty), &off)) in layout.fields.iter().zip(&layout.offsets).enumerate() {
+            let at = base + off;
+            let bytes = |n: usize| buf.get(at..at + n);
+            let v = match *fty {
+                FfiType::Int => Value::from(i64::from_ne_bytes(bytes(8)?.try_into().ok()?)),
+                FfiType::UInt64 => Value::from(u64::from_ne_bytes(bytes(8)?.try_into().ok()?) as i64),
+                FfiType::Float => Value::from(f64::from_ne_bytes(bytes(8)?.try_into().ok()?)),
+                FfiType::Int32 => Value::from(i64::from(i32::from_ne_bytes(bytes(4)?.try_into().ok()?))),
+                FfiType::UInt32 => Value::from(i64::from(u32::from_ne_bytes(bytes(4)?.try_into().ok()?))),
+                FfiType::Int16 => Value::from(i64::from(i16::from_ne_bytes(bytes(2)?.try_into().ok()?))),
+                FfiType::UInt16 => Value::from(i64::from(u16::from_ne_bytes(bytes(2)?.try_into().ok()?))),
+                FfiType::Int8 => Value::from(i64::from(bytes(1)?[0] as i8)),
+                FfiType::UInt8 => Value::from(i64::from(bytes(1)?[0])),
+                FfiType::Bool => Value::from(bytes(1)?[0] != 0),
+                FfiType::Struct(sub) if depth < 64 => take(heap, layouts.get(sub as usize)?, layouts, buf, at, depth + 1)?,
+                _ => return None,
+            };
+            *slots.get_mut(struct_record_slot(layout, i))? = v;
+        }
+        let (obj, _) = heap.alloc(ObjInstance::with_slots(common::FFI_STRUCT_TYPE_ID, slots), Object::Instance);
+        Some(Value::from(obj.addr()))
+    }
+    let layout = layouts.get(id as usize)?;
+    take(heap, layout, layouts, buf, 0, 0)
 }
 
 fn field_byte_size(fty: FfiType, layouts: &[CStructLayout]) -> Result<usize, FfiError> {

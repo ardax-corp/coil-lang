@@ -4867,6 +4867,9 @@ pub struct CStructLayout {
     pub offsets: Vec<usize>,
     pub size: usize,
     pub align: usize,
+    /// The record slot of each field: a struct value is a record, its
+    /// slots its fields sorted by name.
+    pub slots: Vec<usize>,
 }
 
 impl CStructLayout {
@@ -4884,6 +4887,11 @@ impl CStructLayout {
             offsets: layout.offsets.iter().map(|&o| o as usize).collect(),
             size: layout.size as usize,
             align: layout.align as usize,
+            slots: layout
+                .fields
+                .iter()
+                .map(|(n, _)| layout.fields.iter().filter(|(f, _)| f < n).count())
+                .collect(),
         }
     }
 }

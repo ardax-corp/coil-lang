@@ -426,6 +426,12 @@ pub struct NativeHost {
     /// Run the FFI op (`FfiLoad` / `DeclareFFI` / `FfiInvoke`, by opcode
     /// byte) with its operand on `args`, on the runtime.
     pub ffi: MachineHostFn,
+    /// A direct extern call's struct by value ([`coil_native_ffi_struct_in`],
+    /// [`coil_native_ffi_struct_out`]): with the `bool` clear, pack the
+    /// record word into struct id's C bytes at the pointer (`Some(1)`, or
+    /// `Some(0)` when it cannot); set, a new record of the bytes there.
+    /// `None`: nothing ran.
+    pub ffi_struct: unsafe fn(*mut std::ffi::c_void, u32, u64, *mut u8, bool) -> Option<u64>,
     /// Run the ordinary host native `id` on `args` in `layout` as the runtime's
     /// `HostInvoke` does, without interpreting a body: a native that would block the
     /// task parks the fiber the call runs on. `None`: it is no ordinary
@@ -518,6 +524,7 @@ impl NativeHost {
         gc: |_, _, _| 0,
         free: |_, _, _, _| true,
         ffi: |_, _, _, _, _, _| None,
+        ffi_struct: |_, _, _, _, _| None,
         invoke: |_, _, _, _, _| None,
     };
 }
@@ -2694,6 +2701,44 @@ pub unsafe extern "C" fn coil_native_ffi_str(ctx: *mut NativeCtx, ptr: u64) -> u
     s.as_ptr() as *mut u8 as u64
 }
 
+/// A direct extern call's struct argument: the record `word` as struct
+/// `id`'s C bytes at `buf` (its size, rounded up to a word). `0` when it
+/// cannot be packed here: the runtime's call then makes it, and reports
+/// any error.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `buf` points at the struct's bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi_struct_in(ctx: *mut NativeCtx, id: u64, word: u64, buf: *mut u8) -> u64 {
+    let c = unsafe { &*ctx };
+    if c.machine.is_null() || word == 0 {
+        return 0;
+    }
+    // SAFETY: `machine` is the live machine the host was made for.
+    unsafe { (c.host.ffi_struct)(c.machine, id as u32, word, buf, false) }.unwrap_or(0)
+}
+
+/// A direct extern call's struct result: a new record of struct `id`'s C
+/// bytes at `buf`.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `buf` points at the struct's bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi_struct_out(ctx: *mut NativeCtx, id: u64, buf: *mut u8) -> u64 {
+    let c = unsafe { &*ctx };
+    if c.machine.is_null() {
+        return unsafe { bail(ctx) };
+    }
+    // SAFETY: `machine` is the live machine the host was made for.
+    let Some(w) = (unsafe { (c.host.ffi_struct)(c.machine, id as u32, 0, buf, true) }) else {
+        return unsafe { bail(ctx) };
+    };
+    if let Some(heap) = unsafe { heap(ctx) } {
+        unsafe { note_alloc(ctx, heap) };
+    }
+    w
+}
+
 /// [`coil_native_host`] of an ordinary native that is no plain function:
 /// the machine runs it in Rust ([`NativeHost::invoke`]), no interpreted body.
 /// `None`: it is no ordinary native.
@@ -3045,6 +3090,8 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_ffi_arg", coil_native_ffi_arg as *const u8),
         ("coil_native_ffi_done", coil_native_ffi_done as *const u8),
         ("coil_native_ffi_str", coil_native_ffi_str as *const u8),
+        ("coil_native_ffi_struct_in", coil_native_ffi_struct_in as *const u8),
+        ("coil_native_ffi_struct_out", coil_native_ffi_struct_out as *const u8),
         ("coil_native_defer", coil_native_defer as *const u8),
         ("coil_native_claim", coil_native_claim as *const u8),
         ("coil_native_collect", coil_native_collect as *const u8),
@@ -3054,7 +3101,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 44;
+const HELPERS: usize = 46;
 
 #[cfg(test)]
 mod pin_tests {
