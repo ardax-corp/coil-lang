@@ -237,19 +237,27 @@ native code reloads its words.
 - `task_*` ops go to `Driver::task_op`. A failed `requires` (`contract_fail`) names
   the caller.
 - FFI ops (`Load`, `Declare`, `Invoke`, `Addr`) run through `coil_native_ffi`.
-- An `extern` block's call is an `ExternCall` with the declared signature. When
-  every parameter is an `int`, `float` or `bool` and the result one of those, a
-  `ptr` or `void`, native code calls the C function directly at the address module
-  setup stored (`FFI_OP_ADDR`), with the platform's C calling convention: no
-  runtime, no libffi, no roots (nothing allocates or calls back during it). A `bool`
-  goes as its byte and comes back as `true` for any nonzero byte. Any other call
-  (strings, buffers, structs, callbacks, `ptr` arguments, variadics) goes through
-  the runtime's libffi call (`FFI_OP_CALL`) on its words. So does every extern call
+- An `extern` block's call is an `ExternCall` with the declared signature. When its
+  parameters are `int`, `float`, `bool`, `string`, `constbytes`, `bytes` or `ptr` and
+  its result is `int`, `float`, `bool`, `ptr`, `string` or `void`, native code calls
+  the C function directly at the address module setup stored (`FFI_OP_ADDR`), with
+  the platform's C calling convention: no runtime call and no libffi. A `bool` goes
+  as its byte and comes back as `true` for any nonzero byte. Each pointer argument
+  comes from `coil_native_ffi_arg`: a `string` as a NUL-terminated copy for the call
+  (dropped by `coil_native_ffi_done` once the result is read), a byte view or a
+  `Vec<byte>` buffer lent in place (C's writes land in it), a `ptr` word as it is. When
+  the runtime's call must make one instead (an interior NUL, an empty or word
+  buffer it copies, a buffer that is also another argument, an array a `ptr`
+  copies), the call goes there (`FFI_OP_CALL`), which also reports the error. A
+  returned C string becomes a coil string (`coil_native_ffi_str`). Nothing collects
+  during native code, so a lent buffer stays put. Structs, callbacks, sized
+  integers (#2886) and variadics go through the runtime. So does every extern call
   of a program that may make a C callback into coil (an extern function that takes
   a `Callback`, or any `ffi::declare` / `ffi::invoke`): a library may keep a callback
   and run it during a later call, and only the runtime's call roots the caller's
-  words and reports a panic in it (`may_call_back`). A call into `sum` costs
-  about 3.5 ns this way against 270 ns through `invoke` on a tuple.
+  words and reports a panic in it (`may_call_back`). A call into `sum` costs about
+  3.5 ns this way against 270 ns through `invoke` on a tuple; one passing a
+  12-byte string about 40 ns against 315 ns.
 
 `CallIndirect` runs through `coil_native_call_value` and `Driver::call_value`, which
 handles exact calls, partial and over-application and dictionaries. A function value
