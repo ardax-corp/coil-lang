@@ -16,7 +16,7 @@ use crate::debug::{DebugLine, ProgramDebug, SpanLoc};
 pub const ARCHIVE_MAJOR: u16 = 8;
 
 /// Archive minor. Bump on an additive change to the format.
-pub const ARCHIVE_MINOR: u16 = 3;
+pub const ARCHIVE_MINOR: u16 = 4;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -291,6 +291,31 @@ pub fn compute_c_struct_layout(
         size,
         align: max_align,
     })
+}
+
+/// The scalar fields of layout `id`, nested structs flattened, as
+/// `(byte offset, FFI tag)` in offset order: what a C calling convention
+/// sees when it passes the struct by value. `None` for an unknown id.
+pub fn flat_c_struct_fields(layouts: &[CStructLayout], id: u32) -> Option<Vec<(u32, u32)>> {
+    fn walk(layouts: &[CStructLayout], id: u32, base: u32, out: &mut Vec<(u32, u32)>, depth: u32) -> Option<()> {
+        let layout = layouts.get(id as usize)?;
+        if depth > 64 {
+            return None;
+        }
+        for ((_, enc), &off) in layout.fields.iter().zip(&layout.offsets) {
+            let (tag, aux) = crate::ffi::decode_tag_operand(*enc);
+            if tag == crate::ffi::tag::STRUCT {
+                walk(layouts, aux, base + off, out, depth + 1)?;
+            } else {
+                out.push((base + off, tag));
+            }
+        }
+        Some(())
+    }
+    let mut out = Vec::new();
+    walk(layouts, id, 0, &mut out, 0)?;
+    out.sort_by_key(|&(off, _)| off);
+    Some(out)
 }
 
 /// Compute layouts for a sequence of `extern struct` defs (declaration order).

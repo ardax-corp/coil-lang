@@ -5800,6 +5800,29 @@ impl Compiler {
         self.messages.push(message);
     }
 
+    /// The C layout of each `extern struct` the tags `words` pass by
+    /// value, once per id, for an `ExternCall` signature.
+    fn extern_struct_layouts<'a>(&self, words: impl IntoIterator<Item = &'a u32>) -> Vec<crate::mir::MirCStruct> {
+        let ids: std::collections::BTreeSet<u32> = words
+            .into_iter()
+            .map(|&w| common::decode_tag_operand(w))
+            .filter(|&(tag, _)| tag == common::tag::STRUCT)
+            .map(|(_, id)| id)
+            .collect();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let defs = self.checker.c_structs().iter().map(|d| (d.name.clone(), d.fields.clone()));
+        let Ok(layouts) = common::compute_c_struct_layouts(defs) else { return Vec::new() };
+        ids.into_iter()
+            .filter_map(|id| {
+                let layout = layouts.get(id as usize)?;
+                let fields = common::flat_c_struct_fields(&layouts, id)?;
+                Some(crate::mir::MirCStruct { id, size: layout.size, align: layout.align, fields })
+            })
+            .collect()
+    }
+
     pub fn c_structs(&self) -> &[CStructDef] {
         self.checker.c_structs()
     }
@@ -6997,13 +7020,16 @@ impl Compiler {
                         format!("__ext_addr_{}", table_name),
                         crate::typechecking::ty::int(),
                     );
+                    let ret_word = encode_tag_operand(ret_tag, ret_aux);
+                    let structs = self.extern_struct_layouts(tag_words.iter().chain([&ret_word]));
                     self.extern_signatures.insert(
                         fn_id_slot,
                         (crate::mir::MirExternSig {
                             symbol: unescape_coil_string(sym),
                             params: tag_words.clone(),
-                            ret: encode_tag_operand(ret_tag, ret_aux),
+                            ret: ret_word,
                             variadic: decl.variadic.then(Vec::new),
+                            structs,
                         }, addr_slot),
                     );
                     self.setup_steps.push(module_setup::SetupStep::Declare {

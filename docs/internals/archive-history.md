@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 3, below, is the
-current version, 8.3 with MIR section `FORMAT` 19). A runtime refuses a major
+only add something to the format raise the minor (minor 4, below, is the
+current version, 8.4 with MIR section `FORMAT` 20). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -117,6 +117,16 @@ on an argument tuple with its `Result` unwrapped: the runtime's FFI op 3
 and panics with a call's error. Format 18 is format 19 without tag 51 and FFI op 3, and the
 reader takes it (and 17 and 16); an older section that holds tag 51 is refused. An 8.2
 archive loads and runs unchanged: its extern calls are `invoke`s.
+
+Minor 4 (direct extern calls, step 4) gives an `ExternCall` signature the C layout
+of each `extern struct` it passes or returns by value, additively: in MIR section
+`FORMAT` 20, tag 51 writes, after the variadic tags, a count and per struct its id
+(the tag's aux), size, alignment and its scalar fields with nested structs flattened
+(a count, then each field's byte offset and FFI tag), before the argument values.
+Native code places such a struct in registers or memory by the platform's C calling
+convention from that layout. Format 19 is format 20 without the layouts; the reader
+takes it (and 18 to 16), and an extern call of it that passes a struct goes through
+the runtime's call. An 8.3 archive loads and runs unchanged.
 
 ## Major 7
 
