@@ -333,6 +333,11 @@ pub struct Heap {
     pretenure_bytes: usize,
     /// Minor collections in a row most of the nursery survived.
     pretenure_streak: u32,
+    /// Young objects freed early since the last minor collection: they died
+    /// young, so the next minor's survival ratio counts them as dead
+    /// (#2881; without them a nursery the compiler empties looks as if it
+    /// all survived, and allocation goes old).
+    young_freed: usize,
     /// Open `region` blocks ([`Self::region_enter`]); while non-zero the
     /// nursery takes strings too, never pretenures, and holds up to
     /// [`REGION_CHUNKS`].
@@ -404,6 +409,7 @@ impl Default for Heap {
             heap_checks: heap_checks_on(),
             pretenure_bytes: 0,
             pretenure_streak: 0,
+            young_freed: 0,
             region_depth: 0,
             region_saved_chunks: 0,
             gc_phase: GcPhase::Idle,
@@ -1426,6 +1432,9 @@ impl Heap {
             unsafe { self.dealloc(root) };
             return 1;
         }
+        if !check && self.finalizer_types.is_empty() {
+            return self.free_deep_unchecked(v, keep);
+        }
         let Some((mut found, reaches_drop, _)) = self.early_walk(v, deep, keep) else {
             return 0;
         };
@@ -1447,6 +1456,46 @@ impl Heap {
         };
         found.clear();
         self.early_scratch.0 = found;
+        n
+    }
+
+    /// A deep [`Self::free_early`] with no `drop` type registered and no
+    /// check (#2881): each object is freed as soon as its precise children
+    /// are listed, so the walk needs no mark bits and no second pass. A DAG
+    /// child named twice is freed once: its slot is poisoned (kind 0) after
+    /// the first, and the second visit finds no object there.
+    fn free_deep_unchecked(&mut self, v: Value, keep: &dyn Fn(u64) -> bool) -> usize {
+        let Some(root) = self.early_root(v, keep) else {
+            return 0;
+        };
+        self.freed_early = true;
+        let (found, work, mut children) = std::mem::take(&mut self.early_scratch);
+        let mut stack = work;
+        stack.clear();
+        stack.push(root);
+        let mut n = 0;
+        while let Some(obj) = stack.pop() {
+            children.clear();
+            obj.precise_children(self, &mut children);
+            // SAFETY: nothing else reaches `obj` (the compiler's proof);
+            // its children were read above.
+            unsafe { self.dealloc(obj) };
+            n += 1;
+            for &addr in &children {
+                // SAFETY: a precise word of a live object names a slot.
+                let Some(child) = (unsafe { Object::from_header(addr) }) else {
+                    continue;
+                };
+                if self.early_freeable(child) && !keep(addr) {
+                    // Poisoned at once, so a second name of it in this walk
+                    // finds nothing.
+                    child.header().kind.set(0);
+                    stack.push(child);
+                }
+            }
+        }
+        children.clear();
+        self.early_scratch = (found, stack, children);
         n
     }
 
@@ -1504,14 +1553,10 @@ impl Heap {
             let obj = found[i];
             i += 1;
             work.clear();
-            obj.for_each_reference(self, &mut |addr, precise| {
-                if precise {
-                    children.push(addr);
-                }
-            });
+            obj.precise_children(self, &mut children);
             for addr in children.drain(..) {
-                // SAFETY: `for_each_reference` visits only the addresses of
-                // live objects (it looked each word up).
+                // SAFETY: a precise pointer word of a live object names a
+                // live object (`precise_children` keeps slab addresses only).
                 let Some(child) = (unsafe { Object::from_header(addr) }) else {
                     continue;
                 };
@@ -1733,6 +1778,7 @@ impl Heap {
     /// them buys nothing: allocate old for a while, longer each time in a
     /// row, and try the nursery again after.
     pub(super) fn note_survival(&mut self, survivors: usize, objects: usize) {
+        let objects = objects + std::mem::take(&mut self.young_freed);
         // A minor that found nothing young (only held chunks) says nothing
         // about survival.
         if self.region_depth != 0 || objects == 0 {
@@ -1859,6 +1905,7 @@ impl Heap {
         unsafe { object.recycle_payload() };
         if young {
             // Reused by the nursery until its chunk is reset.
+            self.young_freed += 1;
             self.counts.young_bytes = self.counts.young_bytes.saturating_sub(size);
             self.slab.free_young(ptr);
         } else {
@@ -2679,6 +2726,38 @@ impl Object {
     /// (unknown-kind words, closure captures, unmasked coroutine words,
     /// `Member::Value` fields): a moving collector cannot rewrite those
     /// (`docs/internals/gc-evacuation.md`). Not on the mark path.
+    /// The addresses of the objects this one names through precise
+    /// pointer words, for an early free's walk (#2881): a precise word
+    /// always names a live object, so unlike [`Self::for_each_reference`]
+    /// no word is looked up in the slab, only range-checked.
+    pub(crate) fn precise_children(&self, heap: &Heap, out: &mut Vec<u64>) {
+        struct Precise<'a> {
+            lo: u64,
+            hi: u64,
+            out: &'a mut Vec<u64>,
+        }
+        impl SlotVisitor for Precise<'_> {
+            #[inline(always)]
+            fn word(&mut self, &v: &Value, kind: u8) {
+                if kind == common::WORD_POINTER {
+                    let addr = v.heap_addr();
+                    if addr >= self.lo && addr < self.hi {
+                        self.out.push(addr);
+                    }
+                }
+            }
+
+            #[inline(always)]
+            fn member(&mut self, m: &Member) {
+                if let Member::Object(o) = m {
+                    self.out.push(o.addr());
+                }
+            }
+        }
+        let (lo, hi) = heap.slab.bounds();
+        self.visit_slots(heap, &mut Precise { lo, hi, out });
+    }
+
     pub fn for_each_reference(&self, heap: &Heap, visit: &mut dyn FnMut(u64, bool)) {
         struct Tracer<'a, 'v> {
             heap: &'a Heap,
