@@ -1,0 +1,263 @@
+// More second names for a borrowed object (#2842 step 3): stores, pushes,
+// tuples, enum payloads, captures, generators and map values all take a
+// copy while the borrow lives; see borrow_second_name_copies.coil.
+use tests::assert;
+use collections::map::HashMap;
+
+class C {
+    pub x: int,
+}
+
+class H {
+    pub c: C,
+}
+
+fn consume(C c) -> int {
+    return c.x;
+}
+
+fn stash(Vec<C> vs, C c) {
+    vs.push(c);
+}
+
+test("store into a field while borrowed") {
+    let a = new C(1);
+    let w = mut a;
+    let h = new H(new C(0));
+    h.c = a;
+    w.x += 10;
+    assert!(a.x == 11 && h.c.x == 1);
+}
+
+test("push into a vector while borrowed") {
+    let a = new C(1);
+    let w = mut a;
+    let vs: Vec<C> = Vec::new();
+    vs.push(a);
+    w.x += 10;
+    assert!(a.x == 11 && vs[0].x == 1);
+}
+
+test("a callee pushes it while borrowed") {
+    let a = new C(1);
+    let w = mut a;
+    let vs: Vec<C> = Vec::new();
+    stash(vs, a);
+    w.x += 10;
+    assert!(a.x == 11 && vs[0].x == 1);
+}
+
+test("tuple of the borrowed object") {
+    let a = new C(1);
+    let w = mut a;
+    let t = (a, 5);
+    w.x += 10;
+    let (p, _) = t;
+    assert!(a.x == 11 && p.x == 1);
+}
+
+test("copy capture while borrowed") {
+    let a = new C(1);
+    let w = mut a;
+    let g = fn () use (a) {
+        return a.x;
+    };
+    w.x += 10;
+    assert!(a.x == 11 && g() == 1);
+}
+
+test("borrow in a loop, second name each pass") {
+    let a = new C(0);
+    let keep: Vec<C> = Vec::new();
+    let i = 0;
+    while i < 3 {
+        let w = mut a;
+        let b = a;
+        keep.push(b);
+        w.x += 1;
+        i += 1;
+    }
+    assert!(a.x == 3);
+    assert!(keep[0].x == 0 && keep[1].x == 1 && keep[2].x == 2);
+}
+
+test("borrow in one branch, second name after") {
+    let a = new C(1);
+    let b = a;
+    if a.x == 1 {
+        let w = mut a;
+        let c = a;
+        w.x += 10;
+        assert!(c.x == 1);
+    }
+    assert!(a.x == 11 && b.x == 1);
+}
+
+test("second name, then the source is written too") {
+    let a = new C(1);
+    let w = mut a;
+    let b = a;
+    a.x += 5;
+    w.x += 10;
+    b.x += 100;
+    assert!(a.x == 16 && w.x == 16 && b.x == 101);
+}
+
+test("second name of the second name") {
+    let a = new C(1);
+    let w = mut a;
+    let b = a;
+    let c = b;
+    w.x += 10;
+    c.x += 1;
+    assert!(a.x == 11 && b.x == 1 && c.x == 2);
+}
+
+test("second name of the borrow itself") {
+    let a = new C(1);
+    let w = mut a;
+    let b = w;
+    w.x += 10;
+    assert!(a.x == 11 && b.x == 1);
+}
+
+test("nested field borrow, holder shared twice") {
+    let h = new H(new C(1));
+    let w = mut h.c;
+    let h2 = h;
+    let h3 = h;
+    w.x += 10;
+    h2.c.x += 100;
+    assert!(h.c.x == 11 && h2.c.x == 101 && h3.c.x == 1);
+}
+
+test("for mut with a whole-vector copy, then later writes") {
+    let a: Vec<C> = [new C(1), new C(2)];
+    let k: Vec<C> = [];
+    for mut x in a {
+        k = a;
+        x.x += 10;
+    }
+    a[0].x += 100;
+    assert!(a[0].x == 111 && a[1].x == 12);
+    assert!(k[0].x == 11 && k[1].x == 2);
+}
+
+test("last use moved into a call") {
+    let a = new C(1);
+    let w = mut a;
+    let b = a;
+    w.x += 10;
+    assert!(consume(b) == 1);
+    assert!(consume(a) == 11);
+}
+
+class P {
+    pub a: C,
+    pub b: C,
+}
+
+enum E {
+    One(C),
+    Two(C, C),
+}
+
+gen fn twice(C c) {
+    yield c.x;
+    yield c.x;
+}
+
+fn pass(C c) -> C {
+    return c;
+}
+
+test("an enum payload made while borrowed") {
+    let a = new C(1);
+    let w = mut a;
+    let e = E::One(a);
+    w.x += 10;
+    let got = match e {
+        E::One(c) => c.x,
+        E::Two(_, _) => 0,
+    };
+    assert!(got == 1);
+    assert!(a.x == 11);
+}
+
+test("a pattern binding of a holder while a field is borrowed") {
+    let p = new P(new C(1), new C(2));
+    let w = mut p.a;
+    let q = p;
+    w.x += 10;
+    let qa = q.a;
+    assert!(qa.x == 1 && p.a.x == 11);
+}
+
+test("a generator given the borrowed object") {
+    let a = new C(1);
+    let w = mut a;
+    let g = twice(a);
+    let first = resume g;
+    w.x += 10;
+    let second = resume g;
+    assert!(first == 1);
+    assert!(second == 1);
+    assert!(a.x == 11);
+}
+
+test("a map value set while borrowed") {
+    let a = new C(1);
+    let w = mut a;
+    let m: HashMap<string, C> = HashMap::new();
+    let _ = m.insert("k", a);
+    w.x += 10;
+    let got = match m.get("k") {
+        Some(c) => c.x,
+        None => 0,
+    };
+    assert!(got == 1);
+    assert!(a.x == 11);
+}
+
+test("a known callee hands it back") {
+    let a = new C(1);
+    let w = mut a;
+    let r = pass(a);
+    w.x += 10;
+    assert!(r.x == 1 && a.x == 11);
+}
+
+test("two borrows of the same object, second name between") {
+    let a = new C(1);
+    let w1 = mut a;
+    w1.x += 1;
+    let b = a;
+    let w2 = mut a;
+    w2.x += 10;
+    w1.x += 100;
+    assert!(a.x == 112 && b.x == 2);
+}
+
+test("a use (mut a) closure and a copy capture") {
+    let a = new C(1);
+    let inc = fn () use (mut a) {
+        a.x += 1;
+    };
+    let snap = fn () use (a) {
+        return a.x;
+    };
+    inc();
+    inc();
+    assert!(a.x == 3 && snap() == 1);
+}
+
+test("for mut over a vector of vectors, inner second name") {
+    let a: Vec<Vec<int>> = [[1], [2]];
+    let keep: Vec<Vec<int>> = [];
+    for mut x in a {
+        keep.push(a[0]);
+        x.push(9);
+    }
+    assert!(a[0].len() == 2 && a[1].len() == 2);
+    assert!(keep[0].len() == 1 && keep[1].len() == 2);
+}

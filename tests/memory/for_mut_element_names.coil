@@ -1,7 +1,6 @@
 // A `for mut x in a` binding borrows one element of `a` (#2827 follow-up):
-// a second name for that element while `x` lives is E0149
-// (compile_fail/for_mut_element_*), while other names stay legal and read
-// their own values.
+// a second name for that element while `x` lives is a copy made there
+// (borrow_second_name_copies.coil), and other names read their own values.
 use tests::assert;
 
 class C {
