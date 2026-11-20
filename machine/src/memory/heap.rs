@@ -2512,7 +2512,7 @@ macro_rules! walk_slots {
             Object::Array(a) => {
                 let a = a.$get();
                 if a.may_hold_refs() {
-                    let (k, mask, kind) = (a.lanes(), a.tag_mask, a.elem_kind());
+                    let (k, mask, kind) = (a.lanes(), a.tag_mask, a.gc_elem_kind());
                     if let Some(words) = a.$gc_words() {
                         if k > 1 {
                             for i in 0..words.len() {
@@ -3844,12 +3844,21 @@ impl ObjArray {
         self.elem_kind
     }
 
-    /// Stamp the static element kind. A pointer kind is kept; a byte kind
-    /// packs the elements when they all fit. Other scalar stamps are dropped:
-    /// they would be unsound for generic bodies that box values.
+    /// The element kind the collector reads the words by: a pointer kind,
+    /// else unknown. A scalar stamp is for reference counts only until
+    /// their oracle has checked every scalar stamp (plan step 2): marking
+    /// still resolves those words.
+    #[inline]
+    pub fn gc_elem_kind(&self) -> u8 {
+        if self.elem_kind == common::WORD_POINTER { common::WORD_POINTER } else { common::WORD_UNKNOWN }
+    }
+
+    /// Stamp the static element kind. A pointer or scalar kind is kept
+    /// (the collector reads a scalar one as unknown, [`Self::gc_elem_kind`]);
+    /// a byte kind packs the elements when they all fit.
     #[inline]
     pub fn set_elem_kind(&mut self, kind: u8) {
-        if kind == common::WORD_POINTER {
+        if kind == common::WORD_POINTER || kind == common::WORD_SCALAR {
             self.elem_kind = kind;
         } else if kind == common::WORD_BYTE {
             self.pack();
@@ -6456,7 +6465,7 @@ mod tests {
     }
 
     /// A pointer element kind makes array words precise references; a scalar
-    /// stamp is ignored (generic bodies may store boxed values).
+    /// stamp is kept but the collector still resolves those words.
     #[test]
     fn pointer_kind_array_words_are_precise() {
         let mut heap = Heap::default();
@@ -6466,7 +6475,8 @@ mod tests {
             Object::Array,
         );
         gc.as_mut().set_elem_kind(common::WORD_SCALAR);
-        assert_eq!(gc.as_ref().elem_kind(), common::WORD_UNKNOWN);
+        assert_eq!(gc.as_ref().elem_kind(), common::WORD_SCALAR);
+        assert_eq!(gc.as_ref().gc_elem_kind(), common::WORD_UNKNOWN);
         gc.as_mut().set_elem_kind(common::WORD_POINTER);
         let mut seen = Vec::new();
         arr.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));

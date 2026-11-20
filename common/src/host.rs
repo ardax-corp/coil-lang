@@ -411,6 +411,12 @@ host_natives! {
     /// `HostOp::Restore`): an AOT executable's native `__start` runs it where
     /// the startup restored a snapshot. Compiler-emitted only.
     214 "startup_restore" (1) SUSPEND, NO_CAP => STARTUP_RESTORE_ID, STARTUP_RESTORE_NATIVE;
+    /// `vec_stamp(v, kind)` (MIR section format 19, compiler lowering
+    /// only): stamp array `v`'s element kind (`WORD_SCALAR` or
+    /// `WORD_POINTER`), as a shared generic body does for an array of a type
+    /// parameter it makes, from its `kinds` word (reference counts plan
+    /// step 2).
+    215 "vec_stamp" (2) HEAP_R, NO_CAP => VEC_STAMP_ID, VEC_STAMP_NATIVE;
 }
 
 /// `eq_mode`: the type's `==` is not one the runtime runs; the caller compares
@@ -469,7 +475,7 @@ pub const PACKED_VEC_ARITH: &str = "packed_vec_arith";
 // Every row's id is its index (so its consts name their row), and the
 // table only grows.
 const _: () = {
-    assert!(HOST_NATIVES.len() == 215);
+    assert!(HOST_NATIVES.len() == 216);
     let mut i = 0;
     while i < HOST_NATIVES.len() {
         assert!(HOST_NATIVES[i].id as usize == i, "a host native's id is not its index");
@@ -502,6 +508,7 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "vec_with_capacity",
     "vec_capacity",
     "vec_reserve",
+    "vec_stamp",
     "vec_clear",
     "vec_pop",
     "vec_remove",

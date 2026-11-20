@@ -130,6 +130,24 @@ pub fn host_vec_rotate_in(heap: &mut Heap, args: &[Value]) -> Value {
 pub const VEC_MOVE_WIRING: &[(&str, usize, crate::HostValueFn)] =
     &[(common::VEC_DRAIN_NATIVE, 3, host_vec_drain), (common::VEC_ROTATE_IN_NATIVE, 2, host_vec_rotate_in)];
 
+/// `vec_stamp(v, kind) -> ()`: stamp array `v`'s element kind
+/// ([`ObjArray::set_elem_kind`]), as a shared generic body does for an
+/// array of a type parameter it makes.
+pub fn host_vec_stamp(heap: &mut Heap, args: &[Value]) -> Value {
+    let handle = args.first().copied().unwrap_or(Value::from(0i64));
+    let kind = args.get(1).map_or(0, |v| v.as_int());
+    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits())
+        && let Ok(kind @ (common::WORD_SCALAR | common::WORD_POINTER)) = u8::try_from(kind)
+        && gc.as_ref().elem_kind() == common::WORD_UNKNOWN
+    {
+        gc.as_mut().set_elem_kind(kind);
+    }
+    Value::from(0i64)
+}
+
+/// `vec_stamp` (MIR section format 19), after `startup_restore`.
+pub const VEC_STAMP_WIRING: &[(&str, usize, crate::HostValueFn)] = &[(common::VEC_STAMP_NATIVE, 2, host_vec_stamp)];
+
 /// Copy a fixed array into a fresh growable vec (`Vec::from`).
 pub fn host_vec_from_array(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));

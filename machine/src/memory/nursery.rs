@@ -476,7 +476,7 @@ impl Heap {
         if !a.may_hold_refs() {
             return (0, 0, usize::MAX);
         }
-        let (k, mask, kind) = (a.lanes(), a.tag_mask, a.elem_kind());
+        let (k, mask, kind) = (a.lanes(), a.tag_mask, a.gc_elem_kind());
         if k == 1 && kind == common::WORD_SCALAR {
             return (0, 0, usize::MAX);
         }
