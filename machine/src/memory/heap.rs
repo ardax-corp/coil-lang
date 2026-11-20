@@ -333,11 +333,6 @@ pub struct Heap {
     pretenure_bytes: usize,
     /// Minor collections in a row most of the nursery survived.
     pretenure_streak: u32,
-    /// Young objects freed early since the last minor collection: they died
-    /// young, so the next minor's survival ratio counts them as dead
-    /// (#2881; without them a nursery the compiler empties looks as if it
-    /// all survived, and allocation goes old).
-    young_freed: usize,
     /// Open `region` blocks ([`Self::region_enter`]); while non-zero the
     /// nursery takes strings too, never pretenures, and holds up to
     /// [`REGION_CHUNKS`].
@@ -409,7 +404,6 @@ impl Default for Heap {
             heap_checks: heap_checks_on(),
             pretenure_bytes: 0,
             pretenure_streak: 0,
-            young_freed: 0,
             region_depth: 0,
             region_saved_chunks: 0,
             gc_phase: GcPhase::Idle,
@@ -1778,7 +1772,6 @@ impl Heap {
     /// them buys nothing: allocate old for a while, longer each time in a
     /// row, and try the nursery again after.
     pub(super) fn note_survival(&mut self, survivors: usize, objects: usize) {
-        let objects = objects + std::mem::take(&mut self.young_freed);
         // A minor that found nothing young (only held chunks) says nothing
         // about survival.
         if self.region_depth != 0 || objects == 0 {
@@ -1905,7 +1898,6 @@ impl Heap {
         unsafe { object.recycle_payload() };
         if young {
             // Reused by the nursery until its chunk is reset.
-            self.young_freed += 1;
             self.counts.young_bytes = self.counts.young_bytes.saturating_sub(size);
             self.slab.free_young(ptr);
         } else {
