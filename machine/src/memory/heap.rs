@@ -3251,6 +3251,18 @@ impl EnumPayload {
         self
     }
 
+    /// Add word kinds `k` (packed, as [`Self::with_kinds`]) to those the
+    /// construction site recorded: a shared body's, for a type parameter's
+    /// words (`vec_stamp`).
+    #[inline]
+    pub fn add_kinds(&mut self, k: u8) {
+        match &mut self.inner {
+            EnumPayloadInner::Inline { kinds, .. } | EnumPayloadInner::Spill { kinds, .. } => {
+                *kinds |= k;
+            }
+        }
+    }
+
     /// True when payload lives in the object header (no spill `Vec`).
     #[inline]
     pub fn is_inline(&self) -> bool {
@@ -7154,3 +7166,4 @@ mod tests {
         assert_eq!(ints(gc.as_ref()), vec![1, 2, 3]);
     }
 }
+

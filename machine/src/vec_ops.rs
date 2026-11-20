@@ -130,17 +130,28 @@ pub fn host_vec_rotate_in(heap: &mut Heap, args: &[Value]) -> Value {
 pub const VEC_MOVE_WIRING: &[(&str, usize, crate::HostValueFn)] =
     &[(common::VEC_DRAIN_NATIVE, 3, host_vec_drain), (common::VEC_ROTATE_IN_NATIVE, 2, host_vec_rotate_in)];
 
-/// `vec_stamp(v, kind) -> ()`: stamp array `v`'s element kind
-/// ([`ObjArray::set_elem_kind`]), as a shared generic body does for an
-/// array of a type parameter it makes.
+/// `vec_stamp(v, kinds) -> ()`: stamp the word kinds of an object a shared
+/// generic body made of a type parameter's words. An array's element kind
+/// (`WORD_SCALAR` or `WORD_POINTER`, [`ObjArray::set_elem_kind`]); a tuple's or
+/// enum's payload kinds, packed (`common::pack_word_kinds`), added to those
+/// its construction recorded.
 pub fn host_vec_stamp(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
-    let kind = args.get(1).map_or(0, |v| v.as_int());
-    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.bits())
-        && let Ok(kind @ (common::WORD_SCALAR | common::WORD_POINTER)) = u8::try_from(kind)
-        && gc.as_ref().elem_kind() == common::WORD_UNKNOWN
-    {
-        gc.as_mut().set_elem_kind(kind);
+    let kinds = args.get(1).map_or(0, |v| v.as_int());
+    match heap.find_object_by_addr(handle.bits()) {
+        Some(Object::Array(mut gc)) => {
+            if let Ok(kind @ (common::WORD_SCALAR | common::WORD_POINTER)) = u8::try_from(kinds)
+                && gc.as_ref().elem_kind() == common::WORD_UNKNOWN
+            {
+                gc.as_mut().set_elem_kind(kind);
+            }
+        }
+        Some(Object::Enum(mut gc)) => {
+            if let Ok(k) = u8::try_from(kinds) {
+                gc.as_mut().payload.add_kinds(k);
+            }
+        }
+        _ => {}
     }
     Value::from(0i64)
 }

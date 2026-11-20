@@ -3253,7 +3253,12 @@ impl Lower<'_> {
         // `()` payload (#1427).
         let kinds = common::pack_word_kinds(args.iter().map(|&a| self.expr_ty(a).map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t))));
         let obj = self.b.ins_alloc_kinds(MirAllocKind::TUPLE, words, kinds).map_err(mir)?;
-        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+        let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+        if self.kinds.is_some() {
+            let tys: Vec<Option<Ty>> = args.iter().map(|&a| self.expr_ty(a).cloned()).collect();
+            self.stamp_product_from_kinds(obj, &tys)?;
+        }
+        Ok(Val::V(obj))
     }
 
     /// `a..b` over a shared generic body's open `T` (#1230): the typed
@@ -7365,6 +7370,38 @@ impl Lower<'_> {
         Ok(())
     }
 
+    /// A shared body's tuple or enum `obj` of words of types `tys`: stamp
+    /// the kinds of those of a type parameter from its heap-reference bit
+    /// (`vec_stamp`, packed as `common::pack_word_kinds`). Nothing where no
+    /// word is a type parameter's the body has a bit for.
+    fn stamp_product_from_kinds(&mut self, obj: ValueId, tys: &[Option<Ty>]) -> Result<(), Refusal> {
+        let mut packed: Option<ValueId> = None;
+        for (i, t) in tys.iter().enumerate().take(common::PACKED_KIND_WORDS) {
+            let Some(t) = t else { continue };
+            if self.cx.word_kind(t) != common::WORD_UNKNOWN {
+                continue;
+            }
+            let Some((kinds, p)) = self.kinds_bit(t) else { continue };
+            let k = self.b.ins_const(MirConst::I64(i64::from(crate::codegen::kinds_ptr_bit(p)))).map_err(mir)?;
+            let bit = self.b.ins_binop(MirBinOp::Shr, kinds, k).map_err(mir)?;
+            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            let bit = self.b.ins_binop(MirBinOp::BitAnd, bit, one).map_err(mir)?;
+            // `WORD_SCALAR` is 1, `WORD_POINTER` 2: the word's kind, at its
+            // two bits.
+            let kind = self.b.ins_binop(MirBinOp::Add, bit, one).map_err(mir)?;
+            let at = self.b.ins_const(MirConst::I64(2 * i as i64)).map_err(mir)?;
+            let kind = self.b.ins_binop(MirBinOp::Shl, kind, at).map_err(mir)?;
+            packed = Some(match packed {
+                Some(w) => self.b.ins_binop(MirBinOp::BitOr, w, kind).map_err(mir)?,
+                None => kind,
+            });
+        }
+        if let Some(w) = packed {
+            self.b.ins_host_invoke(common::VEC_STAMP_ID, vec![obj, w]).map_err(mir)?;
+        }
+        Ok(())
+    }
+
     /// After call `id`: a `Vec::new()` / `Vec::with_capacity(n)` of a type
     /// parameter's elements in a shared body gets no stamped twin
     /// (`stamped_vec_ctor_name`), so its array is stamped here
@@ -7524,7 +7561,12 @@ impl Lower<'_> {
             None => MirAllocKind::Enum { tag },
         };
         let obj = self.b.ins_alloc_kinds(kind, words, kinds).map_err(mir)?;
-        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+        let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+        if self.kinds.is_some() {
+            let tys: Vec<Option<Ty>> = tys.iter().map(|t| Some(t.clone())).collect();
+            self.stamp_product_from_kinds(obj, &tys)?;
+        }
+        Ok(Val::V(obj))
     }
 
     /// A two-word enum value boxed to one word: the tag tested against each variant's but
