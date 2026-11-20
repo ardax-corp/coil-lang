@@ -5,8 +5,8 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs` (19 today; a reader takes
-19 only and refuses any other).
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (21 today; a reader takes
+21 only and refuses any other).
 
 ## Major 8
 
@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 3, below, is the
-current version, 8.3 with MIR section `FORMAT` 19). A runtime refuses a major
+only add something to the format raise the minor (minor 5, below, is the
+current version, 8.5 with MIR section `FORMAT` 21). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -105,26 +105,43 @@ pinned children are copied for it ([cow-calls.md](cow-calls.md), "Pinned objects
 The AOT layout fingerprint covers the pin's offset, so an object built against the
 old header is refused. An 8.1 archive loads and runs unchanged (no op of it pins).
 
-- MIR section `FORMAT` 19 (reference counts, plan step 2): a shared generic
-  entry's `kinds` word holds two bits per type parameter `p`, bit `2p` for
-  a copy-on-write object and bit `2p + 1` for a heap reference, so 31
-  parameters (16 for a dictionary's word, 28 for a call through a function
-  value). An `Alloc`'s construction `kinds` is a `u32` (it was a byte):
-  packed word kinds, two bits a word, of up to 12 words
-  (`common::PackedKinds`, `PACKED_KIND_WORDS`). The layout is format 18's
-  otherwise; the reader refuses 16 to 18, whose constant `kinds` words
-  have one bit per parameter.
+Minor 3 (direct extern calls, steps 1 and 2) adds `ExternCall`, additively: MIR
+section `FORMAT` 19 has one more instruction (tag 51: dest, the C symbol, the
+declared parameters' tags, the result's tag, a variadic byte and, when it is set, the
+tags of the call's arguments, then the argument values: library, function id, the
+function's C address and the arguments' words), and FFI op index 3 of an `Ffi`
+instruction is `addr` (`common::FFI_OP_ADDR`, 4: a declared function's C address, as
+a `Result`), which module setup stores in a static beside each function id. An `extern` block's call lowers to it instead of `Ffi` `invoke`
+on an argument tuple with its `Result` unwrapped: the runtime's FFI op 3
+(`common::FFI_OP_CALL`) takes the words as they are, returns the C function's word
+and panics with a call's error. Format 18 is format 19 without tag 51 and FFI op 3, and the
+reader takes it (and 17 and 16); an older section that holds tag 51 is refused. An 8.2
+archive loads and runs unchanged: its extern calls are `invoke`s.
 
-Minor 3 (reference counts, plan step 2) widens a snapshot enum object's
-payload kinds additively: the header's 24-bit `aux` field holds the packed
-kinds of up to 12 payload words, where it held 4 words' kinds in its low byte.
-An 8.2 runtime reads the low byte, the first 4 words' kinds, which stay exact;
-an 8.2 archive's enums read the same as before. A snapshot instance's `aux`
-field, `0` before, holds the packed kinds of its own slots that its class row
-leaves unknown (generic fields, `ObjInstance::own_kinds`); an 8.2 runtime
-ignores it and reads those slots as unknown, as it always has. A snapshot
-array's element kind may be `WORD_SCALAR` as well as `WORD_POINTER`; an 8.2
-runtime reads a scalar one as unknown.
+Minor 4 (direct extern calls, step 4) gives an `ExternCall` signature the C layout
+of each `extern struct` it passes or returns by value, additively: in MIR section
+`FORMAT` 20, tag 51 writes, after the variadic tags, a count and per struct its id
+(the tag's aux), size, alignment and its scalar fields with nested structs flattened
+(a count, then each field's byte offset and FFI tag), before the argument values.
+Native code places such a struct in registers or memory by the platform's C calling
+convention from that layout. Format 19 is format 20 without the layouts; the reader
+takes it (and 18 to 16), and an extern call of it that passes a struct goes through
+the runtime's call. An 8.3 archive loads and runs unchanged.
+
+Minor 5 (reference counts, plan step 2) changes what words mean, so its MIR
+section is a new `FORMAT`, 21, and the reader refuses 16 to 20: a shared generic
+entry's `kinds` word holds two bits per type parameter `p`, bit `2p` for a
+copy-on-write object and bit `2p + 1` for a heap reference (31 parameters, 16 for
+a dictionary's word, 28 for a call through a function value), where older formats'
+constant `kinds` words have one bit per parameter; and an `Alloc`'s construction
+`kinds` is a `u32` (it was a byte): packed word kinds, two bits a word, of up to 12
+words (`common::PackedKinds`, `PACKED_KIND_WORDS`). Its layout is format 20's
+otherwise, so an 8.4 archive's code is compiled again. The snapshot additions are
+additive: an enum object's header `aux` field holds the packed kinds of up to 12
+payload words in its 24 bits (it held 4 words' kinds in its low byte); an instance's
+`aux`, `0` before, holds the packed kinds of its own slots that its class row leaves
+unknown (generic fields, `ObjInstance::own_kinds`); and an array's element kind may
+be `WORD_SCALAR` as well as `WORD_POINTER`. An 8.4 snapshot reads as before.
 
 ## Major 7
 

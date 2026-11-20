@@ -1489,11 +1489,14 @@ impl Compiler {
         // nothing else of the body is emitted.
         let stray = refusal::stray_jumps(&module, hir);
         if !stray.is_empty() {
-            for (at, brk) in stray {
+            for ((start, end), brk) in stray {
                 let keyword = if brk { "break" } else { "continue" };
-                let (start, end) = hir.expr(at).span;
-                let mut message = Message::error(ErrorCode::CodegenError, format!("{keyword} outside of loop"), start..end);
-                message.push(DiagLabel::new(format!("`{keyword}` can only be used inside a loop"), start..end));
+                let mut message =
+                    Message::error(ErrorCode::JumpOutsideLoop, format!("`{keyword}` outside of a loop"), start..end);
+                message.push(DiagLabel::new(
+                    format!("`{keyword}` can only be used inside a loop of its own function"),
+                    start..end,
+                ));
                 self.messages.push(message);
             }
             self.hir_module = Some(module);

@@ -127,7 +127,7 @@ impl MirInst {
                 OpProps { barrier: impure, effects: if impure { Effects::Yes } else { Effects::No }, allocates: true, vector_barrier: true, ..P }
             }
             Self::Call { .. } => OpProps { barrier: true, effects: Effects::UnlessPureCall, vector_barrier: true, ..P },
-            Self::CallIndirect { .. } | Self::Ffi { .. } => {
+            Self::CallIndirect { .. } | Self::Ffi { .. } | Self::ExternCall { .. } => {
                 OpProps { barrier: true, effects: Effects::Yes, allocates: true, vector_barrier: true, ..P }
             }
             Self::ResumeCoro { .. } | Self::Yield { .. } => OpProps { barrier: true, effects: Effects::Yes, allocates: true, vector_barrier: true, ..P },

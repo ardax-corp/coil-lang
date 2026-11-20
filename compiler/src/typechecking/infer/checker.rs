@@ -1903,6 +1903,7 @@ impl Checker {
         }
         self.check_duplicate_classes(ast);
         self.check_duplicate_consts(ast);
+        self.check_imports_against_local_items(ast);
         self.check_builtin_class_names(ast);
         self.pre_register_readonly_classes(ast);
         self.collect_variadic_templates(ast);
@@ -4249,6 +4250,8 @@ impl Checker {
             Some(common::tag::CONST_BYTES) => {
                 readonly_ty(crate::typechecking::ty::vec_app_ty(crate::typechecking::ty::byte()))
             }
+            // An `extern struct` by value: the record `invoke` gives too.
+            Some(common::tag::STRUCT) => self.ty_from_ffi_type_expr(t),
             _ => self.parse_type_name(t),
         }
     }
@@ -4311,7 +4314,10 @@ impl Checker {
             let ret_ty = decl
                 .returns
                 .as_ref()
-                .map(|r| self.parse_type_name(r))
+                .map(|r| match self.ffi_type_tag_from_output(r) {
+                    Some((common::tag::STRUCT, _)) => self.ty_from_ffi_type_expr(r),
+                    _ => self.parse_type_name(r),
+                })
                 .unwrap_or_else(unit_ty);
             // Register the fixed-prefix function type (extra `...` args
             // are accepted at call sites via `extern_variadic`).
@@ -9491,7 +9497,8 @@ impl Checker {
             );
         }
         for (i, ty) in arg_tys.iter().enumerate().skip(nfixed) {
-            if !Self::is_ffi_marshallable_ty(ty) {
+            // An unannotated local's type is a variable bound by now.
+            if !Self::is_ffi_marshallable_ty(&apply_ty_prune(&self.subst, ty)) {
                 let span = arg_exprs
                     .and_then(|a| a.get(i))
                     .map(|e| e.0.into_range())
@@ -14501,6 +14508,34 @@ impl Checker {
         }
     }
 
+    /// The structural record of `extern struct` `id`: its fields by name, a
+    /// nested struct as its own record (`int` past a nesting no C layout has).
+    fn c_struct_record_ty(&self, id: u32, depth: u32) -> Ty {
+        use common::tag;
+        let Some(def) = self.c_structs.get(id as usize).filter(|_| depth < 64) else {
+            return int();
+        };
+        let fields = def
+            .fields
+            .iter()
+            .map(|(name, enc)| {
+                let (t, aux) = common::decode_tag_operand(*enc);
+                let fty = match t {
+                    tag::STRUCT => self.c_struct_record_ty(aux, depth + 1),
+                    tag::FLOAT => float(),
+                    tag::STRING => string(),
+                    tag::BOOL => boolean(),
+                    tag::VOID => unit_ty(),
+                    // int / int32 / ptr / …, treat as int at the
+                    // language level (narrow C widths are ABI-only).
+                    _ => int(),
+                };
+                (name.clone(), fty)
+            })
+            .collect();
+        crate::typechecking::ty::record(fields)
+    }
+
     /// Map an FFI type tag expression to the language `Ty` used for
     /// `invoke` result typing (void → unit, structs → structural record).
     fn ty_from_ffi_type_expr(&self, expr: &Output) -> Ty {
@@ -14510,34 +14545,7 @@ impl Checker {
             Some((t, _)) if t == tag::FLOAT => float(),
             Some((t, _)) if t == tag::STRING => string(),
             Some((t, _)) if t == tag::BOOL => boolean(),
-            Some((t, id)) if t == tag::STRUCT => {
-                if let Some(def) = self.c_structs.get(id as usize) {
-                    let fields = def
-                        .fields
-                        .iter()
-                        .map(|(name, enc)| {
-                            let tag = if *enc <= tag::LAST {
-                                *enc
-                            } else {
-                                *enc & 0xFFFF
-                            };
-                            let fty = match tag {
-                                t if t == tag::FLOAT => float(),
-                                t if t == tag::STRING => string(),
-                                t if t == tag::BOOL => boolean(),
-                                t if t == tag::VOID => unit_ty(),
-                                // int / int32 / ptr / …, treat as int at the
-                                // language level (narrow C widths are ABI-only).
-                                _ => int(),
-                            };
-                            (name.clone(), fty)
-                        })
-                        .collect();
-                    crate::typechecking::ty::record(fields)
-                } else {
-                    int()
-                }
-            }
+            Some((t, id)) if t == tag::STRUCT => self.c_struct_record_ty(id, 0),
             _ => int(),
         }
     }
@@ -16204,6 +16212,46 @@ impl Checker {
     /// A second top-level `const` of a name already declared in this module
     /// would silently replace the first (#1960): report it. A `const` whose
     /// initializer runs at startup is a lifted static, the same declaration.
+    /// `use m::x` where this module also declares an item `x` (#2866):
+    /// one local name bound twice, E0133 as two imports of it are, rather
+    /// than the local item silently winning.
+    fn check_imports_against_local_items(&mut self, ast: &Output) {
+        fn walk<'a>(node: &'a Output<'a>, uses: &mut Vec<(String, String, Range<usize>)>, items: &mut HashSet<String>) {
+            let inner = Checker::pre_pass_unwrap_stmt(node);
+            match inner.1.as_ref() {
+                Expression::Use { path, name, alias } if name != "*" => {
+                    let local = alias.clone().unwrap_or_else(|| name.clone());
+                    uses.push((local, format!("{}::{name}", path.join("::")), node.0.into_range()));
+                }
+                Expression::Use { .. } => {}
+                Expression::Program(children) | Expression::Fragment(children) => {
+                    for child in children {
+                        walk(child, uses, items);
+                    }
+                }
+                _ => crate::typechecking::resolve::item_names(inner, items),
+            }
+        }
+        let mut uses = Vec::new();
+        let mut items = HashSet::new();
+        walk(ast, &mut uses, &mut items);
+        for (local, fqn, range) in uses {
+            if !items.contains(&local) {
+                continue;
+            }
+            let mut msg = Message::error(
+                ErrorCode::DuplicateImport,
+                format!("`{local}` is both imported (as `{fqn}`) and declared in this module"),
+                range,
+            );
+            msg.with_help(format!(
+                "rename the local `{local}`, or import the other one under another name, e.g. `use {} as other`",
+                fqn
+            ));
+            self.messages.push(msg);
+        }
+    }
+
     fn check_duplicate_consts(&mut self, ast: &Output) {
         fn const_name<'a>(node: &'a Expression<'a>) -> Option<&'a str> {
             match node {

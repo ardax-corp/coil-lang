@@ -430,6 +430,12 @@ pub struct NativeHost {
     /// Run the FFI op (`FfiLoad` / `DeclareFFI` / `FfiInvoke`, by opcode
     /// byte) with its operand on `args`, on the runtime.
     pub ffi: MachineHostFn,
+    /// A direct extern call's struct by value ([`coil_native_ffi_struct_in`],
+    /// [`coil_native_ffi_struct_out`]): with the `bool` clear, pack the
+    /// record word into struct id's C bytes at the pointer (`Some(1)`, or
+    /// `Some(0)` when it cannot); set, a new record of the bytes there.
+    /// `None`: nothing ran.
+    pub ffi_struct: unsafe fn(*mut std::ffi::c_void, u32, u64, *mut u8, bool) -> Option<u64>,
     /// Run the ordinary host native `id` on `args` in `layout` as the runtime's
     /// `HostInvoke` does, without interpreting a body: a native that would block the
     /// task parks the fiber the call runs on. `None`: it is no ordinary
@@ -522,6 +528,7 @@ impl NativeHost {
         gc: |_, _, _| 0,
         free: |_, _, _, _| true,
         ffi: |_, _, _, _, _, _| None,
+        ffi_struct: |_, _, _, _, _| None,
         invoke: |_, _, _, _, _| None,
     };
 }
@@ -2045,6 +2052,27 @@ fn concat_tails<'a>(rest: &str, args: &[u64]) -> Option<([&'a str; 8], usize)> {
     Some((out, args.len()))
 }
 
+/// `f` with an empty scratch string, reused across calls on this thread so
+/// a format renders without an allocation of its own (a nested call, which
+/// the runtime never makes, gets a fresh one).
+fn with_scratch<R>(f: impl FnOnce(&mut String) -> R) -> R {
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+    SCRATCH.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut s) => {
+            s.clear();
+            let r = f(&mut s);
+            // Keep a big render's buffer only while it is modest.
+            if s.capacity() > 1 << 16 {
+                *s = String::new();
+            }
+            r
+        }
+        Err(_) => f(&mut String::new()),
+    })
+}
+
 /// `FORMAT` with the format string `fmt` and the `n` argument words at
 /// `args` (in order), as the runtime's handler: a leading `%s` appends the rest
 /// to the first argument (in place when that string ends at its buffer's
@@ -2084,29 +2112,28 @@ pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args:
         {
             let joined = match &tails[..count] {
                 [one] => gh.as_ref().concat(one),
-                many => {
-                    let mut tail = String::with_capacity(many.iter().map(|t| t.len()).sum());
+                many => with_scratch(|tail| {
                     for t in many {
                         tail.push_str(t);
                     }
-                    gh.as_ref().concat(&tail)
-                }
+                    gh.as_ref().concat(tail)
+                }),
             };
             let addr = heap.alloc(joined, Object::String).0.addr();
             unsafe { note_alloc(ctx, heap) };
             return addr;
         }
-        let message = crate::format::render_format(rest, || words.next().unwrap_or_default());
-        match head {
-            Some(head) => {
-                let joined = match object(head.bits()) {
-                    Some(Object::String(gh)) => gh.as_ref().concat(&message),
-                    _ => ObjString::new(crate::format::string_at(heap, head.bits()) + &message),
-                };
-                heap.alloc(joined, Object::String).0.addr()
+        let joined = with_scratch(|message| {
+            crate::format::render_format_into(message, rest, || words.next().unwrap_or_default());
+            match head {
+                Some(head) => match object(head.bits()) {
+                    Some(Object::String(gh)) => gh.as_ref().concat(message),
+                    _ => ObjString::new(crate::format::string_at(heap, head.bits()) + message),
+                },
+                None => ObjString::from_data(crate::memory::StrData::copy_of(message)),
             }
-            None => heap.alloc_string(message).as_ptr() as *mut u8 as u64,
-        }
+        });
+        heap.alloc(joined, Object::String).0.addr()
     };
     unsafe { note_alloc(ctx, heap) };
     addr
@@ -2598,6 +2625,146 @@ pub unsafe extern "C" fn coil_native_ffi(ctx: *mut NativeCtx, op: u64, operand: 
     unsafe { host_on_machine(ctx, ffi, op, operand, args, n) }
 }
 
+/// How a direct extern call passes an argument ([`coil_native_ffi_arg`]).
+pub const FFI_ARG_CSTR: u64 = 0;
+pub const FFI_ARG_CONST_BYTES: u64 = 1;
+pub const FFI_ARG_BYTES: u64 = 2;
+pub const FFI_ARG_PTR: u64 = 3;
+
+/// One argument of a direct extern call as the C pointer it passes, at
+/// `out`: a `string` as a NUL-terminated copy for this call
+/// ([`FFI_ARG_CSTR`], until [`coil_native_ffi_done`]), a byte view or
+/// buffer lent in place, or a `ptr` word. `0` when the runtime's call
+/// must make it instead (an interior NUL, a buffer it copies, an array a
+/// `ptr` copies), which then also reports any error.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `out` points at a word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi_arg(ctx: *mut NativeCtx, kind: u64, word: u64, out: *mut u64) -> u64 {
+    use crate::memory::Object;
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return 0;
+    };
+    let ptr = match kind {
+        FFI_ARG_CSTR => match heap.cstr_from_addr(word) {
+            Ok(Some(p)) => p as u64,
+            Ok(None) => match heap.intern_ffi_bytes(b"") {
+                Ok(p) => p as u64,
+                Err(_) => return 0,
+            },
+            Err(_) => return 0,
+        },
+        FFI_ARG_CONST_BYTES | FFI_ARG_BYTES => match heap.find_object_by_addr(word) {
+            Some(Object::String(gc)) if kind == FFI_ARG_CONST_BYTES && !gc.as_ref().data.is_empty() => gc.as_ref().data.as_ptr() as u64,
+            Some(Object::Array(mut gc)) => match gc.as_mut().bytes_mut() {
+                Some(b) if !b.is_empty() => b.as_mut_ptr() as u64,
+                _ => return 0,
+            },
+            _ => return 0,
+        },
+        FFI_ARG_PTR => match heap.find_object_by_addr(word) {
+            Some(Object::Array(gc)) if !gc.as_ref().is_empty() => return 0,
+            Some(Object::Enum(gc)) if gc.as_ref().is_tuple() && !gc.as_ref().elements().is_empty() => return 0,
+            _ => word,
+        },
+        _ => return 0,
+    };
+    // SAFETY: the caller passes a word to write.
+    unsafe { *out = ptr };
+    1
+}
+
+/// After a direct extern call that passed a `string`: drop the copies.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi_done(ctx: *mut NativeCtx) {
+    if let Some(heap) = unsafe { heap(ctx) } {
+        heap.reset_ffi_strings();
+    }
+}
+
+/// A direct extern call's `string` result: a new string of the C string
+/// at `ptr` (invalid UTF-8 replaced), or `0` for a null pointer, as the
+/// runtime's call makes it.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `ptr` is null or a C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi_str(ctx: *mut NativeCtx, ptr: u64) -> u64 {
+    if ptr == 0 {
+        return 0;
+    }
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    // SAFETY: C returned a NUL-terminated string.
+    let text = unsafe { std::ffi::CStr::from_ptr(ptr as *const std::ffi::c_char) }.to_string_lossy().into_owned();
+    let s = heap.alloc_string(text);
+    unsafe { note_alloc(ctx, heap) };
+    s.as_ptr() as *mut u8 as u64
+}
+
+/// A direct extern call's struct argument: the record `word` as struct
+/// `id`'s C bytes at `buf` (its size, rounded up to a word). `0` when it
+/// cannot be packed here: the runtime's call then makes it, and reports
+/// any error.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `buf` points at the struct's bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi_struct_in(ctx: *mut NativeCtx, id: u64, word: u64, buf: *mut u8) -> u64 {
+    let c = unsafe { &*ctx };
+    if c.machine.is_null() || word == 0 {
+        return 0;
+    }
+    // SAFETY: `machine` is the live machine the host was made for.
+    unsafe { (c.host.ffi_struct)(c.machine, id as u32, word, buf, false) }.unwrap_or(0)
+}
+
+/// A direct call to a variadic C function on x86-64 System V goes through
+/// this: the C function's address is the sixth integer argument (`r9`,
+/// after zero words), and `al` must bound the vector registers the call
+/// uses, which Cranelift does not set. It sets `al` to 8 and jumps to the
+/// function, which returns to the caller. The callee reads no integer
+/// register past the ones its arguments took.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "C" fn coil_native_va_call() {
+    core::arch::naked_asm!("mov r11, r9", "mov al, 8", "jmp r11")
+}
+
+/// Only x86-64 System V calls through [`coil_native_va_call`] there.
+#[cfg(not(target_arch = "x86_64"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn coil_native_va_call() {
+    std::process::abort()
+}
+
+/// A direct extern call's struct result: a new record of struct `id`'s C
+/// bytes at `buf`.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `buf` points at the struct's bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_ffi_struct_out(ctx: *mut NativeCtx, id: u64, buf: *mut u8) -> u64 {
+    let c = unsafe { &*ctx };
+    if c.machine.is_null() {
+        return unsafe { bail(ctx) };
+    }
+    // SAFETY: `machine` is the live machine the host was made for.
+    let Some(w) = (unsafe { (c.host.ffi_struct)(c.machine, id as u32, 0, buf, true) }) else {
+        return unsafe { bail(ctx) };
+    };
+    if let Some(heap) = unsafe { heap(ctx) } {
+        unsafe { note_alloc(ctx, heap) };
+    }
+    w
+}
+
 /// [`coil_native_host`] of an ordinary native that is no plain function:
 /// the machine runs it in Rust ([`NativeHost::invoke`]), no interpreted body.
 /// `None`: it is no ordinary native.
@@ -2946,6 +3113,12 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_coro_done", coil_native_coro_done as *const u8),
         ("coil_native_yield", coil_native_yield as *const u8),
         ("coil_native_ffi", coil_native_ffi as *const u8),
+        ("coil_native_ffi_arg", coil_native_ffi_arg as *const u8),
+        ("coil_native_ffi_done", coil_native_ffi_done as *const u8),
+        ("coil_native_ffi_str", coil_native_ffi_str as *const u8),
+        ("coil_native_ffi_struct_in", coil_native_ffi_struct_in as *const u8),
+        ("coil_native_ffi_struct_out", coil_native_ffi_struct_out as *const u8),
+        ("coil_native_va_call", coil_native_va_call as *const u8),
         ("coil_native_defer", coil_native_defer as *const u8),
         ("coil_native_claim", coil_native_claim as *const u8),
         ("coil_native_collect", coil_native_collect as *const u8),
@@ -2955,7 +3128,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 41;
+const HELPERS: usize = 47;
 
 #[cfg(test)]
 mod pin_tests {

@@ -1,0 +1,12 @@
+// @expected E0133 — `add` is imported from `calc` and declared here too: one
+// local name bound twice, as two imports of it are, instead of the local
+// function silently winning (#2866).
+use calc::add;
+
+fn add(int a, int b) -> int {
+    return a * b;
+}
+
+fn main() {
+    let _ = add(2, 3);
+}

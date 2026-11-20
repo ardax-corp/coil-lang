@@ -1,0 +1,10 @@
+// @expected E0154 — `compile_fail::self_import` imports its own `other`. A
+// module is checked after the modules it imports, so the `use` used to find
+// nothing and the error was E0100 "Cannot find value `other` in module
+// `self_import`", which does declare it (#2865). Its own items are in scope
+// without a `use`.
+use compile_fail::self_import::one;
+
+fn main() {
+    let _ = one();
+}

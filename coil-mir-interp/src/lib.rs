@@ -221,9 +221,11 @@ fn refusal(f: &MirFunc) -> Option<String> {
 /// Each op's site in `f`, adding to `sites`: what `coil_native`'s
 /// lowering records, shared by the ops of one location.
 fn body_sites(f: &MirFunc, pc: u32, sites: &mut Vec<NativeSite>) -> (Vec<Vec<u32>>, u32) {
-    let mut seen: HashMap<(u32, u32, u32), u32> = HashMap::new();
+    // Keyed by the whole location: two splices of one callee share its
+    // spans but not their inline scopes, which name the call (#2868).
+    let mut seen: HashMap<(u32, u32, u32, u32), u32> = HashMap::new();
     let mut site = |loc: DebugLoc, sites: &mut Vec<NativeSite>| -> u32 {
-        *seen.entry((loc.file, loc.start_byte, loc.end_byte)).or_insert_with(|| {
+        *seen.entry((loc.file, loc.start_byte, loc.end_byte, loc.scope)).or_insert_with(|| {
             sites.push(NativeSite { body_id: pc, loc });
             (sites.len() - 1) as u32
         })

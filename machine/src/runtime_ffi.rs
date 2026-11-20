@@ -35,7 +35,7 @@ impl FfiCall {
 }
 
 /// An FFI type tag word (`ffi::Type`) as the type it names.
-fn ffi_type_from_value(v: &Value, heap: &Heap) -> crate::memory::FfiType {
+pub(crate) fn ffi_type_from_value(v: &Value, heap: &Heap) -> crate::memory::FfiType {
     let raw = v.bits();
     let (tag, aux) = if raw <= common::tag::LAST as u64 {
         (raw as u32, 0)
@@ -124,14 +124,37 @@ impl Runtime {
     /// `FfiInvoke`: call the declared function. `callback` makes the C
     /// trampoline for a callback argument (the function at that offset).
     pub(crate) fn ffi_invoke(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>, callback: &mut dyn FnMut(u32) -> Result<crate::ffi::OwnedClosure, crate::ffi::FfiError>) -> Value {
+        match self.ffi_call(lib_addr, function_id, args, arg_types, callback) {
+            Ok(v) => crate::io::alloc_result_ok(&mut self.heap, v),
+            Err((kind, message)) => self.ffi_err(kind, message),
+        }
+    }
+
+    /// `FFI_OP_ADDR`: the C address of function `function_id` of the
+    /// library at `lib`, as a `Result`.
+    pub(crate) fn ffi_addr(&mut self, lib: Value, function_id: Value) -> Value {
+        let addr = match self.ffi.userland_libraries.get(&lib.bits()).copied() {
+            Some(Object::Library(gc)) => gc.as_ref().signatures.get(function_id.as_int() as usize).map(|f| f.prepared.address()),
+            _ => None,
+        };
+        match addr {
+            Some(a) => crate::io::alloc_result_ok(&mut self.heap, Value::from(a as i64)),
+            None => self.ffi_error(crate::ffi::FfiError::InvalidHandle("function id out of range".into())),
+        }
+    }
+
+    /// [`Runtime::ffi_invoke`]'s call: the C function's word (`0` for a
+    /// `void` one), or its error's kind and message.
+    pub(crate) fn ffi_call(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>, callback: &mut dyn FnMut(u32) -> Result<crate::ffi::OwnedClosure, crate::ffi::FfiError>) -> Result<Value, (crate::ffi::FfiErrorKindTag, String)> {
+        let error = |e: crate::ffi::FfiError| (crate::ffi::FfiErrorKindTag::from_ffi_error(&e), e.to_string());
         let lib = match self.ffi.userland_libraries.get(&lib_addr).copied() {
             Some(Object::Library(gc)) => gc,
-            Some(_) => return self.ffi_err(crate::ffi::FfiErrorKindTag::InvalidHandle, "invalid library handle (not a loaded library)".into()),
-            None => return self.ffi_error(crate::ffi::FfiError::InvalidHandle("invalid library handle".into())),
+            Some(_) => return Err((crate::ffi::FfiErrorKindTag::InvalidHandle, "invalid library handle (not a loaded library)".into())),
+            None => return Err(error(crate::ffi::FfiError::InvalidHandle("invalid library handle".into()))),
         };
         let lib_ref: &crate::memory::ObjLibrary = lib.as_ref();
         let Some(registered) = lib_ref.signatures.get(function_id) else {
-            return self.ffi_error(crate::ffi::FfiError::InvalidHandle("function id out of range".into()));
+            return Err(error(crate::ffi::FfiError::InvalidHandle("function id out of range".into())));
         };
         let sig = registered.ffi_signature();
         let mut owned_args;
@@ -146,7 +169,7 @@ impl Runtime {
                             owned_args[i] = Value::from(closure.code_ptr_usize() as u64);
                             self.ffi.closures.push(closure);
                         }
-                        Err(e) => return self.ffi_error(e),
+                        Err(e) => return Err(error(e)),
                     }
                 }
             }
@@ -160,10 +183,6 @@ impl Runtime {
         self.ffi_arg_roots.extend_from_slice(args);
         let result = crate::ffi::invoke_via_libffi(&registered.prepared, sig, args, arg_types, &mut ctx, &mut closure_ptrs);
         self.ffi_arg_roots.truncate(roots_len);
-        match result {
-            Ok(Some(v)) => crate::io::alloc_result_ok(&mut self.heap, v),
-            Ok(None) => crate::io::alloc_result_ok(&mut self.heap, Value::default()),
-            Err(e) => self.ffi_error(e),
-        }
+        result.map(Option::unwrap_or_default).map_err(error)
     }
 }

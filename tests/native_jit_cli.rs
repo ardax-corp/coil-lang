@@ -972,9 +972,9 @@ fn vector_loops_and_byte_scans_run_from_native_code() {
     for f in ["sum", "dot", "scale", "find", "copy"] {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
-    // `scale` (a store loop) and `find` (a scan, run twice) go through the
-    // the interpreter's lane code; the reduces compile to native loops.
-    assert!(vector_ops(&stats) >= 3, "stats: {stats}");
+    // `find` (a scan, run twice) goes through the interpreter's lane code;
+    // the reduces and `scale` (a store loop) compile to native loops.
+    assert!(vector_ops(&stats) >= 2, "stats: {stats}");
 }
 
 #[test]
