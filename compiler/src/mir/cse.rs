@@ -547,6 +547,7 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         MirInst::Phi { .. }
         | MirInst::HostInvoke { .. }
         | MirInst::Ffi { .. }
+        | MirInst::ExternCall { .. }
         | MirInst::Call { .. }
         | MirInst::CallIndirect { .. }
         | MirInst::MatchPayload { .. }

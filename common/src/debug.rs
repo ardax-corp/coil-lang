@@ -262,6 +262,10 @@ pub const MIR_SECTION_SCOPES_FORMAT: u8 = 17;
 /// otherwise, so a reader takes 16, 17 and this one.
 pub const MIR_SECTION_COW_PIN_FORMAT: u8 = 18;
 
+/// The first MIR section format that may hold `ExternCall` (archive 8.3).
+/// Its layout is format 18's otherwise.
+pub const MIR_SECTION_EXTERN_FORMAT: u8 = 19;
+
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and
 /// scope and an `at_call` byte; little-endian `u32`s.

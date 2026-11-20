@@ -922,7 +922,7 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, body_i
                 bodies[**i].mir.blocks.iter().flat_map(|b| &b.insts).any(|inst| {
                     matches!(
                         inst,
-                        MirInst::ArrayPush { .. } | MirInst::LanePush { .. } | MirInst::LanesToWords { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. } | MirInst::VecLoop { .. }
+                        MirInst::ArrayPush { .. } | MirInst::LanePush { .. } | MirInst::LanesToWords { .. } | MirInst::HostInvoke { .. } | MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::FreeEarly { .. } | MirInst::Yield { .. } | MirInst::Ffi { .. } | MirInst::ExternCall { .. } | MirInst::VecLoop { .. }
                     )
                 })
         })
@@ -1100,7 +1100,7 @@ fn pin_reach(bodies: &[NativeBody], by_label: &HashMap<Label, usize>) -> HashSet
             return everything();
         }
         work.extend(insts(i).flat_map(named_labels).filter_map(|l| by_label.get(&l).copied()));
-        if !values && insts(i).any(|x| matches!(x, MirInst::CallIndirect { .. } | MirInst::HostInvoke { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. })) {
+        if !values && insts(i).any(|x| matches!(x, MirInst::CallIndirect { .. } | MirInst::HostInvoke { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. } | MirInst::ExternCall { .. })) {
             values = true;
             for b in bodies {
                 let f = &b.mir;
@@ -1120,7 +1120,7 @@ fn pin_reach(bodies: &[NativeBody], by_label: &HashMap<Label, usize>) -> HashSet
 /// (in a program with `drop`s) or collection that may run `drop`s.
 fn reaches_runtime(inst: &MirInst, drops: bool) -> bool {
     match inst {
-        MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. } => true,
+        MirInst::CallIndirect { .. } | MirInst::ResumeCoro { .. } | MirInst::Ffi { .. } | MirInst::ExternCall { .. } => true,
         MirInst::FreeEarly { .. } => drops,
         MirInst::HostInvoke { native_id, .. } => {
             machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.on_machine)
@@ -1457,6 +1457,15 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         }
                         if args.len() > 16 {
                             return Err("FFI op of more than 16 words".into());
+                        }
+                    }
+                    MirInst::ExternCall { dest, sig, args } => {
+                        need(dest)?;
+                        for a in args {
+                            need(a)?;
+                        }
+                        if args.len() + sig.variadic.as_ref().map_or(0, Vec::len) > 16 {
+                            return Err("extern call of more than 16 words".into());
                         }
                     }
                     // A generator body: it runs on a fiber of its own and a
@@ -3316,6 +3325,26 @@ impl<'a> Lower<'a> {
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
+            MirInst::ExternCall { dest, sig, args } => {
+                // On the runtime's libffi call (`coil_native_ffi`).
+                let tags: Vec<i64> = sig.variadic.iter().flatten().map(|&t| i64::from(t)).collect();
+                let operand = (args.len() as u64 - 2) | if sig.variadic.is_some() { 1 << 16 } else { 0 };
+                let o = self.b.ins().iconst(types::I64, i64::from(common::FFI_OP_CALL));
+                let x = self.b.ins().iconst(types::I64, operand as i64);
+                let p = self.words_slot_consts(f, args, &tags);
+                let n = self.b.ins().iconst(types::I64, (args.len() + tags.len()) as i64);
+                let roots = self.push_roots(f);
+                let prev = self.push_call();
+                let call = self.b.ins().call(self.ffi, &[self.ctx, o, x, p, n]);
+                let w = self.b.inst_results(call)[0];
+                self.pop_call(prev);
+                self.pop_roots(roots);
+                self.bail_on_helper();
+                self.drop_views();
+                let w = self.coerce(w, cl_ty(ty_of(f, *dest)));
+                self.set(f, *dest, w);
+                self.view_of(f, *dest);
+            }
             MirInst::Yield { dest, value, from: true, .. } => {
                 // `yield from h`: resume `h` (sending what this generator's
                 // resumer sent) and yield what it yields until it is done.
@@ -4093,7 +4122,12 @@ impl<'a> Lower<'a> {
 
     /// [`Self::words_slot`] with the constant `last` after the words.
     fn words_slot_with(&mut self, f: &MirFunc, vs: &[ValueId], last: Option<i64>) -> cranelift_codegen::ir::Value {
-        let n = vs.len() + usize::from(last.is_some());
+        self.words_slot_consts(f, vs, last.as_slice())
+    }
+
+    /// [`Self::words_slot`] with the constants `tail` after the words.
+    fn words_slot_consts(&mut self, f: &MirFunc, vs: &[ValueId], tail: &[i64]) -> cranelift_codegen::ir::Value {
+        let n = vs.len() + tail.len();
         let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
             (n.max(1) * 8) as u32,
@@ -4104,9 +4138,9 @@ impl<'a> Lower<'a> {
             let x = self.coerce(x, types::I64);
             self.b.ins().stack_store(types::I64, x, slot, (i * 8) as i32);
         }
-        if let Some(c) = last {
+        for (i, &c) in tail.iter().enumerate() {
             let x = self.b.ins().iconst(types::I64, c);
-            self.b.ins().stack_store(types::I64, x, slot, (vs.len() * 8) as i32);
+            self.b.ins().stack_store(types::I64, x, slot, ((vs.len() + i) * 8) as i32);
         }
         self.b.ins().stack_addr(types::I64, slot, 0)
     }

@@ -221,6 +221,10 @@ pub fn ffi_use(bodies: &[NativeBody], strings: &[String]) -> (bool, Vec<String>)
             })
             .collect();
         for inst in b.mir.blocks.iter().flat_map(|blk| &blk.insts) {
+            if matches!(inst, super::MirInst::ExternCall { .. }) {
+                uses = true;
+                continue;
+            }
             let super::MirInst::Ffi { op, args, .. } = inst else { continue };
             uses = true;
             if *op != super::MirFfiOp::Load {
