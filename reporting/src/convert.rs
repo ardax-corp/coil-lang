@@ -25,10 +25,19 @@ impl Diagnostic {
             .find(|l| l.range().start < l.range().end)
             .map(|l| l.range().clone());
 
+        // A point (an empty range past the file's first byte: the end of a
+        // body, the end of input) still names a line and column; `0..0` is
+        // how producers say "no position".
+        let point = || {
+            std::iter::once(primary)
+                .chain(msg.labels().iter().map(|l| l.range()))
+                .find(|r| r.start > 0)
+                .map(|r| r.start..r.start)
+        };
         let anchor = if primary.start < primary.end {
             Some(primary.clone())
         } else {
-            promoted
+            promoted.or_else(point)
         };
 
         let mut diag = Diagnostic::new(Severity::from(*msg.kind()), msg.message());
@@ -58,7 +67,7 @@ impl Diagnostic {
             && let Some(range) = diag
                 .location
                 .as_ref()
-                .filter(|loc| loc.range.start < loc.range.end)
+                .filter(|loc| loc.range.start < loc.range.end || loc.range.start > 0)
                 .map(|loc| loc.range.clone())
             {
                 diag = diag.with_label(RelatedLabel::new(Location::new(file, range), ""));
@@ -124,6 +133,24 @@ mod tests {
         let diag = Diagnostic::from_message(&msg, file);
         assert!(diag.labels.is_empty());
         assert!(diag.location.is_none());
+    }
+
+    /// E0111 at the end of a body, a parse error at the end of input: the
+    /// only position is a point, and the report keeps it.
+    #[test]
+    fn from_message_keeps_a_point_position() {
+        let mut map = SourceMap::new();
+        let file = map.insert("test.coil", "fn f() -> bool {}\n");
+
+        let mut msg = Message::error(ErrorCode::ReturnMismatch, "reaches the end".into(), 0..0);
+        msg.push(Label::new("add a `return`".into(), 16..16));
+        let diag = Diagnostic::from_message(&msg, file);
+        assert_eq!(diag.location.as_ref().map(|l| l.range.clone()), Some(16..16));
+
+        let msg = Message::error(ErrorCode::ReturnMismatch, "reaches the end".into(), 16..16);
+        let diag = Diagnostic::from_message(&msg, file);
+        assert_eq!(diag.location.as_ref().map(|l| l.range.clone()), Some(16..16));
+        assert_eq!(diag.labels.len(), 1);
     }
 
     #[test]

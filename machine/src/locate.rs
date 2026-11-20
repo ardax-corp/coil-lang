@@ -44,7 +44,7 @@ impl Locator<'_> {
             None => format!("  in {name}"),
         };
         let shown = common::cold_helper_of(name);
-        let own = shown.unwrap_or(name);
+        let own = common::source_fn_name(shown.unwrap_or(name));
         let (inlined, at) = match loc {
             Some(loc) => self.debug.inline_frames(loc),
             None => (Vec::new(), common::DebugLoc::unknown()),
@@ -55,9 +55,18 @@ impl Locator<'_> {
             frames.remove(0);
         }
         for (f, at) in frames {
-            lines.push(line(f, at.and_then(|l| self.location(l))));
+            let at = at.and_then(|l| self.location(l));
+            // A clone at a type its module does not know is a stub that
+            // calls the shared body: no line, and the same function as the
+            // frame inside it, which stands for the call (#2867).
+            // Only after a located frame: without debug lines (`-g0`) every
+            // frame has none, and a recursion's repeats stay frames.
+            if at.is_none() && lines.last().is_some_and(|l: &String| l.strip_prefix("  in ").is_some_and(|r| r.starts_with(&format!("{f} at ")))) {
+                continue;
+            }
+            lines.push(line(f, at));
         }
-        shown
+        shown.map(common::source_fn_name)
     }
 
     /// The backtrace of native `sites`, innermost first: `  in name at

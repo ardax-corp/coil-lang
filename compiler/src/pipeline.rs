@@ -887,6 +887,16 @@ impl Pipeline {
     /// [`Self::record_module_dep`] of a `use` / `mod` at `range` in `from`.
     fn record_use_dep(&mut self, from: &Path, on: &Path, range: std::ops::Range<usize>) {
         self.module_dep_spans.entry((from.to_path_buf(), on.to_path_buf())).or_insert(range);
+        if from == on {
+            // A module that imports itself is a cycle of one (#2865): its
+            // items are checked after its imports, so the `use` would find
+            // none of them.
+            let own = self.module_deps.entry(from.to_path_buf()).or_default();
+            if !own.iter().any(|d| d == on) {
+                own.push(on.to_path_buf());
+            }
+            return;
+        }
         self.record_module_dep(from, on);
     }
 
@@ -957,6 +967,14 @@ impl Pipeline {
         let mut range = self.module_dep_spans.get(&(cycle[0].clone(), cycle[1].clone())).cloned().unwrap_or(0..0);
         if let Some(text) = src.get(range.clone()) {
             range.end = range.start + text.trim_end().len();
+        }
+        if cycle.len() == 2 && cycle[0] == cycle[1] {
+            let me = name(&cycle[0]);
+            let mut msg = Message::error(ErrorCode::ImportCycle, format!("module `{me}` imports itself"), range);
+            msg.with_help(format!(
+                "the items `{me}` declares are in scope in it without a `use`; remove this import"
+            ));
+            return (cycle[0].clone(), src, msg);
         }
         let mut msg = Message::error(ErrorCode::ImportCycle, format!("import cycle: `{path}`"), range);
         msg.with_help(format!(

@@ -1,0 +1,9 @@
+// @expected E0133 — an imported name and a local `const` of that name clash
+// (#2866).
+use calc::add;
+
+const add = 4;
+
+fn main() {
+    let _ = add;
+}
