@@ -1,9 +1,8 @@
 // Code not known here (a function value, a trait method called through a
 // dictionary) given a borrowed object may keep it (#2825). That is a
 // second holder only when the borrow, or its source, writes the object
-// after the call while the borrow lives (E0149, compile_fail/
-// borrow_opaque_*kept.coil). These stay legal, and every name reads its own
-// value.
+// after the call while the borrow lives, where what it keeps is a copy
+// (borrow_second_name_copies.coil). In these every name reads its own value.
 use tests::assert;
 
 class C {

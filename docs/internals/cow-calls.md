@@ -153,8 +153,9 @@ an operator operand.
 
 A `use (mut x)` capture of a copy-on-write value is a borrow of `x`'s
 object for as long as the closure lives (#2787), under the E0149 rule of
-`let w = mut x` (`Plan::check_borrows`): while it lives, `x` gets no second
-name (a `let`, a store, an argument a callee keeps) and is not replaced.
+`let w = mut x` (`Plan::check_borrows`): while it lives, a second name for
+`x` (a `let`, a store, an argument a callee keeps) is a copy made there (see
+"Pinned objects") and `x` is not replaced.
 The closure's life (`closure_life`) runs from the lambda to the last read of
 any local holding it (`let f = …`, copies of `f`, closures capturing `f`, to
 the end of the body for a `defer` capturing it) and through any call that
@@ -166,6 +167,7 @@ the closure's life went unreported, and the next write through `x` copied
 its object while the closure kept the old one. State a kept closure shares
 belongs in a `Ref<T>` or a `shared class`. Tests:
 `tests/memory/capture_borrow_in_step.coil`,
+`tests/memory/borrow_second_name_copies.coil`,
 `tests/memory/compile_fail/capture_borrow_*.coil`.
 
 ## `defer` captures
@@ -420,8 +422,31 @@ of object:
   `bump(c, c, out)` with `d` written reads the `c` from before the call
   (`tests/codegen/licm_field_reads_past_element_stores.coil`).
 
-`COIL_COW_PIN=0` leaves the pins out, to measure what they cost. Test:
-`tests/memory/inout_opaque_kept.coil`.
+`Plan::check_borrows` adds a third (#2842 step 3):
+
+- a borrow (`let w = mut a.f`, `for mut x in a`, `use (mut a)`) that meets a
+  second name while it lives: a binding or store of the borrowed place or
+  of one holding it, a call result that may be the object, code not known
+  here that may keep it, a copy capture, a `for` that walks it. The
+  borrow's path is pinned where the borrow begins (after its `let`, after
+  the statement holding the closure, at the start of each pass of a `for
+  mut` with the element last) and never unpinned. Each second name then
+  takes the object through a share, which copies it: the binding, store or
+  call result is wrapped in one, and a copy capture captures a bound copy
+  (as for an `inout` parameter, #2843) since a statement share's copy would
+  be lost. The name reads the value the object had where it was made.
+
+A borrow with no second name pins nothing, so a program E0149 accepted
+before compiles to the same code. E0149 stays for replacing the borrowed
+place, for a `use (mut x)` closure that outlives the body, and for a view's
+borrows; where this document below says a second name for a borrowed object
+is E0149, it is now this copy unless the borrow is a view.
+
+`COIL_COW_PIN=0` leaves the pins out, to measure what they cost (and turns
+step 3's copies back into E0149). Tests:
+`tests/memory/inout_opaque_kept.coil`,
+`tests/memory/borrow_second_name_copies.coil`,
+`tests/memory/borrow_second_name_copies_more.coil`.
 
 ## Casts
 

@@ -987,6 +987,24 @@ struct Plan {
     /// the call, and the places from the root down to the argument, pinned
     /// for the call.
     pin_paths: Vec<((HirId, HirId), Vec<HirId>)>,
+    /// Borrows a second name would meet (#2842 step 3): the path each
+    /// pins where it begins, for the rest of the body, so a share of the
+    /// borrowed object (or one holding it) while it lives is a copy.
+    borrow_pins: Vec<BorrowPin>,
+}
+
+/// Where a borrow's path is pinned ([`Plan::borrow_pins`]); never unpinned,
+/// as a stale pin costs copies, not values.
+#[derive(Clone)]
+enum BorrowPin {
+    /// After the statement that makes the borrow: its places, root first.
+    After((HirId, HirId), Vec<HirId>),
+    /// A `use (mut l)` capture: `l`'s object, after the statement holding
+    /// the closure.
+    Local((HirId, HirId), LocalId),
+    /// A `for mut l` binding: at the start of each pass of the loop, the
+    /// iterable's places, root first, then the element `l` is bound to.
+    Loop(HirId, Vec<HirId>, LocalId),
 }
 
 impl Plan {
@@ -999,6 +1017,7 @@ impl Plan {
             && self.unique_before.is_empty()
             && self.pin_params.is_empty()
             && self.pin_paths.is_empty()
+            && self.borrow_pins.is_empty()
     }
 
     fn new(checker: &Checker, body: &HirBody, f: &Facts<'_>, mutates: u64) -> Self {
@@ -1498,11 +1517,14 @@ impl Plan {
             /// The locals holding a `use (mut x)` closure: calling one may
             /// write the borrowed object.
             holders: HashSet<LocalId>,
+            /// Where the borrow pins its path when a second name meets it;
+            /// `None` keeps that second name E0149 (a view).
+            pin: Option<BorrowPin>,
         }
         let mut borrows: Vec<Borrow> = Vec::new();
-        let mut add = |name: &str, local: LocalId, src: HirId, span: (u32, u32), within: Option<HirId>| {
+        let mut add = |name: &str, local: LocalId, src: HirId, span: (u32, u32), within: Option<HirId>, pin: Option<BorrowPin>| {
             if let (Some((root, path)), Some(text)) = (place_path(body, f, src), place_text(body, src)) {
-                borrows.push(Borrow { name: name.to_string(), root, path, text, span, within, capture: false, local: Some(local), holders: HashSet::new() });
+                borrows.push(Borrow { name: name.to_string(), root, path, text, span, within, capture: false, local: Some(local), holders: HashSet::new(), pin });
             }
         };
         for (&l, inits) in &f.inits {
@@ -1515,7 +1537,8 @@ impl Plan {
                 let from = f.parent.get(&v).copied().unwrap_or(v);
                 let span = f.live_span(l, from);
                 if !view {
-                    add(&local.name, l, v, span, Some(v));
+                    let pin = pin_chain(body, v).map(|c| BorrowPin::After(f.statement_of(v), c));
+                    add(&local.name, l, v, span, Some(v), pin);
                     continue;
                 }
                 // A view borrows the places its `mut` fields were given, or
@@ -1525,7 +1548,7 @@ impl Plan {
                     match &body.expr(at).kind {
                         HirKind::Make { .. } => {
                             for a in crate::hir::view_lint::borrow_args(checker, body, at) {
-                                add(&local.name, l, a, span, Some(v));
+                                add(&local.name, l, a, span, Some(v), None);
                             }
                             break;
                         }
@@ -1535,7 +1558,7 @@ impl Plan {
                                 at = r;
                                 continue;
                             }
-                            add(&local.name, l, r, span, Some(v));
+                            add(&local.name, l, r, span, Some(v), None);
                             break;
                         }
                         _ => break,
@@ -1545,7 +1568,11 @@ impl Plan {
         }
         for (&l, &(src, binder)) in &f.bound {
             if body.local(l).borrow && cow_ty(checker, body.local(l).ty.as_ref()) {
-                add(&body.local(l).name, l, src, f.live_span(l, binder), Some(src));
+                let pin = match body.expr(binder).kind {
+                    HirKind::ForIn { kind: Some(ForInKind::Array), .. } => pin_chain(body, src).map(|c| BorrowPin::Loop(binder, c, l)),
+                    _ => None,
+                };
+                add(&body.local(l).name, l, src, f.live_span(l, binder), Some(src), pin);
             }
         }
         // `for mut x in a` borrows an element of `a`, not `a`: a second name
@@ -1573,7 +1600,8 @@ impl Plan {
                         .map(|h| body.local(h))
                         .filter(|h| !h.name.starts_with('$') && h.kind != LocalKind::Temp)
                         .map_or_else(String::new, |h| h.name.clone());
-                    borrows.push(Borrow { name: holder, root: a, path: Vec::new(), text: name.clone(), span, within: Some(lambda), capture: true, local: None, holders });
+                    let pin = Some(BorrowPin::Local(f.statement_of(lambda), a));
+                    borrows.push(Borrow { name: holder, root: a, path: Vec::new(), text: name.clone(), span, within: Some(lambda), capture: true, local: None, holders, pin });
                 }
                 Err(why) => {
                     let span = body.expr(lambda).span;
@@ -1606,6 +1634,7 @@ impl Plan {
                         capture: false,
                         local: None,
                         holders: HashSet::new(),
+                        pin: None,
                     });
                 }
             }
@@ -1649,8 +1678,13 @@ impl Plan {
             .filter(|&id| f.order(id) != u32::MAX && (iterator_loop(body, id) || matches!(body.expr(id).kind, HirKind::ForIn { kind: Some(ForInKind::Array), .. })))
             .collect();
         walks.sort_by_key(|&id| f.order(id));
-        let mut seen: HashSet<(HirId, String)> = HashSet::new();
         for b in &borrows {
+            let mut seen: HashSet<(HirId, String)> = HashSet::new();
+            // Second names this borrow meets: pinned where it can be, E0149
+            // where not (a view).
+            let mut hits: Vec<Message> = Vec::new();
+            let mut results: Vec<HirId> = Vec::new();
+            let mut captures: Vec<((HirId, HirId), LocalId)> = Vec::new();
             let (start, end) = b.span;
             let live = |at: HirId| {
                 let o = f.order(at);
@@ -1670,6 +1704,9 @@ impl Plan {
                 (true, n) => (format!("the closure `{n}`"), format!("call `{n}` for the last time")),
             };
             for &(v, at, below) in &shares {
+                if live(at) && covers_below(v, below) && !f.borrow_args.contains(&v) {
+                    results.push(v);
+                }
                 if live(at) && covers_below(v, below) && !f.borrow_args.contains(&v) && seen.insert((v, stext.clone())) {
                     let span = body.expr(v).span;
                     let vtext = place_text(body, v).unwrap_or_else(|| stext.clone());
@@ -1679,7 +1716,7 @@ impl Plan {
                         span.0..span.1,
                     );
                     m.with_help(format!("{last} before this, or hold the shared state in a `Ref<T>`"));
-                    self.notes.push(m);
+                    hits.push(m);
                 }
             }
             // A call result that may be the borrowed object or one holding
@@ -1714,6 +1751,9 @@ impl Plan {
                     };
                     p.len() + below + steps <= b.path.len()
                 });
+                if hit {
+                    results.push(c);
+                }
                 if hit && seen.insert((c, stext.clone())) {
                     let span = body.expr(c).span;
                     let mut m = Message::error(
@@ -1722,7 +1762,7 @@ impl Plan {
                         span.0..span.1,
                     );
                     m.with_help(format!("{last} before this, or hold the shared state in a `Ref<T>`"));
-                    self.notes.push(m);
+                    hits.push(m);
                 }
             }
             // Code not known here given the borrowed object, a holder of it
@@ -1764,12 +1804,15 @@ impl Plan {
                         span.0..span.1,
                     );
                     m.with_help(format!("make the borrow's writes before this call and {last} there, or hold the shared state in a `Ref<T>`"));
-                    self.notes.push(m);
+                    hits.push(m);
                 }
             }
             let captured = self.share_before.iter().copied().chain(self.copy_before.iter().map(|&(at, _, l)| (at, l)));
             for (capture_at, l) in captured {
                 let at = capture_at.1;
+                if l == b.root && b.path.iter().all(Option::is_some) && live(at) {
+                    captures.push((capture_at, l));
+                }
                 if l == b.root && b.path.iter().all(Option::is_some) && live(at) && seen.insert((at, stext.clone())) {
                     let span = body.expr(at).span;
                     let name = &body.local(l).name;
@@ -1779,7 +1822,7 @@ impl Plan {
                         span.0..span.1,
                     );
                     m.with_help(format!("{last} before this closure, or capture with `use (mut {name})`"));
-                    self.notes.push(m);
+                    hits.push(m);
                 }
             }
             // A `for` holds what it walks while the body runs (an iterator
@@ -1821,7 +1864,37 @@ impl Plan {
                         span.0..span.1,
                     );
                     m.with_help(format!("{last} before the loop, or keep what the loop finds and write it after the loop"));
-                    self.notes.push(m);
+                    hits.push(m);
+                }
+            }
+            if !hits.is_empty() {
+                match &b.pin {
+                    Some(pin) if pins_enabled() => {
+                        self.borrow_pins.push(pin.clone());
+                        // A second name (a binding, a store, a call result
+                        // that may be the borrowed object) takes it through a
+                        // share, which copies the pinned object.
+                        for c in results {
+                            if !self.share.iter().any(|&(x, _)| x == c) {
+                                self.share.push((c, false));
+                            }
+                        }
+                        // A copy capture takes a bound copy, as a statement
+                        // share's copy of the pinned object would be lost.
+                        for (at, l) in captures {
+                            let lambda = f.capture_lists.iter().find_map(|(&id, ls)| {
+                                let HirKind::Lambda { body: inner } = body.expr(id).kind else { return None };
+                                (ls.contains(&l) && f.statement_of(id) == at && !f.borrow_captures.contains(&(id, l))).then_some(inner)
+                            });
+                            if let Some(inner) = lambda
+                                && let Some(i) = self.share_before.iter().position(|&(x, y)| x == at && y == l)
+                            {
+                                self.share_before.remove(i);
+                                self.copy_before.push((at, inner, l));
+                            }
+                        }
+                    }
+                    _ => self.notes.extend(hits),
                 }
             }
             for (i, e) in body.exprs.iter().enumerate() {
@@ -2534,6 +2607,7 @@ impl Plan {
         for ((block, at), unpins) in after {
             insert_after(out, block, at, unpins);
         }
+        self.pin_borrows(out);
         // Pattern-bound and captured locals: a share statement. A `let`
         // pattern binding more than one shares each after it (#2744).
         let mut let_pats: HashSet<HirId> = HashSet::new();
@@ -2619,6 +2693,50 @@ impl Plan {
         }
         self.pin_body(out);
         moved
+    }
+
+    /// Pin [`Self::borrow_pins`]: each place's object, root first, bound to
+    /// a `$pin` temp that nothing unpins.
+    fn pin_borrows(&self, out: &mut HirBody) {
+        let pin_places = |out: &mut HirBody, places: &[HirId], span: Span| -> Vec<HirId> {
+            places
+                .iter()
+                .map(|&place| {
+                    let read = dup(out, place);
+                    let pin = pin_of(out, read, span);
+                    bind_temp(out, "$pin", pin, span).1
+                })
+                .collect()
+        };
+        let pin_local = |out: &mut HirBody, l: LocalId, span: Span| -> HirId {
+            let ty = out.local(l).ty.clone();
+            let read = out.push_new(HirKind::Local(l), ty, span);
+            let pin = pin_of(out, read, span);
+            bind_temp(out, "$pin", pin, span).1
+        };
+        for pin in &self.borrow_pins {
+            match pin {
+                BorrowPin::After((block, at), places) => {
+                    let span = out.expr(*at).span;
+                    let stmts = pin_places(out, places, span);
+                    insert_after(out, *block, *at, stmts);
+                }
+                BorrowPin::Local((block, at), l) => {
+                    let span = out.expr(*at).span;
+                    let stmt = pin_local(out, *l, span);
+                    insert_after(out, *block, *at, vec![stmt]);
+                }
+                BorrowPin::Loop(binder, places, l) => {
+                    let HirKind::ForIn { body: b, .. } = out.expr(*binder).kind else { continue };
+                    let span = out.expr(b).span;
+                    let mut stmts = pin_places(out, places, span);
+                    stmts.push(pin_local(out, *l, span));
+                    let inner = relocate(out, b);
+                    out.exprs[b.0 as usize].kind = HirKind::Block { stmts, tail: Some(inner) };
+                    out.exprs[b.0 as usize].node = None;
+                }
+            }
+        }
     }
 
     /// Pin [`Self::pin_params`] at the body's entry and unpin them before

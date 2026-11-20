@@ -1,0 +1,402 @@
+// A second name for an object a borrow writes in place (`let w = mut a`,
+// `use (mut a)`, `for mut x in a`) is a copy made where the name is made
+// (#2842 step 3): the borrow's path is pinned while it lives, so a share of
+// it copies. These were E0149 before; replacing the borrowed place, and a
+// `use (mut a)` closure that outlives the body, still are.
+use tests::assert;
+use collections::map::HashMap;
+
+class C {
+    pub x: int,
+}
+
+class Box {
+    pub c: C,
+    pub n: int,
+}
+
+class Holder {
+    pub c: C,
+}
+
+class Shelf {
+    pub b: Box,
+}
+
+class Config {
+    pub port: int,
+}
+
+class App {
+    pub config: Config,
+}
+
+fn inner(Box b) -> C {
+    return b.c;
+}
+
+fn touch(Box b) -> Box {
+    b.n += 1;
+    return b;
+}
+
+fn same(C c) -> C {
+    return c;
+}
+
+fn keep(Holder h, C c) -> int {
+    h.c = c;
+    return 0;
+}
+
+fn put(Shelf s, Box b) -> int {
+    s.b = b;
+    return 0;
+}
+
+trait Put<R> {
+    fn put(R self, C x) -> int {}
+}
+
+impl Put for Holder {
+    fn put(Holder self, C x) -> int {
+        self.c = x;
+        return 0;
+    }
+}
+
+fn via<P: Put>(P p, C x) -> int {
+    return p.put(x);
+}
+
+fn peek(C c) -> int {
+    let h = new Holder(c);
+    return h.c.x;
+}
+
+gen fn values(HashMap<string, int> m) {
+    for p in m {
+        yield p.value;
+    }
+}
+
+class Bag {
+    pub items: Vec<int>,
+}
+
+class BagIter {
+    pub bag: Bag,
+    pub i: int,
+}
+
+impl IntoIterator for Bag {
+    type Item = int;
+    type IntoIter = BagIter;
+    fn into_iter(Bag b) -> BagIter {
+        return new BagIter(b, 0);
+    }
+}
+
+impl Iterator for BagIter {
+    type Item = int;
+    fn next(BagIter it) -> Option<int> {
+        if it.i >= it.bag.items.len() {
+            return None;
+        }
+        let v = it.bag.items[it.i];
+        it.i += 1;
+        return Some(v);
+    }
+}
+
+fn one_entry() -> HashMap<string, int> {
+    let a: HashMap<string, int> = HashMap::new();
+    let _ = a.insert("a", 1);
+    return a;
+}
+
+test("a second name for the borrowed object") {
+    let m = new C(1);
+    let c = mut m;
+    let m2 = m;
+    c.x = 5;
+    assert!(m.x == 5 && c.x == 5);
+    assert!(m2.x == 1);
+}
+
+test("a second name for the object holding the borrowed one") {
+    let a = new App(new Config(1));
+    let c = mut a.config;
+    let b = a;
+    c.port = 80;
+    assert!(a.config.port == 80);
+    assert!(b.config.port == 1);
+}
+
+test("a call result that is the borrowed object") {
+    let d = new Box(new C(1), 0);
+    let wd = mut d.c;
+    let q = inner(d);
+    wd.x += 10;
+    assert!(d.c.x == 11);
+    assert!(q.x == 1);
+}
+
+test("a call result stored straight into a new object") {
+    let d = new Box(new C(1), 0);
+    let wd = mut d.c;
+    let h = new Holder(inner(d));
+    wd.x += 10;
+    assert!(d.c.x == 11);
+    assert!(h.c.x == 1);
+}
+
+test("a callee that writes the holder and returns it") {
+    let d = new Box(new C(1), 0);
+    let wd = mut d.c;
+    let q = touch(d);
+    wd.x += 10;
+    assert!(d.n == 1 && d.c.x == 11);
+    assert!(q.n == 1 && q.c.x == 1);
+}
+
+test("the result of code not known here given the borrowed object") {
+    let a = new C(1);
+    let w = mut a;
+    let g = same;
+    let r = g(a);
+    w.x += 10;
+    assert!(a.x == 11);
+    assert!(r.x == 1);
+}
+
+test("code not known here keeps the borrowed object") {
+    let h = new Holder(new C(0));
+    let a = new C(1);
+    let w = mut a;
+    let k = keep;
+    let _ = k(h, a);
+    w.x += 10;
+    assert!(a.x == 11);
+    assert!(h.c.x == 1);
+}
+
+test("code not known here keeps the object holding the borrowed one") {
+    let s = new Shelf(new Box(new C(0), 0));
+    let d = new Box(new C(1), 0);
+    let w = mut d.c;
+    let p = put;
+    let _ = p(s, d);
+    w.x += 10;
+    assert!(d.c.x == 11);
+    assert!(s.b.c.x == 1);
+}
+
+test("a trait method through a dictionary keeps the borrow") {
+    let h = new Holder(new C(0));
+    let a = new C(1);
+    let w = mut a;
+    let i = 0;
+    while i < 2 {
+        w.x += 1;
+        let _ = via(h, w);
+        i += 1;
+    }
+    w.x += 100;
+    assert!(a.x == 103);
+    assert!(h.c.x == 3);
+}
+
+test("an iterator made while the borrow lives") {
+    let a = one_entry();
+    let w = mut a;
+    let it = a.iter();
+    let _ = a.insert("b", 2);
+    let _ = w.insert("c", 3);
+    let n = 0;
+    while let Some(_) = it.next() {
+        n += 1;
+    }
+    assert!(n == 1);
+    assert!(a.len() == 3 && w.len() == 3);
+}
+
+test("a generator walking the borrowed object") {
+    let a = one_entry();
+    let w = mut a;
+    let g = values(a);
+    let _ = a.insert("b", 2);
+    let _ = w.insert("c", 3);
+    let s = 0;
+    for v in g {
+        s += v;
+    }
+    assert!(s == 1);
+    assert!(a.len() == 3);
+}
+
+test("a for over the source written through the borrow") {
+    let a = one_entry();
+    let w = mut a;
+    for p in a {
+        let _ = w.insert(p.key + "2", 2);
+    }
+    assert!(a.len() == 2 && w.len() == 2);
+}
+
+test("a for over the borrow written through the source") {
+    let a = one_entry();
+    let w = mut a;
+    for p in w {
+        let _ = a.insert(p.key + "2", 2);
+    }
+    let _ = w.insert("q", 0);
+    assert!(a.len() == 3);
+}
+
+test("a for over the source written through the source") {
+    let a = one_entry();
+    let w = mut a;
+    for p in a {
+        let _ = a.insert(p.key + "2", 2);
+    }
+    let _ = w.insert("q", 0);
+    assert!(a.len() == 3);
+}
+
+test("a for over the holder written through the borrow") {
+    let b = new Bag(Vec::new());
+    b.items.push(1);
+    let w = mut b.items;
+    let seen = 0;
+    for x in b {
+        w.push(x + 1);
+        seen += 1;
+    }
+    assert!(seen == 1);
+    assert!(b.items.len() == 2 && b.items[1] == 2);
+}
+
+test("a for over a Vec written through the borrow") {
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    v.push(2);
+    let w = mut v;
+    for x in v {
+        w[1] = x + 10;
+    }
+    assert!(v[0] == 1 && v[1] == 12);
+}
+
+test("a for over a Vec written through the source") {
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    v.push(2);
+    let w = mut v;
+    for x in v {
+        v.push(x);
+    }
+    w.push(0);
+    assert!(v.len() == 5 && v[4] == 0 && w.len() == 5);
+}
+
+test("a use (mut v) closure called in a for over v") {
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    let f = fn () use (mut v) {
+        v.push(2);
+    };
+    let n = 0;
+    for x in v {
+        f();
+        n += x;
+    }
+    assert!(n == 1);
+    assert!(v.len() == 2);
+}
+
+test("a use (mut a) closure called in a for over a") {
+    let a = one_entry();
+    let f = fn () use (mut a) {
+        let _ = a.insert("b", 2);
+    };
+    let n = 0;
+    for p in a {
+        f();
+        n += p.value;
+    }
+    assert!(n == 1);
+    assert!(a.len() == 2);
+}
+
+test("a callee keeps the object a use (mut a) closure borrows") {
+    let a = new C(1);
+    let f = fn () use (mut a) {
+        a.x += 10;
+        return a.x;
+    };
+    assert!(f() == 11);
+    assert!(peek(a) == 11);
+    a.x += 100;
+    assert!(f() == 121);
+    assert!(a.x == 121);
+}
+
+test("a second name while a use (mut a) closure borrows a") {
+    let a = new C(1);
+    let f = fn () use (mut a) {
+        a.x += 10;
+    };
+    let b = a;
+    f();
+    assert!(a.x == 11);
+    assert!(b.x == 1);
+}
+
+test("a second name for the element a for mut binding borrows") {
+    let a: Vec<C> = [new C(1)];
+    let seen = 0;
+    for mut x in a {
+        let b = a[0];
+        x.x += 10;
+        seen = b.x;
+    }
+    assert!(seen == 1);
+    assert!(a[0].x == 11);
+}
+
+test("the element a for mut binding borrows stored elsewhere") {
+    let a: Vec<C> = [new C(1)];
+    let vs: Vec<C> = Vec::new();
+    for mut x in a {
+        vs.push(a[0]);
+        x.x += 10;
+    }
+    assert!(vs[0].x == 1);
+    assert!(a[0].x == 11);
+}
+
+test("for mut over several elements, each copied while borrowed") {
+    let a: Vec<C> = [new C(1), new C(2), new C(3)];
+    let vs: Vec<C> = Vec::new();
+    let i = 0;
+    for mut x in a {
+        vs.push(a[i]);
+        x.x += 10;
+        i += 1;
+    }
+    assert!(vs[0].x == 1 && vs[1].x == 2 && vs[2].x == 3);
+    assert!(a[0].x == 11 && a[1].x == 12 && a[2].x == 13);
+}
+
+test("a copy of the whole vector inside a for mut") {
+    let a: Vec<C> = [new C(1), new C(2)];
+    let keep: Vec<Vec<C>> = Vec::new();
+    for mut x in a {
+        keep.push(a);
+        x.x += 10;
+    }
+    assert!(a[0].x == 11 && a[1].x == 12);
+    assert!(keep[0][0].x == 1 && keep[0][1].x == 2);
+    assert!(keep[1][0].x == 11 && keep[1][1].x == 2);
+}
