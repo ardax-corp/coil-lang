@@ -547,6 +547,12 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     {
         return common::WORD_POINTER;
     }
+    // A non-scalar enum's or a tuple's word is its object (a two-word one
+    // boxed to one word), a unit variant's the immortal one: an `Option` /
+    // `Result` of any layout is that or its niche word.
+    if matches!(ty, Ty::Tuple(_)) || enum_name(ty).is_some_and(|n| checker.enum_variants(n).is_some()) {
+        return common::WORD_POINTER;
+    }
     // A `Vec<T>` / `[T]` / `[T; N]` word is always an array object, whatever
     // `T` is (a fixed array stored as a word is materialized on the heap).
     if matches!(ty, Ty::Array { .. })
@@ -628,9 +634,12 @@ mod word_tests {
         assert_eq!(kind(string()), common::WORD_POINTER);
         assert_eq!(kind(option_ty(string())), common::WORD_POINTER);
         assert_eq!(kind(result_ty(string(), string())), common::WORD_POINTER);
-        // Boxed `Option<int>` and unresolved generics stay unknown.
-        assert_eq!(kind(option_ty(int())), common::WORD_UNKNOWN);
+        // A two-word `Option<int>` and a tuple are stored as their objects.
+        assert_eq!(kind(option_ty(int())), common::WORD_POINTER);
+        assert_eq!(kind(Ty::Tuple(vec![int(), int()])), common::WORD_POINTER);
+        // Unresolved generics stay unknown.
         assert_eq!(kind(Ty::Con("T".into())), common::WORD_UNKNOWN);
+        assert_eq!(kind(Ty::Var(crate::typechecking::ty::TyVarId(0))), common::WORD_UNKNOWN);
         // Arrays are objects whatever their element type.
         assert_eq!(kind(array(Ty::Var(crate::typechecking::ty::TyVarId(0)))), common::WORD_POINTER);
     }
