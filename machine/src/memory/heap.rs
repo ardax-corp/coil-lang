@@ -2057,7 +2057,7 @@ impl Heap {
             return *obj;
         }
         let _epoch_guard = self.epoch_guard();
-        let pfn = ObjFn { entry, arity, is_rest, filled_mask: 0, captured_args: Vec::new(), captures: Vec::new(), dicts: None };
+        let pfn = ObjFn { entry, arity, is_rest, filled_mask: 0, captured_args: Vec::new(), captures: Vec::new(), dicts: None, word_kinds: 0 };
         // Old: a root for the runtime's lifetime, never worth a nursery copy.
         let (object, _) = self.alloc_unlocked_in(pfn, Object::Fn, false);
         self.immortal_fns.insert((entry, arity, is_rest), object);
@@ -2547,8 +2547,9 @@ macro_rules! walk_slots {
             }
             Object::Fn(func) => {
                 let func = func.$get();
-                for v in func.captures.$iter().chain(func.captured_args.$iter()) {
-                    f.word(v, common::WORD_UNKNOWN);
+                let kinds = func.word_kinds;
+                for (i, v) in func.captures.$iter().chain(func.captured_args.$iter()).enumerate() {
+                    f.word(v, common::packed_word_kind(kinds, i));
                 }
                 for m in func.dicts.$iter().flatten().flatten() {
                     f.member(m);
@@ -4653,6 +4654,10 @@ pub struct ObjFn {
     /// by `CallIndirect`. A `None` slot takes application-time evidence.
     /// `None` for a monomorphic function.
     pub dicts: Option<Vec<Option<Member>>>,
+    /// Packed kinds (`common::PackedKinds`) of [`Self::captures`] then
+    /// [`Self::captured_args`], as the value's construction recorded them;
+    /// `0` where it recorded none.
+    pub word_kinds: common::PackedKinds,
 }
 
 impl ObjFn {
@@ -4667,6 +4672,7 @@ impl ObjFn {
             captured_args: Vec::new(),
             captures: Vec::new(),
             dicts: Some(dicts),
+            word_kinds: 0,
         }
     }
 }

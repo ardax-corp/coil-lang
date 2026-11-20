@@ -1631,6 +1631,7 @@ pub(crate) fn spawn_arg_to_value(heap: &mut Heap, arg: SpawnArg) -> Result<Value
                 captured_args: Vec::new(),
                 captures,
                 dicts: None,
+                word_kinds: 0,
             };
             let (obj, _) = heap.alloc(f, Object::Fn);
             Ok(Value::from(obj.addr()))
@@ -2750,6 +2751,7 @@ mod tests {
             captured_args: vec![],
             captures: vec![],
             dicts: None,
+            word_kinds: 0,
         };
         let (obj, _) = heap.alloc(pfn, Object::Fn);
         let v = Value::from(obj.addr());

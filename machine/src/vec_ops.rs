@@ -152,6 +152,11 @@ pub fn host_vec_stamp(heap: &mut Heap, args: &[Value]) -> Value {
                 gc.as_mut().payload.add_kinds(k);
             }
         }
+        Some(Object::Fn(mut gc)) => {
+            if let Ok(k) = common::PackedKinds::try_from(kinds) {
+                gc.as_mut().word_kinds |= k;
+            }
+        }
         Some(Object::Instance(mut gc)) => {
             if let Ok(k) = common::PackedKinds::try_from(kinds) {
                 gc.as_mut().add_own_kinds(k);

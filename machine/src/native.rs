@@ -1886,6 +1886,8 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 captured_args: filled.to_vec(),
                 captures: captures.to_vec(),
                 dicts: None,
+                // The mask word's high half: the words' packed kinds.
+                word_kinds: (mask.bits() >> 32) as u32,
             };
             heap.alloc(pfn, Object::Fn).0.addr()
         }

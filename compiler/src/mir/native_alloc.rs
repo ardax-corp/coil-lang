@@ -45,7 +45,8 @@ pub fn alloc_call(
         }
         MirAllocKind::Fn { target, operand, mask } => {
             let pc = pc_of(target).ok_or(target)?;
-            call(ALLOC_FN, n + 1, u64::from(pc) | (u64::from(operand) << 32), Some(u64::from(mask)))
+            // The fill mask, and above it the words' recorded kinds.
+            call(ALLOC_FN, n + 1, u64::from(pc) | (u64::from(operand) << 32), Some(u64::from(mask) | u64::from(kinds) << 32))
         }
         MirAllocKind::Coro { target } => call(ALLOC_CORO, n, u64::from(pc_of(target).ok_or(target)?), None),
         MirAllocKind::PolyFn { target } => call(ALLOC_POLY_FN, n, u64::from(pc_of(target).ok_or(target)?), None),

@@ -6021,35 +6021,54 @@ impl Lower<'_> {
         if self.expr_ty(id).and_then(|t| self.word_ty(t)) != Some(MirTy::HeapRef) {
             return Err("function value type".into());
         }
-        let h = self.alloc_fn_value(f)?;
-        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
+        Ok(Val::V(self.alloc_fn_value(f)?))
     }
 
-    /// The allocation of function value `f`: its captures' words, then its
-    /// dictionaries.
+    /// The allocation of function value `f`, past its safepoint: its
+    /// captures' words, then its dictionaries.
     fn alloc_fn_value(&mut self, f: &HirFnValue) -> Result<ValueId, Refusal> {
         // The captures made here first, before any other word is read.
         let mut remade = HashMap::new();
         for (at, value) in &f.remade {
-            let h = self.alloc_fn_value(value)?;
-            remade.insert(*at, self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?);
+            remade.insert(*at, self.alloc_fn_value(value)?);
         }
         let mut words = Vec::with_capacity(f.captures.len());
+        // Each word's kind, from the capture's type; a type parameter's in
+        // a shared body comes from its `kinds` word (`tys`).
+        let mut kinds = Vec::with_capacity(f.captures.len());
+        let mut tys: Vec<Option<Ty>> = Vec::with_capacity(f.captures.len());
         for (i, &local) in f.captures.iter().enumerate() {
             if let Some(&h) = remade.get(&i) {
                 words.push(h);
+                kinds.push(common::WORD_POINTER);
+                tys.push(None);
                 continue;
             }
+            let ty = self.hir.local(local).ty.clone();
             if f.pairs.get(i).copied().unwrap_or(false) {
                 let (lo, hi, lo_ty, hi_ty) = self.pair_local(local).ok_or("pair capture")?;
                 words.push(self.b.use_local(lo, lo_ty).map_err(mir)?);
                 words.push(self.b.use_local(hi, hi_ty).map_err(mir)?);
+                // A low word of a type that may carry a heap payload there
+                // under some tags is unknown.
+                let holds = ty.as_ref().is_none_or(|t| self.cx.pair_holds_heap(t));
+                kinds.push(if holds && lo_ty != MirTy::HeapRef { common::WORD_UNKNOWN } else { crate::mir::frame_words::word_kind(lo_ty) });
+                kinds.push(crate::mir::frame_words::word_kind(hi_ty));
+                tys.extend([None, None]);
                 continue;
             }
             words.push(self.local_word(local)?);
+            kinds.push(ty.as_ref().map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t)));
+            tys.push(ty);
         }
         words.extend(self.dict_values(&f.dicts)?);
-        self.b.ins_alloc(f.kind, words).map_err(mir)
+        let packed = if matches!(f.kind, MirAllocKind::Fn { .. }) { common::pack_word_kinds(kinds) } else { 0 };
+        let h = self.b.ins_alloc_kinds(f.kind, words, packed).map_err(mir)?;
+        let h = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?;
+        if matches!(f.kind, MirAllocKind::Fn { .. }) && self.kinds.is_some() {
+            self.stamp_product_from_kinds(h, &tys)?;
+        }
+        Ok(h)
     }
 
     /// A partial application `f(args)`, as HIR emission builds it: each
@@ -6067,10 +6086,20 @@ impl Lower<'_> {
             };
             words.push(v);
         }
+        let tys: Vec<Option<Ty>> = args.iter().map(|&a| self.expr_ty(a).cloned()).collect();
+        let packed = if matches!(f.kind, MirAllocKind::Fn { .. }) {
+            common::pack_word_kinds(tys.iter().map(|t| t.as_ref().map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t))))
+        } else {
+            0
+        };
         // A shared generic entry's `kinds` word, its last filled parameter.
         words.extend(self.dict_values(&f.dicts)?);
-        let h = self.b.ins_alloc(f.kind, words).map_err(mir)?;
-        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?))
+        let h = self.b.ins_alloc_kinds(f.kind, words, packed).map_err(mir)?;
+        let h = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?;
+        if matches!(f.kind, MirAllocKind::Fn { .. }) && self.kinds.is_some() {
+            self.stamp_product_from_kinds(h, &tys)?;
+        }
+        Ok(Val::V(h))
     }
 
     /// The word a plain one-word local holds, as a `Local` read.
