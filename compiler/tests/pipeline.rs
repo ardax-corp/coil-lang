@@ -523,6 +523,31 @@ fn main() { let _ = dload("plugin"); }
     );
 }
 
+/// A call of an `extern` function is an extern call on its words, with
+/// no `invoke` on an argument tuple.
+#[test]
+fn extern_call_lowers_to_extern_call() {
+    let mut pipeline = test_pipeline();
+    pipeline.grant_dload_allow("plugin");
+    let compiled = compile_ok(
+        &mut pipeline,
+        r#"
+extern "plugin" {
+    fn add(int a, int b) -> int;
+}
+fn main() { let _ = add(1, 2); }
+"#,
+    );
+    assert!(
+        compiled.all_insts().any(|i| matches!(i, MirInst::ExternCall { sig, args, .. } if sig.symbol == "add" && args.len() == 4)),
+        "an extern call must be an ExternCall"
+    );
+    assert!(
+        !compiled.all_insts().any(|i| matches!(i, MirInst::Ffi { op: MirFfiOp::Invoke, .. })),
+        "an extern call must not invoke on a tuple"
+    );
+}
+
 #[test]
 fn granted_ffi_exec_extern_compiles() {
     let mut pipeline = test_pipeline();

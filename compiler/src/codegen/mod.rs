@@ -267,6 +267,8 @@ pub struct Compiler {
     extern_runtime_libs: HashMap<String, u32>,
     /// Source name → (lib_static_slot, fn_id_static_slot) for runtime FFI calls.
     extern_runtime_functions: HashMap<String, (u32, u32)>,
+    /// Each `extern` function's signature, by its function id's static slot.
+    extern_signatures: HashMap<u32, crate::mir::MirExternSig>,
     /// Each `extern` function's library (as the block names it) and C
     /// symbol, in declaration order: what a package links statically.
     extern_symbols: Vec<(String, String)>,
@@ -764,6 +766,7 @@ impl Default for Compiler {
             native: HashMap::default(),
             extern_runtime_libs: HashMap::with_capacity(4),
             extern_runtime_functions: HashMap::with_capacity(16),
+            extern_signatures: HashMap::new(),
             extern_symbols: Vec::new(),
             extern_runtime_libs_loaded: HashSet::new(),
             messages: Vec::default(),

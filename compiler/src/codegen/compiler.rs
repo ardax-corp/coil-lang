@@ -6993,6 +6993,15 @@ impl Compiler {
                     }
                     self.extern_symbols
                         .push((unescape_coil_string(library), unescape_coil_string(sym)));
+                    self.extern_signatures.insert(
+                        fn_id_slot,
+                        crate::mir::MirExternSig {
+                            symbol: unescape_coil_string(sym),
+                            params: tag_words.clone(),
+                            ret: encode_tag_operand(ret_tag, ret_aux),
+                            variadic: decl.variadic.then(Vec::new),
+                        },
+                    );
                     self.setup_steps.push(module_setup::SetupStep::Declare {
                         lib_slot,
                         name: sym_idx,
