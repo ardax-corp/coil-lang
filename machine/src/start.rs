@@ -27,6 +27,21 @@ pub struct NativeStart {
     /// names no default, so a link that never starts the standard table
     /// drops the natives its program does not call.
     pub host_natives: Vec<Arc<dyn crate::ffi::NativeFn>>,
+    /// The FFI hook ([`crate::driver::FFI_HOOK`]), or `None` for an AOT
+    /// executable whose program makes no FFI call: naming no default
+    /// here, as with `host_natives`, lets that link drop libffi, `dload`
+    /// and its gate.
+    pub ffi: Option<crate::native::MachineHostFn>,
+}
+
+/// The FFI hook of this process ([`NativeStart::ffi`]): set by the first
+/// start that has one. FFI is a property of the executable, so threads
+/// and later runs share it.
+static LINKED_FFI: std::sync::OnceLock<crate::native::MachineHostFn> = std::sync::OnceLock::new();
+
+/// The FFI hook a start linked ([`NativeStart::ffi`]), if any.
+pub(crate) fn linked_ffi() -> Option<crate::native::MachineHostFn> {
+    LINKED_FFI.get().copied()
 }
 
 /// Every standard host native, by id (built once per process).
@@ -104,6 +119,9 @@ fn runtime_for(program: &ThreadProgram, start: NativeStart) -> Runtime {
     let mut rt = Runtime::new();
     for native in start.host_natives {
         rt.natives.register(native);
+    }
+    if let Some(hook) = start.ffi {
+        let _ = LINKED_FFI.set(hook);
     }
     rt.ffi.base_dir = start.base_dir;
     rt.ffi.search_paths = start.ffi_search_paths;

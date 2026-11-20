@@ -28,9 +28,24 @@ pub(crate) fn runs_natively(job: &Job) -> bool {
     native.lookup(job.entry as usize).is_some() && startup
 }
 
+/// [`run_native_job`], linked with the thread natives' groups
+/// ([`link_jobs`]): only a program that spawns threads queues jobs, so the
+/// others leave the job runner out.
+static JOBS: std::sync::OnceLock<fn(Job)> = std::sync::OnceLock::new();
+
+/// Link the job runner ([`JOBS`]).
+pub(crate) fn link_jobs() {
+    let _ = JOBS.set(run_native_job);
+}
+
+/// The linked job runner ([`JOBS`]), if any.
+pub(crate) fn job_runner() -> Option<fn(Job)> {
+    JOBS.get().copied()
+}
+
 /// Run `job` (one [`runs_natively`] accepts) on the driver and store its
 /// result.
-pub(crate) fn run_native_job(job: Job) {
+fn run_native_job(job: Job) {
     let mut rt = RUNTIMES.with(|p| p.borrow_mut().pop()).unwrap_or_else(Runtime::new);
     run_on(&mut rt, job);
     RUNTIMES.with(|p| {

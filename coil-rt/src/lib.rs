@@ -25,7 +25,19 @@ unsafe extern "C" {
     static coil_aot_host_group_count: u64;
     static coil_aot_package: u8;
     static coil_aot_package_len: u64;
+    /// `coil_ffi_link` below when the program makes an FFI call, else null.
+    static coil_aot_ffi: *const std::ffi::c_void;
 }
+
+/// The FFI this runtime offers. Only `coil_aot_ffi` names it, so an
+/// executable whose program makes no FFI call links none of it.
+#[unsafe(export_name = "coil_ffi_link")]
+static FFI_LINK: coil_cli::FfiLink = coil_cli::FFI_LINK;
+
+/// Which profile built this library, for `coil package` to warn about a
+/// debug runtime (it reads the archive's bytes for this text).
+#[used]
+pub static PROFILE_MARK: [u8; 25] = *if cfg!(debug_assertions) { b"coil-rt profile: debug;\0\0" } else { b"coil-rt profile: release;" };
 
 /// The executable's entry (the C runtime calls it).
 /// Left out of the libtest build, whose harness brings its own `main`.
@@ -52,7 +64,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     }
     // SAFETY: the linked object defines the package as `aot` wrote it.
     let package = unsafe { std::slice::from_raw_parts(&raw const coil_aot_package, coil_aot_package_len as usize) };
-    match coil_cli::run_linked_package(package) {
+    // SAFETY: the linked object defines it, null or `coil_ffi_link`.
+    let ffi = unsafe { coil_aot_ffi.cast::<coil_cli::FfiLink>().as_ref() };
+    match coil_cli::run_linked_package(package, ffi) {
         // A language `panic` exits 1, as `coil-embed`.
         Some(panicked) => exit(i32::from(panicked)),
         None => {
