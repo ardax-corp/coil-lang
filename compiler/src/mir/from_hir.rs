@@ -4229,7 +4229,8 @@ impl Lower<'_> {
                     let Some(idx) = self.index_word(*index)? else {
                         return Ok(Val::Never);
                     };
-                    return Ok(Val::V(self.stack_select_checked(slot, n, idx, ty)?));
+                    // Its bounds check at the index's own span (#2858).
+                    return Ok(Val::V(self.at_expr(id, |l| l.stack_select_checked(slot, n, idx, ty))?));
                 }
                 let Some(k) = self.stack_index(id, *index, n)? else {
                     return Ok(Val::Never);
@@ -6562,7 +6563,8 @@ impl Lower<'_> {
         let Some(h) = self.word(handle)? else {
             return Ok(Val::Never);
         };
-        let out = self.b.ins_resume_coro(h, send, dest_ty).map_err(mir)?;
+        // A resume of a finished generator panics at the `resume` (#2858).
+        let out = self.at_expr(id, |l| l.b.ins_resume_coro(h, send, dest_ty).map_err(mir))?;
         if !read {
             return Ok(Val::Unit);
         }
@@ -7218,7 +7220,10 @@ impl Lower<'_> {
         // A boxed stack array's read is always checked, as HIR emission's.
         let proven = self.hir.expr(id).flags.contains(HirFlags::IN_BOUNDS) && self.boxed(base).is_none();
         let byte = self.expr_ty(base).and_then(array_elem).is_some_and(is_byte);
-        let v = self.b.ins_index(arr, idx, ty, proven).map_err(mir)?;
+        // At the index's own span, as a division is at its operator: inside
+        // a call's argument the statement's or the call's would be reported
+        // (#2858), and an inlined callee's index would lose its frame.
+        let v = self.at_expr(id, |l| l.b.ins_index(arr, idx, ty, proven).map_err(mir))?;
         if byte {
             self.b.mark_byte_load(v);
         }
