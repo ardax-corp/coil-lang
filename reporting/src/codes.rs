@@ -128,6 +128,9 @@ pub enum ErrorCode {
     /// Modules that import each other, directly or through others
     /// (`a -> b -> a`): each module is checked after those it imports.
     ImportCycle,
+    /// A `break` or `continue` outside every loop of its own function (a
+    /// lambda body is a function of its own).
+    JumpOutsideLoop,
 
     DuplicateEnum,
     DuplicateConstructor,
@@ -265,6 +268,7 @@ impl ErrorCode {
             Self::DeferAssignsCapture => "E0152",
             Self::BareTraitCall => "E0153",
             Self::ImportCycle => "E0154",
+            Self::JumpOutsideLoop => "E0155",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -379,6 +383,7 @@ impl ErrorCode {
             Self::DeferAssignsCapture => "`defer` assigns a variable that is gone when it runs",
             Self::BareTraitCall => "a trait method called as a free function",
             Self::ImportCycle => "modules import each other",
+            Self::JumpOutsideLoop => "`break` or `continue` outside a loop",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -501,6 +506,7 @@ mod tests {
             | DeferAssignsCapture
             | BareTraitCall
             | ImportCycle
+            | JumpOutsideLoop
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -605,6 +611,7 @@ mod tests {
             DeferAssignsCapture,
             BareTraitCall,
             ImportCycle,
+            JumpOutsideLoop,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

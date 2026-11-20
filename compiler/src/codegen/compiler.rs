@@ -7426,7 +7426,7 @@ impl Compiler {
                 }
                 crate::monomorphize::MonoCapReason::Budget => format!(
                     "monomorphization budget ({} clones) reached at `{}`",
-                    crate::monomorphize::MAX_TOTAL_SPECIALIZATIONS,
+                    self.checker.host_grants().clone_budget(),
                     hit.fn_name
                 ),
             };

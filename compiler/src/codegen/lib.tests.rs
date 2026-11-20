@@ -131,17 +131,17 @@ fn break_and_continue_outside_loop_emit_diagnostics() {
         compiler
             .get_messages()
             .iter()
-            .any(|m| m.code() == Some(ErrorCode::CodegenError)
-                && m.message().contains("break outside of loop")),
-        "expected CodegenError for break, got {rendered}"
+            .any(|m| m.code() == Some(ErrorCode::JumpOutsideLoop)
+                && m.message().contains("`break` outside of a loop")),
+        "expected JumpOutsideLoop for break, got {rendered}"
     );
     assert!(
         compiler
             .get_messages()
             .iter()
-            .any(|m| m.code() == Some(ErrorCode::CodegenError)
-                && m.message().contains("continue outside of loop")),
-        "expected CodegenError for continue, got {rendered}"
+            .any(|m| m.code() == Some(ErrorCode::JumpOutsideLoop)
+                && m.message().contains("`continue` outside of a loop")),
+        "expected JumpOutsideLoop for continue, got {rendered}"
     );
 }
 
