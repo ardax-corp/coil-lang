@@ -59,7 +59,9 @@ impl Locator<'_> {
             // A clone at a type its module does not know is a stub that
             // calls the shared body: no line, and the same function as the
             // frame inside it, which stands for the call (#2867).
-            if at.is_none() && lines.last().is_some_and(|l: &String| l.strip_prefix("  in ").is_some_and(|r| r == f || r.starts_with(&format!("{f} at ")))) {
+            // Only after a located frame: without debug lines (`-g0`) every
+            // frame has none, and a recursion's repeats stay frames.
+            if at.is_none() && lines.last().is_some_and(|l: &String| l.strip_prefix("  in ").is_some_and(|r| r.starts_with(&format!("{f} at ")))) {
                 continue;
             }
             lines.push(line(f, at));
