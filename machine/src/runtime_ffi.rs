@@ -123,7 +123,7 @@ impl Runtime {
 
     /// `FfiInvoke`: call the declared function. `callback` makes the C
     /// trampoline for a callback argument (the function at that offset).
-    pub(crate) fn ffi_invoke(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>, callback: &mut dyn FnMut(u32) -> Result<crate::ffi::OwnedClosure, crate::ffi::FfiError>) -> Value {
+    pub(crate) fn ffi_invoke(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>, callback: &mut dyn FnMut(u32, u32) -> Result<crate::ffi::OwnedClosure, crate::ffi::FfiError>) -> Value {
         match self.ffi_call(lib_addr, function_id, args, arg_types, callback) {
             Ok(v) => crate::io::alloc_result_ok(&mut self.heap, v),
             Err((kind, message)) => self.ffi_err(kind, message),
@@ -145,7 +145,7 @@ impl Runtime {
 
     /// [`Runtime::ffi_invoke`]'s call: the C function's word (`0` for a
     /// `void` one), or its error's kind and message.
-    pub(crate) fn ffi_call(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>, callback: &mut dyn FnMut(u32) -> Result<crate::ffi::OwnedClosure, crate::ffi::FfiError>) -> Result<Value, (crate::ffi::FfiErrorKindTag, String)> {
+    pub(crate) fn ffi_call(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>, callback: &mut dyn FnMut(u32, u32) -> Result<crate::ffi::OwnedClosure, crate::ffi::FfiError>) -> Result<Value, (crate::ffi::FfiErrorKindTag, String)> {
         let error = |e: crate::ffi::FfiError| (crate::ffi::FfiErrorKindTag::from_ffi_error(&e), e.to_string());
         let lib = match self.ffi.userland_libraries.get(&lib_addr).copied() {
             Some(Object::Library(gc)) => gc,
@@ -162,15 +162,21 @@ impl Runtime {
         if sig.args.iter().any(|ty| matches!(ty, crate::memory::FfiType::Callback(_))) {
             owned_args = args.to_vec();
             for (i, ty) in sig.args.iter().enumerate() {
-                if let crate::memory::FfiType::Callback(_) = ty {
-                    let made = callback(owned_args[i].as_int() as u32);
-                    match made {
-                        Ok(closure) => {
-                            owned_args[i] = Value::from(closure.code_ptr_usize() as u64);
-                            self.ffi.closures.push(closure);
-                        }
-                        Err(e) => return Err(error(e)),
-                    }
+                if let crate::memory::FfiType::Callback(aux) = *ty {
+                    // One closure per function and signature, made once.
+                    let key = (owned_args[i].as_int() as u32, aux);
+                    let at = match self.ffi.closure_of.get(&key) {
+                        Some(&at) => at,
+                        None => match callback(key.0, key.1) {
+                            Ok(closure) => {
+                                self.ffi.closures.push(closure);
+                                self.ffi.closure_of.insert(key, self.ffi.closures.len() - 1);
+                                self.ffi.closures.len() - 1
+                            }
+                            Err(e) => return Err(error(e)),
+                        },
+                    };
+                    owned_args[i] = Value::from(self.ffi.closures[at].code_ptr_usize() as u64);
                 }
             }
             args = &owned_args;
