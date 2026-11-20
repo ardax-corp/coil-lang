@@ -67,8 +67,11 @@ then the function the code is in at the call of the outermost scope
   `Compiler::hir_splice_files`, noted when the body was kept for splicing), and
   lowering locates the scope's nodes in that file (`Lower::scope_file`): an op's
   `DebugLoc::file` is the callee module's entry in `source_files`, as any other, so
-  the archive needs nothing beyond the scope table. A clone's frame is named by its
-  entry (`helper::pick$inst$int`), as a call of it shows. Only when the file is not
+  the archive needs nothing beyond the scope table. A clone's frame is named by the
+  item it is a clone of (`helper::pick`, not `helper::pick$inst$int` or
+  `pick$mono$84$0`: `common::source_fn_name`), as the shared body is under
+  `--clone-budget 0` (#2867); a stub that only forwards a clone to the shared
+  body has no line and adds no frame of its own. Only when the file is not
   known (a prelude instance) is the scope `at_call`: the callee's frame has no line,
   the caller's is at the call. A foreign callee's cold helper keeps the call's span.
 - **Cold helpers** of partial inlining (`hir::outline`, `{function}$cold{k}`) are cut
