@@ -5642,18 +5642,21 @@ impl Lower<'_> {
                         stack.push(w);
                         continue;
                     };
+                    // Both of the parameter's bits: copy-on-write and
+                    // heap reference.
+                    let (from, to) = (crate::codegen::kinds_cow_bit(u32::from(from)), crate::codegen::kinds_cow_bit(u32::from(to)));
                     let mut bit = own;
                     if from != to {
                         let k = self.b.ins_const(MirConst::I64(i64::from(from))).map_err(mir)?;
                         bit = self.b.ins_binop(MirBinOp::Shr, bit, k).map_err(mir)?;
-                        let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
-                        bit = self.b.ins_binop(MirBinOp::BitAnd, bit, one).map_err(mir)?;
+                        let two = self.b.ins_const(MirConst::I64(3)).map_err(mir)?;
+                        bit = self.b.ins_binop(MirBinOp::BitAnd, bit, two).map_err(mir)?;
                         if to > 0 {
                             let k = self.b.ins_const(MirConst::I64(i64::from(to))).map_err(mir)?;
                             bit = self.b.ins_binop(MirBinOp::Shl, bit, k).map_err(mir)?;
                         }
                     } else {
-                        let m = self.b.ins_const(MirConst::I64((1u64 << to) as i64)).map_err(mir)?;
+                        let m = self.b.ins_const(MirConst::I64((3u64 << to) as i64)).map_err(mir)?;
                         bit = self.b.ins_binop(MirBinOp::BitAnd, bit, m).map_err(mir)?;
                     }
                     stack.push(self.b.ins_binop(MirBinOp::BitOr, w, bit).map_err(mir)?);
@@ -5668,7 +5671,7 @@ impl Lower<'_> {
     /// its bits past the mask are the sentinel's, else the entry was
     /// called without it (a compiler bug), and panics with message `msg`.
     fn check_kinds(&mut self, kinds: ValueId, n: u32, msg: u32) -> Result<(), Refusal> {
-        let high = if n >= 64 { 0 } else { u64::MAX << n };
+        let high = if 2 * n >= 64 { 0 } else { u64::MAX << (2 * n) };
         if high == 0 {
             return Ok(());
         }
@@ -5685,16 +5688,16 @@ impl Lower<'_> {
         Ok(())
     }
 
-    /// One `kinds` word of `n` bits from dictionary word `d` (its first
-    /// `dn` bits) and entry word `p` (the rest).
+    /// One `kinds` word of `n` parameters from dictionary word `d` (its
+    /// first `dn` parameters) and entry word `p` (the rest).
     fn merge_kinds(&mut self, d: ValueId, dn: u32, p: ValueId, n: u32) -> Result<ValueId, Refusal> {
-        let low = |k: u32| if k >= 64 { u64::MAX } else { (1u64 << k) - 1 };
+        let low = |k: u32| if 2 * k >= 64 { u64::MAX } else { (1u64 << (2 * k)) - 1 };
         let dm = self.b.ins_const(MirConst::I64(low(dn) as i64)).map_err(mir)?;
         let d = self.b.ins_binop(MirBinOp::BitAnd, d, dm).map_err(mir)?;
         let pm = self.b.ins_const(MirConst::I64(low(n - dn) as i64)).map_err(mir)?;
         let mut p = self.b.ins_binop(MirBinOp::BitAnd, p, pm).map_err(mir)?;
         if dn > 0 {
-            let k = self.b.ins_const(MirConst::I64(i64::from(dn))).map_err(mir)?;
+            let k = self.b.ins_const(MirConst::I64(i64::from(2 * dn))).map_err(mir)?;
             p = self.b.ins_binop(MirBinOp::Shl, p, k).map_err(mir)?;
         }
         let w = self.b.ins_binop(MirBinOp::BitOr, d, p).map_err(mir)?;
@@ -5702,9 +5705,10 @@ impl Lower<'_> {
         self.b.ins_binop(MirBinOp::BitOr, w, s).map_err(mir)
     }
 
-    /// The bit of the body's `kinds` word that says whether a value of
-    /// type `ty` (a type parameter, or one applied) is a copy-on-write
-    /// object, with the word: `None` where the body has none for it.
+    /// The parameter of the body's `kinds` word whose bits say whether a
+    /// value of type `ty` (a type parameter, or one applied) is a
+    /// copy-on-write object or a heap reference, with the word: `None` where
+    /// the body has none for it.
     fn kinds_bit(&self, ty: &Ty) -> Option<(ValueId, u32)> {
         let kinds = self.kinds?;
         let var = match strip_readonly(ty) {
@@ -5733,7 +5737,7 @@ impl Lower<'_> {
         item: Option<(ValueId, ValueId, bool)>,
     ) -> Result<ValueId, Refusal> {
         let ty = self.b.value_ty(v);
-        let m = self.b.ins_const(MirConst::I64((1u64 << bit) as i64)).map_err(mir)?;
+        let m = self.b.ins_const(MirConst::I64((1u64 << crate::codegen::kinds_cow_bit(bit)) as i64)).map_err(mir)?;
         let set = self.b.ins_binop(MirBinOp::BitAnd, kinds, m).map_err(mir)?;
         let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
         let object = self.b.ins_cmp(MirCmpOp::Ne, set, zero).map_err(mir)?;
@@ -5830,7 +5834,7 @@ impl Lower<'_> {
     /// Whether `kinds`' bit `bit` is set: the type parameter is a
     /// copy-on-write object at this call ([`Self::guarded_cow`]).
     fn kinds_test(&mut self, kinds: ValueId, bit: u32) -> Result<ValueId, Refusal> {
-        let m = self.b.ins_const(MirConst::I64((1u64 << bit) as i64)).map_err(mir)?;
+        let m = self.b.ins_const(MirConst::I64((1u64 << crate::codegen::kinds_cow_bit(bit)) as i64)).map_err(mir)?;
         let set = self.b.ins_binop(MirBinOp::BitAnd, kinds, m).map_err(mir)?;
         let zero = self.b.ins_const(MirConst::I64(0)).map_err(mir)?;
         self.b.ins_cmp(MirCmpOp::Ne, set, zero).map_err(mir)

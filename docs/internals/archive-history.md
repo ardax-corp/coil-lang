@@ -5,8 +5,8 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs` (18 today; a reader takes
-18, 17 and 16 and refuses any other).
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (19 today; a reader takes
+19 only and refuses any other).
 
 ## Major 8
 
@@ -15,7 +15,7 @@ format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
 only add something to the format raise the minor (minor 2, below, is the
-current version, 8.2 with MIR section `FORMAT` 18). A runtime refuses a major
+current version, 8.2 with MIR section `FORMAT` 19). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -104,6 +104,13 @@ pinned object hands out a copy instead of setting the shared flag, and a copy's
 pinned children are copied for it ([cow-calls.md](cow-calls.md), "Pinned objects").
 The AOT layout fingerprint covers the pin's offset, so an object built against the
 old header is refused. An 8.1 archive loads and runs unchanged (no op of it pins).
+
+- MIR section `FORMAT` 19 (reference counts, plan step 2): a shared generic
+  entry's `kinds` word holds two bits per type parameter `p`, bit `2p` for
+  a copy-on-write object and bit `2p + 1` for a heap reference, so 31
+  parameters (16 for a dictionary's word, 28 for a call through a function
+  value). The layout is format 18's; the reader refuses 16 to 18, whose
+  constant `kinds` words have one bit per parameter.
 
 ## Major 7
 

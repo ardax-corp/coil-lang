@@ -55,11 +55,12 @@ pub(crate) fn apply(heap: &mut Heap, raw: Value, args: &[Value], dicts: usize, c
             call.push(match slot {
                 // A bit of the `kinds` word before it, from the call's.
                 Some(Member::Value(v)) if let Some((n, to, from)) = common::kinds_from_call_parts(v.bits()) => {
+                    // Both of the parameter's bits (copy-on-write, heap
+                    // reference): bits `2p` and `2p + 1`.
                     if count == Some(n)
-                        && given >> from & 1 == 1
                         && let Some(word) = call.last_mut()
                     {
-                        *word = Value::from(word.bits() | 1 << to);
+                        *word = Value::from(word.bits() | (given >> (2 * from) & 3) << (2 * to));
                     }
                     continue;
                 }

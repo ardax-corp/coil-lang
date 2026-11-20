@@ -32,11 +32,14 @@ use crate::mir::{
 };
 
 const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
-/// Bump when the layout changes. A reader takes this format,
-/// [`FORMAT_SCOPED`] and [`FORMAT_UNSCOPED`], and refuses any other.
-const FORMAT: u8 = common::MIR_SECTION_COW_PIN_FORMAT;
+/// Bump when the layout or the meaning of a body's words changes. A reader
+/// takes this format only: older sections' `kinds` words have one bit per
+/// type parameter. [`FORMAT_SCOPED`] and [`FORMAT_UNSCOPED`] remain for
+/// tests of what older sections hold.
+const FORMAT: u8 = common::MIR_SECTION_KINDS2_FORMAT;
 /// The format before the pin ops (archive 8.1): the same layout, with no
 /// `CowPin` / `CowUnpin` in it.
+#[cfg(test)]
 const FORMAT_SCOPED: u8 = common::MIR_SECTION_SCOPES_FORMAT;
 /// The format before inline scopes: no scope table, no scope in a location
 /// (each is `0`). Archives of minor 0 of major 8 have it.
@@ -77,8 +80,8 @@ pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), S
         return Err("not a native MIR section".into());
     }
     let format = r.u8()?;
-    if ![FORMAT, FORMAT_SCOPED, FORMAT_UNSCOPED].contains(&format) {
-        return Err(format!("native MIR format {format}, this coil reads {FORMAT_UNSCOPED} to {FORMAT}"));
+    if format != FORMAT {
+        return Err(format!("native MIR format {format}, this coil reads {FORMAT}"));
     }
     r.scoped = format != FORMAT_UNSCOPED;
     r.pins = format >= FORMAT;
@@ -1331,16 +1334,15 @@ mod tests {
         assert_eq!(back[0].mir.op_loc(ValueId(2)).scope, 1);
     }
 
-    /// A section of an archive before inline scopes (format 16) reads, with
-    /// no scope table and no location in a scope.
+    /// A section of an archive before two-bit `kinds` words (formats 16 to
+    /// 18) is refused: its constant `kinds` words mean otherwise.
     #[test]
-    fn a_section_without_scopes_reads() {
+    fn a_section_of_an_older_format_is_refused() {
         let b = body();
-        let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), FORMAT_UNSCOPED);
-        assert!(common::section_inline_scopes(&old).is_empty());
-        let (back, pcs) = decode(&old).expect("decode format 16");
-        assert_eq!(pcs.get("f"), Some(&42));
-        assert_eq!(back[0].mir.op_loc(ValueId(2)), DebugLoc { scope: 0, ..b.mir.op_loc(ValueId(2)) });
+        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, common::MIR_SECTION_COW_PIN_FORMAT] {
+            let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), format);
+            assert!(decode(&old).is_err(), "format {format}");
+        }
     }
 
     /// `f` with a copy-on-write pin pair around nothing: `v3 = cow.pin v0`,
@@ -1359,25 +1361,9 @@ mod tests {
     fn the_pin_ops_come_back() {
         let b = pinned_body();
         let bytes = bytes(&b);
-        assert_eq!(bytes[MAGIC.len()], 18, "archive 8.2 writes format 18");
+        assert_eq!(bytes[MAGIC.len()], FORMAT);
         let (back, _) = decode(&bytes).expect("decode");
         assert_eq!(back[0].mir, b.mir);
-    }
-
-    /// A section of an 8.1 archive (format 17) reads; one that holds a pin
-    /// op is no section 8.1 wrote, and is refused.
-    #[test]
-    fn a_format_17_section_reads_and_holds_no_pin() {
-        let b = body();
-        let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), FORMAT_SCOPED);
-        assert_eq!(old[MAGIC.len()], 17);
-        assert_eq!(common::section_inline_scopes(&old), scopes());
-        let (back, pcs) = decode(&old).expect("decode format 17");
-        assert_eq!(pcs.get("f"), Some(&42));
-        assert_eq!(back[0].mir, b.mir);
-        let p = pinned_body();
-        let bad = encode_as(std::slice::from_ref(&p), &HashMap::new(), &scopes(), FORMAT_SCOPED);
-        assert!(decode(&bad).is_err());
     }
 
     #[test]

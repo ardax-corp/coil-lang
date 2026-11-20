@@ -934,6 +934,7 @@ fn extract_enum_name(ty: &crate::typechecking::ty::Ty) -> Option<String> {
 mod compiler;
 pub(crate) use compiler::frame::BodyFrame;
 pub(crate) use compiler::kinds::sentinel as kinds_sentinel;
+pub(crate) use compiler::kinds::cow_bit as kinds_cow_bit;
 pub(crate) use compiler::kinds::DICT_BITS as KINDS_DICT_BITS;
 mod inline_cost;
 
