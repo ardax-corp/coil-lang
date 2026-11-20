@@ -719,6 +719,9 @@ fn define_all<M: Module>(
 ) -> Result<Result<Defined, (usize, String)>, String> {
     let ids = declare(module, bodies, plan)?;
     define_trampolines(module, &ids.tramps, recorder.as_deref_mut())?;
+    if let Some(cb) = &ids.cb {
+        define_callbacks(module, cb, recorder.as_deref_mut())?;
+    }
     let fcfg = module.isa().frontend_config();
     let mut fbc = FunctionBuilderContext::new();
     let mut ctx = module.make_context();
@@ -1822,6 +1825,30 @@ struct Ids {
     ffi_struct_in: FuncId,
     ffi_struct_out: FuncId,
     va_call: FuncId,
+    /// A program whose C code may call back ([`Plan::ffi_callbacks`]): its
+    /// direct calls' trampolines and its callbacks' thunks.
+    cb: Option<CbIds>,
+}
+
+/// [`CbIds`] a body uses, and its code pointers' body ids.
+struct CbRefs {
+    calls: HashMap<CShape, FuncRef>,
+    thunks: HashMap<(u32, u32), FuncRef>,
+    pcs: HashMap<ValueId, u32>,
+}
+
+/// [`Ids::cb`].
+struct CbIds {
+    /// A trampoline per [`CShape`]: `(ctx, addr, args..)`, which records its
+    /// frame pointer and the call's context ([`machine::native::coil_native_cb_enter`])
+    /// around the C call.
+    calls: HashMap<CShape, FuncId>,
+    /// A C-convention thunk per callback: the coil function's body id and
+    /// the callback signature ([`machine::native::coil_native_callback`]).
+    thunks: HashMap<(u32, u32), FuncId>,
+    enter: FuncId,
+    leave: FuncId,
+    callback: FuncId,
 }
 
 /// Whether C code may call back into coil while an extern call runs: an
@@ -1854,6 +1881,71 @@ enum CArg {
     /// ([`machine::native::coil_native_ffi_struct_in`]) passed `how`, from a
     /// buffer of `size` bytes (a multiple of 8).
     Struct { id: u32, size: u32, how: SPass },
+    /// A C function pointer: the native thunk that calls the coil function
+    /// (its code pointer word) with this callback signature (a
+    /// `tag::CALLBACK` aux).
+    Callback(u32),
+}
+
+/// The C types of a direct extern call's signature as it is made: its
+/// parameters (padding and a variadic call's address included) and
+/// results. A call that a C callback may interrupt goes through one
+/// trampoline per shape ([`define_callbacks`]).
+type CShape = (Vec<Type>, Vec<Type>);
+
+/// [`CShape`] of a direct call passing `params` and taking `ret` (`va` for
+/// a variadic one with `nfixed` declared parameters), as
+/// [`Lower::direct_extern_call`] makes it. `None` with a struct, whose
+/// special parameters a trampoline does not forward.
+fn c_shape(params: &[CArg], ret: CRet, va: Option<CVa>, nfixed: usize) -> Option<CShape> {
+    let mut ps = Vec::new();
+    for (i, p) in params.iter().enumerate() {
+        if let (Some(CVa::Stack { gpad, fpad }), true) = (va, i == nfixed) {
+            ps.extend(std::iter::repeat_n(types::I64, usize::from(gpad)));
+            ps.extend(std::iter::repeat_n(types::F64, usize::from(fpad)));
+        }
+        ps.push(match *p {
+            CArg::Word(t) => t,
+            CArg::Ptr(_) | CArg::Callback(_) => types::I64,
+            CArg::Struct { .. } => return None,
+        });
+    }
+    if let Some(CVa::Thunk { pad }) = va {
+        ps.extend(std::iter::repeat_n(types::I64, usize::from(pad) + 1));
+    }
+    let rs = match ret {
+        CRet::Void => Vec::new(),
+        CRet::Word(t) => vec![t],
+        CRet::Bool => vec![types::I8],
+        CRet::Str => vec![types::I64],
+        CRet::Struct { .. } => return None,
+    };
+    Some((ps, rs))
+}
+
+/// A callback signature's C parameter and result types (`bool` a byte).
+fn callback_c_types(aux: u32) -> Option<(Vec<Type>, Option<Type>)> {
+    use common::tag;
+    let (params, ret) = common::decode_callback_sig(aux)?;
+    let ty = |t: u32| match t {
+        tag::FLOAT => types::F64,
+        tag::BOOL => types::I8,
+        _ => types::I64,
+    };
+    Some((params.iter().map(|&t| ty(t)).collect(), (ret != tag::VOID).then(|| ty(ret))))
+}
+
+/// The code pointer each value of `f` holds that a `CodePtr` makes: the
+/// body id of the function it names.
+fn code_ptr_pcs(f: &MirFunc, plan: &Plan) -> HashMap<ValueId, u32> {
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i {
+            MirInst::CodePtr { dest, target } => plan.pcs.get(target).map(|&pc| (*dest, pc)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Where a struct argument's bytes go.
@@ -2032,6 +2124,7 @@ fn direct_extern(sig: &compiler::native_mir::MirExternSig, abi: CAbi) -> Option<
             (tag::CONST_BYTES, _) => CArg::Ptr(FFI_ARG_CONST_BYTES),
             (tag::BYTES, _) => CArg::Ptr(FFI_ARG_BYTES),
             (tag::PTR, _) => CArg::Ptr(FFI_ARG_PTR),
+            (tag::CALLBACK, aux) => CArg::Callback(aux),
             (tag::STRUCT, id) => {
                 let st = sig.struct_layout(id)?;
                 let (words, hfa) = c_struct_shape(st)?;
@@ -2267,6 +2360,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let ffi_struct_out = module.declare_function("coil_native_ffi_struct_out", Linkage::Import, &s3).map_err(e)?;
     // Its signature is each call's own (it jumps to the C function).
     let va_call = module.declare_function("coil_native_va_call", Linkage::Import, &module.make_signature()).map_err(e)?;
+    let cb = if plan.ffi_callbacks { Some(declare_callbacks(module, bodies, plan)?) } else { None };
     Ok(Ids {
         tramps,
         imp,
@@ -2318,7 +2412,177 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         ffi_struct_in,
         ffi_struct_out,
         va_call,
+        cb,
     })
+}
+
+/// [`CbIds`] for the direct extern calls and callbacks of `plan`'s bodies.
+fn declare_callbacks(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Result<CbIds, String> {
+    let e = |e: cranelift_module::ModuleError| e.to_string();
+    let abi = CAbi::of(module.isa());
+    let mut shapes = HashSet::new();
+    let mut callbacks = HashSet::new();
+    for &i in &plan.compile {
+        let f = &bodies[i].mir;
+        let pcs = code_ptr_pcs(f, plan);
+        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
+            let MirInst::ExternCall { sig, args, .. } = inst else { continue };
+            let Some((params, ret, va)) = direct_extern(sig, abi) else { continue };
+            shapes.extend(c_shape(&params, ret, va, sig.params.len()));
+            for (k, p) in params.iter().enumerate() {
+                if let (CArg::Callback(aux), Some(&pc)) = (p, args.get(3 + k).and_then(|a| pcs.get(a))) {
+                    callbacks.insert((pc, *aux));
+                }
+            }
+        }
+    }
+    let mut shapes: Vec<CShape> = shapes.into_iter().collect();
+    shapes.sort_by_key(|(p, r)| (p.iter().map(|t| t.to_string()).collect::<Vec<_>>(), r.iter().map(|t| t.to_string()).collect::<Vec<_>>()));
+    let mut callbacks: Vec<(u32, u32)> = callbacks.into_iter().collect();
+    callbacks.sort_unstable();
+    let mut calls = HashMap::new();
+    for (k, shape) in shapes.into_iter().enumerate() {
+        let sig = cb_call_signature(module, &shape);
+        calls.insert(shape, module.declare_function(&format!("coil_cb_call_{k}"), Linkage::Local, &sig).map_err(e)?);
+    }
+    let mut thunks = HashMap::new();
+    for (pc, aux) in callbacks {
+        let Some(sig) = callback_signature(module, aux) else { continue };
+        thunks.insert((pc, aux), module.declare_function(&format!("coil_cb_thunk_{pc}_{aux}"), Linkage::Local, &sig).map_err(e)?);
+    }
+    let words = |n: usize| {
+        let mut sig = module.make_signature();
+        sig.params.extend((0..n).map(|_| AbiParam::new(types::I64)));
+        sig.returns.push(AbiParam::new(types::I64));
+        sig
+    };
+    let (s1, s2, s4) = (words(1), words(2), words(4));
+    Ok(CbIds {
+        calls,
+        thunks,
+        enter: module.declare_function("coil_native_cb_enter", Linkage::Import, &s1).map_err(e)?,
+        leave: module.declare_function("coil_native_cb_leave", Linkage::Import, &s2).map_err(e)?,
+        callback: module.declare_function("coil_native_callback", Linkage::Import, &s4).map_err(e)?,
+    })
+}
+
+/// A [`CbIds::calls`] trampoline's signature: the context, the C
+/// function's address and its arguments, its results.
+fn cb_call_signature(module: &impl Module, (params, rets): &CShape) -> Signature {
+    let mut sig = module.make_signature();
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.push(AbiParam::new(types::I64));
+    sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
+    sig.returns.extend(rets.iter().map(|&t| AbiParam::new(t)));
+    sig
+}
+
+/// A callback thunk's C signature.
+fn callback_signature(module: &impl Module, aux: u32) -> Option<Signature> {
+    let (params, ret) = callback_c_types(aux)?;
+    let mut sig = Signature::new(module.isa().default_call_conv());
+    sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
+    sig.returns.extend(ret.map(AbiParam::new));
+    Some(sig)
+}
+
+/// Define [`CbIds`]' trampolines and thunks.
+fn define_callbacks<M: Module>(module: &mut M, cb: &CbIds, mut recorder: Option<&mut image::Recorder>) -> Result<(), String> {
+    let fcfg = module.isa().frontend_config();
+    let conv = module.isa().default_call_conv();
+    let mut fbc = FunctionBuilderContext::new();
+    let mut ctx = module.make_context();
+    let mut finish = |module: &mut M, id: FuncId, ctx: &mut cranelift_codegen::Context| -> Result<(), String> {
+        module.define_function(id, ctx).map_err(|e| format!("cranelift callback: {e:?}"))?;
+        if let (Some(r), Some(func)) = (recorder.as_deref_mut(), image::Func::of(id, ctx)) {
+            r.add(func);
+        }
+        module.clear_context(ctx);
+        Ok(())
+    };
+    let mut calls: Vec<_> = cb.calls.iter().collect();
+    calls.sort_by_key(|(_, id)| id.as_u32());
+    for (shape, &id) in calls {
+        // ctx.native_fp = fp; saved = enter(ctx); r = addr(args..);
+        // leave(ctx, saved); return r
+        ctx.func.signature = cb_call_signature(module, shape);
+        let enter = module.declare_func_in_func(cb.enter, &mut ctx.func);
+        let leave = module.declare_func_in_func(cb.leave, &mut ctx.func);
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let blk = b.create_block();
+        b.append_block_params_for_function_params(blk);
+        b.switch_to_block(blk);
+        let params = b.block_params(blk).to_vec();
+        let (c, addr) = (params[0], params[1]);
+        let fp = b.ins().get_frame_pointer(types::I64);
+        b.ins().store(MemFlagsData::trusted(), fp, c, machine::native::NATIVE_CTX_NATIVE_FP);
+        let call = b.ins().call(enter, &[c]);
+        let saved = b.inst_results(call)[0];
+        let mut csig = Signature::new(conv);
+        csig.params.extend(shape.0.iter().map(|&t| AbiParam::new(t)));
+        csig.returns.extend(shape.1.iter().map(|&t| AbiParam::new(t)));
+        let csig = b.import_signature(csig);
+        let call = b.ins().call_indirect(csig, addr, &params[2..]);
+        let rets = b.inst_results(call).to_vec();
+        b.ins().call(leave, &[c, saved]);
+        b.ins().return_(&rets);
+        b.seal_all_blocks();
+        b.finalize(fcfg);
+        finish(module, id, &mut ctx)?;
+    }
+    let mut thunks: Vec<_> = cb.thunks.iter().collect();
+    thunks.sort_by_key(|(_, id)| id.as_u32());
+    for (&(pc, aux), &id) in thunks {
+        // words = [args as words]; w = callback(pc, aux, words, n); return w as C's
+        let Some(sig) = callback_signature(module, aux) else { continue };
+        let ret = sig.returns.first().map(|p| p.value_type);
+        ctx.func.signature = sig;
+        let callback = module.declare_func_in_func(cb.callback, &mut ctx.func);
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+        let blk = b.create_block();
+        b.append_block_params_for_function_params(blk);
+        b.switch_to_block(blk);
+        let params = b.block_params(blk).to_vec();
+        let n = params.len();
+        let slot = b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(cranelift_codegen::ir::StackSlotKind::ExplicitSlot, (n.max(1) * 8) as u32, 3));
+        for (k, &p) in params.iter().enumerate() {
+            let w = match b.func.dfg.value_type(p) {
+                types::F64 => b.ins().bitcast(types::I64, MemFlagsData::new(), p),
+                types::I8 => {
+                    let nz = b.ins().icmp_imm_u(IntCC::NotEqual, p, 0);
+                    b.ins().uextend(types::I64, nz)
+                }
+                _ => p,
+            };
+            b.ins().stack_store(types::I64, w, slot, (k * 8) as i32);
+        }
+        let at = b.ins().stack_addr(types::I64, slot, 0);
+        let pc = b.ins().iconst(types::I64, i64::from(pc));
+        let aux = b.ins().iconst(types::I64, i64::from(aux));
+        let n = b.ins().iconst(types::I64, n as i64);
+        let call = b.ins().call(callback, &[pc, aux, at, n]);
+        let w = b.inst_results(call)[0];
+        match ret {
+            None => {
+                b.ins().return_(&[]);
+            }
+            Some(types::F64) => {
+                let x = b.ins().bitcast(types::F64, MemFlagsData::new(), w);
+                b.ins().return_(&[x]);
+            }
+            Some(types::I8) => {
+                let x = b.ins().ireduce(types::I8, w);
+                b.ins().return_(&[x]);
+            }
+            Some(_) => {
+                b.ins().return_(&[w]);
+            }
+        }
+        b.seal_all_blocks();
+        b.finalize(fcfg);
+        finish(module, id, &mut ctx)?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2427,6 +2691,9 @@ struct Lower<'a> {
     ffi_struct_in: FuncRef,
     ffi_struct_out: FuncRef,
     va_call: FuncRef,
+    /// The body's direct extern calls run in a program whose C code may
+    /// call back: through a [`CbIds::calls`] trampoline, rooted.
+    cb: Option<CbRefs>,
     /// This body's index into the plan's bodies.
     body_index: Option<usize>,
     /// The body may run while an object is pinned ([`pin_reach`]): its
@@ -2598,6 +2865,29 @@ impl<'a> Lower<'a> {
         let ffi_struct_in = module.declare_func_in_func(ids.ffi_struct_in, func);
         let ffi_struct_out = module.declare_func_in_func(ids.ffi_struct_out, func);
         let va_call = module.declare_func_in_func(ids.va_call, func);
+        let cb = ids.cb.as_ref().map(|cb| {
+            // Only what the body's extern calls use.
+            let pcs = code_ptr_pcs(body, plan);
+            let abi = CAbi::of(module.isa());
+            let (mut calls, mut thunks) = (HashMap::new(), HashMap::new());
+            for inst in body.blocks.iter().flat_map(|b| &b.insts) {
+                let MirInst::ExternCall { sig, args, .. } = inst else { continue };
+                let Some((params, ret, va)) = direct_extern(sig, abi) else { continue };
+                if let Some(shape) = c_shape(&params, ret, va, sig.params.len())
+                    && let Some(&id) = cb.calls.get(&shape)
+                {
+                    calls.entry(shape).or_insert_with(|| module.declare_func_in_func(id, func));
+                }
+                for (k, p) in params.iter().enumerate() {
+                    if let (CArg::Callback(aux), Some(&pc)) = (p, args.get(3 + k).and_then(|a| pcs.get(a)))
+                        && let Some(&id) = cb.thunks.get(&(pc, *aux))
+                    {
+                        thunks.entry((pc, *aux)).or_insert_with(|| module.declare_func_in_func(id, func));
+                    }
+                }
+            }
+            CbRefs { calls, thunks, pcs }
+        });
         let defer = module.declare_func_in_func(ids.defer, func);
         let claim = module.declare_func_in_func(ids.claim, func);
         let pad_refs = ids.pad.iter().map(|(&i, &id)| (i, module.declare_func_in_func(id, func))).collect();
@@ -2635,7 +2925,7 @@ impl<'a> Lower<'a> {
             entry_sig,
             c_conv: module.isa().default_call_conv(),
             c_abi: CAbi::of(module.isa()),
-            direct_externs: !plan.ffi_callbacks,
+            direct_externs: true,
             cow,
             cow_field,
             alloc,
@@ -2709,7 +2999,22 @@ impl<'a> Lower<'a> {
             bail,
             ret,
             ret_hi,
+            cb,
         }
+    }
+
+    /// Whether the direct extern call passing `params` on `args` can run
+    /// where a C callback may interrupt it: a trampoline for its shape, a
+    /// thunk for each callback, and no buffer lent in place (a collection
+    /// may run during it).
+    fn cb_call_ok(&self, sig: &compiler::native_mir::MirExternSig, args: &[ValueId], params: &[CArg], ret: CRet, va: Option<CVa>) -> bool {
+        let Some(cb) = &self.cb else { return true };
+        c_shape(params, ret, va, sig.params.len()).is_some_and(|s| cb.calls.contains_key(&s))
+            && params.iter().enumerate().all(|(k, p)| match *p {
+                CArg::Ptr(kind) => kind == machine::native::FFI_ARG_CSTR,
+                CArg::Callback(aux) => args.get(3 + k).and_then(|a| cb.pcs.get(a)).is_some_and(|&pc| cb.thunks.contains_key(&(pc, aux))),
+                _ => true,
+            })
     }
 
     fn var(&mut self, f: &MirFunc, v: ValueId) -> Variable {
@@ -4002,7 +4307,7 @@ impl<'a> Lower<'a> {
                 self.view_of(f, *dest);
             }
             MirInst::ExternCall { dest, sig, args } => {
-                let w = match direct_extern(sig, self.c_abi).filter(|_| self.direct_externs) {
+                let w = match direct_extern(sig, self.c_abi).filter(|(p, r, va)| self.direct_externs && self.cb_call_ok(sig, args, p, *r, *va)) {
                     Some((params, ret, va)) => self.direct_extern_call(f, *dest, sig, args, &params, ret, va),
                     None => self.runtime_extern_call(f, *dest, sig, args),
                 };
@@ -4932,6 +5237,12 @@ impl<'a> Lower<'a> {
                 zero_words(&mut self.b, &mut csig, &mut cargs, types::F64, fpad);
             }
             match *p {
+                CArg::Callback(aux) => {
+                    csig.params.push(AbiParam::new(types::I64));
+                    let cb = self.cb.as_ref().expect("a callback argument runs in a program that calls back");
+                    let thunk = cb.thunks[&(cb.pcs[&a], aux)];
+                    cargs.push(self.b.ins().func_addr(types::I64, thunk));
+                }
                 CArg::Ptr(_) => {
                     csig.params.push(AbiParam::new(types::I64));
                     let (slot, k) = made[&i];
@@ -4986,9 +5297,27 @@ impl<'a> Lower<'a> {
             cargs.push(addr);
             addr = self.b.ins().func_addr(types::I64, self.va_call);
         }
-        let csig = self.b.import_signature(csig);
-        let call = self.b.ins().call_indirect(csig, addr, &cargs);
-        let results: Vec<_> = self.b.inst_results(call).to_vec();
+        let results: Vec<_> = if let Some(cb) = &self.cb {
+            // A callback may run coil code, which may collect: the caller's
+            // words are rooted, the trampoline records its frame and the
+            // context the callback runs in, and a panic in it bails here.
+            let shape = (csig.params.iter().map(|p| p.value_type).collect(), csig.returns.iter().map(|p| p.value_type).collect());
+            let tramp = cb.calls[&shape];
+            let mut targs = vec![self.ctx, addr];
+            targs.extend(cargs);
+            let roots = self.push_roots(f);
+            let prev = self.push_call();
+            let call = self.b.ins().call(tramp, &targs);
+            let results = self.b.inst_results(call).to_vec();
+            self.pop_call(prev);
+            self.pop_roots(roots);
+            self.bail_on_helper();
+            results
+        } else {
+            let csig = self.b.import_signature(csig);
+            let call = self.b.ins().call_indirect(csig, addr, &cargs);
+            self.b.inst_results(call).to_vec()
+        };
         let r = results.first().copied();
         let out = match (ret, r) {
             (CRet::Bool, Some(r)) => {

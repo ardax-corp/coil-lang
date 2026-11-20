@@ -275,16 +275,33 @@ native code reloads its words.
   set) and jumps to the C function, whose address is the call's last integer
   argument after zero words, in `r9` (a call that needs all six integer registers
   goes through the runtime). A variadic call of more than seven arguments keeps its
-  argument tuple and goes through the runtime. Callbacks and sized integers (#2886)
-  go through the runtime. So does every extern call
-  of a program that may make a C callback into coil (an extern function that takes
-  a `Callback`, or any `ffi::declare` / `ffi::invoke`): a library may keep a callback
-  and run it during a later call, and only the runtime's call roots the caller's
-  words and reports a panic in it (`may_call_back`). A call into `sum` costs about
-  3.5 ns this way against 270 ns through `invoke` on a tuple; one passing a
-  12-byte string about 40 ns against 315 ns; one passing a 16-byte struct about
-  18 ns against 400 ns through the runtime's call, and one that also returns one
-  (a new record) about 60 ns against 760 ns.
+  argument tuple and goes through the runtime. Sized integers (#2886) go through
+  the runtime. A C callback (an extern parameter of function type, `fn(int x) ->
+  int cb`, whose argument names a top-level function) goes direct as the address of
+  a thunk the backend emits per callback function and signature,
+  `coil_cb_thunk_<body>_<aux>`: a C-convention entry that stores its arguments as
+  words and calls `coil_native_callback`, which runs the body on the program through
+  `Driver::callback` (a C string becomes a coil string) and returns the result word.
+  The signature (up to five `int`, `float`, `bool`, `ptr` or `string` parameters;
+  an `int`, `float`, `bool`, `ptr` or no result) is in the `CALLBACK` tag's aux
+  (`common::encode_callback_sig`), so the archive is unchanged. In a program that may
+  make a C callback into coil (an extern function that takes one, or any
+  `ffi::declare` / `ffi::invoke`: a library may keep a callback and run it during a
+  later call, `may_call_back`), every direct extern call goes through a trampoline
+  per call shape, `coil_cb_call_<k>`, between `push_roots` / `pop_roots`: it saves
+  the frame pointer for the collector, calls `coil_native_cb_enter` (which makes
+  this thread's context the one a callback runs on), calls C, and then
+  `coil_native_cb_leave`, which reports a panic in a callback as the call's. A call
+  with a struct or a lent buffer (`bytes`, `Vec`) still goes through the runtime
+  there. A call into `sum` costs about 3.5 ns direct against 270 ns through
+  `invoke` on a tuple, and about 10 ns against 125 ns through the trampoline in a
+  program that may call back; one passing a 12-byte string about 40 ns against
+  315 ns; one passing a 16-byte struct about 18 ns against 400 ns through the
+  runtime's call, and one that also returns one (a new record) about 60 ns against
+  760 ns. A call to `apply_cb(doubler, i)` (C calls the coil function once) costs
+  about 60 ns; through `invoke` with a `Callback` about 400 ns, where the runtime
+  used to make a new libffi closure on each call (about 1.5 us, and never freed);
+  it now keeps one per function and signature.
 
 `CallIndirect` runs through `coil_native_call_value` and `Driver::call_value`, which
 handles exact calls, partial and over-application and dictionaries. A function value

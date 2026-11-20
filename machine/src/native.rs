@@ -432,6 +432,11 @@ pub struct NativeHost {
     /// `Some(0)` when it cannot); set, a new record of the bytes there.
     /// `None`: nothing ran.
     pub ffi_struct: unsafe fn(*mut std::ffi::c_void, u32, u64, *mut u8, bool) -> Option<u64>,
+    /// A direct extern call that a C callback may interrupt
+    /// ([`coil_native_cb_enter`], [`coil_native_cb_leave`],
+    /// [`coil_native_callback`]), by op ([`CB_ENTER`], [`CB_LEAVE`],
+    /// [`CB_CALL`]) on two operands and a callback's argument words.
+    pub callback: unsafe fn(*mut std::ffi::c_void, *mut NativeCtx, u8, u64, u64, *const u64, usize) -> u64,
     /// Run the ordinary host native `id` on `args` in `layout` as the runtime's
     /// `HostInvoke` does, without interpreting a body: a native that would block the
     /// task parks the fiber the call runs on. `None`: it is no ordinary
@@ -525,6 +530,7 @@ impl NativeHost {
         free: |_, _, _, _| true,
         ffi: |_, _, _, _, _, _| None,
         ffi_struct: |_, _, _, _, _| None,
+        callback: |_, _, _, _, _, _, _| 0,
         invoke: |_, _, _, _, _| None,
     };
 }
@@ -2718,6 +2724,82 @@ pub unsafe extern "C" fn coil_native_ffi_struct_in(ctx: *mut NativeCtx, id: u64,
     unsafe { (c.host.ffi_struct)(c.machine, id as u32, word, buf, false) }.unwrap_or(0)
 }
 
+/// [`NativeHost::callback`]'s ops: a C call begins (the driver's panic
+/// flag is saved and cleared; its operand is nothing), ends (the saved flag
+/// is the operand; the result says whether a callback panicked), or a C
+/// callback runs (the body's id and the callback signature).
+pub const CB_ENTER: u8 = 0;
+pub const CB_LEAVE: u8 = 1;
+pub const CB_CALL: u8 = 2;
+
+thread_local! {
+    /// The context of the extern call a C callback on this thread runs
+    /// in: the coil frames below it are that call's caller's.
+    static CB_CTX: std::cell::Cell<*mut NativeCtx> = const { std::cell::Cell::new(std::ptr::null_mut()) };
+}
+
+/// A direct extern call in a program whose C code may call back: before
+/// it, from the call's trampoline (which has recorded the frame pointer),
+/// make `ctx` the one a callback runs in. Returns what
+/// [`coil_native_cb_leave`] takes: the context before (a callback's own
+/// extern call nests) and the driver's panic flag.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_cb_enter(ctx: *mut NativeCtx) -> u64 {
+    let c = unsafe { &mut *ctx };
+    // A callback may allocate and collect.
+    c.host_calls += 1;
+    c.gc_epoch += 1;
+    let prev = CB_CTX.replace(ctx);
+    let was = if c.machine.is_null() { 0 } else { unsafe { (c.host.callback)(c.machine, ctx, CB_ENTER, 0, 0, std::ptr::null(), 0) } };
+    prev as u64 | was
+}
+
+/// After [`coil_native_cb_enter`]'s call: put back the context before, and
+/// bail (the callback's panic was reported) if a callback panicked.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `saved` is what its enter returned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_cb_leave(ctx: *mut NativeCtx, saved: u64) -> u64 {
+    CB_CTX.set((saved & !1) as *mut NativeCtx);
+    let c = unsafe { &mut *ctx };
+    if c.machine.is_null() {
+        return 0;
+    }
+    if unsafe { (c.host.callback)(c.machine, ctx, CB_LEAVE, saved & 1, 0, std::ptr::null(), 0) } != 0 {
+        c.trap = TRAP_PANICKED;
+        return unsafe { bail(ctx) };
+    }
+    0
+}
+
+/// A C callback into coil (a native thunk calls it): run body `pc`, of
+/// callback signature `aux` (`common::decode_callback_sig`), on the `n` C
+/// argument words at `words`, in the context of the extern call it runs
+/// in. Its C result word; `0` after a panic, which the call reports when
+/// it returns.
+///
+/// # Safety
+/// `words` points at `n` words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_callback(pc: u64, aux: u64, words: *const u64, n: u64) -> u64 {
+    let ctx = CB_CTX.get();
+    if ctx.is_null() {
+        // A library kept the function pointer and called it from another
+        // thread, or after every extern call returned.
+        eprintln!("coil: a C callback into coil ran outside an extern call on its thread");
+        std::process::abort();
+    }
+    let c = unsafe { &mut *ctx };
+    if c.machine.is_null() {
+        return 0;
+    }
+    unsafe { (c.host.callback)(c.machine, ctx, CB_CALL, pc, aux, words, n as usize) }
+}
+
 /// A direct call to a variadic C function on x86-64 System V goes through
 /// this: the C function's address is the sixth integer argument (`r9`,
 /// after zero words), and `al` must bound the vector registers the call
@@ -3112,6 +3194,9 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_ffi_str", coil_native_ffi_str as *const u8),
         ("coil_native_ffi_struct_in", coil_native_ffi_struct_in as *const u8),
         ("coil_native_ffi_struct_out", coil_native_ffi_struct_out as *const u8),
+        ("coil_native_cb_enter", coil_native_cb_enter as *const u8),
+        ("coil_native_cb_leave", coil_native_cb_leave as *const u8),
+        ("coil_native_callback", coil_native_callback as *const u8),
         ("coil_native_va_call", coil_native_va_call as *const u8),
         ("coil_native_defer", coil_native_defer as *const u8),
         ("coil_native_claim", coil_native_claim as *const u8),
@@ -3122,7 +3207,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 47;
+const HELPERS: usize = 50;
 
 #[cfg(test)]
 mod pin_tests {

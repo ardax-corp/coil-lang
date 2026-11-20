@@ -866,11 +866,21 @@ impl Compiler {
                 if params.len() != args.len() {
                     return None;
                 }
-                let items = args.iter().zip(params).map(|(&a, &p)| value(self, a, p)).collect::<Option<Vec<_>>>()?;
                 // An extern call on its words: no argument tuple, no
                 // `Result` (the runtime panics with a call's error). One with
                 // more words than a host call takes keeps the tuple.
                 if let Some((mut sig, addr)) = self.extern_signatures.get(&func).cloned() {
+                    // A callback parameter takes the named function's entry
+                    // (the checker allows no other argument there).
+                    let mut items = Vec::with_capacity(args.len());
+                    for (i, (&a, &p)) in args.iter().zip(params).enumerate() {
+                        let callback = sig.params.get(i).is_some_and(|&t| common::decode_tag_operand(t).0 == common::tag::CALLBACK);
+                        items.push(if callback {
+                            O::CodePtr(self.bodies.entry_label_for_offset(self.hir_ffi_callback(hir, builtin, a)?? as usize)?)
+                        } else {
+                            value(self, a, p)?
+                        });
+                    }
                     if let Some(def) = variadic {
                         let tags = self.hir_variadic_tags(def, hir.expr(id).span, args.len())?;
                         sig.variadic = Some(tags.into_iter().map(|(t, aux)| encode_tag_operand(t, aux)).collect());
@@ -882,8 +892,11 @@ impl Compiler {
                         operands.extend(items);
                         return Some(crate::mir::HirFfi { op: MirFfiOp::Invoke, operand: 0, operands, unwrap: true, niche: None, extern_sig: Some(sig) });
                     }
+                    operands.extend([O::Static(lib), O::Static(func), O::Tuple(items)]);
+                } else {
+                    let items = args.iter().zip(params).map(|(&a, &p)| value(self, a, p)).collect::<Option<Vec<_>>>()?;
+                    operands.extend([O::Static(lib), O::Static(func), O::Tuple(items)]);
                 }
-                operands.extend([O::Static(lib), O::Static(func), O::Tuple(items)]);
                 let mut operand = args.len() as u32 & 0xFFFF;
                 if let Some(def) = variadic {
                     let tags = self.hir_variadic_tags(def, hir.expr(id).span, args.len())?;

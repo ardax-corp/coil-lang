@@ -84,6 +84,53 @@ pub fn encode_tag_operand(tag: u32, aux: u32) -> u32 {
     }
 }
 
+/// The parameter tags a C callback can take, by their digit in
+/// [`encode_callback_sig`] (`0` ends the list).
+const CALLBACK_PARAMS: [u32; 5] = [tag::INT, tag::FLOAT, tag::BOOL, tag::PTR, tag::STRING];
+/// The result tags a C callback can return, by their digit.
+const CALLBACK_RETS: [u32; 5] = [tag::VOID, tag::INT, tag::FLOAT, tag::BOOL, tag::PTR];
+
+/// The most parameters a callback signature (a [`tag::CALLBACK`] aux) holds.
+pub const CALLBACK_MAX_PARAMS: usize = 5;
+
+/// A C callback's signature as a [`tag::CALLBACK`] tag's aux: the result's
+/// digit plus five times the parameters' digits in base 6, plus one, so it
+/// fits the aux's 16 bits for up to [`CALLBACK_MAX_PARAMS`] parameters. `0`
+/// (no aux) is `int (*)(int64_t)`, what `ffi::types::Callback` has always
+/// meant. `None`: a type a callback cannot take or return, or too many.
+pub fn encode_callback_sig(params: &[u32], ret: u32) -> Option<u32> {
+    if params.len() > CALLBACK_MAX_PARAMS {
+        return None;
+    }
+    let r = CALLBACK_RETS.iter().position(|&t| t == ret)? as u32;
+    let mut digits = 0u32;
+    for &p in params.iter().rev() {
+        digits = digits * 6 + 1 + CALLBACK_PARAMS.iter().position(|&t| t == p)? as u32;
+    }
+    Some(1 + r + 5 * digits)
+}
+
+/// Inverse of [`encode_callback_sig`]: the parameters' and the result's
+/// tags.
+pub fn decode_callback_sig(aux: u32) -> Option<(Vec<u32>, u32)> {
+    if aux == 0 {
+        return Some((vec![tag::INT], tag::INT));
+    }
+    let n = aux - 1;
+    let ret = CALLBACK_RETS[(n % 5) as usize];
+    let mut digits = n / 5;
+    let mut params = Vec::new();
+    while digits != 0 {
+        let d = digits % 6;
+        if d == 0 || params.len() == CALLBACK_MAX_PARAMS {
+            return None;
+        }
+        params.push(CALLBACK_PARAMS[d as usize - 1]);
+        digits /= 6;
+    }
+    Some((params, ret))
+}
+
 /// Inverse of [`encode_tag_operand`].
 pub fn decode_tag_operand(enc: u32) -> (u32, u32) {
     if enc <= tag::LAST {
@@ -153,5 +200,32 @@ mod tests {
             decode_tag_operand(encode_tag_operand(tag::CONST_BYTES, 0)),
             (tag::CONST_BYTES, 0)
         );
+    }
+}
+
+#[cfg(test)]
+mod callback_sig_tests {
+    use super::*;
+
+    #[test]
+    fn a_callback_signature_round_trips_through_its_aux() {
+        let sigs: &[(&[u32], u32)] = &[
+            (&[], tag::VOID),
+            (&[tag::INT], tag::INT),
+            (&[tag::PTR, tag::PTR], tag::INT),
+            (&[tag::FLOAT, tag::BOOL, tag::STRING], tag::FLOAT),
+            (&[tag::STRING; 5], tag::PTR),
+        ];
+        for &(params, ret) in sigs {
+            let aux = encode_callback_sig(params, ret).expect("encodes");
+            assert!(aux != 0 && aux <= 0xFFFF);
+            assert_eq!(decode_callback_sig(aux), Some((params.to_vec(), ret)));
+            let (t, a) = decode_tag_operand(encode_tag_operand(tag::CALLBACK, aux));
+            assert_eq!((t, a), (tag::CALLBACK, aux));
+        }
+        assert_eq!(decode_callback_sig(0), Some((vec![tag::INT], tag::INT)));
+        assert_eq!(encode_callback_sig(&[tag::INT; 6], tag::INT), None);
+        assert_eq!(encode_callback_sig(&[tag::STRUCT], tag::INT), None);
+        assert_eq!(encode_callback_sig(&[], tag::STRING), None);
     }
 }

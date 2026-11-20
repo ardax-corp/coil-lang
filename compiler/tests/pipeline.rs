@@ -1591,6 +1591,18 @@ fn example_ffi_array_sum_prints_15() {
 
 #[cfg(unix)]
 #[test]
+fn example_ffi_callbacks_prints_each_result() {
+    let libsum = ensure_ffi_libsum_built();
+    if !libsum.exists() {
+        ffi_soft_skip(&format!("{} not built", libsum.display()));
+        return;
+    }
+    let output = run_ffi_example_with_lib("examples/ffi_callbacks.coil", &libsum);
+    assert_eq!(output, "42 3.5 5 8 8 <1><2><3> kept 1 kept 2");
+}
+
+#[cfg(unix)]
+#[test]
 fn example_ffi_callback_prints_42() {
     let libsum = ensure_ffi_libsum_built();
     if !libsum.exists() {
