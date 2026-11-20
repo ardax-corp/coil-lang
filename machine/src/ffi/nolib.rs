@@ -46,6 +46,13 @@ pub struct PreparedCall {
     pub cif: Cif,
 }
 
+impl PreparedCall {
+    /// No C function to call directly.
+    pub fn address(&self) -> u64 {
+        0
+    }
+}
+
 pub struct InvokeContext;
 
 impl InvokeContext {

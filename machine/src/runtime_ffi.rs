@@ -130,6 +130,19 @@ impl Runtime {
         }
     }
 
+    /// `FFI_OP_ADDR`: the C address of function `function_id` of the
+    /// library at `lib`, as a `Result`.
+    pub(crate) fn ffi_addr(&mut self, lib: Value, function_id: Value) -> Value {
+        let addr = match self.ffi.userland_libraries.get(&lib.bits()).copied() {
+            Some(Object::Library(gc)) => gc.as_ref().signatures.get(function_id.as_int() as usize).map(|f| f.prepared.address()),
+            _ => None,
+        };
+        match addr {
+            Some(a) => crate::io::alloc_result_ok(&mut self.heap, Value::from(a as i64)),
+            None => self.ffi_error(crate::ffi::FfiError::InvalidHandle("function id out of range".into())),
+        }
+    }
+
     /// [`Runtime::ffi_invoke`]'s call: the C function's word (`0` for a
     /// `void` one), or its error's kind and message.
     pub(crate) fn ffi_call(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>, callback: &mut dyn FnMut(u32) -> Result<crate::ffi::OwnedClosure, crate::ffi::FfiError>) -> Result<Value, (crate::ffi::FfiErrorKindTag, String)> {
