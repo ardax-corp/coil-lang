@@ -996,15 +996,15 @@ impl VecLoopKind {
     }
 }
 
-/// The signature of an [`MirInst::ExternCall`]: the C symbol, the
-/// declared parameters' and the result's FFI type tags (each
-/// `encode_tag_operand(tag, aux)`) and, for a variadic function, the tags
-/// of every argument of this call.
 /// The most words an [`MirInst::ExternCall`] passes the runtime: its
 /// library, function id and arguments, and a variadic call's tags (a
 /// host call's limit). A call with more keeps the argument tuple.
 pub const EXTERN_CALL_MAX_WORDS: usize = 16;
 
+/// The signature of an [`MirInst::ExternCall`]: the C symbol, the
+/// declared parameters' and the result's FFI type tags (each
+/// `encode_tag_operand(tag, aux)`) and, for a variadic function, the tags
+/// of every argument of this call.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MirExternSig {
     pub symbol: String,
