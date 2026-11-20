@@ -13485,11 +13485,15 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
             None => None,
         };
         let mut layout = u8::try_from(call.ret.host_enum_layout()).ok()?;
-        if u32::from(layout) == common::HOST_ENUM_LAYOUT_BOXED && !self.hir.is_generic && self.hir.span != crate::hir::synth::SPAN {
+        // The builtin `Vec<T>` thunks serve every `T` with an `int` standing
+        // in (`Compiler::emit_vec_method_thunks`); their natives take the
+        // kind from the array.
+        let any_t = self.hir.span == crate::hir::synth::SPAN
+            && self.hir.name.strip_prefix(common::BUILTIN_VEC_TYPE).is_some_and(|m| m.starts_with("::"));
+        if u32::from(layout) == common::HOST_ENUM_LAYOUT_BOXED && !self.hir.is_generic && !any_t {
             // A boxed `Option` / `Result` the native makes takes its
             // payloads' word kinds from the call's type, in a body whose
-            // types hold for every call: not a generic body, nor a builtin
-            // thunk serving any `T` with an `int` standing in (`Vec::pop`).
+            // types hold for every call.
             let kind = |t: &Ty| crate::layout::word_kind(&c.checker, t);
             let payloads = ty
                 .as_ref()

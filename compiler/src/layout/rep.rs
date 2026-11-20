@@ -554,7 +554,12 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
         return common::WORD_POINTER;
     }
     // A `Vec<T>` / `[T]` / `[T; N]` word is always an array object, whatever
-    // `T` is (a fixed array stored as a word is materialized on the heap).
+    // `T` is (a fixed array stored as a word is materialized on the heap);
+    // a `Stream` or `thread` handle (`Thread<T>`, `Mutex<T>`, ...) its
+    // handle object.
+    if crate::typechecking::ty::opaque_handle_name(ty).is_some() {
+        return common::WORD_POINTER;
+    }
     if matches!(ty, Ty::Array { .. })
         || matches!(ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE))
     {
@@ -637,6 +642,8 @@ mod word_tests {
         // A two-word `Option<int>` and a tuple are stored as their objects.
         assert_eq!(kind(option_ty(int())), common::WORD_POINTER);
         assert_eq!(kind(Ty::Tuple(vec![int(), int()])), common::WORD_POINTER);
+        // A handle is its object, whatever it carries.
+        assert_eq!(kind(crate::typechecking::ty::thread_ty(Ty::Var(crate::typechecking::ty::TyVarId(0)))), common::WORD_POINTER);
         // Unresolved generics stay unknown.
         assert_eq!(kind(Ty::Con("T".into())), common::WORD_UNKNOWN);
         assert_eq!(kind(Ty::Var(crate::typechecking::ty::TyVarId(0))), common::WORD_UNKNOWN);
