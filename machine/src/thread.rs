@@ -2357,7 +2357,11 @@ fn rw_try(heap: &mut Heap, lock: Value, write: bool) -> Value {
 
 fn rw_release(heap: &mut Heap, lock: Value, write: bool) -> Value {
     if let Ok(inner) = rwlock_inner(heap, lock) {
-        let held = if write { inner.lock.is_locked_exclusive() } else { inner.lock.is_locked() && !inner.lock.is_locked_exclusive() };
+        // A writer waiting for the readers to leave already sets the
+        // exclusive bit, so a reader's release must not read it as a write
+        // hold: the read hold would never end, and the writer would wait
+        // for it forever (#2861).
+        let held = if write { inner.lock.is_locked_exclusive() } else { inner.lock.is_locked() };
         if held {
             unsafe { inner.unlock(write) };
         }
