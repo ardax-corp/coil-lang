@@ -122,7 +122,9 @@ An 8.2 runtime reads the low byte, the first 4 words' kinds, which stay exact;
 an 8.2 archive's enums read the same as before. A snapshot instance's `aux`
 field, `0` before, holds the packed kinds of its own slots that its class row
 leaves unknown (generic fields, `ObjInstance::own_kinds`); an 8.2 runtime
-ignores it and reads those slots as unknown, as it always has.
+ignores it and reads those slots as unknown, as it always has. A snapshot
+array's element kind may be `WORD_SCALAR` as well as `WORD_POINTER`; an 8.2
+runtime reads a scalar one as unknown.
 
 ## Major 7
 

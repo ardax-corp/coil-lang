@@ -115,10 +115,13 @@ impl Heap {
             SnapObject::String(s) => self.alloc(ObjString::new(s.clone()), Object::String).0,
             SnapObject::Bytes(b) => self.alloc(ObjArray::from_bytes(b.clone()), Object::Array).0,
             SnapObject::Array { elem_kind, words } => {
-                let mut array = ObjArray::new(zeros(words.len()));
-                if *elem_kind == common::WORD_POINTER {
-                    array.set_elem_kind(common::WORD_POINTER);
-                }
+                // A scalar or pointer kind (an 8.2 snapshot records only
+                // pointer ones).
+                let array = ObjArray::new(zeros(words.len()));
+                let array = match *elem_kind {
+                    kind @ (common::WORD_POINTER | common::WORD_SCALAR) => array.of_kind(kind),
+                    _ => array,
+                };
                 self.alloc(array, Object::Array).0
             }
             SnapObject::Lanes { k, tag_mask, words } => {
@@ -215,7 +218,7 @@ impl Capture<'_> {
                     .map(|(i, v)| self.word(*v, kind, parent(SnapStep::Element(i))))
                     .collect::<Result<_, _>>()?;
                 SnapObject::Array {
-                    elem_kind: if kind == common::WORD_POINTER { kind } else { common::WORD_UNKNOWN },
+                    elem_kind: if matches!(kind, common::WORD_POINTER | common::WORD_SCALAR) { kind } else { common::WORD_UNKNOWN },
                     words,
                 }
             }
