@@ -374,17 +374,27 @@ fn link_with_cc(object: &[u8], rt: &Path, link: &LinkInputs) -> Result<Vec<u8>, 
     let out = (|| {
         fs::write(&obj, object).map_err(|e| format!("cannot write `{}`: {e}", obj.display()))?;
         let cc = std::env::var_os("CC").unwrap_or_else(|| "cc".into());
-        let run = std::process::Command::new(&cc)
-            .arg(&obj)
-            .args(link.statics.iter().map(|s| &s.path))
-            .arg(rt)
-            .arg("-o")
-            .arg(&exe)
-            .args(&link.args)
-            .args(system_libs())
-            .args(link.strip.cc_args())
-            .output()
-            .map_err(|e| format!("cannot run `{}` to link ({e})", cc.to_string_lossy()))?;
+        let cc_run = |linker: &[&str]| {
+            std::process::Command::new(&cc)
+                .arg(&obj)
+                .args(link.statics.iter().map(|s| &s.path))
+                .arg(rt)
+                .arg("-o")
+                .arg(&exe)
+                .args(linker)
+                .args(&link.args)
+                .args(system_libs())
+                .args(link.strip.cc_args())
+                .output()
+                .map_err(|e| format!("cannot run `{}` to link ({e})", cc.to_string_lossy()))
+        };
+        // lld where `cc` can use it: a smaller executable (about 40 KB),
+        // else the default linker.
+        let lld = cfg!(target_os = "linux") && !link.args.iter().any(|a| a.contains("-fuse-ld"));
+        let run = match lld.then(|| cc_run(&["-fuse-ld=lld"])) {
+            Some(Ok(run)) if run.status.success() => run,
+            _ => cc_run(&[])?,
+        };
         if !run.status.success() {
             let err = String::from_utf8_lossy(&run.stderr);
             let first = err.lines().find(|l| !l.trim().is_empty()).unwrap_or("no output");
