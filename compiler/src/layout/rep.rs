@@ -540,6 +540,13 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     if niche_heap_only(checker, ty) || value_layout(checker, ty) != ValueLayout::Boxed {
         return common::WORD_POINTER;
     }
+    // A class instance's word is its object, whatever its type arguments.
+    if let Ty::App(head, _) = ty
+        && let Ty::Con(name) = strip_readonly(head)
+        && checker.is_class(name)
+    {
+        return common::WORD_POINTER;
+    }
     // A `Vec<T>` / `[T]` / `[T; N]` word is always an array object, whatever
     // `T` is (a fixed array stored as a word is materialized on the heap).
     if matches!(ty, Ty::Array { .. })
@@ -629,13 +636,13 @@ mod word_tests {
     }
 
     #[test]
-    fn array_stamps_pack_bytes_and_bools_only() {
+    fn array_stamps_pack_bytes_and_bools_and_mark_scalars() {
         let c = Checker::new();
         let stamp = |ty: Ty| array_elem_stamp(&c, &ty);
         assert_eq!(stamp(Ty::Con("byte".into())), common::WORD_BYTE);
         assert_eq!(stamp(Ty::Con("bool".into())), common::WORD_BYTE);
-        assert_eq!(stamp(int()), common::WORD_UNKNOWN);
-        assert_eq!(stamp(Ty::Con("float".into())), common::WORD_UNKNOWN);
+        assert_eq!(stamp(int()), common::WORD_SCALAR);
+        assert_eq!(stamp(Ty::Con("float".into())), common::WORD_SCALAR);
         assert_eq!(stamp(string()), common::WORD_POINTER);
         // A two-word `Option<int>` element is its boxed object (#2074).
         assert_eq!(stamp(option_ty(int())), common::WORD_POINTER);
