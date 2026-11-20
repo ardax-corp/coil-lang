@@ -119,10 +119,10 @@ pub struct HirCallSite {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum HirRetItems {
     /// A tuple: each item, and the rebuilt tuple's word kinds.
-    Tuple { items: Vec<HirRetItem>, kinds: u8 },
+    Tuple { items: Vec<HirRetItem>, kinds: common::PackedKinds },
     /// An enum: each variant to rebuild (its tag, payload items and word
     /// kinds); any other variant is kept as it is.
-    Enum { variants: Vec<(u32, Vec<HirRetItem>, u8)> },
+    Enum { variants: Vec<(u32, Vec<HirRetItem>, common::PackedKinds)> },
 }
 
 /// One item of a [`HirRetItems`] object: its ground word, and whether the
@@ -3043,7 +3043,7 @@ impl Lower<'_> {
         // stamped as a literal of the result type is.
         let kinds = match self.expr_ty(id).filter(|_| open).map(strip_readonly) {
             Some(Ty::Tuple(items)) => common::pack_word_kinds(items.iter().map(|t| self.cx.word_kind(t))),
-            Some(t) => array_elem(t).map_or(0, |e| self.cx.array_stamp(e)),
+            Some(t) => array_elem(t).map_or(0, |e| common::PackedKinds::from(self.cx.array_stamp(e))),
             None => 0,
         };
         let obj = self.b.ins_alloc_kinds(kind, out, kinds).map_err(mir)?;
@@ -7341,7 +7341,7 @@ impl Lower<'_> {
         // Stamped as HIR emission stamps it: packed bytes / bools, pointer
         // elements.
         let stamp = self.expr_ty(id).and_then(array_elem).map_or(0, |e| self.cx.array_stamp(e));
-        let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, stamp).map_err(mir)?;
+        let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, stamp.into()).map_err(mir)?;
         let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
         if stamp == common::WORD_UNKNOWN
             && let Some(elem) = self.expr_ty(id).and_then(array_elem).cloned()
@@ -7802,7 +7802,7 @@ impl Lower<'_> {
             self.b.ins_alloc_kinds(MirAllocKind::TUPLE, words, kinds).map_err(mir)?
         } else {
             let stamp = array_elem(&ty).map_or(0, |e| self.cx.array_stamp(e));
-            self.b.ins_alloc_kinds(MirAllocKind::Array, words, stamp).map_err(mir)?
+            self.b.ins_alloc_kinds(MirAllocKind::Array, words, stamp.into()).map_err(mir)?
         };
         Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
     }

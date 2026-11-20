@@ -3115,12 +3115,12 @@ enum EnumPayloadInner {
     /// `kinds`: packed word kinds (`common::packed_word_kind`), in padding.
     Inline {
         len: u8,
-        kinds: u8,
+        kinds: common::PackedKinds,
         slots: [Value; ENUM_INLINE_ARITY],
     },
     Spill {
         words: Vec<Value>,
-        kinds: u8,
+        kinds: common::PackedKinds,
     },
 }
 
@@ -3232,7 +3232,7 @@ impl EnumPayload {
 
     /// Packed word kinds of the first words (`common::packed_word_kind`).
     #[inline]
-    pub fn kinds(&self) -> u8 {
+    pub fn kinds(&self) -> common::PackedKinds {
         match &self.inner {
             EnumPayloadInner::Inline { kinds, .. } | EnumPayloadInner::Spill { kinds, .. } => {
                 *kinds
@@ -3242,7 +3242,7 @@ impl EnumPayload {
 
     /// Record the construction site's word kinds.
     #[inline]
-    pub fn with_kinds(mut self, k: u8) -> Self {
+    pub fn with_kinds(mut self, k: common::PackedKinds) -> Self {
         match &mut self.inner {
             EnumPayloadInner::Inline { kinds, .. } | EnumPayloadInner::Spill { kinds, .. } => {
                 *kinds = k;
@@ -3255,7 +3255,7 @@ impl EnumPayload {
     /// construction site recorded: a shared body's, for a type parameter's
     /// words (`vec_stamp`).
     #[inline]
-    pub fn add_kinds(&mut self, k: u8) {
+    pub fn add_kinds(&mut self, k: common::PackedKinds) {
         match &mut self.inner {
             EnumPayloadInner::Inline { kinds, .. } | EnumPayloadInner::Spill { kinds, .. } => {
                 *kinds |= k;
@@ -3324,7 +3324,7 @@ impl ObjEnum {
     /// an enum object of [`common::PRODUCT_TAG`]. Immutable; up to
     /// [`ENUM_INLINE_ARITY`] words live in the object, wider ones spill.
     #[inline]
-    pub fn tuple(elements: &[Value], kinds: u8) -> Self {
+    pub fn tuple(elements: &[Value], kinds: common::PackedKinds) -> Self {
         Self::new(common::PRODUCT_TAG, EnumPayload::from_slice(elements).with_kinds(kinds))
     }
 

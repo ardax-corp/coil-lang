@@ -147,7 +147,7 @@ pub fn host_vec_stamp(heap: &mut Heap, args: &[Value]) -> Value {
             }
         }
         Some(Object::Enum(mut gc)) => {
-            if let Ok(k) = u8::try_from(kinds) {
+            if let Ok(k) = common::PackedKinds::try_from(kinds) {
                 gc.as_mut().payload.add_kinds(k);
             }
         }

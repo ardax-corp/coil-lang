@@ -16,7 +16,7 @@ use crate::debug::{DebugLine, ProgramDebug, SpanLoc};
 pub const ARCHIVE_MAJOR: u16 = 8;
 
 /// Archive minor. Bump on an additive change to the format.
-pub const ARCHIVE_MINOR: u16 = 2;
+pub const ARCHIVE_MINOR: u16 = 3;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -180,27 +180,32 @@ pub const fn dict_from_call_parts(word: u64) -> Option<u32> {
 /// this many variants.
 pub const PRODUCT_TAG: u32 = u32::MAX;
 
-/// Words whose kinds a packed `u8` records (2 bits each). Later words of a
-/// wider payload are unknown.
-pub const PACKED_KIND_WORDS: usize = 4;
+/// Packed word kinds: 2 bits per word ([`packed_word_kind`]), for the
+/// first [`PACKED_KIND_WORDS`] words of a payload.
+pub type PackedKinds = u32;
 
-/// Kind of word `i` in a packed `u8` (see [`PACKED_KIND_WORDS`]).
+/// Words whose kinds a [`PackedKinds`] records (2 bits each): 24 bits,
+/// what a snapshot object header's `aux` field holds. Later words of a
+/// wider payload are unknown.
+pub const PACKED_KIND_WORDS: usize = 12;
+
+/// Kind of word `i` in packed kinds (see [`PACKED_KIND_WORDS`]).
 #[inline]
-pub const fn packed_word_kind(kinds: u8, i: usize) -> u8 {
+pub const fn packed_word_kind(kinds: PackedKinds, i: usize) -> u8 {
     if i < PACKED_KIND_WORDS {
-        (kinds >> (2 * i)) & 3
+        ((kinds >> (2 * i)) & 3) as u8
     } else {
         WORD_UNKNOWN
     }
 }
 
-/// Pack per-word kinds (first [`PACKED_KIND_WORDS`]) into a `u8`.
-pub fn pack_word_kinds(kinds: impl IntoIterator<Item = u8>) -> u8 {
+/// Pack per-word kinds (first [`PACKED_KIND_WORDS`]).
+pub fn pack_word_kinds(kinds: impl IntoIterator<Item = u8>) -> PackedKinds {
     kinds
         .into_iter()
         .take(PACKED_KIND_WORDS)
         .enumerate()
-        .fold(0, |acc, (i, k)| acc | ((k & 3) << (2 * i)))
+        .fold(0, |acc, (i, k)| acc | (PackedKinds::from(k & 3) << (2 * i)))
 }
 
 /// Word kinds of a class's typed fields, in slot order (minor 24+).

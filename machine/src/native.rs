@@ -1811,7 +1811,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 [a, b] => EnumPayload::two(*a, *b),
                 v => EnumPayload::from_slice(v),
             }
-            .with_kinds((extra >> 32) as u8);
+            .with_kinds((extra >> 32) as u32);
             let (obj, mut gc) = heap.alloc(ObjEnum::new(extra as u32, payload), Object::Enum);
             let type_id = type_id.bits() as u32;
             gc.as_mut().type_id = type_id;
@@ -1829,7 +1829,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 [a, b] => EnumPayload::two(*a, *b),
                 v => EnumPayload::from_slice(v),
             }
-            .with_kinds((extra >> 32) as u8);
+            .with_kinds((extra >> 32) as u32);
             heap.alloc(ObjEnum::new(tag, payload), Object::Enum).0.addr()
         }
         ALLOC_OBJECT => {

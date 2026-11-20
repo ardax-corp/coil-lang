@@ -26,8 +26,8 @@ pub struct AllocCall {
 pub fn alloc_call(
     kind: MirAllocKind,
     words: usize,
-    kinds: u8,
-    packed: impl FnOnce() -> u8,
+    kinds: common::PackedKinds,
+    packed: impl FnOnce() -> common::PackedKinds,
     pc_of: impl FnOnce(Label) -> Option<u32>,
 ) -> Result<AllocCall, Label> {
     let n = words as u64;

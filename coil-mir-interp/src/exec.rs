@@ -182,7 +182,7 @@ fn push(act: &mut Activation, body: &Body, homes: *mut u64) -> bool {
 }
 
 /// A word's kinds for an object's packed kinds.
-fn packed_kinds(f: &MirFunc, words: &[ValueId]) -> u8 {
+fn packed_kinds(f: &MirFunc, words: &[ValueId]) -> common::PackedKinds {
     if f.opaque_words {
         return 0;
     }

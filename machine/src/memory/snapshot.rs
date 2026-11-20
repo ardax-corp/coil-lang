@@ -255,7 +255,7 @@ impl Capture<'_> {
     fn kinded(
         &mut self,
         words: &[Value],
-        kinds: u8,
+        kinds: common::PackedKinds,
         step: impl Fn(usize) -> Parent,
     ) -> Result<Vec<SnapWord>, SnapshotError> {
         words

@@ -22,7 +22,7 @@ pub enum InlineShape {
     /// `ALLOC_ENUM` of a variant (a tuple: [`common::PRODUCT_TAG`]) with
     /// `n` payload words (1 to [`ENUM_INLINE_ARITY`]), `kinds` their packed
     /// word kinds.
-    Enum { tag: u32, kinds: u8, n: u8 },
+    Enum { tag: u32, kinds: common::PackedKinds, n: u8 },
     /// `ALLOC_OBJECT` of a class with `n` fields (1 to
     /// [`INSTANCE_INLINE_FIELDS`]); its fields stay zero until stored.
     Instance { type_id: u32, n: u8 },
@@ -112,7 +112,7 @@ pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
             let (d, len, k, slots, words) = payload_probe(&obj.payload);
             put(&mut img, base, &[d]);
             put(&mut img, base + len, &[n as u8]);
-            put(&mut img, base + k, &[kinds]);
+            put(&mut img, base + k, &kinds.to_le_bytes());
             for (i, w) in words.iter().enumerate() {
                 put(&mut img, base + slots + i * 8, &w.to_le_bytes());
             }

@@ -688,7 +688,7 @@ pub enum MirInst {
         /// / enum's packed payload kinds (`MakeTupleK` / `MakeEnumK`).
         /// `0` = none recorded; emission then reads tuple / enum kinds off
         /// the element words' MIR types.
-        kinds: u8,
+        kinds: common::PackedKinds,
     },
     /// GC safepoint / write-barrier (I5). Dest is a `HeapRef` token
     /// (not a second object). `roots` is the S2a live-heap SSA list

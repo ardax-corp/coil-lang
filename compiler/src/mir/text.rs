@@ -920,7 +920,7 @@ impl<'a> Parser<'a> {
         }
         if let Some(kind_s) = op.strip_prefix("alloc.") {
             let kinds = if self.eat('[') {
-                let k = u8::try_from(self.uint()?).map_err(|_| ParseError("alloc kinds".into()))?;
+                let k = common::PackedKinds::try_from(self.uint()?).map_err(|_| ParseError("alloc kinds".into()))?;
                 self.expect(']')?;
                 k
             } else {

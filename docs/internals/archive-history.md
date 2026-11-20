@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 2, below, is the
-current version, 8.2 with MIR section `FORMAT` 19). A runtime refuses a major
+only add something to the format raise the minor (minor 3, below, is the
+current version, 8.3 with MIR section `FORMAT` 19). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -109,8 +109,17 @@ old header is refused. An 8.1 archive loads and runs unchanged (no op of it pins
   entry's `kinds` word holds two bits per type parameter `p`, bit `2p` for
   a copy-on-write object and bit `2p + 1` for a heap reference, so 31
   parameters (16 for a dictionary's word, 28 for a call through a function
-  value). The layout is format 18's; the reader refuses 16 to 18, whose
-  constant `kinds` words have one bit per parameter.
+  value). An `Alloc`'s construction `kinds` is a `u32` (it was a byte):
+  packed word kinds, two bits a word, of up to 12 words
+  (`common::PackedKinds`, `PACKED_KIND_WORDS`). The layout is format 18's
+  otherwise; the reader refuses 16 to 18, whose constant `kinds` words
+  have one bit per parameter.
+
+Minor 3 (reference counts, plan step 2) widens a snapshot enum object's
+payload kinds additively: the header's 24-bit `aux` field holds the packed
+kinds of up to 12 payload words, where it held 4 words' kinds in its low byte.
+An 8.2 runtime reads the low byte, the first 4 words' kinds, which stay exact;
+an 8.2 archive's enums read the same as before.
 
 ## Major 7
 

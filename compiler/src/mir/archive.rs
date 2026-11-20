@@ -608,7 +608,7 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             for e in elems {
                 w.v(*e);
             }
-            w.u8(*kinds);
+            w.u32(*kinds);
         }
         MirInst::ArrayPush { dest, array, value } => {
             w.u8(I_ARRAY_PUSH);
@@ -1142,7 +1142,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             };
             let n = r.len()?;
             let elems = (0..n).map(|_| r.v()).collect::<Result<Vec<_>, _>>()?;
-            MirInst::Alloc { dest, kind, elems, kinds: r.u8()? }
+            MirInst::Alloc { dest, kind, elems, kinds: r.u32()? }
         }
         I_STRING => MirInst::String { dest: r.v()?, idx: r.u32()? },
         I_LOAD_STATIC => MirInst::LoadStatic { dest: r.v()?, slot: r.u32()? },
