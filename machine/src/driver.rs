@@ -196,6 +196,7 @@ impl<'a> Driver<'a> {
         free: Driver::host_free,
         ffi: Driver::host_ffi,
         ffi_struct: Driver::host_ffi_struct,
+        callback: Driver::host_callback,
         invoke: Driver::host_invoke,
     };
 
@@ -920,6 +921,26 @@ impl<'a> Driver<'a> {
             crate::ffi::unpack_struct_from(heap, id, layouts, bytes).map(|v| v.bits())
         } else {
             Some(u64::from(crate::ffi::pack_struct_into(heap, Value::from(word), id, layouts, bytes)))
+        }
+    }
+
+    /// [`NativeHost::callback`]: a direct extern call's start and end, and a
+    /// C callback in it, which runs rooted at the call's context.
+    unsafe fn host_callback(raw: *mut c_void, ctx: *mut NativeCtx, op: u8, a: u64, b: u64, words: *const u64, n: usize) -> u64 {
+        // SAFETY: native code passes back the driver it was given.
+        let d = unsafe { Self::from_raw(raw) };
+        match op {
+            crate::native::CB_ENTER => u64::from(std::mem::replace(&mut d.panicked, false)),
+            crate::native::CB_LEAVE => {
+                let panicked = d.panicked;
+                d.panicked |= a != 0;
+                u64::from(panicked)
+            }
+            _ => {
+                // SAFETY: the thunk passes its `n` argument words.
+                let words = unsafe { std::slice::from_raw_parts(words, n) };
+                d.rooted(ctx, |d| d.callback(a as u32, b as u32, words))
+            }
         }
     }
 
