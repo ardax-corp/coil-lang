@@ -4040,27 +4040,28 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(bump);
         let bumps = self.b.ins().load(types::I64, mem, self.ctx, NATIVE_CTX_ALLOC_BUMPS);
         let cursor = self.b.ins().iadd_imm_s(bumps, i64::from(obj.class) * i64::from(BUMP_BYTES));
-        // A slot freed early since the last minor first (#2881), else the
-        // bump pointer.
-        let free = self.b.ins().load(types::I64, mem, cursor, BUMP_FREE);
-        let reuse = self.b.create_block();
-        let fresh = self.b.create_block();
+        // The bump pointer first; when its chunk is spent, a slot freed
+        // early since the last minor (#2881), else the helper. Programs that
+        // free nothing pay no extra load on the fast path.
         self.b.append_block_param(fast, types::I64);
-        self.b.ins().brif(free, reuse, &[], fresh, &[]);
-        self.b.switch_to_block(reuse);
-        let link = self.b.ins().load(types::I64, mem, free, BUMP_FREE_LINK);
-        self.b.ins().store(mem, link, cursor, BUMP_FREE);
-        self.b.ins().jump(fast, &[free.into()]);
-        self.b.switch_to_block(fresh);
         let at = self.b.ins().load(types::I64, mem, cursor, BUMP_NEXT);
         let end = self.b.ins().load(types::I64, mem, cursor, BUMP_END);
         let next = self.b.ins().iadd_imm_s(at, i64::from(obj.slot));
         let fits = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, next, end);
         let bumped = self.b.create_block();
-        self.b.ins().brif(fits, bumped, &[], slow, &[]);
+        let spent = self.b.create_block();
+        self.b.ins().brif(fits, bumped, &[], spent, &[]);
         self.b.switch_to_block(bumped);
         self.b.ins().store(mem, next, cursor, BUMP_NEXT);
         self.b.ins().jump(fast, &[at.into()]);
+        self.b.switch_to_block(spent);
+        let free = self.b.ins().load(types::I64, mem, cursor, BUMP_FREE);
+        let reuse = self.b.create_block();
+        self.b.ins().brif(free, reuse, &[], slow, &[]);
+        self.b.switch_to_block(reuse);
+        let link = self.b.ins().load(types::I64, mem, free, BUMP_FREE_LINK);
+        self.b.ins().store(mem, link, cursor, BUMP_FREE);
+        self.b.ins().jump(fast, &[free.into()]);
         self.b.switch_to_block(fast);
         let at = self.b.block_params(fast)[0];
         let first = obj.words_at as usize;

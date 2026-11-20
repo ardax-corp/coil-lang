@@ -331,7 +331,8 @@ pub const YOUNG_CLASSES: usize = 32;
 /// minor collection): the next allocation refills. `free` heads the
 /// class's slots freed early since the last minor collection, linked
 /// through each slot's first payload word ([`FREE_LINK`]); allocation,
-/// native code's inline path too, takes those first (#2881).
+/// native code's inline path too, takes those once the bump pointer
+/// runs out, before a refill (#2881).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Bump {
@@ -425,16 +426,16 @@ impl Slab {
         let key = (slot_size as u32, align as u32);
         if let Some(class) = self.young.iter_mut().find(|c| c.key == key) {
             let bump = &mut self.bumps[class.cursor];
+            if bump.next + slot_size as u64 <= bump.end {
+                let p = bump.next;
+                bump.next += slot_size as u64;
+                return unsafe { NonNull::new_unchecked(p as *mut u8) };
+            }
             if bump.free != 0 {
                 let p = bump.free;
                 // SAFETY: a freed young slot holds the next one's address
                 // at `FREE_LINK` (`free_young`).
                 bump.free = unsafe { *((p + FREE_LINK) as *const u64) };
-                return unsafe { NonNull::new_unchecked(p as *mut u8) };
-            }
-            if bump.next + slot_size as u64 <= bump.end {
-                let p = bump.next;
-                bump.next += slot_size as u64;
                 return unsafe { NonNull::new_unchecked(p as *mut u8) };
             }
         }
