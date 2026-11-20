@@ -553,7 +553,8 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
 /// Element kind an array of `elem` is stamped with at construction
 /// (`MakeArrayK`): `WORD_POINTER` for ground heap words and closed
 /// two-word values (stored boxed), `WORD_BYTE` for `byte` / `bool` (the runtime packs those one byte per
-/// element), else `WORD_UNKNOWN` (no stamp).
+/// element), `WORD_SCALAR` for other scalars, else `WORD_UNKNOWN` (no stamp:
+/// a type parameter's, which a shared body stamps from its `kinds` word).
 pub fn array_elem_stamp(checker: &Checker, elem: &Ty) -> u8 {
     let ty = apply_ty_prune(checker.subst(), elem);
     if let Ty::Con(name) = strip_readonly(&ty)
@@ -566,7 +567,7 @@ pub fn array_elem_stamp(checker: &Checker, elem: &Ty) -> u8 {
         return common::WORD_POINTER;
     }
     match word_kind(checker, &ty) {
-        common::WORD_POINTER => common::WORD_POINTER,
+        k @ (common::WORD_POINTER | common::WORD_SCALAR) => k,
         _ => common::WORD_UNKNOWN,
     }
 }

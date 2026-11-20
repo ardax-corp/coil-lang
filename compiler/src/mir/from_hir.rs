@@ -3651,7 +3651,10 @@ impl Lower<'_> {
             HirKind::Call { args, .. } if let Some(fork) = self.site(id).par_fork.as_ref() => self.par_fork(id, args, &fork.clone()),
             HirKind::Call { args, .. } if let Some(bound) = self.site(id).bound_call.as_ref() => self.bound_call(id, args, bound),
             HirKind::Call { args, .. } if let Some(&slot) = self.site(id).existential_call.as_ref() => self.existential_call(id, args, slot),
-            HirKind::Call { args, .. } => self.call(id, args),
+            HirKind::Call { args, .. } => {
+                let v = self.call(id, args)?;
+                self.stamp_made_vec(id, v)
+            }
             HirKind::Resume { handle, value, .. } => {
                 let read = !self.unread.remove(&id);
                 self.resume(id, *handle, *value, read)
@@ -7334,7 +7337,61 @@ impl Lower<'_> {
         // elements.
         let stamp = self.expr_ty(id).and_then(array_elem).map_or(0, |e| self.cx.array_stamp(e));
         let arr = self.b.ins_alloc_kinds(MirAllocKind::Array, items, stamp).map_err(mir)?;
-        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?))
+        let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![arr]).map_err(mir)?;
+        if stamp == common::WORD_UNKNOWN
+            && let Some(elem) = self.expr_ty(id).and_then(array_elem).cloned()
+        {
+            self.stamp_from_kinds(arr, &elem)?;
+        }
+        Ok(Val::V(arr))
+    }
+
+    /// A shared body's array of a type parameter's words: stamp its
+    /// element kind from the parameter's heap-reference bit of the body's
+    /// `kinds` word (reference counts plan step 2). Nothing where the body
+    /// has no bit for the type.
+    fn stamp_from_kinds(&mut self, arr: ValueId, elem: &Ty) -> Result<(), Refusal> {
+        let Some((kinds, p)) = self.kinds_bit(elem) else {
+            return Ok(());
+        };
+        let k = self.b.ins_const(MirConst::I64(i64::from(crate::codegen::kinds_ptr_bit(p)))).map_err(mir)?;
+        let bit = self.b.ins_binop(MirBinOp::Shr, kinds, k).map_err(mir)?;
+        let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+        let bit = self.b.ins_binop(MirBinOp::BitAnd, bit, one).map_err(mir)?;
+        // `WORD_SCALAR` is 1, `WORD_POINTER` 2.
+        const _: () = assert!(common::WORD_SCALAR == 1 && common::WORD_POINTER == 2);
+        let kind = self.b.ins_binop(MirBinOp::Add, bit, one).map_err(mir)?;
+        self.b.ins_host_invoke(common::VEC_STAMP_ID, vec![arr, kind]).map_err(mir)?;
+        Ok(())
+    }
+
+    /// After call `id`: a `Vec::new()` / `Vec::with_capacity(n)` of a type
+    /// parameter's elements in a shared body gets no stamped twin
+    /// (`stamped_vec_ctor_name`), so its array is stamped here
+    /// ([`Self::stamp_from_kinds`]).
+    fn stamp_made_vec(&mut self, id: HirId, v: Val) -> Result<Val, Refusal> {
+        let Val::V(arr) = v else {
+            return Ok(v);
+        };
+        if self.kinds.is_none() || self.b.value_ty(arr) != MirTy::HeapRef {
+            return Ok(v);
+        }
+        let name = match &self.hir.expr(id).kind {
+            HirKind::Call { callee: Callee::Named { name, .. }, .. } => name.as_str(),
+            HirKind::Call { callee: Callee::Resolved(r), .. } => r.key.as_str(),
+            _ => return Ok(v),
+        };
+        let ctor = name
+            .strip_prefix(common::BUILTIN_VEC_TYPE)
+            .and_then(|n| n.strip_prefix("::"))
+            .is_some_and(|n| matches!(n, "new" | "with_capacity"));
+        if !ctor {
+            return Ok(v);
+        }
+        if let Some(elem) = self.expr_ty(id).and_then(array_elem).cloned() {
+            self.stamp_from_kinds(arr, &elem)?;
+        }
+        Ok(v)
     }
 
     /// A local `const` table of literals (#1561): built into static `slot`
