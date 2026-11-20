@@ -301,12 +301,14 @@ fn is_too_many_open_files(err: &io::Error) -> bool {
 /// so niche vs boxed is chosen once.
 pub fn alloc_result_ok(heap: &mut Heap, payload: Value) -> Value {
     let _ = BUILTIN_RESULT_VARIANTS;
-    alloc_enum(heap, 0, EnumPayload::one(payload))
+    let kinds = common::pack_word_kinds([crate::host_enum::host_payload_kind(0)]);
+    alloc_enum(heap, 0, EnumPayload::one(payload).with_kinds(kinds))
 }
 
 /// Allocate `Result::Err(payload)` on the heap.
 pub fn alloc_result_err(heap: &mut Heap, payload: Value) -> Value {
-    alloc_enum(heap, 1, EnumPayload::one(payload))
+    let kinds = common::pack_word_kinds([crate::host_enum::host_payload_kind(1)]);
+    alloc_enum(heap, 1, EnumPayload::one(payload).with_kinds(kinds))
 }
 
 /// Allocate boxed `Option::None`. Prefer [`crate::host_enum::pack_option`].
@@ -317,7 +319,8 @@ pub fn alloc_option_none(heap: &mut Heap) -> Value {
 
 /// Allocate boxed `Option::Some(payload)`. Prefer [`crate::host_enum::pack_option`].
 pub fn alloc_option_some(heap: &mut Heap, payload: Value) -> Value {
-    alloc_enum(heap, 1, EnumPayload::one(payload))
+    let kinds = common::pack_word_kinds([crate::host_enum::host_payload_kind(0)]);
+    alloc_enum(heap, 1, EnumPayload::one(payload).with_kinds(kinds))
 }
 
 /// Allocate a unit-payload `IoError` variant.

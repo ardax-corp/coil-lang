@@ -451,6 +451,28 @@ pub const HOST_ENUM_LAYOUT_RESULT_NICHE: u32 = 2;
 /// word, with no enum object made (`Option<int>`, `Result<int, E>`).
 pub const HOST_ENUM_LAYOUT_PAIR: u32 = 3;
 
+/// A MIR `HostInvoke` layout byte's bits above the layout (its low 2 bits,
+/// [`HOST_ENUM_LAYOUT_MASK`]), with [`HOST_ENUM_LAYOUT_BOXED`] only: the
+/// word kind (`WORD_*`) of a boxed result's `Some` / `Ok` payload at bits
+/// `[3:2]` and of its `Err` payload at bits `[5:4]` (MIR section format 21).
+pub const HOST_PAYLOAD_KINDS_SHIFT: u32 = 2;
+
+/// A boxed host result's layout byte with its payloads' word kinds.
+pub const fn host_layout_with_kinds(some_ok: u8, err: u8) -> u8 {
+    ((some_ok & 3) << HOST_PAYLOAD_KINDS_SHIFT) | ((err & 3) << (HOST_PAYLOAD_KINDS_SHIFT + 2))
+}
+
+/// The layout of a `HostInvoke` layout byte, without its payload kinds.
+pub const fn host_layout_base(layout: u32) -> u32 {
+    layout & HOST_ENUM_LAYOUT_MASK
+}
+
+/// The word kind a boxed host result's payload of `variant` takes from its
+/// layout bits: `0` is `Some` / `Ok`, `1` is `Err`.
+pub const fn host_payload_kind(layout: u32, variant: u32) -> u8 {
+    ((layout >> (HOST_PAYLOAD_KINDS_SHIFT + 2 * variant)) & 3) as u8
+}
+
 /// Pack `HostInvoke` arity and host-edge Option/Result layout into one operand.
 pub const fn pack_host_invoke_operand(arity: u32, layout: u32) -> u32 {
     (arity & HOST_INVOKE_ARITY_MASK) | ((layout & HOST_ENUM_LAYOUT_MASK) << HOST_ENUM_LAYOUT_SHIFT)
@@ -614,6 +636,15 @@ pub fn library_stem(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_boxed_layout_carries_its_payload_kinds() {
+        let bits = HOST_ENUM_LAYOUT_BOXED | u32::from(host_layout_with_kinds(crate::WORD_POINTER, crate::WORD_SCALAR));
+        assert_eq!(host_layout_base(bits), HOST_ENUM_LAYOUT_BOXED);
+        assert_eq!(host_payload_kind(bits, 0), crate::WORD_POINTER);
+        assert_eq!(host_payload_kind(bits, 1), crate::WORD_SCALAR);
+        assert_eq!(host_payload_kind(HOST_ENUM_LAYOUT_PAIR, 0), crate::WORD_UNKNOWN);
+    }
 
     #[test]
     fn frozen_tail_ids() {

@@ -95,7 +95,7 @@ fn expandable(func: &MirFunc, which: VecNative, dest: ValueId, layout: u8, args:
                 && heap(arg(0))
                 && int(arg(1))
                 && matches!(
-                    (u32::from(layout), func.ty(dest)),
+                    (common::host_layout_base(u32::from(layout)), func.ty(dest)),
                     (common::HOST_ENUM_LAYOUT_BOXED, MirTy::HeapRef) | (common::HOST_ENUM_LAYOUT_OPTION_NICHE, MirTy::NicheOpt)
                 )
         }
@@ -295,7 +295,7 @@ fn remove(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, arg
     ex.br(check_hi, above, none, take);
 
     let nothing = ex.value(ty);
-    if u32::from(layout) == common::HOST_ENUM_LAYOUT_BOXED {
+    if common::host_layout_base(u32::from(layout)) == common::HOST_ENUM_LAYOUT_BOXED {
         ex.push(none, MirInst::Alloc { dest: nothing, kind: MirAllocKind::Enum { tag: 0 }, elems: Vec::new(), kinds: 0 });
     } else {
         ex.push(none, MirInst::Cast { dest: nothing, kind: MirCastKind::Word, to: ty, src: zero });

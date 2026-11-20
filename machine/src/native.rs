@@ -2490,11 +2490,12 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         return unsafe { bail(ctx) };
     }
     let live_before = heap.live_object_count();
-    let layout = crate::host_enum::HostEnumLayout::from_u32(layout as u32);
+    let bits = layout as u32;
+    let layout = crate::host_enum::HostEnumLayout::from_u32(bits);
     if layout == crate::host_enum::HostEnumLayout::Pair {
         crate::host_enum::take_pair_tag();
     }
-    let v = crate::host_enum::in_host_enum_layout(layout, || f(heap, args));
+    let v = crate::host_enum::in_host_enum_bits(bits, || f(heap, args));
     // The runtime checks for a collection once the call returns.
     let made = heap.live_object_count().saturating_sub(live_before) as u64;
     if made != 0 {

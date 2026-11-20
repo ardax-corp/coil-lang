@@ -15,6 +15,24 @@ fn pack_vec_option(heap: &mut Heap, value: Option<Value>) -> Value {
     })
 }
 
+/// [`pack_vec_option`] of an element taken out of an array whose element
+/// kind is `kind`: a boxed `Some` takes that kind for its payload (a byte
+/// element comes out a number). The builtin `Vec` thunks serve every `T`,
+/// so the call's own layout bits carry no payload kind.
+fn pack_vec_element(heap: &mut Heap, value: Option<Value>, kind: u8) -> Value {
+    let kind = match kind {
+        common::WORD_BYTE => common::WORD_SCALAR,
+        k @ (common::WORD_SCALAR | common::WORD_POINTER) => k,
+        _ => return pack_vec_option(heap, value),
+    };
+    let bits = crate::host_enum::current_host_enum_bits();
+    if common::host_layout_base(bits) != common::HOST_ENUM_LAYOUT_BOXED || value.is_none() {
+        return pack_vec_option(heap, value);
+    }
+    let bits = common::host_layout_base(bits) | u32::from(common::host_layout_with_kinds(kind, common::WORD_UNKNOWN));
+    crate::host_enum::with_host_enum_bits(bits, || pack_vec_option(heap, value))
+}
+
 /// `Vec::with_capacity(n) -> Vec<T>` — empty growable array with reserved capacity.
 pub fn host_vec_with_capacity(heap: &mut Heap, args: &[Value]) -> Value {
     let n = args.first().map(|v| v.as_int()).unwrap_or(0).max(0) as usize;
@@ -57,10 +75,11 @@ pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_pop(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     match heap.find_object_by_addr(handle.bits()) {
-        Some(Object::Array(mut gc)) => match gc.as_mut().pop() {
-            Some(v) => pack_vec_option(heap, Some(v)),
-            None => pack_vec_option(heap, None),
-        },
+        Some(Object::Array(mut gc)) => {
+            let kind = gc.as_ref().elem_kind();
+            let v = gc.as_mut().pop();
+            pack_vec_element(heap, v, kind)
+        }
         _ => pack_vec_option(heap, None),
     }
 }
@@ -92,8 +111,9 @@ pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
             if index < 0 || (index as usize) >= len {
                 pack_vec_option(heap, None)
             } else {
+                let kind = gc.as_ref().elem_kind();
                 let v = gc.as_mut().remove(index as usize);
-                pack_vec_option(heap, Some(v))
+                pack_vec_element(heap, Some(v), kind)
             }
         }
         _ => pack_vec_option(heap, None),

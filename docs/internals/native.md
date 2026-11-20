@@ -222,7 +222,12 @@ Host natives keep frozen ids: the `*_ID` consts in `common/src/host.rs`, with a 
 in `machine/src/host_natives.rs`. Retired ids stay as panic stubs, so later ids do not
 move. A `HostInvoke` carries a layout for `Option` / `Result` results (`0` boxed
 `ObjEnum`, `1` `Option` pointer niche or `Result<(), E>` with heap `E`, `2` heap-heap
-`Result`), and natives build that layout once through `machine::host_enum`.
+`Result`, `3` two words), and natives build that layout once through
+`machine::host_enum`. A boxed layout's higher bits give the word kinds of the
+`Some` / `Ok` and `Err` payloads, from the call's type in a ground body
+(`common::host_layout_with_kinds`, read back with `host_enum::host_payload_kind`);
+`Vec::pop` / `remove`, one thunk for every `T`, take theirs from the array's
+element kind.
 
 A native with a plain function (`machine::native::direct_host_natives`, resolved at
 compile time since ids are frozen) is called straight from `coil_native_host`. One

@@ -135,7 +135,10 @@ copy-on-write object and bit `2p + 1` for a heap reference (31 parameters, 16 fo
 a dictionary's word, 28 for a call through a function value), where older formats'
 constant `kinds` words have one bit per parameter; and an `Alloc`'s construction
 `kinds` is a `u32` (it was a byte): packed word kinds, two bits a word, of up to 12
-words (`common::PackedKinds`, `PACKED_KIND_WORDS`). Its layout is format 20's
+words (`common::PackedKinds`, `PACKED_KIND_WORDS`); and a `HostInvoke`'s layout
+byte, with `HOST_ENUM_LAYOUT_BOXED`, carries the word kinds of the boxed `Some` /
+`Ok` payload at bits 2-3 and of the `Err` payload at bits 4-5
+(`common::host_layout_with_kinds`). Its layout is format 20's
 otherwise, so an 8.4 archive's code is compiled again. The snapshot additions are
 additive: an enum object's header `aux` field holds the packed kinds of up to 12
 payload words in its 24 bits (it held 4 words' kinds in its low byte); an instance's

@@ -344,7 +344,8 @@ pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::Na
     if park_tasks && !h.on_fiber() {
         return None;
     }
-    let layout = crate::host_enum::HostEnumLayout::from_u32(layout as u32);
+    let bits = layout as u32;
+    let layout = crate::host_enum::HostEnumLayout::from_u32(bits);
     if fn_id == common::CLOCK_SLEEP_MS_ID as usize && park_tasks {
         // Inside a scope, `clock::sleep_ms` suspends the task.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(args.first().map_or(0, |v| v.as_int()).max(0) as u64);
@@ -371,7 +372,7 @@ pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::Na
         let rt = h.rt();
         rt.native_roots.push((ctx, depth));
         let native = rt.natives.get_by_id(fn_id).expect("the caller checked");
-        let mut invoked = crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut rt.heap, args));
+        let mut invoked = crate::host_enum::with_host_enum_bits(bits, || native.invoke(&mut rt.heap, args));
         if opens_fd && crate::io::take_fd_exhausted() {
             // Streams nothing reaches may hold the descriptors: collect
             // (native frames' words pinned) and try once more.
@@ -381,7 +382,7 @@ pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::Na
             let rt = h.rt();
             rt.ffi_arg_roots.truncate(roots_len);
             let native = rt.natives.get_by_id(fn_id).expect("checked above");
-            invoked = crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut rt.heap, args));
+            invoked = crate::host_enum::with_host_enum_bits(bits, || native.invoke(&mut rt.heap, args));
         }
         h.rt().native_roots.pop();
         if park_tasks {

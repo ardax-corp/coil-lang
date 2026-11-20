@@ -13484,7 +13484,24 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
             ),
             None => None,
         };
-        let layout = u8::try_from(call.ret.host_enum_layout()).ok()?;
+        let mut layout = u8::try_from(call.ret.host_enum_layout()).ok()?;
+        if u32::from(layout) == common::HOST_ENUM_LAYOUT_BOXED && !self.hir.is_generic && self.hir.span != crate::hir::synth::SPAN {
+            // A boxed `Option` / `Result` the native makes takes its
+            // payloads' word kinds from the call's type, in a body whose
+            // types hold for every call: not a generic body, nor a builtin
+            // thunk serving any `T` with an `int` standing in (`Vec::pop`).
+            let kind = |t: &Ty| crate::layout::word_kind(&c.checker, t);
+            let payloads = ty
+                .as_ref()
+                .and_then(|t| match (t.as_option(), t.as_result()) {
+                    (Some(some), _) => Some((kind(some), common::WORD_UNKNOWN)),
+                    (_, Some((ok, err))) => Some((kind(ok), kind(err))),
+                    _ => None,
+                });
+            if let Some((some_ok, err)) = payloads {
+                layout |= common::host_layout_with_kinds(some_ok, err);
+            }
+        }
         Some((u16::try_from(native).ok()?, layout, unbox))
     }
 
