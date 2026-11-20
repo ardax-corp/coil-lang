@@ -75,8 +75,9 @@ Do not treat any of these as a nursery.
 Traversal walks the slab: every slot of each resident chunk, live iff its
 header `kind != 0` (chunks are carved whole and keep their size class;
 released chunks are skipped so their zero pages are not refaulted). The
-header holds `kind`, `marked`, `fresh` and the generation bits, with no
-intrusive `next` link, which saves 16 bytes per object. Collection trigger stays
+header is one word: the `kind` byte, a flags byte (marked, fresh, shared,
+finalized, pinned), the generation bits, a debug byte and a 32-bit reference
+count (`COUNT_IMMORTAL` never changes), with no intrusive `next` link, which saves 16 bytes per object. Collection trigger stays
 `alloc_bytes` versus `gc_next_threshold` while **idle**. Safepoint mark +
 lazy sweep (COI-309 S4) is documented in
 [gc-incremental.md](gc-incremental.md). Mark seeds roots via slab lookup.

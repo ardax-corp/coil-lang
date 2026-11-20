@@ -1352,8 +1352,8 @@ impl Heap {
         // cycle skip tracing its children.
         // SAFETY: a live slot starts with its header.
         let header = unsafe { &*(obj.addr() as *const GcHeader) };
-        let fresh = header.fresh.replace(false);
-        if !header.marked.replace(false) && !fresh {
+        let fresh = header.replace_flag(FLAG_FRESH, false);
+        if !header.replace_flag(FLAG_MARKED, false) && !fresh {
             unsafe { self.dealloc_swept(obj, &mut cur) };
         }
         self.gc_sweep_cursor = Some(cur);
@@ -2578,8 +2578,8 @@ impl Object {
     #[inline]
     pub fn mark(&self, grey_objects: &mut Vec<Self>) {
         let header = self.header();
-        if !header.marked.get() {
-            header.marked.set(true);
+        if !header.flag(FLAG_MARKED) {
+            header.set_flag(FLAG_MARKED, true);
             grey_objects.push(*self);
         }
     }
@@ -2587,13 +2587,13 @@ impl Object {
     /// Unmark the object.
     #[inline]
     pub fn unmark(&self) {
-        self.header().marked.set(false);
+        self.header().set_flag(FLAG_MARKED, false);
     }
 
     #[must_use]
     #[inline]
     pub fn is_marked(&self) -> bool {
-        self.header().marked.get()
+        self.header().flag(FLAG_MARKED)
     }
 
     /// Call `f` on each slot of `self` that may hold a reference
@@ -2799,7 +2799,7 @@ impl Object {
     #[inline]
     pub fn is_shared(&self) -> bool {
         // SAFETY: every kind shares the `repr(C)` header at the slot start.
-        unsafe { &*(self.addr() as *const GcHeader) }.shared.get()
+        unsafe { &*(self.addr() as *const GcHeader) }.flag(FLAG_SHARED)
     }
 
     /// This object as a tuple: an enum object of [`common::PRODUCT_TAG`].
@@ -2815,22 +2815,20 @@ impl Object {
     #[inline]
     pub fn is_finalized(&self) -> bool {
         // SAFETY: every kind shares the `repr(C)` header at the slot start.
-        unsafe { &*(self.addr() as *const GcHeader) }.finalized.get()
+        unsafe { &*(self.addr() as *const GcHeader) }.flag(FLAG_FINALIZED)
     }
 
     /// Claim this object's `drop`: `false` when it was claimed already.
     #[inline]
     pub fn claim_finalizer(&self) -> bool {
         // SAFETY: as in `is_finalized`.
-        !unsafe { &*(self.addr() as *const GcHeader) }.finalized.replace(true)
+        !unsafe { &*(self.addr() as *const GcHeader) }.replace_flag(FLAG_FINALIZED, true)
     }
 
     #[inline]
     pub(crate) fn set_shared(&self) {
-        // SAFETY: a live object's header; the flag is a `Cell<bool>` at
-        // [`COW_SHARED_OFFSET`], which native code's inline share writes the
-        // same way.
-        unsafe { *((self.addr() + COW_SHARED_OFFSET as u64) as *mut u8) = COW_SHARED_SET };
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.set_flag(FLAG_SHARED, true);
     }
 
     /// Copy-on-write: whether a name writes this object in place without a
@@ -2839,17 +2837,16 @@ impl Object {
     #[inline]
     pub fn is_pinned(&self) -> bool {
         // SAFETY: every kind shares the `repr(C)` header at the slot start.
-        unsafe { &*(self.addr() as *const GcHeader) }.pinned.get()
+        unsafe { &*(self.addr() as *const GcHeader) }.flag(FLAG_PINNED)
     }
 
-    /// Set or clear the pin ([`Self::is_pinned`]): a byte at
-    /// [`COW_PINNED_OFFSET`], which native code's `CowPin` / `CowUnpin`
+    /// Set or clear the pin ([`Self::is_pinned`]): [`FLAG_PINNED`] at
+    /// [`HEADER_FLAGS_OFFSET`], which native code's `CowPin` / `CowUnpin`
     /// write the same way.
     #[inline]
     pub fn set_pinned(&self, on: bool) {
-        // SAFETY: a live object's header; the bit is a `Cell<bool>` at
-        // [`COW_PINNED_OFFSET`].
-        unsafe { *((self.addr() + COW_PINNED_OFFSET as u64) as *mut u8) = if on { COW_PINNED_SET } else { 0 } };
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.set_flag(FLAG_PINNED, on);
     }
 
     /// Point every word of this instance's slots or array's elements that
@@ -5127,36 +5124,47 @@ fn remember_viewed(addr: u64) {
 }
 
 /// Prefix of every managed allocation. Kind reconstructs [`Object`] without
-/// a live-address HashSet (`kind == 0` is a free slot).
+/// a live-address HashSet (`kind == 0` is a free slot). One word: kind,
+/// flags and generation bytes, a debug byte, then the reference count.
 #[repr(C)]
 struct GcHeader {
     kind: Cell<u8>,
-    marked: Cell<bool>,
-    /// Allocated while a sweep was running; that sweep skips it once.
-    fresh: Cell<bool>,
+    /// [`FLAG_MARKED`], [`FLAG_FRESH`], [`FLAG_SHARED`],
+    /// [`FLAG_FINALIZED`], [`FLAG_PINNED`]. Header state: no barrier, and
+    /// an evacuation copies it with the slot.
+    flags: Cell<u8>,
     /// Nursery bits ([`GEN_YOUNG`], [`GEN_UNLOGGED`], [`GEN_PINNED`]).
     generation: Cell<u8>,
-    /// Copy-on-write: a second place may name this object, so a write
-    /// copies it first ([`Heap::cow_unique`]). Sticky until the slot is
-    /// reused.
-    shared: Cell<bool>,
-    /// An instance's or enum's `drop` has been claimed: it never runs
-    /// twice ([`Object::claim_finalizer`]).
-    finalized: Cell<bool>,
-    /// Copy-on-write: a name writes this object in place without a test
-    /// (an alias the compiler pinned it for, `CowPin`), so a share copies
-    /// it instead of setting [`Self::shared`] ([`Heap::cow_share`]). A
-    /// pinned object is never shared. Header state, like `shared`: no
-    /// barrier, and an evacuation copies it with the slot.
-    pinned: Cell<bool>,
     /// Debug / gc-stress: generation of the steal epoch the object was
-    /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes a
-    /// byte of what is header padding before an 8-aligned payload; release
-    /// builds do not have it.
+    /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes the
+    /// byte before the count; release builds leave it as padding.
     #[cfg(any(debug_assertions, feature = "gc-stress"))]
     epoch: Cell<u8>,
+    /// Reference count: the number of places that own this object.
+    /// [`COUNT_IMMORTAL`] never changes. Not maintained yet (#2881 plan
+    /// step 2).
+    count: Cell<u32>,
 }
 
+/// Marked by the collector's current mark.
+pub(super) const FLAG_MARKED: u8 = 1;
+/// Allocated while a sweep was running; that sweep skips it once.
+pub(super) const FLAG_FRESH: u8 = 1 << 1;
+/// Copy-on-write: a second place may name this object, so a write copies it
+/// first ([`Heap::cow_unique`]). Sticky until the slot is reused.
+pub const FLAG_SHARED: u8 = 1 << 2;
+/// An instance's or enum's `drop` has been claimed: it never runs twice
+/// ([`Object::claim_finalizer`]).
+const FLAG_FINALIZED: u8 = 1 << 3;
+/// Copy-on-write: a name writes this object in place without a test (an
+/// alias the compiler pinned it for, `CowPin`), so a share copies it
+/// instead of setting [`FLAG_SHARED`] ([`Heap::cow_share`]). A pinned
+/// object is never shared.
+pub const FLAG_PINNED: u8 = 1 << 4;
+
+/// A count that never changes: interned and constant objects that live as
+/// long as the program.
+pub const COUNT_IMMORTAL: u32 = u32::MAX;
 
 /// What [`Heap::cow_share`] did with a word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5173,28 +5181,21 @@ pub enum CowShare {
 /// [`Object::from_header`] reads, and native code's inline share
 /// (#2506, `coil-native`).
 pub const HEADER_KIND_OFFSET: i32 = std::mem::offset_of!(GcHeader, kind) as i32;
-/// Byte offset of a header's copy-on-write flag ([`GcHeader::shared`]).
-/// A share stores [`COW_SHARED_SET`] there: [`Object::set_shared`], and
-/// native code's inline share of a class instance or an array (#2506).
-pub const COW_SHARED_OFFSET: i32 = std::mem::offset_of!(GcHeader, shared) as i32;
-/// The byte a share stores at [`COW_SHARED_OFFSET`]: `true`.
-pub const COW_SHARED_SET: u8 = 1;
-/// Byte offset of a header's copy-on-write pin ([`GcHeader::pinned`]):
-/// what native code's inline share tests, and its `CowPin` / `CowUnpin`
-/// write ([`COW_PINNED_SET`] or `0`).
-pub const COW_PINNED_OFFSET: i32 = std::mem::offset_of!(GcHeader, pinned) as i32;
-/// The byte a pin stores at [`COW_PINNED_OFFSET`]: `true`.
-pub const COW_PINNED_SET: u8 = 1;
+/// Byte offset of a header's flags byte ([`GcHeader::flags`]): native code's
+/// inline share sets [`FLAG_SHARED`] there, and its `CowPin` / `CowUnpin`
+/// set and clear [`FLAG_PINNED`].
+pub const HEADER_FLAGS_OFFSET: i32 = std::mem::offset_of!(GcHeader, flags) as i32;
+/// Byte offset of a header's reference count ([`GcHeader::count`]), a
+/// 32-bit word.
+pub const HEADER_COUNT_OFFSET: i32 = std::mem::offset_of!(GcHeader, count) as i32;
 
-// The flag and the kind are one byte each, so native code reads and writes
-// them as bytes.
-const _: () = assert!(std::mem::size_of::<Cell<bool>>() == 1 && std::mem::size_of::<Cell<u8>>() == 1);
-const _: () = assert!(COW_SHARED_SET == true as u8 && COW_PINNED_SET == true as u8);
-// The pin takes a byte of what was padding before an 8-aligned payload: the
-// header stays within one word, so no slot grows.
-const _: () = assert!(std::mem::size_of::<GcHeader>() <= 8);
+// Native code reads and writes the kind and the flags as bytes.
+const _: () = assert!(std::mem::size_of::<Cell<u8>>() == 1);
+// The header stays one word, so no slot grows.
+const _: () = assert!(std::mem::size_of::<GcHeader>() == 8);
+const _: () = assert!(HEADER_COUNT_OFFSET == 4);
 const _: () = assert!(std::mem::offset_of!(GcData<u64>, data) == 8);
-const _: () = assert!(COW_PINNED_OFFSET != COW_SHARED_OFFSET && COW_PINNED_OFFSET != HEADER_KIND_OFFSET);
+const _: () = assert!(HEADER_FLAGS_OFFSET != HEADER_KIND_OFFSET);
 
 #[repr(C)]
 pub struct GcData<T> {
@@ -5206,15 +5207,31 @@ impl GcHeader {
     const fn new() -> Self {
         Self {
             kind: Cell::new(0),
-            marked: Cell::new(false),
-            fresh: Cell::new(false),
+            flags: Cell::new(0),
             generation: Cell::new(0),
-            shared: Cell::new(false),
-            finalized: Cell::new(false),
-            pinned: Cell::new(false),
             #[cfg(any(debug_assertions, feature = "gc-stress"))]
             epoch: Cell::new(0),
+            count: Cell::new(0),
         }
+    }
+
+    #[inline]
+    const fn flag(&self, f: u8) -> bool {
+        self.flags.get() & f != 0
+    }
+
+    #[inline]
+    fn set_flag(&self, f: u8, on: bool) {
+        let v = self.flags.get();
+        self.flags.set(if on { v | f } else { v & !f });
+    }
+
+    /// Set or clear `f`, returning whether it was set.
+    #[inline]
+    fn replace_flag(&self, f: u8, on: bool) -> bool {
+        let was = self.flag(f);
+        self.set_flag(f, on);
+        was
     }
 }
 
@@ -5231,23 +5248,23 @@ impl<T> GcData<T> {
     }
 
     fn set_fresh(&self) {
-        self.header.fresh.set(true);
+        self.header.set_flag(FLAG_FRESH, true);
     }
 
     pub const fn is_marked(&self) -> bool {
-        self.header.marked.get()
+        self.header.flag(FLAG_MARKED)
     }
 
     pub fn mark(&self) -> bool {
-        let is_not_marked = !self.header.marked.get();
+        let is_not_marked = !self.header.flag(FLAG_MARKED);
         if is_not_marked {
-            self.header.marked.set(true);
+            self.header.set_flag(FLAG_MARKED, true);
         }
         is_not_marked
     }
 
     pub fn unmark(&self) {
-        self.header.marked.set(false);
+        self.header.set_flag(FLAG_MARKED, false);
     }
 }
 
@@ -5345,11 +5362,11 @@ impl<T> Gc<T> {
         unsafe {
             ptr::drop_in_place(&mut (*p).data);
             (*p).header.kind.set(0);
-            (*p).header.marked.set(false);
-            (*p).header.fresh.set(false);
+            // Every flag but the finalizer's claim, as before the flags
+            // shared a byte.
+            (*p).header.flags.set((*p).header.flags.get() & FLAG_FINALIZED);
             (*p).header.generation.set(0);
-            (*p).header.shared.set(false);
-            (*p).header.pinned.set(false);
+            (*p).header.count.set(0);
         }
     }
 
@@ -5831,7 +5848,7 @@ mod tests {
         unsafe { heap.sweep() };
         assert!(heap.find_object_by_addr(addr).is_none(), "swept");
         // SAFETY: a swept slot stays mapped.
-        let pin = unsafe { *((addr + COW_PINNED_OFFSET as u64) as *const u8) };
+        let pin = unsafe { *((addr + HEADER_FLAGS_OFFSET as u64) as *const u8) } & FLAG_PINNED;
         assert_eq!(pin, 0, "the recycled header holds no pin");
     }
 

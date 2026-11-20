@@ -3795,15 +3795,17 @@ impl<'a> Lower<'a> {
                 if self.pins {
                     self.b.ins().brif(either, test, &[], join, &[s.into()]);
                     self.b.switch_to_block(test);
-                    let pinned = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
+                    let bits = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_FLAGS_OFFSET);
+                    let pinned = self.b.ins().band_imm_u(bits, i64::from(machine::FLAG_PINNED));
                     self.b.ins().brif(pinned, copy, &[], mark, &[]);
                 } else {
                     // No body pins: no object is pinned, so no copy path.
                     self.b.ins().brif(either, mark, &[], join, &[s.into()]);
                 }
                 self.b.switch_to_block(mark);
-                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_SHARED_SET));
-                self.b.ins().store(flags, set, o, machine::COW_SHARED_OFFSET);
+                let bits = self.b.ins().uload8(types::I32, flags, o, machine::HEADER_FLAGS_OFFSET);
+                let set = self.b.ins().bor_imm_u(bits, i64::from(machine::FLAG_SHARED));
+                self.b.ins().istore8(flags, set, o, machine::HEADER_FLAGS_OFFSET);
                 self.b.ins().jump(join, &[s.into()]);
                 if self.pins {
                     self.b.set_cold_block(copy);
@@ -3818,7 +3820,7 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, word);
                 self.view_of(f, *dest);
             }
-            // The pin is a header byte beside the shared flag, set for a class
+            // The pin is a header flag beside the shared one, set for a class
             // instance or an array only, as a share marks only those.
             MirInst::CowPin { dest, src } => {
                 let s = self.get(f, *src);
@@ -3836,9 +3838,11 @@ impl<'a> Lower<'a> {
                 let either = self.b.ins().bor(inst, arr);
                 self.b.ins().brif(either, pin, &[], join, &[zero.into()]);
                 self.b.switch_to_block(pin);
-                let p = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
-                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_PINNED_SET));
-                self.b.ins().store(flags, set, o, machine::COW_PINNED_OFFSET);
+                let bits = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_FLAGS_OFFSET);
+                let set = self.b.ins().bor_imm_u(bits, i64::from(machine::FLAG_PINNED));
+                self.b.ins().istore8(flags, set, o, machine::HEADER_FLAGS_OFFSET);
+                let bit = self.b.ins().ushr_imm_u(bits, i64::from(machine::FLAG_PINNED.trailing_zeros()));
+                let p = self.b.ins().band_imm_u(bit, 1);
                 self.b.ins().jump(join, &[p.into()]);
                 self.b.switch_to_block(join);
                 self.set(f, *dest, was);
@@ -3861,8 +3865,9 @@ impl<'a> Lower<'a> {
                 let either = self.b.ins().bor(inst, arr);
                 self.b.ins().brif(either, unpin, &[], join, &[]);
                 self.b.switch_to_block(unpin);
-                let clear = self.b.ins().iconst(types::I8, 0);
-                self.b.ins().store(flags, clear, o, machine::COW_PINNED_OFFSET);
+                let bits = self.b.ins().uload8(types::I32, flags, o, machine::HEADER_FLAGS_OFFSET);
+                let clear = self.b.ins().band_imm_u(bits, i64::from(!machine::FLAG_PINNED));
+                self.b.ins().istore8(flags, clear, o, machine::HEADER_FLAGS_OFFSET);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
                 let zero = self.b.ins().iconst(types::I64, 0);

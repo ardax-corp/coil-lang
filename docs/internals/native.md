@@ -454,27 +454,27 @@ layout is refused.
 A copy-on-write share of a word (`Cow` with `unique` false and no field) sets
 the object's shared flag in place, with no call (#2506): the word with its low
 tag bit cleared, nothing for null, then the header's kind byte, and for a class
-instance or an array (`KIND_INSTANCE`, `KIND_ARRAY`) a store of
-`COW_SHARED_SET` at `COW_SHARED_OFFSET`. Those constants sit next to
+instance or an array (`KIND_INSTANCE`, `KIND_ARRAY`) an or of `FLAG_SHARED`
+into the flags byte at `HEADER_FLAGS_OFFSET`. Those constants sit next to
 `GcHeader` (`machine/src/memory/heap.rs`), tied to it by `offset_of!` and
-size asserts, and `Object::set_shared` writes the flag through the same pair;
+size asserts, and `Object::set_shared` sets the same bit;
 `layout_fingerprint` covers them. Any other word is left as it is, as
 `Heap::cow_share` leaves it. A share allocates nothing (`OpProps` of a share
 `Cow`: no `allocates`, no `gc_edge`), so a body whose only copy-on-write op on
 a type parameter is a share behind its `kinds` test stays without a GC poll
-and with no helper call. The flag is a `Cell<bool>` the runtime sets from a
+and with no helper call. The flags byte is a `Cell<u8>` the runtime sets from a
 shared reference, never through `GcData::as_mut`, so the inline store is the
 same in debug and `gc-stress` builds. The interpreter keeps `coil_native_cow`,
 which also counts the share for `--cow-report`'s summary line; native code's
 inline shares are not in that count (the copies are).
 
 A pinned object (archive 8.2, [cow-calls.md](cow-calls.md), "Pinned objects") is
-never marked: after the kind byte the share loads the pin at `COW_PINNED_OFFSET`
+never marked: after the kind byte the share tests `FLAG_PINNED` in the flags byte
 and, when it is set, branches to a cold block that calls `coil_native_cow`, whose
 copy is the share's result. That helper allocates and never collects, so the share
 stays no GC edge and allocates nothing as far as the body's `OpProps` go: a copy
 it makes is counted, and the next safepoint collects. `CowPin` and `CowUnpin`
-are inline byte operations on the same header byte, for a class instance or an
+are inline or / and operations on the same flags byte, for a class instance or an
 array only (null and other kinds: `CowPin` gives `0`, `CowUnpin` does nothing).
 The pin test and its cold call are emitted only in the bodies that may run
 while an object is pinned (`Plan::pins`, `pin_reach`): the bodies with a
