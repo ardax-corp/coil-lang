@@ -77,16 +77,18 @@ impl Walk<'_> {
 
 /// Each `break` / `continue` outside every loop of `body` and of the
 /// anonymous `fn`s in it (E0801), with whether it is a `break`.
-pub fn stray_jumps(module: &super::HirModule, body: &HirBody) -> Vec<(HirId, bool)> {
-    fn walk(module: &super::HirModule, body: &HirBody, id: HirId, loops: u32, out: &mut Vec<(HirId, bool)>) {
+pub fn stray_jumps(module: &super::HirModule, body: &HirBody) -> Vec<(super::Span, bool)> {
+    fn walk(module: &super::HirModule, body: &HirBody, id: HirId, loops: u32, out: &mut Vec<(super::Span, bool)>) {
         // Walks recurse through here once per level of the tree.
         common::deep_stack(|| walk_level(module, body, id, loops, out))
     }
 
-    fn walk_level(module: &super::HirModule, body: &HirBody, id: HirId, loops: u32, out: &mut Vec<(HirId, bool)>) {
+    fn walk_level(module: &super::HirModule, body: &HirBody, id: HirId, loops: u32, out: &mut Vec<(super::Span, bool)>) {
         match &body.expr(id).kind {
+            // The span of the jump itself: one in a lambda is an expression
+            // of the lambda's body, not of this one.
             HirKind::Break | HirKind::Continue if loops == 0 => {
-                out.push((id, matches!(body.expr(id).kind, HirKind::Break)));
+                out.push((body.expr(id).span, matches!(body.expr(id).kind, HirKind::Break)));
             }
             HirKind::Lambda { body: lam } => {
                 let lam = &module.bodies[*lam];
