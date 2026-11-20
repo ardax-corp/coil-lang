@@ -2039,6 +2039,27 @@ fn concat_tails<'a>(rest: &str, args: &[u64]) -> Option<([&'a str; 8], usize)> {
     Some((out, args.len()))
 }
 
+/// `f` with an empty scratch string, reused across calls on this thread so
+/// a format renders without an allocation of its own (a nested call, which
+/// the runtime never makes, gets a fresh one).
+fn with_scratch<R>(f: impl FnOnce(&mut String) -> R) -> R {
+    thread_local! {
+        static SCRATCH: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    }
+    SCRATCH.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut s) => {
+            s.clear();
+            let r = f(&mut s);
+            // Keep a big render's buffer only while it is modest.
+            if s.capacity() > 1 << 16 {
+                *s = String::new();
+            }
+            r
+        }
+        Err(_) => f(&mut String::new()),
+    })
+}
+
 /// `FORMAT` with the format string `fmt` and the `n` argument words at
 /// `args` (in order), as the runtime's handler: a leading `%s` appends the rest
 /// to the first argument (in place when that string ends at its buffer's
@@ -2078,29 +2099,28 @@ pub unsafe extern "C" fn coil_native_format(ctx: *mut NativeCtx, fmt: u64, args:
         {
             let joined = match &tails[..count] {
                 [one] => gh.as_ref().concat(one),
-                many => {
-                    let mut tail = String::with_capacity(many.iter().map(|t| t.len()).sum());
+                many => with_scratch(|tail| {
                     for t in many {
                         tail.push_str(t);
                     }
-                    gh.as_ref().concat(&tail)
-                }
+                    gh.as_ref().concat(tail)
+                }),
             };
             let addr = heap.alloc(joined, Object::String).0.addr();
             unsafe { note_alloc(ctx, heap) };
             return addr;
         }
-        let message = crate::format::render_format(rest, || words.next().unwrap_or_default());
-        match head {
-            Some(head) => {
-                let joined = match object(head.bits()) {
-                    Some(Object::String(gh)) => gh.as_ref().concat(&message),
-                    _ => ObjString::new(crate::format::string_at(heap, head.bits()) + &message),
-                };
-                heap.alloc(joined, Object::String).0.addr()
+        let joined = with_scratch(|message| {
+            crate::format::render_format_into(message, rest, || words.next().unwrap_or_default());
+            match head {
+                Some(head) => match object(head.bits()) {
+                    Some(Object::String(gh)) => gh.as_ref().concat(message),
+                    _ => ObjString::new(crate::format::string_at(heap, head.bits()) + message),
+                },
+                None => ObjString::from_data(crate::memory::StrData::copy_of(message)),
             }
-            None => heap.alloc_string(message).as_ptr() as *mut u8 as u64,
-        }
+        });
+        heap.alloc(joined, Object::String).0.addr()
     };
     unsafe { note_alloc(ctx, heap) };
     addr
