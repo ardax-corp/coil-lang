@@ -109,6 +109,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.rust_toolchain }}
+          # scripts/build_runtime.sh rebuilds std for the AOT runtime.
+          components: rust-src
 
       - name: Verify host triple
         if: matrix.libc != 'musl'
@@ -132,10 +134,12 @@ jobs:
         if: runner.os != 'Windows' && matrix.libc != 'musl'
         # Separate invocations: a workspace-wide build unifies helper-only
         # `machine` features (`debugger`) into `coil`.
+        # The AOT runtime links into every packaged program, so it is built
+        # with std trimmed for size (scripts/build_runtime.sh).
         run: |
           cargo build --release -p coil
           cargo build --release -p coil-embed
-          cargo build --release -p coil-rt
+          scripts/build_runtime.sh
           cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
 
       - name: Build release binaries (musl / Alpine)
@@ -164,7 +168,8 @@ jobs:
               # Split so helper-only features stay out of coil.
               cargo build --release -p coil
               cargo build --release -p coil-embed
-              cargo build --release -p coil-rt
+              rustup component add rust-src
+              scripts/build_runtime.sh
               cargo build --release -p coil-debug -p coil-dissect -p coil-fmt -p coil-lsp -p coil-test
             '
           mkdir -p target/release
