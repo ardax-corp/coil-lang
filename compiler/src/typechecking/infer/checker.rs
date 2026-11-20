@@ -9497,7 +9497,8 @@ impl Checker {
             );
         }
         for (i, ty) in arg_tys.iter().enumerate().skip(nfixed) {
-            if !Self::is_ffi_marshallable_ty(ty) {
+            // An unannotated local's type is a variable bound by now.
+            if !Self::is_ffi_marshallable_ty(&apply_ty_prune(&self.subst, ty)) {
                 let span = arg_exprs
                     .and_then(|a| a.get(i))
                     .map(|e| e.0.into_range())
