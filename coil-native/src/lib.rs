@@ -4212,7 +4212,12 @@ impl<'a> Lower<'a> {
                 let words = elems;
                 // An opaque body's `int` words may be objects: their kinds
                 // stay unknown.
-                let packed = || if f.opaque_words { 0 } else { common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w)))) };
+                let packed = || {
+                    common::pack_word_kinds(words.iter().map(|w| match ty_of(f, *w) {
+                        MirTy::I64 if f.opaque_words => common::WORD_UNKNOWN,
+                        t => word_kind(t),
+                    }))
+                };
                 let AllocCall { code, n, extra, last } =
                     alloc_call(*kind, words.len(), *kinds, packed, |t| self.plan.pcs.get(&t).copied()).map_err(|_| {
                         if matches!(kind, MirAllocKind::Coro { .. }) {

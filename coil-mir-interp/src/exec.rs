@@ -183,10 +183,11 @@ fn push(act: &mut Activation, body: &Body, homes: *mut u64) -> bool {
 
 /// A word's kinds for an object's packed kinds.
 fn packed_kinds(f: &MirFunc, words: &[ValueId]) -> common::PackedKinds {
-    if f.opaque_words {
-        return 0;
-    }
-    common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w))))
+    // An opaque body's `int` words may be objects: their kinds stay unknown.
+    common::pack_word_kinds(words.iter().map(|w| match ty_of(f, *w) {
+        MirTy::I64 if f.opaque_words => common::WORD_UNKNOWN,
+        t => word_kind(t),
+    }))
 }
 
 /// `a op b` on ints, as [`common::int_arith`] defines it (and the constant
