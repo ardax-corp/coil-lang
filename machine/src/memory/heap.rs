@@ -1945,7 +1945,9 @@ impl Heap {
 
     /// [`Self::dealloc`] of the slot the sweep walk is at.
     unsafe fn dealloc_swept(&mut self, object: Object, cur: &mut super::slab::SlotCursor) {
-        if self.rc_on {
+        // An immortal object (a program string the intern table lets go)
+        // is no leak of the counts.
+        if self.rc_on && object.rc_count() != COUNT_IMMORTAL {
             self.rc_swept += 1;
             if rc::rc_swept_shown() {
                 eprintln!("coil rc-swept: {} at {:#x} (count {})", object.kind_name(), object.addr(), object.rc_count());
