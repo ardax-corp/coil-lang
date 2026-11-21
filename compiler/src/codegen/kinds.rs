@@ -262,7 +262,8 @@ impl Compiler {
     /// receiver first, for a method) returning `ret_ty`, as ops.
     pub(super) fn kinds_ops_for(&self, bounds: &[TyVarId], fun_ty: &Ty, arg_tys: &[Ty], ret_ty: Option<&Ty>) -> Vec<HirDictOp> {
         let frame = self.hir_body_frame.as_ref().and_then(|f| f.kinds.as_ref());
-        let (params, ret) = Self::fun_param_and_ret_tys(fun_ty);
+        // A result that is a function type is no parameter (#2898: `fn lam<T>() -> fn(T) -> T`).
+        let (params, ret) = Self::fun_param_and_ret_tys_n(fun_ty, arg_tys.len());
         let mut vars = HashMap::new();
         // A method's receiver may be typed by its class alone (`self` in
         // the class's own body): the caller's scheme type of it binds the

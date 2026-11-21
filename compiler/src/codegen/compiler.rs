@@ -3618,6 +3618,21 @@ impl Compiler {
         (params, cur)
     }
 
+    /// [`Self::fun_param_and_ret_tys`] of a function of `arity` parameters
+    /// (a zero-parameter function's type takes one `unit`): a result that is
+    /// a function type stays the result.
+    pub(super) fn fun_param_and_ret_tys_n(ty: &Ty, arity: usize) -> (Vec<Ty>, Ty) {
+        let mut params = Vec::new();
+        let mut cur = ty.clone();
+        while params.len() < arity.max(1)
+            && let Ty::Fun(p, r) = cur
+        {
+            params.push(*p);
+            cur = *r;
+        }
+        (params, cur)
+    }
+
     /// Resolve a constraint's type arguments through `var_to_ty`, returning
     /// concrete lookup types when every argument is ground. `None` means at
     /// least one argument is still open (cannot synthesize yet).
