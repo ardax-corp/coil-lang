@@ -302,6 +302,7 @@ impl Pass {
         let mut inserted = 0usize;
         // In-block code: after each instruction, and before the terminator.
         let mut after: Vec<HashMap<usize, Vec<MirInst>>> = vec![HashMap::new(); n];
+        let mut before: Vec<HashMap<usize, Vec<MirInst>>> = vec![HashMap::new(); n];
         let mut before_term: Vec<Vec<MirInst>> = vec![Vec::new(); n];
         // Edge code: (pred, succ) -> ops.
         let mut edges: Vec<((BlockId, BlockId), Vec<MirInst>)> = Vec::new();
@@ -346,12 +347,20 @@ impl Pass {
                         }
                     }
                 }
-                // A static or a home keeps its word as long as the program
-                // (a later store's old word is not released yet: a leak).
+                // A static owns its word: a store reads the old one first
+                // and releases it after. A home keeps its word (a `defer`
+                // flag's slot may hold no word yet: its old one is not
+                // released, a leak).
                 if let MirInst::StoreStatic { value, .. } | MirInst::HomeStore { value, .. } = inst
                     && (self.root(*value).is_some() || matches!(ty_of(func, *value), MirTy::I64 | MirTy::Value))
                 {
                     ops.insert(0, MirInst::RcInc { dest: tok(&mut new_types), src: *value, guard: None });
+                    if let MirInst::StoreStatic { slot, value, .. } = inst {
+                        let old = tok(&mut new_types);
+                        *new_types.last_mut().expect("the token's type") = ty_of(func, *value);
+                        before[bi].insert(ii, vec![MirInst::LoadStatic { dest: old, slot: *slot }]);
+                        ops.insert(1, MirInst::RcDec { dest: tok(&mut new_types), src: old, guard: None });
+                    }
                 }
                 if !ops.is_empty() {
                     inserted += ops.len();
@@ -434,7 +443,7 @@ impl Pass {
         func.types.extend(new_types);
         // Materialize: in-block code first (positions are the old ones).
         for (bi, block) in func.blocks.iter_mut().enumerate() {
-            if after[bi].is_empty() && before_term[bi].is_empty() {
+            if after[bi].is_empty() && before[bi].is_empty() && before_term[bi].is_empty() {
                 continue;
             }
             let old = std::mem::take(&mut block.insts);
@@ -454,6 +463,9 @@ impl Pass {
                 .collect();
             let mut pending: Vec<MirInst> = Vec::new();
             for (ii, inst) in old.into_iter().enumerate() {
+                if let Some(ops) = before[bi].remove(&ii) {
+                    block.insts.extend(ops);
+                }
                 block.insts.push(inst);
                 if let Some(ops) = after[bi].remove(&ii) {
                     pending.extend(ops);
