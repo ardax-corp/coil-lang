@@ -49,6 +49,13 @@ pub fn insert_rc(func: &mut MirFunc) -> usize {
     if let Some(pad) = func.cleanup.as_deref_mut() {
         n += insert_rc(pad);
     }
+    // Counts free what an early free would (`hir/early_free.rs`): its
+    // frees go, or a count would be decremented on a freed object.
+    for inst in func.blocks.iter_mut().flat_map(|b| b.insts.iter_mut()) {
+        if let MirInst::FreeEarly { dest, .. } = *inst {
+            *inst = MirInst::Const { dest, c: super::inst::MirConst::Bool(false) };
+        }
+    }
     n + Pass::new(func).run(func)
 }
 
@@ -126,8 +133,8 @@ impl Pass {
             }
         }
         // Aliases, in definition order: a block's defs come after what
-        // dominates them, and a φ is a root.
-        let mut base: HashMap<ValueId, ValueId> = HashMap::new();
+        // dominates them, and a φ is a root. Parameters are roots.
+        let mut base: HashMap<ValueId, ValueId> = func.params.iter().filter(|p| counted.contains(p)).map(|&p| (p, p)).collect();
         let order = reverse_postorder(func);
         let mut owned_at_def = HashSet::new();
         for &b in &order {
@@ -183,9 +190,15 @@ impl Pass {
                 }
             }
         }
-        let borrowed: HashSet<ValueId> = func.params.iter().copied().filter(|p| counted.contains(p)).collect();
-        for &p in &borrowed {
+        // A generator's parameters are its coroutine's words, which the
+        // coroutine took an owner of when it was made: its frame owns them.
+        let generator = super::frame_words::is_generator(func);
+        let borrowed: HashSet<ValueId> = if generator { HashSet::new() } else { func.params.iter().copied().filter(|p| counted.contains(p)).collect() };
+        for &p in func.params.iter().filter(|p| counted.contains(p)) {
             base.insert(p, p);
+            if generator {
+                owned_at_def.insert(p);
+            }
         }
         Self { base, borrowed, owned_at_def }
     }
@@ -427,14 +440,25 @@ impl Pass {
             let old = std::mem::take(&mut block.insts);
             // An allocation's barrier stays right after it: ops after the
             // allocation go past its barrier.
-            let barrier_at: Vec<bool> = old.iter().map(|i| matches!(i, MirInst::GcBarrier { .. })).collect();
+            // A run of field stores into one object (a flat pair field's
+            // word, then its tag) counts the word once its tag says it is a
+            // pointer: decrements wait for the run's end.
+            let hold: Vec<bool> = old
+                .iter()
+                .zip(old.iter().skip(1))
+                .map(|(a, b)| match (a, b) {
+                    (_, MirInst::GcBarrier { .. }) => true,
+                    (MirInst::HeapFieldStore { object: o1, .. }, MirInst::HeapFieldStore { object: o2, .. }) => o1 == o2,
+                    _ => false,
+                })
+                .collect();
             let mut pending: Vec<MirInst> = Vec::new();
             for (ii, inst) in old.into_iter().enumerate() {
                 block.insts.push(inst);
                 if let Some(ops) = after[bi].remove(&ii) {
                     pending.extend(ops);
                 }
-                if !barrier_at.get(ii + 1).copied().unwrap_or(false) {
+                if !hold.get(ii).copied().unwrap_or(false) {
                     block.insts.append(&mut pending);
                 }
             }
