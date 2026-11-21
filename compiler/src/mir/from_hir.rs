@@ -5219,7 +5219,14 @@ impl Lower<'_> {
                     }
                     words.push(self.b.use_local(slot, ty).map_err(mir)?);
                 }
-                let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+                // A slot's own kind from its frame word's type (the class
+                // row's kinds cover the rest).
+                let kinds = common::pack_word_kinds(tys.iter().map(|&t| match t {
+                    MirTy::HeapRef => common::WORD_POINTER,
+                    MirTy::F64 | MirTy::Bool => common::WORD_SCALAR,
+                    _ => common::WORD_UNKNOWN,
+                }));
+                let obj = self.b.ins_alloc_kinds(MirAllocKind::Object { type_id, nfields }, Vec::new(), kinds).map_err(mir)?;
                 let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
                 for (i, v) in words.into_iter().enumerate() {
                     self.b.ins_heap_field_store(obj, v, i as u32).map_err(mir)?;
