@@ -6140,12 +6140,14 @@ impl<'a> Lower<'a> {
 /// Body names compiled per call to [`jit`], for `COIL_NATIVE_STATS`.
 pub fn describe(p: &NativeProgram) -> String {
     let refused: HashSet<&str> = p.refused.iter().map(|(n, _)| n.as_str()).collect();
-    format!(
-        "native: {} compiled, {} installed, {} refused",
-        p.compiled.len(),
-        p.entries.len(),
-        refused.len()
-    )
+    let mut out = format!("native: {} compiled, {} installed, {} refused", p.compiled.len(), p.entries.len(), refused.len());
+    // `COIL_NATIVE_STATS=why`: each refusal's reason too.
+    if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "why") {
+        for (name, why) in &p.refused {
+            out.push_str(&format!("\n  refused {name}: {why}"));
+        }
+    }
+    out
 }
 
 /// Whether every operand of scan predicate `e` names one of `streams`
