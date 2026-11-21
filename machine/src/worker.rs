@@ -181,6 +181,11 @@ fn run_on(rt: &mut Runtime, job: Job) {
             for a in args {
                 child_args.push(crate::thread::spawn_arg_to_value(d.rt.heap.get_mut(), a)?);
             }
+            // The job owns its copied arguments and the entry's result
+            // (reference counts): released once the result is copied out.
+            for &a in &child_args {
+                d.rt.heap.get_mut().rc_retain(a);
+            }
             let ret = d.call(entry as usize, &child_args).map_or_else(Value::default, |(lo, _)| Value::from(lo));
             if epoch.as_ref().is_some_and(|e| e.is_aborted()) {
                 return Err(ThreadErrorTag::JoinFailed);
@@ -189,7 +194,16 @@ fn run_on(rt: &mut Runtime, job: Job) {
                 panic_message = Some(d.take_panic_message());
                 return Err(ThreadErrorTag::Panicked);
             }
-            if shared { Ok(PortableValue::Immediate(ret.bits())) } else { crate::thread::value_to_portable(d.rt.heap.get(), ret) }
+            if shared {
+                return Ok(PortableValue::Immediate(ret.bits()));
+            }
+            let out = crate::thread::value_to_portable(d.rt.heap.get(), ret);
+            let heap = d.rt.heap.get_mut();
+            heap.rc_drop(ret);
+            for a in child_args {
+                heap.rc_drop(a);
+            }
+            out
         })();
         drop(write_scope);
         drop(guard);
