@@ -556,8 +556,9 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     // A `Vec<T>` / `[T]` / `[T; N]` word is always an array object, whatever
     // `T` is (a fixed array stored as a word is materialized on the heap);
     // a `Stream` or `thread` handle (`Thread<T>`, `Mutex<T>`, ...) its
-    // handle object.
-    if crate::typechecking::ty::opaque_handle_name(ty).is_some() {
+    // handle object, a function value its `ObjFn` and an existential its
+    // pack (or a bare class's object).
+    if crate::typechecking::ty::opaque_handle_name(ty).is_some() || matches!(ty, Ty::Fun(..) | Ty::Existential { .. }) {
         return common::WORD_POINTER;
     }
     if matches!(ty, Ty::Array { .. })
@@ -642,7 +643,8 @@ mod word_tests {
         // A two-word `Option<int>` and a tuple are stored as their objects.
         assert_eq!(kind(option_ty(int())), common::WORD_POINTER);
         assert_eq!(kind(Ty::Tuple(vec![int(), int()])), common::WORD_POINTER);
-        // A handle is its object, whatever it carries.
+        // A handle or a function value is its object, whatever it carries.
+        assert_eq!(kind(Ty::Fun(Box::new(int()), Box::new(string()))), common::WORD_POINTER);
         assert_eq!(kind(crate::typechecking::ty::thread_ty(Ty::Var(crate::typechecking::ty::TyVarId(0)))), common::WORD_POINTER);
         // Unresolved generics stay unknown.
         assert_eq!(kind(Ty::Con("T".into())), common::WORD_UNKNOWN);
