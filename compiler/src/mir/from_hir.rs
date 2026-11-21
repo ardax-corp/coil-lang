@@ -2715,7 +2715,12 @@ impl Lower<'_> {
 
     /// `MakeEnum tag` of at most one payload word.
     fn make_enum(&mut self, tag: u32, payload: Option<ValueId>) -> Result<ValueId, Refusal> {
-        let obj = self.b.ins_alloc(MirAllocKind::Enum { tag }, payload.into_iter().collect()).map_err(mir)?;
+        // A heap reference's payload kind is known from its MIR type.
+        let kinds = match payload {
+            Some(p) if self.b.value_ty(p) == MirTy::HeapRef => common::PackedKinds::from(common::WORD_POINTER),
+            _ => 0,
+        };
+        let obj = self.b.ins_alloc_kinds(MirAllocKind::Enum { tag }, payload.into_iter().collect(), kinds).map_err(mir)?;
         self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)
     }
 
@@ -3054,7 +3059,23 @@ impl Lower<'_> {
             None => 0,
         };
         let obj = self.b.ins_alloc_kinds(kind, out, kinds).map_err(mir)?;
-        Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?))
+        let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+        // A shared body's type parameter words: from its `kinds` word.
+        if self.kinds.is_some() {
+            match self.expr_ty(id).filter(|_| open).map(strip_readonly).cloned() {
+                Some(Ty::Tuple(items)) => {
+                    let tys: Vec<Option<Ty>> = items.into_iter().map(Some).collect();
+                    self.stamp_product_from_kinds(obj, &tys)?;
+                }
+                Some(t) if array && kinds == 0 => {
+                    if let Some(elem) = array_elem(&t).cloned() {
+                        self.stamp_from_kinds(obj, &elem)?;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(Val::V(obj))
     }
 
     /// One element of an element-wise operator at a user type: the
@@ -3565,7 +3586,7 @@ impl Lower<'_> {
             MirTy::HeapRef => common::WORD_POINTER,
             _ => self.expr_ty(id).map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t)),
         };
-        let mut out = self.dict_program_kinded(vec![v], vec![kind], ops)?;
+        let (mut out, _) = self.dict_program_kinded(vec![v], vec![kind], ops)?;
         let (Some(pack), true) = (out.pop(), out.is_empty()) else {
             return Err("existential pack program".into());
         };
@@ -5651,11 +5672,17 @@ impl Lower<'_> {
     /// Run dictionary program `ops` on `stack`, giving the words left.
     fn dict_program(&mut self, stack: Vec<ValueId>, ops: &[HirDictOp]) -> Result<Vec<ValueId>, Refusal> {
         let kinds = vec![common::WORD_UNKNOWN; stack.len()];
-        self.dict_program_kinded(stack, kinds, ops)
+        Ok(self.dict_program_kinded(stack, kinds, ops)?.0)
     }
 
-    /// [`Self::dict_program`] on a `stack` whose words' kinds are `kinds`.
-    fn dict_program_kinded(&mut self, mut stack: Vec<ValueId>, mut kinds: Vec<u8>, ops: &[HirDictOp]) -> Result<Vec<ValueId>, Refusal> {
+    /// [`Self::dict_values`] with each word's kind (`common::WORD_*`).
+    fn dict_values_kinded(&mut self, ops: &[HirDictOp]) -> Result<(Vec<ValueId>, Vec<u8>), Refusal> {
+        self.dict_program_kinded(Vec::new(), Vec::new(), ops)
+    }
+
+    /// [`Self::dict_program`] on a `stack` whose words' kinds are `kinds`:
+    /// the words left and theirs.
+    fn dict_program_kinded(&mut self, mut stack: Vec<ValueId>, mut kinds: Vec<u8>, ops: &[HirDictOp]) -> Result<(Vec<ValueId>, Vec<u8>), Refusal> {
         // Each stack word's kind, for the dictionary tuples made of them: a
         // method's code pointer and a `kinds` word are numbers, a
         // dictionary (made, interned or forwarded) an object.
@@ -5724,7 +5751,7 @@ impl Lower<'_> {
             kinds.resize(stack.len() - 1, common::WORD_UNKNOWN);
             kinds.push(made);
         }
-        Ok(stack)
+        Ok((stack, kinds))
     }
 
     /// The entry check of a `kinds` word for `n` type parameters (#2506):
@@ -6109,7 +6136,10 @@ impl Lower<'_> {
             kinds.push(ty.as_ref().map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t)));
             tys.push(ty);
         }
-        words.extend(self.dict_values(&f.dicts)?);
+        // Then its dictionaries (and a shared entry's `kinds` word).
+        let (dicts, dict_kinds) = self.dict_values_kinded(&f.dicts)?;
+        words.extend(dicts);
+        kinds.extend(dict_kinds);
         let packed = if matches!(f.kind, MirAllocKind::Fn { .. }) { common::pack_word_kinds(kinds) } else { 0 };
         let h = self.b.ins_alloc_kinds(f.kind, words, packed).map_err(mir)?;
         let h = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?;
@@ -6135,13 +6165,13 @@ impl Lower<'_> {
             words.push(v);
         }
         let tys: Vec<Option<Ty>> = args.iter().map(|&a| self.expr_ty(a).cloned()).collect();
-        let packed = if matches!(f.kind, MirAllocKind::Fn { .. }) {
-            common::pack_word_kinds(tys.iter().map(|t| t.as_ref().map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t))))
-        } else {
-            0
-        };
-        // A shared generic entry's `kinds` word, its last filled parameter.
-        words.extend(self.dict_values(&f.dicts)?);
+        let mut kinds: Vec<u8> = tys.iter().map(|t| t.as_ref().map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t))).collect();
+        // Its dictionaries, and a shared generic entry's `kinds` word, its
+        // last filled parameter.
+        let (dicts, dict_kinds) = self.dict_values_kinded(&f.dicts)?;
+        words.extend(dicts);
+        kinds.extend(dict_kinds);
+        let packed = if matches!(f.kind, MirAllocKind::Fn { .. }) { common::pack_word_kinds(kinds) } else { 0 };
         let h = self.b.ins_alloc_kinds(f.kind, words, packed).map_err(mir)?;
         let h = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![h]).map_err(mir)?;
         if matches!(f.kind, MirAllocKind::Fn { .. }) && self.kinds.is_some() {
