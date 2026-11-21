@@ -2104,6 +2104,7 @@ impl Heap {
         let pfn = ObjFn { entry, arity, is_rest, filled_mask: 0, captured_args: Vec::new(), captures: Vec::new(), dicts: None, word_kinds: 0 };
         // Old: a root for the runtime's lifetime, never worth a nursery copy.
         let (object, _) = self.alloc_unlocked_in(pfn, Object::Fn, false);
+        object.rc_set_immortal();
         self.immortal_fns.insert((entry, arity, is_rest), object);
         object
     }

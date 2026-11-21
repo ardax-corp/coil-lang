@@ -395,7 +395,7 @@ impl Heap {
     /// loses an owner, and those that reach zero are released in turn (a
     /// worklist, not recursion). An object the runtime cannot free here
     /// stays, at count zero, for the collector: an interned string, a
-    /// handle, a closure or coroutine (their words are frame-shaped), an
+    /// handle, a coroutine (its words are frame-shaped), an
     /// object whose `drop` has not run (step 7), and every
     /// object while a collection or a steal epoch is open. The last
     /// collection's root buffer is no test: it is stale once that ends, and
@@ -439,8 +439,9 @@ impl Heap {
 
     /// Whether [`Self::rc_release`] may free `obj`.
     fn rc_releasable(&self, obj: Object) -> bool {
-        matches!(obj, Object::String(_) | Object::Array(_) | Object::Enum(_) | Object::Instance(_))
-            && self.early_freeable(obj)
+        // A closure owns its captured and filled words: its allocation
+        // counted them ([`Self::rc_inc_slots`]).
+        (matches!(obj, Object::Fn(_)) || matches!(obj, Object::String(_) | Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
             && !self.pending_drop(obj)
             && obj.rc_count() == 0
     }
