@@ -558,7 +558,7 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     // a `Stream` or `thread` handle (`Thread<T>`, `Mutex<T>`, ...) its
     // handle object, a function value its `ObjFn` and an existential its
     // pack (or a bare class's object).
-    if crate::typechecking::ty::opaque_handle_name(ty).is_some() || matches!(ty, Ty::Fun(..) | Ty::Existential { .. }) {
+    if crate::typechecking::ty::opaque_handle_name(ty).is_some() || matches!(ty, Ty::Fun(..) | Ty::Forall { .. } | Ty::Existential { .. }) {
         return common::WORD_POINTER;
     }
     if matches!(ty, Ty::Array { .. })
