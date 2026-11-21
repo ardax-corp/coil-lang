@@ -75,6 +75,11 @@ impl Heap {
             .iter()
             .map(|object| self.alloc_snapshot_shell(object))
             .collect();
+        // A snapshot's objects live as long as the program: their counts
+        // never change (reference-count plan step 1).
+        for object in &objects {
+            object.rc_set_immortal();
+        }
         for (object, snap) in objects.iter().zip(&snapshot.objects) {
             match (object, snap) {
                 (Object::Array(gc), SnapObject::Lanes { words, k, .. }) => {

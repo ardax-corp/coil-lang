@@ -552,7 +552,12 @@ impl Heap {
         if unlikely(!self.alloc_lock.is_null()) {
             return self.alloc_from_epoch_batch(data, map);
         }
-        self.alloc_unlocked(data, map)
+        let out = self.alloc_unlocked(data, map);
+        // Its first words gain their owner (reference-count plan step 2).
+        if T::HOLDS_REFS && unlikely(self.rc_counting()) {
+            self.rc_inc_slots(out.0);
+        }
+        out
     }
 
     /// Steal-epoch alloc: write into this thread's batch, taking the epoch
@@ -983,7 +988,9 @@ impl Heap {
                 }
             };
             if let Some(to) = to {
+                let before = self.rc_before(Value::from(copy.addr()));
                 copy.replace_reference(child.addr(), to);
+                self.rc_after(before);
             }
         }
     }
@@ -1198,6 +1205,7 @@ impl Heap {
             self.finish_sweep();
             return;
         }
+        self.rc_check();
         self.unlink_unmarked_interns();
         self.gc_phase = GcPhase::Sweeping;
         self.sync_inline_gate();
@@ -1301,6 +1309,7 @@ impl Heap {
         if self.gc_phase == GcPhase::Sweeping {
             return;
         }
+        self.rc_check();
         self.unlink_unmarked_interns();
         self.unmark_young();
         self.gc_phase = GcPhase::Sweeping;
@@ -2094,6 +2103,7 @@ impl Heap {
         }
         let obj_enum = crate::memory::ObjEnum::new(tag, EnumPayload::empty());
         let (object, _) = self.alloc_unlocked(obj_enum, Object::Enum);
+        object.rc_set_immortal();
         self.immortal_enums.insert(tag, object);
         self.unit_enum = Some((tag, object));
         object
@@ -5824,6 +5834,10 @@ mod nursery;
 mod inline;
 pub use inline::{InlineObject, InlineShape, ProductSlots, inline_object, product_slots, layout_fingerprint};
 pub use nursery::MinorPlan;
+
+#[path = "rc.rs"]
+mod rc;
+pub use rc::{RcCheckMode, rc_check_mode};
 
 #[path = "snapshot.rs"]
 mod snapshot;
