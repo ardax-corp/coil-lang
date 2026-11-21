@@ -13002,6 +13002,10 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         crate::layout::array_elem_stamp(&self.c().checker, t)
     }
 
+    fn pair_pointer_tags(&self, t: &Ty) -> Option<u64> {
+        crate::layout::pair_pointer_tags(&self.c().checker, t)
+    }
+
     fn boxed_enum(&self, t: &Ty, variant: Option<&str>) -> Option<Vec<Ty>> {
         let checker = &self.c().checker;
         let t = apply_ty_prune(checker.subst(), t);

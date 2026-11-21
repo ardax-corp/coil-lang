@@ -599,6 +599,9 @@ pub trait LowerCx {
     /// The element kind an array of a type is stamped with at construction
     /// (`layout::array_elem_stamp`): packed bytes, pointer elements.
     fn array_stamp(&self, ty: &Ty) -> u8;
+    /// The tags under which a closed two-word value's first word is a heap
+    /// pointer (`layout::pair_pointer_tags`).
+    fn pair_pointer_tags(&self, ty: &Ty) -> Option<u64>;
     /// For a boxed user enum type (one word, an `ObjEnum`, matched with
     /// `JumpIfMatch`): with no variant, `Some` of nothing; with a variant,
     /// its payload field types in declaration order. `None` for every other
@@ -6134,6 +6137,9 @@ impl Lower<'_> {
         // a shared body comes from its `kinds` word (`tys`).
         let mut kinds = Vec::with_capacity(f.captures.len());
         let mut tys: Vec<Option<Ty>> = Vec::with_capacity(f.captures.len());
+        // Pair captures whose low word's kind is by tag: (its word, the tag
+        // word, the pointer tags).
+        let mut by_tag: Vec<(usize, ValueId, u64)> = Vec::new();
         for (i, &local) in f.captures.iter().enumerate() {
             if let Some(&h) = remade.get(&i) {
                 words.push(h);
@@ -6148,8 +6154,18 @@ impl Lower<'_> {
                 words.push(self.b.use_local(hi, hi_ty).map_err(mir)?);
                 // A low word of a type that may carry a heap payload there
                 // under some tags is unknown.
+                // A low word of a type that may carry a heap payload there
+                // under some tags takes its kind from the tag the value has
+                // now (a capture is not written again).
                 let holds = ty.as_ref().is_none_or(|t| self.cx.pair_holds_heap(t));
-                kinds.push(if holds && lo_ty != MirTy::HeapRef { common::WORD_UNKNOWN } else { crate::mir::frame_words::word_kind(lo_ty) });
+                let tagged = holds && lo_ty != MirTy::HeapRef;
+                if tagged
+                    && words.len() + 1 < common::PACKED_KIND_WORDS
+                    && let Some(mask) = ty.as_ref().and_then(|t| self.cx.pair_pointer_tags(t))
+                {
+                    by_tag.push((words.len() - 2, words[words.len() - 1], mask));
+                }
+                kinds.push(if tagged { common::WORD_UNKNOWN } else { crate::mir::frame_words::word_kind(lo_ty) });
                 kinds.push(crate::mir::frame_words::word_kind(hi_ty));
                 tys.extend([None, None]);
                 continue;
@@ -6168,7 +6184,35 @@ impl Lower<'_> {
         if matches!(f.kind, MirAllocKind::Fn { .. }) && self.kinds.is_some() {
             self.stamp_product_from_kinds(h, &tys)?;
         }
+        if matches!(f.kind, MirAllocKind::Fn { .. }) {
+            self.stamp_pair_captures(h, &by_tag)?;
+        }
         Ok(h)
+    }
+
+    /// Function value `h`'s pair captures whose low word is a pointer under
+    /// some tags: each word's kind from its tag (`vec_stamp`, packed as
+    /// `common::pack_word_kinds`).
+    fn stamp_pair_captures(&mut self, h: ValueId, by_tag: &[(usize, ValueId, u64)]) -> Result<(), Refusal> {
+        let mut packed: Option<ValueId> = None;
+        for &(at, tag, mask) in by_tag {
+            let mask = self.b.ins_const(MirConst::I64(mask as i64)).map_err(mir)?;
+            let bit = self.b.ins_binop(MirBinOp::Shr, mask, tag).map_err(mir)?;
+            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            let bit = self.b.ins_binop(MirBinOp::BitAnd, bit, one).map_err(mir)?;
+            // `WORD_SCALAR` is 1, `WORD_POINTER` 2.
+            let kind = self.b.ins_binop(MirBinOp::Add, bit, one).map_err(mir)?;
+            let shift = self.b.ins_const(MirConst::I64(2 * at as i64)).map_err(mir)?;
+            let kind = self.b.ins_binop(MirBinOp::Shl, kind, shift).map_err(mir)?;
+            packed = Some(match packed {
+                Some(w) => self.b.ins_binop(MirBinOp::BitOr, w, kind).map_err(mir)?,
+                None => kind,
+            });
+        }
+        if let Some(w) = packed {
+            self.b.ins_host_invoke(common::VEC_STAMP_ID, vec![h, w]).map_err(mir)?;
+        }
+        Ok(())
     }
 
     /// A partial application `f(args)`, as HIR emission builds it: each
