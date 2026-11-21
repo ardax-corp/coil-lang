@@ -315,6 +315,9 @@ pub struct Heap {
     rc_on: bool,
     /// A count that reaches zero frees its object ([`Self::set_rc_frees`]).
     rc_frees: bool,
+    /// Objects the sweep freed in a run that keeps counts: what the counts
+    /// leaked (or a cycle's), cumulative.
+    pub(crate) rc_swept: u64,
     /// Allocate movable kinds in the nursery ([`Self::set_nursery`]).
     nursery: bool,
     /// Objects born in the open steal epoch that can hold references. The
@@ -401,7 +404,8 @@ impl Default for Heap {
             early_scratch: (Vec::new(), Vec::new(), Vec::new()),
             freed_early: false,
             rc_on: rc_check_mode() != RcCheckMode::Off,
-            rc_frees: false,
+            rc_frees: rc::rc_frees_asked(),
+            rc_swept: 0,
             nursery: false,
             epoch_born: Vec::new(),
             nursery_chunks: NURSERY_CHUNKS,
@@ -1934,6 +1938,9 @@ impl Heap {
 
     /// [`Self::dealloc`] of the slot the sweep walk is at.
     unsafe fn dealloc_swept(&mut self, object: Object, cur: &mut super::slab::SlotCursor) {
+        if self.rc_on {
+            self.rc_swept += 1;
+        }
         let size = object.size();
         self.counts.alloc_bytes -= size;
         self.gc_sweep_freed += size;

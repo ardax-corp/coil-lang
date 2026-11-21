@@ -35,6 +35,14 @@ pub fn rc_check_mode() -> RcCheckMode {
     })
 }
 
+/// `COIL_RC_FREE=1` in a check run: a count that reaches zero frees its
+/// object ([`Heap::set_rc_frees`]). The code must count its frames' words
+/// (compiled in a check run, plan step 4).
+pub(crate) fn rc_frees_asked() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| rc_check_mode() != RcCheckMode::Off && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "1"))
+}
+
 impl GcHeader {
     #[inline]
     fn inc(&self) {
@@ -411,8 +419,9 @@ impl Heap {
         }
         let kinds: Vec<String> = by_kind.iter().map(|(k, n)| format!("{k}={n}")).collect();
         eprintln!(
-            "coil rc-check: below={below} equal={equal} above={above} immortal={immortal} unknown-words={} [{}]",
+            "coil rc-check: below={below} equal={equal} above={above} immortal={immortal} unknown-words={} swept={} [{}]",
             t.unknown,
+            self.rc_swept,
             kinds.join(" ")
         );
         // Who names the first few undercounted objects.
