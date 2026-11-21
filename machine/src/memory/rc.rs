@@ -37,10 +37,18 @@ pub fn rc_check_mode() -> RcCheckMode {
 
 /// `COIL_RC_FREE=1` in a check run: a count that reaches zero frees its
 /// object ([`Heap::set_rc_frees`]). The code must count its frames' words
-/// (compiled in a check run, plan step 4).
+/// (compiled in a check run, plan step 4). `COIL_RC_FREE=check` releases
+/// without freeing: the objects are recorded instead, and the next major
+/// mark aborts naming who still holds one it reaches, as
+/// `--early-free check` does.
 pub(crate) fn rc_frees_asked() -> bool {
+    rc_check_mode() != RcCheckMode::Off && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "1" || v == "check")
+}
+
+/// `COIL_RC_FREE=check` ([`rc_frees_asked`]).
+fn rc_frees_checked() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| rc_check_mode() != RcCheckMode::Off && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| rc_frees_asked() && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "check"))
 }
 
 impl GcHeader {
@@ -154,6 +162,44 @@ impl Heap {
         refs.then(|| (o, self.rc_words(o)))
     }
 
+    /// [`Self::rc_before`] of element `index` of a lane array only (a
+    /// `LaneStore`, which would otherwise diff the whole array).
+    pub fn rc_before_lane(&self, v: Value, index: usize) -> Option<(Object, Vec<u64>, usize)> {
+        if !self.rc_counting() {
+            return None;
+        }
+        let o @ Object::Array(a) = self.rc_object(v)? else { return None };
+        (a.as_ref().lanes() > 1).then(|| (o, self.rc_lane_words(o, index), index))
+    }
+
+    /// [`Self::rc_after`] of [`Self::rc_before_lane`]'s element.
+    pub fn rc_after_lane(&self, before: Option<(Object, Vec<u64>, usize)>) {
+        let Some((o, old, index)) = before else { return };
+        for a in old {
+            if let Some(o) = unsafe { Object::from_header(a) } {
+                o.rc_dec();
+            }
+        }
+        for a in self.rc_lane_words(o, index) {
+            if let Some(o) = unsafe { Object::from_header(a) } {
+                o.rc_inc();
+            }
+        }
+    }
+
+    /// The objects element `index` of the lane array `o` names.
+    fn rc_lane_words(&self, o: Object, index: usize) -> Vec<u64> {
+        let Object::Array(a) = o else { return Vec::new() };
+        let a = a.as_ref();
+        let (k, mask) = (a.lanes(), a.tag_mask);
+        let Some(words) = a.gc_words() else { return Vec::new() };
+        (index * k..(index * k + k).min(words.len()))
+            .filter(|&i| ObjArray::lane_pointer(words, k, mask, i))
+            .filter_map(|i| self.rc_object(words[i]))
+            .map(|o| o.addr())
+            .collect()
+    }
+
     /// After that mutation: each object it now names that it did not gains
     /// an owner, each it no longer names loses one.
     pub fn rc_after(&self, before: Option<(Object, Vec<u64>)>) {
@@ -249,11 +295,10 @@ impl Heap {
     }
 
     /// Every pointer word of `obj` (as the collector reads them) gains an
-    /// owner: a new object's initial words, or a copy's.
+    /// owner: a new object's initial words, or a copy's. A new coroutine's
+    /// words are its generator's arguments, which its frame owns once it
+    /// starts (a generator body's parameters are owned, plan step 4).
     pub fn rc_inc_slots(&self, obj: Object) {
-        if matches!(obj, Object::Coroutine(_)) {
-            return;
-        }
         struct Inc<'a>(&'a Heap);
         impl SlotVisitor for Inc<'_> {
             fn word(&mut self, v: &Value, kind: u8) {
@@ -337,11 +382,15 @@ impl Heap {
                     stack.push(child);
                 }
             }
+            n += 1;
+            if rc_frees_checked() {
+                self.doomed.push(obj.addr());
+                continue;
+            }
             self.freed_early = true;
             // SAFETY: its count is zero: no counted word names it, and
             // frames count theirs once [`Self::rc_frees`] is on.
             unsafe { self.dealloc(obj) };
-            n += 1;
         }
         n
     }

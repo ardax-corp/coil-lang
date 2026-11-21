@@ -1406,18 +1406,31 @@ pub unsafe extern "C" fn coil_native_lane_store(
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
-    let before = heap.rc_before(common::Value::from(addr));
-    let stored = if gc.as_ref().lanes() == 2 {
-        usize::try_from(index).is_ok_and(|i| gc.as_mut().set_lanes(i, &[common::Value::from(lo), common::Value::from(hi)]))
-    } else if gc.as_ref().read_indexed(index, false).is_some() {
+    if gc.as_ref().lanes() == 2 {
+        // One element's words: no diff of the whole array.
+        let before = usize::try_from(index).ok().and_then(|i| heap.rc_before_lane(common::Value::from(addr), i));
+        let stored = usize::try_from(index).is_ok_and(|i| gc.as_mut().set_lanes(i, &[common::Value::from(lo), common::Value::from(hi)]));
+        if !stored {
+            unsafe { (*ctx).trap = TRAP_OUT_OF_BOUNDS };
+            return unsafe { bail(ctx) };
+        }
+        heap.rc_after_lane(before);
+        return 1;
+    }
+    let old = gc.as_ref().read_indexed(index, false);
+    let stored = if let Some(old) = old {
         let boxed = lane_box(heap, lo, hi, [tag_mask, payload_mask, unit_mask]);
         gc.as_mut().store_indexed(index, common::Value::from(boxed), false);
+        if heap.rc_counting() {
+            let kind = gc.as_ref().elem_kind();
+            heap.rc_inc_word(common::Value::from(boxed), kind);
+            heap.rc_dec_word(old, kind);
+        }
         unsafe { note_alloc(ctx, heap) };
         true
     } else {
         false
     };
-    heap.rc_after(before);
     if !stored {
         unsafe { (*ctx).trap = TRAP_OUT_OF_BOUNDS };
         return unsafe { bail(ctx) };
@@ -1438,14 +1451,18 @@ pub unsafe extern "C" fn coil_native_lane_push(ctx: *mut NativeCtx, addr: u64, l
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
-    let before = heap.rc_before(common::Value::from(addr));
+    // The new element's words gain an owner (no diff of the whole array).
     if gc.as_ref().lanes() == 2 {
         gc.as_mut().push_lanes(&[common::Value::from(lo), common::Value::from(hi)]);
+        let last = gc.as_ref().len().saturating_sub(1);
+        heap.rc_after_lane(heap.rc_before_lane(common::Value::from(addr), last).map(|(o, _, i)| (o, Vec::new(), i)));
     } else {
         let boxed = lane_box(heap, lo, hi, [tag_mask, payload_mask, unit_mask]);
         gc.as_mut().push(common::Value::from(boxed));
+        if heap.rc_counting() {
+            heap.rc_inc_word(common::Value::from(boxed), gc.as_ref().elem_kind());
+        }
     }
-    heap.rc_after(before);
     heap.account_array(gc.as_mut());
     unsafe { note_alloc(ctx, heap) };
     addr

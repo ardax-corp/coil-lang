@@ -3910,7 +3910,7 @@ impl ObjArray {
     /// Whether word `i` of lane words `words` (`k` per element) is a
     /// reference: lane 0 of an element whose tag (lane 1) is in `mask`.
     #[inline]
-    fn lane_pointer(words: &[Value], k: usize, mask: u64, i: usize) -> bool {
+    pub(crate) fn lane_pointer(words: &[Value], k: usize, mask: u64, i: usize) -> bool {
         let lane = i % k;
         lane == 0 && words.get(i + 1).is_some_and(|t| t.bits() < 64 && mask >> t.bits() & 1 == 1)
     }
