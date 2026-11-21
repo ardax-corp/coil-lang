@@ -21,8 +21,10 @@
 //! that dies there moves, anything else is incremented first. A payload a
 //! `JumpIfMatch` binds is a load on its taken edge.
 //!
-//! The pass is deliberately plain: no inc/dec pairs are cancelled and no
-//! ownership moves into calls yet (elision comes next). What it leaves as
+//! Elision so far: numbers (constants, arithmetic, φs of them) are never
+//! counted, and an inc / dec pair of one word in a block cancels when
+//! nothing between them can release an object ([`cancel_pairs`]). No
+//! ownership moves into calls yet. What it leaves as
 //! leaks, which the oracle reports but which free nothing early: a tail
 //! call's arguments (decrementing them after the call would end the tail
 //! call), a frame that unwinds through a panic, a coroutine abandoned
@@ -56,7 +58,108 @@ pub fn insert_rc(func: &mut MirFunc) -> usize {
             *inst = MirInst::Const { dest, c: super::inst::MirConst::Bool(false) };
         }
     }
-    n + Pass::new(func).run(func)
+    n += Pass::new(func).run(func);
+    n - cancel_pairs(func)
+}
+
+/// Cancel an `RcInc` of a word with a later `RcDec` of the same word in its
+/// block when nothing between them can decrement a count: the frame's own
+/// owner is not needed while no object can be released. Returns how many
+/// ops it removed.
+fn cancel_pairs(func: &mut MirFunc) -> usize {
+    let mut removed = 0;
+    for block in &mut func.blocks {
+        // Field stores into an object allocated earlier in the block, each
+        // slot's first: the old word is no word, so nothing is released.
+        let mut fresh: HashSet<ValueId> = HashSet::new();
+        let mut stored: HashSet<(ValueId, u32)> = HashSet::new();
+        let mut first_store = vec![false; block.insts.len()];
+        for (i, inst) in block.insts.iter().enumerate() {
+            match inst {
+                MirInst::Alloc { dest, .. } => {
+                    fresh.insert(*dest);
+                }
+                MirInst::HeapFieldStore { object, index, .. } => {
+                    first_store[i] = fresh.contains(object) && stored.insert((*object, *index));
+                }
+                _ => {}
+            }
+        }
+        let quiet = |i: usize, inst: &MirInst| match inst {
+            MirInst::Const { .. }
+            | MirInst::Bin { .. }
+            | MirInst::Unary { .. }
+            | MirInst::Cast { .. }
+            | MirInst::Cmp { .. }
+            | MirInst::ProductLoad { .. }
+            | MirInst::Index { .. }
+            | MirInst::LaneIndex { .. }
+            | MirInst::MatchPayload { .. }
+            | MirInst::LoadStatic { .. }
+            | MirInst::HomeLoad { .. }
+            | MirInst::GcBarrier { .. }
+            | MirInst::Alloc { .. }
+            | MirInst::String { .. }
+            | MirInst::ArrayPush { .. }
+            | MirInst::LanePush { .. }
+            | MirInst::RcInc { .. } => true,
+            MirInst::Cow { unique: false, field: None, .. } => true,
+            MirInst::HeapFieldStore { .. } => first_store[i],
+            _ => false,
+        };
+        // Another word's decrement in between moves after the pair's: an
+        // owner kept longer frees nothing early.
+        let mut gone = vec![false; block.insts.len()];
+        let mut relocated: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut any = false;
+        for i in 0..block.insts.len() {
+            let MirInst::RcInc { src, guard: None, .. } = block.insts[i] else { continue };
+            if gone[i] {
+                continue;
+            }
+            let mut later = Vec::new();
+            for j in i + 1..block.insts.len() {
+                // Decrements an earlier pair moved run here.
+                if relocated.contains_key(&j) {
+                    break;
+                }
+                if gone[j] {
+                    continue;
+                }
+                match &block.insts[j] {
+                    MirInst::RcDec { src: s, guard: None, .. } if *s == src => {
+                        gone[i] = true;
+                        gone[j] = true;
+                        removed += 2;
+                        any = true;
+                        for &k in &later {
+                            gone[k] = true;
+                        }
+                        relocated.entry(j).or_default().extend(later);
+                        break;
+                    }
+                    MirInst::RcDec { guard: None, .. } => later.push(j),
+                    inst if quiet(j, inst) => {}
+                    _ => break,
+                }
+            }
+        }
+        if any {
+            let old = std::mem::take(&mut block.insts);
+            let mut keep: Vec<Option<MirInst>> = old.into_iter().map(Some).collect();
+            let mut out = Vec::with_capacity(keep.len());
+            for k in 0..keep.len() {
+                if !gone[k] {
+                    out.push(keep[k].take().expect("each op once"));
+                }
+                if let Some(moved) = relocated.remove(&k) {
+                    out.extend(moved.into_iter().map(|m| keep[m].take().expect("each moved op once")));
+                }
+            }
+            block.insts = out;
+        }
+    }
+    removed
 }
 
 struct Pass {
@@ -608,4 +711,30 @@ fn reverse_postorder(func: &MirFunc) -> Vec<BlockId> {
     }
     post.reverse();
     post
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rc_ops(f: &MirFunc) -> Vec<&MirInst> {
+        f.blocks[0].insts.iter().filter(|i| matches!(i, MirInst::RcInc { .. } | MirInst::RcDec { .. })).collect()
+    }
+
+    /// An inc and a dec of one word with nothing between them that can
+    /// release an object cancel; another word's dec between them moves
+    /// after the pair's place; a call between them keeps both.
+    #[test]
+    fn a_pair_with_no_release_between_cancels() {
+        let quiet = "func @f(v0: heapref, v1: heapref, v2: heapref) -> heapref {\nbb0:\n    v3 = rc.inc v1\n    v4 = arraypush v0, v1\n    v5 = rc.dec v2\n    v6 = productload v1, 0\n    v7 = rc.dec v1\n    return v0\n}\n";
+        let mut f = crate::mir::parse_func(quiet).expect(quiet);
+        assert_eq!(cancel_pairs(&mut f), 2);
+        assert_eq!(rc_ops(&f).len(), 1, "{f}");
+        let pos = |f: &MirFunc, pred: &dyn Fn(&MirInst) -> bool| f.blocks[0].insts.iter().position(pred).expect("op");
+        assert!(pos(&f, &|i| matches!(i, MirInst::RcDec { .. })) > pos(&f, &|i| matches!(i, MirInst::ProductLoad { .. })), "{f}");
+        let call = quiet.replace("v6 = productload v1, 0", "v6 = call.heapref 9 v1");
+        let mut g = crate::mir::parse_func(&call).expect(&call);
+        assert_eq!(cancel_pairs(&mut g), 0);
+        assert_eq!(rc_ops(&g).len(), 3, "{g}");
+    }
 }
