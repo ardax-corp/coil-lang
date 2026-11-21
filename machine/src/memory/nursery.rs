@@ -267,6 +267,7 @@ impl Heap {
     /// it. The runtime then rewrites its precise roots and calls
     /// [`Self::minor_finish`].
     pub fn minor_plan(&mut self, pins: &[u64], precise: &[u64]) -> MinorPlan {
+        self.rc_pending.get_mut().clear();
         debug_assert_eq!(self.gc_phase, GcPhase::Idle, "minor collections run between cycles");
         let spans = self.slab.young_spans();
         let remembered = self.take_remembered();

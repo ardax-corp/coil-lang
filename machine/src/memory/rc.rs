@@ -184,7 +184,7 @@ impl Heap {
         let Some((o, old, index)) = before else { return };
         for a in old {
             if let Some(o) = unsafe { Object::from_header(a) } {
-                o.rc_dec();
+                self.rc_dec_pending(o);
             }
         }
         for a in self.rc_lane_words(o, index) {
@@ -222,13 +222,13 @@ impl Heap {
                 }
                 (Some(&a), Some(&b)) if a < b => {
                     if let Some(o) = by_addr(a) {
-                        o.rc_dec();
+                        self.rc_dec_pending(o);
                     }
                     i += 1;
                 }
                 (Some(&a), None) => {
                     if let Some(o) = by_addr(a) {
-                        o.rc_dec();
+                        self.rc_dec_pending(o);
                     }
                     i += 1;
                 }
@@ -297,8 +297,36 @@ impl Heap {
         if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
             && let Some(o) = self.rc_object(v)
         {
-            o.rc_dec();
+            self.rc_dec_pending(o);
         }
+    }
+
+    /// `o` loses an owner on the host side; at zero, with frees on, it waits
+    /// in [`Heap::rc_pending`] for the next `RcDec`.
+    #[inline]
+    fn rc_dec_pending(&self, o: Object) {
+        if o.rc_dec() && self.rc_frees {
+            self.rc_pending.borrow_mut().push(o.addr());
+        }
+    }
+
+    /// Release what [`Self::rc_dec_pending`] left at zero and still is.
+    fn rc_release_pending(&mut self) -> usize {
+        if self.rc_pending.get_mut().is_empty() || self.gc_phase != GcPhase::Idle {
+            return 0;
+        }
+        let mut n = 0;
+        let mut pending = std::mem::take(self.rc_pending.get_mut());
+        pending.sort_unstable();
+        pending.dedup();
+        for addr in pending {
+            if let Some(o) = self.find_object_by_addr(addr)
+                && o.rc_count() == 0
+            {
+                n += self.rc_release(o);
+            }
+        }
+        n
     }
 
     /// Every pointer word of `obj` (as the collector reads them) gains an
@@ -352,7 +380,7 @@ impl Heap {
         if !self.rc_counting() {
             return 0;
         }
-        self.rc_release_word(v)
+        self.rc_release_word(v) + self.rc_release_pending()
     }
 
     /// [`Self::rc_drop`] in a heap that keeps counts.

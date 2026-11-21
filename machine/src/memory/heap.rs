@@ -315,6 +315,11 @@ pub struct Heap {
     rc_on: bool,
     /// A count that reaches zero frees its object ([`Self::set_rc_frees`]).
     rc_frees: bool,
+    /// Objects a host-side diff ([`Self::rc_after`]) took to count zero:
+    /// released at the next `RcDec`, once the code has counted what the
+    /// host handed back (a popped element). A collection drops the list
+    /// (the sweep frees what is still unowned; a minor moves objects).
+    pub(crate) rc_pending: std::cell::RefCell<Vec<u64>>,
     /// Objects the sweep freed in a run that keeps counts: what the counts
     /// leaked (or a cycle's), cumulative.
     pub(crate) rc_swept: u64,
@@ -406,6 +411,7 @@ impl Default for Heap {
             rc_on: rc_check_mode() != RcCheckMode::Off,
             rc_frees: rc::rc_frees_asked(),
             rc_swept: 0,
+            rc_pending: std::cell::RefCell::new(Vec::new()),
             nursery: false,
             epoch_born: Vec::new(),
             nursery_chunks: NURSERY_CHUNKS,
@@ -1284,6 +1290,7 @@ impl Heap {
             return;
         }
         self.gc_phase = GcPhase::Marking;
+        self.rc_pending.get_mut().clear();
         self.sync_inline_gate();
         let mut gray = std::mem::take(&mut self.gc_gray);
         gray.clear();
