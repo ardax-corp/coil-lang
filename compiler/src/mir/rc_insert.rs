@@ -176,6 +176,23 @@ fn new_pad(func: &MirFunc) -> Option<MirFunc> {
 /// owner is not needed while no object can be released. Returns how many
 /// ops it removed.
 fn cancel_pairs(func: &mut MirFunc, homes: &HashMap<ValueId, u16>) -> usize {
+    // Only a word read out of a place that keeps owning it: the place's
+    // owner holds the count above zero across the pair. A new object's
+    // only owner is the frame, whose decrement is its release.
+    let loaded: HashSet<ValueId> = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|inst| match inst {
+            MirInst::ProductLoad { dest, .. }
+            | MirInst::Index { dest, .. }
+            | MirInst::LaneIndex { dest, .. }
+            | MirInst::MatchPayload { dest, .. }
+            | MirInst::LoadStatic { dest, .. }
+            | MirInst::Cow { dest, unique: false, field: None, .. } => Some(*dest),
+            _ => None,
+        })
+        .collect();
     let mut removed = 0;
     for block in &mut func.blocks {
         // Field stores into an object allocated earlier in the block, each
@@ -224,7 +241,7 @@ fn cancel_pairs(func: &mut MirFunc, homes: &HashMap<ValueId, u16>) -> usize {
         for i in 0..block.insts.len() {
             let MirInst::RcInc { src, guard: None, .. } = block.insts[i] else { continue };
             // A word a home keeps is stored there between the two.
-            if gone[i] || homes.contains_key(&src) {
+            if gone[i] || homes.contains_key(&src) || !loaded.contains(&src) {
                 continue;
             }
             let mut later = Vec::new();
@@ -933,7 +950,7 @@ mod tests {
     /// after the pair's place; a call between them keeps both.
     #[test]
     fn a_pair_with_no_release_between_cancels() {
-        let quiet = "func @f(v0: heapref, v1: heapref, v2: heapref) -> heapref {\nbb0:\n    v3 = rc.inc v1\n    v4 = arraypush v0, v1\n    v5 = rc.dec v2\n    v6 = productload v1, 0\n    v7 = rc.dec v1\n    return v0\n}\n";
+        let quiet = "func @f(v0: heapref, v2: heapref) -> heapref {\nbb0:\n    v1 = productload v2, 0\n    v3 = rc.inc v1\n    v4 = arraypush v0, v1\n    v5 = rc.dec v2\n    v6 = productload v1, 0\n    v7 = rc.dec v1\n    return v0\n}\n";
         let mut f = crate::mir::parse_func(quiet).expect(quiet);
         assert_eq!(cancel_pairs(&mut f, &HashMap::new()), 2);
         assert_eq!(rc_ops(&f).len(), 1, "{f}");
@@ -943,5 +960,13 @@ mod tests {
         let mut g = crate::mir::parse_func(&call).expect(&call);
         assert_eq!(cancel_pairs(&mut g, &HashMap::new()), 0);
         assert_eq!(rc_ops(&g).len(), 3, "{g}");
+    }
+
+    #[test]
+    fn a_new_objects_pair_stays_its_release() {
+        let src = "func @f(v0: i64) -> i64 {\nbb0:\n    v1 = alloc.enum[1] 0, v0\n    v2 = rc.inc v1\n    v3 = matchpayload v1, 0\n    v4 = rc.dec v1\n    return v3\n}\n";
+        let mut f = crate::mir::parse_func(src).expect(src);
+        assert_eq!(cancel_pairs(&mut f, &HashMap::new()), 0);
+        assert_eq!(rc_ops(&f).len(), 2, "{f}");
     }
 }
