@@ -142,6 +142,8 @@ fn run_on(rt: &mut Runtime, job: Job) {
                         if let Some(arg) = arg
                             && let Ok(v) = crate::thread::spawn_arg_to_value(rt.heap.get_mut(), arg)
                         {
+                            // The static owns its copy (reference counts).
+                            rt.heap.get_mut().rc_retain(v);
                             rt.statics[i] = v;
                         }
                     }
