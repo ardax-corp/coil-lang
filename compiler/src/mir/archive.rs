@@ -32,17 +32,21 @@ use crate::mir::{
 };
 
 const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
-/// Bump when the layout changes. A reader takes this format,
-/// [`FORMAT_EXTERN`], [`FORMAT_PINS`], [`FORMAT_SCOPED`] and [`FORMAT_UNSCOPED`], and refuses
-/// any other.
-const FORMAT: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
-/// The format before [`FORMAT`]: `ExternCall` without struct layouts.
+/// Bump when the layout or the meaning of a body's words changes. A reader
+/// takes this format only: older sections' `kinds` words have one bit per
+/// type parameter. The older formats remain for tests of what their
+/// sections hold.
+const FORMAT: u8 = common::MIR_SECTION_KINDS2_FORMAT;
+/// The format before two-bit `kinds` words (archive 8.4): `ExternCall`
+/// signatures carry struct layouts from it on.
+const FORMAT_STRUCTS: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
+/// `ExternCall` without struct layouts (archive 8.3).
 const FORMAT_EXTERN: u8 = common::MIR_SECTION_EXTERN_FORMAT;
-/// The format before `ExternCall` (archive 8.2): the same layout, with no
-/// extern call in it.
+/// The format before `ExternCall` (archive 8.2).
 const FORMAT_PINS: u8 = common::MIR_SECTION_COW_PIN_FORMAT;
 /// The format before the pin ops (archive 8.1): the same layout, with no
 /// `CowPin` / `CowUnpin` in it.
+#[cfg(test)]
 const FORMAT_SCOPED: u8 = common::MIR_SECTION_SCOPES_FORMAT;
 /// The format before inline scopes: no scope table, no scope in a location
 /// (each is `0`). Archives of minor 0 of major 8 have it.
@@ -59,7 +63,7 @@ pub fn encode(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[
 /// section of an older archive has none.
 fn encode_as(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[common::InlineScope], format: u8) -> Vec<u8> {
     let scoped = format != FORMAT_UNSCOPED;
-    let mut w = Writer(Vec::new(), scoped, format >= FORMAT);
+    let mut w = Writer(Vec::new(), scoped, format >= FORMAT_STRUCTS);
     w.0.extend_from_slice(MAGIC);
     w.u8(format);
     if scoped {
@@ -83,13 +87,13 @@ pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), S
         return Err("not a native MIR section".into());
     }
     let format = r.u8()?;
-    if ![FORMAT, FORMAT_EXTERN, FORMAT_PINS, FORMAT_SCOPED, FORMAT_UNSCOPED].contains(&format) {
-        return Err(format!("native MIR format {format}, this coil reads {FORMAT_UNSCOPED} to {FORMAT}"));
+    if format != FORMAT {
+        return Err(format!("native MIR format {format}, this coil reads {FORMAT}"));
     }
     r.scoped = format != FORMAT_UNSCOPED;
     r.pins = format >= FORMAT_PINS;
     r.externs = format >= FORMAT_EXTERN;
-    r.structs = format >= FORMAT;
+    r.structs = format >= FORMAT_STRUCTS;
     if r.scoped {
         common::read_inline_scopes(r.b, &mut r.i).ok_or("native MIR section has a bad inline scope table")?;
     }
@@ -207,6 +211,9 @@ const I_COW_PIN: u8 = 49;
 const I_COW_UNPIN: u8 = 50;
 // Format 19 (archive 8.3).
 const I_EXTERN_CALL: u8 = 51;
+/// Reference count ops (format 21 on, reference counts plan step 3).
+const I_RC_INC: u8 = 52;
+const I_RC_DEC: u8 = 53;
 
 const FFI_OPS: [MirFfiOp; 4] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke, MirFfiOp::Addr];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -569,6 +576,12 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*src);
             w.v(*saved);
         }
+        MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+            w.u8(if matches!(inst, MirInst::RcInc { .. }) { I_RC_INC } else { I_RC_DEC });
+            w.v(*dest);
+            w.v(*src);
+            w.opt_v(*guard);
+        }
         MirInst::Alloc { dest, kind, elems, kinds } => {
             w.u8(I_ALLOC);
             w.v(*dest);
@@ -616,7 +629,7 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             for e in elems {
                 w.v(*e);
             }
-            w.u8(*kinds);
+            w.u32(*kinds);
         }
         MirInst::ArrayPush { dest, array, value } => {
             w.u8(I_ARRAY_PUSH);
@@ -1188,7 +1201,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             };
             let n = r.len()?;
             let elems = (0..n).map(|_| r.v()).collect::<Result<Vec<_>, _>>()?;
-            MirInst::Alloc { dest, kind, elems, kinds: r.u8()? }
+            MirInst::Alloc { dest, kind, elems, kinds: r.u32()? }
         }
         I_STRING => MirInst::String { dest: r.v()?, idx: r.u32()? },
         I_LOAD_STATIC => MirInst::LoadStatic { dest: r.v()?, slot: r.u32()? },
@@ -1235,6 +1248,8 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         }
         I_COW_PIN if r.pins => MirInst::CowPin { dest: r.v()?, src: r.v()? },
         I_COW_UNPIN if r.pins => MirInst::CowUnpin { dest: r.v()?, src: r.v()?, saved: r.v()? },
+        I_RC_INC => MirInst::RcInc { dest: r.v()?, src: r.v()?, guard: r.opt_v()? },
+        I_RC_DEC => MirInst::RcDec { dest: r.v()?, src: r.v()?, guard: r.opt_v()? },
         I_RESUME => MirInst::ResumeCoro { dest: r.v()?, handle: r.v()?, send: r.opt_v()? },
         I_DONE => MirInst::DoneCoro { dest: r.v()?, handle: r.v()? },
         I_YIELD => MirInst::Yield { dest: r.v()?, value: r.v()?, from: r.u8()? != 0, receive: r.u8()? != 0 },
@@ -1405,16 +1420,15 @@ mod tests {
         assert_eq!(back[0].mir.op_loc(ValueId(2)).scope, 1);
     }
 
-    /// A section of an archive before inline scopes (format 16) reads, with
-    /// no scope table and no location in a scope.
+    /// A section of an archive before two-bit `kinds` words (formats 16 to
+    /// 20) is refused: its constant `kinds` words mean otherwise.
     #[test]
-    fn a_section_without_scopes_reads() {
+    fn a_section_of_an_older_format_is_refused() {
         let b = body();
-        let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), FORMAT_UNSCOPED);
-        assert!(common::section_inline_scopes(&old).is_empty());
-        let (back, pcs) = decode(&old).expect("decode format 16");
-        assert_eq!(pcs.get("f"), Some(&42));
-        assert_eq!(back[0].mir.op_loc(ValueId(2)), DebugLoc { scope: 0, ..b.mir.op_loc(ValueId(2)) });
+        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, FORMAT_PINS, FORMAT_EXTERN, FORMAT_STRUCTS] {
+            let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), format);
+            assert!(decode(&old).is_err(), "format {format}");
+        }
     }
 
     /// `f` with a copy-on-write pin pair around nothing: `v3 = cow.pin v0`,
@@ -1433,25 +1447,33 @@ mod tests {
     fn the_pin_ops_come_back() {
         let b = pinned_body();
         let bytes = bytes(&b);
-        assert_eq!(bytes[MAGIC.len()], 20, "archive 8.4 writes format 20");
+        assert_eq!(bytes[MAGIC.len()], FORMAT);
         let (back, _) = decode(&bytes).expect("decode");
         assert_eq!(back[0].mir, b.mir);
     }
 
-    /// A section of an 8.1 archive (format 17) reads; one that holds a pin
-    /// op is no section 8.1 wrote, and is refused.
+    /// `f` with reference count ops, guarded and not: `v3 = rc.inc v0`,
+    /// `v5 = rc.dec v0 if v4` (and the verifier takes them).
     #[test]
-    fn a_format_17_section_reads_and_holds_no_pin() {
-        let b = body();
-        let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), FORMAT_SCOPED);
-        assert_eq!(old[MAGIC.len()], 17);
-        assert_eq!(common::section_inline_scopes(&old), scopes());
-        let (back, pcs) = decode(&old).expect("decode format 17");
-        assert_eq!(pcs.get("f"), Some(&42));
+    fn the_reference_count_ops_come_back() {
+        let mut b = body();
+        b.mir.types.extend([MirTy::Bool, MirTy::Bool, MirTy::Bool]);
+        b.mir.types[0] = MirTy::HeapRef;
+        let insts = &mut b.mir.blocks[0].insts;
+        insts.insert(1, MirInst::RcInc { dest: ValueId(3), src: ValueId(0), guard: None });
+        insts.insert(2, MirInst::Const { dest: ValueId(4), c: MirConst::Bool(true) });
+        insts.insert(3, MirInst::RcDec { dest: ValueId(5), src: ValueId(0), guard: Some(ValueId(4)) });
+        let bytes = bytes(&b);
+        let (back, _) = decode(&bytes).expect("decode");
         assert_eq!(back[0].mir, b.mir);
-        let p = pinned_body();
-        let bad = encode_as(std::slice::from_ref(&p), &HashMap::new(), &scopes(), FORMAT_SCOPED);
-        assert!(decode(&bad).is_err());
+        let text = b.mir.to_string();
+        assert!(text.contains("rc.dec v0 if v4") || text.contains("rc.dec %0 if %4"), "{text}");
+        assert_eq!(crate::mir::parse_func(&text).expect(&text).blocks[0].insts[1..4], b.mir.blocks[0].insts[1..4]);
+        // The verifier takes them, and a guard is a `bool`.
+        let ok = "func @f(v0: heapref, v1: bool) -> heapref {\nbb0:\n    v2 = rc.inc v0\n    v3 = rc.dec v0 if v1\n    return v0\n}\n";
+        crate::mir::parse_func(ok).expect(ok).verify().expect("verify");
+        let bad = ok.replace("v1: bool", "v1: i64");
+        assert!(crate::mir::parse_func(&bad).expect(&bad).verify().is_err());
     }
 
     /// `f` with extern calls: `v3 = extern sum v0, v0, v0, v0` on a struct
@@ -1473,38 +1495,6 @@ mod tests {
         let b = extern_body();
         let (back, _) = decode(&bytes(&b)).expect("decode");
         assert_eq!(back[0].mir, b.mir);
-    }
-
-    /// A section of an 8.2 archive (format 18) reads; one that holds an
-    /// extern call is no section 8.2 wrote, and is refused.
-    #[test]
-    fn a_format_18_section_reads_and_holds_no_extern_call() {
-        let p = pinned_body();
-        let old = encode_as(std::slice::from_ref(&p), &HashMap::new(), &scopes(), FORMAT_PINS);
-        assert_eq!(old[MAGIC.len()], 18);
-        assert_eq!(decode(&old).expect("decode format 18").0[0].mir, p.mir);
-        let e = extern_body();
-        let bad = encode_as(std::slice::from_ref(&e), &HashMap::new(), &scopes(), FORMAT_PINS);
-        assert!(decode(&bad).is_err());
-    }
-
-    /// A section of an 8.3 archive (format 19) reads: its extern calls come
-    /// back without struct layouts, so a struct argument takes the runtime's
-    /// call.
-    #[test]
-    fn a_format_19_section_reads_without_struct_layouts() {
-        let e = extern_body();
-        let old = encode_as(std::slice::from_ref(&e), &HashMap::new(), &scopes(), FORMAT_EXTERN);
-        assert_eq!(old[MAGIC.len()], 19);
-        let back = decode(&old).expect("decode format 19").0;
-        let sigs: Vec<&MirExternSig> = back[0].mir.blocks[0]
-            .insts
-            .iter()
-            .filter_map(|i| if let MirInst::ExternCall { sig, .. } = i { Some(&**sig) } else { None })
-            .collect();
-        assert_eq!(sigs.len(), 2);
-        assert!(sigs.iter().all(|s| s.structs.is_empty()));
-        assert_eq!(sigs[0].params, vec![1, 14]);
     }
 
     #[test]

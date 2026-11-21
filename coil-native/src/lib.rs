@@ -186,8 +186,10 @@ fn inline_shape(kind: MirAllocKind, n: usize, extra: u64) -> Option<machine::nat
     }
     let n = u8::try_from(n).ok()?;
     match kind {
-        MirAllocKind::Enum { tag } => Some(InlineShape::Enum { tag, kinds: (extra >> 32) as u8, n }),
-        MirAllocKind::Object { type_id, nfields } => Some(InlineShape::Instance { type_id, n: u8::try_from(nfields).ok()? }),
+        MirAllocKind::Enum { tag } => Some(InlineShape::Enum { tag, kinds: (extra >> 32) as u32, n }),
+        MirAllocKind::Object { type_id, nfields } => {
+            Some(InlineShape::Instance { type_id, kinds: (extra >> 32) as u32, n: u8::try_from(nfields).ok()? })
+        }
         _ => None,
     }
 }
@@ -1537,6 +1539,13 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(src)?;
                         need_scalar(saved)?;
                     }
+                    MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                        need_scalar(dest)?;
+                        need(src)?;
+                        if let Some(g) = guard {
+                            need_scalar(g)?;
+                        }
+                    }
                     MirInst::Phi { dest, args, .. } => {
                         need(dest)?;
                         for (_, v) in args {
@@ -1779,6 +1788,8 @@ struct Ids {
     /// Copy-on-write (these allocate, never collect).
     cow: FuncId,
     cow_field: FuncId,
+    /// Reference count ops (`coil_native_rc`).
+    rc: FuncId,
     /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
     alloc: FuncId,
     array_push: FuncId,
@@ -2318,6 +2329,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     s1v.params.push(AbiParam::new(types::I64));
     let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
+    let rc = module.declare_function("coil_native_rc", Linkage::Import, &s3).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
     let lane_index = module.declare_function("coil_native_lane_index", Linkage::Import, &s3).map_err(e)?;
@@ -2382,6 +2394,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         fn_entry_pair,
         cow,
         cow_field,
+        rc,
         alloc,
         array_push,
         lane_index,
@@ -2661,6 +2674,7 @@ struct Lower<'a> {
     direct_externs: bool,
     cow: FuncRef,
     cow_field: FuncRef,
+    rc: FuncRef,
     alloc: FuncRef,
     array_push: FuncRef,
     lane_index: FuncRef,
@@ -2835,6 +2849,7 @@ impl<'a> Lower<'a> {
         let entry_sig = func.import_signature(entry_signature(module));
         let cow = module.declare_func_in_func(ids.cow, func);
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
+        let rc = module.declare_func_in_func(ids.rc, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
         let array_push = module.declare_func_in_func(ids.array_push, func);
         let lane_index = module.declare_func_in_func(ids.lane_index, func);
@@ -2928,6 +2943,7 @@ impl<'a> Lower<'a> {
             direct_externs: true,
             cow,
             cow_field,
+            rc,
             alloc,
             array_push,
             lane_index,
@@ -3300,6 +3316,10 @@ impl<'a> Lower<'a> {
     /// with lane `p` untouched and runs the rest, from `p`, on the runtime's
     /// lane code. `false`: not such a loop (nothing emitted).
     fn native_store(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
+        // A check run counts the loop's stores in the runtime's.
+        if machine::native::rc_counting() {
+            return Ok(false);
+        }
         use compiler::native_mir::VecLoopKind;
         use common::dense;
         let MirInst::VecLoop { dest, pos, from, to, kind: VecLoopKind::Store { stores } } = inst else {
@@ -4452,6 +4472,17 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
+            MirInst::StoreIndex { dest, array, index, value, .. } if machine::native::rc_counting() => {
+                // A check run counts each store in the helper.
+                let a = self.get(f, *array);
+                let i = self.get(f, *index);
+                let v = self.get(f, *value);
+                let v = self.coerce(v, types::I64);
+                self.call_checked(self.store_index, &[self.ctx, a, i, v]);
+                self.drop_views();
+                let v = self.get(f, *value);
+                self.set(f, *dest, v);
+            }
             MirInst::StoreIndex { dest, array, index, value, .. } => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
@@ -4496,7 +4527,7 @@ impl<'a> Lower<'a> {
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
                 let join = self.b.create_block();
-                if machine::native::product_slots().inline_stores {
+                if machine::native::product_slots().inline_stores && !machine::native::rc_counting() {
                     // In place, unless the write barrier must log the object.
                     let (fast, slow) = self.product_slot(o, *index, true);
                     self.b.switch_to_block(fast);
@@ -4515,7 +4546,12 @@ impl<'a> Lower<'a> {
                 let words = elems;
                 // An opaque body's `int` words may be objects: their kinds
                 // stay unknown.
-                let packed = || if f.opaque_words { 0 } else { common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w)))) };
+                let packed = || {
+                    common::pack_word_kinds(words.iter().map(|w| match ty_of(f, *w) {
+                        MirTy::I64 if f.opaque_words => common::WORD_UNKNOWN,
+                        t => word_kind(t),
+                    }))
+                };
                 let AllocCall { code, n, extra, last } =
                     alloc_call(*kind, words.len(), *kinds, packed, |t| self.plan.pcs.get(&t).copied()).map_err(|_| {
                         if matches!(kind, MirAllocKind::Coro { .. }) {
@@ -4524,7 +4560,7 @@ impl<'a> Lower<'a> {
                             "function value of a body with no body id"
                         }
                     })?;
-                let inline = inline_shape(*kind, words.len(), extra).and_then(machine::native::inline_object);
+                let inline = inline_shape(*kind, words.len(), extra).and_then(machine::native::inline_object).filter(|_| !machine::native::rc_counting());
                 let join = inline.map(|obj| {
                     let join = self.b.create_block();
                     self.b.append_block_param(join, types::I64);
@@ -4594,10 +4630,15 @@ impl<'a> Lower<'a> {
                 let (fast, slow) = self.in_lane_view(f, *array, i);
                 let join = self.b.create_block();
                 self.b.switch_to_block(fast);
-                let at = self.lane_element(*array, i);
-                self.b.ins().store(MemFlagsData::trusted(), lo, at, 0);
-                self.b.ins().store(MemFlagsData::trusted(), hi, at, 8);
-                self.b.ins().jump(join, &[]);
+                if machine::native::rc_counting() {
+                    // A check run counts the store in the helper.
+                    self.b.ins().jump(slow, &[]);
+                } else {
+                    let at = self.lane_element(*array, i);
+                    self.b.ins().store(MemFlagsData::trusted(), lo, at, 0);
+                    self.b.ins().store(MemFlagsData::trusted(), hi, at, 8);
+                    self.b.ins().jump(join, &[]);
+                }
                 self.b.switch_to_block(slow);
                 let [t, p, u] = self.lane_shape(shape);
                 self.call_checked(self.lane_store, &[self.ctx, a, i, lo, hi, t, p, u]);
@@ -4815,15 +4856,17 @@ impl<'a> Lower<'a> {
                 if self.pins {
                     self.b.ins().brif(either, test, &[], join, &[s.into()]);
                     self.b.switch_to_block(test);
-                    let pinned = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
+                    let bits = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_FLAGS_OFFSET);
+                    let pinned = self.b.ins().band_imm_u(bits, i64::from(machine::FLAG_PINNED));
                     self.b.ins().brif(pinned, copy, &[], mark, &[]);
                 } else {
                     // No body pins: no object is pinned, so no copy path.
                     self.b.ins().brif(either, mark, &[], join, &[s.into()]);
                 }
                 self.b.switch_to_block(mark);
-                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_SHARED_SET));
-                self.b.ins().store(flags, set, o, machine::COW_SHARED_OFFSET);
+                let bits = self.b.ins().uload8(types::I32, flags, o, machine::HEADER_FLAGS_OFFSET);
+                let set = self.b.ins().bor_imm_u(bits, i64::from(machine::FLAG_SHARED));
+                self.b.ins().istore8(flags, set, o, machine::HEADER_FLAGS_OFFSET);
                 self.b.ins().jump(join, &[s.into()]);
                 if self.pins {
                     self.b.set_cold_block(copy);
@@ -4838,7 +4881,7 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, word);
                 self.view_of(f, *dest);
             }
-            // The pin is a header byte beside the shared flag, set for a class
+            // The pin is a header flag beside the shared one, set for a class
             // instance or an array only, as a share marks only those.
             MirInst::CowPin { dest, src } => {
                 let s = self.get(f, *src);
@@ -4856,9 +4899,11 @@ impl<'a> Lower<'a> {
                 let either = self.b.ins().bor(inst, arr);
                 self.b.ins().brif(either, pin, &[], join, &[zero.into()]);
                 self.b.switch_to_block(pin);
-                let p = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
-                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_PINNED_SET));
-                self.b.ins().store(flags, set, o, machine::COW_PINNED_OFFSET);
+                let bits = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_FLAGS_OFFSET);
+                let set = self.b.ins().bor_imm_u(bits, i64::from(machine::FLAG_PINNED));
+                self.b.ins().istore8(flags, set, o, machine::HEADER_FLAGS_OFFSET);
+                let bit = self.b.ins().ushr_imm_u(bits, i64::from(machine::FLAG_PINNED.trailing_zeros()));
+                let p = self.b.ins().band_imm_u(bit, 1);
                 self.b.ins().jump(join, &[p.into()]);
                 self.b.switch_to_block(join);
                 self.set(f, *dest, was);
@@ -4881,10 +4926,35 @@ impl<'a> Lower<'a> {
                 let either = self.b.ins().bor(inst, arr);
                 self.b.ins().brif(either, unpin, &[], join, &[]);
                 self.b.switch_to_block(unpin);
-                let clear = self.b.ins().iconst(types::I8, 0);
-                self.b.ins().store(flags, clear, o, machine::COW_PINNED_OFFSET);
+                let bits = self.b.ins().uload8(types::I32, flags, o, machine::HEADER_FLAGS_OFFSET);
+                let clear = self.b.ins().band_imm_u(bits, i64::from(!machine::FLAG_PINNED));
+                self.b.ins().istore8(flags, clear, o, machine::HEADER_FLAGS_OFFSET);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, zero);
+            }
+            // A runtime call for now: the count is kept only in a check run
+            // until frames own their words (plan steps 4 and 6).
+            MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                let dec = self.b.ins().iconst(types::I64, i64::from(matches!(inst, MirInst::RcDec { .. })));
+                match guard {
+                    Some(g) => {
+                        let g = self.get(f, *g);
+                        let g = self.coerce(g, types::I64);
+                        let (call, join) = (self.b.create_block(), self.b.create_block());
+                        self.b.ins().brif(g, call, &[], join, &[]);
+                        self.b.switch_to_block(call);
+                        self.b.ins().call(self.rc, &[self.ctx, s, dec]);
+                        self.b.ins().jump(join, &[]);
+                        self.b.switch_to_block(join);
+                    }
+                    None => {
+                        self.b.ins().call(self.rc, &[self.ctx, s, dec]);
+                    }
+                }
                 let zero = self.b.ins().iconst(types::I64, 0);
                 self.set(f, *dest, zero);
             }
@@ -5029,7 +5099,7 @@ impl<'a> Lower<'a> {
     /// current block, on return) calls the helper, which refills.
     fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], join: Block) {
         use machine::native::{
-            BUMP_BYTES, BUMP_END, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
+            BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
             COUNTS_LIVE_COUNT, COUNTS_YOUNG_BYTES, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
         };
         let mem = MemFlagsData::trusted();
@@ -5060,13 +5130,30 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(bump);
         let bumps = self.b.ins().load(types::I64, mem, self.ctx, NATIVE_CTX_ALLOC_BUMPS);
         let cursor = self.b.ins().iadd_imm_s(bumps, i64::from(obj.class) * i64::from(BUMP_BYTES));
+        // The bump pointer first; when its chunk is spent, a slot freed
+        // early since the last minor (#2881), else the helper. Programs that
+        // free nothing pay no extra load on the fast path.
+        self.b.append_block_param(fast, types::I64);
         let at = self.b.ins().load(types::I64, mem, cursor, BUMP_NEXT);
         let end = self.b.ins().load(types::I64, mem, cursor, BUMP_END);
         let next = self.b.ins().iadd_imm_s(at, i64::from(obj.slot));
         let fits = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, next, end);
-        self.b.ins().brif(fits, fast, &[], slow, &[]);
-        self.b.switch_to_block(fast);
+        let bumped = self.b.create_block();
+        let spent = self.b.create_block();
+        self.b.ins().brif(fits, bumped, &[], spent, &[]);
+        self.b.switch_to_block(bumped);
         self.b.ins().store(mem, next, cursor, BUMP_NEXT);
+        self.b.ins().jump(fast, &[at.into()]);
+        self.b.switch_to_block(spent);
+        let free = self.b.ins().load(types::I64, mem, cursor, BUMP_FREE);
+        let reuse = self.b.create_block();
+        self.b.ins().brif(free, reuse, &[], slow, &[]);
+        self.b.switch_to_block(reuse);
+        let link = self.b.ins().load(types::I64, mem, free, BUMP_FREE_LINK);
+        self.b.ins().store(mem, link, cursor, BUMP_FREE);
+        self.b.ins().jump(fast, &[free.into()]);
+        self.b.switch_to_block(fast);
+        let at = self.b.block_params(fast)[0];
         let first = obj.words_at as usize;
         for (i, &img) in obj.image.iter().enumerate() {
             let x = match i.checked_sub(first).and_then(|k| words.get(k)) {
@@ -6053,12 +6140,14 @@ impl<'a> Lower<'a> {
 /// Body names compiled per call to [`jit`], for `COIL_NATIVE_STATS`.
 pub fn describe(p: &NativeProgram) -> String {
     let refused: HashSet<&str> = p.refused.iter().map(|(n, _)| n.as_str()).collect();
-    format!(
-        "native: {} compiled, {} installed, {} refused",
-        p.compiled.len(),
-        p.entries.len(),
-        refused.len()
-    )
+    let mut out = format!("native: {} compiled, {} installed, {} refused", p.compiled.len(), p.entries.len(), refused.len());
+    // `COIL_NATIVE_STATS=why`: each refusal's reason too.
+    if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "why") {
+        for (name, why) in &p.refused {
+            out.push_str(&format!("\n  refused {name}: {why}"));
+        }
+    }
+    out
 }
 
 /// Whether every operand of scan predicate `e` names one of `streams`
@@ -6124,6 +6213,67 @@ mod tests {
         let p = jit(&bodies, &pcs).expect("jit");
         assert_eq!(p.entries.len(), 1, "refused: {:?}", p.refused);
         assert_eq!(run(&p.entries[0], &[1.5f64.to_bits()]), (0, 1.5f64.to_bits()));
+    }
+
+    /// `f(v0, v1)`: two `rc.inc v0`, then `rc.dec v0 if v1`; returns `v1`.
+    /// `g(v0)`: `rc.dec v0`.
+    fn counting_bodies() -> Vec<NativeBody> {
+        let mut f = MirFunc::new("f");
+        f.blocks.clear();
+        f.types = vec![MirTy::HeapRef, MirTy::Bool, MirTy::Bool, MirTy::Bool, MirTy::Bool];
+        f.params = vec![ValueId(0), ValueId(1)];
+        f.ret_ty = Some(MirTy::Bool);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::RcInc { dest: ValueId(2), src: ValueId(0), guard: None });
+        b.insts.push(MirInst::RcInc { dest: ValueId(3), src: ValueId(0), guard: None });
+        b.insts.push(MirInst::RcDec { dest: ValueId(4), src: ValueId(0), guard: Some(ValueId(1)) });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        f.blocks.push(b);
+        let mut g = MirFunc::new("g");
+        g.blocks.clear();
+        g.types = vec![MirTy::HeapRef, MirTy::Bool];
+        g.params = vec![ValueId(0)];
+        g.ret_ty = Some(MirTy::Bool);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::RcDec { dest: ValueId(1), src: ValueId(0), guard: None });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        g.blocks.push(b);
+        vec![NativeBody { name: "f".into(), entry: Some(Label(0)), mir: f }, NativeBody { name: "g".into(), entry: Some(Label(1)), mir: g }]
+    }
+
+    /// The reference count ops (plan step 3): an increment, a guarded
+    /// decrement that applies only when its guard is true, and a decrement
+    /// of the last owner that frees the object.
+    #[test]
+    fn the_count_ops_move_the_count_and_the_last_one_frees() {
+        let mut heap = machine::Heap::default();
+        heap.set_rc_counting(true);
+        heap.set_rc_frees(true);
+        let (obj, _) = heap.alloc(machine::ObjString::from("counted"), machine::Object::String);
+        obj.rc_inc();
+        let pcs = HashMap::from([("f".to_string(), 0u32), ("g".to_string(), 1u32)]);
+        let p = jit(&counting_bodies(), &pcs).expect("jit");
+        assert!(p.refused.is_empty(), "refused: {:?}", p.refused);
+        let entry = |name: u32| p.entries.iter().find(|e| e.pc == name).expect("entry");
+        let call = |heap: &mut machine::Heap, pc: u32, args: &[u64]| {
+            let marker = 0u8;
+            let mut ctx = NativeCtx::new((std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET));
+            ctx.heap = heap;
+            // SAFETY: compiled for `args.len()` argument words.
+            unsafe { (entry(pc).entry)(&mut ctx, args.as_ptr()) };
+            assert_eq!(ctx.bail, 0);
+        };
+        call(&mut heap, 0, &[obj.addr(), 0]);
+        assert_eq!(obj.rc_count(), 3, "the guarded decrement did not run");
+        call(&mut heap, 0, &[obj.addr(), 1]);
+        assert_eq!(obj.rc_count(), 4);
+        let live = heap.live_object_count();
+        for _ in 0..3 {
+            call(&mut heap, 1, &[obj.addr()]);
+        }
+        assert_eq!((obj.rc_count(), heap.live_object_count()), (1, live));
+        call(&mut heap, 1, &[obj.addr()]);
+        assert_eq!(heap.live_object_count(), live - 1, "the last owner's decrement frees it");
     }
 
     /// `f(v0)`: pin `v0`, share it, pin it again and unpin twice, the

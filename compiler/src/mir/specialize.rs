@@ -112,6 +112,12 @@ fn check_after(func: &crate::mir::MirFunc, pass: &str) {
     }
 }
 
+/// Verify a body after the count insertion ([`crate::mir::insert_rc`]), as
+/// after any pass.
+pub(super) fn check_after_rc(func: &crate::mir::MirFunc) {
+    check_after(func, "insert_rc");
+}
+
 /// Under `COIL_MIR_VERIFY`, verify a body as an engine gets it from
 /// lowering, before any pass: what `-O0` and the interpreter run.
 pub(super) fn check_lowered(func: &crate::mir::MirFunc) {

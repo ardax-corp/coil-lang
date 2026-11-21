@@ -19,7 +19,7 @@ pub fn read_ints(heap: &mut Heap, args: &[Value]) -> Value {
     let r = match words_at(heap, args) {
         Ok(words) => {
             let elements = words.into_iter().map(Value::from).collect();
-            let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
+            let (obj, _) = heap.alloc(ObjArray::new(elements).of_kind(common::WORD_SCALAR), Object::Array);
             Ok(Value::from(obj.addr()))
         }
         Err((kind, message)) => Err(alloc_ffi_error(heap, kind, message)),

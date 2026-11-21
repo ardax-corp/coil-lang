@@ -7,7 +7,7 @@ mod strbuf;
 
 pub use addr_hash::*;
 pub use heap::*;
-pub use slab::Bump;
+pub use slab::{Bump, FREE_LINK};
 pub use strbuf::StrData;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};

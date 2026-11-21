@@ -114,7 +114,7 @@ fn host_capture_end(heap: &mut Heap, _args: &[Value]) -> Value {
         Value::from(gc.as_ptr() as *mut u8 as u64)
     };
     let (out, err) = (string(out), string(err));
-    alloc_tuple2(heap, out, err)
+    alloc_tuple2(heap, [out, err], [common::WORD_POINTER, common::WORD_POINTER])
 }
 
 /// Pipeline wiring: `(registry_name, arity, host_fn)`.
@@ -301,12 +301,14 @@ fn is_too_many_open_files(err: &io::Error) -> bool {
 /// so niche vs boxed is chosen once.
 pub fn alloc_result_ok(heap: &mut Heap, payload: Value) -> Value {
     let _ = BUILTIN_RESULT_VARIANTS;
-    alloc_enum(heap, 0, EnumPayload::one(payload))
+    let kinds = common::pack_word_kinds([crate::host_enum::host_payload_kind(0)]);
+    alloc_enum(heap, 0, EnumPayload::one(payload).with_kinds(kinds))
 }
 
 /// Allocate `Result::Err(payload)` on the heap.
 pub fn alloc_result_err(heap: &mut Heap, payload: Value) -> Value {
-    alloc_enum(heap, 1, EnumPayload::one(payload))
+    let kinds = common::pack_word_kinds([crate::host_enum::host_payload_kind(1)]);
+    alloc_enum(heap, 1, EnumPayload::one(payload).with_kinds(kinds))
 }
 
 /// Allocate boxed `Option::None`. Prefer [`crate::host_enum::pack_option`].
@@ -317,7 +319,8 @@ pub fn alloc_option_none(heap: &mut Heap) -> Value {
 
 /// Allocate boxed `Option::Some(payload)`. Prefer [`crate::host_enum::pack_option`].
 pub fn alloc_option_some(heap: &mut Heap, payload: Value) -> Value {
-    alloc_enum(heap, 1, EnumPayload::one(payload))
+    let kinds = common::pack_word_kinds([crate::host_enum::host_payload_kind(0)]);
+    alloc_enum(heap, 1, EnumPayload::one(payload).with_kinds(kinds))
 }
 
 /// Allocate a unit-payload `IoError` variant.
@@ -1307,7 +1310,7 @@ pub fn tcp_peer_addr(heap: &mut Heap, stream: Value) -> Result<Value, IoErrorTag
         let gc = heap.intern(host);
         Value::from(gc.as_ptr() as *mut u8 as u64)
     };
-    Ok(alloc_tuple2(heap, host_v, Value::from(port)))
+    Ok(alloc_tuple2(heap, [host_v, Value::from(port)], [common::WORD_POINTER, common::WORD_SCALAR]))
 }
 
 /// Local `(host, port)` for a TCP listener or connected TCP/TLS stream.
@@ -1317,7 +1320,7 @@ pub fn tcp_local_addr(heap: &mut Heap, stream: Value) -> Result<Value, IoErrorTa
         let gc = heap.intern(host);
         Value::from(gc.as_ptr() as *mut u8 as u64)
     };
-    Ok(alloc_tuple2(heap, host_v, Value::from(port)))
+    Ok(alloc_tuple2(heap, [host_v, Value::from(port)], [common::WORD_POINTER, common::WORD_SCALAR]))
 }
 
 /// Enable / disable `TCP_NODELAY` on a TCP or TLS stream.
@@ -1368,17 +1371,19 @@ pub fn tcp_shutdown(heap: &mut Heap, stream: Value, how: i64) -> Result<(), IoEr
 }
 
 
-fn alloc_tuple2(heap: &mut Heap, a: Value, b: Value) -> Value {
+/// A host-made tuple of `a` and `b`, whose word kinds are `kinds`.
+fn alloc_tuple2(heap: &mut Heap, [a, b]: [Value; 2], kinds: [u8; 2]) -> Value {
     let (obj, _) = heap.alloc(
-        ObjEnum::tuple(&[a, b], 0),
+        ObjEnum::tuple(&[a, b], common::pack_word_kinds(kinds)),
         Object::Enum,
     );
     Value::from(obj.addr())
 }
 
-fn alloc_tuple3(heap: &mut Heap, a: Value, b: Value, c: Value) -> Value {
+/// A host-made tuple of `a`, `b` and `c`, whose word kinds are `kinds`.
+fn alloc_tuple3(heap: &mut Heap, [a, b, c]: [Value; 3], kinds: [u8; 3]) -> Value {
     let (obj, _) = heap.alloc(
-        ObjEnum::tuple(&[a, b, c], 0),
+        ObjEnum::tuple(&[a, b, c], common::pack_word_kinds(kinds)),
         Object::Enum,
     );
     Value::from(obj.addr())
@@ -1491,12 +1496,7 @@ pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value
             let gc = heap.intern(String::new());
             Value::from(gc.as_ptr() as *mut u8 as u64)
         };
-        return Ok(alloc_tuple3(
-            heap,
-            Value::from(0_i64),
-            host,
-            Value::from(0_i64),
-        ));
+        return Ok(alloc_tuple3(heap, [Value::from(0_i64), host, Value::from(0_i64)], [common::WORD_SCALAR, common::WORD_POINTER, common::WORD_SCALAR]));
     }
     let mut tmp = vec![0u8; capacity];
 
@@ -1537,12 +1537,7 @@ pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value
         let gc = heap.intern(host_str);
         Value::from(gc.as_ptr() as *mut u8 as u64)
     };
-    Ok(alloc_tuple3(
-        heap,
-        Value::from(n as i64),
-        host,
-        Value::from(peer.port() as i64),
-    ))
+    Ok(alloc_tuple3(heap, [Value::from(n as i64), host, Value::from(peer.port() as i64)], [common::WORD_SCALAR, common::WORD_POINTER, common::WORD_SCALAR]))
 }
 
 /// Block until a datagram arrives, then [`udp_recv_from`].

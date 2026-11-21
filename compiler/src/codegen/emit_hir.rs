@@ -13002,6 +13002,10 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         crate::layout::array_elem_stamp(&self.c().checker, t)
     }
 
+    fn pair_pointer_tags(&self, t: &Ty) -> Option<u64> {
+        crate::layout::pair_pointer_tags(&self.c().checker, t)
+    }
+
     fn boxed_enum(&self, t: &Ty, variant: Option<&str>) -> Option<Vec<Ty>> {
         let checker = &self.c().checker;
         let t = apply_ty_prune(checker.subst(), t);
@@ -13484,7 +13488,29 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
             ),
             None => None,
         };
-        let layout = u8::try_from(call.ret.host_enum_layout()).ok()?;
+        let mut layout = u8::try_from(call.ret.host_enum_layout()).ok()?;
+        // The builtin `Vec<T>` thunks serve every `T` with an `int` standing
+        // in (`Compiler::emit_vec_method_thunks`); their natives take the
+        // kind from the array.
+        let any_t = self.hir.span == crate::hir::synth::SPAN
+            && self.hir.name.strip_prefix(common::BUILTIN_VEC_TYPE).is_some_and(|m| m.starts_with("::"));
+        if u32::from(layout) == common::HOST_ENUM_LAYOUT_BOXED && !any_t {
+            // A boxed `Option` / `Result` the native makes takes its
+            // payloads' word kinds from the call's type. In a generic body a
+            // type parameter's word stays unknown; `Thread<T>` or `Vec<T>`
+            // is a handle whatever `T` is.
+            let kind = |t: &Ty| crate::layout::word_kind(&c.checker, t);
+            let payloads = ty
+                .as_ref()
+                .and_then(|t| match (t.as_option(), t.as_result()) {
+                    (Some(some), _) => Some((kind(some), common::WORD_UNKNOWN)),
+                    (_, Some((ok, err))) => Some((kind(ok), kind(err))),
+                    _ => None,
+                });
+            if let Some((some_ok, err)) = payloads {
+                layout |= common::host_layout_with_kinds(some_ok, err);
+            }
+        }
         Some((u16::try_from(native).ok()?, layout, unbox))
     }
 

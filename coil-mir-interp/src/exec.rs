@@ -182,11 +182,12 @@ fn push(act: &mut Activation, body: &Body, homes: *mut u64) -> bool {
 }
 
 /// A word's kinds for an object's packed kinds.
-fn packed_kinds(f: &MirFunc, words: &[ValueId]) -> u8 {
-    if f.opaque_words {
-        return 0;
-    }
-    common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w))))
+fn packed_kinds(f: &MirFunc, words: &[ValueId]) -> common::PackedKinds {
+    // An opaque body's `int` words may be objects: their kinds stay unknown.
+    common::pack_word_kinds(words.iter().map(|w| match ty_of(f, *w) {
+        MirTy::I64 if f.opaque_words => common::WORD_UNKNOWN,
+        t => word_kind(t),
+    }))
 }
 
 /// `a op b` on ints, as [`common::int_arith`] defines it (and the constant
@@ -959,6 +960,13 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
             MirInst::CowUnpin { dest, src, saved } => {
                 let (s, saved) = (get!(*src), get!(*saved));
                 rt::cow_unpin(ctx, s, saved);
+                set!(*dest, 0);
+            }
+            MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                if guard.is_none_or(|g| get!(g) != 0) {
+                    let s = get!(*src);
+                    rt::coil_native_rc(ctx, s, u64::from(matches!(inst, MirInst::RcDec { .. })));
+                }
                 set!(*dest, 0);
             }
         }

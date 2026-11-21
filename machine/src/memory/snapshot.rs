@@ -75,6 +75,11 @@ impl Heap {
             .iter()
             .map(|object| self.alloc_snapshot_shell(object))
             .collect();
+        // A snapshot's objects live as long as the program: their counts
+        // never change (reference-count plan step 1).
+        for object in &objects {
+            object.rc_set_immortal();
+        }
         for (object, snap) in objects.iter().zip(&snapshot.objects) {
             match (object, snap) {
                 (Object::Array(gc), SnapObject::Lanes { words, k, .. }) => {
@@ -115,10 +120,13 @@ impl Heap {
             SnapObject::String(s) => self.alloc(ObjString::new(s.clone()), Object::String).0,
             SnapObject::Bytes(b) => self.alloc(ObjArray::from_bytes(b.clone()), Object::Array).0,
             SnapObject::Array { elem_kind, words } => {
-                let mut array = ObjArray::new(zeros(words.len()));
-                if *elem_kind == common::WORD_POINTER {
-                    array.set_elem_kind(common::WORD_POINTER);
-                }
+                // A scalar or pointer kind (an 8.2 snapshot records only
+                // pointer ones).
+                let array = ObjArray::new(zeros(words.len()));
+                let array = match *elem_kind {
+                    kind @ (common::WORD_POINTER | common::WORD_SCALAR) => array.of_kind(kind),
+                    _ => array,
+                };
                 self.alloc(array, Object::Array).0
             }
             SnapObject::Lanes { k, tag_mask, words } => {
@@ -129,8 +137,8 @@ impl Heap {
                 e.type_id = *type_id;
                 self.alloc(e, Object::Enum).0
             }
-            SnapObject::Instance { type_id, words } => {
-                self.alloc(ObjInstance::with_slots(*type_id, zeros(words.len())), Object::Instance).0
+            SnapObject::Instance { type_id, kinds, words } => {
+                self.alloc(ObjInstance::with_slots(*type_id, zeros(words.len())).with_own_kinds(*kinds), Object::Instance).0
             }
         }
     }
@@ -215,7 +223,7 @@ impl Capture<'_> {
                     .map(|(i, v)| self.word(*v, kind, parent(SnapStep::Element(i))))
                     .collect::<Result<_, _>>()?;
                 SnapObject::Array {
-                    elem_kind: if kind == common::WORD_POINTER { kind } else { common::WORD_UNKNOWN },
+                    elem_kind: if matches!(kind, common::WORD_POINTER | common::WORD_SCALAR) { kind } else { common::WORD_UNKNOWN },
                     words,
                 }
             }
@@ -237,7 +245,7 @@ impl Capture<'_> {
                 let kinds = self.heap.class_field_kinds(inst.type_id);
                 let words = slots
                     .iter()
-                    .zip(common::class_slot_kinds(kinds, slots))
+                    .zip(common::class_slot_kinds(kinds, inst.own_kinds(), slots))
                     .enumerate()
                     .map(|(i, (v, kind))| {
                         self.word(*v, kind, parent(SnapStep::Field { type_id: inst.type_id, index: i }))
@@ -245,6 +253,7 @@ impl Capture<'_> {
                     .collect::<Result<_, _>>()?;
                 SnapObject::Instance {
                     type_id: inst.type_id,
+                    kinds: inst.own_kinds(),
                     words,
                 }
             }
@@ -255,7 +264,7 @@ impl Capture<'_> {
     fn kinded(
         &mut self,
         words: &[Value],
-        kinds: u8,
+        kinds: common::PackedKinds,
         step: impl Fn(usize) -> Parent,
     ) -> Result<Vec<SnapWord>, SnapshotError> {
         words

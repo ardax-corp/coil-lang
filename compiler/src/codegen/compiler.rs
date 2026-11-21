@@ -3618,6 +3618,21 @@ impl Compiler {
         (params, cur)
     }
 
+    /// [`Self::fun_param_and_ret_tys`] of a function of `arity` parameters
+    /// (a zero-parameter function's type takes one `unit`): a result that is
+    /// a function type stays the result.
+    pub(super) fn fun_param_and_ret_tys_n(ty: &Ty, arity: usize) -> (Vec<Ty>, Ty) {
+        let mut params = Vec::new();
+        let mut cur = ty.clone();
+        while params.len() < arity.max(1)
+            && let Ty::Fun(p, r) = cur
+        {
+            params.push(*p);
+            cur = *r;
+        }
+        (params, cur)
+    }
+
     /// Resolve a constraint's type arguments through `var_to_ty`, returning
     /// concrete lookup types when every argument is ground. `None` means at
     /// least one argument is still open (cannot synthesize yet).
@@ -4857,6 +4872,7 @@ impl Compiler {
         let suffix = match stamp {
             common::WORD_POINTER => "ptr",
             common::WORD_BYTE => "bytes",
+            common::WORD_SCALAR => "scalar",
             _ => return None,
         };
         Some(format!("{}::{name}${suffix}", common::BUILTIN_VEC_TYPE))
@@ -4903,23 +4919,30 @@ impl Compiler {
             compiler.emit_builtin_method(&fqn, &params, ret.clone(), |b, a| b.call(native, a, ret.clone()));
         };
 
-        // static fn new() -> Vec<T>
-        let vec_ty = vec.clone();
+        // static fn new() -> Vec<T>: an array of no element kind, which a
+        // shared body stamps from its `kinds` word. Its literal is typed
+        // over a type variable no scheme binds, so no stamp is read off it.
+        let vec_ty = coil_ty::vec_app_ty(Ty::Var(crate::typechecking::ty::TyVarId(u32::MAX)));
         self.emit_builtin_method(&format!("{owner}::new"), &[], vec.clone(), |b, _| {
             b.push(HirKind::Make { kind: MakeKind::Array, args: Vec::new() }, vec_ty)
         });
         host(self, "with_capacity", "vec_with_capacity", std::slice::from_ref(&int), &vec);
         host(self, "from", "vec_from_array", &[coil_ty::array(int.clone())], &vec);
 
-        // Constructors for a ground pointer element type (`Vec<Node>`) or a
-        // byte / bool one: the empty array is made with that element kind
-        // (`MakeArrayK`), so marking treats the elements as precise
-        // references, or the runtime packs them one byte each. Call sites
+        // Constructors for a ground pointer element type (`Vec<Node>`), a
+        // byte / bool one or another scalar: the empty array is made with
+        // that element kind (`MakeArrayK`), so marking treats the elements
+        // as precise references, the runtime packs them one byte each, or
+        // reference counts know them for scalars. Call sites
         // pick them by static type. `Vec::from` needs no twin: the copy keeps
         // the source array's storage and kind.
-        for stamp in [common::WORD_POINTER, common::WORD_BYTE] {
+        for stamp in [common::WORD_POINTER, common::WORD_BYTE, common::WORD_SCALAR] {
             // An element type the stamp is read off (`array_elem_stamp`).
-            let elem = if stamp == common::WORD_BYTE { coil_ty::byte() } else { coil_ty::string() };
+            let elem = match stamp {
+                common::WORD_BYTE => coil_ty::byte(),
+                common::WORD_SCALAR => coil_ty::int(),
+                _ => coil_ty::string(),
+            };
             let made_ty = coil_ty::vec_app_ty(elem);
             if let Some(fqn) = Self::stamped_vec_ctor_name("new", stamp) {
                 let made_ty = made_ty.clone();

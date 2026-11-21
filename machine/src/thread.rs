@@ -257,7 +257,8 @@ pub fn take_pending_panic() -> Option<String> {
 pub enum PortableValue {
     Immediate(u64),
     String(String),
-    Array(Vec<PortableValue>),
+    /// An array's elements and its element kind (`common::WORD_*`).
+    Array(Vec<PortableValue>, u8),
     /// A packed byte array (`Vec<byte>` / `Vec<bool>`), kept packed.
     Bytes(Vec<u8>),
     /// A variant, or a tuple under [`common::PRODUCT_TAG`].
@@ -266,11 +267,14 @@ pub enum PortableValue {
         payload: Vec<PortableValue>,
         /// `fn drop()` key, kept like [`Self::Instance`]'s `type_id`.
         type_id: u32,
+        /// The payload's packed word kinds.
+        kinds: common::PackedKinds,
     },
-    /// A class instance: its slots in order.
+    /// A class instance: its slots in order, and its own packed kinds.
     Instance {
         type_id: u32,
         fields: Vec<PortableValue>,
+        kinds: common::PackedKinds,
     },
     Sender(Arc<ChannelInner>),
     Receiver(Arc<ChannelInner>),
@@ -290,22 +294,25 @@ impl std::fmt::Debug for PortableValue {
         match self {
             Self::Immediate(v) => write!(f, "Immediate({v})"),
             Self::String(s) => write!(f, "String({s:?})"),
-            Self::Array(a) => f.debug_tuple("Array").field(a).finish(),
+            Self::Array(a, k) => f.debug_tuple("Array").field(a).field(k).finish(),
             Self::Bytes(b) => f.debug_tuple("Bytes").field(b).finish(),
             Self::Enum {
                 tag,
                 payload,
                 type_id,
+                kinds,
             } => f
                 .debug_struct("Enum")
                 .field("tag", tag)
                 .field("payload", payload)
                 .field("type_id", type_id)
+                .field("kinds", kinds)
                 .finish(),
-            Self::Instance { type_id, fields } => f
+            Self::Instance { type_id, fields, kinds } => f
                 .debug_struct("Instance")
                 .field("type_id", type_id)
                 .field("fields", fields)
+                .field("kinds", kinds)
                 .finish(),
             Self::Sender(_) => write!(f, "Sender(..)"),
             Self::Receiver(_) => write!(f, "Receiver(..)"),
@@ -322,22 +329,24 @@ impl PartialEq for PortableValue {
         match (self, other) {
             (Self::Immediate(a), Self::Immediate(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
-            (Self::Array(a), Self::Array(b)) => a == b,
+            (Self::Array(a, ka), Self::Array(b, kb)) => a == b && ka == kb,
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
             (
                 Self::Enum {
                     tag: t1,
                     payload: p1,
                     type_id: y1,
+                    kinds: k1,
                 },
                 Self::Enum {
                     tag: t2,
                     payload: p2,
                     type_id: y2,
+                    kinds: k2,
                 },
-            ) => t1 == t2 && p1 == p2 && y1 == y2,
-            (Self::Instance { type_id: t1, fields: f1 }, Self::Instance { type_id: t2, fields: f2 }) => {
-                t1 == t2 && f1 == f2
+            ) => t1 == t2 && p1 == p2 && y1 == y2 && k1 == k2,
+            (Self::Instance { type_id: t1, fields: f1, kinds: k1 }, Self::Instance { type_id: t2, fields: f2, kinds: k2 }) => {
+                t1 == t2 && f1 == f2 && k1 == k2
             }
             (Self::Sender(a), Self::Sender(b)) => Arc::ptr_eq(a, b),
             (Self::Receiver(a), Self::Receiver(b)) => Arc::ptr_eq(a, b),
@@ -1285,7 +1294,8 @@ pub fn alloc_thread_error(heap: &mut Heap, set: ErrorSet, tag: ThreadErrorTag) -
         let message = JOIN_PANIC.with(|p| p.borrow_mut().take()).unwrap_or_default();
         let gc = heap.intern(message);
         let message = Value::from(gc.as_ptr() as *mut u8 as u64);
-        return alloc_enum(heap, tag.tag_in(set), vec![message]);
+        let kinds = common::pack_word_kinds([common::WORD_POINTER]);
+        return alloc_enum(heap, tag.tag_in(set), EnumPayload::one(message).with_kinds(kinds));
     }
     alloc_enum(heap, tag.tag_in(set), vec![])
 }
@@ -1380,6 +1390,7 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
             tag: gc.as_ref().tag,
             payload: vec![],
             type_id: 0,
+            kinds: 0,
         });
     }
     if !cx.visited.insert(addr) {
@@ -1395,7 +1406,7 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
             for e in gc.as_ref().iter() {
                 out.push(encode_value(heap, e, cx)?);
             }
-            Ok(PortableValue::Array(out))
+            Ok(PortableValue::Array(out, gc.as_ref().elem_kind()))
         }
         Object::Enum(gc) => {
             let mut payload = Vec::with_capacity(gc.as_ref().payload.len());
@@ -1406,6 +1417,7 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
                 tag: gc.as_ref().tag,
                 payload,
                 type_id: gc.as_ref().type_id,
+                kinds: gc.as_ref().payload.kinds(),
             })
         }
         Object::Instance(gc) => {
@@ -1417,6 +1429,7 @@ fn encode_value(heap: &Heap, v: Value, cx: &mut Encode) -> Result<PortableValue,
             Ok(PortableValue::Instance {
                 type_id: inst.type_id,
                 fields,
+                kinds: inst.own_kinds(),
             })
         }
         Object::Stream(_)
@@ -1462,12 +1475,12 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             let gc = heap.alloc_string(s);
             Ok(Value::from(gc.as_ptr() as *mut u8 as u64))
         }
-        PortableValue::Array(elems) => {
+        PortableValue::Array(elems, kind) => {
             let mut elements = Vec::with_capacity(elems.len());
             for e in elems {
                 elements.push(decode_portable(heap, e)?);
             }
-            let (obj, _) = heap.alloc(ObjArray::new(elements), Object::Array);
+            let (obj, _) = heap.alloc(ObjArray::new(elements).of_kind(kind), Object::Array);
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Bytes(bytes) => {
@@ -1478,6 +1491,7 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             tag,
             payload,
             type_id,
+            kinds,
         } => {
             // Unit variants and `()` are the shared immortals.
             if payload.is_empty() && type_id == 0 {
@@ -1488,17 +1502,17 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
                 let v = decode_portable(heap, pv)?;
                 members.push(v);
             }
-            let mut obj_enum = ObjEnum::new(tag, EnumPayload::from_vec(members));
+            let mut obj_enum = ObjEnum::new(tag, EnumPayload::from_vec(members).with_kinds(kinds));
             obj_enum.type_id = type_id;
             let (obj, _) = heap.alloc(obj_enum, Object::Enum);
             Ok(Value::from(obj.addr()))
         }
-        PortableValue::Instance { type_id, fields } => {
+        PortableValue::Instance { type_id, fields, kinds } => {
             let mut slots = Vec::with_capacity(fields.len());
             for pv in fields {
                 slots.push(decode_portable(heap, pv)?);
             }
-            let (obj, _) = heap.alloc(ObjInstance::with_slots(type_id, slots), Object::Instance);
+            let (obj, _) = heap.alloc(ObjInstance::with_slots(type_id, slots).with_own_kinds(kinds), Object::Instance);
             Ok(Value::from(obj.addr()))
         }
         PortableValue::Sender(inner) => {
@@ -1630,6 +1644,7 @@ pub(crate) fn spawn_arg_to_value(heap: &mut Heap, arg: SpawnArg) -> Result<Value
                 captured_args: Vec::new(),
                 captures,
                 dicts: None,
+                word_kinds: 0,
             };
             let (obj, _) = heap.alloc(f, Object::Fn);
             Ok(Value::from(obj.addr()))
@@ -1927,7 +1942,8 @@ pub fn host_channel(heap: &mut Heap, _args: &[Value]) -> Value {
     );
     let (rx_obj, _) = heap.alloc(ObjReceiver { inner }, Object::Receiver);
     let pair = vec![Value::from(tx_obj.addr()), Value::from(rx_obj.addr())];
-    let (tup, _) = heap.alloc(ObjEnum::tuple(&pair, 0), Object::Enum);
+    let kinds = common::pack_word_kinds([common::WORD_POINTER, common::WORD_POINTER]);
+    let (tup, _) = heap.alloc(ObjEnum::tuple(&pair, kinds), Object::Enum);
     let v = Value::from(tup.addr());
     as_result_value(heap, ErrorSet::Channel, Ok(v))}
 
@@ -2749,6 +2765,7 @@ mod tests {
             captured_args: vec![],
             captures: vec![],
             dicts: None,
+            word_kinds: 0,
         };
         let (obj, _) = heap.alloc(pfn, Object::Fn);
         let v = Value::from(obj.addr());
@@ -2781,7 +2798,7 @@ mod tests {
         assert_eq!(elems[1], PortableValue::Immediate(Value::from(1_i64).bits()));
         assert_eq!(elems[2], PortableValue::UnsentStream);
         let mut worker = Heap::default();
-        let copy = portable_to_value(&mut worker, PortableValue::Enum { tag: common::PRODUCT_TAG, payload: elems, type_id: 0 }).unwrap();
+        let copy = portable_to_value(&mut worker, PortableValue::Enum { tag: common::PRODUCT_TAG, payload: elems, type_id: 0, kinds: 0 }).unwrap();
         let Some(Object::Enum(gc)) = worker.find_object_by_addr(copy.bits()) else {
             panic!("expected a tuple");
         };

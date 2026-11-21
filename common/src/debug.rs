@@ -266,8 +266,8 @@ pub const MIR_SECTION_MAGIC: &[u8; 5] = b"CNMIR";
 pub const MIR_SECTION_SCOPES_FORMAT: u8 = 17;
 
 /// The first MIR section format that may hold the copy-on-write pin ops,
-/// `CowPin` / `CowUnpin` (archive 8.2). Its layout is format 17's
-/// otherwise, so a reader takes 16, 17 and this one.
+/// `CowPin` / `CowUnpin` (archive 8.2), 18. Its layout is format 17's
+/// otherwise.
 pub const MIR_SECTION_COW_PIN_FORMAT: u8 = 18;
 
 /// The first MIR section format that may hold `ExternCall` (archive 8.3).
@@ -278,6 +278,14 @@ pub const MIR_SECTION_EXTERN_FORMAT: u8 = 19;
 /// layout of each struct they pass by value (archive 8.4). Its layout is
 /// format 19's otherwise.
 pub const MIR_SECTION_EXTERN_STRUCT_FORMAT: u8 = 20;
+
+/// The first MIR section format whose `kinds` words hold two bits per type
+/// parameter (copy-on-write, heap reference) and whose `Alloc` carries
+/// 12 words' packed kinds (`common::PackedKinds`; reference counts plan
+/// step 2, archive 8.5), and that may hold the reference count ops `RcInc` /
+/// `RcDec` (step 3). Its layout is format 20's otherwise; a reader refuses
+/// older sections, whose constant `kinds` words mean otherwise.
+pub const MIR_SECTION_KINDS2_FORMAT: u8 = 21;
 
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and

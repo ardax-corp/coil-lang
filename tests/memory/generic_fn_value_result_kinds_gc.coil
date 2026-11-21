@@ -1,0 +1,35 @@
+// A static method with its own type parameter returns a shared generic's
+// function value; the caller's `kinds` word names that parameter by the
+// returned function's type. A result that holds objects at that parameter
+// survives a collection, which marks them through it (coil-lang#2898).
+use tests::assert;
+use gc::collect;
+
+fn dup<T>(T x) -> (T, T) {
+    return (x, x);
+}
+
+class M {
+    pub a: int,
+}
+
+impl M {
+    pub static fn lam<T>() -> fn(T) -> (T, T) {
+        return fn (T x) => dup(x);
+    }
+}
+
+test("a tuple result of a returned generic lambda survives a collection") {
+    let dp: fn((int, int)) -> ((int, int), (int, int)) = M::lam();
+    let r = dp((1, 2));
+    let _ = collect();
+    assert!(r[0][0] == 1 && r[0][1] == 2, "first");
+    assert!(r[1][0] == 1 && r[1][1] == 2, "second");
+}
+
+test("a string result of a returned generic lambda survives a collection") {
+    let dp: fn(string) -> (string, string) = M::lam();
+    let r = dp("ab" + "cd");
+    let _ = collect();
+    assert!(r[0] == "abcd" && r[1] == "abcd", "strings");
+}

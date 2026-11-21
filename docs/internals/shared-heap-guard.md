@@ -74,15 +74,16 @@ already serialized or atomic:
 | `ObjString` hash | `AtomicU64`, relaxed |
 | String append in place (`alloc_concat`) | atomic claim of the shared buffer's tail (`strbuf.rs` `try_append_at`) |
 | Header `marked` / `fresh` bits | written only by the collector, and collect is forbidden in an epoch (`collect::collect` and `collect::safepoint` abort it instead) |
+| Header flags byte (`FLAG_SHARED` beside the collector's bits, `FLAG_FINALIZED`, `FLAG_PINNED`) | a plain or / and of one byte. In an epoch only a share writes a pre-epoch object's flags (workers neither collect, finalize pre-epoch objects nor pin what they may not write), and two shares or the same bit, so a lost update loses nothing |
 | `ObjWeak` `Cell`s | written only by the collector / `gc::upgrade` paths; weaks are not whitelisted |
 
 ## The guard
 
 Behind `cfg(any(debug_assertions, feature = "gc-stress"))` only:
 
-1. **Header stamp.** `GcHeader` gets an `epoch: Cell<u8>` after `fresh`.
-   The header is `repr(C)` and every payload is 8-aligned, so the byte lands
-   in what is padding otherwise; release builds do not have the field at all
+1. **Header stamp.** `GcHeader` gets an `epoch: Cell<u8>` before the count.
+   The header is `repr(C)` and its 32-bit count is 4-aligned, so the byte
+   lands in what is padding otherwise; release builds do not have the field at all
    (no layout change there).
 2. **Epoch generation.** `Heap::enter_epoch_stw` bumps `Heap::epoch_gen`
    (never 0). `alloc_from_epoch_batch` stamps it on every object a mutator

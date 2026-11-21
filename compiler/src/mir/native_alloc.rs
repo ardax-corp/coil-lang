@@ -26,8 +26,8 @@ pub struct AllocCall {
 pub fn alloc_call(
     kind: MirAllocKind,
     words: usize,
-    kinds: u8,
-    packed: impl FnOnce() -> u8,
+    kinds: common::PackedKinds,
+    packed: impl FnOnce() -> common::PackedKinds,
     pc_of: impl FnOnce(Label) -> Option<u32>,
 ) -> Result<AllocCall, Label> {
     let n = words as u64;
@@ -37,13 +37,16 @@ pub fn alloc_call(
         MirAllocKind::Array => call(ALLOC_ARRAY, n, u64::from(kinds), None),
         MirAllocKind::Lanes { tag_mask } => call(ALLOC_LANES, n, tag_mask, None),
         MirAllocKind::Enum { tag } => call(ALLOC_ENUM, n, u64::from(tag) | (kinds_or_packed() << 32), None),
-        MirAllocKind::Object { type_id, nfields } => call(ALLOC_OBJECT, u64::from(nfields), u64::from(type_id), None),
+        MirAllocKind::Object { type_id, nfields } => {
+            call(ALLOC_OBJECT, u64::from(nfields), u64::from(type_id) | u64::from(kinds) << 32, None)
+        }
         MirAllocKind::DropEnum { tag, type_id } => {
             call(ALLOC_DROP_ENUM, n + 1, u64::from(tag) | (kinds_or_packed() << 32), Some(u64::from(type_id)))
         }
         MirAllocKind::Fn { target, operand, mask } => {
             let pc = pc_of(target).ok_or(target)?;
-            call(ALLOC_FN, n + 1, u64::from(pc) | (u64::from(operand) << 32), Some(u64::from(mask)))
+            // The fill mask, and above it the words' recorded kinds.
+            call(ALLOC_FN, n + 1, u64::from(pc) | (u64::from(operand) << 32), Some(u64::from(mask) | u64::from(kinds) << 32))
         }
         MirAllocKind::Coro { target } => call(ALLOC_CORO, n, u64::from(pc_of(target).ok_or(target)?), None),
         MirAllocKind::PolyFn { target } => call(ALLOC_POLY_FN, n, u64::from(pc_of(target).ok_or(target)?), None),

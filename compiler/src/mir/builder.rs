@@ -1176,7 +1176,7 @@ impl MirBuilder {
         &mut self,
         kind: super::inst::MirAllocKind,
         elems: Vec<ValueId>,
-        kinds: u8,
+        kinds: common::PackedKinds,
     ) -> Result<ValueId, MirError> {
         let elems: Vec<ValueId> = elems.into_iter().map(|v| self.resolve(v)).collect();
         for (i, &e) in elems.iter().enumerate() {

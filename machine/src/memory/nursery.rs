@@ -15,7 +15,7 @@ use common::Value;
 
 use super::compact::{forward, AddrMap};
 use super::{
-    barriered, ObjArray, GcHeader, GcPhase, GcSized, Heap, Member, Object, GEN_HELD, GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, QUIET,
+    barriered, ObjArray, FLAG_FRESH, FLAG_MARKED, GcHeader, GcPhase, GcSized, Heap, Member, Object, GEN_HELD, GEN_PINNED, GEN_UNLOGGED, GEN_YOUNG, QUIET,
     REMEMBERED,
 };
 
@@ -186,8 +186,8 @@ impl Heap {
             let mut live = false;
             for addr in slots(first, end, size) {
                 let header = unsafe { &*(addr as *const GcHeader) };
-                live |= header.kind.get() != 0 && header.marked.get();
-                if header.kind.get() != 0 && !header.marked.get() {
+                live |= header.kind.get() != 0 && header.flag(FLAG_MARKED);
+                if header.kind.get() != 0 && !header.flag(FLAG_MARKED) {
                     let obj = unsafe { Object::from_header(addr) }.expect("live held slot");
                     let bytes = obj.size();
                     self.counts.alloc_bytes -= bytes;
@@ -207,7 +207,7 @@ impl Heap {
                 // SAFETY: a slot start in a mapped chunk holds a header.
                 let header = unsafe { &*(addr as *const GcHeader) };
                 if header.kind.get() != 0 {
-                    header.marked.set(false);
+                    header.set_flag(FLAG_MARKED, false);
                 }
             }
         }
@@ -235,7 +235,7 @@ impl Heap {
                 if sweeping {
                     // The sweep may still reach this chunk; it must keep
                     // what it never marked.
-                    header.fresh.set(true);
+                    header.set_flag(FLAG_FRESH, true);
                 }
             }
             let tail = self.slab.chunk_slots_end(chunk);
@@ -267,6 +267,7 @@ impl Heap {
     /// it. The runtime then rewrites its precise roots and calls
     /// [`Self::minor_finish`].
     pub fn minor_plan(&mut self, pins: &[u64], precise: &[u64]) -> MinorPlan {
+        self.rc_pending.get_mut().clear();
         debug_assert_eq!(self.gc_phase, GcPhase::Idle, "minor collections run between cycles");
         let spans = self.slab.young_spans();
         let remembered = self.take_remembered();
@@ -476,7 +477,7 @@ impl Heap {
         if !a.may_hold_refs() {
             return (0, 0, usize::MAX);
         }
-        let (k, mask, kind) = (a.lanes(), a.tag_mask, a.elem_kind());
+        let (k, mask, kind) = (a.lanes(), a.tag_mask, a.gc_elem_kind());
         if k == 1 && kind == common::WORD_SCALAR {
             return (0, 0, usize::MAX);
         }
@@ -652,7 +653,7 @@ impl Heap {
         unsafe {
             std::ptr::copy_nonoverlapping(addr as *const u8, to.as_ptr(), layout.size());
             let header = &*(to.as_ptr() as *const GcHeader);
-            header.marked.set(false);
+            header.set_flag(FLAG_MARKED, false);
             header.generation.set(0);
         }
         fwd.insert(addr, to.as_ptr() as u64);
@@ -681,7 +682,7 @@ impl Heap {
                 }
                 if fwd.contains_key(&addr) {
                     header.kind.set(0);
-                    header.marked.set(false);
+                    header.set_flag(FLAG_MARKED, false);
                     header.generation.set(0);
                     continue;
                 }
@@ -689,12 +690,12 @@ impl Heap {
                 if header.generation.get() & GEN_HELD != 0 {
                     // Held by an earlier minor: not traced, kept as it is.
                     keep = true;
-                } else if header.marked.get() {
+                } else if header.flag(FLAG_MARKED) {
                     // Pinned: held where it is until a major cycle finds it
                     // dead ([`Self::unmark_young`]); its chunk stays out of
                     // reuse until then. Later minors treat it as old, so
                     // the barrier records writes to it.
-                    header.marked.set(false);
+                    header.set_flag(FLAG_MARKED, false);
                     header.generation.set(GEN_YOUNG | GEN_HELD | GEN_UNLOGGED);
                     kept += 1;
                     keep = true;

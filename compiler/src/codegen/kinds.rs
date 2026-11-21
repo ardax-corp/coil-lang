@@ -2,12 +2,16 @@
 //!
 //! A shared generic body holds a value of a type parameter as the ground
 //! type's word, which may be a scalar or an object, so it cannot tell on
-//! its own whether a copy-on-write op applies. Its entry takes one more
-//! word after the dictionaries: bit `i` is set when type parameter `i` of
-//! its scheme (`Scheme::bounds`, in order) is a copy-on-write object at the
-//! call, as `hir::cow::cow_ty` decides for a per-type clone. The bits past
-//! the scheme's parameters hold [`SENTINEL`]'s, so a word that is no
-//! `kinds` word is caught where the entry checks it ([`check_on`]).
+//! its own whether a copy-on-write op applies, or whether the word is a
+//! heap reference at all. Its entry takes one more word after the
+//! dictionaries, two bits for each type parameter `p` of its scheme
+//! (`Scheme::bounds`, in order): bit [`cow_bit`]`(p)` is set when it is a
+//! copy-on-write object at the call, as `hir::cow::cow_ty` decides for a
+//! per-type clone, and bit [`ptr_bit`]`(p)` when its word is a heap
+//! reference (`layout::word_kind` is `WORD_POINTER`), which reference counts
+//! need. The bits past the scheme's parameters hold [`SENTINEL`]'s, so a
+//! word that is no `kinds` word is caught where the entry checks it
+//! ([`check_on`]).
 //!
 //! A ground call passes a constant. A call from a shared body computes each
 //! bit from its own: a type parameter forwards its bit, a type whose head
@@ -22,19 +26,37 @@ use crate::typechecking::ty::{strip_readonly, Constraint, Scheme, TyVarId};
 /// The bits a `kinds` word carries past its mask.
 pub(crate) const SENTINEL: u64 = 0xC0DE_5A3C_A5C3_3C5A;
 
-/// The most type parameters a shared generic entry may have: one bit each,
-/// below the sentinel's top bit, so every `kinds` word has bit 63 set.
-pub(crate) const MAX_PARAMS: usize = 63;
+/// The most type parameters a shared generic entry may have: two bits each,
+/// below the sentinel's top bits, so every `kinds` word has bit 63 set.
+pub(crate) const MAX_PARAMS: usize = 31;
 
-/// The bits of a dictionary's `kinds` word: its trait's parameters, then
-/// its instance head's type variables. The sentinel is above them for every
-/// dictionary of every trait, so a default body checks it the same way
-/// whatever instance's dictionary it gets.
-pub(crate) const DICT_BITS: u32 = 32;
+/// The type parameters of a dictionary's `kinds` word: its trait's
+/// parameters, then its instance head's type variables. The sentinel is
+/// above them for every dictionary of every trait, so a default body checks
+/// it the same way whatever instance's dictionary it gets.
+pub(crate) const DICT_BITS: u32 = 16;
+
+/// The bit of a `kinds` word set when type parameter `p` is a copy-on-write
+/// object.
+pub(crate) const fn cow_bit(p: u32) -> u32 {
+    2 * p
+}
+
+/// The bit of a `kinds` word set when type parameter `p`'s word is a heap
+/// reference.
+pub(crate) const fn ptr_bit(p: u32) -> u32 {
+    2 * p + 1
+}
 
 /// [`SENTINEL`]'s bits past a mask of `n` parameters.
 pub(crate) fn sentinel(n: u32) -> u64 {
-    if n >= 64 { 0 } else { SENTINEL & (u64::MAX << n) }
+    if 2 * n >= 64 { 0 } else { SENTINEL & (u64::MAX << (2 * n)) }
+}
+
+/// A parameter's two bits in a `kinds` word for a ground type's
+/// [`Bit::Const`].
+fn const_bits(p: u32, cow: bool, ptr: bool) -> u64 {
+    u64::from(cow) << cow_bit(p) | u64::from(ptr) << ptr_bit(p)
 }
 
 /// Whether a shared generic entry checks its `kinds` word's sentinel bits:
@@ -49,7 +71,9 @@ pub(super) type DictKinds = (u32, u32, Vec<(TyVarId, u32)>);
 
 /// Where one bit of a call's `kinds` word comes from.
 enum Bit {
-    Const(bool),
+    /// A ground type: whether it is a copy-on-write object, and whether its
+    /// word is a heap reference.
+    Const { cow: bool, ptr: bool },
     /// The caller's own bit.
     From(u32),
 }
@@ -135,9 +159,9 @@ impl Compiler {
         let mut from = Vec::new();
         for (i, v) in own.iter().enumerate() {
             match vars.get(v).map(|t| self.kinds_bit(t, frame)) {
-                Some(Bit::Const(true)) => word |= 1 << i,
+                Some(Bit::Const { cow, ptr }) => word |= const_bits(i as u32, cow, ptr),
                 Some(Bit::From(j)) => from.push(HirDictOp::KindsBit { from: j as u8, to: i as u8 }),
-                Some(Bit::Const(false)) | None => {}
+                None => {}
             }
         }
         std::iter::once(HirDictOp::Kinds(word)).chain(from).collect()
@@ -213,8 +237,15 @@ impl Compiler {
         let ty = apply_ty_prune(self.checker.subst(), ty);
         match head_var(&ty) {
             // A variable the caller has no bit for: no op, as before.
-            Some(v) => frame.and_then(|f| f.bit(v)).map_or(Bit::Const(false), Bit::From),
-            None => Bit::Const(crate::hir::effects::cow::cow_ty(&self.checker, Some(&ty))),
+            Some(v) => frame.and_then(|f| f.bit(v)).map_or(Bit::Const { cow: false, ptr: false }, Bit::From),
+            // A type parameter's word in a shared body is one word: a type
+            // that is no number, bool or scalar enum arrives as an object
+            // (boxed, when its own layout is two words) or a niche word,
+            // so a heap reference whatever `word_kind` can tell of it.
+            None => Bit::Const {
+                cow: crate::hir::effects::cow::cow_ty(&self.checker, Some(&ty)),
+                ptr: crate::layout::word_kind(&self.checker, &ty) != common::WORD_SCALAR,
+            },
         }
     }
 
@@ -231,7 +262,8 @@ impl Compiler {
     /// receiver first, for a method) returning `ret_ty`, as ops.
     pub(super) fn kinds_ops_for(&self, bounds: &[TyVarId], fun_ty: &Ty, arg_tys: &[Ty], ret_ty: Option<&Ty>) -> Vec<HirDictOp> {
         let frame = self.hir_body_frame.as_ref().and_then(|f| f.kinds.as_ref());
-        let (params, ret) = Self::fun_param_and_ret_tys(fun_ty);
+        // A result that is a function type is no parameter (#2898: `fn lam<T>() -> fn(T) -> T`).
+        let (params, ret) = Self::fun_param_and_ret_tys_n(fun_ty, arg_tys.len());
         let mut vars = HashMap::new();
         // A method's receiver may be typed by its class alone (`self` in
         // the class's own body): the caller's scheme type of it binds the
@@ -260,9 +292,9 @@ impl Compiler {
         let mut from = Vec::new();
         for (i, v) in bounds.iter().enumerate().take(MAX_PARAMS) {
             match vars.get(v).map(|t| self.kinds_bit(t, frame)) {
-                Some(Bit::Const(true)) => word |= 1 << i,
+                Some(Bit::Const { cow, ptr }) => word |= const_bits(i as u32, cow, ptr),
                 Some(Bit::From(j)) => from.push(HirDictOp::KindsBit { from: j as u8, to: i as u8 }),
-                Some(Bit::Const(false)) | None => {}
+                None => {}
             }
         }
         std::iter::once(HirDictOp::Kinds(word)).chain(from).collect()
@@ -413,9 +445,9 @@ impl Compiler {
         let mut from = Vec::new();
         for (i, t) in bound.iter().enumerate() {
             match t.map(|t| self.kinds_bit(t, frame)) {
-                Some(Bit::Const(true)) => word |= 1 << i,
+                Some(Bit::Const { cow, ptr }) => word |= const_bits(i as u32, cow, ptr),
                 Some(Bit::From(j)) => from.push(DictStep::KindsBit { from: j as u8, to: i as u8 }),
-                Some(Bit::Const(false)) | None => {}
+                None => {}
             }
         }
         Some(std::iter::once(DictStep::Kinds(word)).chain(from).collect())
@@ -476,13 +508,13 @@ impl Compiler {
 /// The type variables of a function value's type `body` among `binders`
 /// that a call through the value passes a bit for, in that order: their
 /// order of first appearance, so a type and one it renames into another
-/// declared order agree (#2621). At most
-/// [`common::KINDS_CALL_COUNT_SHIFT`].
+/// declared order agree (#2621). At most half
+/// [`common::KINDS_CALL_COUNT_SHIFT`]: two bits each.
 pub(super) fn value_kinds_order(binders: &[TyVarId], body: &Ty) -> Vec<TyVarId> {
     let mut order = Vec::new();
     body.collect_vars(&mut order);
     order.retain(|v| binders.contains(v));
-    order.truncate(common::KINDS_CALL_COUNT_SHIFT as usize);
+    order.truncate(common::KINDS_CALL_COUNT_SHIFT as usize / 2);
     order
 }
 
