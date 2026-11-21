@@ -1279,11 +1279,18 @@ pub unsafe extern "C" fn coil_native_store_index(ctx: *mut NativeCtx, addr: u64,
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
-    if gc.as_ref().read_indexed(index, false).is_none() {
+    let Some(old) = gc.as_ref().read_indexed(index, false) else {
         unsafe { (*ctx).trap = TRAP_OUT_OF_BOUNDS };
         return unsafe { bail(ctx) };
-    }
+    };
     gc.as_mut().store_indexed(index, common::Value::from(value), false);
+    if let Some(heap) = unsafe { heap(ctx) }
+        && heap.rc_counting()
+    {
+        let kind = gc.as_ref().elem_kind();
+        heap.rc_inc_word(common::Value::from(value), kind);
+        heap.rc_dec_word(old, kind);
+    }
     value
 }
 
@@ -1385,6 +1392,7 @@ pub unsafe extern "C" fn coil_native_lane_store(
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
+    let before = heap.rc_before(common::Value::from(addr));
     let stored = if gc.as_ref().lanes() == 2 {
         usize::try_from(index).is_ok_and(|i| gc.as_mut().set_lanes(i, &[common::Value::from(lo), common::Value::from(hi)]))
     } else if gc.as_ref().read_indexed(index, false).is_some() {
@@ -1395,6 +1403,7 @@ pub unsafe extern "C" fn coil_native_lane_store(
     } else {
         false
     };
+    heap.rc_after(before);
     if !stored {
         unsafe { (*ctx).trap = TRAP_OUT_OF_BOUNDS };
         return unsafe { bail(ctx) };
@@ -1415,12 +1424,14 @@ pub unsafe extern "C" fn coil_native_lane_push(ctx: *mut NativeCtx, addr: u64, l
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
+    let before = heap.rc_before(common::Value::from(addr));
     if gc.as_ref().lanes() == 2 {
         gc.as_mut().push_lanes(&[common::Value::from(lo), common::Value::from(hi)]);
     } else {
         let boxed = lane_box(heap, lo, hi, [tag_mask, payload_mask, unit_mask]);
         gc.as_mut().push(common::Value::from(boxed));
     }
+    heap.rc_after(before);
     heap.account_array(gc.as_mut());
     unsafe { note_alloc(ctx, heap) };
     addr
@@ -1443,6 +1454,7 @@ pub unsafe extern "C" fn coil_native_lanes_to_words(ctx: *mut NativeCtx, addr: u
     let Some(words) = gc.as_ref().lane_words().filter(|_| gc.as_ref().lanes() == 2).map(<[common::Value]>::to_vec) else {
         return addr;
     };
+    let before = heap.rc_before(common::Value::from(addr));
     // No collection runs inside an allocation, so the boxes made so far
     // stay alive until the array holds them.
     let boxes = words
@@ -1452,6 +1464,7 @@ pub unsafe extern "C" fn coil_native_lanes_to_words(ctx: *mut NativeCtx, addr: u
         .map(|w| common::Value::from(lane_box(heap, w[0].bits(), w[1].bits(), [tag_mask, payload_mask, unit_mask])))
         .collect();
     gc.as_mut().lanes_into_words(boxes);
+    heap.rc_after(before);
     heap.account_array(gc.as_mut());
     unsafe { note_alloc(ctx, heap) };
     addr
@@ -1471,7 +1484,12 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
     if slot >= gc.as_ref().slot_len() {
         return unsafe { bail(ctx) };
     }
+    let heap = unsafe { heap(ctx) };
+    let before = heap.as_ref().and_then(|h| h.rc_before(common::Value::from(addr)));
     gc.as_mut().set_slot(slot, common::Value::from(value));
+    if let Some(heap) = heap {
+        heap.rc_after(before);
+    }
     value
 }
 
@@ -1738,7 +1756,9 @@ pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, fi
         && let Some(v) = gc.as_ref().slot(field as usize)
         && let Some(copy) = heap.cow_unique(v)
     {
+        let before = heap.rc_before(common::Value::from(obj));
         gc.as_mut().set_slot(field as usize, copy);
+        heap.rc_after(before);
         unsafe { note_alloc(ctx, heap) };
     }
     obj
@@ -1935,6 +1955,9 @@ pub unsafe extern "C" fn coil_native_array_push(ctx: *mut NativeCtx, addr: u64, 
         return unsafe { bail(ctx) };
     };
     gc.as_mut().push(common::Value::from(value));
+    if heap.rc_counting() {
+        heap.rc_inc_word(common::Value::from(value), gc.as_ref().elem_kind());
+    }
     heap.account_array(gc.as_mut());
     unsafe { note_alloc(ctx, heap) };
     addr
@@ -2470,7 +2493,13 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         Some(f) if !host.on_machine => f,
         _ if host.on_machine || host.func.is_some() => {
             crate::host_enum::take_pair_tag();
-            return match unsafe { host_invoke(ctx, id, layout, args, n) } {
+            // SAFETY: `args` holds `n` words.
+            let before = heap.rc_before_all(unsafe { std::slice::from_raw_parts(args.cast::<common::Value>(), n as usize) });
+            let out = unsafe { host_invoke(ctx, id, layout, args, n) };
+            if let Some(heap) = unsafe { crate::native::heap(ctx) } {
+                heap.rc_after_all(before);
+            }
+            return match out {
                 Some(out) if layout as u32 == common::HOST_ENUM_LAYOUT_PAIR => unsafe { split_pair(ctx, out) },
                 Some(out) => out,
                 None => unsafe { bail(ctx) },
@@ -2495,7 +2524,9 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
     if layout == crate::host_enum::HostEnumLayout::Pair {
         crate::host_enum::take_pair_tag();
     }
+    let before = heap.rc_before_all(args);
     let v = crate::host_enum::in_host_enum_bits(bits, || f(heap, args));
+    heap.rc_after_all(before);
     // The runtime checks for a collection once the call returns.
     let made = heap.live_object_count().saturating_sub(live_before) as u64;
     if made != 0 {
@@ -3057,7 +3088,11 @@ pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flag
     let frame = unsafe { std::slice::from_raw_parts_mut(slots, nslots as usize) };
     // SAFETY: `call` set `heap` to the machine's live heap.
     let heap = unsafe { &mut *c.heap };
-    match crate::lanes::lanes_on_frame(heap, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64) {
+    // The loop's arrays: what it pushes and stores counts once it ends.
+    let before = heap.rc_before_all(&frame.iter().map(|&w| common::Value::from(w)).collect::<Vec<_>>());
+    let out = crate::lanes::lanes_on_frame(heap, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64);
+    heap.rc_after_all(before);
+    match out {
         Ok(p) => {
             VECTOR_OPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             p as u64
