@@ -881,7 +881,12 @@ impl Heap {
                     return None;
                 }
                 let slots = inst.storage.as_slice().to_vec();
-                self.alloc(ObjInstance::with_slots(inst.type_id, slots), Object::Instance).0
+                let own = inst.own_kinds();
+                self.alloc(
+                    ObjInstance::with_slots(inst.type_id, slots).with_own_kinds(own),
+                    Object::Instance,
+                )
+                .0
             }
             Object::Array(gc) => {
                 let copy = gc.as_ref().copy();
@@ -922,7 +927,12 @@ impl Heap {
                     return None;
                 }
                 let slots = inst.storage.as_slice().to_vec();
-                self.alloc(ObjInstance::with_slots(inst.type_id, slots), Object::Instance).0
+                let own = inst.own_kinds();
+                self.alloc(
+                    ObjInstance::with_slots(inst.type_id, slots).with_own_kinds(own),
+                    Object::Instance,
+                )
+                .0
             }
             Object::Array(gc) => {
                 let copy = gc.as_ref().copy();
@@ -7209,4 +7219,3 @@ mod tests {
         assert_eq!(ints(gc.as_ref()), vec![1, 2, 3]);
     }
 }
-
