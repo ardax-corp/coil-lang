@@ -547,10 +547,10 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     {
         return common::WORD_POINTER;
     }
-    // A non-scalar enum's or a tuple's word is its object (a two-word one
-    // boxed to one word), a unit variant's the immortal one: an `Option` /
-    // `Result` of any layout is that or its niche word.
-    if matches!(ty, Ty::Tuple(_)) || enum_name(ty).is_some_and(|n| checker.enum_variants(n).is_some()) {
+    // A non-scalar enum's, a tuple's or a record's word is its object (a
+    // two-word one boxed to one word), a unit variant's the immortal one: an
+    // `Option` / `Result` of any layout is that or its niche word.
+    if matches!(ty, Ty::Tuple(_) | Ty::Record { .. }) || enum_name(ty).is_some_and(|n| checker.enum_variants(n).is_some()) {
         return common::WORD_POINTER;
     }
     // A `Vec<T>` / `[T]` / `[T; N]` word is always an array object, whatever
@@ -559,6 +559,14 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     // handle object, a function value its `ObjFn` and an existential its
     // pack (or a bare class's object).
     if crate::typechecking::ty::opaque_handle_name(ty).is_some() || matches!(ty, Ty::Fun(..) | Ty::Forall { .. } | Ty::Existential { .. }) {
+        return common::WORD_POINTER;
+    }
+    // A `Root<T>` / `Weak<T>` word is its pin or weak object, a
+    // `coroutine<Y, R>` its coroutine object.
+    if let Ty::App(head, _) = ty
+        && let Ty::Con(name) = strip_readonly(head)
+        && matches!(name.as_str(), crate::typechecking::ty::ROOT | crate::typechecking::ty::WEAK | "coroutine")
+    {
         return common::WORD_POINTER;
     }
     if matches!(ty, Ty::Array { .. })
