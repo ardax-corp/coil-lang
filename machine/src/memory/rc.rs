@@ -1,7 +1,9 @@
 //! Reference counts (reference-count plan step 2): each object's header
 //! count is the number of places that own it. Step 2 counts the heap words
 //! the runtime and native code store; frames own nothing yet, so nothing is
-//! freed at zero until the insertion pass (step 4) counts them too.
+//! freed at zero until the insertion pass (step 4) counts them too. The MIR
+//! ops `RcInc` / `RcDec` (step 3) are [`Heap::rc_retain`] / [`Heap::rc_drop`];
+//! [`Heap::set_rc_frees`] turns on the release at zero.
 //!
 //! The oracle (`COIL_RC_CHECK=1`, or `abort`) runs at every major mark, once
 //! marking is done: it counts the pointer words of every reachable object
@@ -89,7 +91,12 @@ impl Heap {
     /// the counts of objects from before it, plan step 8).
     #[inline]
     pub fn rc_counting(&self) -> bool {
-        rc_check_mode() != RcCheckMode::Off && self.alloc_lock.is_null()
+        self.rc_on && self.alloc_lock.is_null()
+    }
+
+    /// Keep counts in this heap whatever `COIL_RC_CHECK` says (tests).
+    pub fn set_rc_counting(&mut self, on: bool) {
+        self.rc_on = on;
     }
 
     /// The objects `obj`'s words name, as the collector reads its words,
@@ -254,6 +261,92 @@ impl Heap {
         obj.visit_slots(self, &mut Inc(self));
     }
 
+    /// Whether a count that reaches zero frees its object
+    /// ([`Self::set_rc_frees`]). Off until frames own their words (plan
+    /// step 4): a frame may still name an object no heap word does.
+    #[inline]
+    pub fn rc_frees(&self) -> bool {
+        self.rc_frees && self.rc_counting()
+    }
+
+    /// Free objects whose count reaches zero ([`Self::rc_drop`]).
+    pub fn set_rc_frees(&mut self, on: bool) {
+        self.rc_frees = on;
+    }
+
+    /// `RcInc` (plan step 3): `v`'s object gains an owner, when counts are
+    /// kept and `v` names an object.
+    #[inline]
+    pub fn rc_retain(&self, v: Value) {
+        if self.rc_counting()
+            && let Some(o) = self.rc_object(v)
+        {
+            o.rc_inc();
+        }
+    }
+
+    /// `RcDec`: `v`'s object loses an owner, and is released when that was
+    /// its last and [`Self::rc_frees`]. Returns how many objects it freed.
+    #[inline]
+    pub fn rc_drop(&mut self, v: Value) -> usize {
+        if !self.rc_counting() {
+            return 0;
+        }
+        self.rc_release_word(v)
+    }
+
+    /// [`Self::rc_drop`] in a heap that keeps counts.
+    fn rc_release_word(&mut self, v: Value) -> usize {
+        match self.rc_object(v) {
+            Some(o) if o.rc_dec() && self.rc_frees => self.rc_release(o),
+            _ => 0,
+        }
+    }
+
+    /// Free `obj`, whose count reached zero: each object its words name
+    /// loses an owner, and those that reach zero are released in turn (a
+    /// worklist, not recursion). An object the runtime cannot free here
+    /// stays, at count zero, for the collector: an interned string, a
+    /// handle, a closure or coroutine (their words are frame-shaped), an
+    /// object whose `drop` has not run (step 7), a host root, and every
+    /// object while a collection or a steal epoch is open. Returns how many
+    /// objects it freed.
+    fn rc_release(&mut self, obj: Object) -> usize {
+        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
+            return 0;
+        }
+        let mut stack = vec![obj];
+        let mut n = 0;
+        while let Some(obj) = stack.pop() {
+            if !self.rc_releasable(obj) {
+                continue;
+            }
+            for addr in self.rc_words(obj) {
+                // SAFETY: `rc_words` lists live objects' addresses.
+                if let Some(child) = unsafe { Object::from_header(addr) }
+                    && child.rc_dec()
+                {
+                    stack.push(child);
+                }
+            }
+            self.freed_early = true;
+            // SAFETY: its count is zero: no counted word names it, and
+            // frames count theirs once [`Self::rc_frees`] is on.
+            unsafe { self.dealloc(obj) };
+            n += 1;
+        }
+        n
+    }
+
+    /// Whether [`Self::rc_release`] may free `obj`.
+    fn rc_releasable(&self, obj: Object) -> bool {
+        matches!(obj, Object::String(_) | Object::Array(_) | Object::Enum(_) | Object::Instance(_))
+            && self.early_freeable(obj)
+            && !self.pending_drop(obj)
+            && obj.rc_count() == 0
+            && !self.gc_roots.contains(&obj.addr())
+    }
+
     /// The oracle ([`rc_check_mode`]), between a major mark and its sweep.
     pub(crate) fn rc_check(&self) {
         let mode = rc_check_mode();
@@ -405,6 +498,31 @@ mod tests {
         assert_eq!(a.rc_count(), COUNT_IMMORTAL);
         let unit = heap.immortal_unit_enum(4);
         assert_eq!(unit.rc_count(), COUNT_IMMORTAL);
+    }
+
+    /// A list `a -> b -> c` with `b` also named by `d`: dropping `a`'s last
+    /// owner frees `a` only, `b` keeps `d`'s owner, `c` stays with `b`.
+    #[test]
+    fn a_release_frees_what_only_the_object_kept() {
+        let mut heap = Heap::default();
+        let ptr = |o: Object| Value::from(o.addr());
+        let (c, _) = heap.alloc(ObjString::from("c"), Object::String);
+        let (b, _) = heap.alloc(ObjArray::new(vec![ptr(c)]).of_kind(common::WORD_POINTER), Object::Array);
+        let (a, _) = heap.alloc(ObjArray::new(vec![ptr(b)]).of_kind(common::WORD_POINTER), Object::Array);
+        let (d, _) = heap.alloc(ObjArray::new(vec![ptr(b)]).of_kind(common::WORD_POINTER), Object::Array);
+        // As a check run's allocation would count them.
+        for o in [c, b, b] {
+            o.rc_inc();
+        }
+        a.rc_inc();
+        d.rc_inc();
+        heap.rc_frees = true;
+        let live = heap.counts.live_count;
+        assert_eq!(heap.rc_release_word(ptr(a)), 1);
+        assert_eq!(heap.counts.live_count, live - 1);
+        assert_eq!(b.rc_count(), 1);
+        assert_eq!(heap.rc_release_word(ptr(d)), 3, "d, then b, then c");
+        assert_eq!(heap.counts.live_count, live - 4);
     }
 
     #[test]

@@ -311,6 +311,10 @@ pub struct Heap {
     /// object may now point at a freed or reused slot, so a typed handle
     /// is looked up before it is marked ([`Self::early_freed_slot`]).
     freed_early: bool,
+    /// Reference counts are kept (`COIL_RC_CHECK`, [`Self::set_rc_counting`]).
+    rc_on: bool,
+    /// A count that reaches zero frees its object ([`Self::set_rc_frees`]).
+    rc_frees: bool,
     /// Allocate movable kinds in the nursery ([`Self::set_nursery`]).
     nursery: bool,
     /// Objects born in the open steal epoch that can hold references. The
@@ -396,6 +400,8 @@ impl Default for Heap {
             early_freed: Vec::new(),
             early_scratch: (Vec::new(), Vec::new(), Vec::new()),
             freed_early: false,
+            rc_on: rc_check_mode() != RcCheckMode::Off,
+            rc_frees: false,
             nursery: false,
             epoch_born: Vec::new(),
             nursery_chunks: NURSERY_CHUNKS,
@@ -1692,6 +1698,8 @@ impl Heap {
         let mut heap = Self::default();
         heap.set_nursery(self.nursery);
         heap.set_byte_cap(self.byte_cap);
+        heap.rc_on = self.rc_on;
+        heap.rc_frees = self.rc_frees;
         heap
     }
 
