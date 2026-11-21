@@ -1749,6 +1749,27 @@ pub unsafe fn cow_unpin(ctx: *mut NativeCtx, word: u64, saved: u64) {
     }
 }
 
+/// `RcInc` (`dec` zero) or `RcDec` of the heap word `word`: its object
+/// gains or loses an owner, and one that lost its last is released
+/// ([`crate::memory::Heap::rc_drop`]). Nothing when counts are not kept or
+/// `word` names no object. Returns `0`.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_rc(ctx: *mut NativeCtx, word: u64, dec: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return 0;
+    };
+    let w = common::Value::from(word);
+    if dec == 0 {
+        heap.rc_retain(w);
+    } else {
+        heap.rc_drop(w);
+    }
+    0
+}
+
 /// `Cow` of field `field` of the instance `obj`: `obj.f = unique(obj.f)`,
 /// writing the slot back only when it copied.
 /// Returns `obj`.
@@ -3137,6 +3158,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_fn_entry_pair", coil_native_fn_entry_pair as *const u8),
         ("coil_native_cow", coil_native_cow as *const u8),
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
+        ("coil_native_rc", coil_native_rc as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
         ("coil_native_array_push", coil_native_array_push as *const u8),
         ("coil_native_lane_index", coil_native_lane_index as *const u8),
@@ -3174,7 +3196,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 47;
+const HELPERS: usize = 48;
 
 #[cfg(test)]
 mod pin_tests {

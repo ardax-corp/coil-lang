@@ -1102,6 +1102,14 @@ impl MirFunc {
                     return Err(format!("{dest} CowUnpin type"));
                 }
             }
+            MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                if self.ty(*dest) != MirTy::Bool || !matches!(self.ty(*src), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64 | MirTy::Value) {
+                    return Err(format!("{dest} reference count op type"));
+                }
+                if guard.is_some_and(|g| self.ty(g) != MirTy::Bool) {
+                    return Err(format!("{dest} reference count op guard is not bool"));
+                }
+            }
             MirInst::Stringify { dest, src, .. } => {
                 if self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} Stringify dest is not heapref"));

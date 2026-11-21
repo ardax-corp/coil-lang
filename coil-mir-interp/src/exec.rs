@@ -962,6 +962,13 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 rt::cow_unpin(ctx, s, saved);
                 set!(*dest, 0);
             }
+            MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                if guard.is_none_or(|g| get!(g) != 0) {
+                    let s = get!(*src);
+                    rt::coil_native_rc(ctx, s, u64::from(matches!(inst, MirInst::RcDec { .. })));
+                }
+                set!(*dest, 0);
+            }
         }
         Flow::Next
     }

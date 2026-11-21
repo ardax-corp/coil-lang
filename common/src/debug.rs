@@ -282,8 +282,9 @@ pub const MIR_SECTION_EXTERN_STRUCT_FORMAT: u8 = 20;
 /// The first MIR section format whose `kinds` words hold two bits per type
 /// parameter (copy-on-write, heap reference) and whose `Alloc` carries
 /// 12 words' packed kinds (`common::PackedKinds`; reference counts plan
-/// step 2, archive 8.5). Its layout is format 20's otherwise; a reader
-/// refuses older sections, whose constant `kinds` words mean otherwise.
+/// step 2, archive 8.5), and that may hold the reference count ops `RcInc` /
+/// `RcDec` (step 3). Its layout is format 20's otherwise; a reader refuses
+/// older sections, whose constant `kinds` words mean otherwise.
 pub const MIR_SECTION_KINDS2_FORMAT: u8 = 21;
 
 /// Append `scopes` as a MIR section stores them: a count, then per scope

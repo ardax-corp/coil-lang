@@ -521,6 +521,17 @@ same in debug and `gc-stress` builds. The interpreter keeps `coil_native_cow`,
 which also counts the share for `--cow-report`'s summary line; native code's
 inline shares are not in that count (the copies are).
 
+The reference count ops `RcInc` / `RcDec` (archive 8.5, reference counts plan
+step 3) call `coil_native_rc` (`ctx`, the word, `1` for a decrement), behind a
+branch on the op's guard when it has one. The helper does nothing unless the heap
+keeps counts (`COIL_RC_CHECK` today) and the word names an object
+(`Heap::rc_retain` / `Heap::rc_drop`); a decrement of the last owner releases the
+object once `Heap::set_rc_frees` is on: what it names loses an owner in turn, and
+it is freed (strings, arrays, enums and instances; anything else, an object with
+a pending `drop`, and everything during a collection or a steal epoch stays for
+the collector at count zero). The interpreter calls the same helper. An inline
+increment and decrement come with the insertion pass (steps 4 and 6).
+
 A pinned object (archive 8.2, [cow-calls.md](cow-calls.md), "Pinned objects") is
 never marked: after the kind byte the share tests `FLAG_PINNED` in the flags byte
 and, when it is set, branches to a cold block that calls `coil_native_cow`, whose

@@ -146,6 +146,9 @@ word's high half the next 4 words' (an older reader ignores it); an instance's
 `aux`, `0` before, holds the packed kinds of its first 12 own slots that its class row leaves
 unknown (generic fields, `ObjInstance::own_kinds`); and an array's element kind may
 be `WORD_SCALAR` as well as `WORD_POINTER`. An 8.4 snapshot reads as before.
+Format 21 also holds the reference count ops of plan step 3, `RcInc` (tag 52) and
+`RcDec` (tag 53): a dest, a source word and an optional `bool` guard, each a value
+id (the guard as an optional one).
 
 ## Major 7
 

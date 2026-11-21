@@ -1536,6 +1536,13 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(src)?;
                         need_scalar(saved)?;
                     }
+                    MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                        need_scalar(dest)?;
+                        need(src)?;
+                        if let Some(g) = guard {
+                            need_scalar(g)?;
+                        }
+                    }
                     MirInst::Phi { dest, args, .. } => {
                         need(dest)?;
                         for (_, v) in args {
@@ -1778,6 +1785,8 @@ struct Ids {
     /// Copy-on-write (these allocate, never collect).
     cow: FuncId,
     cow_field: FuncId,
+    /// Reference count ops (`coil_native_rc`).
+    rc: FuncId,
     /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
     alloc: FuncId,
     array_push: FuncId,
@@ -2227,6 +2236,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     s1v.params.push(AbiParam::new(types::I64));
     let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
+    let rc = module.declare_function("coil_native_rc", Linkage::Import, &s3).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
     let lane_index = module.declare_function("coil_native_lane_index", Linkage::Import, &s3).map_err(e)?;
@@ -2290,6 +2300,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         fn_entry_pair,
         cow,
         cow_field,
+        rc,
         alloc,
         array_push,
         lane_index,
@@ -2399,6 +2410,7 @@ struct Lower<'a> {
     direct_externs: bool,
     cow: FuncRef,
     cow_field: FuncRef,
+    rc: FuncRef,
     alloc: FuncRef,
     array_push: FuncRef,
     lane_index: FuncRef,
@@ -2570,6 +2582,7 @@ impl<'a> Lower<'a> {
         let entry_sig = func.import_signature(entry_signature(module));
         let cow = module.declare_func_in_func(ids.cow, func);
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
+        let rc = module.declare_func_in_func(ids.rc, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
         let array_push = module.declare_func_in_func(ids.array_push, func);
         let lane_index = module.declare_func_in_func(ids.lane_index, func);
@@ -2640,6 +2653,7 @@ impl<'a> Lower<'a> {
             direct_externs: !plan.ffi_callbacks,
             cow,
             cow_field,
+            rc,
             alloc,
             array_push,
             lane_index,
@@ -4615,6 +4629,30 @@ impl<'a> Lower<'a> {
                 let zero = self.b.ins().iconst(types::I64, 0);
                 self.set(f, *dest, zero);
             }
+            // A runtime call for now: the count is kept only in a check run
+            // until frames own their words (plan steps 4 and 6).
+            MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                let dec = self.b.ins().iconst(types::I64, i64::from(matches!(inst, MirInst::RcDec { .. })));
+                match guard {
+                    Some(g) => {
+                        let g = self.get(f, *g);
+                        let g = self.coerce(g, types::I64);
+                        let (call, join) = (self.b.create_block(), self.b.create_block());
+                        self.b.ins().brif(g, call, &[], join, &[]);
+                        self.b.switch_to_block(call);
+                        self.b.ins().call(self.rc, &[self.ctx, s, dec]);
+                        self.b.ins().jump(join, &[]);
+                        self.b.switch_to_block(join);
+                    }
+                    None => {
+                        self.b.ins().call(self.rc, &[self.ctx, s, dec]);
+                    }
+                }
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, zero);
+            }
             MirInst::Cow { dest, src, unique, field } => {
                 let s = self.get(f, *src);
                 let s = self.coerce(s, types::I64);
@@ -5844,6 +5882,67 @@ mod tests {
         let p = jit(&bodies, &pcs).expect("jit");
         assert_eq!(p.entries.len(), 1, "refused: {:?}", p.refused);
         assert_eq!(run(&p.entries[0], &[1.5f64.to_bits()]), (0, 1.5f64.to_bits()));
+    }
+
+    /// `f(v0, v1)`: two `rc.inc v0`, then `rc.dec v0 if v1`; returns `v1`.
+    /// `g(v0)`: `rc.dec v0`.
+    fn counting_bodies() -> Vec<NativeBody> {
+        let mut f = MirFunc::new("f");
+        f.blocks.clear();
+        f.types = vec![MirTy::HeapRef, MirTy::Bool, MirTy::Bool, MirTy::Bool, MirTy::Bool];
+        f.params = vec![ValueId(0), ValueId(1)];
+        f.ret_ty = Some(MirTy::Bool);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::RcInc { dest: ValueId(2), src: ValueId(0), guard: None });
+        b.insts.push(MirInst::RcInc { dest: ValueId(3), src: ValueId(0), guard: None });
+        b.insts.push(MirInst::RcDec { dest: ValueId(4), src: ValueId(0), guard: Some(ValueId(1)) });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        f.blocks.push(b);
+        let mut g = MirFunc::new("g");
+        g.blocks.clear();
+        g.types = vec![MirTy::HeapRef, MirTy::Bool];
+        g.params = vec![ValueId(0)];
+        g.ret_ty = Some(MirTy::Bool);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::RcDec { dest: ValueId(1), src: ValueId(0), guard: None });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        g.blocks.push(b);
+        vec![NativeBody { name: "f".into(), entry: Some(Label(0)), mir: f }, NativeBody { name: "g".into(), entry: Some(Label(1)), mir: g }]
+    }
+
+    /// The reference count ops (plan step 3): an increment, a guarded
+    /// decrement that applies only when its guard is true, and a decrement
+    /// of the last owner that frees the object.
+    #[test]
+    fn the_count_ops_move_the_count_and_the_last_one_frees() {
+        let mut heap = machine::Heap::default();
+        heap.set_rc_counting(true);
+        heap.set_rc_frees(true);
+        let (obj, _) = heap.alloc(machine::ObjString::from("counted"), machine::Object::String);
+        obj.rc_inc();
+        let pcs = HashMap::from([("f".to_string(), 0u32), ("g".to_string(), 1u32)]);
+        let p = jit(&counting_bodies(), &pcs).expect("jit");
+        assert!(p.refused.is_empty(), "refused: {:?}", p.refused);
+        let entry = |name: u32| p.entries.iter().find(|e| e.pc == name).expect("entry");
+        let call = |heap: &mut machine::Heap, pc: u32, args: &[u64]| {
+            let marker = 0u8;
+            let mut ctx = NativeCtx::new((std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET));
+            ctx.heap = heap;
+            // SAFETY: compiled for `args.len()` argument words.
+            unsafe { (entry(pc).entry)(&mut ctx, args.as_ptr()) };
+            assert_eq!(ctx.bail, 0);
+        };
+        call(&mut heap, 0, &[obj.addr(), 0]);
+        assert_eq!(obj.rc_count(), 3, "the guarded decrement did not run");
+        call(&mut heap, 0, &[obj.addr(), 1]);
+        assert_eq!(obj.rc_count(), 4);
+        let live = heap.live_object_count();
+        for _ in 0..3 {
+            call(&mut heap, 1, &[obj.addr()]);
+        }
+        assert_eq!((obj.rc_count(), heap.live_object_count()), (1, live));
+        call(&mut heap, 1, &[obj.addr()]);
+        assert_eq!(heap.live_object_count(), live - 1, "the last owner's decrement frees it");
     }
 
     /// `f(v0)`: pin `v0`, share it, pin it again and unpin twice, the

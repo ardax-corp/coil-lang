@@ -377,6 +377,14 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::Cow { dest, src, field: Some(i), .. } => write!(f, "{dest} = cow.unique_field {src} {i}"),
         MirInst::CowPin { dest, src } => write!(f, "{dest} = cow.pin {src}"),
         MirInst::CowUnpin { dest, src, saved } => write!(f, "{dest} = cow.unpin {src}, {saved}"),
+        MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+            let op = if matches!(inst, MirInst::RcInc { .. }) { "rc.inc" } else { "rc.dec" };
+            write!(f, "{dest} = {op} {src}")?;
+            match guard {
+                Some(g) => write!(f, " if {g}"),
+                None => Ok(()),
+            }
+        }
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             write!(f, "{dest} = {} {lhs}, {rhs}", if *ne { "strne" } else { "streq" })
         }
@@ -1047,6 +1055,18 @@ impl<'a> Parser<'a> {
             let saved = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::CowUnpin { dest, src, saved });
+        }
+        if op == "rc.inc" || op == "rc.dec" {
+            let src = self.value()?;
+            // The guard is on the op's own line.
+            let guard = if self.starts(" if ") {
+                self.i += 4;
+                Some(self.value()?)
+            } else {
+                None
+            };
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(if op == "rc.inc" { MirInst::RcInc { dest, src, guard } } else { MirInst::RcDec { dest, src, guard } });
         }
         if op == "cow.unique_field" {
             let src = self.value()?;

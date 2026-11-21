@@ -211,6 +211,9 @@ const I_COW_PIN: u8 = 49;
 const I_COW_UNPIN: u8 = 50;
 // Format 19 (archive 8.3).
 const I_EXTERN_CALL: u8 = 51;
+/// Reference count ops (format 21 on, reference counts plan step 3).
+const I_RC_INC: u8 = 52;
+const I_RC_DEC: u8 = 53;
 
 const FFI_OPS: [MirFfiOp; 4] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke, MirFfiOp::Addr];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -572,6 +575,12 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*dest);
             w.v(*src);
             w.v(*saved);
+        }
+        MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+            w.u8(if matches!(inst, MirInst::RcInc { .. }) { I_RC_INC } else { I_RC_DEC });
+            w.v(*dest);
+            w.v(*src);
+            w.opt_v(*guard);
         }
         MirInst::Alloc { dest, kind, elems, kinds } => {
             w.u8(I_ALLOC);
@@ -1239,6 +1248,8 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         }
         I_COW_PIN if r.pins => MirInst::CowPin { dest: r.v()?, src: r.v()? },
         I_COW_UNPIN if r.pins => MirInst::CowUnpin { dest: r.v()?, src: r.v()?, saved: r.v()? },
+        I_RC_INC => MirInst::RcInc { dest: r.v()?, src: r.v()?, guard: r.opt_v()? },
+        I_RC_DEC => MirInst::RcDec { dest: r.v()?, src: r.v()?, guard: r.opt_v()? },
         I_RESUME => MirInst::ResumeCoro { dest: r.v()?, handle: r.v()?, send: r.opt_v()? },
         I_DONE => MirInst::DoneCoro { dest: r.v()?, handle: r.v()? },
         I_YIELD => MirInst::Yield { dest: r.v()?, value: r.v()?, from: r.u8()? != 0, receive: r.u8()? != 0 },
@@ -1439,6 +1450,30 @@ mod tests {
         assert_eq!(bytes[MAGIC.len()], FORMAT);
         let (back, _) = decode(&bytes).expect("decode");
         assert_eq!(back[0].mir, b.mir);
+    }
+
+    /// `f` with reference count ops, guarded and not: `v3 = rc.inc v0`,
+    /// `v5 = rc.dec v0 if v4` (and the verifier takes them).
+    #[test]
+    fn the_reference_count_ops_come_back() {
+        let mut b = body();
+        b.mir.types.extend([MirTy::Bool, MirTy::Bool, MirTy::Bool]);
+        b.mir.types[0] = MirTy::HeapRef;
+        let insts = &mut b.mir.blocks[0].insts;
+        insts.insert(1, MirInst::RcInc { dest: ValueId(3), src: ValueId(0), guard: None });
+        insts.insert(2, MirInst::Const { dest: ValueId(4), c: MirConst::Bool(true) });
+        insts.insert(3, MirInst::RcDec { dest: ValueId(5), src: ValueId(0), guard: Some(ValueId(4)) });
+        let bytes = bytes(&b);
+        let (back, _) = decode(&bytes).expect("decode");
+        assert_eq!(back[0].mir, b.mir);
+        let text = b.mir.to_string();
+        assert!(text.contains("rc.dec v0 if v4") || text.contains("rc.dec %0 if %4"), "{text}");
+        assert_eq!(crate::mir::parse_func(&text).expect(&text).blocks[0].insts[1..4], b.mir.blocks[0].insts[1..4]);
+        // The verifier takes them, and a guard is a `bool`.
+        let ok = "func @f(v0: heapref, v1: bool) -> heapref {\nbb0:\n    v2 = rc.inc v0\n    v3 = rc.dec v0 if v1\n    return v0\n}\n";
+        crate::mir::parse_func(ok).expect(ok).verify().expect("verify");
+        let bad = ok.replace("v1: bool", "v1: i64");
+        assert!(crate::mir::parse_func(&bad).expect(&bad).verify().is_err());
     }
 
     /// `f` with extern calls: `v3 = extern sum v0, v0, v0, v0` on a struct

@@ -791,6 +791,27 @@ pub enum MirInst {
         src: ValueId,
         saved: ValueId,
     },
+    /// Reference count increment (reference counts plan step 3, archive
+    /// 8.5): `src`'s object gains an owner. A word that names no object
+    /// (`0`, a scalar, an interned or immortal object) is left alone; a
+    /// `Result` niche word's `Err` bit is cleared first. With `guard` (a
+    /// `bool`: a shared generic body's bit of its `kinds` word, a pair's
+    /// tag test) the op applies only when it is `true`, for a word that may
+    /// be a scalar or an object. Dest is a `bool` unit token.
+    RcInc {
+        dest: ValueId,
+        src: ValueId,
+        guard: Option<ValueId>,
+    },
+    /// Reference count decrement: `src`'s object loses an owner, and when
+    /// that was its last, the runtime releases it (`machine::Heap::rc_drop`:
+    /// what it names loses an owner in turn, then it is freed). The same
+    /// words and `guard` as [`Self::RcInc`]. Dest is a `bool` unit token.
+    RcDec {
+        dest: ValueId,
+        src: ValueId,
+        guard: Option<ValueId>,
+    },
     /// String `==` (`!=` when `ne`): structural equality, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
     /// [`MirTy::HeapRef`] words. Also a user type's `==` with no `Eq`
@@ -1225,6 +1246,8 @@ impl MirInst {
             | Self::Cow { dest, .. }
             | Self::CowPin { dest, .. }
             | Self::CowUnpin { dest, .. }
+            | Self::RcInc { dest, .. }
+            | Self::RcDec { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
             | Self::VecLoop { dest, .. } => dest,
@@ -1278,6 +1301,8 @@ impl MirInst {
             | Self::Cow { dest, .. }
             | Self::CowPin { dest, .. }
             | Self::CowUnpin { dest, .. }
+            | Self::RcInc { dest, .. }
+            | Self::RcDec { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
             | Self::VecLoop { dest, .. } => dest,
@@ -1343,6 +1368,7 @@ impl MirInst {
             Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::CowUnpin { src, saved, .. } => vec![*src, *saved],
+            Self::RcInc { src, guard, .. } | Self::RcDec { src, guard, .. } => std::iter::once(*src).chain(*guard).collect(),
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -1447,6 +1473,12 @@ impl MirInst {
             Self::CowUnpin { src, saved, .. } => {
                 *src = map(*src);
                 *saved = map(*saved);
+            }
+            Self::RcInc { src, guard, .. } | Self::RcDec { src, guard, .. } => {
+                *src = map(*src);
+                if let Some(g) = guard {
+                    *g = map(*g);
+                }
             }
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);

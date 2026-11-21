@@ -337,3 +337,74 @@ pub(crate) fn prepare_with(bodies: Vec<NativeBody>, body_ids: &HashMap<String, u
 pub(crate) fn reg(v: ValueId) -> usize {
     v.index()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use compiler::native_mir::{MirBlock, MirTy};
+    use machine::native::{NATIVE_STACK_BUDGET, NativeCtx};
+
+    /// `f(v0, v1)`: two `rc.inc v0`, then `rc.dec v0 if v1`; returns `v1`.
+    /// `g(v0)`: `rc.dec v0`.
+    fn counting_bodies() -> Vec<NativeBody> {
+        let body = |name: &str, label: u32, ops: Vec<MirInst>, params: u32| {
+            let mut f = MirFunc::new(name);
+            f.blocks.clear();
+            f.types = vec![MirTy::HeapRef];
+            f.types.resize(params as usize + ops.len(), MirTy::Bool);
+            f.params = (0..params).map(ValueId).collect();
+            f.ret_ty = Some(MirTy::Bool);
+            let mut b = MirBlock::new(BlockId(0));
+            b.insts = ops;
+            b.term = Some(Terminator::Return { lo: Some(ValueId(params - 1)), hi: None });
+            f.blocks.push(b);
+            NativeBody { name: name.into(), entry: Some(Label(label)), mir: f }
+        };
+        let f = vec![
+            MirInst::RcInc { dest: ValueId(2), src: ValueId(0), guard: None },
+            MirInst::RcInc { dest: ValueId(3), src: ValueId(0), guard: None },
+            MirInst::RcDec { dest: ValueId(4), src: ValueId(0), guard: Some(ValueId(1)) },
+        ];
+        let g = vec![MirInst::RcDec { dest: ValueId(1), src: ValueId(0), guard: None }];
+        vec![body("f", 0, f, 2), body("g", 1, g, 1)]
+    }
+
+    /// The reference count ops (plan step 3), as `coil_native`'s test of
+    /// the same bodies: an increment, a guarded decrement that applies only
+    /// when its guard is true, and a decrement of the last owner that
+    /// frees the object.
+    #[test]
+    fn the_count_ops_move_the_count_and_the_last_one_frees() {
+        let mut heap = machine::Heap::default();
+        heap.set_rc_counting(true);
+        heap.set_rc_frees(true);
+        let (obj, _) = heap.alloc(machine::ObjString::from("counted"), machine::Object::String);
+        obj.rc_inc();
+        let pcs = HashMap::from([("f".to_string(), 0u32), ("g".to_string(), 1u32)]);
+        let p = prepare(counting_bodies(), &pcs);
+        assert!(p.refused.is_empty(), "refused: {:?}", p.refused);
+        let call = |heap: &mut machine::Heap, pc: u32, args: &[u64]| {
+            let e = p.entries.iter().find(|e| e.pc == pc).expect("entry");
+            let marker = 0u8;
+            let mut ctx = NativeCtx::new((std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET));
+            ctx.heap = heap;
+            ctx.entry_data = e.data as u64;
+            let mut fuel = u64::MAX;
+            ctx.fuel = &mut fuel;
+            // SAFETY: `e` runs a body of `args.len()` parameters.
+            unsafe { (e.entry)(&mut ctx, args.as_ptr()) };
+            assert_eq!(ctx.bail, 0);
+        };
+        call(&mut heap, 0, &[obj.addr(), 0]);
+        assert_eq!(obj.rc_count(), 3, "the guarded decrement did not run");
+        call(&mut heap, 0, &[obj.addr(), 1]);
+        assert_eq!(obj.rc_count(), 4);
+        let live = heap.live_object_count();
+        for _ in 0..3 {
+            call(&mut heap, 1, &[obj.addr()]);
+        }
+        assert_eq!((obj.rc_count(), heap.live_object_count()), (1, live));
+        call(&mut heap, 1, &[obj.addr()]);
+        assert_eq!(heap.live_object_count(), live - 1, "the last owner's decrement frees it");
+    }
+}
