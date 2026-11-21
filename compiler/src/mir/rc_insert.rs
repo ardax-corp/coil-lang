@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::frame_words::{barrier_pairs, heap_word, opaque_words, pair_words, pointer_words, ty_of};
 use super::func::{MirBlock, MirFunc, is_tail_call_inst};
-use super::inst::{BlockId, MirCastKind, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, MirBinOp, MirCastKind, MirInst, Terminator, ValueId};
 use super::ty::MirTy;
 
 /// Whether this compile inserts the ops: a run that keeps counts
@@ -66,6 +66,9 @@ struct Pass {
     borrowed: HashSet<ValueId>,
     /// Owned roots whose definition already owns its word.
     owned_at_def: HashSet<ValueId>,
+    /// Words that are numbers by their definition (a constant, arithmetic,
+    /// a comparison): never an object, whatever their type.
+    scalar: HashSet<ValueId>,
 }
 
 /// The value an alias-defining instruction names the same object as.
@@ -73,7 +76,8 @@ fn alias_source(inst: &MirInst, counted: &dyn Fn(ValueId) -> bool) -> Option<Val
     match inst {
         MirInst::Cast { kind: MirCastKind::Word, src, .. } | MirInst::Unary { src, .. } => counted(*src).then_some(*src),
         MirInst::Cast { src, .. } => counted(*src).then_some(*src),
-        MirInst::Bin { lhs, rhs, .. } => [*lhs, *rhs].into_iter().find(|v| counted(*v)),
+        // A tag bit set or cleared keeps the object; arithmetic makes a number.
+        MirInst::Bin { op: MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor, lhs, rhs, .. } => [*lhs, *rhs].into_iter().find(|v| counted(*v)),
         MirInst::HeapFieldStore { value, .. } | MirInst::StoreIndex { value, .. } => counted(*value).then_some(*value),
         MirInst::ArrayPush { array, .. } | MirInst::LanePush { array, .. } | MirInst::LanesToWords { array, .. } => counted(*array).then_some(*array),
         _ => None,
@@ -200,7 +204,25 @@ impl Pass {
                 owned_at_def.insert(p);
             }
         }
-        Self { base, borrowed, owned_at_def }
+        let scalar = func
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|i| match i {
+                MirInst::Const { .. } => true,
+                MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
+                _ => false,
+            })
+            .map(MirInst::dest)
+            .filter(|d| !base.contains_key(d))
+            .collect();
+        Self { base, borrowed, owned_at_def, scalar }
+    }
+
+    /// Whether `v`, which is no counted word, may still name an object the
+    /// types do not say (an `int` or untyped word that is no number).
+    fn maybe_object(&self, func: &MirFunc, v: ValueId) -> bool {
+        matches!(ty_of(func, v), MirTy::I64 | MirTy::Value) && !self.scalar.contains(&v)
     }
 
     fn root(&self, v: ValueId) -> Option<ValueId> {
@@ -352,7 +374,7 @@ impl Pass {
                 // flag's slot may hold no word yet: its old one is not
                 // released, a leak).
                 if let MirInst::StoreStatic { value, .. } | MirInst::HomeStore { value, .. } = inst
-                    && (self.root(*value).is_some() || matches!(ty_of(func, *value), MirTy::I64 | MirTy::Value))
+                    && (self.root(*value).is_some() || self.maybe_object(func, *value))
                 {
                     ops.insert(0, MirInst::RcInc { dest: tok(&mut new_types), src: *value, guard: None });
                     if let MirInst::StoreStatic { slot, value, .. } = inst {
@@ -379,7 +401,7 @@ impl Pass {
                             Some(_) => before_term[bi].push(MirInst::RcInc { dest: tok(&mut new_types), src: v, guard: None }),
                             None => {
                                 let counted = self.root(v).is_some();
-                                if counted || matches!(ty_of(func, v), MirTy::I64 | MirTy::Value) {
+                                if counted || self.maybe_object(func, v) {
                                     before_term[bi].push(MirInst::RcInc { dest: tok(&mut new_types), src: v, guard: None });
                                 }
                             }
@@ -417,12 +439,16 @@ impl Pass {
                         // Each φ arg: moved when its root dies on this edge
                         // (once), else incremented.
                         let mut moved: HashSet<ValueId> = HashSet::new();
-                        for (v, _) in phi_args_from(sb, b) {
+                        for (v, phi) in phi_args_from(sb, b) {
+                            // A φ that is no root (a number) owns nothing.
+                            if self.root(phi) != Some(phi) {
+                                continue;
+                            }
                             match self.owned(v) {
                                 // A bound payload was incremented above when it
                                 // flows on: the φ takes that owner.
                                 Some(r) if !into.contains(&r) && moved.insert(r) => {}
-                                _ if self.root(v).is_none() && !matches!(ty_of(func, v), MirTy::I64 | MirTy::Value) => {}
+                                _ if self.root(v).is_none() && !self.maybe_object(func, v) => {}
                                 _ => ops.push(MirInst::RcInc { dest: tok(&mut new_types), src: v, guard: None }),
                             }
                         }
