@@ -64,7 +64,7 @@ pub use reporting::{ErrorCode, Label, Message, MessageKind};
 pub use typechecking::env::{Env, Frame};
 pub use typechecking::pretty::format_ty_for_diag;
 pub use typechecking::{
-    BuiltinExport, CStructDef, CallbackSigDef, Checker, DefId, DefInterner, DefKind, FfiBuiltin,
+    BuiltinExport, CStructDef, Checker, DefId, DefInterner, DefKind, FfiBuiltin,
     ForInCounted, ForInInfo, ForInKind, ModuleId, Ty, VirtualModules,
 };
 

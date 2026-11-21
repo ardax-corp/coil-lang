@@ -196,6 +196,7 @@ impl<'a> Driver<'a> {
         free: Driver::host_free,
         ffi: Driver::host_ffi,
         ffi_struct: Driver::host_ffi_struct,
+        callback: Driver::host_callback,
         invoke: Driver::host_invoke,
     };
 
@@ -873,11 +874,7 @@ impl<'a> Driver<'a> {
                 let tags = (operand & (1 << 16) != 0).then(|| args.get(2 + n..).unwrap_or_default().iter().map(|v| crate::runtime_ffi::ffi_type_from_value(v, &d.rt.heap)).collect::<Vec<_>>());
                 let out = d.rooted(ctx, |d| {
                     let me = std::ptr::from_mut(d).cast::<c_void>();
-                    let layouts = Arc::clone(&d.rt.ffi.struct_layouts);
-                    let mut callback = |offset: u32| {
-                        let cif = crate::ffi::callback_cif(&[crate::memory::FfiType::Int], crate::memory::FfiType::Int, &layouts)?;
-                        crate::ffi::make_int_callback(me, offset, Driver::ffi_callback, cif)
-                    };
+                    let mut callback = |offset: u32, aux: u32| crate::ffi::make_callback(me, offset, aux, Driver::ffi_callback);
                     d.rt.ffi_call(lib, func, call_args, tags.as_deref(), &mut callback)
                 });
                 *panicked = d.panicked;
@@ -899,11 +896,7 @@ impl<'a> Driver<'a> {
                 d.rooted(ctx, |d| {
                     // A callback the C function makes runs that body natively.
                     let me = std::ptr::from_mut(d).cast::<c_void>();
-                    let layouts = Arc::clone(&d.rt.ffi.struct_layouts);
-                    let mut callback = |offset: u32| {
-                        let cif = crate::ffi::callback_cif(&[crate::memory::FfiType::Int], crate::memory::FfiType::Int, &layouts)?;
-                        crate::ffi::make_int_callback(me, offset, Driver::ffi_callback, cif)
-                    };
+                    let mut callback = |offset: u32, aux: u32| crate::ffi::make_callback(me, offset, aux, Driver::ffi_callback);
                     d.rt.ffi_invoke(call.lib_addr, call.function_id, &call.args, call.arg_types.as_deref(), &mut callback)
                 })
             }
@@ -931,13 +924,74 @@ impl<'a> Driver<'a> {
         }
     }
 
-    /// An FFI callback into the body at `offset` on `len` words at `args`.
-    unsafe fn ffi_callback(raw: *mut c_void, offset: u32, args: *const Value, len: usize) -> Value {
+    /// [`NativeHost::callback`]: a direct extern call's start and end, and a
+    /// C callback in it, which runs rooted at the call's context.
+    unsafe fn host_callback(raw: *mut c_void, ctx: *mut NativeCtx, op: u8, a: u64, b: u64, words: *const u64, n: usize) -> u64 {
+        // SAFETY: native code passes back the driver it was given.
+        let d = unsafe { Self::from_raw(raw) };
+        match op {
+            crate::native::CB_ENTER => u64::from(std::mem::replace(&mut d.panicked, false)),
+            crate::native::CB_LEAVE => {
+                let panicked = d.panicked;
+                d.panicked |= a != 0;
+                u64::from(panicked)
+            }
+            _ => {
+                // SAFETY: the thunk passes its `n` argument words.
+                let words = unsafe { std::slice::from_raw_parts(words, n) };
+                d.rooted(ctx, |d| d.callback(a as u32, b as u32, words))
+            }
+        }
+    }
+
+    /// An FFI callback into the body at `offset`, of callback signature
+    /// `aux`, on the `len` C argument words at `args`
+    /// ([`crate::ffi::ProgramCallFn`]): its C result word. A panic in it
+    /// stays on the driver, which reports it when the C call returns.
+    unsafe fn ffi_callback(raw: *mut c_void, offset: u32, aux: u32, args: *const u64, len: usize) -> u64 {
         // SAFETY: the driver made the callback and runs the C call.
         let d = unsafe { Self::from_raw(raw) };
-        // SAFETY: libffi passes the callback's argument words.
-        let args = unsafe { std::slice::from_raw_parts(args, len) };
-        d.call(offset as usize, args).map_or_else(Value::default, |(lo, _)| Value::from(lo))
+        // SAFETY: the trampoline passes the callback's argument words.
+        let words = unsafe { std::slice::from_raw_parts(args, len) };
+        d.callback(offset, aux, words)
+    }
+
+    /// [`Self::ffi_callback`]'s call: C's words made coil values (a C
+    /// string a new string), the call, and its result as C's word.
+    pub(crate) fn callback(&mut self, offset: u32, aux: u32, words: &[u64]) -> u64 {
+        use common::tag;
+        if self.panicked {
+            // An earlier callback of this C call panicked: run no more coil.
+            return 0;
+        }
+        let Some((params, ret)) = common::decode_callback_sig(aux) else {
+            return 0;
+        };
+        let mut args = [Value::default(); common::CALLBACK_MAX_PARAMS + 1];
+        for (i, (&t, &w)) in params.iter().zip(words).enumerate() {
+            args[i] = if t == tag::STRING {
+                let s = if w == 0 {
+                    std::borrow::Cow::Borrowed("")
+                } else {
+                    // SAFETY: C passes a NUL-terminated string for this parameter.
+                    unsafe { std::ffi::CStr::from_ptr(w as *const std::ffi::c_char) }.to_string_lossy()
+                };
+                let (obj, _) = self.rt.heap.get_mut().alloc(crate::memory::ObjString::from(s.as_ref()), crate::memory::Object::String);
+                Value::from(obj.addr())
+            } else {
+                Value::from(w as i64)
+            };
+        }
+        // `fn() -> T` takes the unit word.
+        let n = params.len().max(1);
+        let Some((lo, _)) = self.call(offset as usize, &args[..n]) else {
+            return 0;
+        };
+        match ret {
+            tag::VOID => 0,
+            tag::BOOL => u64::from(lo != 0),
+            _ => lo,
+        }
     }
 
     unsafe fn host_invoke(raw: *mut c_void, ctx: *mut NativeCtx, id: u64, layout: u64, args: &[Value]) -> Option<Invoked> {

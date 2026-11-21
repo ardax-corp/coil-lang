@@ -21,11 +21,11 @@ pub use call::{
     prepare_variadic_cif, promote_variadic_arg_type, resolve_symbol, unpack_struct_from,
 };
 #[cfg(not(target_family = "wasm"))]
-pub use closure::{OwnedClosure, ProgramCallFn, callback_cif, make_int_callback};
+pub use closure::{OwnedClosure, ProgramCallFn, make_callback};
 #[cfg(target_family = "wasm")]
 pub use nolib::{
-    InvokeContext, Library, OwnedClosure, PreparedCall, ProgramCallFn, callback_cif,
-    invoke_via_libffi, make_int_callback, pack_struct_into, prepare_cif, prepare_cif_for_symbol,
+    InvokeContext, Library, OwnedClosure, PreparedCall, ProgramCallFn,
+    invoke_via_libffi, make_callback, pack_struct_into, prepare_cif, prepare_cif_for_symbol,
     prepare_variadic_cif, promote_variadic_arg_type, resolve_symbol, unpack_struct_from,
 };
 pub use error::{FfiErrorKindTag, alloc_ffi_error, alloc_ffi_error_kind, alloc_result_ffi_err};
@@ -52,11 +52,12 @@ pub fn register_on_library(
 ) -> Result<usize, FfiError> {
     let prepared = match obj_lib.static_symbols {
         // A library linked into the executable: the address it recorded.
+        // A symbol no `extern` block names is looked up in the process,
+        // which holds a library linked by name.
         #[cfg(not(target_family = "wasm"))]
-        Some(linked) => {
-            let addr = *linked.get(&sig.name).ok_or_else(|| FfiError::SymbolNotFound { name: sig.name.clone() })?;
+        Some(linked) if linked.contains_key(&sig.name) => {
             let mut prepared = prepare_cif(&sig, layouts)?;
-            prepared.addr = libffi::middle::CodePtr::from_ptr(addr as *mut std::ffi::c_void);
+            prepared.addr = libffi::middle::CodePtr::from_ptr(linked[&sig.name] as *mut std::ffi::c_void);
             prepared
         }
         _ => prepare_cif_for_symbol(&sig, &obj_lib.library, &sig.name, layouts)?,

@@ -306,3 +306,32 @@ double va_scaled(double k, int64_t n, ...) {
     va_end(args);
     return total * k;
 }
+
+/// Callbacks of each kind: C calls the coil function it is given.
+double apply_fcb(double (*cb)(double, int64_t), double x, int64_t k) {
+    return cb(x, k);
+}
+
+int64_t count_if(_Bool (*pred)(int64_t), int64_t n) {
+    int64_t count = 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (pred(i)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+int64_t name_len(int64_t (*cb)(const char *)) {
+    return cb("callback");
+}
+
+int64_t call0(int64_t (*cb)(void)) {
+    return cb() + 1;
+}
+
+void each_up_to(void (*cb)(int64_t), int64_t n) {
+    for (int64_t i = 1; i <= n; i++) {
+        cb(i);
+    }
+}

@@ -111,6 +111,8 @@ pub(crate) struct FfiState {
     pub(crate) struct_layouts: Arc<Vec<crate::CStructLayout>>,
     /// Keeps libffi callback trampolines alive (ties lifetime to the run).
     pub(crate) closures: Vec<crate::ffi::OwnedClosure>,
+    /// Each closure's index by its function offset and callback signature.
+    pub(crate) closure_of: std::collections::HashMap<(u32, u32), usize>,
 }
 
 impl Runtime {
@@ -157,6 +159,7 @@ impl Runtime {
         self.sched = None;
         self.ffi.userland_libraries.clear();
         self.ffi.closures.clear();
+        self.ffi.closure_of.clear();
         // Drop PCs belong to the job's program: a reused worker may load a
         // different one next, where the same `type_id` names another type.
         self.finalizer_by_type.clear();

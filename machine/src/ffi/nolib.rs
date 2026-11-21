@@ -121,22 +121,9 @@ impl OwnedClosure {
 }
 
 /// Type-erased reentrant call into the running program (set per closure).
-pub type ProgramCallFn = unsafe fn(*mut c_void, u32, *const Value, usize) -> Value;
+pub type ProgramCallFn = unsafe fn(*mut c_void, u32, u32, *const u64, usize) -> u64;
 
-pub fn callback_cif(
-    _args: &[FfiType],
-    _ret: FfiType,
-    _layouts: &[CStructLayout],
-) -> Result<Cif, FfiError> {
-    Err(unsupported())
-}
-
-pub fn make_int_callback(
-    _program: *mut c_void,
-    _fn_offset: u32,
-    _call_fn: ProgramCallFn,
-    _cif: Cif,
-) -> Result<OwnedClosure, FfiError> {
+pub fn make_callback(_program: *mut c_void, _fn_offset: u32, _aux: u32, _call_fn: ProgramCallFn) -> Result<OwnedClosure, FfiError> {
     Err(unsupported())
 }
 

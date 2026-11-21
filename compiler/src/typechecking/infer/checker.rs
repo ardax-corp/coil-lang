@@ -261,7 +261,6 @@ impl Checker {
             current_send_ty: None,
             yield_receives_used: false,
             c_structs: Vec::new(),
-            callback_sigs: Vec::new(),
             ffi_fn_ret_tys: HashMap::new(),
             ffi_fn_ret_owner: HashMap::new(),
             ffi_prescan_fn: None,
@@ -282,6 +281,7 @@ impl Checker {
             extern_variadic: HashSet::new(),
             extern_variadic_nfixed: HashMap::new(),
             extern_const_bytes: HashMap::new(),
+            extern_callbacks: HashMap::new(),
             variadic_call_arg_tags: HashMap::new(),
             fn_result_mode: None,
             in_test_case: false,
@@ -1782,7 +1782,6 @@ impl Checker {
         self.static_method_values_by_span.clear();
         self.bare_patterns_by_span.clear();
         self.c_structs.clear();
-        self.callback_sigs.clear();
         self.ffi_fn_ret_tys.clear();
         self.ffi_fn_ret_owner.clear();
         self.ffi_prescan_fn = None;
@@ -1803,6 +1802,7 @@ impl Checker {
         self.extern_variadic.clear();
         self.extern_variadic_nfixed.clear();
         self.extern_const_bytes.clear();
+        self.extern_callbacks.clear();
         self.ffi_exec_names.clear();
         self.variadic_call_arg_tags.clear();
         self.pending_exhaustive.clear();
@@ -4269,6 +4269,34 @@ impl Checker {
                 .any(|&(nfixed, variadic, i)| i == index && (nfixed == argc || (variadic && argc >= nfixed)))
     }
 
+    /// Whether parameter `index` of `extern` `name` is a callback.
+    fn extern_callback_param(&self, name: Option<&str>, index: usize) -> bool {
+        name.and_then(|n| self.extern_callbacks.get(n)).is_some_and(|ps| ps.contains(&index))
+    }
+
+    /// A callback argument names a top-level function: C calls its entry,
+    /// and a closure or a local has none it could keep.
+    fn check_extern_callback_arg(&mut self, arg: Option<&Output>, range: &Range<usize>) {
+        let named_fn = match arg.map(|a| a.1.as_ref()) {
+            // A local of the same name binds another scheme than the
+            // function's.
+            Some(Expression::Identifier(n)) => self.local_defs.get(*n).is_some_and(|&d| {
+                self.def_interner.info(d).is_some_and(|info| info.kind == crate::typechecking::DefKind::Fn)
+                    && self.schemes_by_def.get(&d).is_none_or(|s| self.env.lookup(n) == Some(s))
+            }),
+            _ => false,
+        };
+        if !named_fn {
+            let span = arg.map_or_else(|| range.clone(), |a| a.0.into_range());
+            let _ = self.error_with_help(
+                ErrorCode::InvalidFfiType,
+                "A C callback must name a top-level function".to_string(),
+                span,
+                Some("C keeps only a function pointer: pass a `fn` declared at the top level, not a closure, a lambda or a local".to_string()),
+            );
+        }
+    }
+
     #[inline(never)]
     fn infer_extern_block(
         &mut self,
@@ -4309,6 +4337,19 @@ impl Checker {
                 if !const_bytes.is_empty() {
                     let entry = self.extern_const_bytes.entry(decl.name.to_string()).or_default();
                     entry.extend(const_bytes.into_iter().map(|i| (nfixed, decl.variadic, i)));
+                }
+                let callbacks: Vec<usize> = items
+                    .iter()
+                    .filter_map(|item| match item.1.as_ref() {
+                        Expression::Argument { ty: Some(t), .. } => Some(t),
+                        _ => None,
+                    })
+                    .enumerate()
+                    .filter(|(_, t)| matches!(t.1.as_ref(), Expression::TypeFn { .. }))
+                    .map(|(i, _)| i)
+                    .collect();
+                if !callbacks.is_empty() {
+                    self.extern_callbacks.insert(decl.name.to_string(), callbacks);
                 }
             }
             let ret_ty = decl
@@ -9256,6 +9297,9 @@ impl Checker {
                                 arg_exprs.and_then(|args| args.get(i)),
                                 &range,
                             );
+                        } else if extern_call && self.extern_callback_param(name, i) {
+                            self.check_extern_callback_arg(arg_exprs.and_then(|args| args.get(i)), &range);
+                            self.coerce_or_unify(param.as_ref(), arg, arg_exprs.and_then(|args| args.get(i)), &range, "function argument");
                         } else if extern_call && self.extern_const_bytes_string(name, arg_tys.len(), i, arg) {
                             // A `ConstBytes` view of a string's bytes (#1665).
                         } else if let Some(elem) = extern_call
@@ -14376,6 +14420,26 @@ impl Checker {
             // `Vec<T>` is the same heap array a `[T; N]` passes (#890).
             Expression::TypeApp { name, args } if *name == "Vec" && args.len() == 1 => Some((tag::PTR, 0)),
             Expression::Tuple(_) => Some((tag::PTR, 0)),
+            // A C function pointer to a coil function of this type.
+            Expression::TypeFn { params, ret, .. } => {
+                let params = match params.1.as_ref() {
+                    Expression::Fragment(items) => items
+                        .iter()
+                        .map(|item| match item.1.as_ref() {
+                            Expression::Argument { ty: Some(t), is_rest: false, .. } => self.ffi_type_tag_from_output(t).map(|(t, _)| t),
+                            Expression::Argument { .. } => None,
+                            _ => self.ffi_type_tag_from_output(item).map(|(t, _)| t),
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                    _ => vec![self.ffi_type_tag_from_output(params)?.0],
+                };
+                let ret = match ret.1.as_ref() {
+                    Expression::Tuple(items) if items.is_empty() => tag::VOID,
+                    Expression::Type(n) | Expression::Identifier(n) if *n == UNIT => tag::VOID,
+                    _ => self.ffi_type_tag_from_output(ret)?.0,
+                };
+                Some((tag::CALLBACK, common::encode_callback_sig(&params, ret)?))
+            }
             _ => None,
         }
     }
@@ -14447,10 +14511,6 @@ impl Checker {
 
     pub fn c_structs(&self) -> &[CStructDef] {
         &self.c_structs
-    }
-
-    pub fn callback_sigs(&self) -> &[CallbackSigDef] {
-        &self.callback_sigs
     }
 
     /// Emit a diagnostic when `expr` is not a valid FFI type tag.

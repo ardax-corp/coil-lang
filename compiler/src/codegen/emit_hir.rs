@@ -7172,7 +7172,7 @@ impl Compiler {
     /// const or static is a value, not a callback (#868).
     fn hir_ffi_callback(&self, hir: &HirBody, builtin: HirBuiltin, arg: HirId) -> Option<Option<u32>> {
         match (&hir.expr(arg).kind, builtin) {
-            (HirKind::Global { name, .. }, HirBuiltin::FfiDyn(crate::typechecking::FfiBuiltin::Invoke))
+            (HirKind::Global { name, .. }, HirBuiltin::FfiDyn(crate::typechecking::FfiBuiltin::Invoke) | HirBuiltin::Ffi { .. })
                 if !self.hir_global_is_value(hir, arg, name) =>
             {
                 // A shared generic entry takes a `kinds` word no C caller
