@@ -1940,6 +1940,9 @@ impl Heap {
     unsafe fn dealloc_swept(&mut self, object: Object, cur: &mut super::slab::SlotCursor) {
         if self.rc_on {
             self.rc_swept += 1;
+            if rc::rc_swept_shown() {
+                eprintln!("coil rc-swept: {} at {:#x} (count {})", object.kind_name(), object.addr(), object.rc_count());
+            }
         }
         let size = object.size();
         self.counts.alloc_bytes -= size;

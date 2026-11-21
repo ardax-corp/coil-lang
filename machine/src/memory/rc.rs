@@ -51,6 +51,13 @@ fn rc_frees_checked() -> bool {
     *ON.get_or_init(|| rc_frees_asked() && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "check"))
 }
 
+/// `COIL_RC_SWEPT=1` in a check run: the sweep names each object it frees
+/// (what the counts leaked, or a cycle's) on stderr.
+pub(crate) fn rc_swept_shown() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| rc_check_mode() != RcCheckMode::Off && std::env::var_os("COIL_RC_SWEPT").is_some_and(|v| v == "1"))
+}
+
 impl GcHeader {
     #[inline]
     fn inc(&self) {
@@ -361,17 +368,24 @@ impl Heap {
     /// worklist, not recursion). An object the runtime cannot free here
     /// stays, at count zero, for the collector: an interned string, a
     /// handle, a closure or coroutine (their words are frame-shaped), an
-    /// object whose `drop` has not run (step 7), a host root, and every
-    /// object while a collection or a steal epoch is open. Returns how many
-    /// objects it freed.
+    /// object whose `drop` has not run (step 7), and every
+    /// object while a collection or a steal epoch is open. The last
+    /// collection's root buffer is no test: it is stale once that ends, and
+    /// frames count their words. Returns how many objects it freed.
     fn rc_release(&mut self, obj: Object) -> usize {
         if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
+            if rc_swept_shown() {
+                eprintln!("coil rc-swept: release of {} at {:#x} skipped (phase {:?}, epoch {}, lock {})", obj.kind_name(), obj.addr(), self.gc_phase, self.epoch_stw, !self.alloc_lock.is_null());
+            }
             return 0;
         }
         let mut stack = vec![obj];
         let mut n = 0;
         while let Some(obj) = stack.pop() {
             if !self.rc_releasable(obj) {
+                if rc_swept_shown() && obj.rc_count() == 0 {
+                    eprintln!("coil rc-swept: {} at {:#x} not releasable", obj.kind_name(), obj.addr());
+                }
                 continue;
             }
             for addr in self.rc_words(obj) {
@@ -401,7 +415,6 @@ impl Heap {
             && self.early_freeable(obj)
             && !self.pending_drop(obj)
             && obj.rc_count() == 0
-            && !self.gc_roots.contains(&obj.addr())
     }
 
     /// The oracle ([`rc_check_mode`]), between a major mark and its sweep.
