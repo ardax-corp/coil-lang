@@ -2056,7 +2056,12 @@ pub unsafe extern "C" fn coil_native_string(ctx: *mut NativeCtx, idx: u64) -> u6
         return unsafe { bail(ctx) };
     };
     let data = unsafe { &*c.strings.add(idx as usize) };
-    let handle = common::Value::from(heap.intern_str(data).as_ptr() as *mut u8 as u64);
+    let s = heap.intern_str(data);
+    // A program string is constant data: counts leave it to the program's end.
+    if heap.rc_counting() {
+        crate::memory::Object::String(s).rc_set_immortal();
+    }
+    let handle = common::Value::from(s.as_ptr() as *mut u8 as u64);
     // No collection runs during native code, so the cache entry stays
     // valid until the runtime's next sweep clears it, as after `STRING`.
     unsafe { *c.string_cache.add(idx as usize) = handle };

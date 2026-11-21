@@ -394,7 +394,7 @@ impl Heap {
     /// Free `obj`, whose count reached zero: each object its words name
     /// loses an owner, and those that reach zero are released in turn (a
     /// worklist, not recursion). An object the runtime cannot free here
-    /// stays, at count zero, for the collector: an interned string, a
+    /// stays, at count zero, for the collector: a
     /// handle, a coroutine (its words are frame-shaped), an
     /// object whose `drop` has not run (step 7), and every
     /// object while a collection or a steal epoch is open. The last
@@ -429,6 +429,14 @@ impl Heap {
                 self.doomed.push(obj.addr());
                 continue;
             }
+            // An interned string leaves the table first (a program string
+            // is immortal and never gets here).
+            if let Object::String(st) = obj
+                && st.as_ref().hash_set()
+                && self.strings.find(&st.as_ref().data, st.as_ref().hash_code()).is_some_and(|i| i.as_ptr() == st.as_ptr())
+            {
+                self.strings.remove(st);
+            }
             self.freed_early = true;
             // SAFETY: its count is zero: no counted word names it, and
             // frames count theirs once [`Self::rc_frees`] is on.
@@ -441,7 +449,7 @@ impl Heap {
     fn rc_releasable(&self, obj: Object) -> bool {
         // A closure owns its captured and filled words: its allocation
         // counted them ([`Self::rc_inc_slots`]).
-        (matches!(obj, Object::Fn(_)) || matches!(obj, Object::String(_) | Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
+        (matches!(obj, Object::Fn(_) | Object::String(_)) || matches!(obj, Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
             && !self.pending_drop(obj)
             && obj.rc_count() == 0
     }
