@@ -175,7 +175,13 @@ fn run_on(rt: &mut Runtime, job: Job) {
                 let hits = d.rt.take_probes();
                 let steps = (d.rt.steps_charged(), d.rt.step_budget_hit);
                 d.rt.set_step_budget(None);
-                return Ok(crate::reactor::finish_test(d.panicked(), ret, d.rt.heap.get(), test, hits, steps));
+                let out = crate::reactor::finish_test(d.panicked(), ret, d.rt.heap.get(), test, hits, steps);
+                // The case's result (a test body's `Result`) is the job's
+                // to release once it is read (reference counts).
+                if let Some(v) = ret.filter(|_| !d.panicked()) {
+                    d.rt.heap.get_mut().rc_drop(v);
+                }
+                return Ok(out);
             }
             let mut child_args = Vec::with_capacity(args.len());
             for a in args {
