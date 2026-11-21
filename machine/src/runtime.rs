@@ -154,6 +154,15 @@ impl Runtime {
     /// emptied, unmapped when it grew past one slab chunk so RSS cannot
     /// climb with successive jobs.
     pub(crate) fn reset_isolate(&mut self) {
+        // The job's statics owned their words (reference counts): released
+        // with them, so the collection below sweeps only what leaked.
+        if !self.heap.is_borrowed() {
+            let heap = self.heap.owned_mut();
+            for &v in &self.statics {
+                heap.rc_drop(v);
+            }
+            heap.rc_release_pending();
+        }
         self.statics.fill(Value::default());
         self.program_string_cache.fill(Value::default());
         self.sched = None;

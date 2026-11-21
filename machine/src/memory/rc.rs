@@ -311,7 +311,7 @@ impl Heap {
     }
 
     /// Release what [`Self::rc_dec_pending`] left at zero and still is.
-    fn rc_release_pending(&mut self) -> usize {
+    pub(crate) fn rc_release_pending(&mut self) -> usize {
         if self.rc_pending.get_mut().is_empty() || self.gc_phase != GcPhase::Idle {
             return 0;
         }
