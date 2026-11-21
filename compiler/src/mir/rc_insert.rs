@@ -44,12 +44,25 @@ pub fn rc_insert_on() -> bool {
     *ON.get_or_init(|| std::env::var("COIL_RC_CHECK").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
+/// Whether an unwound frame releases what it owned ([`unwind_homes`]):
+/// on unless `COIL_RC_UNWIND=0`.
+fn unwind_homes_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("COIL_RC_UNWIND").map_or(true, |v| v != "0"))
+}
+
 /// Insert the count ops into `func` (and its cleanup pad). Returns how many
 /// it inserted.
 pub fn insert_rc(func: &mut MirFunc) -> usize {
+    insert_rc_in(func, false)
+}
+
+/// [`insert_rc`] of a body, or of a cleanup pad (`pad`: it runs while the
+/// frame unwinds, so it keeps no homes of its own).
+fn insert_rc_in(func: &mut MirFunc, pad: bool) -> usize {
     let mut n = 0;
-    if let Some(pad) = func.cleanup.as_deref_mut() {
-        n += insert_rc(pad);
+    if let Some(p) = func.cleanup.as_deref_mut() {
+        n += insert_rc_in(p, true);
     }
     // Counts free what an early free would (`hir/early_free.rs`): its
     // frees go, or a count would be decremented on a freed object.
@@ -58,15 +71,111 @@ pub fn insert_rc(func: &mut MirFunc) -> usize {
             *inst = MirInst::Const { dest, c: super::inst::MirConst::Bool(false) };
         }
     }
-    n += Pass::new(func).run(func);
-    n - cancel_pairs(func)
+    let pass = Pass::new(func);
+    let (ops, homes) = pass.run(func, !pad);
+    n += ops;
+    n -= cancel_pairs(func, &homes);
+    n + unwind_homes(func, &homes)
+}
+
+/// The owned words a panic may unwind past, each kept in a home of its
+/// own while the frame owns it: a store where it becomes owned, a clear
+/// (`0`) before each decrement and where a φ takes it over. The cleanup
+/// pad (the body's, or a new one) decrements what the homes hold, so an
+/// unwound frame releases what it owned. Returns how many ops it added.
+fn unwind_homes(func: &mut MirFunc, homes: &HashMap<ValueId, u16>) -> usize {
+    if homes.is_empty() {
+        return 0;
+    }
+    let mut added = 0;
+    let mut next = func.types.len() as u32;
+    let mut new_types = Vec::new();
+    let mut fresh = |ty: MirTy, new_types: &mut Vec<MirTy>| {
+        let v = ValueId(next);
+        next += 1;
+        new_types.push(ty);
+        v
+    };
+    // The clears before each decrement.
+    for block in &mut func.blocks {
+        let old = std::mem::take(&mut block.insts);
+        for inst in old {
+            if let MirInst::RcDec { src, guard: None, .. } = inst
+                && let Some(&h) = homes.get(&src)
+            {
+                let zero = fresh(MirTy::I64, &mut new_types);
+                block.insts.push(MirInst::Const { dest: zero, c: super::inst::MirConst::I64(0) });
+                block.insts.push(MirInst::HomeStore { dest: fresh(MirTy::Bool, &mut new_types), home: h, value: zero });
+                added += 2;
+            }
+            block.insts.push(inst);
+        }
+    }
+    func.types.extend(new_types);
+    let mut order: Vec<(u16, ValueId)> = homes.iter().map(|(&v, &h)| (h, v)).collect();
+    order.sort_unstable();
+    for &(h, _) in &order {
+        while func.homes.len() <= usize::from(h) {
+            func.homes.push(MirTy::I64);
+        }
+    }
+    // The pad: each home's word loses this frame's owner, then the unwind
+    // goes on (a body's own pad does that after its `defer`s).
+    let decs = |pad: &mut MirFunc| {
+        let mut ops = Vec::new();
+        for &(h, _) in &order {
+            let v = ValueId(pad.types.len() as u32);
+            pad.types.push(MirTy::I64);
+            let t = ValueId(pad.types.len() as u32);
+            pad.types.push(MirTy::Bool);
+            ops.push(MirInst::HomeLoad { dest: v, home: h });
+            ops.push(MirInst::RcDec { dest: t, src: v, guard: None });
+        }
+        ops
+    };
+    match func.cleanup.as_deref_mut() {
+        Some(pad) => {
+            pad.homes.clone_from(&func.homes);
+            let ops = decs(pad);
+            added += ops.len();
+            let entry = pad.entry.index();
+            let tail = std::mem::take(&mut pad.blocks[entry].insts);
+            pad.blocks[entry].insts = ops;
+            pad.blocks[entry].insts.extend(tail);
+        }
+        None => {
+            let Some(mut pad) = new_pad(func) else { return added };
+            let ops = decs(&mut pad);
+            added += ops.len();
+            let entry = pad.entry.index();
+            let tail = std::mem::take(&mut pad.blocks[entry].insts);
+            pad.blocks[entry].insts = ops;
+            pad.blocks[entry].insts.extend(tail);
+            func.cleanup = Some(Box::new(pad));
+        }
+    }
+    added
+}
+
+/// A cleanup pad that only resumes the unwind, over `func`'s homes.
+fn new_pad(func: &MirFunc) -> Option<MirFunc> {
+    let mut b = super::MirBuilder::new(format!("{}$pad", func.name));
+    b.allow_host_edges = true;
+    b.set_ret_ty(MirTy::I64);
+    for &ty in &func.homes {
+        b.add_home(ty).ok()?;
+    }
+    b.ins_host_invoke(common::UNWIND_RESUME_ID, Vec::new()).ok()?;
+    let zero = b.ins_const(super::inst::MirConst::I64(0)).ok()?;
+    b.ret(Some(zero)).ok()?;
+    b.finish().ok()
 }
 
 /// Cancel an `RcInc` of a word with a later `RcDec` of the same word in its
 /// block when nothing between them can decrement a count: the frame's own
 /// owner is not needed while no object can be released. Returns how many
 /// ops it removed.
-fn cancel_pairs(func: &mut MirFunc) -> usize {
+fn cancel_pairs(func: &mut MirFunc, homes: &HashMap<ValueId, u16>) -> usize {
     let mut removed = 0;
     for block in &mut func.blocks {
         // Field stores into an object allocated earlier in the block, each
@@ -114,7 +223,8 @@ fn cancel_pairs(func: &mut MirFunc) -> usize {
         let mut any = false;
         for i in 0..block.insts.len() {
             let MirInst::RcInc { src, guard: None, .. } = block.insts[i] else { continue };
-            if gone[i] {
+            // A word a home keeps is stored there between the two.
+            if gone[i] || homes.contains_key(&src) {
                 continue;
             }
             let mut later = Vec::new();
@@ -410,11 +520,50 @@ impl Pass {
         live
     }
 
-    fn run(&self, func: &mut MirFunc) -> usize {
+    /// Owned roots live where a panic may unwind the frame (an
+    /// instruction that may trap or call), each with the home
+    /// [`unwind_homes`] keeps it in.
+    fn unwind_roots(&self, func: &MirFunc, live_in: &[HashSet<ValueId>]) -> HashMap<ValueId, u16> {
+        let mut out: HashMap<ValueId, u16> = HashMap::new();
+        if super::frame_words::is_generator(func) {
+            return out;
+        }
+        let storable = |r: ValueId| matches!(ty_of(func, r), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64);
+        let mut found: Vec<ValueId> = Vec::new();
+        for (bi, block) in func.blocks.iter().enumerate() {
+            let mut live = self.live_end(func, BlockId(bi as u32), live_in);
+            for inst in block.insts.iter().rev() {
+                for d in inst.dests() {
+                    if self.root(d) == Some(d) {
+                        live.remove(&d);
+                    }
+                }
+                if !inst.is_phi() {
+                    let used = self.used_roots(inst);
+                    if may_unwind(inst) {
+                        found.extend(live.iter().copied().chain(used.iter().copied()).filter(|&r| storable(r)));
+                    }
+                    live.extend(used);
+                }
+            }
+        }
+        found.sort_unstable();
+        found.dedup();
+        let base = func.homes.len();
+        for (k, r) in found.into_iter().enumerate() {
+            let Ok(h) = u16::try_from(base + k) else { break };
+            out.insert(r, h);
+        }
+        out
+    }
+
+    fn run(&self, func: &mut MirFunc, unwinds: bool) -> (usize, HashMap<ValueId, u16>) {
         if self.base.is_empty() {
-            return 0;
+            return (0, HashMap::new());
         }
         let live_in = self.live_in(func);
+        // `COIL_RC_UNWIND=0`: no homes (an unwound frame leaks what it owned).
+    let homes = if unwinds && unwind_homes_on() { self.unwind_roots(func, &live_in) } else { HashMap::new() };
         let n = func.blocks.len();
         let mut new_types: Vec<MirTy> = Vec::new();
         let mut next = func.types.len() as u32;
@@ -460,6 +609,17 @@ impl Pass {
                     }
                     if !self.owned_at_def.contains(&d) && !inst.is_phi() {
                         ops.push(MirInst::RcInc { dest: tok(&mut new_types), src: d, guard: None });
+                    }
+                    if let Some(&h) = homes.get(&d) {
+                        let w = if ty_of(func, d) == MirTy::I64 {
+                            d
+                        } else {
+                            let w = tok(&mut new_types);
+                            *new_types.last_mut().expect("the word's type") = MirTy::I64;
+                            ops.push(MirInst::Cast { dest: w, kind: MirCastKind::Word, to: MirTy::I64, src: d });
+                            w
+                        };
+                        ops.push(MirInst::HomeStore { dest: tok(&mut new_types), home: h, value: w });
                     }
                     if !live_after[ii].contains(&d) {
                         ops.push(MirInst::RcDec { dest: tok(&mut new_types), src: d, guard: None });
@@ -536,6 +696,17 @@ impl Pass {
                             for &p in payloads {
                                 if self.root(p) == Some(p) && (into.contains(&p) || args.contains(&p)) {
                                     ops.push(MirInst::RcInc { dest: tok(&mut new_types), src: p, guard: None });
+                                    if let Some(&h) = homes.get(&p) {
+                                        let w = if ty_of(func, p) == MirTy::I64 {
+                                            p
+                                        } else {
+                                            let w = tok(&mut new_types);
+                                            *new_types.last_mut().expect("the word's type") = MirTy::I64;
+                                            ops.push(MirInst::Cast { dest: w, kind: MirCastKind::Word, to: MirTy::I64, src: p });
+                                            w
+                                        };
+                                        ops.push(MirInst::HomeStore { dest: tok(&mut new_types), home: h, value: w });
+                                    }
                                 }
                             }
                         }
@@ -550,7 +721,15 @@ impl Pass {
                             match self.owned(v) {
                                 // A bound payload was incremented above when it
                                 // flows on: the φ takes that owner.
-                                Some(r) if !into.contains(&r) && moved.insert(r) => {}
+                                Some(r) if !into.contains(&r) && moved.insert(r) => {
+                                    // The φ's home takes it over.
+                                    if let Some(&h) = homes.get(&r) {
+                                        let zero = tok(&mut new_types);
+                                        *new_types.last_mut().expect("the zero's type") = MirTy::I64;
+                                        ops.push(MirInst::Const { dest: zero, c: super::inst::MirConst::I64(0) });
+                                        ops.push(MirInst::HomeStore { dest: tok(&mut new_types), home: h, value: zero });
+                                    }
+                                }
                                 _ if self.root(v).is_none() && !self.maybe_object(func, v) => {}
                                 _ => ops.push(MirInst::RcInc { dest: tok(&mut new_types), src: v, guard: None }),
                             }
@@ -611,8 +790,36 @@ impl Pass {
         for ((p, s), ops) in edges {
             place_edge(func, p, s, ops);
         }
-        inserted
+        (inserted, homes)
     }
+}
+
+/// Whether a panic may unwind the frame at `inst`: it calls, traps or may
+/// run code that does.
+fn may_unwind(inst: &MirInst) -> bool {
+    !matches!(
+        inst,
+        MirInst::Const { .. }
+            | MirInst::Unary { .. }
+            | MirInst::Cast { .. }
+            | MirInst::Cmp { .. }
+            | MirInst::Phi { .. }
+            | MirInst::ProductLoad { .. }
+            | MirInst::MatchPayload { .. }
+            | MirInst::LoadStatic { .. }
+            | MirInst::StoreStatic { .. }
+            | MirInst::HomeLoad { .. }
+            | MirInst::HomeStore { .. }
+            | MirInst::GcBarrier { .. }
+            | MirInst::Alloc { .. }
+            | MirInst::String { .. }
+            | MirInst::RcInc { .. }
+            | MirInst::RcDec { .. }
+            | MirInst::HeapFieldStore { .. }
+            | MirInst::ArrayPush { .. }
+            | MirInst::LanePush { .. }
+            | MirInst::Cow { unique: false, field: None, .. }
+    ) && !matches!(inst, MirInst::Bin { op, .. } if !matches!(op, MirBinOp::Div | MirBinOp::Rem | MirBinOp::Pow))
 }
 
 /// Move a block's φs back in front of anything inserted between them.
@@ -728,13 +935,13 @@ mod tests {
     fn a_pair_with_no_release_between_cancels() {
         let quiet = "func @f(v0: heapref, v1: heapref, v2: heapref) -> heapref {\nbb0:\n    v3 = rc.inc v1\n    v4 = arraypush v0, v1\n    v5 = rc.dec v2\n    v6 = productload v1, 0\n    v7 = rc.dec v1\n    return v0\n}\n";
         let mut f = crate::mir::parse_func(quiet).expect(quiet);
-        assert_eq!(cancel_pairs(&mut f), 2);
+        assert_eq!(cancel_pairs(&mut f, &HashMap::new()), 2);
         assert_eq!(rc_ops(&f).len(), 1, "{f}");
         let pos = |f: &MirFunc, pred: &dyn Fn(&MirInst) -> bool| f.blocks[0].insts.iter().position(pred).expect("op");
         assert!(pos(&f, &|i| matches!(i, MirInst::RcDec { .. })) > pos(&f, &|i| matches!(i, MirInst::ProductLoad { .. })), "{f}");
         let call = quiet.replace("v6 = productload v1, 0", "v6 = call.heapref 9 v1");
         let mut g = crate::mir::parse_func(&call).expect(&call);
-        assert_eq!(cancel_pairs(&mut g), 0);
+        assert_eq!(cancel_pairs(&mut g, &HashMap::new()), 0);
         assert_eq!(rc_ops(&g).len(), 3, "{g}");
     }
 }
