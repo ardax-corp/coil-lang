@@ -1409,6 +1409,10 @@ fn is_thread(ty: &Ty) -> bool {
 }
 
 /// The element type of an array or `Vec`.
+/// An adapter function value's one capture, the function value it wraps:
+/// a heap reference.
+const ADAPTED_FN_KINDS: common::PackedKinds = common::WORD_POINTER as common::PackedKinds;
+
 fn array_elem(ty: &Ty) -> Option<&Ty> {
     if let Some(data) = crate::typechecking::aggregate_arith::unwrap_matrix_ty(strip_readonly(ty)) {
         return array_elem(data);
@@ -3301,7 +3305,8 @@ impl Lower<'_> {
             if items.len() != 2 {
                 return Err("box pair type".into());
             }
-            let obj = self.b.ins_alloc(MirAllocKind::TUPLE, vec![lo, hi]).map_err(mir)?;
+            let kinds = common::pack_word_kinds(items.iter().map(|t| self.cx.word_kind(t)));
+            let obj = self.b.ins_alloc_kinds(MirAllocKind::TUPLE, vec![lo, hi], kinds).map_err(mir)?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?));
         }
         // A numeric range: its typed object, start and end its fields.
@@ -3525,7 +3530,7 @@ impl Lower<'_> {
             if self.b.value_ty(v) != MirTy::HeapRef {
                 return Err("unit function adapter".into());
             }
-            let f = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![v]).map_err(mir))?;
+            let f = self.at_expr(id, |l| l.b.ins_alloc_kinds(MirAllocKind::Fn { target, operand, mask: 0 }, vec![v], ADAPTED_FN_KINDS).map_err(mir))?;
             val = Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?);
         }
         // A lane array leaving for one-word code: boxed in place.
@@ -3555,7 +3560,12 @@ impl Lower<'_> {
             }
             _ => return Err("existential pack value".into()),
         };
-        let mut out = self.dict_program(vec![v], ops)?;
+        // The packed value's kind is its static type's.
+        let kind = match self.b.value_ty(v) {
+            MirTy::HeapRef => common::WORD_POINTER,
+            _ => self.expr_ty(id).map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t)),
+        };
+        let mut out = self.dict_program_kinded(vec![v], vec![kind], ops)?;
         let (Some(pack), true) = (out.pop(), out.is_empty()) else {
             return Err("existential pack program".into());
         };
@@ -4180,7 +4190,12 @@ impl Lower<'_> {
                 // Each value in literal order, then the slotted object and
                 // each value to its slot (the fields sorted by name).
                 let mut slots = vec![None; words.len()];
+                // Each slot's static type, for the record's own word kinds.
+                let mut tys: Vec<Option<Ty>> = vec![None; words.len()];
                 for (&arg, (slot, ty)) in args.iter().zip(words) {
+                    if let Some(t) = tys.get_mut(slot as usize) {
+                        *t = self.expr_ty(arg).cloned();
+                    }
                     // A `()` runs for its effect and is stored as the empty
                     // tuple object (#1510).
                     let v = if self.expr_ty(arg).is_some_and(is_unit) {
@@ -4202,8 +4217,12 @@ impl Lower<'_> {
                 }
                 let slots = slots.into_iter().collect::<Option<Vec<_>>>().ok_or("record slot")?;
                 let nfields = slots.len() as u32;
-                let obj = self.b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new()).map_err(mir)?;
+                let kinds = common::pack_word_kinds(tys.iter().map(|t| t.as_ref().map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t))));
+                let obj = self.b.ins_alloc_kinds(MirAllocKind::Object { type_id, nfields }, Vec::new(), kinds).map_err(mir)?;
                 let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)?;
+                if self.kinds.is_some() {
+                    self.stamp_product_from_kinds(obj, &tys)?;
+                }
                 for (slot, v) in slots.into_iter().enumerate() {
                     self.b.ins_heap_field_store(obj, v, slot as u32).map_err(mir)?;
                 }
@@ -5464,7 +5483,7 @@ impl Lower<'_> {
                     if self.b.value_ty(v) != MirTy::HeapRef {
                         return Err("call argument adapter".into());
                     }
-                    let f = self.at_expr(arg, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![v]).map_err(mir))?;
+                    let f = self.at_expr(arg, |l| l.b.ins_alloc_kinds(MirAllocKind::Fn { target, operand, mask: 0 }, vec![v], ADAPTED_FN_KINDS).map_err(mir))?;
                     words.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?);
                 }
                 // A bare type parameter of a shared generic: the value's
@@ -5549,7 +5568,7 @@ impl Lower<'_> {
             if site.word_ret || niche.is_some() || dest_hi.is_some() || ret != MirTy::HeapRef {
                 return Err("call result adapter".into());
             }
-            let f = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![dest]).map_err(mir))?;
+            let f = self.at_expr(id, |l| l.b.ins_alloc_kinds(MirAllocKind::Fn { target, operand, mask: 0 }, vec![dest], ADAPTED_FN_KINDS).map_err(mir))?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?));
         }
         // A bare type parameter result comes back as its word; a niche
@@ -5630,23 +5649,43 @@ impl Lower<'_> {
     }
 
     /// Run dictionary program `ops` on `stack`, giving the words left.
-    fn dict_program(&mut self, mut stack: Vec<ValueId>, ops: &[HirDictOp]) -> Result<Vec<ValueId>, Refusal> {
+    fn dict_program(&mut self, stack: Vec<ValueId>, ops: &[HirDictOp]) -> Result<Vec<ValueId>, Refusal> {
+        let kinds = vec![common::WORD_UNKNOWN; stack.len()];
+        self.dict_program_kinded(stack, kinds, ops)
+    }
+
+    /// [`Self::dict_program`] on a `stack` whose words' kinds are `kinds`.
+    fn dict_program_kinded(&mut self, mut stack: Vec<ValueId>, mut kinds: Vec<u8>, ops: &[HirDictOp]) -> Result<Vec<ValueId>, Refusal> {
+        // Each stack word's kind, for the dictionary tuples made of them: a
+        // method's code pointer and a `kinds` word are numbers, a
+        // dictionary (made, interned or forwarded) an object.
         for op in ops {
+            let before = stack.len();
+            let mut made = common::WORD_SCALAR;
             match *op {
                 HirDictOp::Code(target) => stack.push(self.b.ins_code_ptr(target).map_err(mir)?),
                 HirDictOp::Null => stack.push(self.b.ins_const(MirConst::I64(0)).map_err(mir)?),
                 HirDictOp::Tuple(n) => {
                     let at = stack.len().checked_sub(n as usize).ok_or("dictionary arity")?;
                     let elems = stack.split_off(at);
-                    let dict = self.b.ins_alloc(MirAllocKind::TUPLE, elems).map_err(mir)?;
+                    let packed = common::pack_word_kinds(kinds.split_off(at));
+                    let dict = self.b.ins_alloc_kinds(MirAllocKind::TUPLE, elems, packed).map_err(mir)?;
                     stack.push(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).map_err(mir)?);
+                    made = common::WORD_POINTER;
                 }
-                HirDictOp::Load(slot) => stack.push(*self.dict_params.get(&slot).ok_or("dictionary parameter")?),
+                HirDictOp::Load(slot) => {
+                    stack.push(*self.dict_params.get(&slot).ok_or("dictionary parameter")?);
+                    made = common::WORD_POINTER;
+                }
                 HirDictOp::Word => {
                     let v = stack.pop().ok_or("dictionary word")?;
                     stack.push(self.b.ins_word(v).map_err(mir)?);
+                    made = kinds.pop().unwrap_or(common::WORD_UNKNOWN);
                 }
-                HirDictOp::Interned { slot, ref ops } => stack.push(self.interned_dict(slot, ops)?),
+                HirDictOp::Interned { slot, ref ops } => {
+                    stack.push(self.interned_dict(slot, ops)?);
+                    made = common::WORD_POINTER;
+                }
                 HirDictOp::Kinds(bits) => stack.push(self.b.ins_const(MirConst::I64(bits as i64)).map_err(mir)?),
                 HirDictOp::KindsBit { from, to } => {
                     let w = stack.pop().ok_or("kinds word")?;
@@ -5654,6 +5693,8 @@ impl Lower<'_> {
                     // pad) passes the bit clear: no op, as before.
                     let Some(own) = self.kinds else {
                         stack.push(w);
+                        kinds.truncate(stack.len() - 1);
+                        kinds.push(common::WORD_SCALAR);
                         continue;
                     };
                     // Both of the parameter's bits: copy-on-write and
@@ -5677,6 +5718,11 @@ impl Lower<'_> {
                 }
                 HirDictOp::KindsOwn => stack.push(self.kinds.ok_or("kinds word")?),
             }
+            // The op pushed one word (a tuple or a `kinds` op after taking
+            // its operands): the operands' kinds go, its own goes on.
+            kinds.truncate(stack.len().saturating_sub(1).min(before));
+            kinds.resize(stack.len() - 1, common::WORD_UNKNOWN);
+            kinds.push(made);
         }
         Ok(stack)
     }
@@ -6470,7 +6516,7 @@ impl Lower<'_> {
             if p.word_ret || ret != MirTy::HeapRef {
                 return Err("call result adapter".into());
             }
-            let f = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Fn { target, operand, mask: 0 }, vec![dest]).map_err(mir))?;
+            let f = self.at_expr(id, |l| l.b.ins_alloc_kinds(MirAllocKind::Fn { target, operand, mask: 0 }, vec![dest], ADAPTED_FN_KINDS).map_err(mir))?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).map_err(mir)?));
         }
         Ok(if unit { Val::Unit } else { Val::V(dest) })
@@ -7866,8 +7912,7 @@ impl Lower<'_> {
     /// `dot`'s products
     /// summed in order, and each cell of a matrix product, element-wise
     /// operator or negation; a matrix's rows and the matrix are made as
-    /// tuples or arrays with no word kinds, as `MakeTuple` / `MakeArray`
-    /// there.
+    /// tuples or arrays, as `MakeTuple` / `MakeArray` there.
     fn unrolled_la(&mut self, id: HirId, kind: crate::typechecking::LinearAlgebraKind, args: &[HirId]) -> Result<Val, Refusal> {
         use crate::typechecking::{LinearAlgebraKind as K, ScalarSide};
         let scalar = match &kind {
@@ -7896,9 +7941,14 @@ impl Lower<'_> {
             at(l, row, j, ty)
         };
         let bin = |l: &mut Self, op: MirBinOp, a: ValueId, b: ValueId| l.at_expr(id, |l2| l2.b.ins_binop(op, a, b).map_err(mir));
-        let made = |l: &mut Self, tuple: bool, words: Vec<ValueId>| -> Result<ValueId, Refusal> {
-            let kind = if tuple { MirAllocKind::TUPLE } else { MirAllocKind::Array };
-            let obj = l.b.ins_alloc(kind, words).map_err(mir)?;
+        // A row's words are numbers, a matrix's its rows.
+        let made = |l: &mut Self, tuple: bool, words: Vec<ValueId>, of: u8| -> Result<ValueId, Refusal> {
+            let (kind, kinds) = if tuple {
+                (MirAllocKind::TUPLE, common::pack_word_kinds(std::iter::repeat_n(of, words.len())))
+            } else {
+                (MirAllocKind::Array, common::PackedKinds::from(of))
+            };
+            let obj = l.b.ins_alloc_kinds(kind, words, kinds).map_err(mir)?;
             l.b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj]).map_err(mir)
         };
         // `m` rows of `n` cells, each from `f(i, j)`.
@@ -7909,9 +7959,9 @@ impl Lower<'_> {
                 for j in 0..n {
                     cells.push(f(l, i, j)?);
                 }
-                rows.push(made(l, row, cells)?);
+                rows.push(made(l, row, cells, common::WORD_SCALAR)?);
             }
-            Ok(Val::V(made(l, outer, rows)?))
+            Ok(Val::V(made(l, outer, rows, common::WORD_POINTER)?))
         };
         match kind {
             K::Dot { length, elem_is_float, elem_is_byte, .. } if length > 0 && objs.len() == 2 => {
