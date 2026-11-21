@@ -1294,7 +1294,8 @@ pub fn alloc_thread_error(heap: &mut Heap, set: ErrorSet, tag: ThreadErrorTag) -
         let message = JOIN_PANIC.with(|p| p.borrow_mut().take()).unwrap_or_default();
         let gc = heap.intern(message);
         let message = Value::from(gc.as_ptr() as *mut u8 as u64);
-        return alloc_enum(heap, tag.tag_in(set), vec![message]);
+        let kinds = common::pack_word_kinds([common::WORD_POINTER]);
+        return alloc_enum(heap, tag.tag_in(set), EnumPayload::one(message).with_kinds(kinds));
     }
     alloc_enum(heap, tag.tag_in(set), vec![])
 }

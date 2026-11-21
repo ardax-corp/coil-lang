@@ -41,7 +41,8 @@ pub fn alloc_tty_error(heap: &mut Heap, fail: TtyFail) -> Value {
         TtyFail::NotATerminal => heap.alloc_enum_value(0, EnumPayload::empty()),
         TtyFail::Io(tag) => {
             let io = alloc_io_error(heap, tag);
-            heap.alloc_enum_value(1, EnumPayload::one(io))
+            let kinds = common::pack_word_kinds([common::WORD_POINTER]);
+            heap.alloc_enum_value(1, EnumPayload::one(io).with_kinds(kinds))
         }
     }
 }
