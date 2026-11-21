@@ -2997,6 +2997,10 @@ impl<'a> Lower<'a> {
     /// with lane `p` untouched and runs the rest, from `p`, on the runtime's
     /// lane code. `false`: not such a loop (nothing emitted).
     fn native_store(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
+        // A check run counts the loop's stores in the runtime's.
+        if machine::native::rc_counting() {
+            return Ok(false);
+        }
         use compiler::native_mir::VecLoopKind;
         use common::dense;
         let MirInst::VecLoop { dest, pos, from, to, kind: VecLoopKind::Store { stores } } = inst else {
@@ -4149,6 +4153,17 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
+            MirInst::StoreIndex { dest, array, index, value, .. } if machine::native::rc_counting() => {
+                // A check run counts each store in the helper.
+                let a = self.get(f, *array);
+                let i = self.get(f, *index);
+                let v = self.get(f, *value);
+                let v = self.coerce(v, types::I64);
+                self.call_checked(self.store_index, &[self.ctx, a, i, v]);
+                self.drop_views();
+                let v = self.get(f, *value);
+                self.set(f, *dest, v);
+            }
             MirInst::StoreIndex { dest, array, index, value, .. } => {
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
@@ -4193,7 +4208,7 @@ impl<'a> Lower<'a> {
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
                 let join = self.b.create_block();
-                if machine::native::product_slots().inline_stores {
+                if machine::native::product_slots().inline_stores && !machine::native::rc_counting() {
                     // In place, unless the write barrier must log the object.
                     let (fast, slow) = self.product_slot(o, *index, true);
                     self.b.switch_to_block(fast);
@@ -4226,7 +4241,7 @@ impl<'a> Lower<'a> {
                             "function value of a body with no body id"
                         }
                     })?;
-                let inline = inline_shape(*kind, words.len(), extra).and_then(machine::native::inline_object);
+                let inline = inline_shape(*kind, words.len(), extra).and_then(machine::native::inline_object).filter(|_| !machine::native::rc_counting());
                 let join = inline.map(|obj| {
                     let join = self.b.create_block();
                     self.b.append_block_param(join, types::I64);
@@ -4296,10 +4311,15 @@ impl<'a> Lower<'a> {
                 let (fast, slow) = self.in_lane_view(f, *array, i);
                 let join = self.b.create_block();
                 self.b.switch_to_block(fast);
-                let at = self.lane_element(*array, i);
-                self.b.ins().store(MemFlagsData::trusted(), lo, at, 0);
-                self.b.ins().store(MemFlagsData::trusted(), hi, at, 8);
-                self.b.ins().jump(join, &[]);
+                if machine::native::rc_counting() {
+                    // A check run counts the store in the helper.
+                    self.b.ins().jump(slow, &[]);
+                } else {
+                    let at = self.lane_element(*array, i);
+                    self.b.ins().store(MemFlagsData::trusted(), lo, at, 0);
+                    self.b.ins().store(MemFlagsData::trusted(), hi, at, 8);
+                    self.b.ins().jump(join, &[]);
+                }
                 self.b.switch_to_block(slow);
                 let [t, p, u] = self.lane_shape(shape);
                 self.call_checked(self.lane_store, &[self.ctx, a, i, lo, hi, t, p, u]);

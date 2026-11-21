@@ -292,6 +292,14 @@ pub const NATIVE_CTX_ROOTS: i32 = std::mem::offset_of!(NativeCtx, roots) as i32;
 
 pub use crate::memory::{InlineObject, InlineShape, ProductSlots, inline_object, product_slots, layout_fingerprint};
 
+/// A check run keeps reference counts (`COIL_RC_CHECK`): native code then
+/// stores and allocates through the helpers, which count (plan step 2),
+/// until its own count ops come (step 3).
+#[must_use]
+pub fn rc_counting() -> bool {
+    crate::memory::rc_check_mode() != crate::memory::RcCheckMode::Off
+}
+
 /// Byte offsets of [`NativeCtx::alloc_counts`] and [`NativeCtx::alloc_bumps`].
 pub const NATIVE_CTX_ALLOC_COUNTS: i32 = std::mem::offset_of!(NativeCtx, alloc_counts) as i32;
 pub const NATIVE_CTX_ALLOC_BUMPS: i32 = std::mem::offset_of!(NativeCtx, alloc_bumps) as i32;
