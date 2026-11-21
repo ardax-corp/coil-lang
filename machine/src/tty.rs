@@ -189,7 +189,7 @@ enum Wait {
 
 fn alloc_size(heap: &mut Heap, (cols, rows): (i64, i64)) -> Value {
     let (obj, _) = heap.alloc(
-        ObjEnum::tuple(&[Value::from(cols), Value::from(rows)], 0),
+        ObjEnum::tuple(&[Value::from(cols), Value::from(rows)], common::pack_word_kinds([common::WORD_SCALAR; 2])),
         Object::Enum,
     );
     Value::from(obj.addr())

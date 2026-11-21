@@ -314,7 +314,7 @@ fn host_output(heap: &mut Heap, args: &[Value]) -> Value {
                 Value::from(code),
                 Value::from(out.as_ptr() as *mut u8 as u64),
                 Value::from(err.as_ptr() as *mut u8 as u64),
-            ], 0),
+            ], common::pack_word_kinds([common::WORD_SCALAR, common::WORD_POINTER, common::WORD_POINTER])),
             Object::Enum,
         );
         Value::from(obj.addr())

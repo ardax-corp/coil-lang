@@ -166,7 +166,7 @@ fn pack_i64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<i64>
 /// A tuple or an array of `values`, whose array words are `kind` (`common::WORD_*`).
 fn alloc_aggregate(heap: &mut Heap, values: Vec<Value>, is_tuple: bool, kind: u8) -> Value {
     let addr = if is_tuple {
-        let (object, _) = heap.alloc(ObjEnum::tuple(&values, 0), Object::Enum);
+        let (object, _) = heap.alloc(ObjEnum::tuple(&values, common::pack_word_kinds(std::iter::repeat_n(kind, values.len()))), Object::Enum);
         object.addr()
     } else {
         let arr = ObjArray::from_values(values, heap).of_kind(kind);

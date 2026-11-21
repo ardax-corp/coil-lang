@@ -1929,7 +1929,8 @@ pub fn host_channel(heap: &mut Heap, _args: &[Value]) -> Value {
     );
     let (rx_obj, _) = heap.alloc(ObjReceiver { inner }, Object::Receiver);
     let pair = vec![Value::from(tx_obj.addr()), Value::from(rx_obj.addr())];
-    let (tup, _) = heap.alloc(ObjEnum::tuple(&pair, 0), Object::Enum);
+    let kinds = common::pack_word_kinds([common::WORD_POINTER, common::WORD_POINTER]);
+    let (tup, _) = heap.alloc(ObjEnum::tuple(&pair, kinds), Object::Enum);
     let v = Value::from(tup.addr());
     as_result_value(heap, ErrorSet::Channel, Ok(v))}
 
