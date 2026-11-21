@@ -3012,7 +3012,7 @@ impl Lower<'_> {
             M::Zip | M::Broadcast(_) => Some(rhs.ok_or("aggregate rhs")?),
         };
         let Some(n) = shape.static_len() else {
-            return self.aggregate_dynamic(lhs, rhs, mode, ty, apply);
+            return self.aggregate_dynamic(id, lhs, rhs, mode, ty, apply);
         };
         // A static shape: the operands run left to right. An array's
         // elements are read where they are (its literal items in order, with
@@ -3123,6 +3123,7 @@ impl Lower<'_> {
     /// length: a loop pushing each result.
     fn aggregate_dynamic(
         &mut self,
+        id: HirId,
         lhs: HirId,
         rhs: Option<HirId>,
         mode: crate::typechecking::AggregateMode,
@@ -3161,8 +3162,21 @@ impl Lower<'_> {
         }
         // `out` and the index live in temps across the loop.
         let len = self.b.ins_array_len(arr).map_err(mir)?;
-        let empty = self.b.ins_alloc(MirAllocKind::Array, Vec::new()).map_err(mir)?;
+        // Stamped as a literal of the result type is (a word array still:
+        // the loop pushes words), a type parameter's elements from the
+        // shared body's `kinds` word.
+        let elem = self.expr_ty(id).and_then(array_elem).cloned();
+        let stamp = match elem.as_ref().map_or(0, |e| self.cx.array_stamp(e)) {
+            common::WORD_BYTE => common::WORD_SCALAR,
+            k => k,
+        };
+        let empty = self.b.ins_alloc_kinds(MirAllocKind::Array, Vec::new(), stamp.into()).map_err(mir)?;
         let empty = self.b.ins_gc_barrier(MirGcKind::Safepoint, vec![empty]).map_err(mir)?;
+        if stamp == common::WORD_UNKNOWN
+            && let Some(elem) = &elem
+        {
+            self.stamp_from_kinds(empty, elem)?;
+        }
         let out = self.temp();
         self.b.def_local(out, empty).map_err(mir)?;
         let i = self.temp();
@@ -5220,9 +5234,10 @@ impl Lower<'_> {
                     words.push(self.b.use_local(slot, ty).map_err(mir)?);
                 }
                 // A slot's own kind from its frame word's type (the class
-                // row's kinds cover the rest).
+                // row's kinds cover the rest; an `i64` may be a heap word
+                // moved into an int).
                 let kinds = common::pack_word_kinds(tys.iter().map(|&t| match t {
-                    MirTy::HeapRef => common::WORD_POINTER,
+                    MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes => common::WORD_POINTER,
                     MirTy::F64 | MirTy::Bool => common::WORD_SCALAR,
                     _ => common::WORD_UNKNOWN,
                 }));
@@ -7524,6 +7539,51 @@ impl Lower<'_> {
         Ok(())
     }
 
+    /// A shared body's boxed `Option` / `Result` host result `obj` (call
+    /// `id`): the payload of a type parameter takes its kind from the body's
+    /// `kinds` word, by the variant the native made
+    /// ([`common::VEC_STAMP_BY_TAG`]). A ground payload's kind came with the
+    /// layout byte.
+    fn stamp_host_enum(&mut self, id: HirId, obj: ValueId) -> Result<(), Refusal> {
+        if self.kinds.is_none() {
+            return Ok(());
+        }
+        let Some(ty) = self.expr_ty(id).cloned() else {
+            return Ok(());
+        };
+        let variants: Vec<(u32, Ty)> = match (ty.as_option(), ty.as_result()) {
+            (Some(some), _) => vec![(1, some.clone())],
+            (_, Some((ok, err))) => vec![(0, ok.clone()), (1, err.clone())],
+            _ => return Ok(()),
+        };
+        let mut packed: Option<ValueId> = None;
+        for (tag, t) in variants {
+            if self.cx.word_kind(&t) != common::WORD_UNKNOWN {
+                continue;
+            }
+            let Some((kinds, p)) = self.kinds_bit(&t) else { continue };
+            let k = self.b.ins_const(MirConst::I64(i64::from(crate::codegen::kinds_ptr_bit(p)))).map_err(mir)?;
+            let bit = self.b.ins_binop(MirBinOp::Shr, kinds, k).map_err(mir)?;
+            let one = self.b.ins_const(MirConst::I64(1)).map_err(mir)?;
+            let bit = self.b.ins_binop(MirBinOp::BitAnd, bit, one).map_err(mir)?;
+            // `WORD_SCALAR` is 1, `WORD_POINTER` 2: the one payload word's
+            // kind, in the variant's byte.
+            let kind = self.b.ins_binop(MirBinOp::Add, bit, one).map_err(mir)?;
+            let at = self.b.ins_const(MirConst::I64(8 * i64::from(tag))).map_err(mir)?;
+            let kind = self.b.ins_binop(MirBinOp::Shl, kind, at).map_err(mir)?;
+            packed = Some(match packed {
+                Some(w) => self.b.ins_binop(MirBinOp::BitOr, w, kind).map_err(mir)?,
+                None => kind,
+            });
+        }
+        if let Some(w) = packed {
+            let by_tag = self.b.ins_const(MirConst::I64(common::VEC_STAMP_BY_TAG)).map_err(mir)?;
+            let w = self.b.ins_binop(MirBinOp::BitOr, w, by_tag).map_err(mir)?;
+            self.b.ins_host_invoke(common::VEC_STAMP_ID, vec![obj, w]).map_err(mir)?;
+        }
+        Ok(())
+    }
+
     /// After call `id`: a `Vec::new()` / `Vec::with_capacity(n)` of a type
     /// parameter's elements in a shared body gets no stamped twin
     /// (`stamped_vec_ctor_name`), so its array is stamped here
@@ -8248,6 +8308,9 @@ impl Lower<'_> {
         let out = self.at_expr(id, |l| l.b.ins_host_invoke_as(native, words, layout, ret).map_err(mir))?;
         if let Some(((lo_ty, _), variants)) = pair {
             return self.unbox_pair(out, lo_ty, &variants);
+        }
+        if !tuple && !raw && ret == Some(MirTy::HeapRef) && common::host_layout_base(u32::from(layout)) == common::HOST_ENUM_LAYOUT_BOXED {
+            self.stamp_host_enum(id, out)?;
         }
         if tuple && let Some((lo_ty, hi_ty)) = self.pair_tys(id) {
             let ty = self.expr_ty(id).ok_or("host tuple type")?.clone();

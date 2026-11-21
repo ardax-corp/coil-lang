@@ -13490,10 +13490,11 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         // kind from the array.
         let any_t = self.hir.span == crate::hir::synth::SPAN
             && self.hir.name.strip_prefix(common::BUILTIN_VEC_TYPE).is_some_and(|m| m.starts_with("::"));
-        if u32::from(layout) == common::HOST_ENUM_LAYOUT_BOXED && !self.hir.is_generic && !any_t {
+        if u32::from(layout) == common::HOST_ENUM_LAYOUT_BOXED && !any_t {
             // A boxed `Option` / `Result` the native makes takes its
-            // payloads' word kinds from the call's type, in a body whose
-            // types hold for every call.
+            // payloads' word kinds from the call's type. In a generic body a
+            // type parameter's word stays unknown; `Thread<T>` or `Vec<T>`
+            // is a handle whatever `T` is.
             let kind = |t: &Ty| crate::layout::word_kind(&c.checker, t);
             let payloads = ty
                 .as_ref()

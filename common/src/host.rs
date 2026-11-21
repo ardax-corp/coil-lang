@@ -473,6 +473,12 @@ pub const fn host_payload_kind(layout: u32, variant: u32) -> u8 {
     ((layout >> (HOST_PAYLOAD_KINDS_SHIFT + 2 * variant)) & 3) as u8
 }
 
+/// A `vec_stamp` kinds argument with this bit set stamps an enum by its tag:
+/// byte `t` of the argument (`t` < 4) is the packed payload kinds a variant of
+/// tag `t` takes, so one stamp covers a shared body's boxed `Option` /
+/// `Result` whichever variant a native made.
+pub const VEC_STAMP_BY_TAG: i64 = 1 << 62;
+
 /// Pack `HostInvoke` arity and host-edge Option/Result layout into one operand.
 pub const fn pack_host_invoke_operand(arity: u32, layout: u32) -> u32 {
     (arity & HOST_INVOKE_ARITY_MASK) | ((layout & HOST_ENUM_LAYOUT_MASK) << HOST_ENUM_LAYOUT_SHIFT)

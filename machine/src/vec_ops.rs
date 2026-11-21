@@ -154,7 +154,7 @@ pub const VEC_MOVE_WIRING: &[(&str, usize, crate::HostValueFn)] =
 /// generic body made of a type parameter's words. An array's element kind
 /// (`WORD_SCALAR` or `WORD_POINTER`, [`ObjArray::set_elem_kind`]); a tuple's or
 /// enum's payload kinds, packed (`common::pack_word_kinds`), added to those
-/// its construction recorded; an instance's own kinds of its generic slots
+/// its construction recorded (by its tag with [`common::VEC_STAMP_BY_TAG`]); an instance's own kinds of its generic slots
 /// ([`crate::memory::ObjInstance::own_kinds`]), the same way.
 pub fn host_vec_stamp(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
@@ -168,7 +168,14 @@ pub fn host_vec_stamp(heap: &mut Heap, args: &[Value]) -> Value {
             }
         }
         Some(Object::Enum(mut gc)) => {
-            if let Ok(k) = common::PackedKinds::try_from(kinds) {
+            let tag = gc.as_ref().tag;
+            let k = if kinds & common::VEC_STAMP_BY_TAG != 0 {
+                // Only a variant with words: a unit one is immortal.
+                (tag < 4 && !gc.as_ref().payload.is_empty()).then(|| ((kinds >> (8 * tag)) & 0xff) as common::PackedKinds)
+            } else {
+                common::PackedKinds::try_from(kinds).ok()
+            };
+            if let Some(k) = k.filter(|&k| k != 0) {
                 gc.as_mut().payload.add_kinds(k);
             }
         }
