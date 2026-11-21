@@ -195,10 +195,11 @@ pub const PRODUCT_TAG: u32 = u32::MAX;
 /// first [`PACKED_KIND_WORDS`] words of a payload.
 pub type PackedKinds = u32;
 
-/// Words whose kinds a [`PackedKinds`] records (2 bits each): 24 bits,
-/// what a snapshot object header's `aux` field holds. Later words of a
-/// wider payload are unknown.
-pub const PACKED_KIND_WORDS: usize = 12;
+/// Words whose kinds a [`PackedKinds`] records (2 bits each, all 32).
+/// Later words of a wider payload are unknown. A snapshot keeps an enum's
+/// in its header's 24-bit `aux` field and the top byte beside its type id,
+/// an instance's first 12 only.
+pub const PACKED_KIND_WORDS: usize = 16;
 
 /// Kind of word `i` in packed kinds (see [`PACKED_KIND_WORDS`]).
 #[inline]
