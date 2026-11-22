@@ -31,6 +31,7 @@
 //! before it finishes.
 
 use std::collections::{HashMap, HashSet};
+use crate::bodies::Label;
 
 use super::frame_words::{barrier_pairs, heap_word, opaque_words, pair_words, pointer_words, ty_of};
 use super::func::{MirBlock, MirFunc, is_tail_call_inst};
@@ -51,18 +52,82 @@ fn unwind_homes_on() -> bool {
     *ON.get_or_init(|| std::env::var("COIL_RC_UNWIND").map_or(true, |v| v != "0"))
 }
 
-/// Insert the count ops into `func` (and its cleanup pad). Returns how many
-/// it inserted.
-pub fn insert_rc(func: &mut MirFunc) -> usize {
-    insert_rc_in(func, false)
+/// Insert the count ops into a program's bodies, each `(entry, body)`, and
+/// their cleanup pads. A call to a body that only ever returns a number
+/// gives no word to count. Returns how many ops it inserted.
+pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mut MirFunc)>) -> usize {
+    let mut bodies: Vec<(Option<Label>, &mut MirFunc)> = bodies.into_iter().collect();
+    let numbers = number_returns(bodies.iter().map(|(l, f)| (*l, &**f)));
+    bodies.iter_mut().map(|(_, f)| insert_rc_in(f, false, &numbers)).sum()
 }
 
-/// [`insert_rc`] of a body, or of a cleanup pad (`pad`: it runs while the
+/// The entries of the bodies whose every return is a number (by its
+/// definition: a constant, arithmetic, a comparison, a call of another
+/// such body, a φ of those), found optimistically: every candidate is
+/// assumed until one of its returns says otherwise.
+fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>) -> HashSet<Label> {
+    let cands: Vec<(Label, &MirFunc)> = bodies
+        .filter_map(|(l, f)| Some((l?, f)))
+        .filter(|(_, f)| f.ret_ty == Some(MirTy::I64) && !super::frame_words::is_generator(f) && f.blocks.iter().any(|b| matches!(b.term, Some(Terminator::Return { .. }))))
+        .collect();
+    let mut set: HashSet<Label> = cands.iter().map(|(l, _)| *l).collect();
+    loop {
+        let before = set.len();
+        for (l, f) in &cands {
+            if !set.contains(l) {
+                continue;
+            }
+            let nums = number_words(f, &set);
+            let all = f.blocks.iter().all(|b| match &b.term {
+                Some(Terminator::Return { lo, hi }) => hi.is_none() && lo.is_none_or(|v| nums.contains(&v)),
+                _ => true,
+            });
+            if !all {
+                set.remove(l);
+            }
+        }
+        if set.len() == before {
+            return set;
+        }
+    }
+}
+
+/// The words of `func` that are numbers by their definition, a call of a
+/// body in `numbers` included (φs optimistically).
+fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
+    let insts = || func.blocks.iter().flat_map(|b| &b.insts);
+    let mut out: HashSet<ValueId> = insts()
+        .filter(|i| match i {
+            MirInst::Const { .. } | MirInst::Cmp { .. } => true,
+            MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
+            MirInst::Call { target, dest_hi: None, .. } => numbers.contains(target),
+            MirInst::Phi { .. } => true,
+            _ => false,
+        })
+        .map(MirInst::dest)
+        .collect();
+    loop {
+        let before = out.len();
+        for inst in insts() {
+            if let MirInst::Phi { dest, args, .. } = inst
+                && out.contains(dest)
+                && args.iter().any(|(_, a)| !out.contains(a))
+            {
+                out.remove(dest);
+            }
+        }
+        if out.len() == before {
+            return out;
+        }
+    }
+}
+
+/// [`insert_rc_all`] of a body, or of a cleanup pad (`pad`: it runs while the
 /// frame unwinds, so it keeps no homes of its own).
-fn insert_rc_in(func: &mut MirFunc, pad: bool) -> usize {
+fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>) -> usize {
     let mut n = 0;
     if let Some(p) = func.cleanup.as_deref_mut() {
-        n += insert_rc_in(p, true);
+        n += insert_rc_in(p, true, numbers);
     }
     // Counts free what an early free would (`hir/early_free.rs`): its
     // frees go, or a count would be decremented on a freed object.
@@ -71,7 +136,7 @@ fn insert_rc_in(func: &mut MirFunc, pad: bool) -> usize {
             *inst = MirInst::Const { dest, c: super::inst::MirConst::Bool(false) };
         }
     }
-    let pass = Pass::new(func);
+    let pass = Pass::new(func, numbers);
     let (ops, homes) = pass.run(func, !pad);
     n += ops;
     n -= cancel_pairs(func, &homes);
@@ -315,12 +380,21 @@ fn alias_source(inst: &MirInst, counted: &dyn Fn(ValueId) -> bool) -> Option<Val
 }
 
 impl Pass {
-    fn new(func: &MirFunc) -> Self {
+    fn new(func: &MirFunc, numbers: &HashSet<Label>) -> Self {
         let pointers = pointer_words(func);
         let mut counted: HashSet<ValueId> = (0..func.types.len() as u32).map(ValueId).filter(|v| matches!(ty_of(func, *v), t if heap_word(t) || t == MirTy::Value)).collect();
         counted.extend(opaque_words(func));
         counted.extend(pair_words(func, &pointers));
         counted.extend(pointers);
+        // A call of a body that only returns numbers hands back no object.
+        let number_calls: HashSet<ValueId> = if numbers.is_empty() {
+            HashSet::new()
+        } else {
+            number_words(func, numbers)
+                .into_iter()
+                .filter(|v| ty_of(func, *v) == MirTy::I64)
+                .collect()
+        };
         // An `int` word read from an object or handed back by a call may
         // be a pointer the types do not say (a pair's low word, a payload
         // of a type variable): counted, the runtime tests the address.
@@ -337,7 +411,7 @@ impl Pass {
                 | MirInst::Call { .. }
                 | MirInst::CallIndirect { .. }
                 | MirInst::ResumeCoro { .. }
-                | MirInst::Yield { .. } => counted.extend(inst.dests().filter(|d| maybe(*d))),
+                | MirInst::Yield { .. } => counted.extend(inst.dests().filter(|d| maybe(*d) && !number_calls.contains(d))),
                 _ => {}
             }
         }
@@ -427,11 +501,40 @@ impl Pass {
         // A generator's parameters are its coroutine's words, which the
         // coroutine took an owner of when it was made: its frame owns them.
         let generator = super::frame_words::is_generator(func);
-        let borrowed: HashSet<ValueId> = if generator { HashSet::new() } else { func.params.iter().copied().filter(|p| counted.contains(p)).collect() };
+        let mut borrowed: HashSet<ValueId> = if generator { HashSet::new() } else { func.params.iter().copied().filter(|p| counted.contains(p)).collect() };
         for &p in func.params.iter().filter(|p| counted.contains(p)) {
             base.insert(p, p);
             if generator {
                 owned_at_def.insert(p);
+            }
+        }
+        // An enum's payload is never written after the enum is made, so a
+        // payload of a borrowed enum stays owned by it for the whole call:
+        // borrowed too (no count of its own).
+        if !borrowed.is_empty() {
+            let mut changed = true;
+            while changed {
+                changed = false;
+                let mut payload_of = |dest: ValueId, scrutinee: ValueId, borrowed: &mut HashSet<ValueId>| {
+                    if base.get(&dest) == Some(&dest)
+                        && base.get(&scrutinee).is_some_and(|r| borrowed.contains(r))
+                        && borrowed.insert(dest)
+                    {
+                        changed = true;
+                    }
+                };
+                for block in &func.blocks {
+                    for inst in &block.insts {
+                        if let MirInst::MatchPayload { dest, scrutinee, .. } = inst {
+                            payload_of(*dest, *scrutinee, &mut borrowed);
+                        }
+                    }
+                    if let Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) = &block.term {
+                        for &p in payloads {
+                            payload_of(p, *scrutinee, &mut borrowed);
+                        }
+                    }
+                }
             }
         }
         let scalar = func
@@ -711,7 +814,7 @@ impl Pass {
                         {
                             let args: HashSet<ValueId> = phi_args_from(sb, b).into_iter().map(|(v, _)| v).collect();
                             for &p in payloads {
-                                if self.root(p) == Some(p) && (into.contains(&p) || args.contains(&p)) {
+                                if self.root(p) == Some(p) && !self.borrowed.contains(&p) && (into.contains(&p) || args.contains(&p)) {
                                     ops.push(MirInst::RcInc { dest: tok(&mut new_types), src: p, guard: None });
                                     if let Some(&h) = homes.get(&p) {
                                         let w = if ty_of(func, p) == MirTy::I64 {
@@ -960,6 +1063,24 @@ mod tests {
         let mut g = crate::mir::parse_func(&call).expect(&call);
         assert_eq!(cancel_pairs(&mut g, &HashMap::new()), 0);
         assert_eq!(rc_ops(&g).len(), 3, "{g}");
+    }
+
+    fn all_rc_ops(f: &MirFunc) -> usize {
+        f.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, MirInst::RcInc { .. } | MirInst::RcDec { .. })).count()
+    }
+
+    /// A tree walk: the payloads of the borrowed enum are borrowed too, and
+    /// the recursive call returns only numbers, so nothing is counted.
+    #[test]
+    fn a_walk_of_a_borrowed_enum_counts_nothing() {
+        let walk = "func @w(v0: heapref) -> i64 {\nbb0:\n    jumpifmatch v0, 0, bb2, bb1\nbb1:\n    v1 = matchpayload v0, 0\n    v2 = call.i64 7 v1\n    v3 = iconst.i64 1\n    v4 = iadd v2, v3\n    return v4\nbb2:\n    v5 = iconst.i64 1\n    return v5\n}\n";
+        let mut f = crate::mir::parse_func(walk).expect(walk);
+        insert_rc_all([(Some(Label(7)), &mut f)]);
+        assert_eq!(all_rc_ops(&f), 0, "{f}");
+        // Called under another label, its result is a word to count.
+        let mut g = crate::mir::parse_func(walk).expect(walk);
+        insert_rc_all([(Some(Label(8)), &mut g)]);
+        assert_eq!(all_rc_ops(&g), 1, "{g}");
     }
 
     #[test]

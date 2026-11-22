@@ -112,7 +112,7 @@ fn check_after(func: &crate::mir::MirFunc, pass: &str) {
     }
 }
 
-/// Verify a body after the count insertion ([`crate::mir::insert_rc`]), as
+/// Verify a body after the count insertion ([`crate::mir::insert_rc_all`]), as
 /// after any pass.
 pub(super) fn check_after_rc(func: &crate::mir::MirFunc) {
     check_after(func, "insert_rc");

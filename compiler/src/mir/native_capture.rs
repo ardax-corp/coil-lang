@@ -78,8 +78,8 @@ fn finished(mut bodies: Vec<NativeBody>) -> Vec<NativeBody> {
     // A run that keeps counts: frames own their words (reference counts
     // plan step 4).
     if super::rc_insert_on() {
-        for body in &mut bodies {
-            super::insert_rc(&mut body.mir);
+        super::insert_rc_all(bodies.iter_mut().map(|b| (b.entry, &mut b.mir)));
+        for body in &bodies {
             super::specialize::check_after_rc(&body.mir);
         }
     }
