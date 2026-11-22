@@ -275,6 +275,9 @@ pub enum QuotePart<'expr> {
     Repeat { list: Output<'expr>, sep: &'expr str },
 }
 
+/// A `use`'s module path, name and alias as written ([`Expression::Use`]'s `written`).
+pub type UseSpelling = (Vec<String>, String, Option<String>);
+
 #[derive(PartialEq, Debug)]
 pub enum Expression<'expr> {
     Noop(Output<'expr>),
@@ -497,10 +500,18 @@ pub enum Expression<'expr> {
     /// Runtime FFI call: `invoke(lib, fn_id, args_tuple)`.
     Invoke(Vec<Output<'expr>>),
 
+    /// `use path::name as alias;`, or `pub use …;` (`public`), which
+    /// re-exports the imported name from this module.
     Use {
         path: Vec<String>,
         name: String,
         alias: Option<String>,
+        public: bool,
+        /// The `path`, `name` and `alias` as written, when the pipeline
+        /// resolved this `use` of a re-exported name to the item it names
+        /// (`path` and `name` then name the defining module). `None` as
+        /// parsed.
+        written: Option<Box<UseSpelling>>,
     },
 
     /// `extern "libname" { fn name(args) -> ret; ... }`.
@@ -896,10 +907,12 @@ impl Clone for Expression<'_> {
             E::Done(a0) => E::Done(Clone::clone(a0)),
             E::Declare(a0) => E::Declare(Clone::clone(a0)),
             E::Invoke(a0) => E::Invoke(Clone::clone(a0)),
-            E::Use { path, name, alias } => E::Use {
+            E::Use { path, name, alias, public, written } => E::Use {
                 path: Clone::clone(path),
                 name: Clone::clone(name),
                 alias: Clone::clone(alias),
+                public: *public,
+                written: Clone::clone(written),
             },
             E::ExternBlock { library, declarations } => E::ExternBlock {
                 library: Clone::clone(library),
@@ -2159,7 +2172,10 @@ impl<'a> Display for Expression<'a> {
                     _ => write!(f, " => {}", body.1),
                 }
             }
-            Self::Use { path, name, alias } => {
+            Self::Use { path, name, alias, public, .. } => {
+                if *public {
+                    write!(f, "pub ")?;
+                }
                 write!(f, "use ")?;
                 for (i, seg) in path.iter().enumerate() {
                     if i > 0 {

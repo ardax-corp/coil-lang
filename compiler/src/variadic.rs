@@ -569,7 +569,7 @@ pub fn copy_scope<'a>(module: &str, ast: &Output<'a>, templates: &[&str]) -> Vec
             continue;
         }
         seen.push(name);
-        let item = Expression::Use { path: path.clone(), name: name.to_string(), alias: None };
+        let item = Expression::Use { path: path.clone(), name: name.to_string(), alias: None, public: false, written: None };
         out.push((child.0, Box::new(item)));
     }
     out

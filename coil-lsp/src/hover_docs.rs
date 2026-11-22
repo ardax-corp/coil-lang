@@ -154,7 +154,7 @@ fn visit_uses(expression: &Expression<'_>, f: &mut UseVisitor<'_>) {
                 visit_uses(item, f);
             }
         }
-        Expression::Use { path, name, alias } => f(path, name, alias.as_deref()),
+        Expression::Use { path, name, alias, .. } => f(path, name, alias.as_deref()),
         _ => {}
     }
 }

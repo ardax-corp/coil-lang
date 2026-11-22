@@ -2985,11 +2985,14 @@ impl<'pratt> Pratt<'pratt> {
                 .map(EndKind::Concrete),
         ));
 
-        keyword!("use")
-            .ignore_then(segment.then(path_middle).then(path_end))
+        keyword!("pub")
+            .or_not()
+            .map(|p| p.is_some())
+            .then_ignore(keyword!("use"))
+            .then(segment.then(path_middle).then(path_end))
             .then_ignore(op!(";"))
             .map_with(
-                |((first, middle), end): ((&str, Vec<String>), EndKind), e| {
+                |(public, ((first, middle), end)): (bool, ((&str, Vec<String>), EndKind)), e| {
                     let span = e.span();
                     match end {
                         EndKind::Brace(items) => {
@@ -3009,6 +3012,8 @@ impl<'pratt> Pratt<'pratt> {
                                             path: child_path,
                                             name,
                                             alias,
+                                            public,
+                                            written: None,
                                         }),
                                     )
                                 })
@@ -3029,6 +3034,8 @@ impl<'pratt> Pratt<'pratt> {
                                     path,
                                     name: "*".to_string(),
                                     alias: None,
+                                    public,
+                                    written: None,
                                 }),
                             )
                         }
@@ -3044,6 +3051,8 @@ impl<'pratt> Pratt<'pratt> {
                                     path: segs,
                                     name,
                                     alias,
+                                    public,
+                                    written: None,
                                 }),
                             )
                         }
@@ -5009,9 +5018,12 @@ fn format_parse_error_title(input: &str, err: &Rich<'_, char>) -> String {
     if let Some(msg) = missing_param_type_message(input, err) {
         return msg;
     }
+    if let Some(("use", _)) = misplaced_pub(input, err) {
+        return "`pub use` is allowed only at the top level of a module".to_string();
+    }
     if let Some((kw, _)) = misplaced_pub(input, err) {
         return format!(
-            "`pub` is not allowed on `{kw}`: it marks class fields and `impl` methods only"
+            "`pub` is not allowed on `{kw}`: it marks class fields, `impl` methods and `pub use` only"
         );
     }
     match err.reason() {
@@ -5121,8 +5133,11 @@ fn format_parse_error_label(input: &str, err: &Rich<'_, char>) -> String {
     if let Some(msg) = missing_param_type_message(input, err) {
         return msg;
     }
+    if let Some(("use", _)) = misplaced_pub(input, err) {
+        return "`pub use` re-exports a name from a module".to_string();
+    }
     if misplaced_pub(input, err).is_some() {
-        return "`pub` is only for class fields and `impl` methods".to_string();
+        return "`pub` is only for class fields, `impl` methods and `pub use`".to_string();
     }
     match err.reason() {
         RichReason::Custom(msg) => msg.to_string(),
@@ -5137,6 +5152,12 @@ fn format_parse_error_label(input: &str, err: &Rich<'_, char>) -> String {
 }
 
 fn parse_error_help(input: &str, err: &Rich<'_, char>) -> Option<String> {
+    if let Some(("use", _)) = misplaced_pub(input, err) {
+        return Some(
+            "move it to the top level of the module, or remove `pub` to import the name in this block only"
+                .to_string(),
+        );
+    }
     if misplaced_pub(input, err).is_some() {
         return Some(
             "remove `pub`: every top-level item can be imported with `use` without it".to_string(),

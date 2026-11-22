@@ -2179,7 +2179,7 @@ fn collect_virtual_candidates(
                 collect_virtual_candidates(item, modules, out);
             }
         }
-        Expression::Use { path, name, alias } => {
+        Expression::Use { path, name, alias, .. } => {
             if name == "*" {
                 if let Some(exports) = modules.resolve_glob(path) {
                     for export in exports {
