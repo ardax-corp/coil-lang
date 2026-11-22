@@ -162,6 +162,9 @@ impl Runtime {
                 heap.rc_drop(v);
             }
             heap.rc_release_pending();
+            // A released object a check run kept is swept below; its
+            // address may hold the next job's object.
+            heap.forget_doomed();
         }
         self.statics.fill(Value::default());
         self.program_string_cache.fill(Value::default());

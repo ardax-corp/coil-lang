@@ -1635,6 +1635,12 @@ impl Heap {
     }
 
     /// Whether check mode recorded objects since the last check.
+    /// Drop the record [`Self::check_doomed`] reads: the job that made it
+    /// ended, and its objects go with its heap's reset.
+    pub fn forget_doomed(&mut self) {
+        self.doomed.clear();
+    }
+
     pub fn has_doomed(&self) -> bool {
         !self.doomed.is_empty()
     }
