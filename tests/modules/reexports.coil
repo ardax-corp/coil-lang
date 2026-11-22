@@ -1,0 +1,45 @@
+// `pub use` re-exports (#2864): every kind of item imported through a module
+// that only re-exports it, under its own name, an alias the re-export gave
+// it, an alias of the importer, and through a chain of two re-exports.
+use tests::assert;
+use reexport_facade::{bump, first, LIMIT, seed, Item, Kind, Score, Pair, next, twice_bumped};
+use reexport_facade::bump as inc;
+use reexport_chain::{step, Item as ChainItem, next as chain_next};
+
+fn kind_value(Kind k) -> int {
+    return match k {
+        Kind::One(n) => n,
+        Kind::Two => 0,
+    };
+}
+
+test("a re-exported fn, generic fn, const and static") {
+    assert!(bump(1) == 2);
+    assert!(first([4, 5]) == 4);
+    assert!(LIMIT == 5);
+    assert!(seed == 9);
+}
+
+test("a re-exported class, enum, trait and type alias") {
+    assert!(new Item(3).n == 3);
+    assert!(kind_value(Kind::One(4)) == 4);
+    assert!(kind_value(Kind::Two) == 0);
+    assert!(new Item(2).score() == 200);
+    assert!(Score::score(new Item(1)) == 100);
+    let p: Pair = (1, 2);
+    let (a, b) = p;
+    assert!(a + b == 3);
+}
+
+test("aliases on either side and the facade's own items") {
+    assert!(next(1) == 2);
+    assert!(inc(2) == 3);
+    assert!(twice_bumped(1) == 3);
+}
+
+test("a chain of re-exports names the same item") {
+    assert!(step(10) == 11);
+    assert!(chain_next(20) == 21);
+    let a: Item = new ChainItem(6);
+    assert!(a.score() == 600);
+}

@@ -74,7 +74,7 @@ pub fn display_names(msg: &Message, names: &[String]) -> Message {
 /// Builtin trait names a `use prelude… as Alias` frees in this module.
 fn collect_rebound(node: &Output<'_>, out: &mut HashSet<String>) {
     match node.1.as_ref() {
-        Expression::Use { path, name, alias: Some(alias) }
+        Expression::Use { path, name, alias: Some(alias), .. }
             if path.first().is_some_and(|p| p == "prelude")
                 && alias != name
                 && Checker::is_builtin_class(name) =>

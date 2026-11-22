@@ -22,6 +22,9 @@ mod macros;
 #[path = "pipeline_contracts.rs"]
 mod contracts;
 
+#[path = "pipeline_reexports.rs"]
+mod reexports;
+
 #[path = "pipeline_contract_tests.rs"]
 mod contract_tests;
 pub use contract_tests::CASE_PREFIX as CONTRACT_CASE_PREFIX;
@@ -1438,6 +1441,7 @@ impl Pipeline {
                 break;
             }
         }
+        self.resolve_reexports();
     }
 
     /// Compile a single file. Parse/expand/check come from

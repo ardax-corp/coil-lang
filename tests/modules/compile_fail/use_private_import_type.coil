@@ -1,0 +1,5 @@
+// @expected E0100 — a plain `use` of a class does not re-export it either:
+// `reexport_facade_private` imports `Item` without `pub` (#2864).
+use reexport_facade_private::Item;
+
+fn main() {}

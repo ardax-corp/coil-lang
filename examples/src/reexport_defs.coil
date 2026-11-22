@@ -1,0 +1,37 @@
+// Declares every kind of item `reexport_facade` re-exports (#2864).
+fn bump(int x) -> int {
+    return x + 1;
+}
+
+fn first<T>(Vec<T> xs) -> T {
+    return xs[0];
+}
+
+const LIMIT = 5;
+
+static let seed: int = 9;
+
+class Item {
+    pub n: int,
+}
+
+enum Kind {
+    One(int),
+    Two,
+}
+
+trait Score<T> {
+    fn score(T self) -> int {}
+}
+
+impl Score for Item {
+    pub fn score(Item self) -> int {
+        return self.n * 100;
+    }
+}
+
+type Pair = (int, int);
+
+fn hidden() -> int {
+    return 7;
+}

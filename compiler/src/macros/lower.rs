@@ -348,7 +348,7 @@ fn inject_macro_uses(children: &mut Vec<Output<'_>>, needed: &[&str]) {
     let mut glob = false;
     fn scan(node: &Output<'_>, have: &mut HashSet<String>, glob: &mut bool) {
         match node.1.as_ref() {
-            Expression::Use { path, name, alias } if path.first().map(String::as_str) == Some(MACRO_MODULE) => {
+            Expression::Use { path, name, alias, .. } if path.first().map(String::as_str) == Some(MACRO_MODULE) => {
                 if name == "*" {
                     *glob = true;
                 } else {
@@ -377,6 +377,8 @@ fn inject_macro_uses(children: &mut Vec<Output<'_>>, needed: &[&str]) {
                     path: vec![MACRO_MODULE.to_string()],
                     name: name.to_string(),
                     alias: None,
+                    public: false,
+                    written: None,
                 }),
             ),
         );
