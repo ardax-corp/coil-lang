@@ -1,0 +1,9 @@
+// Re-exports items of `reexport_defs` (#2864): `pub use` makes an imported
+// name an item of this module; the plain `use` of `hidden` stays private.
+pub use reexport_defs::{bump, first, LIMIT, seed, Item, Kind, Score, Pair};
+pub use reexport_defs::bump as next;
+use reexport_defs::hidden;
+
+fn twice_bumped(int x) -> int {
+    return bump(bump(x)) + hidden() - hidden();
+}

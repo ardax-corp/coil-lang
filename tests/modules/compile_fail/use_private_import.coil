@@ -1,0 +1,5 @@
+// @expected E0100 — `reexport_facade` imports `hidden` with a plain `use`,
+// which does not re-export it; only a `pub use` does (#2864).
+use reexport_facade::hidden;
+
+fn main() {}
