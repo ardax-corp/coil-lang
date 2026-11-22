@@ -46,13 +46,14 @@ impl Pipeline {
             // A chain of re-exports is at most one hop per module; a longer
             // one is a cycle, which discovery reports.
             for _ in 0..=files.len() {
-                if at.1 == "*"
-                    || virtual_modules.resolves_use(&at.0, &at.1)
-                    || crate::macros::embedded_use(&at.0, &at.1).is_some()
-                {
+                if at.1 == "*" || virtual_modules.resolves_use(&at.0, &at.1) {
                     break;
                 }
-                let Some(file) = resolve_use_in_roots(&self.roots, &self.project_root, &at.0, &at.1) else {
+                // A module embedded in the compiler (`task`) or a file on the roots.
+                let file = crate::macros::embedded_use(&at.0, &at.1)
+                    .map(|(file, _)| file)
+                    .or_else(|| resolve_use_in_roots(&self.roots, &self.project_root, &at.0, &at.1));
+                let Some(file) = file else {
                     break;
                 };
                 let Some(next) = exports.get(&file).and_then(|e| e.get(&at.1)) else {
