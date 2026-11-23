@@ -392,6 +392,8 @@ extern "sum" {
     fn sum_bytes(ConstBytes buf, int n) -> int;
     fn copy_bytes(Bytes dst, ConstBytes src, int n);
     fn fill_bytes(bytes buf, int n, int v);
+    fn scale_ints(Vec<int> xs, int n, int k);
+    fn sum_array(Vec<int> xs, int n) -> int;
 }
 
 fn main() {
@@ -415,11 +417,45 @@ fn main() {
     if d[0] != (121 as byte) || d[1] != (122 as byte) {
         panic "same-array copy failed";
     }
+    let xs = [1, 2, 3];
+    scale_ints(xs, 3, 10);
+    if xs[0] != 10 || xs[2] != 30 || sum_array(xs, 3) != 60 {
+        panic "Vec<int> write-back failed";
+    }
 }
 "#,
     )
     .unwrap();
     check(&bin, &tmp, &src);
+
+    // A string with a NUL byte cannot be a C string: the call panics, with
+    // the same message in every mode.
+    let nul = tmp.join("nul.coil");
+    std::fs::write(
+        &nul,
+        r#"
+extern "sum" {
+    fn str_len(string s) -> int;
+}
+
+fn main() {
+    let s = "a" + "\0" + "b";
+    let _ = str_len(s);
+}
+"#,
+    )
+    .unwrap();
+    for mode in [&[][..], &["-O", "0"][..], &["--mir"][..]] {
+        let run = Command::new(&bin)
+            .args(mode)
+            .args(["--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"])
+            .arg(&tmp)
+            .arg(&nul)
+            .output()
+            .expect("coil run");
+        let err = String::from_utf8_lossy(&run.stderr);
+        assert!(!run.status.success() && err.contains("NUL"), "{mode:?}: a string with a NUL byte passed: {err}");
+    }
 
     let ro = tmp.join("readonly.coil");
     std::fs::write(
