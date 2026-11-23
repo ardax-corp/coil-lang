@@ -1,31 +1,19 @@
-// C calls back into coil via ffi::types::Callback. Expected output: `42`.
+// C calls back into coil through a function-typed `extern` parameter.
+// Expected output: `42`.
 //
 // @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
-use ffi::declare;
-use ffi::dload;
-use ffi::invoke;
-use ffi::types::Callback;
-use ffi::types::Int;
 use io::sync::print;
 use string::format;
+
+extern "sum" {
+    fn apply_cb(fn(int x) -> int cb, int x) -> int;
+}
 
 fn doubler(int x) -> int {
     return x * 2;
 }
 
 fn main() {
-    let lib = match dload("sum") {
-        Result::Ok(h) => h,
-        Result::Err(e) => panic e.message,
-    };
-    let id = match declare(lib, "apply_cb", (Callback, Int), Int) {
-        Result::Ok(i) => i,
-        Result::Err(e) => panic e.message,
-    };
-    let n = match invoke(lib, id, (doubler, 21)) {
-        Result::Ok(v) => v,
-        Result::Err(e) => panic e.message,
-    };
-    let _ = print(format("%i", n));
+    let _ = print(format("%i", apply_cb(doubler, 21)));
 }

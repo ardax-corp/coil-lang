@@ -2,11 +2,6 @@
 //
 // @output (not checked: needs `--allow-dload sum`; see the example_ffi_* pipeline tests)
 
-use ffi::Error;
-use ffi::declare;
-use ffi::dload;
-use ffi::invoke;
-use ffi::types::Int32;
 use io::sync::print;
 use string::format;
 
@@ -15,10 +10,14 @@ extern struct Point {
     y: int32,
 };
 
-fn main() -> Result<(), Error> {
-    let lib = dload("sum")?;
-    let make_id = declare(lib, "make_point", (Int32, Int32), Point)?;
-    let p = invoke(lib, make_id, (3, 4))?;
+// C takes `int32_t`; an `extern` parameter cannot be a sized integer yet
+// (#2886), and the low 32 bits of an `int` register are what C reads.
+extern "sum" {
+    fn make_point(int x, int y) -> Point;
+}
+
+fn main() {
+    let p = make_point(3, 4);
     let _ = print(format("%i", p.x));
     let _ = print(format("%i", p.y));
 }
