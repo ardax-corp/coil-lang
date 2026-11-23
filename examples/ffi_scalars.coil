@@ -16,6 +16,11 @@ extern "sum" {
     fn sum_reset();
     fn sum_noted() -> int;
     fn get_doubler() -> ptr;
+    fn trunc32(int x) -> int32;
+    fn widen32(int32 x) -> int;
+    fn low_byte(int x) -> uint8;
+    fn widen_u16(uint16 x) -> int;
+    fn sized_mix(int8 a, uint32 b, int16 c) -> int;
 }
 
 fn main() {
@@ -29,4 +34,9 @@ fn main() {
             get_doubler() != get_doubler(),
         ),
     );
+    // Sized C integers are `int`s in coil, narrowed and widened at the call.
+    let _ = print(
+        format(" %i %i %i", widen32(trunc32(-1)), widen32(trunc32(4294967297)), low_byte(-1)),
+    );
+    let _ = print(format(" %i %i", widen_u16(-1), sized_mix(-3, 4000000000, -7)));
 }

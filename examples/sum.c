@@ -342,3 +342,24 @@ void each_up_to(void (*cb)(int64_t), int64_t n) {
         cb(i);
     }
 }
+
+/// Sized integers (#2886): narrowed on the way in, widened on the way out.
+int32_t trunc32(int64_t x) {
+    return (int32_t)x;
+}
+
+int64_t widen32(int32_t x) {
+    return x;
+}
+
+uint8_t low_byte(int64_t x) {
+    return (uint8_t)x;
+}
+
+int64_t widen_u16(uint16_t x) {
+    return x;
+}
+
+int64_t sized_mix(int8_t a, uint32_t b, int16_t c) {
+    return (int64_t)a * 1000000 + (int64_t)b + (int64_t)c;
+}
