@@ -461,7 +461,7 @@ impl Heap {
     /// loses an owner, and those that reach zero are released in turn (a
     /// worklist, not recursion). An object the runtime cannot free here
     /// stays, at count zero, for the collector: a
-    /// root handle, a generator that never started, and every
+    /// root handle, and every
     /// object while a collection or a steal epoch is open (one that owes a
     /// `drop` or a close waits for it in [`Self::rc_due`]). The last
     /// collection's root buffer is no test: it is stale once that ends, and
@@ -538,10 +538,12 @@ impl Heap {
     }
 
     /// Each object `obj`'s words name loses an owner; those that reach zero
-    /// go on `stack` ([`Self::rc_release`]'s worklist). A coroutine's saved
-    /// words are its frame's, which counted them itself.
+    /// go on `stack` ([`Self::rc_release`]'s worklist). A started
+    /// coroutine's saved words are its frame's, which counted them itself;
+    /// one that never started owns its arguments (its allocation counted
+    /// them, and its body takes them over when it starts).
     fn rc_dec_children(&self, obj: Object, stack: &mut Vec<Object>) {
-        if matches!(obj, Object::Coroutine(_)) {
+        if matches!(obj, Object::Coroutine(c) if c.as_ref().started) {
             return;
         }
         struct Dec<'a>(&'a Heap, &'a mut Vec<Object>);
@@ -630,7 +632,7 @@ impl Heap {
         // frame's words). Freeing a stream closes its descriptor (a local
         // one is kept to the end of its scope, `hir/early_free.rs`).
         (matches!(obj, Object::Fn(_) | Object::String(_) | Object::Weak(_) | Object::Stream(_))
-            || matches!(obj, Object::Coroutine(c) if c.as_ref().state == CoroState::Done)
+            || matches!(obj, Object::Coroutine(c) if c.as_ref().state == CoroState::Done || !c.as_ref().started)
             || matches!(obj, Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
             && !self.pending_drop(obj)
             && obj.rc_count() == 0

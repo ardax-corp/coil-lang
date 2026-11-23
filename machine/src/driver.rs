@@ -1103,7 +1103,11 @@ impl Driver<'_> {
                 if !s.scopes.get(&arg(0)).is_some_and(|sc| !sc.closed) {
                     return Invoked::Panic("spawn on a task scope that has ended".into());
                 }
-                Invoked::Value(Value::from(s.add_task(coro, arg(0)) as i64).bits())
+                let id = s.add_task(coro, arg(0));
+                // The task's record owns its coroutine until its scope goes
+                // ([`crate::task::Scheduler::released`]).
+                self.rt.heap.rc_retain(Value::from(crate::memory::Object::Coroutine(coro).addr()));
+                Invoked::Value(Value::from(id as i64).bits())
             }
             4 => {
                 let id = arg(0) as u64;
@@ -1632,6 +1636,14 @@ impl GcHost for Driver<'_> {
     }
 
     fn run_due_drops(&mut self) {
+        // Removed task records let go of their coroutines.
+        if let Some(released) = self.rt.sched.as_mut().map(|s| std::mem::take(&mut s.released))
+            && !released.is_empty()
+        {
+            for coro in released {
+                self.rt.heap.rc_drop(Value::from(crate::memory::Object::Coroutine(coro).addr()));
+            }
+        }
         // A `drop` may release more: until none is left.
         loop {
             let due = self.rt.heap.take_rc_due();

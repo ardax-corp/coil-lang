@@ -178,6 +178,9 @@ pub(crate) struct Scheduler {
     pub current: TaskId,
     /// Child tasks not finished yet.
     pub live: usize,
+    /// Coroutines of removed task records: each record owned a count on
+    /// its coroutine, which the runtime drops at its next safepoint.
+    pub released: Vec<RefCoroutine>,
     next_task: TaskId,
     next_scope: ScopeId,
     next_timer: u64,
@@ -231,6 +234,7 @@ impl Scheduler {
             reactor: crate::io_reactor::IoReactor::new(),
             current: ROOT,
             live: 0,
+            released: Vec::new(),
             next_task: 1,
             next_scope: 1,
             next_timer: 0,
@@ -402,7 +406,9 @@ impl Scheduler {
     pub(crate) fn remove_scope(&mut self, scope: ScopeId) -> Option<ScopeRec> {
         let s = self.scopes.remove(&scope)?;
         for c in &s.children {
-            self.tasks.remove(c);
+            if let Some(coro) = self.tasks.remove(c).and_then(|r| r.coro) {
+                self.released.push(coro);
+            }
         }
         Some(s)
     }
