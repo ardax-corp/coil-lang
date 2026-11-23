@@ -3319,15 +3319,16 @@ impl<'a> Lower<'a> {
     /// with lane `p` untouched and runs the rest, from `p`, on the runtime's
     /// lane code. `false`: not such a loop (nothing emitted).
     fn native_store(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
-        // A check run counts the loop's stores in the runtime's.
-        if machine::native::rc_counting() {
-            return Ok(false);
-        }
         use compiler::native_mir::VecLoopKind;
         use common::dense;
         let MirInst::VecLoop { dest, pos, from, to, kind: VecLoopKind::Store { stores } } = inst else {
             return Ok(false);
         };
+        // Lanes are numbers: a store of one over another changes no count.
+        // A run that keeps counts leaves any other element to the runtime.
+        if machine::native::rc_counting() && !stores.iter().all(|s| matches!(s.2, dense::TY_I64 | dense::TY_F64)) {
+            return Ok(false);
+        }
         if stores.is_empty() || pos.is_some_and(|p| value_used(f, p)) {
             return Ok(false);
         }
