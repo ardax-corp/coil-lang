@@ -209,9 +209,10 @@ pub struct AotObject {
 /// package`): the same lowering as [`jit`], linked against the runtime
 /// library instead of bound in memory. `statics` are the `extern`
 /// functions linked into the executable, as `(library stem, C symbol)`:
-/// the object imports each symbol and records its address. `package` is
+/// the object imports each symbol and records its address. `all_linked`:
+/// they are every `extern` function the program declares. `package` is
 /// the program's data (`common::linked_package`), as `coil_aot_package`.
-pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(String, String)], package: &[u8]) -> Result<AotObject, String> {
+pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(String, String)], all_linked: bool, package: &[u8]) -> Result<AotObject, String> {
     let mut excluded = HashMap::new();
     loop {
         let plan = plan_without(bodies, &excluded, body_ids);
@@ -339,7 +340,7 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         words("coil_aot_stack_map_count", map_count.to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
         host_group_table(&mut module, bodies)?;
-        ffi_link_table(&mut module, bodies)?;
+        ffi_link_table(&mut module, bodies, all_linked && !ids.runtime_ffi.get())?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });
     }
@@ -439,13 +440,22 @@ fn host_group_table(module: &mut cranelift_object::ObjectModule, bodies: &[Nativ
 /// `coil_aot_ffi`: the address of the runtime's `coil_ffi_link` when
 /// `bodies` make an FFI call (`MirInst::Ffi`), else null. A link without
 /// the reference drops libffi, `dload` and its gate from the executable.
-fn ffi_link_table(module: &mut cranelift_object::ObjectModule, bodies: &[NativeBody]) -> Result<(), String> {
+/// `direct`: every library the program loads is linked into the
+/// executable and every extern call is direct, so with no
+/// `MirFfiOp::Invoke` either it takes `coil_ffi_link_linked`, which has
+/// none of them.
+fn ffi_link_table(module: &mut cranelift_object::ObjectModule, bodies: &[NativeBody], direct: bool) -> Result<(), String> {
     let e = |e: cranelift_module::ModuleError| e.to_string();
     let mut d = cranelift_module::DataDescription::new();
     d.define(vec![0u8; 8].into_boxed_slice());
     d.set_align(8);
     if uses_ffi(bodies) {
-        let link = module.declare_data("coil_ffi_link", Linkage::Import, false, false).map_err(e)?;
+        let invokes = bodies
+            .iter()
+            .flat_map(|b| b.mir.blocks.iter().flat_map(|b| &b.insts))
+            .any(|i| matches!(i, MirInst::Ffi { op: compiler::native_mir::MirFfiOp::Invoke, .. }));
+        let name = if direct && !invokes { "coil_ffi_link_linked" } else { "coil_ffi_link" };
+        let link = module.declare_data(name, Linkage::Import, false, false).map_err(e)?;
         let gv = module.declare_data_in_data(link, &mut d);
         d.write_data_addr(0, gv, 0);
     }
@@ -742,6 +752,7 @@ fn define_all<M: Module>(
                 if r.is_ok() {
                     lower.b.finalize(fcfg);
                 }
+                ids.runtime_ffi.set(ids.runtime_ffi.get() | lower.runtime_ffi);
                 r
             };
             if let Err(why) = lowered {
@@ -762,6 +773,7 @@ fn define_all<M: Module>(
                     if r.is_ok() {
                         lower.b.finalize(fcfg);
                     }
+                    ids.runtime_ffi.set(ids.runtime_ffi.get() | lower.runtime_ffi);
                     r
                 };
                 if let Err(why) = lowered {
@@ -1828,6 +1840,9 @@ struct Ids {
     /// A program whose C code may call back ([`Plan::ffi_callbacks`]): its
     /// direct calls' trampolines and its callbacks' thunks.
     cb: Option<CbIds>,
+    /// Set when a lowered body calls an extern function through the
+    /// runtime's libffi call ([`Lower::runtime_extern_call`]).
+    runtime_ffi: std::cell::Cell<bool>,
 }
 
 /// [`CbIds`] a body uses, and its code pointers' body ids.
@@ -2413,6 +2428,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         ffi_struct_out,
         va_call,
         cb,
+        runtime_ffi: Default::default(),
     })
 }
 
@@ -2659,6 +2675,8 @@ struct Lower<'a> {
     /// Extern calls may be direct: no C callback can run coil code
     /// ([`Plan::ffi_callbacks`]).
     direct_externs: bool,
+    /// This body calls an extern function through the runtime.
+    runtime_ffi: bool,
     cow: FuncRef,
     cow_field: FuncRef,
     alloc: FuncRef,
@@ -2926,6 +2944,7 @@ impl<'a> Lower<'a> {
             c_conv: module.isa().default_call_conv(),
             c_abi: CAbi::of(module.isa()),
             direct_externs: true,
+            runtime_ffi: false,
             cow,
             cow_field,
             alloc,
@@ -5119,6 +5138,7 @@ impl<'a> Lower<'a> {
     /// An extern call on the runtime's libffi call (`coil_native_ffi`),
     /// with no address: its result word.
     fn runtime_extern_call(&mut self, f: &MirFunc, dest: ValueId, sig: &compiler::native_mir::MirExternSig, args: &[ValueId]) -> cranelift_codegen::ir::Value {
+        self.runtime_ffi = true;
         let words: Vec<ValueId> = args.iter().take(2).chain(args.iter().skip(3)).copied().collect();
         let tags: Vec<i64> = sig.variadic.iter().flatten().map(|&t| i64::from(t)).collect();
         let operand = (words.len() as u64 - 2) | if sig.variadic.is_some() { 1 << 16 } else { 0 };

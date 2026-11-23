@@ -75,8 +75,9 @@ fn aot_object(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], 
     if bodies.iter().any(|b| b.name == coil_native::START_NAME) {
         pcs.insert(coil_native::START_NAME.to_string(), start_id(bodies));
     }
-    let linked: Vec<(String, String)> = pipeline
-        .extern_symbols()
+    let externs = pipeline.extern_symbols();
+    let declared = externs.len();
+    let linked: Vec<(String, String)> = externs
         .into_iter()
         .filter_map(|(lib, sym)| {
             let stem = machine::dload_request_stem(&lib);
@@ -88,7 +89,7 @@ fn aot_object(pipeline: &Pipeline, bodies: &[compiler::native_mir::NativeBody], 
             eprintln!("warning: `--link-static {}`: no `extern \"{}\"` block declares a function", s.path.display(), s.stem);
         }
     }
-    let object = coil_native::aot(bodies, &pcs, &linked, package).map_err(|e| format!("native code for the package failed ({e})"))?;
+    let object = coil_native::aot(bodies, &pcs, &linked, linked.len() == declared, package).map_err(|e| format!("native code for the package failed ({e})"))?;
     if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "2") {
         for (name, why) in &object.refused {
             eprintln!("  refused: {name}: {why}");

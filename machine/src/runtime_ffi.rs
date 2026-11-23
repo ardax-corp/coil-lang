@@ -180,6 +180,52 @@ impl Runtime {
         }
     }
 
+    /// `FfiLoad` with [`crate::FFI_LINKED_HOOK`]: the library at `path`
+    /// from the executable's table of linked functions, with no file
+    /// opened and no gate (it was checked when the executable linked).
+    pub(crate) fn ffi_load_linked(&mut self, path: Value) -> Value {
+        let path = match self.heap.find_object_by_addr(path.bits()) {
+            Some(Object::String(gc)) => gc.as_ref().data.to_string(),
+            _ => String::new(),
+        };
+        match crate::ffi::static_library(&path) {
+            Some(lib) => {
+                self.ffi.linked.push((lib, Vec::new()));
+                crate::io::alloc_result_ok(&mut self.heap, Value::from(self.ffi.linked.len() as i64))
+            }
+            None => self.ffi_err(crate::ffi::FfiErrorKindTag::LibraryNotFound, format!("FFI library `{path}` is not linked into this executable")),
+        }
+    }
+
+    /// `DeclareFFI` with [`crate::FFI_LINKED_HOOK`]: function `name` of
+    /// linked library `lib`, by its address in the table.
+    pub(crate) fn ffi_declare_linked(&mut self, lib: Value, name: Value) -> Value {
+        let name = match self.heap.find_object_by_addr(name.bits()) {
+            Some(Object::String(gc)) => gc.as_ref().data.to_string(),
+            _ => String::new(),
+        };
+        let Some((table, declared)) = (lib.as_int() as usize).checked_sub(1).and_then(|i| self.ffi.linked.get_mut(i)) else {
+            return self.ffi_err(crate::ffi::FfiErrorKindTag::InvalidHandle, "invalid library handle".into());
+        };
+        match table.get(&name) {
+            Some(&addr) => {
+                declared.push(addr);
+                let id = declared.len() as i64 - 1;
+                crate::io::alloc_result_ok(&mut self.heap, Value::from(id))
+            }
+            None => self.ffi_error(crate::ffi::FfiError::SymbolNotFound { name }),
+        }
+    }
+
+    /// `FFI_OP_ADDR` with [`crate::FFI_LINKED_HOOK`].
+    pub(crate) fn ffi_addr_linked(&mut self, lib: Value, function_id: Value) -> Value {
+        let addr = (lib.as_int() as usize).checked_sub(1).and_then(|i| self.ffi.linked.get(i)).and_then(|(_, d)| d.get(function_id.as_int() as usize).copied());
+        match addr {
+            Some(a) => crate::io::alloc_result_ok(&mut self.heap, Value::from(a as i64)),
+            None => self.ffi_error(crate::ffi::FfiError::InvalidHandle("function id out of range".into())),
+        }
+    }
+
     /// [`Runtime::ffi_invoke`]'s call: the C function's word (`0` for a
     /// `void` one), or its error's kind and message.
     pub(crate) fn ffi_call(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>, callback: &mut dyn FnMut(u32, u32) -> Result<crate::ffi::OwnedClosure, crate::ffi::FfiError>) -> Result<Value, (crate::ffi::FfiErrorKindTag, String)> {

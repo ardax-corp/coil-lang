@@ -117,6 +117,10 @@ pub(crate) struct FfiState {
     pub(crate) recipes: crate::ffi::LibraryRecipes,
     /// A spawning runtime's library handle -> this runtime's copy of it.
     pub(crate) adopted: std::collections::HashMap<u64, u64, AddrHashBuilder>,
+    /// With [`crate::FFI_LINKED_HOOK`]: the libraries loaded from the
+    /// executable's own table (handle `i + 1`), with the address of each
+    /// function declared on them (its id).
+    pub(crate) linked: Vec<(&'static crate::ffi::StaticLibrary, Vec<usize>)>,
 }
 
 impl Runtime {

@@ -67,7 +67,7 @@ pub use packed_la::{
 };
 pub use runtime_wire::class_kind_table;
 pub use isolate::{Isolate, IsolateProgram};
-pub use driver::FFI_HOOK;
+pub use driver::{FFI_HOOK, FFI_LINKED_HOOK};
 pub use start::{NativeStart, run_natively, spawn_context, standard_host_natives};
 pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
 pub use thread::{

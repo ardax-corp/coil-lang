@@ -711,7 +711,17 @@ all`. Two changes take it to 675 KB (-39%) with the same instruction counts:
   reference the link drops libffi, `libloading`, the FFI registry, the `dload` gate and
   `sha2`. Every other start (`coil FILE`, `coil run`, the JIT runner, `coil debug`)
   passes the hook. A program with no FFI op whose package still says it uses FFI exits
-  with "linked without FFI"; `coil package` makes neither.
+  with "linked without FFI"; `coil package` makes neither. When every library the
+  program's `extern` blocks name is linked into the executable (`--link-static`, or a
+  shared library on ELF) and every extern call is direct (no `runtime_extern_call`,
+  `Ids::runtime_ffi`) with no `MirFfiOp::Invoke`, `coil_aot_ffi` holds
+  `coil_ffi_link_linked` instead (`coil_cli::FFI_LINK_LINKED`,
+  `machine::FFI_LINKED_HOOK`): module setup's load, declare and address ops read the
+  executable's `coil_static_syms` table, and there is no native lock, gate, `dload` or
+  libffi (`examples/ffi_sum.coil`: 1,045 KB -> 905 KB with `--strip-symbols all`).
+  A direct call makes its own argument copies (`machine::ffi::DirectCopies`, through
+  `coil_native_ffi_arg` / `coil_native_ffi_done`) and panics on an argument it cannot
+  pass, so it never retries on the runtime's libffi call.
 - **Size-trimmed std** (-300 KB): `scripts/build_runtime.sh` builds the release
   `libcoil_rt.a` on Linux with std rebuilt (`-Zbuild-std`, `RUSTC_BOOTSTRAP=1`
   on stable, needs `rust-src`): without std's backtrace symbolizer (`gimli`,
