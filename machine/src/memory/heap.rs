@@ -870,6 +870,23 @@ impl Heap {
         }
     }
 
+    /// Whether a write through `obj` must copy it first: a value share
+    /// marked it, and, with counts kept, an owner besides the writer's is
+    /// still there (reference-count plan step 5: the mark is no longer
+    /// sticky once the other names are gone). The mark stays the test of
+    /// whether a share happened at all: a name that writes in place by
+    /// design (a `mut` capture, a view) counts an owner but shares nothing.
+    #[inline]
+    fn cow_is_shared(&self, obj: Object) -> bool {
+        obj.is_shared() && (!self.rc_counting() || obj.rc_count() > 1)
+    }
+
+    /// A copy's child now has a second owner: marked shared.
+    #[inline]
+    fn cow_share_child(&self, child: Object) {
+        child.set_shared();
+    }
+
     /// [`Self::cow_share`] of a pinned object: a copy of it.
     #[cold]
     #[inline(never)]
@@ -892,7 +909,7 @@ impl Heap {
     /// class, or not a class instance or array.
     pub fn cow_unique(&mut self, v: Value) -> Option<Value> {
         let obj = self.find_object_by_addr(v.heap_addr())?;
-        if !obj.is_shared() {
+        if !self.cow_is_shared(obj) {
             return None;
         }
         let copy = match obj {
@@ -921,7 +938,7 @@ impl Heap {
                 if child.is_pinned() {
                     pinned = true;
                 } else {
-                    child.set_shared();
+                    self.cow_share_child(child);
                 }
             }
         });
@@ -967,7 +984,7 @@ impl Heap {
                 if child.is_pinned() {
                     pinned = true;
                 } else {
-                    child.set_shared();
+                    self.cow_share_child(child);
                 }
             }
         });
