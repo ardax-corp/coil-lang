@@ -2838,6 +2838,23 @@ pub extern "C" fn coil_native_va_call() {
     std::process::abort()
 }
 
+/// [`coil_native_va_call`] for a call whose arguments take every integer
+/// register: the C function's address is the eighth `double` argument
+/// (`xmm7`, after zero words). Eight vector registers are then in use.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+#[unsafe(no_mangle)]
+pub extern "C" fn coil_native_va_call_f() {
+    core::arch::naked_asm!("movq r11, xmm7", "mov al, 8", "jmp r11")
+}
+
+/// Only x86-64 System V calls through [`coil_native_va_call_f`] there.
+#[cfg(not(target_arch = "x86_64"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn coil_native_va_call_f() {
+    std::process::abort()
+}
+
 /// A direct extern call's struct result: a new record of struct `id`'s C
 /// bytes at `buf`.
 ///
@@ -3223,6 +3240,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_cb_leave", coil_native_cb_leave as *const u8),
         ("coil_native_callback", coil_native_callback as *const u8),
         ("coil_native_va_call", coil_native_va_call as *const u8),
+        ("coil_native_va_call_f", coil_native_va_call_f as *const u8),
         ("coil_native_defer", coil_native_defer as *const u8),
         ("coil_native_claim", coil_native_claim as *const u8),
         ("coil_native_collect", coil_native_collect as *const u8),
@@ -3232,7 +3250,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 50;
+const HELPERS: usize = 51;
 
 #[cfg(test)]
 mod pin_tests {
