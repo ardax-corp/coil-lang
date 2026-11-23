@@ -10,10 +10,9 @@ extern struct Point {
     y: int32,
 };
 
-// C takes `int32_t`; an `extern` parameter cannot be a sized integer yet
-// (#2886), and the low 32 bits of an `int` register are what C reads.
+// A sized C integer parameter takes an `int`, narrowed at the call.
 extern "sum" {
-    fn make_point(int x, int y) -> Point;
+    fn make_point(int32 x, int32 y) -> Point;
 }
 
 fn main() {
