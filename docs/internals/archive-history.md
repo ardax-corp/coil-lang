@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 5, below, is the
-current version, 8.5 with MIR section `FORMAT` 21). A runtime refuses a major
+only add something to the format raise the minor (minor 6, below, is the
+current version, 8.6 with MIR section `FORMAT` 21). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -149,6 +149,13 @@ be `WORD_SCALAR` as well as `WORD_POINTER`. An 8.4 snapshot reads as before.
 Format 21 also holds the reference count ops of plan step 3, `RcInc` (tag 52) and
 `RcDec` (tag 53): a dest, a source word and an optional `bool` guard, each a value
 id (the guard as an optional one).
+
+Minor 6 (reference counts, plan step 9) marks the classes whose objects can close
+a reference cycle: the finalizer registry's `gc_register_finalizer` (**101**) call
+for such a class sets `common::CYCLIC_TYPE_FLAG` (bit 16) on its type id, and one
+for a class with no `drop` passes `0` as the entry. The cycle collector starts its
+walks from those classes' objects. An 8.5 archive loads unchanged and marks none:
+its cycles are left to the collector.
 
 ## Major 7
 

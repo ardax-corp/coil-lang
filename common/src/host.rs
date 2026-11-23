@@ -435,6 +435,12 @@ pub const KEY_EQ_STRING: i64 = 2;
 /// flag is never flagged.
 pub const EARLY_DROP_FLAG: u32 = 1 << 15;
 
+/// Set on the `type_id` argument of `gc_register_finalizer` when the
+/// class's objects can close a reference cycle (reference-count plan step
+/// 9): the cycle collector starts from them. The drop entry is `0` for a
+/// class with no `drop` (archive minor 6).
+pub const CYCLIC_TYPE_FLAG: u32 = 1 << 16;
+
 /// Low 16 bits of a `HostInvoke` operand are the argument count.
 pub const HOST_INVOKE_ARITY_MASK: u32 = 0xFFFF;
 /// Bits `[17:16]` select the Option/Result host-edge layout (archive minor 2).

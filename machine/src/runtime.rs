@@ -313,9 +313,16 @@ impl Runtime {
     /// drop method runs at `pc` (`EARLY_DROP_FLAG`: freed early too).
     pub(crate) fn register_finalizer(&mut self, type_id: u32, pc: u32) {
         let early = type_id & common::EARLY_DROP_FLAG != 0;
-        let type_id = type_id & !common::EARLY_DROP_FLAG;
+        let cyclic = type_id & common::CYCLIC_TYPE_FLAG != 0;
+        let type_id = type_id & !(common::EARLY_DROP_FLAG | common::CYCLIC_TYPE_FLAG);
         if type_id == 0 {
             return;
+        }
+        if cyclic {
+            self.heap.register_cyclic_type(type_id);
+            if pc == 0 {
+                return;
+            }
         }
         if early {
             self.heap.register_early_drop_type(type_id);
