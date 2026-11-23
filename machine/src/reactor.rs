@@ -81,6 +81,8 @@ pub struct Job {
     /// C struct layouts for pass-by-value FFI (ids are indices, so the
     /// worker runtime takes the parent's list as is).
     pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
+    /// The libraries the spawning program loaded (#2902).
+    pub ffi_recipes: crate::ffi::LibraryRecipes,
     /// What the job's statics start as: the spawning runtime's, so startup
     /// `const`s read the same values (#1561, #1663). `None` starts them
     /// zeroed.
@@ -870,6 +872,7 @@ pub fn job_from_spawn_context(
         dload_gate: ctx.dload_gate,
         epoch: None,
         struct_layouts: ctx.struct_layouts,
+        ffi_recipes: ctx.ffi_recipes,
         test: None,
         statics: None,
         native: ctx.native,
@@ -935,6 +938,7 @@ mod tests {
             dload_gate: DloadGate::deny_all(),
             epoch: None,
             struct_layouts: Arc::default(),
+            ffi_recipes: Default::default(),
             test: None,
             statics: None,
             native: const_code(imm),
@@ -972,6 +976,7 @@ mod tests {
             ffi_search_paths: Vec::new(),
             dload_gate: DloadGate::deny_all(),
             struct_layouts: Arc::default(),
+            ffi_recipes: Default::default(),
             statics: Arc::default(),
             native: None,
         }
@@ -1194,6 +1199,7 @@ mod tests {
             dload_gate: DloadGate::deny_all(),
             epoch: None,
             struct_layouts: Arc::default(),
+            ffi_recipes: Default::default(),
             test: None,
             statics: None,
             native: None,

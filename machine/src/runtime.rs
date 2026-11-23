@@ -113,6 +113,10 @@ pub(crate) struct FfiState {
     pub(crate) closures: Vec<crate::ffi::OwnedClosure>,
     /// Each closure's index by its function offset and callback signature.
     pub(crate) closure_of: std::collections::HashMap<(u32, u32), usize>,
+    /// The libraries the program loaded, shared with spawned jobs.
+    pub(crate) recipes: crate::ffi::LibraryRecipes,
+    /// A spawning runtime's library handle -> this runtime's copy of it.
+    pub(crate) adopted: std::collections::HashMap<u64, u64, AddrHashBuilder>,
 }
 
 impl Runtime {
@@ -158,6 +162,7 @@ impl Runtime {
         self.program_string_cache.fill(Value::default());
         self.sched = None;
         self.ffi.userland_libraries.clear();
+        self.ffi.adopted.clear();
         self.ffi.closures.clear();
         self.ffi.closure_of.clear();
         // Drop PCs belong to the job's program: a reused worker may load a
@@ -292,6 +297,7 @@ impl Runtime {
             ffi_search_paths: self.ffi.search_paths.clone(),
             dload_gate: self.ffi.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.ffi.struct_layouts),
+            ffi_recipes: Arc::clone(&self.ffi.recipes),
             statics: self.static_words(),
             native: self.native.as_ref().map(|t| Arc::clone(&t.code)),
         })

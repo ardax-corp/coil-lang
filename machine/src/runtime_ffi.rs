@@ -78,6 +78,32 @@ impl Runtime {
         self.ffi_err(kind, err.to_string())
     }
 
+    /// The library behind handle `addr`: one this runtime loaded, or this
+    /// runtime's copy of one its spawning runtime loaded, loaded and
+    /// declared again on first use (#2902). Native code calls through the
+    /// address it read at setup instead, so only the runtime's call path
+    /// (the MIR interpreter, `invoke`) needs the copy.
+    fn library_object(&mut self, addr: u64) -> Option<Object> {
+        if let Some(&object) = self.ffi.userland_libraries.get(&addr) {
+            return Some(object);
+        }
+        if let Some(local) = self.ffi.adopted.get(&addr) {
+            return self.ffi.userland_libraries.get(local).copied();
+        }
+        let recipe = self.ffi.recipes.lock().ok()?.get(&addr).cloned()?;
+        let lib_arc = crate::ffi::resolve_library(&recipe.path, self.ffi.base_dir.as_deref(), &self.ffi.search_paths, &self.ffi.dload_gate).ok()?;
+        self.ffi.libraries.entry(recipe.path.clone()).or_insert_with(|| lib_arc.clone());
+        let (mut object, lib) = self.heap.alloc_library(lib_arc);
+        lib.payload_mut().static_symbols = crate::ffi::static_library(&recipe.path);
+        for sig in recipe.signatures {
+            register_signature_on_object(&mut object, sig, &self.ffi.struct_layouts).ok()?;
+        }
+        let local = object.addr();
+        self.ffi.userland_libraries.insert(local, object);
+        self.ffi.adopted.insert(addr, local);
+        Some(object)
+    }
+
     /// `FfiLoad`: load the library at the string `path`.
     pub(crate) fn ffi_load(&mut self, path: Value) -> Value {
         let path = match self.heap.find_object_by_addr(path.bits()) {
@@ -91,6 +117,9 @@ impl Runtime {
                 lib.payload_mut().static_symbols = crate::ffi::static_library(&path);
                 let addr = object.addr();
                 self.ffi.userland_libraries.insert(addr, object);
+                if let Ok(mut recipes) = self.ffi.recipes.lock() {
+                    recipes.insert(addr, crate::ffi::LibraryRecipe { path, signatures: Vec::new() });
+                }
                 crate::io::alloc_result_ok(&mut self.heap, Value::from(addr))
             }
             Err(e) => self.ffi_error(e),
@@ -108,13 +137,21 @@ impl Runtime {
             _ => String::new(),
         };
         let lib_addr = lib.bits();
-        let Some(mut owned) = self.ffi.userland_libraries.get(&lib_addr).copied() else {
+        let Some(mut owned) = self.library_object(lib_addr) else {
             return self.ffi_err(crate::ffi::FfiErrorKindTag::InvalidHandle, format!("FFI declare: library at 0x{lib_addr:x} is not loaded"));
         };
         let sig = crate::ffi::FfiSignature { name, args, ret, variadic };
-        match register_signature_on_object(&mut owned, sig, &self.ffi.struct_layouts) {
+        match register_signature_on_object(&mut owned, sig.clone(), &self.ffi.struct_layouts) {
             Ok(id) => {
-                self.ffi.userland_libraries.insert(lib_addr, owned);
+                self.ffi.userland_libraries.insert(owned.addr(), owned);
+                // A library this runtime loaded: its jobs declare the same
+                // ids on their copies.
+                if let Ok(mut recipes) = self.ffi.recipes.lock()
+                    && let Some(recipe) = recipes.get_mut(&lib_addr)
+                    && recipe.signatures.len() == id
+                {
+                    recipe.signatures.push(sig);
+                }
                 crate::io::alloc_result_ok(&mut self.heap, Value::from(id as i64))
             }
             Err(e) => self.ffi_error(e),
@@ -133,7 +170,7 @@ impl Runtime {
     /// `FFI_OP_ADDR`: the C address of function `function_id` of the
     /// library at `lib`, as a `Result`.
     pub(crate) fn ffi_addr(&mut self, lib: Value, function_id: Value) -> Value {
-        let addr = match self.ffi.userland_libraries.get(&lib.bits()).copied() {
+        let addr = match self.library_object(lib.bits()) {
             Some(Object::Library(gc)) => gc.as_ref().signatures.get(function_id.as_int() as usize).map(|f| f.prepared.address()),
             _ => None,
         };
@@ -147,7 +184,7 @@ impl Runtime {
     /// `void` one), or its error's kind and message.
     pub(crate) fn ffi_call(&mut self, lib_addr: u64, function_id: usize, args: &[Value], arg_types: Option<&[crate::memory::FfiType]>, callback: &mut dyn FnMut(u32, u32) -> Result<crate::ffi::OwnedClosure, crate::ffi::FfiError>) -> Result<Value, (crate::ffi::FfiErrorKindTag, String)> {
         let error = |e: crate::ffi::FfiError| (crate::ffi::FfiErrorKindTag::from_ffi_error(&e), e.to_string());
-        let lib = match self.ffi.userland_libraries.get(&lib_addr).copied() {
+        let lib = match self.library_object(lib_addr) {
             Some(Object::Library(gc)) => gc,
             Some(_) => return Err((crate::ffi::FfiErrorKindTag::InvalidHandle, "invalid library handle (not a loaded library)".into())),
             None => return Err(error(crate::ffi::FfiError::InvalidHandle("invalid library handle".into()))),
