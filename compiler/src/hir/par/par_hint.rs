@@ -337,7 +337,7 @@ impl<'a> Cx<'a> {
             out.insert(NamedEscape { kind: EscapeKind::Fd, name });
             return;
         }
-        if is_ffi_host(short) {
+        if is_ffi_host(short) || self.checker.is_extern_fn(short) {
             note_ffi_names(body, short, args, out);
             return;
         }

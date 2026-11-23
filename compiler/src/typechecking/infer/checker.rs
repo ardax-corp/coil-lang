@@ -4272,6 +4272,11 @@ impl Checker {
                 .any(|&(nfixed, variadic, i)| i == index && (nfixed == argc || (variadic && argc >= nfixed)))
     }
 
+    /// Whether `name` is a function an `extern` block declares.
+    pub(crate) fn is_extern_fn(&self, name: &str) -> bool {
+        self.extern_fns.contains(name)
+    }
+
     /// Whether parameter `index` of `extern` `name` is a callback.
     fn extern_callback_param(&self, name: Option<&str>, index: usize) -> bool {
         name.and_then(|n| self.extern_callbacks.get(n)).is_some_and(|ps| ps.contains(&index))
@@ -6051,9 +6056,9 @@ impl Checker {
         if matches!(ident.as_str(), "dload" | "declare" | "invoke") {
             return self.error_with_help(
                 ErrorCode::UnknownValue,
-                format!("Cannot find value `{}` in this scope", ident),
+                format!("`{ident}` was removed"),
                 range,
-                Some("import it with `use ffi::{dload, declare, invoke}`".to_string()),
+                Some(crate::typechecking::virtual_modules::REMOVED_FFI_HELP.to_string()),
             );
         }
 
@@ -14141,11 +14146,6 @@ impl Checker {
             return;
         };
         self.record_ffi_param_invoke_flow(fn_name, &param_names, arg_exprs);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_ffi_param_invoke_ret(&self, key: &str) -> Option<&(Ty, bool, usize)> {
-        self.ffi_fn_param_invoke_ret.get(key)
     }
 
     fn ffi_invoke_fn_id_metadata_prescan(
