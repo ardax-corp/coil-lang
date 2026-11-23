@@ -1,0 +1,11 @@
+// @expected E0102 — the `extern` function takes an `int`; a `Stream` is not one.
+use io::stdout;
+
+extern "notalist" {
+    fn labs(int x) -> int;
+}
+
+fn main() {
+    let s = stdout();
+    let _ = labs(s);
+}

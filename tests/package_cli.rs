@@ -299,22 +299,12 @@ fn package_with_native_lock_finds_library_in_cache_or_beside_exe() {
     std::fs::write(
         tmp.join("src/main.coil"),
         r#"
-use ffi::{declare, dload, invoke};
-use ffi::types::{Int};
+extern "sum" {
+    fn sum(int a, int b) -> int;
+}
 
 fn main() {
-    let lib = match dload("sum") {
-        Result::Ok(h) => h,
-        Result::Err(e) => panic e.message,
-    };
-    let sum_id = match declare(lib, "sum", (Int, Int), Int) {
-        Result::Ok(id) => id,
-        Result::Err(e) => panic e.message,
-    };
-    let n = match invoke(lib, sum_id, (40, 2)) {
-        Result::Ok(v) => v,
-        Result::Err(e) => panic e.message,
-    };
+    let n = sum(40, 2);
     if n != 42 {
         panic "sum failed";
     }
