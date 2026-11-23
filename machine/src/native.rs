@@ -2631,58 +2631,67 @@ pub const FFI_ARG_CONST_BYTES: u64 = 1;
 pub const FFI_ARG_BYTES: u64 = 2;
 pub const FFI_ARG_PTR: u64 = 3;
 
+/// [`coil_native_ffi_arg`]'s kind bit: another argument of the call is
+/// the same word, so a buffer is copied, not lent.
+pub const FFI_ARG_SHARED: u64 = 1 << 8;
+
+thread_local! {
+    /// The copies the pointer arguments of the direct extern call on this
+    /// thread made, until [`coil_native_ffi_done`]. No coil code runs
+    /// between the two (a program that may call back passes only strings).
+    static FFI_COPIES: std::cell::RefCell<crate::ffi::DirectCopies> = std::cell::RefCell::new(crate::ffi::DirectCopies::default());
+}
+
 /// One argument of a direct extern call as the C pointer it passes, at
-/// `out`: a `string` as a NUL-terminated copy for this call
-/// ([`FFI_ARG_CSTR`], until [`coil_native_ffi_done`]), a byte view or
-/// buffer lent in place, or a `ptr` word. `0` when the runtime's call
-/// must make it instead (an interior NUL, a buffer it copies, an array a
-/// `ptr` copies), which then also reports any error.
+/// `out`, as the runtime's call makes it: a `string` as a NUL-terminated
+/// copy ([`FFI_ARG_CSTR`]), a byte view or buffer lent in place or copied
+/// (unless [`FFI_ARG_SHARED`]: then always copied), a `ptr` word, or an
+/// `int` array or tuple as an `int64_t[]` copy. The call's copies live
+/// (and are written back) until [`coil_native_ffi_done`]. `0`, with the
+/// panic message set and the bail flag up, when it cannot be passed (a
+/// string with a NUL byte).
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `out` points at a word.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_ffi_arg(ctx: *mut NativeCtx, kind: u64, word: u64, out: *mut u64) -> u64 {
-    use crate::memory::Object;
+    use crate::ffi::DirectPtr;
     let Some(heap) = (unsafe { heap(ctx) }) else {
-        return 0;
+        return unsafe { bail(ctx) };
     };
-    let ptr = match kind {
-        FFI_ARG_CSTR => match heap.cstr_from_addr(word) {
-            Ok(Some(p)) => p as u64,
-            Ok(None) => match heap.intern_ffi_bytes(b"") {
-                Ok(p) => p as u64,
-                Err(_) => return 0,
-            },
-            Err(_) => return 0,
-        },
-        FFI_ARG_CONST_BYTES | FFI_ARG_BYTES => match heap.find_object_by_addr(word) {
-            Some(Object::String(gc)) if kind == FFI_ARG_CONST_BYTES && !gc.as_ref().data.is_empty() => gc.as_ref().data.as_ptr() as u64,
-            Some(Object::Array(mut gc)) => match gc.as_mut().bytes_mut() {
-                Some(b) if !b.is_empty() => b.as_mut_ptr() as u64,
-                _ => return 0,
-            },
-            _ => return 0,
-        },
-        FFI_ARG_PTR => match heap.find_object_by_addr(word) {
-            Some(Object::Array(gc)) if !gc.as_ref().is_empty() => return 0,
-            Some(Object::Enum(gc)) if gc.as_ref().is_tuple() && !gc.as_ref().elements().is_empty() => return 0,
-            _ => word,
-        },
-        _ => return 0,
+    let how = match kind & 0xFF {
+        FFI_ARG_CSTR => DirectPtr::CStr,
+        FFI_ARG_CONST_BYTES => DirectPtr::ConstBytes,
+        FFI_ARG_BYTES => DirectPtr::Bytes,
+        _ => DirectPtr::Ptr,
     };
-    // SAFETY: the caller passes a word to write.
-    unsafe { *out = ptr };
-    1
+    let lend = kind & FFI_ARG_SHARED == 0;
+    match FFI_COPIES.with_borrow_mut(|c| c.arg(heap, how, common::Value::from(word), lend)) {
+        Ok(p) => {
+            // SAFETY: the caller passes a word to write.
+            unsafe { *out = p };
+            1
+        }
+        Err(e) => {
+            FFI_COPIES.with_borrow_mut(|c| c.discard(heap));
+            let c = unsafe { &mut *ctx };
+            c.trap = TRAP_MESSAGE;
+            // SAFETY: `call` set `message` for the call.
+            unsafe { *c.message = e.to_string() };
+            unsafe { bail(ctx) }
+        }
+    }
 }
 
-/// After a direct extern call that passed a `string`: drop the copies.
+/// After a direct extern call that passed a pointer: write its copies
+/// back and drop them.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_ffi_done(ctx: *mut NativeCtx) {
     if let Some(heap) = unsafe { heap(ctx) } {
-        heap.reset_ffi_strings();
+        FFI_COPIES.with_borrow_mut(|c| c.finish(heap));
     }
 }
 
@@ -2708,20 +2717,29 @@ pub unsafe extern "C" fn coil_native_ffi_str(ctx: *mut NativeCtx, ptr: u64) -> u
 }
 
 /// A direct extern call's struct argument: the record `word` as struct
-/// `id`'s C bytes at `buf` (its size, rounded up to a word). `0` when it
-/// cannot be packed here: the runtime's call then makes it, and reports
-/// any error.
+/// `id`'s C bytes at `buf` (its size, rounded up to a word). `0`, with the
+/// panic message set and the bail flag up, when it is not such a record.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `buf` points at the struct's bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_ffi_struct_in(ctx: *mut NativeCtx, id: u64, word: u64, buf: *mut u8) -> u64 {
-    let c = unsafe { &*ctx };
-    if c.machine.is_null() || word == 0 {
-        return 0;
+    let c = unsafe { &mut *ctx };
+    if c.machine.is_null() {
+        return unsafe { bail(ctx) };
     }
     // SAFETY: `machine` is the live machine the host was made for.
-    unsafe { (c.host.ffi_struct)(c.machine, id as u32, word, buf, false) }.unwrap_or(0)
+    if word != 0 && unsafe { (c.host.ffi_struct)(c.machine, id as u32, word, buf, false) }.unwrap_or(0) != 0 {
+        return 1;
+    }
+    if let Some(heap) = unsafe { heap(ctx) } {
+        FFI_COPIES.with_borrow_mut(|c| c.discard(heap));
+    }
+    let c = unsafe { &mut *ctx };
+    c.trap = TRAP_MESSAGE;
+    // SAFETY: `call` set `message` for the call.
+    unsafe { *c.message = "an extern struct argument is not a record of its fields".to_string() };
+    unsafe { bail(ctx) }
 }
 
 /// [`NativeHost::callback`]'s ops: a C call begins (the driver's panic

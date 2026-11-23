@@ -82,6 +82,13 @@ void fill_bytes(uint8_t *buf, int64_t n, int64_t v) {
     }
 }
 
+/// Multiply `n` int64s of `xs` by `k` in place (for `Vec<int>` write-back tests).
+void scale_ints(int64_t *xs, int64_t n, int64_t k) {
+    for (int64_t i = 0; i < n; i++) {
+        xs[i] *= k;
+    }
+}
+
 typedef struct {
     int32_t x;
     int32_t y;

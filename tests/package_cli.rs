@@ -794,7 +794,8 @@ fn aot_package_strips_symbols_as_asked() {
 
 /// `--link-static` links an `extern` block's library into the AOT
 /// executable: it runs with no shared library anywhere, and the interpreter runner
-/// cannot take one.
+/// cannot take one. Every library linked and every call direct, the
+/// executable links no libffi.
 #[test]
 fn aot_package_links_extern_libraries_statically() {
     let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
@@ -836,6 +837,12 @@ fn aot_package_links_extern_libraries_statically() {
     let run = run_command_with_timeout(run, 60);
     assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(run.status.code(), Some(0));
+    // A windows-gnu link still keeps libffi (#2907).
+    #[cfg(not(windows))]
+    {
+        let image = std::fs::read(&exe).unwrap();
+        assert!(!image.windows(12).any(|w| w == b"ffi_prep_cif"), "a program of direct calls to linked libraries links libffi");
+    }
     let jit = package(&dir.join("app-jit"), &["--no-aot", "--link-static", lib.to_str().unwrap()]);
     assert!(!jit.status.success());
     assert!(String::from_utf8_lossy(&jit.stderr).contains("--link-static"), "{}", String::from_utf8_lossy(&jit.stderr));
