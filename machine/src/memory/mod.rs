@@ -34,7 +34,7 @@ pub fn set_nursery(on: bool) {
 }
 
 pub fn nursery_enabled() -> bool {
-    NURSERY.load(Ordering::Relaxed) && !heap::rc_trace_off()
+    NURSERY.load(Ordering::Relaxed)
 }
 
 /// What compiled early frees do in this process (`--early-free`).

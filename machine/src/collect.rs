@@ -611,7 +611,9 @@ pub(crate) fn collect_cycles<H: GcHost + ?Sized>(h: &mut H) {
     if !h.rt().heap.rc_frees() || h.rt().heap.epoch_stw() || !h.rt().heap.gc_is_idle() {
         return;
     }
-    minor_counted(h);
+    if !crate::memory::rc_trace_off() {
+        minor_counted(h);
+    }
     for pass in 0..2 {
         let mut roots = Vec::new();
         for_each_root(h, &mut |addr, _| roots.push(addr));
