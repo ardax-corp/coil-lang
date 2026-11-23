@@ -461,9 +461,9 @@ impl Heap {
     /// loses an owner, and those that reach zero are released in turn (a
     /// worklist, not recursion). An object the runtime cannot free here
     /// stays, at count zero, for the collector: a
-    /// root handle, a coroutine (its words are frame-shaped), an
-    /// object whose `drop` has not run (step 7), and every
-    /// object while a collection or a steal epoch is open. The last
+    /// root handle, a stream, a generator that never started, and every
+    /// object while a collection or a steal epoch is open (one that owes a
+    /// `drop` or a close waits for it in [`Self::rc_due`]). The last
     /// collection's root buffer is no test: it is stale once that ends, and
     /// frames count their words. Returns how many objects it freed.
     pub(super) fn rc_release(&mut self, obj: Object) -> usize {
@@ -479,7 +479,7 @@ impl Heap {
         while let Some(obj) = stack.pop() {
             if !self.rc_releasable(obj) {
                 // Its `drop` runs first, at the runtime's next safepoint.
-                if obj.rc_count() == 0 && self.pending_drop(obj) && !self.rc_due.contains(&obj.addr()) {
+                if obj.rc_count() == 0 && (self.pending_drop(obj) || Self::close_owed(obj)) && !self.rc_due.contains(&obj.addr()) {
                     self.rc_due.push(obj.addr());
                     continue;
                 }
@@ -531,9 +531,19 @@ impl Heap {
         unsafe { self.dealloc(obj) };
     }
 
+    /// A generator that started and is suspended: its close runs first, at
+    /// the next safepoint, and releases its frame's words.
+    fn close_owed(obj: Object) -> bool {
+        matches!(obj, Object::Coroutine(c) if c.as_ref().state == CoroState::Suspended && c.as_ref().started)
+    }
+
     /// Each object `obj`'s words name loses an owner; those that reach zero
-    /// go on `stack` ([`Self::rc_release`]'s worklist).
+    /// go on `stack` ([`Self::rc_release`]'s worklist). A coroutine's saved
+    /// words are its frame's, which counted them itself.
     fn rc_dec_children(&self, obj: Object, stack: &mut Vec<Object>) {
+        if matches!(obj, Object::Coroutine(_)) {
+            return;
+        }
         struct Dec<'a>(&'a Heap, &'a mut Vec<Object>);
         impl SlotVisitor for Dec<'_> {
             fn word(&mut self, v: &Value, kind: u8) {
@@ -616,7 +626,12 @@ impl Heap {
     fn rc_releasable(&self, obj: Object) -> bool {
         // A closure owns its captured and filled words: its allocation
         // counted them ([`Self::rc_inc_slots`]).
-        (matches!(obj, Object::Fn(_) | Object::String(_) | Object::Weak(_)) || matches!(obj, Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
+        // A coroutine goes once its body is done (its close released its
+        // frame's words). A stream stays for the collector: freeing it
+        // closes its descriptor, at a last use the program may not expect.
+        (matches!(obj, Object::Fn(_) | Object::String(_) | Object::Weak(_))
+            || matches!(obj, Object::Coroutine(c) if c.as_ref().state == CoroState::Done)
+            || matches!(obj, Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
             && !self.pending_drop(obj)
             && obj.rc_count() == 0
     }

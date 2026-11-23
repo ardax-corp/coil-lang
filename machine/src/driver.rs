@@ -1647,7 +1647,10 @@ impl GcHost for Driver<'_> {
             }
             for &addr in &due {
                 let Some(obj) = self.rt.heap.find_object_by_addr(addr) else { continue };
-                if let Some(pc) = self.rt.pending_finalizer(obj) {
+                if let crate::memory::Object::Coroutine(_) = obj {
+                    // A suspended generator's close.
+                    GcHost::run_pending(self, Value::from(addr), None);
+                } else if let Some(pc) = self.rt.pending_finalizer(obj) {
                     GcHost::run_pending(self, Value::from(addr), Some(pc));
                 }
             }
