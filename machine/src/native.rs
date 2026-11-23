@@ -1525,6 +1525,22 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
     value
 }
 
+/// Whether host native `id` may write a word into an object it is passed,
+/// so a run that keeps counts diffs its arguments around the call. One
+/// whose row says it neither mutates the heap nor does anything unknown
+/// (a probe, a hash, a read) only reads them, or makes new objects, which
+/// count their own words.
+fn host_writes_words(id: u64) -> bool {
+    use common::EffectFlags as E;
+    match u16::try_from(id).ok().and_then(|id| common::HOST_NATIVES.get(usize::from(id)).filter(|n| n.id == id)) {
+        Some(n) => {
+            let e = n.effects;
+            [E::HEAP_MUT, E::UNKNOWN, E::FFI, E::GC, E::THREAD, E::YIELD, E::SUSPEND, E::ATTACH_PARK].iter().any(|&b| e.contains(b))
+        }
+        None => true,
+    }
+}
+
 /// An array's element words, for native code to index in place: writes
 /// `[pointer, length]` to `out` and returns [`crate::memory::VIEW_PLAIN`]
 /// for an array that stores words, `0` for anything else (a byte array, a
@@ -2552,7 +2568,11 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         _ if host.on_machine || host.func.is_some() => {
             crate::host_enum::take_pair_tag();
             // SAFETY: `args` holds `n` words.
-            let before = heap.rc_before_all(unsafe { std::slice::from_raw_parts(args.cast::<common::Value>(), n as usize) });
+            let before = if host_writes_words(id) {
+                heap.rc_before_all(unsafe { std::slice::from_raw_parts(args.cast::<common::Value>(), n as usize) })
+            } else {
+                Vec::new()
+            };
             let out = unsafe { host_invoke(ctx, id, layout, args, n) };
             if let Some(heap) = unsafe { crate::native::heap(ctx) } {
                 heap.rc_after_all(before);
@@ -2582,7 +2602,7 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
     if layout == crate::host_enum::HostEnumLayout::Pair {
         crate::host_enum::take_pair_tag();
     }
-    let before = heap.rc_before_all(args);
+    let before = if host_writes_words(id) { heap.rc_before_all(args) } else { Vec::new() };
     let v = crate::host_enum::in_host_enum_bits(bits, || f(heap, args));
     heap.rc_after_all(before);
     // The runtime checks for a collection once the call returns.
