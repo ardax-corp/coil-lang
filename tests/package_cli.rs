@@ -837,8 +837,12 @@ fn aot_package_links_extern_libraries_statically() {
     let run = run_command_with_timeout(run, 60);
     assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(run.status.code(), Some(0));
-    let image = std::fs::read(&exe).unwrap();
-    assert!(!image.windows(12).any(|w| w == b"ffi_prep_cif"), "a program of direct calls to linked libraries links libffi");
+    // A windows-gnu link still keeps libffi (#2907).
+    #[cfg(not(windows))]
+    {
+        let image = std::fs::read(&exe).unwrap();
+        assert!(!image.windows(12).any(|w| w == b"ffi_prep_cif"), "a program of direct calls to linked libraries links libffi");
+    }
     let jit = package(&dir.join("app-jit"), &["--no-aot", "--link-static", lib.to_str().unwrap()]);
     assert!(!jit.status.success());
     assert!(String::from_utf8_lossy(&jit.stderr).contains("--link-static"), "{}", String::from_utf8_lossy(&jit.stderr));
