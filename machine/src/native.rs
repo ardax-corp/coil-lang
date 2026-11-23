@@ -1532,8 +1532,10 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
 /// count their own words.
 fn host_writes_words(id: u64) -> bool {
     use common::EffectFlags as E;
-    // `vec_stamp` counts the one object it changes itself.
-    if id == u64::from(common::VEC_STAMP_ID) {
+    // `vec_stamp` counts the one object it changes itself. The lock
+    // primitives change only the lock, whose value is a portable copy, and
+    // never a word of an argument.
+    if id == u64::from(common::VEC_STAMP_ID) || (u64::from(common::LOCK_ACQUIRE_ID)..=u64::from(common::RW_STORE_ID)).contains(&id) {
         return false;
     }
     match u16::try_from(id).ok().and_then(|id| common::HOST_NATIVES.get(usize::from(id)).filter(|n| n.id == id)) {
