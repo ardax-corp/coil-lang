@@ -578,6 +578,19 @@ impl Pass {
         out
     }
 
+    /// Whether the frame reads root `r` after instruction `ii` of block `b`:
+    /// a later use there or past the block. A slot clear (`ClearWord`)
+    /// reads nothing, and a barrier only names live words.
+    fn read_after(&self, func: &MirFunc, b: BlockId, ii: usize, r: ValueId, live_in: &[HashSet<ValueId>]) -> bool {
+        let block = func.block(b);
+        let names = |v: &ValueId| self.root(*v) == Some(r);
+        let later = block.insts[ii + 1..].iter().any(|i| !matches!(i, MirInst::ClearWord { .. } | MirInst::GcBarrier { .. }) && i.operands().iter().any(names));
+        let term = block.term.as_ref();
+        later
+            || term.is_some_and(|t| t.uses().any(|v| names(&v)))
+            || term.is_some_and(|t| t.succs().iter().any(|s| live_in[s.index()].contains(&r) || phi_args_from(func.block(*s), b).iter().any(|(v, _)| names(v))))
+    }
+
     fn term_roots(&self, term: &Terminator) -> Vec<ValueId> {
         let mut out: Vec<ValueId> = term.uses().filter_map(|v| self.owned(v)).collect();
         out.sort_unstable();
@@ -751,6 +764,18 @@ impl Pass {
                             ops.push(MirInst::RcDec { dest: tok(&mut new_types), src: r, guard: None });
                         }
                     }
+                }
+                // A write check of a word the frame reads again after it
+                // (another name of the same word: a share's copy folded
+                // into its source): the frame holds a second owner across
+                // the check, so the object is copied, not written in place
+                // under that name (reference-count plan step 5).
+                if let MirInst::Cow { src, unique: true, field: None, .. } = inst
+                    && let Some(r) = self.root(*src)
+                    && (self.borrowed.contains(&r) || (live_after[ii].contains(&r) && self.read_after(func, b, ii, r, &live_in)))
+                {
+                    before[bi].entry(ii).or_default().push(MirInst::RcInc { dest: tok(&mut new_types), src: *src, guard: None });
+                    ops.insert(0, MirInst::RcDec { dest: tok(&mut new_types), src: *src, guard: None });
                 }
                 // A static owns its word: a store reads the old one first
                 // and releases it after. A home keeps its word (a `defer`
