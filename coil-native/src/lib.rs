@@ -5139,8 +5139,9 @@ impl<'a> Lower<'a> {
     /// An extern call straight to the C function at `args[2]` (its
     /// address static), on `args[3..]` as `params`: its result word. No
     /// coil code runs and nothing collects during it (the program makes no
-    /// callback), so it needs no roots. A pointer or struct argument the
-    /// runtime must make (a copy) sends the call there instead.
+    /// callback), so it needs no roots. The runtime makes each pointer
+    /// argument (lent in place or a copy, written back after the call) and
+    /// packs each struct one; one that cannot be passed panics.
     #[allow(clippy::too_many_arguments)]
     fn direct_extern_call(
         &mut self,
@@ -5157,62 +5158,50 @@ impl<'a> Lower<'a> {
         let ptrs: Vec<usize> = (0..params.len()).filter(|&i| matches!(params[i], CArg::Ptr(_))).collect();
         let structs: Vec<usize> = (0..params.len()).filter(|&i| matches!(params[i], CArg::Struct { .. })).collect();
         let want = cl_ty(ty_of(f, dest));
-        let (fast, join) = (self.b.create_block(), self.b.create_block());
-        self.b.append_block_param(join, want);
         let mut made = HashMap::new();
         let mut packed = HashMap::new();
-        if !ptrs.is_empty() || !structs.is_empty() {
-            let mut ok = self.b.ins().iconst(types::I64, 1);
-            if !ptrs.is_empty() {
-                let slot = self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (ptrs.len() * 8) as u32, 3));
-                for (k, &i) in ptrs.iter().enumerate() {
-                    let CArg::Ptr(kind) = params[i] else { continue };
-                    let w = self.get(f, words[i]);
-                    let w = self.coerce(w, types::I64);
-                    let kind_v = self.b.ins().iconst(types::I64, kind as i64);
-                    let out = self.b.ins().stack_addr(types::I64, slot, (k * 8) as i32);
-                    let call = self.b.ins().call(self.ffi_arg, &[self.ctx, kind_v, w, out]);
-                    let r = self.b.inst_results(call)[0];
-                    ok = self.b.ins().band(ok, r);
-                    made.insert(i, (slot, k));
-                    // A buffer lent in place is no other argument too (the
-                    // runtime copies each).
-                    if kind == machine::native::FFI_ARG_CONST_BYTES || kind == machine::native::FFI_ARG_BYTES {
-                        for (j, &other) in words.iter().enumerate() {
-                            if j != i {
-                                let o = self.get(f, other);
-                                let o = self.coerce(o, types::I64);
-                                let differ = self.b.ins().icmp(IntCC::NotEqual, w, o);
-                                let differ = self.b.ins().uextend(types::I64, differ);
-                                ok = self.b.ins().band(ok, differ);
-                            }
+        if !ptrs.is_empty() {
+            let slot = self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (ptrs.len() * 8) as u32, 3));
+            for (k, &i) in ptrs.iter().enumerate() {
+                let CArg::Ptr(kind) = params[i] else { continue };
+                let w = self.get(f, words[i]);
+                let w = self.coerce(w, types::I64);
+                let mut kind_v = self.b.ins().iconst(types::I64, kind as i64);
+                // A buffer that is another argument too is copied (as the
+                // runtime's call does), so C sees no aliasing.
+                if kind == machine::native::FFI_ARG_CONST_BYTES || kind == machine::native::FFI_ARG_BYTES {
+                    for (j, &other) in words.iter().enumerate() {
+                        if j != i {
+                            let o = self.get(f, other);
+                            let o = self.coerce(o, types::I64);
+                            let same = self.b.ins().icmp(IntCC::Equal, w, o);
+                            let same = self.b.ins().uextend(types::I64, same);
+                            let bit = self.b.ins().ishl_imm_u(same, 8);
+                            kind_v = self.b.ins().bor(kind_v, bit);
                         }
                     }
                 }
+                let out = self.b.ins().stack_addr(types::I64, slot, (k * 8) as i32);
+                self.b.ins().call(self.ffi_arg, &[self.ctx, kind_v, w, out]);
+                made.insert(i, (slot, k));
             }
-            // Each struct argument's C bytes, in a buffer of its own
-            // (16-byte aligned, as Windows x64 wants a copy it is lent).
-            for &i in &structs {
-                let CArg::Struct { id, size, .. } = params[i] else { continue };
-                let slot = self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size, 4));
-                let w = self.get(f, words[i]);
-                let w = self.coerce(w, types::I64);
-                let id_v = self.b.ins().iconst(types::I64, i64::from(id));
-                let at = self.b.ins().stack_addr(types::I64, slot, 0);
-                let call = self.b.ins().call(self.ffi_struct_in, &[self.ctx, id_v, w, at]);
-                let r = self.b.inst_results(call)[0];
-                ok = self.b.ins().band(ok, r);
-                packed.insert(i, slot);
-            }
-            let slow = self.b.create_block();
-            self.b.ins().brif(ok, fast, &[], slow, &[]);
-            self.b.switch_to_block(slow);
-            let w = self.runtime_extern_call(f, dest, sig, args);
-            self.b.ins().jump(join, &[w.into()]);
-        } else {
-            self.b.ins().jump(fast, &[]);
         }
-        self.b.switch_to_block(fast);
+        // Each struct argument's C bytes, in a buffer of its own (16-byte
+        // aligned, as Windows x64 wants a copy it is lent).
+        for &i in &structs {
+            let CArg::Struct { id, size, .. } = params[i] else { continue };
+            let slot = self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size, 4));
+            let w = self.get(f, words[i]);
+            let w = self.coerce(w, types::I64);
+            let id_v = self.b.ins().iconst(types::I64, i64::from(id));
+            let at = self.b.ins().stack_addr(types::I64, slot, 0);
+            self.b.ins().call(self.ffi_struct_in, &[self.ctx, id_v, w, at]);
+            packed.insert(i, slot);
+        }
+        // An argument that cannot be passed has set its panic.
+        if !ptrs.is_empty() || !structs.is_empty() {
+            self.bail_on_helper();
+        }
         let mut csig = Signature::new(self.c_conv);
         let mut cargs = Vec::with_capacity(params.len() + 1);
         // A struct result too large for registers: C writes it through a
@@ -5342,13 +5331,10 @@ impl<'a> Lower<'a> {
             _ => self.b.ins().iconst(types::I64, 0),
         };
         // A returned string may be an argument's copy: it is read first.
-        if params.iter().any(|p| matches!(p, CArg::Ptr(machine::native::FFI_ARG_CSTR))) {
+        if !ptrs.is_empty() {
             self.b.ins().call(self.ffi_done, &[self.ctx]);
         }
-        let out = self.coerce(out, want);
-        self.b.ins().jump(join, &[out.into()]);
-        self.b.switch_to_block(join);
-        self.b.block_params(join)[0]
+        self.coerce(out, want)
     }
 
     /// [`Self::words_slot`] with the constants `tail` after the words.

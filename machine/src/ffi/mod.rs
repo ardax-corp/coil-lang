@@ -4,6 +4,7 @@
 mod call;
 #[cfg(not(target_family = "wasm"))]
 mod closure;
+mod direct;
 mod error;
 mod gate;
 #[cfg(target_family = "wasm")]
@@ -20,6 +21,7 @@ pub use call::{
     InvokeContext, PreparedCall, invoke_via_libffi, pack_struct_into, prepare_cif, prepare_cif_for_symbol,
     prepare_variadic_cif, promote_variadic_arg_type, resolve_symbol, unpack_struct_from,
 };
+pub use direct::{DirectCopies, DirectPtr};
 #[cfg(not(target_family = "wasm"))]
 pub use closure::{OwnedClosure, ProgramCallFn, make_callback};
 #[cfg(target_family = "wasm")]
