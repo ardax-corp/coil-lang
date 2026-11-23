@@ -228,14 +228,12 @@ impl Heap {
             inst.as_mut().set_slot(slot, value);
             return;
         }
-        let row = self.class_field_kinds(inst.as_ref().type_id);
-        if row.contains(&common::WORD_TAGGED) {
-            let before = self.rc_before(Value::from(Object::Instance(*inst).addr()));
-            inst.as_mut().set_slot(slot, value);
-            self.rc_after(before);
+        let type_id = inst.as_ref().type_id;
+        if self.class_has_tagged(type_id) {
+            self.rc_set_tagged_slot(inst, slot, value);
             return;
         }
-        let kind = match row.get(slot).copied() {
+        let kind = match self.class_field_kinds(type_id).get(slot).copied() {
             Some(common::WORD_UNKNOWN) | None => common::packed_word_kind(inst.as_ref().own_kinds(), slot),
             Some(k) => k,
         };
@@ -243,6 +241,43 @@ impl Heap {
         inst.as_mut().set_slot(slot, value);
         self.rc_inc_word(value, kind);
         self.rc_dec_word(old, kind);
+    }
+
+    /// [`Self::rc_set_instance_slot`] for a class row with a tagged slot: a
+    /// store into a tag changes the kind of the slot it decides, so each
+    /// slot's word and kind before and after are compared (on the stack for
+    /// a small object, by snapshot otherwise).
+    fn rc_set_tagged_slot(&self, inst: &mut RefInstance, slot: usize, value: Value) {
+        const SMALL: usize = 16;
+        let type_id = inst.as_ref().type_id;
+        let n = inst.as_ref().storage.as_slice().len();
+        if n > SMALL {
+            let before = self.rc_before(Value::from(Object::Instance(*inst).addr()));
+            inst.as_mut().set_slot(slot, value);
+            self.rc_after(before);
+            return;
+        }
+        let row = self.class_field_kinds(type_id);
+        let mut before = [(Value::from(0i64), 0u8); SMALL];
+        {
+            let i = inst.as_ref();
+            let slots = i.storage.as_slice();
+            let mut kinds = common::ClassSlotKinds::new(row, n).with_own(i.own_kinds());
+            for (b, &w) in before.iter_mut().zip(slots) {
+                *b = (w, kinds.next_kind(slots));
+            }
+        }
+        inst.as_mut().set_slot(slot, value);
+        let i = inst.as_ref();
+        let slots = i.storage.as_slice();
+        let mut kinds = common::ClassSlotKinds::new(row, n).with_own(i.own_kinds());
+        for (&(old, a), &w) in before.iter().zip(slots) {
+            let b = kinds.next_kind(slots);
+            if old != w || a != b {
+                self.rc_inc_word(w, b);
+                self.rc_dec_word(old, a);
+            }
+        }
     }
 
     /// Add own slot kinds `k` to instance `inst`, counting only the slots

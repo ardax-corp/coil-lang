@@ -2346,6 +2346,12 @@ impl Heap {
         self.class_kinds = table;
     }
 
+    /// True when `type_id`'s row has a tagged slot ([`common::WORD_TAGGED`]).
+    #[inline]
+    pub fn class_has_tagged(&self, type_id: u32) -> bool {
+        self.class_field_kinds(type_id).contains(&common::WORD_TAGGED)
+    }
+
     /// Word kinds of `type_id`'s typed fields (empty = all unknown).
     #[inline]
     pub fn class_field_kinds(&self, type_id: u32) -> &[u8] {
