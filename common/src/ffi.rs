@@ -157,6 +157,10 @@ pub const FFI_OP_INVOKE: u8 = 2;
 /// `n` arguments' type tags. The result is the C function's word; an error
 /// panics.
 pub const FFI_OP_CALL: u8 = 3;
+/// The most words an [`FFI_OP_CALL`] passes the runtime: library, function
+/// id, the arguments and a variadic call's tags. A call with more keeps
+/// the argument tuple.
+pub const FFI_CALL_MAX_WORDS: usize = 64;
 /// The C address of a declared function: library and function id. Its
 /// `Result` holds the address word (module setup stores it for a direct
 /// call).

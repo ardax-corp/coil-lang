@@ -2924,8 +2924,15 @@ unsafe fn host_invoke(
 unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, layout: u64, args: *const u64, n: u64) -> u64 {
     let c = unsafe { &mut *ctx };
     let mut buf = [common::Value::default(); HOST_STUB_ARITIES];
-    let Some(words) = buf.get_mut(..n as usize) else {
-        return unsafe { bail(ctx) };
+    // An extern call through the runtime may pass more words.
+    let mut more = Vec::new();
+    let words = match buf.get_mut(..n as usize) {
+        Some(words) => words,
+        None if n as usize <= common::FFI_CALL_MAX_WORDS => {
+            more.resize(n as usize, common::Value::default());
+            &mut more[..]
+        }
+        None => return unsafe { bail(ctx) },
     };
     if c.machine.is_null() {
         return unsafe { bail(ctx) };
