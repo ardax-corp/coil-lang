@@ -4557,7 +4557,7 @@ impl<'a> Lower<'a> {
                 let v = self.get(f, *value);
                 self.set(f, *dest, v);
             }
-            MirInst::HeapFieldStore { dest, object, value, index } => {
+            MirInst::HeapFieldStore { dest, object, value, index, scalar } => {
                 let o = self.get(f, *object);
                 let o = self.coerce(o, types::I64);
                 let v = self.get(f, *value);
@@ -4567,8 +4567,9 @@ impl<'a> Lower<'a> {
                 // A run that keeps counts stores in place too when the word's
                 // type says whether it is an object: the new word gains an
                 // owner, the old one loses one (reference-count plan step 6).
+                // A number field's old and new words are numbers (`scalar`).
                 let counted = machine::native::rc_counting();
-                let inline = !counted || counted_inline(vt) || matches!(vt, MirTy::F64 | MirTy::Bool);
+                let inline = !counted || counted_inline(vt) || *scalar || matches!(vt, MirTy::F64 | MirTy::Bool);
                 if machine::native::product_slots().inline_stores && inline {
                     // In place, unless the write barrier must log the object.
                     let (fast, slow) = self.product_slot(o, *index, true);
