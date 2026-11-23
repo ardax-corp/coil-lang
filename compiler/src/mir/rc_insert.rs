@@ -58,7 +58,7 @@ fn unwind_homes_on() -> bool {
 pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mut MirFunc)>) -> usize {
     let mut bodies: Vec<(Option<Label>, &mut MirFunc)> = bodies.into_iter().collect();
     let numbers = number_returns(bodies.iter().map(|(l, f)| (*l, &**f)));
-    bodies.iter_mut().map(|(_, f)| insert_rc_in(f, false, &numbers)).sum()
+    bodies.iter_mut().map(|(l, f)| insert_rc_in(f, false, &numbers, *l)).sum()
 }
 
 /// The entries of the bodies whose every return is a number (by its
@@ -78,8 +78,9 @@ fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>
                 continue;
             }
             let nums = number_words(f, &set);
+            let used = used_as_numbers(f, true);
             let all = f.blocks.iter().all(|b| match &b.term {
-                Some(Terminator::Return { lo, hi }) => hi.is_none() && lo.is_none_or(|v| nums.contains(&v)),
+                Some(Terminator::Return { lo, hi }) => hi.is_none() && lo.is_none_or(|v| nums.contains(&v) || used.contains(&v) && computed_with(f, v)),
                 _ => true,
             });
             if !all {
@@ -122,52 +123,125 @@ fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
     }
 }
 
-/// Whether `v` is an `int` word a load defines (a field, an element, a
-/// payload, a static) whose every use computes with it: an operand of an
-/// arithmetic op or a compare, or a branch condition.
-fn arith_only_load(func: &MirFunc, v: ValueId) -> bool {
-    if ty_of(func, v) != MirTy::I64 {
-        return false;
-    }
+/// The `int` words of `func` that are numbers by how they are used: a
+/// load (a field, an element, a payload, a static), a host result or a φ
+/// whose every use computes with it (an arithmetic op, a compare, a
+/// branch, an element index, a φ of such words, or a return when the body
+/// returns only numbers). Nothing keeps one or reads through it, so none
+/// needs an owner. Found optimistically: every candidate is assumed until
+/// a use says otherwise.
+fn used_as_numbers(func: &MirFunc, returns_number: bool) -> HashSet<ValueId> {
     let insts = || func.blocks.iter().flat_map(|b| &b.insts);
-    let loaded = insts().any(|i| {
-        matches!(i, MirInst::ProductLoad { .. } | MirInst::Index { .. } | MirInst::LaneIndex { .. } | MirInst::LoadStatic { .. } | MirInst::MatchPayload { .. })
-            && i.dests().any(|d| d == v)
-    });
-    if !loaded {
-        return false;
-    }
-    let mut used = false;
-    for i in insts() {
-        if !i.operands().contains(&v) {
-            continue;
+    let mut set: HashSet<ValueId> = insts()
+        .filter(|i| {
+            matches!(
+                i,
+                MirInst::ProductLoad { .. }
+                    | MirInst::Index { .. }
+                    | MirInst::LaneIndex { .. }
+                    | MirInst::LoadStatic { .. }
+                    | MirInst::MatchPayload { .. }
+                    | MirInst::HostInvoke { dest_hi: None, .. }
+                    | MirInst::Phi { .. }
+            )
+        })
+        .flat_map(MirInst::dests)
+        .filter(|v| ty_of(func, *v) == MirTy::I64)
+        .collect();
+    loop {
+        let before = set.len();
+        for i in insts() {
+            let ok = |v: ValueId| match i {
+                MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
+                MirInst::Cmp { .. } => true,
+                MirInst::Index { array, .. } | MirInst::LaneIndex { array, .. } => *array != v,
+                MirInst::StoreIndex { array, value, .. } => *array != v && *value != v,
+                MirInst::Phi { dest, .. } => set.contains(dest),
+                _ => false,
+            };
+            let bad: Vec<ValueId> = i.operands().into_iter().filter(|v| set.contains(v) && !ok(*v)).collect();
+            for v in bad {
+                set.remove(&v);
+            }
         }
-        used = true;
-        let arith = match i {
-            MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
-            MirInst::Cmp { .. } => true,
-            _ => false,
-        };
-        if !arith {
-            return false;
+        for t in func.blocks.iter().filter_map(|b| b.term.as_ref()) {
+            let keeps: Vec<ValueId> = match t {
+                Terminator::Br { .. } => Vec::new(),
+                Terminator::Return { hi: None, .. } if returns_number => Vec::new(),
+                _ => t.uses().collect(),
+            };
+            for v in keeps {
+                set.remove(&v);
+            }
+        }
+        if set.len() == before {
+            return set;
         }
     }
-    for t in func.blocks.iter().filter_map(|b| b.term.as_ref()) {
-        match t {
-            Terminator::Br { cond, .. } if *cond == v => used = true,
-            _ if t.uses().any(|u| u == v) => return false,
-            _ => {}
+}
+
+/// Whether `v` is an operand of arithmetic, an ordered compare or an
+/// element index: what only a number is (a word that is only returned
+/// may be an object of a type variable, which [`used_as_numbers`] alone
+/// would take for one).
+fn computed_with(func: &MirFunc, v: ValueId) -> bool {
+    use super::inst::MirCmpOp;
+    func.blocks.iter().flat_map(|b| &b.insts).any(|i| match i {
+        MirInst::Bin { op, lhs, rhs, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor) && (*lhs == v || *rhs == v),
+        MirInst::Cmp { op, lhs, rhs, .. } => !matches!(op, MirCmpOp::Eq | MirCmpOp::Ne) && (*lhs == v || *rhs == v),
+        MirInst::Index { index, .. } | MirInst::LaneIndex { index, .. } | MirInst::StoreIndex { index, .. } => *index == v,
+        _ => false,
+    })
+}
+
+/// Whether an instruction may write a word into an object, or run code
+/// that may: what ends a load's borrow of its holder ([`Pass::new`]).
+fn may_write_words(inst: &MirInst) -> bool {
+    match inst {
+        MirInst::Const { .. }
+        | MirInst::Bin { .. }
+        | MirInst::Cmp { .. }
+        | MirInst::Unary { .. }
+        | MirInst::Cast { .. }
+        | MirInst::Phi { .. }
+        | MirInst::ProductLoad { .. }
+        | MirInst::Index { .. }
+        | MirInst::LaneIndex { .. }
+        | MirInst::ArrayLen { .. }
+        | MirInst::MatchPayload { .. }
+        | MirInst::HomeLoad { .. }
+        | MirInst::HomeStore { .. }
+        | MirInst::ClearWord { .. }
+        | MirInst::KeepAlive { .. }
+        | MirInst::GcBarrier { .. } => false,
+        MirInst::HostInvoke { native_id, .. } => {
+            use common::EffectFlags as E;
+            let e = super::effects::host_effects(*native_id);
+            [E::HEAP_MUT, E::UNKNOWN, E::FFI, E::GC, E::THREAD, E::YIELD, E::SUSPEND, E::ATTACH_PARK].iter().any(|&b| e.contains(b))
         }
+        _ => true,
     }
-    used
+}
+
+/// Whether instruction `inst` only reads through `v` or computes with it:
+/// a use that keeps no copy of the word.
+fn reads_only(inst: &MirInst, v: ValueId) -> bool {
+    match inst {
+        MirInst::ProductLoad { object, .. } => *object == v,
+        MirInst::Index { array, index, .. } | MirInst::LaneIndex { array, index, .. } => *array == v && *index != v,
+        MirInst::ArrayLen { .. } | MirInst::Cmp { .. } | MirInst::KeepAlive { .. } | MirInst::ClearWord { .. } | MirInst::GcBarrier { .. } => true,
+        MirInst::MatchPayload { scrutinee, .. } => *scrutinee == v,
+        MirInst::HostInvoke { .. } => !may_write_words(inst),
+        _ => false,
+    }
 }
 
 /// [`insert_rc_all`] of a body, or of a cleanup pad (`pad`: it runs while the
 /// frame unwinds, so it keeps no homes of its own).
-fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>) -> usize {
+fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>, own: Option<Label>) -> usize {
     let mut n = 0;
     if let Some(p) = func.cleanup.as_deref_mut() {
-        n += insert_rc_in(p, true, numbers);
+        n += insert_rc_in(p, true, numbers, None);
     }
     // Counts free what an early free would (`hir/early_free.rs`): its
     // frees go, or a count would be decremented on a freed object.
@@ -176,7 +250,7 @@ fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>) -> usiz
             *inst = MirInst::Const { dest, c: super::inst::MirConst::Bool(false) };
         }
     }
-    let pass = Pass::new(func, numbers);
+    let pass = Pass::new(func, numbers, own.is_some_and(|l| numbers.contains(&l)));
     let (ops, homes) = pass.run(func, !pad);
     n += ops;
     n -= cancel_pairs(func, &homes);
@@ -420,7 +494,7 @@ fn alias_source(inst: &MirInst, counted: &dyn Fn(ValueId) -> bool) -> Option<Val
 }
 
 impl Pass {
-    fn new(func: &MirFunc, numbers: &HashSet<Label>) -> Self {
+    fn new(func: &MirFunc, numbers: &HashSet<Label>, returns_number: bool) -> Self {
         let pointers = pointer_words(func);
         let mut counted: HashSet<ValueId> = (0..func.types.len() as u32).map(ValueId).filter(|v| matches!(ty_of(func, *v), t if heap_word(t) || t == MirTy::Value)).collect();
         counted.extend(opaque_words(func));
@@ -455,10 +529,6 @@ impl Pass {
                 _ => {}
             }
         }
-        // A word loaded from an object that the frame only computes with
-        // (arithmetic, a compare, a branch) is a number: nothing keeps it,
-        // and it is never read through.
-        counted.retain(|v| !arith_only_load(func, *v));
         // A φ that merges a counted word may hold its object.
         let mut changed = true;
         while changed {
@@ -474,6 +544,9 @@ impl Pass {
                 }
             }
         }
+        // An `int` word the frame only computes with is a number.
+        let nums = used_as_numbers(func, returns_number);
+        counted.retain(|v| !nums.contains(v));
         // A barrier's dest is the object the op before it made, from the
         // safepoint on; a barrier with none names no object.
         let barriers = barrier_pairs(func);
@@ -577,6 +650,41 @@ impl Pass {
                         for &p in payloads {
                             payload_of(p, *scrutinee, &mut borrowed);
                         }
+                    }
+                }
+            }
+        }
+        // A load from a borrowed holder that the frame only reads through,
+        // within its block and before anything may write a word into an
+        // object, is borrowed too: the holder keeps it that long.
+        let mut changed = !borrowed.is_empty();
+        while changed {
+            changed = false;
+            for (bi, block) in func.blocks.iter().enumerate() {
+                for (ii, inst) in block.insts.iter().enumerate() {
+                    let (dest, holder) = match inst {
+                        MirInst::ProductLoad { dest, object, .. } => (*dest, *object),
+                        MirInst::Index { dest, array, .. } => (*dest, *array),
+                        _ => continue,
+                    };
+                    if base.get(&dest) != Some(&dest) || borrowed.contains(&dest) || !base.get(&holder).is_some_and(|r| borrowed.contains(r)) {
+                        continue;
+                    }
+                    if base.iter().any(|(k, r)| *r == dest && *k != dest) {
+                        continue;
+                    }
+                    let elsewhere = func.blocks.iter().enumerate().any(|(bj, b)| {
+                        b.term.as_ref().is_some_and(|t| t.uses().any(|u| u == dest)) || (bj != bi && b.insts.iter().any(|i| i.operands().contains(&dest)))
+                    });
+                    if elsewhere {
+                        continue;
+                    }
+                    let rest = &block.insts[ii + 1..];
+                    let last = rest.iter().rposition(|i| i.operands().contains(&dest)).map_or(0, |j| j + 1);
+                    let ok = rest[..last].iter().all(|i| if i.operands().contains(&dest) { reads_only(i, dest) } else { !may_write_words(i) });
+                    if ok {
+                        borrowed.insert(dest);
+                        changed = true;
                     }
                 }
             }
@@ -1162,6 +1270,21 @@ mod tests {
         assert_eq!(all_rc_ops(&f), 0, "{f}");
         let kept = "func @k(v0: heapref) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    return v2\n}\n";
         let mut g = crate::mir::parse_func(kept).expect(kept);
+        insert_rc_all([(None, &mut g)]);
+        assert!(all_rc_ops(&g) > 0, "{g}");
+    }
+
+    /// A field of a borrowed object handed to a host native that only
+    /// reads it borrows the object's count; handed to a call, which may
+    /// overwrite the field, it takes one of its own.
+    #[test]
+    fn a_borrowed_field_read_by_a_host_counts_nothing() {
+        let read = "func @r(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = host.key_index_probe v2, v2, v1, v1\n    v4 = iadd v3, v1\n    return v4\n}\n";
+        let mut f = crate::mir::parse_func(read).expect(read);
+        insert_rc_all([(None, &mut f)]);
+        assert_eq!(all_rc_ops(&f), 0, "{f}");
+        let call = "func @c(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = call.i64 7 v2\n    v4 = iadd v3, v1\n    return v4\n}\n";
+        let mut g = crate::mir::parse_func(call).expect(call);
         insert_rc_all([(None, &mut g)]);
         assert!(all_rc_ops(&g) > 0, "{g}");
     }
