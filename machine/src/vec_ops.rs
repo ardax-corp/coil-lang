@@ -159,11 +159,7 @@ pub const VEC_MOVE_WIRING: &[(&str, usize, crate::HostValueFn)] =
 pub fn host_vec_stamp(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let kinds = args.get(1).map_or(0, |v| v.as_int());
-    // A word stamped a number no longer counts as an owner: the counts
-    // follow what the new kinds say ([`Heap::rc_before`]).
-    let before = heap.rc_before(handle);
     stamp(heap, handle, kinds);
-    heap.rc_after(before);
     Value::from(0i64)
 }
 
@@ -194,8 +190,11 @@ fn stamp(heap: &mut Heap, handle: Value, kinds: i64) {
             }
         }
         Some(Object::Instance(mut gc)) => {
+            // Counts follow the new kinds ([`Heap::rc_add_instance_kinds`]);
+            // an array's walk reads a scalar kind as unknown and an enum's or
+            // closure's words are counted as made, so those need none.
             if let Ok(k) = common::PackedKinds::try_from(kinds) {
-                gc.as_mut().add_own_kinds(k);
+                heap.rc_add_instance_kinds(&mut gc, k);
             }
         }
         _ => {}

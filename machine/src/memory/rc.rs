@@ -245,6 +245,31 @@ impl Heap {
         self.rc_dec_word(old, kind);
     }
 
+    /// Add own slot kinds `k` to instance `inst`, counting only the slots
+    /// whose kind that changes (a `vec_stamp`): a word stamped a number no
+    /// longer counts as an owner. Walks the old and new kinds side by side,
+    /// as [`Object::visit_slots`] reads them.
+    pub fn rc_add_instance_kinds(&self, inst: &mut RefInstance, k: common::PackedKinds) {
+        let old_kinds = inst.as_ref().own_kinds();
+        inst.as_mut().add_own_kinds(k);
+        let new_kinds = inst.as_ref().own_kinds();
+        if old_kinds == new_kinds || !self.rc_counting() {
+            return;
+        }
+        let i = inst.as_ref();
+        let row = self.class_field_kinds(i.type_id);
+        let slots = i.storage.as_slice();
+        let mut old = common::ClassSlotKinds::new(row, slots.len()).with_own(old_kinds);
+        let mut new = common::ClassSlotKinds::new(row, slots.len()).with_own(new_kinds);
+        for &w in slots {
+            let (a, b) = (old.next_kind(slots), new.next_kind(slots));
+            if a != b {
+                self.rc_inc_word(w, b);
+                self.rc_dec_word(w, a);
+            }
+        }
+    }
+
     /// [`Self::rc_before`] of element `index` of a lane array only (a
     /// `LaneStore`, which would otherwise diff the whole array).
     pub fn rc_before_lane(&self, v: Value, index: usize) -> Option<(Object, Vec<u64>, usize)> {
