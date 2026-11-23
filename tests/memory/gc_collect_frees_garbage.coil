@@ -1,19 +1,23 @@
 // `gc::collect()` returns the bytes it freed: never negative, more than zero
-// after garbage was made, and less on a second collect with nothing new.
+// after garbage was made, and less on a second collect with nothing new. The
+// garbage is cycles of `shared class` nodes: no count reaches zero on them,
+// so only a collection frees them.
 use tests::assert;
 use gc::collect;
 
-// Two locals share the vector, so early freeing leaves it to the GC.
+shared class Ring {
+    pub payload: Vec<int>,
+    pub next: Option<Ring>,
+}
+
+// Rings of two nodes, each pointing at the other, dropped on return.
 fn garbage() {
-    let v: Vec<int> = Vec::new();
-    let alias = mut v;
     let i = 0;
-    while i < 10000 {
-        v.push(i);
+    while i < 200 {
+        let a = new Ring(Vec::from([i, i + 1, i + 2]), Option::None);
+        let b = new Ring(Vec::from([i]), Option::Some(a));
+        a.next = Option::Some(b);
         i += 1;
-    }
-    if alias.len() != 10000 {
-        panic "alias";
     }
 }
 
