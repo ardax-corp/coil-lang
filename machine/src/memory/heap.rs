@@ -333,6 +333,9 @@ pub struct Heap {
     /// The count changes of the open steal epoch's mutators, folded in from
     /// their batches ([`Heap::rc_log`]).
     epoch_rc: Vec<u64>,
+    /// The class type ids whose objects can close a reference cycle, a
+    /// bitset ([`Heap::register_cyclic_type`]): the cycle collector's starts.
+    pub(crate) cyclic_types: Vec<u64>,
     /// Objects the sweep freed in a run that keeps counts: what the counts
     /// leaked (or a cycle's), cumulative.
     pub(crate) rc_swept: u64,
@@ -428,6 +431,7 @@ impl Default for Heap {
             rc_stack: Vec::new(),
             rc_due: Vec::new(),
             epoch_rc: Vec::new(),
+            cyclic_types: Vec::new(),
             nursery: false,
             epoch_born: Vec::new(),
             nursery_chunks: NURSERY_CHUNKS,
@@ -5988,6 +5992,9 @@ pub use nursery::MinorPlan;
 #[path = "rc.rs"]
 mod rc;
 pub use rc::{RcCheckMode, rc_check_mode};
+
+#[path = "cycles.rs"]
+mod cycles;
 
 #[path = "snapshot.rs"]
 mod snapshot;

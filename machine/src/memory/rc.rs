@@ -336,7 +336,7 @@ impl Heap {
     /// The object a pointer-kind heap word names (a `Result` niche word's
     /// `Err` bit cleared), if any.
     #[inline]
-    fn rc_object(&self, v: Value) -> Option<Object> {
+    pub(super) fn rc_object(&self, v: Value) -> Option<Object> {
         let addr = v.heap_addr() & !1;
         if addr == 0 {
             return None;
@@ -466,7 +466,7 @@ impl Heap {
     /// object while a collection or a steal epoch is open. The last
     /// collection's root buffer is no test: it is stale once that ends, and
     /// frames count their words. Returns how many objects it freed.
-    fn rc_release(&mut self, obj: Object) -> usize {
+    pub(super) fn rc_release(&mut self, obj: Object) -> usize {
         if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
             if rc_swept_shown() {
                 eprintln!("coil rc-swept: release of {} at {:#x} skipped (phase {:?}, epoch {}, lock {})", obj.kind_name(), obj.addr(), self.gc_phase, self.epoch_stw, !self.alloc_lock.is_null());
@@ -490,34 +490,45 @@ impl Heap {
             }
             self.rc_dec_children(obj, &mut stack);
             n += 1;
-            if obj.is_weak_target() {
-                self.clear_weaks_to(obj.addr());
-            }
-            if rc_frees_checked() {
-                self.doomed.push(obj.addr());
-                continue;
-            }
-            // An interned string leaves the table first (a program string
-            // is immortal and never gets here).
-            if let Object::String(st) = obj
-                && st.as_ref().hash_set()
-                && self.strings.find(&st.as_ref().data, st.as_ref().hash_code()).is_some_and(|i| i.as_ptr() == st.as_ptr())
-            {
-                self.strings.remove(st);
-            }
-            // A weak handle leaves the weak list (its target is no owner).
-            if let Object::Weak(_) = obj
-                && let Some(i) = self.weaks.iter().position(|&w| w == obj.addr())
-            {
-                self.weaks.swap_remove(i);
-            }
-            self.freed_early = true;
             // SAFETY: its count is zero: no counted word names it, and
             // frames count theirs once [`Self::rc_frees`] is on.
-            unsafe { self.dealloc(obj) };
+            unsafe { self.rc_free(obj) };
         }
         self.rc_stack = stack;
         n
+    }
+
+    /// Free `obj`, whose owners are gone and whose words were released:
+    /// its weaks clear, an interned string leaves the table, a weak handle
+    /// the weak list. `COIL_RC_FREE=check` records it instead.
+    ///
+    /// # Safety
+    /// Nothing that will be read again names `obj`.
+    pub(super) unsafe fn rc_free(&mut self, obj: Object) {
+        if obj.is_weak_target() {
+            self.clear_weaks_to(obj.addr());
+        }
+        if rc_frees_checked() {
+            self.doomed.push(obj.addr());
+            return;
+        }
+        // An interned string leaves the table first (a program string
+        // is immortal and never gets here).
+        if let Object::String(st) = obj
+            && st.as_ref().hash_set()
+            && self.strings.find(&st.as_ref().data, st.as_ref().hash_code()).is_some_and(|i| i.as_ptr() == st.as_ptr())
+        {
+            self.strings.remove(st);
+        }
+        // A weak handle leaves the weak list (its target is no owner).
+        if let Object::Weak(_) = obj
+            && let Some(i) = self.weaks.iter().position(|&w| w == obj.addr())
+        {
+            self.weaks.swap_remove(i);
+        }
+        self.freed_early = true;
+        // SAFETY: the caller's.
+        unsafe { self.dealloc(obj) };
     }
 
     /// Each object `obj`'s words name loses an owner; those that reach zero

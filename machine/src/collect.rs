@@ -411,6 +411,7 @@ pub(crate) fn collect<H: GcHost + ?Sized>(h: &mut H) {
     if !h.rt().heap.rc_due.is_empty() && h.rt().heap.gc_is_idle() {
         h.run_due_drops();
     }
+    collect_cycles(h);
     h.rt_mut().gc_in_progress = true;
     loop {
         h.rt_mut().gc_deferred = false;
@@ -571,6 +572,7 @@ pub(crate) fn start_incremental<H: GcHost + ?Sized>(h: &mut H) {
     h.note_cycle(false);
     // Empty the nursery first: the major cycle then sees only old objects.
     minor_counted(h);
+    collect_cycles(h);
     // A cache is not a root (the dense-index one kept the last indexed
     // array alive after its frame returned); drop it before objects can be
     // freed or moved under it.
@@ -587,7 +589,51 @@ fn remark<H: GcHost + ?Sized>(h: &mut H) {
     h.rt_mut().heap.restore_gc_roots(roots);
 }
 
-/// Finish a pending lazy sweep in one go.
+/// Free the garbage cycles counts cannot ([`crate::memory::Heap::cycle_garbage`],
+/// reference-count plan step 9), once every young object is old. Their
+/// `drop`s run first, the objects owned meanwhile; a cycle a `drop` let go of
+/// is then freed by its counts, and what is left by a second pass.
+pub(crate) fn collect_cycles<H: GcHost + ?Sized>(h: &mut H) {
+    if !h.rt().heap.rc_frees() || h.rt().heap.epoch_stw() || !h.rt().heap.gc_is_idle() {
+        return;
+    }
+    minor_counted(h);
+    for pass in 0..2 {
+        let mut roots = Vec::new();
+        for_each_root(h, &mut |addr, _| roots.push(addr));
+        let garbage = h.rt().heap.cycle_garbage(&roots);
+        if garbage.is_empty() {
+            return;
+        }
+        let drops: Vec<(Value, u32)> = garbage
+            .iter()
+            .filter_map(|&o| Some((Value::from(o.addr()), h.rt().pending_finalizer(o)?)))
+            .collect();
+        if drops.is_empty() {
+            h.rt_mut().heap.free_cycles(&garbage);
+            return;
+        }
+        if pass == 1 {
+            // A `drop` made more garbage that owes one: the next collect.
+            return;
+        }
+        let words: Vec<Value> = garbage.iter().map(|o| Value::from(o.addr())).collect();
+        for &w in &words {
+            h.rt().heap.rc_retain(w);
+        }
+        // No collection inside the `drop`s: they run on a heap mid-pass.
+        let was = std::mem::replace(&mut h.rt_mut().gc_in_progress, true);
+        for (val, pc) in drops {
+            h.run_pending(val, Some(pc));
+        }
+        h.rt_mut().gc_in_progress = was;
+        for w in words {
+            h.rt_mut().heap.rc_drop(w);
+        }
+    }
+}
+
+/// Finish a pending lazy sweep in one go./// Finish a pending lazy sweep in one go.
 pub(crate) fn finish_sweep<H: GcHost + ?Sized>(h: &mut H) {
     h.rt_mut().heap.finish_sweep();
     h.rt_mut().invalidate_program_string_cache();
