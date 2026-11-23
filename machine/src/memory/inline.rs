@@ -260,6 +260,8 @@ pub fn layout_fingerprint() -> u64 {
     (super::HEADER_KIND_OFFSET, super::HEADER_FLAGS_OFFSET, super::FLAG_SHARED, super::KIND_ARRAY).hash(&mut h);
     // The pin the inline share tests, and `CowPin` / `CowUnpin` write.
     (super::FLAG_PINNED, super::HEADER_COUNT_OFFSET).hash(&mut h);
+    // The inline count ops (reference-count plan step 6).
+    (super::HEAP_ALLOC_LOCK_OFFSET, super::COUNT_IMMORTAL, super::HEAP_SLAB_LO_OFFSET, super::HEAP_SLAB_HI_OFFSET).hash(&mut h);
     // The store view protocol (#2687): code built for plain views only
     // would store in place into an array with a card table.
     (super::VIEW_PLAIN, super::VIEW_TRACKED, super::CARD_SHIFT, super::CARD_MIN_WORDS).hash(&mut h);

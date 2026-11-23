@@ -5320,6 +5320,14 @@ pub const HEADER_KIND_OFFSET: i32 = std::mem::offset_of!(GcHeader, kind) as i32;
 /// inline share sets [`FLAG_SHARED`] there, and its `CowPin` / `CowUnpin`
 /// set and clear [`FLAG_PINNED`].
 pub const HEADER_FLAGS_OFFSET: i32 = std::mem::offset_of!(GcHeader, flags) as i32;
+/// Byte offset of [`Heap`]'s steal-epoch allocation lock: non-null while
+/// counts are not kept ([`Heap::rc_counting`]); native code's inline count
+/// ops test it.
+pub const HEAP_ALLOC_LOCK_OFFSET: i32 = std::mem::offset_of!(Heap, alloc_lock) as i32;
+/// Offsets of the heap's chunk span `[lo, hi)`: every object lies in it.
+pub const HEAP_SLAB_LO_OFFSET: i32 = (std::mem::offset_of!(Heap, slab) + super::slab::SLAB_LO_OFFSET) as i32;
+pub const HEAP_SLAB_HI_OFFSET: i32 = (std::mem::offset_of!(Heap, slab) + super::slab::SLAB_HI_OFFSET) as i32;
+
 /// Byte offset of a header's reference count ([`GcHeader::count`]), a
 /// 32-bit word.
 pub const HEADER_COUNT_OFFSET: i32 = std::mem::offset_of!(GcHeader, count) as i32;

@@ -173,6 +173,11 @@ struct ChunkTable {
     hi: AtomicU64,
 }
 
+/// Offsets in a [`Slab`] of its chunk span's `[lo, hi)` words, which native
+/// code reads to reject a word that names no object before a runtime call.
+pub(crate) const SLAB_LO_OFFSET: usize = std::mem::offset_of!(Slab, chunks) + std::mem::offset_of!(ChunkTable, lo);
+pub(crate) const SLAB_HI_OFFSET: usize = std::mem::offset_of!(Slab, chunks) + std::mem::offset_of!(ChunkTable, hi);
+
 impl ChunkTable {
     fn new() -> Self {
         Self {

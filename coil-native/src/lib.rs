@@ -34,7 +34,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_RET_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
+    NATIVE_CTX_BAIL, NATIVE_CTX_HEAP, NATIVE_CTX_RET_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -1224,6 +1224,9 @@ fn may_drop_views(inst: &MirInst) -> bool {
             | MirInst::HomeStore { .. }
             | MirInst::ClearWord { .. }
             | MirInst::KeepAlive { .. }
+            // A count change frees only objects the frame no longer reads.
+            | MirInst::RcInc { .. }
+            | MirInst::RcDec { .. }
     )
 }
 
@@ -4473,13 +4476,45 @@ impl<'a> Lower<'a> {
                 self.view_of(f, *dest);
             }
             MirInst::StoreIndex { dest, array, index, value, .. } if machine::native::rc_counting() => {
-                // A check run counts each store in the helper.
+                // A run that keeps counts stores in place in a plain view
+                // when it can count the store itself: the new word gains an
+                // owner and the old one loses one. A word that may or may
+                // not be an object stays in place only when neither the new
+                // nor the old one can be; the helper counts the rest.
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
+                let vt = ty_of(f, *value);
+                let (fast, slow, join) = self.in_view_as(f, *array, i, false, true);
+                self.b.switch_to_block(fast);
+                let at = self.element(*array, i);
+                if counted_inline(vt) {
+                    let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                    self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    self.emit_rc(v, false);
+                    self.emit_rc(old, true);
+                    self.b.ins().jump(join, &[]);
+                } else if matches!(vt, MirTy::F64 | MirTy::Bool) {
+                    self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    self.b.ins().jump(join, &[]);
+                } else {
+                    let (obj, plain) = self.maybe_object(v);
+                    self.b.switch_to_block(obj);
+                    self.b.ins().jump(slow, &[]);
+                    self.b.switch_to_block(plain);
+                    let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                    let (obj, plain) = self.maybe_object(old);
+                    self.b.switch_to_block(obj);
+                    self.b.ins().jump(slow, &[]);
+                    self.b.switch_to_block(plain);
+                    self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    self.b.ins().jump(join, &[]);
+                }
+                self.b.switch_to_block(slow);
                 self.call_checked(self.store_index, &[self.ctx, a, i, v]);
-                self.drop_views();
+                self.b.ins().jump(join, &[]);
+                self.b.switch_to_block(join);
                 let v = self.get(f, *value);
                 self.set(f, *dest, v);
             }
@@ -4527,12 +4562,25 @@ impl<'a> Lower<'a> {
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
                 let join = self.b.create_block();
-                if machine::native::product_slots().inline_stores && !machine::native::rc_counting() {
+                let vt = ty_of(f, *value);
+                // A run that keeps counts stores in place too when the word's
+                // type says whether it is an object: the new word gains an
+                // owner, the old one loses one (reference-count plan step 6).
+                let counted = machine::native::rc_counting();
+                let inline = !counted || counted_inline(vt) || matches!(vt, MirTy::F64 | MirTy::Bool);
+                if machine::native::product_slots().inline_stores && inline {
                     // In place, unless the write barrier must log the object.
                     let (fast, slow) = self.product_slot(o, *index, true);
                     self.b.switch_to_block(fast);
                     let at = self.b.block_params(fast)[0];
-                    self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    if counted && counted_inline(vt) {
+                        let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                        self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                        self.emit_rc(v, false);
+                        self.emit_rc(old, true);
+                    } else {
+                        self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    }
                     self.b.ins().jump(join, &[]);
                     self.b.switch_to_block(slow);
                 }
@@ -4560,11 +4608,11 @@ impl<'a> Lower<'a> {
                             "function value of a body with no body id"
                         }
                     })?;
-                let inline = inline_shape(*kind, words.len(), extra).and_then(machine::native::inline_object).filter(|_| !machine::native::rc_counting());
+                let inline = inline_shape(*kind, words.len(), extra).and_then(machine::native::inline_object);
                 let join = inline.map(|obj| {
                     let join = self.b.create_block();
                     self.b.append_block_param(join, types::I64);
-                    self.inline_alloc(f, &obj, *kind, words, join);
+                    self.inline_alloc(f, &obj, *kind, words, extra, join);
                     join
                 });
                 let p = match last {
@@ -4934,6 +4982,15 @@ impl<'a> Lower<'a> {
                 let zero = self.b.ins().iconst(types::I64, 0);
                 self.set(f, *dest, zero);
             }
+            // A word that is an object or null by its type: the count is
+            // read and written inline (reference-count plan step 6).
+            MirInst::RcInc { dest, src, guard: None } | MirInst::RcDec { dest, src, guard: None } if counted_inline(ty_of(f, *src)) => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                self.emit_rc(s, matches!(inst, MirInst::RcDec { .. }));
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, zero);
+            }
             // A runtime call for now: the count is kept only in a check run
             // until frames own their words (plan steps 4 and 6).
             MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
@@ -4952,7 +5009,11 @@ impl<'a> Lower<'a> {
                         self.b.switch_to_block(join);
                     }
                     None => {
+                        let (call, join) = self.maybe_object(s);
+                        self.b.switch_to_block(call);
                         self.b.ins().call(self.rc, &[self.ctx, s, dec]);
+                        self.b.ins().jump(join, &[]);
+                        self.b.switch_to_block(join);
                     }
                 }
                 let zero = self.b.ins().iconst(types::I64, 0);
@@ -5097,7 +5158,7 @@ impl<'a> Lower<'a> {
     /// slot's image with `words` in place and count the object, then jump
     /// to `join` with its address. Otherwise the code after this (the
     /// current block, on return) calls the helper, which refills.
-    fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], join: Block) {
+    fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], extra: u64, join: Block) {
         use machine::native::{
             BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
             COUNTS_LIVE_COUNT, COUNTS_YOUNG_BYTES, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
@@ -5164,6 +5225,31 @@ impl<'a> Lower<'a> {
                 None => self.b.ins().iconst(types::I64, img as i64),
             };
             self.b.ins().store(mem, x, at, (i * 8) as i32);
+        }
+        // A run that keeps counts: each payload word that names an object
+        // gains an owner, as the runtime's allocation counts them (an
+        // instance's fields are stored after it is made).
+        if machine::native::rc_counting() && matches!(kind, MirAllocKind::Enum { .. }) {
+            let kinds = (extra >> 32) as u32;
+            for (k, &v) in words.iter().enumerate() {
+                let word_kind = if k < 16 { ((kinds >> (2 * k)) & 3) as u8 } else { common::WORD_UNKNOWN };
+                let vt = ty_of(f, v);
+                if matches!(word_kind, common::WORD_SCALAR | common::WORD_BYTE) || matches!(vt, MirTy::F64 | MirTy::Bool) {
+                    continue;
+                }
+                let x = self.get(f, v);
+                let x = self.coerce(x, types::I64);
+                if counted_inline(vt) {
+                    self.emit_rc(x, false);
+                } else {
+                    let (call, done) = self.maybe_object(x);
+                    self.b.switch_to_block(call);
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    self.b.ins().call(self.rc, &[self.ctx, x, zero]);
+                    self.b.ins().jump(done, &[]);
+                    self.b.switch_to_block(done);
+                }
+            }
         }
         for (off, by) in [(COUNTS_ALLOC_BYTES, i64::from(obj.size)), (COUNTS_YOUNG_BYTES, i64::from(obj.size)), (COUNTS_LIVE_COUNT, 1)] {
             let c = self.b.ins().load(types::I64, mem, counts, off);
@@ -5867,6 +5953,76 @@ impl<'a> Lower<'a> {
     /// Branches to the first block, with the slot's address as its
     /// parameter, or to the second. A `store` takes instances only, and an
     /// object the write barrier must log takes the second.
+    /// An inline `RcInc` / `RcDec` of `s`, a word that is an object or null
+    /// (a tag bit allowed): the header count is read and written here, and
+    /// the runtime is called only for a decrement that may release the
+    /// object. Nothing in a steal epoch (its workers keep no counts) or for
+    /// an immortal object. Leaves the builder after it.
+    /// Branch to the returned block when the word `s` (of a type that may
+    /// hold a number) may name an object: 8-aligned but for a `Result`'s
+    /// `Err` bit, and inside the heap's chunk span. Anything else goes on to
+    /// the join block, which the caller switches to after the first.
+    fn maybe_object(&mut self, s: cranelift_codegen::ir::Value) -> (Block, Block) {
+        let t = MemFlagsData::trusted();
+        let (aligned, has_heap, low, call, join) =
+            (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        let odd = self.b.ins().band_imm_u(s, 6);
+        self.b.ins().brif(odd, join, &[], aligned, &[]);
+        self.b.switch_to_block(aligned);
+        let heap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HEAP);
+        self.b.ins().brif(heap, has_heap, &[], join, &[]);
+        self.b.switch_to_block(has_heap);
+        let o = self.b.ins().band_imm_u(s, !1i64);
+        let lo = self.b.ins().load(types::I64, t, heap, machine::HEAP_SLAB_LO_OFFSET);
+        let below = self.b.ins().icmp(IntCC::UnsignedLessThan, o, lo);
+        self.b.ins().brif(below, join, &[], low, &[]);
+        self.b.switch_to_block(low);
+        let hi = self.b.ins().load(types::I64, t, heap, machine::HEAP_SLAB_HI_OFFSET);
+        let inside = self.b.ins().icmp(IntCC::UnsignedLessThan, o, hi);
+        self.b.ins().brif(inside, call, &[], join, &[]);
+        (call, join)
+    }
+
+    fn emit_rc(&mut self, s: cranelift_codegen::ir::Value, dec: bool) {
+        let t = MemFlagsData::trusted();
+        // A word of an object type may still name none (a function value's
+        // code offset, a static's): only one in the heap's span is counted.
+        let (lock_b, join) = self.maybe_object(s);
+        let (count_b, change) = (self.b.create_block(), self.b.create_block());
+        self.b.switch_to_block(lock_b);
+        let o = self.b.ins().band_imm_u(s, !1i64);
+        let heap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HEAP);
+        let lock = self.b.ins().load(types::I64, t, heap, machine::HEAP_ALLOC_LOCK_OFFSET);
+        self.b.ins().brif(lock, join, &[], count_b, &[]);
+        self.b.switch_to_block(count_b);
+        let c = self.b.ins().uload32(t, o, machine::HEADER_COUNT_OFFSET);
+        let immortal = self.b.ins().icmp_imm_s(IntCC::Equal, c, i64::from(machine::COUNT_IMMORTAL));
+        if dec {
+            let (test, slow) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(immortal, join, &[], test, &[]);
+            self.b.switch_to_block(test);
+            // At one, the runtime takes the last owner and frees.
+            let last = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, c, 1);
+            self.b.ins().brif(last, slow, &[], change, &[]);
+            self.b.switch_to_block(change);
+            let n = self.b.ins().iadd_imm_s(c, -1);
+            self.b.ins().istore32(t, n, o, machine::HEADER_COUNT_OFFSET);
+            self.b.ins().jump(join, &[]);
+            self.b.set_cold_block(slow);
+            self.b.switch_to_block(slow);
+            let one = self.b.ins().iconst(types::I64, 1);
+            self.b.ins().call(self.rc, &[self.ctx, s, one]);
+            self.b.ins().jump(join, &[]);
+        } else {
+            self.b.ins().brif(immortal, join, &[], change, &[]);
+            self.b.switch_to_block(change);
+            let n = self.b.ins().iadd_imm_s(c, 1);
+            self.b.ins().istore32(t, n, o, machine::HEADER_COUNT_OFFSET);
+            self.b.ins().jump(join, &[]);
+        }
+        self.b.switch_to_block(join);
+    }
+
     fn product_slot(&mut self, o: cranelift_codegen::ir::Value, index: u32, store: bool) -> (Block, Block) {
         let l = machine::native::product_slots();
         let flags = MemFlagsData::trusted();
@@ -6164,6 +6320,12 @@ fn lane_expr_fits(e: &compiler::native_mir::LaneExpr, streams: usize, scalars: u
         LaneExpr::And(a, b) | LaneExpr::Or(a, b) => lane_expr_fits(a, streams, scalars) && lane_expr_fits(b, streams, scalars),
         LaneExpr::Not(a) => lane_expr_fits(a, streams, scalars),
     }
+}
+
+/// Whether a word of type `t` is an object or null by its type, so native
+/// code counts it inline ([`Lower::emit_rc`]).
+fn counted_inline(t: MirTy) -> bool {
+    matches!(t, MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes)
 }
 
 #[cfg(test)]
