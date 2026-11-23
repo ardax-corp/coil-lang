@@ -698,6 +698,9 @@ impl Pass {
             .map(MirInst::dest)
             .filter(|d| !base.contains_key(d))
             .collect();
+        let mut scalar: HashSet<ValueId> = scalar;
+        // A φ of numbers only is a number (a loop's running sum).
+        scalar.extend(number_words(func, numbers).into_iter().filter(|d| !base.contains_key(d)));
         Self { base, borrowed, owned_at_def, scalar }
     }
 
