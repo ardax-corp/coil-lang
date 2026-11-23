@@ -537,6 +537,9 @@ pub enum MirInst {
         object: ValueId,
         value: ValueId,
         index: u32,
+        /// The field's static type is a number (`WORD_SCALAR`): the store
+        /// moves no reference count, the old word being a number too.
+        scalar: bool,
     },
     /// Heap index load (S3). `array` is `HeapRef`; `index` is `i64`.
     /// Reconstructs `Index` / `IndexUnchecked` (pin forms lower to the

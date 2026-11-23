@@ -2195,6 +2195,17 @@ impl Lower<'_> {
         LocalId(self.next_temp - 1)
     }
 
+    /// A static type whose word is a number (`WORD_SCALAR`): a field of it
+    /// is stored with no reference count change.
+    fn number_ty(&self, ty: Option<&Ty>) -> bool {
+        ty.is_some_and(|t| self.cx.word_kind(t) == common::WORD_SCALAR)
+    }
+
+    /// [`Self::number_ty`] of the field `place` names.
+    fn number_field(&self, place: HirId) -> bool {
+        self.number_ty(self.expr_ty(place))
+    }
+
     fn expr_ty(&self, id: HirId) -> Option<&Ty> {
         self.hir.expr(id).ty.as_ref()
     }
@@ -4031,7 +4042,7 @@ impl Lower<'_> {
                 }
                 match self.boxed_field(*place, slot)? {
                     Some((obj, index)) => {
-                        self.b.ins_heap_field_store(obj, v, index).map_err(mir)?;
+                        self.b.ins_field_store(obj, v, index, self.number_field(*place)).map_err(mir)?;
                     }
                     None => {
                         // A field split into a frame slot is a local of its
@@ -4182,7 +4193,7 @@ impl Lower<'_> {
                 let Some(obj) = self.word(base)? else {
                     return Ok(Val::Never);
                 };
-                self.b.ins_heap_field_store(obj, v, slot).map_err(mir)?;
+                self.b.ins_field_store(obj, v, slot, self.number_field(*place)).map_err(mir)?;
                 Ok(Val::Unit)
             }
             // A record's field: its slot.
@@ -4214,7 +4225,7 @@ impl Lower<'_> {
                 let Some(obj) = self.word(base)? else {
                     return Ok(Val::Never);
                 };
-                self.b.ins_heap_field_store(obj, v, slot).map_err(mir)?;
+                self.b.ins_field_store(obj, v, slot, self.number_field(*place)).map_err(mir)?;
                 Ok(Val::Unit)
             }
             HirKind::Make { kind: MakeKind::Record(_), args } if let Some((type_id, words)) = self.cx.record(id) => {
@@ -4255,7 +4266,7 @@ impl Lower<'_> {
                     self.stamp_product_from_kinds(obj, &tys)?;
                 }
                 for (slot, v) in slots.into_iter().enumerate() {
-                    self.b.ins_heap_field_store(obj, v, slot as u32).map_err(mir)?;
+                    self.b.ins_field_store(obj, v, slot as u32, self.number_ty(tys.get(slot).and_then(Option::as_ref))).map_err(mir)?;
                 }
                 Ok(Val::V(obj))
             }
@@ -7704,7 +7715,7 @@ impl Lower<'_> {
             self.stamp_product_from_kinds(obj, &tys)?;
         }
         for (slot, v) in words.into_iter().enumerate() {
-            self.b.ins_heap_field_store(obj, v, slot as u32).map_err(mir)?;
+            self.b.ins_field_store(obj, v, slot as u32, self.number_ty(tys.get(slot).and_then(Option::as_ref))).map_err(mir)?;
         }
         Ok(Val::V(obj))
     }

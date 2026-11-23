@@ -15,7 +15,7 @@ format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
 only add something to the format raise the minor (minor 6, below, is the
-current version, 8.6 with MIR section `FORMAT` 21). A runtime refuses a major
+current version, 8.7 with MIR section `FORMAT` 21). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -156,6 +156,12 @@ for such a class sets `common::CYCLIC_TYPE_FLAG` (bit 16) on its type id, and on
 for a class with no `drop` passes `0` as the entry. The cycle collector starts its
 walks from those classes' objects. An 8.5 archive loads unchanged and marks none:
 its cycles are left to the collector.
+
+Minor 7 (reference counts, plan step 10) adds MIR tag 54 to format 21: a
+`HeapFieldStore` of a field whose static type is a number (`scalar`), laid out
+as tag 13's. Its old and new words are numbers, so native code stores it in place
+in a run that keeps counts instead of calling the runtime. An 8.6 archive loads
+unchanged: its field stores all take the counted path.
 
 ## Major 7
 

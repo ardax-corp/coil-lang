@@ -214,6 +214,8 @@ const I_EXTERN_CALL: u8 = 51;
 /// Reference count ops (format 21 on, reference counts plan step 3).
 const I_RC_INC: u8 = 52;
 const I_RC_DEC: u8 = 53;
+/// A `HeapFieldStore` of a number field (archive 8.7).
+const I_SET_FIELD_SCALAR: u8 = 54;
 
 const FFI_OPS: [MirFfiOp; 4] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke, MirFfiOp::Addr];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -551,8 +553,8 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*value);
             w.u8(*unchecked as u8);
         }
-        MirInst::HeapFieldStore { dest, object, value, index } => {
-            w.u8(I_SET_FIELD);
+        MirInst::HeapFieldStore { dest, object, value, index, scalar } => {
+            w.u8(if *scalar { I_SET_FIELD_SCALAR } else { I_SET_FIELD });
             w.v(*dest);
             w.v(*object);
             w.v(*value);
@@ -1184,7 +1186,9 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             value: r.v()?,
             unchecked: r.u8()? != 0,
         },
-        I_SET_FIELD => MirInst::HeapFieldStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()? },
+        tag @ (I_SET_FIELD | I_SET_FIELD_SCALAR) => {
+            MirInst::HeapFieldStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()?, scalar: tag == I_SET_FIELD_SCALAR }
+        }
         I_ALLOC => {
             let dest = r.v()?;
             let kind = match r.u8()? {

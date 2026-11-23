@@ -1009,9 +1009,13 @@ impl MirFunc {
                 // Any slot index: the dense form packs one that fits a
                 // byte, and the stack form takes a full word (#1498).
                 index: _,
+                scalar,
             } => {
                 if self.ty(*object) != MirTy::HeapRef {
                     return Err(format!("{dest} HeapFieldStore object type"));
+                }
+                if *scalar && !matches!(self.ty(*value), MirTy::I64 | MirTy::F64 | MirTy::Bool) {
+                    return Err(format!("{dest} HeapFieldStore of a number field stores an object word"));
                 }
                 if !self.ty(*value).is_specialized() {
                     return Err(format!("{dest} HeapFieldStore value type"));

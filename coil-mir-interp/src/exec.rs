@@ -813,7 +813,7 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 check!();
                 set!(*dest, v);
             }
-            MirInst::HeapFieldStore { dest, object, value, index } => {
+            MirInst::HeapFieldStore { dest, object, value, index, .. } => {
                 let w = rt::coil_native_set_field(ctx, get!(*object), u64::from(*index), get!(*value));
                 check!();
                 set!(*dest, w);

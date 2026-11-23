@@ -805,6 +805,18 @@ impl MirBuilder {
         value: ValueId,
         index: u32,
     ) -> Result<ValueId, MirError> {
+        self.ins_field_store(object, value, index, false)
+    }
+
+    /// [`Self::ins_heap_field_store`] of a field whose static type is a
+    /// number when `scalar` (`MirInst::HeapFieldStore::scalar`).
+    pub fn ins_field_store(
+        &mut self,
+        object: ValueId,
+        value: ValueId,
+        index: u32,
+        scalar: bool,
+    ) -> Result<ValueId, MirError> {
         if !self.field_object_ok(object) {
             return Err(MirError::msg(format!(
                 "HeapFieldStore object {}",
@@ -815,6 +827,8 @@ impl MirBuilder {
         if !ty.is_specialized() {
             return Err(MirError::msg(format!("HeapFieldStore value {ty}")));
         }
+        // Only a number word is stored as one (a boxed word is an object).
+        let scalar = scalar && matches!(ty, MirTy::I64 | MirTy::F64 | MirTy::Bool);
         let dest = self.alloc(ty);
         let value = self.resolve(value);
         self.push(MirInst::HeapFieldStore {
@@ -822,6 +836,7 @@ impl MirBuilder {
             object: self.resolve(object),
             value,
             index,
+            scalar,
         })?;
         Ok(dest)
     }

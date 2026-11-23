@@ -280,7 +280,7 @@ fn fresh_object(func: &MirFunc, alloc: ValueId, phi: ValueId) -> Option<Fresh> {
                 continue;
             }
             match inst {
-                MirInst::HeapFieldStore { dest, object, value, index } if *object == alloc => {
+                MirInst::HeapFieldStore { dest, object, value, index, .. } if *object == alloc => {
                     if b.id != block || !seen_alloc || *value == alloc {
                         return None;
                     }

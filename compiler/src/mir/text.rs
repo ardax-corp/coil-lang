@@ -243,7 +243,8 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             object,
             value,
             index,
-        } => write!(f, "{dest} = heapsetfield.slot {object}, {value}, {index}"),
+            scalar,
+        } => write!(f, "{dest} = heapsetfield.{} {object}, {value}, {index}", if *scalar { "num" } else { "slot" }),
         MirInst::Index {
             dest,
             array,
@@ -626,7 +627,7 @@ impl<'a> Parser<'a> {
                 ensure_ty(types, dest, MirTy::I64);
                 return Ok(MirInst::ProductLoad { dest, object, slot: index });
             }
-            if op == "heapsetfield.slot" {
+            if op == "heapsetfield.slot" || op == "heapsetfield.num" {
                 let object = self.value()?;
                 self.expect(',')?;
                 let value = self.value()?;
@@ -638,6 +639,7 @@ impl<'a> Parser<'a> {
                     object,
                     value,
                     index,
+                    scalar: op == "heapsetfield.num",
                 });
             }
         }
