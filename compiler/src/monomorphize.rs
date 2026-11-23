@@ -1394,7 +1394,7 @@ where
             f(body);
         }
         // Expanded before this runs; its body is the expansion program's.
-        Expression::ComptimeBlock(_) | Expression::RegionMark => {}
+        Expression::ComptimeBlock(_) => {}
         Expression::TypeApp { args, .. } => {
             for arg in args {
                 f(arg);

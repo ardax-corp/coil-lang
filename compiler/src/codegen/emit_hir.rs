@@ -11099,7 +11099,6 @@ impl Compiler {
         match &hir.expr(id).kind {
             HirKind::Clear(_) => Ok(()),
             // An early free reads a one-word object reference.
-            HirKind::Builtin { op: Builtin::Region { .. }, .. } => Ok(()),
             // A share as a statement: its operand's word, then dropped.
             HirKind::Builtin { op: Builtin::Cow { .. }, args } => {
                 let want = self.hir_natural(hir, emit, args[0]).or_else(|| self.hir_natural(hir, emit, id)).ok_or("cow-shape")?;

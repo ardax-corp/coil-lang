@@ -61,7 +61,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | 2 | Free at scope end and after the call for non-escaping fresh objects; check mode, gc-stress | done |
 | 3 | Static uniqueness: free a string's old value when it is rebuilt in place, free fresh concatenation operands and variable-size match scrutinees; zero-copy `to_bytes`/`from_bytes`; enum SROA dropped | done |
 | 4 | Copying nursery for young objects: write barrier, minor collections, pretenuring, held pins | done |
-| 5 | Opt-in checked `region` block: contextual keyword, E0140, nursery reset at the end | done |
+| 5 | Opt-in checked `region` block: contextual keyword, E0140, nursery reset at the end | done; removed in RC step 10 |
 | 6 | Re-measure; decide whether anything else is worth doing | done |
 
 ## Escape facts (step 1)
@@ -464,6 +464,12 @@ and binary_trees and hashmap run within 2.5% of the instructions but touch more
 memory. Whether it stays on by default is decided with step 6.
 
 ## Regions (step 5)
+
+**Removed** with the tracing GC (reference-count plan step 10): under counts
+an object is freed at its last use, so a region freed nothing more. The
+parser no longer knows `region { … }`; E0140 is retired, and host ids 177 /
+178 stay as no-ops so later ids do not move. The rest of this section is the
+history of the feature.
 
 `region { ... }` is a block whose garbage is freed when it ends, for code
 with a clear unit of work (a request handler, a compiler pass, one frame

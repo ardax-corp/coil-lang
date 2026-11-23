@@ -90,7 +90,8 @@ pub enum ErrorCode {
     /// A function states an escape fact (`#[noescape(x)]`, `#[fresh]`)
     /// that the inferred escape facts do not support.
     EscapeMismatch,
-    /// An object made inside a `region { … }` block can leave it.
+    /// Retired: `region { … }` blocks were removed (reference counts free
+    /// garbage at its last use).
     RegionEscape,
     /// A write copies an object another name shares (copy-on-write).
     CowCopy,

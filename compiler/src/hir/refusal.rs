@@ -1359,11 +1359,6 @@ impl Walk<'_> {
                 };
                 self.value(*local)
             }
-            // A region mark: a host call with no operands.
-            HirKind::Builtin {
-                op: Builtin::Region { .. },
-                ..
-            } => Ok(()),
             // A copy-on-write unpin: the object's word and its pin's `bool`.
             HirKind::Builtin {
                 op: Builtin::CowUnpin,

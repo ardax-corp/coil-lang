@@ -1032,22 +1032,6 @@ fn an_archive_carries_generators_and_vector_loops() {
 }
 
 #[test]
-fn region_blocks_run_from_native_code() {
-    // `region { }` enters and leaves through host calls that collect:
-    // native code's words stay rooted (and forwarded) across both.
-    let src = format!(
-        "{HEADER}class Node {{ pub v: int, pub next: Option<Node> }}\n\
-         #[inline(never)]\nfn build(int n) -> Option<Node> {{ let head: Option<Node> = Option::None; let i = 0; while i < n {{ head = Option::Some(new Node(i, head)); i += 1; }} return head; }}\n\
-         #[inline(never)]\nfn total(Option<Node> head) -> int {{ let n = 0; let cur = head; while let Option::Some(node) = cur {{ n += node.v; cur = node.next; }} return n; }}\n\
-         #[inline(never)]\nfn rounds(Option<Node> kept, int k) -> int {{ let sum = 0; let r = 0; while r < k {{ sum += region {{ let list = build(100 + r); total(list) + total(kept) }}; r += 1; }} return sum + total(kept); }}\n\
-         fn main() {{ let kept = build(50); let _ = println(format(\"%i\", rounds(kept, 200))); }}\n"
-    );
-    let stats = same_as_mir("native_region", &src);
-    assert!(compiled(&stats, "rounds"), "stats: {stats}");
-    // The region hooks run in Rust: no stubs.
-}
-
-#[test]
 fn reduce_loops_compile_to_native_loops() {
     // Counted reduces (a sum over an index expression as spectral_norm's,
     // a float dot, an int max, a xor, a NaN-aware float max) run as native

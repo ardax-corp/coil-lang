@@ -7262,7 +7262,6 @@ impl Compiler {
             self.messages.extend(fx.violation_messages());
             self.messages.extend(fx.readonly_messages());
             self.messages.extend(fx.escape_messages());
-            self.messages.extend(fx.region_messages());
             effects::log_seed_disagreements(hir, module, &fx, &self.typed_sidecar.length_stability().fns);
             let pure = effects::pure_names(hir, module, &fx.summaries);
             if effects::effects_capture_active() {
