@@ -3165,6 +3165,9 @@ impl<'pratt> Pratt<'pratt> {
                     .or_not()
                     .map(|o| o.is_some()),
             )
+            // A trailing comma, as `coil fmt` writes after the last
+            // parameter (or the `...`) of a wrapped list.
+            .then_ignore(op!(',').or_not())
             .try_map(|(args, variadic), span| {
                 if args.iter().any(|a| matches!(a, ExternArg::IllegalRest)) {
                     return Err(Rich::custom(
