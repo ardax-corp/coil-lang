@@ -807,9 +807,6 @@ impl Pass {
     /// [`unwind_homes`] keeps it in.
     fn unwind_roots(&self, func: &MirFunc, live_in: &[HashSet<ValueId>]) -> HashMap<ValueId, u16> {
         let mut out: HashMap<ValueId, u16> = HashMap::new();
-        if super::frame_words::is_generator(func) {
-            return out;
-        }
         let storable = |r: ValueId| matches!(ty_of(func, r), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64);
         let mut found: Vec<ValueId> = Vec::new();
         for (bi, block) in func.blocks.iter().enumerate() {
