@@ -201,6 +201,12 @@ fn run_on(rt: &mut Runtime, job: Job) {
                 return Err(ThreadErrorTag::Panicked);
             }
             if shared {
+                // The arguments go; the result keeps the job's count until
+                // the joiner takes it (`thread::join`, plan step 8).
+                let heap = d.rt.heap.get_mut();
+                for a in child_args {
+                    heap.rc_drop(a);
+                }
                 return Ok(PortableValue::Immediate(ret.bits()));
             }
             let out = crate::thread::value_to_portable(d.rt.heap.get(), ret);

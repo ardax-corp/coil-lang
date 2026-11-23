@@ -1897,6 +1897,9 @@ fn try_host_join(heap: &mut Heap, handle: Value) -> Result<Value, ThreadErrorTag
             Ok(PortableValue::Immediate(raw)) => {
                 let published = Value::from(raw);
                 host_end_shared_steal(published);
+                // The job's count on its result goes once the joiner's
+                // code counts what it was handed (plan step 8).
+                heap.rc_dec_word(published, common::WORD_UNKNOWN);
                 Ok(published)
             }
             Ok(pv) => {
