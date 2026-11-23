@@ -2723,10 +2723,11 @@ fn main() {}
     #[test]
     fn typecheck_project_denies_ungranted_ffi_exec() {
         let src = r#"
-use ffi::{declare};
-use ffi::types::{Int, Ptr};
+extern "plugin" {
+    fn system() -> int;
+}
 fn main() {
-    let _ = declare(0, "system", (Ptr,), Int);
+    let _ = system();
 }
 "#;
         let (_dir, file) = temp_hy("ffi_exec", src);

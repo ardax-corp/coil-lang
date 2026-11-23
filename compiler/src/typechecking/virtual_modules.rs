@@ -166,6 +166,9 @@ const REMOVED_MATH_HELP: &str =
 pub const REMOVED_PRELUDE_TEXT_FNS: &[&str] = &["ord", "char"];
 
 /// `prelude::math::pow` was removed in favour of the `**` operator.
+/// The help for `use ffi::{dload, declare, invoke, read_ints}`.
+pub(crate) const REMOVED_FFI_HELP: &str = "declare the library's functions in an `extern \"lib\" { ... }` block, or load one while the program runs with the coil-ffi package (`use coil_ffi::{Library}`)";
+
 const REMOVED_POW_HELP: &str =
     "`prelude::math::pow` was removed: write `base ** exponent` (checked, wrapping and saturating forms are in `arith`)";
 /// `prelude::math::rem` was removed in favour of the `%` operator.
@@ -726,19 +729,9 @@ impl VirtualModules {
                 BuiltinExport::Enum {
                     name: common::BUILTIN_FFI_ERROR_KIND_ENUM,
                 },
-                BuiltinExport::FfiFn {
-                    kind: FfiBuiltin::Dload,
-                },
-                BuiltinExport::FfiFn {
-                    kind: FfiBuiltin::Declare,
-                },
-                BuiltinExport::FfiFn {
-                    kind: FfiBuiltin::Invoke,
-                },
-                BuiltinExport::HostFn {
-                    surface: "read_ints",
-                    registry: common::FFI_READ_INTS_NATIVE,
-                },
+                // `dload`, `declare`, `invoke` and `read_ints` are gone: an
+                // `extern` block binds a library when the program compiles,
+                // and the coil-ffi package loads one at run time.
             ],
         );
 
@@ -1044,6 +1037,7 @@ impl VirtualModules {
             ("prelude::math", "pow") => Some(REMOVED_POW_HELP),
             ("prelude::math", "rem") => Some(REMOVED_REM_HELP),
             ("prelude::math", name) if REMOVED_MATH_FNS.contains(&name) => Some(REMOVED_MATH_HELP),
+            ("ffi", "dload" | "declare" | "invoke" | "read_ints") => Some(REMOVED_FFI_HELP),
             _ => None,
         }
     }

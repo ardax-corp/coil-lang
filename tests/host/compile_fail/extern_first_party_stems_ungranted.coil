@@ -1,0 +1,19 @@
+// @expected E0410 — first-party stems (`time`, `crypto`, `tls`, `regex`)
+// still need `--allow-dload`, even as absolute paths.
+extern "/coil-dload-missing/libtime.so" {
+    fn coil_time_now() -> int;
+}
+
+extern "/coil-dload-missing/libcrypto.so" {
+    fn coil_crypto_null() -> ptr;
+}
+
+extern "/coil-dload-missing/libtls.so" {
+    fn coil_tls_last_error() -> string;
+}
+
+extern "/coil-dload-missing/libregex.so" {
+    fn coil_regex_null() -> ptr;
+}
+
+fn main() {}

@@ -699,44 +699,36 @@ fn build_libsum_into(dir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// COI-233 worker fixture: FFI search dir `./allowed` with libsum
-/// there, and a non-loadable marker at cwd `native/libtls.so` (not a hijack).
+/// COI-233 worker fixture: FFI search dir `./allowed` with libsum there,
+/// and a non-loadable marker at cwd `native/libsum.so` (not a hijack). A
+/// spawned worker calls the `extern` function its parent's program declared.
 fn run_coi233_worker_ffi_project() -> Option<String> {
     let files = [
         (
             "src/main.coil",
             r#"
-use ffi::{dload};
 use thread::{join, spawn};
 use io::{stdout, write};
 use string::{format, to_bytes};
 
+extern "sum" {
+    fn sum(int a, int b) -> int;
+}
+
 fn worker() -> int {
-    let tls = match dload("tls") {
-        Result::Ok(_) => "tls-loaded",
-        Result::Err(e) => e.message,
-    };
-    write(stdout(), to_bytes(tls));
-    let sum_ok = match dload("sum") {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
-    return sum_ok;
+    return sum(40, 2);
 }
 
 fn main() {
-    let parent = match dload("sum") {
-        Result::Ok(_) => 1,
-        Result::Err(_) => 0,
-    };
+    let parent = sum(1, 2);
     let t = spawn(worker)?;
     let w = join(t)?;
-    write(stdout(), to_bytes(format("|%i%i", parent, w)));
+    write(stdout(), to_bytes(format("%i|%i", parent, w)));
 }
 "#,
         ),
         (
-            "native/libtls.so",
+            "native/libsum.so",
             "coil-security-pin: not a shared library\n",
         ),
     ];
@@ -751,7 +743,6 @@ fn main() {
         let mut grants = HostGrants::deny_all();
         grants.add_ffi_search_path(root.join("allowed"));
         grants.grant_dload_allow("sum");
-        grants.grant_dload_allow("tls");
         pipeline.set_host_grants(grants);
         pipeline.grant_dload_file("sum", libsum);
         let compiled = match compile_file(&mut pipeline, entry.to_str().unwrap()) {
@@ -769,38 +760,14 @@ fn main() {
     Some(output)
 }
 
-/// COI-233: a worker `dload("tls")` must not take cwd `./native/libtls`.
+/// COI-233: a `thread::spawn` worker resolves the parent's `extern` library
+/// from the same FFI search paths, never from cwd `./native/` (#2902).
 #[test]
-fn worker_dload_does_not_search_cwd_native_tls() {
+fn worker_extern_call_sees_parent_ffi_search_paths() {
     let Some(output) = run_coi233_worker_ffi_project() else {
         return;
     };
-    let lower = output.to_ascii_lowercase();
-    assert!(
-        !lower.contains("tls-loaded"),
-        "worker must not load cwd ./native/ as a tls fallback, got {output:?}"
-    );
-    assert!(
-        !lower.contains("native/libtls") && !lower.contains("native\\libtls"),
-        "worker dload must not search cwd ./native/libtls, got {output:?}"
-    );
-    assert!(
-        output.ends_with("|10") || output.ends_with("|11"),
-        "parent must dload sum via FFI search paths, got {output:?}"
-    );
-}
-
-/// COI-233: a `thread::spawn` worker must resolve `dload("sum")` from the same
-/// FFI search paths as the root graph.
-#[test]
-fn worker_dload_sees_parent_ffi_search_paths() {
-    let Some(output) = run_coi233_worker_ffi_project() else {
-        return;
-    };
-    assert!(
-        output.ends_with("|11"),
-        "parent and worker must both dload sum via FFI search paths, got {output:?}"
-    );
+    assert_eq!(output, "3|42", "parent and worker must both call sum from the FFI search path");
 }
 
 /// Cross-file: a two-slot `Result<int,int>` helper defined in one module

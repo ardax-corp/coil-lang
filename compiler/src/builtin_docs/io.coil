@@ -51,7 +51,7 @@ impl Stream {
     ///
     /// `ptr` is the package's session pointer and `read`, `write`,
     /// `shutdown` and `free` are C function pointers (as `int`, usually
-    /// looked up through `dload`). After `attach`, `read` / `write` on the
+    /// returned by the package's `extern` block). After `attach`, `read` / `write` on the
     /// stream go through those hooks, `close` (or a GC drop) calls `shutdown`
     /// then `free`, and the socket keeps its descriptor. This is how the
     /// coil-tls package turns a TCP stream into a TLS stream.
@@ -65,7 +65,7 @@ impl Stream {
     /// ```text
     /// use io::net::tcp::{connect};
     /// let s = connect("example.com", 443)?;
-    /// // session, rd, wr, sd, fr: a session pointer and C hooks from a dload'ed library
+    /// // session, rd, wr, sd, fr: a session pointer and C hooks from the package's extern library
     /// let tls = s.attach(session, rd, wr, sd, fr)?;
     /// ```
     pub fn attach(int ptr, int read, int write, int shutdown, int free) -> Result<Stream, IoError> {}
@@ -655,8 +655,8 @@ fn result_unit_probe(int n) -> Result<unit, IoError> {}
 /// Installs package IO hooks on `s` in place; the free-function form of `Stream.attach`.
 ///
 /// `ptr` is the package's session pointer and `read`, `write`, `shutdown`
-/// and `free` are C function pointers (as `int`, usually looked up through
-/// `dload`). Afterwards `read` / `write` on `s` go through those hooks and
+/// and `free` are C function pointers (as `int`, usually returned by the
+/// package's `extern` block). Afterwards `read` / `write` on `s` go through those hooks and
 /// `close` calls `shutdown` then `free`. Returns `s`.
 ///
 /// Returns `Err(IoError::InvalidInput)` when `ptr` is `0` or `s` is already
@@ -669,7 +669,7 @@ fn result_unit_probe(int n) -> Result<unit, IoError> {}
 /// use io::{attach};
 /// use io::net::tcp::{connect};
 /// let s = connect("example.com", 443)?;
-/// // session, rd, wr, sd, fr: a session pointer and C hooks from a dload'ed library
+/// // session, rd, wr, sd, fr: a session pointer and C hooks from the package's extern library
 /// let tls = attach(s, session, rd, wr, sd, fr)?;
 /// ```
 fn attach(Stream s, int ptr, int read, int write, int shutdown, int free) -> Result<Stream, IoError> {}

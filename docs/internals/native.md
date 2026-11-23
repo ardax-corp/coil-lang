@@ -285,9 +285,8 @@ native code reloads its words.
   The signature (up to five `int`, `float`, `bool`, `ptr` or `string` parameters;
   an `int`, `float`, `bool`, `ptr` or no result) is in the `CALLBACK` tag's aux
   (`common::encode_callback_sig`), so the archive is unchanged. In a program that may
-  make a C callback into coil (an extern function that takes one, or any
-  `ffi::declare` / `ffi::invoke`: a library may keep a callback and run it during a
-  later call, `may_call_back`), every direct extern call goes through a trampoline
+  make a C callback into coil (an extern function that takes one: a library may keep
+  a callback and run it during a later call, `may_call_back`), every direct extern call goes through a trampoline
   per call shape, `coil_cb_call_<k>`, between `push_roots` / `pop_roots`: it saves
   the frame pointer for the collector, calls `coil_native_cb_enter` (which makes
   this thread's context the one a callback runs on), calls C, and then
@@ -782,8 +781,7 @@ archive is the build tool's job (spool); the compiler takes paths only.
   table. Calls go as for a shared library: direct for scalar signatures, libffi
   otherwise.
 - The native lock and `--check-native` skip linked stems.
-- A declare of a symbol the table does not hold (an `ffi::declare` of a library an
-  `extern` block also names) looks it up in the process.
+- A declare of a symbol the table does not hold looks it up in the process.
 
 ### Shared `extern` libraries
 
@@ -798,7 +796,7 @@ like a static archive's, so at start the loader binds them, the runtime opens no
 checks no pin for them (trusted by soname), and the natives cache is not searched. The
 lock keeps their rows, for `coil natives dump` and the tools that ship the files. macOS
 (the install name is the library's choice) and Windows keep opening them at start
-through the `dload` gate, as does a library only `ffi::dload` opens.
+through the `dload` gate.
 
 ## Where the pieces are
 

@@ -1,0 +1,6 @@
+// @expected E0410 — an `extern` library's stem not on `--allow-dload`.
+extern "notalist" {
+    fn f(int x) -> int;
+}
+
+fn main() {}
