@@ -929,9 +929,11 @@ impl Pass {
                 // A static owns its word: a store reads the old one first
                 // and releases it after. A home keeps its word (a `defer`
                 // flag's slot may hold no word yet: its old one is not
-                // released, a leak).
+                // released, a leak), unless the caller keeps it: a borrowed
+                // word outlives the frame and its pads.
                 if let MirInst::StoreStatic { value, .. } | MirInst::HomeStore { value, .. } = inst
                     && (self.root(*value).is_some() || self.maybe_object(func, *value))
+                    && !(matches!(inst, MirInst::HomeStore { .. }) && self.root(*value).is_some_and(|r| self.borrowed.contains(&r)))
                 {
                     ops.insert(0, MirInst::RcInc { dest: tok(&mut new_types), src: *value, guard: None });
                     if let MirInst::StoreStatic { slot, value, .. } = inst {
