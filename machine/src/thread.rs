@@ -1683,6 +1683,8 @@ pub struct ThreadSpawnContext {
     pub dload_gate: crate::ffi::DloadGate,
     /// Parent's C struct layouts (pass-by-value FFI).
     pub struct_layouts: Arc<Vec<crate::CStructLayout>>,
+    /// The libraries the parent's program loaded (#2902).
+    pub ffi_recipes: crate::ffi::LibraryRecipes,
     /// The parent's static slots, raw: a shared-heap job reads the same
     /// startup `const`s (#1561). Its words name the parent's heap, so an
     /// isolate job takes copies ([`copy_statics_out`]) instead.
@@ -1707,6 +1709,7 @@ impl Clone for ThreadSpawnContext {
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
             struct_layouts: Arc::clone(&self.struct_layouts),
+            ffi_recipes: Arc::clone(&self.ffi_recipes),
             statics: Arc::clone(&self.statics),
             native: self.native.clone(),
         }
@@ -1742,6 +1745,11 @@ fn copy_statics_out(heap: &Heap, words: &[u64], kinds: &[u8]) -> Vec<Option<Spaw
             }
             let v = Value::from(w);
             if kinds.get(i) == Some(&common::WORD_SCALAR) || is_immediate_value(heap, v) {
+                return Some(SpawnArg::Value(PortableValue::Immediate(w)));
+            }
+            // An `extern` block's library: the job's runtime loads its own
+            // copy the first time it calls through this handle (#2902).
+            if matches!(heap.find_object_by_addr(w), Some(crate::memory::Object::Library(_))) {
                 return Some(SpawnArg::Value(PortableValue::Immediate(w)));
             }
             value_to_static_arg(heap, v).ok()
