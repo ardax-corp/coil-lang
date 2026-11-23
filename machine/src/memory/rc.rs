@@ -23,6 +23,9 @@ pub enum RcCheckMode {
     Report,
     /// [`Self::Report`], and panic when a count is below its references.
     Abort,
+    /// Keep counts with no oracle (`COIL_RC_CHECK=count`): what a run
+    /// costs with counts (reference-count plan step 6).
+    Count,
 }
 
 /// The process's [`RcCheckMode`], read once from `COIL_RC_CHECK`.
@@ -30,6 +33,7 @@ pub fn rc_check_mode() -> RcCheckMode {
     static MODE: std::sync::OnceLock<RcCheckMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("COIL_RC_CHECK").as_deref() {
         Ok("abort") => RcCheckMode::Abort,
+        Ok("count") => RcCheckMode::Count,
         Ok("0") | Ok("") | Err(_) => RcCheckMode::Off,
         Ok(_) => RcCheckMode::Report,
     })
@@ -167,6 +171,32 @@ impl Heap {
             _ => false,
         };
         refs.then(|| (o, self.rc_words(o)))
+    }
+
+    /// Store `value` into slot `slot` of instance `inst` (in range), counting
+    /// just that slot: the old word loses an owner and the new one gains
+    /// one. A class row with a tagged slot (whose kind another slot's tag
+    /// decides) falls back to [`Self::rc_before`] / [`Self::rc_after`].
+    pub fn rc_set_instance_slot(&self, inst: &mut RefInstance, slot: usize, value: Value) {
+        if !self.rc_counting() {
+            inst.as_mut().set_slot(slot, value);
+            return;
+        }
+        let row = self.class_field_kinds(inst.as_ref().type_id);
+        if row.contains(&common::WORD_TAGGED) {
+            let before = self.rc_before(Value::from(Object::Instance(*inst).addr()));
+            inst.as_mut().set_slot(slot, value);
+            self.rc_after(before);
+            return;
+        }
+        let kind = match row.get(slot).copied() {
+            Some(common::WORD_UNKNOWN) | None => common::packed_word_kind(inst.as_ref().own_kinds(), slot),
+            Some(k) => k,
+        };
+        let old = inst.as_ref().storage.as_slice()[slot];
+        inst.as_mut().set_slot(slot, value);
+        self.rc_inc_word(value, kind);
+        self.rc_dec_word(old, kind);
     }
 
     /// [`Self::rc_before`] of element `index` of a lane array only (a
@@ -416,14 +446,7 @@ impl Heap {
                 }
                 continue;
             }
-            for addr in self.rc_words(obj) {
-                // SAFETY: `rc_words` lists live objects' addresses.
-                if let Some(child) = unsafe { Object::from_header(addr) }
-                    && child.rc_dec()
-                {
-                    stack.push(child);
-                }
-            }
+            self.rc_dec_children(obj, &mut stack);
             n += 1;
             if rc_frees_checked() {
                 self.doomed.push(obj.addr());
@@ -445,6 +468,31 @@ impl Heap {
         n
     }
 
+    /// Each object `obj`'s words name loses an owner; those that reach zero
+    /// go on `stack` ([`Self::rc_release`]'s worklist).
+    fn rc_dec_children(&self, obj: Object, stack: &mut Vec<Object>) {
+        struct Dec<'a>(&'a Heap, &'a mut Vec<Object>);
+        impl SlotVisitor for Dec<'_> {
+            fn word(&mut self, v: &Value, kind: u8) {
+                if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
+                    && let Some(o) = self.0.rc_object(*v)
+                    && o.rc_dec()
+                {
+                    self.1.push(o);
+                }
+            }
+
+            fn member(&mut self, m: &Member) {
+                if let Member::Object(o) = m
+                    && o.rc_dec()
+                {
+                    self.1.push(*o);
+                }
+            }
+        }
+        obj.visit_slots(self, &mut Dec(self, stack));
+    }
+
     /// Whether [`Self::rc_release`] may free `obj`.
     fn rc_releasable(&self, obj: Object) -> bool {
         // A closure owns its captured and filled words: its allocation
@@ -457,7 +505,7 @@ impl Heap {
     /// The oracle ([`rc_check_mode`]), between a major mark and its sweep.
     pub(crate) fn rc_check(&self) {
         let mode = rc_check_mode();
-        if mode == RcCheckMode::Off {
+        if matches!(mode, RcCheckMode::Off | RcCheckMode::Count) {
             return;
         }
         struct Tally<'a> {

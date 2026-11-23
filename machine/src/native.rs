@@ -276,6 +276,9 @@ pub const ROOTS_SCAN: u64 = 1 << 61;
 /// SiteScanFn, data]`, as [`ROOTS_SCAN`] for call sites.
 pub const SITES_SCAN: u64 = u64::MAX;
 
+/// Byte offset of [`NativeCtx::heap`].
+pub const NATIVE_CTX_HEAP: i32 = std::mem::offset_of!(NativeCtx, heap) as i32;
+
 /// Byte offset of [`NativeCtx::gc_epoch`].
 pub const NATIVE_CTX_GC_EPOCH: i32 = std::mem::offset_of!(NativeCtx, gc_epoch) as i32;
 
@@ -1515,11 +1518,9 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
     if slot >= gc.as_ref().slot_len() {
         return unsafe { bail(ctx) };
     }
-    let heap = unsafe { heap(ctx) };
-    let before = heap.as_ref().and_then(|h| h.rc_before(common::Value::from(addr)));
-    gc.as_mut().set_slot(slot, common::Value::from(value));
-    if let Some(heap) = heap {
-        heap.rc_after(before);
+    match unsafe { heap(ctx) } {
+        Some(heap) => heap.rc_set_instance_slot(&mut gc, slot, common::Value::from(value)),
+        None => gc.as_mut().set_slot(slot, common::Value::from(value)),
     }
     value
 }
