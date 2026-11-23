@@ -1532,6 +1532,10 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
 /// count their own words.
 fn host_writes_words(id: u64) -> bool {
     use common::EffectFlags as E;
+    // `vec_stamp` counts the one object it changes itself.
+    if id == u64::from(common::VEC_STAMP_ID) {
+        return false;
+    }
     match u16::try_from(id).ok().and_then(|id| common::HOST_NATIVES.get(usize::from(id)).filter(|n| n.id == id)) {
         Some(n) => {
             let e = n.effects;

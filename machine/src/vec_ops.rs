@@ -159,6 +159,15 @@ pub const VEC_MOVE_WIRING: &[(&str, usize, crate::HostValueFn)] =
 pub fn host_vec_stamp(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let kinds = args.get(1).map_or(0, |v| v.as_int());
+    // A word stamped a number no longer counts as an owner: the counts
+    // follow what the new kinds say ([`Heap::rc_before`]).
+    let before = heap.rc_before(handle);
+    stamp(heap, handle, kinds);
+    heap.rc_after(before);
+    Value::from(0i64)
+}
+
+fn stamp(heap: &mut Heap, handle: Value, kinds: i64) {
     match heap.find_object_by_addr(handle.bits()) {
         Some(Object::Array(mut gc)) => {
             if let Ok(kind @ (common::WORD_SCALAR | common::WORD_POINTER)) = u8::try_from(kinds)
@@ -191,7 +200,6 @@ pub fn host_vec_stamp(heap: &mut Heap, args: &[Value]) -> Value {
         }
         _ => {}
     }
-    Value::from(0i64)
 }
 
 /// `vec_stamp` (MIR section format 19), after `startup_restore`.
