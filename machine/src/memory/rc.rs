@@ -211,8 +211,9 @@ impl Heap {
                 a.lanes() > 1 || !matches!(a.elem_kind(), common::WORD_SCALAR | common::WORD_BYTE)
             }
             // A coroutine's saved words are its suspended frame's: frames
-            // own nothing in step 2.
-            Object::Instance(_) | Object::Enum(_) | Object::Fn(_) | Object::Root(_) => true,
+            // own nothing in step 2. An enum's payload and a closure's
+            // captures are never written once made: no native changes them.
+            Object::Instance(_) | Object::Root(_) => true,
             _ => false,
         };
         refs.then(|| (o, self.rc_words(o)))
