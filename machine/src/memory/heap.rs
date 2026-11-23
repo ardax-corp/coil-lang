@@ -320,6 +320,8 @@ pub struct Heap {
     /// host handed back (a popped element). A collection drops the list
     /// (the sweep frees what is still unowned; a minor moves objects).
     pub(crate) rc_pending: std::cell::RefCell<Vec<u64>>,
+    /// [`Heap::rc_release`]'s worklist, kept so a release allocates nothing.
+    pub(crate) rc_stack: Vec<Object>,
     /// Objects the sweep freed in a run that keeps counts: what the counts
     /// leaked (or a cycle's), cumulative.
     pub(crate) rc_swept: u64,
@@ -412,6 +414,7 @@ impl Default for Heap {
             rc_frees: rc::rc_frees_asked(),
             rc_swept: 0,
             rc_pending: std::cell::RefCell::new(Vec::new()),
+            rc_stack: Vec::new(),
             nursery: false,
             epoch_born: Vec::new(),
             nursery_chunks: NURSERY_CHUNKS,

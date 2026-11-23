@@ -437,7 +437,8 @@ impl Heap {
             }
             return 0;
         }
-        let mut stack = vec![obj];
+        let mut stack = std::mem::take(&mut self.rc_stack);
+        stack.push(obj);
         let mut n = 0;
         while let Some(obj) = stack.pop() {
             if !self.rc_releasable(obj) {
@@ -465,6 +466,7 @@ impl Heap {
             // frames count theirs once [`Self::rc_frees`] is on.
             unsafe { self.dealloc(obj) };
         }
+        self.rc_stack = stack;
         n
     }
 
