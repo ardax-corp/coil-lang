@@ -2065,6 +2065,20 @@ impl Heap {
         self.restore_gc_roots(roots);
     }
 
+    /// Clear the [`Object::Weak`] handles that name `addr`, an object whose
+    /// last strong reference just went (reference-count plan step 7).
+    pub fn clear_weaks_to(&self, addr: u64) {
+        for &w in &self.weaks {
+            if let Some(Object::Weak(gc)) = self.find_object_by_addr(w) {
+                let weak = gc.as_ref();
+                if !weak.cleared.get() && weak.target.get().heap_addr() == addr {
+                    weak.cleared.set(true);
+                    weak.target.set(Value::from(0i64));
+                }
+            }
+        }
+    }
+
     /// Clear [`Object::Weak`] handles whose referents were not marked.
     ///
     /// Must run after the mark phase and before [`Self::sweep`] so upgrades
@@ -2906,6 +2920,20 @@ impl Object {
     pub(crate) fn set_shared(&self) {
         // SAFETY: every kind shares the `repr(C)` header at the slot start.
         unsafe { &*(self.addr() as *const GcHeader) }.set_flag(FLAG_SHARED, true);
+    }
+
+    /// Whether a `gc::weak` handle names this object ([`FLAG_WEAK_TARGET`]).
+    #[inline]
+    pub fn is_weak_target(&self) -> bool {
+        // SAFETY: every kind shares the `repr(C)` header at the slot start.
+        unsafe { &*(self.addr() as *const GcHeader) }.flag(FLAG_WEAK_TARGET)
+    }
+
+    /// Note that a `gc::weak` handle names this object ([`Self::is_weak_target`]).
+    #[inline]
+    pub fn set_weak_target(&self) {
+        // SAFETY: as in `is_weak_target`.
+        unsafe { &*(self.addr() as *const GcHeader) }.set_flag(FLAG_WEAK_TARGET, true);
     }
 
     /// Copy-on-write: whether a name writes this object in place without a
@@ -5299,6 +5327,9 @@ const FLAG_FINALIZED: u8 = 1 << 3;
 /// instead of setting [`FLAG_SHARED`] ([`Heap::cow_share`]). A pinned
 /// object is never shared.
 pub const FLAG_PINNED: u8 = 1 << 4;
+/// A `gc::weak` handle names this object: its release clears them
+/// ([`Heap::clear_weaks_to`]).
+const FLAG_WEAK_TARGET: u8 = 1 << 5;
 
 /// A count that never changes: interned and constant objects that live as
 /// long as the program.

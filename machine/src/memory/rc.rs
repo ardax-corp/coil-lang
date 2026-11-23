@@ -449,6 +449,9 @@ impl Heap {
             }
             self.rc_dec_children(obj, &mut stack);
             n += 1;
+            if obj.is_weak_target() {
+                self.clear_weaks_to(obj.addr());
+            }
             if rc_frees_checked() {
                 self.doomed.push(obj.addr());
                 continue;

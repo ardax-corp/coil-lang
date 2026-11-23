@@ -71,6 +71,10 @@ pub fn host_gc_unroot(heap: &mut Heap, args: &[Value]) -> Value {
 /// `gc::weak(v) -> Weak<T>` — non-rooting handle to `v`.
 pub fn host_gc_weak(heap: &mut Heap, args: &[Value]) -> Value {
     let v = args.first().copied().unwrap_or(Value::from(0i64));
+    // Its release clears the handle once counts free it (plan step 7).
+    if let Member::Object(o) = member_from_value(heap, v) {
+        o.set_weak_target();
+    }
     let (obj, _) = heap.alloc(
         ObjWeak {
             target: Cell::new(v),
