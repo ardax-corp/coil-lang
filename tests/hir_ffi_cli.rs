@@ -1,5 +1,5 @@
 //! `extern` calls and `dload` / `declare` / `invoke`: the HIR lowering
-//! emits them and they run at every opt level.
+//! emits them and they run at every opt level and on the MIR interpreter.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
         .collect();
     assert!(refused.is_empty(), "FFI bodies refused direct MIR: {refused:#?}");
 
-    for mode in [&[][..], &["-O", "0"][..]] {
+    for mode in [&[][..], &["-O", "0"][..], &["--mir"][..]] {
         let run = Command::new(bin)
             .args(mode)
             .args(["--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"])
@@ -117,6 +117,39 @@ fn main() {
     )
     .unwrap();
     check(&bin, &tmp, &src);
+
+    // A spawned thread calls through the library its parent loaded (#2902).
+    let threads = tmp.join("threads.coil");
+    std::fs::write(
+        &threads,
+        r#"
+use thread::{join, spawn};
+
+extern "sum" {
+    fn sum(int a, int b) -> int;
+}
+
+fn work() -> int {
+    return sum(40, 2);
+}
+
+fn main() {
+    let t = match spawn(fn () => work()) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "spawn failed",
+    };
+    let r = match join(t) {
+        Result::Ok(v) => v,
+        Result::Err(_) => panic "the thread's extern call failed",
+    };
+    if r + sum(0, 0) != 42 {
+        panic "wrong sum";
+    }
+}
+"#,
+    )
+    .unwrap();
+    check(&bin, &tmp, &threads);
 
     // Dynamic FFI: a signature's tags are constants, a function named in
     // the argument tuple is its code pointer.
