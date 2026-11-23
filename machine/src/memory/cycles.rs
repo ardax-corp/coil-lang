@@ -27,6 +27,13 @@ enum Color {
 }
 
 impl Heap {
+    /// A cycle pass ran on allocation pressure with no tracing collector
+    /// ([`super::rc::rc_trace_off`]): the next one waits until the live bytes
+    /// grow by the growth factor.
+    pub(crate) fn cycles_ran(&mut self) {
+        self.gc_next_threshold = self.counts.alloc_bytes.saturating_mul(self.gc_growth_factor.max(2)).max(GC_NEXT_THRESHOLD).min(self.byte_cap);
+    }
+
     /// Objects of class `type_id` can close a reference cycle (the
     /// compiler's finalizer registry, `CYCLIC_TYPE_FLAG`).
     pub fn register_cyclic_type(&mut self, type_id: u32) {

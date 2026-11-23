@@ -5991,7 +5991,7 @@ pub use nursery::MinorPlan;
 
 #[path = "rc.rs"]
 mod rc;
-pub use rc::{RcCheckMode, rc_check_mode};
+pub use rc::{RcCheckMode, rc_check_mode, rc_trace_off};
 
 #[path = "cycles.rs"]
 mod cycles;

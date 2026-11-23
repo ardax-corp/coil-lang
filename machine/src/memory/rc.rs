@@ -46,7 +46,16 @@ pub fn rc_check_mode() -> RcCheckMode {
 /// mark aborts naming who still holds one it reaches, as
 /// `--early-free check` does.
 pub(crate) fn rc_frees_asked() -> bool {
-    rc_check_mode() != RcCheckMode::Off && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "1" || v == "check")
+    rc_check_mode() != RcCheckMode::Off && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "1" || v == "check" || v == "only")
+}
+
+/// `COIL_RC_FREE=only`: counts free, and the tracing collector never runs
+/// (no nursery, no mark or sweep; `gc::collect` and allocation pressure
+/// run the cycle collector). What the runtime is once step 10 deletes the
+/// tracing GC.
+pub fn rc_trace_off() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| rc_frees_asked() && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "only"))
 }
 
 /// `COIL_RC_FREE=check` ([`rc_frees_asked`]).

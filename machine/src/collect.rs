@@ -412,6 +412,10 @@ pub(crate) fn collect<H: GcHost + ?Sized>(h: &mut H) {
         h.run_due_drops();
     }
     collect_cycles(h);
+    if crate::memory::rc_trace_off() {
+        h.rt_mut().heap.cycles_ran();
+        return;
+    }
     h.rt_mut().gc_in_progress = true;
     loop {
         h.rt_mut().gc_deferred = false;
@@ -517,6 +521,16 @@ pub(crate) fn safepoint<H: GcHost + ?Sized>(h: &mut H) {
     }
     if !h.rt().heap.rc_due.is_empty() && h.rt().heap.gc_is_idle() && !h.rt().heap.epoch_stw() {
         h.run_due_drops();
+    }
+    if crate::memory::rc_trace_off() {
+        if !h.rt().heap.epoch_stw() && h.rt().heap.should_collect_old() {
+            collect_cycles(h);
+            h.rt_mut().heap.cycles_ran();
+        }
+        if h.rt().heap.get().over_byte_cap() {
+            over_cap(h);
+        }
+        return;
     }
     let heap = &h.rt().heap;
     if heap.epoch_stw() {
