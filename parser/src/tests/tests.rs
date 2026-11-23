@@ -1980,6 +1980,27 @@
     }
 
     #[test]
+    fn parse_extern_params_take_a_trailing_comma() {
+        // `coil fmt` wraps a long parameter list with a comma after the
+        // last parameter, and after a trailing `...`.
+        let fixed = decl_ast!("extern \"c\" { fn f(\n    int a,\n    int b,\n) -> int; }");
+        let variadic = decl_ast!("extern \"c\" { fn g(\n    string fmt,\n    ...,\n) -> int; }");
+        for (ast, params, is_variadic) in [(fixed, 2, false), (variadic, 1, true)] {
+            match ast {
+                Expression::ExternBlock { declarations, .. } => {
+                    let f = &declarations[0];
+                    assert_eq!(f.variadic, is_variadic);
+                    match f.args.1.as_ref() {
+                        Expression::Fragment(items) => assert_eq!(items.len(), params),
+                        other => panic!("expected Fragment, got {:?}", other),
+                    }
+                }
+                other => panic!("expected ExternBlock, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
     fn parse_extern_block_bare_ellipsis_only() {
         let ast = decl_ast!("extern \"c\" { fn weird(...) -> int; }");
         match ast {
