@@ -461,7 +461,7 @@ impl Heap {
     /// loses an owner, and those that reach zero are released in turn (a
     /// worklist, not recursion). An object the runtime cannot free here
     /// stays, at count zero, for the collector: a
-    /// root handle, a stream, a generator that never started, and every
+    /// root handle, a generator that never started, and every
     /// object while a collection or a steal epoch is open (one that owes a
     /// `drop` or a close waits for it in [`Self::rc_due`]). The last
     /// collection's root buffer is no test: it is stale once that ends, and
@@ -627,9 +627,9 @@ impl Heap {
         // A closure owns its captured and filled words: its allocation
         // counted them ([`Self::rc_inc_slots`]).
         // A coroutine goes once its body is done (its close released its
-        // frame's words). A stream stays for the collector: freeing it
-        // closes its descriptor, at a last use the program may not expect.
-        (matches!(obj, Object::Fn(_) | Object::String(_) | Object::Weak(_))
+        // frame's words). Freeing a stream closes its descriptor (a local
+        // one is kept to the end of its scope, `hir/early_free.rs`).
+        (matches!(obj, Object::Fn(_) | Object::String(_) | Object::Weak(_) | Object::Stream(_))
             || matches!(obj, Object::Coroutine(c) if c.as_ref().state == CoroState::Done)
             || matches!(obj, Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
             && !self.pending_drop(obj)
