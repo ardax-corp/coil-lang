@@ -2237,7 +2237,9 @@ impl Compiler {
         }
         // A body kept for splicing is the one before its frees.
         let frees = passes.frees() && self.opt_options.early_free && quiet && !self.hir_kept_splice_off.get();
-        if body.is_none() && !frees {
+        // A stream closes at the end of its local's scope at every level.
+        let streams = if frees { None } else { crate::hir::effects::ProgramEffects::keep_streams(body.as_ref().unwrap_or(hir)) };
+        if body.is_none() && !frees && streams.is_none() {
             return Ok(None);
         }
         let fail = |reason, freed: bool| HirRewriteFail { reason, inlined: !spliced.is_empty(), freed };
@@ -2282,7 +2284,7 @@ impl Compiler {
             };
             self.program_effects.early_frees(&self.checker, &module_path, module, at, &host, &slots)
         } else {
-            None
+            streams
         };
         if body.is_none() && freed.is_none() {
             return Ok(None);

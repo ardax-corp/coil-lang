@@ -100,6 +100,11 @@ pub(super) fn rewrite(
     linear.retain(|&l, _| !(slots.local)(l));
     let mut locals = block_locals(checker, body, &mut e, kept, &linear);
     locals.retain(|&(_, l)| !(slots.local)(l));
+    for sl in stream_locals(body, &parents) {
+        if !locals.contains(&sl) {
+            locals.push(sl);
+        }
+    }
     let mut chains = concat_temps(body, &mut e, &parents);
     chains.retain(|(head, _)| !based(*head));
     let mut scrutinees = match_temps(body, &mut e, &parents, kept);
@@ -451,6 +456,59 @@ fn block_locals(checker: &Checker, body: &HirBody, e: &mut Escape<'_, '_>, kept:
             continue;
         }
         out.push((block, l));
+    }
+    out
+}
+
+/// `body` with a free at the end of each `Stream` local's scope
+/// ([`stream_locals`]), when it has one: what a body the early-free
+/// rewrite does not run on still gets, so a stream closes at the same
+/// point at every optimization level.
+pub(super) fn keep_streams(body: &HirBody) -> Option<HirBody> {
+    if body.is_coro {
+        return None;
+    }
+    let live = crate::hir::inline::without_orphans(body, body.root?);
+    let body = live.as_ref().unwrap_or(body);
+    let locals = stream_locals(body, &parents(body));
+    if locals.is_empty() {
+        return None;
+    }
+    let mut out = body.clone();
+    for (block, local) in locals {
+        free_at_end(&mut out, block, local);
+    }
+    Some(out)
+}
+
+/// The `Stream` locals of each block, freed at its end: a stream counts as
+/// any object, and its last owner going closes its descriptor. The free at
+/// the end of its scope keeps it open until then, as a `drop` class's
+/// object (the runtime frees no stream there; under counts the decrement
+/// after it closes the stream). A stream handed on is not closed there:
+/// another owner keeps it.
+fn stream_locals(body: &HirBody, parents: &HashMap<HirId, HirId>) -> Vec<(HirId, LocalId)> {
+    let mut out = Vec::new();
+    for (i, x) in body.exprs.iter().enumerate() {
+        let HirKind::Let { local, .. } = x.kind else { continue };
+        let l = body.local(local);
+        if !matches!(l.kind, LocalKind::Let) || l.captured || l.name == "_" {
+            continue;
+        }
+        if !matches!(l.ty.as_ref().map(ty::strip_readonly), Some(Ty::Con(n)) if n == "Stream") {
+            continue;
+        }
+        let decl = HirId(i as u32);
+        let Some(&block) = parents.get(&decl) else { continue };
+        let HirKind::Block { stmts, .. } = &body.expr(block).kind else { continue };
+        if !stmts.contains(&decl) || matches!(stmts.last().map(|s| &body.expr(*s).kind), Some(HirKind::Break | HirKind::Continue)) {
+            continue;
+        }
+        // One `let` per local.
+        if body.exprs.iter().filter(|y| matches!(y.kind, HirKind::Let { local: m, .. } if m == local)).count() != 1 {
+            continue;
+        }
+        out.push((block, local));
     }
     out
 }

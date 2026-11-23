@@ -352,6 +352,12 @@ impl ProgramEffects {
         early_free::rewrite(checker, module, body, &lookup, host, slots)
     }
 
+    /// `body` with a free at the end of each `Stream` local's scope, for a
+    /// body [`Self::early_frees`] does not run on.
+    pub fn keep_streams(body: &HirBody) -> Option<HirBody> {
+        early_free::keep_streams(body)
+    }
+
     /// `body` with its copy-on-write ops ([`cow`]), when it needs any.
     /// `mutates` is the body's own summary bits: the parameters it writes
     /// in place for its caller.
