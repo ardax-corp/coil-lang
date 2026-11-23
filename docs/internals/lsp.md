@@ -73,8 +73,9 @@ hover text with links into [coil-website](https://github.com/ardax-corp/coil-web
 (`src/content/docs/`; site route `/docs/…`). Process clocks are virtual
 `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms` → HostInvoke `clock_*`).
 There is no virtual `time` / `regex` / `tls` / `crypto` module; those live
-in userland packages. `ffi::dload` / `declare` / `invoke` are documented as
-HostInvoke FFI stubs.
+in userland packages. `ffi` keeps only its `Error` / `ErrorKind` enums and
+`ffi::types`; libraries are called through `extern` blocks, or loaded while
+the program runs with the coil-ffi package.
 
 Function completion items use snippet insertion: selecting `fib` inserts
 parameter placeholders such as `fib(${1:n})$0` and advertises `(` / `,` as
