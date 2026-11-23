@@ -122,6 +122,46 @@ fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
     }
 }
 
+/// Whether `v` is an `int` word a load defines (a field, an element, a
+/// payload, a static) whose every use computes with it: an operand of an
+/// arithmetic op or a compare, or a branch condition.
+fn arith_only_load(func: &MirFunc, v: ValueId) -> bool {
+    if ty_of(func, v) != MirTy::I64 {
+        return false;
+    }
+    let insts = || func.blocks.iter().flat_map(|b| &b.insts);
+    let loaded = insts().any(|i| {
+        matches!(i, MirInst::ProductLoad { .. } | MirInst::Index { .. } | MirInst::LaneIndex { .. } | MirInst::LoadStatic { .. } | MirInst::MatchPayload { .. })
+            && i.dests().any(|d| d == v)
+    });
+    if !loaded {
+        return false;
+    }
+    let mut used = false;
+    for i in insts() {
+        if !i.operands().contains(&v) {
+            continue;
+        }
+        used = true;
+        let arith = match i {
+            MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
+            MirInst::Cmp { .. } => true,
+            _ => false,
+        };
+        if !arith {
+            return false;
+        }
+    }
+    for t in func.blocks.iter().filter_map(|b| b.term.as_ref()) {
+        match t {
+            Terminator::Br { cond, .. } if *cond == v => used = true,
+            _ if t.uses().any(|u| u == v) => return false,
+            _ => {}
+        }
+    }
+    used
+}
+
 /// [`insert_rc_all`] of a body, or of a cleanup pad (`pad`: it runs while the
 /// frame unwinds, so it keeps no homes of its own).
 fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>) -> usize {
@@ -415,6 +455,10 @@ impl Pass {
                 _ => {}
             }
         }
+        // A word loaded from an object that the frame only computes with
+        // (arithmetic, a compare, a branch) is a number: nothing keeps it,
+        // and it is never read through.
+        counted.retain(|v| !arith_only_load(func, *v));
         // A φ that merges a counted word may hold its object.
         let mut changed = true;
         while changed {
@@ -1106,6 +1150,20 @@ mod tests {
         let mut g = crate::mir::parse_func(walk).expect(walk);
         insert_rc_all([(Some(Label(8)), &mut g)]);
         assert_eq!(all_rc_ops(&g), 1, "{g}");
+    }
+
+    /// An `int` field the frame only adds up is no word to count; one it
+    /// hands on (here returned) is.
+    #[test]
+    fn an_int_field_summed_counts_nothing() {
+        let sum = "func @s(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = iadd v1, v2\n    return v3\n}\n";
+        let mut f = crate::mir::parse_func(sum).expect(sum);
+        insert_rc_all([(None, &mut f)]);
+        assert_eq!(all_rc_ops(&f), 0, "{f}");
+        let kept = "func @k(v0: heapref) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    return v2\n}\n";
+        let mut g = crate::mir::parse_func(kept).expect(kept);
+        insert_rc_all([(None, &mut g)]);
+        assert!(all_rc_ops(&g) > 0, "{g}");
     }
 
     #[test]
