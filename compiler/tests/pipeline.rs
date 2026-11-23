@@ -1579,7 +1579,7 @@ fn example_ffi_callbacks_prints_each_result() {
         return;
     }
     let output = run_ffi_example_with_lib("examples/ffi_callbacks.coil", &libsum);
-    assert_eq!(output, "42 3.5 5 8 8 <1><2><3> kept 1 kept 2");
+    assert_eq!(output, "42 3.5 5 8 8 <1><2><3> kept 1 kept 2 152.25");
 }
 
 #[cfg(unix)]
@@ -1639,7 +1639,7 @@ fn example_ffi_scalars_prints_each_result() {
         return;
     }
     let output = run_ffi_example_with_lib("examples/ffi_scalars.coil", &libsum);
-    assert_eq!(output, "6.0 true false 21 0 false");
+    assert_eq!(output, "6.0 true false 21 0 false -1 1 255 65535 3996999993");
 }
 
 #[cfg(unix)]
@@ -1675,7 +1675,7 @@ fn example_ffi_varargs_prints_each_sum() {
         return;
     }
     let output = run_ffi_example_with_lib("examples/ffi_varargs.coil", &libsum);
-    assert_eq!(output, "60 91.0 30.0 55.0 31.0 3.0");
+    assert_eq!(output, "60 91.0 30.0 55.0 144.0 31.0 3.0");
 }
 
 

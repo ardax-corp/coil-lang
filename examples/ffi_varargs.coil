@@ -28,6 +28,8 @@ fn main() {
     let _ = print(format("%f ", va_mix("dddddd", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)));
     let _ = print(format("%f ", va_mix("iiii", 1, 2, 3, 4)));
     let _ = print(format("%f ", va_mix("iiiii", 1, 2, 3, 4, 5)));
+    // More integers than registers: the last ones on the stack.
+    let _ = print(format("%f ", va_mix("iiiiiiid", 1, 2, 3, 4, 5, 6, 7, 0.5)));
     let _ = print(format("%f ", va_mix("idsb", 7, 2.5, "hello", true)));
     let _ = print(format("%f", va_scaled(0.5, 3, 1.0, 2.0, 3.0)));
 }
