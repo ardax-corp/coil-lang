@@ -322,6 +322,10 @@ pub struct Heap {
     pub(crate) rc_pending: std::cell::RefCell<Vec<u64>>,
     /// [`Heap::rc_release`]'s worklist, kept so a release allocates nothing.
     pub(crate) rc_stack: Vec<Object>,
+    /// Objects whose count reached zero with their `drop` still owed
+    /// (reference-count plan step 7): roots until the runtime runs it
+    /// ([`Heap::take_rc_due`]) and releases them.
+    pub(crate) rc_due: Vec<u64>,
     /// Objects the sweep freed in a run that keeps counts: what the counts
     /// leaked (or a cycle's), cumulative.
     pub(crate) rc_swept: u64,
@@ -415,6 +419,7 @@ impl Default for Heap {
             rc_swept: 0,
             rc_pending: std::cell::RefCell::new(Vec::new()),
             rc_stack: Vec::new(),
+            rc_due: Vec::new(),
             nursery: false,
             epoch_born: Vec::new(),
             nursery_chunks: NURSERY_CHUNKS,

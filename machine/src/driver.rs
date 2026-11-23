@@ -693,33 +693,55 @@ impl<'a> Driver<'a> {
     /// `FreeEarly` of `v`: the `drop`s it owes run first. `false` when one
     /// panicked.
     fn free_early(&mut self, v: Value, deep: bool) -> bool {
+        if self.rt.heap.rc_counting() {
+            // Counts free what dies: the scope's end only runs the `drop`s
+            // its owner's last decrement will owe (plan step 7).
+            let drops = self.rt.heap.rc_doomed_drops(v);
+            if !self.run_drops(v, &drops) {
+                return false;
+            }
+            if !self.rt.heap.rc_due.is_empty() {
+                GcHost::run_due_drops(self);
+            }
+            return true;
+        }
         let mode = crate::memory::early_free_mode();
         if !self.rt.finalizer_by_type.is_empty() && mode == crate::memory::EarlyFreeMode::Free {
             let Some(drops) = self.rt.heap.early_drops(v, deep, &|_| false) else {
                 return true;
             };
-            if !drops.is_empty() {
-                // Rooted while they run: nothing else reaches them.
-                let n = self.rt.ffi_arg_roots.len();
-                self.rt.ffi_arg_roots.push(v);
-                self.rt.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
-                for obj in &drops {
-                    let Some(pc) = self.rt.pending_finalizer(*obj) else { continue };
-                    let val = Value::from(obj.addr());
-                    if self.finalizer_aborted || !self.rt.claim_finalizer(val) {
-                        continue;
-                    }
-                    if self.call(pc as usize, &[val]).is_none() {
-                        self.rt.ffi_arg_roots.truncate(n);
-                        return false;
-                    }
-                }
-                self.rt.ffi_arg_roots.truncate(n);
+            if !self.run_drops(v, &drops) {
+                return false;
             }
         }
         if mode != crate::memory::EarlyFreeMode::Off {
             self.rt.heap.free_early(v, deep, mode == crate::memory::EarlyFreeMode::Check, &|_| false);
         }
+        true
+    }
+
+    /// Run the `drop`s of `drops` (a free of `v` gives them back), parents
+    /// first. `false` when one panicked.
+    fn run_drops(&mut self, v: Value, drops: &[crate::memory::Object]) -> bool {
+        if drops.is_empty() {
+            return true;
+        }
+        // Rooted while they run: nothing else reaches them.
+        let n = self.rt.ffi_arg_roots.len();
+        self.rt.ffi_arg_roots.push(v);
+        self.rt.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
+        for obj in drops {
+            let Some(pc) = self.rt.pending_finalizer(*obj) else { continue };
+            let val = Value::from(obj.addr());
+            if self.finalizer_aborted || !self.rt.claim_finalizer(val) {
+                continue;
+            }
+            if self.call(pc as usize, &[val]).is_none() {
+                self.rt.ffi_arg_roots.truncate(n);
+                return false;
+            }
+        }
+        self.rt.ffi_arg_roots.truncate(n);
         true
     }
 
@@ -1591,6 +1613,29 @@ impl GcHost for Driver<'_> {
     /// Not while auto-par workers run on the heap.
     fn can_move(&self) -> bool {
         self.rt.shared_epoch.is_none()
+    }
+
+    fn run_due_drops(&mut self) {
+        // A `drop` may release more: until none is left.
+        loop {
+            let due = self.rt.heap.take_rc_due();
+            if due.is_empty() {
+                return;
+            }
+            // Rooted until each is released.
+            let n = self.rt.ffi_arg_roots.len();
+            self.rt.ffi_arg_roots.extend(due.iter().map(|&a| Value::from(a)));
+            for &addr in &due {
+                let Some(obj) = self.rt.heap.find_object_by_addr(addr) else { continue };
+                if let Some(pc) = self.rt.pending_finalizer(obj) {
+                    GcHost::run_pending(self, Value::from(addr), Some(pc));
+                }
+            }
+            self.rt.ffi_arg_roots.truncate(n);
+            for addr in due {
+                self.rt.heap.rc_release_due(addr);
+            }
+        }
     }
 
     fn run_pending(&mut self, val: Value, pc: Option<u32>) {

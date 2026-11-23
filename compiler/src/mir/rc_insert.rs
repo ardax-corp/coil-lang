@@ -243,13 +243,10 @@ fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>, own: Op
     if let Some(p) = func.cleanup.as_deref_mut() {
         n += insert_rc_in(p, true, numbers, None);
     }
-    // Counts free what an early free would (`hir/early_free.rs`): its
-    // frees go, or a count would be decremented on a freed object.
-    for inst in func.blocks.iter_mut().flat_map(|b| b.insts.iter_mut()) {
-        if let MirInst::FreeEarly { dest, .. } = *inst {
-            *inst = MirInst::Const { dest, c: super::inst::MirConst::Bool(false) };
-        }
-    }
+    // A `FreeEarly` (`hir/early_free.rs`) stays: in a counting run the
+    // runtime frees nothing there and only runs the `drop`s the value's
+    // last decrement will owe, at the scope's end (plan step 7). It reads
+    // its value, so the decrement comes after it.
     let pass = Pass::new(func, numbers, own.is_some_and(|l| numbers.contains(&l)));
     let (ops, homes) = pass.run(func, !pad);
     n += ops;

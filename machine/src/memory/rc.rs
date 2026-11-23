@@ -425,7 +425,7 @@ impl Heap {
     /// loses an owner, and those that reach zero are released in turn (a
     /// worklist, not recursion). An object the runtime cannot free here
     /// stays, at count zero, for the collector: a
-    /// handle, a coroutine (its words are frame-shaped), an
+    /// root handle, a coroutine (its words are frame-shaped), an
     /// object whose `drop` has not run (step 7), and every
     /// object while a collection or a steal epoch is open. The last
     /// collection's root buffer is no test: it is stale once that ends, and
@@ -442,6 +442,11 @@ impl Heap {
         let mut n = 0;
         while let Some(obj) = stack.pop() {
             if !self.rc_releasable(obj) {
+                // Its `drop` runs first, at the runtime's next safepoint.
+                if obj.rc_count() == 0 && self.pending_drop(obj) && !self.rc_due.contains(&obj.addr()) {
+                    self.rc_due.push(obj.addr());
+                    continue;
+                }
                 if rc_swept_shown() && obj.rc_count() == 0 {
                     eprintln!("coil rc-swept: {} at {:#x} not releasable", obj.kind_name(), obj.addr());
                 }
@@ -463,6 +468,12 @@ impl Heap {
                 && self.strings.find(&st.as_ref().data, st.as_ref().hash_code()).is_some_and(|i| i.as_ptr() == st.as_ptr())
             {
                 self.strings.remove(st);
+            }
+            // A weak handle leaves the weak list (its target is no owner).
+            if let Object::Weak(_) = obj
+                && let Some(i) = self.weaks.iter().position(|&w| w == obj.addr())
+            {
+                self.weaks.swap_remove(i);
             }
             self.freed_early = true;
             // SAFETY: its count is zero: no counted word names it, and
@@ -498,11 +509,76 @@ impl Heap {
         obj.visit_slots(self, &mut Dec(self, stack));
     }
 
+    /// The objects whose `drop` is owed once `v` loses the owner a scope's
+    /// end takes from it (a `FreeEarly` in a counting run, reference-count
+    /// plan step 7): `v` when that is its last, and, breadth first (a parent's
+    /// `drop` runs before its children's), each object only a doomed one
+    /// owns. An object two doomed parents share counts two and is left to
+    /// its count: its `drop` runs when that reaches zero.
+    pub fn rc_doomed_drops(&self, v: Value) -> Vec<Object> {
+        struct Kids<'a>(&'a Heap, &'a mut Vec<Object>);
+        impl SlotVisitor for Kids<'_> {
+            fn word(&mut self, v: &Value, kind: u8) {
+                if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
+                    && let Some(o) = self.0.rc_object(*v)
+                {
+                    self.1.push(o);
+                }
+            }
+
+            fn member(&mut self, m: &Member) {
+                if let Member::Object(o) = m {
+                    self.1.push(*o);
+                }
+            }
+        }
+        let mut drops = Vec::new();
+        if !self.rc_counting() || self.finalizer_types.is_empty() {
+            return drops;
+        }
+        let Some(root) = self.rc_object(v) else {
+            return drops;
+        };
+        if root.rc_count() > 1 {
+            return drops;
+        }
+        let (mut doomed, mut kids) = (vec![root], Vec::new());
+        let mut i = 0;
+        while i < doomed.len() {
+            let obj = doomed[i];
+            i += 1;
+            if self.pending_drop(obj) {
+                drops.push(obj);
+            }
+            if !matches!(obj, Object::Array(_) | Object::Enum(_) | Object::Instance(_)) {
+                continue;
+            }
+            kids.clear();
+            obj.visit_slots(self, &mut Kids(self, &mut kids));
+            doomed.extend(kids.iter().copied().filter(|k| k.rc_count() == 1));
+        }
+        drops
+    }
+
+    /// The objects [`Self::rc_release`] left for their `drop`.
+    pub fn take_rc_due(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.rc_due)
+    }
+
+    /// Release `addr`, one of [`Self::take_rc_due`] whose `drop` ran, when
+    /// nothing took it meanwhile (its count is still zero).
+    pub fn rc_release_due(&mut self, addr: u64) -> usize {
+        match self.find_object_by_addr(addr) {
+            Some(obj) if obj.rc_count() == 0 && self.rc_frees => self.rc_release(obj),
+            _ => 0,
+        }
+    }
+
     /// Whether [`Self::rc_release`] may free `obj`.
     fn rc_releasable(&self, obj: Object) -> bool {
         // A closure owns its captured and filled words: its allocation
         // counted them ([`Self::rc_inc_slots`]).
-        (matches!(obj, Object::Fn(_) | Object::String(_)) || matches!(obj, Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
+        (matches!(obj, Object::Fn(_) | Object::String(_) | Object::Weak(_)) || matches!(obj, Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
             && !self.pending_drop(obj)
             && obj.rc_count() == 0
     }

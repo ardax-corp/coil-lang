@@ -56,6 +56,9 @@ pub(crate) trait GcHost {
     /// Run what an unreachable object owes: its `drop` at `pc`, or the
     /// close of a generator (`None`).
     fn run_pending(&mut self, val: Value, pc: Option<u32>);
+    /// Run the `drop`s of the objects counts released at zero
+    /// ([`crate::memory::Heap::take_rc_due`]), then free them.
+    fn run_due_drops(&mut self) {}
     /// A collection was asked for in a shared-heap epoch: end the epoch.
     fn epoch_abort(&mut self) {
         if let Some(e) = &self.rt().shared_epoch {
@@ -145,6 +148,10 @@ impl Runtime {
         self.for_each_static_root(&mut |_, addr, kind| visit(addr, kind));
         self.for_each_handle_root(visit);
         self.for_each_native_root(visit);
+        // Released at count zero, their `drop` still to run.
+        for &addr in &self.heap.rc_due {
+            visit(addr, RootKind::Ambiguous);
+        }
     }
 }
 
@@ -401,6 +408,9 @@ pub(crate) fn collect<H: GcHost + ?Sized>(h: &mut H) {
         h.rt_mut().gc_deferred = true;
         return;
     }
+    if !h.rt().heap.rc_due.is_empty() && h.rt().heap.gc_is_idle() {
+        h.run_due_drops();
+    }
     h.rt_mut().gc_in_progress = true;
     loop {
         h.rt_mut().gc_deferred = false;
@@ -503,6 +513,9 @@ pub(crate) fn minor_counted<H: GcHost + ?Sized>(h: &mut H) {
 pub(crate) fn safepoint<H: GcHost + ?Sized>(h: &mut H) {
     if h.rt().gc_in_progress {
         return;
+    }
+    if !h.rt().heap.rc_due.is_empty() && h.rt().heap.gc_is_idle() && !h.rt().heap.epoch_stw() {
+        h.run_due_drops();
     }
     let heap = &h.rt().heap;
     if heap.epoch_stw() {
