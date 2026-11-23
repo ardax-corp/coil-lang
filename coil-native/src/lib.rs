@@ -5988,12 +5988,19 @@ impl<'a> Lower<'a> {
         // A word of an object type may still name none (a function value's
         // code offset, a static's): only one in the heap's span is counted.
         let (lock_b, join) = self.maybe_object(s);
-        let (count_b, change) = (self.b.create_block(), self.b.create_block());
+        let (count_b, change, logged) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
         self.b.switch_to_block(lock_b);
         let o = self.b.ins().band_imm_u(s, !1i64);
         let heap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HEAP);
         let lock = self.b.ins().load(types::I64, t, heap, machine::HEAP_ALLOC_LOCK_OFFSET);
-        self.b.ins().brif(lock, join, &[], count_b, &[]);
+        self.b.ins().brif(lock, logged, &[], count_b, &[]);
+        // In a steal epoch the runtime logs the change (plan step 8): the
+        // headers are shared with the other mutators.
+        self.b.set_cold_block(logged);
+        self.b.switch_to_block(logged);
+        let flag = self.b.ins().iconst(types::I64, i64::from(dec));
+        self.b.ins().call(self.rc, &[self.ctx, s, flag]);
+        self.b.ins().jump(join, &[]);
         self.b.switch_to_block(count_b);
         let c = self.b.ins().uload32(t, o, machine::HEADER_COUNT_OFFSET);
         let immortal = self.b.ins().icmp_imm_s(IntCC::Equal, c, i64::from(machine::COUNT_IMMORTAL));

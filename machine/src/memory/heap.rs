@@ -78,6 +78,9 @@ struct EpochBatch {
     finalizable: Vec<u64>,
     /// Objects that can hold references, for [`Heap::epoch_born`].
     born: Vec<u64>,
+    /// Count changes made in the epoch, for [`Heap::epoch_rc`]: an object's
+    /// address, with bit 0 set for a decrement (reference-count plan step 8).
+    rc: Vec<u64>,
 }
 
 impl EpochBatch {
@@ -88,6 +91,7 @@ impl EpochBatch {
             && self.weaks.is_empty()
             && self.finalizable.is_empty()
             && self.born.is_empty()
+            && self.rc.is_empty()
     }
 }
 
@@ -326,6 +330,9 @@ pub struct Heap {
     /// (reference-count plan step 7): roots until the runtime runs it
     /// ([`Heap::take_rc_due`]) and releases them.
     pub(crate) rc_due: Vec<u64>,
+    /// The count changes of the open steal epoch's mutators, folded in from
+    /// their batches ([`Heap::rc_log`]).
+    epoch_rc: Vec<u64>,
     /// Objects the sweep freed in a run that keeps counts: what the counts
     /// leaked (or a cycle's), cumulative.
     pub(crate) rc_swept: u64,
@@ -420,6 +427,7 @@ impl Default for Heap {
             rc_pending: std::cell::RefCell::new(Vec::new()),
             rc_stack: Vec::new(),
             rc_due: Vec::new(),
+            epoch_rc: Vec::new(),
             nursery: false,
             epoch_born: Vec::new(),
             nursery_chunks: NURSERY_CHUNKS,
@@ -558,6 +566,7 @@ impl Heap {
         self.epoch_stw = false;
         self.sync_inline_gate();
         self.alloc_lock = ptr::null();
+        self.apply_epoch_rc();
         for addr in std::mem::take(&mut self.epoch_born) {
             if let Some(obj) = self.find_object_by_addr(addr)
                 && obj.generation() & GEN_YOUNG == 0
@@ -573,10 +582,7 @@ impl Heap {
     where
         F: Fn(Gc<T>) -> Object,
     {
-        if unlikely(!self.alloc_lock.is_null()) {
-            return self.alloc_from_epoch_batch(data, map);
-        }
-        let out = self.alloc_unlocked(data, map);
+        let out = if unlikely(!self.alloc_lock.is_null()) { self.alloc_from_epoch_batch(data, map) } else { self.alloc_unlocked(data, map) };
         // Its first words gain their owner (reference-count plan step 2).
         if T::HOLDS_REFS && unlikely(self.rc_counting()) {
             self.rc_inc_slots(out.0);
@@ -644,6 +650,52 @@ impl Heap {
         self.weaks.append(&mut batch.weaks);
         self.finalizable.append(&mut batch.finalizable);
         self.epoch_born.append(&mut batch.born);
+        self.epoch_rc.append(&mut batch.rc);
+    }
+
+    /// A count change while a steal epoch is open (reference-count plan
+    /// step 8): mutators share the heap and its objects, so no header count
+    /// is written. This thread's batch logs the change; the epoch's end
+    /// sums the logs into the counts ([`Self::apply_epoch_rc`]).
+    pub(crate) fn rc_log(&self, o: Object, dec: bool) {
+        let me: *const Heap = self;
+        EPOCH_BATCH_TLS.with(|cell| {
+            let mut batch = cell.borrow_mut();
+            debug_assert!(batch.heap.is_null() || batch.heap == me, "epoch batch left over from another heap");
+            batch.heap = me;
+            batch.rc.push(o.addr() | u64::from(dec));
+        });
+    }
+
+    /// Sum the epoch's count changes into the counts, once it ended, and
+    /// release what reached zero.
+    fn apply_epoch_rc(&mut self) {
+        if self.epoch_rc.is_empty() {
+            return;
+        }
+        let mut delta: HashMap<u64, i64> = HashMap::new();
+        for w in std::mem::take(&mut self.epoch_rc) {
+            *delta.entry(w & !1).or_default() += if w & 1 == 0 { 1 } else { -1 };
+        }
+        let mut zero = Vec::new();
+        for (addr, d) in delta {
+            // SAFETY: nothing is freed while an epoch is open: a logged
+            // address still names its object.
+            let Some(o) = (unsafe { Object::from_header(addr) }) else { continue };
+            let c = o.rc_count();
+            if c == COUNT_IMMORTAL || d == 0 {
+                continue;
+            }
+            let n = (i64::from(c) + d).clamp(0, i64::from(COUNT_IMMORTAL - 1)) as u32;
+            o.rc_set_count(n);
+            if n == 0 && d < 0 {
+                zero.push(addr);
+            }
+        }
+        if self.rc_frees() {
+            self.rc_pending.get_mut().extend(zero);
+            self.rc_release_pending();
+        }
     }
 
     /// Give this thread's unused epoch slots back and fold its counts in.
@@ -886,7 +938,7 @@ impl Heap {
     /// design (a `mut` capture, a view) counts an owner but shares nothing.
     #[inline]
     fn cow_is_shared(&self, obj: Object) -> bool {
-        obj.is_shared() && (!self.rc_counting() || obj.rc_count() > 1)
+        obj.is_shared() && (!self.rc_counts_live() || obj.rc_count() > 1)
     }
 
     /// A copy's child now has a second owner: marked shared.
@@ -7075,6 +7127,37 @@ mod tests {
     /// A thread that waits mid-epoch on heap A and helps with a job in heap
     /// B's epoch keeps the two batches apart (#766, #779): B's objects land
     /// in B, and A's batch comes back intact for A's flush.
+    /// In a steal epoch a count change is logged, not written: the header
+    /// stays as it was until the epoch ends and the logs are summed in
+    /// (reference-count plan step 8). One released to zero is freed then.
+    #[test]
+    fn epoch_count_changes_apply_at_its_end() {
+        let lock = Mutex::new(());
+        let mut heap = Heap::default();
+        heap.set_rc_counting(true);
+        heap.set_rc_frees(true);
+        let old = heap.alloc(ObjString::from("old"), Object::String).0;
+        let dropped = heap.alloc(ObjString::from("dropped"), Object::String).0;
+        old.rc_inc();
+        dropped.rc_inc();
+        heap.enter_epoch_stw(&lock);
+        let born = heap.alloc(ObjString::from("born"), Object::String).0;
+        let gone = heap.alloc(ObjString::from("gone"), Object::String).0;
+        heap.rc_inc_obj(old);
+        heap.rc_inc_obj(born);
+        heap.rc_inc_obj(gone);
+        assert!(!heap.rc_dec_obj(gone), "no release inside the epoch");
+        heap.rc_inc_obj(born);
+        assert!(!heap.rc_dec_obj(dropped));
+        assert_eq!((old.rc_count(), born.rc_count(), dropped.rc_count()), (1, 0, 1), "headers untouched in the epoch");
+        heap.flush_epoch_batch();
+        heap.exit_epoch_stw();
+        assert_eq!((old.rc_count(), born.rc_count()), (2, 2));
+        // `dropped` reached zero and was freed; `gone`'s changes cancel, so
+        // it stays (at zero) for the collector.
+        assert_eq!(heap.live_object_count(), 3);
+    }
+
     #[test]
     fn stashed_epoch_batch_keeps_heaps_apart() {
         let (lock_a, lock_b) = (Mutex::new(()), Mutex::new(()));

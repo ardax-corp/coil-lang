@@ -104,6 +104,12 @@ impl Object {
         self.header().inc();
     }
 
+    /// Set the count (a steal epoch's logged changes, summed at its end).
+    #[inline]
+    pub(crate) fn rc_set_count(&self, n: u32) {
+        self.header().count.set(n);
+    }
+
     /// One owner fewer; nothing is freed at zero yet (step 2). Returns
     /// whether that was the last.
     #[inline]
@@ -118,7 +124,37 @@ impl Heap {
     /// the counts of objects from before it, plan step 8).
     #[inline]
     pub fn rc_counting(&self) -> bool {
+        self.rc_on
+    }
+
+    /// Counts are kept and the headers hold them: no steal epoch is open
+    /// (its changes wait in logs until it ends, [`Heap::rc_log`]).
+    #[inline]
+    pub fn rc_counts_live(&self) -> bool {
         self.rc_on && self.alloc_lock.is_null()
+    }
+
+    /// `o` gains an owner (logged while a steal epoch is open).
+    #[inline]
+    pub(crate) fn rc_inc_obj(&self, o: Object) {
+        if self.alloc_lock.is_null() {
+            o.rc_inc();
+        } else if o.rc_count() != COUNT_IMMORTAL {
+            self.rc_log(o, false);
+        }
+    }
+
+    /// `o` loses an owner; whether that was the last. Never while a steal
+    /// epoch is open: the change is logged and its end releases.
+    #[inline]
+    pub(crate) fn rc_dec_obj(&self, o: Object) -> bool {
+        if self.alloc_lock.is_null() {
+            return o.rc_dec();
+        }
+        if o.rc_count() != COUNT_IMMORTAL {
+            self.rc_log(o, true);
+        }
+        false
     }
 
     /// Keep counts in this heap whatever `COIL_RC_CHECK` says (tests).
@@ -219,7 +255,7 @@ impl Heap {
         }
         for a in self.rc_lane_words(o, index) {
             if let Some(o) = unsafe { Object::from_header(a) } {
-                o.rc_inc();
+                self.rc_inc_obj(o);
             }
         }
     }
@@ -264,7 +300,7 @@ impl Heap {
                 }
                 (_, Some(&b)) => {
                     if let Some(o) = by_addr(b) {
-                        o.rc_inc();
+                        self.rc_inc_obj(o);
                     }
                     j += 1;
                 }
@@ -316,7 +352,7 @@ impl Heap {
         if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
             && let Some(o) = self.rc_object(v)
         {
-            o.rc_inc();
+            self.rc_inc_obj(o);
         }
     }
 
@@ -335,14 +371,14 @@ impl Heap {
     /// in [`Heap::rc_pending`] for the next `RcDec`.
     #[inline]
     fn rc_dec_pending(&self, o: Object) {
-        if o.rc_dec() && self.rc_frees {
+        if self.rc_dec_obj(o) && self.rc_frees {
             self.rc_pending.borrow_mut().push(o.addr());
         }
     }
 
     /// Release what [`Self::rc_dec_pending`] left at zero and still is.
     pub(crate) fn rc_release_pending(&mut self) -> usize {
-        if self.rc_pending.get_mut().is_empty() || self.gc_phase != GcPhase::Idle {
+        if !self.alloc_lock.is_null() || self.rc_pending.get_mut().is_empty() || self.gc_phase != GcPhase::Idle {
             return 0;
         }
         let mut n = 0;
@@ -372,7 +408,7 @@ impl Heap {
 
             fn member(&mut self, m: &Member) {
                 if let Member::Object(o) = m {
-                    o.rc_inc();
+                    self.0.rc_inc_obj(*o);
                 }
             }
         }
@@ -399,7 +435,7 @@ impl Heap {
         if self.rc_counting()
             && let Some(o) = self.rc_object(v)
         {
-            o.rc_inc();
+            self.rc_inc_obj(o);
         }
     }
 
@@ -416,7 +452,7 @@ impl Heap {
     /// [`Self::rc_drop`] in a heap that keeps counts.
     fn rc_release_word(&mut self, v: Value) -> usize {
         match self.rc_object(v) {
-            Some(o) if o.rc_dec() && self.rc_frees => self.rc_release(o),
+            Some(o) if self.rc_dec_obj(o) && self.rc_frees => self.rc_release(o),
             _ => 0,
         }
     }
@@ -492,7 +528,7 @@ impl Heap {
             fn word(&mut self, v: &Value, kind: u8) {
                 if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
                     && let Some(o) = self.0.rc_object(*v)
-                    && o.rc_dec()
+                    && self.0.rc_dec_obj(o)
                 {
                     self.1.push(o);
                 }
@@ -500,7 +536,7 @@ impl Heap {
 
             fn member(&mut self, m: &Member) {
                 if let Member::Object(o) = m
-                    && o.rc_dec()
+                    && self.0.rc_dec_obj(*o)
                 {
                     self.1.push(*o);
                 }
@@ -533,7 +569,7 @@ impl Heap {
             }
         }
         let mut drops = Vec::new();
-        if !self.rc_counting() || self.finalizer_types.is_empty() {
+        if !self.rc_counts_live() || self.finalizer_types.is_empty() {
             return drops;
         }
         let Some(root) = self.rc_object(v) else {
