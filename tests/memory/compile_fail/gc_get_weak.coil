@@ -2,6 +2,6 @@
 use gc::{get, weak};
 
 fn main() {
-    let w = weak(1);
+    let w = weak("x");
     let _ = get(w);
 }

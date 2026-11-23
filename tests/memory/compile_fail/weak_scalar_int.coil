@@ -1,0 +1,6 @@
+// @expected E0119 — `weak()` is refused for a one-word value (`int`): it is no object, so there is nothing to observe.
+use gc::weak;
+
+fn main() {
+    let w = weak(42);
+}

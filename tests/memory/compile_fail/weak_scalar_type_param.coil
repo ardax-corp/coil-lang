@@ -1,0 +1,10 @@
+// @expected E0119 — a generic that calls `weak()` on its parameter refuses `bool` at the call that sets it.
+use gc::{weak, Weak};
+
+fn handle<T>(T value) -> Weak<T> {
+    return weak(value);
+}
+
+fn main() {
+    let w = handle(true);
+}
