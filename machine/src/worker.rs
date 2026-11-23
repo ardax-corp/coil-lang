@@ -106,7 +106,10 @@ fn run_on(rt: &mut Runtime, job: Job) {
     let mut panic_message = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rt.natives = natives.clone_registry();
-        rt.heap.set_class_word_kinds(Arc::clone(&program.class_word_kinds));
+        // The job's own heap: bound to a shared epoch's, `rt.heap` is the
+        // spawner's, which has the table already and which other workers
+        // read while this one runs (#2908).
+        rt.heap.owned_mut().set_class_word_kinds(Arc::clone(&program.class_word_kinds));
         rt.live_threads = Arc::clone(&live_threads);
         rt.reactor = Arc::clone(&reactor);
         rt.io_reactor = Arc::clone(&io_reactor);
