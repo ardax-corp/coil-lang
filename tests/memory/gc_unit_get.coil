@@ -1,7 +1,7 @@
-// `gc::get` of a `Root<unit>` and `gc::upgrade` of a `Weak<unit>` return
-// an `Option<unit>` (#1449).
+// `gc::get` of a `Root<unit>` returns an `Option<unit>` (#1449). A
+// `weak(())` is refused (E0119): `()` has no object of its own.
 use tests::assert;
-use gc::{root, weak, get, upgrade, unroot};
+use gc::{root, get, unroot};
 
 test("get of a unit root is Some") {
     let r = root(());
@@ -10,14 +10,4 @@ test("get of a unit root is Some") {
         Option::None => false,
     });
     unroot(r);
-}
-
-// `()` is one shared object that is never collected.
-test("upgrade of a unit weak is Some") {
-    let w = weak(());
-    let u = upgrade(w);
-    assert!(match u {
-        Option::Some(_) => true,
-        Option::None => false,
-    });
 }
