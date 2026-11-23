@@ -98,8 +98,6 @@ impl MacroHost for IsolateMacroHost {
 
 fn const_isolate(program: &CompiledExpansion, captured: &Captured) -> Box<Isolate> {
     let mut isolate = new_isolate(program);
-    isolate.heap_mut()
-        .set_class_word_kinds(machine::class_kind_table(&program.class_word_kinds));
     let _ = isolate.with_output(captured.clone());
     isolate
 }
@@ -367,6 +365,9 @@ fn new_isolate(program: &CompiledExpansion) -> Box<Isolate> {
     for native in sandbox_natives() {
         isolate.register_native(native.clone());
     }
+    // Every isolate's heap knows the classes' word kinds: a job of a
+    // parallel loop shares it and does not install them (#2908).
+    isolate.heap_mut().set_class_word_kinds(machine::class_kind_table(&program.class_word_kinds));
     isolate
 }
 
