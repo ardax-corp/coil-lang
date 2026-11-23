@@ -565,15 +565,6 @@ impl Heap {
         std::mem::take(&mut self.rc_due)
     }
 
-    /// Release `addr`, one of [`Self::take_rc_due`] whose `drop` ran, when
-    /// nothing took it meanwhile (its count is still zero).
-    pub fn rc_release_due(&mut self, addr: u64) -> usize {
-        match self.find_object_by_addr(addr) {
-            Some(obj) if obj.rc_count() == 0 && self.rc_frees => self.rc_release(obj),
-            _ => 0,
-        }
-    }
-
     /// Whether [`Self::rc_release`] may free `obj`.
     fn rc_releasable(&self, obj: Object) -> bool {
         // A closure owns its captured and filled words: its allocation

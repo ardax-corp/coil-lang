@@ -697,6 +697,8 @@ impl<'a> Driver<'a> {
             // Counts free what dies: the scope's end only runs the `drop`s
             // its owner's last decrement will owe (plan step 7).
             let drops = self.rt.heap.rc_doomed_drops(v);
+            // One already at zero is released by [`Self::run_drops`].
+            self.rt.heap.rc_due.retain(|a| !drops.iter().any(|o| o.addr() == *a));
             if !self.run_drops(v, &drops) {
                 return false;
             }
@@ -726,10 +728,26 @@ impl<'a> Driver<'a> {
         if drops.is_empty() {
             return true;
         }
-        // Rooted while they run: nothing else reaches them.
+        // Rooted while they run: nothing else reaches them. With counts the
+        // runtime owns each meanwhile too, so a `drop` that lets go of the
+        // last other reference does not free its own object; the release
+        // after the `drop`s frees what nothing took.
         let n = self.rt.ffi_arg_roots.len();
         self.rt.ffi_arg_roots.push(v);
         self.rt.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
+        for obj in drops {
+            self.rt.heap.rc_retain(Value::from(obj.addr()));
+        }
+        let ok = self.call_drops(drops);
+        self.rt.ffi_arg_roots.truncate(n);
+        for obj in drops {
+            self.rt.heap.rc_drop(Value::from(obj.addr()));
+        }
+        ok
+    }
+
+    /// [`Self::run_drops`]' calls.
+    fn call_drops(&mut self, drops: &[crate::memory::Object]) -> bool {
         for obj in drops {
             let Some(pc) = self.rt.pending_finalizer(*obj) else { continue };
             let val = Value::from(obj.addr());
@@ -737,11 +755,9 @@ impl<'a> Driver<'a> {
                 continue;
             }
             if self.call(pc as usize, &[val]).is_none() {
-                self.rt.ffi_arg_roots.truncate(n);
                 return false;
             }
         }
-        self.rt.ffi_arg_roots.truncate(n);
         true
     }
 
@@ -1622,9 +1638,13 @@ impl GcHost for Driver<'_> {
             if due.is_empty() {
                 return;
             }
-            // Rooted until each is released.
+            // Rooted and owned while their `drop`s run ([`Self::run_drops`]);
+            // the last release frees what nothing took.
             let n = self.rt.ffi_arg_roots.len();
             self.rt.ffi_arg_roots.extend(due.iter().map(|&a| Value::from(a)));
+            for &addr in &due {
+                self.rt.heap.rc_retain(Value::from(addr));
+            }
             for &addr in &due {
                 let Some(obj) = self.rt.heap.find_object_by_addr(addr) else { continue };
                 if let Some(pc) = self.rt.pending_finalizer(obj) {
@@ -1633,7 +1653,7 @@ impl GcHost for Driver<'_> {
             }
             self.rt.ffi_arg_roots.truncate(n);
             for addr in due {
-                self.rt.heap.rc_release_due(addr);
+                self.rt.heap.rc_drop(Value::from(addr));
             }
         }
     }
