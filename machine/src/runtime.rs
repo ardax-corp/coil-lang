@@ -154,8 +154,7 @@ impl Runtime {
     /// emptied, unmapped when it grew past one slab chunk so RSS cannot
     /// climb with successive jobs.
     pub(crate) fn reset_isolate(&mut self) {
-        // The job's statics owned their words (reference counts): released
-        // with them, so the collection below sweeps only what leaked.
+        // The job's statics owned their words: released with them.
         if !self.heap.is_borrowed() {
             let heap = self.heap.owned_mut();
             for &v in &self.statics {
@@ -183,13 +182,11 @@ impl Runtime {
             return;
         }
         self.heap.owned_mut().clear_finalizer_types();
-        if self.heap.owned_mut().slab_chunk_count() > 1 {
+        // Counts freed what the job let go; what it leaked goes with its
+        // chunks.
+        if self.heap.owned_mut().slab_chunk_count() > 0 {
             let emptied = self.heap.owned_mut().emptied();
             *self.heap.owned_mut() = emptied;
-        } else if self.heap.owned_mut().slab_chunk_count() == 1 {
-            self.heap.owned_mut().collect(&[]);
-            self.heap.owned_mut().clear_young();
-            self.program_string_cache.fill(Value::default());
         }
     }
 

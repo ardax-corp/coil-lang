@@ -100,10 +100,7 @@ pub fn host_gc_upgrade(heap: &mut Heap, args: &[Value]) -> Value {
         _ => None,
     };
     match target {
-        Some(v) => {
-            heap.resurrect_during_mark(v);
-            pack_gc_option(heap, Some(v))
-        }
+        Some(v) => pack_gc_option(heap, Some(v)),
         None => pack_gc_option(heap, None),
     }
 }
@@ -143,15 +140,6 @@ mod tests {
         Value::from(gc.as_ptr() as *mut u8 as u64)
     }
 
-    fn force_collect(heap: &mut Heap, keep: &[Value]) {
-        let roots: Vec<u64> = keep
-            .iter()
-            .map(|v| v.bits())
-            .filter(|&a| a != 0 && heap.find_object_by_addr(a).is_some())
-            .collect();
-        heap.collect(&roots);
-    }
-
     fn option_payload(heap: &Heap, opt: Value) -> Option<Value> {
         match heap.find_object_by_addr(opt.bits()) {
             Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => {
@@ -159,121 +147,6 @@ mod tests {
             }
             Some(Object::Enum(gc)) if gc.as_ref().tag == 0 => None,
             _ => panic!("expected Option"),
-        }
-    }
-
-    /// A finalizer runs while mark is still open (weaks not yet cleared). An
-    /// upgrade there may hand back an unmarked object; storing it into an
-    /// already-black holder must keep it alive.
-    #[test]
-    fn upgrade_during_mark_shades_target() {
-        use crate::memory::{GcPhase, ObjInstance, ObjString};
-        let mut heap = Heap::default();
-        let (leaf, _) = heap.alloc(ObjString::from("leaf"), Object::String);
-        let w = host_gc_weak(&mut heap, &[Value::from(leaf.addr())]);
-        let (holder, mut holder_gc) = heap.alloc(
-            ObjInstance::with_slots(1, vec![Value::from(0i64)]),
-            Object::Instance,
-        );
-        let roots = [holder.addr(), w.bits()];
-        heap.begin_mark(&roots);
-        while !heap.mark_quantum(usize::MAX) {}
-        assert_eq!(heap.gc_phase(), GcPhase::Marking);
-
-        let opt = host_gc_upgrade(&mut heap, &[w]);
-        let got = option_payload(&heap, opt).expect("weak not cleared yet");
-        assert_eq!(got.bits(), leaf.addr());
-        holder_gc.as_mut().set_slot(0, Value::from(leaf.addr()));
-
-        heap.remark_roots(&roots);
-        while !heap.mark_quantum(usize::MAX) {}
-        heap.clear_dead_weaks();
-        heap.begin_sweep();
-        heap.finish_sweep();
-        assert!(
-            heap.find_object_by_addr(leaf.addr()).is_some(),
-            "object resurrected through upgrade was swept while still referenced"
-        );
-    }
-
-    #[test]
-    fn root_keeps_payload_alive() {
-        let mut heap = Heap::default();
-        let s = intern(&mut heap, "pinned");
-        let root = host_gc_root(&mut heap, &[s]);
-        // Drop the only direct reference to the string; Root should keep it.
-        force_collect(&mut heap, &[root]);
-        let got_opt = host_gc_get(&mut heap, &[root]);
-        let got = option_payload(&heap, got_opt).expect("rooted string");
-        match heap.find_object_by_addr(got.bits()) {
-            Some(Object::String(gc)) => assert_eq!(gc.as_ref().data, "pinned"),
-            _ => panic!("expected rooted string to survive"),
-        }
-    }
-
-    #[test]
-    fn unroot_allows_collection() {
-        let mut heap = Heap::default();
-        let s = intern(&mut heap, "gone");
-        let root = host_gc_root(&mut heap, &[s]);
-        let taken_opt = host_gc_unroot(&mut heap, &[root]);
-        let taken = option_payload(&heap, taken_opt).expect("unroot payload");
-        assert_eq!(
-            heap.find_object_by_addr(taken.bits())
-                .map(|o| matches!(o, Object::String(_))),
-            Some(true)
-        );
-        // Neither root shell nor string kept — both should die.
-        force_collect(&mut heap, &[]);
-        assert!(heap.find_object_by_addr(taken.bits()).is_none());
-        assert!(heap.find_object_by_addr(root.bits()).is_none());
-    }
-
-    #[test]
-    fn weak_does_not_keep_alive_and_upgrade_clears() {
-        let mut heap = Heap::default();
-        let s = intern(&mut heap, "ephemeral");
-        let w = host_gc_weak(&mut heap, &[s]);
-        let some = host_gc_upgrade(&mut heap, &[w]);
-        // Option::Some
-        match heap.find_object_by_addr(some.bits()) {
-            Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 1),
-            _ => panic!("expected Option"),
-        }
-        force_collect(&mut heap, &[w]);
-        let up = host_gc_upgrade(&mut heap, &[w]);
-        match heap.find_object_by_addr(up.bits()) {
-            Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 0, "expected None after collect"),
-            _ => panic!("expected Option::None"),
-        }
-    }
-
-    #[test]
-    fn root_and_weak_together() {
-        let mut heap = Heap::default();
-        let s = intern(&mut heap, "both");
-        let root = host_gc_root(&mut heap, &[s]);
-        let w = host_gc_weak(&mut heap, &[s]);
-        force_collect(&mut heap, &[root, w]);
-        let up = host_gc_upgrade(&mut heap, &[w]);
-        match heap.find_object_by_addr(up.bits()) {
-            Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 1),
-            _ => panic!("expected Some while Root lives"),
-        }
-    }
-
-    #[test]
-    fn weak_of_immediate_always_upgrades() {
-        let mut heap = Heap::default();
-        let w = host_gc_weak(&mut heap, &[Value::from(42i64)]);
-        force_collect(&mut heap, &[w]);
-        let up = host_gc_upgrade(&mut heap, &[w]);
-        match heap.find_object_by_addr(up.bits()) {
-            Some(Object::Enum(gc)) => {
-                assert_eq!(gc.as_ref().tag, 1);
-                assert_eq!(gc.as_ref().payload[0].as_int(), 42);
-            }
-            _ => panic!("expected Some(42)"),
         }
     }
 
@@ -331,36 +204,6 @@ mod tests {
     }
 
     #[test]
-    fn root_of_immediate_roundtrips() {
-        let mut heap = Heap::default();
-        let root = host_gc_root(&mut heap, &[Value::from(42i64)]);
-        force_collect(&mut heap, &[root]);
-        let g = host_gc_get(&mut heap, &[root]);
-        assert_eq!(option_payload(&heap, g).unwrap().as_int(), 42);
-    }
-
-    /// Dead weaks are cleared after mark and before sweep so upgrades never
-    /// observe a recycled address (ABA).
-    #[test]
-    fn clear_dead_weaks_zeros_target_before_sweep() {
-        let mut heap = Heap::default();
-        let s = intern(&mut heap, "aba");
-        let w = host_gc_weak(&mut heap, &[s]);
-        // Mark only the Weak shell — Weak does not keep the string alive.
-        heap.trace(&[w.bits()]);
-        heap.clear_dead_weaks();
-        match heap.find_object_by_addr(w.bits()) {
-            Some(Object::Weak(gc)) => {
-                assert!(gc.as_ref().cleared.get());
-                assert_eq!(gc.as_ref().target.get().as_int(), 0);
-            }
-            _ => panic!("expected Weak handle"),
-        }
-        // Referent still allocated until sweep; clear already closed the ABA window.
-        assert!(heap.find_object_by_addr(s.bits()).is_some());
-    }
-
-    #[test]
     fn gc_wiring_names_and_arities_are_stable() {
         assert_eq!(GC_WIRING.len(), 6);
         let expected = [
@@ -375,25 +218,6 @@ mod tests {
             assert_eq!(GC_WIRING[i].0, *name);
             assert_eq!(GC_WIRING[i].1, *arity);
         }
-    }
-
-    #[test]
-    fn collect_keeps_array_children() {
-        let mut heap = Heap::default();
-        let s = intern(&mut heap, "kid");
-        let (arr, _) = heap.alloc(
-            crate::memory::ObjArray::new(vec![s]),
-            Object::Array,
-        );
-        heap.collect(&[arr.addr()]);
-        assert!(
-            heap.find_object_by_addr(arr.addr()).is_some(),
-            "array root must live"
-        );
-        assert!(
-            heap.find_object_by_addr(s.bits()).is_some(),
-            "array child must live without a runtime tracing it"
-        );
     }
 
     #[test]

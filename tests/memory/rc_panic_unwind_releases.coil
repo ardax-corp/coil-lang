@@ -1,9 +1,7 @@
 // A frame a panic unwinds releases the counted objects it owned: each owned
 // root lives in a frame home while a call that may unwind runs, and the
-// cleanup pad drops what the homes still hold (refcount step 4). Under
-// `COIL_RC_CHECK=abort COIL_RC_FREE=check` a wrong release aborts at the
-// collection below; in a plain run this checks the panic still reaches the
-// scope and the program goes on.
+// cleanup pad drops what the homes still hold (refcount step 4). This
+// checks the panic still reaches the scope and the program goes on.
 use tests::assert;
 use gc::collect;
 use task::{scope, Scope, TaskError};

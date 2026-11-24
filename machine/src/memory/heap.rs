@@ -24,32 +24,14 @@ const GC_GROWTH_FACTOR: usize = 2;
 const EPOCH_GC_HEADROOM_FACTOR: usize = 4;
 /// ...and never to less than this many bytes past the entry heap size.
 const EPOCH_GC_HEADROOM_MIN: usize = 256 * 1024 * 1024;
-/// Growth when most of the heap survived its last collection: the live set is
-/// still growing, so re-marking it every doubling is mostly wasted work.
-const GC_GROWTH_FACTOR_SURVIVING: usize = 4;
 /// Nursery size in 64 KiB slab chunks: filling this many asks for a minor
 /// collection (`feature/escape-memory` step 4).
 const NURSERY_CHUNKS: usize = 32;
-/// Nursery chunks a `region` block may fill (64 MiB) before a minor
-/// collection runs inside it.
-const REGION_CHUNKS: usize = 1024;
 /// Unmarked objects considered at one alloc safepoint during lazy sweep.
 pub const GC_SWEEP_QUANTUM: usize = 128;
 
 /// Slots one steal-epoch mutator takes per size class under the epoch lock.
 const EPOCH_BATCH: usize = 64;
-
-/// Whether the collector checks its own invariants as it goes (the
-/// missed-barrier check at the top of each minor, #2687): `gc-stress` and
-/// debug builds, and any run with `COIL_MIR_VERIFY` set. A heap reads it
-/// once, when it is made.
-pub(crate) fn heap_checks_on() -> bool {
-    if cfg!(any(feature = "gc-stress", debug_assertions)) {
-        return true;
-    }
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("COIL_MIR_VERIFY").is_some_and(|v| !v.is_empty() && v != "0"))
-}
 
 /// One size class's untaken slots: `(slot size, align)` and the slots.
 type BatchClass = ((u32, u32), Vec<NonNull<u8>>);
@@ -261,11 +243,6 @@ pub struct Heap {
     /// allocation past it reaches a safepoint.
     byte_cap: usize,
     gc_growth_factor: usize,
-    /// Heap bytes when the current sweep started (survival for the next budget).
-    gc_sweep_start_bytes: usize,
-    /// Bytes the current sweep has freed: what survived the mark is
-    /// `gc_sweep_start_bytes` less this, whatever was allocated meanwhile.
-    gc_sweep_freed: usize,
     strings: Table<()>,
     slab: Slab,
     /// Per class `type_id`: field word kinds from static types
@@ -302,11 +279,6 @@ pub struct Heap {
     /// Shared function values that capture and fill nothing, by entry,
     /// arity and rest flag ([`Self::immortal_plain_fn`]), never swept.
     immortal_fns: HashMap<(u32, u32, bool), Object>,
-    /// Reused gray worklist / root buffers across collections.
-    gc_gray: Vec<Object>,
-    gc_root_objects: Vec<Object>,
-    gc_roots: Vec<u64>,
-    gc_dangling_strings: Vec<RefString>,
     /// Check mode of [`Self::free_early`]: objects it would have freed,
     /// which the next mark must not reach ([`Self::check_doomed`]).
     doomed: Vec<u64>,
@@ -319,7 +291,8 @@ pub struct Heap {
     /// object may now point at a freed or reused slot, so a typed handle
     /// is looked up before it is marked ([`Self::early_freed_slot`]).
     freed_early: bool,
-    /// Reference counts are kept (`COIL_RC_CHECK`, [`Self::set_rc_counting`]).
+    /// Reference counts are kept (always, but in tests that turn them off,
+    /// [`Self::set_rc_counting`]).
     rc_on: bool,
     /// A count that reaches zero frees its object ([`Self::set_rc_frees`]).
     rc_frees: bool,
@@ -340,9 +313,6 @@ pub struct Heap {
     /// The class type ids whose objects can close a reference cycle, a
     /// bitset ([`Heap::register_cyclic_type`]): the cycle collector's starts.
     pub(crate) cyclic_types: Vec<u64>,
-    /// Objects the sweep freed in a run that keeps counts: what the counts
-    /// leaked (or a cycle's), cumulative.
-    pub(crate) rc_swept: u64,
     /// Allocate movable kinds in the nursery ([`Self::set_nursery`]).
     nursery: bool,
     /// Objects born in the open steal epoch that can hold references. The
@@ -358,19 +328,13 @@ pub struct Heap {
     /// Held nursery chunks that ask for a major cycle
     /// ([`Self::held_over_budget`]).
     held_budget: usize,
-    /// [`heap_checks_on`], read once.
-    pub(super) heap_checks: bool,
     /// Bytes still to allocate old after a minor collection most of the
     /// nursery survived ([`Self::note_survival`]).
     pretenure_bytes: usize,
-    /// Minor collections in a row most of the nursery survived.
-    pretenure_streak: u32,
     /// Open `region` blocks ([`Self::region_enter`]); while non-zero the
     /// nursery takes strings too, never pretenures, and holds up to
     /// [`REGION_CHUNKS`].
     region_depth: u32,
-    /// [`Self::nursery_chunks`] outside the region.
-    region_saved_chunks: usize,
     /// Incremental mark / lazy sweep (COI-309 S4).
     gc_phase: GcPhase,
     /// Next object to consider while sweeping; `None` when the cursor is idle.
@@ -405,8 +369,6 @@ impl Default for Heap {
             gc_next_threshold: GC_NEXT_THRESHOLD,
             byte_cap: usize::MAX,
             gc_growth_factor: GC_GROWTH_FACTOR,
-            gc_sweep_start_bytes: 0,
-            gc_sweep_freed: 0,
             strings: Table::default(),
             slab: Slab::new(),
             class_kinds: std::sync::Arc::default(),
@@ -421,17 +383,12 @@ impl Default for Heap {
             immortal_enums: HashMap::default(),
             unit_enum: None,
             immortal_fns: HashMap::new(),
-            gc_gray: Vec::new(),
-            gc_root_objects: Vec::new(),
-            gc_roots: Vec::new(),
-            gc_dangling_strings: Vec::new(),
             doomed: Vec::new(),
             early_freed: Vec::new(),
             early_scratch: (Vec::new(), Vec::new(), Vec::new()),
             freed_early: false,
-            rc_on: rc_check_mode() != RcCheckMode::Off,
-            rc_frees: rc::rc_frees_asked(),
-            rc_swept: 0,
+            rc_on: true,
+            rc_frees: true,
             rc_pending: std::cell::RefCell::new(Vec::new()),
             rc_stack: Vec::new(),
             rc_due: Vec::new(),
@@ -442,11 +399,8 @@ impl Default for Heap {
             nursery_chunks: NURSERY_CHUNKS,
             held_after_major: 0,
             held_budget: NURSERY_CHUNKS,
-            heap_checks: heap_checks_on(),
             pretenure_bytes: 0,
-            pretenure_streak: 0,
             region_depth: 0,
-            region_saved_chunks: 0,
             gc_phase: GcPhase::Idle,
             gc_sweep_cursor: None,
             ffi_strings: Vec::new(),
@@ -1147,46 +1101,6 @@ impl Heap {
         }
     }
 
-    /// Objects the last mark left unmarked that still owe their `drop`,
-    /// in address order. Prunes [`Self::finalizable`] to the objects that
-    /// still exist, still have a `drop` type and have not been finalized.
-    pub fn unmarked_finalizable(&mut self) -> Vec<Object> {
-        if self.finalizable.is_empty() {
-            return Vec::new();
-        }
-        let mut list = std::mem::take(&mut self.finalizable);
-        list.sort_unstable();
-        list.dedup();
-        let mut out = Vec::new();
-        list.retain(|&addr| {
-            let Some(obj) = self.find_object_by_addr(addr) else {
-                return false;
-            };
-            let (type_id, finalized) = match obj {
-                Object::Instance(gc) => (gc.as_ref().type_id, obj.is_finalized()),
-                Object::Enum(gc) => (gc.as_ref().type_id, obj.is_finalized()),
-                // A closeable generator stays listed until it is done.
-                Object::Coroutine(gc) => {
-                    let open = gc.as_ref().closeable && gc.as_ref().state == CoroState::Suspended;
-                    if open && !obj.is_marked() {
-                        out.push(obj);
-                    }
-                    return open;
-                }
-                _ => return false,
-            };
-            if finalized || !self.has_finalizer(type_id) {
-                return false;
-            }
-            if !obj.is_marked() {
-                out.push(obj);
-            }
-            true
-        });
-        self.finalizable = list;
-        out
-    }
-
     /// Write a fresh object into a slab slot and stamp its kind.
     #[inline(always)]
     fn init_slot<T: GcSized, F>(slot: NonNull<GcData<T>>, data: T, map: F) -> (Object, Gc<T>)
@@ -1294,30 +1208,6 @@ impl Heap {
         common::Value::from(object.addr())
     }
 
-    /// Releases all objects that aren't marked. This method also removes
-    /// interned strings when no object is referencing them.
-    ///
-    /// ## Safety
-    ///
-    /// The caller must ensure that all reachable pointers have been marked.
-    /// Otherwise, we'll deallocate objects that are in use and leave dangling
-    /// pointers.
-    pub unsafe fn sweep(&mut self) {
-        if self.gc_phase == GcPhase::Sweeping {
-            self.finish_sweep();
-            return;
-        }
-        self.rc_check();
-        self.unlink_unmarked_interns();
-        self.gc_phase = GcPhase::Sweeping;
-        self.sync_inline_gate();
-        self.unmark_young();
-        self.gc_sweep_start_bytes = self.counts.alloc_bytes;
-        self.gc_sweep_freed = 0;
-        self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
-        self.finish_sweep();
-    }
-
     #[inline]
     pub fn gc_phase(&self) -> GcPhase {
         self.gc_phase
@@ -1326,196 +1216,6 @@ impl Heap {
     #[inline]
     pub fn gc_is_idle(&self) -> bool {
         self.gc_phase == GcPhase::Idle
-    }
-
-    #[inline]
-    pub fn gc_is_sweeping(&self) -> bool {
-        self.gc_phase == GcPhase::Sweeping
-    }
-
-    /// Mark `v` and everything it reaches when a cycle is open.
-    ///
-    /// Marking always drains before the mutator runs again (finalizers run
-    /// with an empty gray list), so the only way user code can reach an
-    /// unmarked object is a `Weak` upgrade before dead weaks are cleared.
-    /// Draining here restores the "no gray objects while the mutator runs"
-    /// invariant, which is why stores need no write barrier.
-    pub fn resurrect_during_mark(&mut self, v: Value) {
-        if unlikely(self.gc_phase == GcPhase::Marking) {
-            self.shade_value(v);
-            while !self.mark_quantum(usize::MAX) {}
-        }
-    }
-
-    /// Mark a finalizable object (and later its graph) before its `drop` runs.
-    pub fn shade_for_finalizer(&mut self, obj: Object) {
-        if self.gc_phase == GcPhase::Marking {
-            self.shade_object(obj);
-        }
-    }
-
-    fn shade_value(&mut self, v: Value) {
-        let addr = v.heap_addr();
-        if addr == 0 {
-            return;
-        }
-        if let Some(obj) = self.find_object_by_addr(addr) {
-            self.shade_object(obj);
-        }
-    }
-
-    fn shade_object(&mut self, obj: Object) {
-        let mut gray = std::mem::take(&mut self.gc_gray);
-        obj.mark(&mut gray);
-        self.gc_gray = gray;
-    }
-
-    /// Seed the gray list from `root_addrs` via O(1) slab lookup (no list walk).
-    pub fn begin_mark(&mut self, root_addrs: &[u64]) {
-        if self.gc_phase != GcPhase::Idle {
-            return;
-        }
-        self.gc_phase = GcPhase::Marking;
-        self.rc_pending.get_mut().clear();
-        self.sync_inline_gate();
-        let mut gray = std::mem::take(&mut self.gc_gray);
-        gray.clear();
-        for &addr in root_addrs {
-            let addr = addr & !1;
-            if addr == 0 {
-                continue;
-            }
-            if let Some(obj) = self.find_object_by_addr(addr) {
-                obj.mark(&mut gray);
-            }
-        }
-        self.gc_gray = gray;
-    }
-
-    /// Scan up to `n` gray objects. Returns true when the worklist is empty.
-    pub fn mark_quantum(&mut self, n: usize) -> bool {
-        let mut gray = std::mem::take(&mut self.gc_gray);
-        let mut i = 0;
-        while i < n {
-            let Some(obj) = gray.pop() else {
-                break;
-            };
-            obj.mark_references(self, &mut gray);
-            i += 1;
-        }
-        let done = gray.is_empty();
-        self.gc_gray = gray;
-        done
-    }
-
-    pub fn begin_sweep(&mut self) {
-        if self.gc_phase == GcPhase::Sweeping {
-            return;
-        }
-        self.rc_check();
-        self.unlink_unmarked_interns();
-        self.unmark_young();
-        self.gc_phase = GcPhase::Sweeping;
-        self.sync_inline_gate();
-        self.gc_sweep_start_bytes = self.counts.alloc_bytes;
-        self.gc_sweep_freed = 0;
-        self.gc_sweep_cursor = Some(super::slab::SlotCursor::sweep());
-    }
-
-    /// Reclaim up to `n` unmarked objects. Returns true when sweep finished.
-    pub fn sweep_quantum(&mut self, n: usize) -> bool {
-        if self.gc_phase != GcPhase::Sweeping {
-            return true;
-        }
-        for _ in 0..n {
-            if self.gc_sweep_cursor.is_none() {
-                self.finish_sweep_cycle();
-                return true;
-            }
-            self.sweep_one();
-        }
-        if self.gc_sweep_cursor.is_none() {
-            self.finish_sweep_cycle();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Drain the remaining sweep cursor and rescale the byte threshold.
-    pub fn finish_sweep(&mut self) {
-        if self.gc_phase != GcPhase::Sweeping {
-            return;
-        }
-        while self.gc_sweep_cursor.is_some() {
-            self.sweep_one();
-        }
-        self.finish_sweep_cycle();
-    }
-
-    /// Visit the next object (free slots are skipped): free it if unmarked,
-    /// unmark it if marked, and let one allocated during this sweep
-    /// (`fresh`) through.
-    fn sweep_one(&mut self) {
-        let Some(mut cur) = self.gc_sweep_cursor else {
-            return;
-        };
-        let obj = loop {
-            let Some(addr) = self.slab.next_slot(&mut cur) else {
-                self.gc_sweep_cursor = None;
-                return;
-            };
-            if let Some(obj) = unsafe { Object::from_header(addr) } {
-                break obj;
-            }
-        };
-        // A `fresh` object is kept whatever its mark (it may postdate the
-        // mark phase) — but still unmarked: a stale mark would make the next
-        // cycle skip tracing its children.
-        // SAFETY: a live slot starts with its header.
-        let header = unsafe { &*(obj.addr() as *const GcHeader) };
-        let fresh = header.replace_flag(FLAG_FRESH, false);
-        if !header.replace_flag(FLAG_MARKED, false) && !fresh {
-            unsafe { self.dealloc_swept(obj, &mut cur) };
-        }
-        self.gc_sweep_cursor = Some(cur);
-    }
-
-    fn finish_sweep_cycle(&mut self) {
-        // Floor at the initial budget: a tiny live set would otherwise
-        // schedule a collection every few allocations.
-        let growth = if self.counts.alloc_bytes.saturating_mul(2) > self.gc_sweep_start_bytes {
-            self.gc_growth_factor.max(GC_GROWTH_FACTOR_SURVIVING)
-        } else {
-            self.gc_growth_factor
-        };
-        // What the mark kept, not what a lazy sweep let the program allocate
-        // meanwhile: counting those (pretenured objects, mostly) as live
-        // would push the next collection out by the growth factor.
-        let survived = self.gc_sweep_start_bytes.saturating_sub(self.gc_sweep_freed).min(self.counts.alloc_bytes);
-        self.gc_next_threshold = (survived.saturating_sub(self.counts.young_bytes))
-            .saturating_mul(growth)
-            .max(GC_NEXT_THRESHOLD)
-            .min(self.byte_cap);
-        // Empty chunks the program did not touch all cycle go back to the OS.
-        self.slab.release_idle_chunks();
-        self.gc_phase = GcPhase::Idle;
-        self.sync_inline_gate();
-        self.gc_sweep_cursor = None;
-    }
-
-    fn unlink_unmarked_interns(&mut self) {
-        let mut dangling_strings = std::mem::take(&mut self.gc_dangling_strings);
-        dangling_strings.clear();
-        for (k, ()) in self.strings.iter() {
-            if !k.is_marked() {
-                dangling_strings.push(k);
-            }
-        }
-        for s in dangling_strings.drain(..) {
-            self.strings.remove(s);
-        }
-        self.gc_dangling_strings = dangling_strings;
     }
 
     /// Free the object `v` points at before a collection would, because
@@ -1727,10 +1427,6 @@ impl Heap {
         self.doomed.clear();
     }
 
-    pub fn has_doomed(&self) -> bool {
-        !self.doomed.is_empty()
-    }
-
     /// Whether `obj` is an object of a type with a `drop`.
     fn finalizer_object(&self, obj: Object) -> bool {
         !self.finalizer_types.is_empty() && Self::finalizer_type_of(obj).is_some_and(|t| self.has_finalizer(t))
@@ -1757,29 +1453,6 @@ impl Heap {
             Object::Enum(e) => !e.as_ref().payload.is_empty(),
             Object::Instance(_) => true,
             _ => false,
-        }
-    }
-
-    /// Check mode of [`Self::free_early`], once a mark from the roots that
-    /// are certainly live is complete: an object it would have freed that
-    /// the mark reached was still in use.
-    pub fn check_doomed(&mut self) {
-        for addr in std::mem::take(&mut self.doomed) {
-            if let Some(obj) = self.find_object_by_addr(addr)
-                && obj.is_marked()
-            {
-                let root = self.gc_roots.contains(&addr);
-                let mut holders = Vec::new();
-                for o in self.objects() {
-                    o.for_each_reference(self, &mut |a, precise| {
-                        if a == addr {
-                            holders.push(format!("{o}{}", if precise { "" } else { " (imprecise)" }));
-                        }
-                    });
-                }
-                eprintln!("early free check: {obj} at {addr:#x} was freed while still reachable (root: {root}, held by: {holders:?})");
-                std::process::abort();
-            }
         }
     }
 
@@ -1879,74 +1552,6 @@ impl Heap {
         self.held_budget = self.held_after_major + self.nursery_chunks.max(self.held_after_major);
     }
 
-    /// The nursery is full: run a minor collection.
-    #[inline]
-    pub fn should_collect_young(&self) -> bool {
-        self.nursery
-            && (cfg!(feature = "gc-stress") || self.slab.young_chunks_in_use() >= self.nursery_chunks)
-    }
-
-    /// A minor collection that could not move promoted the nursery in
-    /// place: allocate old for a nursery's worth, into the promoted
-    /// chunks' free tails. Otherwise a nested run, where every minor
-    /// promotes, maps a fresh nursery chunk per collection: under
-    /// `gc-stress` one per allocation, thousands of mostly empty chunks
-    /// that every later collection sweeps.
-    pub fn pretenure_after_promote(&mut self) {
-        self.pretenure_bytes = self.nursery_chunks * super::slab::CHUNK_BYTES;
-        self.sync_inline_gate();
-    }
-
-    /// A minor collection found `survivors` of `objects` young objects
-    /// live. When most survived (a large structure being built), copying
-    /// them buys nothing: allocate old for a while, longer each time in a
-    /// row, and try the nursery again after.
-    pub(super) fn note_survival(&mut self, survivors: usize, objects: usize) {
-        // A minor that found nothing young (only held chunks) says nothing
-        // about survival.
-        if self.region_depth != 0 || objects == 0 {
-            return;
-        }
-        if survivors * 2 > objects {
-            self.pretenure_streak = (self.pretenure_streak + 1).min(6);
-            self.pretenure_bytes = (self.nursery_chunks * super::slab::CHUNK_BYTES) << (self.pretenure_streak - 1);
-            self.sync_inline_gate();
-        } else {
-            self.pretenure_streak = 0;
-        }
-    }
-
-    /// A `region` block opens. Returns true for the outermost one, which
-    /// the runtime starts with an empty nursery.
-    pub fn region_enter(&mut self) -> bool {
-        self.region_depth += 1;
-        if self.region_depth != 1 {
-            return false;
-        }
-        self.region_saved_chunks = self.nursery_chunks;
-        self.nursery_chunks = self.nursery_chunks.max(REGION_CHUNKS);
-        self.sync_held_budget();
-        self.pretenure_bytes = 0;
-        self.sync_inline_gate();
-        self.pretenure_streak = 0;
-        true
-    }
-
-    /// A `region` block ends. Returns true for the outermost one, after
-    /// which the runtime collects the nursery.
-    pub fn region_exit(&mut self) -> bool {
-        if self.region_depth == 0 {
-            return false;
-        }
-        self.region_depth -= 1;
-        if self.region_depth != 0 {
-            return false;
-        }
-        self.nursery_chunks = self.region_saved_chunks;
-        self.sync_held_budget();
-        true
-    }
-
     /// The old space crossed its budget: run a major cycle.
     #[inline]
     pub fn should_collect_old(&self) -> bool {
@@ -1969,16 +1574,6 @@ impl Heap {
 
     pub fn nursery(&self) -> bool {
         self.nursery
-    }
-
-    /// Objects to sweep at one safepoint (doubles under pressure).
-    #[inline]
-    pub fn gc_sweep_quantum(&self) -> usize {
-        if self.counts.alloc_bytes > self.gc_next_threshold {
-            GC_SWEEP_QUANTUM.saturating_mul(2)
-        } else {
-            GC_SWEEP_QUANTUM
-        }
     }
 
     /// Lower the byte threshold so the next [`Self::should_collect`] check
@@ -2035,102 +1630,6 @@ impl Heap {
         }
     }
 
-    /// [`Self::dealloc`] of the slot the sweep walk is at.
-    unsafe fn dealloc_swept(&mut self, object: Object, cur: &mut super::slab::SlotCursor) {
-        // An immortal object (a program string the intern table lets go)
-        // is no leak of the counts.
-        if self.rc_on && object.rc_count() != COUNT_IMMORTAL {
-            self.rc_swept += 1;
-            if rc::rc_swept_shown() {
-                eprintln!("coil rc-swept: {} at {:#x} (count {})", object.kind_name(), object.addr(), object.rc_count());
-            }
-        }
-        let size = object.size();
-        self.counts.alloc_bytes -= size;
-        self.gc_sweep_freed += size;
-        debug_assert!(self.counts.live_count > 0);
-        self.counts.live_count -= 1;
-        let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
-        unsafe { object.recycle_payload() };
-        self.slab.free_at_cursor(cur, ptr);
-    }
-
-    pub fn trace(&mut self, values: &[u64]) {
-        let mut gray = std::mem::take(&mut self.gc_gray);
-        gray.clear();
-        for &addr in values {
-            let addr = addr & !1;
-            if addr == 0 {
-                continue;
-            }
-            if let Some(obj) = self.find_object_by_addr(addr) {
-                obj.mark(&mut gray);
-            }
-        }
-        gray.clear();
-        self.gc_gray = gray;
-    }
-
-    /// Mark a `Value` if it is a live heap pointer.
-    ///
-    /// Strips the Result `Err` low bit before lookup so tagged payloads stay live.
-    pub fn mark_value(&self, v: Value, gray: &mut Vec<Object>) {
-        let addr = v.heap_addr();
-        if addr == 0 {
-            return;
-        }
-        if let Some(child) = self.find_object_by_addr(addr) {
-            child.mark(gray);
-        }
-    }
-
-    /// Push `root_addrs` onto the gray list without draining it (end-of-mark remark).
-    pub fn remark_roots(&mut self, root_addrs: &[u64]) {
-        let mut gray = std::mem::take(&mut self.gc_gray);
-        for &addr in root_addrs {
-            let addr = addr & !1;
-            if addr == 0 {
-                continue;
-            }
-            if let Some(obj) = self.find_object_by_addr(addr) {
-                obj.mark(&mut gray);
-            }
-        }
-        self.gc_gray = gray;
-    }
-
-    /// Mark `root_addrs` and walk children via [`Object::mark_references`].
-    ///
-    /// Seeds gray via slab lookup (not an O(heap) list scan).
-    pub fn mark_from_roots(&mut self, root_addrs: &[u64]) {
-        self.gc_gray.clear();
-        self.remark_roots(root_addrs);
-        while !self.mark_quantum(usize::MAX) {}
-    }
-
-    /// Complete collect with no host's roots: mark `extra_roots` plus immortal
-    /// enums, clear dead weaks, sweep.
-    pub fn collect(&mut self, extra_roots: &[u64]) {
-        if self.epoch_stw {
-            return;
-        }
-        if self.gc_phase == GcPhase::Sweeping {
-            self.finish_sweep();
-        }
-        let mut roots = self.take_gc_roots();
-        roots.extend_from_slice(extra_roots);
-        if self.gc_phase == GcPhase::Idle {
-            self.begin_mark(&roots);
-        } else {
-            self.mark_from_roots(&roots);
-        }
-        while !self.mark_quantum(usize::MAX) {}
-        self.clear_dead_weaks();
-        self.begin_sweep();
-        self.finish_sweep();
-        self.restore_gc_roots(roots);
-    }
-
     /// Clear the [`Object::Weak`] handles that name `addr`, an object whose
     /// last strong reference just went (reference-count plan step 7).
     pub fn clear_weaks_to(&self, addr: u64) {
@@ -2143,61 +1642,6 @@ impl Heap {
                 }
             }
         }
-    }
-
-    /// Clear [`Object::Weak`] handles whose referents were not marked.
-    ///
-    /// Must run after the mark phase and before [`Self::sweep`] so upgrades
-    /// never observe a recycled address (ABA).
-    pub fn clear_dead_weaks(&mut self) {
-        if self.weaks.is_empty() {
-            return;
-        }
-        let mut list = std::mem::take(&mut self.weaks);
-        list.sort_unstable();
-        list.dedup();
-        // A cleared weak stays cleared: only live, uncleared ones stay listed.
-        list.retain(|&addr| {
-            let Some(Object::Weak(gc)) = self.find_object_by_addr(addr) else {
-                return false;
-            };
-            let weak = gc.as_ref();
-            if weak.cleared.get() {
-                return false;
-            }
-            let target = weak.target.get().heap_addr();
-            if target != 0
-                && let Some(referent) = self.find_object_by_addr(target)
-                && !referent.is_marked()
-            {
-                weak.cleared.set(true);
-                weak.target.set(Value::from(0i64));
-                return false;
-            }
-            true
-        });
-        self.weaks = list;
-    }
-
-    /// Follow an evacuation in the side lists (before its old slots free).
-    fn forward_side_lists(&mut self, fwd: &AddrMap) {
-        for addr in self.weaks.iter_mut().chain(self.finalizable.iter_mut()) {
-            if let Some(&new) = fwd.get(addr) {
-                *addr = new;
-            }
-        }
-    }
-
-    /// Take the reusable GC root address buffer (caller must restore via [`Self::restore_gc_roots`]).
-    /// Immortal arity-0 enum singletons are always seeded as roots.
-    pub fn take_gc_roots(&mut self) -> Vec<u64> {
-        let mut roots = std::mem::take(&mut self.gc_roots);
-        roots.clear();
-        for obj in self.immortal_enums.values() {
-            roots.push(obj.addr());
-        }
-        roots.extend(self.immortal_fns.values().map(Object::addr));
-        roots
     }
 
     /// The shared function value at `entry` that captures and fills
@@ -2243,109 +1687,6 @@ impl Heap {
         object
     }
 
-    pub fn restore_gc_roots(&mut self, roots: Vec<u64>) {
-        self.gc_roots = roots;
-    }
-
-    pub fn take_gc_worklists(&mut self) -> (Vec<Object>, Vec<Object>) {
-        let mut gray = std::mem::take(&mut self.gc_gray);
-        let mut root_objects = std::mem::take(&mut self.gc_root_objects);
-        gray.clear();
-        root_objects.clear();
-        (gray, root_objects)
-    }
-
-    pub fn restore_gc_worklists(&mut self, gray: Vec<Object>, root_objects: Vec<Object>) {
-        self.gc_gray = gray;
-        self.gc_root_objects = root_objects;
-    }
-
-    /// Head of the intrusive object list (for address lookup).
-    /// One line of moving-GC feasibility numbers for the current mark
-    /// (`gc-stats` feature, `docs/internals/gc-evacuation.md`). Call
-    /// after marking completes: marked objects are the live set.
-    #[cfg(feature = "gc-stats")]
-    pub fn census(&self, roots: &[(u64, RootKind)]) -> String {
-        use std::collections::{HashMap, HashSet};
-        // chunk -> (live slots, slots, slot size)
-        let mut chunks: HashMap<usize, (usize, usize, usize)> = HashMap::new();
-        let (mut live, mut live_bytes) = (0usize, 0usize);
-        let mut pinned: HashSet<u64> = HashSet::new();
-        let (mut precise_refs, mut ambiguous_refs) = (0usize, 0usize);
-        for obj in self.objects() {
-            if obj.is_marked() {
-                live += 1;
-                if let Some((i, size, slots)) = self.slab.slot_meta(obj.addr()) {
-                    live_bytes += size;
-                    let e = chunks.entry(i).or_insert((0, slots, size));
-                    e.0 += 1;
-                }
-                obj.for_each_reference(self, &mut |addr, precise| {
-                    if precise {
-                        precise_refs += 1;
-                    } else {
-                        ambiguous_refs += 1;
-                        pinned.insert(addr);
-                    }
-                });
-            }
-        }
-        let interior_pinned = pinned.len();
-        let (mut root_precise, mut root_ambiguous, mut root_pinned) = (0usize, 0usize, 0usize);
-        for &(addr, kind) in roots {
-            match kind {
-                RootKind::Precise => root_precise += 1,
-                RootKind::Ambiguous => {
-                    root_ambiguous += 1;
-                    pinned.insert(addr);
-                }
-                RootKind::Pinned => {
-                    root_pinned += 1;
-                    pinned.insert(addr);
-                }
-            }
-        }
-        let mapped = self.slab.mapped_bytes();
-        let total_chunks = self.slab.chunk_count();
-        let empty = total_chunks.saturating_sub(chunks.len());
-        // Per size class: chunks in use vs chunks the live slots would fill.
-        let mut by_size: HashMap<usize, (usize, usize, usize)> = HashMap::new();
-        for &(n, slots, size) in chunks.values() {
-            let e = by_size.entry(size).or_insert((0, 0, slots));
-            e.0 += 1;
-            e.1 += n;
-        }
-        let packable: usize = by_size
-            .values()
-            .map(|&(used, live_slots, per)| used - live_slots.div_ceil(per.max(1)).min(used))
-            .sum();
-        let chunk = mapped.checked_div(total_chunks).unwrap_or(0);
-        let pct = |a: usize, b: usize| if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 };
-        format!(
-            "gc-stats: rss={}KiB mapped={}KiB released={}KiB chunks={} live={} ({}KiB, {:.1}% of mapped) | \
-             reclaim unmap-empty={}KiB compact={}KiB | \
-             roots precise={} ambiguous={} pinned={} | \
-             interior refs precise={} ambiguous={} | pinned objs={} ({:.1}% of live; {} via interior)",
-            resident_kib(),
-            mapped / 1024,
-            self.slab.released_bytes() / 1024,
-            total_chunks,
-            live,
-            live_bytes / 1024,
-            pct(live_bytes, mapped),
-            empty * chunk / 1024,
-            packable * chunk / 1024,
-            root_precise,
-            root_ambiguous,
-            root_pinned,
-            precise_refs,
-            ambiguous_refs,
-            pinned.len(),
-            pct(pinned.len(), live),
-            interior_pinned,
-        )
-    }
-
     /// Install the program's per-class field word kinds.
     pub fn set_class_word_kinds(&mut self, table: std::sync::Arc<Vec<Box<[u8]>>>) {
         self.class_leaf = table
@@ -2373,19 +1714,6 @@ impl Heap {
         self.class_kinds
             .get(common::type_kinds_index(type_id))
             .map_or(&[][..], |row| &row[..])
-    }
-
-    /// `gc-stress`: a word's declared kind must match what it holds.
-    #[cfg(feature = "gc-stress")]
-    fn verify_kinded_word(&self, what: &str, index: usize, kind: u8, v: Value) {
-        let addr = v.heap_addr();
-        let resolves = addr != 0 && self.find_object_by_addr(addr).is_some();
-        if kind == common::WORD_SCALAR && resolves {
-            panic!("gc-stress: scalar word {index} of {what} holds a heap reference");
-        }
-        if kind == common::WORD_POINTER && addr != 0 && !resolves && !self.early_freed_slot(addr) {
-            panic!("gc-stress: pointer word {index} of {what} holds a non-object");
-        }
     }
 
     /// Every live object, in slab order.
@@ -2460,10 +1788,6 @@ impl Heap {
         self.find_object_by_addr(addr).is_some()
     }
 
-    #[cfg(test)]
-    fn slot_mapped_for_test(&self, addr: u64) -> bool {
-        self.slab.contains_slot(addr)
-    }
 }
 
 impl Drop for Heap {
@@ -2639,12 +1963,6 @@ pub(crate) trait SlotVisitor {
     fn member(&mut self, m: &Member);
 }
 
-/// [`SlotVisitor`] with the slots writable ([`Object::visit_slots_mut`]).
-pub(crate) trait SlotVisitorMut {
-    fn word(&mut self, v: &mut Value, kind: u8);
-    fn member(&mut self, m: &mut Member);
-}
-
 /// The one walk of an object's slots, behind [`Object::visit_slots`] (reads)
 /// and [`Object::visit_slots_mut`] (rewrites). It says which words of each
 /// kind of object may hold a reference and how sure that is:
@@ -2773,113 +2091,6 @@ impl Object {
     #[inline]
     pub(crate) fn visit_slots(&self, heap: &Heap, f: &mut impl SlotVisitor) {
         walk_slots!(self, heap, f, as_ref, as_slice, gc_words, iter)
-    }
-
-    /// `gc-stats`: how many slots [`Self::visit_slots`] walks.
-    #[cfg(feature = "gc-stats")]
-    pub(crate) fn slot_words(&self, heap: &Heap) -> usize {
-        struct Count(usize);
-        impl SlotVisitor for Count {
-            fn word(&mut self, _: &Value, _: u8) {
-                self.0 += 1;
-            }
-
-            fn member(&mut self, _: &Member) {
-                self.0 += 1;
-            }
-        }
-        let mut count = Count(0);
-        self.visit_slots(heap, &mut count);
-        count.0
-    }
-
-    /// [`Self::visit_slots`] with the slots writable, for a moving
-    /// collector. Takes each payload as a write does ([`Gc::payload_mut`]).
-    pub(crate) fn visit_slots_mut(&self, heap: &Heap, f: &mut impl SlotVisitorMut) {
-        walk_slots!(self, heap, f, payload_mut, as_mut_slice, gc_words_mut, iter_mut, mut)
-    }
-
-    /// Mark a stored member, including Result `Err` tagged pointers in `Value`.
-    fn mark_member(heap: &Heap, member: &Member, grey_objects: &mut Vec<Self>) {
-        match member {
-            // A dead object may still name a slot an early free gave back.
-            Member::Object(o) if heap.freed_early => heap.mark_value(Value::from(o.addr()), grey_objects),
-            Member::Object(o) => o.mark(grey_objects),
-            Member::Value(v) => heap.mark_value(*v, grey_objects),
-        }
-    }
-
-    /// Mark direct heap references held by this object.
-    ///
-    /// Aggregates that store raw [`Value`]s (arrays, tuples, fn captures,
-    /// coroutine stacks) resolve those addresses through `heap`. Stream attach
-    /// state is host-side (A4); channel payloads are PortableValue copies,
-    /// not this-heap pointers. An array found to hold none is flagged so the
-    /// next mark skips it until a write.
-    #[inline]
-    pub fn mark_references(&self, heap: &Heap, grey_objects: &mut Vec<Self>) {
-        struct Marker<'a> {
-            heap: &'a Heap,
-            grey: &'a mut Vec<Object>,
-            any: bool,
-            #[cfg(feature = "gc-stress")]
-            check: Option<(String, usize)>,
-        }
-        impl SlotVisitor for Marker<'_> {
-            #[inline(always)]
-            fn word(&mut self, &v: &Value, kind: u8) {
-                #[cfg(feature = "gc-stress")]
-                if let Some((what, i)) = &mut self.check {
-                    if kind != common::WORD_UNKNOWN {
-                        self.heap.verify_kinded_word(what, *i, kind, v);
-                    }
-                    *i += 1;
-                }
-                let reference = match kind {
-                    common::WORD_SCALAR => false,
-                    // `0` or an object: no classification.
-                    common::WORD_POINTER => v.heap_addr() != 0,
-                    _ => self.heap.may_be_ref(v),
-                };
-                if reference {
-                    self.any = true;
-                    self.heap.mark_value(v, self.grey);
-                }
-            }
-
-            #[inline(always)]
-            fn member(&mut self, m: &Member) {
-                Object::mark_member(self.heap, m, self.grey);
-            }
-        }
-        let mut marker = Marker {
-            heap,
-            grey: grey_objects,
-            any: false,
-            // Coroutine words are not checked.
-            #[cfg(feature = "gc-stress")]
-            check: (!matches!(self, Self::Coroutine(_))).then(|| (self.slot_owner(), 0)),
-        };
-        self.visit_slots(heap, &mut marker);
-        // Clear flag: scanned clean at this mark, unwritten since.
-        if let Self::Array(a) = self
-            && !marker.any
-            && a.as_ref().may_hold_refs()
-        {
-            a.payload_mut().may_hold_refs = false;
-        }
-    }
-
-    /// What a gc-stress check names the slots of `self` by.
-    #[cfg(feature = "gc-stress")]
-    fn slot_owner(&self) -> String {
-        match self {
-            Self::Instance(i) => format!("class {}", i.as_ref().type_id),
-            Self::Array(a) if a.as_ref().lanes() > 1 => "a lane array's pointer lane".into(),
-            Self::Array(_) => "a pointer-kind array".into(),
-            Self::Enum(e) => format!("an enum payload / tuple (tag {}, {} words, kinds {:#x})", e.as_ref().tag, e.as_ref().payload.as_slice().len(), e.as_ref().payload.kinds()),
-            _ => "an enum payload / tuple".into(),
-        }
     }
 
     /// Every heap reference `self` holds, with whether the word is precise.
@@ -3086,29 +2297,6 @@ impl Object {
             Self::Receiver(_) => 16,
             Self::Mutex(_) => 17,
             Self::RwLock(_) => 18,
-        }
-    }
-
-    /// What a collector check names an object by.
-    pub(crate) fn kind_name(self) -> &'static str {
-        match self {
-            Self::String(_) => "a string",
-            Self::Instance(_) => "an instance",
-            Self::Enum(e) if e.as_ref().is_tuple() => "a tuple",
-            Self::Enum(_) => "an enum",
-            Self::Library(_) => "a library",
-            Self::Array(a) if a.as_ref().elem_kind() == common::WORD_POINTER => "a pointer-kind array",
-            Self::Array(_) => "an array",
-            Self::Coroutine(_) => "a coroutine",
-            Self::Root(_) => "a root",
-            Self::Weak(_) => "a weak",
-            Self::Fn(_) => "a closure",
-            Self::Stream(_) => "a stream",
-            Self::Thread(_) => "a thread",
-            Self::Sender(_) => "a sender",
-            Self::Receiver(_) => "a receiver",
-            Self::Mutex(_) => "a mutex",
-            Self::RwLock(_) => "a rwlock",
         }
     }
 
@@ -3691,10 +2879,6 @@ pub(crate) struct CardTable {
 }
 
 impl CardTable {
-    fn new(capacity: usize) -> Self {
-        Self { all: false, cards: vec![0; Self::cards_for(capacity)] }
-    }
-
     /// Cards that cover `n` elements.
     #[inline]
     pub(crate) fn cards_for(n: usize) -> usize {
@@ -4340,44 +3524,6 @@ impl ObjArray {
         }
     }
 
-    /// Whether the array has a card table: native code's stores into it
-    /// mark cards ([`VIEW_TRACKED`]).
-    #[inline]
-    #[cfg(test)]
-    pub(crate) fn has_cards(&self) -> bool {
-        matches!(self.data, ArrayData::Words(_, Some(_)))
-    }
-
-    /// A minor found this array remembered and scanned it whole: give a
-    /// large one a clean card table. Returns whether it did.
-    pub(crate) fn attach_cards(&mut self) -> bool {
-        match &mut self.data {
-            ArrayData::Words(w, cards @ None) if w.len() >= CARD_MIN_WORDS => {
-                *cards = Some(Box::new(CardTable::new(w.capacity())));
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// The words and the card table, for a minor's card scan.
-    #[inline]
-    pub(crate) fn words_and_cards_mut(&mut self) -> Option<(&mut [Value], Option<&mut CardTable>)> {
-        match &mut self.data {
-            ArrayData::Words(w, cards) => Some((w, cards.as_deref_mut())),
-            _ => None,
-        }
-    }
-
-    /// The card table, for the missed-barrier check.
-    #[inline]
-    pub(crate) fn cards(&self) -> Option<&CardTable> {
-        match &self.data {
-            ArrayData::Words(_, cards) => cards.as_deref(),
-            _ => None,
-        }
-    }
-
     /// Store a numeric SIMD lane (never a reference) without classifying.
     ///
     /// # Safety
@@ -4751,12 +3897,6 @@ impl ObjArray {
         }
     }
 
-    pub(crate) fn gc_words_mut(&mut self) -> Option<&mut [Value]> {
-        match &mut self.data {
-            ArrayData::Words(w, ..) | ArrayData::Lanes { words: w, .. } => Some(w),
-            ArrayData::Bytes(_) => None,
-        }
-    }
 }
 
 /// A one-word element read or write on a lane array: a code path that
@@ -5251,9 +4391,6 @@ pub(crate) const GEN_YOUNG: u8 = 1;
 /// [`GcHeader::generation`]: an old object not in the remembered set; its
 /// next payload write records it ([`remember_written`]).
 pub(crate) const GEN_UNLOGGED: u8 = 2;
-/// [`GcHeader::generation`]: a young object a minor collection may not
-/// move (an ambiguous word names it). Only set during a minor collection.
-pub(crate) const GEN_PINNED: u8 = 4;
 /// [`GcHeader::generation`]: a young object a minor pinned, held in its
 /// chunk until a major frees it. Minors treat it as old: they do not trace
 /// it, and the write barrier records it ([`GEN_UNLOGGED`]) like any old
@@ -5982,25 +5119,7 @@ struct EntryInner<V> {
     val: V,
 }
 
-/// Resident set size of this process in KiB (`gc-stats`; 0 off Linux).
-#[cfg(feature = "gc-stats")]
-fn resident_kib() -> usize {
-    #[cfg(target_os = "linux")]
-    {
-        let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
-        let pages: usize = statm.split_whitespace().nth(1).and_then(|p| p.parse().ok()).unwrap_or(0);
-        pages * 4
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        0
-    }
-}
 
-
-#[path = "compact.rs"]
-mod compact;
-pub use compact::{AddrMap, EvacPlan, Evacuation};
 
 #[path = "nursery.rs"]
 mod nursery;
@@ -6008,11 +5127,9 @@ mod nursery;
 #[path = "inline.rs"]
 mod inline;
 pub use inline::{InlineObject, InlineShape, ProductSlots, inline_object, product_slots, layout_fingerprint};
-pub use nursery::MinorPlan;
 
 #[path = "rc.rs"]
 mod rc;
-pub use rc::{RcCheckMode, rc_check_mode, rc_trace_off};
 
 #[path = "cycles.rs"]
 mod cycles;
@@ -6106,29 +5223,6 @@ mod tests {
     }
 
     #[test]
-    fn recycling_a_slot_clears_its_pin() {
-        let mut heap = Heap::default();
-        let a = cow_instance(&mut heap, vec![Value::from(1i64)]);
-        a.set_pinned(true);
-        let addr = a.addr();
-        heap.begin_mark(&[]);
-        while !heap.mark_quantum(usize::MAX) {}
-        unsafe { heap.sweep() };
-        assert!(heap.find_object_by_addr(addr).is_none(), "swept");
-        // SAFETY: a swept slot stays mapped.
-        let pin = unsafe { *((addr + HEADER_FLAGS_OFFSET as u64) as *const u8) } & FLAG_PINNED;
-        assert_eq!(pin, 0, "the recycled header holds no pin");
-    }
-
-    fn live_object_addrs(heap: &Heap) -> std::collections::HashSet<u64> {
-        let mut addrs = std::collections::HashSet::new();
-        for obj in heap {
-            addrs.insert(obj.addr());
-        }
-        addrs
-    }
-
-    #[test]
     fn lane_array_keeps_each_elements_words() {
         let mut a = ObjArray::with_lanes(2, 2, 0);
         for i in 0..5_i64 {
@@ -6161,89 +5255,6 @@ mod tests {
         let table: Table<u32> = Table::new();
         assert!(table.is_empty());
         assert_eq!(table.len(), 0);
-    }
-
-    #[test]
-    fn enum_gc_marks_payload_pointers() {
-        let mut heap = Heap::default();
-
-        // 1. Allocate the inner object (a string).
-        let (string_obj, string_ref) = heap.alloc(ObjString::from("inner"), Object::String);
-        let string_addr = string_obj.addr();
-        let string_member = Value::from(string_obj.addr());
-
-        // 2. Allocate the enum with the string in its payload.
-        let enum_value = ObjEnum::new(0, EnumPayload::one(string_member));
-        let (enum_obj, _enum_ref) = heap.alloc(enum_value, Object::Enum);
-        let enum_addr = enum_obj.addr();
-
-        // 3. Mark the enum as a root and propagate the mark to its
-        //    payload (which holds the string pointer).
-        let mut gray = Vec::new();
-        heap.trace(&[enum_addr]);
-        enum_obj.mark_references(&heap, &mut gray);
-
-        // 4. Sweep, anything not marked is deallocated.
-        unsafe { heap.sweep() };
-
-        // 5. Both objects must still be alive.
-        let live = live_object_addrs(&heap);
-        assert!(
-            live.contains(&string_addr),
-            "string at 0x{:x} was collected despite being reachable from enum payload",
-            string_addr
-        );
-        assert!(
-            live.contains(&enum_addr),
-            "enum at 0x{:x} was collected despite being a GC root",
-            enum_addr
-        );
-        // Sanity: the string ref is still dereferenceable.
-        let _ = string_ref.as_ref();
-    }
-
-    #[test]
-    fn enum_gc_marks_nested_enum_payloads() {
-        let mut heap = Heap::default();
-
-        // Inner enum: empty payload.
-        let (inner_obj, _inner_ref) = heap.alloc(
-            ObjEnum::new(1, EnumPayload::empty()),
-            Object::Enum,
-        );
-        let inner_addr = inner_obj.addr();
-
-        // Outer enum: payload contains the inner enum as a
-        // `Member::Object`.
-        let outer = ObjEnum::new(0, EnumPayload::one(Value::from(inner_obj.addr())));
-        let (outer_obj, _outer_ref) = heap.alloc(outer, Object::Enum);
-        let outer_addr = outer_obj.addr();
-
-        // Mark outer as root, propagate through its payload to mark
-        // the inner enum.
-        let mut gray = Vec::new();
-        heap.trace(&[outer_addr]);
-        outer_obj.mark_references(&heap, &mut gray);
-
-        // Drain grey stack (inner enum has empty payload; still exercise the arm).
-        while let Some(obj) = gray.pop() {
-            obj.mark_references(&heap, &mut gray);
-        }
-
-        unsafe { heap.sweep() };
-
-        // Both must survive.
-        let live = live_object_addrs(&heap);
-        assert!(
-            live.contains(&inner_addr),
-            "inner enum at 0x{:x} was collected despite being reachable from outer enum payload",
-            inner_addr
-        );
-        assert!(
-            live.contains(&outer_addr),
-            "outer enum at 0x{:x} was collected despite being a GC root",
-            outer_addr
-        );
     }
 
     #[test]
@@ -6289,155 +5300,6 @@ mod tests {
     }
 
     #[test]
-    fn instance_gc_marks_inline_slot_pointers() {
-        let mut heap = Heap::default();
-        let (a, _) = heap.alloc(ObjString::from("a"), Object::String);
-        let (b, _) = heap.alloc(ObjString::from("b"), Object::String);
-        let inst = ObjInstance::with_slots(
-            3,
-            vec![Value::from(a.addr()), Value::from(b.addr())],
-        );
-        assert!(inst.slots_are_inline());
-        let (obj, _) = heap.alloc(inst, Object::Instance);
-
-        let mut gray = Vec::new();
-        heap.trace(&[obj.addr()]);
-        obj.mark_references(&heap, &mut gray);
-        while let Some(next) = gray.pop() {
-            next.mark_references(&heap, &mut gray);
-        }
-        unsafe { heap.sweep() };
-
-        let live = live_object_addrs(&heap);
-        assert!(live.contains(&a.addr()));
-        assert!(live.contains(&b.addr()));
-        assert!(live.contains(&obj.addr()));
-    }
-
-    /// Field word kinds: pointer fields are traced and reported precise;
-    /// a scalar field is skipped even if its bits look like an address.
-    #[test]
-    fn class_word_kinds_skip_scalars_and_trace_pointers() {
-        let mut heap = Heap::default();
-        heap.set_class_word_kinds(crate::class_kind_table(&[common::ClassWordKinds {
-            type_id: 7,
-            kinds: vec![common::WORD_POINTER, common::WORD_SCALAR],
-        }]));
-        let (kept, _) = heap.alloc(ObjString::from("kept"), Object::String);
-        let (lookalike, _) = heap.alloc(ObjString::from("lookalike"), Object::String);
-        let inst = ObjInstance::with_slots(
-            7,
-            vec![Value::from(kept.addr()), Value::from(lookalike.addr())],
-        );
-        let (obj, _) = heap.alloc(inst, Object::Instance);
-
-        let mut seen = Vec::new();
-        obj.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
-        assert_eq!(seen, vec![(kept.addr(), true)]);
-
-        let mut gray = Vec::new();
-        heap.trace(&[obj.addr()]);
-        obj.mark_references(&heap, &mut gray);
-        while let Some(next) = gray.pop() {
-            next.mark_references(&heap, &mut gray);
-        }
-        unsafe { heap.sweep() };
-        let live = live_object_addrs(&heap);
-        assert!(live.contains(&kept.addr()));
-        assert!(!live.contains(&lookalike.addr()), "a scalar field is not a root");
-    }
-
-    /// Payload / element word kinds from the construction site: a scalar
-    /// word is not traced even if its bits look like an address.
-    #[test]
-    fn payload_and_tuple_kinds_skip_scalars() {
-        let mut heap = Heap::default();
-        let (kept, _) = heap.alloc(ObjString::from("kept"), Object::String);
-        let (lookalike, _) = heap.alloc(ObjString::from("lookalike"), Object::String);
-        let kinds = common::pack_word_kinds([common::WORD_POINTER, common::WORD_SCALAR]);
-        let words = [Value::from(kept.addr()), Value::from(lookalike.addr())];
-        let (en, _) = heap.alloc(
-            ObjEnum::new(1, EnumPayload::from_slice(&words).with_kinds(kinds)),
-            Object::Enum,
-        );
-        let (tup, _) = heap.alloc(ObjEnum::tuple(&words, kinds), Object::Enum);
-
-        for obj in [en, tup] {
-            let mut seen = Vec::new();
-            obj.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
-            assert_eq!(seen, vec![(kept.addr(), true)]);
-        }
-
-        let mut gray = Vec::new();
-        heap.trace(&[en.addr(), tup.addr()]);
-        for obj in [en, tup] {
-            obj.mark_references(&heap, &mut gray);
-        }
-        while let Some(next) = gray.pop() {
-            next.mark_references(&heap, &mut gray);
-        }
-        unsafe { heap.sweep() };
-        let live = live_object_addrs(&heap);
-        assert!(live.contains(&kept.addr()));
-        assert!(!live.contains(&lookalike.addr()), "a scalar payload word is not a root");
-    }
-
-    #[test]
-    fn instance_gc_marks_spilled_slot_pointers() {
-        let mut heap = Heap::default();
-        let (a, _) = heap.alloc(ObjString::from("a"), Object::String);
-        let (b, _) = heap.alloc(ObjString::from("b"), Object::String);
-        let (c, _) = heap.alloc(ObjString::from("c"), Object::String);
-        let mut words = vec![Value::from(a.addr()), Value::from(b.addr()), Value::from(c.addr())];
-        words.resize(INSTANCE_INLINE_FIELDS + 1, Value::from(7i64));
-        let inst = ObjInstance::with_slots(3, words);
-        assert!(!inst.slots_are_inline());
-        let (obj, _) = heap.alloc(inst, Object::Instance);
-
-        let mut gray = Vec::new();
-        heap.trace(&[obj.addr()]);
-        obj.mark_references(&heap, &mut gray);
-        while let Some(next) = gray.pop() {
-            next.mark_references(&heap, &mut gray);
-        }
-        unsafe { heap.sweep() };
-
-        let live = live_object_addrs(&heap);
-        assert!(live.contains(&a.addr()));
-        assert!(live.contains(&b.addr()));
-        assert!(live.contains(&c.addr()));
-        assert!(live.contains(&obj.addr()));
-    }
-
-    #[test]
-    fn enum_gc_marks_spilled_payload_pointers() {
-        let mut heap = Heap::default();
-        let (a, _) = heap.alloc(ObjString::from("a"), Object::String);
-        let (b, _) = heap.alloc(ObjString::from("b"), Object::String);
-        let (c, _) = heap.alloc(ObjString::from("c"), Object::String);
-        let mut words = vec![Value::from(a.addr()), Value::from(b.addr()), Value::from(c.addr())];
-        words.resize(ENUM_INLINE_ARITY + 1, Value::from(9i64));
-        let payload = EnumPayload::from_vec(words);
-        assert!(!payload.is_inline());
-        let (enum_obj, enum_ref) = heap.alloc(ObjEnum::new(0, payload), Object::Enum);
-        assert_eq!(enum_ref.as_ref().payload.len(), ENUM_INLINE_ARITY + 1);
-
-        let mut gray = Vec::new();
-        heap.trace(&[enum_obj.addr()]);
-        enum_obj.mark_references(&heap, &mut gray);
-        while let Some(obj) = gray.pop() {
-            obj.mark_references(&heap, &mut gray);
-        }
-        unsafe { heap.sweep() };
-
-        let live = live_object_addrs(&heap);
-        assert!(live.contains(&a.addr()));
-        assert!(live.contains(&b.addr()));
-        assert!(live.contains(&c.addr()));
-        assert!(live.contains(&enum_obj.addr()));
-    }
-
-    #[test]
     fn find_object_by_addr_hit_and_miss() {
         let mut heap = Heap::default();
         let (obj, _) = heap.alloc(ObjString::from("hi"), Object::String);
@@ -6447,20 +5309,6 @@ mod tests {
             Some(Object::String(_))
         ));
         assert!(heap.find_object_by_addr(addr.wrapping_add(1)).is_none());
-    }
-
-    #[test]
-    fn mark_value_strips_result_err_low_bit() {
-        let mut heap = Heap::default();
-        let (obj, _) = heap.alloc(ObjString::from("err"), Object::String);
-        let tagged = Value::from(obj.addr() | 1);
-        assert!(heap.find_object_by_addr(tagged.bits()).is_none());
-        let mut gray = Vec::new();
-        heap.mark_value(tagged, &mut gray);
-        assert_eq!(gray.len(), 1);
-        heap.mark_from_roots(&[tagged.heap_addr()]);
-        unsafe { heap.sweep() };
-        assert!(heap.find_object_by_addr(obj.addr()).is_some());
     }
 
     #[test]
@@ -6492,134 +5340,6 @@ mod tests {
     }
 
     #[test]
-    fn sweep_reuses_dangling_string_scratch() {
-        let mut heap = Heap::default();
-        let _ = heap.intern("first".to_owned());
-        unsafe { heap.sweep() };
-        let capacity = heap.gc_dangling_strings.capacity();
-        assert!(capacity >= 1);
-
-        let _ = heap.intern("second".to_owned());
-        unsafe { heap.sweep() };
-        assert_eq!(heap.gc_dangling_strings.capacity(), capacity);
-    }
-
-    /// Byte-threshold GC: under threshold → no collect; after a rooted sweep the
-    /// threshold scales with live bytes so a single surviving object does not
-    /// trigger on every subsequent alloc.
-    #[test]
-    fn should_collect_uses_byte_threshold_rescaled_by_sweep() {
-        let mut heap = Heap::default();
-        assert!(
-            !heap.should_collect(),
-            "fresh heap must sit under the default threshold"
-        );
-
-        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
-        let keep_addr = keep.addr();
-        // Force a collection, then root `keep` so it survives.
-        heap.set_gc_threshold_for_test(0);
-        assert!(heap.should_collect());
-        heap.trace(&[keep_addr]);
-        keep.mark_references(&heap, &mut Vec::new());
-        unsafe { heap.sweep() };
-
-        assert!(
-            !heap.should_collect(),
-            "after sweep, threshold must be max(live*growth, budget) so one survivor is quiet"
-        );
-        let quiet_size = heap.size();
-        // Grow past the rescaled (floored) threshold without roots, should_collect again.
-        while !heap.should_collect() {
-            let _ = heap.alloc(ObjString::from("pressure"), Object::String);
-            // Guard against runaway if rescale broke (would never trip).
-            assert!(
-                heap.size() <= quiet_size.saturating_mul(8).max(GC_NEXT_THRESHOLD * 2),
-                "alloc_bytes grew without tripping should_collect"
-            );
-        }
-        assert!(
-            heap.size() > GC_NEXT_THRESHOLD,
-            "a tiny live set must not collect below the initial budget"
-        );
-    }
-
-    /// The next budget grows 4× when most of the heap survived (a growing live
-    /// set) and 2× when most of it was garbage, never below the initial budget.
-    #[test]
-    fn gc_budget_grows_faster_when_most_of_the_heap_survives() {
-        let mut heap = Heap::default();
-        let mut keep = Vec::new();
-        while heap.size() < GC_NEXT_THRESHOLD / 2 {
-            keep.push(heap.alloc(ObjString::from("live"), Object::String).0.addr());
-        }
-        heap.trace(&keep);
-        unsafe { heap.sweep() };
-        assert_eq!(heap.gc_next_threshold, heap.size() * GC_GROWTH_FACTOR_SURVIVING);
-
-        let live = heap.size();
-        while heap.size() < live * 4 {
-            let _ = heap.alloc(ObjString::from("garbage"), Object::String);
-        }
-        heap.trace(&keep);
-        unsafe { heap.sweep() };
-        assert_eq!(heap.gc_next_threshold, (heap.size() * GC_GROWTH_FACTOR).max(GC_NEXT_THRESHOLD));
-    }
-
-    /// Immortal arity-0 enums are seeded as GC roots and must not be swept,
-    /// even when nothing else references them.
-    #[test]
-    fn immortal_unit_enums_survive_sweep_as_roots() {
-        let mut heap = Heap::default();
-        let immortal = heap.immortal_unit_enum(7);
-        let immortal_addr = immortal.addr();
-        let again = heap.immortal_unit_enum(7);
-        assert_eq!(immortal_addr, again.addr());
-
-        let (junk, _) = heap.alloc(ObjString::from("junk"), Object::String);
-        let junk_addr = junk.addr();
-
-        let roots = heap.take_gc_roots();
-        assert!(
-            roots.contains(&immortal_addr),
-            "take_gc_roots must seed immortal enum addresses"
-        );
-        heap.trace(&roots);
-        unsafe { heap.sweep() };
-        heap.restore_gc_roots(roots);
-
-        assert!(
-            heap.find_object_by_addr(immortal_addr).is_some(),
-            "immortal enum must survive an otherwise empty-root sweep"
-        );
-        assert!(
-            heap.find_object_by_addr(junk_addr).is_none(),
-            "unrooted junk must still be collected"
-        );
-        assert_eq!(
-            heap.immortal_unit_enum(7).addr(),
-            immortal_addr,
-            "post-sweep lookup must reuse the same singleton"
-        );
-    }
-
-    #[test]
-    fn empty_tuple_is_one_immortal_object() {
-        let mut heap = Heap::default();
-        let first = heap.immortal_empty_tuple().addr();
-        assert_eq!(first, heap.immortal_empty_tuple().addr());
-        let roots = heap.take_gc_roots();
-        assert!(roots.contains(&first), "`()` is always a root");
-        heap.trace(&roots);
-        unsafe { heap.sweep() };
-        heap.restore_gc_roots(roots);
-        match heap.find_object_by_addr(first) {
-            Some(Object::Enum(t)) => assert!(t.as_ref().is_tuple() && t.as_ref().elements().is_empty()),
-            _ => panic!("`()` must survive a sweep"),
-        }
-    }
-
-    #[test]
     fn alloc_enum_value_reuses_unit_singletons() {
         let mut heap = Heap::default();
         let first = heap.alloc_enum_value(3, Vec::new());
@@ -6632,118 +5352,6 @@ mod tests {
                 .count(),
             1
         );
-    }
-
-    #[test]
-    fn find_object_by_addr_clears_after_sweep() {
-        let mut heap = Heap::default();
-        let (obj, _) = heap.alloc(ObjString::from("gone"), Object::String);
-        let addr = obj.addr();
-        assert!(heap.find_object_by_addr(addr).is_some());
-        // No roots → sweep poisons the header; the slot stays mapped.
-        unsafe { heap.sweep() };
-        assert!(
-            heap.slot_mapped_for_test(addr),
-            "swept slot must stay mapped"
-        );
-        assert!(
-            heap.find_object_by_addr(addr).is_none(),
-            "swept object must be poisoned (kind 0), not a HashSet miss"
-        );
-    }
-
-    /// Many strings, all swept: after the release window their chunks' pages
-    /// go back, stale lookups still read a poisoned header, and new
-    /// allocations reuse the released chunks instead of mapping more.
-    // Release is `madvise`; elsewhere it is a no-op and nothing is released.
-    #[cfg(unix)]
-    #[test]
-    fn idle_chunks_release_and_are_reused() {
-        let mut heap = Heap::default();
-        let mut addrs = Vec::new();
-        for i in 0..20_000 {
-            let (obj, _) = heap.alloc(ObjString::from(format!("s{i}").as_str()), Object::String);
-            addrs.push(obj.addr());
-        }
-        let mapped = heap.slab.mapped_bytes();
-        assert!(mapped >= 4 * 64 * 1024, "test needs several chunks: {mapped}");
-        // Sweep everything, then idle: the first window still saw the
-        // allocation phase drain the list, the second finds it idle.
-        for _ in 0..2 * super::super::slab::RELEASE_WINDOW_FOR_TEST {
-            unsafe { heap.sweep() };
-        }
-        assert!(heap.slab.released_bytes() > 0, "idle chunks must be released");
-        for &a in addrs.iter().step_by(997) {
-            assert!(heap.slot_mapped_for_test(a), "released chunk stays mapped");
-            assert!(heap.find_object_by_addr(a).is_none(), "released slot reads poisoned");
-        }
-        for i in 0..20_000 {
-            let _ = heap.alloc(ObjString::from(format!("t{i}").as_str()), Object::String);
-        }
-        assert_eq!(heap.slab.mapped_bytes(), mapped, "reuse released chunks, map nothing new");
-        assert_eq!(heap.slab.released_bytes(), 0);
-    }
-
-    /// Steady churn drains the free list every cycle: nothing is released.
-    #[test]
-    fn busy_chunks_are_not_released() {
-        let mut heap = Heap::default();
-        for _ in 0..(2 * super::super::slab::RELEASE_WINDOW_FOR_TEST) {
-            for i in 0..20_000 {
-                let _ = heap.alloc(ObjString::from(format!("s{i}").as_str()), Object::String);
-            }
-            unsafe { heap.sweep() };
-        }
-        assert_eq!(heap.slab.released_bytes(), 0);
-    }
-
-    /// An int-only array is scanned once, then skipped; a reference stored
-    /// after that must still keep its target alive.
-    #[test]
-    fn clean_array_is_skipped_until_written() {
-        let mut heap = Heap::default();
-        let (arr, gc) = heap.alloc(
-            ObjArray::new((0..1000).map(Value::from).collect()),
-            Object::Array,
-        );
-        heap.gc_roots.push(arr.addr());
-        let root = |heap: &mut Heap| {
-            heap.begin_mark(&[arr.addr()]);
-            while !heap.mark_quantum(usize::MAX) {}
-            unsafe { heap.sweep() };
-        };
-        root(&mut heap);
-        assert!(!gc.as_ref().may_hold_refs(), "no element looked like a reference");
-        let (s, _) = heap.alloc(ObjString::from("kept"), Object::String);
-        let mut gc = gc;
-        gc.as_mut().set(3, Value::from(s.addr()));
-        assert!(gc.as_ref().may_hold_refs(), "a write reopens the scan");
-        root(&mut heap);
-        assert!(heap.find_object_by_addr(s.addr()).is_some(), "stored reference survives");
-        assert!(gc.as_ref().may_hold_refs());
-    }
-
-    /// A pointer element kind makes array words precise references; a scalar
-    /// stamp is kept but the collector still resolves those words.
-    #[test]
-    fn pointer_kind_array_words_are_precise() {
-        let mut heap = Heap::default();
-        let (s, _) = heap.alloc(ObjString::from("x"), Object::String);
-        let (arr, mut gc) = heap.alloc(
-            ObjArray::new(vec![Value::from(s.addr()), Value::from(0i64)]),
-            Object::Array,
-        );
-        gc.as_mut().set_elem_kind(common::WORD_SCALAR);
-        assert_eq!(gc.as_ref().elem_kind(), common::WORD_SCALAR);
-        assert_eq!(gc.as_ref().gc_elem_kind(), common::WORD_UNKNOWN);
-        gc.as_mut().set_elem_kind(common::WORD_POINTER);
-        let mut seen = Vec::new();
-        arr.for_each_reference(&heap, &mut |a, precise| seen.push((a, precise)));
-        assert_eq!(seen, vec![(s.addr(), true)], "`0` is a hole, not a reference");
-        heap.begin_mark(&[arr.addr()]);
-        while !heap.mark_quantum(usize::MAX) {}
-        unsafe { heap.sweep() };
-        assert!(heap.find_object_by_addr(s.addr()).is_some(), "element survives");
     }
 
     /// Array elements and enum payloads are raw words (ambiguous).
@@ -6831,88 +5439,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn gc_scratch_buffers_round_trip_take_restore() {
-        let mut heap = Heap::default();
-        let mut roots = heap.take_gc_roots();
-        roots.push(1);
-        roots.push(2);
-        heap.restore_gc_roots(roots);
-
-        let (mut gray, mut root_objects) = heap.take_gc_worklists();
-        assert!(gray.is_empty());
-        assert!(root_objects.is_empty());
-        // Capacity may be retained after clear; restore must not panic.
-        gray.reserve(4);
-        root_objects.reserve(4);
-        heap.restore_gc_worklists(gray, root_objects);
-
-        let roots2 = heap.take_gc_roots();
-        // Prior contents were cleared on take; buffer is reusable.
-        assert!(roots2.is_empty());
-        heap.restore_gc_roots(roots2);
-    }
-
-    #[test]
-    fn repeated_trace_reuses_mark_set_without_leaking_prior_roots() {
-        let mut heap = Heap::default();
-        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
-        let (drop_me, _) = heap.alloc(ObjString::from("drop"), Object::String);
-        let keep_addr = keep.addr();
-        let drop_addr = drop_me.addr();
-
-        // First collection: only `keep` is a root.
-        heap.trace(&[keep_addr]);
-        let mut gray = Vec::new();
-        keep.mark_references(&heap, &mut gray);
-        unsafe { heap.sweep() };
-
-        let live = live_object_addrs(&heap);
-        assert!(live.contains(&keep_addr));
-        assert!(!live.contains(&drop_addr));
-
-        // Second collection with empty roots must not resurrect drop_me via a
-        // stale mark-set entry from the previous trace.
-        let (orphan, _) = heap.alloc(ObjString::from("orphan"), Object::String);
-        let orphan_addr = orphan.addr();
-        heap.trace(&[]);
-        unsafe { heap.sweep() };
-        let live = live_object_addrs(&heap);
-        assert!(
-            !live.contains(&orphan_addr),
-            "empty-root trace must not keep prior mark-set addresses alive"
-        );
-        // `keep` was unmarked after sweep and not re-rooted, also gone.
-        assert!(!live.contains(&keep_addr));
-    }
-
-    fn weak_to(heap: &mut Heap, target: Object) -> Object {
-        let weak = ObjWeak { target: Cell::new(Value::from(target.addr())), cleared: Cell::new(false) };
-        heap.alloc(weak, Object::Weak).0
-    }
-
-    /// A cycle visits the weak list, not the heap: cleared and swept weaks
-    /// leave it, live ones stay (#1870).
-    #[test]
-    fn weak_list_drops_cleared_and_swept_weaks() {
-        let mut heap = Heap::default();
-        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
-        let (dies, _) = heap.alloc(ObjString::from("dies"), Object::String);
-        let live_weak = weak_to(&mut heap, keep);
-        let dead_target = weak_to(&mut heap, dies);
-        let unreached = weak_to(&mut heap, keep);
-        assert_eq!(heap.weaks.len(), 3);
-        heap.collect(&[keep.addr(), live_weak.addr(), dead_target.addr()]);
-        let Some(Object::Weak(gc)) = heap.find_object_by_addr(dead_target.addr()) else {
-            panic!("rooted weak swept");
-        };
-        assert!(gc.as_ref().cleared.get());
-        // The unreached weak was still listed when its cycle cleared weaks.
-        assert!(heap.find_object_by_addr(unreached.addr()).is_none());
-        heap.collect(&[keep.addr(), live_weak.addr()]);
-        assert_eq!(heap.weaks, vec![live_weak.addr()]);
-    }
-
     /// One `drop` type does not stop early freeing of other types' objects;
     /// an object of a `drop` type, or one reaching it, is left to the
     /// collector, which runs the `drop`.
@@ -6967,118 +5493,6 @@ mod tests {
         late.claim_finalizer();
         assert!(heap.early_drops(Value::from(late.addr()), false, &keep).is_some_and(|d| d.is_empty()));
         assert_eq!(heap.free_early(Value::from(late.addr()), false, false, &keep), 1);
-    }
-
-    /// Objects of a `drop` type are listed from their allocation (or from
-    /// the registration, for ones made before it) until they are finalized.
-    #[test]
-    fn finalizable_list_tracks_drop_types() {
-        let mut heap = Heap::default();
-        let (early, _) = heap.alloc(ObjInstance::with_type_id_and_fields(7, 1), Object::Instance);
-        let (_other, _) = heap.alloc(ObjInstance::with_type_id_and_fields(8, 1), Object::Instance);
-        heap.register_finalizer_type(7);
-        let (late, _) = heap.alloc(ObjInstance::with_type_id_and_fields(7, 1), Object::Instance);
-        let (tagged, tagged_gc) = heap.alloc(ObjEnum::new(1, EnumPayload::one(Value::from(1i64))), Object::Enum);
-        tagged_gc.payload_mut().type_id = 7;
-        heap.note_enum_type(tagged, 7);
-        heap.begin_mark(&[late.addr()]);
-        while !heap.mark_quantum(usize::MAX) {}
-        let mut got: Vec<u64> = heap.unmarked_finalizable().iter().map(|o| o.addr()).collect();
-        got.sort_unstable();
-        let mut want = vec![early.addr(), tagged.addr()];
-        want.sort_unstable();
-        assert_eq!(got, want);
-        early.claim_finalizer();
-        let left: Vec<u64> = heap.unmarked_finalizable().iter().map(|o| o.addr()).collect();
-        assert_eq!(left, vec![tagged.addr()]);
-        assert_eq!(heap.finalizable.len(), 2, "finalized entries leave the list");
-    }
-
-    #[test]
-    fn incremental_mark_seeds_via_lookup_not_list_scan() {
-        let mut heap = Heap::default();
-        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
-        let (drop_me, _) = heap.alloc(ObjString::from("drop"), Object::String);
-        heap.begin_mark(&[keep.addr()]);
-        assert_eq!(heap.gc_phase(), GcPhase::Marking);
-        assert!(keep.is_marked());
-        assert!(!drop_me.is_marked());
-        while !heap.mark_quantum(1) {}
-        heap.clear_dead_weaks();
-        heap.begin_sweep();
-        while !heap.sweep_quantum(1) {}
-        assert_eq!(heap.gc_phase(), GcPhase::Idle);
-        assert!(heap.find_object_by_addr(keep.addr()).is_some());
-        assert!(heap.find_object_by_addr(drop_me.addr()).is_none());
-    }
-
-    #[test]
-    fn alloc_during_mark_is_black() {
-        let mut heap = Heap::default();
-        let (root, _) = heap.alloc(ObjString::from("root"), Object::String);
-        heap.begin_mark(&[root.addr()]);
-        let (baby, baby_gc) = heap.alloc(ObjString::from("baby"), Object::String);
-        assert!(baby_gc.is_marked());
-        while !heap.mark_quantum(64) {}
-        heap.clear_dead_weaks();
-        heap.begin_sweep();
-        heap.finish_sweep();
-        assert!(heap.find_object_by_addr(baby.addr()).is_some());
-        assert!(heap.find_object_by_addr(root.addr()).is_some());
-    }
-
-    #[test]
-    fn object_allocated_behind_the_sweep_is_traced_next_cycles() {
-        let mut heap = Heap::default();
-        // Garbage in `P`'s size class, swept first so its slot is reused.
-        let (garbage, _) = heap.alloc(ObjInstance::with_slots(1, vec![Value::from(0i64)]), Object::Instance);
-        heap.mark_from_roots(&[]);
-        heap.begin_sweep();
-        while heap.find_object_by_addr(garbage.addr()).is_some() {
-            assert!(!heap.sweep_quantum(1), "sweep ended before freeing the garbage");
-        }
-        // Allocated mid-sweep into the freed slot, behind the cursor.
-        let (parent, mut parent_gc) =
-            heap.alloc(ObjInstance::with_slots(1, vec![Value::from(0i64)]), Object::Instance);
-        assert_eq!(parent.addr(), garbage.addr());
-        heap.finish_sweep();
-
-        let (child, _) = heap.alloc(ObjString::from("child"), Object::String);
-        parent_gc.as_mut().set_slot(0, Value::from(child.addr()));
-        for cycle in 0..3 {
-            heap.mark_from_roots(&[parent.addr()]);
-            heap.begin_sweep();
-            heap.finish_sweep();
-            assert!(
-                heap.find_object_by_addr(child.addr()).is_some(),
-                "cycle {cycle}: child of a once-fresh object was freed"
-            );
-        }
-    }
-
-    #[test]
-    fn lazy_sweep_reclaims_across_quanta() {
-        let mut heap = Heap::default();
-        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
-        let mut dead = Vec::new();
-        for i in 0..8 {
-            let (o, _) = heap.alloc(ObjString::from(format!("d{i}").as_str()), Object::String);
-            dead.push(o.addr());
-        }
-        heap.mark_from_roots(&[keep.addr()]);
-        heap.begin_sweep();
-        assert_eq!(heap.gc_phase(), GcPhase::Sweeping);
-        let mut steps = 0;
-        while !heap.sweep_quantum(1) {
-            steps += 1;
-            assert!(steps < 64);
-        }
-        assert!(steps >= 1, "sweep must take more than one quantum");
-        assert_eq!(heap.gc_phase(), GcPhase::Idle);
-        assert!(heap.find_object_by_addr(keep.addr()).is_some());
-        for addr in dead {
-            assert!(heap.find_object_by_addr(addr).is_none());
-        }
     }
 
     /// Shared-heap workers intern and allocate concurrently inside a steal
@@ -7279,23 +5693,6 @@ mod tests {
         old.as_mut().set(0, Value::from(1_i64));
     }
 
-    /// Allocs between sweep quanta prepend to `head`; freeing the old dead
-    /// head must not unlink them (leaked bytes tripped the Drop assert).
-    #[test]
-    fn alloc_during_sweep_stays_linked() {
-        let mut heap = Heap::default();
-        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
-        let (_dead, _) = heap.alloc(ObjString::from("dead"), Object::String);
-        heap.mark_from_roots(&[keep.addr()]);
-        heap.begin_sweep();
-        let (baby, _) = heap.alloc(ObjString::from("baby"), Object::String);
-        while !heap.sweep_quantum(1) {}
-        assert!(heap.find_object_by_addr(baby.addr()).is_some());
-        assert!((&heap).into_iter().any(|o| o.addr() == baby.addr()));
-        assert!((&heap).into_iter().any(|o| o.addr() == keep.addr()));
-        assert_eq!((&heap).into_iter().count(), 2);
-    }
-
     fn words(vals: &[i64]) -> Vec<Value> {
         vals.iter().map(|&v| Value::from(v)).collect()
     }
@@ -7432,15 +5829,4 @@ mod tests {
         assert_eq!(ObjArray::new(words(&[0])).copy().elem_kind(), common::WORD_UNKNOWN);
     }
 
-    #[test]
-    fn packed_array_survives_collection() {
-        let mut heap = Heap::default();
-        let (arr, gc) = heap.alloc(ObjArray::from_bytes(vec![1, 2, 3]), Object::Array);
-        heap.gc_roots.push(arr.addr());
-        heap.begin_mark(&[arr.addr()]);
-        while !heap.mark_quantum(usize::MAX) {}
-        unsafe { heap.sweep() };
-        assert!(gc.as_ref().is_packed());
-        assert_eq!(ints(gc.as_ref()), vec![1, 2, 3]);
-    }
 }

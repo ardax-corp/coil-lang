@@ -75,13 +75,10 @@ pub fn peek_native_capture() -> Vec<NativeBody> {
 /// `bodies` as an engine runs them.
 fn finished(mut bodies: Vec<NativeBody>) -> Vec<NativeBody> {
     super::native_expand::apply_all(bodies.iter_mut().map(|b| &mut b.mir));
-    // A run that keeps counts: frames own their words (reference counts
-    // plan step 4).
-    if super::rc_insert_on() {
-        super::insert_rc_all(bodies.iter_mut().map(|b| (b.entry, &mut b.mir)));
-        for body in &bodies {
-            super::specialize::check_after_rc(&body.mir);
-        }
+    // Frames own their words (reference counts plan step 4).
+    super::insert_rc_all(bodies.iter_mut().map(|b| (b.entry, &mut b.mir)));
+    for body in &bodies {
+        super::specialize::check_after_rc(&body.mir);
     }
     for body in &bodies {
         super::specialize::check_expanded(&body.mir);

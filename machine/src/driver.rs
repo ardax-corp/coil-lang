@@ -1043,10 +1043,8 @@ impl<'a> Driver<'a> {
                 d.rt.register_finalizer(word(0), word(1));
                 Some(Invoked::Value(0))
             }
-            op @ (crate::HostOp::RegionEnter | crate::HostOp::RegionExit) => {
-                let ((), fresh) = d.fresh_panic(|d| d.rooted(ctx, |d| crate::collect::region(d, op == crate::HostOp::RegionEnter)));
-                Some(if fresh { Invoked::Unwound } else { Invoked::Value(0) })
-            }
+            // `region` is gone; its frozen hooks do nothing.
+            crate::HostOp::RegionEnter | crate::HostOp::RegionExit => Some(Invoked::Value(0)),
             crate::HostOp::Task => Some(match TASKS.get() {
                 Some(tasks) => (tasks.op)(d, ctx, fn_id, args),
                 // Pushing a task native links the scheduler.
@@ -1628,11 +1626,6 @@ impl GcHost for Driver<'_> {
                 unsafe { &*ctx }.for_each_root(|w, _| visit(HostRoot(Value::from(unsafe { *w }).heap_addr(), RootKind::Ambiguous)));
             }
         }
-    }
-
-    /// Not while auto-par workers run on the heap.
-    fn can_move(&self) -> bool {
-        self.rt.shared_epoch.is_none()
     }
 
     fn run_due_drops(&mut self) {

@@ -3325,8 +3325,8 @@ impl<'a> Lower<'a> {
             return Ok(false);
         };
         // Lanes are numbers: a store of one over another changes no count.
-        // A run that keeps counts leaves any other element to the runtime.
-        if machine::native::rc_counting() && !stores.iter().all(|s| matches!(s.2, dense::TY_I64 | dense::TY_F64)) {
+        // Any other element is left to the runtime, which counts it.
+        if !stores.iter().all(|s| matches!(s.2, dense::TY_I64 | dense::TY_F64)) {
             return Ok(false);
         }
         if stores.is_empty() || pos.is_some_and(|p| value_used(f, p)) {
@@ -4476,8 +4476,8 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
-            MirInst::StoreIndex { dest, array, index, value, .. } if machine::native::rc_counting() => {
-                // A run that keeps counts stores in place in a plain view
+            MirInst::StoreIndex { dest, array, index, value, .. } => {
+                // A store goes in place in a plain view
                 // when it can count the store itself: the new word gains an
                 // owner and the old one loses one. A word that may or may
                 // not be an object stays in place only when neither the new
@@ -4519,44 +4519,6 @@ impl<'a> Lower<'a> {
                 let v = self.get(f, *value);
                 self.set(f, *dest, v);
             }
-            MirInst::StoreIndex { dest, array, index, value, .. } => {
-                let a = self.get(f, *array);
-                let i = self.get(f, *index);
-                let v = self.get(f, *value);
-                let v = self.coerce(v, types::I64);
-                let (fast, slow, join) = self.in_view_as(f, *array, i, false, true);
-                // In place.
-                self.b.switch_to_block(fast);
-                let at = self.element(*array, i);
-                self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
-                self.b.ins().jump(join, &[]);
-                // A tracked view (an array with a card table): in place
-                // too, and the element's card marked.
-                self.b.switch_to_block(slow);
-                let (ok, _, len) = self.views[array];
-                let ok = self.b.use_var(ok);
-                let len = self.b.use_var(len);
-                let tracked = self.b.ins().icmp_imm_s(IntCC::Equal, ok, machine::VIEW_TRACKED as i64);
-                let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
-                let both = self.b.ins().band(tracked, inb);
-                let (marked, helper) = (self.b.create_block(), self.b.create_block());
-                self.b.ins().brif(both, marked, &[], helper, &[]);
-                self.b.switch_to_block(marked);
-                let at = self.element(*array, i);
-                self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
-                let cards = self.b.use_var(self.view_cards[array]);
-                let card = self.b.ins().ushr_imm_u(i, i64::from(machine::CARD_SHIFT));
-                let card_at = self.b.ins().iadd(cards, card);
-                let one = self.b.ins().iconst(types::I8, 1);
-                self.b.ins().store(MemFlagsData::trusted(), one, card_at, 0);
-                self.b.ins().jump(join, &[]);
-                self.b.switch_to_block(helper);
-                self.call_checked(self.store_index, &[self.ctx, a, i, v]);
-                self.b.ins().jump(join, &[]);
-                self.b.switch_to_block(join);
-                let v = self.get(f, *value);
-                self.set(f, *dest, v);
-            }
             MirInst::HeapFieldStore { dest, object, value, index, scalar } => {
                 let o = self.get(f, *object);
                 let o = self.coerce(o, types::I64);
@@ -4568,14 +4530,13 @@ impl<'a> Lower<'a> {
                 // type says whether it is an object: the new word gains an
                 // owner, the old one loses one (reference-count plan step 6).
                 // A number field's old and new words are numbers (`scalar`).
-                let counted = machine::native::rc_counting();
-                let inline = !counted || counted_inline(vt) || *scalar || matches!(vt, MirTy::F64 | MirTy::Bool);
+                let inline = counted_inline(vt) || *scalar || matches!(vt, MirTy::F64 | MirTy::Bool);
                 if machine::native::product_slots().inline_stores && inline {
                     // In place, unless the write barrier must log the object.
                     let (fast, slow) = self.product_slot(o, *index, true);
                     self.b.switch_to_block(fast);
                     let at = self.b.block_params(fast)[0];
-                    if counted && counted_inline(vt) {
+                    if counted_inline(vt) {
                         let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
                         self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
                         self.emit_rc(v, false);
@@ -4680,15 +4641,8 @@ impl<'a> Lower<'a> {
                 let (fast, slow) = self.in_lane_view(f, *array, i);
                 let join = self.b.create_block();
                 self.b.switch_to_block(fast);
-                if machine::native::rc_counting() {
-                    // A check run counts the store in the helper.
-                    self.b.ins().jump(slow, &[]);
-                } else {
-                    let at = self.lane_element(*array, i);
-                    self.b.ins().store(MemFlagsData::trusted(), lo, at, 0);
-                    self.b.ins().store(MemFlagsData::trusted(), hi, at, 8);
-                    self.b.ins().jump(join, &[]);
-                }
+                // The helper counts the store.
+                self.b.ins().jump(slow, &[]);
                 self.b.switch_to_block(slow);
                 let [t, p, u] = self.lane_shape(shape);
                 self.call_checked(self.lane_store, &[self.ctx, a, i, lo, hi, t, p, u]);
@@ -5228,10 +5182,10 @@ impl<'a> Lower<'a> {
             };
             self.b.ins().store(mem, x, at, (i * 8) as i32);
         }
-        // A run that keeps counts: each payload word that names an object
-        // gains an owner, as the runtime's allocation counts them (an
-        // instance's fields are stored after it is made).
-        if machine::native::rc_counting() && matches!(kind, MirAllocKind::Enum { .. }) {
+        // Each payload word that names an object gains an owner, as the
+        // runtime's allocation counts them (an instance's fields are stored
+        // after it is made).
+        if matches!(kind, MirAllocKind::Enum { .. }) {
             let kinds = (extra >> 32) as u32;
             for (k, &v) in words.iter().enumerate() {
                 let word_kind = if k < 16 { ((kinds >> (2 * k)) & 3) as u8 } else { common::WORD_UNKNOWN };

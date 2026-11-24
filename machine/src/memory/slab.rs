@@ -12,17 +12,6 @@ const CHUNK: usize = 64 * 1024;
 /// Entries of [`Slab::chunk_for`]'s recent-chunk cache.
 const RECENT: usize = 64;
 
-/// Bytes per slab chunk (evacuation accounting).
-pub const CHUNK_BYTES: usize = CHUNK;
-
-/// Sweep cycles a free slot must stay unused before its empty chunk's pages
-/// go back to the OS. Longer than the phase of typical periodic churn, so
-/// released chunks are not refaulted a cycle later.
-const RELEASE_WINDOW: u32 = 8;
-
-#[cfg(test)]
-pub(crate) const RELEASE_WINDOW_FOR_TEST: u32 = RELEASE_WINDOW;
-
 struct Chunk {
     ptr: *mut u8,
     meta: PageMeta,
@@ -274,12 +263,6 @@ impl Drop for ChunkTable {
     }
 }
 
-/// Whether `addr` lies in one of the chunks starting at `starts` (sorted).
-fn in_chunks(starts: &[u64], addr: u64) -> bool {
-    let i = starts.partition_point(|&s| s <= addr);
-    i > 0 && addr < starts[i - 1] + CHUNK as u64
-}
-
 /// Free slots of one `(slot_size, align)` class.
 struct FreeClass {
     key: (u32, u32),
@@ -300,8 +283,6 @@ pub struct Slab {
     /// They stay mapped (zero pages read as poisoned headers) and are
     /// re-carved before a new chunk is mapped. Chunk indices.
     released: Vec<((u32, u32), Vec<usize>)>,
-    /// Sweep cycles since the last idle scan (see [`RELEASE_WINDOW`]).
-    cycles_since_scan: u32,
     /// Entries of the chunks that last contained a lookup, one per 64 KiB
     /// window of the address (`addr >> 16`, mod [`RECENT`]): a loop reading
     /// strings of a few size classes touches a few chunks, and one entry
@@ -395,13 +376,6 @@ pub struct SlotCursor {
 }
 
 impl SlotCursor {
-    /// A walk for the major sweep: nursery chunks are skipped.
-    pub fn sweep() -> Self {
-        Self {
-            skip_young: true,
-            ..Self::default()
-        }
-    }
 }
 
 impl Slab {
@@ -410,7 +384,6 @@ impl Slab {
             chunks: ChunkTable::new(),
             free: Vec::new(),
             released: Vec::new(),
-            cycles_since_scan: 0,
             recent: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
             released_mask: Vec::new(),
             young_mask: Vec::new(),
@@ -570,33 +543,6 @@ impl Slab {
     #[inline]
     pub fn held_chunks(&self) -> usize {
         self.young_held
-    }
-
-    /// Reset held `chunks` a major cycle emptied for reuse.
-    pub fn unhold(&mut self, chunks: &[usize]) {
-        if chunks.is_empty() {
-            return;
-        }
-        for class in &mut self.young {
-            let (gone, kept): (Vec<_>, Vec<_>) = class.held.drain(..).partition(|h| chunks.contains(&h.0));
-            class.held = kept;
-            class.spare.extend(gone.into_iter().map(|h| h.0));
-        }
-        self.young_held -= chunks.len();
-    }
-
-    /// The held nursery chunks: `(chunk index, first slot, end, slot
-    /// size)` like [`Self::young_spans`].
-    pub fn held_spans(&self) -> Vec<(usize, u64, u64, u64)> {
-        let mut out = Vec::new();
-        for class in &self.young {
-            for &(i, end) in &class.held {
-                if let Some(c) = self.chunks.get(i) {
-                    out.push((i, c.ptr as u64 + u64::from(c.meta.first_off), end, u64::from(c.meta.slot_size)));
-                }
-            }
-        }
-        out
     }
 
     /// Whether any nursery chunk holds young objects (in use or held).
@@ -812,21 +758,6 @@ impl Slab {
         self.free_in_class(key, ptr);
     }
 
-    /// [`Self::free`] of a slot the sweep walk just returned: the cursor
-    /// already knows its class, so no chunk lookup.
-    pub fn free_at_cursor(&mut self, cur: &mut SlotCursor, ptr: NonNull<u8>) {
-        debug_assert_eq!(
-            self.chunk_for(ptr.as_ptr() as u64).map(|(_, m)| (m.slot_size, m.slot_align)),
-            Some(cur.class)
-        );
-        if cur.free_class == 0 {
-            self.free_in_class(cur.class, ptr);
-            cur.free_class = 1 + self.free.iter().position(|c| c.key == cur.class).expect("class just used");
-            return;
-        }
-        self.free[cur.free_class - 1].slots.push(ptr);
-    }
-
     fn free_in_class(&mut self, key: (u32, u32), ptr: NonNull<u8>) {
         if let Some(class) = self.free.iter_mut().find(|c| c.key == key) {
             class.slots.push(ptr);
@@ -857,16 +788,6 @@ impl Slab {
         (self.chunks.lo.load(Ordering::Acquire), self.chunks.hi.load(Ordering::Acquire))
     }
 
-    /// `(chunk index, slot size, slots in that chunk)` for a slot address.
-    #[cfg(feature = "gc-stats")]
-    pub fn slot_meta(&self, addr: u64) -> Option<(usize, usize, usize)> {
-        let i = self.chunks.position(addr)?;
-        let c = self.chunks.get(i)?;
-        let size = c.meta.slot_size as usize;
-        let slots = (CHUNK - c.meta.first_off as usize) / size;
-        Some((i, size, slots))
-    }
-
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
     }
@@ -883,200 +804,6 @@ impl Slab {
             let rel = off - meta.first_off;
             meta.is_slot_offset(rel) && (off as usize) + (meta.slot_size as usize) <= CHUNK
         })
-    }
-
-    /// Give back the pages of chunks the program did not need for the last
-    /// [`RELEASE_WINDOW`] sweep cycles. Call once per completed sweep.
-    ///
-    /// Per size class, `low_water` free slots were never handed out since the
-    /// previous scan; only that many slots' worth of *empty* chunks is
-    /// released, so steady churn (which drains its free list) keeps
-    /// everything and never refaults. Chunks stay mapped: a released page
-    /// reads as zeros, so every header in it is poisoned (`kind == 0`) and a
-    /// stale or conservative lookup stays defined
-    /// (`docs/internals/heap-identity.md`). Returns bytes released.
-    pub fn release_idle_chunks(&mut self) -> usize {
-        self.cycles_since_scan += 1;
-        if self.cycles_since_scan < RELEASE_WINDOW {
-            return 0;
-        }
-        self.cycles_since_scan = 0;
-        let idle: Vec<((u32, u32), usize)> = self
-            .free
-            .iter_mut()
-            .map(|c| {
-                let idle = c.low_water;
-                c.low_water = c.slots.len();
-                (c.key, idle)
-            })
-            .collect();
-        if !cfg!(unix) {
-            return 0;
-        }
-        // Skip the scan unless some class idled at least two chunks' worth.
-        let chunk_slots = |(size, _): (u32, u32)| CHUNK / size as usize;
-        let mut budget: Vec<((u32, u32), usize)> = idle
-            .into_iter()
-            .map(|(k, n)| (k, n / chunk_slots(k)))
-            .filter(|&(_, chunks)| chunks >= 2)
-            .collect();
-        if budget.is_empty() {
-            return 0;
-        }
-        #[cfg(feature = "gc-stats")]
-        eprintln!("gc-stats idle chunks by class: {budget:?}");
-        let n = self.chunks.len();
-        let mut starts: Vec<(u64, usize)> = Vec::with_capacity(n);
-        for i in 0..n {
-            if let Some(c) = self.chunks.get(i) {
-                starts.push((c.ptr as u64, i));
-            }
-        }
-        starts.sort_unstable();
-        let chunk_of = |addr: u64| -> Option<usize> {
-            let at = starts.partition_point(|&(s, _)| s <= addr).checked_sub(1)?;
-            let (s, i) = starts[at];
-            (addr < s + CHUNK as u64).then_some(i)
-        };
-        let mut free_slots = vec![0usize; n];
-        for class in self.free.iter().filter(|c| budget.iter().any(|(k, _)| *k == c.key)) {
-            for p in &class.slots {
-                if let Some(i) = chunk_of(p.as_ptr() as u64) {
-                    free_slots[i] += 1;
-                }
-            }
-        }
-        let mut release = vec![false; n];
-        let mut released_bytes = 0;
-        for (i, &free) in free_slots.iter().enumerate() {
-            let Some(c) = self.chunks.get(i) else {
-                continue;
-            };
-            let key = (c.meta.slot_size, c.meta.slot_align);
-            let slots = (CHUNK - c.meta.first_off as usize) / c.meta.slot_size as usize;
-            if free == 0 || free != slots {
-                continue;
-            }
-            let Some((_, left)) = budget.iter_mut().find(|(k, _)| *k == key) else {
-                continue;
-            };
-            if *left == 0 {
-                continue;
-            }
-            *left -= 1;
-            release_pages(c.ptr, CHUNK);
-            release[i] = true;
-            self.set_released(i, true);
-            released_bytes += CHUNK;
-            match self.released.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, list)) => list.push(i),
-                None => self.released.push((key, vec![i])),
-            }
-        }
-        if released_bytes != 0 {
-            for class in &mut self.free {
-                class
-                    .slots
-                    .retain(|p| chunk_of(p.as_ptr() as u64).is_none_or(|i| !release[i]));
-                class.low_water = class.slots.len();
-            }
-        }
-        released_bytes
-    }
-
-    /// Chunk index of a slot address (evacuation).
-    pub fn chunk_of(&self, addr: u64) -> Option<usize> {
-        self.chunks.position(addr)
-    }
-
-    /// `(slot size, align)` class and slot count of chunk `i` (evacuation).
-    pub fn chunk_shape(&self, i: usize) -> Option<((u32, u32), usize)> {
-        let c = self.chunks.get(i)?;
-        let slots = (CHUNK - c.meta.first_off as usize) / c.meta.slot_size as usize;
-        Some(((c.meta.slot_size, c.meta.slot_align), slots))
-    }
-
-    /// Bytes of free slots across every class (evacuation gate).
-    pub fn free_slot_bytes(&self) -> usize {
-        self.free
-            .iter()
-            .map(|c| c.slots.len() * c.key.0 as usize)
-            .sum()
-    }
-
-    /// Take every free slot lying in a `chunks[i]` chunk off the free lists,
-    /// so new copies land elsewhere (evacuation). Give them back with
-    /// [`Self::free`].
-    #[cold]
-    pub fn take_free_in(&mut self, chunks: &[bool]) -> Vec<NonNull<u8>> {
-        let mut parked = Vec::new();
-        let starts = self.chunk_starts(chunks);
-        if starts.is_empty() {
-            return parked;
-        }
-        for class in &mut self.free {
-            class.slots.retain(|p| {
-                let inside = in_chunks(&starts, p.as_ptr() as u64);
-                if inside {
-                    parked.push(*p);
-                }
-                !inside
-            });
-            class.low_water = class.low_water.min(class.slots.len());
-        }
-        parked
-    }
-
-    /// Give back the pages of `emptied` chunks (every slot free) at once and
-    /// drop their slots from the free lists; they are re-carved before a new
-    /// chunk is mapped (evacuation). Returns bytes released.
-    #[cold]
-    pub fn release_chunks(&mut self, emptied: &[bool]) -> usize {
-        if !cfg!(unix) || !emptied.contains(&true) {
-            return 0;
-        }
-        let mut released_bytes = 0;
-        for (i, _) in emptied.iter().enumerate().filter(|(_, e)| **e) {
-            let Some(c) = self.chunks.get(i) else {
-                continue;
-            };
-            if self.released_mask.get(i).copied().unwrap_or(false) {
-                continue;
-            }
-            let key = (c.meta.slot_size, c.meta.slot_align);
-            release_pages(c.ptr, CHUNK);
-            self.set_released(i, true);
-            released_bytes += CHUNK;
-            match self.released.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, list)) => list.push(i),
-                None => self.released.push((key, vec![i])),
-            }
-        }
-        let starts = self.chunk_starts(emptied);
-        for class in &mut self.free {
-            class.slots.retain(|p| !in_chunks(&starts, p.as_ptr() as u64));
-            class.low_water = class.low_water.min(class.slots.len());
-        }
-        released_bytes
-    }
-
-    /// Start addresses of the chunks flagged in `chunks`, sorted. A free
-    /// slot scan tests these few ranges instead of looking every slot's
-    /// chunk up in the table.
-    fn chunk_starts(&self, chunks: &[bool]) -> Vec<u64> {
-        let mut starts: Vec<u64> = chunks
-            .iter()
-            .enumerate()
-            .filter(|(_, on)| **on)
-            .filter_map(|(i, _)| self.chunks.get(i).map(|c| c.ptr as u64))
-            .collect();
-        starts.sort_unstable();
-        starts
-    }
-
-    /// Bytes of chunks whose pages were given back and not yet reused.
-    pub fn released_bytes(&self) -> usize {
-        self.released.iter().map(|(_, l)| l.len()).sum::<usize>() * CHUNK
     }
 
     fn carve_page(&mut self, slot_size: usize, align: usize) -> NonNull<u8> {
@@ -1230,17 +957,6 @@ fn unmap(ptr: *mut u8, len: usize) {
         libc::munmap(ptr.cast(), len);
     }
 }
-
-/// Drop a chunk's pages but keep the range mapped: later reads see zeros.
-#[cfg(unix)]
-fn release_pages(ptr: *mut u8, len: usize) {
-    unsafe {
-        libc::madvise(ptr.cast(), len, libc::MADV_DONTNEED);
-    }
-}
-
-#[cfg(not(unix))]
-fn release_pages(_ptr: *mut u8, _len: usize) {}
 
 /// Zeroed like `mmap`: an untouched slot must read as a poisoned header
 /// (`kind == 0`), or the slot walk would take it for a live object.

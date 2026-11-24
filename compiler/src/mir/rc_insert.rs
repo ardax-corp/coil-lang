@@ -38,13 +38,6 @@ use super::func::{MirBlock, MirFunc, is_tail_call_inst};
 use super::inst::{BlockId, MirBinOp, MirCastKind, MirInst, Terminator, ValueId};
 use super::ty::MirTy;
 
-/// Whether this compile inserts the ops: a run that keeps counts (all but
-/// `COIL_RC_CHECK=0`, as `machine::rc_check_mode` reads it).
-pub fn rc_insert_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("COIL_RC_CHECK").map_or(true, |v| v != "0"))
-}
-
 /// Whether an unwound frame releases what it owned ([`unwind_homes`]):
 /// on unless `COIL_RC_UNWIND=0`.
 fn unwind_homes_on() -> bool {

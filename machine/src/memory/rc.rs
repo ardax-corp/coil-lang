@@ -1,80 +1,10 @@
-//! Reference counts (reference-count plan step 2): each object's header
-//! count is the number of places that own it. Step 2 counts the heap words
-//! the runtime and native code store; frames own nothing yet, so nothing is
-//! freed at zero until the insertion pass (step 4) counts them too. The MIR
-//! ops `RcInc` / `RcDec` (step 3) are [`Heap::rc_retain`] / [`Heap::rc_drop`];
-//! [`Heap::set_rc_frees`] turns on the release at zero.
-//!
-//! The oracle (`COIL_RC_CHECK=1`, or `abort`) runs at every major mark, once
-//! marking is done: it counts the pointer words of every reachable object
-//! (a coroutine's saved words are its suspended frame's, which own nothing
-//! yet) and reports each reachable object whose count is below the number of
-//! words that name it (a word stored without its increment) and those above
-//! it (a decrement missed, or a referrer that died uncounted).
+//! Reference counts: each object's header count is the number of places
+//! that own it: heap words the runtime and native code store, and frames'
+//! words, which the compiler's insertion pass counts (`RcInc` / `RcDec`,
+//! [`Heap::rc_retain`] / [`Heap::rc_drop`]). An object is freed when its
+//! count reaches zero; cycles go to the cycle collector (`cycles.rs`).
 
 use super::*;
-
-/// What [`Heap::rc_check`] does at a major mark (`COIL_RC_CHECK`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RcCheckMode {
-    /// No counts: the tracing collector alone (`COIL_RC_CHECK=0`).
-    Off,
-    /// Count and print a summary line to stderr.
-    Report,
-    /// [`Self::Report`], and panic when a count is below its references.
-    Abort,
-    /// Keep counts with no oracle (the default, or `COIL_RC_CHECK=count`).
-    Count,
-}
-
-/// The process's [`RcCheckMode`], read once from `COIL_RC_CHECK`.
-pub fn rc_check_mode() -> RcCheckMode {
-    static MODE: std::sync::OnceLock<RcCheckMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| match std::env::var("COIL_RC_CHECK").as_deref() {
-        Ok("abort") => RcCheckMode::Abort,
-        Ok("count") | Ok("") | Err(_) => RcCheckMode::Count,
-        Ok("0") => RcCheckMode::Off,
-        Ok(_) => RcCheckMode::Report,
-    })
-}
-
-/// `COIL_RC_FREE=1` in a check run: a count that reaches zero frees its
-/// object ([`Heap::set_rc_frees`]). The code must count its frames' words
-/// (compiled in a check run, plan step 4). `COIL_RC_FREE=check` releases
-/// without freeing: the objects are recorded instead, and the next major
-/// mark aborts naming who still holds one it reaches, as
-/// `--early-free check` does.
-pub(crate) fn rc_frees_asked() -> bool {
-    rc_check_mode() != RcCheckMode::Off && matches!(rc_free_mode().as_str(), "1" | "check" | "only")
-}
-
-/// `COIL_RC_FREE`, or `only` when counts are kept with no oracle (the
-/// default).
-fn rc_free_mode() -> String {
-    std::env::var("COIL_RC_FREE").unwrap_or_else(|_| if rc_check_mode() == RcCheckMode::Count { "only".into() } else { String::new() })
-}
-
-/// `COIL_RC_FREE=only`: counts free, and the tracing collector never runs
-/// (no nursery, no mark or sweep; `gc::collect` and allocation pressure
-/// run the cycle collector). What the runtime is once step 10 deletes the
-/// tracing GC.
-pub fn rc_trace_off() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| rc_frees_asked() && rc_free_mode() == "only")
-}
-
-/// `COIL_RC_FREE=check` ([`rc_frees_asked`]).
-fn rc_frees_checked() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| rc_frees_asked() && rc_free_mode() == "check")
-}
-
-/// `COIL_RC_SWEPT=1` in a check run: the sweep names each object it frees
-/// (what the counts leaked, or a cycle's) on stderr.
-pub(crate) fn rc_swept_shown() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| rc_check_mode() != RcCheckMode::Off && std::env::var_os("COIL_RC_SWEPT").is_some_and(|v| v == "1"))
-}
 
 impl GcHeader {
     #[inline]
@@ -171,7 +101,7 @@ impl Heap {
         false
     }
 
-    /// Keep counts in this heap whatever `COIL_RC_CHECK` says (tests).
+    /// Keep counts in this heap, or not (tests that count by hand).
     pub fn set_rc_counting(&mut self, on: bool) {
         self.rc_on = on;
     }
@@ -543,9 +473,6 @@ impl Heap {
     /// frames count their words. Returns how many objects it freed.
     pub(super) fn rc_release(&mut self, obj: Object) -> usize {
         if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
-            if rc_swept_shown() {
-                eprintln!("coil rc-swept: release of {} at {:#x} skipped (phase {:?}, epoch {}, lock {})", obj.kind_name(), obj.addr(), self.gc_phase, self.epoch_stw, !self.alloc_lock.is_null());
-            }
             return 0;
         }
         // A leaf names nothing: free it without the worklist.
@@ -564,9 +491,6 @@ impl Heap {
                     self.rc_due.push(obj.addr());
                     continue;
                 }
-                if rc_swept_shown() && obj.rc_count() == 0 {
-                    eprintln!("coil rc-swept: {} at {:#x} not releasable", obj.kind_name(), obj.addr());
-                }
                 continue;
             }
             if !self.rc_leaf(obj) {
@@ -583,17 +507,13 @@ impl Heap {
 
     /// Free `obj`, whose owners are gone and whose words were released:
     /// its weaks clear, an interned string leaves the table, a weak handle
-    /// the weak list. `COIL_RC_FREE=check` records it instead.
+    /// the weak list.
     ///
     /// # Safety
     /// Nothing that will be read again names `obj`.
     pub(super) unsafe fn rc_free(&mut self, obj: Object) {
         if obj.is_weak_target() {
             self.clear_weaks_to(obj.addr());
-        }
-        if rc_frees_checked() {
-            self.doomed.push(obj.addr());
-            return;
         }
         // An interned string leaves the table first (a program string
         // is immortal and never gets here).
@@ -742,127 +662,6 @@ impl Heap {
             && obj.rc_count() == 0
     }
 
-    /// The oracle ([`rc_check_mode`]), between a major mark and its sweep.
-    pub(crate) fn rc_check(&self) {
-        let mode = rc_check_mode();
-        if matches!(mode, RcCheckMode::Off | RcCheckMode::Count) {
-            return;
-        }
-        struct Tally<'a> {
-            heap: &'a Heap,
-            refs: HashMap<u64, u32>,
-            unknown: u64,
-        }
-        impl SlotVisitor for Tally<'_> {
-            fn word(&mut self, v: &Value, kind: u8) {
-                match kind {
-                    common::WORD_POINTER => {}
-                    common::WORD_UNKNOWN => {
-                        self.unknown += 1;
-                    }
-                    _ => return,
-                }
-                if let Some(o) = self.heap.rc_object(*v) {
-                    *self.refs.entry(o.addr()).or_default() += 1;
-                }
-            }
-
-            fn member(&mut self, m: &Member) {
-                if let Member::Object(o) = m {
-                    *self.refs.entry(o.addr()).or_default() += 1;
-                }
-            }
-        }
-        let mut t = Tally { heap: self, refs: HashMap::new(), unknown: 0 };
-        let mut live = Vec::new();
-        for obj in self {
-            if obj.is_marked() {
-                // A coroutine's saved words are its frame's (not counted).
-                if !matches!(obj, Object::Coroutine(_)) {
-                    obj.visit_slots(self, &mut t);
-                }
-                live.push(obj);
-            }
-        }
-        let (mut below, mut equal, mut above, mut immortal) = (0u64, 0u64, 0u64, 0u64);
-        let mut by_kind: std::collections::BTreeMap<&'static str, u64> = Default::default();
-        let mut short: Vec<(u64, &'static str, u32, u32)> = Vec::new();
-        for &obj in &live {
-            let count = obj.rc_count();
-            let refs = t.refs.get(&obj.addr()).copied().unwrap_or(0);
-            if count == COUNT_IMMORTAL {
-                immortal += 1;
-            } else if count < refs {
-                below += 1;
-                *by_kind.entry(obj.kind_name()).or_default() += 1;
-                if short.len() < 4 {
-                    short.push((obj.addr(), obj.kind_name(), count, refs));
-                }
-            } else if count == refs {
-                equal += 1;
-            } else {
-                above += 1;
-            }
-        }
-        let kinds: Vec<String> = by_kind.iter().map(|(k, n)| format!("{k}={n}")).collect();
-        eprintln!(
-            "coil rc-check: below={below} equal={equal} above={above} immortal={immortal} unknown-words={} swept={} [{}]",
-            t.unknown,
-            self.rc_swept,
-            kinds.join(" ")
-        );
-        // Who names the first few undercounted objects.
-        if !short.is_empty() {
-            struct Who<'a> {
-                heap: &'a Heap,
-                want: Vec<u64>,
-                at: usize,
-                hits: Vec<(u64, usize)>,
-            }
-            impl SlotVisitor for Who<'_> {
-                fn word(&mut self, v: &Value, kind: u8) {
-                    if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
-                        && let Some(o) = self.heap.rc_object(*v)
-                        && self.want.contains(&o.addr())
-                    {
-                        self.hits.push((o.addr(), self.at));
-                    }
-                    self.at += 1;
-                }
-
-                fn member(&mut self, m: &Member) {
-                    if let Member::Object(o) = m
-                        && self.want.contains(&o.addr())
-                    {
-                        self.hits.push((o.addr(), self.at));
-                    }
-                    self.at += 1;
-                }
-            }
-            for (addr, kind, count, refs) in &short {
-                let mut named = Vec::new();
-                for &obj in &live {
-                    if matches!(obj, Object::Coroutine(_)) {
-                        continue;
-                    }
-                    let mut w = Who { heap: self, want: vec![*addr], at: 0, hits: Vec::new() };
-                    obj.visit_slots(self, &mut w);
-                    for (_, at) in w.hits {
-                        let what = match obj {
-                            Object::Instance(i) => format!("{} type {} slot {at}", obj.kind_name(), i.as_ref().type_id),
-                            Object::Enum(e) => format!("{} tag {} word {at}", obj.kind_name(), e.as_ref().tag),
-                            _ => format!("{} word {at}", obj.kind_name()),
-                        };
-                        named.push(what);
-                    }
-                }
-                eprintln!("coil rc-check:   {kind} count {count} < {refs}: named by {}", named.join(", "));
-            }
-        }
-        if mode == RcCheckMode::Abort && below > 0 {
-            panic!("coil rc-check: {below} reachable objects have a count below their heap references");
-        }
-    }
 }
 
 #[cfg(test)]
