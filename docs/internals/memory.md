@@ -46,8 +46,11 @@ interpreter, wasm) runs the same counted bodies. Its module doc is the reference
 
 Elision: numbers are never counted (constants, arithmetic, φs of them, a word a number store
 writes, scalar array elements), and an inc / dec pair of one word in a block cancels when nothing
-between them can release an object. `hir/early_free.rs` frees whole fresh graphs at scope end
-before MIR exists, so many objects never reach a count operation at all.
+between them can release an object. `hir/early_free.rs` frees whole fresh graphs before MIR
+exists, so many objects never reach a count operation at all. A local's free goes right after the
+last statement that names it, unless its type may hold a `drop` class or enum, a `Stream`, a
+coroutine or a function value: those keep their free at the end of the scope, so a `drop` runs, a
+descriptor closes and a generator's `defer`s run where the scope ends.
 
 Host natives follow the same convention: they take borrowed arguments and return owned results.
 Runtime stores (`set_field`, `Vec` / `HashMap` natives, the key index, string builders) increment
