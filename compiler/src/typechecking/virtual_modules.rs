@@ -1124,17 +1124,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_concrete_ffi_dload() {
+    fn ffi_runtime_calls_are_gone() {
+        // `extern` blocks replaced `ffi::dload` / `declare` / `invoke` (#2904).
         let vm = VirtualModules::new();
-        let e = vm
-            .resolve_item(&["ffi".into()], "dload")
-            .expect("ffi::dload");
-        assert_eq!(
-            e,
-            BuiltinExport::FfiFn {
-                kind: FfiBuiltin::Dload
-            }
-        );
+        for name in ["dload", "declare", "invoke", "read_ints"] {
+            assert!(vm.resolve_item(&["ffi".into()], name).is_none(), "ffi::{name}");
+        }
     }
 
     #[test]
