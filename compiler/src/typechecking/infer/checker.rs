@@ -2833,39 +2833,6 @@ impl Checker {
             );
         }
 
-        // Read::read / Write::write, stream IO groundwork.
-        {
-            use crate::typechecking::ty::byte;
-            let var = self.counter.fresh();
-            let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
-            let res_opt_int = result_ty(option_ty(int()), io_err.clone());
-            let res_int = result_ty(int(), io_err);
-            let bytes = vec_app_ty(byte());
-            self.typeclass_method_schemes.insert(
-                ("Read".to_string(), "read".to_string()),
-                Scheme::poly(
-                    vec![var],
-                    vec![Constraint::unary("Read", var)],
-                    Ty::Fun(
-                        Box::new(Ty::Var(var)),
-                        Box::new(Ty::Fun(Box::new(bytes.clone()), Box::new(res_opt_int))),
-                    ),
-                ),
-            );
-            let var = self.counter.fresh();
-            self.typeclass_method_schemes.insert(
-                ("Write".to_string(), "write".to_string()),
-                Scheme::poly(
-                    vec![var],
-                    vec![Constraint::unary("Write", var)],
-                    Ty::Fun(
-                        Box::new(Ty::Var(var)),
-                        Box::new(Ty::Fun(Box::new(bytes), Box::new(res_int))),
-                    ),
-                ),
-            );
-        }
-
         // Iterator::next : ∀I Item. Iterator<I> => I → Option<Item>
         {
             let i_var = self.counter.fresh();

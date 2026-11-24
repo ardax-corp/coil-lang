@@ -4753,23 +4753,6 @@ impl Compiler {
             }
         }
 
-        // `Stream` `Read` / `Write`: the free `read` / `write`'s native on
-        // the unboxed stream and buffer. The natives are named as callees
-        // the body reaches whatever this module calls `read` / `write`.
-        let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
-        let bytes = coil_ty::vec_app_ty(coil_ty::byte());
-        for (class, method, ok) in [("Read", "read", coil_ty::option_ty(int.clone())), ("Write", "write", int.clone())] {
-            let fqn = Generics::builtin_instance_fqn(class, "Stream", method);
-            if self.native_id(method).is_none() {
-                continue;
-            }
-            let params = [(coil_ty::stream_ty(), true), (bytes.clone(), true)];
-            let ret = coil_ty::result_ty(ok, io_err.clone());
-            self.hir_synth_callees.insert(method.to_string(), SynthCallee { host: true, ..SynthCallee::default() });
-            self.emit_builtin_entry(&fqn, &params, ret.clone(), false, |b, a| b.call(method, a, ret));
-            self.hir_synth_callees.clear();
-        }
-
         // `into`: the unboxed word cast, boxed again when its tag changes.
         for (from, to, from_tag, to_tag) in [
             ("int", "float", ValueTag::Int, ValueTag::Float),

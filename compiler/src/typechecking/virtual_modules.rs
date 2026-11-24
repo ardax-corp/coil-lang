@@ -773,8 +773,6 @@ impl VirtualModules {
             BuiltinExport::Enum {
                 name: common::BUILTIN_IO_ERROR_ENUM,
             },
-            BuiltinExport::TypeClass { name: "Read" },
-            BuiltinExport::TypeClass { name: "Write" },
         ];
         for kind in IoBuiltin::core() {
             io_exports.push(BuiltinExport::IoFn { kind: *kind });

@@ -1,0 +1,62 @@
+// `io::Read`, `io::Write` and `io::Close`, in Coil. Embedded in the
+// compiler as module `stream_io`: every program that uses `io` loads it, so
+// a `Stream`'s `s.read(buf)` needs no import, and a `use io::Read` (and so
+// on) imports from here (`macros::forward_thread_uses`). `Stream`'s impls
+// call the host primitives of the `io` virtual module.
+use io::{Stream, IoError, read as stream_read, write as stream_write, close as stream_close, wait_readable as stream_wait_readable, wait_writable as stream_wait_writable};
+
+/// Types that bytes can be read from without waiting.
+///
+/// `read` fills the front of `buf` and returns `Ok(Some(n))`, `Ok(None)`
+/// at end of input, or `Err(IoError::WouldBlock)` when nothing is ready
+/// yet; `wait_readable` then waits until a retry can make progress.
+trait Read<S> {
+    fn read(S s, Vec<byte> buf) -> Result<Option<int>, IoError> {}
+    fn wait_readable(S s) -> Result<unit, IoError> {}
+}
+
+/// Types that bytes can be written to without waiting.
+///
+/// `write` returns how many bytes of `buf` it took, or
+/// `Err(IoError::WouldBlock)`; `wait_writable` then waits until a retry can
+/// make progress. `flush` sends anything the writer holds back; it does
+/// nothing unless the type says otherwise.
+trait Write<S> {
+    fn write(S s, Vec<byte> buf) -> Result<int, IoError> {}
+    fn wait_writable(S s) -> Result<unit, IoError> {}
+
+    fn flush(S s) -> Result<unit, IoError> {
+        return Ok(());
+    }
+}
+
+/// Types that hold a resource to release.
+trait Close<S> {
+    fn close(S s) -> Result<unit, IoError> {}
+}
+
+impl Read for Stream {
+    fn read(Stream s, Vec<byte> buf) -> Result<Option<int>, IoError> {
+        return stream_read(s, buf);
+    }
+
+    fn wait_readable(Stream s) -> Result<unit, IoError> {
+        return stream_wait_readable(s);
+    }
+}
+
+impl Write for Stream {
+    fn write(Stream s, Vec<byte> buf) -> Result<int, IoError> {
+        return stream_write(s, buf);
+    }
+
+    fn wait_writable(Stream s) -> Result<unit, IoError> {
+        return stream_wait_writable(s);
+    }
+}
+
+impl Close for Stream {
+    fn close(Stream s) -> Result<unit, IoError> {
+        return stream_close(s);
+    }
+}

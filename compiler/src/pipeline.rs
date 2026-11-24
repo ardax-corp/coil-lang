@@ -794,6 +794,15 @@ impl Pipeline {
                     self.enqueue_file(file);
                     return;
                 }
+                // A module that uses `io` gets its traits and `Stream`'s
+                // impls of them, so `s.read(buf)` needs no import.
+                if path.first().map(String::as_str).unwrap_or(name) == "io" {
+                    let file = crate::macros::stream_io_module_path();
+                    if parent_file != file {
+                        self.record_use_dep(parent_file, &file, use_range.clone());
+                        self.enqueue_file(file);
+                    }
+                }
                 // Compiler virtual modules (`prelude`, `ffi`, …) are not
                 // `.coil` files, skip disk discovery for those paths.
                 {
