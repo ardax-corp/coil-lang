@@ -1,0 +1,56 @@
+// A trait value bound from `e?`: the payload is packed once, as from any
+// other value of the class.
+use tests::assert;
+
+trait Shape<S> {
+    fn area(S s) -> int {}
+}
+
+class Square {
+    pub side: int,
+}
+
+impl Shape for Square {
+    fn area(Square s) -> int {
+        return s.side * s.side;
+    }
+}
+
+fn square(int side) -> Result<Square, string> {
+    if side < 0 {
+        return Err("negative side");
+    }
+    return Ok(new Square(side));
+}
+
+fn maybe(int side) -> Option<Square> {
+    if side < 0 {
+        return None;
+    }
+    return Some(new Square(side));
+}
+
+fn area_of(int side) -> Result<int, string> {
+    let s: Shape = square(side)?;
+    return s.area();
+}
+
+fn area_or_zero(int side) -> Option<int> {
+    let s: Shape = maybe(side)?;
+    return Some(s.area());
+}
+
+test("a trait value bound from `?` on a Result") {
+    assert!(area_of(3)? == 9);
+    assert!(area_of(-1) == Err("negative side"));
+}
+
+test("a trait value bound from `?` on an Option") {
+    assert!(area_or_zero(4) == Some(16));
+    assert!(area_or_zero(-1) == None);
+}
+
+test("a trait value bound from `?` in a test body") {
+    let s: Shape = square(5)?;
+    assert!(s.area() == 25);
+}
