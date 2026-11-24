@@ -46,7 +46,19 @@ Codegen solves effects on the module's HIR
 functions from there. A body's summary keeps its own effects apart from
 the function parameters it calls, and each call site fills those in from
 its arguments, so `map(xs, fn (int x) => x * 2)` is pure while the same call
-with a lambda that writes a static is not. A lambda, a named `fn` or a
+with a lambda that writes a static is not. A generic function's call of
+a trait method on its parameter of a type parameter's type (`w.write(..)`
+on `W w`, or `Write::write(w, ..)`), when the trait leaves that method's
+effects undeclared, stays open the same way (`Summary::dispatch`): the call
+site adds the impl of that method for the type it passes there, from the
+instances the checker picked for the call, or passes the call on when that
+is its own such parameter again. So `write_all<W: Write>(stdout(), ..)`
+costs `Stream`'s `write`, which writes and may wait. An impl the call does
+not name (a default or builtin body, another trait's method of that name
+reached through a bound's superclasses) or one whose own effects depend on
+what it is passed is unknown. A `uses {…}` or `pure` declaration on the
+generic function covers what it does itself, as for a function parameter.
+A lambda, a named `fn` or a
 `let f = fn …` never reassigned is a known callee; a function value from
 anywhere else is unknown. A `Vec` built in the function (`Vec::new()`, a
 literal) that only leaves it by `return` may be pushed to without
