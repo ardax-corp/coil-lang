@@ -82,3 +82,15 @@ fn a_folded_call_frees_the_string_it_returns() {
     )]);
     assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
 }
+
+/// What a static holds when the program ends is the program's for its
+/// whole life: the report leaves it out.
+#[test]
+fn what_statics_hold_at_exit_is_not_a_leak() {
+    let stderr = run_with_leak_report("statics", &[(
+        "main.coil",
+        "static let items: Vec<string> = Vec::new();\n\
+         fn main() {\n    for i in 0..3 {\n        items.push(\"x\" + \"y\");\n    }\n}\n",
+    )]);
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
