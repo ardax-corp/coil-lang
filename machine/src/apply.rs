@@ -117,7 +117,10 @@ pub(crate) fn apply(heap: &mut Heap, raw: Value, args: &[Value], dicts: usize, c
             word_kinds: base.word_kinds & (1u32.checked_shl(2 * base.captures.len() as u32).unwrap_or(0).wrapping_sub(1)),
         };
         let (object, _) = heap.alloc(partial, Object::Fn);
-        return Apply::Value(Value::from(object.addr()));
+        // A call's result is its caller's to own.
+        let v = Value::from(object.addr());
+        heap.rc_retain(v);
+        return Apply::Value(v);
     }
     let mut call = base.captures.clone();
     call.extend(captured_args);

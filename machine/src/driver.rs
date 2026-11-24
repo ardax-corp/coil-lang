@@ -424,13 +424,17 @@ impl<'a> Driver<'a> {
     /// instance dictionaries, as `CallIndirect` does.
     pub(crate) fn call_value(&mut self, callee: Value, args: &[Value], dicts: usize) -> Option<Value> {
         let (mut callee, mut args, mut dicts) = (callee, args.to_vec(), dicts);
+        // An over-application's function in between: the result of the
+        // call before, owned here until the next step is done with it.
+        let mut between: Option<Value> = None;
         loop {
             let code_len = self.program.native.code_len();
-            match crate::apply::apply(&mut self.rt.heap, callee, &args, dicts, code_len) {
-                crate::apply::Apply::Value(v) => return Some(v),
+            let applied = crate::apply::apply(&mut self.rt.heap, callee, &args, dicts, code_len);
+            let out = match applied {
+                crate::apply::Apply::Value(v) => Some(Some(v)),
                 crate::apply::Apply::Bad(msg) => {
                     self.report(&msg, None, Vec::new(), false);
-                    return None;
+                    Some(None)
                 }
                 crate::apply::Apply::Call { pc, args: call, extras } => {
                     // The extras wait rooted for the result.
@@ -438,12 +442,23 @@ impl<'a> Driver<'a> {
                     self.rt.ffi_arg_roots.extend_from_slice(&extras);
                     let out = self.call(pc, &call);
                     self.rt.ffi_arg_roots.truncate(n);
-                    let (lo, _) = out?;
-                    if extras.is_empty() {
-                        return Some(Value::from(lo));
+                    match out {
+                        Some((lo, _)) if !extras.is_empty() => {
+                            if let Some(f) = between.replace(Value::from(lo)) {
+                                self.rt.heap.rc_drop(f);
+                            }
+                            (callee, args, dicts) = (Value::from(lo), extras, 0);
+                            None
+                        }
+                        out => Some(out.map(|(lo, _)| Value::from(lo))),
                     }
-                    (callee, args, dicts) = (Value::from(lo), extras, 0);
                 }
+            };
+            if let Some(out) = out {
+                if let Some(f) = between {
+                    self.rt.heap.rc_drop(f);
+                }
+                return out;
             }
         }
     }
