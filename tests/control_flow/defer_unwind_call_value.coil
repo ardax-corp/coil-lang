@@ -1,0 +1,50 @@
+// A function value called from a `defer` that runs while a panic unwinds
+// returns to the defer when its result is a new object: the rest of that
+// defer, and the defers after it, still run.
+use string::format;
+use task::{scope, Scope, TaskError};
+use tests::assert;
+
+static let LOG: int = 0;
+
+fn add(int n) {
+    LOG = LOG + n;
+}
+
+fn make(int n) -> Vec<int> {
+    let v: Vec<int> = [];
+    v.push(n);
+    return v;
+}
+
+fn unwinds() -> int {
+    let f: int -> Vec<int> = make;
+    defer use (f) {
+        let v = f(7);
+        add(v[0]);
+    }
+    defer {
+        add(100);
+    }
+    panic "unwinds";
+}
+
+fn failed(Result<int, TaskError> r) -> bool {
+    return match r {
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    };
+}
+
+fn run(unit -> int body) -> bool {
+    return failed(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+test("a function value's new result in an unwinding defer") {
+    LOG = 0;
+    assert!(run(unwinds));
+    assert!(LOG == 107, format("%i", LOG));
+}
