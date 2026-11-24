@@ -116,6 +116,11 @@ fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
         })
         .map(MirInst::dest)
         .collect();
+    // A ground body's `int` parameter is a number, unless it is a pair's
+    // low word (which may carry a heap payload).
+    if !func.opaque_words {
+        out.extend(func.params.iter().copied().filter(|p| ty_of(func, *p) == MirTy::I64 && !func.heap_pair_words.contains(p)));
+    }
     loop {
         let before = out.len();
         for inst in insts() {
@@ -752,8 +757,6 @@ impl Pass {
         Self { base, borrowed, owned_at_def, scalar }
     }
 
-    /// Whether `v`, which is no counted word, may still name an object the
-    /// types do not say (an `int` or untyped word that is no number).
     /// The homes some `HomeStore` writes an object word to, in order.
     fn object_homes(&self, func: &MirFunc) -> Vec<u16> {
         let mut homes: Vec<u16> = func
@@ -770,6 +773,8 @@ impl Pass {
         homes
     }
 
+    /// Whether `v`, which is no counted word, may still name an object the
+    /// types do not say (an `int` or untyped word that is no number).
     fn maybe_object(&self, func: &MirFunc, v: ValueId) -> bool {
         matches!(ty_of(func, v), MirTy::I64 | MirTy::Value) && !self.scalar.contains(&v)
     }
