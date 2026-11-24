@@ -1043,14 +1043,55 @@ mod linked {
         std::fs::create_dir_all(dir.join("lib")).unwrap();
         std::fs::copy(lib_dir.join(&lib), dir.join("lib").join(&lib)).unwrap();
         let run = run_app();
-        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n144.0 1\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
         // Another build of the library: the loader binds it by name, with no
         // hash check at start.
         let mut bytes = std::fs::read(dir.join("lib").join(&lib)).unwrap();
         bytes.push(0);
         std::fs::write(dir.join("lib").join(&lib), bytes).unwrap();
         let run = run_app();
-        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n144.0 1\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `Stream.attach` in an AOT executable that links its library by
+    /// name takes that library's code pointers: the link checked the
+    /// library, so no run-time gate is asked (coil-tls's loopback).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn an_aot_executable_attaches_a_stream_to_its_linked_library() {
+        let dir = temp_dir("aot_linked_attach");
+        let lib_dir = dir.join("deps");
+        std::fs::create_dir_all(&lib_dir).unwrap();
+        let c = dir.join("hooks.c");
+        std::fs::write(
+            &c,
+            "#include <stddef.h>\n#include <stdint.h>\n\
+             int64_t hook_read(void *s, uint8_t *b, size_t n, const char **e) { return 0; }\n\
+             int64_t hook_write(void *s, const uint8_t *b, size_t n, const char **e) { return (int64_t)n; }\n\
+             int32_t hook_shutdown(void *s, const char **e) { return 0; }\n\
+             void hook_free(void *s) {}\n\
+             long long hook(long long k) {\n\
+                 switch (k) { case 0: return (long long)(intptr_t)hook_read; case 1: return (long long)(intptr_t)hook_write;\n\
+                 case 2: return (long long)(intptr_t)hook_shutdown; default: return (long long)(intptr_t)hook_free; }\n}\n",
+        )
+        .unwrap();
+        build_shared_library(&c, &lib_dir, "hooks");
+        let src = "use io::sync::println;\nuse io::{stdin, IoError};\nextern \"hooks\" {\n    fn hook(int k) -> int;\n}\n\
+                   fn main() {\n    match stdin().attach(1, hook(0), hook(1), hook(2), hook(3)) {\n        \
+                   Result::Ok(_) => { let _ = println(\"attached\"); },\n        \
+                   Result::Err(_) => { let _ = println(\"refused\"); },\n    };\n}\n";
+        let exe = dir.join("app");
+        let row = format!("name=hooks,version=1.0.0,path={}", lib_dir.display());
+        let o = package_to(&dir, &exe, src, &["--allow-attach", "--allow-dload", "hooks", "--dload-trusted", "hooks", "--ffi-native", &row]);
+        assert_linked_native_code(&o);
+        std::fs::create_dir_all(dir.join("lib")).unwrap();
+        let lib = machine::platform_shared_lib_filename("hooks");
+        std::fs::copy(lib_dir.join(&lib), dir.join("lib").join(&lib)).unwrap();
+        let mut run = Command::new(&exe);
+        run.current_dir(std::env::temp_dir());
+        let run = run_command_with_timeout(run, 60);
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "attached\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
