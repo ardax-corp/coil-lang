@@ -3095,6 +3095,13 @@ impl<'a> Lower<'a> {
     /// thunk for each callback, and no buffer lent in place (a collection
     /// may run during it).
     fn cb_call_ok(&self, sig: &compiler::native_mir::MirExternSig, args: &[ValueId], params: &[CArg], ret: CRet, va: Option<CVa>) -> bool {
+        // A struct passed in memory is copied by a `memcpy` the call
+        // lowers to: two safepoints for one call's stack map, which frames
+        // whose counted words live across the call carry. Those calls go
+        // through the runtime's call until frames carry no stack maps.
+        if params.iter().any(|p| matches!(p, CArg::Struct { how: SPass::Stack, .. })) {
+            return false;
+        }
         let Some(cb) = &self.cb else { return true };
         c_shape(params, ret, va, sig.params.len()).is_some_and(|s| cb.calls.contains_key(&s))
             && params.iter().enumerate().all(|(k, p)| match *p {
