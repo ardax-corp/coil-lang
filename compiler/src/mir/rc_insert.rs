@@ -51,17 +51,20 @@ fn unwind_homes_on() -> bool {
 pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mut MirFunc)>) -> usize {
     let mut bodies: Vec<(Option<Label>, &mut MirFunc)> = bodies.into_iter().collect();
     let numbers = number_returns(bodies.iter().map(|(l, f)| (*l, &**f)));
-    let coros = coro_bodies(bodies.iter().map(|(_, f)| &**f));
+    let coros = owning_bodies(bodies.iter().map(|(_, f)| &**f));
     bodies.iter_mut().map(|(l, f)| insert_rc_in(f, false, &numbers, *l, l.is_some_and(|l| coros.contains(&l)))).sum()
 }
 
-/// The bodies a coroutine runs (a `gen fn`'s, `MakeCoro` targets): their
-/// parameters are the coroutine's words, also when the body never yields.
-fn coro_bodies<'a>(bodies: impl Iterator<Item = &'a MirFunc>) -> HashSet<Label> {
+/// The bodies that own their parameters: a coroutine's (a `gen fn`'s,
+/// `MakeCoro` targets), whose parameters are the coroutine's words, also
+/// when the body never yields; and a two-word value call's `unpair`, handed
+/// the call's one-word result, which it takes over.
+fn owning_bodies<'a>(bodies: impl Iterator<Item = &'a MirFunc>) -> HashSet<Label> {
     bodies
         .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
         .filter_map(|i| match i {
             MirInst::Alloc { kind: super::inst::MirAllocKind::Coro { target }, .. } => Some(*target),
+            MirInst::CallIndirect { pair: Some((_, unpair)), .. } => Some(*unpair),
             _ => None,
         })
         .collect()
