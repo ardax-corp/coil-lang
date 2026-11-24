@@ -444,6 +444,11 @@ fn unpack_struct(
             .get(i)
             .ok_or_else(|| FfiError::Unsupported("struct layout missing field offset".into()))?;
         let (val, _nbytes) = read_field_bytes(buf, off, *fty, heap, layouts)?;
+        // A nested record is a new object the record owns (reference
+        // counts); the allocation counted only its initial words.
+        if matches!(fty, FfiType::Struct(_)) {
+            heap.rc_retain(val);
+        }
         gc.as_mut().set_slot(struct_record_slot(layout, i), val);
     }
     Ok(Value::from(obj.addr()))
