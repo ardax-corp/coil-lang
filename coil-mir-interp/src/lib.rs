@@ -126,11 +126,14 @@ pub(crate) struct Edge {
 pub(crate) struct Exec {
     pub(crate) blocks: Vec<ExecBlock>,
     pub(crate) entry: u32,
+    /// The homes that own a count ([`MirFunc::counted_homes_of`] its pad), which a
+    /// generator's yield names to the cycle collector.
+    pub(crate) counted_homes: Option<u64>,
 }
 
 impl Body {
     pub(crate) fn exec(&self) -> &Exec {
-        self.exec.get_or_init(|| Exec::new(&self.mir))
+        self.exec.get_or_init(|| Exec::new(&self.mir, self.pad.as_deref().map(|p| &p.mir)))
     }
 
     /// The site of op `ip` of `block` (the terminator's past the last).
@@ -141,7 +144,7 @@ impl Body {
 }
 
 impl Exec {
-    fn new(f: &MirFunc) -> Self {
+    fn new(f: &MirFunc, pad: Option<&MirFunc>) -> Self {
         let pos: HashMap<BlockId, u32> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i as u32)).collect();
         let edge = |from: BlockId, to: BlockId| -> Option<Edge> {
             let at = *pos.get(&to)?;
@@ -186,7 +189,7 @@ impl Exec {
                 }
             }
         }
-        Self { blocks, entry: pos.get(&f.entry).copied().unwrap_or(0) }
+        Self { blocks, entry: pos.get(&f.entry).copied().unwrap_or(0), counted_homes: MirFunc::counted_homes_of(pad) }
     }
 }
 

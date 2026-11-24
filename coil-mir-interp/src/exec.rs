@@ -299,10 +299,18 @@ unsafe fn unwind(act: *mut Activation, code: u64) -> u64 {
 }
 
 /// Yield `word`. Under a debugger the generator's frames leave the task's
-/// stack meanwhile: a resume may come from another task, or never.
-unsafe fn yield_word(act: *mut Activation, ctx: *mut NativeCtx, word: u64) -> u64 {
+/// stack meanwhile: a resume may come from another task, or never. The
+/// frame's counted homes go with it, for the cycle collector.
+unsafe fn yield_word(act: *mut Activation, ctx: *mut NativeCtx, regs: *mut u64, word: u64) -> u64 {
     // SAFETY: the running activation and its context.
     unsafe {
+        let top = (&(*act).frames).last().expect("a running frame");
+        let body = &*top.body;
+        if let Some(mask) = body.exec().counted_homes {
+            let f = &body.mir;
+            (*ctx).gen_homes = if f.homes.is_empty() { rt::GEN_FRAME_EMPTY } else { frame_homes(top, regs, f) as u64 };
+            (*ctx).gen_mask = mask;
+        }
         let debug = crate::debug::active();
         if debug {
             crate::debug::leave(act);
@@ -738,14 +746,14 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                         break;
                     }
                     (*act).rerun_op = rt::parks();
-                    send = yield_word(act, ctx, w);
+                    send = yield_word(act, ctx, regs, w);
                     // A close unwinds from the yield.
                     check!();
                 }
                 set_word(f, regs, *dest, 0);
             }
             MirInst::Yield { dest, value, .. } => {
-                let w = yield_word(act, ctx, get!(*value));
+                let w = yield_word(act, ctx, regs, get!(*value));
                 check!();
                 set_word(f, regs, *dest, w);
             }

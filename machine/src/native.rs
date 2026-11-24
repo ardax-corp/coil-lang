@@ -106,7 +106,19 @@ pub struct NativeCtx {
     /// enter a plain function value's body on this context (null: through
     /// the runtime).
     pub code: *const NativeCode,
+    /// A generator body about to yield names its frame's homes here, and
+    /// in [`Self::gen_mask`] the ones that own a count (`0`: unknown, so
+    /// the cycle collector keeps the generator; [`GEN_FRAME_EMPTY`] when it
+    /// has no homes). [`coil_native_yield`] takes both.
+    pub gen_homes: u64,
+    pub gen_mask: u64,
 }
+
+/// [`NativeCtx::gen_homes`] of a generator frame without homes: it owns
+/// nothing while suspended.
+pub const GEN_FRAME_EMPTY: u64 = 8;
+pub const NATIVE_CTX_GEN_HOMES: i32 = std::mem::offset_of!(NativeCtx, gen_homes) as i32;
+pub const NATIVE_CTX_GEN_MASK: i32 = std::mem::offset_of!(NativeCtx, gen_mask) as i32;
 
 /// The host-native groups an AOT executable links ([`install_aot_host_groups`]).
 static AOT_HOST_GROUPS: std::sync::OnceLock<Vec<(crate::host_natives::HostPush, u32, u32)>> = std::sync::OnceLock::new();
@@ -453,6 +465,8 @@ impl NativeCtx {
             resume_word: 0,
             resume_how: 0,
             code: std::ptr::null(),
+            gen_homes: 0,
+            gen_mask: 0,
         }
     }
 
@@ -1733,6 +1747,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 started: false,
                 closeable: false,
                 native: None,
+                frame: (0, 0),
             };
             heap.alloc(coro, Object::Coroutine).0.addr()
         }
@@ -2426,6 +2441,10 @@ unsafe fn split_pair(ctx: *mut NativeCtx, word: u64) -> u64 {
 /// `ctx` is the call's [`NativeCtx`], on a generator's fiber.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_yield(ctx: *mut NativeCtx, value: u64) -> u64 {
+    {
+        let c = unsafe { &mut *ctx };
+        GEN_FRAME.set((std::mem::take(&mut c.gen_homes), std::mem::take(&mut c.gen_mask)));
+    }
     if parks() {
         let c = unsafe { &mut *ctx };
         c.park = PARK_YIELD;
@@ -2448,6 +2467,10 @@ pub unsafe extern "C" fn coil_native_yield(ctx: *mut NativeCtx, value: u64) -> u
 thread_local! {
     /// The next generator resume is a close ([`coil_native_yield`]).
     pub(crate) static GEN_CLOSING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The frame of the generator that just yielded: its homes and the
+    /// counted ones ([`NativeCtx::gen_homes`]), for the resumer to keep on
+    /// the generator while it is suspended (`gen_fiber.rs`).
+    pub(crate) static GEN_FRAME: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 #[cfg(not(target_family = "wasm"))]

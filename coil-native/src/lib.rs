@@ -35,6 +35,7 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
     NATIVE_CTX_BAIL, NATIVE_CTX_HEAP, NATIVE_CTX_RET_HI, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS,
+    NATIVE_CTX_GEN_HOMES, NATIVE_CTX_GEN_MASK,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
@@ -3542,6 +3543,21 @@ impl<'a> Lower<'a> {
         call
     }
 
+    /// Name this generator frame's counted homes to the yield that comes
+    /// next ([`machine::native::NativeCtx::gen_homes`]), so the cycle
+    /// collector sees what the frame owns while it is suspended.
+    fn note_gen_frame(&mut self, f: &MirFunc) {
+        let Some(mask) = f.counted_homes() else { return };
+        let homes = match self.homes_slot {
+            Some(slot) => self.b.ins().stack_addr(types::I64, slot, 0),
+            None if mask == 0 => self.b.ins().iconst(types::I64, machine::native::GEN_FRAME_EMPTY as i64),
+            None => return,
+        };
+        let mask = self.b.ins().iconst(types::I64, mask as i64);
+        self.b.ins().store(MemFlagsData::trusted(), homes, self.ctx, NATIVE_CTX_GEN_HOMES);
+        self.b.ins().store(MemFlagsData::trusted(), mask, self.ctx, NATIVE_CTX_GEN_MASK);
+    }
+
     /// Leave through the bail block when the last helper set the
     /// context's bail flag.
     fn bail_on_helper(&mut self) {
@@ -4142,6 +4158,7 @@ impl<'a> Lower<'a> {
                 let done = self.b.inst_results(call)[0];
                 self.b.ins().brif(done, exit, &[], more, &[]);
                 self.b.switch_to_block(more);
+                self.note_gen_frame(f);
                 let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.gen_yield, &[self.ctx, w]);
@@ -4161,6 +4178,7 @@ impl<'a> Lower<'a> {
                 // words while it is away (they are this call's roots).
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
+                self.note_gen_frame(f);
                 let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.gen_yield, &[self.ctx, v]);

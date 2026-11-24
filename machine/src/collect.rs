@@ -240,9 +240,13 @@ pub(crate) fn collect_cycles<H: GcHost + ?Sized>(h: &mut H) {
         if garbage.is_empty() {
             return;
         }
-        let drops: Vec<(Value, u32)> = garbage
+        // A `drop` to run, or a suspended generator to close (`None`).
+        let drops: Vec<(Value, Option<u32>)> = garbage
             .iter()
-            .filter_map(|&o| Some((Value::from(o.addr()), h.rt().pending_finalizer(o)?)))
+            .filter_map(|&o| {
+                let pc = if crate::memory::Heap::cycle_closes(o) { None } else { Some(h.rt().pending_finalizer(o)?) };
+                Some((Value::from(o.addr()), pc))
+            })
             .collect();
         if drops.is_empty() {
             h.rt_mut().heap.free_cycles(&garbage);
@@ -259,7 +263,7 @@ pub(crate) fn collect_cycles<H: GcHost + ?Sized>(h: &mut H) {
         // No collection inside the `drop`s: they run on a heap mid-pass.
         let was = std::mem::replace(&mut h.rt_mut().gc_in_progress, true);
         for (val, pc) in drops {
-            h.run_pending(val, Some(pc));
+            h.run_pending(val, pc);
         }
         h.rt_mut().gc_in_progress = was;
         for w in words {

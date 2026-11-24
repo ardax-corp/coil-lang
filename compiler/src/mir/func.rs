@@ -180,6 +180,38 @@ impl MirFunc {
         }
     }
 
+    /// The homes that own a count, as a mask (bit `h` for home `h`): the
+    /// ones this body's cleanup pad loads and releases. A generator's
+    /// suspended frame owns exactly these words, so the cycle collector
+    /// can see through it. `None` when a counted home is past the 64th.
+    pub fn counted_homes(&self) -> Option<u64> {
+        Self::counted_homes_of(self.cleanup.as_deref())
+    }
+
+    /// [`Self::counted_homes`] of the body whose cleanup pad is `pad`.
+    pub fn counted_homes_of(pad: Option<&MirFunc>) -> Option<u64> {
+        let Some(pad) = pad else { return Some(0) };
+        let mut loaded: HashMap<ValueId, u16> = HashMap::new();
+        let mut mask = 0u64;
+        for inst in pad.blocks.iter().flat_map(|b| &b.insts) {
+            match inst {
+                MirInst::HomeLoad { dest, home } => {
+                    loaded.insert(*dest, *home);
+                }
+                MirInst::RcDec { src, .. } => {
+                    if let Some(&h) = loaded.get(src) {
+                        if h >= 64 {
+                            return None;
+                        }
+                        mask |= 1 << h;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(mask)
+    }
+
     /// The function entries this body's code names: the callees of its
     /// calls, its code pointers and function values, its cleanup pad's
     /// included.

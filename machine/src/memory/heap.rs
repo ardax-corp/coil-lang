@@ -3711,6 +3711,10 @@ pub struct ObjCoroutine {
     /// Its body is native code, suspended on this fiber (`gen_fiber.rs`):
     /// `saved_stack` then holds that frame's root words.
     pub native: Option<Box<crate::native::GenFiber>>,
+    /// While it is suspended at a yield: where its frame's homes are and
+    /// which of them own a count (`NativeCtx::gen_homes`), the words its
+    /// frame holds that the cycle collector sees. `(0, _)`: unknown.
+    pub frame: (u64, u64),
 }
 
 /// Explicit strong GC pin: keeps `payload` alive while this object is reachable.

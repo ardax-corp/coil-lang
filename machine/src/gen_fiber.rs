@@ -58,6 +58,7 @@ pub(crate) fn finish(coro: RefCoroutine) {
     let c = coro.payload_mut();
     c.state = CoroState::Done;
     c.saved_stack.clear();
+    c.frame = (0, 0);
 }
 
 fn with_mut(coro: RefCoroutine, f: impl FnOnce(&mut ObjCoroutine)) {
@@ -120,6 +121,10 @@ fn run_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, go: impl FnOnce(
 /// leaves its frames on the heap.
 fn step_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) -> Option<GenStep> {
     let parked = gc.payload_mut().native.take().and_then(|mut f| f.call.take());
+    if parked.is_some() {
+        gc.payload_mut().frame = (0, 0);
+    }
+    crate::native::GEN_FRAME.set((0, 0));
     let (outcome, cleanup) = match parked {
         Some(call) => {
             let wake = h.pending_wake().and_then(|w| if call.kind == crate::native::PARK_WAIT { w.take() } else { *w });
@@ -161,10 +166,12 @@ fn step_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) ->
     match outcome {
         crate::native::NativeOutcome::Parked(call, word) => {
             let waiting = call.kind != crate::native::PARK_YIELD;
+            let frame = crate::native::GEN_FRAME.take();
             with_mut(gc, |c| {
                 // Its arguments are the body's now.
                 c.saved_stack.clear();
                 c.saved_live_mask = 0;
+                c.frame = if waiting { (0, 0) } else { frame };
                 c.state = CoroState::Suspended;
                 c.native = Some(Box::new(crate::native::GenFiber::parked(call)));
             });
@@ -213,16 +220,22 @@ fn step_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) -> 
         Some(f) => f,
         None => new_fiber(h, gc)?,
     };
-    with_mut(gc, |c| c.started = true);
+    with_mut(gc, |c| {
+        c.started = true;
+        c.frame = (0, 0);
+    });
+    crate::native::GEN_FRAME.set((0, 0));
     match run_fiber(h, gc, &mut fiber, send.bits(), false) {
         corosensei::CoroutineResult::Yield((v, ctx)) => {
             let ctx = ctx as *mut crate::native::NativeCtx;
             fiber.parked = ctx;
             let cleanup = fiber.cleanup;
+            let frame = crate::native::GEN_FRAME.take();
             with_mut(gc, |c| {
                 // Its arguments are the body's now.
                 c.saved_stack.clear();
                 c.saved_live_mask = 0;
+                c.frame = frame;
                 c.state = CoroState::Suspended;
                 c.native = Some(fiber);
             });
@@ -297,6 +310,8 @@ fn new_fiber<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Box<cra
 /// collected are the host's to run (`None`: there are none). The
 /// generator is done either way.
 pub(crate) fn close<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine) -> Option<Vec<crate::native::NativePad>> {
+    // Its frame unwinds from here: the collector no longer reads it.
+    gc.payload_mut().frame = (0, 0);
     if crate::native::parks() {
         return close_parked(h, gc);
     }

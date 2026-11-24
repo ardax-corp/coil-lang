@@ -57,7 +57,20 @@ impl Heap {
     }
 
     /// The objects `obj`'s counted words name, as a release decrements them.
+    /// A generator suspended at a yield owns the words its frame's counted
+    /// homes hold ([`ObjCoroutine::frame`]), which its close releases.
     fn rc_children(&self, obj: Object, out: &mut Vec<Object>) {
+        if let Some((homes, mask)) = Self::suspended_frame(obj) {
+            for i in (0..64).filter(|i| mask & (1 << i) != 0) {
+                // SAFETY: a suspended generator's frame stays where it
+                // yielded until it is resumed or closed, which clears it.
+                let w = unsafe { *(homes as *const u64).add(i) };
+                if let Some(o) = self.rc_object(Value::from(w)) {
+                    out.push(o);
+                }
+            }
+            return;
+        }
         struct Kids<'a>(&'a Heap, &'a mut Vec<Object>);
         impl SlotVisitor for Kids<'_> {
             fn word(&mut self, v: &Value, kind: u8) {
@@ -77,11 +90,28 @@ impl Heap {
         obj.visit_slots(self, &mut Kids(self, out));
     }
 
+    /// The frame of generator `obj` suspended at a yield, when it is
+    /// known: its homes and the counted ones.
+    fn suspended_frame(obj: Object) -> Option<(u64, u64)> {
+        let Object::Coroutine(c) = obj else { return None };
+        let c = c.as_ref();
+        (c.started && c.state == CoroState::Suspended && c.frame.0 != 0).then_some(c.frame)
+    }
+
+    /// Whether `obj` in a garbage cycle goes by its close, not a free: a
+    /// generator suspended at a yield whose frame the pass saw. Closing
+    /// it releases its frame's words, and the counts free the rest.
+    pub(crate) fn cycle_closes(obj: Object) -> bool {
+        Self::suspended_frame(obj).is_some()
+    }
+
     /// Whether a cycle pass may free `obj` once nothing outside its cycle
-    /// owns it. A coroutine, a thread, a stream or a library is kept (with
-    /// all it reaches), as is a pinned object.
+    /// owns it, or close it ([`Self::cycle_closes`]). Another coroutine, a
+    /// thread, a stream or a library is kept (with all it reaches), as is
+    /// a pinned object.
     fn cycle_freeable(obj: Object) -> bool {
-        matches!(obj, Object::Instance(_) | Object::Enum(_) | Object::Array(_) | Object::Fn(_) | Object::String(_) | Object::Root(_) | Object::Weak(_))
+        (matches!(obj, Object::Instance(_) | Object::Enum(_) | Object::Array(_) | Object::Fn(_) | Object::String(_) | Object::Root(_) | Object::Weak(_))
+            || Self::cycle_closes(obj))
             && !obj.is_pinned()
     }
 
