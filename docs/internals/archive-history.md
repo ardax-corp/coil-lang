@@ -5,8 +5,8 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs` (22 today; a reader takes
-22 only and refuses any other).
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (23 today; a reader takes
+23 only and refuses any other).
 
 ## Major 8
 
@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 9, below, is the
-current version, 8.9 with MIR section `FORMAT` 22). A runtime refuses a major
+only add something to the format raise the minor (minor 10, below, is the
+current version, 8.10 with MIR section `FORMAT` 23). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -175,6 +175,14 @@ Minor 9 (reference counts, plan step 10) adds MIR tag 55 to format 22: a
 as tag 12's. Its old and new words are numbers, so native code stores it in place
 with no count change and no test of either word. An 8.8 archive loads unchanged:
 its index stores all take the counted path.
+
+Minor 10 (reference counts, plan step 10) drops the live-root records: frames
+are no longer collector roots, so nothing read them. A `GcBarrier` (tag 15)
+writes its dest and then its object (the word of the allocating op before it)
+where it wrote a counted list of live roots, and a body writes neither its
+IL slot snapshots (`slot_env`) nor its live roots at each safepoint (`gc_roots`)
+before its debug slots. The layout changes, so the MIR section is a new `FORMAT`,
+23, and the reader refuses 22: an 8.9 archive's code is compiled again.
 
 ## Major 7
 
