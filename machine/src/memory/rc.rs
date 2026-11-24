@@ -559,6 +559,7 @@ impl Heap {
                 n <= common::PACKED_KIND_WORDS
                     && (0..n).all(|i| matches!(common::packed_word_kind(kinds, i), common::WORD_SCALAR | common::WORD_BYTE))
             }
+            Object::Array(a) => a.as_ref().holds_no_refs(),
             _ => false,
         }
     }

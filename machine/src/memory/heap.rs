@@ -2011,7 +2011,7 @@ macro_rules! walk_slots {
             }
             Object::Array(a) => {
                 let a = a.$get();
-                if a.may_hold_refs() {
+                if !a.holds_no_refs() {
                     let (k, mask, kind) = (a.lanes(), a.tag_mask, a.gc_elem_kind());
                     if let Some(words) = a.$gc_words() {
                         if k > 1 {
@@ -3265,13 +3265,24 @@ impl ObjArray {
         self.elem_kind
     }
 
-    /// The element kind the collector reads the words by: a pointer kind,
-    /// else unknown. A scalar stamp is for reference counts only until
-    /// their oracle has checked every scalar stamp (plan step 2): marking
-    /// still resolves those words.
+    /// The element kind a walk reads the words by: a pointer or scalar
+    /// stamp, else unknown. A scalar stamp names no object: its words are
+    /// not walked (a wrong one could only keep objects alive, never free
+    /// one early).
     #[inline]
     pub fn gc_elem_kind(&self) -> u8 {
-        if self.elem_kind == common::WORD_POINTER { common::WORD_POINTER } else { common::WORD_UNKNOWN }
+        match self.elem_kind {
+            common::WORD_POINTER | common::WORD_SCALAR => self.elem_kind,
+            _ => common::WORD_UNKNOWN,
+        }
+    }
+
+    /// Whether no element word names an object by the array's stamp or
+    /// storage: nothing written that may, bytes, or one-word elements
+    /// stamped scalar.
+    #[inline]
+    pub fn holds_no_refs(&self) -> bool {
+        !self.may_hold_refs || matches!(self.data, ArrayData::Bytes(_)) || (self.lanes() == 1 && self.elem_kind == common::WORD_SCALAR)
     }
 
     /// Stamp the static element kind. A pointer or scalar kind is kept
