@@ -173,3 +173,24 @@ fn what_a_test_writes_into_a_snapshot_static_is_not_a_leak() {
     );
     assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
 }
+
+/// A `defer use (mut s)` keeps `s` in a home where the cleanup pad finds
+/// it: the home owns each word written to it until the next write, and the
+/// last until the frame ends, by a return or after its pad's `defer`s.
+#[test]
+fn a_defer_home_releases_the_words_written_to_it() {
+    let stderr = run_with_leak_report_flags(
+        "defer_home",
+        &[(
+            "main.coil",
+            "use tests::assert;\nuse task::{scope, Scope};\n\n\
+             fn nested() -> string {\n    let s = \"\";\n    {\n        defer use (mut s) {\n            s = s + \"inner,\";\n        }\n    }\n    return s;\n}\n\n\
+             fn unwinds() -> int {\n    let s = \"a\";\n    {\n        defer use (mut s) {\n            s = s + \"b\";\n        }\n        s = s + \"c\";\n        if s.len() > 0 {\n            panic \"unwinds\";\n        }\n    }\n    return s.len();\n}\n\n\
+             test(\"returns\") {\n    assert!(nested() == \"inner,\");\n}\n\n\
+             test(\"unwinds\") {\n    let r = scope(fn (Scope sc) {\n        let _ = sc.spawn(unwinds);\n        0\n    });\n    assert!(r.is_err());\n}\n",
+        )],
+        &["test"],
+        &[],
+    );
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
