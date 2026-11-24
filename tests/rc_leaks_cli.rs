@@ -94,3 +94,15 @@ fn what_statics_hold_at_exit_is_not_a_leak() {
     )]);
     assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
 }
+
+/// A generator owns the arguments its coroutine was made with, also one
+/// its body never reads: that one is released as the body starts.
+#[test]
+fn a_generator_releases_an_argument_it_never_reads() {
+    let stderr = run_with_leak_report("gen_unread", &[(
+        "main.coil",
+        "class Box {\n    pub n: int,\n}\n\ngen fn one(Box b) {\n    yield 1;\n}\n\n\
+         fn main() {\n    let t = 0;\n    for v in one(new Box(1)) {\n        t += v;\n    }\n}\n",
+    )]);
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
