@@ -618,7 +618,12 @@ impl Heap {
                 Object::Weak(_) => "weak",
                 Object::Root(_) => "root",
                 Object::Stream(_) => "stream",
-                _ => "other",
+                Object::Library(_) => "library",
+                Object::Thread(_) => "thread",
+                Object::Sender(_) => "sender",
+                Object::Receiver(_) => "receiver",
+                Object::Mutex(_) => "mutex",
+                Object::RwLock(_) => "rwlock",
             };
             let e = by_kind.entry(kind).or_default();
             e.0 += 1;
@@ -711,8 +716,13 @@ impl Heap {
         // counted them ([`Self::rc_inc_slots`]).
         // A coroutine goes once its body is done (its close released its
         // frame's words). Freeing a stream closes its descriptor (a local
-        // one is kept to the end of its scope, `hir/early_free.rs`).
-        (matches!(obj, Object::Fn(_) | Object::String(_) | Object::Weak(_) | Object::Stream(_))
+        // one is kept to the end of its scope, `hir/early_free.rs`). A
+        // thread handle, channel end or lock drops its share of the
+        // runtime's state, as a sweep did.
+        (matches!(
+            obj,
+            Object::Fn(_) | Object::String(_) | Object::Weak(_) | Object::Stream(_) | Object::Thread(_) | Object::Sender(_) | Object::Receiver(_) | Object::Mutex(_) | Object::RwLock(_)
+        )
             || matches!(obj, Object::Coroutine(c) if c.as_ref().state == CoroState::Done || !c.as_ref().started)
             || matches!(obj, Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
             && !self.pending_drop(obj)
