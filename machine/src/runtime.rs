@@ -175,7 +175,7 @@ impl Runtime {
         }
         self.statics.fill(Value::default());
         self.program_string_cache.fill(Value::default());
-        self.sched = None;
+        self.task_drop_scheduler();
         self.ffi.userland_libraries.clear();
         self.ffi.adopted.clear();
         self.ffi.closures.clear();
@@ -201,7 +201,7 @@ impl Runtime {
 
     /// After a shared-heap job (the epoch's heap unbound).
     pub(crate) fn reset_shared(&mut self) {
-        self.sched = None;
+        self.task_drop_scheduler();
         self.gc_in_progress = false;
         self.gc_deferred = false;
     }

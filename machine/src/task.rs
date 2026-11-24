@@ -1064,14 +1064,24 @@ impl crate::runtime::Runtime {
     /// Forget the scheduler once no scope or task is left.
     pub(crate) fn task_drop_idle_scheduler(&mut self) {
         if self.sched.as_ref().is_some_and(|s| s.idle()) {
-            // Its removed records' coroutines lose the count each record
-            // held: no safepoint will find them once it is gone.
-            if let Some(s) = self.sched.take() {
-                for coro in s.released {
-                    self.heap.rc_drop(common::Value::from(crate::memory::Object::Coroutine(coro).addr()));
-                }
+            self.task_drop_scheduler();
+        }
+    }
+
+    /// Forget the scheduler: its removed records' coroutines lose the count
+    /// each record held, since no safepoint will find them once it is gone.
+    pub(crate) fn task_drop_scheduler(&mut self) {
+        if let Some(s) = self.sched.take() {
+            for coro in s.released {
+                self.heap.rc_drop(common::Value::from(crate::memory::Object::Coroutine(coro).addr()));
             }
         }
+    }
+
+    /// Removed task records owe their coroutines a release
+    /// ([`Scheduler::released`]), which the next safepoint makes.
+    pub(crate) fn task_coros_released(&self) -> bool {
+        self.sched.as_ref().is_some_and(|s| !s.released.is_empty())
     }
 
     pub(crate) fn task_string(&mut self, text: String) -> common::Value {

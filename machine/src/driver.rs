@@ -1612,7 +1612,7 @@ impl Drop for Driver<'_> {
         #[cfg(not(target_family = "wasm"))]
         if !self.tasks.is_empty() {
             self.tasks.clear();
-            self.rt.sched = None;
+            self.rt.task_drop_scheduler();
         }
     }
 }

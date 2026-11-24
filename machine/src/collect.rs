@@ -198,7 +198,7 @@ pub(crate) fn collect<H: GcHost + ?Sized>(h: &mut H) {
         h.rt_mut().gc_deferred = true;
         return;
     }
-    if !h.rt().heap.rc_due.is_empty() {
+    if !h.rt().heap.rc_due.is_empty() || h.rt().task_coros_released() {
         h.run_due_drops();
     }
     collect_cycles(h);
@@ -214,7 +214,7 @@ pub(crate) fn safepoint<H: GcHost + ?Sized>(h: &mut H) {
     if h.rt().heap.epoch_stw() {
         return;
     }
-    if !h.rt().heap.rc_due.is_empty() {
+    if !h.rt().heap.rc_due.is_empty() || h.rt().task_coros_released() {
         h.run_due_drops();
     }
     if h.rt().heap.should_collect_old() {
