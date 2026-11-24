@@ -1328,7 +1328,7 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
 /// whose row says it neither mutates the heap nor does anything unknown
 /// (a probe, a hash, a read) only reads them, or makes new objects, which
 /// count their own words.
-fn host_writes_words(id: u64) -> bool {
+pub(crate) fn host_writes_words(id: u64) -> bool {
     use common::EffectFlags as E;
     // `vec_stamp` counts the one object it changes itself. The lock
     // primitives change only the lock, whose value is a portable copy, and
@@ -2365,13 +2365,15 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         _ if host.on_machine || host.func.is_some() => {
             crate::host_enum::take_pair_tag();
             // SAFETY: `args` holds `n` words.
-            let before = if host_writes_words(id) {
+            let before = if host.writes_words {
                 heap.rc_before_all(unsafe { std::slice::from_raw_parts(args.cast::<common::Value>(), n as usize) })
             } else {
                 Vec::new()
             };
             let out = unsafe { host_invoke(ctx, id, layout, args, n) };
-            if let Some(heap) = unsafe { crate::native::heap(ctx) } {
+            if !before.is_empty()
+                && let Some(heap) = unsafe { crate::native::heap(ctx) }
+            {
                 heap.rc_after_all(before);
             }
             return match out {
@@ -2399,9 +2401,14 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
     if layout == crate::host_enum::HostEnumLayout::Pair {
         crate::host_enum::take_pair_tag();
     }
-    let before = if host_writes_words(id) { heap.rc_before_all(args) } else { Vec::new() };
-    let v = crate::host_enum::in_host_enum_bits(bits, || f(heap, args));
-    heap.rc_after_all(before);
+    let v = if host.writes_words {
+        let before = heap.rc_before_all(args);
+        let v = crate::host_enum::in_host_enum_bits(bits, || f(heap, args));
+        heap.rc_after_all(before);
+        v
+    } else {
+        crate::host_enum::in_host_enum_bits(bits, || f(heap, args))
+    };
     // The runtime checks for a collection once the call returns.
     let made = heap.live_object_count().saturating_sub(live_before) as u64;
     if made != 0 {

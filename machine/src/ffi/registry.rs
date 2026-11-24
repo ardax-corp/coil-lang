@@ -79,6 +79,10 @@ pub struct HostCall {
     /// the finalizer registry's `gc_register_finalizer`: native code runs it
     /// as a runtime call.
     pub on_machine: bool,
+    /// It may write a word into an object it is passed, so a run that
+    /// keeps counts diffs its arguments around the call
+    /// (`native::host_writes_words`, looked up once here).
+    pub writes_words: bool,
 }
 
 impl HostCall {
@@ -95,7 +99,7 @@ impl HostCall {
                 n.host_op(),
                 HostOp::Ordinary | HostOp::Task | HostOp::RegionEnter | HostOp::RegionExit | HostOp::RegisterFinalizer | HostOp::Restore
             );
-        Self { func, guarded, collect, on_machine }
+        Self { func, guarded, collect, on_machine, writes_words: true }
     }
 }
 
@@ -229,7 +233,8 @@ impl Natives {
             }
             by_name.insert(name, Arc::clone(&native));
         }
-        Arc::make_mut(&mut self.calls).push(HostCall::of(native.as_ref()));
+        let call = HostCall { writes_words: crate::native::host_writes_words(id as u64), ..HostCall::of(native.as_ref()) };
+        Arc::make_mut(&mut self.calls).push(call);
         Arc::make_mut(&mut self.direct).push(native.direct());
         Arc::make_mut(&mut self.by_id).push(native);
         id
