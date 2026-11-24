@@ -184,6 +184,7 @@ pub(crate) fn collect<H: GcHost + ?Sized>(h: &mut H) {
     }
     collect_cycles(h);
     h.rt_mut().heap.cycles_ran();
+    h.rt_mut().heap.release_chunks_if_due();
 }
 
 /// At an allocation safepoint: the `drop`s counts left due, and the cycle
@@ -201,6 +202,7 @@ pub(crate) fn safepoint<H: GcHost + ?Sized>(h: &mut H) {
     if h.rt().heap.cycles_due() {
         collect_cycles(h);
         h.rt_mut().heap.cycles_ran();
+        h.rt_mut().heap.release_chunks_if_due();
     }
     if h.rt().heap.get().over_byte_cap() {
         over_cap(h);

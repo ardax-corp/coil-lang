@@ -519,6 +519,10 @@ impl Heap {
             unsafe { self.rc_free(obj) };
         }
         self.rc_stack = stack;
+        // A large release may leave whole chunks empty.
+        if n >= RELEASE_CHECK_FREES {
+            self.release_chunks_if_due();
+        }
         n
     }
 

@@ -212,11 +212,23 @@ pub struct HeapCounts {
     pub live_count: usize,
 }
 
+/// How far the slab's resident bytes may run past twice the live bytes
+/// before empty chunks go back to the OS ([`Heap::release_chunks_if_due`]).
+pub const RELEASE_SLACK: usize = 32 << 20;
+
+/// Objects one release frees before it checks whether empty chunks are
+/// due back to the OS ([`Heap::release_chunks_if_due`]).
+pub(crate) const RELEASE_CHECK_FREES: usize = 4096;
+
 /// Managed heap. Objects are linked in an intrusive list for traversal.
 /// `Gc<T>` handles are copyable; the runtime controls when objects become unreachable.
 pub struct Heap {
     counts: Box<HeapCounts>,
     gc_next_threshold: usize,
+    /// The live and resident bytes at the last release of empty chunks
+    /// ([`Self::release_chunks_if_due`]).
+    release_live: usize,
+    release_resident: usize,
     /// Most bytes the heap may hold ([`Self::set_byte_cap`]); `usize::MAX`
     /// when unlimited. The collection threshold never exceeds it, so an
     /// allocation past it reaches a safepoint.
@@ -323,6 +335,8 @@ impl Default for Heap {
         let mut heap = Self {
             counts: Box::default(),
             gc_next_threshold: GC_NEXT_THRESHOLD,
+            release_live: 0,
+            release_resident: 0,
             byte_cap: usize::MAX,
             gc_growth_factor: GC_GROWTH_FACTOR,
             strings: Table::default(),
@@ -1164,6 +1178,9 @@ impl Heap {
         };
         found.clear();
         self.early_scratch.0 = found;
+        if n >= RELEASE_CHECK_FREES {
+            self.release_chunks_if_due();
+        }
         n
     }
 
@@ -1204,6 +1221,9 @@ impl Heap {
         }
         children.clear();
         self.early_scratch = (found, stack, children);
+        if n >= RELEASE_CHECK_FREES {
+            self.release_chunks_if_due();
+        }
         n
     }
 
@@ -1432,6 +1452,26 @@ impl Heap {
     /// the cycle collector on allocation pressure, or a heap over its cap
     /// ([`crate::collect::safepoint`]).
     #[inline]
+    /// Give the pages of empty chunks back to the OS when the slab holds
+    /// well over twice what is live ([`RELEASE_SLACK`] past it), and the
+    /// heap shrank or grew by that much since the last release, so a steady
+    /// program never rescans. Not in a steal epoch. Returns bytes released.
+    pub fn release_chunks_if_due(&mut self) -> usize {
+        if self.epoch_stw || !self.alloc_lock.is_null() {
+            return 0;
+        }
+        let live = self.counts.alloc_bytes;
+        let resident = self.slab.resident_bytes();
+        let moved = resident >= self.release_resident + RELEASE_SLACK || live + RELEASE_SLACK <= self.release_live;
+        if resident <= live.saturating_mul(2) + RELEASE_SLACK || !moved {
+            return 0;
+        }
+        let bytes = self.slab.release_empty_chunks();
+        self.release_live = live;
+        self.release_resident = self.slab.resident_bytes();
+        bytes
+    }
+
     pub fn safepoint_due(&self) -> bool {
         !self.rc_due.is_empty() || self.cycles_due() || self.over_byte_cap()
     }

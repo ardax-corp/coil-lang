@@ -677,6 +677,113 @@ impl Slab {
         self.chunks.len() * CHUNK
     }
 
+    /// Mapped bytes less the chunks whose pages went back to the OS.
+    pub fn resident_bytes(&self) -> usize {
+        let released: usize = self.released.iter().map(|(_, l)| l.len()).sum();
+        (self.chunks.len() - released) * CHUNK
+    }
+
+    /// Give back the pages of every chunk with no live slot: its free
+    /// slots (the free lists, a nursery class's freed slots and the rest of
+    /// its bump chunk) are all of its slots, or it is a spare nursery
+    /// chunk. Its slots leave the free lists and it waits on
+    /// [`Self::released`] to be carved again. Chunks stay mapped: a
+    /// released page reads as zeros, so every header in it is poisoned
+    /// and a lookup stays defined (`docs/internals/heap-identity.md`).
+    /// Returns the bytes released.
+    pub fn release_empty_chunks(&mut self) -> usize {
+        if !cfg!(unix) {
+            return 0;
+        }
+        let n = self.chunks.len();
+        let mut free = vec![0usize; n];
+        let chunks = &self.chunks;
+        let mut tally = |addr: u64, k: usize| {
+            if let Some(i) = chunks.position(addr) {
+                free[i] += k;
+            }
+        };
+        for class in &self.free {
+            for p in &class.slots {
+                tally(p.as_ptr() as u64, 1);
+            }
+        }
+        for class in &self.young {
+            let b = self.bumps[class.cursor];
+            let mut p = b.free;
+            while p != 0 {
+                tally(p, 1);
+                // SAFETY: a freed nursery slot links the next at `FREE_LINK`.
+                p = unsafe { *((p + FREE_LINK) as *const u64) };
+            }
+            if b.next < b.end {
+                tally(b.next, ((b.end - b.next) / u64::from(class.key.0)) as usize);
+            }
+        }
+        let mut empty = vec![false; n];
+        for (i, e) in empty.iter_mut().enumerate() {
+            let Some(c) = self.chunks.get(i) else { continue };
+            let slots = (CHUNK - c.meta.first_off as usize) / c.meta.slot_size as usize;
+            *e = free[i] == slots && !self.released_mask.get(i).copied().unwrap_or(false);
+        }
+        for class in &self.young {
+            for &i in &class.spare {
+                if !self.released_mask.get(i).copied().unwrap_or(false) {
+                    empty[i] = true;
+                }
+            }
+        }
+        let mut bytes = 0;
+        for i in (0..n).filter(|&i| empty[i]) {
+            let Some(c) = self.chunks.get(i) else { continue };
+            let (ptr, key) = (c.ptr, (c.meta.slot_size, c.meta.slot_align));
+            release_pages(ptr, CHUNK);
+            self.set_released(i, true);
+            match self.released.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, list)) => list.push(i),
+                None => self.released.push((key, vec![i])),
+            }
+            bytes += CHUNK;
+        }
+        if bytes == 0 {
+            return 0;
+        }
+        let chunks = &self.chunks;
+        let gone = |addr: u64| chunks.position(addr).is_some_and(|i| empty[i]);
+        for class in &mut self.free {
+            class.slots.retain(|p| !gone(p.as_ptr() as u64));
+            class.low_water = class.low_water.min(class.slots.len());
+        }
+        for class in &mut self.young {
+            class.used.retain(|&i| !empty[i]);
+            class.spare.retain(|&i| !empty[i]);
+            let b = &mut self.bumps[class.cursor];
+            if b.next < b.end && gone(b.next) {
+                // Its bump chunk went: the next allocation refills.
+                b.next = 0;
+                b.end = 0;
+            }
+            // Relink the freed slots that are left, in their order.
+            let mut keep = Vec::new();
+            let mut p = b.free;
+            while p != 0 {
+                if !gone(p) {
+                    keep.push(p);
+                }
+                // SAFETY: as above; a released slot's link was read before
+                // its page went (`release_pages` zeroes it).
+                p = unsafe { *((p + FREE_LINK) as *const u64) };
+            }
+            b.free = 0;
+            for &p in keep.iter().rev() {
+                // SAFETY: a freed slot of this class, kept.
+                unsafe { *((p + FREE_LINK) as *mut u64) = b.free };
+                b.free = p;
+            }
+        }
+        bytes
+    }
+
     /// Address lies in the span of mapped chunks (cheap reject for values).
     #[inline]
     pub fn may_contain(&self, addr: u64) -> bool {
@@ -853,6 +960,17 @@ fn process_memory_note() -> String {
     format!(" (VmSize {}, VmRSS {}, {maps} mappings)", field("VmSize:"), field("VmRSS:"))
 }
 
+/// Give `len` bytes at `ptr` back to the OS; they read as zeros after.
+#[cfg(unix)]
+fn release_pages(ptr: *mut u8, len: usize) {
+    unsafe {
+        libc::madvise(ptr.cast(), len, libc::MADV_DONTNEED);
+    }
+}
+
+#[cfg(not(unix))]
+fn release_pages(_ptr: *mut u8, _len: usize) {}
+
 #[cfg(unix)]
 fn unmap(ptr: *mut u8, len: usize) {
     unsafe {
@@ -881,6 +999,55 @@ fn unmap(ptr: *mut u8, len: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_nursery_chunks_go_back_and_are_carved_again() {
+        let mut slab = Slab::new();
+        let layout = Layout::from_size_align(32, 8).unwrap();
+        let per_chunk = CHUNK / 32;
+        let slots: Vec<NonNull<u8>> = (0..per_chunk * 10).map(|_| slab.alloc_young(layout)).collect();
+        // Keep one slot, marked, in the first chunk; free the rest.
+        let kept = slots[0];
+        unsafe { *(kept.as_ptr().add(16) as *mut u64) = 0xC011 };
+        for &p in &slots[1..] {
+            slab.free_young(p);
+        }
+        let before = slab.resident_bytes();
+        let released = slab.release_empty_chunks();
+        assert!(released >= 8 * CHUNK, "released {released}");
+        assert_eq!(slab.resident_bytes(), before - released);
+        // Nothing left to release, and the kept slot is intact.
+        assert_eq!(slab.release_empty_chunks(), 0);
+        assert_eq!(unsafe { *(kept.as_ptr().add(16) as *const u64) }, 0xC011);
+        // Allocation goes on: the freed slots left, then released chunks.
+        let again: Vec<NonNull<u8>> = (0..per_chunk * 10).map(|_| slab.alloc_young(layout)).collect();
+        assert!(!again.contains(&kept));
+        let mut uniq: Vec<usize> = again.iter().map(|p| p.as_ptr() as usize).collect();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), again.len());
+        // The released chunks were carved again, not new ones mapped.
+        assert!(slab.chunk_count() <= 11, "{} chunks", slab.chunk_count());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_old_chunks_go_back() {
+        let mut slab = Slab::new();
+        let layout = Layout::from_size_align(48, 8).unwrap();
+        let slots: Vec<NonNull<u8>> = (0..(CHUNK / 48) * 6).map(|_| slab.alloc(layout)).collect();
+        let mapped = slab.chunk_count();
+        for &p in &slots {
+            slab.free(p);
+        }
+        assert_eq!(slab.release_empty_chunks(), mapped * CHUNK);
+        assert_eq!(slab.resident_bytes(), 0);
+        // A new allocation re-carves a released chunk instead of mapping one.
+        let p = slab.alloc(layout);
+        assert_eq!(slab.chunk_count(), mapped);
+        slab.free(p);
+    }
 
     #[test]
     fn slot_offset_test_matches_remainder() {

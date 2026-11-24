@@ -124,8 +124,18 @@ freed young slot goes on its class's intrusive free list. `promote_young` (`memo
 moves the young chunks to the old space where nothing may allocate young: a steal epoch. The
 name is historical: nothing is collected young.
 
-Chunks stay mapped. Freed slots are reused, but empty chunks are not given back to the OS yet
-(the tracing collector released idle ones after a sweep); RSS after a peak stays flat.
+Chunks stay mapped. Freed slots are reused; once the slab's resident bytes run more than
+`RELEASE_SLACK` (32 MiB) past twice the live bytes, `Heap::release_chunks_if_due` gives the pages
+of every empty chunk back to the OS (`Slab::release_empty_chunks`, `madvise(MADV_DONTNEED)`, unix
+only). It runs after a release or an early free of at least 4096 objects and after a cycle pass,
+and only once the heap moved by the slack since the last one, so a steady program never rescans.
+A chunk is empty when its free slots (free lists, a nursery class's freed slots and the rest of
+its bump chunk) are all of its slots. A released chunk reads as zeros, so its headers are
+poisoned, and it is carved again before a new chunk is mapped.
+
+Releasing an array frees its leaf elements in place (`rc_release_elements`) instead of queuing
+one worklist entry per element, so a large array of plain objects frees without a transient
+buffer the size of the array.
 
 The `region` hooks (host ids 177/178) are no-ops kept so later ids do not move.
 
@@ -144,4 +154,3 @@ The `region` hooks (host ids 177/178) are no-ops kept so later ids do not move.
 - A cycle through a suspended generator whose frame has a counted home past the 64th leaks.
 - A frame that unwinds through a panic past code without unwind homes, and a coroutine abandoned
   before it finishes, can leave objects to the leak report.
-- Empty chunks are not returned to the OS.
