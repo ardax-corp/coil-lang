@@ -10,7 +10,7 @@ cargo build   # coil + coil-dissect (+ other helpers)
 coil dissect examples/fib.coil --fn fib
 coil dissect examples/fib.coil --fn fib --hir
 coil dissect examples/fib.coil --ast
-coil dissect gated.coil --allow-attach --fn main
+coil dissect gated.coil --allow-exit --fn main
 # or:
 coil-dissect examples/fib.coil --fn fib
 ```
@@ -32,7 +32,6 @@ coil-dissect examples/fib.coil --fn fib
 | `--allow-read` / `--allow-write` | Allow reachable file reads / writes (`io::open`, `io::fs::*`; default deny) |
 | `--allow-net` | Allow reachable sockets (`io::net::tcp::*`, `udp_*`; default deny) |
 | `--allow-env` | Allow reachable environment / working-directory calls (`env::var`, …; default deny) |
-| `--allow-attach` | Allow `Stream.attach` (default deny) |
 | `--allow-exit` | Allow reachable `env::exit` (default deny) |
 | `-A`, `--allow-all` | Every capability above plus `--allow-ffi-exec` (not `dload`) |
 | `--allow-ffi-exec` | Allow FFI process-exec symbols (`system`, `execve`, …) |

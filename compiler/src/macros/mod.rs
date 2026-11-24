@@ -69,8 +69,21 @@ pub const THREAD_LOCKS_SOURCE: &str = include_str!("../prelude/thread_locks.coil
 /// of one is a `use thread_locks::x` ([`forward_thread_uses`]).
 pub const THREAD_LOCKS_FNS: &[&str] = &["with_lock", "with_read", "with_write", "try_read", "try_write"];
 
+/// Module path of the embedded `io::Read` / `io::Write` / `io::Close`
+/// traits and `Stream`'s impls of them, in Coil. Every program that uses
+/// `io` depends on it.
+pub const STREAM_IO_MODULE: &str = "stream_io";
+
+/// Source of the embedded `stream_io` module.
+pub const STREAM_IO_SOURCE: &str = include_str!("../prelude/stream_io.coil");
+
+/// The `io` names [`STREAM_IO_MODULE`] defines: a `use io::x` of one is a
+/// `use stream_io::x` ([`forward_thread_uses`]).
+pub const STREAM_IO_TRAITS: &[&str] = &["Read", "Write", "Close"];
+
 /// Point each top-level `use thread::x` of a [`THREAD_LOCKS_FNS`] name at
-/// [`THREAD_LOCKS_MODULE`], where `x` is written in Coil.
+/// [`THREAD_LOCKS_MODULE`], and each `use io::x` of a [`STREAM_IO_TRAITS`]
+/// name at [`STREAM_IO_MODULE`], where `x` is written in Coil.
 pub fn forward_thread_uses(ast: &mut parser::ast::Output<'_>) {
     use parser::ast::Expression;
     fn visit(e: &mut Expression<'_>) {
@@ -78,6 +91,9 @@ pub fn forward_thread_uses(ast: &mut parser::ast::Output<'_>) {
             Expression::Use { path, name, .. } => {
                 if path.len() == 1 && path[0] == "thread" && THREAD_LOCKS_FNS.contains(&name.as_str()) {
                     path[0] = THREAD_LOCKS_MODULE.to_string();
+                }
+                if path.len() == 1 && path[0] == "io" && STREAM_IO_TRAITS.contains(&name.as_str()) {
+                    path[0] = STREAM_IO_MODULE.to_string();
                 }
             }
             Expression::Fragment(items) => items.iter_mut().for_each(|i| visit(&mut i.1)),
@@ -194,6 +210,11 @@ pub fn thread_locks_module_path() -> PathBuf {
     PathBuf::from("<coil>/thread_locks.coil")
 }
 
+/// Pseudo path of the embedded `stream_io` module.
+pub fn stream_io_module_path() -> PathBuf {
+    PathBuf::from("<coil>/stream_io.coil")
+}
+
 /// Pseudo path of the core prelude module.
 pub fn core_module_path() -> PathBuf {
     PathBuf::from("<coil>/core.coil")
@@ -215,6 +236,8 @@ pub fn embedded_source(path: &Path) -> Option<&'static str> {
         Some(CORE_SOURCE)
     } else if path == thread_locks_module_path() {
         Some(THREAD_LOCKS_SOURCE)
+    } else if path == stream_io_module_path() {
+        Some(STREAM_IO_SOURCE)
     } else {
         None
     }
@@ -236,6 +259,8 @@ pub fn embedded_module(path: &Path) -> Option<&'static str> {
         Some(CORE_MODULE)
     } else if path == thread_locks_module_path() {
         Some(THREAD_LOCKS_MODULE)
+    } else if path == stream_io_module_path() {
+        Some(STREAM_IO_MODULE)
     } else {
         None
     }
@@ -258,6 +283,9 @@ pub fn embedded_use(path: &[String], name: &str) -> Option<(PathBuf, &'static st
     }
     if head == THREAD_LOCKS_MODULE {
         return Some((thread_locks_module_path(), THREAD_LOCKS_MODULE));
+    }
+    if head == STREAM_IO_MODULE {
+        return Some((stream_io_module_path(), STREAM_IO_MODULE));
     }
     (head == DERIVE_MODULE).then(|| (derive_module_path(), DERIVE_MODULE))
 }

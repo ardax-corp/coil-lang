@@ -246,7 +246,7 @@ const fn prelude_trait(name: &'static str, methods: &'static [&'static str]) -> 
 /// its own trait so a type can implement only the operations it supports;
 /// `Num`, `Integral` and `Ord` are method-less bundles over them (`Ord`
 /// takes `Eq` too, so `==` in a `T: Ord` body uses `T`'s `Eq`, #1716).
-const BUILTIN_TRAITS: [BuiltinTrait; 32] = [
+const BUILTIN_TRAITS: [BuiltinTrait; 30] = [
     op_trait("Add", &["add"]),
     op_trait("Sub", &["sub"]),
     op_trait("Mul", &["mul"]),
@@ -280,8 +280,6 @@ const BUILTIN_TRAITS: [BuiltinTrait; 32] = [
     // `[Self, T]`. Prefer `x.into()` with an expected type over a reverse
     // `From` encoding.
     BuiltinTrait { params: &["Self", "T"], prelude: false, ..op_trait("Into", &["into"]) },
-    BuiltinTrait { module: "io", params: &["S"], prelude: false, ..op_trait("Read", &["read"]) },
-    BuiltinTrait { module: "io", params: &["S"], prelude: false, ..op_trait("Write", &["write"]) },
     // Carrier as first type param (same shape as Collect). Builtin arrays,
     // tuples, dicts and coroutines are synthesised at for-in sites without
     // a ground instance per T; users write ordinary `impl`.
@@ -858,7 +856,7 @@ impl Generics {
 
     /// Register the built-in typeclasses and their builtin instances.
     fn register_builtins(&mut self) {
-        use super::ty::{BUILTIN_SCALARS, BuiltinScalar, STREAM};
+        use super::ty::{BUILTIN_SCALARS, BuiltinScalar};
 
         self.register_builtin_type_ctors();
 
@@ -911,10 +909,6 @@ impl Generics {
                 });
             }
         }
-        for class in ["Read", "Write"] {
-            self.push_builtin_instance(class, Ty::Con(STREAM.into()), STREAM);
-        }
-
         // Opaque prelude iterator state type (arrays materialise as this
         // conceptually; codegen fast-paths never allocate a real class).
         self.register_nominal_type("ArrayIter", PRELUDE_MODULE);

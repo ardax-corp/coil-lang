@@ -1,0 +1,117 @@
+// `io::Read`, `io::Write` and `io::Close`, in Coil. Embedded in the
+// compiler as module `stream_io`: every program that uses `io` loads it, so
+// a `Stream`'s `s.read(buf)` needs no import, and a `use io::Read` (and so
+// on) imports from here (`macros::forward_thread_uses`). `Stream`'s impls
+// call the host primitives of the `io` virtual module.
+use io::{Stream, IoError, read as stream_read, write as stream_write, write_from as stream_write_from, close as stream_close, wait_readable as stream_wait_readable, wait_writable as stream_wait_writable};
+
+/// Types that bytes can be read from without waiting.
+///
+/// `read` fills the front of `buf` and returns `Ok(Some(n))`, `Ok(None)`
+/// at end of input, or `Err(IoError::WouldBlock)` when nothing is ready
+/// yet; `wait_readable` then waits until a retry can make progress.
+trait Read<S> {
+    fn read(S s, Vec<byte> buf) -> Result<Option<int>, IoError> {}
+    fn wait_readable(S s) -> Result<unit, IoError> {}
+}
+
+/// Types that bytes can be written to without waiting.
+///
+/// `write` returns how many bytes of `buf` it took, or
+/// `Err(IoError::WouldBlock)`; `wait_writable` then waits until a retry can
+/// make progress. `write_from` writes from an offset into `buf`. `flush`
+/// sends anything the writer holds back; it does nothing unless the type
+/// says otherwise.
+trait Write<S> {
+    fn write(S s, Vec<byte> buf) -> Result<int, IoError> {}
+    fn wait_writable(S s) -> Result<unit, IoError> {}
+
+    /// `write` of `buf` from index `offset` on. By default it writes a copy
+    /// of that part; a type that can write from the middle (`Stream`)
+    /// overrides it.
+    fn write_from(S s, Vec<byte> buf, int offset) -> Result<int, IoError> {
+        if offset == 0 {
+            return s.write(buf);
+        }
+        let rest: Vec<byte> = [];
+        for i in offset..buf.len() {
+            rest.push(buf[i]);
+        }
+        return s.write(rest);
+    }
+
+    fn flush(S s) -> Result<unit, IoError> {
+        return Ok(());
+    }
+}
+
+/// Types that hold a resource to release.
+trait Close<S> {
+    fn close(S s) -> Result<unit, IoError> {}
+}
+
+impl Read for Stream {
+    fn read(Stream s, Vec<byte> buf) -> Result<Option<int>, IoError> {
+        return stream_read(s, buf);
+    }
+
+    fn wait_readable(Stream s) -> Result<unit, IoError> {
+        return stream_wait_readable(s);
+    }
+}
+
+impl Write for Stream {
+    fn write(Stream s, Vec<byte> buf) -> Result<int, IoError> {
+        return stream_write(s, buf);
+    }
+
+    fn wait_writable(Stream s) -> Result<unit, IoError> {
+        return stream_wait_writable(s);
+    }
+
+    fn write_from(Stream s, Vec<byte> buf, int offset) -> Result<int, IoError> {
+        return stream_write_from(s, buf, offset);
+    }
+}
+
+impl Close for Stream {
+    fn close(Stream s) -> Result<unit, IoError> {
+        return stream_close(s);
+    }
+}
+
+// A trait value meets its own trait's bound: these forward to the value
+// the pack holds.
+impl Read for Read {
+    fn read(Read r, Vec<byte> buf) -> Result<Option<int>, IoError> {
+        return r.read(buf);
+    }
+
+    fn wait_readable(Read r) -> Result<unit, IoError> {
+        return r.wait_readable();
+    }
+}
+
+impl Write for Write {
+    fn write(Write w, Vec<byte> buf) -> Result<int, IoError> {
+        return w.write(buf);
+    }
+
+    fn wait_writable(Write w) -> Result<unit, IoError> {
+        return w.wait_writable();
+    }
+
+    fn write_from(Write w, Vec<byte> buf, int offset) -> Result<int, IoError> {
+        return w.write_from(buf, offset);
+    }
+
+    fn flush(Write w) -> Result<unit, IoError> {
+        return w.flush();
+    }
+}
+
+impl Close for Close {
+    fn close(Close c) -> Result<unit, IoError> {
+        return c.close();
+    }
+}

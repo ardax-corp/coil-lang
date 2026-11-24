@@ -161,7 +161,7 @@ mod tests {
         assert!(classify_host_name("clock_sleep_ms").contains(EffectFlags::HOST));
         assert!(classify_host_name("write").contains(EffectFlags::IO));
         assert!(classify_host_name("gc_collect").contains(EffectFlags::GC));
-        assert!(classify_host_name("invoke").contains(EffectFlags::FFI));
+        assert!(classify_host_name("ffi_read_ints").contains(EffectFlags::FFI));
         assert!(!classify_host_name("mystery").is_pure());
     }
 

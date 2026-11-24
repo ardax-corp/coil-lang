@@ -116,7 +116,7 @@ Program arguments follow `--`: `coil FILE -- a b` and `coil run X.ccoil -- a b` 
 with `env::args()` == [FILE, a, b]; coil's own flags are never visible to the program.\n\
 Default diagnostics: pretty reports on stderr.\n\
 `--root DIR` is repeatable extra `use`/`mod` search (default is `src` under cwd).\n\
-Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
+Host grants (`--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
 `--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck.\n\
 `coil run out.ccoil` and coil-embed do\n\
 not re-apply allow flags; if the archive has the call, it runs. `--ffi-search-path` is\n\
@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn parse_debug_dap_with_host_grants() {
-        let cli = parse_args(&args(&["debug", "--dap", "--allow-attach", "--allow-exit"])).unwrap();
+        let cli = parse_args(&args(&["debug", "--dap", "--allow-exit"])).unwrap();
         assert_eq!(
             cli.command,
             Command::Debug {
@@ -897,7 +897,6 @@ mod tests {
                 dap: true,
             }
         );
-        assert!(cli.host_grants.allow_attach);
         assert!(cli.host_grants.allow_exit);
     }
 
@@ -942,7 +941,6 @@ mod tests {
         let cli = parse_args(&args(&[
             "dissect",
             "a.coil",
-            "--allow-attach",
             "--allow-exit",
             "--allow-ffi-exec",
             "--allow-dload",
@@ -961,7 +959,6 @@ mod tests {
                 show_ast: false,
             }
         );
-        assert!(cli.host_grants.allow_attach);
         assert!(cli.host_grants.allow_exit);
         assert!(cli.host_grants.allow_ffi_exec);
         assert_eq!(
@@ -1377,7 +1374,6 @@ mod tests {
         let cli = parse_args(&args(&[
             "run",
             "out.ccoil",
-            "--allow-attach",
             "--allow-exec",
             "--allow-exit",
             "--allow-ffi-exec",
@@ -1389,7 +1385,6 @@ mod tests {
             "./native",
         ]))
         .unwrap();
-        assert!(cli.host_grants.allow_attach);
         assert!(cli.host_grants.allow_exec);
         assert!(cli.host_grants.allow_exit);
         assert!(cli.host_grants.allow_ffi_exec);
@@ -1404,7 +1399,8 @@ mod tests {
 
         let cli = parse_args(&args(&["--allow-exit", "examples/fib.coil"])).unwrap();
         assert!(cli.host_grants.allow_exit);
-        assert!(!cli.host_grants.allow_attach);
+        assert!(!cli.host_grants.allow_exec);
+        assert!(parse_args(&args(&["run", "out.ccoil", "--allow-attach"])).is_err());
 
         let cli = parse_args(&args(&["run", "out.ccoil"])).unwrap();
         assert_eq!(cli.host_grants, HostGrants::deny_all());

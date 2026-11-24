@@ -53,6 +53,15 @@ a forwarder per method of the superclass, then `D` itself. `Eq` from an `Ord` or
 
 Tests: `tests/traits/superclass_dict_methods.coil`, `superclass_dict_open_goal.coil` and their `_shared` twins.
 
+## Impls for trait values
+
+A trait's name in an impl head is its trait values' type (`impl Sink for Port`, `Ty::Existential { class: "Port" }`, in the checker's pre-pass and codegen's head mangling alike). Such an instance is ground: a trait value is one pack word, so `ty_is_closed` holds for it and a call of `fn f<T: Sink>` at `Port` is a per-type clone like any other. Its methods are ordinary source, usually forwarders whose `p.put(n)` is the pack's own slot call (`ExistentialMethodCall`). Two uses follow:
+
+- `impl Sink for Sink` lets a `Sink` value meet a `T: Sink` bound;
+- `impl Sink for Port`, with `Sink` a supertrait of `Port`, lets a `Port` value meet it and pack as a `Sink` (`let s: Sink = p;`): the new pack holds the `Port` pack as its value and `Sink<Port>`'s dictionary.
+
+The inliner keeps such a repack: a `Port` argument does not stand in for a `Sink` parameter (`inline::packs`). Nothing writes these forwarders for the user yet.
+
 ## Comparing trait objects (#2740)
 
 A bare-trait existential is a pack `(value, dictionary)`. `==` / `!=` on two of them need an `Eq` the trait gives its values, a superclass of its parameter (`trait Tr<S: Eq>`, or `Ord`): without one it is E0119, as on a type parameter without the bound. With one, the checker records the slot of `eq` .. `ge` in the trait's flattened methods (`ExistentialMethodCall`), the planner makes it `HirOp::Existential`, and MIR (`Lower::existential_cmp`) calls that slot of the left pack's dictionary on the two packed values when both packs hold the same dictionary, that is the same instance's values. Packs of two instances are never equal (`==` false, `!=` true), and an order between them panics (`` `<` on `Tr` values of different types ``). The test is the dictionary's identity: two packs of one type made where the dictionary is not the same object (an open goal's dictionary, built at each use; another worker's interned static) compare unequal.

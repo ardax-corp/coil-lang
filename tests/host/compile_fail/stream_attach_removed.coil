@@ -1,0 +1,8 @@
+// @expected E0101 — `Stream.attach` was removed; streams implement the
+// `io::Read` / `io::Write` / `io::Close` traits instead.
+use io::stdout;
+
+fn main() {
+    let s = stdout();
+    let _ = s.attach(0, 0, 0, 0, 0);
+}

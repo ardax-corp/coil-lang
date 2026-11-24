@@ -1820,8 +1820,6 @@ pub enum StreamKind {
     TcpListener,
     /// Datagram socket (`io::net::udp::bind` / `connect`).
     Udp,
-    /// Package IO attached in place (`Stream.attach`).
-    Attached,
     /// A file or socket stream a `thread::spawn` worker read from a static
     /// of its spawner: the handle stays with the spawner, so using it in
     /// the worker panics (#1684).
@@ -3815,7 +3813,7 @@ impl ObjFn {
     }
 }
 
-/// Host-backed non-blocking IO stream (file / stdio / TCP / UDP / attached).
+/// Host-backed non-blocking IO stream (file / stdio / TCP / UDP).
 pub struct ObjStream {
     pub handle: Option<crate::io_handle::NativeHandle>,
     pub kind: StreamKind,
@@ -3824,16 +3822,10 @@ pub struct ObjStream {
     pub read_timeout: Option<std::time::Duration>,
     /// Soft deadline for sync write adapters / handshake writes (`None` = wait forever).
     pub write_timeout: Option<std::time::Duration>,
-    /// Package session pointer + C vtable (`Stream.attach`).
-    pub attached: Option<crate::stream_attach::AttachedIo>,
 }
 
 impl Drop for ObjStream {
     fn drop(&mut self) {
-        if let Some(slot) = self.attached.take() {
-            // shutdown when the fd is still here, then free.
-            slot.shutdown_then_free(self.handle.as_mut());
-        }
         // NativeHandle closes on drop; clear so Drop does not double-close.
         self.handle.take();
         self.closed = true;

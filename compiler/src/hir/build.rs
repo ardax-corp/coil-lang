@@ -2865,7 +2865,10 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
         };
         let x = b.temp("ok", ok_ty.clone());
         let hit_pat = self.variant_pat(enum_name, hit, HirPatFields::Tuple(vec![HirPat::Bind(x)]));
-        let hit_body = self.synth(b, span, HirKind::Local(x), ok_ty);
+        // The payload read takes the operand's span, not the try's: a pack the
+        // checker recorded for `e?` (`let s: Shape = e?`) belongs to the match,
+        // and a read sharing its span and type would pack it a second time.
+        let hit_body = self.synth(b, span_of(inner), HirKind::Local(x), ok_ty);
         // In a test body the miss arm fails the case with a message (#628).
         let test_try = self.checker.test_try_at(span.0, span.1).cloned();
         // The miss arm re-wraps the error in the function's own return type.

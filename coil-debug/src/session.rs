@@ -1473,17 +1473,17 @@ mod tests {
     fn host_grants_apply_to_debug_compile() {
         let dir = std::env::temp_dir().join(format!("coil_dbg_grant_{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let path = dir.join("attach.coil");
+        let path = dir.join("exit.coil");
         fs::write(
             &path,
-            "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+            "use env::exit;\nfn main() { exit(0); }\n",
         )
         .unwrap();
         let denied = compile_entry(path.to_str().unwrap(), HostGrants::deny_all());
-        assert!(denied.is_err(), "ungranted attach must fail typecheck");
+        assert!(denied.is_err(), "ungranted exit must fail typecheck");
         let mut grants = HostGrants::deny_all();
-        grants.allow_attach = true;
-        compile_entry(path.to_str().unwrap(), grants).expect("granted attach");
+        grants.allow_exit = true;
+        compile_entry(path.to_str().unwrap(), grants).expect("granted exit");
         let _ = fs::remove_dir_all(&dir);
     }
 

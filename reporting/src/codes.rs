@@ -168,7 +168,7 @@ pub enum ErrorCode {
     HostExecDenied,
     /// `env::exit` without `--allow-exit`.
     HostExitDenied,
-    /// `Stream.attach` without `--allow-attach`.
+    /// Retired: `Stream.attach` without `--allow-attach` (both removed).
     HostAttachDenied,
     /// FFI process-exec symbol without `--allow-ffi-exec`.
     HostFfiExecDenied,

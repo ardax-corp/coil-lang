@@ -474,13 +474,13 @@ fn dap_stop_on_entry_has_stack_and_step_case() {
     client.disconnect();
 }
 
-fn dap_launch_allow_attach_grant_case() {
+fn dap_launch_allow_exit_grant_case() {
     let dir = case_dir("coil_dap_grant");
     let _ = std::fs::create_dir_all(&dir);
     let gated = dir.join("gated.coil");
     std::fs::write(
         &gated,
-        "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+        "use env::exit;\nfn main() { exit(0); }\n",
     )
     .expect("write gated");
 
@@ -505,7 +505,7 @@ fn dap_launch_allow_attach_grant_case() {
     );
     denied.disconnect();
 
-    let mut granted = DapClient::spawn_with(&dir, &["--allow-attach"]);
+    let mut granted = DapClient::spawn_with(&dir, &["--allow-exit"]);
     let init = granted.request(
         "initialize",
         serde_json::json!({ "clientID": "test", "adapterID": "coil" }),
@@ -539,14 +539,14 @@ fn dap_launch_allow_attach_grant_case() {
         serde_json::json!({
             "program": gated.to_string_lossy(),
             "cwd": dir.to_string_lossy(),
-            "allowAttach": true,
+            "allowExit": true,
             "stopOnEntry": true,
         }),
     );
     assert_eq!(
         ok.get("success"),
         Some(&serde_json::json!(true)),
-        "launch allowAttach={ok}"
+        "launch allowExit={ok}"
     );
     via_launch.disconnect();
     let _ = std::fs::remove_dir_all(&dir);
@@ -771,7 +771,7 @@ dap_tests! {
     dap_line_breakpoint_hit_case => dap_line_breakpoint_hit;
     dap_launch_compile_failure_case => dap_launch_compile_failure;
     dap_stop_on_entry_has_stack_and_step_case => dap_stop_on_entry_has_stack_and_step;
-    dap_launch_allow_attach_grant_case => dap_launch_allow_attach_grant;
+    dap_launch_allow_exit_grant_case => dap_launch_allow_exit_grant;
     dap_panic_stops_for_inspection_case => dap_panic_stops_for_inspection;
     dap_let_locals_at_line_breakpoint_case => dap_let_locals_at_line_breakpoint;
     dap_dead_local_keeps_its_value_case => dap_dead_local_is_optimized_out;

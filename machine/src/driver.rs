@@ -400,9 +400,12 @@ impl<'a> Driver<'a> {
                     let n = self.rt.ffi_arg_roots.len();
                     self.rt.ffi_arg_roots.push(Value::from(r.lo));
                     self.rt.ffi_arg_roots.extend(r.hi.map(Value::from));
-                    crate::collect::safepoint(self);
+                    // A pad that runs while a panic unwinds starts with
+                    // `panicked` set: only a panic of the safepoint's own
+                    // fails the call.
+                    let ((), fresh) = self.fresh_panic(crate::collect::safepoint);
                     self.rt.ffi_arg_roots.truncate(n);
-                    if self.panicked {
+                    if fresh {
                         return None;
                     }
                 }

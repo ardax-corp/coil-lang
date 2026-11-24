@@ -1,9 +1,7 @@
 //! Host-backed non-blocking IO streams (files, stdio, TCP).
 //!
 //! Streams are always non-blocking at the OS level. Blocking adapters are
-//! Coil userland (coil-stdlib `io/sync.coil`) over L0 + `await_*`. Attached
-//! package IO (`Stream.attach`) parks handshake waits on
-//! [`reactor_wait_fd_no_help`].
+//! Coil userland (coil-stdlib `io/sync.coil`) over L0 + `await_*`.
 
 use std::cell::RefCell;
 use std::io::{self, ErrorKind, Read, Write};
@@ -207,8 +205,8 @@ pub enum IoErrorTag {
     AlreadyExists = 7,
     TimedOut = 8,
     Truncated = 9,
-    /// An attached package stream reported a protocol failure (a TLS
-    /// certificate, handshake or alert); the package says which.
+    /// A package stream reported a protocol failure (a TLS certificate,
+    /// handshake or alert); the package says which.
     Protocol = 10,
     /// EMFILE / ENFILE: no descriptor left for this process or the system.
     TooManyOpenFiles = 11,
@@ -234,43 +232,6 @@ impl IoErrorTag {
             ErrorKind::NotADirectory => Self::NotADirectory,
             ErrorKind::AlreadyExists => Self::AlreadyExists,
             ErrorKind::UnexpectedEof => Self::Truncated,
-            _ => Self::Other,
-        }
-    }
-
-    /// Map a package-IO `err_out` discriminant (`IoErrorTag` as `i32`).
-    pub fn from_abi(code: i32) -> Self {
-        match code {
-            0 => Self::WouldBlock,
-            1 => Self::NotFound,
-            2 => Self::PermissionDenied,
-            3 => Self::AlreadyClosed,
-            4 => Self::InvalidInput,
-            5 => Self::Other,
-            6 => Self::NotADirectory,
-            7 => Self::AlreadyExists,
-            8 => Self::TimedOut,
-            9 => Self::Truncated,
-            // A package's own failure: coil-tls sends its certificate (10)
-            // and handshake (11) codes; it reports which through its own API.
-            10 | 11 => Self::Protocol,
-            _ => Self::Other,
-        }
-    }
-
-    /// Map a package-IO `err_out` name (`tls.h` tag names: NUL-terminated, NULL = ok).
-    pub fn from_abi_name(name: &str) -> Self {
-        match name {
-            "WouldBlock" => Self::WouldBlock,
-            "NotFound" => Self::NotFound,
-            "PermissionDenied" => Self::PermissionDenied,
-            "AlreadyClosed" => Self::AlreadyClosed,
-            "InvalidInput" => Self::InvalidInput,
-            "NotADirectory" => Self::NotADirectory,
-            "AlreadyExists" => Self::AlreadyExists,
-            "TimedOut" => Self::TimedOut,
-            "Truncated" => Self::Truncated,
-            "Protocol" | "Certificate" | "Handshake" => Self::Protocol,
             _ => Self::Other,
         }
     }
@@ -383,7 +344,7 @@ pub fn reactor_wait_fd(
     crate::thread::host_io_wait(handle, interest, timeout)
 }
 
-/// Wait for handle readiness without CPU help-steal (package attach handshake; COI-116).
+/// Wait for handle readiness without CPU help-steal (COI-116).
 pub fn reactor_wait_fd_no_help(
     handle: WaitHandle,
     interest: Interest,
@@ -415,7 +376,6 @@ pub fn alloc_stream(heap: &mut Heap, handle: NativeHandle, kind: StreamKind) -> 
             closed: false,
             read_timeout: None,
             write_timeout: None,
-            attached: None,
         },
         Object::Stream,
     );
@@ -454,8 +414,7 @@ pub(crate) fn stream_std_reopen(
                 closed: true,
                 read_timeout: None,
                 write_timeout: None,
-                attached: None,
-            },
+                },
             Object::Stream,
         );
         return Ok(Value::from(obj.addr()));
@@ -483,7 +442,6 @@ pub(crate) fn alloc_unsent_stream(heap: &mut Heap) -> Value {
             closed: false,
             read_timeout: None,
             write_timeout: None,
-            attached: None,
         },
         Object::Stream,
     );
@@ -528,9 +486,6 @@ pub fn stream_close(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
             return Err(IoErrorTag::AlreadyClosed);
         }
         let wait = s.handle.as_ref().map(|h| h.wait_handle());
-        if let Some(slot) = s.attached.take() {
-            slot.shutdown_then_free(s.handle.as_mut());
-        }
         s.handle.take();
         s.closed = true;
         Ok(wait)
@@ -579,9 +534,6 @@ fn stream_read_into(
             return Err(IoErrorTag::AlreadyClosed);
         }
         let handle = s.handle.as_mut().unwrap();
-        if let Some(att) = s.attached.as_ref() {
-            return att.read(&mut tmp);
-        }
         match handle.read(&mut tmp) {
             Ok(0) => Ok(None),
             Ok(n) => Ok(Some(n)),
@@ -662,9 +614,6 @@ fn stream_write_bytes(heap: &mut Heap, stream: Value, bytes: &[u8]) -> Result<us
             return result;
         }
         let handle = s.handle.as_mut().unwrap();
-        if let Some(att) = s.attached.as_ref() {
-            return att.write(bytes);
-        }
         match handle.write(bytes) {
             Ok(n) => Ok(n),
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {
@@ -779,34 +728,12 @@ pub fn stream_write_all(heap: &mut Heap, stream: Value, buf: Value) -> Result<()
 
 fn wait_readable(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
     let timeout = stream_read_timeout(heap, stream)?;
-    {
-        // Pending attached ciphertext must go out before we can expect a reply.
-        // Prefer writable poll so sync adapters (read_to_end after write) progress.
-        let wants_write = with_stream_mut(heap, stream, |s| {
-            s.attached.as_ref().is_some_and(|t| t.wants_write())
-        })?;
-        if wants_write {
-            let handle = stream_wait_handle(heap, stream)?;
-            let write_timeout = stream_write_timeout(heap, stream)?;
-            return poll_ready(handle, false, write_timeout);
-        }
-    }
     let handle = stream_wait_handle(heap, stream)?;
     poll_ready(handle, true, timeout)
 }
 
 fn wait_writable(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
     let timeout = stream_write_timeout(heap, stream)?;
-    {
-        // Prefer draining pending attached writes when the socket can accept them.
-        let wants = with_stream_mut(heap, stream, |s| {
-            s.attached.as_ref().is_some_and(|t| t.wants_write())
-        })?;
-        if wants {
-            let handle = stream_wait_handle(heap, stream)?;
-            return poll_ready(handle, false, timeout);
-        }
-    }
     let handle = stream_wait_handle(heap, stream)?;
     poll_ready(handle, false, timeout)
 }
@@ -833,28 +760,6 @@ fn stream_await_interest(
         Interest::Readable => stream_read_timeout(heap, stream)?,
         Interest::Writable => stream_write_timeout(heap, stream)?,
     };
-    if interest == Interest::Readable {
-        // Attached sessions track last WouldBlock interest; wait writable when
-        // handshake / ciphertext still needs to flush (wrong-read park).
-        let wants_write = with_stream_mut(heap, stream, |s| {
-            s.attached.as_ref().is_some_and(|t| t.wants_write())
-        })?;
-        if wants_write {
-            let handle = stream_wait_handle(heap, stream)?;
-            match reactor_wait_fd(handle, Interest::Writable, Some(Duration::ZERO)) {
-                Ok(()) => return Ok(Some(as_result_unit(heap, Ok(())))),
-                Err(IoErrorTag::TimedOut) => {
-                    request_io_park(IoParkRequest {
-                        handle,
-                        interest: Interest::Writable,
-                        timeout: stream_write_timeout(heap, stream)?,
-                    });
-                    return Ok(None);
-                }
-                Err(e) => return Ok(Some(as_result_unit(heap, Err(e)))),
-            }
-        }
-    }
     let handle = stream_wait_handle(heap, stream)?;
     // Already ready?
     match reactor_wait_fd(handle, interest, Some(Duration::ZERO)) {
@@ -1276,7 +1181,7 @@ fn tcp_stream_addr(
             return Err(IoErrorTag::AlreadyClosed);
         }
         match s.kind {
-            StreamKind::Tcp | StreamKind::TcpListener | StreamKind::Attached => Ok(s.kind),
+            StreamKind::Tcp | StreamKind::TcpListener => Ok(s.kind),
             _ => Err(IoErrorTag::InvalidInput),
         }
     })??;
@@ -1330,7 +1235,7 @@ pub fn tcp_set_nodelay(heap: &mut Heap, stream: Value, enabled: bool) -> Result<
             return Err(IoErrorTag::AlreadyClosed);
         }
         match s.kind {
-            StreamKind::Tcp | StreamKind::Attached => {}
+            StreamKind::Tcp => {}
             _ => return Err(IoErrorTag::InvalidInput),
         }
         let sock = s
@@ -1357,7 +1262,7 @@ pub fn tcp_shutdown(heap: &mut Heap, stream: Value, how: i64) -> Result<(), IoEr
             return Err(IoErrorTag::AlreadyClosed);
         }
         match s.kind {
-            StreamKind::Tcp | StreamKind::Attached => {}
+            StreamKind::Tcp => {}
             _ => return Err(IoErrorTag::InvalidInput),
         }
         let sock = s
@@ -2237,32 +2142,6 @@ mod tests {
         let client = tcp_connect(&mut heap, "localhost", port).expect("localhost connect");
         stream_close(&mut heap, client).ok();
         let _ = accept.join();
-    }
-
-    #[test]
-    fn from_abi_name_matches_tls_h_tags() {
-        assert_eq!(
-            IoErrorTag::from_abi_name("WouldBlock"),
-            IoErrorTag::WouldBlock
-        );
-        // coil-tls names its own failures; the stream reports `Protocol`.
-        assert_eq!(
-            IoErrorTag::from_abi_name("Certificate"),
-            IoErrorTag::Protocol
-        );
-        assert_eq!(
-            IoErrorTag::from_abi_name("Handshake"),
-            IoErrorTag::Protocol
-        );
-        assert_eq!(IoErrorTag::from_abi_name("TimedOut"), IoErrorTag::TimedOut);
-        assert_eq!(IoErrorTag::from_abi_name("not-a-tag"), IoErrorTag::Other);
-        assert_eq!(
-            IoErrorTag::from_abi_name("WouldBlock"),
-            IoErrorTag::from_abi(0)
-        );
-        assert_eq!(IoErrorTag::from_abi(10), IoErrorTag::Protocol);
-        assert_eq!(IoErrorTag::from_abi(11), IoErrorTag::Protocol);
-        assert_eq!(IoErrorTag::from_abi(12), IoErrorTag::Other);
     }
 
     #[test]

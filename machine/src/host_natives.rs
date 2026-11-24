@@ -47,7 +47,8 @@ const TIME_REMOVED: &[(&str, usize)] = &[
 /// Leftover TLS (`tls_client_enable` … `tls_alpn_protocol`) and virtual crypto
 /// slots were dropped; holes collapsed. Those ids are not reserved stubs.
 /// Virtual time slots are panic stubs so later catalog ids do not slide
-/// through the time block. `stream_attach` / `stream_park` are 119 / 120.
+/// through the time block, and so are `stream_attach` / `stream_park` (119 /
+/// 120).
 pub fn build_standard_host_natives(
     mut register_id: impl FnMut(&str, usize),
 ) -> Vec<Arc<dyn NativeFn>> {
@@ -180,10 +181,9 @@ host_groups! {
     35 => |o, r| push_math_libm(o, r);
     // Append-only after math_libm: Vec helpers.
     36 => |o, r| push_wiring(o, r, VEC_WIRING);
-    // `stream_attach` / `stream_park` are the package-IO hooks (coil-tls uses
-    // these via `dload`, not runtime TLS natives).
-    37 => |o, r| push_stream_attach(o, r);
-    38 => |o, r| push_stream_park(o, r);
+    // `stream_attach` / `stream_park`: removed package-IO hooks, panic stubs.
+    37 => |o, r| push_removed_stream_stub(o, r, STREAM_ATTACH_NATIVE);
+    38 => |o, r| push_removed_stream_stub(o, r, STREAM_PARK_NATIVE);
     // Append-only after stream_park: process clocks (no Instant HashMap).
     39 => |o, r| push_wiring(o, r, CLOCK_WIRING);
     // Append-only after clocks: `Result<(), IoError>` pack probe (no IO).
@@ -357,8 +357,6 @@ const STREAM_FIRST_NATIVES: &[&str] = &[
     "udp_send_to",
     "udp_recv_from",
     "udp_local_port",
-    STREAM_ATTACH_NATIVE,
-    STREAM_PARK_NATIVE,
     STREAM_FD_NATIVE,
 ];
 
@@ -403,21 +401,17 @@ pub use common::{
     STREAM_FD_NATIVE, STREAM_PARK_NATIVE,
 };
 
-fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
-    use crate::io::as_result_value;
-    register(out, register_id, STREAM_ATTACH_NATIVE, FfiType::Int, |sig| {
-        HostClosureFn::new(sig, |heap, args| {
-            use crate::stream_attach::{typed_fn_from_hashed_dload, StreamVTable};
-            let r = (|| {
-                let vtable = StreamVTable {
-                    read: typed_fn_from_hashed_dload(args[2].as_int())?,
-                    write: typed_fn_from_hashed_dload(args[3].as_int())?,
-                    shutdown: typed_fn_from_hashed_dload(args[4].as_int())?,
-                    free: typed_fn_from_hashed_dload(args[5].as_int())?,
-                };
-                crate::stream_attach::stream_attach(heap, args[0], args[1].as_int(), vtable)
-            })();
-            Ok(Some(as_result_value(heap, r)))
+/// `stream_attach` / `stream_park`: `Stream.attach` / `Stream.park` were
+/// removed (stream types implement `io::Read` / `io::Write` / `io::Close`).
+/// A panic stub so its id and every later id stay put.
+fn push_removed_stream_stub(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut dyn FnMut(&str, usize),
+    name: &'static str,
+) {
+    register(out, register_id, name, FfiType::Int, |sig| {
+        HostClosureFn::new(sig, move |_heap, _args| {
+            panic!("removed HostInvoke `{name}` (`Stream.attach` / `Stream.park` are gone)");
         })
     });
 }
@@ -484,26 +478,6 @@ fn push_thread_spawn_shared(
     let id = out.len();
     register_id(common::THREAD_SPAWN_SHARED_NATIVE, id);
     out.push(spawn_shared_native(crate::thread::thread_spawn_shared));
-}
-
-fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
-    use crate::io::as_result_unit;
-    register(out, register_id, STREAM_PARK_NATIVE, FfiType::Int, |sig| {
-        HostClosureFn::new(sig, |heap, args| {
-            if crate::task::tasks_active() {
-                // Under a task scheduler: suspend this task, not the thread.
-                return match crate::stream_attach::stream_park_request(heap, args[0]) {
-                    Ok(req) => {
-                        crate::io::request_io_park(req);
-                        Ok(None)
-                    }
-                    Err(e) => Ok(Some(as_result_unit(heap, Err(e)))),
-                };
-            }
-            let r = crate::stream_attach::stream_park(heap, args[0]);
-            Ok(Some(as_result_unit(heap, r)))
-        })
-    });
 }
 
 fn push_stream_fd(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
@@ -1368,7 +1342,7 @@ mod tests {
         assert_eq!(attach, 119);
     }
 
-    /// COI-232: attach/park are live package-IO natives, not leftover TLS/crypto stubs.
+    /// COI-232: attach/park keep HostInvoke 119 / 120 as panic stubs.
     #[test]
     fn stream_attach_and_park_own_hostinvoke_119_and_120() {
         let mut map = std::collections::HashMap::new();
@@ -1514,6 +1488,28 @@ mod tests {
                 msg.contains("virtual time is gone") && msg.contains(name),
                 "{name} stub must name the removed host, got {msg:?}"
             );
+        }
+    }
+
+    #[test]
+    fn removed_stream_attach_and_park_stubs_panic() {
+        let natives = build_standard_host_natives(|_, _| {});
+        let mut heap = crate::Heap::default();
+        for (name, id, arity) in [(STREAM_ATTACH_NATIVE, 119, 6), (STREAM_PARK_NATIVE, 120, 1)] {
+            let native = &natives[id];
+            assert_eq!(native.name(), name);
+            assert_eq!(native.signature().args.len(), arity, "{name}");
+            let args: Vec<Value> = (0..arity).map(|i| Value::from(i as i64)).collect();
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                native.invoke(&mut heap, &args)
+            }));
+            let payload = panicked.expect_err(&format!("{name} must panic, not run"));
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_default();
+            assert!(msg.contains("removed HostInvoke") && msg.contains(name), "{name}: {msg:?}");
         }
     }
 

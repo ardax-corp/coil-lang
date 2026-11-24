@@ -1,7 +1,8 @@
 //! Append-only HostInvoke catalog shared by compiler and runtime.
 //!
 //! Ids are the table index. New natives go at the end. Do not reorder or
-//! reuse slots. Frozen: 119 = `stream_attach`, 120 = `stream_park`.
+//! reuse slots. Frozen: 119 = `stream_attach`, 120 = `stream_park` (both
+//! panic stubs since `Stream.attach` / `Stream.park` were removed).
 //! Append-only after that: 121–123 = `clock_*`, 124 = `result_unit_probe`.
 
 use crate::{Caps, EffectFlags};
@@ -62,7 +63,6 @@ const NET_CAP: Caps = Caps::NET;
 const ENV_CAP: Caps = Caps::ENV;
 const EXEC_CAP: Caps = Caps::EXEC;
 const EXIT_CAP: Caps = Caps::EXIT;
-const ATTACH_CAP: Caps = Caps::ATTACH;
 
 /// The HostInvoke catalog, one row per native:
 ///
@@ -225,9 +225,12 @@ host_natives! {
     116 "vec_insert" (3) HEAP_R, NO_CAP;
     117 "vec_remove" (2) HEAP_R, NO_CAP;
     118 "vec_from_array" (1) HEAP_R, NO_CAP;
-    /// Frozen HostInvoke id for `stream_attach`.
-    119 "stream_attach" (6) PARK_R, ATTACH_CAP => STREAM_ATTACH_ID, STREAM_ATTACH_NATIVE;
-    /// Frozen HostInvoke id for `stream_park`.
+    // Removed slots: `Stream.attach` / `Stream.park` (stream types implement
+    // `io::Read` / `io::Write` / `io::Close` instead). Kept so later ids do
+    // not slide; nothing exports them and the runtime panics.
+    /// Frozen HostInvoke id for `stream_attach` (a panic stub).
+    119 "stream_attach" (6) PARK_R, NO_CAP => STREAM_ATTACH_ID, STREAM_ATTACH_NATIVE;
+    /// Frozen HostInvoke id for `stream_park` (a panic stub).
     120 "stream_park" (1) PARK_R, NO_CAP => STREAM_PARK_ID, STREAM_PARK_NATIVE;
     /// HostInvoke id for `clock_wall_nanos`.
     121 "clock_wall_nanos" (0) HOST, NO_CAP => CLOCK_WALL_NANOS_ID, CLOCK_WALL_NANOS_NATIVE;

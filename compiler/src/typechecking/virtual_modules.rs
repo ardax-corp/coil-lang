@@ -169,6 +169,7 @@ pub const REMOVED_PRELUDE_TEXT_FNS: &[&str] = &["ord", "char"];
 /// The help for `use ffi::{dload, declare, invoke, read_ints}`.
 pub(crate) const REMOVED_FFI_HELP: &str = "declare the library's functions in an `extern \"lib\" { ... }` block, or load one while the program runs with the coil-ffi package (`use coil_ffi::{Library}`)";
 
+const REMOVED_ATTACH_HELP: &str = "`io::attach` / `io::park` were removed: a stream type implements the `io::Read`, `io::Write` and `io::Close` traits instead";
 const REMOVED_POW_HELP: &str =
     "`prelude::math::pow` was removed: write `base ** exponent` (checked, wrapping and saturating forms are in `arith`)";
 /// `prelude::math::rem` was removed in favour of the `%` operator.
@@ -223,10 +224,6 @@ pub enum IoBuiltin {
     UdpRecvFrom,
     /// Local bound port of a UDP socket (useful after `bind(..., 0)`).
     UdpLocalPort,
-    /// In-place attach of package IO hooks (`Stream.attach`).
-    StreamAttach,
-    /// Park this coro on the stream fd (`Stream.park`).
-    StreamPark,
     /// Host-edge `Result<(), IoError>` probe (`Ok` = 0 / `Err` = pointer).
     ResultUnitProbe,
 }
@@ -264,8 +261,6 @@ impl IoBuiltin {
             Self::UdpSendTo => "send_to",
             Self::UdpRecvFrom => "recv_from",
             Self::UdpLocalPort => "local_port",
-            Self::StreamAttach => "attach",
-            Self::StreamPark => "park",
             Self::ResultUnitProbe => "result_unit_probe",
         }
     }
@@ -303,8 +298,6 @@ impl IoBuiltin {
             Self::UdpSendTo => "udp_send_to",
             Self::UdpRecvFrom => "udp_recv_from",
             Self::UdpLocalPort => "udp_local_port",
-            Self::StreamAttach => "stream_attach",
-            Self::StreamPark => "stream_park",
             Self::ResultUnitProbe => "result_unit_probe",
         }
     }
@@ -326,8 +319,6 @@ impl IoBuiltin {
             Self::AwaitWritable,
             Self::Drive,
             Self::WaitReady,
-            Self::StreamAttach,
-            Self::StreamPark,
             Self::ResultUnitProbe,
         ]
     }
@@ -391,8 +382,6 @@ impl IoBuiltin {
             // (append-only). Leftover TLS HostInvoke was dropped.
             Self::WaitReady,
             Self::WriteFrom,
-            Self::StreamAttach,
-            Self::StreamPark,
             Self::ResultUnitProbe,
         ]
     }
@@ -773,8 +762,6 @@ impl VirtualModules {
             BuiltinExport::Enum {
                 name: common::BUILTIN_IO_ERROR_ENUM,
             },
-            BuiltinExport::TypeClass { name: "Read" },
-            BuiltinExport::TypeClass { name: "Write" },
         ];
         for kind in IoBuiltin::core() {
             io_exports.push(BuiltinExport::IoFn { kind: *kind });
@@ -1034,6 +1021,7 @@ impl VirtualModules {
         match (path.join("::").as_str(), name) {
             ("io", "from_bytes") => Some("`from_bytes` is in the `string` module: `use string::{from_bytes};`"),
             ("io", "to_bytes") => Some("`to_bytes` is in the `string` module: `use string::{to_bytes};`"),
+            ("io", "attach" | "park") => Some(REMOVED_ATTACH_HELP),
             ("prelude::math", "pow") => Some(REMOVED_POW_HELP),
             ("prelude::math", "rem") => Some(REMOVED_REM_HELP),
             ("prelude::math", name) if REMOVED_MATH_FNS.contains(&name) => Some(REMOVED_MATH_HELP),
@@ -1124,17 +1112,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_concrete_ffi_dload() {
+    fn ffi_runtime_calls_are_gone() {
+        // `extern` blocks replaced `ffi::dload` / `declare` / `invoke` (#2904).
         let vm = VirtualModules::new();
-        let e = vm
-            .resolve_item(&["ffi".into()], "dload")
-            .expect("ffi::dload");
-        assert_eq!(
-            e,
-            BuiltinExport::FfiFn {
-                kind: FfiBuiltin::Dload
-            }
-        );
+        for name in ["dload", "declare", "invoke", "read_ints"] {
+            assert!(vm.resolve_item(&["ffi".into()], name).is_none(), "ffi::{name}");
+        }
     }
 
     #[test]
@@ -1230,8 +1213,9 @@ mod tests {
         );
         assert!(exports.iter().any(|e| e.short_name() == "wait_ready"));
         assert!(exports.iter().any(|e| e.short_name() == "write_from"));
-        assert!(exports.iter().any(|e| e.short_name() == "attach"));
-        assert!(exports.iter().any(|e| e.short_name() == "park"));
+        assert!(!exports.iter().any(|e| e.short_name() == "attach"));
+        assert!(!exports.iter().any(|e| e.short_name() == "park"));
+        assert!(VirtualModules::removed_item(&["io".into()], "attach").is_some_and(|h| h.contains("io::Read")));
         assert!(!exports.iter().any(|e| e.short_name() == "write_all"));
         assert!(!exports.iter().any(|e| e.short_name() == "set_read_timeout"));
         assert!(

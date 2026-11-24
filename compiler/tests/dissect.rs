@@ -3,15 +3,15 @@
 use compiler::Pipeline;
 
 #[test]
-fn compile_dissect_attach_matches_compile_grant() {
+fn compile_dissect_exit_matches_compile_grant() {
     let pid = std::process::id();
-    let dir = std::env::temp_dir().join(format!("coil_dissect_attach_{pid}"));
+    let dir = std::env::temp_dir().join(format!("coil_dissect_exit_{pid}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
     let entry = dir.join("main.coil");
     std::fs::write(
         &entry,
-        "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+        "use env::exit;\nfn main() { exit(0); }\n",
     )
     .expect("write entry");
 
@@ -21,14 +21,14 @@ fn compile_dissect_attach_matches_compile_grant() {
         denied
             .compile_dissect(entry.to_str().unwrap())
             .is_err(),
-        "attach without grant should fail dissect"
+        "exit without grant should fail dissect"
     );
     assert!(
         denied
             .messages()
             .iter()
-            .any(|m| m.code() == Some(compiler::ErrorCode::HostAttachDenied)),
-        "expected HostAttachDenied, messages={:?}",
+            .any(|m| m.code() == Some(compiler::ErrorCode::HostExitDenied)),
+        "expected HostExitDenied, messages={:?}",
         denied
             .messages()
             .iter()
@@ -38,10 +38,10 @@ fn compile_dissect_attach_matches_compile_grant() {
 
     let mut granted = Pipeline::new();
     granted.bind_workspace_language_roots();
-    granted.grant_attach();
+    granted.grant_exit();
     granted
         .compile_dissect(entry.to_str().unwrap())
-        .expect("attach with grant should dissect");
+        .expect("exit with grant should dissect");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

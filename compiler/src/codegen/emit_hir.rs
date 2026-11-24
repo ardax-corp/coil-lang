@@ -137,6 +137,9 @@ pub(crate) struct MethodClonePlan {
     shared: String,
     shared_params: Vec<ValueLayout>,
     shared_ret: ValueLayout,
+    /// The two words the shared body returns a closed two-word result in
+    /// (`-> Result<int, string>`): its call in the thunk takes them so.
+    shared_pair: Option<PairKind>,
     shared_tys: Vec<Ty>,
     shared_ret_ty: Ty,
     generic: Option<HirGeneric>,
@@ -5804,6 +5807,7 @@ impl Compiler {
             shared: shared.key.clone(),
             shared_params: shared.params.clone(),
             shared_ret: shared.ret,
+            shared_pair: shared.pair.clone(),
             shared_tys: param_tys,
             shared_ret_ty: ret_ty,
             generic: shared.generic.as_deref().cloned(),
@@ -6076,7 +6080,10 @@ impl Compiler {
         // A function argument is wrapped as the call site would wrap it for
         // the shared body (#2182).
         let adapt = plan.generic.as_ref().map(|g| g.adapt.clone()).unwrap_or_default();
-        self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, adapt, ..compiler::SynthCallee::default() });
+        // A shared body returning a closed two-word result returns its
+        // pair: the thunk's call takes both words.
+        let pair = if unbox.is_some() { None } else { plan.shared_pair.clone() };
+        self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, adapt, pair, ..compiler::SynthCallee::default() });
         self.emit_synth_fn(name, &hir, calls);
         self.hir_synth_callees.clear();
         // The adapters its call wraps a function argument in (#2163).
@@ -7361,12 +7368,10 @@ impl Compiler {
                     .is_some_and(|n| n == explicit) => {}
             _ => return Err("callee-arity"),
         }
-        // `Stream.fd()` / `.park()` / `.attach(ptr, read, write, shutdown,
-        // free)`: the inherent `HostInvoke` thunks (`emit_stream_method_thunks`)
-        // take the stream and `int` words and return the boxed
-        // `Result<int, IoError>`, the unit niche or the heap niche (no
-        // scheme lists them).
-        let stream_thunk = [("fd", 0, ValueLayout::Boxed), ("park", 0, ValueLayout::NicheUnitResult), ("attach", 5, ValueLayout::NicheResult)]
+        // `Stream.fd()`: the inherent `HostInvoke` thunk
+        // (`emit_stream_method_thunks`) takes the stream and returns the
+        // boxed `Result<int, IoError>` (no scheme lists it).
+        let stream_thunk = [("fd", 0, ValueLayout::Boxed)]
             .into_iter()
             .find(|(method, _, _)| lookup == format!("{}::{method}", crate::typechecking::ty::STREAM));
         if let Some((_, words, ret)) = stream_thunk

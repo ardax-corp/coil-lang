@@ -34,7 +34,7 @@ subtracted.
    checks panic; `defer` pads, `drop` and a joining task can observe the
    heap afterwards. No store moves across a trapping op unless the panic
    path writes it back.
-2. **Effects are barriers.** Host, FFI, IO, `yield`, park/attach, GC and
+2. **Effects are barriers.** Host, FFI, IO, `yield`, IO parks, GC and
    unknown calls keep their order (`common::EffectFlags`).
 3. **Tasks and threads.** A suspension point ends a promotion. No other
    thread writes an object a loop holds: `thread::spawn` copies, and

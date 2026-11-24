@@ -580,9 +580,6 @@ impl ThreadWaiters {
 }
 
 thread_local! {
-    /// Set while child tasks can be switched to on this thread, so natives
-    /// that would block in place (`stream_park`) request a park instead.
-    static TASKS_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The running task's waker and the key its next thread wait gets.
     static TASK_WAITER: std::cell::RefCell<Option<(std::sync::Arc<TaskWaker>, u64)>> =
         const { std::cell::RefCell::new(None) };
@@ -600,9 +597,8 @@ thread_local! {
 }
 
 /// Around a native the runtime runs where it can switch tasks: `Some` arms
-/// [`tasks_active`] and [`ThreadWaiters::park_current`], `None` disarms.
+/// [`ThreadWaiters::park_current`], `None` disarms.
 pub(crate) fn set_task_waiter(waiter: Option<(std::sync::Arc<TaskWaker>, u64, TaskId)>) {
-    TASKS_ACTIVE.with(|c| c.set(waiter.is_some()));
     let waiter = waiter.map(|(waker, key, task)| {
         CURRENT_TASK.with(|c| c.set(task));
         (waker, key)
@@ -849,10 +845,6 @@ pub(crate) fn thread_parked() -> bool {
 /// The native just run parked the task on a thread object (clears the flag).
 pub(crate) fn take_thread_parked() -> bool {
     THREAD_PARKED.with(|p| p.replace(false))
-}
-
-pub(crate) fn tasks_active() -> bool {
-    TASKS_ACTIVE.with(|c| c.get())
 }
 
 /// The scheduler rules every host that runs tasks shares (the runtime and the

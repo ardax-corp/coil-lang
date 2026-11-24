@@ -488,7 +488,7 @@ impl Checker {
         }
     }
 
-    /// Synthetic `Stream` inherent methods (`attach` / `park` / `fd`).
+    /// Synthetic `Stream` inherent method `fd`.
     ///
     /// Idempotent: same re-entry contract as [`Self::register_builtin_vec`].
     fn register_builtin_stream(&mut self) {
@@ -501,58 +501,8 @@ impl Checker {
         let dummy = 0..0;
         let stream = stream_ty();
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
-        let res_stream = result_ty(stream.clone(), io_err.clone());
-        let res_unit = result_ty(unit_ty(), io_err.clone());
         let res_int = result_ty(int(), io_err);
-
-        let attach_ty = Ty::fun(
-            &[stream.clone(), int(), int(), int(), int(), int()],
-            res_stream,
-        );
-        let park_ty = Ty::fun(std::slice::from_ref(&stream), res_unit);
         let fd_ty = Ty::fun(&[stream], res_int);
-        let attach_params = ["ptr", "read", "write", "shutdown", "free"];
-
-        let fqn = format!("{STREAM}::attach");
-        let scheme = Scheme::mono(attach_ty);
-        self.fn_param_names.insert(
-            fqn.clone(),
-            attach_params.iter().map(|s| (*s).to_string()).collect(),
-        );
-        self.register_overload_candidate(
-            &fqn,
-            OverloadCandidate {
-                id: 0,
-                fixed_arity: 5,
-                is_rest: false,
-                scheme: scheme.clone(),
-                param_names: attach_params.iter().map(|s| (*s).to_string()).collect(),
-            },
-            &dummy,
-        );
-        self.methods
-            .entry(STREAM.to_string())
-            .or_default()
-            .insert("attach".to_string(), (Visibility::Public, scheme));
-
-        let fqn = format!("{STREAM}::park");
-        let scheme = Scheme::mono(park_ty);
-        self.fn_param_names.insert(fqn.clone(), Vec::new());
-        self.register_overload_candidate(
-            &fqn,
-            OverloadCandidate {
-                id: 0,
-                fixed_arity: 0,
-                is_rest: false,
-                scheme: scheme.clone(),
-                param_names: Vec::new(),
-            },
-            &dummy,
-        );
-        self.methods
-            .entry(STREAM.to_string())
-            .or_default()
-            .insert("park".to_string(), (Visibility::Public, scheme));
 
         let fqn = format!("{STREAM}::fd");
         let scheme = Scheme::mono(fd_ty);
@@ -1071,10 +1021,6 @@ impl Checker {
             IoBuiltin::UdpSendTo => Ty::fun(&[stream, bytes, string(), int()], res_int),
             IoBuiltin::UdpRecvFrom => Ty::fun(&[stream, bytes], res_recv_from),
             IoBuiltin::UdpLocalPort => Ty::fun(&[stream], res_int),
-            IoBuiltin::StreamAttach => {
-                Ty::fun(&[stream, int(), int(), int(), int(), int()], res_stream)
-            }
-            IoBuiltin::StreamPark => Ty::fun(&[stream], res_unit),
             IoBuiltin::ResultUnitProbe => Ty::fun(&[int()], res_unit),
         };
         Scheme::mono(ty)
@@ -2829,39 +2775,6 @@ impl Checker {
                         args: vec![Ty::Var(self_v), Ty::Var(t_v)],
                     }],
                     Ty::Fun(Box::new(Ty::Var(self_v)), Box::new(Ty::Var(t_v))),
-                ),
-            );
-        }
-
-        // Read::read / Write::write, stream IO groundwork.
-        {
-            use crate::typechecking::ty::byte;
-            let var = self.counter.fresh();
-            let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
-            let res_opt_int = result_ty(option_ty(int()), io_err.clone());
-            let res_int = result_ty(int(), io_err);
-            let bytes = vec_app_ty(byte());
-            self.typeclass_method_schemes.insert(
-                ("Read".to_string(), "read".to_string()),
-                Scheme::poly(
-                    vec![var],
-                    vec![Constraint::unary("Read", var)],
-                    Ty::Fun(
-                        Box::new(Ty::Var(var)),
-                        Box::new(Ty::Fun(Box::new(bytes.clone()), Box::new(res_opt_int))),
-                    ),
-                ),
-            );
-            let var = self.counter.fresh();
-            self.typeclass_method_schemes.insert(
-                ("Write".to_string(), "write".to_string()),
-                Scheme::poly(
-                    vec![var],
-                    vec![Constraint::unary("Write", var)],
-                    Ty::Fun(
-                        Box::new(Ty::Var(var)),
-                        Box::new(Ty::Fun(Box::new(bytes), Box::new(res_int))),
-                    ),
                 ),
             );
         }
@@ -5534,14 +5447,6 @@ impl Checker {
                 Some("a `readonly` Vec cannot change; keep and use the mutable value instead".to_string()),
             );
         }
-        // The method form runs through a shared thunk with no call site of
-        // its own, so it is still gated where it is written.
-        if *method == "attach"
-            && self.class_owner_from_ty(&resolved).as_deref()
-                == Some(crate::typechecking::ty::STREAM)
-        {
-            self.gate_stream_attach(range.clone());
-        }
         // A method's `... xs` template calls its instance for this call's
         // pack (#1754).
         if let Some(owner) = self.class_owner_from_ty(&resolved)
@@ -5927,7 +5832,7 @@ impl Checker {
             }
         };
 
-        // `env::exit`, `Stream.attach` and the other gated host
+        // `env::exit` and the other gated host
         // calls are checked over what `main` / tests reach, after codegen
         // (`Compiler::capability_violations`).
         if let Some(IoBuiltin::Drive | IoBuiltin::WaitReady) = self.io_fn_in_scope(&ident) {
@@ -12551,6 +12456,14 @@ impl Checker {
             .iter()
             .zip(arg_tys.iter())
             .filter(|(_, ty)| !matches!(apply_ty_prune(&self.subst, ty), Ty::Var(_)))
+            // The trait value of a trait declared here is a type of this
+            // module (`impl Close for Conn` beside `trait Conn`).
+            .filter(|(_, ty)| match apply_ty_prune(&self.subst, ty) {
+                Ty::Existential { class } => {
+                    self.generics.typeclass(&class).is_none_or(|c| c.defined_module != self.current_module)
+                }
+                _ => true,
+            })
             .filter(|(expr, ty)| {
                 let head = self
                     .nominal_head_from_instance_arg(expr)
@@ -16656,6 +16569,18 @@ impl Checker {
     /// its module-qualified name, as the real pass (`resolve_class_key`)
     /// keys it, so a same-named type in another module does not share the
     /// stub (#957).
+    /// Whether `name` spells a trait whose values are a type (a trait of
+    /// one type-kinded parameter, or one of this module's traits).
+    pub fn is_trait_value_name(&self, name: &str) -> bool {
+        if self.enums.contains_key(name) || self.generics.nominal_type_module(name).is_some() {
+            return false;
+        }
+        match self.generics.typeclass(self.impl_trait_key(name)) {
+            Some(def) => def.type_params.len() == 1 && def.kind_at(0) == Kind::Type,
+            None => self.module_trait_names.contains(name),
+        }
+    }
+
     fn pre_pass_local_head(&self, name: &str, local_types: &HashSet<&str>) -> Option<String> {
         local_types
             .contains(name)
@@ -16720,7 +16645,15 @@ impl Checker {
                     return Ty::Con(canon);
                 }
                 // An imported class or enum, once the imports are known.
-                Ty::Con(self.resolve_instance_head_key(name).unwrap_or(canon))
+                if let Some(key) = self.resolve_instance_head_key(name) {
+                    return Ty::Con(key);
+                }
+                // A trait's name is its trait values' type (`impl Write for
+                // Conn`), as in an annotation.
+                if self.is_trait_value_name(name) {
+                    return Ty::Existential { class: self.impl_trait_key(name).to_string() };
+                }
+                Ty::Con(canon)
             }
             Expression::TypeApp { name, args } => {
                 let head = match name.to_ascii_lowercase().as_str() {

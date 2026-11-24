@@ -422,6 +422,30 @@ fn main() {
     if xs[0] != 10 || xs[2] != 30 || sum_array(xs, 3) != 60 {
         panic "Vec<int> write-back failed";
     }
+    // A function returning an `Option` / `Result` around an extern's int
+    // result: the int cannot hold the buffer, so the caller does not share
+    // it and the `Bytes` write reaches it.
+    let w: Vec<byte> = to_bytes("..");
+    if fill_and_sum(w) != Some(2 * 119) || w[0] != (119 as byte) {
+        panic "Bytes write behind an Option result failed";
+    }
+    if fill_checked(w) != Ok(2 * 118) || w[1] != (118 as byte) {
+        panic "Bytes write behind a Result result failed";
+    }
+}
+
+fn fill_and_sum(Vec<byte> buf) -> Option<int> {
+    fill_bytes(buf, 2, 119);
+    return Some(sum_bytes(buf, 2));
+}
+
+fn fill_checked(Vec<byte> buf) -> Result<int, string> {
+    fill_bytes(buf, 2, 118);
+    let n = sum_bytes(buf, 2);
+    if n < 0 {
+        return Err("negative");
+    }
+    return Ok(n);
 }
 "#,
     )

@@ -4768,23 +4768,6 @@ impl Compiler {
             }
         }
 
-        // `Stream` `Read` / `Write`: the free `read` / `write`'s native on
-        // the unboxed stream and buffer. The natives are named as callees
-        // the body reaches whatever this module calls `read` / `write`.
-        let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
-        let bytes = coil_ty::vec_app_ty(coil_ty::byte());
-        for (class, method, ok) in [("Read", "read", coil_ty::option_ty(int.clone())), ("Write", "write", int.clone())] {
-            let fqn = Generics::builtin_instance_fqn(class, "Stream", method);
-            if self.native_id(method).is_none() {
-                continue;
-            }
-            let params = [(coil_ty::stream_ty(), true), (bytes.clone(), true)];
-            let ret = coil_ty::result_ty(ok, io_err.clone());
-            self.hir_synth_callees.insert(method.to_string(), SynthCallee { host: true, ..SynthCallee::default() });
-            self.emit_builtin_entry(&fqn, &params, ret.clone(), false, |b, a| b.call(method, a, ret));
-            self.hir_synth_callees.clear();
-        }
-
         // `into`: the unboxed word cast, boxed again when its tag changes.
         for (from, to, from_tag, to_tag) in [
             ("int", "float", ValueTag::Int, ValueTag::Float),
@@ -5007,25 +4990,19 @@ impl Compiler {
         self.emit_range_to_vec_thunk("RangeInclusive::__float_to_vec".into(), true, true);
     }
 
-    /// Inherent `Stream::attach` / `Stream::park` / `Stream::fd` bodies:
-    /// each returns its host native's result on the stream and `int`
-    /// arguments. Built as HIR ([`crate::hir::synth`]); the native's result
-    /// layout (the `Result<Stream, IoError>` heap niche, the
-    /// `Result<(), IoError>` unit niche, the boxed `Result<int, IoError>`)
-    /// follows from the call's type, as for any host call.
+    /// Inherent `Stream::fd` body: returns its host native's result on the
+    /// stream. Built as HIR ([`crate::hir::synth`]); the native's result
+    /// layout (the boxed `Result<int, IoError>`) follows from the call's
+    /// type, as for any host call.
     fn emit_stream_method_thunks(&mut self) {
         use crate::hir::synth::Synth;
         use crate::hir::LocalKind;
         use crate::typechecking::ty::{self as coil_ty, STREAM};
         let methods = self.context.methods.entry(STREAM.to_string()).or_default();
-        methods.insert("attach".to_string(), format!("{STREAM}::attach"));
-        methods.insert("park".to_string(), format!("{STREAM}::park"));
         methods.insert("fd".to_string(), format!("{STREAM}::fd"));
 
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
         for (method, native, ints, ok) in [
-            ("attach", common::STREAM_ATTACH_NATIVE, 5, coil_ty::stream_ty()),
-            ("park", common::STREAM_PARK_NATIVE, 0, coil_ty::unit()),
             ("fd", common::STREAM_FD_NATIVE, 0, coil_ty::int()),
         ] {
             let fqn = format!("{STREAM}::{method}");
@@ -5361,13 +5338,13 @@ impl Compiler {
             || Self::is_stream_host_method(name)
     }
 
-    /// `Stream.fd` / `attach` / `park` are HostInvoke thunks, not two-slot CALLs.
+    /// `Stream.fd` is a HostInvoke thunk, not a two-slot CALL.
     fn is_stream_host_method(name: &str) -> bool {
         let Some((owner, method)) = name.rsplit_once("::") else {
             return false;
         };
         owner == crate::typechecking::ty::STREAM
-            && matches!(method, "fd" | "attach" | "park")
+            && method == "fd"
     }
 
     /// Return type of the function whose body is being compiled: its
@@ -5912,11 +5889,14 @@ impl Compiler {
                     // Same class or enum key the checker's instance head
                     // uses, so an imported type names `Trait__module::Type__method`.
                     _ if !self.checker.generics().generic_type_ctors.contains_key(*name) => {
-                        Ty::Con(
-                            self.checker
-                                .resolve_instance_head_key(name)
-                                .unwrap_or_else(|| name.to_string()),
-                        )
+                        match self.checker.resolve_instance_head_key(name) {
+                            Some(key) => Ty::Con(key),
+                            // A trait's values (`impl Write for Conn`).
+                            None if self.checker.is_trait_value_name(name) => {
+                                Ty::Existential { class: self.checker.impl_trait_key(name).to_string() }
+                            }
+                            None => Ty::Con(name.to_string()),
+                        }
                     }
                     _ => Ty::Con(name.to_string()),
                 }

@@ -60,7 +60,7 @@ which the driver runs itself (`HostOp::Task`) because they can switch tasks.
 A task switch happens only at:
 
 1. an IO park: any HostInvoke that returns a park request (`wait_readable` /
-   `wait_writable`, so every `io::sync` adapter), and `Stream.park`;
+   `wait_writable`, so every `io::sync` adapter);
 2. `task::sleep`, and `clock::sleep_ms` inside a scope;
 3. `join` on an unfinished task, and the end of a scope with unfinished children;
 4. `task::yield_now`;

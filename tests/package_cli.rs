@@ -1043,14 +1043,14 @@ mod linked {
         std::fs::create_dir_all(dir.join("lib")).unwrap();
         std::fs::copy(lib_dir.join(&lib), dir.join("lib").join(&lib)).unwrap();
         let run = run_app();
-        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n144.0 1\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
         // Another build of the library: the loader binds it by name, with no
         // hash check at start.
         let mut bytes = std::fs::read(dir.join("lib").join(&lib)).unwrap();
         bytes.push(0);
         std::fs::write(dir.join("lib").join(&lib), bytes).unwrap();
         let run = run_app();
-        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n144.0 1\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
