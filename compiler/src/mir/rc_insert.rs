@@ -815,7 +815,9 @@ impl Pass {
                 }
                 if !inst.is_phi() {
                     let used = self.used_roots(inst);
-                    if may_unwind(inst) {
+                    // A tail call takes the frame, homes and all: what it
+                    // passes is not released after it either (a leak).
+                    if may_unwind(inst) && !is_tail_call_inst(func, block, inst) {
                         found.extend(live.iter().copied().chain(used.iter().copied()).filter(|&r| storable(r)));
                     }
                     live.extend(used);
