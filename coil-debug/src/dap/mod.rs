@@ -572,9 +572,6 @@ impl DapServer {
 
 fn merge_launch_grants(cli: &HostGrants, args: &Value) -> HostGrants {
     let mut grants = cli.clone();
-    if args.get("allowAttach").and_then(|v| v.as_bool()) == Some(true) {
-        grants.allow_attach = true;
-    }
     if args.get("allowExit").and_then(|v| v.as_bool()) == Some(true) {
         grants.allow_exit = true;
     }
@@ -679,13 +676,13 @@ mod tests {
         let mut cli = HostGrants::deny_all();
         cli.allow_exit = true;
         let args = serde_json::json!({
-            "allowAttach": true,
+            "allowExec": true,
             "allowDload": ["tls"],
             "ffiSearchPath": ["./native"],
         });
         let merged = super::merge_launch_grants(&cli, &args);
         assert!(merged.allow_exit);
-        assert!(merged.allow_attach);
+        assert!(merged.allow_exec);
         assert!(!merged.allow_ffi_exec);
         assert_eq!(merged.allow_dload, vec!["tls".to_string()]);
         assert_eq!(merged.ffi_search_paths, vec![PathBuf::from("./native")]);

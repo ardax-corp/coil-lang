@@ -1357,7 +1357,7 @@ pub fn effect_names(flags: EffectFlags) -> Vec<&'static str> {
         (EffectFlags::YIELD, "yield"),
         (EffectFlags::THREAD, "thread"),
         (EffectFlags::GC, "gc"),
-        (EffectFlags::ATTACH_PARK, "attach"),
+        (EffectFlags::ATTACH_PARK, "park"),
         (EffectFlags::UNKNOWN, "unknown"),
         (EffectFlags::ALLOC, "alloc"),
     ];

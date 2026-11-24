@@ -144,45 +144,45 @@ fn dissect_fib_mir_and_ast_sections() {
     let _ = std::fs::remove_dir_all(&cwd);
 }
 
-fn write_attach_entry(dir: &std::path::Path) -> PathBuf {
-    let entry = dir.join("attach.coil");
+fn write_exit_entry(dir: &std::path::Path) -> PathBuf {
+    let entry = dir.join("exit.coil");
     std::fs::write(
         &entry,
-        "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+        "use env::exit;\nfn main() { exit(0); }\n",
     )
-    .expect("write attach.coil");
+    .expect("write exit.coil");
     entry
 }
 
 #[test]
-fn dissect_attach_fails_without_grant_and_succeeds_with_flag() {
+fn dissect_exit_fails_without_grant_and_succeeds_with_flag() {
     ensure_coil_dissect();
     let bin = coil_bin();
     let cwd = std::env::temp_dir().join(format!("coil_dissect_grant_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cwd);
     std::fs::create_dir_all(&cwd).expect("temp cwd");
-    let entry = write_attach_entry(&cwd);
+    let entry = write_exit_entry(&cwd);
 
     let denied = coil_dissect(&bin, Some(&cwd), &entry)
         .output()
-        .expect("spawn coil dissect attach (denied)");
+        .expect("spawn coil dissect exit (denied)");
     assert!(
         !denied.status.success(),
-        "expected typecheck failure without --allow-attach"
+        "expected typecheck failure without --allow-exit"
     );
     let err = String::from_utf8_lossy(&denied.stderr);
     assert!(
-        err.contains("allow-attach") || err.contains("E0408") || err.contains("HostAttach"),
+        err.contains("allow-exit") || err.contains("E0407"),
         "stderr={err}"
     );
 
     let granted = coil_dissect(&bin, Some(&cwd), &entry)
-        .arg("--allow-attach")
+        .arg("--allow-exit")
         .output()
-        .expect("spawn coil dissect --allow-attach");
+        .expect("spawn coil dissect --allow-exit");
     assert!(
         granted.status.success(),
-        "dissect --allow-attach failed: {}",
+        "dissect --allow-exit failed: {}",
         String::from_utf8_lossy(&granted.stderr)
     );
     let stdout = String::from_utf8_lossy(&granted.stdout);
@@ -213,7 +213,6 @@ fn dissect_help_lists_host_grant_flags() {
         String::from_utf8_lossy(&out.stderr)
     );
     for flag in [
-        "--allow-attach",
         "--allow-exit",
         "--allow-ffi-exec",
         "--allow-dload",

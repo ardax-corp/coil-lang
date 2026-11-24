@@ -7366,12 +7366,10 @@ impl Compiler {
                     .is_some_and(|n| n == explicit) => {}
             _ => return Err("callee-arity"),
         }
-        // `Stream.fd()` / `.park()` / `.attach(ptr, read, write, shutdown,
-        // free)`: the inherent `HostInvoke` thunks (`emit_stream_method_thunks`)
-        // take the stream and `int` words and return the boxed
-        // `Result<int, IoError>`, the unit niche or the heap niche (no
-        // scheme lists them).
-        let stream_thunk = [("fd", 0, ValueLayout::Boxed), ("park", 0, ValueLayout::NicheUnitResult), ("attach", 5, ValueLayout::NicheResult)]
+        // `Stream.fd()`: the inherent `HostInvoke` thunk
+        // (`emit_stream_method_thunks`) takes the stream and returns the
+        // boxed `Result<int, IoError>` (no scheme lists it).
+        let stream_thunk = [("fd", 0, ValueLayout::Boxed)]
             .into_iter()
             .find(|(method, _, _)| lookup == format!("{}::{method}", crate::typechecking::ty::STREAM));
         if let Some((_, words, ret)) = stream_thunk

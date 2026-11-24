@@ -454,12 +454,6 @@ impl Pipeline {
         self.try_sync_host_caps();
     }
 
-    /// Allow `Stream.attach` (`--allow-attach`).
-    pub fn grant_attach(&mut self) {
-        self.host_grants.allow_attach = true;
-        self.try_sync_host_caps();
-    }
-
     /// Allow `env::exit` (`--allow-exit`).
     pub fn grant_exit(&mut self) {
         self.host_grants.allow_exit = true;
@@ -467,7 +461,7 @@ impl Pipeline {
     }
 
     /// Allow a capability by name (`read`, `write`, `net`, `env`, `exec`,
-    /// `exit`, `attach`, `ffi-exec`): `--allow-<name>`. False for an
+    /// `exit`, `ffi-exec`): `--allow-<name>`. False for an
     /// unknown name.
     pub fn grant_capability(&mut self, name: &str) -> bool {
         let known = self.host_grants.grant_named(name);

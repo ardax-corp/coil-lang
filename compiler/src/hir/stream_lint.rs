@@ -77,7 +77,7 @@ fn use_of(checker: &Checker, body: &HirBody, parent: Option<HirId>, node: HirId)
             None => Use::HandOff,
         },
         HirKind::Call { callee: Callee::Method { name }, args }
-            if args.first() == Some(&node) && matches!(name.as_str(), "fd" | "attach" | "park") =>
+            if args.first() == Some(&node) && name == "fd" =>
         {
             Use::Keep
         }
