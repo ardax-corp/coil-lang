@@ -668,8 +668,9 @@ fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: 
                 HirKind::Named { value, .. } => work.push(*value),
                 HirKind::Builtin { op: Builtin::Cow { .. }, args } => work.extend(args.iter().copied()),
                 HirKind::Local(l) => bits |= holds.get(l).copied().unwrap_or(0),
-                // The result may be an argument the callee hands back.
-                HirKind::Call { callee, args } => {
+                // The result may be an argument the callee hands back, unless
+                // it is a scalar, which holds no object.
+                HirKind::Call { callee, args } if !scalar_result(body, at) => {
                     let used = arg_use(body, lookup, callee, args);
                     for (j, &a) in args.iter().enumerate().take(64) {
                         if used.returned & (1 << j) != 0 {
@@ -702,7 +703,7 @@ fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: 
                     }
                     bits |= b;
                 }
-                HirKind::Call { callee, args } => {
+                HirKind::Call { callee, args } if !scalar_result(body, at) => {
                     let used = arg_use(body, lookup, callee, args);
                     for (j, &a) in args.iter().enumerate().take(64) {
                         if used.returned & (1 << j) != 0 {
@@ -791,6 +792,16 @@ fn keeps_of(module: &HirModule, body: &HirBody, lookup: &CallLookup<'_>, seeds: 
         }
     }
     (kept, returned, opaque, inner)
+}
+
+/// Whether `at`'s value is a scalar (`int`, `float`, `bool`, `byte`, `()`):
+/// it holds no object, whatever its callee may hand back. An extern's
+/// `int` result says nothing about the buffer it was passed.
+fn scalar_result(body: &HirBody, at: HirId) -> bool {
+    match body.expr(at).ty.as_ref().map(strip_readonly) {
+        Some(Ty::Con(n)) => matches!(n.as_str(), ty::INT | ty::FLOAT | ty::BOOL | ty::BYTE | ty::UNIT),
+        _ => false,
+    }
 }
 
 /// The parameter whose field or element `v` reads (through `p.f`,
