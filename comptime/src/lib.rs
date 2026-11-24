@@ -471,11 +471,20 @@ fn run_entry(program: &CompiledExpansion, entry: u32, input: &str, limits: &Comp
 fn call_entry(isolate: &mut Isolate, entry: u32, input: &str, limits: &ComptimeLimits) -> Result<String, String> {
     let input = isolate.heap_mut().intern(input.to_string());
     let arg = Value::from(input.as_ptr() as *mut u8 as u64);
-    let ret = call_limited(isolate, entry, &[arg], limits)?;
-    match isolate.heap().find_object_by_addr(ret.bits()) {
-        Some(Object::String(s)) => Ok(s.as_ref().data.to_string()),
-        _ => Err("it did not return a string".to_string()),
-    }
+    // The host owns the input across the call and the result once it
+    // returns (reference counts): both are released when read.
+    isolate.heap_mut().rc_retain(arg);
+    let ret = call_limited(isolate, entry, &[arg], limits);
+    let text = ret.and_then(|ret| {
+        let text = match isolate.heap().find_object_by_addr(ret.bits()) {
+            Some(Object::String(s)) => Ok(s.as_ref().data.to_string()),
+            _ => Err("it did not return a string".to_string()),
+        };
+        isolate.heap_mut().rc_drop(ret);
+        text
+    });
+    isolate.heap_mut().rc_drop(arg);
+    text
 }
 
 /// Call `entry` within `limits`. An empty error is a plain panic (its
