@@ -238,10 +238,9 @@ worker count and the number of compile threads.
   code size plus 256 MiB), on `--engine mir` with `COIL_NO_FIBERS=1`: one
   malloc arena, and no fiber stacks reserving address space with nothing
   behind it.
-- **GC mode.** Cases run with the same class / static word maps and the
-  same root scanning (stack maps on native code) as `coil <file>`
-  (`coil_host::thread_program`), so a `collect()` in a test exercises
-  production roots.
+- **Collection.** Cases run with the same class / static word maps and the
+  same runtime roots as `coil <file>` (`coil_host::thread_program`), so a
+  `collect()` in a test runs the production cycle collector.
 - Cases that call `thread::spawn` put their jobs on the same reactor.
 - **Cases never nest.** A queued case sits in the reactor's own case queue
   (`Reactor::submit_test`), which only an idle worker drains, after every

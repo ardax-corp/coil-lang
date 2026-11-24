@@ -124,8 +124,8 @@ array may grow, stays checked. Refusals: [limitations](limitations.md).
 Aggregate construction is not copy-bound: making the builders one `memcpy`
 measured neutral on `binary_trees` (on the bytecode VM, since deleted). What
 is left is payload layout, not identity: `find_object_by_addr` is a slab probe
-([heap-identity.md](heap-identity.md)), and collection is incremental
-([gc-incremental.md](gc-incremental.md)).
+([heap-identity.md](heap-identity.md)), and memory is freed by counts
+([memory.md](memory.md)).
 
 ### Calls
 

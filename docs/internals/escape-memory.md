@@ -1,10 +1,16 @@
 # Escape facts and early freeing
 
-Coil keeps its tracing GC, but the compiler frees memory itself wherever it
-can see when an object dies. The GC is the backstop for data whose lifetime
-is decided at run time (map entries, graph nodes, anything stored in a
-mutable field). Nothing here needs annotations: every fact is inferred.
-Stating a fact on a function is optional and only checked.
+The compiler frees memory itself wherever it can see when an object dies.
+Nothing here needs annotations: every fact is inferred. Stating a fact on a
+function is optional and only checked.
+
+**Status (2026-11-24).** The escape facts (step 1), early freeing (step 2)
+and static uniqueness (step 3) still run: early frees happen before the
+reference counts that replaced the tracing GC ([memory.md](memory.md),
+coil-lang#2889). The nursery (step 4) and regions (step 5) went with the
+tracing GC; their sections below are history, and the young chunks survive
+only as the bump allocator. Where this note says "the GC is the backstop",
+read "the counts".
 
 The work happens on the feature branch `feature/escape-memory`, one PR per
 step. Assessment and measurements: the "Coil memory management: can we drop
@@ -286,7 +292,10 @@ parsed field strings and row vectors (b_csv), and the decoded strings and
 store (b_json). Those are live until the program drops the result, which
 is the GC's job (or step 4's).
 
-## Nursery (step 4)
+## Nursery (step 4, removed)
+
+**Removed** with the tracing GC: there are no minor collections, write
+barriers, remembered sets or card tables. What follows is the history.
 
 After step 3, collections cost little marking: gc_shrink keeps 11 live
 objects and result_heap_churn about as few. What is left is reclaiming
@@ -463,7 +472,7 @@ every node of the list it is building once before pretenuring kicks in,
 and binary_trees and hashmap run within 2.5% of the instructions but touch more
 memory. Whether it stays on by default is decided with step 6.
 
-## Regions (step 5)
+## Regions (step 5, removed)
 
 **Removed** with the tracing GC (reference-count plan step 10): under counts
 an object is freed at its last use, so a region freed nothing more. The
@@ -571,6 +580,8 @@ Decided (Dimitar, 2026-10-27): the nursery stays on by default
 test`). The `COIL_EARLY_FREE` and `COIL_NURSERY` variables the measurements
 above used are gone: early frees follow the opt level (on at `-O1` and
 above), and `--early-free on|off|check` and `--nursery on|off` are the
-switches. Not pursued: reference counting (cycles
-need a collector anyway) and dropping the GC (the remaining garbage is
-aliased container data).
+switches. Not pursued then: reference counting (cycles need a collector
+anyway) and dropping the GC (the remaining garbage is aliased container
+data). Revisited 2026-11-20: Dimitar chose reference counts with compiler
+elision and a cycle collector only for cyclic classes, built on
+`feature/native` ([memory.md](memory.md)); `--nursery` is gone.

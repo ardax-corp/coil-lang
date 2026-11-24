@@ -21,7 +21,7 @@ coil/
 ├── common/          # Value, archive (ARCHIVE_MAJOR/MINOR), host native table, StartupOp
 ├── parser/          # Pratt parser, AST
 ├── compiler/        # HM typechecker, HIR (src/hir/), MIR (src/mir/), codegen plan (src/codegen/), pipeline
-├── machine/         # Runtime: driver, heap/GC, tasks, reactor, FFI, host natives, native ABI
+├── machine/         # Runtime: driver, heap (counts, cycle collector), tasks, reactor, FFI, host natives, native ABI
 ├── coil-native/     # MIR to Cranelift: JIT, AOT objects
 ├── coil-mir-interp/ # MIR interpreter
 ├── coil-rt/         # Runtime library AOT executables link
