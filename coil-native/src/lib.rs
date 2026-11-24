@@ -211,9 +211,10 @@ pub struct AotObject {
 /// package`): the same lowering as [`jit`], linked against the runtime
 /// library instead of bound in memory. `statics` are the `extern`
 /// functions linked into the executable, as `(library stem, C symbol)`:
-/// the object imports each symbol and records its address. `package` is
+/// the object imports each symbol and records its address. `all_linked`:
+/// they are every `extern` function the program declares. `package` is
 /// the program's data (`common::linked_package`), as `coil_aot_package`.
-pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(String, String)], package: &[u8]) -> Result<AotObject, String> {
+pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(String, String)], all_linked: bool, package: &[u8]) -> Result<AotObject, String> {
     let mut excluded = HashMap::new();
     loop {
         let plan = plan_without(bodies, &excluded, body_ids);
@@ -341,7 +342,7 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         words("coil_aot_stack_map_count", map_count.to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
         host_group_table(&mut module, bodies)?;
-        ffi_link_table(&mut module, bodies)?;
+        ffi_link_table(&mut module, bodies, all_linked && !ids.runtime_ffi.get())?;
         let bytes = module.finish().emit().map_err(|e| e.to_string())?;
         return Ok(AotObject { bytes, compiled, refused });
     }
@@ -441,13 +442,22 @@ fn host_group_table(module: &mut cranelift_object::ObjectModule, bodies: &[Nativ
 /// `coil_aot_ffi`: the address of the runtime's `coil_ffi_link` when
 /// `bodies` make an FFI call (`MirInst::Ffi`), else null. A link without
 /// the reference drops libffi, `dload` and its gate from the executable.
-fn ffi_link_table(module: &mut cranelift_object::ObjectModule, bodies: &[NativeBody]) -> Result<(), String> {
+/// `direct`: every library the program loads is linked into the
+/// executable and every extern call is direct, so with no
+/// `MirFfiOp::Invoke` either it takes `coil_ffi_link_linked`, which has
+/// none of them.
+fn ffi_link_table(module: &mut cranelift_object::ObjectModule, bodies: &[NativeBody], direct: bool) -> Result<(), String> {
     let e = |e: cranelift_module::ModuleError| e.to_string();
     let mut d = cranelift_module::DataDescription::new();
     d.define(vec![0u8; 8].into_boxed_slice());
     d.set_align(8);
     if uses_ffi(bodies) {
-        let link = module.declare_data("coil_ffi_link", Linkage::Import, false, false).map_err(e)?;
+        let invokes = bodies
+            .iter()
+            .flat_map(|b| b.mir.blocks.iter().flat_map(|b| &b.insts))
+            .any(|i| matches!(i, MirInst::Ffi { op: compiler::native_mir::MirFfiOp::Invoke, .. }));
+        let name = if direct && !invokes { "coil_ffi_link_linked" } else { "coil_ffi_link" };
+        let link = module.declare_data(name, Linkage::Import, false, false).map_err(e)?;
         let gv = module.declare_data_in_data(link, &mut d);
         d.write_data_addr(0, gv, 0);
     }
@@ -744,6 +754,7 @@ fn define_all<M: Module>(
                 if r.is_ok() {
                     lower.b.finalize(fcfg);
                 }
+                ids.runtime_ffi.set(ids.runtime_ffi.get() | lower.runtime_ffi);
                 r
             };
             if let Err(why) = lowered {
@@ -764,6 +775,7 @@ fn define_all<M: Module>(
                     if r.is_ok() {
                         lower.b.finalize(fcfg);
                     }
+                    ids.runtime_ffi.set(ids.runtime_ffi.get() | lower.runtime_ffi);
                     r
                 };
                 if let Err(why) = lowered {
@@ -1652,8 +1664,8 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             need(a)?;
                         }
                         // The runtime's call takes all but the address.
-                        if args.len() - 1 + sig.variadic.as_ref().map_or(0, Vec::len) > 16 {
-                            return Err("extern call of more than 16 words".into());
+                        if args.len() - 1 + sig.variadic.as_ref().map_or(0, Vec::len) > common::FFI_CALL_MAX_WORDS {
+                            return Err("extern call of more words than the runtime's call takes".into());
                         }
                     }
                     // A generator body: it runs on a fiber of its own and a
@@ -1839,9 +1851,13 @@ struct Ids {
     ffi_struct_in: FuncId,
     ffi_struct_out: FuncId,
     va_call: FuncId,
+    va_call_f: FuncId,
     /// A program whose C code may call back ([`Plan::ffi_callbacks`]): its
     /// direct calls' trampolines and its callbacks' thunks.
     cb: Option<CbIds>,
+    /// Set when a lowered body calls an extern function through the
+    /// runtime's libffi call ([`Lower::runtime_extern_call`]).
+    runtime_ffi: std::cell::Cell<bool>,
 }
 
 /// [`CbIds`] a body uses, and its code pointers' body ids.
@@ -1888,6 +1904,10 @@ fn may_call_back(bodies: &[NativeBody]) -> bool {
 enum CArg {
     /// The word as this C type.
     Word(Type),
+    /// A sized C integer (`int32`, `uint8`, …): the `int` word narrowed to
+    /// this type and widened back (sign or zero extended, `signed`), passed
+    /// as a whole register as C callers do.
+    Int(Type, bool),
     /// The pointer [`machine::native::coil_native_ffi_arg`] makes of the word
     /// (`FFI_ARG_*`).
     Ptr(u64),
@@ -1909,8 +1929,9 @@ type CShape = (Vec<Type>, Vec<Type>);
 
 /// [`CShape`] of a direct call passing `params` and taking `ret` (`va` for
 /// a variadic one with `nfixed` declared parameters), as
-/// [`Lower::direct_extern_call`] makes it. `None` with a struct, whose
-/// special parameters a trampoline does not forward.
+/// [`Lower::direct_extern_call`] makes it. `None` with a struct passed on
+/// the stack or returned through a hidden pointer, special parameters a
+/// trampoline does not forward.
 fn c_shape(params: &[CArg], ret: CRet, va: Option<CVa>, nfixed: usize) -> Option<CShape> {
     let mut ps = Vec::new();
     for (i, p) in params.iter().enumerate() {
@@ -1920,19 +1941,27 @@ fn c_shape(params: &[CArg], ret: CRet, va: Option<CVa>, nfixed: usize) -> Option
         }
         ps.push(match *p {
             CArg::Word(t) => t,
-            CArg::Ptr(_) | CArg::Callback(_) => types::I64,
-            CArg::Struct { .. } => return None,
+            CArg::Int(..) | CArg::Ptr(_) | CArg::Callback(_) => types::I64,
+            CArg::Struct { how: SPass::Regs(tys, n), .. } => {
+                ps.extend_from_slice(&tys[..usize::from(n)]);
+                continue;
+            }
+            CArg::Struct { how: SPass::Ref, .. } => types::I64,
+            CArg::Struct { how: SPass::Stack, .. } => return None,
         });
     }
-    if let Some(CVa::Thunk { pad }) = va {
-        ps.extend(std::iter::repeat_n(types::I64, usize::from(pad) + 1));
+    match va {
+        Some(CVa::Thunk { pad }) => ps.extend(std::iter::repeat_n(types::I64, usize::from(pad) + 1)),
+        Some(CVa::ThunkF { pad }) => ps.extend(std::iter::repeat_n(types::F64, usize::from(pad) + 1)),
+        _ => {}
     }
     let rs = match ret {
         CRet::Void => Vec::new(),
-        CRet::Word(t) => vec![t],
+        CRet::Word(t) | CRet::Int(t, _) => vec![t],
         CRet::Bool => vec![types::I8],
         CRet::Str => vec![types::I64],
-        CRet::Struct { .. } => return None,
+        CRet::Struct { n: 0, .. } => return None,
+        CRet::Struct { regs, n, .. } => regs[..usize::from(n)].to_vec(),
     };
     Some((ps, rs))
 }
@@ -1981,6 +2010,9 @@ enum CRet {
     Word(Type),
     /// A C `bool`: any nonzero byte is `true`.
     Bool,
+    /// A sized C integer of this type, sign or zero extended (`signed`) to
+    /// an `int`.
+    Int(Type, bool),
     /// A C string, made a coil string ([`machine::native::coil_native_ffi_str`]).
     Str,
     /// A struct by value, made a record of struct `id`
@@ -2002,6 +2034,10 @@ enum CVa {
     /// which sets it, with `pad` zero words and the C function's address
     /// after the arguments (so the address is in `r9`).
     Thunk { pad: u8 },
+    /// x86-64 System V with every integer register taken by arguments: as
+    /// `Thunk`, through [`machine::native::coil_native_va_call_f`], with
+    /// `pad` zero `double`s and the address in `xmm7`.
+    ThunkF { pad: u8 },
     /// Apple arm64: every variadic argument in an 8-byte stack slot. `gpad`
     /// integer and `fpad` floating-point zero words after the declared
     /// arguments use up the registers left.
@@ -2070,6 +2106,19 @@ fn c_struct_shape(st: &compiler::native_mir::MirCStruct) -> Option<(Vec<Type>, b
     Some((eightbytes, hfa))
 }
 
+/// A sized C integer tag's Cranelift type and whether it is signed.
+fn sized_int(t: u32) -> (Type, bool) {
+    use common::tag;
+    match t {
+        tag::INT8 => (types::I8, true),
+        tag::INT16 => (types::I16, true),
+        tag::INT32 => (types::I32, true),
+        tag::UINT8 => (types::I8, false),
+        tag::UINT16 => (types::I16, false),
+        _ => (types::I32, false),
+    }
+}
+
 fn regs_of(tys: &[Type]) -> [Type; 4] {
     let mut out = [types::I64; 4];
     out[..tys.len()].copy_from_slice(tys);
@@ -2077,14 +2126,14 @@ fn regs_of(tys: &[Type]) -> [Type; 4] {
 }
 
 /// How a direct call passes an extern call's arguments and takes its
-/// result: `int`, `float`, `bool`, `string`, byte views and buffers, `ptr`
-/// and (on x86-64 and AArch64) structs of numbers and bools by value;
-/// `int`, `float`, `bool`, `ptr`, `string`, such structs and `void`
-/// results; a variadic function's arguments after the declared ones
-/// (`...`) as C's default promotions make them, but for structs, with the
-/// [`CVa`] the convention needs. `None`: it has another struct, a
-/// callback or a sized integer, or (x86-64) a variadic call uses every
-/// integer register, and goes through the runtime.
+/// result: `int`, the sized integers, `float`, `bool`, `string`, byte
+/// views and buffers, `ptr` and (on x86-64 and AArch64) structs of numbers
+/// and bools by value; the same results, but byte views, and `void`; a
+/// variadic function's arguments after the declared ones (`...`) as C's
+/// default promotions make them, but for structs, with the [`CVa`] the
+/// convention needs. `None`: it has another struct or callback type, or
+/// (x86-64 System V) a variadic call uses every integer and vector
+/// register, and goes through the runtime.
 fn direct_extern(sig: &compiler::native_mir::MirExternSig, abi: CAbi) -> Option<(Vec<CArg>, CRet, Option<CVa>)> {
     use common::tag;
     use machine::native::{FFI_ARG_BYTES, FFI_ARG_CONST_BYTES, FFI_ARG_CSTR, FFI_ARG_PTR};
@@ -2095,8 +2144,12 @@ fn direct_extern(sig: &compiler::native_mir::MirExternSig, abi: CAbi) -> Option<
     };
     let ret = match common::decode_tag_operand(sig.ret) {
         (tag::VOID, _) => CRet::Void,
-        (tag::INT | tag::PTR, _) => CRet::Word(types::I64),
+        (tag::INT | tag::PTR | tag::UINT64, _) => CRet::Word(types::I64),
         (tag::FLOAT, _) => CRet::Word(types::F64),
+        (t @ (tag::INT8 | tag::INT16 | tag::INT32 | tag::UINT8 | tag::UINT16 | tag::UINT32), _) => {
+            let (ty, signed) = sized_int(t);
+            CRet::Int(ty, signed)
+        }
         (tag::BOOL, _) => CRet::Bool,
         (tag::STRING, _) => CRet::Str,
         (tag::STRUCT, id) => {
@@ -2108,8 +2161,9 @@ fn direct_extern(sig: &compiler::native_mir::MirExternSig, abi: CAbi) -> Option<
                 CAbi::Arm64 { .. } if hfa => vec![types::F64; st.fields.len()],
                 CAbi::Arm64 { .. } if st.size <= 16 => vec![types::I64; words.len()],
                 CAbi::Win64 if matches!(st.size, 1 | 2 | 4 | 8) => vec![types::I64],
-                CAbi::SysV64 | CAbi::Arm64 { .. } => Vec::new(),
-                _ => return None,
+                // Any other size through a hidden pointer (`rcx` on Windows).
+                CAbi::SysV64 | CAbi::Arm64 { .. } | CAbi::Win64 => Vec::new(),
+                CAbi::Other => return None,
             };
             CRet::Struct { id, size, regs: regs_of(&regs), n: regs.len() as u8 }
         }
@@ -2118,12 +2172,10 @@ fn direct_extern(sig: &compiler::native_mir::MirExternSig, abi: CAbi) -> Option<
     // The registers left as the arguments take them, for a struct that
     // must have all its eightbytes in registers or none.
     let (mut gprs, mut fprs) = abi.arg_regs();
-    if matches!(ret, CRet::Struct { n: 0, .. }) && abi == CAbi::SysV64 {
+    if matches!(ret, CRet::Struct { n: 0, .. }) && matches!(abi, CAbi::SysV64 | CAbi::Win64) {
         // The hidden result pointer (AArch64 has x8 for it).
         gprs -= 1;
     }
-    // The sized integers (`int32`, `uint8`, …) have no word type in an
-    // `extern` block yet (#2886): no call of one reaches native code.
     let mut params = Vec::with_capacity(sig.params.len());
     for &t in &sig.params {
         let take = |gprs: &mut usize, fprs: &mut usize, ty: Type| {
@@ -2131,9 +2183,13 @@ fn direct_extern(sig: &compiler::native_mir::MirExternSig, abi: CAbi) -> Option<
             *r = r.saturating_sub(1);
         };
         let p = match common::decode_tag_operand(t) {
-            (tag::INT, _) => CArg::Word(types::I64),
+            (tag::INT | tag::UINT64, _) => CArg::Word(types::I64),
             (tag::FLOAT, _) => CArg::Word(types::F64),
             (tag::BOOL, _) => CArg::Word(types::I8),
+            (t @ (tag::INT8 | tag::INT16 | tag::INT32 | tag::UINT8 | tag::UINT16 | tag::UINT32), _) => {
+                let (ty, signed) = sized_int(t);
+                CArg::Int(ty, signed)
+            }
             (tag::STRING, _) => CArg::Ptr(FFI_ARG_CSTR),
             (tag::CONST_BYTES, _) => CArg::Ptr(FFI_ARG_CONST_BYTES),
             (tag::BYTES, _) => CArg::Ptr(FFI_ARG_BYTES),
@@ -2175,6 +2231,7 @@ fn direct_extern(sig: &compiler::native_mir::MirExternSig, abi: CAbi) -> Option<
         };
         match p {
             CArg::Word(ty) => take(&mut gprs, &mut fprs, ty),
+            CArg::Int(..) => take(&mut gprs, &mut fprs, types::I64),
             _ => take(&mut gprs, &mut fprs, types::I64),
         }
         params.push(p);
@@ -2209,6 +2266,8 @@ fn direct_extern(sig: &compiler::native_mir::MirExternSig, abi: CAbi) -> Option<
     let va = match abi {
         // The C function's address takes an integer register of its own.
         CAbi::SysV64 if gprs >= 1 => CVa::Thunk { pad: gprs as u8 - 1 },
+        // Otherwise the last vector register it has left.
+        CAbi::SysV64 if fprs >= 1 => CVa::ThunkF { pad: fprs as u8 - 1 },
         CAbi::Arm64 { apple: true } => CVa::Stack { gpad, fpad },
         CAbi::Arm64 { apple: false } | CAbi::Win64 => CVa::Plain,
         CAbi::SysV64 | CAbi::Other => return None,
@@ -2375,6 +2434,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let ffi_struct_out = module.declare_function("coil_native_ffi_struct_out", Linkage::Import, &s3).map_err(e)?;
     // Its signature is each call's own (it jumps to the C function).
     let va_call = module.declare_function("coil_native_va_call", Linkage::Import, &module.make_signature()).map_err(e)?;
+    let va_call_f = module.declare_function("coil_native_va_call_f", Linkage::Import, &module.make_signature()).map_err(e)?;
     let cb = if plan.ffi_callbacks { Some(declare_callbacks(module, bodies, plan)?) } else { None };
     Ok(Ids {
         tramps,
@@ -2428,7 +2488,9 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         ffi_struct_in,
         ffi_struct_out,
         va_call,
+        va_call_f,
         cb,
+        runtime_ffi: Default::default(),
     })
 }
 
@@ -2675,6 +2737,8 @@ struct Lower<'a> {
     /// Extern calls may be direct: no C callback can run coil code
     /// ([`Plan::ffi_callbacks`]).
     direct_externs: bool,
+    /// This body calls an extern function through the runtime.
+    runtime_ffi: bool,
     cow: FuncRef,
     cow_field: FuncRef,
     rc: FuncRef,
@@ -2708,6 +2772,7 @@ struct Lower<'a> {
     ffi_struct_in: FuncRef,
     ffi_struct_out: FuncRef,
     va_call: FuncRef,
+    va_call_f: FuncRef,
     /// The body's direct extern calls run in a program whose C code may
     /// call back: through a [`CbIds::calls`] trampoline, rooted.
     cb: Option<CbRefs>,
@@ -2883,6 +2948,7 @@ impl<'a> Lower<'a> {
         let ffi_struct_in = module.declare_func_in_func(ids.ffi_struct_in, func);
         let ffi_struct_out = module.declare_func_in_func(ids.ffi_struct_out, func);
         let va_call = module.declare_func_in_func(ids.va_call, func);
+        let va_call_f = module.declare_func_in_func(ids.va_call_f, func);
         let cb = ids.cb.as_ref().map(|cb| {
             // Only what the body's extern calls use.
             let pcs = code_ptr_pcs(body, plan);
@@ -2944,6 +3010,7 @@ impl<'a> Lower<'a> {
             c_conv: module.isa().default_call_conv(),
             c_abi: CAbi::of(module.isa()),
             direct_externs: true,
+            runtime_ffi: false,
             cow,
             cow_field,
             rc,
@@ -2977,6 +3044,7 @@ impl<'a> Lower<'a> {
             ffi_struct_in,
             ffi_struct_out,
         va_call,
+        va_call_f,
             body_index: None,
             pins: false,
             is_pad: false,
@@ -5248,6 +5316,7 @@ impl<'a> Lower<'a> {
     /// An extern call on the runtime's libffi call (`coil_native_ffi`),
     /// with no address: its result word.
     fn runtime_extern_call(&mut self, f: &MirFunc, dest: ValueId, sig: &compiler::native_mir::MirExternSig, args: &[ValueId]) -> cranelift_codegen::ir::Value {
+        self.runtime_ffi = true;
         let words: Vec<ValueId> = args.iter().take(2).chain(args.iter().skip(3)).copied().collect();
         let tags: Vec<i64> = sig.variadic.iter().flatten().map(|&t| i64::from(t)).collect();
         let operand = (words.len() as u64 - 2) | if sig.variadic.is_some() { 1 << 16 } else { 0 };
@@ -5268,8 +5337,9 @@ impl<'a> Lower<'a> {
     /// An extern call straight to the C function at `args[2]` (its
     /// address static), on `args[3..]` as `params`: its result word. No
     /// coil code runs and nothing collects during it (the program makes no
-    /// callback), so it needs no roots. A pointer or struct argument the
-    /// runtime must make (a copy) sends the call there instead.
+    /// callback), so it needs no roots. The runtime makes each pointer
+    /// argument (lent in place or a copy, written back after the call) and
+    /// packs each struct one; one that cannot be passed panics.
     #[allow(clippy::too_many_arguments)]
     fn direct_extern_call(
         &mut self,
@@ -5286,62 +5356,50 @@ impl<'a> Lower<'a> {
         let ptrs: Vec<usize> = (0..params.len()).filter(|&i| matches!(params[i], CArg::Ptr(_))).collect();
         let structs: Vec<usize> = (0..params.len()).filter(|&i| matches!(params[i], CArg::Struct { .. })).collect();
         let want = cl_ty(ty_of(f, dest));
-        let (fast, join) = (self.b.create_block(), self.b.create_block());
-        self.b.append_block_param(join, want);
         let mut made = HashMap::new();
         let mut packed = HashMap::new();
-        if !ptrs.is_empty() || !structs.is_empty() {
-            let mut ok = self.b.ins().iconst(types::I64, 1);
-            if !ptrs.is_empty() {
-                let slot = self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (ptrs.len() * 8) as u32, 3));
-                for (k, &i) in ptrs.iter().enumerate() {
-                    let CArg::Ptr(kind) = params[i] else { continue };
-                    let w = self.get(f, words[i]);
-                    let w = self.coerce(w, types::I64);
-                    let kind_v = self.b.ins().iconst(types::I64, kind as i64);
-                    let out = self.b.ins().stack_addr(types::I64, slot, (k * 8) as i32);
-                    let call = self.b.ins().call(self.ffi_arg, &[self.ctx, kind_v, w, out]);
-                    let r = self.b.inst_results(call)[0];
-                    ok = self.b.ins().band(ok, r);
-                    made.insert(i, (slot, k));
-                    // A buffer lent in place is no other argument too (the
-                    // runtime copies each).
-                    if kind == machine::native::FFI_ARG_CONST_BYTES || kind == machine::native::FFI_ARG_BYTES {
-                        for (j, &other) in words.iter().enumerate() {
-                            if j != i {
-                                let o = self.get(f, other);
-                                let o = self.coerce(o, types::I64);
-                                let differ = self.b.ins().icmp(IntCC::NotEqual, w, o);
-                                let differ = self.b.ins().uextend(types::I64, differ);
-                                ok = self.b.ins().band(ok, differ);
-                            }
+        if !ptrs.is_empty() {
+            let slot = self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (ptrs.len() * 8) as u32, 3));
+            for (k, &i) in ptrs.iter().enumerate() {
+                let CArg::Ptr(kind) = params[i] else { continue };
+                let w = self.get(f, words[i]);
+                let w = self.coerce(w, types::I64);
+                let mut kind_v = self.b.ins().iconst(types::I64, kind as i64);
+                // A buffer that is another argument too is copied (as the
+                // runtime's call does), so C sees no aliasing.
+                if kind == machine::native::FFI_ARG_CONST_BYTES || kind == machine::native::FFI_ARG_BYTES {
+                    for (j, &other) in words.iter().enumerate() {
+                        if j != i {
+                            let o = self.get(f, other);
+                            let o = self.coerce(o, types::I64);
+                            let same = self.b.ins().icmp(IntCC::Equal, w, o);
+                            let same = self.b.ins().uextend(types::I64, same);
+                            let bit = self.b.ins().ishl_imm_u(same, 8);
+                            kind_v = self.b.ins().bor(kind_v, bit);
                         }
                     }
                 }
+                let out = self.b.ins().stack_addr(types::I64, slot, (k * 8) as i32);
+                self.b.ins().call(self.ffi_arg, &[self.ctx, kind_v, w, out]);
+                made.insert(i, (slot, k));
             }
-            // Each struct argument's C bytes, in a buffer of its own
-            // (16-byte aligned, as Windows x64 wants a copy it is lent).
-            for &i in &structs {
-                let CArg::Struct { id, size, .. } = params[i] else { continue };
-                let slot = self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size, 4));
-                let w = self.get(f, words[i]);
-                let w = self.coerce(w, types::I64);
-                let id_v = self.b.ins().iconst(types::I64, i64::from(id));
-                let at = self.b.ins().stack_addr(types::I64, slot, 0);
-                let call = self.b.ins().call(self.ffi_struct_in, &[self.ctx, id_v, w, at]);
-                let r = self.b.inst_results(call)[0];
-                ok = self.b.ins().band(ok, r);
-                packed.insert(i, slot);
-            }
-            let slow = self.b.create_block();
-            self.b.ins().brif(ok, fast, &[], slow, &[]);
-            self.b.switch_to_block(slow);
-            let w = self.runtime_extern_call(f, dest, sig, args);
-            self.b.ins().jump(join, &[w.into()]);
-        } else {
-            self.b.ins().jump(fast, &[]);
         }
-        self.b.switch_to_block(fast);
+        // Each struct argument's C bytes, in a buffer of its own (16-byte
+        // aligned, as Windows x64 wants a copy it is lent).
+        for &i in &structs {
+            let CArg::Struct { id, size, .. } = params[i] else { continue };
+            let slot = self.b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size, 4));
+            let w = self.get(f, words[i]);
+            let w = self.coerce(w, types::I64);
+            let id_v = self.b.ins().iconst(types::I64, i64::from(id));
+            let at = self.b.ins().stack_addr(types::I64, slot, 0);
+            self.b.ins().call(self.ffi_struct_in, &[self.ctx, id_v, w, at]);
+            packed.insert(i, slot);
+        }
+        // An argument that cannot be passed has set its panic.
+        if !ptrs.is_empty() || !structs.is_empty() {
+            self.bail_on_helper();
+        }
         let mut csig = Signature::new(self.c_conv);
         let mut cargs = Vec::with_capacity(params.len() + 1);
         // A struct result too large for registers: C writes it through a
@@ -5390,6 +5448,13 @@ impl<'a> Lower<'a> {
                         }
                     });
                 }
+                CArg::Int(t, signed) => {
+                    csig.params.push(AbiParam::new(types::I64));
+                    let w = self.get(f, a);
+                    let w = self.coerce(w, types::I64);
+                    let narrow = self.b.ins().ireduce(t, w);
+                    cargs.push(if signed { self.b.ins().sextend(types::I64, narrow) } else { self.b.ins().uextend(types::I64, narrow) });
+                }
                 CArg::Struct { size, how, .. } => {
                     let slot = packed[&i];
                     match how {
@@ -5413,7 +5478,7 @@ impl<'a> Lower<'a> {
         }
         match ret {
             CRet::Void => {}
-            CRet::Word(t) => csig.returns.push(AbiParam::new(t)),
+            CRet::Word(t) | CRet::Int(t, _) => csig.returns.push(AbiParam::new(t)),
             CRet::Bool => csig.returns.push(AbiParam::new(types::I8)),
             CRet::Str => csig.returns.push(AbiParam::new(types::I64)),
             CRet::Struct { regs, n, .. } => csig.returns.extend(regs.iter().take(n as usize).map(|&t| AbiParam::new(t))),
@@ -5425,6 +5490,12 @@ impl<'a> Lower<'a> {
             csig.params.push(AbiParam::new(types::I64));
             cargs.push(addr);
             addr = self.b.ins().func_addr(types::I64, self.va_call);
+        }
+        if let Some(CVa::ThunkF { pad }) = va {
+            zero_words(&mut self.b, &mut csig, &mut cargs, types::F64, pad);
+            csig.params.push(AbiParam::new(types::F64));
+            cargs.push(self.b.ins().bitcast(types::F64, MemFlagsData::new(), addr));
+            addr = self.b.ins().func_addr(types::I64, self.va_call_f);
         }
         let results: Vec<_> = if let Some(cb) = &self.cb {
             // A callback may run coil code, which may collect: the caller's
@@ -5458,6 +5529,8 @@ impl<'a> Lower<'a> {
                 self.b.inst_results(call)[0]
             }
             (CRet::Word(_), Some(r)) => r,
+            (CRet::Int(_, true), Some(r)) => self.b.ins().sextend(types::I64, r),
+            (CRet::Int(_, false), Some(r)) => self.b.ins().uextend(types::I64, r),
             (CRet::Struct { id, .. }, _) => {
                 let slot = ret_slot.expect("a struct result has its buffer");
                 for (k, &w) in results.iter().enumerate() {
@@ -5471,13 +5544,10 @@ impl<'a> Lower<'a> {
             _ => self.b.ins().iconst(types::I64, 0),
         };
         // A returned string may be an argument's copy: it is read first.
-        if params.iter().any(|p| matches!(p, CArg::Ptr(machine::native::FFI_ARG_CSTR))) {
+        if !ptrs.is_empty() {
             self.b.ins().call(self.ffi_done, &[self.ctx]);
         }
-        let out = self.coerce(out, want);
-        self.b.ins().jump(join, &[out.into()]);
-        self.b.switch_to_block(join);
-        self.b.block_params(join)[0]
+        self.coerce(out, want)
     }
 
     /// [`Self::words_slot`] with the constants `tail` after the words.

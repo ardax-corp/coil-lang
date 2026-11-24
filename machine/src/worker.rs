@@ -74,6 +74,7 @@ fn run_on(rt: &mut Runtime, job: Job) {
         dload_gate,
         epoch,
         struct_layouts,
+        ffi_recipes,
         test,
         statics,
         native,
@@ -118,6 +119,8 @@ fn run_on(rt: &mut Runtime, job: Job) {
         rt.ffi.search_paths = ffi_search_paths;
         rt.ffi.dload_gate = dload_gate;
         rt.ffi.struct_layouts = struct_layouts;
+        rt.ffi.recipes = ffi_recipes;
+        rt.ffi.adopted.clear();
         rt.output = None;
         if let Some(buf) = &shared_print {
             rt.output = Some(Box::new(SharedPrintWriter(Arc::clone(buf))));

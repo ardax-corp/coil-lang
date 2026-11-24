@@ -1980,6 +1980,27 @@
     }
 
     #[test]
+    fn parse_extern_params_take_a_trailing_comma() {
+        // `coil fmt` wraps a long parameter list with a comma after the
+        // last parameter, and after a trailing `...`.
+        let fixed = decl_ast!("extern \"c\" { fn f(\n    int a,\n    int b,\n) -> int; }");
+        let variadic = decl_ast!("extern \"c\" { fn g(\n    string fmt,\n    ...,\n) -> int; }");
+        for (ast, params, is_variadic) in [(fixed, 2, false), (variadic, 1, true)] {
+            match ast {
+                Expression::ExternBlock { declarations, .. } => {
+                    let f = &declarations[0];
+                    assert_eq!(f.variadic, is_variadic);
+                    match f.args.1.as_ref() {
+                        Expression::Fragment(items) => assert_eq!(items.len(), params),
+                        other => panic!("expected Fragment, got {:?}", other),
+                    }
+                }
+                other => panic!("expected ExternBlock, got {:?}", other),
+            }
+        }
+    }
+
+    #[test]
     fn parse_extern_block_bare_ellipsis_only() {
         let ast = decl_ast!("extern \"c\" { fn weird(...) -> int; }");
         match ast {
@@ -2230,7 +2251,7 @@
         let result = Pratt::default().declaration().parse(src).into_result();
         match result {
             Ok((_span, expr)) => match expr.as_ref() {
-                Expression::Use { path, name, alias } => {
+                Expression::Use { path, name, alias, .. } => {
                     assert_eq!(path, &["foo".to_string()]);
                     assert_eq!(name, "bar");
                     assert!(alias.is_none());
@@ -2242,12 +2263,30 @@
     }
 
     #[test]
+    fn parse_pub_use_marks_every_brace_item_public() {
+        let src = "pub use foo::{bar, baz as qux};";
+        let result = Pratt::default().declaration().parse(src).into_result();
+        let Ok((_span, expr)) = result else {
+            panic!("parse failed: {result:?}");
+        };
+        let Expression::Fragment(items) = expr.as_ref() else {
+            panic!("expected a fragment of uses, got {expr:?}");
+        };
+        assert_eq!(items.len(), 2);
+        for item in items {
+            assert!(matches!(item.1.as_ref(), Expression::Use { public: true, written: None, .. }));
+        }
+        let plain = Pratt::default().declaration().parse("use foo::bar;").into_result();
+        assert!(matches!(plain.map(|(_, e)| e).as_deref(), Ok(Expression::Use { public: false, .. })));
+    }
+
+    #[test]
     fn parse_use_multi_segment() {
         let src = "use foo::bar::baz;";
         let result = Pratt::default().declaration().parse(src).into_result();
         match result {
             Ok((_span, expr)) => match expr.as_ref() {
-                Expression::Use { path, name, alias } => {
+                Expression::Use { path, name, alias, .. } => {
                     assert_eq!(path, &["foo".to_string(), "bar".to_string()]);
                     assert_eq!(name, "baz");
                     assert!(alias.is_none());
@@ -2264,7 +2303,7 @@
         let result = Pratt::default().declaration().parse(src).into_result();
         match result {
             Ok((_span, expr)) => match expr.as_ref() {
-                Expression::Use { path, name, alias } => {
+                Expression::Use { path, name, alias, .. } => {
                     assert_eq!(path, &["foo".to_string()]);
                     assert_eq!(name, "bar");
                     assert_eq!(alias.as_deref(), Some("x"));
@@ -2281,7 +2320,7 @@
         let result = Pratt::default().declaration().parse(src).into_result();
         match result {
             Ok((_span, expr)) => match expr.as_ref() {
-                Expression::Use { path, name, alias } => {
+                Expression::Use { path, name, alias, .. } => {
                     assert_eq!(path, &["foo".to_string(), "bar".to_string()]);
                     assert_eq!(name, "*");
                     assert!(alias.is_none());
@@ -2301,7 +2340,7 @@
                 Expression::Fragment(children) => {
                     assert_eq!(children.len(), 2);
                     match children[0].1.as_ref() {
-                        Expression::Use { path, name, alias } => {
+                        Expression::Use { path, name, alias, .. } => {
                             assert_eq!(path, &["foo".to_string()]);
                             assert_eq!(name, "sadge");
                             assert!(alias.is_none());
@@ -2309,7 +2348,7 @@
                         other => panic!("expected first Use, got {:?}", other),
                     }
                     match children[1].1.as_ref() {
-                        Expression::Use { path, name, alias } => {
+                        Expression::Use { path, name, alias, .. } => {
                             assert_eq!(path, &["foo".to_string()]);
                             assert_eq!(name, "greet");
                             assert_eq!(alias.as_deref(), Some("g"));
@@ -2340,7 +2379,7 @@
         let result = Pratt::default().declaration().parse(src).into_result();
         match result {
             Ok((_span, expr)) => match expr.as_ref() {
-                Expression::Use { path, name, alias } => {
+                Expression::Use { path, name, alias, .. } => {
                     assert_eq!(path, &["foo".to_string()]);
                     assert_eq!(name, "sadge");
                     assert!(alias.is_none());

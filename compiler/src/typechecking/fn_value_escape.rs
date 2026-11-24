@@ -42,7 +42,7 @@ pub fn collect_fn_value_escaped(ast: &Output<'_>, into: &mut HashSet<String>) {
 }
 
 fn collect_use_aliases(ast: &Output<'_>, aliases: &mut HashMap<String, Vec<String>>) {
-    if let Expression::Use { path, name, alias } = ast.1.as_ref() {
+    if let Expression::Use { path, name, alias, .. } = ast.1.as_ref() {
         if name != "*" {
             let local = alias.clone().unwrap_or_else(|| name.clone());
             let fqn = if path.is_empty() {

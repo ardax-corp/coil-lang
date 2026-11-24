@@ -82,6 +82,13 @@ void fill_bytes(uint8_t *buf, int64_t n, int64_t v) {
     }
 }
 
+/// Multiply `n` int64s of `xs` by `k` in place (for `Vec<int>` write-back tests).
+void scale_ints(int64_t *xs, int64_t n, int64_t k) {
+    for (int64_t i = 0; i < n; i++) {
+        xs[i] *= k;
+    }
+}
+
 typedef struct {
     int32_t x;
     int32_t y;
@@ -334,4 +341,25 @@ void each_up_to(void (*cb)(int64_t), int64_t n) {
     for (int64_t i = 1; i <= n; i++) {
         cb(i);
     }
+}
+
+/// Sized integers (#2886): narrowed on the way in, widened on the way out.
+int32_t trunc32(int64_t x) {
+    return (int32_t)x;
+}
+
+int64_t widen32(int32_t x) {
+    return x;
+}
+
+uint8_t low_byte(int64_t x) {
+    return (uint8_t)x;
+}
+
+int64_t widen_u16(uint16_t x) {
+    return x;
+}
+
+int64_t sized_mix(int8_t a, uint32_t b, int16_t c) {
+    return (int64_t)a * 1000000 + (int64_t)b + (int64_t)c;
 }

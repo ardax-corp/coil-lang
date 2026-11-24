@@ -25,7 +25,8 @@ unsafe extern "C" {
     static coil_aot_host_group_count: u64;
     static coil_aot_package: u8;
     static coil_aot_package_len: u64;
-    /// `coil_ffi_link` below when the program makes an FFI call, else null.
+    /// `coil_ffi_link` or `coil_ffi_link_linked` below when the program makes
+    /// an FFI call, else null.
     static coil_aot_ffi: *const std::ffi::c_void;
 }
 
@@ -33,6 +34,12 @@ unsafe extern "C" {
 /// executable whose program makes no FFI call links none of it.
 #[unsafe(export_name = "coil_ffi_link")]
 static FFI_LINK: coil_cli::FfiLink = coil_cli::FFI_LINK;
+
+/// The FFI of a program whose libraries are all linked into the executable
+/// and called directly ([`coil_cli::FFI_LINK_LINKED`]): no libffi, `dload`
+/// or gate.
+#[unsafe(export_name = "coil_ffi_link_linked")]
+static FFI_LINK_LINKED: coil_cli::FfiLink = coil_cli::FFI_LINK_LINKED;
 
 /// Which profile built this library, for `coil package` to warn about a
 /// debug runtime (it reads the archive's bytes for this text).

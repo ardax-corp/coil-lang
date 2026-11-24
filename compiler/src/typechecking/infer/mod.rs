@@ -229,6 +229,10 @@ pub struct Checker {
     /// Module path -> every name its top level declares (persists across
     /// files): a disk `use` of a name not in it is an error (#1851).
     module_item_names: HashMap<String, HashSet<String>>,
+    /// Module path -> the locals its plain `use`s bind (local -> the module
+    /// imported from): a `use` of one is an error naming the `pub use` that
+    /// would re-export it (#2864).
+    module_private_imports: HashMap<String, HashMap<String, String>>,
     /// Local name -> FQN of every `use` in the current file. A second `use`
     /// binding the same local to another item is an error (#1354).
     import_locals: HashMap<String, String>,

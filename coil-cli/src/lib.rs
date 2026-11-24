@@ -145,6 +145,11 @@ pub struct FfiLink {
 /// The full [`FfiLink`].
 pub const FFI_LINK: FfiLink = FfiLink { hook: machine::FFI_HOOK, lock: native_lock_start };
 
+/// The [`FfiLink`] of an AOT executable that links every library its
+/// program loads and calls them all directly: no libffi, `dload` gate or
+/// native lock at start (the libraries were checked when it linked).
+pub const FFI_LINK_LINKED: FfiLink = FfiLink { hook: machine::FFI_LINKED_HOOK, lock: |_, _, _| None };
+
 /// [`FfiLink::lock`].
 fn native_lock_start(data: &[u8], trailer: PackageTrailer, search: &mut Vec<PathBuf>) -> Option<DloadGate> {
     if let Err(msg) = machine::packaged_app_ffi_startup_check(trailer.uses_ffi()) {

@@ -1,27 +1,28 @@
 // Doc stubs for the builtin `ffi::types` module (hover docs; never compiled).
 //
-// Each FFI type tag is its own export. A tag names a C type in the tuple of
-// argument types and the return type given to `ffi::declare`.
+// Each FFI type tag is its own export. `Bytes` and `ConstBytes` name buffer
+// parameters in an `extern` block; the other tags name the C types that the
+// bare names in an `extern` block (`int`, `float`, `string`, `ptr`, ...) stand
+// for.
 
 /// FFI tag for a 64-bit signed integer (`int64_t`), passed from and returned as `int`.
 ///
-/// The bare name `int` means the same in `declare` and `extern` blocks.
+/// Written `int` in an `extern` block.
 ///
 /// # Examples
 ///
 /// ```text
-/// use ffi::{dload, declare, invoke};
-/// use ffi::types::{Int};
+/// extern "sum" {
+///     fn sum(int a, int b) -> int; // int64_t sum(int64_t, int64_t)
+/// }
 ///
-/// let lib = dload("sum")?;
-/// let sum_id = declare(lib, "sum", (Int, Int), Int)?; // int64_t sum(int64_t, int64_t)
-/// let n = invoke(lib, sum_id, (40, 2))?;
+/// let n = sum(40, 2);
 /// ```
 class Int {}
 
 /// FFI tag for a 64-bit float (`double`), passed from and returned as `float`.
 ///
-/// The bare name `float` means the same.
+/// Written `float` in an `extern` block.
 class Float {}
 
 /// FFI tag for a NUL-terminated C string (`const char *`), passed from and returned as `string`.
@@ -34,8 +35,7 @@ class String {}
 
 /// FFI tag for no value (`void`), valid only as a return type.
 ///
-/// `invoke` then returns `Ok(())`. As an argument type it is
-/// `ErrorKind::InvalidSignature`. The bare name `void` means the same.
+/// In an `extern` block, leave out the `->` result.
 class Void {}
 
 /// FFI tag for a C `bool` (one byte, `0` or `1`), passed from and returned as `bool`.
@@ -72,71 +72,63 @@ class UInt64 {}
 
 /// FFI tag for a raw pointer (`void *`), returned as an `int` address.
 ///
-/// A `Vec<T>`, `[T; N]` or tuple type written in a `declare` signature also
-/// means `Ptr`.
-///
-/// As an argument, an `int` is passed as the address itself, and a non-empty
-/// array or tuple of `int` is passed as a pointer to a temporary
-/// `int64_t[]` copy whose changes are copied back after the call. Keep a
-/// value C retains alive with `gc::root`.
+/// Written `ptr` in an `extern` block. A `Vec<int>` parameter is passed as
+/// a pointer to a temporary `int64_t[]` copy whose changes are copied back
+/// after the call. Keep a value C retains alive with `gc::root`.
 ///
 /// # Examples
 ///
 /// ```text
-/// use ffi::{dload, declare, invoke};
-/// use ffi::types::{Int, Ptr};
+/// extern "sum" {
+///     // int64_t sum_array(const int64_t *xs, int64_t n)
+///     fn sum_array(Vec<int> xs, int n) -> int;
+/// }
 ///
-/// let lib = dload("sum")?;
-/// // int64_t sum_array(const int64_t *xs, int64_t n)
-/// let id = declare(lib, "sum_array", (Ptr, Int), Int)?;
-/// let n = invoke(lib, id, ([1, 2, 3, 4, 5], 5))?; // 15
+/// let n = sum_array([1, 2, 3, 4, 5], 5); // 15
 /// ```
 class Ptr {}
 
 /// FFI tag for a C function pointer, letting C call back into a Coil function.
 ///
-/// As an argument, pass a named Coil function; C receives a pointer it can
-/// call. The callback signature is currently fixed to `int64_t (*)(int64_t)`,
-/// so the Coil function must take one `int` and return `int`. As a return
-/// type, the function pointer comes back as an opaque `int` address, like
-/// `Ptr`.
+/// Written as a function type in an `extern` block (`fn(int x) -> int cb`).
+/// Pass a named top-level Coil function; C receives a pointer it can call.
 ///
 /// # Examples
 ///
 /// ```text
-/// use ffi::{dload, declare, invoke};
-/// use ffi::types::{Callback, Int};
+/// extern "sum" {
+///     // int64_t apply_cb(int64_t (*f)(int64_t), int64_t x) { return f(x); }
+///     fn apply_cb(fn(int x) -> int f, int x) -> int;
+/// }
 ///
 /// fn doubler(int x) -> int {
 ///     return x * 2;
 /// }
 ///
-/// // int64_t apply_cb(int64_t (*f)(int64_t), int64_t x) { return f(x); }
-/// let id = declare(lib, "apply_cb", (Callback, Int), Int)?;
-/// let n = invoke(lib, id, (doubler, 21))?; // 42
+/// let n = apply_cb(doubler, 21); // 42
 /// ```
 class Callback {}
 
 /// FFI tag for a C struct passed or returned by value.
 ///
-/// Not written directly: name an `extern struct` type in `declare` instead,
-/// and the compiler uses this tag with that struct's layout. A returned
-/// struct becomes a record whose fields are read with `.name`.
+/// Not written directly: name an `extern struct` type in an `extern` block
+/// instead, and the compiler uses this tag with that struct's layout. A
+/// returned struct becomes a record whose fields are read with `.name`.
 ///
 /// # Examples
 ///
 /// ```text
-/// use ffi::{dload, declare, invoke};
-/// use ffi::types::{Int32};
-///
 /// extern struct Point {
-///     x: int32,
-///     y: int32,
+///     x: float,
+///     y: float,
 /// };
 ///
-/// let make_id = declare(lib, "make_point", (Int32, Int32), Point)?;
-/// let p = invoke(lib, make_id, (3, 4))?;
-/// let sum = p.x + p.y; // 7
+/// extern "geom" {
+///     fn make_point(float x, float y) -> Point;
+/// }
+///
+/// let p = make_point(3.0, 4.0);
+/// let sum = p.x + p.y; // 7.0
 /// ```
 class Struct {}
 
@@ -146,8 +138,7 @@ class Struct {}
 /// in place, and otherwise (a coil callback exists, the same `Vec` is passed
 /// twice, or its elements are stored as words) C gets a copy that is copied
 /// back after the call. No NUL terminator is added, so pass the length
-/// separately. Argument only: as a return type it is
-/// `ErrorKind::Unsupported` (return a `Ptr` instead).
+/// separately. Argument only (return a `ptr` instead).
 class Bytes {}
 
 /// FFI tag for a read-only byte view (`const uint8_t *`) of a `string` or `Vec<byte>`.

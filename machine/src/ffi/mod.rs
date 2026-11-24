@@ -4,6 +4,7 @@
 mod call;
 #[cfg(not(target_family = "wasm"))]
 mod closure;
+mod direct;
 mod error;
 mod gate;
 #[cfg(target_family = "wasm")]
@@ -20,6 +21,7 @@ pub use call::{
     InvokeContext, PreparedCall, invoke_via_libffi, pack_struct_into, prepare_cif, prepare_cif_for_symbol,
     prepare_variadic_cif, promote_variadic_arg_type, resolve_symbol, unpack_struct_from,
 };
+pub use direct::{DirectCopies, DirectPtr};
 #[cfg(not(target_family = "wasm"))]
 pub use closure::{OwnedClosure, ProgramCallFn, make_callback};
 #[cfg(target_family = "wasm")]
@@ -30,6 +32,19 @@ pub use nolib::{
 };
 pub use error::{FfiErrorKindTag, alloc_ffi_error, alloc_ffi_error_kind, alloc_result_ffi_err};
 pub use gate::DloadGate;
+
+/// A library a runtime loaded with `FfiLoad`: its path and the signatures
+/// declared on it, in id order. A spawned job's runtime loads its own copy
+/// from this the first time it calls through the parent's handle (#2902).
+#[derive(Clone, Debug)]
+pub struct LibraryRecipe {
+    pub(crate) path: String,
+    pub(crate) signatures: Vec<FfiSignature>,
+}
+
+/// The program's [`LibraryRecipe`]s by the loading runtime's handle,
+/// shared with every job it spawns.
+pub type LibraryRecipes = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, LibraryRecipe>>>;
 pub use read::read_ints;
 #[cfg(not(target_family = "wasm"))]
 pub use libloading::Library;

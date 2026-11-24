@@ -268,9 +268,9 @@ native code reloads its words.
   bytes in `x` registers and larger ones as a pointer to a copy; Windows x64 passes
   a struct of 1, 2, 4 or 8 bytes in a register and any other as a pointer to a copy.
   A result too large for registers comes back through a hidden pointer
-  (`StructReturn`: `rdi` on x86-64, `x8` on AArch64; Windows x64 and an AArch64
-  struct that would be split between registers and the stack go through the
-  runtime). A variadic function's arguments after the declared ones (`...`) go
+  (`StructReturn`: `rdi` on x86-64 System V, `rcx` on Windows x64, `x8` on
+  AArch64; an AArch64 struct that would be split between registers and the stack
+  goes through the runtime). A variadic function's arguments after the declared ones (`...`) go
   direct as C's default promotions make them (a `bool` as an `int`; no struct): as
   declared ones on AArch64 Linux; on Windows x64 a `double` in the integer register
   of its position, which is where the callee's `va_arg` reads it; on Apple arm64
@@ -278,10 +278,15 @@ native code reloads its words.
   declared arguments leave; on x86-64 System V through `coil_native_va_call`, which
   sets `al` (an upper bound of the vector registers used, which Cranelift does not
   set) and jumps to the C function, whose address is the call's last integer
-  argument after zero words, in `r9` (a call that needs all six integer registers
-  goes through the runtime). A variadic call of more than seven arguments keeps its
-  argument tuple and goes through the runtime. Sized integers (#2886) go through
-  the runtime. A C callback (an extern parameter of function type, `fn(int x) ->
+  argument after zero words, in `r9`, or, when the arguments take all six integer
+  registers, through `coil_native_va_call_f` with the address as the last `double`
+  after zero ones, in `xmm7` (a call that takes every integer and vector register
+  goes through the runtime). A call of more than 64 words (library, function id,
+  arguments and a variadic call's tags) keeps its argument tuple and goes through
+  the runtime. A sized integer (`int32`, `uint8`, …) is an `int` in coil: an
+  argument is narrowed to its C type and sign or zero extended to a whole register
+  (what C callers do), a result sign or zero extended back, as the runtime's call
+  does. A C callback (an extern parameter of function type, `fn(int x) ->
   int cb`, whose argument names a top-level function) goes direct as the address of
   a thunk the backend emits per callback function and signature,
   `coil_cb_thunk_<body>_<aux>`: a C-convention entry that stores its arguments as
@@ -290,15 +295,15 @@ native code reloads its words.
   The signature (up to five `int`, `float`, `bool`, `ptr` or `string` parameters;
   an `int`, `float`, `bool`, `ptr` or no result) is in the `CALLBACK` tag's aux
   (`common::encode_callback_sig`), so the archive is unchanged. In a program that may
-  make a C callback into coil (an extern function that takes one, or any
-  `ffi::declare` / `ffi::invoke`: a library may keep a callback and run it during a
-  later call, `may_call_back`), every direct extern call goes through a trampoline
+  make a C callback into coil (an extern function that takes one: a library may keep
+  a callback and run it during a later call, `may_call_back`), every direct extern call goes through a trampoline
   per call shape, `coil_cb_call_<k>`, between `push_roots` / `pop_roots`: it saves
   the frame pointer for the collector, calls `coil_native_cb_enter` (which makes
   this thread's context the one a callback runs on), calls C, and then
   `coil_native_cb_leave`, which reports a panic in a callback as the call's. A call
-  with a struct or a lent buffer (`bytes`, `Vec`) still goes through the runtime
-  there. A call into `sum` costs about 3.5 ns direct against 270 ns through
+  with a struct on the stack or through a hidden result pointer (special parameters
+  a trampoline does not forward) or a buffer (`bytes`, `Vec`: the collector may move
+  the object a copy writes back to) still goes through the runtime there. A call into `sum` costs about 3.5 ns direct against 270 ns through
   `invoke` on a tuple, and about 10 ns against 125 ns through the trampoline in a
   program that may call back; one passing a 12-byte string about 40 ns against
   315 ns; one passing a 16-byte struct about 18 ns against 400 ns through the
@@ -728,7 +733,17 @@ all`. Two changes take it to 675 KB (-39%) with the same instruction counts:
   reference the link drops libffi, `libloading`, the FFI registry, the `dload` gate and
   `sha2`. Every other start (`coil FILE`, `coil run`, the JIT runner, `coil debug`)
   passes the hook. A program with no FFI op whose package still says it uses FFI exits
-  with "linked without FFI"; `coil package` makes neither.
+  with "linked without FFI"; `coil package` makes neither. When every library the
+  program's `extern` blocks name is linked into the executable (`--link-static`, or a
+  shared library on ELF) and every extern call is direct (no `runtime_extern_call`,
+  `Ids::runtime_ffi`) with no `MirFfiOp::Invoke`, `coil_aot_ffi` holds
+  `coil_ffi_link_linked` instead (`coil_cli::FFI_LINK_LINKED`,
+  `machine::FFI_LINKED_HOOK`): module setup's load, declare and address ops read the
+  executable's `coil_static_syms` table, and there is no native lock, gate, `dload` or
+  libffi (`examples/ffi_sum.coil`: 1,045 KB -> 905 KB with `--strip-symbols all`).
+  A direct call makes its own argument copies (`machine::ffi::DirectCopies`, through
+  `coil_native_ffi_arg` / `coil_native_ffi_done`) and panics on an argument it cannot
+  pass, so it never retries on the runtime's libffi call.
 - **Size-trimmed std** (-300 KB): `scripts/build_runtime.sh` builds the release
   `libcoil_rt.a` on Linux with std rebuilt (`-Zbuild-std`, `RUSTC_BOOTSTRAP=1`
   on stable, needs `rust-src`): without std's backtrace symbolizer (`gimli`,
@@ -798,8 +813,7 @@ archive is the build tool's job (spool); the compiler takes paths only.
   table. Calls go as for a shared library: direct for scalar signatures, libffi
   otherwise.
 - The native lock and `--check-native` skip linked stems.
-- A declare of a symbol the table does not hold (an `ffi::declare` of a library an
-  `extern` block also names) looks it up in the process.
+- A declare of a symbol the table does not hold looks it up in the process.
 
 ### Shared `extern` libraries
 
@@ -814,7 +828,7 @@ like a static archive's, so at start the loader binds them, the runtime opens no
 checks no pin for them (trusted by soname), and the natives cache is not searched. The
 lock keeps their rows, for `coil natives dump` and the tools that ship the files. macOS
 (the install name is the library's choice) and Windows keep opening them at start
-through the `dload` gate, as does a library only `ffi::dload` opens.
+through the `dload` gate.
 
 ## Where the pieces are
 

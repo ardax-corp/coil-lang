@@ -133,6 +133,7 @@ impl Checker {
             disk_imports: HashSet::new(),
             unresolved_imports: HashMap::new(),
             module_item_names: HashMap::new(),
+            module_private_imports: HashMap::new(),
             import_locals: HashMap::new(),
             imported_enum_keys: HashMap::new(),
             imported_class_keys: HashMap::new(),
@@ -1889,6 +1890,8 @@ impl Checker {
         // Union: a module is checked again for variadic copies (#1386).
         let names = self.module_item_names.entry(self.current_module.clone()).or_default();
         crate::typechecking::resolve::item_names(ast, names);
+        let private = self.module_private_imports.entry(self.current_module.clone()).or_default();
+        crate::typechecking::resolve::private_import_names(ast, private);
         self.bare_cases_by_module
             .insert(self.current_module_id, Default::default());
 
@@ -3000,7 +3003,7 @@ impl Checker {
             // Named call-site arg: type is the value's type.
             Expression::NamedArg(_, value) => self.infer(value),
             // `use`: virtual modules first, else disk-module function alias.
-            Expression::Use { path, name, alias } => self.infer_use_decl(path, name, alias, range),
+            Expression::Use { path, name, alias, .. } => self.infer_use_decl(path, name, alias, range),
             Expression::Module(_, _) => unit_ty(),
             // FFI extern: register signatures in the top frame; body is empty.
             Expression::ExternBlock {
@@ -4252,8 +4255,17 @@ impl Checker {
             }
             // An `extern struct` by value: the record `invoke` gives too.
             Some(common::tag::STRUCT) => self.ty_from_ffi_type_expr(t),
+            _ if Self::extern_sized_int(t) => crate::typechecking::ty::int(),
             _ => self.parse_type_name(t),
         }
+    }
+
+    /// Whether an `extern` parameter or result type is a sized C integer
+    /// (`int32`, `uint8`, …): an `int` in coil, narrowed and widened at the
+    /// call (#2886).
+    fn extern_sized_int(t: &Output) -> bool {
+        matches!(t.1.as_ref(), Expression::Type(n) | Expression::Identifier(n)
+            if crate::typechecking::ty::FFI_INTS.contains(&n.to_ascii_lowercase().as_str()))
     }
 
     /// A `string` passed to `extern` `name`'s `ConstBytes` parameter `index`
@@ -4267,6 +4279,11 @@ impl Checker {
             && params
                 .iter()
                 .any(|&(nfixed, variadic, i)| i == index && (nfixed == argc || (variadic && argc >= nfixed)))
+    }
+
+    /// Whether `name` is a function an `extern` block declares.
+    pub(crate) fn is_extern_fn(&self, name: &str) -> bool {
+        self.extern_fns.contains(name)
     }
 
     /// Whether parameter `index` of `extern` `name` is a callback.
@@ -4357,6 +4374,7 @@ impl Checker {
                 .as_ref()
                 .map(|r| match self.ffi_type_tag_from_output(r) {
                     Some((common::tag::STRUCT, _)) => self.ty_from_ffi_type_expr(r),
+                    _ if Self::extern_sized_int(r) => crate::typechecking::ty::int(),
                     _ => self.parse_type_name(r),
                 })
                 .unwrap_or_else(unit_ty);
@@ -4412,6 +4430,7 @@ impl Checker {
         range: Range<usize>,
     ) -> Ty {
         let module_ns = path.join("::");
+
         if name == "*" {
             // Prelude is injected automatically; every other module,             // virtual or userland, requires explicit imports.
             let mod_label = if module_ns.is_empty() {
@@ -4499,11 +4518,17 @@ impl Checker {
             && !self.macro_imports.contains(&local)
             && !self.variadic_exports.is_template(&fqn)
         {
+            let help = match self.module_private_imports.get(&module_ns).and_then(|p| p.get(name)) {
+                Some(from) => format!(
+                    "`{module_ns}` imports `{name}` from `{from}` without re-exporting it: import it from `{from}`, or write `pub use` in `{module_ns}` to re-export it"
+                ),
+                None => format!("`{module_ns}` declares nothing named `{name}`; check the spelling"),
+            };
             return self.error_with_help(
                 ErrorCode::UnknownValue,
                 format!("module `{module_ns}` has no item `{name}`"),
                 range,
-                Some(format!("`{module_ns}` declares nothing named `{name}`; check the spelling")),
+                Some(help),
             );
         }
         self.drop_prelude_fn(&local);
@@ -6041,9 +6066,9 @@ impl Checker {
         if matches!(ident.as_str(), "dload" | "declare" | "invoke") {
             return self.error_with_help(
                 ErrorCode::UnknownValue,
-                format!("Cannot find value `{}` in this scope", ident),
+                format!("`{ident}` was removed"),
                 range,
-                Some("import it with `use ffi::{dload, declare, invoke}`".to_string()),
+                Some(crate::typechecking::virtual_modules::REMOVED_FFI_HELP.to_string()),
             );
         }
 
@@ -14133,11 +14158,6 @@ impl Checker {
         self.record_ffi_param_invoke_flow(fn_name, &param_names, arg_exprs);
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_ffi_param_invoke_ret(&self, key: &str) -> Option<&(Ty, bool, usize)> {
-        self.ffi_fn_param_invoke_ret.get(key)
-    }
-
     fn ffi_invoke_fn_id_metadata_prescan(
         &self,
         expr: &Output,
@@ -16279,7 +16299,7 @@ impl Checker {
         fn walk<'a>(node: &'a Output<'a>, uses: &mut Vec<(String, String, Range<usize>)>, items: &mut HashSet<String>) {
             let inner = Checker::pre_pass_unwrap_stmt(node);
             match inner.1.as_ref() {
-                Expression::Use { path, name, alias } if name != "*" => {
+                Expression::Use { path, name, alias, .. } if name != "*" => {
                     let local = alias.clone().unwrap_or_else(|| name.clone());
                     uses.push((local, format!("{}::{name}", path.join("::")), node.0.into_range()));
                 }
@@ -16953,7 +16973,7 @@ impl Checker {
                     self.import_type_aliases(child);
                 }
             }
-            Expression::Use { path, name, alias } if name != "*" && !path.is_empty() => {
+            Expression::Use { path, name, alias, .. } if name != "*" && !path.is_empty() => {
                 let fqn = format!("{}::{name}", path.join("::"));
                 let local = alias.clone().unwrap_or_else(|| name.clone());
                 if let Some(ty) = self.qualified_type_aliases.get(&fqn).cloned() {
@@ -16986,7 +17006,7 @@ impl Checker {
                     self.pre_process_top_level_use_node(child);
                 }
             }
-            Expression::Use { path, name, alias }
+            Expression::Use { path, name, alias, .. }
                 if name != "*" => {
                     let local = alias.as_deref().unwrap_or(name);
                     if !self.apply_virtual_use(path, name, alias.as_deref()) {
@@ -17550,7 +17570,7 @@ impl Checker {
                     Self::collect_top_level_uses(child, out);
                 }
             }
-            Expression::Use { path, name, alias } => out.push((path, name, alias.as_deref())),
+            Expression::Use { path, name, alias, .. } => out.push((path, name, alias.as_deref())),
             _ => {}
         }
     }

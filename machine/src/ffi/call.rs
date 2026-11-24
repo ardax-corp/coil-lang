@@ -7,6 +7,7 @@ use libffi::middle::{Arg, Cif, CodePtr, Type};
 
 use crate::memory::{CStructLayout, FfiType, Heap, ObjString, Object};
 
+use super::direct::{array_buffer_from_value, byte_arg_from_value, copy_array_buffers_back, copy_byte_buffers_back};
 use super::signature::{FfiError, FfiSignature};
 
 pub struct PreparedCall {
@@ -448,108 +449,6 @@ fn unpack_struct(
     Ok(Value::from(obj.addr()))
 }
 
-fn array_buffer_from_value(
-    heap: &Heap,
-    value: &Value,
-    bufs: &mut Vec<Vec<i64>>,
-) -> Result<(*mut c_void, Option<u64>), FfiError> {
-    let addr = value.bits();
-    if let Some(obj) = heap.find_object_by_addr(addr) {
-        let mut buf: Vec<i64> = match &obj {
-            Object::Array(gc) => gc.as_ref().iter().map(|v| v.as_int()).collect(),
-            Object::Enum(gc) if gc.as_ref().is_tuple() => gc.as_ref().elements().iter().map(|v| v.as_int()).collect(),
-            _ => Vec::new(),
-        };
-        if !buf.is_empty() {
-            let ptr = buf.as_mut_ptr() as *mut c_void;
-            bufs.push(buf);
-            return Ok((ptr, Some(addr)));
-        }
-    }
-    Ok((value.raw() as *mut c_void, None))
-}
-
-/// Backing for an empty byte view, so C never gets a dangling pointer.
-static EMPTY_CONST_BYTES: [u8; 1] = [0];
-
-/// A byte argument as C sees it: a `Vec<byte>` (or byte tuple) as `Bytes`
-/// (`uint8_t *`, `writable`), or a `string` / `Vec<byte>` (or byte tuple) as
-/// `ConstBytes` (read-only `const uint8_t *`). No NUL terminator; the callee
-/// takes the length separately. `Some(addr)` when the bytes are a copy that
-/// goes back into that array after the call.
-///
-/// A string is lent in place: its bytes never move or change while the
-/// string lives (`memory::strbuf`), and the interpreter roots the call's arguments
-/// until it returns. A packed array is lent in place too when `lend` (no
-/// coil callback can run during the call, so nothing can grow, unpack or
-/// free it) and no other argument names the same array (so C sees no
-/// aliasing a copy would not have had): a `Bytes` callee then writes the
-/// array itself, which is what copying back gave. Anything else (a
-/// word-stored array, a tuple, an empty array) is copied in, and a
-/// `Bytes` array copied back, as before.
-fn byte_arg_from_value(
-    heap: &Heap,
-    value: &Value,
-    writable: bool,
-    lend: bool,
-    bufs: &mut Vec<Vec<u8>>,
-) -> Result<(*mut c_void, Option<u64>), FfiError> {
-    let addr = value.bits();
-    if addr == 0 && !writable {
-        return Ok((EMPTY_CONST_BYTES.as_ptr() as *mut c_void, None));
-    }
-    let (mut buf, copy_back): (Vec<u8>, bool) = match heap.find_object_by_addr(addr) {
-        Some(Object::String(gc)) if !writable => {
-            let bytes = gc.as_ref().data.as_bytes();
-            if bytes.is_empty() {
-                return Ok((EMPTY_CONST_BYTES.as_ptr() as *mut c_void, None));
-            }
-            return Ok((bytes.as_ptr() as *mut c_void, None));
-        }
-        Some(Object::Array(mut gc)) => {
-            if lend
-                && let Some(bytes) = gc.as_mut().bytes_mut()
-                && !bytes.is_empty()
-            {
-                return Ok((bytes.as_mut_ptr() as *mut c_void, None));
-            }
-            (gc.as_ref().to_byte_vec(), writable)
-        }
-        Some(Object::Enum(gc)) if gc.as_ref().is_tuple() => {
-            (gc.as_ref().elements().iter().map(|v| v.as_int() as u8).collect(), false)
-        }
-        _ => {
-            return Err(FfiError::Unsupported(if writable {
-                "Bytes argument must be a Vec<byte>".into()
-            } else {
-                "ConstBytes argument must be a string or Vec<byte>".into()
-            }));
-        }
-    };
-    // Never hand C a dangling pointer for an empty buffer.
-    buf.reserve(1);
-    let ptr = buf.as_mut_ptr() as *mut c_void;
-    bufs.push(buf);
-    Ok((ptr, copy_back.then_some(addr)))
-}
-
-fn copy_byte_buffers_back(heap: &mut Heap, targets: &[(u64, usize)], bufs: &[Vec<u8>]) {
-    for &(addr, buf_idx) in targets {
-        let Some(buf) = bufs.get(buf_idx) else {
-            continue;
-        };
-        heap.update_array_bytes(addr, buf);
-    }
-}
-
-fn copy_array_buffers_back(heap: &mut Heap, targets: &[(u64, usize)], bufs: &[Vec<i64>]) {
-    for &(addr, buf_idx) in targets {
-        let Some(buf) = bufs.get(buf_idx) else {
-            continue;
-        };
-        heap.update_array_elements(addr, buf);
-    }
-}
 
 pub fn invoke_via_libffi(
     prepared: &PreparedCall,

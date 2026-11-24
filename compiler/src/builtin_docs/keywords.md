@@ -604,7 +604,7 @@ Binds C functions from a native library at compile time: `extern "lib" { fn …;
 Each declaration is a signature ending in `;`, called like an ordinary
 function. The compiler loads the library and declares the functions for you,
 panicking with a clear message if that fails. A trailing bare `...` marks C
-varargs. The library stem is gated like `ffi::dload`: the build needs
+varargs. The library stem is gated: the build needs
 `--allow-dload STEM`, and the run a `--dload-pin` or `--dload-trusted` for
 it; `extern "c"` (libc) is always denied. `extern struct Name { … };`
 declares a C struct passed by value.

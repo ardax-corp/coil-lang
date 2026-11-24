@@ -1102,8 +1102,10 @@ impl<'s> Formatter<'s> {
                 self.fmt_delimited_outputs("(", ")", args, false);
             }
 
-            Expression::Use { path, name, alias } => {
-                self.fmt_use(path, name, alias.as_ref());
+            Expression::Use { path, name, alias, public, written } => {
+                let (path, name, alias) =
+                    written.as_deref().map_or((path, name, alias), |(p, n, a)| (p, n, a));
+                self.fmt_use(*public, path, name, alias.as_ref());
             }
 
             Expression::Variable(name, ty) => {
@@ -1840,7 +1842,10 @@ impl<'s> Formatter<'s> {
         }
     }
 
-    fn fmt_use(&mut self, path: &[String], name: &str, alias: Option<&String>) {
+    fn fmt_use(&mut self, public: bool, path: &[String], name: &str, alias: Option<&String>) {
+        if public {
+            self.push_str("pub ");
+        }
         self.push_str("use ");
         for (i, segment) in path.iter().enumerate() {
             if i > 0 {
@@ -1870,13 +1875,14 @@ impl<'s> Formatter<'s> {
             while end < items.len()
                 && use_parts(items[end].1.as_ref())
                     .is_some_and(|(candidate, _, _)| candidate.first() == root.first())
+                && use_public(items[end].1.as_ref()) == use_public(items[start].1.as_ref())
             {
                 end += 1;
             }
             let group = &items[start..end];
             if group.len() < 2 {
                 if let Some((path, name, alias)) = use_parts(group[0].1.as_ref()) {
-                    self.fmt_use(path, name, alias);
+                    self.fmt_use(use_public(group[0].1.as_ref()), path, name, alias);
                 }
             } else if can_group_uses(group) {
                 self.fmt_grouped_use(group);
@@ -1886,7 +1892,7 @@ impl<'s> Formatter<'s> {
                         self.newline();
                     }
                     if let Some((path, name, alias)) = use_parts(item.1.as_ref()) {
-                        self.fmt_use(path, name, alias);
+                        self.fmt_use(use_public(item.1.as_ref()), path, name, alias);
                     }
                 }
             }
@@ -1907,6 +1913,9 @@ impl<'s> Formatter<'s> {
         let root_len = if same_namespace { first_path.len() } else { 1 };
         let root = &first_path[..root_len];
 
+        if use_public(items[0].1.as_ref()) {
+            self.push_str("pub ");
+        }
         self.push_str("use ");
         self.push_str(&root.join("::"));
         self.push_str("::{");
@@ -3050,9 +3059,18 @@ fn use_parts<'a, 'expr>(
     expr: &'a Expression<'expr>,
 ) -> Option<(&'a [String], &'a str, Option<&'a String>)> {
     match expr {
-        Expression::Use { path, name, alias } => Some((path, name, alias.as_ref())),
+        Expression::Use { path, name, alias, written, .. } => {
+            let (path, name, alias) =
+                written.as_deref().map_or((path, name, alias), |(p, n, a)| (p, n, a));
+            Some((path, name, alias.as_ref()))
+        }
         _ => None,
     }
+}
+
+/// Whether `expr` is a `pub use`.
+fn use_public(expr: &Expression<'_>) -> bool {
+    matches!(expr, Expression::Use { public: true, .. })
 }
 
 fn can_group_uses(items: &[Output<'_>]) -> bool {

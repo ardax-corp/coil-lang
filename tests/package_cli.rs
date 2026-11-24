@@ -299,22 +299,12 @@ fn package_with_native_lock_finds_library_in_cache_or_beside_exe() {
     std::fs::write(
         tmp.join("src/main.coil"),
         r#"
-use ffi::{declare, dload, invoke};
-use ffi::types::{Int};
+extern "sum" {
+    fn sum(int a, int b) -> int;
+}
 
 fn main() {
-    let lib = match dload("sum") {
-        Result::Ok(h) => h,
-        Result::Err(e) => panic e.message,
-    };
-    let sum_id = match declare(lib, "sum", (Int, Int), Int) {
-        Result::Ok(id) => id,
-        Result::Err(e) => panic e.message,
-    };
-    let n = match invoke(lib, sum_id, (40, 2)) {
-        Result::Ok(v) => v,
-        Result::Err(e) => panic e.message,
-    };
+    let n = sum(40, 2);
     if n != 42 {
         panic "sum failed";
     }
@@ -804,7 +794,10 @@ fn aot_package_strips_symbols_as_asked() {
 
 /// `--link-static` links an `extern` block's library into the AOT
 /// executable: it runs with no shared library anywhere, and the interpreter runner
-/// cannot take one.
+/// cannot take one. Every library linked and every call direct (a
+/// variadic one with more integers than registers and a sized integer
+/// too), the executable
+/// links no libffi.
 #[test]
 fn aot_package_links_extern_libraries_statically() {
     let bin = std::env::var("CARGO_BIN_EXE_coil").expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
@@ -824,8 +817,9 @@ fn aot_package_links_extern_libraries_statically() {
     let entry = dir.join("app.coil");
     std::fs::write(
         &entry,
-        "use io::sync::println;\nuse string::format;\nextern \"sum\" {\n    fn sum(int a, int b) -> int;\n}\n\
-         fn main() { let _ = println(format(\"%i\", sum(40, 2))); }\n",
+        "use io::sync::println;\nuse string::format;\nextern \"sum\" {\n    fn sum(int a, int b) -> int;\n    fn va_mix(string kinds, ...) -> float;\n    fn trunc32(int x) -> int32;\n}\n\
+         fn main() {\n    let _ = println(format(\"%i\", sum(40, 2)));\n    \
+         let _ = println(format(\"%f %i\", va_mix(\"iiiiiiid\", 1, 2, 3, 4, 5, 6, 7, 0.5), trunc32(4294967297)));\n}\n",
     )
     .unwrap();
     let package = |out: &Path, extra: &[&str]| {
@@ -844,8 +838,14 @@ fn aot_package_links_extern_libraries_statically() {
     let mut run = Command::new(&exe);
     run.current_dir(std::env::temp_dir());
     let run = run_command_with_timeout(run, 60);
-    assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n144.0 1\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
     assert_eq!(run.status.code(), Some(0));
+    // A windows-gnu link still keeps libffi (#2907).
+    #[cfg(not(windows))]
+    {
+        let image = std::fs::read(&exe).unwrap();
+        assert!(!image.windows(12).any(|w| w == b"ffi_prep_cif"), "a program of direct calls to linked libraries links libffi");
+    }
     let jit = package(&dir.join("app-jit"), &["--no-aot", "--link-static", lib.to_str().unwrap()]);
     assert!(!jit.status.success());
     assert!(String::from_utf8_lossy(&jit.stderr).contains("--link-static"), "{}", String::from_utf8_lossy(&jit.stderr));
@@ -1043,14 +1043,14 @@ mod linked {
         std::fs::create_dir_all(dir.join("lib")).unwrap();
         std::fs::copy(lib_dir.join(&lib), dir.join("lib").join(&lib)).unwrap();
         let run = run_app();
-        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n144.0 1\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
         // Another build of the library: the loader binds it by name, with no
         // hash check at start.
         let mut bytes = std::fs::read(dir.join("lib").join(&lib)).unwrap();
         bytes.push(0);
         std::fs::write(dir.join("lib").join(&lib), bytes).unwrap();
         let run = run_app();
-        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n144.0 1\n", "stderr: {}", String::from_utf8_lossy(&run.stderr));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

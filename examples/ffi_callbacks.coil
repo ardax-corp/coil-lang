@@ -12,6 +12,11 @@
 use io::sync::print;
 use string::format;
 
+extern struct Vec2 {
+    x: float,
+    y: float,
+};
+
 extern "sum" {
     fn apply_cb(fn(int x) -> int cb, int x) -> int;
     fn apply_fcb(fn(float x, int k) -> float cb, float x, int k) -> float;
@@ -19,6 +24,8 @@ extern "sum" {
     fn name_len(fn(string s) -> int cb) -> int;
     fn call0(fn() -> int cb) -> int;
     fn each_up_to(fn(int i) -> unit cb, int n);
+    fn vec2_add(Vec2 a, Vec2 b) -> Vec2;
+    fn vec2_code(Vec2 v) -> float;
 }
 
 fn doubler(int x) -> int {
@@ -68,4 +75,6 @@ fn main() {
     let kept = [format("kept %i", 1), format("kept %i", 2)];
     each_up_to(churn, 500);
     let _ = print(format(" %s %s", kept[0], kept[1]));
+    // Structs by value in a program that calls back.
+    let _ = print(format(" %f", vec2_code(vec2_add({ x: 1.0, y: 2.0 }, { x: 0.5, y: 0.25 }))));
 }

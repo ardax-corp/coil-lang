@@ -1,5 +1,5 @@
-//! `extern` calls and `dload` / `declare` / `invoke`: the HIR lowering
-//! emits them and they run at every opt level.
+//! `extern` calls: the HIR lowering
+//! emits them and they run at every opt level and on the MIR interpreter.
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
@@ -41,7 +41,7 @@ fn check(bin: &str, tmp: &Path, src: &Path) {
         .collect();
     assert!(refused.is_empty(), "FFI bodies refused direct MIR: {refused:#?}");
 
-    for mode in [&[][..], &["-O", "0"][..]] {
+    for mode in [&[][..], &["-O", "0"][..], &["--mir"][..]] {
         let run = Command::new(bin)
             .args(mode)
             .args(["--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"])
@@ -118,51 +118,38 @@ fn main() {
     .unwrap();
     check(&bin, &tmp, &src);
 
-    // Dynamic FFI: a signature's tags are constants, a function named in
-    // the argument tuple is its code pointer.
-    let dynamic = tmp.join("dynamic.coil");
+    // A spawned thread calls through the library its parent loaded (#2902).
+    let threads = tmp.join("threads.coil");
     std::fs::write(
-        &dynamic,
+        &threads,
         r#"
-use ffi::{declare, dload, invoke};
-use ffi::types::{Callback, Int};
+use thread::{join, spawn};
 
-fn doubler(int x) -> int {
-    return x * 2;
+extern "sum" {
+    fn sum(int a, int b) -> int;
+}
+
+fn work() -> int {
+    return sum(40, 2);
 }
 
 fn main() {
-    let lib = match dload("sum") {
-        Result::Ok(h) => h,
-        Result::Err(e) => panic e.message,
+    let t = match spawn(fn () => work()) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "spawn failed",
     };
-    let sum_id = match declare(lib, "sum", (Int, Int), Int) {
-        Result::Ok(id) => id,
-        Result::Err(e) => panic e.message,
-    };
-    let n = match invoke(lib, sum_id, (40, 2)) {
+    let r = match join(t) {
         Result::Ok(v) => v,
-        Result::Err(e) => panic e.message,
+        Result::Err(_) => panic "the thread's extern call failed",
     };
-    if n != 42 {
-        panic "invoke failed";
-    }
-    let cb_id = match declare(lib, "apply_cb", (Callback, Int), Int) {
-        Result::Ok(id) => id,
-        Result::Err(e) => panic e.message,
-    };
-    let m = match invoke(lib, cb_id, (doubler, 21)) {
-        Result::Ok(v) => v,
-        Result::Err(e) => panic e.message,
-    };
-    if 1 + m != 43 {
-        panic "callback failed";
+    if r + sum(0, 0) != 42 {
+        panic "wrong sum";
     }
 }
 "#,
     )
     .unwrap();
-    check(&bin, &tmp, &dynamic);
+    check(&bin, &tmp, &threads);
 
     // A `Vec<T>` extern param is a pointer to the elements; a fixed
     // `[T; N]` passes the same way, as `[T]` params took it (#890).
@@ -200,9 +187,13 @@ fn main() {
     std::fs::write(
         &const_bytes,
         r#"
-use ffi::{declare, dload, invoke};
-use ffi::types::{Callback, ConstBytes, Int};
+use ffi::types::{ConstBytes};
 use string::{format, to_bytes};
+
+extern "sum" {
+    fn sum_bytes(ConstBytes data, int n) -> int;
+    fn sum_bytes_after_cb(ConstBytes data, int n, fn(int n) -> int cb) -> int;
+}
 
 fn churn(int n) -> int {
     let i = 0;
@@ -215,38 +206,16 @@ fn churn(int n) -> int {
 }
 
 fn main() {
-    let lib = match dload("sum") {
-        Result::Ok(h) => h,
-        Result::Err(e) => panic e.message,
-    };
-    let id = match declare(lib, "sum_bytes", (ConstBytes, Int), Int) {
-        Result::Ok(id) => id,
-        Result::Err(e) => panic e.message,
-    };
     let s = format("%s%s", "AB", "C");
-    let n = match invoke(lib, id, (s, 3)) {
-        Result::Ok(v) => v,
-        Result::Err(e) => panic e.message,
-    };
-    if n != 65 + 66 + 67 {
+    if sum_bytes(s, 3) != 65 + 66 + 67 {
         panic "string view failed";
     }
     let v: Vec<byte> = to_bytes("ab");
-    let m = match invoke(lib, id, (v, 2)) {
-        Result::Ok(x) => x,
-        Result::Err(e) => panic e.message,
-    };
+    let m = sum_bytes(v, 2);
     if m != 97 + 98 || v[0] != (97 as byte) {
         panic "Vec<byte> view failed";
     }
-    let cb_id = match declare(lib, "sum_bytes_after_cb", (ConstBytes, Int, Callback), Int) {
-        Result::Ok(id) => id,
-        Result::Err(e) => panic e.message,
-    };
-    let k = match invoke(lib, cb_id, (format("%s%s", "xy", "z"), 3, churn)) {
-        Result::Ok(x) => x,
-        Result::Err(e) => panic e.message,
-    };
+    let k = sum_bytes_after_cb(format("%s%s", "xy", "z"), 3, churn);
     if k != 120 + 121 + 122 {
         panic "view did not survive the callback";
     }
@@ -256,14 +225,15 @@ fn main() {
     .unwrap();
     check(&bin, &tmp, &const_bytes);
 
-    // A module `const` set at startup or a `static let` in an `invoke` tuple
-    // is a value, not a callback (#868).
+    // A module `const` set at startup or a `static let` as an `extern`
+    // argument is a value, not a callback (#868).
     let globals = tmp.join("globals.coil");
     std::fs::write(
         &globals,
         r#"
-use ffi::{declare, dload, invoke};
-use ffi::types::Int;
+extern "sum" {
+    fn sum(int a, int b) -> int;
+}
 
 fn forty() -> int {
     return 40;
@@ -273,19 +243,7 @@ const FORTY = forty();
 static let two: int = 2;
 
 fn main() {
-    let lib = match dload("sum") {
-        Result::Ok(h) => h,
-        Result::Err(e) => panic e.message,
-    };
-    let sum_id = match declare(lib, "sum", (Int, Int), Int) {
-        Result::Ok(id) => id,
-        Result::Err(e) => panic e.message,
-    };
-    let n = match invoke(lib, sum_id, (FORTY, two)) {
-        Result::Ok(v) => v,
-        Result::Err(e) => panic e.message,
-    };
-    if n != 42 {
+    if sum(FORTY, two) != 42 {
         panic "global arguments failed";
     }
 }
@@ -390,8 +348,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// An `extern` takes `Bytes` / `ConstBytes` parameters as `declare` /
-/// `invoke` do (#1665): `ConstBytes` reads a `string` or a `Vec<byte>`,
+/// An `extern` takes `Bytes` / `ConstBytes` parameters (#1665): `ConstBytes` reads a `string` or a `Vec<byte>`,
 /// `Bytes` writes into a `Vec<byte>` (also when the same array is passed
 /// twice), and a `readonly` buffer goes only to `ConstBytes`.
 #[test]
@@ -435,6 +392,8 @@ extern "sum" {
     fn sum_bytes(ConstBytes buf, int n) -> int;
     fn copy_bytes(Bytes dst, ConstBytes src, int n);
     fn fill_bytes(bytes buf, int n, int v);
+    fn scale_ints(Vec<int> xs, int n, int k);
+    fn sum_array(Vec<int> xs, int n) -> int;
 }
 
 fn main() {
@@ -458,11 +417,45 @@ fn main() {
     if d[0] != (121 as byte) || d[1] != (122 as byte) {
         panic "same-array copy failed";
     }
+    let xs = [1, 2, 3];
+    scale_ints(xs, 3, 10);
+    if xs[0] != 10 || xs[2] != 30 || sum_array(xs, 3) != 60 {
+        panic "Vec<int> write-back failed";
+    }
 }
 "#,
     )
     .unwrap();
     check(&bin, &tmp, &src);
+
+    // A string with a NUL byte cannot be a C string: the call panics, with
+    // the same message in every mode.
+    let nul = tmp.join("nul.coil");
+    std::fs::write(
+        &nul,
+        r#"
+extern "sum" {
+    fn str_len(string s) -> int;
+}
+
+fn main() {
+    let s = "a" + "\0" + "b";
+    let _ = str_len(s);
+}
+"#,
+    )
+    .unwrap();
+    for mode in [&[][..], &["-O", "0"][..], &["--mir"][..]] {
+        let run = Command::new(&bin)
+            .args(mode)
+            .args(["--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"])
+            .arg(&tmp)
+            .arg(&nul)
+            .output()
+            .expect("coil run");
+        let err = String::from_utf8_lossy(&run.stderr);
+        assert!(!run.status.success() && err.contains("NUL"), "{mode:?}: a string with a NUL byte passed: {err}");
+    }
 
     let ro = tmp.join("readonly.coil");
     std::fs::write(
@@ -492,93 +485,5 @@ fn main() {
         .expect("coil compile");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success() && err.contains("E0107"), "readonly Bytes argument compiled: {err}");
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-/// A variadic `declare` cached in a `static let` keeps its signature:
-/// `invoke` through the static passes the extra arguments as C varargs with
-/// their tags and returns the declared type, whether the static is read in
-/// a function written before or after the one that stores it (#1667).
-#[test]
-fn invoke_through_static_fn_id() {
-    let bin = std::env::var("CARGO_BIN_EXE_coil")
-        .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let tmp = std::env::temp_dir().join(format!("coil_static_fn_id_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-
-    let so = tmp.join(machine::platform_shared_lib_filename("sum"));
-    let mut cc = Command::new("cc");
-    #[cfg(target_os = "macos")]
-    {
-        cc.arg("-dynamiclib");
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        cc.arg("-shared").arg("-fPIC");
-    }
-    let status = cc
-        .args([
-            "-O2",
-            "-o",
-            so.to_str().unwrap(),
-            manifest_dir.join("examples/sum.c").to_str().unwrap(),
-        ])
-        .status()
-        .expect("cc");
-    assert!(status.success(), "failed to build {}", so.display());
-
-    let src = tmp.join("static_id.coil");
-    std::fs::write(
-        &src,
-        r#"
-use ffi::{declare, dload, invoke, Error};
-use ffi::types::Int;
-
-static let lib = 0;
-static let sum_n_id = 0;
-static let sum_id = 0;
-
-fn total() -> Result<int, Error> {
-    let n: int = invoke(lib, sum_n_id, (3, 10, 20, 12))?;
-    return n;
-}
-
-fn load() -> Result<(), Error> {
-    lib = dload("sum")?;
-    sum_n_id = declare(lib, "sum_n", (Int,), Int, true)?;
-    sum_id = declare(lib, "sum", (Int, Int), Int)?;
-}
-
-fn pair() -> Result<int, Error> {
-    let n: int = invoke(lib, sum_id, (40, 2))?;
-    return n;
-}
-
-fn main() {
-    match load() {
-        Result::Ok(_) => {},
-        Result::Err(e) => panic e.message,
-    }
-    let n = match total() {
-        Result::Ok(v) => v,
-        Result::Err(e) => panic e.message,
-    };
-    if n != 42 {
-        panic "variadic invoke through a static failed";
-    }
-    let m = match pair() {
-        Result::Ok(v) => v,
-        Result::Err(e) => panic e.message,
-    };
-    if m + 1 != 43 {
-        panic "invoke through a static failed";
-    }
-}
-"#,
-    )
-    .unwrap();
-    check(&bin, &tmp, &src);
     let _ = std::fs::remove_dir_all(&tmp);
 }

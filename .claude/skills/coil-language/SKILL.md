@@ -43,6 +43,8 @@ Every runnable program needs `fn main()` **unless** the file only has `test("…
 
 Implicit imports (no `use` needed): prelude (`prelude`, `prelude::ops`, `prelude::math`) — injected by the compiler, not written in source. `prelude::math` holds only the linear-algebra helpers (`dot`, `cross`, `matmul`, `matrix`, `intersect`, `diff`). Float functions (`sin` … `tanh`, `sqrt`, `floor`, `ceil`, `exp`, `ln`, `atan2`, …) are [coil-stdlib `math`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md), userland Coil: write `use math::{sin, sqrt};` (a bare `sin(x)` is E0101). Powers and float remainder are `**` and `%`. Named `PI` / `E` / `TAU` are coil-stdlib `num` (`const`), not natives.
 
+Imports are private to the file: `use b::x` works only if `b` declares `x` or re-exports it with `pub use a::{x};` (top level only; a plain `use` in `b` is E0100 for importers). Qualified `b::x` paths do not follow re-exports yet.
+
 Explicit `use` for: `io`, `string`, `ffi`, `thread`, `env`, `process`, `gc`, `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms`), `entropy` (`bytes(n)`, OS CSPRNG). Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 
 ```coil
@@ -69,7 +71,7 @@ There is **no `print` statement**: `io::sync::println` / `print` (no newline) wr
 | Classes | `class C { … }`, `impl C { … }`, `new C(…)` — prefer methods for type-tied ops; inherent `fn drop()` is a GC-time finalizer |
 | Traits | `trait Area<T> { fn area(T x) -> int; }`, `impl Area for Sq { … }`. Call a trait method as `x.area()` or `Area::area(x)` (both lower to the same call; the qualified form picks between traits sharing a name). A bare `area(x)` is not a trait call (`E0153`). Static trait methods: `Sq::make()`, `T::make()` or `Make::make()` |
 | Modules | `use path::{a, b};`, `mod foo;` (load without binding) |
-| FFI | `extern "lib" { fn …; }` (any stem but the libc aliases) or `use ffi::{dload, declare, invoke}` + `ffi::types::{Int, …}` |
+| FFI | `extern "lib" { fn …; }` (any stem but the libc aliases; `ffi::types::{Bytes, ConstBytes}` for buffers); load at run time with the coil-ffi package (`use coil_ffi::{Library}`) |
 | Attributes | `#[derive(Show, Eq, Ord, Hash, Default, Send, Sensitive)]` (composes with `#[repr(int)]` on scalar enums), user derives and attribute macros (below); tests are `test("desc") { … }` only |
 | Macros | `derive Name(TypeDecl t) -> Code attrs(helper) { … }`, `attr name(FnDecl f, int by) -> Code { … }` and `macro name(Expr a, Vec<Expr> rest) -> Code { … }` (used as `name!(…)` in expression, statement or item position) run at compile time; build output with `quote items|expr|stmts|type { … ${x} … $(xs),* }` (`use macro::{TypeDecl, Expr, Code, lit, raw, ident}`). Import with `use`; a module cannot use its own macros. No IO in macros; `panic` to inspect. See `docs/internals/macros.md` |
 | Type query | `typeof expr` → compile-time FQN string (not evaluated at runtime); unary prefix, so `typeof x == "int"` compares the name |
@@ -91,7 +93,7 @@ userland modules. Prelude is auto-injected.
 | `io` | `use io::{stdout, open, read, write};` | `Stream`, `Vec<byte>` buffers, files, TCP/UDP; non-blocking L0 |
 | `io::tty` | `use io::tty::{is_tty, size, enter_raw, leave_raw, read_timeout};` | terminal on a `Stream`: isatty, `(cols, rows)`, raw mode (restored at exit), timed read, `resized()`; no flag |
 | `string` | `use string::{format, to_bytes, from_bytes};` | Formatting / UTF-8 bytes |
-| `ffi` | `use ffi::{dload, declare, invoke};` + `use ffi::types::{Int, Ptr};` | Dynamic loading |
+| `ffi` | `use ffi::types::{Bytes, ConstBytes};` | Buffer params of `extern` blocks; `ffi::{Error, ErrorKind}` |
 | `thread` | `use thread::{spawn, join, channel, send, recv};` | OS threads, channels, mutex |
 | `env` | `use env::{args, var, set_var, exit};` | process environment |
 | `process` | `use process::{Command, Stdio, exec};` | run programs (no shell): `Command` setters, `spawn` / `status` / `output`, child pipes are `Stream`s; needs `--allow-exec` |
@@ -133,7 +135,7 @@ Module search roots come from `--root DIR` (repeatable); `coil` reads no `coil.t
 | Option/Result | `examples/option.coil`, `examples/result.coil` |
 | Modules | `examples/modules.coil` |
 | Coroutines | `examples/coro.coil` |
-| FFI | `examples/ffi_extern.coil` (extern block), `examples/ffi_sum.coil` (`dload`) |
+| FFI | `examples/ffi_extern.coil` (extern block), `examples/ffi_sum.coil`, `examples/ffi_callback.coil` |
 | GC `fn drop()` | `examples/finalizer.coil` |
 | Full catalog | [examples](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/examples.md) (`/docs/manual/examples`) |
 

@@ -507,19 +507,21 @@ fn main() { exit(0); }
 }
 
 #[test]
-fn granted_dload_emits_ffi_load() {
+fn granted_extern_block_emits_ffi_load() {
     let mut pipeline = test_pipeline();
     pipeline.grant_dload_allow("plugin");
     let compiled = compile_ok(
         &mut pipeline,
         r#"
-use ffi::{dload};
-fn main() { let _ = dload("plugin"); }
+extern "plugin" {
+    fn noop(int x) -> int;
+}
+fn main() { let _ = noop(1); }
 "#,
     );
     assert!(
         compiled.all_insts().any(|i| matches!(i, MirInst::Ffi { op: MirFfiOp::Load, .. })),
-        "granted dload must emit an FFI load"
+        "a granted extern block must emit an FFI load"
     );
 }
 
@@ -594,14 +596,16 @@ fn main() { let _ = system(); }
 }
 
 #[test]
-fn host_dload_stem_grant_compiles_without_allow_dload() {
+fn host_dload_stem_grant_compiles_extern_without_allow_dload() {
     let mut pipeline = test_pipeline();
     pipeline.grant_dload_stem("plugin");
     let _ = compile_ok(
         &mut pipeline,
         r#"
-use ffi::{dload};
-fn main() { let _ = dload("plugin"); }
+extern "plugin" {
+    fn noop(int x) -> int;
+}
+fn main() { let _ = noop(1); }
 "#,
     );
 }
@@ -1027,38 +1031,14 @@ fn ensure_ffi_libsum_built() -> std::path::PathBuf {
 
 #[cfg(unix)]
 #[test]
-fn example_ffi_sum_via_dlopen_prints_42() {
+fn example_ffi_sum_prints_42() {
     let libsum = ensure_ffi_libsum_built();
     if !libsum.exists() {
         ffi_soft_skip(&format!("{} not built (no C compiler?)", libsum.display()));
         return;
     }
-
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("compiler crate must have a parent (workspace root)");
-
-    // Absolute dload path avoids cwd races in parallel tests.
-    let full = workspace_root.join("examples/ffi_sum.coil");
-    let lib_abs = libsum.canonicalize().unwrap_or_else(|_| libsum.clone());
-    let mut src = std::fs::read_to_string(&full)
-        .unwrap_or_else(|e| panic!("failed to read {}: {}", full.display(), e));
-    src = src.replace(
-        "dload(\"sum\")",
-        &format!("dload(\"{}\")", lib_abs.display()),
-    );
-
-    let result = std::panic::catch_unwind(|| {
-        run_src_with_grants(&src, Some(full.as_path()), &[("sum", lib_abs.clone())])
-    });
-    let output = match result {
-        Ok(s) => s,
-        Err(_) => {
-            ffi_soft_skip("FFI test panicked (dlopen failure?)");
-            return;
-        }
-    };
-    assert_eq!(output, "42", "sum(40, 2) via userland FFI should print 42");
+    let output = run_ffi_example_with_lib("examples/ffi_sum.coil", &libsum);
+    assert_eq!(output, "42", "sum(40, 2) through an extern block should print 42");
 }
 /// `extern "c"` (a libc alias) is denied even when `c` is granted.
 #[test]
@@ -1109,27 +1089,15 @@ fn userland_dload_extra_stem_hash_mismatch_is_denied() {
     let other = dir.join("other.bin");
     std::fs::write(&other, b"other-bytes").unwrap();
     let abs = path.to_str().unwrap().replace('\\', "/");
-    let src = format!(
-        r#"
-use ffi::{{dload, ErrorKind}};
-use io::{{stdout, write}};
-use string::{{format, to_bytes}};
-fn main() {{
-    let r = dload("{abs}");
-    let msg = match r {{
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {{
-            ErrorKind::LibraryNotFound => "missing",
-            ErrorKind::Other => "denied",
-            default => "other",
-        }},
-    }};
-    write(stdout(), to_bytes(format("%s", msg)));
-}}
-"#
+    // The file granted for `plugin` is another one, so its hash differs.
+    let mut pipeline = test_pipeline();
+    pipeline.grant_dload_file("plugin".to_string(), other);
+    compile(&mut pipeline, &dload_kind_program(&abs)).expect("extern program compiles");
+    let gate = coil_host::pipeline_dload_gate(&pipeline);
+    assert!(
+        matches!(machine::resolve_library(&abs, None, &[], &gate), Err(machine::FfiError::LibraryDenied { .. })),
+        "a hash mismatch is denied"
     );
-    let output = run_src_with_grants(&src, None, &[("plugin", other)]);
-    assert_eq!(output, "denied");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1142,26 +1110,26 @@ fn missing_abs_dload(stem: &str) -> String {
     }
 }
 
+/// A program whose `extern` block names the library at `path`, for
+/// [`run_userland_dload_project`].
 fn dload_kind_program(path: &str) -> String {
     format!(
         r#"
-use ffi::{{dload, ErrorKind}};
-use io::{{stdout, write}};
-use string::{{format, to_bytes}};
+extern "{path}" {{
+    fn coil_dload_probe() -> int;
+}}
+
 fn main() {{
-    let r = dload("{path}");
-    let msg = match r {{
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {{
-            ErrorKind::LibraryNotFound => "missing",
-            ErrorKind::Other => "denied",
-            default => "other",
-        }},
-    }};
-    write(stdout(), to_bytes(format("%s", msg)));
+    let _ = coil_dload_probe();
 }}
 "#
     )
+}
+
+/// The library an [`dload_kind_program`] names.
+fn extern_library(src: &str) -> Option<&str> {
+    let rest = &src[src.find("extern \"")? + "extern \"".len()..];
+    Some(&rest[..rest.find('"')?])
 }
 
 /// `--dload-pin` / `--dload-trusted` / `--allow-dload` for a dload test.
@@ -1260,6 +1228,19 @@ fn run_userland_dload_project_grants(
 ) -> String {
     let (pipeline, dir, entry, compiled) =
         compiled_dload_project(test_name, src, flags.grants(grants));
+    // An `extern` library loads before `main`, where a refusal panics: ask
+    // the program's gate what loading it gives, as `ok`, `missing` (not
+    // found) or `denied`.
+    if let Some(path) = extern_library(src) {
+        let gate = coil_host::pipeline_dload_gate(&pipeline);
+        let _ = std::fs::remove_dir_all(&dir);
+        return match machine::resolve_library(path, None, &[], &gate) {
+            Ok(_) => "ok".into(),
+            Err(machine::FfiError::LibraryNotFound { .. }) => "missing".into(),
+            Err(machine::FfiError::LibraryDenied { .. }) => "denied".into(),
+            Err(e) => format!("other: {e}"),
+        };
+    }
     let output = run_compiled(compiled, &pipeline, Some(entry.as_path()));
     let _ = std::fs::remove_dir_all(&dir);
     output
@@ -1598,7 +1579,7 @@ fn example_ffi_callbacks_prints_each_result() {
         return;
     }
     let output = run_ffi_example_with_lib("examples/ffi_callbacks.coil", &libsum);
-    assert_eq!(output, "42 3.5 5 8 8 <1><2><3> kept 1 kept 2");
+    assert_eq!(output, "42 3.5 5 8 8 <1><2><3> kept 1 kept 2 152.25");
 }
 
 #[cfg(unix)]
@@ -1658,7 +1639,7 @@ fn example_ffi_scalars_prints_each_result() {
         return;
     }
     let output = run_ffi_example_with_lib("examples/ffi_scalars.coil", &libsum);
-    assert_eq!(output, "6.0 true false 21 0 false");
+    assert_eq!(output, "6.0 true false 21 0 false -1 1 255 65535 3996999993");
 }
 
 #[cfg(unix)]
@@ -1694,7 +1675,7 @@ fn example_ffi_varargs_prints_each_sum() {
         return;
     }
     let output = run_ffi_example_with_lib("examples/ffi_varargs.coil", &libsum);
-    assert_eq!(output, "60 91.0 30.0 55.0 31.0 3.0");
+    assert_eq!(output, "60 91.0 30.0 55.0 144.0 31.0 3.0");
 }
 
 
@@ -2479,25 +2460,15 @@ fn main() {
     );
 }
 
-/// FFI dload/invoke on a call bag: named FFI handle, still sequential.
+/// An extern call on a call bag: named FFI handle, still sequential.
 #[test]
-fn auto_par_ffi_invoke_hint_stays_sequential() {
+fn auto_par_extern_call_hint_stays_sequential() {
     let src = r#"
-use ffi::{declare, dload, invoke};
-use ffi::types::{Int};
+extern "plugin" {
+    fn noop(int x) -> int;
+}
 fn poke(int n) -> int {
-    let lib = match dload("plugin") {
-        Result::Ok(h) => h,
-        Result::Err(e) => panic e.message,
-    };
-    let id = match declare(lib, "noop", (Int,), Int) {
-        Result::Ok(v) => v,
-        Result::Err(e) => panic e.message,
-    };
-    let _ = match invoke(lib, id, (n,)) {
-        Result::Ok(v) => v,
-        Result::Err(_) => n,
-    };
+    let _ = noop(n);
     return n;
 }
 fn rec(int n) -> int {

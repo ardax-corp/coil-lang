@@ -1021,9 +1021,9 @@ impl VecLoopKind {
 }
 
 /// The most words an [`MirInst::ExternCall`] passes the runtime: its
-/// library, function id and arguments, and a variadic call's tags (a
-/// host call's limit). A call with more keeps the argument tuple.
-pub const EXTERN_CALL_MAX_WORDS: usize = 16;
+/// library, function id and arguments, and a variadic call's tags. A call
+/// with more keeps the argument tuple.
+pub const EXTERN_CALL_MAX_WORDS: usize = common::FFI_CALL_MAX_WORDS;
 
 /// The signature of an [`MirInst::ExternCall`]: the C symbol, the
 /// declared parameters' and the result's FFI type tags (each

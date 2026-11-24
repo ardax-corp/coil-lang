@@ -183,6 +183,11 @@ pub(crate) struct Driver<'a> {
 /// and `FfiInvoke` on the runtime, through libffi.
 pub const FFI_HOOK: crate::native::MachineHostFn = Driver::run_ffi;
 
+/// The FFI hook of an AOT executable that links every library its program
+/// loads and calls each function directly: loads and declares from the
+/// executable's table of linked functions, with no libffi, `dload` or gate.
+pub const FFI_LINKED_HOOK: crate::native::MachineHostFn = Driver::run_ffi_linked;
+
 impl<'a> Driver<'a> {
     const HOST: NativeHost = NativeHost {
         print: Driver::host_print,
@@ -941,6 +946,24 @@ impl<'a> Driver<'a> {
         };
         *panicked = d.panicked;
         d.panicked |= was;
+        Some(out.bits())
+    }
+
+    /// [`FFI_LINKED_HOOK`]'s op. `coil package` links it only when the
+    /// program makes no call through the runtime.
+    unsafe fn run_ffi_linked(raw: *mut c_void, _ctx: *mut NativeCtx, op: u64, _operand: u64, args: &[Value], _panicked: &mut bool) -> Option<u64> {
+        // SAFETY: native code passes back the driver it was given.
+        let d = unsafe { Self::from_raw(raw) };
+        let arg = |i: usize| args.get(i).copied().unwrap_or_default();
+        let out = match op as u8 {
+            common::FFI_OP_LOAD => d.rt.ffi_load_linked(arg(0)),
+            common::FFI_OP_DECLARE => d.rt.ffi_declare_linked(arg(0), arg(1)),
+            common::FFI_OP_ADDR => d.rt.ffi_addr_linked(arg(0), arg(1)),
+            _ => {
+                eprintln!("coil: this executable was linked without libffi, but its program made a call through it");
+                std::process::exit(1)
+            }
+        };
         Some(out.bits())
     }
 

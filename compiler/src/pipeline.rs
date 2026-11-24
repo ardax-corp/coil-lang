@@ -22,6 +22,9 @@ mod macros;
 #[path = "pipeline_contracts.rs"]
 mod contracts;
 
+#[path = "pipeline_reexports.rs"]
+mod reexports;
+
 #[path = "pipeline_contract_tests.rs"]
 mod contract_tests;
 pub use contract_tests::CASE_PREFIX as CONTRACT_CASE_PREFIX;
@@ -1438,6 +1441,7 @@ impl Pipeline {
                 break;
             }
         }
+        self.resolve_reexports();
     }
 
     /// Compile a single file. Parse/expand/check come from
@@ -2719,10 +2723,11 @@ fn main() {}
     #[test]
     fn typecheck_project_denies_ungranted_ffi_exec() {
         let src = r#"
-use ffi::{declare};
-use ffi::types::{Int, Ptr};
+extern "plugin" {
+    fn system() -> int;
+}
 fn main() {
-    let _ = declare(0, "system", (Ptr,), Int);
+    let _ = system();
 }
 "#;
         let (_dir, file) = temp_hy("ffi_exec", src);

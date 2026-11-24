@@ -1846,7 +1846,7 @@ type UseItem = (Vec<String>, String, Option<String>);
 fn top_level_uses(ast: &Output<'_>) -> Vec<UseItem> {
     fn walk(node: &Output<'_>, out: &mut Vec<UseItem>) {
         match node.1.as_ref() {
-            Expression::Use { path, name, alias } => out.push((path.clone(), name.clone(), alias.clone())),
+            Expression::Use { path, name, alias, .. } => out.push((path.clone(), name.clone(), alias.clone())),
             Expression::Program(items) | Expression::Fragment(items) => {
                 items.iter().for_each(|i| walk(i, out))
             }

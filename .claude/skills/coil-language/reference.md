@@ -145,15 +145,9 @@ extern "c" {
 }
 ```
 
-Runtime:
-
-```coil
-use ffi::{dload, declare, invoke};
-use ffi::types::{Int, Ptr};
-
-let lib = dload("libc.so.6")?;
-let f = declare(lib, "strlen", (String,), Int)?;
-```
+Runtime: the `ffi::{dload, declare, invoke}` functions are gone; load a
+library while the program runs with the coil-ffi package
+(`use coil_ffi::{Library}`; every `Library::open` takes a sha256 pin).
 
 ## Iterator / for-in
 
