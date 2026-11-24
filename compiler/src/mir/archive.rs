@@ -216,6 +216,8 @@ const I_RC_INC: u8 = 52;
 const I_RC_DEC: u8 = 53;
 /// A `HeapFieldStore` of a number field (archive 8.7).
 const I_SET_FIELD_SCALAR: u8 = 54;
+/// A `StoreIndex` of a number element (archive 8.9).
+const I_STORE_INDEX_SCALAR: u8 = 55;
 
 const FFI_OPS: [MirFfiOp; 4] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke, MirFfiOp::Addr];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -545,8 +547,8 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*object);
             w.u32(*slot);
         }
-        MirInst::StoreIndex { dest, array, index, value, unchecked } => {
-            w.u8(I_STORE_INDEX);
+        MirInst::StoreIndex { dest, array, index, value, unchecked, scalar } => {
+            w.u8(if *scalar { I_STORE_INDEX_SCALAR } else { I_STORE_INDEX });
             w.v(*dest);
             w.v(*array);
             w.v(*index);
@@ -1179,12 +1181,13 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_INDEX => MirInst::Index { dest: r.v()?, array: r.v()?, index: r.v()?, unchecked: r.u8()? != 0 },
         I_LEN => MirInst::ArrayLen { dest: r.v()?, array: r.v()? },
         I_FIELD => MirInst::ProductLoad { dest: r.v()?, object: r.v()?, slot: r.u32()? },
-        I_STORE_INDEX => MirInst::StoreIndex {
+        tag @ (I_STORE_INDEX | I_STORE_INDEX_SCALAR) => MirInst::StoreIndex {
             dest: r.v()?,
             array: r.v()?,
             index: r.v()?,
             value: r.v()?,
             unchecked: r.u8()? != 0,
+            scalar: tag == I_STORE_INDEX_SCALAR,
         },
         tag @ (I_SET_FIELD | I_SET_FIELD_SCALAR) => {
             MirInst::HeapFieldStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()?, scalar: tag == I_SET_FIELD_SCALAR }

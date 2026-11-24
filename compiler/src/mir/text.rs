@@ -260,11 +260,13 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             index,
             value,
             unchecked,
+            scalar,
         } => {
-            let name = if *unchecked {
-                "storeindex.u"
-            } else {
-                "storeindex"
+            let name = match (*unchecked, *scalar) {
+                (true, true) => "storeindex.num.u",
+                (true, false) => "storeindex.u",
+                (false, true) => "storeindex.num",
+                (false, false) => "storeindex",
             };
             write!(f, "{dest} = {name} {array}, {index}, {value}")
         }
@@ -655,7 +657,7 @@ impl<'a> Parser<'a> {
                 unchecked: op.ends_with(".u"),
             });
         }
-        if op == "storeindex" || op == "storeindex.u" {
+        if matches!(op.as_str(), "storeindex" | "storeindex.u" | "storeindex.num" | "storeindex.num.u") {
             let array = self.value()?;
             self.expect(',')?;
             let index = self.value()?;
@@ -668,6 +670,7 @@ impl<'a> Parser<'a> {
                 index,
                 value,
                 unchecked: op.ends_with(".u"),
+                scalar: op.starts_with("storeindex.num"),
             });
         }
         if op == "arraylen" {

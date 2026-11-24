@@ -932,6 +932,19 @@ impl MirBuilder {
         value: ValueId,
         unchecked: bool,
     ) -> Result<ValueId, MirError> {
+        self.ins_index_store(array, index, value, unchecked, false)
+    }
+
+    /// [`Self::ins_store_index`] of an element whose static type is a
+    /// number when `scalar` (`MirInst::StoreIndex::scalar`).
+    pub fn ins_index_store(
+        &mut self,
+        array: ValueId,
+        index: ValueId,
+        value: ValueId,
+        unchecked: bool,
+        scalar: bool,
+    ) -> Result<ValueId, MirError> {
         let at = self.resolve_ty(array);
         if at != MirTy::HeapRef && at != MirTy::Value {
             return Err(MirError::msg(format!("StoreIndex array is {at}")));
@@ -944,6 +957,8 @@ impl MirBuilder {
         if !vt.is_word_lane() {
             return Err(MirError::msg(format!("StoreIndex value is {vt}")));
         }
+        // Only a number word is stored as one (a boxed word is an object).
+        let scalar = scalar && matches!(vt, MirTy::I64 | MirTy::F64 | MirTy::Bool);
         let dest = self.alloc(vt);
         self.push(MirInst::StoreIndex {
             dest,
@@ -951,6 +966,7 @@ impl MirBuilder {
             index: self.resolve(index),
             value: self.resolve(value),
             unchecked,
+            scalar,
         })?;
         Ok(dest)
     }

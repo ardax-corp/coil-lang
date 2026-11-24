@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 8, below, is the
-current version, 8.8 with MIR section `FORMAT` 22). A runtime refuses a major
+only add something to the format raise the minor (minor 9, below, is the
+current version, 8.9 with MIR section `FORMAT` 22). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -169,6 +169,12 @@ no tracing collector (`COIL_RC_CHECK=0` is the old collector, until step 10 dele
 it). A body that counts nothing would have its words freed under it, so the MIR
 section is a new `FORMAT`, 22, with format 21's layout, and the reader refuses 21:
 an 8.7 archive's code is compiled again.
+
+Minor 9 (reference counts, plan step 10) adds MIR tag 55 to format 22: a
+`StoreIndex` of an element whose static type is a number (`scalar`), laid out
+as tag 12's. Its old and new words are numbers, so native code stores it in place
+with no count change and no test of either word. An 8.8 archive loads unchanged:
+its index stores all take the counted path.
 
 ## Major 7
 

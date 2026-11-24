@@ -170,7 +170,7 @@ impl Ex<'_> {
 
     fn store(&mut self, b: BlockId, array: ValueId, index: ValueId, value: ValueId) {
         let dest = self.value(self.f.ty(value));
-        self.push(b, MirInst::StoreIndex { dest, array, index, value, unchecked: false });
+        self.push(b, MirInst::StoreIndex { dest, array, index, value, unchecked: false, scalar: false });
     }
 
     fn br(&mut self, b: BlockId, cond: ValueId, taken: BlockId, not_taken: BlockId) {

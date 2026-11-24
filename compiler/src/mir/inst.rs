@@ -557,6 +557,9 @@ pub enum MirInst {
         index: ValueId,
         value: ValueId,
         unchecked: bool,
+        /// The element's static type is a number (`WORD_SCALAR`): its old
+        /// and new words are numbers, stored with no count change.
+        scalar: bool,
     },
     /// Structural `ArrayLen` (S3). Dest is `i64`.
     ArrayLen {

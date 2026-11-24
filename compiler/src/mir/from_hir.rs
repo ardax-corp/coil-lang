@@ -7489,7 +7489,7 @@ impl Lower<'_> {
             );
         });
         let unchecked = quiet && self.hir.expr(place).flags.contains(HirFlags::IN_BOUNDS) && self.boxed(base).is_none();
-        self.b.ins_store_index(arr, idx, v, unchecked).map_err(mir)?;
+        self.b.ins_index_store(arr, idx, v, unchecked, self.number_ty(self.expr_ty(place))).map_err(mir)?;
         Ok(Val::Unit)
     }
 

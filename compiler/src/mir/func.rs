@@ -847,8 +847,12 @@ impl MirFunc {
                 array,
                 index,
                 value,
+                scalar,
                 ..
             } => {
+                if *scalar && !matches!(self.ty(*value), MirTy::I64 | MirTy::F64 | MirTy::Bool) {
+                    return Err(format!("{dest} StoreIndex of a number element stores an object word"));
+                }
                 if self.ty(*array) != MirTy::HeapRef {
                     return Err(format!("{dest} StoreIndex array is not heapref"));
                 }

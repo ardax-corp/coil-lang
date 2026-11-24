@@ -4551,7 +4551,7 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
-            MirInst::StoreIndex { dest, array, index, value, .. } => {
+            MirInst::StoreIndex { dest, array, index, value, scalar, .. } => {
                 // A store goes in place in a plain view
                 // when it can count the store itself: the new word gains an
                 // owner and the old one loses one. A word that may or may
@@ -4571,7 +4571,8 @@ impl<'a> Lower<'a> {
                     self.emit_rc(v, false);
                     self.emit_rc(old, true);
                     self.b.ins().jump(join, &[]);
-                } else if matches!(vt, MirTy::F64 | MirTy::Bool) {
+                } else if *scalar || matches!(vt, MirTy::F64 | MirTy::Bool) {
+                    // A number element's old and new words are numbers.
                     self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
                     self.b.ins().jump(join, &[]);
                 } else {
