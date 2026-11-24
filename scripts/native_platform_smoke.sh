@@ -98,6 +98,7 @@ for ex in ffi_scalars ffi_strings ffi_structs ffi_varargs ffi_callbacks; do
     ffi=(--no-build-cache --root "$stdlib" --ffi-search-path "$work" --allow-dload sum --dload-trusted sum)
     want="$("$coil" "${ffi[@]}" --mir "examples/$ex.coil")"
     echo "MIR interpreter, $ex: $want"
+    COIL_BAIL_TRACE=1 RUST_BACKTRACE=1 "$coil" "${ffi[@]}" "examples/$ex.coil" 2>&1 | grep -vE "^\s+at /rustc|std::|core::" | head -60 || true
     check "$ex, direct extern calls" "$coil" "${ffi[@]}" "examples/$ex.coil"
 done
 want="$("$coil" --no-build-cache --mir --root "$stdlib" "$work/app.coil")"

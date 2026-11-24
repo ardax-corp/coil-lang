@@ -1274,6 +1274,9 @@ pub unsafe extern "C" fn coil_native_product_load(ctx: *mut NativeCtx, addr: u64
 /// # Safety
 /// `ctx` is a live [`NativeCtx`].
 unsafe fn bail(ctx: *mut NativeCtx) -> u64 {
+    if std::env::var_os("COIL_BAIL_TRACE").is_some() {
+        eprintln!("bail:\n{}", std::backtrace::Backtrace::force_capture());
+    }
     unsafe { (*ctx).bail = 1 };
     0
 }
