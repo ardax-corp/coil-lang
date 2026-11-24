@@ -4967,25 +4967,19 @@ impl Compiler {
         self.emit_range_to_vec_thunk("RangeInclusive::__float_to_vec".into(), true, true);
     }
 
-    /// Inherent `Stream::attach` / `Stream::park` / `Stream::fd` bodies:
-    /// each returns its host native's result on the stream and `int`
-    /// arguments. Built as HIR ([`crate::hir::synth`]); the native's result
-    /// layout (the `Result<Stream, IoError>` heap niche, the
-    /// `Result<(), IoError>` unit niche, the boxed `Result<int, IoError>`)
-    /// follows from the call's type, as for any host call.
+    /// Inherent `Stream::fd` body: returns its host native's result on the
+    /// stream. Built as HIR ([`crate::hir::synth`]); the native's result
+    /// layout (the boxed `Result<int, IoError>`) follows from the call's
+    /// type, as for any host call.
     fn emit_stream_method_thunks(&mut self) {
         use crate::hir::synth::Synth;
         use crate::hir::LocalKind;
         use crate::typechecking::ty::{self as coil_ty, STREAM};
         let methods = self.context.methods.entry(STREAM.to_string()).or_default();
-        methods.insert("attach".to_string(), format!("{STREAM}::attach"));
-        methods.insert("park".to_string(), format!("{STREAM}::park"));
         methods.insert("fd".to_string(), format!("{STREAM}::fd"));
 
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
         for (method, native, ints, ok) in [
-            ("attach", common::STREAM_ATTACH_NATIVE, 5, coil_ty::stream_ty()),
-            ("park", common::STREAM_PARK_NATIVE, 0, coil_ty::unit()),
             ("fd", common::STREAM_FD_NATIVE, 0, coil_ty::int()),
         ] {
             let fqn = format!("{STREAM}::{method}");
@@ -5321,13 +5315,13 @@ impl Compiler {
             || Self::is_stream_host_method(name)
     }
 
-    /// `Stream.fd` / `attach` / `park` are HostInvoke thunks, not two-slot CALLs.
+    /// `Stream.fd` is a HostInvoke thunk, not a two-slot CALL.
     fn is_stream_host_method(name: &str) -> bool {
         let Some((owner, method)) = name.rsplit_once("::") else {
             return false;
         };
         owner == crate::typechecking::ty::STREAM
-            && matches!(method, "fd" | "attach" | "park")
+            && method == "fd"
     }
 
     /// Return type of the function whose body is being compiled: its

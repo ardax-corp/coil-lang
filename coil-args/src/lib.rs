@@ -163,9 +163,6 @@ impl CompileProfileFlags {
 /// `dload("c")` stays denied even with `--allow-dload c`.
 #[derive(Args, Clone, Debug, Default)]
 pub struct HostGrantFlags {
-    /// Allow Stream.attach
-    #[arg(long)]
-    pub allow_attach: bool,
     /// Allow env::exit
     #[arg(long)]
     pub allow_exit: bool,
@@ -282,8 +279,7 @@ pub fn parse_dload_pin(s: &str) -> Result<(String, String), String> {
 
 impl HostGrantFlags {
     pub fn is_set(&self) -> bool {
-        self.allow_attach
-            || self.allow_exit
+        self.allow_exit
             || self.allow_exec
             || self.allow_ffi_exec
             || self.allow_read
@@ -337,7 +333,6 @@ impl HostGrantFlags {
         }
         grants.comptime_cache.offline |= extra.comptime_cache.offline;
         grants.comptime_cache.refresh |= extra.comptime_cache.refresh;
-        grants.allow_attach |= extra.allow_attach;
         grants.allow_exec |= extra.allow_exec;
         grants.allow_exit |= extra.allow_exit;
         grants.allow_ffi_exec |= extra.allow_ffi_exec;
@@ -364,7 +359,6 @@ impl HostGrantFlags {
         let comptime_io = self.comptime_io();
         let mut grants = HostGrants {
             comptime_io,
-            allow_attach: self.allow_attach,
             allow_exec: self.allow_exec,
             allow_exit: self.allow_exit,
             allow_ffi_exec: self.allow_ffi_exec,

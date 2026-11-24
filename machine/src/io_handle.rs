@@ -120,7 +120,7 @@ impl NativeHandle {
         }
     }
 
-    /// Socket/fd identity for attach / FFI Stream→fd marshal (Unix fd or Windows SOCKET).
+    /// Socket/fd identity for `Stream.fd` / FFI Stream→fd marshal (Unix fd or Windows SOCKET).
     pub fn fd_i64(&self) -> i64 {
         #[cfg(any(unix, target_os = "wasi"))]
         {
@@ -231,7 +231,7 @@ impl WaitHandle {
         sock.wait_socket()
     }
 
-    /// Wait identity for a TCP stream (tests and package attach handshake).
+    /// Wait identity for a TCP stream (tests and connect waits).
     pub fn from_tcp(stream: &TcpStream) -> Self {
         Self::from_socket(stream)
     }

@@ -19,19 +19,16 @@ impl Caps {
     pub const EXEC: Caps = Caps(16);
     /// `env::exit`.
     pub const EXIT: Caps = Caps(32);
-    /// `Stream.attach`.
-    pub const ATTACH: Caps = Caps(64);
 
     /// Every capability, in the order messages list them, with its name
     /// (the flag is `--allow-<name>`).
-    pub const ALL: [(Caps, &'static str); 7] = [
+    pub const ALL: [(Caps, &'static str); 6] = [
         (Caps::READ, "read"),
         (Caps::WRITE, "write"),
         (Caps::NET, "net"),
         (Caps::ENV, "env"),
         (Caps::EXEC, "exec"),
         (Caps::EXIT, "exit"),
-        (Caps::ATTACH, "attach"),
     ];
 
     pub const fn bits(self) -> u8 {

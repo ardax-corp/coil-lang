@@ -883,11 +883,10 @@ pub(crate) struct MachineHostState {
     speculative_out: unsafe fn(*mut (), Arc<JoinState>),
     debugger_attached: bool,
     // Built on demand from `raw`: `execute` is re-entered after every FFI
-    // call, so cloning these up front (the natives and the dload gate's
-    // pin tables) cost more than the call itself.
+    // call, so cloning these up front (the natives) cost more than the
+    // call itself.
     spawn_context: unsafe fn(*mut ()) -> Option<ThreadSpawnContext>,
     static_words: unsafe fn(*mut ()) -> Arc<Vec<u64>>,
-    dload_gate: unsafe fn(*mut ()) -> *const crate::ffi::DloadGate,
     io_reactor: Option<std::sync::Arc<crate::io_reactor::IoReactor>>,
     cpu_reactor: Option<std::sync::Arc<crate::reactor::Reactor>>,
 }
@@ -918,9 +917,6 @@ impl HostStateGuard {
         unsafe fn no_statics(_: *mut ()) -> Arc<Vec<u64>> {
             Arc::default()
         }
-        unsafe fn no_gate(_: *mut ()) -> *const crate::ffi::DloadGate {
-            std::ptr::null()
-        }
         let prev = HOST_STATE.with(|c| c.borrow_mut().take());
         HOST_STATE.with(|c| {
             *c.borrow_mut() = Some(MachineHostState {
@@ -932,7 +928,6 @@ impl HostStateGuard {
                 debugger_attached: false,
                 spawn_context: no_context,
                 static_words: no_statics,
-                dload_gate: no_gate,
                 io_reactor: Some(io),
                 cpu_reactor: None,
             });
@@ -956,7 +951,6 @@ impl HostStateGuard {
                 debugger_attached: false,
                 spawn_context: Self::driver_spawn_context,
                 static_words: Self::driver_static_words,
-                dload_gate: Self::driver_dload_gate,
                 io_reactor,
                 cpu_reactor,
             });
@@ -981,10 +975,6 @@ impl HostStateGuard {
 
     unsafe fn driver_static_words(raw: *mut ()) -> Arc<Vec<u64>> {
         unsafe { Self::driver(raw) }.rt.static_words()
-    }
-
-    unsafe fn driver_dload_gate(raw: *mut ()) -> *const crate::ffi::DloadGate {
-        &raw const unsafe { Self::driver(raw) }.rt.ffi.dload_gate
     }
 
     unsafe fn driver_begin_steal(raw: *mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
@@ -1122,9 +1112,10 @@ pub(crate) fn host_io_wait(
 
 /// Block on IO readiness without CPU help-steal.
 ///
-/// Package attach handshakes use this path (COI-116): `wait_fd_helping` can nest the peer
-/// `thread::spawn` job under the client's wait on a 1-worker reactor, so both
-/// sides park on the same OS stack and time out. Pool workers still run the peer.
+/// A task's connect probe uses this path (COI-116): `wait_fd_helping` can
+/// nest the peer `thread::spawn` job under the client's wait on a 1-worker
+/// reactor, so both sides park on the same OS stack and time out. Pool
+/// workers still run the peer.
 pub(crate) fn host_io_wait_no_help(
     handle: crate::io_handle::WaitHandle,
     interest: crate::io_reactor::Interest,
@@ -1141,111 +1132,6 @@ pub(crate) fn host_io_wait_no_help(
         Some(io) => io.wait_fd(handle, interest, timeout),
         None => IoReactor::new().wait_fd(handle, interest, timeout),
     }
-}
-
-/// Code pointer must be a symbol in a file the bound gate would hashed-dload.
-pub(crate) fn host_code_ptr_from_hashed_dload(
-    addr: i64,
-) -> Result<*const (), crate::io::IoErrorTag> {
-    use crate::io::IoErrorTag;
-    if addr == 0 {
-        return Err(IoErrorTag::InvalidInput);
-    }
-    HOST_STATE.with(|c| {
-        let state = c.borrow();
-        let Some(state) = state.as_ref() else {
-            return Err(IoErrorTag::PermissionDenied);
-        };
-        // SAFETY: `raw` is the host bound by the live guard.
-        let gate = unsafe { &*(state.dload_gate)(state.raw) };
-        hashed_dload_code_ptr(gate, addr as *const std::ffi::c_void)
-    })
-}
-
-fn hashed_dload_code_ptr(
-    gate: &crate::ffi::DloadGate,
-    ptr: *const std::ffi::c_void,
-) -> Result<*const (), crate::io::IoErrorTag> {
-    use crate::io::IoErrorTag;
-    let path = mapped_module_path(ptr).ok_or(IoErrorTag::InvalidInput)?;
-    let stem = crate::ffi::dload_request_stem(&path);
-    // A library the AOT executable links (by name): `coil package` checked
-    // its grant and hash at link time, and the executable runs with no gate.
-    if crate::ffi::static_library(&stem).is_some() {
-        return Ok(ptr as *const ());
-    }
-    if gate.check_request(&stem).is_err() {
-        return Err(IoErrorTag::InvalidInput);
-    }
-    if !gate.file_hash_allowed(&stem, std::path::Path::new(&path)) {
-        return Err(IoErrorTag::InvalidInput);
-    }
-    Ok(ptr as *const ())
-}
-
-#[cfg(unix)]
-fn mapped_module_path(ptr: *const std::ffi::c_void) -> Option<String> {
-    let mut info = std::mem::MaybeUninit::<libc::Dl_info>::zeroed();
-    let rc = unsafe { libc::dladdr(ptr, info.as_mut_ptr()) };
-    if rc == 0 {
-        return None;
-    }
-    let info = unsafe { info.assume_init() };
-    if info.dli_fname.is_null() {
-        return None;
-    }
-    // Interior pointers (not a symbol start) are not typed code pointers.
-    if info.dli_saddr.is_null() || !std::ptr::eq(info.dli_saddr, ptr) {
-        return None;
-    }
-    Some(
-        unsafe { std::ffi::CStr::from_ptr(info.dli_fname) }
-            .to_string_lossy()
-            .into_owned(),
-    )
-}
-
-/// No dynamic libraries (wasm): no code pointer belongs to a loaded module.
-#[cfg(not(any(unix, windows)))]
-fn mapped_module_path(_ptr: *const std::ffi::c_void) -> Option<String> {
-    None
-}
-
-#[cfg(windows)]
-fn mapped_module_path(ptr: *const std::ffi::c_void) -> Option<String> {
-    use std::os::windows::ffi::OsStringExt;
-    const FROM_ADDRESS: u32 = 0x00000004;
-    const UNCHANGED_REFCOUNT: u32 = 0x00000002;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetModuleHandleExW(
-            flags: u32,
-            lp: *const u16,
-            module: *mut *mut std::ffi::c_void,
-        ) -> i32;
-        fn GetModuleFileNameW(
-            module: *mut std::ffi::c_void,
-            buf: *mut u16,
-            len: u32,
-        ) -> u32;
-    }
-    let mut module: *mut std::ffi::c_void = std::ptr::null_mut();
-    let ok = unsafe {
-        GetModuleHandleExW(FROM_ADDRESS | UNCHANGED_REFCOUNT, ptr as *const u16, &mut module)
-    };
-    if ok == 0 || module.is_null() {
-        return None;
-    }
-    let mut buf = [0u16; 512];
-    let n = unsafe { GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) };
-    if n == 0 {
-        return None;
-    }
-    Some(
-        std::ffi::OsString::from_wide(&buf[..n as usize])
-            .to_string_lossy()
-            .into_owned(),
-    )
 }
 
 /// Drop async waiters registered on `handle` (stream close).

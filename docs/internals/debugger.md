@@ -10,7 +10,7 @@ it on the MIR interpreter, through a stop engine gated behind an attached
 cargo build   # coil + coil-debug (+ coil-dissect / coil-embed)
 coil debug examples/fib.coil
 coil debug examples/fib.coil -x cmds.txt --batch
-coil debug gated.coil --allow-attach -x cmds.txt --batch
+coil debug gated.coil --allow-exit -x cmds.txt --batch
 # DAP mode for IDE integration (program path from launch request):
 coil debug --dap
 coil debug --dap --allow-exit
@@ -25,7 +25,7 @@ coil-debug examples/fib.coil -x cmds.txt --batch
 | `-x <script>` | Run commands from a file (`#` comments; one command per line) |
 | `--batch` | Non-interactive; run the whole script (or stdin if no `-x`). A failing command is reported and the script goes on, like `gdb -batch`; the exit status is non-zero if any command failed or the program panicked |
 | `--dap` | Debug Adapter Protocol over **stdio** (see below); no positional `.coil` |
-| `--allow-attach` / `--allow-exit` / `--allow-ffi-exec` / `--allow-dload STEM` | Host grants at typecheck (same as `coil compile` / `coil dissect`) |
+| `--allow-exit` / `--allow-ffi-exec` / `--allow-dload STEM` | Host grants at typecheck (same as `coil compile` / `coil dissect`) |
 | `--ffi-search-path DIR` | Extra FFI lookup directory (not a grant) |
 | `--root DIR` | Extra `use`/`mod` search directory |
 
@@ -50,7 +50,7 @@ are not shipped in this repository.
 | `program` | Absolute or workspace-relative path to entry `.coil` |
 | `cwd` | Optional working directory for resolving paths |
 | `stopOnEntry` | Optional; stop **before** the program's first op |
-| `allowAttach` / `allowExit` / `allowFfiExec` / `allowRead` / `allowWrite` / `allowNet` / `allowEnv` / `allowAll` | Optional; OR with CLI `--allow-*` |
+| `allowExit` / `allowExec` / `allowFfiExec` / `allowRead` / `allowWrite` / `allowNet` / `allowEnv` / `allowAll` | Optional; OR with CLI `--allow-*` |
 | `allowDload` | Optional string array of dload stems |
 | `ffiSearchPath` | Optional string array of FFI lookup dirs |
 

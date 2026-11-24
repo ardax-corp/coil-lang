@@ -31,7 +31,7 @@ coil debug --dap
 cargo run --quiet -- debug path/to/prog.coil -x /tmp/coil_dbg.txt --batch
 
 # Grant-gated programs (same flags as compile / dissect)
-coil debug gated.coil --allow-attach -x /tmp/coil_dbg.txt --batch
+coil debug gated.coil --allow-exit -x /tmp/coil_dbg.txt --batch
 ```
 
 Use `coil dissect` for MIR/HIR/AST dumps; use `--release` for faster runs.

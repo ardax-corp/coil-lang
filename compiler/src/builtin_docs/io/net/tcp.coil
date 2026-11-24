@@ -201,8 +201,8 @@ fn peer_addr(Stream s) -> Result<(string, int), IoError> {}
 /// Turns `TCP_NODELAY` on or off for a TCP stream.
 ///
 /// With `enabled == true` small writes are sent at once instead of being
-/// held back to be combined (Nagle's algorithm). Works on streams that a
-/// package such as coil-tls has attached to, since they share the socket.
+/// held back to be combined (Nagle's algorithm). Works on the socket under
+/// a package stream such as coil-tls's `TlsStream`.
 /// Returns `Err(IoError::InvalidInput)` for a listener or a stream that is
 /// not TCP.
 ///

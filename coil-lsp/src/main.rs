@@ -4807,7 +4807,6 @@ mod tests {
             vec![PathBuf::from("/work/app/vendor"), PathBuf::from("/abs/lib")]
         );
         assert!(options.grants.allow_exit);
-        assert!(!options.grants.allow_attach);
         assert_eq!(options.grants.allow_dload, vec!["sdl2".to_string()]);
         assert_eq!(options.grants.ffi_search_paths, vec![PathBuf::from("/work/app/native")]);
         assert_eq!(options.workspace, Some(PathBuf::from("/work/app/proj")));

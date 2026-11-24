@@ -38,7 +38,6 @@ mod format;
 pub mod shared_heap;
 pub mod process;
 pub mod str_bytes;
-pub mod stream_attach;
 mod task;
 pub mod thread;
 pub mod tty;
@@ -58,7 +57,7 @@ pub use fs::FS_WIRING;
 pub use gc_handles::{GC_COLLECT_NATIVE, GC_REGISTER_FINALIZER_NATIVE, GC_WIRING};
 pub use host_natives::{
     CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE,
-    STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE, build_standard_host_natives, AotHostGroup, core_host_groups, HostPush, host_group_of, host_group_spans,
+    build_standard_host_natives, AotHostGroup, core_host_groups, HostPush, host_group_of, host_group_spans,
 };
 pub use memory::*;
 pub use packed_la::{
@@ -69,7 +68,6 @@ pub use runtime_wire::class_kind_table;
 pub use isolate::{Isolate, IsolateProgram};
 pub use driver::{FFI_HOOK, FFI_LINKED_HOOK};
 pub use start::{NativeStart, run_natively, spawn_context, standard_host_natives};
-pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
 pub use thread::{
     LiveThreadRegistry, ThreadErrorTag, ThreadProgram, join_undetached_threads,
     new_live_thread_registry,
