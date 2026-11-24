@@ -9,7 +9,7 @@
 /// Use `wait_readable` / `wait_writable` to wait, or the blocking adapters in
 /// `io::sync` (`write_all`, `read_to_end`, ...).
 ///
-/// The handle is closed by `close`, or when the garbage collector drops it.
+/// The handle is closed by `close`, or when its last owner lets go of it.
 /// `Stream` implements `Read` and `Write`, so `s.read(buf)` and
 /// `s.write(buf)` work as methods too.
 ///
@@ -390,7 +390,7 @@ fn open(string path, string mode) -> Result<Stream, IoError> {}
 /// Closing an attached stream calls its package `shutdown` and `free`
 /// hooks first, and wakes any task waiting on it. Closing twice returns
 /// `Err(IoError::AlreadyClosed)`. A stream that is never closed is closed
-/// when the garbage collector drops it.
+/// when its last owner lets go of it.
 ///
 /// # Examples
 ///
