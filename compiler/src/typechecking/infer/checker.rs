@@ -4255,8 +4255,17 @@ impl Checker {
             }
             // An `extern struct` by value: the record `invoke` gives too.
             Some(common::tag::STRUCT) => self.ty_from_ffi_type_expr(t),
+            _ if Self::extern_sized_int(t) => crate::typechecking::ty::int(),
             _ => self.parse_type_name(t),
         }
+    }
+
+    /// Whether an `extern` parameter or result type is a sized C integer
+    /// (`int32`, `uint8`, …): an `int` in coil, narrowed and widened at the
+    /// call (#2886).
+    fn extern_sized_int(t: &Output) -> bool {
+        matches!(t.1.as_ref(), Expression::Type(n) | Expression::Identifier(n)
+            if crate::typechecking::ty::FFI_INTS.contains(&n.to_ascii_lowercase().as_str()))
     }
 
     /// A `string` passed to `extern` `name`'s `ConstBytes` parameter `index`
@@ -4365,6 +4374,7 @@ impl Checker {
                 .as_ref()
                 .map(|r| match self.ffi_type_tag_from_output(r) {
                     Some((common::tag::STRUCT, _)) => self.ty_from_ffi_type_expr(r),
+                    _ if Self::extern_sized_int(r) => crate::typechecking::ty::int(),
                     _ => self.parse_type_name(r),
                 })
                 .unwrap_or_else(unit_ty);
