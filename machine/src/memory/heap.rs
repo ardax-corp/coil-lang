@@ -258,9 +258,6 @@ pub struct Heap {
     /// Shared function values that capture and fill nothing, by entry,
     /// arity and rest flag ([`Self::immortal_plain_fn`]), never swept.
     immortal_fns: HashMap<(u32, u32, bool), Object>,
-    /// Check mode of [`Self::free_early`]: objects it would have freed,
-    /// which the next mark must not reach ([`Self::check_doomed`]).
-    doomed: Vec<u64>,
     /// What the last [`Self::free_early`] gave back.
     early_freed: Vec<u64>,
     /// Scratch of a deep [`Heap::free_early`] walk (found, mark work,
@@ -342,7 +339,6 @@ impl Default for Heap {
             immortal_enums: HashMap::default(),
             unit_enum: None,
             immortal_fns: HashMap::new(),
-            doomed: Vec::new(),
             early_freed: Vec::new(),
             early_scratch: (Vec::new(), Vec::new(), Vec::new()),
             freed_early: false,
@@ -1122,8 +1118,8 @@ impl Heap {
     /// interned strings, the shared unit variants and `()`, objects whose
     /// `drop` has not run (the runtime runs it first when [`Self::early_drops`]
     /// lists it), handles, and everything while a cycle or a steal epoch is
-    /// open. `check` frees nothing and records the objects instead, which
-    /// the next mark must not reach. Returns how many objects it freed.
+    /// open. `check` frees nothing and checks the free instead
+    /// ([`Self::check_early_free`]). Returns how many objects it freed.
     /// [`Self::early_freed`] lists the addresses it freed.
     pub fn free_early(&mut self, v: Value, deep: bool, check: bool, keep: &dyn Fn(u64) -> bool) -> usize {
         self.early_freed.clear();
@@ -1136,7 +1132,7 @@ impl Heap {
                 return 0;
             }
             if check {
-                self.doomed.push(root.addr());
+                self.check_early_free(&[root]);
                 return 0;
             }
             self.freed_early = true;
@@ -1156,7 +1152,7 @@ impl Heap {
         let n = if reaches_drop {
             0
         } else if check {
-            self.doomed.extend(found.iter().map(Object::addr));
+            self.check_early_free(&found);
             0
         } else {
             self.freed_early = true;
@@ -1316,11 +1312,41 @@ impl Heap {
         self.freed_early && self.slab.contains_slot(addr)
     }
 
-    /// Whether check mode recorded objects since the last check.
-    /// Drop the record [`Self::check_doomed`] reads: the job that made it
-    /// ended, and its objects go with its heap's reset.
-    pub fn forget_doomed(&mut self) {
-        self.doomed.clear();
+    /// `--early-free check`: abort when an early free of `found` (its
+    /// root first) would free an object something outside it still owns
+    /// ([`Self::early_free_violation`]).
+    fn check_early_free(&self, found: &[Object]) {
+        if let Some(why) = self.early_free_violation(found) {
+            eprintln!("early free check: {why}");
+            std::process::abort();
+        }
+    }
+
+    /// The root of `found` may be owned once, by the frame that frees it;
+    /// every other object only by the pointer words of the objects freed
+    /// with it. A count above that is an owner the free would leave
+    /// naming a freed slot.
+    pub(crate) fn early_free_violation(&self, found: &[Object]) -> Option<String> {
+        let mut inside: HashMap<u64, u32> = HashMap::new();
+        let mut children = Vec::new();
+        for obj in found {
+            children.clear();
+            obj.precise_children(self, &mut children);
+            for &a in &children {
+                *inside.entry(a).or_insert(0) += 1;
+            }
+        }
+        found.iter().enumerate().find_map(|(i, obj)| {
+            let count = obj.rc_count();
+            let owned = inside.get(&obj.addr()).copied().unwrap_or(0) + u32::from(i == 0);
+            (count != COUNT_IMMORTAL && count > owned).then(|| {
+                format!(
+                    "{} at {:#x} was freed while something else owns it (count {count}, {owned} owners freed with it)",
+                    rc::kind_name(*obj),
+                    obj.addr()
+                )
+            })
+        })
     }
 
     /// Whether `obj` is an object of a type with a `drop`.

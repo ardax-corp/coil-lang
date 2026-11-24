@@ -816,7 +816,7 @@ impl Heap {
 }
 
 /// A kind's name, as the leak report and the count check print it.
-fn kind_name(obj: Object) -> &'static str {
+pub(super) fn kind_name(obj: Object) -> &'static str {
     match obj {
         Object::String(_) => "string",
         Object::Instance(_) => "instance",
@@ -871,6 +871,20 @@ mod tests {
             a.rc_dec();
         }
         heap.rc_check();
+    }
+
+    /// `--early-free check` accepts a free whose objects only the frame and
+    /// each other own, and names one that a second holder still owns.
+    #[test]
+    fn the_early_free_check_names_an_object_owned_from_outside() {
+        let mut heap = Heap::default();
+        let (s, _) = heap.alloc(ObjString::from("s"), Object::String);
+        let (arr, _) = heap.alloc(ObjArray::new(vec![Value::from(s.addr())]).of_kind(common::WORD_POINTER), Object::Array);
+        arr.rc_inc();
+        assert_eq!(heap.early_free_violation(&[arr, s]), None);
+        let _ = heap.alloc(ObjArray::new(vec![Value::from(s.addr())]).of_kind(common::WORD_POINTER), Object::Array);
+        let why = heap.early_free_violation(&[arr, s]).expect("a second holder owns the string");
+        assert!(why.contains("count 2, 1 owners"), "{why}");
     }
 
     #[test]
