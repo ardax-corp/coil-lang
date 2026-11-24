@@ -370,9 +370,9 @@ host_natives! {
     /// `docs/internals/key-index.md`.
     191 "key_index_table" (1) TEXT_R, NO_CAP => KEY_INDEX_TABLE_ID, KEY_INDEX_TABLE_NATIVE;
     192 "key_index_probe" (4) HOST_R, NO_CAP => _, KEY_INDEX_PROBE_NATIVE;
-    193 "key_index_insert" (4) HEAP_R, NO_CAP => _, KEY_INDEX_INSERT_NATIVE;
-    194 "key_index_remove" (4) HEAP_R, NO_CAP => _, KEY_INDEX_REMOVE_NATIVE;
-    195 "key_index_compact" (3) HEAP_R, NO_CAP => _, KEY_INDEX_COMPACT_NATIVE;
+    193 "key_index_insert" (4) HEAP_R, NO_CAP => KEY_INDEX_INSERT_ID, KEY_INDEX_INSERT_NATIVE;
+    194 "key_index_remove" (4) HEAP_R, NO_CAP => KEY_INDEX_REMOVE_ID, KEY_INDEX_REMOVE_NATIVE;
+    195 "key_index_compact" (3) HEAP_R, NO_CAP => KEY_INDEX_COMPACT_ID, KEY_INDEX_COMPACT_NATIVE;
     196 "key_index_retain" (2) HEAP_R, NO_CAP => _, KEY_INDEX_RETAIN_NATIVE;
     197 "key_index_clear" (3) HEAP_R, NO_CAP => KEY_INDEX_CLEAR_ID, KEY_INDEX_CLEAR_NATIVE;
     /// `key_index::find(table, hashes, keys, h, k, mode)`: the slot whose key
@@ -564,6 +564,14 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
 ];
 
 /// Whether standard native `id` is in [`DIRECT_HOST_NATIVES`].
+/// Whether host native `id` writes only number words, into arrays of
+/// numbers (the key index's table, hashes and live flags): it drops and
+/// stores no reference, so the counts need no look at its arguments and a
+/// borrowed load stays valid across it.
+pub fn host_writes_only_numbers(id: u64) -> bool {
+    [KEY_INDEX_INSERT_ID, KEY_INDEX_REMOVE_ID, KEY_INDEX_COMPACT_ID, KEY_INDEX_CLEAR_ID].iter().any(|&k| u64::from(k) == id)
+}
+
 pub fn host_native_is_direct(id: usize) -> bool {
     HOST_NATIVES
         .get(id)

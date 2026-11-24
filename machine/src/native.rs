@@ -1527,16 +1527,24 @@ fn host_writes_words(id: u64) -> bool {
     // `vec_stamp` counts the one object it changes itself. The lock
     // primitives change only the lock, whose value is a portable copy, and
     // never a word of an argument.
-    if id == u64::from(common::VEC_STAMP_ID) || (u64::from(common::LOCK_ACQUIRE_ID)..=u64::from(common::RW_STORE_ID)).contains(&id) {
-        return false;
+    fn exempt(id: u64) -> bool {
+        id == u64::from(common::VEC_STAMP_ID) || common::host_writes_only_numbers(id) || (u64::from(common::LOCK_ACQUIRE_ID)..=u64::from(common::RW_STORE_ID)).contains(&id)
     }
-    match u16::try_from(id).ok().and_then(|id| common::HOST_NATIVES.get(usize::from(id)).filter(|n| n.id == id)) {
-        Some(n) => {
-            let e = n.effects;
-            [E::HEAP_MUT, E::UNKNOWN, E::FFI, E::GC, E::THREAD, E::YIELD, E::SUSPEND, E::ATTACH_PARK].iter().any(|&b| e.contains(b))
-        }
-        None => true,
-    }
+    // One look per id, made once: this runs on every host call.
+    static WRITES: std::sync::LazyLock<Vec<bool>> = std::sync::LazyLock::new(|| {
+        let n = common::HOST_NATIVES.iter().map(|n| usize::from(n.id) + 1).max().unwrap_or(0);
+        (0..n)
+            .map(|i| match common::HOST_NATIVES.get(i).filter(|n| usize::from(n.id) == i) {
+                _ if exempt(i as u64) => false,
+                Some(n) => {
+                    let e = n.effects;
+                    [E::HEAP_MUT, E::UNKNOWN, E::FFI, E::GC, E::THREAD, E::YIELD, E::SUSPEND, E::ATTACH_PARK].iter().any(|&b| e.contains(b))
+                }
+                None => true,
+            })
+            .collect()
+    });
+    usize::try_from(id).ok().and_then(|i| WRITES.get(i).copied()).unwrap_or(true)
 }
 
 /// An array's element words, for native code to index in place: writes

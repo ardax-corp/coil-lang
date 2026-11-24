@@ -340,7 +340,11 @@ impl Heap {
     }
 
     /// [`Self::rc_after`] of each of [`Self::rc_before_all`]'s objects.
+    #[inline]
     pub fn rc_after_all(&self, before: Vec<(Object, Vec<u64>)>) {
+        if before.is_empty() {
+            return;
+        }
         for b in before {
             self.rc_after(Some(b));
         }
