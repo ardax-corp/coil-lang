@@ -307,6 +307,10 @@ pub struct Heap {
     /// (reference-count plan step 7): roots until the runtime runs it
     /// ([`Heap::take_rc_due`]) and releases them.
     pub(crate) rc_due: Vec<u64>,
+    /// What the program's statics still hold as it ends: owned for the
+    /// program's life, so the leak report leaves them out
+    /// ([`Heap::rc_leaks_exempt`]).
+    pub(super) leak_exempt: std::collections::HashSet<u64>,
     /// The count changes of the open steal epoch's mutators, folded in from
     /// their batches ([`Heap::rc_log`]).
     epoch_rc: Vec<u64>,
@@ -392,6 +396,7 @@ impl Default for Heap {
             rc_pending: std::cell::RefCell::new(Vec::new()),
             rc_stack: Vec::new(),
             rc_due: Vec::new(),
+            leak_exempt: std::collections::HashSet::new(),
             epoch_rc: Vec::new(),
             cyclic_types: Vec::new(),
             nursery: false,
@@ -5136,6 +5141,7 @@ pub use inline::{InlineObject, InlineShape, ProductSlots, inline_object, product
 
 #[path = "rc.rs"]
 mod rc;
+pub(crate) use rc::rc_leaks_shown;
 
 #[path = "cycles.rs"]
 mod cycles;

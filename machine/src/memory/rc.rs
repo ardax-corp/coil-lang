@@ -605,7 +605,7 @@ impl Heap {
     pub(super) fn report_leaks(&self) {
         let mut by_kind: std::collections::BTreeMap<&str, (usize, usize)> = std::collections::BTreeMap::new();
         for obj in self.objects() {
-            if obj.rc_count() == COUNT_IMMORTAL {
+            if obj.rc_count() == COUNT_IMMORTAL || self.leak_exempt.contains(&obj.addr()) {
                 continue;
             }
             let kind = match obj {
@@ -635,6 +635,35 @@ impl Heap {
         let (n, bytes) = by_kind.values().fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
         let kinds: Vec<String> = by_kind.iter().map(|(k, (c, _))| format!("{k} {c}")).collect();
         eprintln!("coil rc-leaks: {n} objects, {bytes} bytes ({})", kinds.join(", "));
+    }
+
+    /// [`Self::report_leaks`] leaves out `roots` (the statics' words as the
+    /// program ends) and what they reach: they live as long as the program.
+    pub(crate) fn rc_leaks_exempt(&mut self, roots: &[Value]) {
+        struct Reach<'a>(&'a Heap, &'a mut Vec<Object>);
+        impl SlotVisitor for Reach<'_> {
+            fn word(&mut self, v: &Value, kind: u8) {
+                if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
+                    && let Some(o) = self.0.rc_object(*v)
+                {
+                    self.1.push(o);
+                }
+            }
+
+            fn member(&mut self, m: &Member) {
+                if let Member::Object(o) = m {
+                    self.1.push(*o);
+                }
+            }
+        }
+        let mut seen = std::mem::take(&mut self.leak_exempt);
+        let mut stack: Vec<Object> = roots.iter().filter_map(|v| self.rc_object(*v)).collect();
+        while let Some(o) = stack.pop() {
+            if seen.insert(o.addr()) {
+                o.visit_slots(self, &mut Reach(self, &mut stack));
+            }
+        }
+        self.leak_exempt = seen;
     }
 
     /// A fresh enum a host call boxed for a call site that takes it as two

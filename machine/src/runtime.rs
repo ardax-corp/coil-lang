@@ -262,6 +262,17 @@ impl Runtime {
     }
 }
 
+impl Drop for Runtime {
+    /// The statics' values live as long as the program: the leak report
+    /// (`COIL_RC_LEAKS=1`) of the heap that goes next leaves them out.
+    fn drop(&mut self) {
+        if crate::memory::rc_leaks_shown() && !self.statics.is_empty() {
+            let statics = std::mem::take(&mut self.statics);
+            self.heap.owned_mut().rc_leaks_exempt(&statics);
+        }
+    }
+}
+
 /// What a host call needs from whatever runs the program besides the
 /// [`Runtime`]: whether tasks may switch where it runs, parking the task
 /// it runs in, and a collection with its native frames rooted. The native
