@@ -12518,6 +12518,14 @@ impl Checker {
             .iter()
             .zip(arg_tys.iter())
             .filter(|(_, ty)| !matches!(apply_ty_prune(&self.subst, ty), Ty::Var(_)))
+            // The trait value of a trait declared here is a type of this
+            // module (`impl Close for Conn` beside `trait Conn`).
+            .filter(|(_, ty)| match apply_ty_prune(&self.subst, ty) {
+                Ty::Existential { class } => {
+                    self.generics.typeclass(&class).is_none_or(|c| c.defined_module != self.current_module)
+                }
+                _ => true,
+            })
             .filter(|(expr, ty)| {
                 let head = self
                     .nominal_head_from_instance_arg(expr)
