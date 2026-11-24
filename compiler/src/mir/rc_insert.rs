@@ -52,7 +52,57 @@ pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mu
     let mut bodies: Vec<(Option<Label>, &mut MirFunc)> = bodies.into_iter().collect();
     let numbers = number_returns(bodies.iter().map(|(l, f)| (*l, &**f)));
     let coros = owning_bodies(bodies.iter().map(|(_, f)| &**f));
-    bodies.iter_mut().map(|(l, f)| insert_rc_in(f, false, &numbers, *l, l.is_some_and(|l| coros.contains(&l)))).sum()
+    let quiet = quiet_bodies(bodies.iter().map(|(l, f)| (*l, &**f)), &coros);
+    let facts = Facts { numbers, quiet };
+    bodies.iter_mut().map(|(l, f)| insert_rc_in(f, false, &facts, *l, l.is_some_and(|l| coros.contains(&l)))).sum()
+}
+
+/// What the pass knows of the other bodies.
+struct Facts {
+    /// The bodies that return only numbers ([`number_returns`]).
+    numbers: HashSet<Label>,
+    /// The bodies that write no word into an object ([`quiet_bodies`]).
+    quiet: HashSet<Label>,
+}
+
+/// The calls of `func` that write no word into an object: of a pure
+/// function, or of a body in `quiet`.
+fn quiet_calls(func: &MirFunc, quiet: &HashSet<Label>) -> HashSet<ValueId> {
+    let mut out = func.pure_calls.clone();
+    out.extend(func.blocks.iter().flat_map(|b| &b.insts).filter_map(|i| match i {
+        MirInst::Call { dest, target, .. } if quiet.contains(target) => Some(*dest),
+        _ => None,
+    }));
+    out
+}
+
+/// The entries of the bodies that write no word into an object and call
+/// only such bodies (cleanup pads included), found optimistically. A
+/// body that owns its parameters is never one: it releases them.
+fn quiet_bodies<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>, owning: &HashSet<Label>) -> HashSet<Label> {
+    let cands: Vec<(Label, &MirFunc)> = bodies.filter_map(|(l, f)| Some((l?, f))).filter(|(l, f)| !owning.contains(l) && !super::frame_words::is_generator(f)).collect();
+    let mut set: HashSet<Label> = cands.iter().map(|(l, _)| *l).collect();
+    loop {
+        let before = set.len();
+        for (l, f) in &cands {
+            if !set.contains(l) {
+                continue;
+            }
+            let mut quiet = true;
+            let mut body = Some(*f);
+            while let Some(g) = body {
+                let calls = quiet_calls(g, &set);
+                quiet &= g.blocks.iter().flat_map(|b| &b.insts).all(|i| !may_write_words(i, &calls));
+                body = g.cleanup.as_deref();
+            }
+            if !quiet {
+                set.remove(l);
+            }
+        }
+        if set.len() == before {
+            return set;
+        }
+    }
 }
 
 /// The bodies that own their parameters: a coroutine's (a `gen fn`'s,
@@ -210,8 +260,10 @@ fn computed_with(func: &MirFunc, v: ValueId) -> bool {
 
 /// Whether an instruction may write a word into an object, or run code
 /// that may: what ends a load's borrow of its holder ([`Pass::new`]).
-fn may_write_words(inst: &MirInst) -> bool {
+fn may_write_words(inst: &MirInst, pure: &HashSet<ValueId>) -> bool {
     match inst {
+        // A pure function's call writes into no object it is passed.
+        MirInst::Call { dest, .. } if pure.contains(dest) => false,
         MirInst::Const { .. }
         | MirInst::Bin { .. }
         | MirInst::Cmp { .. }
@@ -228,6 +280,14 @@ fn may_write_words(inst: &MirInst) -> bool {
         | MirInst::ClearWord { .. }
         | MirInst::KeepAlive { .. }
         | MirInst::GcBarrier { .. } => false,
+        // A number stored, a word appended, a field made unique: none drops
+        // an owner's last count (a copy is made only of a shared object,
+        // whose other owner keeps it).
+        MirInst::HeapFieldStore { scalar: true, .. }
+        | MirInst::StoreIndex { scalar: true, .. }
+        | MirInst::ArrayPush { .. }
+        | MirInst::Cow { field: Some(_), .. } => false,
+        MirInst::HostInvoke { native_id, .. } if common::host_writes_only_numbers(u64::from(*native_id)) => false,
         MirInst::HostInvoke { native_id, .. } => {
             use common::EffectFlags as E;
             let e = super::effects::host_effects(*native_id);
@@ -239,31 +299,36 @@ fn may_write_words(inst: &MirInst) -> bool {
 
 /// Whether instruction `inst` only reads through `v` or computes with it:
 /// a use that keeps no copy of the word.
-fn reads_only(inst: &MirInst, v: ValueId) -> bool {
+fn reads_only(inst: &MirInst, v: ValueId, pure: &HashSet<ValueId>) -> bool {
     match inst {
         MirInst::ProductLoad { object, .. } => *object == v,
         MirInst::Index { array, index, .. } | MirInst::LaneIndex { array, index, .. } => *array == v && *index != v,
         MirInst::ArrayLen { .. } | MirInst::Cmp { .. } | MirInst::KeepAlive { .. } | MirInst::ClearWord { .. } | MirInst::GcBarrier { .. } => true,
         MirInst::MatchPayload { scrutinee, .. } => *scrutinee == v,
-        MirInst::HostInvoke { .. } => !may_write_words(inst),
+        MirInst::HostInvoke { .. } => !may_write_words(inst, pure),
+        // Writes into it that keep no copy of it.
+        MirInst::HeapFieldStore { scalar: true, object, value, .. } => *object == v && *value != v,
+        MirInst::StoreIndex { scalar: true, array, index, .. } => *array == v && *index != v,
+        MirInst::ArrayPush { array, value, .. } => *array == v && *value != v,
+        MirInst::Cow { field: Some(_), src, .. } => *src == v,
         _ => false,
     }
 }
 
 /// [`insert_rc_all`] of a body, or of a cleanup pad (`pad`: it runs while the
 /// frame unwinds, so it keeps no homes of its own).
-fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>, own: Option<Label>, coro: bool) -> usize {
+fn insert_rc_in(func: &mut MirFunc, pad: bool, facts: &Facts, own: Option<Label>, coro: bool) -> usize {
     let mut n = 0;
     let mut pad_homes = Vec::new();
     if let Some(p) = func.cleanup.as_deref_mut() {
-        pad_homes = Pass::new(p, numbers, false, false).object_homes(p);
-        n += insert_rc_in(p, true, numbers, None, false);
+        pad_homes = Pass::new(p, facts, false, false).object_homes(p);
+        n += insert_rc_in(p, true, facts, None, false);
     }
     // A `FreeEarly` (`hir/early_free.rs`) stays: in a counting run the
     // runtime frees nothing there and only runs the `drop`s the value's
     // last decrement will owe, at the scope's end (plan step 7). It reads
     // its value, so the decrement comes after it.
-    let pass = Pass::new(func, numbers, own.is_some_and(|l| numbers.contains(&l)), coro);
+    let pass = Pass::new(func, facts, own.is_some_and(|l| facts.numbers.contains(&l)), coro);
     let mut object_homes = pass.object_homes(func);
     object_homes.extend(pad_homes);
     object_homes.sort_unstable();
@@ -413,7 +478,9 @@ fn cancel_pairs(func: &mut MirFunc, homes: &HashMap<ValueId, u16>) -> usize {
             | MirInst::LaneIndex { dest, .. }
             | MirInst::MatchPayload { dest, .. }
             | MirInst::LoadStatic { dest, .. }
-            | MirInst::Cow { dest, unique: false, field: None, .. } => Some(*dest),
+            | MirInst::Cow { dest, unique: false, field: None, .. }
+            // The field's word after the copy, which the holder owns.
+            | MirInst::Cow { dest, field: Some(_), .. } => Some(*dest),
             _ => None,
         })
         .collect();
@@ -539,7 +606,9 @@ fn alias_source(inst: &MirInst, counted: &dyn Fn(ValueId) -> bool) -> Option<Val
 }
 
 impl Pass {
-    fn new(func: &MirFunc, numbers: &HashSet<Label>, returns_number: bool, coro: bool) -> Self {
+    fn new(func: &MirFunc, facts: &Facts, returns_number: bool, coro: bool) -> Self {
+        let numbers = &facts.numbers;
+        let quiet = quiet_calls(func, &facts.quiet);
         let pointers = pointer_words(func);
         let mut counted: HashSet<ValueId> = (0..func.types.len() as u32).map(ValueId).filter(|v| matches!(ty_of(func, *v), t if heap_word(t) || t == MirTy::Value)).collect();
         counted.extend(opaque_words(func));
@@ -731,7 +800,7 @@ impl Pass {
                     }
                     let rest = &block.insts[ii + 1..];
                     let last = rest.iter().rposition(|i| i.operands().contains(&dest)).map_or(0, |j| j + 1);
-                    let ok = rest[..last].iter().all(|i| if i.operands().contains(&dest) { reads_only(i, dest) } else { !may_write_words(i) });
+                    let ok = rest[..last].iter().all(|i| if i.operands().contains(&dest) { reads_only(i, dest, &quiet) } else { !may_write_words(i, &quiet) });
                     if ok {
                         borrowed.insert(dest);
                         changed = true;
@@ -754,7 +823,64 @@ impl Pass {
         let mut scalar: HashSet<ValueId> = scalar;
         // A φ of numbers only is a number (a loop's running sum).
         scalar.extend(number_words(func, numbers).into_iter().filter(|d| !base.contains_key(d)));
-        Self { base, borrowed, owned_at_def, scalar }
+        let mut pass = Self { base, borrowed, owned_at_def, scalar };
+        pass.borrow_loads_of_live_holders(func, &quiet);
+        pass
+    }
+
+    /// A load from a holder the frame owns and keeps past the load's last
+    /// use, read only within its block and before anything may write a word
+    /// into an object, is borrowed: the frame's owner of the holder keeps
+    /// it that long (as a borrowed holder's caller does, in [`Self::new`]).
+    fn borrow_loads_of_live_holders(&mut self, func: &MirFunc, quiet: &HashSet<ValueId>) {
+        let live_in = self.live_in(func);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (bi, block) in func.blocks.iter().enumerate() {
+                let b = BlockId(bi as u32);
+                let mut live_after: Vec<HashSet<ValueId>> = vec![HashSet::new(); block.insts.len()];
+                let mut live = self.live_end(func, b, &live_in);
+                for (ii, inst) in block.insts.iter().enumerate().rev() {
+                    live_after[ii] = live.clone();
+                    for d in inst.dests() {
+                        if self.root(d) == Some(d) {
+                            live.remove(&d);
+                        }
+                    }
+                    if !inst.is_phi() {
+                        live.extend(self.used_roots(inst));
+                    }
+                }
+                for (ii, inst) in block.insts.iter().enumerate() {
+                    let (dest, holder) = match inst {
+                        MirInst::ProductLoad { dest, object, .. } => (*dest, *object),
+                        MirInst::Index { dest, array, .. } => (*dest, *array),
+                        _ => continue,
+                    };
+                    if self.base.get(&dest) != Some(&dest) || self.borrowed.contains(&dest) {
+                        continue;
+                    }
+                    let Some(h) = self.root(holder) else { continue };
+                    if self.base.iter().any(|(k, r)| *r == dest && *k != dest) {
+                        continue;
+                    }
+                    let elsewhere = func.blocks.iter().enumerate().any(|(bj, b)| {
+                        b.term.as_ref().is_some_and(|t| t.uses().any(|u| u == dest)) || (bj != bi && b.insts.iter().any(|i| i.operands().contains(&dest)))
+                    });
+                    if elsewhere {
+                        continue;
+                    }
+                    let rest = &block.insts[ii + 1..];
+                    let Some(last) = rest.iter().rposition(|i| i.operands().contains(&dest)) else { continue };
+                    let kept = self.borrowed.contains(&h) || live_after[ii + 1 + last].contains(&h);
+                    if kept && rest[..=last].iter().all(|i| if i.operands().contains(&dest) { reads_only(i, dest, quiet) } else { !may_write_words(i, quiet) }) {
+                        self.borrowed.insert(dest);
+                        changed = true;
+                    }
+                }
+            }
+        }
     }
 
     /// The homes some `HomeStore` writes an object word to, in order.
