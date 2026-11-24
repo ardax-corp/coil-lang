@@ -60,7 +60,7 @@ Heap objects per run and GC safepoint time (instrumented build, best of 3):
 | 1b | Optional stated facts (`#[noescape(x)]`, `#[fresh]`), checked against the inferred summary (E0139) | done |
 | 2 | Free at scope end and after the call for non-escaping fresh objects; check mode, gc-stress | done |
 | 3 | Static uniqueness: free a string's old value when it is rebuilt in place, free fresh concatenation operands and variable-size match scrutinees; zero-copy `to_bytes`/`from_bytes`; enum SROA dropped | done |
-| 4 | Copying nursery for young objects: write barrier, minor collections, pretenuring, held pins | done |
+| 4 | Copying nursery for young objects: write barrier, minor collections, pretenuring, held pins | done; collector and `--nursery` removed in RC step 10 (the nursery chunks stay as the bump allocator) |
 | 5 | Opt-in checked `region` block: contextual keyword, E0140, nursery reset at the end | done; removed in RC step 10 |
 | 6 | Re-measure; decide whether anything else is worth doing | done |
 

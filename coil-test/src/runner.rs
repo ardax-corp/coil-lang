@@ -64,8 +64,6 @@ pub struct TestOptions {
     pub fold_calls: Option<bool>,
     /// `--early-free on|off|check`; `None` follows the opt level.
     pub early_free: Option<compiler::EarlyFree>,
-    /// `--nursery on|off`; `None` is on.
-    pub nursery: Option<bool>,
     /// `--auto-par on|off`; `None` keeps the pipeline default.
     pub auto_par: Option<bool>,
     /// `--contract-runs`: calls per generated contract test (0: none).
@@ -1739,13 +1737,10 @@ pub fn suite_exit_code(failed: usize) -> i32 {
 
 /// `coil test` entry: run the suite, print the summary, return the process status.
 ///
-/// What `--early-free check` and `--nursery` ask of the runs in this process.
+/// What `--early-free check` asks of the runs in this process.
 pub fn set_memory_options(options: &TestOptions) {
     if options.early_free == Some(compiler::EarlyFree::Check) {
         machine::set_early_free_mode(machine::EarlyFreeMode::Check);
-    }
-    if let Some(on) = options.nursery {
-        machine::set_nursery(on);
     }
 }
 

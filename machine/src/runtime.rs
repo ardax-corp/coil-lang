@@ -257,7 +257,7 @@ impl Runtime {
     /// and worker cap.
     pub(crate) fn new() -> Self {
         let mut heap = crate::memory::HeapSlot::default();
-        heap.get_mut().set_nursery(crate::memory::nursery_enabled());
+        heap.get_mut().set_nursery(true);
         Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None, speculative_out: crate::thread::SpeculativeOut::default(), probes: Vec::new(), fuel: u64::MAX, step_budget_hit: false, fuel_start: u64::MAX, heap_cap: usize::MAX, heap_cap_hit: false }
     }
 }

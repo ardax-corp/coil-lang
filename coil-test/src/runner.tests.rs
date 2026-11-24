@@ -26,7 +26,6 @@ fn options(root: &Path, fail_fast: bool) -> TestOptions {
         contracts: None,
         fold_calls: None,
         early_free: None,
-        nursery: None,
         auto_par: None,
         contract_runs: 0,
         grants: HostGrants::deny_all(),

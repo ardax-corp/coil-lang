@@ -68,26 +68,15 @@ fn parse_opt_level(s: &str) -> Result<OptLevel, String> {
     })
 }
 
-/// `--nursery on|off` for commands that run Coil code.
+/// Flags for commands that run Coil code.
 #[derive(Args, Clone, Debug, Default)]
-pub struct NurseryFlag {
-    /// Allocate young objects in a copying nursery: on (default) or off
-    #[arg(long, value_name = "on|off", value_parser = parse_nursery, action = clap::ArgAction::Set)]
-    pub nursery: Option<bool>,
+pub struct RunFlags {
     /// At exit, print how many copy-on-write copies each source line made
     #[arg(long)]
     pub cow_report: bool,
     /// Run on the MIR interpreter instead of native code
     #[arg(long)]
     pub mir: bool,
-}
-
-fn parse_nursery(s: &str) -> Result<bool, String> {
-    match s {
-        "on" => Ok(true),
-        "off" => Ok(false),
-        _ => Err(format!("invalid --nursery `{s}` (expected on|off)")),
-    }
 }
 
 fn parse_fold_calls(s: &str) -> Result<bool, String> {

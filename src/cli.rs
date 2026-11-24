@@ -5,7 +5,7 @@ use std::process::exit;
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use coil_args::{
-    CompileProfileFlags, DebugLevelFlags, EntryFlag, HostGrantFlags, LogFlags, NurseryFlag,
+    CompileProfileFlags, DebugLevelFlags, EntryFlag, HostGrantFlags, LogFlags, RunFlags,
     OptLevelFlags, RootFlags, expand_o_shorts, merge_entry,
 };
 use compiler::{DebugLevel, EarlyFree, HostGrants, OptLevel};
@@ -87,8 +87,6 @@ pub(crate) struct CliArgs {
     pub fold_calls: Option<bool>,
     /// `--early-free on|off|check`; `None` follows the opt level.
     pub early_free: Option<EarlyFree>,
-    /// `--nursery on|off` for `coil FILE` / `coil run`; `None` is on.
-    pub nursery: Option<bool>,
     /// `--cow-report`: copies per source line at exit.
     pub cow_report: bool,
     /// `--mir`: `coil FILE` and `coil run` run on the MIR interpreter.
@@ -131,7 +129,7 @@ struct RawCli {
     #[command(flatten)]
     opt: OptLevelFlags,
     #[command(flatten)]
-    nursery: NurseryFlag,
+    run: RunFlags,
     #[command(flatten)]
     debug: DebugLevelFlags,
     #[command(flatten)]
@@ -186,7 +184,7 @@ enum RawCommand {
         #[command(flatten)]
         grants: HostGrantFlags,
         #[command(flatten)]
-        nursery: NurseryFlag,
+        run: RunFlags,
         /// Compile the archive's code even when the code cache holds it
         #[arg(long)]
         no_build_cache: bool,
@@ -404,7 +402,6 @@ fn parse_coil_args(args: &[String]) -> Result<CliArgs, String> {
             contracts: None,
             fold_calls: None,
             early_free: None,
-            nursery: None,
             cow_report: false,
             mir: false,
             auto_par: None,
@@ -470,7 +467,6 @@ fn cli_from(
         contracts: opt.contracts,
         fold_calls: opt.fold_calls,
         early_free: opt.early_free,
-        nursery: None,
         cow_report: false,
         mir: false,
         auto_par: opt.auto_par,
@@ -495,9 +491,8 @@ impl RawCli {
     fn parent_run_flags_set(&self) -> bool {
         self.log.is_set()
             || self.opt.is_set()
-            || self.nursery.nursery.is_some()
-            || self.nursery.cow_report
-            || self.nursery.mir
+            || self.run.cow_report
+            || self.run.mir
             || self.debug.is_set()
             || self.profile.is_set()
             || self.include_tests
@@ -521,12 +516,11 @@ impl RawCli {
                     return Err("missing input file (pass a .coil file or `--entry`)".into());
                 }
                 // `--mir` is the raw reference unless `-O` says otherwise.
-                let mir_level = (self.nursery.mir && self.opt.opt_level.is_none()).then_some(OptLevel::None);
+                let mir_level = (self.run.mir && self.opt.opt_level.is_none()).then_some(OptLevel::None);
                 let cli = CliArgs {
                     debug_level: self.debug.level(),
-                    nursery: self.nursery.nursery,
-                    cow_report: self.nursery.cow_report,
-                    mir: self.nursery.mir,
+                    cow_report: self.run.cow_report,
+                    mir: self.run.mir,
                     ..cli_from(
                         Command::BuildAndRun { filename },
                         self.log,
@@ -625,13 +619,12 @@ impl RawCli {
             Some(RawCommand::Run {
                 log,
                 grants,
-                nursery,
+                run,
                 no_build_cache,
                 archive,
             }) => CliArgs {
-                nursery: nursery.nursery,
-                cow_report: nursery.cow_report,
-                mir: nursery.mir,
+                cow_report: run.cow_report,
+                mir: run.mir,
                 build_cache: !no_build_cache,
                 ..cli_from(
                     Command::Run { archive },
