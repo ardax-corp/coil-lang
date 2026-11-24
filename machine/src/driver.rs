@@ -4,8 +4,8 @@
 //! static initializers and `__module_setup`, which are native calls) and
 //! calls `main` or a test case natively. Native code reaches the driver
 //! through its [`NativeHost`]: calls of other bodies and of function
-//! values run natively, host natives on the Runtime, collections over the
-//! native frames' root records ([`GcHost`]).
+//! values run natively, host natives on the Runtime, the cycle collector
+//! over the roots the driver and the Runtime hold ([`GcHost`]).
 //!
 //! Child tasks run on fibers of their own. The root task (the program's
 //! own call) never leaves its stack: where it waits, the driver runs the

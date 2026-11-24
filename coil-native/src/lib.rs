@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use compiler::native_mir::{
     AllocCall, BlockId, Label, MirAllocKind, alloc_call, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp,
-    NativeBody, Terminator, ValueId, allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pair_words, pointer_words, scalar,
+    NativeBody, Terminator, ValueId, allocates, barrier_pairs, heap_word, is_generator, numeric, scalar,
     ty_of, root_handles, used_params, word_kind, in_range_steps,
 };
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -34,19 +34,13 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_HEAP, NATIVE_CTX_RET_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
+    NATIVE_CTX_BAIL, NATIVE_CTX_HEAP, NATIVE_CTX_RET_HI, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
-/// A root record [`Lower::push_roots`] linked.
-struct Roots {
-    prev: cranelift_codegen::ir::Value,
-    slot: cranelift_codegen::ir::StackSlot,
-    /// Heap homes the record lists, written back from it.
-    homes: Vec<u16>,
-    /// `NativeCtx::gc_epoch` when it was linked.
-    epoch: cranelift_codegen::ir::Value,
-}
+/// `NativeCtx::gc_epoch` before a call in which code may run
+/// ([`Lower::epoch_mark`]).
+struct Epoch(cranelift_codegen::ir::Value);
 
 /// What [`jit`] produced.
 pub struct NativeProgram {
@@ -79,8 +73,6 @@ impl NativeProgram {
 /// dropped from here on, which is why it may cross threads.
 struct Code {
     module: ManuallyDrop<JITModule>,
-    /// `(start, size)` of the bodies with stack maps.
-    bodies: Vec<(u64, u32)>,
 }
 
 // SAFETY: nothing reads the module after it is built; `drop` has it alone.
@@ -89,14 +81,13 @@ unsafe impl Send for Code {}
 unsafe impl Sync for Code {}
 
 impl Code {
-    fn keep(module: JITModule, bodies: Vec<(u64, u32)>) -> Arc<dyn Any + Send + Sync> {
-        Arc::new(Self { module: ManuallyDrop::new(module), bodies })
+    fn keep(module: JITModule) -> Arc<dyn Any + Send + Sync> {
+        Arc::new(Self { module: ManuallyDrop::new(module) })
     }
 }
 
 impl Drop for Code {
     fn drop(&mut self) {
-        machine::native::unregister_stack_maps(&self.bodies);
         // SAFETY: this was the last handle, so no runtime can enter the code,
         // and `module` is not used again.
         unsafe { ManuallyDrop::take(&mut self.module).free_memory() };
@@ -197,8 +188,7 @@ fn inline_shape(kind: MirAllocKind, n: usize, extra: u64) -> Option<machine::nat
 /// What [`aot`] produced: a relocatable object for the host target that
 /// defines the compiled bodies and the tables `machine::native::install_aot`
 /// reads (`coil_aot_entries`, `coil_aot_entry_count`, `coil_aot_sites`,
-/// `coil_aot_site_count`, `coil_aot_refused_count`, `coil_aot_layout`,
-/// `coil_aot_stack_maps`, `coil_aot_stack_map_count`), importing the runtime helpers by name, and the
+/// `coil_aot_site_count`, `coil_aot_refused_count`, `coil_aot_layout`), importing the runtime helpers by name, and the
 /// statically linked `extern` symbols' table `machine::install_static_symbols` reads
 /// (`coil_static_syms`, `coil_static_sym_count`).
 pub struct AotObject {
@@ -233,7 +223,7 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         let compile_isa = isa.clone();
         let builder = cranelift_object::ObjectBuilder::new(isa, "coil_aot", default_libcall_names()).map_err(|e| e.to_string())?;
         let mut module = cranelift_object::ObjectModule::new(builder);
-        let (ids, defined, sites, maps) = match define_all(&mut module, bodies, body_ids, &plan, &*compile_isa, None)? {
+        let (ids, defined, sites) = match define_all(&mut module, bodies, body_ids, &plan, &*compile_isa, None)? {
             Ok(done) => done,
             Err((i, why)) => {
                 excluded.insert(i, why);
@@ -278,38 +268,6 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         }
         let table_id = module.declare_data("coil_aot_entries", Linkage::Export, false, false).map_err(e)?;
         module.define_data(table_id, &table).map_err(e)?;
-        // The stack maps: `machine::native::AotStackMap` records, each
-        // followed by its offsets, the function address relocated.
-        let mut map_bytes = Vec::new();
-        let mut map_relocs = Vec::new();
-        let mut map_count = 0u64;
-        for (id, (size, fmaps)) in &maps {
-            map_relocs.push((map_bytes.len(), *id));
-            map_bytes.extend_from_slice(&0u64.to_le_bytes());
-            map_bytes.extend_from_slice(&size.to_le_bytes());
-            map_bytes.extend_from_slice(&(fmaps.len() as u32).to_le_bytes());
-            for (ra, offs) in fmaps {
-                map_bytes.extend_from_slice(&ra.to_le_bytes());
-                map_bytes.extend_from_slice(&(offs.len() as u32).to_le_bytes());
-                for o in offs {
-                    map_bytes.extend_from_slice(&o.to_le_bytes());
-                }
-            }
-            map_bytes.resize(map_bytes.len().next_multiple_of(8), 0);
-            map_count += 1;
-        }
-        if map_bytes.is_empty() {
-            map_bytes.resize(16, 0);
-        }
-        let mut map_table = cranelift_module::DataDescription::new();
-        map_table.define(map_bytes.into_boxed_slice());
-        map_table.set_align(8);
-        for (off, id) in map_relocs {
-            let f = module.declare_func_in_data(id, &mut map_table);
-            map_table.write_function_addr(off as u32, f);
-        }
-        let map_id = module.declare_data("coil_aot_stack_maps", Linkage::Export, false, false).map_err(e)?;
-        module.define_data(map_id, &map_table).map_err(e)?;
         let mut data = cranelift_module::DataDescription::new();
         data.define(package.to_vec().into_boxed_slice());
         // Its archive is read in place, which rkyv's alignment asks of it.
@@ -339,7 +297,6 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         words("coil_aot_site_count", site_count.to_le_bytes().to_vec())?;
         words("coil_aot_refused_count", (refused.len() as u64).to_le_bytes().to_vec())?;
         words("coil_aot_layout", machine::native::layout_fingerprint().to_le_bytes().to_vec())?;
-        words("coil_aot_stack_map_count", map_count.to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
         host_group_table(&mut module, bodies)?;
         ffi_link_table(&mut module, bodies, all_linked && !ids.runtime_ffi.get())?;
@@ -547,7 +504,7 @@ fn jit_isa() -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
     flags.set("enable_verifier", VERIFY_CLIF).map_err(|e| e.to_string())?;
-    // The collector walks native frames by their frame pointers.
+    // Profilers and debuggers walk native frames by their frame pointers.
     flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
     stack_probes(&mut flags)?;
     let isa_builder = cranelift_native::builder().map_err(|e| e.to_string())?;
@@ -606,17 +563,11 @@ fn jit_once(
     let isa = jit_isa()?;
     let mut recorder = keep_image.then(image::Recorder::default);
 
-    let (ids, defined, sites, maps) = match define_all(&mut module, bodies, body_ids, &plan, &*isa, recorder.as_mut())? {
+    let (ids, defined, sites) = match define_all(&mut module, bodies, body_ids, &plan, &*isa, recorder.as_mut())? {
         Ok(done) => done,
         Err((i, why)) => return Ok(Attempt::Without(i, why)),
     };
     module.finalize_definitions().map_err(|e| e.to_string())?;
-    let mut mapped = Vec::with_capacity(maps.len());
-    for (id, (size, fmaps)) in &maps {
-        let start = module.get_finalized_function(*id) as u64;
-        machine::native::register_stack_maps(start, *size, fmaps.clone());
-        mapped.push((start, *size));
-    }
 
     let mut entries = Vec::new();
     let mut entry_funcs = Vec::new();
@@ -641,9 +592,9 @@ fn jit_once(
     }
     // A program with refused bodies does not run on native code alone.
     let image = recorder.filter(|_| refused.is_empty()).and_then(|recorder| {
-        image::encode(image::Parts { module: &module, reserve, recorder, maps: &maps, entries: &entry_funcs, sites: &sites, compiled: &compiled })
+        image::encode(image::Parts { module: &module, reserve, recorder, entries: &entry_funcs, sites: &sites, compiled: &compiled })
     });
-    Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites, image, keep: Code::keep(module, mapped) }))
+    Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites, image, keep: Code::keep(module) }))
 }
 
 /// [`NativeEntry::twin`] of body `i`: one past its two-word twin's entry
@@ -714,8 +665,8 @@ struct Plan {
 }
 
 /// What [`define_all`] made: the declared ids, the bodies defined, the
-/// panic sites their code names, and the stack maps of each function.
-type Defined = (Ids, Vec<usize>, Vec<NativeSite>, Vec<(FuncId, FuncMaps)>);
+/// and the panic sites their code names.
+type Defined = (Ids, Vec<usize>, Vec<NativeSite>);
 
 /// Declare and define every body `plan` compiles (its implementation,
 /// cleanup pad and driver entry) in `module`. `Ok(Err((i, why)))` when body
@@ -730,7 +681,6 @@ fn define_all<M: Module>(
     mut recorder: Option<&mut image::Recorder>,
 ) -> Result<Result<Defined, (usize, String)>, String> {
     let ids = declare(module, bodies, plan)?;
-    define_trampolines(module, &ids.tramps, recorder.as_deref_mut())?;
     if let Some(cb) = &ids.cb {
         define_callbacks(module, cb, recorder.as_deref_mut())?;
     }
@@ -760,7 +710,7 @@ fn define_all<M: Module>(
             if let Err(why) = lowered {
                 return Err((i, why));
             }
-            submit(Job::take(ids.imp[&i], i, "", true, &mut ctx));
+            submit(Job::take(ids.imp[&i], i, "", &mut ctx));
             module.clear_context(&mut ctx);
 
             if let (Some(pad), Some(&pad_id)) = (body.mir.cleanup.as_deref(), ids.pad.get(&i)) {
@@ -781,13 +731,13 @@ fn define_all<M: Module>(
                 if let Err(why) = lowered {
                     return Err((i, format!("cleanup pad: {why}")));
                 }
-                submit(Job::take(pad_id, i, " pad", true, &mut ctx));
+                submit(Job::take(pad_id, i, " pad", &mut ctx));
                 module.clear_context(&mut ctx);
             }
 
             ctx.func.signature = entry_signature(&*module);
             build_entry(module, &mut ctx.func, &mut fbc, ids.imp[&i], &body.mir);
-            submit(Job::take(ids.entry[&i], i, " entry", true, &mut ctx));
+            submit(Job::take(ids.entry[&i], i, " entry", &mut ctx));
             module.clear_context(&mut ctx);
             defined.push(i);
         }
@@ -796,14 +746,9 @@ fn define_all<M: Module>(
     if let Err(failed) = lowered {
         return Ok(Err(failed));
     }
-    let mut maps = Vec::new();
     for done in done {
         let func = match done {
-            Ok((func, Some(fmaps))) => {
-                maps.push((func.id, fmaps));
-                func
-            }
-            Ok((func, None)) => func,
+            Ok(func) => func,
             Err(failed) => return Ok(Err(failed)),
         };
         module.define_function_bytes(func.id, func.align, &func.bytes, &func.relocs).map_err(|e| format!("cranelift: {e:?}"))?;
@@ -811,7 +756,7 @@ fn define_all<M: Module>(
             r.add(func);
         }
     }
-    Ok(Ok((ids, defined, sites, maps)))
+    Ok(Ok((ids, defined, sites)))
 }
 
 /// A function lowered to Cranelift IR, waiting to compile.
@@ -822,20 +767,18 @@ struct Job {
     owner: usize,
     /// What it is of that body, for an error.
     part: &'static str,
-    /// The collector walks its frames: it has stack maps.
-    walked: bool,
 }
 
 impl Job {
     /// The function `ctx` holds, leaving it empty.
-    fn take(id: FuncId, owner: usize, part: &'static str, walked: bool, ctx: &mut cranelift_codegen::Context) -> Self {
+    fn take(id: FuncId, owner: usize, part: &'static str, ctx: &mut cranelift_codegen::Context) -> Self {
         let func = std::mem::replace(&mut ctx.func, cranelift_codegen::ir::Function::new());
-        Self { id, func, owner, part, walked }
+        Self { id, func, owner, part }
     }
 }
 
-/// A compiled function with its stack maps; or the body that did not compile.
-type Done = Result<(image::Func, Option<FuncMaps>), (usize, String)>;
+/// A compiled function; or the body that did not compile.
+type Done = Result<image::Func, (usize, String)>;
 
 fn compile_job(isa: &dyn cranelift_codegen::isa::TargetIsa, ctx: &mut cranelift_codegen::Context, job: Job) -> Done {
     ctx.clear();
@@ -844,8 +787,7 @@ fn compile_job(isa: &dyn cranelift_codegen::isa::TargetIsa, ctx: &mut cranelift_
     if let Err(e) = ctx.compile(isa, &mut plane) {
         return Err((job.owner, format!("cranelift{}: {:?}", job.part, e.inner)));
     }
-    let func = image::Func::of(job.id, ctx).ok_or((job.owner, "cranelift: no code".to_string()))?;
-    Ok((func, job.walked.then(|| stack_maps(ctx))))
+    image::Func::of(job.id, ctx).ok_or((job.owner, "cranelift: no code".to_string()))
 }
 
 /// Functions a thread should have to itself before another is worth starting.
@@ -914,22 +856,6 @@ fn compile_while<R>(isa: &dyn cranelift_codegen::isa::TargetIsa, threads: usize,
     let mut done = finished.into_inner().unwrap_or_else(PoisonError::into_inner);
     done.sort_unstable_by_key(|(at, _)| *at);
     (out, done.into_iter().map(|(_, d)| d).collect())
-}
-
-/// A compiled function's code size and stack maps: per call that holds
-/// heap words across it, the return address's offset in the function and
-/// the stack-pointer offsets of the slots that hold them.
-pub(crate) type FuncMaps = (u32, Vec<(u32, Vec<u32>)>);
-
-fn stack_maps(ctx: &cranelift_codegen::Context) -> FuncMaps {
-    let Some(code) = ctx.compiled_code() else {
-        return (0, Vec::new());
-    };
-    // Each slot by its distance below the frame pointer: a frame's stack
-    // pointer at a call is not always where its callee's frame starts, as a
-    // `tail` body moves its return address to make room for stack arguments.
-    let maps = code.buffer.user_stack_maps().iter().map(|(ra, span, map)| (*ra, map.entries().map(|(_, off)| span - off).collect())).collect();
-    (code.code_info().total_size, maps)
 }
 
 /// [`plan`] with `excluded` bodies refused for the given reason.
@@ -1776,9 +1702,6 @@ fn inst_name(i: &MirInst) -> String {
 // Declarations
 
 struct Ids {
-    /// The trampolines to helpers that may collect, with the helper and
-    /// their signature ([`trampoline`]).
-    tramps: Vec<(FuncId, FuncId, Signature)>,
     /// Native-convention body: `(ctx, params..) -> ret`.
     imp: HashMap<usize, FuncId>,
     /// driver entry: `(ctx, *const u64) -> u64`.
@@ -2303,51 +2226,9 @@ fn entry_signature(module: &impl Module) -> Signature {
     sig
 }
 
-/// Declare the helper `symbol` and a local trampoline to it with the same
-/// signature: native code calls a helper that may collect through its
-/// trampoline, which records its frame pointer in the context so the
-/// collector can walk the native frames ([`define_trampolines`]).
-fn trampoline(module: &mut impl Module, symbol: &str, sig: &Signature, tramps: &mut Vec<(FuncId, FuncId, Signature)>) -> Result<FuncId, String> {
-    let e = |e: cranelift_module::ModuleError| e.to_string();
-    let helper = module.declare_function(symbol, Linkage::Import, sig).map_err(e)?;
-    let tramp = module.declare_function(&format!("{symbol}_t"), Linkage::Local, sig).map_err(e)?;
-    tramps.push((tramp, helper, sig.clone()));
-    Ok(tramp)
-}
-
-/// Define [`trampoline`]s: `ctx.native_fp = fp; return helper(args...)`.
-fn define_trampolines<M: Module>(module: &mut M, tramps: &[(FuncId, FuncId, Signature)], mut recorder: Option<&mut image::Recorder>) -> Result<(), String> {
-    let fcfg = module.isa().frontend_config();
-    let mut fbc = FunctionBuilderContext::new();
-    let mut ctx = module.make_context();
-    for (tramp, helper, sig) in tramps {
-        ctx.func.signature = sig.clone();
-        let callee = module.declare_func_in_func(*helper, &mut ctx.func);
-        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
-        let blk = b.create_block();
-        b.append_block_params_for_function_params(blk);
-        b.switch_to_block(blk);
-        let args = b.block_params(blk).to_vec();
-        let fp = b.ins().get_frame_pointer(types::I64);
-        b.ins().store(MemFlagsData::trusted(), fp, args[0], machine::native::NATIVE_CTX_NATIVE_FP);
-        let call = b.ins().call(callee, &args);
-        let rets = b.inst_results(call).to_vec();
-        b.ins().return_(&rets);
-        b.seal_all_blocks();
-        b.finalize(fcfg);
-        module.define_function(*tramp, &mut ctx).map_err(|e| format!("cranelift trampoline: {e:?}"))?;
-        if let (Some(r), Some(func)) = (recorder.as_deref_mut(), image::Func::of(*tramp, &ctx)) {
-            r.add(func);
-        }
-        module.clear_context(&mut ctx);
-    }
-    Ok(())
-}
-
 fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Result<Ids, String> {
     let compile = &plan.compile;
     let e = |e: cranelift_module::ModuleError| e.to_string();
-    let mut tramps = Vec::new();
     let mut imp = HashMap::new();
     let mut entry = HashMap::new();
     let mut pad = HashMap::new();
@@ -2399,7 +2280,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let lane_push = module.declare_function("coil_native_lane_push", Linkage::Import, &s7).map_err(e)?;
     let lanes_to_words = module.declare_function("coil_native_lanes_to_words", Linkage::Import, &s5).map_err(e)?;
     let probe = module.declare_function("coil_native_probe", Linkage::Import, &s2).map_err(e)?;
-    let free_early = trampoline(module, "coil_native_free_early", &s3, &mut tramps)?;
+    let free_early = module.declare_function("coil_native_free_early", Linkage::Import, &s3).map_err(e)?;
     let format = module.declare_function("coil_native_format", Linkage::Import, &s4).map_err(e)?;
     let stringify = module.declare_function("coil_native_stringify", Linkage::Import, &s3).map_err(e)?;
     let eq = module.declare_function("coil_native_eq", Linkage::Import, &s3).map_err(e)?;
@@ -2409,23 +2290,23 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     s3v.params.extend((0..3).map(|_| AbiParam::new(types::I64)));
     let unwind = module.declare_function("coil_native_unwind", Linkage::Import, &s3v).map_err(e)?;
     let print = module.declare_function("coil_native_print", Linkage::Import, &s2).map_err(e)?;
-    let host = trampoline(module, "coil_native_host", &s5, &mut tramps)?;
-    let ffi = trampoline(module, "coil_native_ffi", &s5, &mut tramps)?;
+    let host = module.declare_function("coil_native_host", Linkage::Import, &s5).map_err(e)?;
+    let ffi = module.declare_function("coil_native_ffi", Linkage::Import, &s5).map_err(e)?;
     let mut s9 = module.make_signature();
     s9.params.extend((0..9).map(|_| AbiParam::new(types::I64)));
     s9.returns.push(AbiParam::new(types::I64));
     let vector = module.declare_function("coil_native_vector", Linkage::Import, &s9).map_err(e)?;
-    let call_value = trampoline(module, "coil_native_call_value", &s5, &mut tramps)?;
-    let resume = trampoline(module, "coil_native_resume", &s4, &mut tramps)?;
+    let call_value = module.declare_function("coil_native_call_value", Linkage::Import, &s5).map_err(e)?;
+    let resume = module.declare_function("coil_native_resume", Linkage::Import, &s4).map_err(e)?;
     let coro_done = module.declare_function("coil_native_coro_done", Linkage::Import, &s2).map_err(e)?;
-    let gen_yield = trampoline(module, "coil_native_yield", &s2, &mut tramps)?;
-    let mut s5v = module.make_signature();
-    s5v.params.extend((0..5).map(|_| AbiParam::new(types::I64)));
-    let defer = module.declare_function("coil_native_defer", Linkage::Import, &s5v).map_err(e)?;
+    let gen_yield = module.declare_function("coil_native_yield", Linkage::Import, &s2).map_err(e)?;
+    let mut s4v = module.make_signature();
+    s4v.params.extend((0..4).map(|_| AbiParam::new(types::I64)));
+    let defer = module.declare_function("coil_native_defer", Linkage::Import, &s4v).map_err(e)?;
     let claim = module.declare_function("coil_native_claim", Linkage::Import, &s3).map_err(e)?;
     let mut s1v2 = module.make_signature();
     s1v2.params.push(AbiParam::new(types::I64));
-    let collect = trampoline(module, "coil_native_collect", &s1v2, &mut tramps)?;
+    let collect = module.declare_function("coil_native_collect", Linkage::Import, &s1v2).map_err(e)?;
     let panic = module.declare_function("coil_native_panic", Linkage::Import, &s2).map_err(e)?;
     let ffi_arg = module.declare_function("coil_native_ffi_arg", Linkage::Import, &s4).map_err(e)?;
     let ffi_done = module.declare_function("coil_native_ffi_done", Linkage::Import, &s1v2).map_err(e)?;
@@ -2437,7 +2318,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let va_call_f = module.declare_function("coil_native_va_call_f", Linkage::Import, &module.make_signature()).map_err(e)?;
     let cb = if plan.ffi_callbacks { Some(declare_callbacks(module, bodies, plan)?) } else { None };
     Ok(Ids {
-        tramps,
         imp,
         entry,
         pad,
@@ -2581,7 +2461,7 @@ fn define_callbacks<M: Module>(module: &mut M, cb: &CbIds, mut recorder: Option<
     let mut calls: Vec<_> = cb.calls.iter().collect();
     calls.sort_by_key(|(_, id)| id.as_u32());
     for (shape, &id) in calls {
-        // ctx.native_fp = fp; saved = enter(ctx); r = addr(args..);
+        // saved = enter(ctx); r = addr(args..);
         // leave(ctx, saved); return r
         ctx.func.signature = cb_call_signature(module, shape);
         let enter = module.declare_func_in_func(cb.enter, &mut ctx.func);
@@ -2592,8 +2472,6 @@ fn define_callbacks<M: Module>(module: &mut M, cb: &CbIds, mut recorder: Option<
         b.switch_to_block(blk);
         let params = b.block_params(blk).to_vec();
         let (c, addr) = (params[0], params[1]);
-        let fp = b.ins().get_frame_pointer(types::I64);
-        b.ins().store(MemFlagsData::trusted(), fp, c, machine::native::NATIVE_CTX_NATIVE_FP);
         let call = b.ins().call(enter, &[c]);
         let saved = b.inst_results(call)[0];
         let mut csig = Signature::new(conv);
@@ -2774,7 +2652,7 @@ struct Lower<'a> {
     va_call: FuncRef,
     va_call_f: FuncRef,
     /// The body's direct extern calls run in a program whose C code may
-    /// call back: through a [`CbIds::calls`] trampoline, rooted.
+    /// call back: through a [`CbIds::calls`] trampoline.
     cb: Option<CbRefs>,
     /// This body's index into the plan's bodies.
     body_index: Option<usize>,
@@ -2794,35 +2672,16 @@ struct Lower<'a> {
     /// not needed: they are copied out at a panic), or the pad's pointer.
     homes_slot: Option<cranelift_codegen::ir::StackSlot>,
     homes_ptr: Option<cranelift_codegen::ir::Value>,
-    /// Homes holding heap words, rooted with the body's heap values.
-    heap_homes: Vec<u16>,
-    /// An opaque body's `int` homes, which may hold objects: rooted
-    /// ambiguously.
-    amb_homes: Vec<u16>,
     /// The [`Self::push_call`] record of this frame.
     calls_slot: Option<cranelift_codegen::ir::StackSlot>,
-    /// An opaque body's `int` words that may be objects: rooted in an
-    /// ambiguous record (pinned, never rewritten).
-    opaque: Vec<ValueId>,
-    /// Words of a non-heap type that hold an object for sure
-    /// ([`pointer_words`]): rooted precisely, as heap words are.
-    ptr_words: HashSet<ValueId>,
     /// `gc::root` handles the body makes: kept alive until it returns
     /// ([`Self::keep_roots`]), where other words die at their last use.
     root_handles: Vec<ValueId>,
     /// Where [`Self::keep_roots`] stores them (made on first use).
     keep_slot: Option<cranelift_codegen::ir::StackSlot>,
-    /// Words of pairs that may carry an object ([`pair_words`]): rooted
-    /// ambiguously.
-    pair_words: Vec<ValueId>,
     /// `int` steps a dominating compare keeps in range
     /// ([`in_range_steps`]): a plain add, with no overflow check.
     in_range: HashSet<ValueId>,
-    /// The heap words the op being lowered hands the runtime. The runtime
-    /// holds its own copy of them, and a word past its last use is in no
-    /// stack map: rooted ambiguously, so the object stays where it is. A
-    /// direct call hands its words to a frame that roots them.
-    op_words: Vec<ValueId>,
     defer: FuncRef,
     claim: FuncRef,
     /// This body's cleanup pad.
@@ -2853,11 +2712,6 @@ struct Lower<'a> {
     /// box and unbox), 0 not known: filled where the array value is
     /// defined, or at the next element op after the views were dropped.
     lane_views: HashMap<ValueId, (Variable, Variable, Variable)>,
-    /// The MIR values to root at the op being lowered (`None`: all of
-    /// them): those live there and the words locals hold ([`held_words`]).
-    /// [`Self::push_roots`] records only these, so a dead temporary is
-    /// not kept alive by this frame.
-    live: Option<HashSet<ValueId>>,
     /// Array values this body stores into.
     stored: HashSet<ValueId>,
     /// `GcBarrier` dest -> the object it names ([`barrier_pairs`]).
@@ -3048,15 +2902,9 @@ impl<'a> Lower<'a> {
             maybe_dropped: HashSet::new(),
             homes_slot: None,
             homes_ptr: None,
-            heap_homes: Vec::new(),
-            amb_homes: Vec::new(),
-            opaque: Vec::new(),
-            ptr_words: HashSet::new(),
             root_handles: Vec::new(),
             keep_slot: None,
-            pair_words: Vec::new(),
             in_range: HashSet::new(),
-            op_words: Vec::new(),
             calls_slot: None,
             defer,
             claim,
@@ -3069,7 +2917,6 @@ impl<'a> Lower<'a> {
             views: HashMap::new(),
             str_views: HashMap::new(),
             lane_views: HashMap::new(),
-            live: None,
             stored: HashSet::new(),
             barriers: HashMap::new(),
             view_slot,
@@ -3090,13 +2937,6 @@ impl<'a> Lower<'a> {
     /// thunk for each callback, and no buffer lent in place (a collection
     /// may run during it).
     fn cb_call_ok(&self, sig: &compiler::native_mir::MirExternSig, args: &[ValueId], params: &[CArg], ret: CRet, va: Option<CVa>) -> bool {
-        // A struct passed in memory is copied by a `memcpy` the call
-        // lowers to: two safepoints for one call's stack map, which frames
-        // whose counted words live across the call carry. Those calls go
-        // through the runtime's call until frames carry no stack maps.
-        if params.iter().any(|p| matches!(p, CArg::Struct { how: SPass::Stack, .. })) {
-            return false;
-        }
         let Some(cb) = &self.cb else { return true };
         c_shape(params, ret, va, sig.params.len()).is_some_and(|s| cb.calls.contains_key(&s))
             && params.iter().enumerate().all(|(k, p)| match *p {
@@ -3114,11 +2954,6 @@ impl<'a> Lower<'a> {
             return var;
         }
         let var = self.b.declare_var(cl_ty(ty_of(f, v)));
-        // The collector finds and rewrites heap words in native frames by
-        // their stack maps, live at last use.
-        if heap_word(ty_of(f, v)) || self.ptr_words.contains(&v) {
-            self.b.declare_var_needs_stack_map(var);
-        }
         self.vars[v.index()] = Some(var);
         var
     }
@@ -3154,114 +2989,41 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Before a call in which a collection may run: link a record of the
-    /// heap words the stack maps cannot describe into the context's root
-    /// chain (see `machine::native::NativeCtx::roots`): the heap homes,
-    /// which live in memory, and the ambiguous words, which are pinned.
-    /// Heap words in values are the stack maps'
-    /// (`declare_var_needs_stack_map`). Returns the chain's previous head,
-    /// for [`Self::pop_roots`].
-    fn push_roots(&mut self, f: &MirFunc) -> Option<Roots> {
-        let homes = if self.homes_slot.is_some() { self.heap_homes.clone() } else { Vec::new() };
-        let amb_homes = if self.homes_slot.is_some() { self.amb_homes.clone() } else { Vec::new() };
-        let opaque: Vec<ValueId> = self
-            .opaque
-            .iter()
-            .chain(&self.pair_words)
-            .chain(&self.op_words)
-            .copied()
-            .filter(|v| self.live.as_ref().is_none_or(|l| l.contains(v)))
-            .collect();
-        if homes.is_empty() && opaque.is_empty() && amb_homes.is_empty() {
-            return None;
-        }
-        let t = MemFlagsData::trusted();
-        let prev = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ROOTS);
-        // The ambiguous record links behind the precise one; nothing
-        // rewrites it, so nothing reloads from it.
-        let mut next = prev;
-        if !opaque.is_empty() || !amb_homes.is_empty() {
-            let amb = self.record(f, next, &opaque, &amb_homes, ROOTS_AMBIGUOUS);
-            next = self.b.ins().stack_addr(types::I64, amb, 0);
-        }
-        let slot = self.record(f, next, &[], &homes, 0);
-        let at = self.b.ins().stack_addr(types::I64, slot, 0);
-        self.b.ins().store(t, at, self.ctx, NATIVE_CTX_ROOTS);
-        let epoch = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_GC_EPOCH);
-        Some(Roots { prev, slot, homes, epoch })
+    /// Before a call in which a collection (and so a `drop`) or other code
+    /// may run: the context's epoch, for [`Self::epoch_check`].
+    fn epoch_mark(&mut self) -> Option<Epoch> {
+        Some(Epoch(self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_GC_EPOCH)))
     }
 
-    /// A root record `[next, n | flags, words...]` of `vals` and then of
-    /// the words in `homes`, in a new slot.
-    fn record(&mut self, f: &MirFunc, next: cranelift_codegen::ir::Value, vals: &[ValueId], homes: &[u16], flags: u64) -> cranelift_codegen::ir::StackSlot {
-        let total = vals.len() + homes.len();
-        let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            ((total + 2) * 8) as u32,
-            3,
-        ));
-        self.b.ins().stack_store(types::I64, next, slot, 0);
-        let n = self.b.ins().iconst(types::I64, (total as u64 | flags) as i64);
-        self.b.ins().stack_store(types::I64, n, slot, 8);
-        for (i, v) in vals.iter().enumerate() {
-            let x = self.get(f, *v);
-            let x = self.coerce(x, types::I64);
-            self.b.ins().stack_store(types::I64, x, slot, ((i + 2) * 8) as i32);
-        }
-        let t = MemFlagsData::trusted();
-        for (k, &h) in homes.iter().enumerate() {
-            let (base, off) = self.home_at(h).expect("homes slot");
-            let x = self.b.ins().load(types::I64, t, base, off);
-            self.b.ins().stack_store(types::I64, x, slot, ((vals.len() + k + 2) * 8) as i32);
-        }
-        slot
-    }
-
-    /// Unlink [`Self::push_roots`]'s record. When a collection may have run
-    /// meanwhile, write the heap homes back from it (a minor collection
-    /// moves young objects and rewrites the record) and re-read every
-    /// array view.
-    fn pop_roots(&mut self, roots: Option<Roots>) {
-        let Some(Roots { prev, slot, homes, epoch }) = roots else {
+    /// After [`Self::epoch_mark`]'s call: when code ran meanwhile (the
+    /// epoch moved), re-read every array view.
+    fn epoch_check(&mut self, epoch: Option<Epoch>) {
+        let Some(Epoch(epoch)) = epoch else {
             return;
         };
-        let t = MemFlagsData::trusted();
-        self.b.ins().store(t, prev, self.ctx, NATIVE_CTX_ROOTS);
-        let now = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_GC_EPOCH);
+        let now = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_GC_EPOCH);
         let moved = self.b.ins().icmp(IntCC::NotEqual, now, epoch);
         let cold = self.b.create_block();
         let go = self.b.create_block();
         self.b.ins().brif(moved, cold, &[], go, &[]);
         self.b.set_cold_block(cold);
         self.b.switch_to_block(cold);
-        for (k, &h) in homes.iter().enumerate() {
-            let x = self.b.ins().stack_load(types::I64, types::I64, slot, ((k + 2) * 8) as i32);
-            let (base, off) = self.home_at(h).expect("homes slot");
-            self.b.ins().store(t, x, base, off);
-        }
         self.drop_views();
         self.b.ins().jump(go, &[]);
         self.b.switch_to_block(go);
     }
 
-    /// A safepoint: when a collection is due, collect with this body's heap
-    /// words rooted.
-    fn safepoint(&mut self, f: &MirFunc) {
+    /// A safepoint: when a collection is due, collect.
+    fn safepoint(&mut self) {
         let due = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_GC_DUE);
         let cold = self.b.create_block();
         let go = self.b.create_block();
         self.b.ins().brif(due, cold, &[], go, &[]);
         self.b.set_cold_block(cold);
         self.b.switch_to_block(cold);
-        let roots = self.push_roots(f);
         self.b.ins().call(self.collect, &[self.ctx]);
-        // A body with no heap homes pushes no roots, so `pop_roots` drops
-        // no views: drop them here (the safepoint may run code that resizes
-        // an array).
-        if roots.is_none() {
-            self.drop_views();
-        }
-        self.pop_roots(roots);
+        // Its `drop`s may resize an array.
+        self.drop_views();
         self.b.ins().jump(go, &[]);
         self.b.switch_to_block(go);
     }
@@ -3829,10 +3591,7 @@ impl<'a> Lower<'a> {
 
     fn body(&mut self, f: &MirFunc) -> Result<(), String> {
         self.barriers = barrier_pairs(f);
-        self.opaque = opaque_words(f);
-        self.ptr_words = pointer_words(f);
         self.root_handles = root_handles(f);
-        self.pair_words = pair_words(f, &self.ptr_words);
         self.in_range = in_range_steps(f);
         for blk in &f.blocks {
             for inst in &blk.insts {
@@ -3925,10 +3684,6 @@ impl<'a> Lower<'a> {
                     self.b.ins().stack_store(types::I64, zero, slot, (i * 8) as i32);
                 }
                 self.homes_slot = Some(slot);
-                self.heap_homes = (0..f.homes.len() as u16).filter(|&h| heap_word(f.homes[h as usize])).collect();
-                if f.opaque_words {
-                    self.amb_homes = (0..f.homes.len() as u16).filter(|&h| f.homes[h as usize] == MirTy::I64).collect();
-                }
             }
             self.pad_fn = self.body_index.and_then(|i| self.pad_refs.get(&i).copied());
         }
@@ -3947,18 +3702,8 @@ impl<'a> Lower<'a> {
         // Live sets by block position: into the block past its phis, and
         // at each op (what lives after it and what it reads, which the
         // call it makes may move).
-        let (live_in, live_after) = compiler::native_mir::liveness(f);
-        let held = held_words(f);
-        let past_phis = |bi: usize| -> HashSet<ValueId> {
-            let phis = f.blocks[bi].insts.iter().take_while(|i| i.is_phi()).count();
-            let mut live = if phis == 0 { live_in[bi].clone() } else { live_after[bi][phis - 1].clone() };
-            live.extend(held[bi][phis].iter().copied());
-            live
-        };
-        let entry_at = f.blocks.iter().position(|b| b.id == f.entry);
         if gc {
-            self.live = entry_at.map(past_phis);
-            self.safepoint(f);
+            self.safepoint();
         }
         // Loop headers (the targets of edges back in block order) are
         // safepoints too.
@@ -3988,7 +3733,7 @@ impl<'a> Lower<'a> {
         let viewed: HashSet<ValueId> = self.views.keys().copied().collect();
         let dropped_in = views_dropped_in(f, &viewed);
 
-        for (bi, blk) in f.blocks.iter().enumerate() {
+        for blk in &f.blocks {
             let cl = self.blocks[&blk.id];
             self.b.switch_to_block(cl);
             self.maybe_dropped = dropped_in.get(&blk.id).cloned().unwrap_or_default();
@@ -4005,8 +3750,7 @@ impl<'a> Lower<'a> {
             }
             if headers.contains(&blk.id) {
                 self.at(None);
-                self.live = Some(past_phis(bi));
-                self.safepoint(f);
+                self.safepoint();
             }
             // A `MatchPayload` of a payload the block's `JumpIfMatch` binds
             // belongs to the taken edge, where the terminator binds it: run here, it would read the payload
@@ -4027,23 +3771,10 @@ impl<'a> Lower<'a> {
                     self.tail_call(f, inst)?;
                     continue;
                 }
-                let mut live = live_after[bi][ii].clone();
-                live.extend(inst.operands());
-                live.extend(held[bi][ii].iter().copied());
-                self.live = Some(live);
                 self.at(Some(f.op_loc(inst.dest())));
-                self.op_words.clear();
-                if !matches!(inst, MirInst::Call { .. }) {
-                    let held = inst.operands().into_iter().filter(|v| heap_word(ty_of(f, *v)) || self.ptr_words.contains(v));
-                    self.op_words.extend(held);
-                    self.op_words.sort_unstable_by_key(|v| v.0);
-                    self.op_words.dedup();
-                }
                 self.inst(f, inst)?;
-                self.op_words.clear();
                 drop_transfer(inst, &viewed, &mut self.maybe_dropped);
             }
-            self.live = None;
             self.at(None);
             if !tail {
                 self.term(f, blk.id, blk.term.as_ref().ok_or("no terminator")?)?;
@@ -4059,22 +3790,8 @@ impl<'a> Lower<'a> {
         if let (Some(pad), Some(slot)) = (self.pad_fn, self.homes_slot) {
             let fp = self.b.ins().func_addr(types::I64, pad);
             let at = self.b.ins().stack_addr(types::I64, slot, 0);
-            // An opaque body's `int` homes go in the record too, which then
-            // roots every home ambiguously.
-            let amb = if self.amb_homes.is_empty() { 0 } else { ROOTS_AMBIGUOUS };
-            let n = self.b.ins().iconst(types::I64, (f.homes.len() as u64 | amb) as i64);
-            let masks = machine::native::root_masks(f.homes.len(), self.heap_homes.iter().chain(&self.amb_homes).map(|&h| usize::from(h)));
-            let mask_slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                (masks.len() * 8) as u32,
-                3,
-            ));
-            for (i, &m) in masks.iter().enumerate() {
-                let m = self.b.ins().iconst(types::I64, m as i64);
-                self.b.ins().stack_store(types::I64, m, mask_slot, (i * 8) as i32);
-            }
-            let masks = self.b.ins().stack_addr(types::I64, mask_slot, 0);
-            self.b.ins().call(self.defer, &[self.ctx, fp, at, n, masks]);
+            let n = self.b.ins().iconst(types::I64, f.homes.len() as i64);
+            self.b.ins().call(self.defer, &[self.ctx, fp, at, n]);
         }
         let mut zeros = Vec::new();
         for t in std::iter::once(self.ret).chain(self.ret_hi) {
@@ -4236,7 +3953,7 @@ impl<'a> Lower<'a> {
                 let p = self.words_slot(f, args);
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
                 let d = self.b.ins().iconst(types::I64, i64::from(*dicts));
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 // A plain function value enters its body here, as a direct
                 // call does (`coil_native_fn_entry`); anything else goes
@@ -4312,7 +4029,7 @@ impl<'a> Lower<'a> {
                     _ => None,
                 };
                 self.pop_call(prev);
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.bail_on_helper();
                 self.drop_views();
                 match (words, pair) {
@@ -4337,12 +4054,12 @@ impl<'a> Lower<'a> {
                     None => (self.b.ins().iconst(types::I64, 0), 0),
                 };
                 let has = self.b.ins().iconst(types::I64, has);
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.resume, &[self.ctx, h, sv, has]);
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.bail_on_helper();
                 self.drop_views();
                 self.set_word(f, *dest, w);
@@ -4379,12 +4096,12 @@ impl<'a> Lower<'a> {
                 let x = self.b.ins().iconst(types::I64, i64::from(*operand));
                 let p = self.words_slot(f, args);
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.ffi, &[self.ctx, o, x, p, n]);
                 let w = self.b.inst_results(call)[0];
                 self.pop_call(prev);
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.bail_on_helper();
                 self.drop_views();
                 self.set(f, *dest, w);
@@ -4411,12 +4128,12 @@ impl<'a> Lower<'a> {
                 let h = self.get(f, *value);
                 let h = self.coerce(h, types::I64);
                 let has = self.b.ins().iconst(types::I64, 1);
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.resume, &[self.ctx, h, send, has]);
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.bail_on_helper();
                 self.drop_views();
                 let h = self.get(f, *value);
@@ -4425,12 +4142,12 @@ impl<'a> Lower<'a> {
                 let done = self.b.inst_results(call)[0];
                 self.b.ins().brif(done, exit, &[], more, &[]);
                 self.b.switch_to_block(more);
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.gen_yield, &[self.ctx, w]);
                 self.pop_call(prev);
                 let sent = self.b.inst_results(call)[0];
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 // A close unwinds from the yield (`coil_native_yield`).
                 self.bail_on_helper();
                 self.drop_views();
@@ -4444,12 +4161,12 @@ impl<'a> Lower<'a> {
                 // words while it is away (they are this call's roots).
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.gen_yield, &[self.ctx, v]);
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 // A close unwinds from the yield (`coil_native_yield`).
                 self.bail_on_helper();
                 self.drop_views();
@@ -4759,14 +4476,14 @@ impl<'a> Lower<'a> {
                 // `gc_collect` collects, and a host call through the runtime may:
                 // this frame's words are roots.
                 let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.on_machine);
-                let roots = if collect { self.push_roots(f) } else { None };
+                let roots = if collect { self.epoch_mark() } else { None };
                 let prev = if collect { Some(self.push_call()) } else { None };
                 let call = self.b.ins().call(self.host, &[self.ctx, fp, lay, p, n]);
                 let w = self.b.inst_results(call)[0];
                 if let Some(prev) = prev {
                     self.pop_call(prev);
                 }
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.bail_on_helper();
                 // A two-word result's tag, which the runtime left in the
                 // context (`HOST_ENUM_LAYOUT_PAIR`).
@@ -4817,11 +4534,11 @@ impl<'a> Lower<'a> {
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
                 let d = self.b.ins().iconst(types::I64, i64::from(*deep));
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 self.b.ins().call(self.free_early, &[self.ctx, v, d]);
                 self.pop_call(prev);
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.drop_views();
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(fast);
@@ -5105,14 +4822,14 @@ impl<'a> Lower<'a> {
     fn call(&mut self, f: &MirFunc, dest: ValueId, dest_hi: Option<ValueId>, target: Label, args: &[ValueId]) -> Result<(), String> {
         let (dest, dest_hi) = (&dest, &dest_hi);
         let (callee, fref, vals) = self.call_words(f, target, args)?;
-        let roots = if self.plan.may_gc.contains(&callee) { self.push_roots(f) } else { None };
+        let roots = if self.plan.may_gc.contains(&callee) { self.epoch_mark() } else { None };
         let prev = if self.plan.runtime_reach.contains(&callee) { Some(self.push_call()) } else { None };
         let call = self.b.ins().call(fref, &vals);
         let results = self.b.inst_results(call).to_vec();
         if let Some(prev) = prev {
             self.pop_call(prev);
         }
-        self.pop_roots(roots);
+        self.epoch_check(roots);
         self.bail_on_helper();
         if self.plan.moves.contains(&callee) {
             self.drop_views();
@@ -5277,17 +4994,15 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(slow);
     }
 
-    /// Before a return: use every `gc::root` handle, so the stack maps keep
-    /// each one (and what it roots) alive until the body returns, as an
-    /// unused `let r = root(h)` asks.
+    /// Before a return: use every `gc::root` handle, so each one stays
+    /// live until the body returns, as an unused `let r = root(h)` asks.
     fn keep_roots(&mut self, f: &MirFunc) {
         for v in self.root_handles.clone() {
             self.keep_word(f, v);
         }
     }
 
-    /// A use of `v` that does nothing else: its word stays live to here,
-    /// so the stack maps hold it.
+    /// A use of `v` that does nothing else: its word stays live to here.
     fn keep_word(&mut self, f: &MirFunc, v: ValueId) {
         let slot = *self.keep_slot.get_or_insert_with(|| {
             self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 8, 3))
@@ -5317,12 +5032,12 @@ impl<'a> Lower<'a> {
         let x = self.b.ins().iconst(types::I64, operand as i64);
         let p = self.words_slot_consts(f, &words, &tags);
         let n = self.b.ins().iconst(types::I64, (words.len() + tags.len()) as i64);
-        let roots = self.push_roots(f);
+        let roots = self.epoch_mark();
         let prev = self.push_call();
         let call = self.b.ins().call(self.ffi, &[self.ctx, o, x, p, n]);
         let w = self.b.inst_results(call)[0];
         self.pop_call(prev);
-        self.pop_roots(roots);
+        self.epoch_check(roots);
         self.bail_on_helper();
         self.coerce(w, cl_ty(ty_of(f, dest)))
     }
@@ -5491,19 +5206,18 @@ impl<'a> Lower<'a> {
             addr = self.b.ins().func_addr(types::I64, self.va_call_f);
         }
         let results: Vec<_> = if let Some(cb) = &self.cb {
-            // A callback may run coil code, which may collect: the caller's
-            // words are rooted, the trampoline records its frame and the
+            // A callback may run coil code: the trampoline records the
             // context the callback runs in, and a panic in it bails here.
             let shape = (csig.params.iter().map(|p| p.value_type).collect(), csig.returns.iter().map(|p| p.value_type).collect());
             let tramp = cb.calls[&shape];
             let mut targs = vec![self.ctx, addr];
             targs.extend(cargs);
-            let roots = self.push_roots(f);
+            let roots = self.epoch_mark();
             let prev = self.push_call();
             let call = self.b.ins().call(tramp, &targs);
             let results = self.b.inst_results(call).to_vec();
             self.pop_call(prev);
-            self.pop_roots(roots);
+            self.epoch_check(roots);
             self.bail_on_helper();
             results
         } else {

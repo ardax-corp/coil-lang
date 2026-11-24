@@ -54,10 +54,6 @@ pub struct NativeCtx {
     pub host: NativeHost,
     /// runtime calls the call made: the runtime then checks for a collection.
     pub host_calls: u64,
-    /// The native frames' heap words while a runtime call runs (a collection
-    /// may run then): a chain of `[next, n, word × n]` records on the
-    /// native stack, newest first, `0`-terminated. The runtime pins them.
-    pub roots: u64,
     /// Non-zero when a collection is due and the call can no longer bail
     /// for the runtime to run it: native code collects at its next safepoint
     /// ([`coil_native_collect`]).
@@ -79,10 +75,6 @@ pub struct NativeCtx {
     /// heap.
     pub alloc_counts: *mut crate::memory::HeapCounts,
     pub alloc_bumps: *mut crate::memory::Bump,
-    /// While the call is in a helper that may collect: the frame pointer
-    /// of the trampoline native code called it through. The collector
-    /// walks the native frames from there ([`register_stack_maps`]).
-    pub native_fp: u64,
     /// The running entry's [`NativeEntry::data`] (or a pad's
     /// [`NativePad::data`]): an engine with one entry function for every
     /// body reads which body to run here.
@@ -116,87 +108,6 @@ pub struct NativeCtx {
     pub code: *const NativeCode,
 }
 
-/// Byte offset of [`NativeCtx::native_fp`].
-pub const NATIVE_CTX_NATIVE_FP: i32 = std::mem::offset_of!(NativeCtx, native_fp) as i32;
-
-/// Native code's stack maps (Cranelift user stack maps): the code ranges
-/// of the compiled bodies, and per call that holds heap words across it,
-/// its return address and the offsets from the stack pointer at that call
-/// of the slots holding them. A program's code leaves with
-/// [`unregister_stack_maps`].
-#[derive(Default)]
-struct StackMaps {
-    /// Start → end of each compiled body's code.
-    code: std::collections::BTreeMap<u64, u64>,
-    maps: std::collections::HashMap<u64, Box<[u32]>>,
-}
-
-static STACK_MAPS: std::sync::LazyLock<std::sync::RwLock<StackMaps>> = std::sync::LazyLock::new(Default::default);
-
-impl StackMaps {
-    fn in_code(&self, ra: u64) -> bool {
-        self.code.range(..=ra).next_back().is_some_and(|(_, &end)| ra < end)
-    }
-}
-
-/// Add a compiled body's code (`size` bytes at `start`) and its stack maps:
-/// `(return address offset, slot offsets)`. A frame walk goes on through
-/// a body's frame whose call holds no heap word, and stops at the first
-/// return address outside every body (the entry wrapper or a helper).
-pub fn register_stack_maps(start: u64, size: u32, maps: impl IntoIterator<Item = (u32, Vec<u32>)>) {
-    let mut table = STACK_MAPS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    table.code.insert(start, start + u64::from(size));
-    for (ra, offsets) in maps {
-        table.maps.insert(start + u64::from(ra), offsets.into_boxed_slice());
-    }
-}
-
-/// Forget `bodies` (`(start, size)`, as registered), whose code is about to go.
-/// Its addresses will be some other program's.
-pub fn unregister_stack_maps(bodies: &[(u64, u32)]) {
-    let gone: std::collections::BTreeMap<u64, u64> = bodies.iter().map(|&(start, size)| (start, start + u64::from(size))).collect();
-    let mut table = STACK_MAPS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    table.code.retain(|start, _| !gone.contains_key(start));
-    // A call that does not return can end its body: `ra` is then the end.
-    table.maps.retain(|ra, _| !gone.range(..ra).next_back().is_some_and(|(_, end)| ra <= end));
-}
-
-/// One AOT stack map record, as `coil_native::aot` writes it: a body's
-/// address and code size and the count of its maps, then each map as its
-/// return address's offset, its slot count and the slot offsets (`u32`
-/// each), the record padded to 8 bytes.
-#[repr(C)]
-pub struct AotStackMap {
-    pub func: u64,
-    pub size: u32,
-    pub count: u32,
-}
-
-/// Register the stack maps an AOT object defines: `n` [`AotStackMap`]
-/// records.
-///
-/// # Safety
-/// `maps` points at `n` records as `coil_native::aot` wrote them.
-pub unsafe fn install_aot_stack_maps(maps: *const u8, n: usize) {
-    let mut at = maps;
-    for _ in 0..n {
-        // SAFETY: the caller's.
-        unsafe {
-            let rec = &*at.cast::<AotStackMap>();
-            let mut w = at.add(std::mem::size_of::<AotStackMap>()).cast::<u32>();
-            let mut out = Vec::with_capacity(rec.count as usize);
-            for _ in 0..rec.count {
-                let (ra, k) = (*w, *w.add(1) as usize);
-                out.push((ra, std::slice::from_raw_parts(w.add(2), k).to_vec()));
-                w = w.add(2 + k);
-            }
-            register_stack_maps(rec.func, rec.size, out);
-            let used = w as usize - at as usize;
-            at = at.add(used.next_multiple_of(8));
-        }
-    }
-}
-
 /// The host-native groups an AOT executable links ([`install_aot_host_groups`]).
 static AOT_HOST_GROUPS: std::sync::OnceLock<Vec<(crate::host_natives::HostPush, u32, u32)>> = std::sync::OnceLock::new();
 
@@ -221,19 +132,11 @@ pub fn aot_host_natives() -> Vec<std::sync::Arc<dyn crate::ffi::NativeFn>> {
 /// A `defer` cleanup pad: called with its frame's homes.
 pub type NativePadFn = unsafe extern "C" fn(ctx: *mut NativeCtx, homes: *const u64) -> u64;
 
-/// Walks an engine's own frames for [`NativeCtx::for_each_root`]: `data`
-/// is the record's, and each word the frames hold goes to `visit`, with
-/// whether it is ambiguous.
-pub type RootScanFn = unsafe fn(data: *mut std::ffi::c_void, visit: &mut dyn FnMut(*mut u64, bool));
-
 /// Walks an engine's own frames for [`NativeCtx::call_sites`]: `data` is
 /// the record's, and each frame's call site goes to `out`, innermost first.
 pub type SiteScanFn = unsafe fn(data: *mut std::ffi::c_void, out: &mut Vec<u32>);
 
-/// The pad of one native frame a panic unwound, with a copy of its homes
-/// laid out as a masked root record (`[next, n | ROOTS_MASKED, masks...,
-/// words...]`, see [`NativeCtx::roots`] and [`mask_words`]): a collection
-/// while pads run keeps (and may move) the heap words among them.
+/// The pad of one native frame a panic unwound, with a copy of its homes.
 pub struct NativePad {
     pub func: NativePadFn,
     pub homes: Vec<u64>,
@@ -241,38 +144,9 @@ pub struct NativePad {
     pub data: usize,
 }
 
-/// Set in a root record's count: the next [`mask_words`] words are a mask
-/// of which words are heap words (the rest are scalars to skip), bit `i`
-/// of word `i / 64` for word `i`.
-pub const ROOTS_MASKED: u64 = 1 << 63;
-
-/// How many mask words a masked root record of `n` words carries: one per
-/// 64 words, and at least one.
-pub const fn mask_words(n: usize) -> usize {
-    if n == 0 { 1 } else { n.div_ceil(64) }
-}
-
-/// The masks of a masked root record of `n` words whose heap words are
-/// `heap` ([`ROOTS_MASKED`]).
-pub fn root_masks(n: usize, heap: impl IntoIterator<Item = usize>) -> Vec<u64> {
-    let mut masks = vec![0u64; mask_words(n)];
-    for h in heap {
-        masks[h / 64] |= 1 << (h % 64);
-    }
-    masks
-}
-
-/// Set in a root record's count: its words are ambiguous (an opaque word
-/// of a generic body may be an immediate), so the collector pins what they
-/// hit instead of moving it, and never rewrites them.
-pub const ROOTS_AMBIGUOUS: u64 = 1 << 62;
-/// A [`NativeCtx::roots`] record of an engine that keeps its frames itself:
-/// `[next, ROOTS_SCAN, RootScanFn, data]`. Native code copies its words
-/// into a record around each call; such an engine has them in place, so
-/// the collector asks for them only when it runs.
-pub const ROOTS_SCAN: u64 = 1 << 61;
 /// In a [`NativeCtx::calls`] record's site word: `[next, SITES_SCAN,
-/// SiteScanFn, data]`, as [`ROOTS_SCAN`] for call sites.
+/// SiteScanFn, data]`, a record of an engine that keeps its frames itself
+/// and names their call sites only when asked.
 pub const SITES_SCAN: u64 = u64::MAX;
 
 /// Byte offset of [`NativeCtx::heap`].
@@ -288,9 +162,6 @@ pub const NATIVE_CTX_HAS_FINALIZERS: i32 = std::mem::offset_of!(NativeCtx, has_f
 
 /// Byte offset of [`NativeCtx::calls`].
 pub const NATIVE_CTX_CALLS: i32 = std::mem::offset_of!(NativeCtx, calls) as i32;
-
-/// Byte offset of [`NativeCtx::roots`].
-pub const NATIVE_CTX_ROOTS: i32 = std::mem::offset_of!(NativeCtx, roots) as i32;
 
 pub use crate::memory::{InlineObject, InlineShape, ProductSlots, inline_object, product_slots, layout_fingerprint};
 
@@ -564,14 +435,12 @@ impl NativeCtx {
             machine: std::ptr::null_mut(),
             host: NativeHost::NONE,
             host_calls: 0,
-            roots: 0,
             gc_due: 0,
             gc_epoch: 0,
             pads: std::ptr::null_mut(),
             calls: 0,
             alloc_counts: std::ptr::null_mut(),
             alloc_bumps: std::ptr::null_mut(),
-            native_fp: 0,
             entry_data: 0,
             fuel: std::ptr::null_mut(),
             natives: std::ptr::null(),
@@ -3004,25 +2873,20 @@ unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, lay
 }
 
 /// A frame with `defer`s on its way out: after a panic, keep its
-/// cleanup pad `func` and a copy of its `n` homes at `homes` (`masks`, at
-/// [`mask_words`] words: the heap words among them) for the runtime to run
-/// ([`NativeCtx::pads`]).
+/// cleanup pad `func` and a copy of its `n` homes at `homes` for the
+/// runtime to run ([`NativeCtx::pads`]).
 ///
 /// # Safety
-/// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words and
-/// `masks` at the mask words for them.
+/// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64, masks: *const u64) {
+pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64) {
     if func == 0 {
         return;
     }
     // SAFETY: the backend passes a function with the `NativePadFn` ABI.
     let func = unsafe { std::mem::transmute::<usize, NativePadFn>(func as usize) };
-    let words = mask_words((n & !ROOTS_AMBIGUOUS) as usize);
-    // SAFETY: the backend passes that many mask words.
-    let masks = unsafe { std::slice::from_raw_parts(masks, words) };
     // SAFETY: as this function's.
-    unsafe { defer_pad(ctx, func, 0, homes, n, masks) };
+    unsafe { defer_pad(ctx, func, 0, homes, n) };
 }
 
 /// [`coil_native_defer`] of a pad that reads `data` from
@@ -3030,38 +2894,26 @@ pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes
 ///
 /// # Safety
 /// As [`coil_native_defer`].
-pub unsafe fn defer_pad(ctx: *mut NativeCtx, func: NativePadFn, data: usize, homes: *const u64, n: u64, masks: &[u64]) {
+pub unsafe fn defer_pad(ctx: *mut NativeCtx, func: NativePadFn, data: usize, homes: *const u64, n: u64) {
     let c = unsafe { &mut *ctx };
     if c.bail != BAIL_PANIC || c.pads.is_null() {
         return;
     }
-    // `n` may carry `ROOTS_AMBIGUOUS` (an opaque body's `int` homes).
-    let (flags, n) = (n & ROOTS_AMBIGUOUS, n & !ROOTS_AMBIGUOUS);
-    debug_assert_eq!(masks.len(), mask_words(n as usize));
-    let mut rec = vec![0, n | ROOTS_MASKED | flags];
-    rec.extend_from_slice(masks);
     // SAFETY: `homes` holds `n` words.
-    rec.extend((0..n as usize).map(|i| unsafe { *homes.add(i) }));
-    unsafe { (*c.pads).push(NativePad { func, homes: rec, data }) };
+    let homes = (0..n as usize).map(|i| unsafe { *homes.add(i) }).collect();
+    unsafe { (*c.pads).push(NativePad { func, homes, data }) };
 }
 
 /// Run the cleanup pads of a native panic, innermost first, on `env`'s
-/// machine. Each pad's homes,
-/// and those of the pads still to run, are roots meanwhile.
+/// machine.
 pub(crate) fn run_pads(
-    mut pads: Vec<NativePad>,
+    pads: Vec<NativePad>,
     env: &NativeEnv,
     on_panic: &mut dyn FnMut(NativePanic),
 ) {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
-    // Link every record: the chain is innermost-last so each pad's own
-    // homes stay listed while it runs.
-    for i in 1..pads.len() {
-        let next = pads[i - 1].homes.as_mut_ptr() as u64;
-        pads[i].homes[0] = next;
-    }
-    for i in 0..pads.len() {
+    for pad in &pads {
         let mut ctx = unsafe { NativeCtx::with_heap(stack_limit_at(sp), env.heap) };
         ctx.machine = env.machine;
         ctx.host = env.host;
@@ -3078,16 +2930,11 @@ pub(crate) fn run_pads(
         ctx.trace = &mut trace;
         let mut message = String::new();
         ctx.message = &mut message;
-        // The last record links all before it.
-        let last = pads.len() - 1;
-        ctx.roots = pads[last].homes.as_mut_ptr() as u64;
         let mut inner = Vec::new();
         ctx.pads = &mut inner;
-        ctx.entry_data = pads[i].data as u64;
-        let words = mask_words((pads[i].homes[1] & !(ROOTS_MASKED | ROOTS_AMBIGUOUS)) as usize);
-        let homes = pads[i].homes[2 + words..].as_ptr();
+        ctx.entry_data = pad.data as u64;
         // SAFETY: the backend compiled `func` as this frame's pad.
-        let _ = unsafe { (pads[i].func)(&mut ctx, homes) };
+        let _ = unsafe { (pad.func)(&mut ctx, pad.homes.as_ptr()) };
         if ctx.bail == BAIL_PANIC {
             on_panic(NativePanic {
                 code: ctx.trap,

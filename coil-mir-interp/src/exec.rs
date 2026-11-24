@@ -2,11 +2,11 @@
 //! does, through the same helpers.
 
 use compiler::native_mir::{
-    AllocCall, MirBinOp, alloc_call, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, heap_word, ty_of, vector_op, word_kind,
+    AllocCall, MirBinOp, alloc_call, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, ty_of, vector_op, word_kind,
 };
 use machine::native::{
     self as rt, Applied, NOT_AN_ENUM, NativeCtx,
-    ROOTS_AMBIGUOUS, TRAP_BUDGET, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_NEGATIVE_EXPONENT, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
+    TRAP_BUDGET, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_NEGATIVE_EXPONENT, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
 use crate::frame::{AT_BLOCK_START, Activation, Frame, MAX_WORDS, frame_homes};
@@ -288,11 +288,7 @@ unsafe fn unwind(act: *mut Activation, code: u64) -> u64 {
                 let f = &body.mir;
                 let regs = (*act).regs.as_mut_ptr().add(frame.base);
                 let homes = frame_homes(frame, regs, f);
-                let heap = (0..f.homes.len()).filter(|&h| heap_word(f.homes[h]));
-                let amb: Vec<usize> = if f.opaque_words { (0..f.homes.len()).filter(|&h| f.homes[h] == MirTy::I64).collect() } else { Vec::new() };
-                let masks = rt::root_masks(f.homes.len(), heap.chain(amb.iter().copied()));
-                let flags = if amb.is_empty() { 0 } else { ROOTS_AMBIGUOUS };
-                rt::defer_pad(ctx, pad_entry, std::ptr::from_ref::<Body>(pad) as usize, homes, f.homes.len() as u64 | flags, &masks);
+                rt::defer_pad(ctx, pad_entry, std::ptr::from_ref::<Body>(pad) as usize, homes, f.homes.len() as u64);
             }
             let base = frame.base;
             (*act).frames.pop();

@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{BlockId, MirCastKind, MirFunc, MirInst, MirTy, Terminator, ValueId};
+use super::{MirCastKind, MirFunc, MirInst, MirTy, Terminator, ValueId};
 
 /// One past the last parameter `f` reads. A `CALL` passes the words its
 /// arity says, which a body's MIR parameters may outnumber (an unread
@@ -153,95 +153,6 @@ pub fn pair_words(f: &MirFunc, pointers: &HashSet<ValueId>) -> Vec<ValueId> {
     let mut words: Vec<ValueId> = out.into_iter().filter(|v| !pointers.contains(v)).collect();
     words.sort_unstable_by_key(|v| v.0);
     words
-}
-
-/// `held[block][inst]`: the heap words locals hold just before that inst
-/// (one past the last: at the terminator), by block position. As in the
-/// runtime's frame, a local holds the word it was bound to
-/// ([`MirFunc::local_binds`]) from the word's definition until another of
-/// the same local's is defined or a `ClearWord` drops it, even past its
-/// last use; a match binding holds its word only through its scrutinee.
-/// Where paths that
-/// left a local different words meet with no φ to merge them (the φ was
-/// dead), it holds neither: what is live stays rooted anyway.
-pub fn held_words(f: &MirFunc) -> Vec<Vec<HashSet<ValueId>>> {
-    let mut locals: HashMap<ValueId, Vec<u32>> = HashMap::new();
-    for &(l, v) in &f.local_binds {
-        locals.entry(v).or_default().push(l.0);
-    }
-    let mut held: Vec<Vec<HashSet<ValueId>>> = f.blocks.iter().map(|b| vec![HashSet::new(); b.insts.len() + 1]).collect();
-    if locals.is_empty() {
-        return held;
-    }
-    let pos: HashMap<BlockId, usize> = f.blocks.iter().enumerate().map(|(i, b)| (b.id, i)).collect();
-    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); f.blocks.len()];
-    for (i, b) in f.blocks.iter().enumerate() {
-        for s in b.term.as_ref().map(|t| t.succs()).unwrap_or_default() {
-            if let Some(&j) = pos.get(&s) {
-                preds[j].push(i);
-            }
-        }
-    }
-    // Local -> the word it holds; `None`: not reached yet.
-    type State = HashMap<u32, ValueId>;
-    let bind = |st: &mut State, v: ValueId| {
-        for &l in locals.get(&v).into_iter().flatten() {
-            st.insert(l, v);
-        }
-    };
-    // A match binding's word is its scrutinee's payload: the scrutinee
-    // holds it, and once that is rebound, the binding holds nothing.
-    let payloads: HashSet<ValueId> = f
-        .blocks
-        .iter()
-        .flat_map(|b| &b.insts)
-        .filter_map(|i| match i {
-            MirInst::MatchPayload { dest, .. } | MirInst::Cast { dest, .. } => Some(*dest),
-            _ => None,
-        })
-        .collect();
-    let words = |st: &State| -> HashSet<ValueId> { st.values().copied().filter(|&v| heap_word(ty_of(f, v)) && !payloads.contains(&v)).collect() };
-    let entry = pos.get(&f.entry).copied();
-    let mut out: Vec<Option<State>> = vec![None; f.blocks.len()];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (bi, b) in f.blocks.iter().enumerate() {
-            let mut reached = preds[bi].iter().filter_map(|&p| out[p].as_ref());
-            let mut st: State = match reached.next() {
-                Some(first) => {
-                    let mut st = first.clone();
-                    for o in reached {
-                        st.retain(|l, v| o.get(l) == Some(v));
-                    }
-                    st
-                }
-                None if Some(bi) == entry => State::new(),
-                None => continue,
-            };
-            if Some(bi) == entry {
-                for &p in &f.params {
-                    bind(&mut st, p);
-                }
-            }
-            for (ii, inst) in b.insts.iter().enumerate() {
-                held[bi][ii] = words(&st);
-                // A local rebound to a word that holds no object.
-                if let MirInst::ClearWord { value, .. } = inst {
-                    st.retain(|_, v| v != value);
-                }
-                for d in inst.dests() {
-                    bind(&mut st, d);
-                }
-            }
-            held[bi][b.insts.len()] = words(&st);
-            if out[bi].as_ref() != Some(&st) {
-                out[bi] = Some(st);
-                changed = true;
-            }
-        }
-    }
-    held
 }
 
 /// Each `GcBarrier`'s object: the dest of the allocating instruction right

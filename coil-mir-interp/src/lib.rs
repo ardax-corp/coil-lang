@@ -16,13 +16,11 @@
 //!
 //! What differs from machine code is the frames. They live in an
 //! [`Activation`], not on the thread's stack: a direct call pushes a frame
-//! and the loop goes on, so recursion costs no Rust stack, and the words a
-//! frame holds stay where they are. The collector reaches them through one
-//! [`ROOTS_SCAN`] record per activation, so a call pays nothing for roots,
-//! and the liveness that says which registers count is computed only for
-//! the bodies a collection finds on the stack.
+//! and the loop goes on, so recursion costs no Rust stack. A backtrace
+//! reads their call sites through one [`machine::native::SITES_SCAN`]
+//! record per activation.
 
-// Activations are reached through raw pointers (the collector walks them while
+// Activations are reached through raw pointers (a backtrace walks them while
 // the loop runs). A method call through one must spell its borrow out, or
 // rustc's `dangerous_implicit_autorefs` fires; clippy then calls it needless.
 #![allow(clippy::needless_borrow)]
@@ -38,7 +36,6 @@ use common::DebugLoc;
 use compiler::native_mir::{BlockId, Label, MirFunc, MirInst, NativeBody, Terminator, ValueId, is_generator, is_tail_call_inst, used_params};
 use machine::native::{NativeEntry, NativeSite};
 
-use frame::RootMaps;
 
 /// What [`prepare`] produced.
 pub struct InterpProgram {
@@ -97,8 +94,6 @@ pub(crate) struct Body {
     pub(crate) entry_site: u32,
     /// Filled by the body's first call.
     exec: OnceLock<Exec>,
-    /// Filled by the first collection that finds the body on the stack.
-    pub(crate) roots: OnceLock<RootMaps>,
     /// Under a debugger: its op numbers and locals.
     pub(crate) ops: Option<debug::BodyOps>,
 }
@@ -256,7 +251,7 @@ fn build_body(mir: MirFunc, program: *const Program, pc: Option<u32>, sites: &mu
     let reads = used_params(&mir) as u32;
     let (op_sites, entry_site) = if pc.is_some() { body_sites(&mir, code, sites) } else { (mir.blocks.iter().map(|b| vec![machine::native::NO_SITE as u32; b.insts.len() + 1]).collect(), machine::native::NO_SITE as u32) };
     mir.shrink_to_fit();
-    Body { mir, program, pc: code, reads, pad, refused, is_drop, sites: op_sites, entry_site, exec: OnceLock::new(), roots: OnceLock::new(), ops: None }
+    Body { mir, program, pc: code, reads, pad, refused, is_drop, sites: op_sites, entry_site, exec: OnceLock::new(), ops: None }
 }
 
 /// `COIL_MIR_ARCHIVE_CHECK`: what comes back from the archive format, which

@@ -31,8 +31,8 @@ pub(crate) struct Runtime {
     /// zeros the table so unmarked literals can die; STRING still stacks
     /// the handle before `maybe_gc`.
     pub(crate) program_string_cache: Vec<Value>,
-    /// Native calls in a runtime call, innermost last: the heap words their
-    /// frames hold are pinned roots ([`crate::native::NativeCtx::for_each_root`]).
+    /// Native calls in a runtime call, innermost last: their call sites
+    /// make a panic's backtrace.
     pub(crate) native_roots: Vec<(*mut crate::native::NativeCtx, usize)>,
     /// Arguments of the native FFI calls in flight (nested when a callback
     /// re-enters the runtime and calls out again). `FfiInvoke` pops them off the
