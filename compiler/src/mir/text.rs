@@ -351,17 +351,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::GcBarrier { dest, kind, roots } => {
-            write!(f, "{dest} = gcbarrier.{}", kind.as_str())?;
-            for (i, r) in roots.iter().enumerate() {
-                if i == 0 {
-                    write!(f, " {r}")?;
-                } else {
-                    write!(f, ", {r}")?;
-                }
-            }
-            Ok(())
-        }
+        MirInst::GcBarrier { dest, kind, object } => write!(f, "{dest} = gcbarrier.{} {object}", kind.as_str()),
         MirInst::String { dest, idx } => write!(f, "{dest} = string {idx}"),
         MirInst::CodePtr { dest, target } => write!(f, "{dest} = codeptr {}", target.0),
         MirInst::Print { dest, src } => write!(f, "{dest} = print {src}"),
@@ -473,9 +463,6 @@ impl<'a> Parser<'a> {
             return Err(ParseError("no blocks".into()));
         }
         func.entry = func.blocks[0].id;
-        if func.has_gc_edge() {
-            super::gc::fill_live_roots(&mut func);
-        }
         Ok(func)
     }
 
@@ -1000,15 +987,9 @@ impl<'a> Parser<'a> {
         if let Some(kind_s) = op.strip_prefix("gcbarrier.") {
             let kind = MirGcKind::parse(kind_s)
                 .ok_or_else(|| ParseError(format!("unknown gc {kind_s}")))?;
-            let mut roots = Vec::new();
-            if self.peek('v') {
-                roots.push(self.value()?);
-                while self.eat(',') {
-                    roots.push(self.value()?);
-                }
-            }
+            let object = self.value()?;
             ensure_ty(types, dest, MirTy::HeapRef);
-            return Ok(MirInst::GcBarrier { dest, kind, roots });
+            return Ok(MirInst::GcBarrier { dest, kind, object });
         }
         if op == "codeptr" {
             let target = crate::bodies::Label(self.uint()? as u32);
@@ -1454,9 +1435,9 @@ bb3:
             mask: 0,
         };
         let f = b.ins_alloc(kind, vec![k]).unwrap();
-        let f = b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).unwrap();
+        let f = b.ins_gc_barrier(MirGcKind::Safepoint, f).unwrap();
         let g = b.ins_alloc(MirAllocKind::PolyFn { target: crate::bodies::Label(9) }, Vec::new()).unwrap();
-        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![g]).unwrap();
+        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, g).unwrap();
         // A partial application: its first parameter filled.
         let partial = MirAllocKind::Fn {
             target: crate::bodies::Label(8),
@@ -1464,15 +1445,15 @@ bb3:
             mask: 1,
         };
         let p = b.ins_alloc(partial, vec![x]).unwrap();
-        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![p]).unwrap();
+        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, p).unwrap();
         // An instance dictionary: a method's code pointer in a tuple.
         let code = b.ins_code_ptr(crate::bodies::Label(11)).unwrap();
         let dict = b.ins_alloc(MirAllocKind::TUPLE, vec![code]).unwrap();
-        let dict = b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).unwrap();
+        let dict = b.ins_gc_barrier(MirGcKind::Safepoint, dict).unwrap();
         // A constrained generic's value over its dictionary, called with
         // the call site's.
         let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::bodies::Label(12), params: 0 }, vec![dict]).unwrap();
-        let poly = b.ins_gc_barrier(MirGcKind::Safepoint, vec![poly]).unwrap();
+        let poly = b.ins_gc_barrier(MirGcKind::Safepoint, poly).unwrap();
         let _ = b.ins_call_indirect_dicts(poly, vec![x, dict], 1, MirTy::I64).unwrap();
         let y = b.ins_call_indirect(f, vec![x], MirTy::I64).unwrap();
         // A dictionary method: the code pointer itself is the callee.

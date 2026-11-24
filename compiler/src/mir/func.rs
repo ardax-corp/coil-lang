@@ -4,7 +4,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use common::DebugLoc;
 
-use super::gc::LiveRootSet;
 use super::inst::{BlockId, LocalId, MirConst, MirInst, Terminator, ValueId};
 use crate::layout::MirLayout;
 use super::ty::MirTy;
@@ -37,10 +36,6 @@ pub struct MirFunc {
     pub blocks: Vec<MirBlock>,
     /// Type of each allocated value, indexed by [`ValueId::index`].
     pub types: Vec<MirTy>,
-    /// IL slot → SSA value at each Alloc / GcBarrier dest (S2a).
-    pub slot_env: HashMap<ValueId, Vec<(LocalId, ValueId)>>,
-    /// Live heap words at each Alloc / GcBarrier (S2a).
-    pub gc_roots: Vec<LiveRootSet>,
     /// Dest → source loc from the IL op that produced it (C3 sparse DebugLoc).
     pub value_locs: HashMap<ValueId, DebugLoc>,
     /// A call's or trapping op's own loc where a variable's defining store
@@ -179,11 +174,6 @@ impl MirFunc {
             b.insts.shrink_to_fit();
         }
         self.types.shrink_to_fit();
-        self.gc_roots.shrink_to_fit();
-        for g in &mut self.gc_roots {
-            g.values.shrink_to_fit();
-            g.slots.shrink_to_fit();
-        }
         self.homes.shrink_to_fit();
         if let Some(c) = &mut self.cleanup {
             c.shrink_to_fit();
@@ -299,8 +289,6 @@ impl MirFunc {
             entry: BlockId(0),
             blocks: vec![MirBlock::new(BlockId(0))],
             types: Vec::new(),
-            slot_env: HashMap::new(),
-            gc_roots: Vec::new(),
             value_locs: HashMap::new(),
             op_locs: HashMap::new(),
             term_locs: HashMap::new(),
@@ -345,11 +333,6 @@ impl MirFunc {
             .get(&b)
             .copied()
             .unwrap_or_else(DebugLoc::unknown)
-    }
-
-    #[cfg(test)]
-    pub fn live_roots_at(&self, at: ValueId) -> Option<&LiveRootSet> {
-        self.gc_roots.iter().find(|s| s.at == at)
     }
 
     pub fn ty(&self, v: ValueId) -> MirTy {
@@ -1038,14 +1021,12 @@ impl MirFunc {
                     }
                 }
             }
-            MirInst::GcBarrier { dest, roots, .. } => {
+            MirInst::GcBarrier { dest, object, .. } => {
                 if self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} GcBarrier dest is not heapref"));
                 }
-                for (i, r) in roots.iter().enumerate() {
-                    if !self.ty(*r).is_heap_word() {
-                        return Err(format!("{dest} GcBarrier root {i} is not a heap word"));
-                    }
+                if !self.ty(*object).is_heap_word() {
+                    return Err(format!("{dest} GcBarrier object is not a heap word"));
                 }
             }
             MirInst::String { dest, .. } => {

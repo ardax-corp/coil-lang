@@ -293,6 +293,12 @@ pub const MIR_SECTION_KINDS2_FORMAT: u8 = 21;
 /// format 21, whose bodies may count nothing and would be freed under.
 pub const MIR_SECTION_COUNTED_FORMAT: u8 = 22;
 
+/// The first MIR section format with no live-root records (archive 8.10):
+/// a `GcBarrier` writes its dest and its object, and a body neither its IL
+/// slot snapshots nor its live roots at each safepoint, which nothing read
+/// since frames stopped being collector roots. A reader refuses format 22.
+pub const MIR_SECTION_ROOTLESS_FORMAT: u8 = 23;
+
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and
 /// scope and an `at_call` byte; little-endian `u32`s.

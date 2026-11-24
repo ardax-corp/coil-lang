@@ -8787,7 +8787,7 @@ impl Compiler {
                     words.push(item(b, it, v)?);
                 }
                 let t = b.ins_alloc_kinds(MirAllocKind::TUPLE, words, *kinds).map_err(err)?;
-                b.ins_gc_barrier(MirGcKind::Safepoint, vec![t]).map_err(err)
+                b.ins_gc_barrier(MirGcKind::Safepoint, t).map_err(err)
             }
             HirRetItems::Enum { variants } => {
                 let join = b.create_block();
@@ -8808,7 +8808,7 @@ impl Compiler {
                         words.push(item(b, it, v)?);
                     }
                     let e = b.ins_alloc_kinds(MirAllocKind::Enum { tag: *tag }, words, *kinds).map_err(err)?;
-                    let e = b.ins_gc_barrier(MirGcKind::Safepoint, vec![e]).map_err(err)?;
+                    let e = b.ins_gc_barrier(MirGcKind::Safepoint, e).map_err(err)?;
                     b.jump(join).map_err(err)?;
                     arms.push((hit, e));
                     b.switch_to_block(miss);
@@ -8911,7 +8911,7 @@ impl Compiler {
             Some(HirFnRet::Unit) => {
                 b.ins_call_indirect(f, args, MirTy::I64).map_err(err)?;
                 let obj = b.ins_alloc(crate::mir::MirAllocKind::TUPLE, Vec::new()).map_err(err)?;
-                let obj = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, vec![obj]).map_err(err)?;
+                let obj = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, obj).map_err(err)?;
                 b.ret(Some(obj)).map_err(err)?;
                 return b.finish().map_err(err);
             }
@@ -8938,7 +8938,7 @@ impl Compiler {
         let err = |e: crate::mir::MirError| format!("mir: {e}");
         let make = |b: &mut crate::mir::MirBuilder, tag: u32, payload: Vec<crate::mir::ValueId>| {
             let obj = b.ins_alloc(MirAllocKind::Enum { tag }, payload)?;
-            b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
+            b.ins_gc_barrier(MirGcKind::Safepoint, obj)
         };
         let zero = b.ins_const(MirConst::I64(0)).map_err(err)?;
         let second = if layout == ValueLayout::NicheResult {

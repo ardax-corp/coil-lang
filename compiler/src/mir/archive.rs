@@ -25,7 +25,6 @@ use common::DebugLoc;
 
 use crate::bodies::Label;
 use crate::layout::MirLayout;
-use crate::mir::gc::LiveRootSet;
 use crate::mir::inst::LocalId;
 use crate::mir::{
     BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirCStruct, MirExternSig, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
@@ -36,7 +35,7 @@ const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
 /// takes this format only: older sections' `kinds` words have one bit per
 /// type parameter. The older formats remain for tests of what their
 /// sections hold.
-const FORMAT: u8 = common::MIR_SECTION_COUNTED_FORMAT;
+const FORMAT: u8 = common::MIR_SECTION_ROOTLESS_FORMAT;
 /// The format before two-bit `kinds` words (archive 8.4): `ExternCall`
 /// signatures carry struct layouts from it on.
 const FORMAT_STRUCTS: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
@@ -374,20 +373,7 @@ fn func(w: &mut Writer, f: &MirFunc) {
     w.locs(f.value_locs.iter().map(|(v, l)| (v.0, *l)));
     w.locs(f.op_locs.iter().map(|(v, l)| (v.0, *l)));
     w.locs(f.term_locs.iter().map(|(b, l)| (b.0, *l)));
-    // The tables the root analyses and the passes read.
-    let mut slot_env: Vec<_> = f.slot_env.iter().collect();
-    slot_env.sort_unstable_by_key(|(v, _)| v.0);
-    w.u32(slot_env.len() as u32);
-    for (v, binds) in slot_env {
-        w.v(*v);
-        w.binds(binds);
-    }
-    w.u32(f.gc_roots.len() as u32);
-    for set in &f.gc_roots {
-        w.v(set.at);
-        w.vs(&set.values);
-        w.locals(set.slots.iter().copied());
-    }
+    // The tables the passes read.
     let mut debug_slots: Vec<_> = f.debug_slots.iter().map(|(&l, &v)| (l, v)).collect();
     debug_slots.sort_unstable_by_key(|(l, _)| l.0);
     w.binds(&debug_slots);
@@ -748,10 +734,10 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*scrutinee);
             w.u32(*index);
         }
-        MirInst::GcBarrier { dest, kind: MirGcKind::Safepoint, roots } => {
+        MirInst::GcBarrier { dest, kind: MirGcKind::Safepoint, object } => {
             w.u8(I_GC_BARRIER);
             w.v(*dest);
-            w.vs(roots);
+            w.v(*object);
         }
         MirInst::ResumeCoro { dest, handle, send } => {
             w.u8(I_RESUME);
@@ -1090,15 +1076,6 @@ fn read_func(r: &mut Reader) -> Result<MirFunc, String> {
     f.value_locs = r.locs()?.into_iter().map(|(k, l)| (ValueId(k), l)).collect();
     f.op_locs = r.locs()?.into_iter().map(|(k, l)| (ValueId(k), l)).collect();
     f.term_locs = r.locs()?.into_iter().map(|(k, l)| (BlockId(k), l)).collect();
-    let n = r.len()?;
-    for _ in 0..n {
-        let v = r.v()?;
-        f.slot_env.insert(v, r.binds()?);
-    }
-    let n = r.len()?;
-    for _ in 0..n {
-        f.gc_roots.push(LiveRootSet { at: r.v()?, values: r.vs()?, slots: r.locals()? });
-    }
     f.debug_slots = r.binds()?.into_iter().collect();
     f.heap_slots = r.locals()?.into_iter().collect::<BTreeSet<_>>();
     f.word_slots = r.locals()?.into_iter().collect::<BTreeSet<_>>();
@@ -1247,7 +1224,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_LANE_STORE => MirInst::LaneStore { dest: r.v()?, array: r.v()?, index: r.v()?, lo: r.v()?, hi: r.v()?, shape: read_lane_shape(r)? },
         I_LANE_PUSH => MirInst::LanePush { dest: r.v()?, array: r.v()?, lo: r.v()?, hi: r.v()?, shape: read_lane_shape(r)? },
         I_LANES_TO_WORDS => MirInst::LanesToWords { dest: r.v()?, array: r.v()?, shape: read_lane_shape(r)? },
-        I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: r.vs()? },
+        I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, object: r.v()? },
         I_COW => {
             let (dest, src, unique) = (r.v()?, r.v()?, r.u8()? != 0);
             let field = Some(r.u32()?).filter(|&f| f != u32::MAX);
@@ -1371,8 +1348,7 @@ fn read_vec_stores(r: &mut Reader) -> Result<Vec<(ValueId, ValueId, u8, VecExpr)
 mod tests {
     use super::*;
 
-    /// A body with a value in the fields the code tiers and the root
-    /// analyses read, and a cleanup pad of its own name.
+    /// A body with a value in the fields the code tiers read, and a cleanup pad of its own name.
     fn body() -> NativeBody {
         let mut pad = MirFunc::new("pad of f");
         pad.homes = vec![MirTy::HeapRef];
@@ -1386,7 +1362,7 @@ mod tests {
         let loc = DebugLoc { file: 1, start_byte: 2, end_byte: 3, scope: 1 };
         let mut b = MirBlock::new(BlockId(0));
         b.insts.push(MirInst::Probe { dest: ValueId(1), id: 7 });
-        b.insts.push(MirInst::GcBarrier { dest: ValueId(2), kind: MirGcKind::Safepoint, roots: vec![ValueId(0)] });
+        b.insts.push(MirInst::GcBarrier { dest: ValueId(2), kind: MirGcKind::Safepoint, object: ValueId(0) });
         f.blocks.push(b);
         let mut last = MirBlock::new(BlockId(1));
         last.term = Some(Terminator::Unreachable);
@@ -1394,8 +1370,6 @@ mod tests {
         f.value_locs.insert(ValueId(1), loc);
         f.op_locs.insert(ValueId(2), loc);
         f.term_locs.insert(BlockId(1), loc);
-        f.slot_env.insert(ValueId(1), vec![(LocalId(3), ValueId(0))]);
-        f.gc_roots.push(LiveRootSet { at: ValueId(1), values: vec![ValueId(0)], slots: vec![LocalId(3)] });
         f.debug_slots.insert(LocalId(3), ValueId(0));
         f.heap_slots.insert(LocalId(3));
         f.word_slots.insert(LocalId(4));

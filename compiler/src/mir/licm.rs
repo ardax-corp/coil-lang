@@ -814,7 +814,6 @@ fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guar
         }
     }
     read.extend(func.debug_slots.values().copied());
-    read.extend(func.slot_env.values().flatten().map(|&(_, v)| v));
     let mut zeros: Vec<(super::ty::MirTy, ValueId)> = Vec::new();
     let mut phis = Vec::new();
     let mut rename: std::collections::HashMap<ValueId, ValueId> = std::collections::HashMap::new();
@@ -882,11 +881,6 @@ fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guar
         }
     }
     func.rewrite_debug_slots(|v| rename.get(&v).copied().unwrap_or(v));
-    for env in func.slot_env.values_mut() {
-        for (_, v) in env.iter_mut() {
-            *v = rename.get(v).copied().unwrap_or(*v);
-        }
-    }
 }
 
 /// How `inst` may move out of a loop with effects `fx`, or `None` when it

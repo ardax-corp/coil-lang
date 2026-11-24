@@ -690,9 +690,7 @@ pub enum MirInst {
         value: ValueId,
     },
     /// Heap allocation (I5). Dest is [`MirTy::HeapRef`]. Always a GC
-    /// safepoint; pair with [`Self::GcBarrier`]. S2a records live heap
-    /// words on the barrier and [`crate::mir::func::MirFunc::gc_roots`].
-    /// S2c may emit across this edge when every allocation has its barrier.
+    /// safepoint; pair with [`Self::GcBarrier`].
     Alloc {
         dest: ValueId,
         kind: MirAllocKind,
@@ -708,12 +706,13 @@ pub enum MirInst {
         kinds: common::PackedKinds,
     },
     /// GC safepoint / write-barrier (I5). Dest is a `HeapRef` token
-    /// (not a second object). `roots` is the S2a live-heap SSA list
-    /// (new object plus other live heap words). Not an interpreter map.
+    /// naming `object`, the word the allocating op right before it made
+    /// ([`crate::mir::barrier_pairs`]). `object` is an operand, so the
+    /// allocation stays as long as its barrier does.
     GcBarrier {
         dest: ValueId,
         kind: MirGcKind,
-        roots: Vec<ValueId>,
+        object: ValueId,
     },
     /// Const string-table push (I4 / Q9 R1). Dest is [`MirTy::HeapRef`].
     String {
@@ -1370,7 +1369,7 @@ impl MirInst {
             Self::LanePush { array, lo, hi, .. } => vec![*array, *lo, *hi],
             Self::LanesToWords { array, .. } => vec![*array],
             Self::Alloc { elems, .. } => elems.clone(),
-            Self::GcBarrier { roots, .. } => roots.clone(),
+            Self::GcBarrier { object, .. } => vec![*object],
             Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::CowUnpin { src, saved, .. } => vec![*src, *saved],
@@ -1469,11 +1468,7 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::GcBarrier { roots, .. } => {
-                for v in roots.iter_mut() {
-                    *v = map(*v);
-                }
-            }
+            Self::GcBarrier { object, .. } => *object = map(*object),
             Self::String { .. } | Self::CodePtr { .. } => {}
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::CowUnpin { src, saved, .. } => {
