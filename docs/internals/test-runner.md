@@ -3,7 +3,7 @@
 `coil test` runs the language harness. The main `coil` binary **re-execs** the
 sibling `coil-test` helper (git-style, like `coil debug` / `coil dissect`) and
 forwards every flag unchanged. `coil test` is the documented spelling;
-`coil-test` can also be invoked directly (CI's GC-stress job does) and takes
+`coil-test` can also be invoked directly (CI's rc-check job does) and takes
 the same flags with the same output.
 
 ```bash
@@ -18,8 +18,8 @@ coil-test --help         # same flags as `coil test --help`
 ## Why a separate binary
 
 Test-only code (coverage, mutation testing, the harness itself) lives in `coil-test`,
-so `coil` and `coil-embed` never carry it. `coil-test` also forwards `gc-stress` /
-`gc-stats`. The step budget is the runtime's (`Runtime::set_step_budget`, which also
+so `coil` and `coil-embed` never carry it. `coil-test` also forwards `rc-check`
+(the cycle collector and a check of every count at each safepoint). The step budget is the runtime's (`Runtime::set_step_budget`, which also
 bounds compile-time evaluation), and only the interpreter charges it; a test job sets
 it per case (`TestCase::step_budget`) and reports `steps` / `timed_out`.
 
@@ -270,7 +270,7 @@ scripts/test_corpora.py --shard 2/3 --no-build -- …   # every 3rd corpus from 
 It builds `coil` / `coil-test` first (`--release` for the release build;
 cargo's cache makes that a no-op when nothing changed). `--bin DIR` uses
 binaries already built, `--harness PATH` runs a `coil-test` directly (the
-GC-stress build), `--limit-as-kb N` caps each process's address space like
+rc-check build), `--limit-as-kb N` caps each process's address space like
 `ulimit -v` (the leak smoke, `-j 1` per process). `--timeout S` (default
 1800) kills a corpus process still running after `S` seconds and reports it
 as timed out: the backstop behind `coil test --wall-timeout` for a wedge
@@ -278,9 +278,9 @@ outside a case. Logs land in `target/corpora/<corpus>.log`; CI uploads them
 when a cell fails or is cut off by its job limit.
 
 CI builds the binaries once per OS and build (`harness-build-debug`,
-`harness-build-release`, `harness-build-gc-stress`: the GC-stress
+`harness-build-release`, `harness-build-rc-check`: the rc-check
 `coil-test` is release only, #2131) and runs every setting (default, `-O 0`,
-leak smoke in debug and release, GC stress in release, the
+leak smoke in debug and release, the count check in release, the
 [configuration cells](#configuration-cells-and-known-failures) in release)
 as separate `harness` cells, side by side. Each group of Linux cells waits only for its own build.
 macOS (`harness-build-macos`, `harness-macos`) and Windows run in CI's second
@@ -300,6 +300,7 @@ refer to; a `coil test` cell passes it as `--cell NAME`:
 | `clone-budget-0` | `--engine native --clone-budget 0 --cell clone-budget-0 …`, then `--engine mir` | shared generic bodies: no per-type clone is made, so every generic call passes dictionaries and boxed words |
 | `mir-verify` | `COIL_MIR_VERIFY=1` with `--engine native --cell mir-verify …`, then `--engine mir` (and on the `mir-opt` cell's `-O 1 2 3 s g` runs) | the MIR verifier on every body as lowered and after each pass, in a release build |
 | `auto-par` | `scripts/auto_par_diff.py --release -- …` (its own script, not `coil test`) | auto-par on against off: every program with a `main`, both ways, on 8 workers |
+| `rc-check` | the `rc-check` build of `coil-test` (`--harness`), `--engine native --cell rc-check …`, then `-O 0`, a code image, `--engine mir` and parked frames | the cycle collector at every safepoint, after `Heap::rc_check`: no heap word names a freed object, no count is below the heap words that own it |
 
 ```bash
 scripts/test_corpora.py --release -- --engine native --clone-budget 0 --cell clone-budget-0 \

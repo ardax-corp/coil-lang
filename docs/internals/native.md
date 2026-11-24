@@ -488,7 +488,7 @@ An `Alloc` of a fixed-size nursery object (an enum variant or tuple, an enum obj
 instance of a class with 1 to 4 fields) does not call `coil_native_alloc` on its fast
 path. Native code loads the heap's gate (`HeapCounts::inline_gate`, closed while the
 nursery is off, a mark is open, pretenuring after a mostly surviving minor, a steal
-epoch, and under `gc-stress`), and for an instance tests its type's bit in the
+epoch, and under `rc-check`), and for an instance tests its type's bit in the
 finalizer types (a type with a `drop` stays old). It then bumps its size class's cursor
 (`Bump`, boxed in the slab, indexed by a class fixed for every heap), writes the slot's
 image with the payload words in place, and adds the object to `alloc_bytes`,
@@ -539,7 +539,7 @@ size asserts, and `Object::set_shared` sets the same bit;
 a type parameter is a share behind its `kinds` test stays without a GC poll
 and with no helper call. The flags byte is a `Cell<u8>` the runtime sets from a
 shared reference, never through `GcData::as_mut`, so the inline store is the
-same in debug and `gc-stress` builds. The interpreter keeps `coil_native_cow`,
+same in debug and `rc-check` builds. The interpreter keeps `coil_native_cow`,
 which also counts the share for `--cow-report`'s summary line; native code's
 inline shares are not in that count (the copies are).
 
@@ -578,8 +578,8 @@ a stand-in `bbox` +14.5%, and `bint` at `--clone-budget 0` +2.2%. With one
 `split` (which pins) in a `bbox` program, testing every body cost +14.2%. With
 the reach it costs +0.15%.
 
-In-place stores are compiled only into release builds without `gc-stress`
-(`ProductSlots::inline_stores`): debug and `gc-stress` builds check epoch writes in
+In-place stores are compiled only into release builds without `rc-check`
+(`ProductSlots::inline_stores`): debug and `rc-check` builds check epoch writes in
 `GcData::as_mut`, which native code would skip. Loads are in place in every build.
 
 ## Operation semantics
@@ -695,7 +695,7 @@ repeat run loads it: 482 ms becomes 9 ms there. `--no-build-cache` skips it. Nei
 - **Size:** at most 256 entries, least recently used first, as the build cache.
 
 `COIL_CODE_IMAGE_CHECK=1` sends every JIT through an image and runs the copy, and fails
-if the code does not fit one. CI's `native` cell runs the corpus so, and GC stress runs
+if the code does not fit one. CI's `native` cell runs the corpus so, and the rc-check cell runs
 `memory` so: any program a cache hit would break fails there.
 
 ### JIT runner

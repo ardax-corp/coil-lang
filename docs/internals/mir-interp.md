@@ -196,7 +196,7 @@ activation instead.
 
 `machine::native::parks()` is true on wasm, and natively under `COIL_NO_FIBERS=1` with
 `--engine mir`, which is how a parking bug gets a native debugger. CI runs that as the
-`mir-parked` cell and in GC stress. Cranelift's code cannot park.
+`mir-parked` cell and in the rc-check cell. Cranelift's code cannot park.
 
 `coil compile` on wasm stores every body in the MIR section
 (`coil_mir_interp::encode_section`), so a wasm `.ccoil` runs on the interpreter and on

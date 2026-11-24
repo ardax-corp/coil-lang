@@ -42,7 +42,7 @@ stays ambiguous. Enum payloads and tuples carry construction-site kinds
 (`kinds` on MIR `Alloc`, 2 bits for each of the first four words, kept in the
 payload's padding), from the source types or the words' `MirTy`. Generic shared
 bodies and host-built enums stay unknown.
-`gc-stress` builds check every declared kind against the slab while
+`rc-check` builds check every declared kind against the slab while
 marking.
 
 Frame roots follow the same split. Native frames hand heap words to the
@@ -68,7 +68,7 @@ the element kind on MIR `Alloc`, as array literals of such elements are.
 every element as `0` or an object: precise, no classification. Only the
 pointer kind is ever kept; a scalar stamp would be unsound because generic
 shared bodies may store boxed values. Arrays from other natives and generic
-code stay ambiguous. `gc-stress` checks every element of a
+code stay ambiguous. `rc-check` checks every element of a
 pointer-kind array. Named `Table` instances (dicts, `INIT`) still hold `Member`s.
 Do not treat any of these as a nursery.
 

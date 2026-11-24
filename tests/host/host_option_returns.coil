@@ -40,7 +40,7 @@ test("gc get unroot upgrade string") {
     assert!(empty);
 
     // A strong local keeps the target alive across the upgrade (a weak
-    // ref to a temporary may be collected first, as gc-stress shows).
+    // ref to a temporary may be collected first, as rc-check shows).
     let target = "ephem";
     let w = weak(target);
     let up = match upgrade(w) {

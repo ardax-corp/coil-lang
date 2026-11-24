@@ -2,7 +2,7 @@
 
 [#1892](https://github.com/ardax-corp/coil-lang/issues/1892). Answers Q2
 ("runtime freeze bit") of [shared-heap-sendability.md](shared-heap-sendability.md)
-for debug and `gc-stress` builds. Release builds are unchanged.
+for debug and `rc-check` builds. Release builds are unchanged.
 
 ## Why
 
@@ -16,7 +16,7 @@ soundness is the compiler's purity and independence proof
 ([auto-par.md](auto-par.md)) plus the spawn whitelist (`is_c1_shareable`).
 A wrong proof, or a pass that widens admission (`Summary::param_only`,
 #1648), is a silent data race. The guard turns that into an abort in every
-debug build and in the `gc-stress` CI harness.
+debug build and in the `rc-check` CI harness.
 
 ## Invariant
 
@@ -79,7 +79,7 @@ already serialized or atomic:
 
 ## The guard
 
-Behind `cfg(any(debug_assertions, feature = "gc-stress"))` only:
+Behind `cfg(any(debug_assertions, feature = "rc-check"))` only:
 
 1. **Header stamp.** `GcHeader` gets an `epoch: Cell<u8>` before the count.
    The header is `repr(C)` and its 32-bit count is 4-aligned, so the byte
@@ -110,7 +110,7 @@ after the epoch and runs its local arms on objects it owns.
 
 ### Cost
 
-- Debug / `gc-stress`: one thread-local read and one compare per payload
+- Debug / `rc-check`: one thread-local read and one compare per payload
   write, one byte store per epoch allocation, one byte in the header padding.
   No change to collection, marking or object size.
 - Release: nothing. The field, the stamp, the thread-local and the check are
@@ -135,7 +135,7 @@ job is to make CI fail when that proof is wrong.
 - Reads of an object another thread is writing. With no admitted write to a
   shared object there is no such read.
 
-Under `gc-stress`, `should_collect` is always true, so an epoch aborts at its
+Under `rc-check`, `should_collect` is always true, so an epoch aborts at its
 first allocation safepoint and the job falls back to sequential. Allocation
 free chunks (`loop_ipa_sum.coil`, `mandelbrot_ipa.coil`, fib-shaped arms) still
 run as shared jobs under the guard; the debug-build test suite
