@@ -20,9 +20,6 @@ const GC_GROWTH_FACTOR: usize = 2;
 const EPOCH_GC_HEADROOM_FACTOR: usize = 4;
 /// ...and never to less than this many bytes past the entry heap size.
 const EPOCH_GC_HEADROOM_MIN: usize = 256 * 1024 * 1024;
-/// Nursery size in 64 KiB slab chunks: filling this many asks for a minor
-/// collection (`feature/escape-memory` step 4).
-const NURSERY_CHUNKS: usize = 32;
 /// Unmarked objects considered at one alloc safepoint during lazy sweep.
 pub const GC_SWEEP_QUANTUM: usize = 128;
 
@@ -211,9 +208,6 @@ pub struct HeapCounts {
     pub fin_words: u64,
     pub fin_len: u64,
     pub alloc_bytes: usize,
-    /// Bytes allocated in the nursery since the last minor collection
-    /// (part of `alloc_bytes`; an estimate, arrays grow in place).
-    pub young_bytes: usize,
     /// Live object count (alloc +1, sweep/dealloc −1). Not a membership set.
     pub live_count: usize,
 }
@@ -304,14 +298,6 @@ pub struct Heap {
     pub(crate) cyclic_types: Vec<u64>,
     /// Allocate movable kinds in the nursery ([`Self::set_nursery`]).
     nursery: bool,
-    /// Nursery chunks in use that ask for a minor collection.
-    nursery_chunks: usize,
-    /// Held nursery chunks the last major cycle found live
-    /// ([`Self::set_held_after_major`]).
-    held_after_major: usize,
-    /// Held nursery chunks that ask for a major cycle
-    /// ([`Self::held_over_budget`]).
-    held_budget: usize,
     /// CString arena for the current FFI invoke (reset after each call).
     ffi_strings: Vec<std::ffi::CString>,
     /// Layer A steal epoch: no collect; `alloc` takes [`Self::alloc_lock`].
@@ -369,9 +355,6 @@ impl Default for Heap {
             epoch_rc: Vec::new(),
             cyclic_types: Vec::new(),
             nursery: false,
-            nursery_chunks: NURSERY_CHUNKS,
-            held_after_major: 0,
-            held_budget: NURSERY_CHUNKS,
             ffi_strings: Vec::new(),
             epoch_stw: false,
             epoch_gc_ceiling: 0,
@@ -681,7 +664,6 @@ impl Heap {
         self.counts.live_count += 1;
         if young {
             content.header.generation.set(GEN_YOUNG);
-            self.counts.young_bytes += size;
             return (object, content);
         }
         match self.side_list_of(object) {
@@ -1089,8 +1071,8 @@ impl Heap {
         if let Some(s) = self.strings.find(&data.data, data.hash_code()) {
             return s;
         }
-        // The table is not traced by a minor collection: a young key would
-        // be freed under it. Intern an old copy instead.
+        // A young string's slot goes back to its bump chunk's free list;
+        // the table keeps an old copy instead.
         if string.header.generation.get() & GEN_YOUNG != 0 {
             let hash = data.hash_code();
             return self.intern_new(data.data.to_string(), hash);
@@ -1420,74 +1402,25 @@ impl Heap {
         self.counts.live_count
     }
 
-    /// True when idle and live heap bytes exceed the collection threshold.
-    /// Mid-cycle work is paced from the alloc safepoint, not a second start.
-    /// In a steal epoch, where a collect means an abort, the bar is the
-    /// epoch ceiling instead; the joiner collects normally once it closes.
-    #[inline]
-    pub fn should_collect(&self) -> bool {
-        let limit = if self.epoch_stw {
-            self.epoch_gc_ceiling
-        } else {
-            self.gc_next_threshold
-        };
-        cfg!(feature = "rc-check")
-            || self.counts.alloc_bytes > limit
-            || self.held_over_budget()
-            || self.slab.young_chunks_in_use() >= self.nursery_chunks
-    }
-
-    /// Enough nursery chunks are held for pinned survivors to ask for a
-    /// major cycle, the only one that frees them: a nursery's worth more
-    /// than the last major kept, and at least twice that. A budget from
-    /// what the last major found live is what keeps the work linear (#2350):
-    /// a growing set of pinned survivors (a map's values, in a vector a
-    /// shared generic body made, whose words are of unknown kind) left
-    /// every safepoint over a fixed
-    /// budget, and each started a major that marked the whole heap again.
-    /// Like the byte threshold's growth factor, it also bounds the held
-    /// chunks to about twice the live ones.
-    #[inline]
-    fn held_over_budget(&self) -> bool {
-        self.slab.held_chunks() >= self.held_budget
-    }
-
-    /// A major cycle (or a promotion) left `held` nursery chunks held.
-    pub(super) fn set_held_after_major(&mut self, held: usize) {
-        self.held_after_major = held;
-        self.sync_held_budget();
-    }
-
-    /// Recompute [`Self::held_budget`]. Native code checks
-    /// [`Self::should_collect`] on every allocation, so the budget is kept
-    /// rather than computed there.
-    fn sync_held_budget(&mut self) {
-        self.held_budget = self.held_after_major + self.nursery_chunks.max(self.held_after_major);
-    }
-
-    /// Whether an allocation's safepoint has work: under counts, `drop`s
-    /// left due, the cycle collector on allocation pressure, or a heap over
-    /// its cap ([`crate::collect::safepoint`]); else a collection.
+    /// Whether an allocation's safepoint has work: `drop`s counts left due,
+    /// the cycle collector on allocation pressure, or a heap over its cap
+    /// ([`crate::collect::safepoint`]).
     #[inline]
     pub fn safepoint_due(&self) -> bool {
-        if self.rc_counting() {
-            !self.rc_due.is_empty() || self.should_collect_old() || self.over_byte_cap()
-        } else {
-            self.should_collect()
-        }
+        !self.rc_due.is_empty() || self.cycles_due() || self.over_byte_cap()
     }
 
-    /// The old space crossed its budget: run a major cycle.
+    /// The heap grew past its threshold since the last cycle collection
+    /// (in a steal epoch, past the epoch's ceiling): run the cycle
+    /// collector.
     #[inline]
-    pub fn should_collect_old(&self) -> bool {
+    pub fn cycles_due(&self) -> bool {
         let limit = if self.epoch_stw {
             self.epoch_gc_ceiling
         } else {
             self.gc_next_threshold
         };
-        cfg!(feature = "rc-check")
-            || self.counts.alloc_bytes > limit
-            || self.held_over_budget()
+        cfg!(feature = "rc-check") || self.counts.alloc_bytes > limit
     }
 
     /// Allocate instances, enums, boxes, tuples, arrays and closures in the
@@ -1501,14 +1434,11 @@ impl Heap {
         self.nursery
     }
 
-    /// Lower the byte threshold so the next [`Self::should_collect`] check
-    /// fires (test helper for GC stress). The nursery then collects at every
-    /// safepoint that finds a young object.
+    /// Lower the byte threshold so the next [`Self::cycles_due`]
+    /// check fires (test helper).
     #[cfg(test)]
     pub fn set_gc_threshold_for_test(&mut self, bytes: usize) {
         self.gc_next_threshold = bytes;
-        self.nursery_chunks = 1;
-        self.sync_held_budget();
     }
 
     /// Count an array's storage change (see [`ObjArray::take_resize`]).
@@ -1547,8 +1477,6 @@ impl Heap {
         let young = object.generation() & GEN_YOUNG != 0;
         unsafe { object.recycle_payload() };
         if young {
-            // Reused by the nursery until its chunk is reset.
-            self.counts.young_bytes = self.counts.young_bytes.saturating_sub(size);
             self.slab.free_young(ptr);
         } else {
             self.slab.free(ptr);
@@ -4179,8 +4107,7 @@ impl fmt::Display for ObjLibrary {
 
 pub trait GcSized {
     fn size(&self) -> usize;
-    /// Allocated in the nursery when it is on: a kind a minor collection
-    /// can move ([`Object::movable_layout`]).
+    /// Bump-allocated in a young chunk when the nursery is on.
     const NURSERY: bool = false;
     /// Can hold heap references: an old object of this kind is remembered
     /// when it is born, since it may start out naming young objects.
@@ -5222,14 +5149,14 @@ mod tests {
         let lock = Mutex::new(());
         let mut heap = Heap::default();
         heap.counts.alloc_bytes = GC_NEXT_THRESHOLD + 1;
-        assert!(heap.should_collect());
+        assert!(heap.cycles_due());
         heap.enter_epoch_stw(&lock);
-        assert!(!heap.should_collect(), "past threshold, under epoch ceiling");
+        assert!(!heap.cycles_due(), "past threshold, under epoch ceiling");
         heap.counts.alloc_bytes = heap.epoch_gc_ceiling + 1;
-        assert!(heap.should_collect(), "past the epoch ceiling");
+        assert!(heap.cycles_due(), "past the epoch ceiling");
         heap.exit_epoch_stw();
         heap.counts.alloc_bytes = GC_NEXT_THRESHOLD + 1;
-        assert!(heap.should_collect(), "normal threshold again after the epoch");
+        assert!(heap.cycles_due(), "normal threshold again after the epoch");
         heap.counts.alloc_bytes = 0;
     }
 

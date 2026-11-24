@@ -4895,7 +4895,7 @@ impl<'a> Lower<'a> {
     fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], extra: u64, join: Block) {
         use machine::native::{
             BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
-            COUNTS_LIVE_COUNT, COUNTS_YOUNG_BYTES, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
+            COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
         };
         let mem = MemFlagsData::trusted();
         let slow = self.b.create_block();
@@ -4985,7 +4985,7 @@ impl<'a> Lower<'a> {
                 }
             }
         }
-        for (off, by) in [(COUNTS_ALLOC_BYTES, i64::from(obj.size)), (COUNTS_YOUNG_BYTES, i64::from(obj.size)), (COUNTS_LIVE_COUNT, 1)] {
+        for (off, by) in [(COUNTS_ALLOC_BYTES, i64::from(obj.size)), (COUNTS_LIVE_COUNT, 1)] {
             let c = self.b.ins().load(types::I64, mem, counts, off);
             let c = self.b.ins().iadd_imm_s(c, by);
             self.b.ins().store(mem, c, counts, off);

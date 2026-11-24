@@ -175,7 +175,6 @@ pub const COUNTS_INLINE_GATE: i32 = std::mem::offset_of!(crate::memory::HeapCoun
 pub const COUNTS_FIN_WORDS: i32 = std::mem::offset_of!(crate::memory::HeapCounts, fin_words) as i32;
 pub const COUNTS_FIN_LEN: i32 = std::mem::offset_of!(crate::memory::HeapCounts, fin_len) as i32;
 pub const COUNTS_ALLOC_BYTES: i32 = std::mem::offset_of!(crate::memory::HeapCounts, alloc_bytes) as i32;
-pub const COUNTS_YOUNG_BYTES: i32 = std::mem::offset_of!(crate::memory::HeapCounts, young_bytes) as i32;
 pub const COUNTS_LIVE_COUNT: i32 = std::mem::offset_of!(crate::memory::HeapCounts, live_count) as i32;
 pub const BUMP_NEXT: i32 = std::mem::offset_of!(crate::memory::Bump, next) as i32;
 pub const BUMP_END: i32 = std::mem::offset_of!(crate::memory::Bump, end) as i32;
@@ -2298,7 +2297,7 @@ pub struct DirectHost {
     /// with native code's words rooted around the call.
     pub collect: bool,
     /// An ordinary native that needs the runtime (it may park the task, open
-    /// descriptors, ...), a task op, a `region` hook (a minor collection)
+    /// descriptors, ...), a task op, a `region` hook
     /// or the finalizer registry's `gc_register_finalizer`:
     /// native code runs it through a host-call stub
     /// ([`host_stubs`]) in a nested interpreter execution, as a runtime call.

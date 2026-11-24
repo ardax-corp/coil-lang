@@ -27,8 +27,8 @@ pub enum HostOp {
     /// `unwind_resume`: the end of a `defer` cleanup pad; the runtime unwinder
     /// takes the frame back ([`common::UNWIND_RESUME_ID`]).
     Unwind,
-    /// `gc_region_enter` / `gc_region_exit` around a `region` block: the runtime
-    /// runs a minor collection ([`common::GC_REGION_ENTER_ID`]).
+    /// `gc_region_enter` / `gc_region_exit`, once around a `region` block:
+    /// no-ops, kept so the frozen ids stay ([`common::GC_REGION_ENTER_ID`]).
     RegionEnter,
     RegionExit,
     /// `startup_restore`: the driver restores the snapshot at a pool index
@@ -75,7 +75,7 @@ pub struct HostCall {
     /// words rooted around the call.
     pub collect: bool,
     /// An ordinary native that needs the runtime (it may park the task, open
-    /// descriptors, ...), a task op, a `region` hook (a minor collection) or
+    /// descriptors, ...), a task op, a `region` hook or
     /// the finalizer registry's `gc_register_finalizer`: native code runs it
     /// as a runtime call.
     pub on_machine: bool,

@@ -240,7 +240,6 @@ pub fn layout_fingerprint() -> u64 {
         std::mem::offset_of!(HeapCounts, fin_words),
         std::mem::offset_of!(HeapCounts, fin_len),
         std::mem::offset_of!(HeapCounts, alloc_bytes),
-        std::mem::offset_of!(HeapCounts, young_bytes),
         std::mem::offset_of!(HeapCounts, live_count),
         std::mem::offset_of!(super::super::slab::Bump, next),
         std::mem::offset_of!(super::super::slab::Bump, end),
@@ -285,7 +284,6 @@ mod tests {
             b.next += u64::from(o.slot);
             let c = unsafe { &mut *counts };
             c.alloc_bytes += o.size as usize;
-            c.young_bytes += o.size as usize;
             c.live_count += 1;
             let p = at as *mut u64;
             for (i, w) in o.image.iter().enumerate() {

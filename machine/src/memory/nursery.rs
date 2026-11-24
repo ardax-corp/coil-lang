@@ -41,10 +41,7 @@ impl Heap {
             let tail = self.slab.chunk_slots_end(chunk);
             free.extend(slots(end, tail, size).map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }));
         }
-        self.counts.young_bytes = 0;
-        self.slab.finish_young(&promoted, &[], free);
-        // Held chunks were promoted with the rest: none is held now.
-        self.set_held_after_major(0);
+        self.slab.finish_young(&promoted, free);
     }
 
 }

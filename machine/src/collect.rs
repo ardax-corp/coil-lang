@@ -198,7 +198,7 @@ pub(crate) fn safepoint<H: GcHost + ?Sized>(h: &mut H) {
     if !h.rt().heap.rc_due.is_empty() || h.rt().task_coros_released() {
         h.run_due_drops();
     }
-    if h.rt().heap.should_collect_old() {
+    if h.rt().heap.cycles_due() {
         collect_cycles(h);
         h.rt_mut().heap.cycles_ran();
     }
@@ -277,7 +277,7 @@ pub(crate) fn begin_shared_steal<H: GcHost + ?Sized>(
         e.jobs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         return Ok(Arc::clone(e));
     }
-    if h.rt().heap.get().should_collect_old() {
+    if h.rt().heap.get().cycles_due() {
         collect(h);
     }
     let rt = h.rt_mut();
@@ -307,7 +307,7 @@ pub(crate) fn end_shared_steal<H: GcHost + ?Sized>(h: &mut H, published: Value) 
         (*e.heap_ptr()).exit_epoch_stw();
     }
     rt.shared_epoch = None;
-    if rt.heap.is_borrowed() || !rt.heap.get().should_collect_old() {
+    if rt.heap.is_borrowed() || !rt.heap.get().cycles_due() {
         return;
     }
     // The cycle collector, with `published` rooted.
