@@ -1570,8 +1570,7 @@ pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u
         return 0;
     };
     let view = if for_store != 0 {
-        let view = gc.as_mut().words_view_for_store();
-        view
+        gc.as_mut().words_view_for_store()
     } else {
         gc.as_ref().words_view_for_load().map(|(p, n)| (p, n, std::ptr::null_mut()))
     };
@@ -1603,8 +1602,7 @@ pub unsafe extern "C" fn coil_native_lane_view(addr: u64, for_store: u64, out: *
         return 0;
     };
     let view = if for_store != 0 {
-        let view = gc.as_mut().lanes_view();
-        view
+        gc.as_mut().lanes_view()
     } else {
         gc.as_ref().lanes_view_for_load()
     };
