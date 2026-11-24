@@ -194,3 +194,17 @@ fn a_defer_home_releases_the_words_written_to_it() {
     );
     assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
 }
+
+/// A coroutine hands its resumer each word it yields, and the one it
+/// returns, with an owner: the resumer's.
+#[test]
+fn a_resumer_owns_what_a_generator_yields_and_returns() {
+    let stderr = run_with_leak_report("gen_handover", &[(
+        "main.coil",
+        "fn half(int n) -> Result<int, string> {\n    if n % 2 != 0 {\n        return Result::Err(\"odd\");\n    }\n    return Result::Ok(n / 2);\n}\n\n\
+         gen fn q(int n) -> Result<int, string> {\n    let h = half(n)?;\n    return h + 100;\n}\n\n\
+         gen fn words() {\n    yield \"a\" + \"b\";\n    yield \"c\" + \"d\";\n}\n\n\
+         fn main() {\n    let h = q(8);\n    let r = resume h;\n    let n = 0;\n    for w in words() {\n        n += w.len();\n    }\n}\n",
+    )]);
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
