@@ -1432,7 +1432,7 @@ impl Heap {
             self.gc_next_threshold
         };
         cfg!(feature = "rc-check")
-            || self.counts.alloc_bytes.saturating_sub(self.counts.young_bytes) > limit
+            || self.counts.alloc_bytes > limit
             || self.held_over_budget()
             || self.slab.young_chunks_in_use() >= self.nursery_chunks
     }
@@ -1486,7 +1486,7 @@ impl Heap {
             self.gc_next_threshold
         };
         cfg!(feature = "rc-check")
-            || self.counts.alloc_bytes.saturating_sub(self.counts.young_bytes) > limit
+            || self.counts.alloc_bytes > limit
             || self.held_over_budget()
     }
 
