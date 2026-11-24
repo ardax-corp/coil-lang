@@ -39,6 +39,10 @@ interpreter, wasm) runs the same counted bodies. Its module doc is the reference
   allocation, a load, a host call's result) is incremented where it is defined;
 - an owned root is decremented after its last use, or on the edge where it dies, and on every way
   out including panics (unwind homes) and `break` / `continue`; a `return` moves it to the caller.
+- a tail call leaves the caller nothing to release after it, so it enters a twin of its callee,
+  `name$own` (`owning_tail_twins`), that owns its parameters: an argument that dies at the call
+  moves in, one that lives on is incremented. The twin keeps no unwind homes, so the engines still
+  reuse the frame. Coroutine bodies own their parameters the same way.
 
 Elision: numbers are never counted (constants, arithmetic, φs of them, a word a number store
 writes, scalar array elements), and an inc / dec pair of one word in a block cancels when nothing
@@ -97,6 +101,15 @@ outside the heap; an object with such an owner, a runtime root (statics, handles
 a kind counts cannot free is live, and so is everything it reaches. The trial counts live in a side
 table, so the headers are never touched.
 
+A generator suspended at a `yield` holds words on its own stack. Before each yield the body names
+its frame's homes and a mask of the ones that own a count (`MirFunc::counted_homes`: the homes its
+cleanup pad loads and releases) in `NativeCtx::gen_homes` / `gen_mask`; `coil_native_yield` hands
+them to the resumer, which keeps them on the coroutine (`ObjCoroutine::frame`) until the next
+resume or close. The collector reads those words as the generator's children. A garbage cycle
+through such a generator is not freed directly: the generator is closed, as a `drop` is run,
+which releases its frame's words, and the counts free the rest. A frame with a counted home past
+the 64th names nothing, and its generator stays live with what it reaches.
+
 It runs from a safepoint when the live bytes pass a threshold (`Heap::cycles_due`; the threshold
 after a run is the live bytes times the growth factor, at least 1 MiB, at most the heap cap), and
 on `gc::collect`. A program with no cyclic class pays nothing.
@@ -128,10 +141,7 @@ The `region` hooks (host ids 177/178) are no-ops kept so later ids do not move.
 
 ## Known gaps
 
-- A cycle through a *suspended* generator's frame leaks: the frame's words are not the coroutine's
-  children under counts, so trial deletion cannot see the cycle.
-- A tail call's owned arguments leak: decrementing them after the call would end the tail call, and
-  there is no owned-parameter convention yet.
+- A cycle through a suspended generator whose frame has a counted home past the 64th leaks.
 - A frame that unwinds through a panic past code without unwind homes, and a coroutine abandoned
   before it finishes, can leave objects to the leak report.
 - Empty chunks are not returned to the OS.
