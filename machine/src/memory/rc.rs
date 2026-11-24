@@ -17,14 +17,13 @@ use super::*;
 /// What [`Heap::rc_check`] does at a major mark (`COIL_RC_CHECK`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RcCheckMode {
-    /// No check (the default).
+    /// No counts: the tracing collector alone (`COIL_RC_CHECK=0`).
     Off,
     /// Count and print a summary line to stderr.
     Report,
     /// [`Self::Report`], and panic when a count is below its references.
     Abort,
-    /// Keep counts with no oracle (`COIL_RC_CHECK=count`): what a run
-    /// costs with counts (reference-count plan step 6).
+    /// Keep counts with no oracle (the default, or `COIL_RC_CHECK=count`).
     Count,
 }
 
@@ -33,8 +32,8 @@ pub fn rc_check_mode() -> RcCheckMode {
     static MODE: std::sync::OnceLock<RcCheckMode> = std::sync::OnceLock::new();
     *MODE.get_or_init(|| match std::env::var("COIL_RC_CHECK").as_deref() {
         Ok("abort") => RcCheckMode::Abort,
-        Ok("count") => RcCheckMode::Count,
-        Ok("0") | Ok("") | Err(_) => RcCheckMode::Off,
+        Ok("count") | Ok("") | Err(_) => RcCheckMode::Count,
+        Ok("0") => RcCheckMode::Off,
         Ok(_) => RcCheckMode::Report,
     })
 }
@@ -46,7 +45,13 @@ pub fn rc_check_mode() -> RcCheckMode {
 /// mark aborts naming who still holds one it reaches, as
 /// `--early-free check` does.
 pub(crate) fn rc_frees_asked() -> bool {
-    rc_check_mode() != RcCheckMode::Off && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "1" || v == "check" || v == "only")
+    rc_check_mode() != RcCheckMode::Off && matches!(rc_free_mode().as_str(), "1" | "check" | "only")
+}
+
+/// `COIL_RC_FREE`, or `only` when counts are kept with no oracle (the
+/// default).
+fn rc_free_mode() -> String {
+    std::env::var("COIL_RC_FREE").unwrap_or_else(|_| if rc_check_mode() == RcCheckMode::Count { "only".into() } else { String::new() })
 }
 
 /// `COIL_RC_FREE=only`: counts free, and the tracing collector never runs
@@ -55,13 +60,13 @@ pub(crate) fn rc_frees_asked() -> bool {
 /// tracing GC.
 pub fn rc_trace_off() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| rc_frees_asked() && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "only"))
+    *ON.get_or_init(|| rc_frees_asked() && rc_free_mode() == "only")
 }
 
 /// `COIL_RC_FREE=check` ([`rc_frees_asked`]).
 fn rc_frees_checked() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| rc_frees_asked() && std::env::var("COIL_RC_FREE").is_ok_and(|v| v == "check"))
+    *ON.get_or_init(|| rc_frees_asked() && rc_free_mode() == "check")
 }
 
 /// `COIL_RC_SWEPT=1` in a check run: the sweep names each object it frees
@@ -867,6 +872,8 @@ mod tests {
     #[test]
     fn a_mutation_moves_the_owners_its_words_gained_and_lost() {
         let mut heap = Heap::default();
+        // Allocation counts nothing: the test counts by hand.
+        heap.set_rc_counting(false);
         let (a, _) = heap.alloc(ObjString::from("a"), Object::String);
         let (b, _) = heap.alloc(ObjString::from("b"), Object::String);
         let (arr, mut gc) = heap.alloc(ObjArray::new(vec![Value::from(a.addr())]).of_kind(common::WORD_POINTER), Object::Array);
@@ -896,6 +903,7 @@ mod tests {
     #[test]
     fn a_release_frees_what_only_the_object_kept() {
         let mut heap = Heap::default();
+        heap.set_rc_counting(false);
         let ptr = |o: Object| Value::from(o.addr());
         let (c, _) = heap.alloc(ObjString::from("c"), Object::String);
         let (b, _) = heap.alloc(ObjArray::new(vec![ptr(c)]).of_kind(common::WORD_POINTER), Object::Array);

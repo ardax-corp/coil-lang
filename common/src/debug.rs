@@ -287,6 +287,12 @@ pub const MIR_SECTION_EXTERN_STRUCT_FORMAT: u8 = 20;
 /// older sections, whose constant `kinds` words mean otherwise.
 pub const MIR_SECTION_KINDS2_FORMAT: u8 = 21;
 
+/// The first MIR section format whose bodies own their words: the compiler
+/// inserts `RcInc` / `RcDec` in every body (reference counts by default,
+/// plan step 10, archive 8.8). Its layout is format 21's; a reader refuses
+/// format 21, whose bodies may count nothing and would be freed under.
+pub const MIR_SECTION_COUNTED_FORMAT: u8 = 22;
+
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and
 /// scope and an `at_call` byte; little-endian `u32`s.

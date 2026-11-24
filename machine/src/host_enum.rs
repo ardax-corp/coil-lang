@@ -593,7 +593,8 @@ mod tests {
     #[test]
     fn layout_3_decodes_as_pair() {
         assert_eq!(HostEnumLayout::from_u32(common::HOST_ENUM_LAYOUT_PAIR), HostEnumLayout::Pair);
-        assert_eq!(HostEnumLayout::from_u32(99), HostEnumLayout::Boxed);
+        // The bits above the base are payload word kinds.
+        assert_eq!(HostEnumLayout::from_u32(HOST_ENUM_LAYOUT_BOXED | 0b1100), HostEnumLayout::Boxed);
     }
 
     #[test]

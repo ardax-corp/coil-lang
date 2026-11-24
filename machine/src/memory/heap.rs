@@ -6090,6 +6090,8 @@ mod tests {
     #[test]
     fn unique_copies_a_shared_objects_pinned_children() {
         let mut heap = Heap::default();
+        // Sharing by the shared bit, as with no counts.
+        heap.set_rc_counting(false);
         let pinned_child = cow_instance(&mut heap, vec![Value::from(3i64)]);
         pinned_child.set_pinned(true);
         let plain_child = cow_instance(&mut heap, vec![Value::from(4i64)]);

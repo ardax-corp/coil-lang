@@ -5,8 +5,8 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs` (21 today; a reader takes
-21 only and refuses any other).
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (22 today; a reader takes
+22 only and refuses any other).
 
 ## Major 8
 
@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 6, below, is the
-current version, 8.7 with MIR section `FORMAT` 21). A runtime refuses a major
+only add something to the format raise the minor (minor 8, below, is the
+current version, 8.8 with MIR section `FORMAT` 22). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -162,6 +162,13 @@ Minor 7 (reference counts, plan step 10) adds MIR tag 54 to format 21: a
 as tag 13's. Its old and new words are numbers, so native code stores it in place
 in a run that keeps counts instead of calling the runtime. An 8.6 archive loads
 unchanged: its field stores all take the counted path.
+
+Minor 8 (reference counts, plan step 10) keeps counts by default: the compiler
+inserts `RcInc` / `RcDec` in every body and the runtime frees at count zero with
+no tracing collector (`COIL_RC_CHECK=0` is the old collector, until step 10 deletes
+it). A body that counts nothing would have its words freed under it, so the MIR
+section is a new `FORMAT`, 22, with format 21's layout, and the reader refuses 21:
+an 8.7 archive's code is compiled again.
 
 ## Major 7
 
