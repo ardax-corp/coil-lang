@@ -30,7 +30,7 @@ HIR summaries (`hir::effects`). The walk's rules:
 - A function is **locally impure** if it uses `panic` / `yield` / FFI / `defer`,
   mutates via index/field assignment, or calls a non-identifier callee.
 - Calls to names that are not user `fn`s (e.g. imported `write_all`, `spawn`,
-  `collect`, `attach`) take the matching effect bit (unknown names are impure).
+  `collect`, `suspend`) take the matching effect bit (unknown names are impure).
 - An operator on a class, an enum or a type parameter (`a < b`, `-a`,
   `a += b`) runs the type's trait impl, and a `for … in` over anything but
   an array, a tuple or a range runs an iterator's `next` or resumes a

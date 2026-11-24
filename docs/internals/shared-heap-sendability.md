@@ -253,7 +253,7 @@ A Layer B implementation that forgets back-edge polls will deadlock when
 one chunk allocates into a collect while another is in a tight `i += 1`
 loop. That is why C1 starts on Layer A.
 
-Parked IO (`wait_fd_helping` / `Stream.park`) must **not** sit inside a
+Parked IO (`wait_fd_helping`) must **not** sit inside a
 shared-heap epoch. Stolen C1 bodies are CPU-pure. Handshake vs IO help-steal
 is an open (refuse for C1).
 
