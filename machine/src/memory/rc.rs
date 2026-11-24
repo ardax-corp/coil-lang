@@ -603,9 +603,14 @@ impl Heap {
     /// [`rc_leaks_shown`]: tally the live objects that are not immortal by
     /// kind and print them (one line, nothing when there are none).
     pub(super) fn report_leaks(&self) {
+        // What an immortal object holds (a static's value restored from the
+        // compile-time snapshot, written since) lives as long as it does.
+        let mut exempt = self.leak_exempt.clone();
+        let immortal: Vec<Object> = self.objects().filter(|o| o.rc_count() == COUNT_IMMORTAL).collect();
+        self.reach_into(immortal, &mut exempt);
         let mut by_kind: std::collections::BTreeMap<&str, (usize, usize)> = std::collections::BTreeMap::new();
         for obj in self.objects() {
-            if obj.rc_count() == COUNT_IMMORTAL || self.leak_exempt.contains(&obj.addr()) {
+            if obj.rc_count() == COUNT_IMMORTAL || exempt.contains(&obj.addr()) {
                 continue;
             }
             let kind = match obj {
@@ -640,12 +645,20 @@ impl Heap {
     /// [`Self::report_leaks`] leaves out `roots` (the statics' words as the
     /// program ends) and what they reach: they live as long as the program.
     pub(crate) fn rc_leaks_exempt(&mut self, roots: &[Value]) {
+        let mut seen = std::mem::take(&mut self.leak_exempt);
+        let stack: Vec<Object> = roots.iter().filter_map(|v| self.rc_object(*v)).collect();
+        self.reach_into(stack, &mut seen);
+        self.leak_exempt = seen;
+    }
+
+    /// Add to `seen` the objects `stack` holds and every object they reach.
+    fn reach_into(&self, mut stack: Vec<Object>, seen: &mut std::collections::HashSet<u64>) {
         struct Reach<'a>(&'a Heap, &'a mut Vec<Object>);
+        // Any word that names an object counts here, whatever its kind
+        // says: the report is the only reader, and erring keeps it quiet.
         impl SlotVisitor for Reach<'_> {
-            fn word(&mut self, v: &Value, kind: u8) {
-                if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
-                    && let Some(o) = self.0.rc_object(*v)
-                {
+            fn word(&mut self, v: &Value, _kind: u8) {
+                if let Some(o) = self.0.rc_object(*v) {
                     self.1.push(o);
                 }
             }
@@ -656,14 +669,11 @@ impl Heap {
                 }
             }
         }
-        let mut seen = std::mem::take(&mut self.leak_exempt);
-        let mut stack: Vec<Object> = roots.iter().filter_map(|v| self.rc_object(*v)).collect();
         while let Some(o) = stack.pop() {
             if seen.insert(o.addr()) {
                 o.visit_slots(self, &mut Reach(self, &mut stack));
             }
         }
-        self.leak_exempt = seen;
     }
 
     /// A fresh enum a host call boxed for a call site that takes it as two
