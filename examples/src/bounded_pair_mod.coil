@@ -1,0 +1,21 @@
+// A trait and generic functions over it that return a closed two-word
+// `Result`, for `tests/modules/imported_bounded_generic_pair_result.coil`.
+
+/// Takes a number and says how much of it it kept.
+trait Take<S> {
+    fn take(S s, int n) -> Result<int, string> {}
+}
+
+/// `t.take(n)` through the bound.
+fn take_through<T: Take>(T t, int n) -> Result<int, string> {
+    return t.take(n);
+}
+
+/// The sum of what `t` keeps of each of `ns`, or the first error.
+fn take_all<T: Take>(T t, Vec<int> ns) -> Result<int, string> {
+    let total = 0;
+    for n in ns {
+        total += t.take(n)?;
+    }
+    return Ok(total);
+}

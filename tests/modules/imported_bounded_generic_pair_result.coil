@@ -1,0 +1,42 @@
+// Another module's bounded generic functions returning a closed two-word
+// `Result`, called at a class of this module: the clone made here calls
+// the shared body, which returns both words.
+// Needs `--root examples/src` (bounded_pair_mod).
+use tests::assert;
+use bounded_pair_mod::{Take, take_through, take_all};
+
+/// Keeps at most `cap` of each take; a negative one is an error.
+shared class Capped {
+    pub cap: int,
+    pub kept: int,
+}
+
+impl Take for Capped {
+    fn take(Capped c, int n) -> Result<int, string> {
+        if n < 0 {
+            return Err("negative");
+        }
+        let k = if n < c.cap {
+            n
+        } else {
+            c.cap
+        };
+        c.kept += k;
+        return Ok(k);
+    }
+}
+
+test("a bounded generic of another module returns its Result") {
+    let c = new Capped(3, 0);
+    assert!(take_through(c, 2) == Ok(2));
+    assert!(take_through(c, 5) == Ok(3));
+    assert!(take_through(c, -1) == Err("negative"));
+    assert!(c.kept == 5);
+}
+
+test("the error comes back through a loop with ?") {
+    let c = new Capped(4, 0);
+    assert!(take_all(c, [1, 9, 2]) == Ok(7));
+    assert!(take_all(c, [1, -2, 3]) == Err("negative"));
+    assert!(c.kept == 8);
+}
