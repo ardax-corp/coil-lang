@@ -256,9 +256,8 @@ pub fn layout_fingerprint() -> u64 {
     (super::FLAG_PINNED, super::HEADER_COUNT_OFFSET).hash(&mut h);
     // The inline count ops (reference-count plan step 6).
     (super::HEAP_ALLOC_LOCK_OFFSET, super::COUNT_IMMORTAL, super::HEAP_SLAB_LO_OFFSET, super::HEAP_SLAB_HI_OFFSET).hash(&mut h);
-    // The store view protocol (#2687): code built for plain views only
-    // would store in place into an array with a card table.
-    (super::VIEW_PLAIN, super::VIEW_TRACKED, super::CARD_SHIFT, super::CARD_MIN_WORDS).hash(&mut h);
+    // The store view protocol: plain views only, no card table.
+    (super::VIEW_PLAIN, "no cards").hash(&mut h);
     h.finish()
 }
 

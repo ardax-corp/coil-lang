@@ -852,8 +852,8 @@ fn compile_job(isa: &dyn cranelift_codegen::isa::TargetIsa, ctx: &mut cranelift_
 const JOBS_PER_THREAD: usize = 16;
 
 /// A word view's state after an op that may have moved its array's storage:
-/// not `0` (no view: not a word array), [`machine::VIEW_PLAIN`] or
-/// [`machine::VIEW_TRACKED`]. The next element access takes the view again.
+/// not `0` (no view: not a word array) or [`machine::VIEW_PLAIN`]. The
+/// next element access takes the view again.
 const VIEW_UNKNOWN: i64 = -1;
 
 /// Past this, lowering is what compiling waits for: more threads only contend.
@@ -2841,10 +2841,6 @@ struct Lower<'a> {
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
     views: HashMap<ValueId, (Variable, Variable, Variable)>,
-    /// The card bytes of the arrays this body stores into, for a store
-    /// through a tracked view (`machine::VIEW_TRACKED`): the third word
-    /// `coil_native_view` writes.
-    view_cards: HashMap<ValueId, Variable>,
     /// Strings this body reads `s[i]` of: `(known, pointer, length)` of
     /// their bytes, filled at the first read after the string value is
     /// defined or the views were dropped (`machine::native::coil_native_str_view`;
@@ -3071,7 +3067,6 @@ impl<'a> Lower<'a> {
             cur_loc: None,
             cur_site: None,
             views: HashMap::new(),
-            view_cards: HashMap::new(),
             str_views: HashMap::new(),
             lane_views: HashMap::new(),
             live: None,
@@ -3261,10 +3256,8 @@ impl<'a> Lower<'a> {
         let roots = self.push_roots(f);
         self.b.ins().call(self.collect, &[self.ctx]);
         // A body with no heap homes pushes no roots, so `pop_roots` drops
-        // no views: drop them here. A minor collection leaves an old array
-        // unlogged again, and an in-place store through a view taken
-        // before it would skip the write barrier, so a young element it
-        // stores is never traced (#2323).
+        // no views: drop them here (the safepoint may run code that resizes
+        // an array).
         if roots.is_none() {
             self.drop_views();
         }
@@ -3885,10 +3878,6 @@ impl<'a> Lower<'a> {
                     for (array, store) in arrays {
                         if store {
                             self.stored.insert(array);
-                            if !self.view_cards.contains_key(&array) {
-                                let v = self.b.declare_var(types::I64);
-                                self.view_cards.insert(array, v);
-                            }
                         }
                         if !self.views.contains_key(&array) {
                             let vars = (self.b.declare_var(types::I64), self.b.declare_var(types::I64), self.b.declare_var(types::I64));
@@ -3900,10 +3889,6 @@ impl<'a> Lower<'a> {
                     MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } => *array,
                     MirInst::StoreIndex { array, .. } => {
                         self.stored.insert(*array);
-                        if !self.view_cards.contains_key(array) {
-                            let v = self.b.declare_var(types::I64);
-                            self.view_cards.insert(*array, v);
-                        }
                         *array
                     }
                     _ => continue,
@@ -4608,7 +4593,7 @@ impl<'a> Lower<'a> {
                 // A number field's old and new words are numbers (`scalar`).
                 let inline = counted_inline(vt) || *scalar || matches!(vt, MirTy::F64 | MirTy::Bool);
                 if machine::native::product_slots().inline_stores && inline {
-                    // In place, unless the write barrier must log the object.
+                    // In place when the object is an instance.
                     let (fast, slow) = self.product_slot(o, *index, true);
                     self.b.switch_to_block(fast);
                     let at = self.b.block_params(fast)[0];
@@ -5640,10 +5625,6 @@ impl<'a> Lower<'a> {
         self.b.def_var(ok, r);
         self.b.def_var(ptr, p);
         self.b.def_var(len, n);
-        if let Some(&cards) = self.view_cards.get(&v) {
-            let c = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 16);
-            self.b.def_var(cards, c);
-        }
     }
 
     /// Fill `v`'s lane view right after `v` is defined, when the body
@@ -5975,8 +5956,8 @@ impl<'a> Lower<'a> {
         self.b.ins().band(inb, has)
     }
 
-    /// Whether word-view state `ok` is a view ([`machine::VIEW_PLAIN`] or
-    /// [`machine::VIEW_TRACKED`]): above `0` (none) and [`VIEW_UNKNOWN`].
+    /// Whether word-view state `ok` is a view ([`machine::VIEW_PLAIN`]):
+    /// above `0` (none) and [`VIEW_UNKNOWN`].
     fn view_known(&mut self, ok: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
         self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, ok, 0)
     }
@@ -5985,8 +5966,7 @@ impl<'a> Lower<'a> {
     /// it (`machine::native::product_slots`): an instance's field or an
     /// enum's payload word (a tuple's item), one store at one offset.
     /// Branches to the first block, with the slot's address as its
-    /// parameter, or to the second. A `store` takes instances only, and an
-    /// object the write barrier must log takes the second.
+    /// parameter, or to the second. A `store` takes instances only.
     /// An inline `RcInc` / `RcDec` of `s`, a word that is an object or null
     /// (a tag bit allowed): the header count is read and written here, and
     /// the runtime is called only for a decrement that may release the

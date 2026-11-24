@@ -1551,13 +1551,7 @@ fn host_writes_words(id: u64) -> bool {
 /// `[pointer, length]` to `out` and returns [`crate::memory::VIEW_PLAIN`]
 /// for an array that stores words, `0` for anything else (a byte array, a
 /// tuple, not an array), which native code then reads through the helpers
-/// above. A store view of an array with a card table returns
-/// [`crate::memory::VIEW_TRACKED`] and writes the card bytes' address as a
-/// third word: loads and stores stay in place, and a store also writes `1`
-/// at `cards + (index >> CARD_SHIFT)` (#2687). The cards cover the length,
-/// and only a push, a runtime call or a collection grows or clears them,
-/// which all drop the view. With
-/// `for_store` set, marks the array as possibly holding references, as
+/// above. With `for_store` set, marks the array as possibly holding references, as
 /// every runtime store does. The pointer stays valid while native code runs:
 /// it never grows or shrinks an array, and storing into a word array never
 /// moves its storage.
@@ -1569,20 +1563,14 @@ pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return 0;
     };
-    let view = if for_store != 0 {
-        gc.as_mut().words_view_for_store()
-    } else {
-        gc.as_ref().words_view_for_load().map(|(p, n)| (p, n, std::ptr::null_mut()))
-    };
+    let view = if for_store != 0 { gc.as_mut().words_view_for_store() } else { gc.as_ref().words_view_for_load() };
     match view {
-        Some((ptr, len, cards)) => {
+        Some((ptr, len)) => {
             unsafe {
                 out.write(ptr as u64);
                 out.add(1).write(len as u64);
-                out.add(2).write(cards as u64);
             }
-            // An array with a card table: native code marks each store's card.
-            if cards.is_null() { crate::memory::VIEW_PLAIN } else { crate::memory::VIEW_TRACKED }
+            crate::memory::VIEW_PLAIN
         }
         None => 0,
     }
