@@ -153,10 +153,11 @@ fn step_parked<H: GenHost + ?Sized>(h: &mut H, gc: RefCoroutine, send: Value) ->
             for (w, v) in words.iter_mut().zip(coro.saved_stack.iter()) {
                 *w = v.bits();
             }
+            // The body owns its arguments from here on, as a fiber's does.
+            with_mut(gc, |c| c.started = true);
             (run_parked(h, gc, |env| crate::native::call(&entry, &words, env)), entry.cleanup)
         }
     };
-    with_mut(gc, |c| c.started = true);
     match outcome {
         crate::native::NativeOutcome::Parked(call, word) => {
             let waiting = call.kind != crate::native::PARK_YIELD;
