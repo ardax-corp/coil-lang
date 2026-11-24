@@ -512,13 +512,7 @@ impl Heap {
         self.sync_inline_gate();
         self.alloc_lock = ptr::null();
         self.apply_epoch_rc();
-        for addr in std::mem::take(&mut self.epoch_born) {
-            if let Some(obj) = self.find_object_by_addr(addr)
-                && obj.generation() & GEN_YOUNG == 0
-            {
-                obj.set_generation(GEN_UNLOGGED);
-            }
-        }
+        self.epoch_born.clear();
     }
 
     /// Allocates an object and returns its handle. The object is pushed to the
@@ -708,17 +702,8 @@ impl Heap {
             self.counts.young_bytes += size;
             return (object, content);
         }
-        if T::HOLDS_REFS && self.nursery {
-            if self.epoch_stw {
-                self.epoch_born.push(object.addr());
-            } else if self.slab.young_chunks_in_use() == 0 {
-                // Nothing young to name yet (pretenuring right after a
-                // minor): the barrier records its first write.
-                content.header.generation.set(GEN_UNLOGGED);
-            } else {
-                // Born old, maybe naming young objects: remembered at once.
-                REMEMBERED.with_borrow_mut(|r| r.push(object.addr()));
-            }
+        if T::HOLDS_REFS && self.nursery && self.epoch_stw {
+            self.epoch_born.push(object.addr());
         }
         match self.side_list_of(object) {
             Some(SideList::Weak) => self.weaks.push(object.addr()),
@@ -1755,10 +1740,6 @@ impl Drop for Heap {
     fn drop(&mut self) {
         // Drop payloads in place; the slab (and its free lists) goes away
         // next, so slots are not returned and nothing is collected first.
-        self.forget_remembered();
-        if self.slab.young_chunks_in_use() != 0 {
-            note_young_heap(false);
-        }
         if rc::rc_leaks_shown() {
             self.report_leaks();
         }
@@ -2136,11 +2117,6 @@ impl Object {
     pub(crate) fn generation(&self) -> u8 {
         // SAFETY: every kind shares the `repr(C)` header at the slot start.
         unsafe { &*(self.addr() as *const GcHeader) }.generation.get()
-    }
-
-    #[inline]
-    pub(crate) fn set_generation(&self, bits: u8) {
-        unsafe { &*(self.addr() as *const GcHeader) }.generation.set(bits);
     }
 
     /// Copy-on-write: whether a second place may name this object.
@@ -4358,125 +4334,7 @@ pub const KIND_ARRAY: u8 = 6;
 
 /// [`GcHeader::generation`]: the object lives in a young (nursery) chunk.
 pub(crate) const GEN_YOUNG: u8 = 1;
-/// [`GcHeader::generation`]: an old object not in the remembered set; its
-/// next payload write records it ([`remember_written`]).
-pub(crate) const GEN_UNLOGGED: u8 = 2;
-/// [`GcHeader::generation`]: a young object a minor pinned, held in its
-/// chunk until a major frees it. Minors treat it as old: they do not trace
-/// it, and the write barrier records it ([`GEN_UNLOGGED`]) like any old
-/// object (#2255).
-pub(crate) const GEN_HELD: u8 = 8;
 
-/// [`GcHeader::generation`]: an old object the barrier logged as quiet
-/// ([`QUIET`]), whose barrier the nursery's restart turns back on
-/// ([`relog_quiet`]). A store view of it must remember it at once instead
-/// ([`GcData::note_store_view`]).
-pub(crate) const GEN_QUIET: u8 = 16;
-
-/// Generation bits of an object the write barrier covers: an old one or a
-/// held one.
-#[inline]
-pub(crate) fn barriered(generation: u8) -> bool {
-    generation & GEN_YOUNG == 0 || generation & GEN_HELD != 0
-}
-
-thread_local! {
-    /// Old objects written since the last minor collection (the nursery's
-    /// remembered set). The barrier has no heap at hand, so the set lives
-    /// with the thread; a heap takes only its own entries
-    /// ([`Heap::take_remembered`]).
-    static REMEMBERED: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// Heaps on this thread with nursery chunks in use. While none has, no
-    /// young object exists for a write to store, and the barrier records
-    /// nothing (pretenured objects are written while the nursery is empty).
-    static YOUNG_HEAPS: Cell<u32> = const { Cell::new(0) };
-    /// Old objects written while no heap here had young objects: their
-    /// barrier is off (nothing young to record) until their heap's nursery
-    /// starts again ([`relog_quiet`]), so a write loop pays it once.
-    static QUIET: std::cell::RefCell<Vec<u64>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// Times [`QUIET`] outgrew [`QUIET_CAP`] and was dropped: a heap that
-    /// has not seen the latest count relogs all its old objects instead
-    /// ([`relog_all`]).
-    static QUIET_OVERFLOWS: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Entries [`QUIET`] holds before it is dropped for a whole-heap relog. A
-/// long pretenured stretch writes every new object once; a list per write
-/// would grow with the program (and every compaction forwards it).
-const QUIET_CAP: usize = 1 << 16;
-
-/// [`QUIET_OVERFLOWS`] now.
-pub(super) fn quiet_overflows() -> u64 {
-    QUIET_OVERFLOWS.with(Cell::get)
-}
-
-/// [`relog_quiet`] for a heap whose entries [`QUIET`] dropped: log every
-/// old object of `slab` again.
-pub(super) fn relog_all(slab: &super::slab::Slab) {
-    let mut cur = super::slab::SlotCursor::default();
-    while let Some(addr) = slab.next_slot(&mut cur) {
-        // SAFETY: `next_slot` yields slot starts in mapped chunks.
-        relog(unsafe { &*(addr as *const GcHeader) });
-    }
-}
-
-/// `slab`'s nursery starts again (no young object exists yet): turn the
-/// barrier back on for its old objects written while it was empty.
-pub(super) fn relog_quiet(slab: &super::slab::Slab) {
-    QUIET.with_borrow_mut(|q| {
-        q.retain(|&addr| {
-            if !slab.contains_slot(addr) {
-                return true;
-            }
-            // SAFETY: a slot start in a mapped chunk holds a header; a
-            // freed or re-carved slot reads as free or as another old
-            // object, and an extra log bit only costs one more record.
-            relog(unsafe { &*(addr as *const GcHeader) });
-            false
-        });
-    });
-}
-
-/// The nursery starts again: an old object written while it was empty is
-/// logged again on its next write.
-fn relog(header: &GcHeader) {
-    let g = header.generation.get();
-    if header.kind.get() != 0 && barriered(g) {
-        header.generation.set(g & !GEN_QUIET | GEN_UNLOGGED);
-    }
-}
-
-/// A heap on this thread started (`true`) or stopped using nursery chunks.
-pub(super) fn note_young_heap(on: bool) {
-    YOUNG_HEAPS.with(|n| n.set(if on { n.get() + 1 } else { n.get().saturating_sub(1) }));
-}
-
-/// Slow path of the write barrier in [`GcData::as_mut`].
-#[cold]
-#[inline(never)]
-fn remember_written(header: &GcHeader) {
-    let addr = header as *const GcHeader as u64;
-    if YOUNG_HEAPS.with(Cell::get) == 0 {
-        header.generation.set(header.generation.get() & !GEN_UNLOGGED | GEN_QUIET);
-        QUIET.with_borrow_mut(|q| {
-            q.push(addr);
-            if q.len() >= QUIET_CAP {
-                q.clear();
-                QUIET_OVERFLOWS.with(|n| n.set(n.get() + 1));
-            }
-        });
-        return;
-    }
-    header.generation.set(header.generation.get() & !GEN_UNLOGGED);
-    REMEMBERED.with_borrow_mut(|r| r.push(addr));
-}
-
-/// Slow path of [`GcData::note_store_view`].
-#[cold]
-#[inline(never)]
-fn remember_viewed(addr: u64) {
-    REMEMBERED.with_borrow_mut(|r| r.push(addr));
-}
 
 /// Prefix of every managed allocation. Kind reconstructs [`Object`] without
 /// a live-address HashSet (`kind == 0` is a free slot). One word: kind,
@@ -4488,7 +4346,7 @@ struct GcHeader {
     /// [`FLAG_FINALIZED`], [`FLAG_PINNED`]. Header state: no barrier, and
     /// an evacuation copies it with the slot.
     flags: Cell<u8>,
-    /// Nursery bits ([`GEN_YOUNG`], [`GEN_UNLOGGED`], [`GEN_PINNED`]).
+    /// Nursery bits ([`GEN_YOUNG`], [`GEN_PINNED`]).
     generation: Cell<u8>,
     /// Debug / gc-stress: generation of the steal epoch the object was
     /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes the
@@ -4638,31 +4496,7 @@ impl<T> AsMut<T> for GcData<T> {
     fn as_mut(&mut self) -> &mut T {
         #[cfg(any(debug_assertions, feature = "gc-stress"))]
         self.check_epoch_write();
-        // Write barrier: the first write to an old object since the last
-        // minor collection records it, so the nursery finds a young object
-        // it may now name ([`remember_written`]).
-        if unlikely(self.header.generation.get() & GEN_UNLOGGED != 0) {
-            remember_written(&self.header);
-        }
         &mut self.data
-    }
-}
-
-impl GcData<ObjArray> {
-    /// Native code took a store view of this array, after
-    /// [`AsMut::as_mut`] ran its barrier: stores through the view skip the
-    /// barrier until native code drops it. An array the barrier logged as
-    /// quiet is remembered now. Its barrier would come back on when the
-    /// nursery starts again, which an allocation does with the view still
-    /// live, and the young objects stored through the view would go
-    /// unseen (#2702).
-    #[inline]
-    pub(crate) fn note_store_view(&self) {
-        let g = self.header.generation.get();
-        if unlikely(g & GEN_QUIET != 0) {
-            self.header.generation.set(g & !GEN_QUIET);
-            remember_viewed(self as *const Self as u64);
-        }
     }
 }
 

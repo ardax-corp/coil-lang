@@ -304,8 +304,6 @@ pub struct Slab {
     young_in_use: usize,
     /// Nursery chunks held by a minor collection for a pinned survivor.
     young_held: usize,
-    /// [`super::heap::quiet_overflows`] when this slab last relogged.
-    quiet_epoch: u64,
 }
 
 /// Nursery size classes a slab can have: one per nursery object type at
@@ -391,7 +389,6 @@ impl Slab {
             bumps: Box::new([Bump::default(); YOUNG_CLASSES]),
             young_in_use: 0,
             young_held: 0,
-            quiet_epoch: 0,
         }
     }
 
@@ -457,15 +454,6 @@ impl Slab {
             Some(i) => i,
             None => self.map_young_chunk(slot_size, align),
         };
-        if self.young_in_use == 0 {
-            super::heap::note_young_heap(true);
-            let overflows = super::heap::quiet_overflows();
-            if self.quiet_epoch != overflows {
-                super::heap::relog_all(self);
-                self.quiet_epoch = overflows;
-            }
-            super::heap::relog_quiet(self);
-        }
         self.young_in_use += 1;
         let c = self.chunks.get(i).expect("young chunk");
         let first = c.ptr as u64 + u64::from(c.meta.first_off);
@@ -601,7 +589,6 @@ impl Slab {
     /// (its slots must already be poisoned). The current chunks restart
     /// empty.
     pub fn finish_young(&mut self, promoted: &[usize], held: &[(usize, u64)], free: Vec<NonNull<u8>>) {
-        let had = self.young_in_use != 0;
         for class in &mut self.young {
             let was_held: Vec<usize> = class.held.drain(..).map(|(i, _)| i).collect();
             for i in class.used.drain(..).chain(was_held) {
@@ -623,9 +610,6 @@ impl Slab {
         }
         self.young_in_use = 0;
         self.young_held = held.len();
-        if had {
-            super::heap::note_young_heap(false);
-        }
     }
 
     fn set_released(&mut self, chunk: usize, released: bool) {

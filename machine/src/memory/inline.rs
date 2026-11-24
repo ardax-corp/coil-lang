@@ -162,10 +162,6 @@ pub struct ProductSlots {
     pub kind_at: u32,
     pub kind: u8,
     pub enum_kind: u8,
-    /// The header's generation byte, and the bit the write barrier takes
-    /// the slow path on ([`GEN_UNLOGGED`]).
-    pub generation_at: u32,
-    pub unlogged: u8,
     /// The storage's discriminant byte.
     pub storage_at: u32,
     /// Inline slots: the discriminant, the `u8` slot count and the words.
@@ -215,8 +211,6 @@ pub fn product_slots() -> ProductSlots {
         kind_at: off(&header, &header.kind) as u32,
         kind: KIND_INSTANCE,
         enum_kind: KIND_ENUM,
-        generation_at: off(&header, &header.generation) as u32,
-        unlogged: GEN_UNLOGGED,
         storage_at: storage as u32,
         inline_tag,
         inline_len_at: inline_len_at as u32,

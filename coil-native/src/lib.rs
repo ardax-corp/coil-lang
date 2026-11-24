@@ -6078,11 +6078,7 @@ impl<'a> Lower<'a> {
         let k = self.b.ins().uload8(types::I64, flags, o, l.kind_at as i32);
         if store {
             let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
-            let g = self.b.ins().uload8(types::I64, flags, o, l.generation_at as i32);
-            let logged = self.b.ins().band_imm_u(g, i64::from(l.unlogged));
-            let clear = self.b.ins().icmp_imm_s(IntCC::Equal, logged, 0);
-            let both = self.b.ins().band(is, clear);
-            self.b.ins().brif(both, storage, &[], slow, &[]);
+            self.b.ins().brif(is, storage, &[], slow, &[]);
         } else {
             // The two kinds differ in one bit: one test for both.
             let bit = l.kind ^ l.enum_kind;

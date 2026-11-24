@@ -1571,7 +1571,6 @@ pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u
     };
     let view = if for_store != 0 {
         let view = gc.as_mut().words_view_for_store();
-        gc.note_store_view();
         view
     } else {
         gc.as_ref().words_view_for_load().map(|(p, n)| (p, n, std::ptr::null_mut()))
@@ -1605,7 +1604,6 @@ pub unsafe extern "C" fn coil_native_lane_view(addr: u64, for_store: u64, out: *
     };
     let view = if for_store != 0 {
         let view = gc.as_mut().lanes_view();
-        gc.note_store_view();
         view
     } else {
         gc.as_ref().lanes_view_for_load()

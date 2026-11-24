@@ -5,7 +5,7 @@
 
 use std::ptr::NonNull;
 
-use super::{GcHeader, Heap, GEN_UNLOGGED, QUIET, REMEMBERED};
+use super::{GcHeader, Heap};
 
 /// Slot addresses of one span.
 fn slots(first: u64, end: u64, size: u64) -> impl Iterator<Item = u64> {
@@ -17,18 +17,6 @@ impl Heap {
     /// Whether any nursery chunk holds young objects (in use or held).
     pub fn has_young(&self) -> bool {
         self.slab.has_young_chunks()
-    }
-
-    /// Drop this heap's entries from the thread's remembered set (the heap
-    /// goes away; another may map the same addresses).
-    pub(super) fn forget_remembered(&self) {
-        for set in [&REMEMBERED, &QUIET] {
-            let _ = set.try_with(|r| {
-                if let Ok(mut r) = r.try_borrow_mut() {
-                    r.retain(|&addr| !self.slab.contains_slot(addr));
-                }
-            });
-        }
     }
 
     /// Make every young object old where it is, without tracing: dead ones
@@ -48,7 +36,7 @@ impl Heap {
                     free.push(unsafe { NonNull::new_unchecked(addr as *mut u8) });
                     continue;
                 }
-                header.generation.set(GEN_UNLOGGED);
+                header.generation.set(0);
             }
             let tail = self.slab.chunk_slots_end(chunk);
             free.extend(slots(end, tail, size).map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }));
