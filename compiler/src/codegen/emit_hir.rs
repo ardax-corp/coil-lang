@@ -137,6 +137,9 @@ pub(crate) struct MethodClonePlan {
     shared: String,
     shared_params: Vec<ValueLayout>,
     shared_ret: ValueLayout,
+    /// The two words the shared body returns a closed two-word result in
+    /// (`-> Result<int, string>`): its call in the thunk takes them so.
+    shared_pair: Option<PairKind>,
     shared_tys: Vec<Ty>,
     shared_ret_ty: Ty,
     generic: Option<HirGeneric>,
@@ -5802,6 +5805,7 @@ impl Compiler {
             shared: shared.key.clone(),
             shared_params: shared.params.clone(),
             shared_ret: shared.ret,
+            shared_pair: shared.pair.clone(),
             shared_tys: param_tys,
             shared_ret_ty: ret_ty,
             generic: shared.generic.as_deref().cloned(),
@@ -6074,7 +6078,10 @@ impl Compiler {
         // A function argument is wrapped as the call site would wrap it for
         // the shared body (#2182).
         let adapt = plan.generic.as_ref().map(|g| g.adapt.clone()).unwrap_or_default();
-        self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, adapt, ..compiler::SynthCallee::default() });
+        // A shared body returning a closed two-word result returns its
+        // pair: the thunk's call takes both words.
+        let pair = if unbox.is_some() { None } else { plan.shared_pair.clone() };
+        self.hir_synth_callees.insert(plan.shared.clone(), compiler::SynthCallee { dicts, adapt, pair, ..compiler::SynthCallee::default() });
         self.emit_synth_fn(name, &hir, calls);
         self.hir_synth_callees.clear();
         // The adapters its call wraps a function argument in (#2163).
