@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 
 const CHUNK: usize = 64 * 1024;
 /// Entries of [`Slab::chunk_for`]'s recent-chunk cache.
-const RECENT: usize = 64;
+const RECENT: usize = 4096;
 
 struct Chunk {
     ptr: *mut u8,
