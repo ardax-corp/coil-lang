@@ -10,6 +10,11 @@ fn coil_bin() -> String {
 /// Run `main.coil` (with the other `files` beside it) with the leak report
 /// on; its stderr.
 fn run_with_leak_report(test: &str, files: &[(&str, &str)]) -> String {
+    run_with_leak_report_flags(test, files, &[], &[])
+}
+
+/// [`run_with_leak_report`] with `flags` before the file and `env` set.
+fn run_with_leak_report_flags(test: &str, files: &[(&str, &str)], flags: &[&str], env: &[(&str, &str)]) -> String {
     let dir = std::env::temp_dir().join(format!("coil_rc_leaks_{test}_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     for (name, text) in files {
@@ -17,6 +22,8 @@ fn run_with_leak_report(test: &str, files: &[(&str, &str)]) -> String {
     }
     let out = Command::new(coil_bin())
         .env("COIL_RC_LEAKS", "1")
+        .envs(env.iter().copied())
+        .args(flags)
         .arg("--root")
         .arg(&dir)
         .arg("-A")
@@ -40,5 +47,24 @@ fn a_macro_expansion_frees_its_input_and_output() {
         ),
         ("main.coil", "use mm::m;\nfn main() { let x = m!(3); }\n"),
     ]);
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
+
+/// A fork-join auto-par makes on the interpreter runs its arms in a steal
+/// epoch, which logs counts: an object born there whose logged changes
+/// sum to nothing (a spawn's result, read and dropped) is freed at the
+/// epoch's end.
+#[test]
+fn auto_par_forks_free_what_their_epochs_made() {
+    let stderr = run_with_leak_report_flags(
+        "auto_par",
+        &[(
+            "main.coil",
+            "fn fib(int n) -> int {\n    if n < 2 {\n        return n;\n    }\n    return fib(n - 1) + fib(n - 2);\n}\n\
+             fn main() { let x = fib(22); }\n",
+        )],
+        &["--mir", "--auto-par", "on"],
+        &[("COIL_MAX_WORKER_THREADS", "4")],
+    );
     assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
 }
