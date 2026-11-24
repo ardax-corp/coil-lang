@@ -180,9 +180,15 @@ enum IoError {
     TooManyOpenFiles,
 }
 
-/// Types that bytes can be read from; implemented for `Stream`.
+/// Types that bytes can be read from without waiting; implemented for
+/// `Stream`, and by any class (a TLS stream, a test double).
 ///
-/// `read` behaves like the free function `io::read`.
+/// `read` fills the front of `buf` like the free function `io::read`:
+/// `Ok(Some(n))`, `Ok(None)` at end of input, or `Err(IoError::WouldBlock)`
+/// when nothing is ready; `wait_readable` then waits until a retry can make
+/// progress. Generic code takes it as a bound (`fn f<R: Read>(R r)`) or
+/// holds a trait value (`let r: Read = s;`). A `Stream`'s methods need no
+/// import of the trait.
 ///
 /// # Examples
 ///
@@ -214,11 +220,18 @@ enum IoError {
 trait Read<S> {
     /// Reads into `buf`; see `io::read`.
     fn read(S s, Vec<byte> buf) -> Result<Option<int>, IoError> {}
+
+    /// Waits until a `read` can make progress; see `io::wait_readable`.
+    fn wait_readable(S s) -> Result<unit, IoError> {}
 }
 
-/// Types that bytes can be written to; implemented for `Stream`.
+/// Types that bytes can be written to without waiting; implemented for
+/// `Stream`, and by any class.
 ///
-/// `write` behaves like the free function `io::write`.
+/// `write` returns how many bytes of `buf` it took, like the free function
+/// `io::write`, or `Err(IoError::WouldBlock)`; `wait_writable` then waits
+/// until a retry can make progress. `flush` sends anything the writer holds
+/// back and does nothing unless the type overrides it.
 ///
 /// # Examples
 ///
@@ -235,6 +248,42 @@ trait Read<S> {
 trait Write<S> {
     /// Writes from `buf`; see `io::write`.
     fn write(S s, Vec<byte> buf) -> Result<int, IoError> {}
+
+    /// Waits until a `write` can make progress; see `io::wait_writable`.
+    fn wait_writable(S s) -> Result<unit, IoError> {}
+
+    /// Sends what the writer holds back; does nothing by default.
+    fn flush(S s) -> Result<unit, IoError> {}
+}
+
+/// Types that hold a resource to release; implemented for `Stream`, where
+/// `close` behaves like the free function `io::close`.
+///
+/// # Examples
+///
+/// ```
+/// use io::{open, Close, IoError};
+/// use io::fs::{remove_file};
+/// # use tests::assert;
+/// let path = "/tmp/coil_doc_close_trait.txt";
+/// let s = match open(path, "w") {
+///     Result::Ok(s) => s,
+///     Result::Err(_) => panic "open failed",
+/// };
+/// let first = match s.close() {
+///     Result::Ok(_) => true,
+///     Result::Err(_) => false,
+/// };
+/// let second = match s.close() {
+///     Result::Err(IoError::AlreadyClosed) => true,
+///     default => false,
+/// };
+/// let _ = remove_file(path);
+/// assert!(first && second);
+/// ```
+trait Close<S> {
+    /// Releases the resource; a second `close` is `Err(IoError::AlreadyClosed)`.
+    fn close(S s) -> Result<unit, IoError> {}
 }
 
 /// Returns a new stream on the process's standard input.
