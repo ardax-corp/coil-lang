@@ -1641,27 +1641,19 @@ impl GcHost for Driver<'_> {
         self.rt
     }
 
-    /// The generators whose fibers run now: native frames' records and
-    /// the Runtime's roots are the rest.
+    /// The generators whose fibers run now; the Runtime's roots are the
+    /// rest.
     fn host_roots(&self, visit: &mut dyn FnMut(HostRoot)) {
         use crate::memory::RootKind;
         for v in &self.gen_running {
             visit(HostRoot(v.heap_addr(), RootKind::Ambiguous));
         }
-        // Parked tasks' frames, pinned.
-        for t in self.parked_tasks.values() {
-            t.call.for_each_word(|w| visit(HostRoot(Value::from(w).heap_addr(), RootKind::Ambiguous)));
-        }
-        // The task side not running: its native frames' words and argument
-        // roots, pinned.
+        // The task side not running: its argument roots. Frames, running
+        // or parked, own counts for what they hold.
         #[cfg(not(target_family = "wasm"))]
         for f in self.tasks.values() {
             for v in f.arg_roots.iter().chain(&f.gen_running) {
                 visit(HostRoot(v.heap_addr(), RootKind::Ambiguous));
-            }
-            for &(ctx, _) in &f.native_roots {
-                // SAFETY: a parked call's frames keep their contexts.
-                unsafe { &*ctx }.for_each_root(|w, _| visit(HostRoot(Value::from(unsafe { *w }).heap_addr(), RootKind::Ambiguous)));
             }
         }
     }

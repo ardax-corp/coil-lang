@@ -105,7 +105,6 @@ pub struct NativeCtx {
     pub park_kind: u64,
     /// What a parked call left, for [`ParkedCall`] (null: it did not park).
     pub parked: *mut std::ffi::c_void,
-    pub park_scan: Option<RootScanFn>,
     pub park_free: Option<unsafe fn(*mut std::ffi::c_void)>,
     /// A parked call this one goes on with (null: a new call), and how.
     pub resume: *mut std::ffi::c_void,
@@ -316,10 +315,6 @@ pub const BUMP_FREE_LINK: i32 = crate::memory::FREE_LINK as i32;
 pub const BUMP_BYTES: i32 = std::mem::size_of::<crate::memory::Bump>() as i32;
 
 impl NativeCtx {
-    /// Every heap word the call's native frames hold while it is in a runtime
-    /// call: the root chain.
-    /// The words are native code's to reload: a moving collection may
-    /// rewrite them.
     /// The sites of [`Self::calls`], innermost first.
     pub(crate) fn call_sites(&self) -> Vec<u32> {
         let mut out = Vec::new();
@@ -338,63 +333,6 @@ impl NativeCtx {
             }
         }
         out
-    }
-
-    pub(crate) fn for_each_root(&self, mut visit: impl FnMut(*mut u64, bool)) {
-        self.for_each_frame_root(&mut visit);
-        let mut at = self.roots as *mut u64;
-        while !at.is_null() {
-            // SAFETY: native code links only live records of its frames.
-            unsafe {
-                let n = *at.add(1);
-                let ambiguous = n & ROOTS_AMBIGUOUS != 0;
-                let count = n & !(ROOTS_MASKED | ROOTS_AMBIGUOUS);
-                if n & ROOTS_SCAN != 0 {
-                    let scan = std::mem::transmute::<usize, RootScanFn>(*at.add(2) as usize);
-                    scan(*at.add(3) as *mut std::ffi::c_void, &mut visit);
-                } else if n & ROOTS_MASKED != 0 {
-                    let words = mask_words(count as usize);
-                    for i in 0..count as usize {
-                        if *at.add(2 + i / 64) & (1 << (i % 64)) != 0 {
-                            visit(at.add(2 + words + i), ambiguous);
-                        }
-                    }
-                } else {
-                    for i in 0..count as usize {
-                        visit(at.add(2 + i), ambiguous);
-                    }
-                }
-                at = *at as *mut u64;
-            }
-        }
-    }
-}
-
-impl NativeCtx {
-    /// The heap words the native frames of this call hold while it is in
-    /// a helper that may collect: from the trampoline's frame
-    /// ([`Self::native_fp`]) up the frame-pointer chain, each frame's
-    /// stack map at the call it is in. A collection may rewrite the slots
-    /// (native code reloads them after the call).
-    fn for_each_frame_root(&self, visit: &mut impl FnMut(*mut u64, bool)) {
-        let mut fp = self.native_fp;
-        if fp == 0 {
-            return;
-        }
-        let maps = STACK_MAPS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        while fp != 0 {
-            // SAFETY: native code keeps frame pointers: `[fp]` is the
-            // caller's frame pointer and `[fp + 8]` the return address into
-            // it. Slots are by their distance below that frame pointer.
-            let (next, ra) = unsafe { (*(fp as *const u64), *(fp as *const u64).add(1)) };
-            if !maps.in_code(ra) {
-                break;
-            }
-            for &off in maps.maps.get(&ra).into_iter().flatten() {
-                visit((next - u64::from(off)) as *mut u64, false);
-            }
-            fp = next;
-        }
     }
 }
 
@@ -642,7 +580,6 @@ impl NativeCtx {
             park_word: 0,
             park_kind: 0,
             parked: std::ptr::null_mut(),
-            park_scan: None,
             park_free: None,
             resume: std::ptr::null_mut(),
             resume_word: 0,
@@ -974,7 +911,6 @@ pub(crate) struct ParkedCall {
     /// Why it parked (`PARK_*`).
     pub(crate) kind: u64,
     state: *mut std::ffi::c_void,
-    scan: RootScanFn,
     free: unsafe fn(*mut std::ffi::c_void),
 }
 
@@ -998,18 +934,6 @@ impl ParkedCall {
     /// Whether its body has `defer`s, which a close must run.
     pub(crate) fn cleanup(&self) -> bool {
         self.entry.cleanup
-    }
-
-    /// Its heap words, for a root that pins them.
-    pub(crate) fn for_each_word(&self, mut visit: impl FnMut(u64)) {
-        // SAFETY: the engine's own state, read only.
-        unsafe { (self.scan)(self.state, &mut |w, _| visit(*w)) };
-    }
-
-    /// Its heap words, as [`NativeCtx::for_each_root`] walks a live call's.
-    pub(crate) fn for_each_root(&mut self, mut visit: impl FnMut(*mut u64, bool)) {
-        // SAFETY: the engine's own state, which nothing else runs.
-        unsafe { (self.scan)(self.state, &mut visit) };
     }
 
     /// Go on, in the way `how` says (`RESUME_*`) with `word`.
@@ -1092,10 +1016,10 @@ fn run_call(entry: &NativeEntry, args: &[u64], resume: Option<(*mut std::ffi::c_
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
     drop(cancel);
     if !ctx.parked.is_null() {
-        let (Some(scan), Some(free)) = (ctx.park_scan, ctx.park_free) else {
+        let Some(free) = ctx.park_free else {
             unreachable!("a parked call names its engine's hooks");
         };
-        let call = ParkedCall { entry: *entry, kind: ctx.park_kind, state: ctx.parked, scan, free };
+        let call = ParkedCall { entry: *entry, kind: ctx.park_kind, state: ctx.parked, free };
         return NativeOutcome::Parked(call, ctx.park_word);
     }
     match ctx.bail {

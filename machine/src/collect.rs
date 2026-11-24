@@ -1,8 +1,11 @@
 //! The collector's root walk. A host (the native driver, or the MIR
 //! interpreter) reports the roots it holds itself; the [`Runtime`] adds its own (statics, the
-//! scheduler's tasks, FFI handles and arguments, native frames' root
-//! records). The cycle collector reads them
-//! ([`collect_cycles`]); counts free everything else.
+//! scheduler's tasks, FFI handles and arguments). The cycle collector
+//! reads them ([`collect_cycles`]); counts free everything else.
+//!
+//! Frames are no roots: every word a frame uses is owned by a count, its
+//! own or a holder's that outlives the use, so trial deletion sees it as
+//! an outside owner already.
 
 use std::sync::Arc;
 
@@ -100,32 +103,10 @@ impl Runtime {
         }
     }
 
-    /// Heap words native frames hold across a runtime call or a safepoint, as
-    /// slot pointers: `true` when the record cannot say the word is one.
-    pub(crate) fn for_each_native_word(&self, visit: &mut dyn FnMut(*mut u64, bool)) {
-        for &(ctx, _) in &self.native_roots {
-            // SAFETY: a native call in a collection keeps its context alive.
-            unsafe { &*ctx }.for_each_root(&mut *visit);
-        }
-    }
-
-    /// The native frames' heap words, as roots.
-    pub(crate) fn for_each_native_root(&self, visit: &mut dyn FnMut(u64, RootKind)) {
-        let heap = &self.heap;
-        self.for_each_native_word(&mut |w, ambiguous| {
-            // SAFETY: a root slot of a live record.
-            let addr = Value::from(unsafe { *w }).heap_addr();
-            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                visit(addr, if ambiguous { RootKind::Ambiguous } else { RootKind::Precise });
-            }
-        });
-    }
-
     /// Every Runtime root that resolves to a live object.
     pub(crate) fn for_each_root(&self, visit: &mut dyn FnMut(u64, RootKind)) {
         self.for_each_static_root(&mut |_, addr, kind| visit(addr, kind));
         self.for_each_handle_root(visit);
-        self.for_each_native_root(visit);
         // Released at count zero, their `drop` still to run.
         for &addr in &self.heap.rc_due {
             visit(addr, RootKind::Ambiguous);

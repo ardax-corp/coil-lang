@@ -71,7 +71,6 @@ unsafe fn finish(mut act: Activation, ctx: *mut NativeCtx) {
         if act.parked {
             act.parked = false;
             (*ctx).parked = Box::into_raw(Box::new(act)).cast();
-            (*ctx).park_scan = Some(crate::frame::scan_roots);
             (*ctx).park_free = Some(free_parked);
         } else {
             act.release();
