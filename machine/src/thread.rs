@@ -1169,6 +1169,11 @@ fn hashed_dload_code_ptr(
     use crate::io::IoErrorTag;
     let path = mapped_module_path(ptr).ok_or(IoErrorTag::InvalidInput)?;
     let stem = crate::ffi::dload_request_stem(&path);
+    // A library the AOT executable links (by name): `coil package` checked
+    // its grant and hash at link time, and the executable runs with no gate.
+    if crate::ffi::static_library(&stem).is_some() {
+        return Ok(ptr as *const ());
+    }
     if gate.check_request(&stem).is_err() {
         return Err(IoErrorTag::InvalidInput);
     }
