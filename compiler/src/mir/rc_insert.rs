@@ -643,6 +643,11 @@ impl Pass {
                         MirInst::Phi { .. } => {
                             owned_at_def.insert(dest);
                         }
+                        // A coroutine hands its resumer the word it yields
+                        // or returns with an owner.
+                        MirInst::ResumeCoro { .. } => {
+                            owned_at_def.insert(dest);
+                        }
                         _ => {}
                     }
                 }
@@ -1005,6 +1010,14 @@ impl Pass {
                         before[bi].insert(ii, vec![MirInst::LoadStatic { dest: old, slot: *slot }]);
                         ops.insert(1, MirInst::RcDec { dest: tok(&mut new_types), src: old, guard: None });
                     }
+                }
+                // A yield hands its word to the resumer with an owner of its
+                // own, as a return does.
+                if let MirInst::Yield { value, from: false, .. } = inst
+                    && (self.root(*value).is_some() || self.maybe_object(func, *value))
+                {
+                    before[bi].entry(ii).or_default().push(MirInst::RcInc { dest: tok(&mut new_types), src: *value, guard: None });
+                    inserted += 1;
                 }
                 if let MirInst::HomeStore { home, value, .. } = inst
                     && object_homes.contains(home)
