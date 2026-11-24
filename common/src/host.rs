@@ -168,7 +168,7 @@ host_natives! {
     64 "env_exec" (2) EXEC, Caps::NONE;
     65 "ord" (1) HOST_R, NO_CAP;
     66 "char" (1) HOST_R, NO_CAP;
-    67 "hash_string" (1) HOST_R, NO_CAP;
+    67 "hash_string" (1) HOST_R, NO_CAP => HASH_STRING_ID;
     68 "thread_spawn" (1) THREAD_R, NO_CAP;
     69 "thread_join" (1) THREAD_R, NO_CAP;
     70 "thread_detach" (1) THREAD_R, NO_CAP;
@@ -377,7 +377,7 @@ host_natives! {
     197 "key_index_clear" (3) HEAP_R, NO_CAP => KEY_INDEX_CLEAR_ID, KEY_INDEX_CLEAR_NATIVE;
     /// `key_index::find(table, hashes, keys, h, k, mode)`: the slot whose key
     /// equals `k` by `mode` (one of the `KEY_EQ_*` below), or `-1`.
-    198 "key_index_find" (6) HOST_R, NO_CAP => _, KEY_INDEX_FIND_NATIVE;
+    198 "key_index_find" (6) HOST_R, NO_CAP => KEY_INDEX_FIND_ID, KEY_INDEX_FIND_NATIVE;
     /// `key_index::eq_mode(k)`: how `find` may compare keys of `k`'s type. The
     /// compiler folds it to a constant in every body it plans; the native
     /// answers [`KEY_EQ_COIL`].
@@ -568,6 +568,12 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
 /// numbers (the key index's table, hashes and live flags): it drops and
 /// stores no reference, so the counts need no look at its arguments and a
 /// borrowed load stays valid across it.
+/// Host natives whose result is always a number (a hash, a slot index):
+/// it never names an object, so a frame does not count it.
+pub fn host_returns_number(id: u64) -> bool {
+    [HASH_STRING_ID, KEY_INDEX_FIND_ID].iter().any(|&k| u64::from(k) == id)
+}
+
 pub fn host_writes_only_numbers(id: u64) -> bool {
     [KEY_INDEX_INSERT_ID, KEY_INDEX_REMOVE_ID, KEY_INDEX_COMPACT_ID, KEY_INDEX_CLEAR_ID].iter().any(|&k| u64::from(k) == id)
 }

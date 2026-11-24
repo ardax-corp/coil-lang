@@ -721,11 +721,14 @@ impl Pass {
                 | MirInst::LaneIndex { .. }
                 | MirInst::LoadStatic { .. }
                 | MirInst::HomeLoad { .. }
-                | MirInst::HostInvoke { .. }
                 | MirInst::Call { .. }
                 | MirInst::CallIndirect { .. }
                 | MirInst::ResumeCoro { .. }
                 | MirInst::Yield { .. } => counted.extend(inst.dests().filter(|d| maybe(*d) && !number_calls.contains(d))),
+                // A host result typed `int` may be a pointer word the
+                // types do not say, unless the native only returns numbers.
+                MirInst::HostInvoke { native_id, .. } if common::host_returns_number(u64::from(*native_id)) => {}
+                MirInst::HostInvoke { .. } => counted.extend(inst.dests().filter(|d| maybe(*d) && !number_calls.contains(d))),
                 _ => {}
             }
         }
