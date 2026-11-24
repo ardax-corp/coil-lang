@@ -646,12 +646,15 @@ impl Heap {
             // address still names its object.
             let Some(o) = (unsafe { Object::from_header(addr) }) else { continue };
             let c = o.rc_count();
-            if c == COUNT_IMMORTAL || d == 0 {
+            if c == COUNT_IMMORTAL {
                 continue;
             }
             let n = (i64::from(c) + d).clamp(0, i64::from(COUNT_IMMORTAL - 1)) as u32;
             o.rc_set_count(n);
-            if n == 0 && d < 0 {
+            // At zero with changes logged: its last owner went in the
+            // epoch, also when it was born there and its owners came and
+            // went (a net change of nothing from a count of zero).
+            if n == 0 && d <= 0 {
                 zero.push(addr);
             }
         }
