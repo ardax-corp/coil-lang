@@ -924,6 +924,43 @@ fn ffi_calls_run_from_native_code() {
     // The FFI ops run in Rust, no stubs.
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_struct_passed_on_the_stack_while_heap_words_are_live() {
+    // `Triple` is passed in memory on the stack (a copy the call makes),
+    // and the struct object `t` stays live across the call: its count is
+    // dropped after it.
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-ffi-stack-struct", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lib = dir.join("libsum.so");
+    let cc = Command::new("cc").args(["-shared", "-fPIC", "-o"]).arg(&lib).arg(manifest.join("examples/sum.c")).status();
+    if !cc.is_ok_and(|s| s.success()) {
+        eprintln!("skipped: no C compiler");
+        return;
+    }
+    let file = dir.join("ffi.coil");
+    std::fs::write(
+        &file,
+        format!(
+            "{HEADER}extern struct Triple {{\n    a: int,\n    b: int,\n    c: int,\n}};\n\
+             extern \"sum\" {{\n    fn triple_sum(int k, Triple t) -> int;\n}}\n\
+             #[inline(never)]\nfn total(int k) -> int {{ let t = {{ a: k, b: 2, c: 3 }}; let n = triple_sum(2, t); return n + t.a; }}\n\
+             fn main() {{ let _ = println(format(\"%i\", total(1))); }}\n"
+        ),
+    )
+    .expect("write source");
+    let mut cmd = Command::new(coil_bin());
+    cmd.arg(&file).args(["--no-build-cache", "--fold-calls", "off", "--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"]).arg(&dir);
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    let out = cmd.env("COIL_NATIVE_STATS", "2").output().expect("spawn coil");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "13\n", "stderr: {stderr}");
+    assert!(compiled(&stderr, "total"), "stats: {stderr}");
+}
+
 #[test]
 fn yield_from_runs_in_native_generator_bodies() {
     // `outer`, `relay` and `talk` delegate natively: values, sends passed
