@@ -5,7 +5,7 @@
 
 use std::ptr::NonNull;
 
-use super::{FLAG_FRESH, GcHeader, GcPhase, Heap, GEN_UNLOGGED, QUIET, REMEMBERED};
+use super::{GcHeader, Heap, GEN_UNLOGGED, QUIET, REMEMBERED};
 
 /// Slot addresses of one span.
 fn slots(first: u64, end: u64, size: u64) -> impl Iterator<Item = u64> {
@@ -38,7 +38,6 @@ impl Heap {
         if !self.has_young() {
             return;
         }
-        let sweeping = self.gc_phase == GcPhase::Sweeping;
         let mut promoted = Vec::new();
         let mut free = Vec::new();
         for (chunk, first, end, size) in self.slab.young_spans() {
@@ -50,11 +49,6 @@ impl Heap {
                     continue;
                 }
                 header.generation.set(GEN_UNLOGGED);
-                if sweeping {
-                    // The sweep may still reach this chunk; it must keep
-                    // what it never marked.
-                    header.set_flag(FLAG_FRESH, true);
-                }
             }
             let tail = self.slab.chunk_slots_end(chunk);
             free.extend(slots(end, tail, size).map(|a| unsafe { NonNull::new_unchecked(a as *mut u8) }));

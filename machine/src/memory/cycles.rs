@@ -90,7 +90,7 @@ impl Heap {
     /// and what they reach are live. Empty unless counts are kept and live
     /// and no collection is under way.
     pub(crate) fn cycle_garbage(&self, roots: &[u64]) -> Vec<Object> {
-        if !self.rc_counts_live() || self.gc_phase != GcPhase::Idle || self.cyclic_types.is_empty() {
+        if !self.rc_counts_live() || self.cyclic_types.is_empty() {
             return Vec::new();
         }
         let mut seen: HashMap<u64, (Color, i64)> = HashMap::new();

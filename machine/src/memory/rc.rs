@@ -395,7 +395,7 @@ impl Heap {
 
     /// Release what [`Self::rc_dec_pending`] left at zero and still is.
     pub(crate) fn rc_release_pending(&mut self) -> usize {
-        if self.rc_pending.get_mut().is_empty() || !self.alloc_lock.is_null() || self.gc_phase != GcPhase::Idle {
+        if self.rc_pending.get_mut().is_empty() || !self.alloc_lock.is_null() {
             return 0;
         }
         let mut n = 0;
@@ -484,7 +484,7 @@ impl Heap {
     /// collection's root buffer is no test: it is stale once that ends, and
     /// frames count their words. Returns how many objects it freed.
     pub(super) fn rc_release(&mut self, obj: Object) -> usize {
-        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
+        if self.epoch_stw || !self.alloc_lock.is_null() {
             return 0;
         }
         // A leaf names nothing: free it without the worklist.

@@ -648,18 +648,6 @@ impl Slab {
         self.enter_next_chunk(cur)
     }
 
-    /// True when this walk will not visit `addr` any more: it already
-    /// returned it, or `addr` lies in a chunk mapped after the walk started.
-    pub fn walk_passed(&self, cur: &SlotCursor, addr: u64) -> bool {
-        if !cur.started {
-            return false;
-        }
-        let Some(i) = self.chunks.position(addr) else {
-            return false;
-        };
-        i > cur.chunk || (i == cur.chunk && (cur.remaining == 0 || addr > cur.next))
-    }
-
     #[inline(never)]
     fn enter_next_chunk(&self, cur: &mut SlotCursor) -> Option<u64> {
         if !cur.started {

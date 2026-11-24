@@ -203,14 +203,6 @@ fn epoch_write_violation(addr: u64, object_gen: u8, epoch_gen: u8) -> ! {
     std::process::abort()
 }
 
-/// Collector phase. `Idle` means the last cycle finished.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GcPhase {
-    Idle,
-    Marking,
-    Sweeping,
-}
-
 /// The heap's allocation counters and the gate of native code's inline
 /// allocation, boxed so native code updates them in place
 /// ([`InlineLayout`]).
@@ -332,17 +324,6 @@ pub struct Heap {
     /// Held nursery chunks that ask for a major cycle
     /// ([`Self::held_over_budget`]).
     held_budget: usize,
-    /// Bytes still to allocate old after a minor collection most of the
-    /// nursery survived ([`Self::note_survival`]).
-    pretenure_bytes: usize,
-    /// Open `region` blocks ([`Self::region_enter`]); while non-zero the
-    /// nursery takes strings too, never pretenures, and holds up to
-    /// [`REGION_CHUNKS`].
-    region_depth: u32,
-    /// Incremental mark / lazy sweep (COI-309 S4).
-    gc_phase: GcPhase,
-    /// Next object to consider while sweeping; `None` when the cursor is idle.
-    gc_sweep_cursor: Option<super::slab::SlotCursor>,
     /// CString arena for the current FFI invoke (reset after each call).
     ffi_strings: Vec<std::ffi::CString>,
     /// Layer A steal epoch: no collect; `alloc` takes [`Self::alloc_lock`].
@@ -404,10 +385,6 @@ impl Default for Heap {
             nursery_chunks: NURSERY_CHUNKS,
             held_after_major: 0,
             held_budget: NURSERY_CHUNKS,
-            pretenure_bytes: 0,
-            region_depth: 0,
-            gc_phase: GcPhase::Idle,
-            gc_sweep_cursor: None,
             ffi_strings: Vec::new(),
             epoch_stw: false,
             epoch_gc_ceiling: 0,
@@ -565,7 +542,6 @@ impl Heap {
     where
         F: Fn(Gc<T>) -> Object,
     {
-        debug_assert_eq!(self.gc_phase, GcPhase::Idle, "steal epochs open with GC idle");
         let layout = Layout::new::<GcData<T>>();
         let key = Slab::class_of(layout);
         let me: *const Heap = self;
@@ -716,14 +692,10 @@ impl Heap {
         F: Fn(Gc<T>) -> Object,
     {
         let layout = Layout::new::<GcData<T>>();
-        // Objects allocated while a mark is open are black, and a young
-        // object must not carry a major-cycle mark: those go old.
-        let young = (T::NURSERY || (T::REGION && self.region_depth != 0))
+        let young = T::NURSERY
             && may_young
             && self.nursery
             && !self.epoch_stw
-            && self.pretenure_bytes == 0
-            && self.gc_phase != GcPhase::Marking
             && (self.finalizer_types.is_empty()
                 || data.finalizer_type_id().is_none_or(|t| !self.has_finalizer(t)));
         let slot = if young { self.slab.alloc_young(layout) } else { self.slab.alloc(layout) };
@@ -735,12 +707,6 @@ impl Heap {
             content.header.generation.set(GEN_YOUNG);
             self.counts.young_bytes += size;
             return (object, content);
-        }
-        if T::NURSERY && self.pretenure_bytes != 0 {
-            self.pretenure_bytes = self.pretenure_bytes.saturating_sub(size);
-            if self.pretenure_bytes == 0 {
-                self.sync_inline_gate();
-            }
         }
         if T::HOLDS_REFS && self.nursery {
             if self.epoch_stw {
@@ -759,18 +725,6 @@ impl Heap {
             Some(SideList::Finalizable) => self.finalizable.push(object.addr()),
             None => {}
         }
-        // Objects allocated while a cycle is open (finalizers) are black.
-        if self.gc_phase == GcPhase::Marking {
-            let _ = content.mark();
-        } else if self.gc_phase == GcPhase::Sweeping
-            && let Some(cur) = &self.gc_sweep_cursor
-            && !self.slab.walk_passed(cur, object.addr())
-        {
-            // Ahead of the sweep cursor: the sweep keeps (and clears) a
-            // `fresh` object instead of freeing an unmarked newcomer. Slots
-            // behind it (most reuse, freed by this sweep) need no tag.
-            content.set_fresh();
-        }
         debug_assert!(
             self.find_object_by_addr(object.addr()).is_some(),
             "slab alloc must be findable at {:#x}",
@@ -786,9 +740,7 @@ impl Heap {
     pub(crate) fn sync_inline_gate(&mut self) {
         let open = !cfg!(feature = "gc-stress")
             && self.nursery
-            && !self.epoch_stw
-            && self.pretenure_bytes == 0
-            && self.gc_phase != GcPhase::Marking;
+            && !self.epoch_stw;
         self.counts.inline_gate = u64::from(open);
     }
 
@@ -1216,16 +1168,6 @@ impl Heap {
         common::Value::from(object.addr())
     }
 
-    #[inline]
-    pub fn gc_phase(&self) -> GcPhase {
-        self.gc_phase
-    }
-
-    #[inline]
-    pub fn gc_is_idle(&self) -> bool {
-        self.gc_phase == GcPhase::Idle
-    }
-
     /// Free the object `v` points at before a collection would, because
     /// the compiler proved nothing else reaches it (`feature/escape-memory`
     /// step 2). `deep` also frees every object it reaches through precise
@@ -1410,7 +1352,7 @@ impl Heap {
     /// The object an early free of `v` starts at: `None` while a collection
     /// or a steal epoch is open, or when it is kept or not freeable.
     fn early_root(&self, v: Value, keep: &dyn Fn(u64) -> bool) -> Option<Object> {
-        if self.gc_phase != GcPhase::Idle || self.epoch_stw || !self.alloc_lock.is_null() {
+        if self.epoch_stw || !self.alloc_lock.is_null() {
             return None;
         }
         let root = self.find_object_by_addr(v.heap_addr())?;
@@ -1525,11 +1467,10 @@ impl Heap {
         } else {
             self.gc_next_threshold
         };
-        self.gc_phase == GcPhase::Idle
-            && (cfg!(feature = "gc-stress")
-                || self.counts.alloc_bytes.saturating_sub(self.counts.young_bytes) > limit
-                || self.held_over_budget()
-                || self.slab.young_chunks_in_use() >= self.nursery_chunks)
+        cfg!(feature = "gc-stress")
+            || self.counts.alloc_bytes.saturating_sub(self.counts.young_bytes) > limit
+            || self.held_over_budget()
+            || self.slab.young_chunks_in_use() >= self.nursery_chunks
     }
 
     /// Enough nursery chunks are held for pinned survivors to ask for a
@@ -2842,7 +2783,6 @@ impl ObjString {
 
 impl GcSized for ObjString {
     const HOLDS_REFS: bool = false;
-    const REGION: bool = true;
 
     fn size(&self) -> usize {
         mem::size_of::<Self>() + self.data.accounted_bytes()
@@ -4400,10 +4340,6 @@ pub trait GcSized {
     /// Allocated in the nursery when it is on: a kind a minor collection
     /// can move ([`Object::movable_layout`]).
     const NURSERY: bool = false;
-    /// Allocated in the nursery inside a `region` block: the movable kinds,
-    /// and strings, which a minor collection frees but never moves (a
-    /// surviving one is held in place).
-    const REGION: bool = Self::NURSERY;
     /// Can hold heap references: an old object of this kind is remembered
     /// when it is born, since it may start out naming young objects.
     const HOLDS_REFS: bool = true;
@@ -4567,8 +4503,6 @@ struct GcHeader {
 
 /// Marked by the collector's current mark.
 pub(super) const FLAG_MARKED: u8 = 1;
-/// Allocated while a sweep was running; that sweep skips it once.
-pub(super) const FLAG_FRESH: u8 = 1 << 1;
 /// Copy-on-write: a second place may name this object, so a write copies it
 /// first ([`Heap::cow_unique`]). Sticky until the slot is reused.
 pub const FLAG_SHARED: u8 = 1 << 2;
@@ -4675,10 +4609,6 @@ impl<T> GcData<T> {
 
     fn set_kind(&self, kind: u8) {
         self.header.kind.set(kind);
-    }
-
-    fn set_fresh(&self) {
-        self.header.set_flag(FLAG_FRESH, true);
     }
 
     pub const fn is_marked(&self) -> bool {
