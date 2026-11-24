@@ -225,14 +225,28 @@ fn eval_in(
                     }
                 })
                 .collect();
-            let ret = call_limited(&mut isolate, f.entry, &args, &item_limits)?;
-            if !f.text {
-                return Ok(FoldValue::Word(ret.bits()));
+            // The call borrows its string arguments: the fold owns them, and
+            // the string it hands back, until their text is read.
+            let texts: Vec<Value> = f.args.iter().zip(&args).filter(|(a, _)| matches!(a, FoldValue::Text(_))).map(|(_, v)| *v).collect();
+            for v in &texts {
+                isolate.heap_mut().rc_retain(*v);
             }
-            match isolate.heap().find_object_by_addr(ret.bits()) {
-                Some(Object::String(s)) => Ok(FoldValue::Text(s.as_ref().data.to_string())),
-                _ => Err("it did not return a string".to_string()),
+            let ret = call_limited(&mut isolate, f.entry, &args, &item_limits);
+            let out = ret.and_then(|ret| {
+                if !f.text {
+                    return Ok(FoldValue::Word(ret.bits()));
+                }
+                let text = match isolate.heap().find_object_by_addr(ret.bits()) {
+                    Some(Object::String(s)) => Ok(FoldValue::Text(s.as_ref().data.to_string())),
+                    _ => Err("it did not return a string".to_string()),
+                };
+                isolate.heap_mut().rc_drop(ret);
+                text
+            });
+            for v in texts {
+                isolate.heap_mut().rc_drop(v);
             }
+            out
         }));
         silent_left = silent_left.saturating_sub(isolate.steps_charged());
         if isolate.step_budget_exhausted() {
