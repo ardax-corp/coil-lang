@@ -106,3 +106,16 @@ fn a_generator_releases_an_argument_it_never_reads() {
     )]);
     assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
 }
+
+/// A call through a function value whose result moves as two words, to a
+/// callee with no two-word twin, gets the result's box and reads the two
+/// words from it: the box is freed after.
+#[test]
+fn a_value_call_frees_the_box_it_reads_two_words_from() {
+    let stderr = run_with_leak_report("unpair", &[(
+        "main.coil",
+        "fn keep<T>(T x) -> T {\n    return x;\n}\n\n\
+         fn main() {\n    let k: fn((int, int)) -> (int, int) = keep;\n    let (a, b) = k((5, 6));\n}\n",
+    )]);
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
