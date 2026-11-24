@@ -156,3 +156,20 @@ fn over_application_frees_the_function_in_between() {
     )]);
     assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
 }
+
+/// A static's value from the compile-time snapshot lives as long as the
+/// program, and so does what a test job writes into it.
+#[test]
+fn what_a_test_writes_into_a_snapshot_static_is_not_a_leak() {
+    let stderr = run_with_leak_report_flags(
+        "snapshot_static",
+        &[(
+            "main.coil",
+            "use tests::assert;\n\nclass Node {\n    pub v: int,\n}\n\nstatic let nodes: Vec<Node> = Vec::new();\n\n\
+             test(\"push\") {\n    nodes.push(new Node(1));\n    assert!(nodes.len() == 1);\n}\n",
+        )],
+        &["test"],
+        &[],
+    );
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
