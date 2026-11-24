@@ -32,7 +32,7 @@
 //! like any other (RAII step 7). The tracing GC
 //! stays the backstop for everything else.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::escape::{leaf, no_heap, result_exprs, CallLookup, Escape, Src};
 use super::{is_vec, BinOp, Builtin, Callee, HirBody, HirId, HirKind, HirModule, LocalId, LocalKind, VEC_MUTATORS};
@@ -141,7 +141,8 @@ pub(super) fn rewrite(
         free_on_reassign(&mut out, assign, deep);
     }
     for (block, local) in locals {
-        free_at_end(&mut out, block, local);
+        let drops = body.local(local).ty.as_ref().is_none_or(|t| may_drop(checker, t));
+        free_at_end(&mut out, block, local, !drops);
     }
     Some(out)
 }
@@ -476,7 +477,7 @@ pub(super) fn keep_streams(body: &HirBody) -> Option<HirBody> {
     }
     let mut out = body.clone();
     for (block, local) in locals {
-        free_at_end(&mut out, block, local);
+        free_at_end(&mut out, block, local, false);
     }
     Some(out)
 }
@@ -970,13 +971,66 @@ fn free_temp(body: &mut HirBody, call: HirId, arg: usize, deep: bool) {
     x.layout = layout;
 }
 
+/// Whether a value of type `t` may own an object with a `fn drop()`
+/// (a type variable may): its free runs that `drop`, which waits for the
+/// end of its scope.
+fn may_drop(checker: &Checker, t: &Ty) -> bool {
+    may_drop_in(checker, t, false, &mut HashSet::new())
+}
+
+/// [`may_drop`] for `t`, seen as a field's or payload's type when
+/// `in_field`: there a type parameter is no drop of its own, since the
+/// local's own type arguments are checked where it is named. A `Stream`
+/// counts as a drop (its last owner closes its descriptor), and so do a
+/// coroutine (its last owner closes it, running its `defer`s) and a
+/// function value (its captures may be either).
+fn may_drop_in(checker: &Checker, t: &Ty, in_field: bool, seen: &mut HashSet<String>) -> bool {
+    let named = |n: &str, seen: &mut HashSet<String>| {
+        if matches!(n, "Stream" | "coroutine") || checker.class_has_drop(n) || checker.enum_has_drop(n) {
+            return true;
+        }
+        if !seen.insert(n.to_string()) {
+            return false;
+        }
+        let fields = checker.class_fields(n).is_some_and(|fs| fs.iter().any(|(_, f)| may_drop_in(checker, f, true, seen)));
+        fields
+            || checker
+                .enum_variants(n)
+                .is_some_and(|vs| vs.iter().any(|(_, _, ps)| ps.iter().any(|p| may_drop_in(checker, p, true, seen))))
+    };
+    match t {
+        Ty::Var(_) => !in_field,
+        Ty::Existential { .. } | Ty::Fun(..) => true,
+        Ty::Con(n) => named(n, seen),
+        Ty::Sum { name, .. } if named(name, seen) => true,
+        _ => t.any_child(|c| may_drop_in(checker, c, in_field, seen)),
+    }
+}
+
+/// Whether `id`'s subtree names `local`.
+fn names(body: &HirBody, id: HirId, local: LocalId) -> bool {
+    let mut work = vec![id];
+    while let Some(at) = work.pop() {
+        if matches!(body.expr(at).kind, HirKind::Local(l) if l == local) {
+            return true;
+        }
+        work.extend(body.children(at));
+    }
+    false
+}
+
 /// Free `local` when `block` ends: before every `return` after its `let`,
 /// and after the block's statements (and its tail, when the tail reads it)
-/// when the block can fall through.
-fn free_at_end(body: &mut HirBody, block: HirId, local: LocalId) {
+/// when the block can fall through. With `at_last_use` (no `drop` to wait
+/// for), it goes right after the last statement that names it instead,
+/// and only the `return`s up to there free it.
+fn free_at_end(body: &mut HirBody, block: HirId, local: LocalId, at_last_use: bool) {
     let HirKind::Block { mut stmts, tail } = body.expr(block).kind.clone() else {
         return;
     };
+    if at_last_use && free_after_last_use(body, block, local, &mut stmts, tail) {
+        return;
+    }
     let span = body.expr(block).span;
     // Cleared by typed inlining after its last read: free it there.
     if let Some(at) = stmts.iter().position(|s| matches!(&body.expr(*s).kind, HirKind::Clear(ls) if ls.contains(&local))) {
@@ -1025,6 +1079,42 @@ fn free_at_end(body: &mut HirBody, block: HirId, local: LocalId) {
     };
     stmts.extend(free_stmts(body, local, false, span));
     body.exprs[block.0 as usize].kind = HirKind::Block { stmts, tail };
+}
+
+/// [`free_at_end`] right after the last statement of `block` that names
+/// `local`, when one comes before the block's end and the tail does not
+/// read it: `false` leaves the free at the end.
+fn free_after_last_use(body: &mut HirBody, block: HirId, local: LocalId, stmts: &mut Vec<HirId>, tail: Option<HirId>) -> bool {
+    if tail.is_some_and(|t| names(body, t, local)) {
+        return false;
+    }
+    let Some(decl) = stmts.iter().position(|s| matches!(body.expr(*s).kind, HirKind::Let { local: l, .. } if l == local)) else {
+        return false;
+    };
+    let last = (decl + 1..stmts.len()).rev().find(|&i| names(body, stmts[i], local)).unwrap_or(decl);
+    if last + 1 >= stmts.len() && tail.is_none() {
+        return false;
+    }
+    let exits = |id: HirId| matches!(body.expr(id).kind, HirKind::Return(_) | HirKind::Break | HirKind::Continue) || never(body, id);
+    if exits(stmts[last]) {
+        return false;
+    }
+    let mut work: Vec<HirId> = stmts[decl + 1..=last].to_vec();
+    let mut returns = Vec::new();
+    while let Some(at) = work.pop() {
+        if matches!(body.expr(at).kind, HirKind::Return(_)) {
+            returns.push(at);
+        }
+        work.extend(body.children(at));
+    }
+    for ret in returns {
+        free_before_return(body, ret, local);
+    }
+    let span = body.expr(block).span;
+    let free = free_stmts(body, local, false, span);
+    stmts.splice(last + 1..last + 1, free);
+    body.exprs[block.0 as usize].kind = HirKind::Block { stmts: std::mem::take(stmts), tail };
+    true
 }
 
 /// `return v` becomes `{ let r = v; free local; return r }`.
