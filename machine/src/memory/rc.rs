@@ -592,6 +592,23 @@ impl Heap {
         obj.visit_slots(self, &mut Dec(self, stack));
     }
 
+    /// A fresh enum a host call boxed for a call site that takes it as two
+    /// words (a pair layout): its payload's owner moves to the caller, whose
+    /// count ops count the word, and the box goes. A box someone else owns
+    /// (its count above zero) stays.
+    pub(crate) fn rc_unbox(&mut self, obj: Object) {
+        if !self.rc_frees() || !self.rc_counts_live() || obj.rc_count() != 0 || !self.rc_releasable(obj) {
+            return;
+        }
+        // A payload that reaches zero is the caller's to count, not freed.
+        let mut moved = std::mem::take(&mut self.rc_stack);
+        self.rc_dec_children(obj, &mut moved);
+        moved.clear();
+        self.rc_stack = moved;
+        // SAFETY: nothing names a fresh box but the call's result word.
+        unsafe { self.rc_free(obj) };
+    }
+
     /// The objects whose `drop` is owed once `v` loses the owner a scope's
     /// end takes from it (a `FreeEarly` in a counting run, reference-count
     /// plan step 7): `v` when that is its last, and, breadth first (a parent's
