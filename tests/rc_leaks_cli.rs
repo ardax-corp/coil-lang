@@ -119,3 +119,15 @@ fn a_value_call_frees_the_box_it_reads_two_words_from() {
     )]);
     assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
 }
+
+/// A root pins its value until `unroot`; the handle it leaves empty goes
+/// with its last owner.
+#[test]
+fn an_unrooted_root_is_freed() {
+    let stderr = run_with_leak_report("unroot", &[(
+        "main.coil",
+        "use gc::{root, get, unroot};\n\nclass Box {\n    pub n: int,\n}\n\n\
+         fn main() {\n    let r = root(new Box(1));\n    let _ = get(r);\n    let _ = unroot(r);\n}\n",
+    )]);
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
