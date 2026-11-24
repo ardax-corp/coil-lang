@@ -505,7 +505,12 @@ impl Heap {
                 }
                 continue;
             }
-            if !self.rc_leaf(obj) {
+            if let Object::Array(a) = obj
+                && a.as_ref().lanes() == 1
+                && !a.as_ref().holds_no_refs()
+            {
+                n += self.rc_release_elements(obj, &mut stack);
+            } else if !self.rc_leaf(obj) {
                 self.rc_dec_children(obj, &mut stack);
             }
             n += 1;
@@ -514,6 +519,38 @@ impl Heap {
             unsafe { self.rc_free(obj) };
         }
         self.rc_stack = stack;
+        n
+    }
+
+    /// Release the elements of array `obj`, which is being freed: an
+    /// element that reaches zero and names nothing is freed on the spot,
+    /// any other goes on `stack`. So a large array of leaves is released
+    /// without a worklist entry per element. Returns how many it freed.
+    fn rc_release_elements(&mut self, obj: Object, stack: &mut Vec<Object>) -> usize {
+        let Object::Array(a) = obj else { return 0 };
+        let kind = a.as_ref().gc_elem_kind();
+        if kind != common::WORD_POINTER && kind != common::WORD_UNKNOWN {
+            return 0;
+        }
+        let Some(words) = a.as_ref().gc_words() else { return 0 };
+        let (ptr, len) = (words.as_ptr(), words.len());
+        let mut n = 0;
+        for i in 0..len {
+            // SAFETY: the array is live until this release frees it, and
+            // freeing its elements does not touch its storage.
+            let v = unsafe { *ptr.add(i) };
+            let Some(o) = self.rc_object(v) else { continue };
+            if !self.rc_dec_obj(o) {
+                continue;
+            }
+            if self.rc_leaf(o) && self.rc_releasable(o) {
+                n += 1;
+                // SAFETY: its count reached zero.
+                unsafe { self.rc_free(o) };
+            } else {
+                stack.push(o);
+            }
+        }
         n
     }
 
