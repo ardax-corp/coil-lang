@@ -68,3 +68,17 @@ fn auto_par_forks_free_what_their_epochs_made() {
     );
     assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
 }
+
+/// Comptime call folding runs a call with constant arguments on a
+/// compile-time isolate: the string it returns is freed once its text is
+/// read.
+#[test]
+fn a_folded_call_frees_the_string_it_returns() {
+    let stderr = run_with_leak_report("fold", &[(
+        "main.coil",
+        "fn label(int n) -> string {\n    let s = \"n\";\n    return s + \"!\";\n}\n\
+         #[inline(never)]\nfn check() -> bool {\n    return label(4) == \"n!\";\n}\n\
+         fn main() { let x = check(); }\n",
+    )]);
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
