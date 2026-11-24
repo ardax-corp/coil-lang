@@ -1052,6 +1052,41 @@ impl Pass {
                 }
             }
         }
+        // Owned parameters (a coroutine body's) are in their homes from the
+        // start: a panic before their last use releases them. Not when the
+        // entry is a jump target, where the stores would run again.
+        let entry = func.entry;
+        let entry_targeted = func.blocks.iter().any(|b| b.term.as_ref().is_some_and(|t| t.succs().contains(&entry)));
+        if !entry_targeted {
+            let mut ops = Vec::new();
+            for &p in &func.params {
+                if self.borrowed.contains(&p) || self.root(p) != Some(p) {
+                    continue;
+                }
+                let Some(&h) = homes.get(&p) else { continue };
+                let w = if ty_of(func, p) == MirTy::I64 {
+                    p
+                } else {
+                    let w = tok(&mut new_types);
+                    *new_types.last_mut().expect("the word's type") = MirTy::I64;
+                    ops.push(MirInst::Cast { dest: w, kind: MirCastKind::Word, to: MirTy::I64, src: p });
+                    w
+                };
+                ops.push(MirInst::HomeStore { dest: tok(&mut new_types), home: h, value: w });
+            }
+            if !ops.is_empty() {
+                inserted += ops.len();
+                let ei = entry.0 as usize;
+                if func.blocks[ei].insts.is_empty() {
+                    ops.append(&mut before_term[ei]);
+                    before_term[ei] = ops;
+                } else {
+                    let at = before[ei].entry(0).or_default();
+                    ops.append(at);
+                    *at = ops;
+                }
+            }
+        }
         func.types.extend(new_types);
         // Materialize: in-block code first (positions are the old ones).
         for (bi, block) in func.blocks.iter_mut().enumerate() {
