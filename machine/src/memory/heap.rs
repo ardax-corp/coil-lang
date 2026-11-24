@@ -1560,6 +1560,18 @@ impl Heap {
         self.held_budget = self.held_after_major + self.nursery_chunks.max(self.held_after_major);
     }
 
+    /// Whether an allocation's safepoint has work: under counts, `drop`s
+    /// left due, the cycle collector on allocation pressure, or a heap over
+    /// its cap ([`crate::collect::safepoint`]); else a collection.
+    #[inline]
+    pub fn safepoint_due(&self) -> bool {
+        if self.rc_counting() {
+            !self.rc_due.is_empty() || self.should_collect_old() || self.over_byte_cap()
+        } else {
+            self.should_collect()
+        }
+    }
+
     /// The old space crossed its budget: run a major cycle.
     #[inline]
     pub fn should_collect_old(&self) -> bool {

@@ -1660,7 +1660,7 @@ unsafe fn heap<'a>(ctx: *mut NativeCtx) -> Option<&'a mut crate::memory::Heap> {
 unsafe fn note_alloc(ctx: *mut NativeCtx, heap: &crate::memory::Heap) {
     let ctx = unsafe { &mut *ctx };
     ctx.allocs += 1;
-    if !heap.gc_is_idle() || heap.should_collect() {
+    if !heap.gc_is_idle() || heap.safepoint_due() {
         ctx.gc_due = 1;
     }
 }
