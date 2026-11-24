@@ -3365,7 +3365,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 51;
+const HELPERS: usize = 52;
 
 #[cfg(test)]
 mod pin_tests {
