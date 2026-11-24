@@ -448,7 +448,7 @@ impl Heap {
 
     /// Release what [`Self::rc_dec_pending`] left at zero and still is.
     pub(crate) fn rc_release_pending(&mut self) -> usize {
-        if !self.alloc_lock.is_null() || self.rc_pending.get_mut().is_empty() || self.gc_phase != GcPhase::Idle {
+        if self.rc_pending.get_mut().is_empty() || !self.alloc_lock.is_null() || self.gc_phase != GcPhase::Idle {
             return 0;
         }
         let mut n = 0;
@@ -543,6 +543,12 @@ impl Heap {
             }
             return 0;
         }
+        // A leaf names nothing: free it without the worklist.
+        if self.rc_leaf(obj) && self.rc_releasable(obj) {
+            // SAFETY: as below.
+            unsafe { self.rc_free(obj) };
+            return 1;
+        }
         let mut stack = std::mem::take(&mut self.rc_stack);
         stack.push(obj);
         let mut n = 0;
@@ -558,7 +564,9 @@ impl Heap {
                 }
                 continue;
             }
-            self.rc_dec_children(obj, &mut stack);
+            if !self.rc_leaf(obj) {
+                self.rc_dec_children(obj, &mut stack);
+            }
             n += 1;
             // SAFETY: its count is zero: no counted word names it, and
             // frames count theirs once [`Self::rc_frees`] is on.
@@ -599,6 +607,27 @@ impl Heap {
         self.freed_early = true;
         // SAFETY: the caller's.
         unsafe { self.dealloc(obj) };
+    }
+
+    /// True when `obj`'s words name no object for sure, so its release has
+    /// no children to walk: a string, an instance of a class whose slots are
+    /// all numbers, an enum whose payload kinds are.
+    #[inline]
+    fn rc_leaf(&self, obj: Object) -> bool {
+        match obj {
+            Object::String(_) => true,
+            Object::Instance(i) => {
+                let i = i.as_ref();
+                self.class_leaf(i.type_id, i.storage.as_slice().len())
+            }
+            Object::Enum(e) => {
+                let p = &e.as_ref().payload;
+                let (n, kinds) = (p.as_slice().len(), p.kinds());
+                n <= common::PACKED_KIND_WORDS
+                    && (0..n).all(|i| matches!(common::packed_word_kind(kinds, i), common::WORD_SCALAR | common::WORD_BYTE))
+            }
+            _ => false,
+        }
     }
 
     /// A generator that started and is suspended: its close runs first, at

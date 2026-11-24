@@ -271,6 +271,10 @@ pub struct Heap {
     /// Per class `type_id`: field word kinds from static types
     /// (`common::WORD_*`). Missing rows / fields are unknown.
     class_kinds: std::sync::Arc<Vec<Box<[u8]>>>,
+    /// Per row of [`Self::class_kinds`]: how many leading slots are numbers
+    /// (`WORD_SCALAR` / `WORD_BYTE`). An instance with no more slots than
+    /// that names no object ([`Self::rc_leaf`]).
+    class_leaf: Vec<u32>,
     /// Every `Weak` object, so [`Self::clear_dead_weaks`] visits the weaks
     /// instead of the heap (#1870). A superset: entries a sweep freed or a
     /// slot reuse replaced drop out when it next runs.
@@ -406,6 +410,7 @@ impl Default for Heap {
             strings: Table::default(),
             slab: Slab::new(),
             class_kinds: std::sync::Arc::default(),
+            class_leaf: Vec::new(),
             weaks: Vec::new(),
             finalizer_types: Vec::new(),
             early_drop_types: Vec::new(),
@@ -2343,7 +2348,17 @@ impl Heap {
 
     /// Install the program's per-class field word kinds.
     pub fn set_class_word_kinds(&mut self, table: std::sync::Arc<Vec<Box<[u8]>>>) {
+        self.class_leaf = table
+            .iter()
+            .map(|row| row.iter().take_while(|&&k| matches!(k, common::WORD_SCALAR | common::WORD_BYTE)).count() as u32)
+            .collect();
         self.class_kinds = table;
+    }
+
+    /// True when an instance of `type_id` with `n` slots holds numbers only.
+    #[inline]
+    pub fn class_leaf(&self, type_id: u32, n: usize) -> bool {
+        self.class_leaf.get(common::type_kinds_index(type_id)).is_some_and(|&p| n <= p as usize)
     }
 
     /// True when `type_id`'s row has a tagged slot ([`common::WORD_TAGGED`]).
