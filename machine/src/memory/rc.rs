@@ -6,6 +6,14 @@
 
 use super::*;
 
+/// `COIL_RC_LEAKS=1`: a heap that goes away names on stderr the objects
+/// still in it that are not immortal: what a static still held, or what
+/// counts leaked (no collector frees it).
+pub(crate) fn rc_leaks_shown() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("COIL_RC_LEAKS").is_some_and(|v| v == "1"))
+}
+
 impl GcHeader {
     #[inline]
     fn inc(&self) {
@@ -590,6 +598,38 @@ impl Heap {
             }
         }
         obj.visit_slots(self, &mut Dec(self, stack));
+    }
+
+    /// [`rc_leaks_shown`]: tally the live objects that are not immortal by
+    /// kind and print them (one line, nothing when there are none).
+    pub(super) fn report_leaks(&self) {
+        let mut by_kind: std::collections::BTreeMap<&str, (usize, usize)> = std::collections::BTreeMap::new();
+        for obj in self.objects() {
+            if obj.rc_count() == COUNT_IMMORTAL {
+                continue;
+            }
+            let kind = match obj {
+                Object::String(_) => "string",
+                Object::Instance(_) => "instance",
+                Object::Enum(_) => "enum",
+                Object::Array(_) => "array",
+                Object::Fn(_) => "fn",
+                Object::Coroutine(_) => "coroutine",
+                Object::Weak(_) => "weak",
+                Object::Root(_) => "root",
+                Object::Stream(_) => "stream",
+                _ => "other",
+            };
+            let e = by_kind.entry(kind).or_default();
+            e.0 += 1;
+            e.1 += obj.size();
+        }
+        if by_kind.is_empty() {
+            return;
+        }
+        let (n, bytes) = by_kind.values().fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1));
+        let kinds: Vec<String> = by_kind.iter().map(|(k, (c, _))| format!("{k} {c}")).collect();
+        eprintln!("coil rc-leaks: {n} objects, {bytes} bytes ({})", kinds.join(", "));
     }
 
     /// A fresh enum a host call boxed for a call site that takes it as two

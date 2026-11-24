@@ -1798,6 +1798,9 @@ impl Drop for Heap {
         if self.slab.young_chunks_in_use() != 0 {
             note_young_heap(false);
         }
+        if rc::rc_leaks_shown() {
+            self.report_leaks();
+        }
         let mut cur = super::slab::SlotCursor::default();
         while let Some(addr) = self.slab.next_slot(&mut cur) {
             if let Some(object) = unsafe { Object::from_header(addr) } {
