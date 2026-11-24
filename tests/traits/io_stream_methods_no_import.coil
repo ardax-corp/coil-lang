@@ -1,0 +1,21 @@
+// A `Stream`'s `Read`, `Write` and `Close` methods need no import of the
+// traits: a program that uses `io` has their impls.
+// @flags --allow-read --allow-write
+use tests::assert;
+use io::open;
+use io::fs::remove_file;
+use string::{from_bytes, to_bytes};
+
+test("stream methods without the traits in scope") {
+    let path = "coil_traits_io_no_import.txt";
+    let w = open(path, "w")?;
+    assert!(w.write(to_bytes("plain"))? == 5);
+    w.flush()?;
+    w.close()?;
+    let r = open(path, "r")?;
+    let buf = to_bytes("........");
+    assert!(r.read(buf)? == Some(5));
+    assert!(from_bytes(buf)? == "plain...");
+    r.close()?;
+    remove_file(path)?;
+}
