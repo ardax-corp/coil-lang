@@ -59,7 +59,7 @@ coil lsp --root src --root .spool/deps --root ~/.coil/stdlib/src --allow-exit
 
 `--root DIR` (repeatable; relative to the server's working directory),
 `--allow-read` / `--allow-write` / `--allow-net` / `--allow-env`,
-`--allow-attach` / `--allow-exit` / `--allow-ffi-exec`,
+`--allow-exit` / `--allow-ffi-exec`,
 `-A`, `--allow-dload STEM` and `--ffi-search-path DIR`. The grants reach the
 project typecheck, so code that the project is allowed to compile is not
 flagged in the editor. The read / write / net / env / exit checks

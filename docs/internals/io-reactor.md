@@ -5,7 +5,7 @@ coil keeps two reactors on each root [`Runtime`](../../machine/src/runtime.rs):
 | Facet | Module | Role |
 |-------|--------|------|
 | CPU | [`reactor.rs`](../../machine/src/reactor.rs) | Work-stealing Coil `Job`s (`spawn` / auto-par) |
-| IO | [`io_reactor.rs`](../../machine/src/io_reactor.rs) | handle readiness for streams / attached package IO |
+| IO | [`io_reactor.rs`](../../machine/src/io_reactor.rs) | handle readiness for streams |
 
 They share a lifecycle (cloned onto pool workers) but **never** put blocking IO onto stealable CPU jobs.
 
@@ -51,38 +51,17 @@ When a CPU reactor is bound (`HostStateGuard`), those blocking waits use
 [`wait_fd_helping`](../../machine/src/io_reactor.rs): short poll slices interleaved with
 [`Reactor::help_once`](../../machine/src/reactor.rs).
 
-**Attached package handshake is different:** userland `Stream.attach` +
-`Stream.park` parks via
-[`reactor_wait_fd_no_help`](../../machine/src/io.rs) and pumps one native
-step per `read` / `write` until the handshake completes,
-so a mid-handshake park cannot nest-steal the peer `thread::spawn` job onto
-the same stack (that deadlocked both sides under `COIL_MAX_WORKER_THREADS=1`
-— COI-116). The pool worker still runs the peer while the waiter polls.
-Inside a `task::scope` with other tasks, `Stream.park` suspends the task
-instead (it returns a park request), so a TLS handshake does not stall the
-scheduler.
+A package stream such as coil-tls's `TlsStream` is a Coil class over the
+`io::Read` / `io::Write` / `io::Close` traits
+([`stream_io.coil`](../../compiler/src/prelude/stream_io.coil)) and its own
+`extern` calls. The runtime has no package stream kind.
 
-`Stream.attach` is a compile-time capability (`--allow-attach` / `HostGrants`,
-default deny). It is not a process-wide switch. Ungranted source fails the compile (`E0408`): the function form
-when `main` or a test reaches it, the method form at the call. An archive
-with HostInvoke 120 runs attach; there is no runtime `allow_attach` re-check.
-`--allow-dload` does not grant attach. Function pointers must be symbols from a hashed (or trusted/host)
-`dload`, not raw `i64` transmutes.
-
-After `Stream.attach`, IO (`stream_read` / `stream_write` / close) dispatches
-to the registered C vtable. The runtime does not have a TLS-named stream kind and
-does not call `coil_tls_*`. coil-tls enable is `dload` + attach. `WouldBlock`
-from package IO is the tagged `IoError` and parks on the runtime's reactor; do not
-handshake on a blocking `.so` thread. Stream close and GC send shutdown when
-the fd is still usable, then Drop frees. If the fd is already gone, free-only
-is OK (best-effort close_notify).
-
-## HostInvoke ids (attach / park / clock / math)
+## HostInvoke ids (clock / math)
 
 | Native | HostInvoke id | Language |
 |--------|---------------|----------|
-| `stream_attach` | **119** | `Stream.attach` |
-| `stream_park` | **120** | `Stream.park` |
+| `stream_attach` | **119** | removed `Stream.attach` (panic stub) |
+| `stream_park` | **120** | removed `Stream.park` (panic stub) |
 | `clock_wall_nanos` | **121** | `clock::wall_nanos` (unix UTC nanos) |
 | `clock_mono_nanos` | **122** | `clock::mono_nanos` (process Instant snapshot) |
 | `clock_sleep_ms` | **123** | `clock::sleep_ms` (thread sleep; suspends the task inside a `task::scope`) |
@@ -94,7 +73,8 @@ is OK (best-effort close_notify).
 | `task_cond_new`, `task_cond_wait`, `task_cond_notify` | **156–158** | `task::channel` wait conditions ([tasks](tasks.md#channels-and-other-threads)); archive minor 34 |
 | `contract_fail` | **159** | a failed `requires`, blaming the caller ([contracts](contracts.md#checks)); archive minor 35 |
 
-119/120 are live package-IO natives, not reserved TLS/crypto/regex panic stubs.
+119/120 are panic stubs of the removed `Stream.attach` / `Stream.park`, kept
+so later ids do not move.
 121–123 are process clocks (`use clock::{…}`); Instant is a Coil `int` of
 `mono_nanos`, not a host HashMap. TLS (`tls_client_enable` … `tls_alpn_protocol`)
 and virtual crypto slots were dropped before the major-4 reset (historical

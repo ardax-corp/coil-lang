@@ -488,7 +488,7 @@ impl Checker {
         }
     }
 
-    /// Synthetic `Stream` inherent methods (`attach` / `park` / `fd`).
+    /// Synthetic `Stream` inherent method `fd`.
     ///
     /// Idempotent: same re-entry contract as [`Self::register_builtin_vec`].
     fn register_builtin_stream(&mut self) {
@@ -501,58 +501,8 @@ impl Checker {
         let dummy = 0..0;
         let stream = stream_ty();
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
-        let res_stream = result_ty(stream.clone(), io_err.clone());
-        let res_unit = result_ty(unit_ty(), io_err.clone());
         let res_int = result_ty(int(), io_err);
-
-        let attach_ty = Ty::fun(
-            &[stream.clone(), int(), int(), int(), int(), int()],
-            res_stream,
-        );
-        let park_ty = Ty::fun(std::slice::from_ref(&stream), res_unit);
         let fd_ty = Ty::fun(&[stream], res_int);
-        let attach_params = ["ptr", "read", "write", "shutdown", "free"];
-
-        let fqn = format!("{STREAM}::attach");
-        let scheme = Scheme::mono(attach_ty);
-        self.fn_param_names.insert(
-            fqn.clone(),
-            attach_params.iter().map(|s| (*s).to_string()).collect(),
-        );
-        self.register_overload_candidate(
-            &fqn,
-            OverloadCandidate {
-                id: 0,
-                fixed_arity: 5,
-                is_rest: false,
-                scheme: scheme.clone(),
-                param_names: attach_params.iter().map(|s| (*s).to_string()).collect(),
-            },
-            &dummy,
-        );
-        self.methods
-            .entry(STREAM.to_string())
-            .or_default()
-            .insert("attach".to_string(), (Visibility::Public, scheme));
-
-        let fqn = format!("{STREAM}::park");
-        let scheme = Scheme::mono(park_ty);
-        self.fn_param_names.insert(fqn.clone(), Vec::new());
-        self.register_overload_candidate(
-            &fqn,
-            OverloadCandidate {
-                id: 0,
-                fixed_arity: 0,
-                is_rest: false,
-                scheme: scheme.clone(),
-                param_names: Vec::new(),
-            },
-            &dummy,
-        );
-        self.methods
-            .entry(STREAM.to_string())
-            .or_default()
-            .insert("park".to_string(), (Visibility::Public, scheme));
 
         let fqn = format!("{STREAM}::fd");
         let scheme = Scheme::mono(fd_ty);
@@ -1071,10 +1021,6 @@ impl Checker {
             IoBuiltin::UdpSendTo => Ty::fun(&[stream, bytes, string(), int()], res_int),
             IoBuiltin::UdpRecvFrom => Ty::fun(&[stream, bytes], res_recv_from),
             IoBuiltin::UdpLocalPort => Ty::fun(&[stream], res_int),
-            IoBuiltin::StreamAttach => {
-                Ty::fun(&[stream, int(), int(), int(), int(), int()], res_stream)
-            }
-            IoBuiltin::StreamPark => Ty::fun(&[stream], res_unit),
             IoBuiltin::ResultUnitProbe => Ty::fun(&[int()], res_unit),
         };
         Scheme::mono(ty)
@@ -5501,14 +5447,6 @@ impl Checker {
                 Some("a `readonly` Vec cannot change; keep and use the mutable value instead".to_string()),
             );
         }
-        // The method form runs through a shared thunk with no call site of
-        // its own, so it is still gated where it is written.
-        if *method == "attach"
-            && self.class_owner_from_ty(&resolved).as_deref()
-                == Some(crate::typechecking::ty::STREAM)
-        {
-            self.gate_stream_attach(range.clone());
-        }
         // A method's `... xs` template calls its instance for this call's
         // pack (#1754).
         if let Some(owner) = self.class_owner_from_ty(&resolved)
@@ -5894,7 +5832,7 @@ impl Checker {
             }
         };
 
-        // `env::exit`, `Stream.attach` and the other gated host
+        // `env::exit` and the other gated host
         // calls are checked over what `main` / tests reach, after codegen
         // (`Compiler::capability_violations`).
         if let Some(IoBuiltin::Drive | IoBuiltin::WaitReady) = self.io_fn_in_scope(&ident) {

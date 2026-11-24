@@ -274,25 +274,25 @@ fn debug_batch_line_breakpoint_unmapped_is_error() {
 }
 
 #[test]
-fn debug_allow_attach_applies() {
+fn debug_allow_exit_applies() {
     let cwd = std::env::temp_dir().join(format!("coil_debug_grant_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cwd);
     std::fs::create_dir_all(&cwd).expect("temp cwd");
-    let entry = cwd.join("attach.coil");
+    let entry = cwd.join("exit.coil");
     std::fs::write(
         &entry,
-        "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+        "use env::exit;\nfn main() { exit(0); }\n",
     )
-    .expect("write attach");
+    .expect("write exit");
 
     let denied = run_debug_script_on(&entry, "break main\nrun\nquit\n", "grant_deny", &[]);
     assert!(
         !denied.0.status.success(),
-        "ungranted attach should fail compile"
+        "ungranted exit should fail compile"
     );
     let err = String::from_utf8_lossy(&denied.0.stderr);
     assert!(
-        err.contains("allow-attach") || err.contains("E0408") || err.contains("HostAttach"),
+        err.contains("allow-exit") || err.contains("E0407"),
         "stderr={err}"
     );
     let _ = std::fs::remove_dir_all(&denied.1);
@@ -301,11 +301,11 @@ fn debug_allow_attach_applies() {
         &entry,
         "break main\nrun\nquit\n",
         "grant_ok",
-        &["--allow-attach"],
+        &["--allow-exit"],
     );
     assert!(
         out.status.success(),
-        "debug --allow-attach failed: {}",
+        "debug --allow-exit failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     let stdout = String::from_utf8_lossy(&out.stdout);

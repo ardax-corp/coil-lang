@@ -23,7 +23,6 @@ impl CapViolation {
         match self.native {
             "env_exit" => "`env::exit`".into(),
             "process_spawn" => "running a program (`process`)".into(),
-            "stream_attach" => "`Stream.attach`".into(),
             "open" => "`io::open`".into(),
             other => {
                 let shown = [("fs_", "io::fs::"), ("tcp_", "io::net::tcp::"), ("udp_", "io::net::udp::"), ("env_", "env::")]
@@ -39,8 +38,6 @@ impl CapViolation {
             ErrorCode::HostExecDenied
         } else if self.needed.contains(Caps::EXIT) {
             ErrorCode::HostExitDenied
-        } else if self.needed.contains(Caps::ATTACH) {
-            ErrorCode::HostAttachDenied
         } else {
             ErrorCode::HostCapDenied
         };

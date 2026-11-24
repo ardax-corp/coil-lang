@@ -17,7 +17,7 @@ use reporting::ReportConfig;
     about = "GDB-style debugger (REPL; --dap for IDE)",
     disable_help_subcommand = true,
     after_help = "Host grant flags apply to the program under the debugger. With --dap the\n\
-program comes from the DAP launch request; launch may also set allowAttach."
+program comes from the DAP launch request; launch may also set allowExit, allowRead and the other grants."
 )]
 struct DebugCli {
     #[command(flatten)]
@@ -119,7 +119,6 @@ mod tests {
     fn parse_dap_allows_host_grants() {
         let parsed = parse_args(&args(&[
             "--dap",
-            "--allow-attach",
             "--allow-exit",
             "--root",
             "src",
@@ -131,7 +130,6 @@ mod tests {
                 grants,
                 extra_roots,
             } => {
-                assert!(grants.allow_attach);
                 assert!(grants.allow_exit);
                 assert_eq!(extra_roots, vec![PathBuf::from("src")]);
             }

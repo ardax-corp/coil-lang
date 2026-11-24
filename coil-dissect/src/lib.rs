@@ -148,7 +148,6 @@ mod tests {
     fn parse_host_grants_and_search_paths() {
         let (_cfg, args) = parse_args(&argv(&[
             "a.coil",
-            "--allow-attach",
             "--allow-exit",
             "--allow-ffi-exec",
             "--allow-dload",
@@ -161,7 +160,6 @@ mod tests {
         .unwrap()
         .unwrap();
         assert_eq!(args.filename, "a.coil");
-        assert!(args.grants.allow_attach);
         assert!(args.grants.allow_exit);
         assert!(args.grants.allow_ffi_exec);
         assert_eq!(
