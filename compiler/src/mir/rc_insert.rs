@@ -51,7 +51,20 @@ fn unwind_homes_on() -> bool {
 pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mut MirFunc)>) -> usize {
     let mut bodies: Vec<(Option<Label>, &mut MirFunc)> = bodies.into_iter().collect();
     let numbers = number_returns(bodies.iter().map(|(l, f)| (*l, &**f)));
-    bodies.iter_mut().map(|(l, f)| insert_rc_in(f, false, &numbers, *l)).sum()
+    let coros = coro_bodies(bodies.iter().map(|(_, f)| &**f));
+    bodies.iter_mut().map(|(l, f)| insert_rc_in(f, false, &numbers, *l, l.is_some_and(|l| coros.contains(&l)))).sum()
+}
+
+/// The bodies a coroutine runs (a `gen fn`'s, `MakeCoro` targets): their
+/// parameters are the coroutine's words, also when the body never yields.
+fn coro_bodies<'a>(bodies: impl Iterator<Item = &'a MirFunc>) -> HashSet<Label> {
+    bodies
+        .flat_map(|f| f.blocks.iter().flat_map(|b| &b.insts))
+        .filter_map(|i| match i {
+            MirInst::Alloc { kind: super::inst::MirAllocKind::Coro { target }, .. } => Some(*target),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The entries of the bodies whose every return is a number (by its
@@ -231,16 +244,16 @@ fn reads_only(inst: &MirInst, v: ValueId) -> bool {
 
 /// [`insert_rc_all`] of a body, or of a cleanup pad (`pad`: it runs while the
 /// frame unwinds, so it keeps no homes of its own).
-fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>, own: Option<Label>) -> usize {
+fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>, own: Option<Label>, coro: bool) -> usize {
     let mut n = 0;
     if let Some(p) = func.cleanup.as_deref_mut() {
-        n += insert_rc_in(p, true, numbers, None);
+        n += insert_rc_in(p, true, numbers, None, false);
     }
     // A `FreeEarly` (`hir/early_free.rs`) stays: in a counting run the
     // runtime frees nothing there and only runs the `drop`s the value's
     // last decrement will owe, at the scope's end (plan step 7). It reads
     // its value, so the decrement comes after it.
-    let pass = Pass::new(func, numbers, own.is_some_and(|l| numbers.contains(&l)));
+    let pass = Pass::new(func, numbers, own.is_some_and(|l| numbers.contains(&l)), coro);
     let (ops, homes) = pass.run(func, !pad);
     n += ops;
     n -= cancel_pairs(func, &homes);
@@ -484,7 +497,7 @@ fn alias_source(inst: &MirInst, counted: &dyn Fn(ValueId) -> bool) -> Option<Val
 }
 
 impl Pass {
-    fn new(func: &MirFunc, numbers: &HashSet<Label>, returns_number: bool) -> Self {
+    fn new(func: &MirFunc, numbers: &HashSet<Label>, returns_number: bool, coro: bool) -> Self {
         let pointers = pointer_words(func);
         let mut counted: HashSet<ValueId> = (0..func.types.len() as u32).map(ValueId).filter(|v| matches!(ty_of(func, *v), t if heap_word(t) || t == MirTy::Value)).collect();
         counted.extend(opaque_words(func));
@@ -607,7 +620,7 @@ impl Pass {
         }
         // A generator's parameters are its coroutine's words, which the
         // coroutine took an owner of when it was made: its frame owns them.
-        let generator = super::frame_words::is_generator(func);
+        let generator = coro || super::frame_words::is_generator(func);
         let mut borrowed: HashSet<ValueId> = if generator { HashSet::new() } else { func.params.iter().copied().filter(|p| counted.contains(p)).collect() };
         for &p in func.params.iter().filter(|p| counted.contains(p)) {
             base.insert(p, p);
