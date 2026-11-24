@@ -16656,6 +16656,18 @@ impl Checker {
     /// its module-qualified name, as the real pass (`resolve_class_key`)
     /// keys it, so a same-named type in another module does not share the
     /// stub (#957).
+    /// Whether `name` spells a trait whose values are a type (a trait of
+    /// one type-kinded parameter, or one of this module's traits).
+    pub fn is_trait_value_name(&self, name: &str) -> bool {
+        if self.enums.contains_key(name) || self.generics.nominal_type_module(name).is_some() {
+            return false;
+        }
+        match self.generics.typeclass(self.impl_trait_key(name)) {
+            Some(def) => def.type_params.len() == 1 && def.kind_at(0) == Kind::Type,
+            None => self.module_trait_names.contains(name),
+        }
+    }
+
     fn pre_pass_local_head(&self, name: &str, local_types: &HashSet<&str>) -> Option<String> {
         local_types
             .contains(name)
@@ -16720,7 +16732,15 @@ impl Checker {
                     return Ty::Con(canon);
                 }
                 // An imported class or enum, once the imports are known.
-                Ty::Con(self.resolve_instance_head_key(name).unwrap_or(canon))
+                if let Some(key) = self.resolve_instance_head_key(name) {
+                    return Ty::Con(key);
+                }
+                // A trait's name is its trait values' type (`impl Write for
+                // Conn`), as in an annotation.
+                if self.is_trait_value_name(name) {
+                    return Ty::Existential { class: self.impl_trait_key(name).to_string() };
+                }
+                Ty::Con(canon)
             }
             Expression::TypeApp { name, args } => {
                 let head = match name.to_ascii_lowercase().as_str() {

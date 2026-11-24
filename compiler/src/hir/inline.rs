@@ -737,7 +737,7 @@ impl Inliner<'_> {
     /// a substitution drops (#2839).
     fn stands_in(&self, callee: &HirBody, p: LocalId, a: HirId) -> bool {
         let arg = self.body.expr(a);
-        let packed = existential(&callee.locals[p.0 as usize].ty) && !existential(&arg.ty);
+        let packed = packs(&callee.locals[p.0 as usize].ty, &arg.ty);
         matches!(arg.kind, HirKind::Lit(_) | HirKind::Local(_)) && !packed && !rebinds(callee, p)
     }
 
@@ -751,7 +751,7 @@ impl Inliner<'_> {
         // The call's node becomes the block (or the bare result), so its
         // parent still reads it. A result packed into the call's trait
         // object stays a node of its own: its pack is keyed on it (#1757).
-        let packed = existential(&self.body.expr(call).ty) && !existential(&self.body.expr(tail).ty);
+        let packed = packs(&self.body.expr(call).ty, &self.body.expr(tail).ty);
         let kind = if stmts.is_empty() && !packed {
             let kind = self.body.expr(tail).kind.clone();
             self.tombstone(tail);
@@ -945,9 +945,16 @@ impl Inliner<'_> {
 
 }
 
-/// A bare-class existential (`Sum`): a `[value, dictionary]` pack.
-fn existential(t: &Option<ty::Ty>) -> bool {
-    t.as_ref().is_some_and(|t| matches!(ty::strip_readonly(t), ty::Ty::Existential { .. }))
+/// Whether a value of type `from` is packed where type `to` is read: `to`
+/// is a bare-class existential (`Sum`, a `[value, dictionary]` pack) and
+/// `from` is not that same one. A trait value of another trait (a `Port`
+/// read as its supertrait `Sink`) is packed again, its pack the value.
+fn packs(to: &Option<ty::Ty>, from: &Option<ty::Ty>) -> bool {
+    let class = |t: &Option<ty::Ty>| match t.as_ref().map(ty::strip_readonly) {
+        Some(ty::Ty::Existential { class }) => Some(class.clone()),
+        _ => None,
+    };
+    class(to).is_some_and(|to| class(from).is_none_or(|from| from != to))
 }
 
 /// Whether `callee` assigns parameter `p` or a place rooted at it by index.

@@ -1,0 +1,119 @@
+// A trait value's type takes impls like any other type: `impl Sink for
+// Sink` forwards to the pack it holds, so a `Sink` value satisfies a
+// `T: Sink` bound, and `impl Sink for Port` makes a `Port` value (whose
+// trait has `Sink` as a supertrait) one too, and packs as a `Sink`.
+use tests::assert;
+
+trait Sink<S> {
+    fn put(S s, int n) -> int {}
+
+    fn scale(S s) -> int {
+        return 1;
+    }
+}
+
+trait Port<S: Sink> {
+    fn id(S s) -> int {}
+}
+
+class Adder {
+    pub base: int,
+}
+
+class Doubler {
+    pub scale_by: int,
+}
+
+impl Sink for Adder {
+    fn put(Adder a, int n) -> int {
+        return a.base + n;
+    }
+}
+
+impl Sink for Doubler {
+    fn put(Doubler d, int n) -> int {
+        return 2 * n;
+    }
+
+    fn scale(Doubler d) -> int {
+        return d.scale_by;
+    }
+}
+
+impl Port for Adder {
+    fn id(Adder a) -> int {
+        return 1;
+    }
+}
+
+impl Port for Doubler {
+    fn id(Doubler d) -> int {
+        return 2;
+    }
+}
+
+impl Sink for Sink {
+    fn put(Sink s, int n) -> int {
+        return s.put(n);
+    }
+
+    fn scale(Sink s) -> int {
+        return s.scale();
+    }
+}
+
+impl Sink for Port {
+    fn put(Port p, int n) -> int {
+        return p.put(n);
+    }
+
+    fn scale(Port p) -> int {
+        return p.scale();
+    }
+}
+
+impl Port for Port {
+    fn id(Port p) -> int {
+        return p.id();
+    }
+}
+
+fn feed<T: Sink>(T s, int n) -> int {
+    return s.put(n) * s.scale();
+}
+
+fn route<P: Port>(P p, int n) -> int {
+    return 100 * p.id() + feed(p, n);
+}
+
+fn feed_value(Sink s, int n) -> int {
+    return feed(s, n);
+}
+
+test("a trait value meets its own trait's bound") {
+    let sinks: Vec<Sink> = [new Adder(10), new Doubler(3)];
+    assert!(feed(sinks[0], 5) == 15);
+    assert!(feed(sinks[1], 5) == 30);
+}
+
+test("a subtrait value meets its supertrait's bound") {
+    let ports: Vec<Port> = [new Adder(10), new Doubler(3)];
+    assert!(route(ports[0], 1) == 111);
+    assert!(route(ports[1], 1) == 206);
+    assert!(feed(ports[1], 4) == 24);
+}
+
+test("a subtrait value packs as its supertrait") {
+    let p: Port = new Doubler(5);
+    let s: Sink = p;
+    assert!(s.put(3) == 6);
+    assert!(s.scale() == 5);
+    assert!(feed_value(p, 2) == 20);
+}
+
+test("an overridden default goes through the forwarder") {
+    let d: Sink = new Doubler(7);
+    let a: Sink = new Adder(0);
+    assert!(feed(d, 1) == 14);
+    assert!(feed(a, 1) == 1);
+}

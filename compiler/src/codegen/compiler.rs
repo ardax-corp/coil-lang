@@ -5889,11 +5889,14 @@ impl Compiler {
                     // Same class or enum key the checker's instance head
                     // uses, so an imported type names `Trait__module::Type__method`.
                     _ if !self.checker.generics().generic_type_ctors.contains_key(*name) => {
-                        Ty::Con(
-                            self.checker
-                                .resolve_instance_head_key(name)
-                                .unwrap_or_else(|| name.to_string()),
-                        )
+                        match self.checker.resolve_instance_head_key(name) {
+                            Some(key) => Ty::Con(key),
+                            // A trait's values (`impl Write for Conn`).
+                            None if self.checker.is_trait_value_name(name) => {
+                                Ty::Existential { class: self.checker.impl_trait_key(name).to_string() }
+                            }
+                            None => Ty::Con(name.to_string()),
+                        }
                     }
                     _ => Ty::Con(name.to_string()),
                 }
