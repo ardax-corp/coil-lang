@@ -39,7 +39,6 @@ mod vectorize;
 mod bool_thread;
 mod phi_sroa;
 mod rc_insert;
-pub use rc_insert::insert_rc_all;
 mod strength;
 mod text;
 mod ty;

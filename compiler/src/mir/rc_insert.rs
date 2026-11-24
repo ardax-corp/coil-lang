@@ -47,14 +47,91 @@ fn unwind_homes_on() -> bool {
 
 /// Insert the count ops into a program's bodies, each `(entry, body)`, and
 /// their cleanup pads. A call to a body that only ever returns a number
-/// gives no word to count. Returns how many ops it inserted.
-pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mut MirFunc)>) -> usize {
+/// gives no word to count. The bodies in `owning` (the tail twins
+/// [`owning_tail_twins`] made) own their parameters. Returns how many ops
+/// it inserted.
+pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mut MirFunc)>, owning: &HashSet<Label>) -> usize {
     let mut bodies: Vec<(Option<Label>, &mut MirFunc)> = bodies.into_iter().collect();
     let numbers = number_returns(bodies.iter().map(|(l, f)| (*l, &**f)));
-    let coros = owning_bodies(bodies.iter().map(|(_, f)| &**f));
+    let mut coros = owning_bodies(bodies.iter().map(|(_, f)| &**f));
+    coros.extend(owning.iter().copied());
     let quiet = quiet_bodies(bodies.iter().map(|(l, f)| (*l, &**f)), &coros);
-    let facts = Facts { numbers, quiet };
+    let mut facts = Facts { numbers, quiet, owned_params: HashMap::new() };
+    // Which parameters a tail twin releases: its caller hands each an owner.
+    let owned_params: HashMap<Label, Vec<bool>> = bodies
+        .iter()
+        .filter_map(|(l, f)| {
+            let l = (*l).filter(|l| owning.contains(l))?;
+            let pass = Pass::new(f, &facts, false, true);
+            Some((l, f.params.iter().map(|&p| pass.root(p) == Some(p)).collect()))
+        })
+        .collect();
+    facts.owned_params = owned_params;
     bodies.iter_mut().map(|(l, f)| insert_rc_in(f, false, &facts, *l, l.is_some_and(|l| coros.contains(&l)))).sum()
+}
+
+/// A tail call hands its callee the frame, so the caller can release
+/// nothing after it: what it passes would leak. Each body a tail call
+/// targets that takes a parameter that may hold an object gets a twin
+/// that owns its parameters (`name$own`, a fresh label), and every tail
+/// call to it, in its twin too, enters the twin with its arguments'
+/// owners handed over. Returns the twins' labels.
+pub fn owning_tail_twins(bodies: &mut Vec<super::native_capture::NativeBody>) -> HashSet<Label> {
+    let by_label: HashMap<Label, usize> = bodies.iter().enumerate().filter_map(|(i, b)| Some((b.entry?, i))).collect();
+    let may_hold = |f: &MirFunc| {
+        f.params.iter().any(|&p| matches!(ty_of(f, p), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes) || f.heap_pair_words.contains(&p))
+            || (f.opaque_words && !f.params.is_empty())
+    };
+    let mut targets: Vec<Label> = Vec::new();
+    for b in bodies.iter() {
+        for block in &b.mir.blocks {
+            if let Some(inst @ MirInst::Call { target, .. }) = block.insts.last()
+                && is_tail_call_inst(&b.mir, block, inst)
+                && let Some(&callee) = by_label.get(target)
+                && !targets.contains(target)
+            {
+                let c = &bodies[callee];
+                if !c.name.ends_with("::drop") && !super::frame_words::is_generator(&c.mir) && may_hold(&c.mir) {
+                    targets.push(*target);
+                }
+            }
+        }
+    }
+    if targets.is_empty() {
+        return HashSet::new();
+    }
+    let first = bodies
+        .iter()
+        .flat_map(|b| b.entry.into_iter().chain(b.mir.code_targets()))
+        .map(|l| l.0)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let mut twin_of: HashMap<Label, Label> = HashMap::new();
+    for (next, t) in (first..).zip(&targets) {
+        let body = &bodies[by_label[t]];
+        let twin = Label(next);
+        twin_of.insert(*t, twin);
+        bodies.push(super::native_capture::NativeBody { name: format!("{}$own", body.name), entry: Some(twin), mir: body.mir.clone() });
+    }
+    for b in bodies.iter_mut() {
+        let f = &mut b.mir;
+        let mut redirected = Vec::new();
+        for bi in 0..f.blocks.len() {
+            let block = &f.blocks[bi];
+            let Some(inst @ MirInst::Call { target, .. }) = block.insts.last() else { continue };
+            if !is_tail_call_inst(f, block, inst) {
+                continue;
+            }
+            let Some(&twin) = twin_of.get(target) else { continue };
+            if let Some(MirInst::Call { target, .. }) = f.blocks[bi].insts.last_mut() {
+                *target = twin;
+            }
+            redirected.push(twin);
+        }
+        f.tail_targets.extend(redirected);
+    }
+    twin_of.into_values().collect()
 }
 
 /// What the pass knows of the other bodies.
@@ -63,6 +140,9 @@ struct Facts {
     numbers: HashSet<Label>,
     /// The bodies that write no word into an object ([`quiet_bodies`]).
     quiet: HashSet<Label>,
+    /// The tail twins ([`owning_tail_twins`]): for each parameter, whether
+    /// the twin releases it, so a tail call hands it an owner.
+    owned_params: HashMap<Label, Vec<bool>>,
 }
 
 /// The calls of `func` that write no word into an object: of a pure
@@ -333,7 +413,11 @@ fn insert_rc_in(func: &mut MirFunc, pad: bool, facts: &Facts, own: Option<Label>
     object_homes.extend(pad_homes);
     object_homes.sort_unstable();
     object_homes.dedup();
-    let (ops, homes) = pass.run(func, !pad);
+    // A tail twin keeps no homes, which would end its own tail calls (an
+    // unwind through it leaks what it owned, as one through a tail call
+    // did before).
+    let twin = own.is_some_and(|l| facts.owned_params.contains_key(&l));
+    let (ops, homes) = pass.run(func, !pad && !twin);
     n += ops;
     if let Some(p) = func.cleanup.as_deref_mut() {
         n += release_object_homes(p, &object_homes);
@@ -590,6 +674,8 @@ struct Pass {
     /// Words that are numbers by their definition (a constant, arithmetic,
     /// a comparison): never an object, whatever their type.
     scalar: HashSet<ValueId>,
+    /// The tail twins' released parameters ([`Facts::owned_params`]).
+    owned_params: HashMap<Label, Vec<bool>>,
 }
 
 /// The value an alias-defining instruction names the same object as.
@@ -835,7 +921,7 @@ impl Pass {
         let mut scalar: HashSet<ValueId> = scalar;
         // A φ of numbers only is a number (a loop's running sum).
         scalar.extend(number_words(func, numbers).into_iter().filter(|d| !base.contains_key(d)));
-        let mut pass = Self { base, borrowed, owned_at_def, scalar };
+        let mut pass = Self { base, borrowed, owned_at_def, scalar, owned_params: facts.owned_params.clone() };
         pass.borrow_loads_of_live_holders(func, &quiet);
         pass
     }
@@ -1119,6 +1205,27 @@ impl Pass {
                     }
                     if !live_after[ii].contains(&d) {
                         ops.push(MirInst::RcDec { dest: tok(&mut new_types), src: d, guard: None });
+                    }
+                }
+                // A tail call into a twin that owns its parameters hands
+                // each one it releases an owner: a root that dies here
+                // moves (once), anything else gains one.
+                if let MirInst::Call { target, args, .. } = inst
+                    && is_tail_call_inst(func, block, inst)
+                    && let Some(mask) = self.owned_params.get(target)
+                {
+                    let mut moved: HashSet<ValueId> = HashSet::new();
+                    for (k, &a) in args.iter().enumerate() {
+                        if !mask.get(k).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        match self.owned(a) {
+                            Some(r) if !live_after[ii].contains(&r) && moved.insert(r) => {}
+                            _ => {
+                                before[bi].entry(ii).or_default().push(MirInst::RcInc { dest: tok(&mut new_types), src: a, guard: None });
+                                inserted += 1;
+                            }
+                        }
                     }
                 }
                 if !inst.is_phi() && !is_tail_call_inst(func, block, inst) {
@@ -1526,11 +1633,11 @@ mod tests {
     fn a_walk_of_a_borrowed_enum_counts_nothing() {
         let walk = "func @w(v0: heapref) -> i64 {\nbb0:\n    jumpifmatch v0, 0, bb2, bb1\nbb1:\n    v1 = matchpayload v0, 0\n    v2 = call.i64 7 v1\n    v3 = iconst.i64 1\n    v4 = iadd v2, v3\n    return v4\nbb2:\n    v5 = iconst.i64 1\n    return v5\n}\n";
         let mut f = crate::mir::parse_func(walk).expect(walk);
-        insert_rc_all([(Some(Label(7)), &mut f)]);
+        insert_rc_all([(Some(Label(7)), &mut f)], &HashSet::new());
         assert_eq!(all_rc_ops(&f), 0, "{f}");
         // Called under another label, its result is a word to count.
         let mut g = crate::mir::parse_func(walk).expect(walk);
-        insert_rc_all([(Some(Label(8)), &mut g)]);
+        insert_rc_all([(Some(Label(8)), &mut g)], &HashSet::new());
         assert_eq!(all_rc_ops(&g), 1, "{g}");
     }
 
@@ -1540,11 +1647,11 @@ mod tests {
     fn an_int_field_summed_counts_nothing() {
         let sum = "func @s(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = iadd v1, v2\n    return v3\n}\n";
         let mut f = crate::mir::parse_func(sum).expect(sum);
-        insert_rc_all([(None, &mut f)]);
+        insert_rc_all([(None, &mut f)], &HashSet::new());
         assert_eq!(all_rc_ops(&f), 0, "{f}");
         let kept = "func @k(v0: heapref) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    return v2\n}\n";
         let mut g = crate::mir::parse_func(kept).expect(kept);
-        insert_rc_all([(None, &mut g)]);
+        insert_rc_all([(None, &mut g)], &HashSet::new());
         assert!(all_rc_ops(&g) > 0, "{g}");
     }
 
@@ -1555,11 +1662,11 @@ mod tests {
     fn a_borrowed_field_read_by_a_host_counts_nothing() {
         let read = "func @r(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = host.key_index_probe v2, v2, v1, v1\n    v4 = iadd v3, v1\n    return v4\n}\n";
         let mut f = crate::mir::parse_func(read).expect(read);
-        insert_rc_all([(None, &mut f)]);
+        insert_rc_all([(None, &mut f)], &HashSet::new());
         assert_eq!(all_rc_ops(&f), 0, "{f}");
         let call = "func @c(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = call.i64 7 v2\n    v4 = iadd v3, v1\n    return v4\n}\n";
         let mut g = crate::mir::parse_func(call).expect(call);
-        insert_rc_all([(None, &mut g)]);
+        insert_rc_all([(None, &mut g)], &HashSet::new());
         assert!(all_rc_ops(&g) > 0, "{g}");
     }
 

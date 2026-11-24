@@ -112,7 +112,7 @@ fn check_after(func: &crate::mir::MirFunc, pass: &str) {
     }
 }
 
-/// Verify a body after the count insertion ([`crate::mir::insert_rc_all`]),
+/// Verify a body after the count insertion ([`crate::mir::rc_insert::insert_rc_all`]),
 /// which runs on expanded bodies: dominance only, as [`check_expanded`],
 /// since an expansion's join block may follow its uses in block order.
 pub(super) fn check_after_rc(func: &crate::mir::MirFunc) {
