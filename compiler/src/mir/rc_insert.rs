@@ -661,6 +661,18 @@ impl Pass {
         // An `int` word the frame only computes with is a number.
         let nums = used_as_numbers(func, returns_number);
         counted.retain(|v| !nums.contains(v));
+        // A word a number store writes is a number by its static type,
+        // wherever else the frame uses it.
+        let stored: HashSet<ValueId> = func
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter_map(|i| match i {
+                MirInst::StoreIndex { value, scalar: true, .. } | MirInst::HeapFieldStore { value, scalar: true, .. } => Some(*value),
+                _ => None,
+            })
+            .collect();
+        counted.retain(|v| !stored.contains(v));
         // A barrier's dest is the object the op before it made, from the
         // safepoint on; a barrier with none names no object.
         let barriers = barrier_pairs(func);
