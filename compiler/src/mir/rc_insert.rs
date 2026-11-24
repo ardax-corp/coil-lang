@@ -1053,14 +1053,19 @@ impl Pass {
             }
         }
         // Owned parameters (a coroutine body's) are in their homes from the
-        // start: a panic before their last use releases them. Not when the
-        // entry is a jump target, where the stores would run again.
+        // start: a panic before their last use releases them. One the body
+        // never reads dies at the start. Not when the entry is a jump
+        // target, where these ops would run again.
         let entry = func.entry;
         let entry_targeted = func.blocks.iter().any(|b| b.term.as_ref().is_some_and(|t| t.succs().contains(&entry)));
         if !entry_targeted {
             let mut ops = Vec::new();
             for &p in &func.params {
                 if self.borrowed.contains(&p) || self.root(p) != Some(p) {
+                    continue;
+                }
+                if !live_in[entry.index()].contains(&p) {
+                    ops.push(MirInst::RcDec { dest: tok(&mut new_types), src: p, guard: None });
                     continue;
                 }
                 let Some(&h) = homes.get(&p) else { continue };
