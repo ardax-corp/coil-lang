@@ -5609,9 +5609,10 @@ mod tests {
         heap.flush_epoch_batch();
         heap.exit_epoch_stw();
         assert_eq!((old.rc_count(), born.rc_count()), (2, 2));
-        // `dropped` reached zero and was freed; `gone`'s changes cancel, so
-        // it stays (at zero) for the collector.
-        assert_eq!(heap.live_object_count(), 3);
+        // `dropped` reached zero and was freed; so was `gone`, born in the
+        // epoch, whose owners came and went (changes that sum to nothing
+        // from a count of zero).
+        assert_eq!(heap.live_object_count(), 2);
     }
 
     #[test]
