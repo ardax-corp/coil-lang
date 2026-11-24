@@ -131,3 +131,28 @@ fn an_unrooted_root_is_freed() {
     )]);
     assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
 }
+
+/// A partial application of a partial is a new function value the call
+/// hands back owned, and freed with its last owner.
+#[test]
+fn a_partial_of_a_partial_is_freed() {
+    let stderr = run_with_leak_report("partial", &[(
+        "main.coil",
+        "fn add3(int a, int b, int c) -> int {\n    return a + b + c;\n}\n\n\
+         fn main() {\n    let p = add3(1);\n    let q = p(2);\n    let x = q(3);\n}\n",
+    )]);
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
+
+/// Over-application calls the function the declared arguments return
+/// with the rest: that function is freed after.
+#[test]
+fn over_application_frees_the_function_in_between() {
+    let stderr = run_with_leak_report("over_app", &[(
+        "main.coil",
+        "fn curried() -> int -> int -> int {\n    return fn (int a) => fn (int b) use (a) => a * 10 + b;\n}\n\n\
+         #[inline(never)]\nfn at2(int -> int -> int f) -> int {\n    return f(1, 2);\n}\n\n\
+         fn main() {\n    let x = at2(curried());\n}\n",
+    )]);
+    assert!(!stderr.contains("coil rc-leaks"), "{stderr}");
+}
