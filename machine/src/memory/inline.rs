@@ -218,7 +218,7 @@ pub fn product_slots() -> ProductSlots {
         spill_tag,
         spill_ptr_at: (vec_at + ptr * 8) as u32,
         spill_len_at: (vec_at + len_word * 8) as u32,
-        inline_stores: !cfg!(any(debug_assertions, feature = "gc-stress")),
+        inline_stores: !cfg!(any(debug_assertions, feature = "rc-check")),
     }
 }
 
@@ -272,7 +272,7 @@ mod tests {
         let mut heap = Heap::default();
         heap.set_nursery(true);
         let (counts, bumps) = heap.inline_alloc_ptrs();
-        assert_eq!(unsafe { (*counts).inline_gate }, u64::from(!cfg!(feature = "gc-stress")));
+        assert_eq!(unsafe { (*counts).inline_gate }, u64::from(!cfg!(feature = "rc-check")));
         let words = [Value::from(7_i64), Value::from(8_i64), Value::from(9_i64)];
         let mut alloc = |shape: InlineShape, payload: &[Value]| -> u64 {
             let o = inline_object(shape).expect("inline shape");

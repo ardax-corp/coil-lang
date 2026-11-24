@@ -106,9 +106,9 @@ impl Drop for EpochBatchStash {
     }
 }
 
-// Shared-heap epoch write guard (debug / gc-stress only, #1892): see
+// Shared-heap epoch write guard (debug / rc-check only, #1892): see
 // `docs/internals/shared-heap-guard.md`.
-#[cfg(any(debug_assertions, feature = "gc-stress"))]
+#[cfg(any(debug_assertions, feature = "rc-check"))]
 thread_local! {
     /// Generation of the steal epoch whose shared-heap job this thread is
     /// running, or 0 when it runs none. While non-zero, every
@@ -121,10 +121,10 @@ thread_local! {
 /// write only objects allocated in its epoch, an isolate job anything in its
 /// own heap. Dropping it restores the enclosing job's rule (a join that
 /// help-steals nests jobs on one thread). Zero-sized and a no-op unless
-/// `debug_assertions` or the `gc-stress` feature is on.
+/// `debug_assertions` or the `rc-check` feature is on.
 #[must_use]
 pub struct EpochWriteScope {
-    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[cfg(any(debug_assertions, feature = "rc-check"))]
     prev: u8,
 }
 
@@ -132,7 +132,7 @@ impl EpochWriteScope {
     /// Enter a job on `heap` (the heap the job's runtime is bound to): a
     /// shared-heap job of `heap`'s open epoch when `shared`, otherwise a job
     /// that may write anything ([`Self::unchecked`]).
-    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[cfg(any(debug_assertions, feature = "rc-check"))]
     #[inline]
     pub fn enter(heap: &Heap, shared: bool) -> Self {
         Self::set(if shared { heap.epoch_gen } else { 0 })
@@ -140,13 +140,13 @@ impl EpochWriteScope {
 
     /// Lift the guard until dropped: a join that help-steals runs the stolen
     /// job (and the reset of its helper runtime's own heap) on this thread.
-    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[cfg(any(debug_assertions, feature = "rc-check"))]
     #[inline]
     pub fn unchecked() -> Self {
         Self::set(0)
     }
 
-    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[cfg(any(debug_assertions, feature = "rc-check"))]
     fn set(generation: u8) -> Self {
         Self {
             prev: EPOCH_WRITE_GEN.with(|g| g.replace(generation)),
@@ -154,21 +154,21 @@ impl EpochWriteScope {
     }
 
     /// Release build: no guard.
-    #[cfg(not(any(debug_assertions, feature = "gc-stress")))]
+    #[cfg(not(any(debug_assertions, feature = "rc-check")))]
     #[inline(always)]
     pub fn enter(_heap: &Heap, _shared: bool) -> Self {
         Self {}
     }
 
     /// Release build: no guard.
-    #[cfg(not(any(debug_assertions, feature = "gc-stress")))]
+    #[cfg(not(any(debug_assertions, feature = "rc-check")))]
     #[inline(always)]
     pub fn unchecked() -> Self {
         Self {}
     }
 }
 
-#[cfg(any(debug_assertions, feature = "gc-stress"))]
+#[cfg(any(debug_assertions, feature = "rc-check"))]
 impl Drop for EpochWriteScope {
     fn drop(&mut self) {
         let _ = EPOCH_WRITE_GEN.try_with(|g| g.set(self.prev));
@@ -180,7 +180,7 @@ impl Drop for EpochWriteScope {
 /// panic is caught and turned into a failed join (the arm reruns
 /// sequentially), which would hide this, so outside the crate's own unit
 /// tests the process aborts.
-#[cfg(any(debug_assertions, feature = "gc-stress"))]
+#[cfg(any(debug_assertions, feature = "rc-check"))]
 #[cold]
 #[inline(never)]
 fn epoch_write_violation(addr: u64, object_gen: u8, epoch_gen: u8) -> ! {
@@ -321,10 +321,10 @@ pub struct Heap {
     /// `alloc_bytes` past which a steal epoch aborts (see
     /// [`EPOCH_GC_HEADROOM_FACTOR`]); only meaningful while `epoch_stw`.
     epoch_gc_ceiling: usize,
-    /// Debug / gc-stress: generation of the current (or last) steal epoch,
+    /// Debug / rc-check: generation of the current (or last) steal epoch,
     /// never 0 once an epoch opened; stamped on objects allocated in it
     /// ([`EpochWriteScope`]).
-    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[cfg(any(debug_assertions, feature = "rc-check"))]
     epoch_gen: u8,
 }
 
@@ -376,7 +376,7 @@ impl Default for Heap {
             epoch_stw: false,
             epoch_gc_ceiling: 0,
             alloc_lock: ptr::null(),
-            #[cfg(any(debug_assertions, feature = "gc-stress"))]
+            #[cfg(any(debug_assertions, feature = "rc-check"))]
             epoch_gen: 0,
         };
         inline::make_inline_classes(&mut heap.slab);
@@ -487,7 +487,7 @@ impl Heap {
             .saturating_mul(EPOCH_GC_HEADROOM_FACTOR)
             .max(self.counts.alloc_bytes.saturating_add(EPOCH_GC_HEADROOM_MIN));
         self.alloc_lock = lock as *const Mutex<()>;
-        #[cfg(any(debug_assertions, feature = "gc-stress"))]
+        #[cfg(any(debug_assertions, feature = "rc-check"))]
         {
             // Skip 0, which marks objects allocated outside any epoch.
             self.epoch_gen = self.epoch_gen.wrapping_add(1).max(1);
@@ -549,7 +549,7 @@ impl Heap {
             slots.pop().expect("epoch batch refill")
         });
         let (object, content) = Self::init_slot(slot.cast::<GcData<T>>(), data, map);
-        #[cfg(any(debug_assertions, feature = "gc-stress"))]
+        #[cfg(any(debug_assertions, feature = "rc-check"))]
         content.header.epoch.set(self.epoch_gen);
         EPOCH_BATCH_TLS.with(|cell| {
             let mut batch = cell.borrow_mut();
@@ -702,7 +702,7 @@ impl Heap {
     /// ([`HeapCounts::inline_gate`]): called wherever one of the
     /// object-independent conditions of a young allocation changes.
     pub(crate) fn sync_inline_gate(&mut self) {
-        let open = !cfg!(feature = "gc-stress")
+        let open = !cfg!(feature = "rc-check")
             && self.nursery
             && !self.epoch_stw;
         self.counts.inline_gate = u64::from(open);
@@ -1431,7 +1431,7 @@ impl Heap {
         } else {
             self.gc_next_threshold
         };
-        cfg!(feature = "gc-stress")
+        cfg!(feature = "rc-check")
             || self.counts.alloc_bytes.saturating_sub(self.counts.young_bytes) > limit
             || self.held_over_budget()
             || self.slab.young_chunks_in_use() >= self.nursery_chunks
@@ -1485,7 +1485,7 @@ impl Heap {
         } else {
             self.gc_next_threshold
         };
-        cfg!(feature = "gc-stress")
+        cfg!(feature = "rc-check")
             || self.counts.alloc_bytes.saturating_sub(self.counts.young_bytes) > limit
             || self.held_over_budget()
     }
@@ -4214,10 +4214,10 @@ struct GcHeader {
     flags: Cell<u8>,
     /// Nursery bits ([`GEN_YOUNG`], [`GEN_PINNED`]).
     generation: Cell<u8>,
-    /// Debug / gc-stress: generation of the steal epoch the object was
+    /// Debug / rc-check: generation of the steal epoch the object was
     /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes the
     /// byte before the count; release builds leave it as padding.
-    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[cfg(any(debug_assertions, feature = "rc-check"))]
     epoch: Cell<u8>,
     /// Reference count: the number of places that own this object.
     /// [`COUNT_IMMORTAL`] never changes. Not maintained yet (#2881 plan
@@ -4297,7 +4297,7 @@ impl GcHeader {
             kind: Cell::new(0),
             flags: Cell::new(0),
             generation: Cell::new(0),
-            #[cfg(any(debug_assertions, feature = "gc-stress"))]
+            #[cfg(any(debug_assertions, feature = "rc-check"))]
             epoch: Cell::new(0),
             count: Cell::new(0),
         }
@@ -4360,13 +4360,13 @@ impl<T> AsRef<T> for GcData<T> {
 
 impl<T> AsMut<T> for GcData<T> {
     fn as_mut(&mut self) -> &mut T {
-        #[cfg(any(debug_assertions, feature = "gc-stress"))]
+        #[cfg(any(debug_assertions, feature = "rc-check"))]
         self.check_epoch_write();
         &mut self.data
     }
 }
 
-#[cfg(any(debug_assertions, feature = "gc-stress"))]
+#[cfg(any(debug_assertions, feature = "rc-check"))]
 impl<T> GcData<T> {
     /// Inside a shared-heap job, a payload write must target an object
     /// allocated in that job's epoch ([`EpochWriteScope`]). Every runtime
@@ -5217,7 +5217,7 @@ mod tests {
     /// Inside a steal epoch the normal threshold does not trigger a collect
     /// (which would abort the epoch); only the epoch ceiling does.
     #[test]
-    #[cfg(not(feature = "gc-stress"))]
+    #[cfg(not(feature = "rc-check"))]
     fn epoch_defers_collect_until_ceiling() {
         let lock = Mutex::new(());
         let mut heap = Heap::default();
@@ -5321,7 +5321,7 @@ mod tests {
     /// The shared-heap write guard (#1892) lets a job write what it
     /// allocated in its epoch, and lets an unchecked scope (a help-stolen
     /// job) write anything.
-    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[cfg(any(debug_assertions, feature = "rc-check"))]
     #[test]
     fn epoch_write_guard_allows_epoch_objects() {
         let lock = Mutex::new(());
@@ -5347,7 +5347,7 @@ mod tests {
 
     /// A shared-heap job that writes an object from before its epoch (a
     /// wrong purity proof) is caught.
-    #[cfg(any(debug_assertions, feature = "gc-stress"))]
+    #[cfg(any(debug_assertions, feature = "rc-check"))]
     #[test]
     #[should_panic(expected = "shared-heap epoch guard")]
     fn epoch_write_guard_rejects_pre_epoch_object() {

@@ -1,3 +1,4 @@
+// @skip rc-check a cycle collection at every safepoint frees the garbage before the test's own collect
 // `gc::collect()` returns the bytes it freed: never negative, more than zero
 // after garbage was made, and less on a second collect with nothing new. The
 // garbage is cycles of `shared class` nodes: no count reaches zero on them,

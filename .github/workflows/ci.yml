@@ -301,8 +301,9 @@ jobs:
 
   # The `.coil` harness binaries, built once per OS and build: `debug` and
   # `release` (the same corpus must pass in both, so a build-mode difference
-  # such as an optimizer or overflow-check bug shows up) and `gc-stress`, the
-  # release `coil-test` that collects at every allocation. Each build is
+  # such as an optimizer or overflow-check bug shows up) and `rc-check`, the
+  # release `coil-test` that runs the cycle collector and a check of every
+  # count at each safepoint. Each build is
   # cached by rust-cache, and every `harness` cell downloads one instead of
   # building its own.
   #
@@ -336,10 +337,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: harness-build-${{ matrix.mode }}
-          cache-directories: ${{ matrix.mode == 'gc-stress' && 'target/gc-stress' || '' }}
+          cache-directories: ${{ matrix.mode == 'rc-check' && 'target/rc-check' || '' }}
 
       - name: Build coil and coil-test
-        if: matrix.mode != 'gc-stress'
+        if: matrix.mode != 'rc-check'
         run: cargo build ${{ matrix.mode == 'release' && '--release' || '' }} --bin coil --bin coil-test
 
       # The runtime `coil package` links native executables with: the
@@ -354,16 +355,16 @@ jobs:
       # `coil test` re-execs `coil-test`; the GC-stress cells run this
       # harness directly. Release only: the debug GC-stress cells are off
       # (#2131).
-      - name: Build coil-test with GC stress
-        if: matrix.mode == 'gc-stress'
-        run: cargo build --release -p coil-test --features gc-stress --target-dir target/gc-stress
+      - name: Build coil-test with the count check
+        if: matrix.mode == 'rc-check'
+        run: cargo build --release -p coil-test --features rc-check --target-dir target/rc-check
 
       - name: Collect binaries
         run: |
           mkdir -p harness-bin
-          if [ "${{ matrix.mode }}" = gc-stress ]; then
-            mkdir -p harness-bin/gc-stress
-            cp target/gc-stress/release/coil-test harness-bin/gc-stress/
+          if [ "${{ matrix.mode }}" = rc-check ]; then
+            mkdir -p harness-bin/rc-check
+            cp target/rc-check/release/coil-test harness-bin/rc-check/
           else
             cp target/${{ matrix.mode }}/coil target/${{ matrix.mode }}/coil-test harness-bin/
             if [ "${{ matrix.mode }}" = release ]; then
@@ -387,22 +388,22 @@ jobs:
         mode: [release]
     steps: *harness-build-steps
 
-  harness-build-gc-stress:
+  harness-build-rc-check:
     name: harness build (${{ matrix.mode }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       matrix:
         os: [ubuntu-latest]
-        mode: [gc-stress]
+        mode: [rc-check]
     steps: *harness-build-steps
 
 
   # The `.coil` corpora under each compiler / engine setting and build mode, one
   # cell each so debug and release run side by side.
   # `scripts/test_corpora.py` runs each `tests/<corpus>` as its own process,
-  # in parallel. A GC-stress cell is named `(release, …)` and runs the
-  # `gc-stress` build.
+  # in parallel. An rc-check cell is named `(release, …)` and runs the
+  # `rc-check` build.
   harness-debug:
     name: harness ${{ matrix.variant }} (${{ matrix.mode }}, ${{ matrix.os }})
     needs: harness-build-debug
@@ -439,7 +440,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: harness-bin-${{ matrix.os }}-${{ matrix.variant == 'gc-stress' && 'gc-stress' || matrix.mode }}
+          name: harness-bin-${{ matrix.os }}-${{ matrix.variant == 'rc-check' && 'rc-check' || matrix.mode }}
           path: harness-bin
 
       - name: Language harness (${{ matrix.variant }}, ${{ matrix.mode }})
@@ -462,27 +463,26 @@ jobs:
               # address space with nothing behind it.
               code_kb=$(( $(size -d harness-bin/coil-test | awk 'NR==2 {print $4}') / 1024 ))
               MALLOC_ARENA_MAX=1 COIL_NO_FIBERS=1 $run -j 1 --limit-as-kb $(( code_kb + 262144 )) -- --engine mir $FLAGS ;;
-            # Collect and evacuate at every allocation (precise-root soundness).
-            # The memory corpus also at -O0: without inlining, a call's
-            # result reaches its consumer as a call result instead of a
-            # local, so the roots differ from the default level (#1481).
-            # Generics too: uninlined calls through `forall` parameters
-            # pass dictionaries the default level folds away (#1530).
-            # A full cycle per allocation costs time quadratic in what a
-            # case keeps live, so a case holds thousands of objects, not
-            # hundreds of thousands, and forces the collection it needs
-            # with `collect()`. The per-case wall limit is wider than the
-            # default 600 s for slow runners.
-            gc-stress)
-              # On both engines, whose roots are their own: stack maps, and
-              # the interpreter's scan.
-              $run --harness harness-bin/gc-stress/coil-test -- --engine native --wall-timeout 1200 $FLAGS
-              $run --harness harness-bin/gc-stress/coil-test memory generics -- --engine native -O 0 --wall-timeout 1200 $FLAGS
-              # Stack maps as a code image carries them.
-              COIL_CODE_IMAGE_CHECK=1 $run --harness harness-bin/gc-stress/coil-test memory -- --engine native --wall-timeout 1200 $FLAGS
-              $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS
+            # The cycle collector at every safepoint, after a check that
+            # no heap word names a freed object and no count is below the
+            # heap words that own it (`Heap::rc_check`). The memory corpus
+            # also at -O0: without inlining, a call's result reaches its
+            # consumer as a call result instead of a local, so the counts
+            # rc_insert places differ from the default level. Generics too:
+            # uninlined calls through `forall` parameters pass dictionaries
+            # the default level folds away. A walk of the heap per safepoint
+            # costs time quadratic in what a case keeps live, so a case holds
+            # thousands of objects, not hundreds of thousands. The per-case
+            # wall limit is wider than the default 600 s for slow runners.
+            # `--cell rc-check` keeps out files whose `// @skip rc-check`
+            # says why they cannot run there.
+            rc-check)
+              $run --harness harness-bin/rc-check/coil-test -- --engine native --wall-timeout 1200 --cell rc-check $FLAGS
+              $run --harness harness-bin/rc-check/coil-test memory generics -- --engine native -O 0 --wall-timeout 1200 --cell rc-check $FLAGS
+              COIL_CODE_IMAGE_CHECK=1 $run --harness harness-bin/rc-check/coil-test memory -- --engine native --wall-timeout 1200 --cell rc-check $FLAGS
+              $run --harness harness-bin/rc-check/coil-test -- --engine mir --wall-timeout 1200 --cell rc-check $FLAGS
               # And the frames parked on the heap, as on wasm.
-              COIL_NO_FIBERS=1 $run --harness harness-bin/gc-stress/coil-test -- --engine mir --wall-timeout 1200 $FLAGS ;;
+              COIL_NO_FIBERS=1 $run --harness harness-bin/rc-check/coil-test -- --engine mir --wall-timeout 1200 --cell rc-check $FLAGS ;;
             # Every corpus on native code (`docs/internals/native.md`). Each
             # run also records the bodies native code refused
             # (`scripts/native_inventory.py`, next step). Every program goes
@@ -588,12 +588,11 @@ jobs:
     env: *harness-env
     steps: *harness-steps
 
-  # GC stress runs in release only. The debug cells took over 30 minutes
-  # even split in three and kept timing out on a stall (#2131), so PRs
-  # ignored them; restore them once that is fixed.
-  harness-gc-stress:
+  # The count check runs in release only, as GC stress did: its debug
+  # cells took over 30 minutes even split in three (#2131).
+  harness-rc-check:
     name: harness ${{ matrix.variant }} (${{ matrix.mode }}, ${{ matrix.os }})
-    needs: harness-build-gc-stress
+    needs: harness-build-rc-check
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -601,7 +600,7 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         mode: [release]
-        variant: [gc-stress]
+        variant: [rc-check]
     env: *harness-env
     steps: *harness-steps
 
@@ -679,10 +678,10 @@ jobs:
       - test-release
       - harness-build-debug
       - harness-build-release
-      - harness-build-gc-stress
+      - harness-build-rc-check
       - harness-debug
       - harness-release
-      - harness-gc-stress
+      - harness-rc-check
       - wasm
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -918,11 +917,11 @@ jobs:
       max-parallel: 2
       matrix:
         os: [macos-latest]
-        mode: [debug, release, gc-stress]
+        mode: [debug, release, rc-check]
     steps: *harness-build-steps
 
-  # macOS (aarch64): stack scanning and the frame maps are per target, the
-  # compiler settings are not.
+  # macOS (aarch64): the native code and its runtime calls are per
+  # target, the compiler settings are not.
   harness-macos:
     name: harness ${{ matrix.variant }} (${{ matrix.mode }}, ${{ matrix.os }})
     needs: harness-build-macos
@@ -933,9 +932,9 @@ jobs:
       matrix:
         os: [macos-latest]
         mode: [debug, release]
-        variant: [default, gc-stress]
+        variant: [default, rc-check]
         exclude:
-          - { mode: debug, variant: gc-stress }
+          - { mode: debug, variant: rc-check }
     env: *harness-env
     steps: *harness-steps
 

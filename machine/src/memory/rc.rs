@@ -605,6 +605,58 @@ impl Heap {
         obj.visit_slots(self, &mut Dec(self, stack));
     }
 
+    /// The `rc-check` build's heap check, at every cycle collection: no
+    /// pointer word names a freed slot, and no object's count is below the
+    /// heap words that own one of it (the words [`Self::rc_dec_children`]
+    /// releases). Frames and runtime roots own counts too, so a count may
+    /// be above that, never below. Panics naming the first object wrong.
+    #[cfg(any(test, feature = "rc-check"))]
+    pub(crate) fn rc_check(&self) {
+        if !self.rc_counts_live() {
+            return;
+        }
+        struct Own<'a>(&'a Heap, &'a mut std::collections::HashMap<u64, Vec<u64>>, u64);
+        impl SlotVisitor for Own<'_> {
+            fn word(&mut self, v: &Value, kind: u8) {
+                if kind != common::WORD_POINTER && kind != common::WORD_UNKNOWN {
+                    return;
+                }
+                let addr = v.heap_addr() & !1;
+                if addr == 0 || !self.0.slab.contains_slot(addr) {
+                    return;
+                }
+                // SAFETY: a slot origin in a mapped chunk.
+                match unsafe { Object::from_header(addr) } {
+                    Some(_) => self.1.entry(addr).or_default().push(self.2),
+                    None => assert!(kind != common::WORD_POINTER, "rc-check: the object at {:#x} holds a freed object at {addr:#x}", self.2),
+                }
+            }
+
+            fn member(&mut self, m: &Member) {
+                if let Member::Object(o) = m {
+                    self.1.entry(o.addr()).or_default().push(self.2);
+                }
+            }
+        }
+        let mut owners = std::collections::HashMap::new();
+        for obj in self.objects() {
+            if matches!(obj, Object::Coroutine(c) if c.as_ref().started) {
+                continue;
+            }
+            obj.visit_slots(self, &mut Own(self, &mut owners, obj.addr()));
+        }
+        for (addr, holders) in owners {
+            // SAFETY: counted above as a live object's address.
+            let Some(o) = (unsafe { Object::from_header(addr) }) else { continue };
+            let (c, n) = (o.rc_count(), holders.len() as u32);
+            if c < COUNT_IMMORTAL - 1 && c < n {
+                // SAFETY: each holder is a live object's address.
+                let named: Vec<String> = holders.iter().filter_map(|&h| unsafe { Object::from_header(h) }).map(|h| format!("{} {:#x}", kind_name(h), h.addr())).collect();
+                panic!("rc-check: the {} at {addr:#x} has count {c}, but {n} heap words own it (in {})", kind_name(o), named.join(", "));
+            }
+        }
+    }
+
     /// [`rc_leaks_shown`]: tally the live objects that are not immortal by
     /// kind and print them (one line, nothing when there are none).
     pub(super) fn report_leaks(&self) {
@@ -618,23 +670,7 @@ impl Heap {
             if obj.rc_count() == COUNT_IMMORTAL || exempt.contains(&obj.addr()) {
                 continue;
             }
-            let kind = match obj {
-                Object::String(_) => "string",
-                Object::Instance(_) => "instance",
-                Object::Enum(_) => "enum",
-                Object::Array(_) => "array",
-                Object::Fn(_) => "fn",
-                Object::Coroutine(_) => "coroutine",
-                Object::Weak(_) => "weak",
-                Object::Root(_) => "root",
-                Object::Stream(_) => "stream",
-                Object::Library(_) => "library",
-                Object::Thread(_) => "thread",
-                Object::Sender(_) => "sender",
-                Object::Receiver(_) => "receiver",
-                Object::Mutex(_) => "mutex",
-                Object::RwLock(_) => "rwlock",
-            };
+            let kind = kind_name(obj);
             let e = by_kind.entry(kind).or_default();
             e.0 += 1;
             e.1 += obj.size();
@@ -779,6 +815,27 @@ impl Heap {
 
 }
 
+/// A kind's name, as the leak report and the count check print it.
+fn kind_name(obj: Object) -> &'static str {
+    match obj {
+        Object::String(_) => "string",
+        Object::Instance(_) => "instance",
+        Object::Enum(_) => "enum",
+        Object::Array(_) => "array",
+        Object::Fn(_) => "fn",
+        Object::Coroutine(_) => "coroutine",
+        Object::Weak(_) => "weak",
+        Object::Root(_) => "root",
+        Object::Stream(_) => "stream",
+        Object::Library(_) => "library",
+        Object::Thread(_) => "thread",
+        Object::Sender(_) => "sender",
+        Object::Receiver(_) => "receiver",
+        Object::Mutex(_) => "mutex",
+        Object::RwLock(_) => "rwlock",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,6 +855,22 @@ mod tests {
         heap.rc_after(Some(before));
         assert_eq!(a.rc_count(), 0);
         assert_eq!(b.rc_count(), 2);
+    }
+
+    /// The `rc-check` heap check passes a heap whose counts cover their
+    /// heap owners and names an object whose count fell below them.
+    #[test]
+    #[should_panic(expected = "but 1 heap words own it")]
+    fn the_heap_check_finds_a_count_below_its_owners() {
+        let mut heap = Heap::default();
+        let (a, _) = heap.alloc(ObjString::from("a"), Object::String);
+        let _ = heap.alloc(ObjArray::new(vec![Value::from(a.addr())]).of_kind(common::WORD_POINTER), Object::Array);
+        assert_eq!(a.rc_count(), 1, "the array's word owns one");
+        heap.rc_check();
+        while a.rc_count() > 0 {
+            a.rc_dec();
+        }
+        heap.rc_check();
     }
 
     #[test]

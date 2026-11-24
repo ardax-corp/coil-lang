@@ -68,8 +68,8 @@ impl Runtime {
             };
             let addr = v.heap_addr();
             let live = addr != 0 && heap.find_object_by_addr(addr).is_some();
-            #[cfg(feature = "gc-stress")]
-            assert!(addr == 0 || live || kind != RootKind::Precise, "gc-stress: pointer static {i} holds a non-object");
+            #[cfg(feature = "rc-check")]
+            assert!(addr == 0 || live || kind != RootKind::Precise, "rc-check: pointer static {i} holds a non-object");
             if live {
                 visit(i, addr, kind);
             }
@@ -231,6 +231,8 @@ pub(crate) fn collect_cycles<H: GcHost + ?Sized>(h: &mut H) {
     if h.rt().heap.epoch_stw() {
         return;
     }
+    #[cfg(feature = "rc-check")]
+    h.rt().heap.rc_check();
     for pass in 0..2 {
         let mut roots = Vec::new();
         for_each_root(h, &mut |addr, _| roots.push(addr));
