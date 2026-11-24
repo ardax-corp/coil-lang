@@ -425,7 +425,9 @@ pub fn niche_heap_only(checker: &Checker, ty: &Ty) -> bool {
 /// too, when the function's type is ([`user_sum_closed`]).
 pub fn ty_is_closed(ty: &Ty) -> bool {
     match strip_readonly(ty) {
-        Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
+        // A trait value is one pack word, whatever it holds.
+        Ty::Existential { .. } => true,
+        Ty::Var(_) | Ty::Fun(_, _) | Ty::Forall { .. } => false,
         Ty::Sum { name, variants } if is_user_sum(name) => user_sum_closed(variants, ty_is_closed),
         // A `thread` handle is one host word whatever it carries (#1905).
         t @ Ty::App(..) if crate::typechecking::ty::opaque_handle_name(t).is_some() => true,
