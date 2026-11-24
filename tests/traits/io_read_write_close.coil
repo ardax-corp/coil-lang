@@ -1,7 +1,7 @@
 // `io::Read`, `io::Write` and `io::Close` are ordinary traits: a user class
 // implements them, a generic body takes them as bounds, a trait value holds
-// a class or a `Stream`, and `Stream` implements all three. `flush` defaults
-// to doing nothing.
+// a class or a `Stream` and meets the bound too, and `Stream` implements all
+// three. `flush` defaults to doing nothing.
 // @flags --allow-read --allow-write
 use tests::assert;
 use io::open;
@@ -177,10 +177,10 @@ test("trait values hold a class or a Stream") {
     let writers: Vec<Write> = [sink, file];
     for w in writers {
         assert!(w.write(to_bytes("sa"))? == 2);
-        assert!(w.write(to_bytes("me"))? == 2);
-        w.flush()?;
+        assert!(put_all(w, to_bytes("me"))? == 2);
     }
     assert!(text(sink.got) == "same");
+    assert!(sink.flushes == 1);
     file.close()?;
     let back = open(path, "r")?;
     assert!(text(drain(back)?) == "same");
@@ -200,5 +200,19 @@ test("Stream implements Read, Write and Close") {
         default => false,
     };
     assert!(again);
+    remove_file(path)?;
+}
+
+test("write_from writes from an offset, by default through a copy") {
+    let sink = new_sink();
+    assert!(sink.write_from(to_bytes("abcd"), 2)? == 2);
+    assert!(text(sink.got) == "cd");
+    let path = "coil_traits_io_write_from.txt";
+    let w = open(path, "w")?;
+    assert!(w.write_from(to_bytes("xyz"), 1)? == 2);
+    w.close()?;
+    let r = open(path, "r")?;
+    assert!(text(drain(r)?) == "yz");
+    r.close()?;
     remove_file(path)?;
 }
