@@ -23,6 +23,31 @@ fn run_scope() -> int {
     };
 }
 
+// The scope's end waits for a child nobody joined.
+fn unjoined_scope() -> bool {
+    let r = scope(fn (Scope s) {
+        let _ = s.spawn(fn () => one());
+        return 0;
+    });
+    return match r {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    };
+}
+
+test("a loop of scopes that wait for their children keeps the heap flat") {
+    assert!(unjoined_scope());
+    collect();
+    let before = heap_bytes();
+    let i = 0;
+    while i < 200 {
+        assert!(unjoined_scope());
+        i += 1;
+    }
+    collect();
+    assert!(heap_bytes() - before < 4000);
+}
+
 test("a loop of finished scopes keeps the heap flat") {
     assert!(run_scope() == 1);
     collect();
