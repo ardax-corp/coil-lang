@@ -753,6 +753,10 @@ impl Heap {
             Object::Fn(_) | Object::String(_) | Object::Weak(_) | Object::Stream(_) | Object::Thread(_) | Object::Sender(_) | Object::Receiver(_) | Object::Mutex(_) | Object::RwLock(_)
         )
             || matches!(obj, Object::Coroutine(c) if c.as_ref().state == CoroState::Done || !c.as_ref().started)
+            // A root pins its value whoever names it (a host may hold the
+            // handle as a number); once `unroot` emptied it, it is a plain
+            // object.
+            || matches!(obj, Object::Root(r) if r.as_ref().payload.is_none())
             || matches!(obj, Object::Array(_) | Object::Enum(_) | Object::Instance(_)) && self.early_freeable(obj))
             && !self.pending_drop(obj)
             && obj.rc_count() == 0
