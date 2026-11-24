@@ -249,7 +249,9 @@ fn reads_only(inst: &MirInst, v: ValueId) -> bool {
 /// frame unwinds, so it keeps no homes of its own).
 fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>, own: Option<Label>, coro: bool) -> usize {
     let mut n = 0;
+    let mut pad_homes = Vec::new();
     if let Some(p) = func.cleanup.as_deref_mut() {
+        pad_homes = Pass::new(p, numbers, false, false).object_homes(p);
         n += insert_rc_in(p, true, numbers, None, false);
     }
     // A `FreeEarly` (`hir/early_free.rs`) stays: in a counting run the
@@ -257,10 +259,42 @@ fn insert_rc_in(func: &mut MirFunc, pad: bool, numbers: &HashSet<Label>, own: Op
     // last decrement will owe, at the scope's end (plan step 7). It reads
     // its value, so the decrement comes after it.
     let pass = Pass::new(func, numbers, own.is_some_and(|l| numbers.contains(&l)), coro);
+    let mut object_homes = pass.object_homes(func);
+    object_homes.extend(pad_homes);
+    object_homes.sort_unstable();
+    object_homes.dedup();
     let (ops, homes) = pass.run(func, !pad);
     n += ops;
+    if let Some(p) = func.cleanup.as_deref_mut() {
+        n += release_object_homes(p, &object_homes);
+    }
     n -= cancel_pairs(func, &homes);
     n + unwind_homes(func, &homes)
+}
+
+/// Before a cleanup pad resumes the unwind (its `defer`s done), the words
+/// its function's `defer` homes own (`homes`) lose their owner, as at a
+/// return. Returns how many ops it added.
+fn release_object_homes(pad: &mut MirFunc, homes: &[u16]) -> usize {
+    let all = homes;
+    let mut added = 0;
+    for bi in 0..pad.blocks.len() {
+        let Some(at) = pad.blocks[bi].insts.iter().position(|i| matches!(i, MirInst::HostInvoke { native_id, .. } if *native_id == common::UNWIND_RESUME_ID)) else {
+            continue;
+        };
+        let mut ops = Vec::new();
+        for &h in all {
+            let w = ValueId(pad.types.len() as u32);
+            pad.types.push(MirTy::I64);
+            let t = ValueId(pad.types.len() as u32);
+            pad.types.push(MirTy::Bool);
+            ops.push(MirInst::HomeLoad { dest: w, home: h });
+            ops.push(MirInst::RcDec { dest: t, src: w, guard: None });
+        }
+        added += ops.len();
+        pad.blocks[bi].insts.splice(at..at, ops);
+    }
+    added
 }
 
 /// The owned words a panic may unwind past, each kept in a home of its
@@ -715,6 +749,22 @@ impl Pass {
 
     /// Whether `v`, which is no counted word, may still name an object the
     /// types do not say (an `int` or untyped word that is no number).
+    /// The homes some `HomeStore` writes an object word to, in order.
+    fn object_homes(&self, func: &MirFunc) -> Vec<u16> {
+        let mut homes: Vec<u16> = func
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter_map(|i| match i {
+                MirInst::HomeStore { home, value, .. } if self.root(*value).is_some() || self.maybe_object(func, *value) => Some(*home),
+                _ => None,
+            })
+            .collect();
+        homes.sort_unstable();
+        homes.dedup();
+        homes
+    }
+
     fn maybe_object(&self, func: &MirFunc, v: ValueId) -> bool {
         matches!(ty_of(func, v), MirTy::I64 | MirTy::Value) && !self.scalar.contains(&v)
     }
@@ -867,6 +917,11 @@ impl Pass {
             v
         };
         let mut inserted = 0usize;
+        // The `defer` homes that hold an object: each owns its word, from a
+        // store (the old word released after it) to the next, and to the
+        // frame's end, where a return (or the pad, [`release_object_homes`])
+        // releases the last.
+        let object_homes = self.object_homes(func);
         // In-block code: after each instruction, and before the terminator.
         let mut after: Vec<HashMap<usize, Vec<MirInst>>> = vec![HashMap::new(); n];
         let mut before: Vec<HashMap<usize, Vec<MirInst>>> = vec![HashMap::new(); n];
@@ -937,14 +992,11 @@ impl Pass {
                     before[bi].entry(ii).or_default().push(MirInst::RcInc { dest: tok(&mut new_types), src: *src, guard: None });
                     ops.insert(0, MirInst::RcDec { dest: tok(&mut new_types), src: *src, guard: None });
                 }
-                // A static owns its word: a store reads the old one first
-                // and releases it after. A home keeps its word (a `defer`
-                // flag's slot may hold no word yet: its old one is not
-                // released, a leak), unless the caller keeps it: a borrowed
-                // word outlives the frame and its pads.
-                if let MirInst::StoreStatic { value, .. } | MirInst::HomeStore { value, .. } = inst
+                // A static, or a `defer` home that holds an object, owns its
+                // word: a store reads the old one first and releases it
+                // after (a home starts at zero).
+                if let MirInst::StoreStatic { value, .. } = inst
                     && (self.root(*value).is_some() || self.maybe_object(func, *value))
-                    && !(matches!(inst, MirInst::HomeStore { .. }) && self.root(*value).is_some_and(|r| self.borrowed.contains(&r)))
                 {
                     ops.insert(0, MirInst::RcInc { dest: tok(&mut new_types), src: *value, guard: None });
                     if let MirInst::StoreStatic { slot, value, .. } = inst {
@@ -953,6 +1005,15 @@ impl Pass {
                         before[bi].insert(ii, vec![MirInst::LoadStatic { dest: old, slot: *slot }]);
                         ops.insert(1, MirInst::RcDec { dest: tok(&mut new_types), src: old, guard: None });
                     }
+                }
+                if let MirInst::HomeStore { home, value, .. } = inst
+                    && object_homes.contains(home)
+                {
+                    let old = tok(&mut new_types);
+                    *new_types.last_mut().expect("the token's type") = MirTy::I64;
+                    before[bi].entry(ii).or_default().push(MirInst::HomeLoad { dest: old, home: *home });
+                    ops.insert(0, MirInst::RcInc { dest: tok(&mut new_types), src: *value, guard: None });
+                    ops.insert(1, MirInst::RcDec { dest: tok(&mut new_types), src: old, guard: None });
                 }
                 if !ops.is_empty() {
                     inserted += ops.len();
@@ -983,6 +1044,13 @@ impl Pass {
                         if !moved.contains(r) && !tail {
                             before_term[bi].push(MirInst::RcDec { dest: tok(&mut new_types), src: *r, guard: None });
                         }
+                    }
+                    // So do the words the `defer` homes own.
+                    for &h in &object_homes {
+                        let w = tok(&mut new_types);
+                        *new_types.last_mut().expect("the token's type") = MirTy::I64;
+                        before_term[bi].push(MirInst::HomeLoad { dest: w, home: h });
+                        before_term[bi].push(MirInst::RcDec { dest: tok(&mut new_types), src: w, guard: None });
                     }
                     inserted += before_term[bi].len();
                 }
