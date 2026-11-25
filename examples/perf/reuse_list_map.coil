@@ -1,0 +1,54 @@
+// Reuse in place: a list rebuilt node by node. Each pass hands the old
+// list to `inc`, whose old nodes die as the new ones are built.
+use io::sync::println;
+use string::format;
+
+enum List {
+    Nil,
+    Cons(int, List),
+}
+
+fn build(int n) -> List {
+    let l = List::Nil();
+    let i = 0;
+    while i < n {
+        l = List::Cons(i, l);
+        i += 1;
+    }
+    return l;
+}
+
+fn inc(List l) -> List {
+    return match l {
+        List::Nil => List::Nil(),
+        List::Cons(h, t) => List::Cons(h + 1, inc(t)),
+    };
+}
+
+fn sum(List l) -> int {
+    let s = 0;
+    let at = l;
+    let more = true;
+    while more {
+        match at {
+            List::Nil => {
+                more = false;
+            },
+            List::Cons(h, t) => {
+                s += h;
+                at = t;
+            },
+        }
+    }
+    return s;
+}
+
+fn main() {
+    let l = build(1000);
+    let pass = 0;
+    while pass < 3000 {
+        l = inc(l);
+        pass += 1;
+    }
+    let _ = println(format("%i", sum(l)));
+}
