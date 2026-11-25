@@ -107,7 +107,10 @@ fn run_on(rt: &mut Runtime, job: Job) {
     let mut panic_message = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rt.natives = natives.clone_registry();
-        rt.heap.set_class_word_kinds(Arc::clone(&program.class_word_kinds));
+        // The job's own heap: bound to a shared epoch's, `rt.heap` is the
+        // spawner's, which has the table already and which other workers
+        // read while this one runs (#2908).
+        rt.heap.owned_mut().set_class_word_kinds(Arc::clone(&program.class_word_kinds));
         rt.live_threads = Arc::clone(&live_threads);
         rt.reactor = Arc::clone(&reactor);
         rt.io_reactor = Arc::clone(&io_reactor);
@@ -145,6 +148,8 @@ fn run_on(rt: &mut Runtime, job: Job) {
                         if let Some(arg) = arg
                             && let Ok(v) = crate::thread::spawn_arg_to_value(rt.heap.get_mut(), arg)
                         {
+                            // The static owns its copy (reference counts).
+                            rt.heap.get_mut().rc_retain(v);
                             rt.statics[i] = v;
                         }
                     }
@@ -176,11 +181,22 @@ fn run_on(rt: &mut Runtime, job: Job) {
                 let hits = d.rt.take_probes();
                 let steps = (d.rt.steps_charged(), d.rt.step_budget_hit);
                 d.rt.set_step_budget(None);
-                return Ok(crate::reactor::finish_test(d.panicked(), ret, d.rt.heap.get(), test, hits, steps));
+                let out = crate::reactor::finish_test(d.panicked(), ret, d.rt.heap.get(), test, hits, steps);
+                // The case's result (a test body's `Result`) is the job's
+                // to release once it is read (reference counts).
+                if let Some(v) = ret.filter(|_| !d.panicked()) {
+                    d.rt.heap.get_mut().rc_drop(v);
+                }
+                return Ok(out);
             }
             let mut child_args = Vec::with_capacity(args.len());
             for a in args {
                 child_args.push(crate::thread::spawn_arg_to_value(d.rt.heap.get_mut(), a)?);
+            }
+            // The job owns its copied arguments and the entry's result
+            // (reference counts): released once the result is copied out.
+            for &a in &child_args {
+                d.rt.heap.get_mut().rc_retain(a);
             }
             let ret = d.call(entry as usize, &child_args).map_or_else(Value::default, |(lo, _)| Value::from(lo));
             if epoch.as_ref().is_some_and(|e| e.is_aborted()) {
@@ -190,7 +206,22 @@ fn run_on(rt: &mut Runtime, job: Job) {
                 panic_message = Some(d.take_panic_message());
                 return Err(ThreadErrorTag::Panicked);
             }
-            if shared { Ok(PortableValue::Immediate(ret.bits())) } else { crate::thread::value_to_portable(d.rt.heap.get(), ret) }
+            if shared {
+                // The arguments go; the result keeps the job's count until
+                // the joiner takes it (`thread::join`, plan step 8).
+                let heap = d.rt.heap.get_mut();
+                for a in child_args {
+                    heap.rc_drop(a);
+                }
+                return Ok(PortableValue::Immediate(ret.bits()));
+            }
+            let out = crate::thread::value_to_portable(d.rt.heap.get(), ret);
+            let heap = d.rt.heap.get_mut();
+            heap.rc_drop(ret);
+            for a in child_args {
+                heap.rc_drop(a);
+            }
+            out
         })();
         drop(write_scope);
         drop(guard);

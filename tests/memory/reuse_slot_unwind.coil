@@ -1,0 +1,57 @@
+// A slot reuse in place keeps for the node built after a recursive call
+// holds a placeholder the frame owns: a panic in that call unwinds the
+// frame, whose cleanup pad frees it. Repeated panics leave the heap as it
+// was.
+use tests::assert;
+use gc::{collect, heap_bytes};
+use task::{scope, Scope, TaskError};
+
+enum Tree {
+    Leaf(int),
+    Node(Tree, Tree),
+}
+
+fn build(int depth) -> Tree {
+    if depth == 0 {
+        return Tree::Leaf(depth);
+    }
+    return Tree::Node(build(depth - 1), build(depth - 1));
+}
+
+// Rebuilds each node in its own slot, and panics at the first leaf on the
+// right: every frame above it holds a kept slot.
+#[inline(never)]
+fn mirror_until(Tree t, bool right) -> Tree {
+    return match t {
+        Tree::Leaf(v) => if right {
+            panic "boom"
+        } else {
+            Tree::Leaf(v)
+        },
+        Tree::Node(l, r) => Tree::Node(mirror_until(r, true), mirror_until(l, right)),
+    };
+}
+
+fn boom() -> bool {
+    let r = scope(fn (Scope s) {
+        s.spawn(fn () => mirror_until(build(6), false));
+        0
+    });
+    return match r {
+        Result::Err(TaskError::Panicked(m)) => m == "boom",
+        default => false,
+    };
+}
+
+test("a panic past kept slots frees them") {
+    assert!(boom());
+    collect();
+    let before = heap_bytes();
+    let i = 0;
+    while i < 50 {
+        assert!(boom());
+        i += 1;
+    }
+    collect();
+    assert!(heap_bytes() <= before + 1024);
+}

@@ -1,0 +1,40 @@
+// Reuse in place: a tree mirrored again and again. Each pass hands the
+// old tree to `mirror`, whose old nodes die as the new ones are built.
+use io::sync::println;
+use string::format;
+
+enum Tree {
+    Leaf(int),
+    Node(Tree, Tree),
+}
+
+fn build(int depth, int at) -> Tree {
+    if depth == 0 {
+        return Tree::Leaf(at);
+    }
+    return Tree::Node(build(depth - 1, at * 2), build(depth - 1, at * 2 + 1));
+}
+
+fn mirror(Tree t) -> Tree {
+    return match t {
+        Tree::Leaf(v) => Tree::Leaf(v),
+        Tree::Node(l, r) => Tree::Node(mirror(r), mirror(l)),
+    };
+}
+
+fn leftmost(Tree t) -> int {
+    return match t {
+        Tree::Leaf(v) => v,
+        Tree::Node(l, _) => leftmost(l),
+    };
+}
+
+fn main() {
+    let t = build(14, 0);
+    let pass = 0;
+    while pass < 301 {
+        t = mirror(t);
+        pass += 1;
+    }
+    let _ = println(format("%i", leftmost(t)));
+}

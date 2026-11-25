@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::{Command, CommandFactory, Parser};
 use coil_args::{
-    DebugLevelFlags, HostGrantFlags, LogFlags, NurseryFlag, OptLevelFlags, RootFlags, expand_o_shorts,
+    DebugLevelFlags, HostGrantFlags, LogFlags, RunFlags, OptLevelFlags, RootFlags, expand_o_shorts,
     parse_with,
     print_command_help,
 };
@@ -64,7 +64,7 @@ struct TestCli {
     #[command(flatten)]
     opt: OptLevelFlags,
     #[command(flatten)]
-    nursery: NurseryFlag,
+    run: RunFlags,
     #[command(flatten)]
     debug: DebugLevelFlags,
     #[command(flatten)]
@@ -231,7 +231,6 @@ fn parse_test(args: &[String]) -> Result<Parsed, String> {
     let (config, test) = assemble(RunParts {
         log: cli.log,
         opt: cli.opt,
-        nursery: cli.nursery.nursery,
         debug: cli.debug.level(),
         grants: cli.grants,
         roots: cli.roots,
@@ -275,7 +274,6 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
     let (config, test) = assemble(RunParts {
         log: cli.log,
         opt: cli.opt,
-        nursery: None,
         debug: None,
         grants: cli.grants,
         roots: cli.roots,
@@ -327,7 +325,6 @@ fn parse_mutate(expanded: &[String], original: &[String]) -> Result<Parsed, Stri
 struct RunParts {
     log: LogFlags,
     opt: OptLevelFlags,
-    nursery: Option<bool>,
     debug: Option<compiler::DebugLevel>,
     grants: HostGrantFlags,
     roots: RootFlags,
@@ -390,7 +387,6 @@ fn assemble(parts: RunParts) -> Result<(ReportConfig, Box<TestOptions>), String>
             contracts: parts.opt.contracts,
             fold_calls: parts.opt.fold_calls,
             early_free: parts.opt.early_free,
-            nursery: parts.nursery,
             auto_par: parts.opt.auto_par,
             contract_runs: parts.contract_runs,
             grants: parts.grants.into_grants(),

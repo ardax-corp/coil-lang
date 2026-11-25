@@ -1,4 +1,5 @@
-//! `gc::weak` on readonly class instances (#1644, #1670) and two-word values.
+//! `gc::weak` on readonly class instances (#1644, #1670), two-word values
+//! and one-word values (reference-count plan step 7).
 //!
 //! A weak handle observes an instance's identity and the moment it is
 //! collected, so a readonly class instance (a value, #1562) may never be
@@ -241,6 +242,13 @@ impl Checker {
         if self.is_readonly_class_ty(ty) {
             return Some(Unweakable::ReadonlyClass);
         }
+        if let Ty::Con(n) = ty
+            && (n != crate::typechecking::ty::STRING && crate::typechecking::ty::is_builtin_scalar(n)
+                || crate::typechecking::ty::FFI_INTS.contains(&n.as_str())
+                || self.is_scalar_enum(n))
+        {
+            return Some(Unweakable::Scalar);
+        }
         matches!(crate::layout::of_resolved(self, ty), crate::layout::Layout::Pair(_)).then_some(Unweakable::TwoWord)
     }
 
@@ -268,6 +276,9 @@ impl Checker {
             Unweakable::TwoWord => format!(
                 "a value of type `{shown}` is held in its two words, with no object whose identity or lifetime a weak handle could observe; keep it out of this generic, or put it in a `class` field if you need a weak handle"
             ),
+            Unweakable::Scalar => format!(
+                "a `{shown}` is a value held in its word, with no object whose identity or lifetime a weak handle could observe; keep it out of this generic, or put it in a `class` field if you need a weak handle"
+            ),
         });
         self.messages.push(msg);
     }
@@ -282,6 +293,10 @@ enum Unweakable {
     /// enum): held in its two words, with no box whose identity a weak
     /// handle could observe.
     TwoWord,
+    /// A one-word value (`int`, `float`, `bool`, `byte`, `()`, an FFI
+    /// integer, a scalar enum): never an object, so a weak handle to it
+    /// would always upgrade (reference-count plan step 7).
+    Scalar,
 }
 
 impl Unweakable {
@@ -289,6 +304,7 @@ impl Unweakable {
         match self {
             Self::ReadonlyClass => "an instance of a readonly class",
             Self::TwoWord => "a two-word value",
+            Self::Scalar => "a value with no object",
         }
     }
 
@@ -299,6 +315,9 @@ impl Unweakable {
             ),
             Self::TwoWord => format!(
                 "a value of type `{shown}` is held in its two words, with no object whose identity or lifetime a weak handle could observe; keep the value itself, or put it in a `class` field if you need a weak handle"
+            ),
+            Self::Scalar => format!(
+                "a `{shown}` is a value held in its word, with no object whose identity or lifetime a weak handle could observe; keep the value itself, or put it in a `class` field if you need a weak handle"
             ),
         }
     }

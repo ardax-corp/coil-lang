@@ -1,0 +1,32 @@
+// A `gen fn` whose body never yields still runs on its coroutine, which
+// owns the arguments it was made with: the body takes them over and
+// releases them, so a loop of such generators keeps the heap flat.
+use tests::assert;
+use gc::{collect, heap_bytes};
+
+class Box {
+    pub n: int,
+}
+
+gen fn once(Box b, unit -> int f) -> int {
+    b.n = f();
+    return 0;
+}
+
+fn run(int k) {
+    let c = once(new Box(k), fn () use (k) => k + 1);
+    let _ = resume c;
+}
+
+test("a loop of generators that never yield keeps the heap flat") {
+    run(0);
+    collect();
+    let before = heap_bytes();
+    let i = 0;
+    while i < 500 {
+        run(i);
+        i += 1;
+    }
+    collect();
+    assert!(heap_bytes() - before < 4000);
+}

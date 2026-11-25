@@ -1,0 +1,25 @@
+// A host native that boxes its `Result` for a call site taking it as two
+// words (`io::write_from`) frees the box once the words are read: counts
+// leave nothing for a collector to find, so a loop of calls keeps the heap
+// flat.
+use tests::assert;
+use gc::heap_bytes;
+use io::{stdout, write_from};
+use string::to_bytes;
+
+test("a loop of pair-result host calls keeps the heap flat") {
+    let out = stdout();
+    let buf = to_bytes("x");
+    let end = buf.len();
+    let before = heap_bytes();
+    let i = 0;
+    while i < 1000 {
+        let n = match write_from(out, buf, end) {
+            Result::Ok(n) => n,
+            Result::Err(_) => -1,
+        };
+        assert!(n == 0);
+        i += 1;
+    }
+    assert!(heap_bytes() - before < 1000);
+}

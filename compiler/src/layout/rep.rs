@@ -542,8 +542,35 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
     if niche_heap_only(checker, ty) || value_layout(checker, ty) != ValueLayout::Boxed {
         return common::WORD_POINTER;
     }
+    // A class instance's word is its object, whatever its type arguments.
+    if let Ty::App(head, _) = ty
+        && let Ty::Con(name) = strip_readonly(head)
+        && checker.is_class(name)
+    {
+        return common::WORD_POINTER;
+    }
+    // A non-scalar enum's, a tuple's or a record's word is its object (a
+    // two-word one boxed to one word), a unit variant's the immortal one: an
+    // `Option` / `Result` of any layout is that or its niche word.
+    if matches!(ty, Ty::Tuple(_) | Ty::Record { .. }) || enum_name(ty).is_some_and(|n| checker.enum_variants(n).is_some()) {
+        return common::WORD_POINTER;
+    }
     // A `Vec<T>` / `[T]` / `[T; N]` word is always an array object, whatever
-    // `T` is (a fixed array stored as a word is materialized on the heap).
+    // `T` is (a fixed array stored as a word is materialized on the heap);
+    // a `Stream` or `thread` handle (`Thread<T>`, `Mutex<T>`, ...) its
+    // handle object, a function value its `ObjFn` and an existential its
+    // pack (or a bare class's object).
+    if crate::typechecking::ty::opaque_handle_name(ty).is_some() || matches!(ty, Ty::Fun(..) | Ty::Forall { .. } | Ty::Existential { .. }) {
+        return common::WORD_POINTER;
+    }
+    // A `Root<T>` / `Weak<T>` word is its pin or weak object, a
+    // `coroutine<Y, R>` its coroutine object.
+    if let Ty::App(head, _) = ty
+        && let Ty::Con(name) = strip_readonly(head)
+        && matches!(name.as_str(), crate::typechecking::ty::ROOT | crate::typechecking::ty::WEAK | "coroutine")
+    {
+        return common::WORD_POINTER;
+    }
     if matches!(ty, Ty::Array { .. })
         || matches!(ty, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if n == common::BUILTIN_VEC_TYPE))
     {
@@ -555,7 +582,8 @@ pub fn word_kind(checker: &Checker, ty: &Ty) -> u8 {
 /// Element kind an array of `elem` is stamped with at construction
 /// (`MakeArrayK`): `WORD_POINTER` for ground heap words and closed
 /// two-word values (stored boxed), `WORD_BYTE` for `byte` / `bool` (the runtime packs those one byte per
-/// element), else `WORD_UNKNOWN` (no stamp).
+/// element), `WORD_SCALAR` for other scalars, else `WORD_UNKNOWN` (no stamp:
+/// a type parameter's, which a shared body stamps from its `kinds` word).
 pub fn array_elem_stamp(checker: &Checker, elem: &Ty) -> u8 {
     let ty = apply_ty_prune(checker.subst(), elem);
     if let Ty::Con(name) = strip_readonly(&ty)
@@ -568,7 +596,7 @@ pub fn array_elem_stamp(checker: &Checker, elem: &Ty) -> u8 {
         return common::WORD_POINTER;
     }
     match word_kind(checker, &ty) {
-        common::WORD_POINTER => common::WORD_POINTER,
+        k @ (common::WORD_POINTER | common::WORD_SCALAR) => k,
         _ => common::WORD_UNKNOWN,
     }
 }
@@ -622,21 +650,27 @@ mod word_tests {
         assert_eq!(kind(string()), common::WORD_POINTER);
         assert_eq!(kind(option_ty(string())), common::WORD_POINTER);
         assert_eq!(kind(result_ty(string(), string())), common::WORD_POINTER);
-        // Boxed `Option<int>` and unresolved generics stay unknown.
-        assert_eq!(kind(option_ty(int())), common::WORD_UNKNOWN);
+        // A two-word `Option<int>` and a tuple are stored as their objects.
+        assert_eq!(kind(option_ty(int())), common::WORD_POINTER);
+        assert_eq!(kind(Ty::Tuple(vec![int(), int()])), common::WORD_POINTER);
+        // A handle or a function value is its object, whatever it carries.
+        assert_eq!(kind(Ty::Fun(Box::new(int()), Box::new(string()))), common::WORD_POINTER);
+        assert_eq!(kind(crate::typechecking::ty::thread_ty(Ty::Var(crate::typechecking::ty::TyVarId(0)))), common::WORD_POINTER);
+        // Unresolved generics stay unknown.
         assert_eq!(kind(Ty::Con("T".into())), common::WORD_UNKNOWN);
+        assert_eq!(kind(Ty::Var(crate::typechecking::ty::TyVarId(0))), common::WORD_UNKNOWN);
         // Arrays are objects whatever their element type.
         assert_eq!(kind(array(Ty::Var(crate::typechecking::ty::TyVarId(0)))), common::WORD_POINTER);
     }
 
     #[test]
-    fn array_stamps_pack_bytes_and_bools_only() {
+    fn array_stamps_pack_bytes_and_bools_and_mark_scalars() {
         let c = Checker::new();
         let stamp = |ty: Ty| array_elem_stamp(&c, &ty);
         assert_eq!(stamp(Ty::Con("byte".into())), common::WORD_BYTE);
         assert_eq!(stamp(Ty::Con("bool".into())), common::WORD_BYTE);
-        assert_eq!(stamp(int()), common::WORD_UNKNOWN);
-        assert_eq!(stamp(Ty::Con("float".into())), common::WORD_UNKNOWN);
+        assert_eq!(stamp(int()), common::WORD_SCALAR);
+        assert_eq!(stamp(Ty::Con("float".into())), common::WORD_SCALAR);
         assert_eq!(stamp(string()), common::WORD_POINTER);
         // A two-word `Option<int>` element is its boxed object (#2074).
         assert_eq!(stamp(option_ty(int())), common::WORD_POINTER);

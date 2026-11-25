@@ -4,8 +4,8 @@
 //! static initializers and `__module_setup`, which are native calls) and
 //! calls `main` or a test case natively. Native code reaches the driver
 //! through its [`NativeHost`]: calls of other bodies and of function
-//! values run natively, host natives on the Runtime, collections over the
-//! native frames' root records ([`GcHost`]).
+//! values run natively, host natives on the Runtime, the cycle collector
+//! over the roots the driver and the Runtime hold ([`GcHost`]).
 //!
 //! Child tasks run on fibers of their own. The root task (the program's
 //! own call) never leaves its stack: where it waits, the driver runs the
@@ -427,13 +427,17 @@ impl<'a> Driver<'a> {
     /// instance dictionaries, as `CallIndirect` does.
     pub(crate) fn call_value(&mut self, callee: Value, args: &[Value], dicts: usize) -> Option<Value> {
         let (mut callee, mut args, mut dicts) = (callee, args.to_vec(), dicts);
+        // An over-application's function in between: the result of the
+        // call before, owned here until the next step is done with it.
+        let mut between: Option<Value> = None;
         loop {
             let code_len = self.program.native.code_len();
-            match crate::apply::apply(&mut self.rt.heap, callee, &args, dicts, code_len) {
-                crate::apply::Apply::Value(v) => return Some(v),
+            let applied = crate::apply::apply(&mut self.rt.heap, callee, &args, dicts, code_len);
+            let out = match applied {
+                crate::apply::Apply::Value(v) => Some(Some(v)),
                 crate::apply::Apply::Bad(msg) => {
                     self.report(&msg, None, Vec::new(), false);
-                    return None;
+                    Some(None)
                 }
                 crate::apply::Apply::Call { pc, args: call, extras } => {
                     // The extras wait rooted for the result.
@@ -441,12 +445,23 @@ impl<'a> Driver<'a> {
                     self.rt.ffi_arg_roots.extend_from_slice(&extras);
                     let out = self.call(pc, &call);
                     self.rt.ffi_arg_roots.truncate(n);
-                    let (lo, _) = out?;
-                    if extras.is_empty() {
-                        return Some(Value::from(lo));
+                    match out {
+                        Some((lo, _)) if !extras.is_empty() => {
+                            if let Some(f) = between.replace(Value::from(lo)) {
+                                self.rt.heap.rc_drop(f);
+                            }
+                            (callee, args, dicts) = (Value::from(lo), extras, 0);
+                            None
+                        }
+                        out => Some(out.map(|(lo, _)| Value::from(lo))),
                     }
-                    (callee, args, dicts) = (Value::from(lo), extras, 0);
                 }
+            };
+            if let Some(out) = out {
+                if let Some(f) = between {
+                    self.rt.heap.rc_drop(f);
+                }
+                return out;
             }
         }
     }
@@ -701,32 +716,70 @@ impl<'a> Driver<'a> {
     /// `FreeEarly` of `v`: the `drop`s it owes run first. `false` when one
     /// panicked.
     fn free_early(&mut self, v: Value, deep: bool) -> bool {
+        if self.rt.heap.rc_counting() {
+            // Counts free what dies: the scope's end only runs the `drop`s
+            // its owner's last decrement will owe (plan step 7).
+            let drops = self.rt.heap.rc_doomed_drops(v);
+            // One already at zero is released by [`Self::run_drops`].
+            self.rt.heap.rc_due.retain(|a| !drops.iter().any(|o| o.addr() == *a));
+            if !self.run_drops(v, &drops) {
+                return false;
+            }
+            if !self.rt.heap.rc_due.is_empty() {
+                GcHost::run_due_drops(self);
+            }
+            return true;
+        }
         let mode = crate::memory::early_free_mode();
         if !self.rt.finalizer_by_type.is_empty() && mode == crate::memory::EarlyFreeMode::Free {
             let Some(drops) = self.rt.heap.early_drops(v, deep, &|_| false) else {
                 return true;
             };
-            if !drops.is_empty() {
-                // Rooted while they run: nothing else reaches them.
-                let n = self.rt.ffi_arg_roots.len();
-                self.rt.ffi_arg_roots.push(v);
-                self.rt.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
-                for obj in &drops {
-                    let Some(pc) = self.rt.pending_finalizer(*obj) else { continue };
-                    let val = Value::from(obj.addr());
-                    if self.finalizer_aborted || !self.rt.claim_finalizer(val) {
-                        continue;
-                    }
-                    if self.call(pc as usize, &[val]).is_none() {
-                        self.rt.ffi_arg_roots.truncate(n);
-                        return false;
-                    }
-                }
-                self.rt.ffi_arg_roots.truncate(n);
+            if !self.run_drops(v, &drops) {
+                return false;
             }
         }
         if mode != crate::memory::EarlyFreeMode::Off {
             self.rt.heap.free_early(v, deep, mode == crate::memory::EarlyFreeMode::Check, &|_| false);
+        }
+        true
+    }
+
+    /// Run the `drop`s of `drops` (a free of `v` gives them back), parents
+    /// first. `false` when one panicked.
+    fn run_drops(&mut self, v: Value, drops: &[crate::memory::Object]) -> bool {
+        if drops.is_empty() {
+            return true;
+        }
+        // Rooted while they run: nothing else reaches them. With counts the
+        // runtime owns each meanwhile too, so a `drop` that lets go of the
+        // last other reference does not free its own object; the release
+        // after the `drop`s frees what nothing took.
+        let n = self.rt.ffi_arg_roots.len();
+        self.rt.ffi_arg_roots.push(v);
+        self.rt.ffi_arg_roots.extend(drops.iter().map(|o| Value::from(o.addr())));
+        for obj in drops {
+            self.rt.heap.rc_retain(Value::from(obj.addr()));
+        }
+        let ok = self.call_drops(drops);
+        self.rt.ffi_arg_roots.truncate(n);
+        for obj in drops {
+            self.rt.heap.rc_drop(Value::from(obj.addr()));
+        }
+        ok
+    }
+
+    /// [`Self::run_drops`]' calls.
+    fn call_drops(&mut self, drops: &[crate::memory::Object]) -> bool {
+        for obj in drops {
+            let Some(pc) = self.rt.pending_finalizer(*obj) else { continue };
+            let val = Value::from(obj.addr());
+            if self.finalizer_aborted || !self.rt.claim_finalizer(val) {
+                continue;
+            }
+            if self.call(pc as usize, &[val]).is_none() {
+                return false;
+            }
         }
         true
     }
@@ -1031,10 +1084,8 @@ impl<'a> Driver<'a> {
                 d.rt.register_finalizer(word(0), word(1));
                 Some(Invoked::Value(0))
             }
-            op @ (crate::HostOp::RegionEnter | crate::HostOp::RegionExit) => {
-                let ((), fresh) = d.fresh_panic(|d| d.rooted(ctx, |d| crate::collect::region(d, op == crate::HostOp::RegionEnter)));
-                Some(if fresh { Invoked::Unwound } else { Invoked::Value(0) })
-            }
+            // `region` is gone; its frozen hooks do nothing.
+            crate::HostOp::RegionEnter | crate::HostOp::RegionExit => Some(Invoked::Value(0)),
             crate::HostOp::Task => Some(match TASKS.get() {
                 Some(tasks) => (tasks.op)(d, ctx, fn_id, args),
                 // Pushing a task native links the scheduler.
@@ -1091,7 +1142,11 @@ impl Driver<'_> {
                 if !s.scopes.get(&arg(0)).is_some_and(|sc| !sc.closed) {
                     return Invoked::Panic("spawn on a task scope that has ended".into());
                 }
-                Invoked::Value(Value::from(s.add_task(coro, arg(0)) as i64).bits())
+                let id = s.add_task(coro, arg(0));
+                // The task's record owns its coroutine until its scope goes
+                // ([`crate::task::Scheduler::released`]).
+                self.rt.heap.rc_retain(Value::from(crate::memory::Object::Coroutine(coro).addr()));
+                Invoked::Value(Value::from(id as i64).bits())
             }
             4 => {
                 let id = arg(0) as u64;
@@ -1575,7 +1630,7 @@ impl Drop for Driver<'_> {
         #[cfg(not(target_family = "wasm"))]
         if !self.tasks.is_empty() {
             self.tasks.clear();
-            self.rt.sched = None;
+            self.rt.task_drop_scheduler();
         }
     }
 }
@@ -1589,34 +1644,59 @@ impl GcHost for Driver<'_> {
         self.rt
     }
 
-    /// The generators whose fibers run now: native frames' records and
-    /// the Runtime's roots are the rest.
+    /// The generators whose fibers run now; the Runtime's roots are the
+    /// rest.
     fn host_roots(&self, visit: &mut dyn FnMut(HostRoot)) {
         use crate::memory::RootKind;
         for v in &self.gen_running {
             visit(HostRoot(v.heap_addr(), RootKind::Ambiguous));
         }
-        // Parked tasks' frames, pinned.
-        for t in self.parked_tasks.values() {
-            t.call.for_each_word(|w| visit(HostRoot(Value::from(w).heap_addr(), RootKind::Ambiguous)));
-        }
-        // The task side not running: its native frames' words and argument
-        // roots, pinned.
+        // The task side not running: its argument roots. Frames, running
+        // or parked, own counts for what they hold.
         #[cfg(not(target_family = "wasm"))]
         for f in self.tasks.values() {
             for v in f.arg_roots.iter().chain(&f.gen_running) {
                 visit(HostRoot(v.heap_addr(), RootKind::Ambiguous));
             }
-            for &(ctx, _) in &f.native_roots {
-                // SAFETY: a parked call's frames keep their contexts.
-                unsafe { &*ctx }.for_each_root(|w, _| visit(HostRoot(Value::from(unsafe { *w }).heap_addr(), RootKind::Ambiguous)));
-            }
         }
     }
 
-    /// Not while auto-par workers run on the heap.
-    fn can_move(&self) -> bool {
-        self.rt.shared_epoch.is_none()
+    fn run_due_drops(&mut self) {
+        // Removed task records let go of their coroutines.
+        if let Some(released) = self.rt.sched.as_mut().map(|s| std::mem::take(&mut s.released))
+            && !released.is_empty()
+        {
+            for coro in released {
+                self.rt.heap.rc_drop(Value::from(crate::memory::Object::Coroutine(coro).addr()));
+            }
+        }
+        // A `drop` may release more: until none is left.
+        loop {
+            let due = self.rt.heap.take_rc_due();
+            if due.is_empty() {
+                return;
+            }
+            // Rooted and owned while their `drop`s run ([`Self::run_drops`]);
+            // the last release frees what nothing took.
+            let n = self.rt.ffi_arg_roots.len();
+            self.rt.ffi_arg_roots.extend(due.iter().map(|&a| Value::from(a)));
+            for &addr in &due {
+                self.rt.heap.rc_retain(Value::from(addr));
+            }
+            for &addr in &due {
+                let Some(obj) = self.rt.heap.find_object_by_addr(addr) else { continue };
+                if let crate::memory::Object::Coroutine(_) = obj {
+                    // A suspended generator's close.
+                    GcHost::run_pending(self, Value::from(addr), None);
+                } else if let Some(pc) = self.rt.pending_finalizer(obj) {
+                    GcHost::run_pending(self, Value::from(addr), Some(pc));
+                }
+            }
+            self.rt.ffi_arg_roots.truncate(n);
+            for addr in due {
+                self.rt.heap.rc_drop(Value::from(addr));
+            }
+        }
     }
 
     fn run_pending(&mut self, val: Value, pc: Option<u32>) {

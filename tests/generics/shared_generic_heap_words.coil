@@ -1,6 +1,6 @@
 // A shared generic body (another module's generic function) moves `T`
 // words that are heap references: its frame maps root them across the
-// allocations it makes (#1955). Under the gc-stress harness every
+// allocations it makes (#1955). Under the rc-check harness every
 // allocation collects, so an unrooted word would be swept.
 use tests::assert;
 use string::format;

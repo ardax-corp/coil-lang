@@ -537,6 +537,9 @@ pub enum MirInst {
         object: ValueId,
         value: ValueId,
         index: u32,
+        /// The field's static type is a number (`WORD_SCALAR`): the store
+        /// moves no reference count, the old word being a number too.
+        scalar: bool,
     },
     /// Heap index load (S3). `array` is `HeapRef`; `index` is `i64`.
     /// Reconstructs `Index` / `IndexUnchecked` (pin forms lower to the
@@ -554,6 +557,9 @@ pub enum MirInst {
         index: ValueId,
         value: ValueId,
         unchecked: bool,
+        /// The element's static type is a number (`WORD_SCALAR`): its old
+        /// and new words are numbers, stored with no count change.
+        scalar: bool,
     },
     /// Structural `ArrayLen` (S3). Dest is `i64`.
     ArrayLen {
@@ -684,9 +690,7 @@ pub enum MirInst {
         value: ValueId,
     },
     /// Heap allocation (I5). Dest is [`MirTy::HeapRef`]. Always a GC
-    /// safepoint; pair with [`Self::GcBarrier`]. S2a records live heap
-    /// words on the barrier and [`crate::mir::func::MirFunc::gc_roots`].
-    /// S2c may emit across this edge when every allocation has its barrier.
+    /// safepoint; pair with [`Self::GcBarrier`].
     Alloc {
         dest: ValueId,
         kind: MirAllocKind,
@@ -699,15 +703,16 @@ pub enum MirInst {
         /// / enum's packed payload kinds (`MakeTupleK` / `MakeEnumK`).
         /// `0` = none recorded; emission then reads tuple / enum kinds off
         /// the element words' MIR types.
-        kinds: u8,
+        kinds: common::PackedKinds,
     },
     /// GC safepoint / write-barrier (I5). Dest is a `HeapRef` token
-    /// (not a second object). `roots` is the S2a live-heap SSA list
-    /// (new object plus other live heap words). Not an interpreter map.
+    /// naming `object`, the word the allocating op right before it made
+    /// ([`crate::mir::barrier_pairs`]). `object` is an operand, so the
+    /// allocation stays as long as its barrier does.
     GcBarrier {
         dest: ValueId,
         kind: MirGcKind,
-        roots: Vec<ValueId>,
+        object: ValueId,
     },
     /// Const string-table push (I4 / Q9 R1). Dest is [`MirTy::HeapRef`].
     String {
@@ -790,6 +795,55 @@ pub enum MirInst {
         dest: ValueId,
         src: ValueId,
         saved: ValueId,
+    },
+    /// Reference count increment (reference counts plan step 3, archive
+    /// 8.5): `src`'s object gains an owner. A word that names no object
+    /// (`0`, a scalar, an interned or immortal object) is left alone; a
+    /// `Result` niche word's `Err` bit is cleared first. With `guard` (a
+    /// `bool`: a shared generic body's bit of its `kinds` word, a pair's
+    /// tag test) the op applies only when it is `true`, for a word that may
+    /// be a scalar or an object. Dest is a `bool` unit token.
+    RcInc {
+        dest: ValueId,
+        src: ValueId,
+        guard: Option<ValueId>,
+    },
+    /// Reference count decrement: `src`'s object loses an owner, and when
+    /// that was its last, the runtime releases it (`machine::Heap::rc_drop`:
+    /// what it names loses an owner in turn, then it is freed). The same
+    /// words and `guard` as [`Self::RcInc`]. Dest is a `bool` unit token.
+    RcDec {
+        dest: ValueId,
+        src: ValueId,
+        guard: Option<ValueId>,
+    },
+    /// Reuse in place: `src`'s object loses an owner, as [`Self::RcDec`].
+    /// When that was its last and it is a plain enum or instance (no
+    /// `drop`, no weak handle), its words are released but its slot is
+    /// kept: dest (`i64`) is the slot's address for the [`Self::AllocAt`]
+    /// that follows in the block, else `0` (`machine::Heap::rc_take_slot`).
+    ///
+    /// `moved`: payload words (bit `i`: word `i`) the body took from the
+    /// object without counting them: a kept slot hands its owner to them,
+    /// and otherwise each gains an owner before the decrement.
+    RcReuse {
+        dest: ValueId,
+        src: ValueId,
+        moved: u32,
+    },
+    /// [`Self::Alloc`] of an enum into `slot` when there is one and it is
+    /// not `0`: a slot [`Self::RcReuse`] kept, of the same layout.
+    ///
+    /// `owned`: payload words (bit `i`: word `i`) whose owner the frame
+    /// hands to the new object, so the allocation counts them no owner
+    /// more and the frame decrements them no more.
+    AllocAt {
+        dest: ValueId,
+        slot: Option<ValueId>,
+        owned: u32,
+        kind: MirAllocKind,
+        elems: Vec<ValueId>,
+        kinds: common::PackedKinds,
     },
     /// String `==` (`!=` when `ne`): structural equality, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
@@ -1225,6 +1279,10 @@ impl MirInst {
             | Self::Cow { dest, .. }
             | Self::CowPin { dest, .. }
             | Self::CowUnpin { dest, .. }
+            | Self::RcInc { dest, .. }
+            | Self::RcDec { dest, .. }
+            | Self::RcReuse { dest, .. }
+            | Self::AllocAt { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
             | Self::VecLoop { dest, .. } => dest,
@@ -1278,6 +1336,10 @@ impl MirInst {
             | Self::Cow { dest, .. }
             | Self::CowPin { dest, .. }
             | Self::CowUnpin { dest, .. }
+            | Self::RcInc { dest, .. }
+            | Self::RcDec { dest, .. }
+            | Self::RcReuse { dest, .. }
+            | Self::AllocAt { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
             | Self::VecLoop { dest, .. } => dest,
@@ -1339,10 +1401,13 @@ impl MirInst {
             Self::LanePush { array, lo, hi, .. } => vec![*array, *lo, *hi],
             Self::LanesToWords { array, .. } => vec![*array],
             Self::Alloc { elems, .. } => elems.clone(),
-            Self::GcBarrier { roots, .. } => roots.clone(),
+            Self::GcBarrier { object, .. } => vec![*object],
             Self::String { .. } | Self::CodePtr { .. } => Vec::new(),
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::CowUnpin { src, saved, .. } => vec![*src, *saved],
+            Self::RcInc { src, guard, .. } | Self::RcDec { src, guard, .. } => std::iter::once(*src).chain(*guard).collect(),
+            Self::RcReuse { src, .. } => vec![*src],
+            Self::AllocAt { slot, elems, .. } => slot.iter().copied().chain(elems.iter().copied()).collect(),
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -1437,16 +1502,27 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::GcBarrier { roots, .. } => {
-                for v in roots.iter_mut() {
-                    *v = map(*v);
-                }
-            }
+            Self::GcBarrier { object, .. } => *object = map(*object),
             Self::String { .. } | Self::CodePtr { .. } => {}
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => *src = map(*src),
             Self::CowUnpin { src, saved, .. } => {
                 *src = map(*src);
                 *saved = map(*saved);
+            }
+            Self::RcReuse { src, .. } => *src = map(*src),
+            Self::AllocAt { slot, elems, .. } => {
+                if let Some(slot) = slot {
+                    *slot = map(*slot);
+                }
+                for e in elems {
+                    *e = map(*e);
+                }
+            }
+            Self::RcInc { src, guard, .. } | Self::RcDec { src, guard, .. } => {
+                *src = map(*src);
+                if let Some(g) = guard {
+                    *g = map(*g);
+                }
             }
             Self::Format { fmt, args, .. } => {
                 *fmt = map(*fmt);

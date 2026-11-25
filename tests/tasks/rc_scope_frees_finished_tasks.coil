@@ -1,0 +1,62 @@
+// A scope whose children all finished lets go of their coroutines, closures
+// and handles: under counts nothing collects them later, so a loop of
+// scopes keeps the heap flat.
+use tests::assert;
+use gc::{collect, heap_bytes};
+use task::{scope, Scope};
+
+fn one() -> int {
+    return 1;
+}
+
+fn run_scope() -> int {
+    let r = scope(fn (Scope s) {
+        let t = s.spawn(fn () => one());
+        return match t.join() {
+            Result::Ok(v) => v,
+            Result::Err(_) => -1,
+        };
+    });
+    return match r {
+        Result::Ok(v) => v,
+        Result::Err(_) => -1,
+    };
+}
+
+// The scope's end waits for a child nobody joined.
+fn unjoined_scope() -> bool {
+    let r = scope(fn (Scope s) {
+        let _ = s.spawn(fn () => one());
+        return 0;
+    });
+    return match r {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    };
+}
+
+test("a loop of scopes that wait for their children keeps the heap flat") {
+    assert!(unjoined_scope());
+    collect();
+    let before = heap_bytes();
+    let i = 0;
+    while i < 200 {
+        assert!(unjoined_scope());
+        i += 1;
+    }
+    collect();
+    assert!(heap_bytes() - before < 4000);
+}
+
+test("a loop of finished scopes keeps the heap flat") {
+    assert!(run_scope() == 1);
+    collect();
+    let before = heap_bytes();
+    let i = 0;
+    while i < 200 {
+        assert!(run_scope() == 1);
+        i += 1;
+    }
+    collect();
+    assert!(heap_bytes() - before < 4000);
+}

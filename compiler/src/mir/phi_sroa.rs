@@ -49,20 +49,7 @@ pub fn phi_sroa(func: &mut MirFunc) -> usize {
 
 /// Drop removed values from the sidecars that name them.
 fn forget(func: &mut MirFunc, gone: &HashSet<ValueId>) {
-    for inst in func.blocks.iter_mut().flat_map(|b| &mut b.insts) {
-        if let MirInst::GcBarrier { roots, .. } = inst {
-            roots.retain(|v| !gone.contains(v));
-        }
-    }
-    func.slot_env.retain(|at, _| !gone.contains(at));
-    for env in func.slot_env.values_mut() {
-        env.retain(|(_, v)| !gone.contains(v));
-    }
     func.debug_slots.retain(|_, v| !gone.contains(v));
-    func.gc_roots.retain(|s| !gone.contains(&s.at));
-    for set in &mut func.gc_roots {
-        set.values.retain(|v| !gone.contains(v));
-    }
 }
 
 /// Every block that reads `v` (in an instruction or its terminator).
@@ -280,7 +267,7 @@ fn fresh_object(func: &MirFunc, alloc: ValueId, phi: ValueId) -> Option<Fresh> {
                 continue;
             }
             match inst {
-                MirInst::HeapFieldStore { dest, object, value, index } if *object == alloc => {
+                MirInst::HeapFieldStore { dest, object, value, index, .. } if *object == alloc => {
                     if b.id != block || !seen_alloc || *value == alloc {
                         return None;
                     }
@@ -292,8 +279,13 @@ fn fresh_object(func: &MirFunc, alloc: ValueId, phi: ValueId) -> Option<Fresh> {
                     fields.insert(*index, *value);
                 }
                 MirInst::Phi { dest, .. } if *dest == phi => {}
-                // A safepoint's root list only says the word is live.
-                MirInst::GcBarrier { .. } => {}
+                // Its own safepoint goes with it, when nothing reads the
+                // word through it.
+                MirInst::GcBarrier { dest, object, .. } if *object == alloc => {
+                    if !user_blocks(func, *dest).is_empty() {
+                        return None;
+                    }
+                }
                 _ if inst.operands().contains(&alloc) => return None,
                 _ => {}
             }
@@ -336,7 +328,6 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
                 match inst {
                     MirInst::ProductLoad { dest, object, slot } if *object == phi => loads.push((*dest, *slot)),
                     MirInst::Phi { dest, .. } if *dest == phi => {}
-                    MirInst::GcBarrier { .. } => {}
                     _ if inst.operands().contains(&phi) => ok = false,
                     _ => {}
                 }
@@ -403,7 +394,8 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
         for b in &mut func.blocks {
             b.insts.retain(|i| {
                 let d = i.dest();
-                d != phi && !allocs.contains(&d) && !dead_stores.contains(&d) && !subst.contains_key(&d)
+                let own_barrier = matches!(i, MirInst::GcBarrier { object, .. } if allocs.contains(object));
+                d != phi && !own_barrier && !allocs.contains(&d) && !dead_stores.contains(&d) && !subst.contains_key(&d)
             });
         }
         func.map_values(|v| subst.get(&v).copied().unwrap_or(v));
@@ -415,11 +407,6 @@ fn split_object_phis(func: &mut MirFunc) -> usize {
         let at = func.block_mut(block);
         for (k, (_, inst)) in new_phis.into_iter().enumerate() {
             at.insts.insert(k, inst);
-        }
-        for env in func.slot_env.values_mut() {
-            for (_, v) in env.iter_mut() {
-                *v = subst.get(v).copied().unwrap_or(*v);
-            }
         }
         let gone: HashSet<ValueId> = allocs.iter().copied().chain([phi]).chain(dead_stores).collect();
         forget(func, &gone);

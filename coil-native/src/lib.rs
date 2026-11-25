@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use compiler::native_mir::{
     AllocCall, BlockId, Label, MirAllocKind, alloc_call, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp,
-    NativeBody, Terminator, ValueId, allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pair_words, pointer_words, scalar,
+    NativeBody, Terminator, ValueId, allocates, barrier_pairs, heap_word, is_generator, numeric, scalar,
     ty_of, root_handles, used_params, word_kind, in_range_steps,
 };
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -34,19 +34,14 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use machine::native::{
-    NATIVE_CTX_BAIL, NATIVE_CTX_RET_HI, NATIVE_CTX_ROOTS, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS, ROOTS_AMBIGUOUS,
+    NATIVE_CTX_BAIL, NATIVE_CTX_HEAP, NATIVE_CTX_RET_HI, NATIVE_CTX_GC_DUE, NATIVE_CTX_GC_EPOCH, NATIVE_CTX_HAS_FINALIZERS, NATIVE_CTX_STATICS, NATIVE_CTX_STATICS_LEN, NATIVE_CTX_STACK_LIMIT, NATIVE_CTX_CALLS,
+    NATIVE_CTX_GEN_HOMES, NATIVE_CTX_GEN_MASK,
     NativeEntry, NativeEntryFn, NativeSite, NO_SITE, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
-/// A root record [`Lower::push_roots`] linked.
-struct Roots {
-    prev: cranelift_codegen::ir::Value,
-    slot: cranelift_codegen::ir::StackSlot,
-    /// Heap homes the record lists, written back from it.
-    homes: Vec<u16>,
-    /// `NativeCtx::gc_epoch` when it was linked.
-    epoch: cranelift_codegen::ir::Value,
-}
+/// `NativeCtx::gc_epoch` before a call in which code may run
+/// ([`Lower::epoch_mark`]).
+struct Epoch(cranelift_codegen::ir::Value);
 
 /// What [`jit`] produced.
 pub struct NativeProgram {
@@ -79,8 +74,6 @@ impl NativeProgram {
 /// dropped from here on, which is why it may cross threads.
 struct Code {
     module: ManuallyDrop<JITModule>,
-    /// `(start, size)` of the bodies with stack maps.
-    bodies: Vec<(u64, u32)>,
 }
 
 // SAFETY: nothing reads the module after it is built; `drop` has it alone.
@@ -89,14 +82,13 @@ unsafe impl Send for Code {}
 unsafe impl Sync for Code {}
 
 impl Code {
-    fn keep(module: JITModule, bodies: Vec<(u64, u32)>) -> Arc<dyn Any + Send + Sync> {
-        Arc::new(Self { module: ManuallyDrop::new(module), bodies })
+    fn keep(module: JITModule) -> Arc<dyn Any + Send + Sync> {
+        Arc::new(Self { module: ManuallyDrop::new(module) })
     }
 }
 
 impl Drop for Code {
     fn drop(&mut self) {
-        machine::native::unregister_stack_maps(&self.bodies);
         // SAFETY: this was the last handle, so no runtime can enter the code,
         // and `module` is not used again.
         unsafe { ManuallyDrop::take(&mut self.module).free_memory() };
@@ -186,8 +178,10 @@ fn inline_shape(kind: MirAllocKind, n: usize, extra: u64) -> Option<machine::nat
     }
     let n = u8::try_from(n).ok()?;
     match kind {
-        MirAllocKind::Enum { tag } => Some(InlineShape::Enum { tag, kinds: (extra >> 32) as u8, n }),
-        MirAllocKind::Object { type_id, nfields } => Some(InlineShape::Instance { type_id, n: u8::try_from(nfields).ok()? }),
+        MirAllocKind::Enum { tag } => Some(InlineShape::Enum { tag, kinds: (extra >> 32) as u32, n }),
+        MirAllocKind::Object { type_id, nfields } => {
+            Some(InlineShape::Instance { type_id, kinds: (extra >> 32) as u32, n: u8::try_from(nfields).ok()? })
+        }
         _ => None,
     }
 }
@@ -195,8 +189,7 @@ fn inline_shape(kind: MirAllocKind, n: usize, extra: u64) -> Option<machine::nat
 /// What [`aot`] produced: a relocatable object for the host target that
 /// defines the compiled bodies and the tables `machine::native::install_aot`
 /// reads (`coil_aot_entries`, `coil_aot_entry_count`, `coil_aot_sites`,
-/// `coil_aot_site_count`, `coil_aot_refused_count`, `coil_aot_layout`,
-/// `coil_aot_stack_maps`, `coil_aot_stack_map_count`), importing the runtime helpers by name, and the
+/// `coil_aot_site_count`, `coil_aot_refused_count`, `coil_aot_layout`), importing the runtime helpers by name, and the
 /// statically linked `extern` symbols' table `machine::install_static_symbols` reads
 /// (`coil_static_syms`, `coil_static_sym_count`).
 pub struct AotObject {
@@ -231,7 +224,7 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         let compile_isa = isa.clone();
         let builder = cranelift_object::ObjectBuilder::new(isa, "coil_aot", default_libcall_names()).map_err(|e| e.to_string())?;
         let mut module = cranelift_object::ObjectModule::new(builder);
-        let (ids, defined, sites, maps) = match define_all(&mut module, bodies, body_ids, &plan, &*compile_isa, None)? {
+        let (ids, defined, sites) = match define_all(&mut module, bodies, body_ids, &plan, &*compile_isa, None)? {
             Ok(done) => done,
             Err((i, why)) => {
                 excluded.insert(i, why);
@@ -276,38 +269,6 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         }
         let table_id = module.declare_data("coil_aot_entries", Linkage::Export, false, false).map_err(e)?;
         module.define_data(table_id, &table).map_err(e)?;
-        // The stack maps: `machine::native::AotStackMap` records, each
-        // followed by its offsets, the function address relocated.
-        let mut map_bytes = Vec::new();
-        let mut map_relocs = Vec::new();
-        let mut map_count = 0u64;
-        for (id, (size, fmaps)) in &maps {
-            map_relocs.push((map_bytes.len(), *id));
-            map_bytes.extend_from_slice(&0u64.to_le_bytes());
-            map_bytes.extend_from_slice(&size.to_le_bytes());
-            map_bytes.extend_from_slice(&(fmaps.len() as u32).to_le_bytes());
-            for (ra, offs) in fmaps {
-                map_bytes.extend_from_slice(&ra.to_le_bytes());
-                map_bytes.extend_from_slice(&(offs.len() as u32).to_le_bytes());
-                for o in offs {
-                    map_bytes.extend_from_slice(&o.to_le_bytes());
-                }
-            }
-            map_bytes.resize(map_bytes.len().next_multiple_of(8), 0);
-            map_count += 1;
-        }
-        if map_bytes.is_empty() {
-            map_bytes.resize(16, 0);
-        }
-        let mut map_table = cranelift_module::DataDescription::new();
-        map_table.define(map_bytes.into_boxed_slice());
-        map_table.set_align(8);
-        for (off, id) in map_relocs {
-            let f = module.declare_func_in_data(id, &mut map_table);
-            map_table.write_function_addr(off as u32, f);
-        }
-        let map_id = module.declare_data("coil_aot_stack_maps", Linkage::Export, false, false).map_err(e)?;
-        module.define_data(map_id, &map_table).map_err(e)?;
         let mut data = cranelift_module::DataDescription::new();
         data.define(package.to_vec().into_boxed_slice());
         // Its archive is read in place, which rkyv's alignment asks of it.
@@ -337,7 +298,6 @@ pub fn aot(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, statics: &[(S
         words("coil_aot_site_count", site_count.to_le_bytes().to_vec())?;
         words("coil_aot_refused_count", (refused.len() as u64).to_le_bytes().to_vec())?;
         words("coil_aot_layout", machine::native::layout_fingerprint().to_le_bytes().to_vec())?;
-        words("coil_aot_stack_map_count", map_count.to_le_bytes().to_vec())?;
         static_symbol_table(&mut module, statics)?;
         host_group_table(&mut module, bodies)?;
         ffi_link_table(&mut module, bodies, all_linked && !ids.runtime_ffi.get())?;
@@ -545,7 +505,7 @@ fn jit_isa() -> Result<cranelift_codegen::isa::OwnedTargetIsa, String> {
     let mut flags = settings::builder();
     flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
     flags.set("enable_verifier", VERIFY_CLIF).map_err(|e| e.to_string())?;
-    // The collector walks native frames by their frame pointers.
+    // Profilers and debuggers walk native frames by their frame pointers.
     flags.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
     stack_probes(&mut flags)?;
     let isa_builder = cranelift_native::builder().map_err(|e| e.to_string())?;
@@ -604,17 +564,11 @@ fn jit_once(
     let isa = jit_isa()?;
     let mut recorder = keep_image.then(image::Recorder::default);
 
-    let (ids, defined, sites, maps) = match define_all(&mut module, bodies, body_ids, &plan, &*isa, recorder.as_mut())? {
+    let (ids, defined, sites) = match define_all(&mut module, bodies, body_ids, &plan, &*isa, recorder.as_mut())? {
         Ok(done) => done,
         Err((i, why)) => return Ok(Attempt::Without(i, why)),
     };
     module.finalize_definitions().map_err(|e| e.to_string())?;
-    let mut mapped = Vec::with_capacity(maps.len());
-    for (id, (size, fmaps)) in &maps {
-        let start = module.get_finalized_function(*id) as u64;
-        machine::native::register_stack_maps(start, *size, fmaps.clone());
-        mapped.push((start, *size));
-    }
 
     let mut entries = Vec::new();
     let mut entry_funcs = Vec::new();
@@ -639,9 +593,9 @@ fn jit_once(
     }
     // A program with refused bodies does not run on native code alone.
     let image = recorder.filter(|_| refused.is_empty()).and_then(|recorder| {
-        image::encode(image::Parts { module: &module, reserve, recorder, maps: &maps, entries: &entry_funcs, sites: &sites, compiled: &compiled })
+        image::encode(image::Parts { module: &module, reserve, recorder, entries: &entry_funcs, sites: &sites, compiled: &compiled })
     });
-    Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites, image, keep: Code::keep(module, mapped) }))
+    Ok(Attempt::Done(NativeProgram { entries, compiled, refused, sites, image, keep: Code::keep(module) }))
 }
 
 /// [`NativeEntry::twin`] of body `i`: one past its two-word twin's entry
@@ -712,8 +666,8 @@ struct Plan {
 }
 
 /// What [`define_all`] made: the declared ids, the bodies defined, the
-/// panic sites their code names, and the stack maps of each function.
-type Defined = (Ids, Vec<usize>, Vec<NativeSite>, Vec<(FuncId, FuncMaps)>);
+/// and the panic sites their code names.
+type Defined = (Ids, Vec<usize>, Vec<NativeSite>);
 
 /// Declare and define every body `plan` compiles (its implementation,
 /// cleanup pad and driver entry) in `module`. `Ok(Err((i, why)))` when body
@@ -728,7 +682,6 @@ fn define_all<M: Module>(
     mut recorder: Option<&mut image::Recorder>,
 ) -> Result<Result<Defined, (usize, String)>, String> {
     let ids = declare(module, bodies, plan)?;
-    define_trampolines(module, &ids.tramps, recorder.as_deref_mut())?;
     if let Some(cb) = &ids.cb {
         define_callbacks(module, cb, recorder.as_deref_mut())?;
     }
@@ -758,7 +711,7 @@ fn define_all<M: Module>(
             if let Err(why) = lowered {
                 return Err((i, why));
             }
-            submit(Job::take(ids.imp[&i], i, "", true, &mut ctx));
+            submit(Job::take(ids.imp[&i], i, "", &mut ctx));
             module.clear_context(&mut ctx);
 
             if let (Some(pad), Some(&pad_id)) = (body.mir.cleanup.as_deref(), ids.pad.get(&i)) {
@@ -779,13 +732,13 @@ fn define_all<M: Module>(
                 if let Err(why) = lowered {
                     return Err((i, format!("cleanup pad: {why}")));
                 }
-                submit(Job::take(pad_id, i, " pad", true, &mut ctx));
+                submit(Job::take(pad_id, i, " pad", &mut ctx));
                 module.clear_context(&mut ctx);
             }
 
             ctx.func.signature = entry_signature(&*module);
             build_entry(module, &mut ctx.func, &mut fbc, ids.imp[&i], &body.mir);
-            submit(Job::take(ids.entry[&i], i, " entry", true, &mut ctx));
+            submit(Job::take(ids.entry[&i], i, " entry", &mut ctx));
             module.clear_context(&mut ctx);
             defined.push(i);
         }
@@ -794,14 +747,9 @@ fn define_all<M: Module>(
     if let Err(failed) = lowered {
         return Ok(Err(failed));
     }
-    let mut maps = Vec::new();
     for done in done {
         let func = match done {
-            Ok((func, Some(fmaps))) => {
-                maps.push((func.id, fmaps));
-                func
-            }
-            Ok((func, None)) => func,
+            Ok(func) => func,
             Err(failed) => return Ok(Err(failed)),
         };
         module.define_function_bytes(func.id, func.align, &func.bytes, &func.relocs).map_err(|e| format!("cranelift: {e:?}"))?;
@@ -809,7 +757,7 @@ fn define_all<M: Module>(
             r.add(func);
         }
     }
-    Ok(Ok((ids, defined, sites, maps)))
+    Ok(Ok((ids, defined, sites)))
 }
 
 /// A function lowered to Cranelift IR, waiting to compile.
@@ -820,20 +768,18 @@ struct Job {
     owner: usize,
     /// What it is of that body, for an error.
     part: &'static str,
-    /// The collector walks its frames: it has stack maps.
-    walked: bool,
 }
 
 impl Job {
     /// The function `ctx` holds, leaving it empty.
-    fn take(id: FuncId, owner: usize, part: &'static str, walked: bool, ctx: &mut cranelift_codegen::Context) -> Self {
+    fn take(id: FuncId, owner: usize, part: &'static str, ctx: &mut cranelift_codegen::Context) -> Self {
         let func = std::mem::replace(&mut ctx.func, cranelift_codegen::ir::Function::new());
-        Self { id, func, owner, part, walked }
+        Self { id, func, owner, part }
     }
 }
 
-/// A compiled function with its stack maps; or the body that did not compile.
-type Done = Result<(image::Func, Option<FuncMaps>), (usize, String)>;
+/// A compiled function; or the body that did not compile.
+type Done = Result<image::Func, (usize, String)>;
 
 fn compile_job(isa: &dyn cranelift_codegen::isa::TargetIsa, ctx: &mut cranelift_codegen::Context, job: Job) -> Done {
     ctx.clear();
@@ -842,16 +788,15 @@ fn compile_job(isa: &dyn cranelift_codegen::isa::TargetIsa, ctx: &mut cranelift_
     if let Err(e) = ctx.compile(isa, &mut plane) {
         return Err((job.owner, format!("cranelift{}: {:?}", job.part, e.inner)));
     }
-    let func = image::Func::of(job.id, ctx).ok_or((job.owner, "cranelift: no code".to_string()))?;
-    Ok((func, job.walked.then(|| stack_maps(ctx))))
+    image::Func::of(job.id, ctx).ok_or((job.owner, "cranelift: no code".to_string()))
 }
 
 /// Functions a thread should have to itself before another is worth starting.
 const JOBS_PER_THREAD: usize = 16;
 
 /// A word view's state after an op that may have moved its array's storage:
-/// not `0` (no view: not a word array), [`machine::VIEW_PLAIN`] or
-/// [`machine::VIEW_TRACKED`]. The next element access takes the view again.
+/// not `0` (no view: not a word array) or [`machine::VIEW_PLAIN`]. The
+/// next element access takes the view again.
 const VIEW_UNKNOWN: i64 = -1;
 
 /// Past this, lowering is what compiling waits for: more threads only contend.
@@ -912,22 +857,6 @@ fn compile_while<R>(isa: &dyn cranelift_codegen::isa::TargetIsa, threads: usize,
     let mut done = finished.into_inner().unwrap_or_else(PoisonError::into_inner);
     done.sort_unstable_by_key(|(at, _)| *at);
     (out, done.into_iter().map(|(_, d)| d).collect())
-}
-
-/// A compiled function's code size and stack maps: per call that holds
-/// heap words across it, the return address's offset in the function and
-/// the stack-pointer offsets of the slots that hold them.
-pub(crate) type FuncMaps = (u32, Vec<(u32, Vec<u32>)>);
-
-fn stack_maps(ctx: &cranelift_codegen::Context) -> FuncMaps {
-    let Some(code) = ctx.compiled_code() else {
-        return (0, Vec::new());
-    };
-    // Each slot by its distance below the frame pointer: a frame's stack
-    // pointer at a call is not always where its callee's frame starts, as a
-    // `tail` body moves its return address to make room for stack arguments.
-    let maps = code.buffer.user_stack_maps().iter().map(|(ra, span, map)| (*ra, map.entries().map(|(_, off)| span - off).collect())).collect();
-    (code.code_info().total_size, maps)
 }
 
 /// [`plan`] with `excluded` bodies refused for the given reason.
@@ -1234,6 +1163,10 @@ fn may_drop_views(inst: &MirInst) -> bool {
             | MirInst::HomeStore { .. }
             | MirInst::ClearWord { .. }
             | MirInst::KeepAlive { .. }
+            // A count change frees only objects the frame no longer reads.
+            | MirInst::RcInc { .. }
+            | MirInst::RcDec { .. }
+            | MirInst::RcReuse { .. }
     )
 }
 
@@ -1549,6 +1482,29 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(src)?;
                         need_scalar(saved)?;
                     }
+                    MirInst::RcReuse { dest, src, .. } => {
+                        need_scalar(dest)?;
+                        need(src)?;
+                    }
+                    MirInst::AllocAt { dest, slot, kind, elems, .. } => {
+                        need(dest)?;
+                        if let Some(slot) = slot {
+                            need_scalar(slot)?;
+                        }
+                        for e in elems {
+                            need(e)?;
+                        }
+                        if !matches!(kind, MirAllocKind::Enum { .. } | MirAllocKind::Object { .. }) {
+                            return Err("an allocation in place of a kind other than an enum or an instance".to_string());
+                        }
+                    }
+                    MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                        need_scalar(dest)?;
+                        need(src)?;
+                        if let Some(g) = guard {
+                            need_scalar(g)?;
+                        }
+                    }
                     MirInst::Phi { dest, args, .. } => {
                         need(dest)?;
                         for (_, v) in args {
@@ -1764,9 +1720,6 @@ fn inst_name(i: &MirInst) -> String {
 // Declarations
 
 struct Ids {
-    /// The trampolines to helpers that may collect, with the helper and
-    /// their signature ([`trampoline`]).
-    tramps: Vec<(FuncId, FuncId, Signature)>,
     /// Native-convention body: `(ctx, params..) -> ret`.
     imp: HashMap<usize, FuncId>,
     /// driver entry: `(ctx, *const u64) -> u64`.
@@ -1791,6 +1744,13 @@ struct Ids {
     /// Copy-on-write (these allocate, never collect).
     cow: FuncId,
     cow_field: FuncId,
+    /// Reference count ops (`coil_native_rc`).
+    rc: FuncId,
+    /// Reuse in place (`coil_native_rc_reuse`, `coil_native_rc_take`,
+    /// `coil_native_offer_slot`).
+    rc_reuse: FuncId,
+    rc_take: FuncId,
+    offer_slot: FuncId,
     /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
     alloc: FuncId,
     array_push: FuncId,
@@ -2289,51 +2249,9 @@ fn entry_signature(module: &impl Module) -> Signature {
     sig
 }
 
-/// Declare the helper `symbol` and a local trampoline to it with the same
-/// signature: native code calls a helper that may collect through its
-/// trampoline, which records its frame pointer in the context so the
-/// collector can walk the native frames ([`define_trampolines`]).
-fn trampoline(module: &mut impl Module, symbol: &str, sig: &Signature, tramps: &mut Vec<(FuncId, FuncId, Signature)>) -> Result<FuncId, String> {
-    let e = |e: cranelift_module::ModuleError| e.to_string();
-    let helper = module.declare_function(symbol, Linkage::Import, sig).map_err(e)?;
-    let tramp = module.declare_function(&format!("{symbol}_t"), Linkage::Local, sig).map_err(e)?;
-    tramps.push((tramp, helper, sig.clone()));
-    Ok(tramp)
-}
-
-/// Define [`trampoline`]s: `ctx.native_fp = fp; return helper(args...)`.
-fn define_trampolines<M: Module>(module: &mut M, tramps: &[(FuncId, FuncId, Signature)], mut recorder: Option<&mut image::Recorder>) -> Result<(), String> {
-    let fcfg = module.isa().frontend_config();
-    let mut fbc = FunctionBuilderContext::new();
-    let mut ctx = module.make_context();
-    for (tramp, helper, sig) in tramps {
-        ctx.func.signature = sig.clone();
-        let callee = module.declare_func_in_func(*helper, &mut ctx.func);
-        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
-        let blk = b.create_block();
-        b.append_block_params_for_function_params(blk);
-        b.switch_to_block(blk);
-        let args = b.block_params(blk).to_vec();
-        let fp = b.ins().get_frame_pointer(types::I64);
-        b.ins().store(MemFlagsData::trusted(), fp, args[0], machine::native::NATIVE_CTX_NATIVE_FP);
-        let call = b.ins().call(callee, &args);
-        let rets = b.inst_results(call).to_vec();
-        b.ins().return_(&rets);
-        b.seal_all_blocks();
-        b.finalize(fcfg);
-        module.define_function(*tramp, &mut ctx).map_err(|e| format!("cranelift trampoline: {e:?}"))?;
-        if let (Some(r), Some(func)) = (recorder.as_deref_mut(), image::Func::of(*tramp, &ctx)) {
-            r.add(func);
-        }
-        module.clear_context(&mut ctx);
-    }
-    Ok(())
-}
-
 fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Result<Ids, String> {
     let compile = &plan.compile;
     let e = |e: cranelift_module::ModuleError| e.to_string();
-    let mut tramps = Vec::new();
     let mut imp = HashMap::new();
     let mut entry = HashMap::new();
     let mut pad = HashMap::new();
@@ -2377,6 +2295,10 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     s1v.params.push(AbiParam::new(types::I64));
     let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
+    let rc = module.declare_function("coil_native_rc", Linkage::Import, &s3).map_err(e)?;
+    let rc_reuse = module.declare_function("coil_native_rc_reuse", Linkage::Import, &s3).map_err(e)?;
+    let rc_take = module.declare_function("coil_native_rc_take", Linkage::Import, &s3).map_err(e)?;
+    let offer_slot = module.declare_function("coil_native_offer_slot", Linkage::Import, &s2).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
     let lane_index = module.declare_function("coil_native_lane_index", Linkage::Import, &s3).map_err(e)?;
@@ -2384,7 +2306,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let lane_push = module.declare_function("coil_native_lane_push", Linkage::Import, &s7).map_err(e)?;
     let lanes_to_words = module.declare_function("coil_native_lanes_to_words", Linkage::Import, &s5).map_err(e)?;
     let probe = module.declare_function("coil_native_probe", Linkage::Import, &s2).map_err(e)?;
-    let free_early = trampoline(module, "coil_native_free_early", &s3, &mut tramps)?;
+    let free_early = module.declare_function("coil_native_free_early", Linkage::Import, &s3).map_err(e)?;
     let format = module.declare_function("coil_native_format", Linkage::Import, &s4).map_err(e)?;
     let stringify = module.declare_function("coil_native_stringify", Linkage::Import, &s3).map_err(e)?;
     let eq = module.declare_function("coil_native_eq", Linkage::Import, &s3).map_err(e)?;
@@ -2394,23 +2316,23 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     s3v.params.extend((0..3).map(|_| AbiParam::new(types::I64)));
     let unwind = module.declare_function("coil_native_unwind", Linkage::Import, &s3v).map_err(e)?;
     let print = module.declare_function("coil_native_print", Linkage::Import, &s2).map_err(e)?;
-    let host = trampoline(module, "coil_native_host", &s5, &mut tramps)?;
-    let ffi = trampoline(module, "coil_native_ffi", &s5, &mut tramps)?;
+    let host = module.declare_function("coil_native_host", Linkage::Import, &s5).map_err(e)?;
+    let ffi = module.declare_function("coil_native_ffi", Linkage::Import, &s5).map_err(e)?;
     let mut s9 = module.make_signature();
     s9.params.extend((0..9).map(|_| AbiParam::new(types::I64)));
     s9.returns.push(AbiParam::new(types::I64));
     let vector = module.declare_function("coil_native_vector", Linkage::Import, &s9).map_err(e)?;
-    let call_value = trampoline(module, "coil_native_call_value", &s5, &mut tramps)?;
-    let resume = trampoline(module, "coil_native_resume", &s4, &mut tramps)?;
+    let call_value = module.declare_function("coil_native_call_value", Linkage::Import, &s5).map_err(e)?;
+    let resume = module.declare_function("coil_native_resume", Linkage::Import, &s4).map_err(e)?;
     let coro_done = module.declare_function("coil_native_coro_done", Linkage::Import, &s2).map_err(e)?;
-    let gen_yield = trampoline(module, "coil_native_yield", &s2, &mut tramps)?;
-    let mut s5v = module.make_signature();
-    s5v.params.extend((0..5).map(|_| AbiParam::new(types::I64)));
-    let defer = module.declare_function("coil_native_defer", Linkage::Import, &s5v).map_err(e)?;
+    let gen_yield = module.declare_function("coil_native_yield", Linkage::Import, &s2).map_err(e)?;
+    let mut s4v = module.make_signature();
+    s4v.params.extend((0..4).map(|_| AbiParam::new(types::I64)));
+    let defer = module.declare_function("coil_native_defer", Linkage::Import, &s4v).map_err(e)?;
     let claim = module.declare_function("coil_native_claim", Linkage::Import, &s3).map_err(e)?;
     let mut s1v2 = module.make_signature();
     s1v2.params.push(AbiParam::new(types::I64));
-    let collect = trampoline(module, "coil_native_collect", &s1v2, &mut tramps)?;
+    let collect = module.declare_function("coil_native_collect", Linkage::Import, &s1v2).map_err(e)?;
     let panic = module.declare_function("coil_native_panic", Linkage::Import, &s2).map_err(e)?;
     let ffi_arg = module.declare_function("coil_native_ffi_arg", Linkage::Import, &s4).map_err(e)?;
     let ffi_done = module.declare_function("coil_native_ffi_done", Linkage::Import, &s1v2).map_err(e)?;
@@ -2422,7 +2344,6 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let va_call_f = module.declare_function("coil_native_va_call_f", Linkage::Import, &module.make_signature()).map_err(e)?;
     let cb = if plan.ffi_callbacks { Some(declare_callbacks(module, bodies, plan)?) } else { None };
     Ok(Ids {
-        tramps,
         imp,
         entry,
         pad,
@@ -2442,6 +2363,10 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         fn_entry_pair,
         cow,
         cow_field,
+        rc,
+        rc_reuse,
+        rc_take,
+        offer_slot,
         alloc,
         array_push,
         lane_index,
@@ -2565,7 +2490,7 @@ fn define_callbacks<M: Module>(module: &mut M, cb: &CbIds, mut recorder: Option<
     let mut calls: Vec<_> = cb.calls.iter().collect();
     calls.sort_by_key(|(_, id)| id.as_u32());
     for (shape, &id) in calls {
-        // ctx.native_fp = fp; saved = enter(ctx); r = addr(args..);
+        // saved = enter(ctx); r = addr(args..);
         // leave(ctx, saved); return r
         ctx.func.signature = cb_call_signature(module, shape);
         let enter = module.declare_func_in_func(cb.enter, &mut ctx.func);
@@ -2576,8 +2501,6 @@ fn define_callbacks<M: Module>(module: &mut M, cb: &CbIds, mut recorder: Option<
         b.switch_to_block(blk);
         let params = b.block_params(blk).to_vec();
         let (c, addr) = (params[0], params[1]);
-        let fp = b.ins().get_frame_pointer(types::I64);
-        b.ins().store(MemFlagsData::trusted(), fp, c, machine::native::NATIVE_CTX_NATIVE_FP);
         let call = b.ins().call(enter, &[c]);
         let saved = b.inst_results(call)[0];
         let mut csig = Signature::new(conv);
@@ -2725,6 +2648,10 @@ struct Lower<'a> {
     runtime_ffi: bool,
     cow: FuncRef,
     cow_field: FuncRef,
+    rc: FuncRef,
+    rc_reuse: FuncRef,
+    rc_take: FuncRef,
+    offer_slot: FuncRef,
     alloc: FuncRef,
     array_push: FuncRef,
     lane_index: FuncRef,
@@ -2757,7 +2684,7 @@ struct Lower<'a> {
     va_call: FuncRef,
     va_call_f: FuncRef,
     /// The body's direct extern calls run in a program whose C code may
-    /// call back: through a [`CbIds::calls`] trampoline, rooted.
+    /// call back: through a [`CbIds::calls`] trampoline.
     cb: Option<CbRefs>,
     /// This body's index into the plan's bodies.
     body_index: Option<usize>,
@@ -2777,35 +2704,16 @@ struct Lower<'a> {
     /// not needed: they are copied out at a panic), or the pad's pointer.
     homes_slot: Option<cranelift_codegen::ir::StackSlot>,
     homes_ptr: Option<cranelift_codegen::ir::Value>,
-    /// Homes holding heap words, rooted with the body's heap values.
-    heap_homes: Vec<u16>,
-    /// An opaque body's `int` homes, which may hold objects: rooted
-    /// ambiguously.
-    amb_homes: Vec<u16>,
     /// The [`Self::push_call`] record of this frame.
     calls_slot: Option<cranelift_codegen::ir::StackSlot>,
-    /// An opaque body's `int` words that may be objects: rooted in an
-    /// ambiguous record (pinned, never rewritten).
-    opaque: Vec<ValueId>,
-    /// Words of a non-heap type that hold an object for sure
-    /// ([`pointer_words`]): rooted precisely, as heap words are.
-    ptr_words: HashSet<ValueId>,
     /// `gc::root` handles the body makes: kept alive until it returns
     /// ([`Self::keep_roots`]), where other words die at their last use.
     root_handles: Vec<ValueId>,
     /// Where [`Self::keep_roots`] stores them (made on first use).
     keep_slot: Option<cranelift_codegen::ir::StackSlot>,
-    /// Words of pairs that may carry an object ([`pair_words`]): rooted
-    /// ambiguously.
-    pair_words: Vec<ValueId>,
     /// `int` steps a dominating compare keeps in range
     /// ([`in_range_steps`]): a plain add, with no overflow check.
     in_range: HashSet<ValueId>,
-    /// The heap words the op being lowered hands the runtime. The runtime
-    /// holds its own copy of them, and a word past its last use is in no
-    /// stack map: rooted ambiguously, so the object stays where it is. A
-    /// direct call hands its words to a frame that roots them.
-    op_words: Vec<ValueId>,
     defer: FuncRef,
     claim: FuncRef,
     /// This body's cleanup pad.
@@ -2824,10 +2732,6 @@ struct Lower<'a> {
     /// words in place, set where the array value is defined (see
     /// `machine::native::coil_native_view`).
     views: HashMap<ValueId, (Variable, Variable, Variable)>,
-    /// The card bytes of the arrays this body stores into, for a store
-    /// through a tracked view (`machine::VIEW_TRACKED`): the third word
-    /// `coil_native_view` writes.
-    view_cards: HashMap<ValueId, Variable>,
     /// Strings this body reads `s[i]` of: `(known, pointer, length)` of
     /// their bytes, filled at the first read after the string value is
     /// defined or the views were dropped (`machine::native::coil_native_str_view`;
@@ -2840,11 +2744,6 @@ struct Lower<'a> {
     /// box and unbox), 0 not known: filled where the array value is
     /// defined, or at the next element op after the views were dropped.
     lane_views: HashMap<ValueId, (Variable, Variable, Variable)>,
-    /// The MIR values to root at the op being lowered (`None`: all of
-    /// them): those live there and the words locals hold ([`held_words`]).
-    /// [`Self::push_roots`] records only these, so a dead temporary is
-    /// not kept alive by this frame.
-    live: Option<HashSet<ValueId>>,
     /// Array values this body stores into.
     stored: HashSet<ValueId>,
     /// `GcBarrier` dest -> the object it names ([`barrier_pairs`]).
@@ -2900,6 +2799,10 @@ impl<'a> Lower<'a> {
         let entry_sig = func.import_signature(entry_signature(module));
         let cow = module.declare_func_in_func(ids.cow, func);
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
+        let rc = module.declare_func_in_func(ids.rc, func);
+        let rc_reuse = module.declare_func_in_func(ids.rc_reuse, func);
+        let rc_take = module.declare_func_in_func(ids.rc_take, func);
+        let offer_slot = module.declare_func_in_func(ids.offer_slot, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
         let array_push = module.declare_func_in_func(ids.array_push, func);
         let lane_index = module.declare_func_in_func(ids.lane_index, func);
@@ -2995,6 +2898,10 @@ impl<'a> Lower<'a> {
             runtime_ffi: false,
             cow,
             cow_field,
+            rc,
+            rc_reuse,
+            rc_take,
+            offer_slot,
             alloc,
             array_push,
             lane_index,
@@ -3033,15 +2940,9 @@ impl<'a> Lower<'a> {
             maybe_dropped: HashSet::new(),
             homes_slot: None,
             homes_ptr: None,
-            heap_homes: Vec::new(),
-            amb_homes: Vec::new(),
-            opaque: Vec::new(),
-            ptr_words: HashSet::new(),
             root_handles: Vec::new(),
             keep_slot: None,
-            pair_words: Vec::new(),
             in_range: HashSet::new(),
-            op_words: Vec::new(),
             calls_slot: None,
             defer,
             claim,
@@ -3052,10 +2953,8 @@ impl<'a> Lower<'a> {
             cur_loc: None,
             cur_site: None,
             views: HashMap::new(),
-            view_cards: HashMap::new(),
             str_views: HashMap::new(),
             lane_views: HashMap::new(),
-            live: None,
             stored: HashSet::new(),
             barriers: HashMap::new(),
             view_slot,
@@ -3093,11 +2992,6 @@ impl<'a> Lower<'a> {
             return var;
         }
         let var = self.b.declare_var(cl_ty(ty_of(f, v)));
-        // The collector finds and rewrites heap words in native frames by
-        // their stack maps, live at last use.
-        if heap_word(ty_of(f, v)) || self.ptr_words.contains(&v) {
-            self.b.declare_var_needs_stack_map(var);
-        }
         self.vars[v.index()] = Some(var);
         var
     }
@@ -3133,116 +3027,41 @@ impl<'a> Lower<'a> {
         }
     }
 
-    /// Before a call in which a collection may run: link a record of the
-    /// heap words the stack maps cannot describe into the context's root
-    /// chain (see `machine::native::NativeCtx::roots`): the heap homes,
-    /// which live in memory, and the ambiguous words, which are pinned.
-    /// Heap words in values are the stack maps'
-    /// (`declare_var_needs_stack_map`). Returns the chain's previous head,
-    /// for [`Self::pop_roots`].
-    fn push_roots(&mut self, f: &MirFunc) -> Option<Roots> {
-        let homes = if self.homes_slot.is_some() { self.heap_homes.clone() } else { Vec::new() };
-        let amb_homes = if self.homes_slot.is_some() { self.amb_homes.clone() } else { Vec::new() };
-        let opaque: Vec<ValueId> = self
-            .opaque
-            .iter()
-            .chain(&self.pair_words)
-            .chain(&self.op_words)
-            .copied()
-            .filter(|v| self.live.as_ref().is_none_or(|l| l.contains(v)))
-            .collect();
-        if homes.is_empty() && opaque.is_empty() && amb_homes.is_empty() {
-            return None;
-        }
-        let t = MemFlagsData::trusted();
-        let prev = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ROOTS);
-        // The ambiguous record links behind the precise one; nothing
-        // rewrites it, so nothing reloads from it.
-        let mut next = prev;
-        if !opaque.is_empty() || !amb_homes.is_empty() {
-            let amb = self.record(f, next, &opaque, &amb_homes, ROOTS_AMBIGUOUS);
-            next = self.b.ins().stack_addr(types::I64, amb, 0);
-        }
-        let slot = self.record(f, next, &[], &homes, 0);
-        let at = self.b.ins().stack_addr(types::I64, slot, 0);
-        self.b.ins().store(t, at, self.ctx, NATIVE_CTX_ROOTS);
-        let epoch = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_GC_EPOCH);
-        Some(Roots { prev, slot, homes, epoch })
+    /// Before a call in which a collection (and so a `drop`) or other code
+    /// may run: the context's epoch, for [`Self::epoch_check`].
+    fn epoch_mark(&mut self) -> Option<Epoch> {
+        Some(Epoch(self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_GC_EPOCH)))
     }
 
-    /// A root record `[next, n | flags, words...]` of `vals` and then of
-    /// the words in `homes`, in a new slot.
-    fn record(&mut self, f: &MirFunc, next: cranelift_codegen::ir::Value, vals: &[ValueId], homes: &[u16], flags: u64) -> cranelift_codegen::ir::StackSlot {
-        let total = vals.len() + homes.len();
-        let slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            ((total + 2) * 8) as u32,
-            3,
-        ));
-        self.b.ins().stack_store(types::I64, next, slot, 0);
-        let n = self.b.ins().iconst(types::I64, (total as u64 | flags) as i64);
-        self.b.ins().stack_store(types::I64, n, slot, 8);
-        for (i, v) in vals.iter().enumerate() {
-            let x = self.get(f, *v);
-            let x = self.coerce(x, types::I64);
-            self.b.ins().stack_store(types::I64, x, slot, ((i + 2) * 8) as i32);
-        }
-        let t = MemFlagsData::trusted();
-        for (k, &h) in homes.iter().enumerate() {
-            let (base, off) = self.home_at(h).expect("homes slot");
-            let x = self.b.ins().load(types::I64, t, base, off);
-            self.b.ins().stack_store(types::I64, x, slot, ((vals.len() + k + 2) * 8) as i32);
-        }
-        slot
-    }
-
-    /// Unlink [`Self::push_roots`]'s record. When a collection may have run
-    /// meanwhile, write the heap homes back from it (a minor collection
-    /// moves young objects and rewrites the record) and re-read every
-    /// array view.
-    fn pop_roots(&mut self, roots: Option<Roots>) {
-        let Some(Roots { prev, slot, homes, epoch }) = roots else {
+    /// After [`Self::epoch_mark`]'s call: when code ran meanwhile (the
+    /// epoch moved), re-read every array view.
+    fn epoch_check(&mut self, epoch: Option<Epoch>) {
+        let Some(Epoch(epoch)) = epoch else {
             return;
         };
-        let t = MemFlagsData::trusted();
-        self.b.ins().store(t, prev, self.ctx, NATIVE_CTX_ROOTS);
-        let now = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_GC_EPOCH);
+        let now = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_GC_EPOCH);
         let moved = self.b.ins().icmp(IntCC::NotEqual, now, epoch);
         let cold = self.b.create_block();
         let go = self.b.create_block();
         self.b.ins().brif(moved, cold, &[], go, &[]);
         self.b.set_cold_block(cold);
         self.b.switch_to_block(cold);
-        for (k, &h) in homes.iter().enumerate() {
-            let x = self.b.ins().stack_load(types::I64, types::I64, slot, ((k + 2) * 8) as i32);
-            let (base, off) = self.home_at(h).expect("homes slot");
-            self.b.ins().store(t, x, base, off);
-        }
         self.drop_views();
         self.b.ins().jump(go, &[]);
         self.b.switch_to_block(go);
     }
 
-    /// A safepoint: when a collection is due, collect with this body's heap
-    /// words rooted.
-    fn safepoint(&mut self, f: &MirFunc) {
+    /// A safepoint: when a collection is due, collect.
+    fn safepoint(&mut self) {
         let due = self.b.ins().load(types::I64, MemFlagsData::trusted(), self.ctx, NATIVE_CTX_GC_DUE);
         let cold = self.b.create_block();
         let go = self.b.create_block();
         self.b.ins().brif(due, cold, &[], go, &[]);
         self.b.set_cold_block(cold);
         self.b.switch_to_block(cold);
-        let roots = self.push_roots(f);
         self.b.ins().call(self.collect, &[self.ctx]);
-        // A body with no heap homes pushes no roots, so `pop_roots` drops
-        // no views: drop them here. A minor collection leaves an old array
-        // unlogged again, and an in-place store through a view taken
-        // before it would skip the write barrier, so a young element it
-        // stores is never traced (#2323).
-        if roots.is_none() {
-            self.drop_views();
-        }
-        self.pop_roots(roots);
+        // Its `drop`s may resize an array.
+        self.drop_views();
         self.b.ins().jump(go, &[]);
         self.b.switch_to_block(go);
     }
@@ -3373,6 +3192,11 @@ impl<'a> Lower<'a> {
         let MirInst::VecLoop { dest, pos, from, to, kind: VecLoopKind::Store { stores } } = inst else {
             return Ok(false);
         };
+        // Lanes are numbers: a store of one over another changes no count.
+        // Any other element is left to the runtime, which counts it.
+        if !stores.iter().all(|s| matches!(s.2, dense::TY_I64 | dense::TY_F64)) {
+            return Ok(false);
+        }
         if stores.is_empty() || pos.is_some_and(|p| value_used(f, p)) {
             return Ok(false);
         }
@@ -3756,6 +3580,21 @@ impl<'a> Lower<'a> {
         call
     }
 
+    /// Name this generator frame's counted homes to the yield that comes
+    /// next ([`machine::native::NativeCtx::gen_homes`]), so the cycle
+    /// collector sees what the frame owns while it is suspended.
+    fn note_gen_frame(&mut self, f: &MirFunc) {
+        let Some(mask) = f.counted_homes() else { return };
+        let homes = match self.homes_slot {
+            Some(slot) => self.b.ins().stack_addr(types::I64, slot, 0),
+            None if mask == 0 => self.b.ins().iconst(types::I64, machine::native::GEN_FRAME_EMPTY as i64),
+            None => return,
+        };
+        let mask = self.b.ins().iconst(types::I64, mask as i64);
+        self.b.ins().store(MemFlagsData::trusted(), homes, self.ctx, NATIVE_CTX_GEN_HOMES);
+        self.b.ins().store(MemFlagsData::trusted(), mask, self.ctx, NATIVE_CTX_GEN_MASK);
+    }
+
     /// Leave through the bail block when the last helper set the
     /// context's bail flag.
     fn bail_on_helper(&mut self) {
@@ -3805,10 +3644,7 @@ impl<'a> Lower<'a> {
 
     fn body(&mut self, f: &MirFunc) -> Result<(), String> {
         self.barriers = barrier_pairs(f);
-        self.opaque = opaque_words(f);
-        self.ptr_words = pointer_words(f);
         self.root_handles = root_handles(f);
-        self.pair_words = pair_words(f, &self.ptr_words);
         self.in_range = in_range_steps(f);
         for blk in &f.blocks {
             for inst in &blk.insts {
@@ -3854,10 +3690,6 @@ impl<'a> Lower<'a> {
                     for (array, store) in arrays {
                         if store {
                             self.stored.insert(array);
-                            if !self.view_cards.contains_key(&array) {
-                                let v = self.b.declare_var(types::I64);
-                                self.view_cards.insert(array, v);
-                            }
                         }
                         if !self.views.contains_key(&array) {
                             let vars = (self.b.declare_var(types::I64), self.b.declare_var(types::I64), self.b.declare_var(types::I64));
@@ -3869,10 +3701,6 @@ impl<'a> Lower<'a> {
                     MirInst::Index { array, .. } | MirInst::ArrayLen { array, .. } => *array,
                     MirInst::StoreIndex { array, .. } => {
                         self.stored.insert(*array);
-                        if !self.view_cards.contains_key(array) {
-                            let v = self.b.declare_var(types::I64);
-                            self.view_cards.insert(*array, v);
-                        }
                         *array
                     }
                     _ => continue,
@@ -3909,10 +3737,6 @@ impl<'a> Lower<'a> {
                     self.b.ins().stack_store(types::I64, zero, slot, (i * 8) as i32);
                 }
                 self.homes_slot = Some(slot);
-                self.heap_homes = (0..f.homes.len() as u16).filter(|&h| heap_word(f.homes[h as usize])).collect();
-                if f.opaque_words {
-                    self.amb_homes = (0..f.homes.len() as u16).filter(|&h| f.homes[h as usize] == MirTy::I64).collect();
-                }
             }
             self.pad_fn = self.body_index.and_then(|i| self.pad_refs.get(&i).copied());
         }
@@ -3931,18 +3755,8 @@ impl<'a> Lower<'a> {
         // Live sets by block position: into the block past its phis, and
         // at each op (what lives after it and what it reads, which the
         // call it makes may move).
-        let (live_in, live_after) = compiler::native_mir::liveness(f);
-        let held = held_words(f);
-        let past_phis = |bi: usize| -> HashSet<ValueId> {
-            let phis = f.blocks[bi].insts.iter().take_while(|i| i.is_phi()).count();
-            let mut live = if phis == 0 { live_in[bi].clone() } else { live_after[bi][phis - 1].clone() };
-            live.extend(held[bi][phis].iter().copied());
-            live
-        };
-        let entry_at = f.blocks.iter().position(|b| b.id == f.entry);
         if gc {
-            self.live = entry_at.map(past_phis);
-            self.safepoint(f);
+            self.safepoint();
         }
         // Loop headers (the targets of edges back in block order) are
         // safepoints too.
@@ -3972,7 +3786,7 @@ impl<'a> Lower<'a> {
         let viewed: HashSet<ValueId> = self.views.keys().copied().collect();
         let dropped_in = views_dropped_in(f, &viewed);
 
-        for (bi, blk) in f.blocks.iter().enumerate() {
+        for blk in &f.blocks {
             let cl = self.blocks[&blk.id];
             self.b.switch_to_block(cl);
             self.maybe_dropped = dropped_in.get(&blk.id).cloned().unwrap_or_default();
@@ -3989,8 +3803,7 @@ impl<'a> Lower<'a> {
             }
             if headers.contains(&blk.id) {
                 self.at(None);
-                self.live = Some(past_phis(bi));
-                self.safepoint(f);
+                self.safepoint();
             }
             // A `MatchPayload` of a payload the block's `JumpIfMatch` binds
             // belongs to the taken edge, where the terminator binds it: run here, it would read the payload
@@ -4011,23 +3824,10 @@ impl<'a> Lower<'a> {
                     self.tail_call(f, inst)?;
                     continue;
                 }
-                let mut live = live_after[bi][ii].clone();
-                live.extend(inst.operands());
-                live.extend(held[bi][ii].iter().copied());
-                self.live = Some(live);
                 self.at(Some(f.op_loc(inst.dest())));
-                self.op_words.clear();
-                if !matches!(inst, MirInst::Call { .. }) {
-                    let held = inst.operands().into_iter().filter(|v| heap_word(ty_of(f, *v)) || self.ptr_words.contains(v));
-                    self.op_words.extend(held);
-                    self.op_words.sort_unstable_by_key(|v| v.0);
-                    self.op_words.dedup();
-                }
                 self.inst(f, inst)?;
-                self.op_words.clear();
                 drop_transfer(inst, &viewed, &mut self.maybe_dropped);
             }
-            self.live = None;
             self.at(None);
             if !tail {
                 self.term(f, blk.id, blk.term.as_ref().ok_or("no terminator")?)?;
@@ -4043,22 +3843,8 @@ impl<'a> Lower<'a> {
         if let (Some(pad), Some(slot)) = (self.pad_fn, self.homes_slot) {
             let fp = self.b.ins().func_addr(types::I64, pad);
             let at = self.b.ins().stack_addr(types::I64, slot, 0);
-            // An opaque body's `int` homes go in the record too, which then
-            // roots every home ambiguously.
-            let amb = if self.amb_homes.is_empty() { 0 } else { ROOTS_AMBIGUOUS };
-            let n = self.b.ins().iconst(types::I64, (f.homes.len() as u64 | amb) as i64);
-            let masks = machine::native::root_masks(f.homes.len(), self.heap_homes.iter().chain(&self.amb_homes).map(|&h| usize::from(h)));
-            let mask_slot = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                (masks.len() * 8) as u32,
-                3,
-            ));
-            for (i, &m) in masks.iter().enumerate() {
-                let m = self.b.ins().iconst(types::I64, m as i64);
-                self.b.ins().stack_store(types::I64, m, mask_slot, (i * 8) as i32);
-            }
-            let masks = self.b.ins().stack_addr(types::I64, mask_slot, 0);
-            self.b.ins().call(self.defer, &[self.ctx, fp, at, n, masks]);
+            let n = self.b.ins().iconst(types::I64, f.homes.len() as i64);
+            self.b.ins().call(self.defer, &[self.ctx, fp, at, n]);
         }
         let mut zeros = Vec::new();
         for t in std::iter::once(self.ret).chain(self.ret_hi) {
@@ -4220,7 +4006,7 @@ impl<'a> Lower<'a> {
                 let p = self.words_slot(f, args);
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
                 let d = self.b.ins().iconst(types::I64, i64::from(*dicts));
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 // A plain function value enters its body here, as a direct
                 // call does (`coil_native_fn_entry`); anything else goes
@@ -4296,7 +4082,7 @@ impl<'a> Lower<'a> {
                     _ => None,
                 };
                 self.pop_call(prev);
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.bail_on_helper();
                 self.drop_views();
                 match (words, pair) {
@@ -4321,12 +4107,12 @@ impl<'a> Lower<'a> {
                     None => (self.b.ins().iconst(types::I64, 0), 0),
                 };
                 let has = self.b.ins().iconst(types::I64, has);
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.resume, &[self.ctx, h, sv, has]);
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.bail_on_helper();
                 self.drop_views();
                 self.set_word(f, *dest, w);
@@ -4363,12 +4149,12 @@ impl<'a> Lower<'a> {
                 let x = self.b.ins().iconst(types::I64, i64::from(*operand));
                 let p = self.words_slot(f, args);
                 let n = self.b.ins().iconst(types::I64, args.len() as i64);
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.ffi, &[self.ctx, o, x, p, n]);
                 let w = self.b.inst_results(call)[0];
                 self.pop_call(prev);
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.bail_on_helper();
                 self.drop_views();
                 self.set(f, *dest, w);
@@ -4395,12 +4181,12 @@ impl<'a> Lower<'a> {
                 let h = self.get(f, *value);
                 let h = self.coerce(h, types::I64);
                 let has = self.b.ins().iconst(types::I64, 1);
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.resume, &[self.ctx, h, send, has]);
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.bail_on_helper();
                 self.drop_views();
                 let h = self.get(f, *value);
@@ -4409,12 +4195,13 @@ impl<'a> Lower<'a> {
                 let done = self.b.inst_results(call)[0];
                 self.b.ins().brif(done, exit, &[], more, &[]);
                 self.b.switch_to_block(more);
-                let roots = self.push_roots(f);
+                self.note_gen_frame(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.gen_yield, &[self.ctx, w]);
                 self.pop_call(prev);
                 let sent = self.b.inst_results(call)[0];
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 // A close unwinds from the yield (`coil_native_yield`).
                 self.bail_on_helper();
                 self.drop_views();
@@ -4428,12 +4215,13 @@ impl<'a> Lower<'a> {
                 // words while it is away (they are this call's roots).
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
-                let roots = self.push_roots(f);
+                self.note_gen_frame(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 let call = self.b.ins().call(self.gen_yield, &[self.ctx, v]);
                 self.pop_call(prev);
                 let w = self.b.inst_results(call)[0];
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 // A close unwinds from the yield (`coil_native_yield`).
                 self.bail_on_helper();
                 self.drop_views();
@@ -4520,56 +4308,75 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, w);
                 self.view_of(f, *dest);
             }
-            MirInst::StoreIndex { dest, array, index, value, .. } => {
+            MirInst::StoreIndex { dest, array, index, value, scalar, .. } => {
+                // A store goes in place in a plain view
+                // when it can count the store itself: the new word gains an
+                // owner and the old one loses one. A word that may or may
+                // not be an object stays in place only when neither the new
+                // nor the old one can be; the helper counts the rest.
                 let a = self.get(f, *array);
                 let i = self.get(f, *index);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
+                let vt = ty_of(f, *value);
                 let (fast, slow, join) = self.in_view_as(f, *array, i, false, true);
-                // In place.
                 self.b.switch_to_block(fast);
                 let at = self.element(*array, i);
-                self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
-                self.b.ins().jump(join, &[]);
-                // A tracked view (an array with a card table): in place
-                // too, and the element's card marked.
+                if counted_inline(vt) {
+                    let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                    self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    self.emit_rc(v, false);
+                    self.emit_rc(old, true);
+                    self.b.ins().jump(join, &[]);
+                } else if *scalar || matches!(vt, MirTy::F64 | MirTy::Bool) {
+                    // A number element's old and new words are numbers.
+                    self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    self.b.ins().jump(join, &[]);
+                } else {
+                    let (obj, plain) = self.maybe_object(v);
+                    self.b.switch_to_block(obj);
+                    self.b.ins().jump(slow, &[]);
+                    self.b.switch_to_block(plain);
+                    let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                    let (obj, plain) = self.maybe_object(old);
+                    self.b.switch_to_block(obj);
+                    self.b.ins().jump(slow, &[]);
+                    self.b.switch_to_block(plain);
+                    self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    self.b.ins().jump(join, &[]);
+                }
                 self.b.switch_to_block(slow);
-                let (ok, _, len) = self.views[array];
-                let ok = self.b.use_var(ok);
-                let len = self.b.use_var(len);
-                let tracked = self.b.ins().icmp_imm_s(IntCC::Equal, ok, machine::VIEW_TRACKED as i64);
-                let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
-                let both = self.b.ins().band(tracked, inb);
-                let (marked, helper) = (self.b.create_block(), self.b.create_block());
-                self.b.ins().brif(both, marked, &[], helper, &[]);
-                self.b.switch_to_block(marked);
-                let at = self.element(*array, i);
-                self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
-                let cards = self.b.use_var(self.view_cards[array]);
-                let card = self.b.ins().ushr_imm_u(i, i64::from(machine::CARD_SHIFT));
-                let card_at = self.b.ins().iadd(cards, card);
-                let one = self.b.ins().iconst(types::I8, 1);
-                self.b.ins().store(MemFlagsData::trusted(), one, card_at, 0);
-                self.b.ins().jump(join, &[]);
-                self.b.switch_to_block(helper);
                 self.call_checked(self.store_index, &[self.ctx, a, i, v]);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
                 let v = self.get(f, *value);
                 self.set(f, *dest, v);
             }
-            MirInst::HeapFieldStore { dest, object, value, index } => {
+            MirInst::HeapFieldStore { dest, object, value, index, scalar } => {
                 let o = self.get(f, *object);
                 let o = self.coerce(o, types::I64);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
                 let join = self.b.create_block();
-                if machine::native::product_slots().inline_stores {
-                    // In place, unless the write barrier must log the object.
+                let vt = ty_of(f, *value);
+                // A run that keeps counts stores in place too when the word's
+                // type says whether it is an object: the new word gains an
+                // owner, the old one loses one (reference-count plan step 6).
+                // A number field's old and new words are numbers (`scalar`).
+                let inline = counted_inline(vt) || *scalar || matches!(vt, MirTy::F64 | MirTy::Bool);
+                if machine::native::product_slots().inline_stores && inline {
+                    // In place when the object is an instance.
                     let (fast, slow) = self.product_slot(o, *index, true);
                     self.b.switch_to_block(fast);
                     let at = self.b.block_params(fast)[0];
-                    self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    if counted_inline(vt) {
+                        let old = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+                        self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                        self.emit_rc(v, false);
+                        self.emit_rc(old, true);
+                    } else {
+                        self.b.ins().store(MemFlagsData::trusted(), v, at, 0);
+                    }
                     self.b.ins().jump(join, &[]);
                     self.b.switch_to_block(slow);
                 }
@@ -4579,11 +4386,99 @@ impl<'a> Lower<'a> {
                 self.b.switch_to_block(join);
                 self.set(f, *dest, v);
             }
-            MirInst::Alloc { dest, kind, elems, kinds } => {
+            MirInst::RcReuse { dest, src, moved } => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                let t = MemFlagsData::trusted();
+                let done = self.b.create_block();
+                self.b.append_block_param(done, types::I64);
+                let (helper, shared) = (self.b.create_block(), self.b.create_block());
+                // An object someone else still owns loses this owner in
+                // place, as `rc.dec` does, and keeps no slot: the helper is
+                // for a last owner (or a steal epoch, an immortal).
+                let (object, none) = self.maybe_object(s);
+                self.b.switch_to_block(none);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.b.ins().jump(done, &[zero.into()]);
+                self.b.switch_to_block(object);
+                let o = self.b.ins().band_imm_u(s, !1i64);
+                let heap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HEAP);
+                let lock = self.b.ins().load(types::I64, t, heap, machine::HEAP_ALLOC_LOCK_OFFSET);
+                let count_b = self.b.create_block();
+                self.b.ins().brif(lock, helper, &[], count_b, &[]);
+                self.b.switch_to_block(count_b);
+                let c = self.b.ins().uload32(t, o, machine::HEADER_COUNT_OFFSET);
+                let (last, test) = (self.b.create_block(), self.b.create_block());
+                let one = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, c, 1);
+                self.b.ins().brif(one, last, &[], test, &[]);
+                self.b.switch_to_block(test);
+                let immortal = self.b.ins().icmp_imm_s(IntCC::Equal, c, i64::from(machine::COUNT_IMMORTAL));
+                self.b.ins().brif(immortal, helper, &[], shared, &[]);
+                // The last owner: the lean helper, which knows the word an
+                // object of this heap and no epoch open.
+                self.b.switch_to_block(last);
+                let m = self.b.ins().iconst(types::I64, i64::from(*moved));
+                let call = self.b.ins().call(self.rc_take, &[self.ctx, s, m]);
+                let slot = self.b.inst_results(call)[0];
+                self.b.ins().jump(done, &[slot.into()]);
+                self.b.switch_to_block(shared);
+                let n = self.b.ins().iadd_imm_s(c, -1);
+                self.b.ins().istore32(t, n, o, machine::HEADER_COUNT_OFFSET);
+                // The moved words gain the owners the body did not count.
+                for i in 0..32u32 {
+                    if *moved & (1 << i) == 0 {
+                        continue;
+                    }
+                    let ty = f.blocks.iter().flat_map(|b| &b.insts).find_map(|inst| match inst {
+                        MirInst::MatchPayload { dest, scrutinee, index } | MirInst::ProductLoad { dest, object: scrutinee, slot: index } if scrutinee == src && *index == i => Some(ty_of(f, *dest)),
+                        _ => None,
+                    });
+                    let w = self.payload(f, *src, s, i);
+                    if ty.is_some_and(counted_inline) {
+                        self.emit_rc(w, false);
+                    } else {
+                        let (call, join) = self.maybe_object(w);
+                        self.b.switch_to_block(call);
+                        let zero = self.b.ins().iconst(types::I64, 0);
+                        self.b.ins().call(self.rc, &[self.ctx, w, zero]);
+                        self.b.ins().jump(join, &[]);
+                        self.b.switch_to_block(join);
+                    }
+                }
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.b.ins().jump(done, &[zero.into()]);
+                self.b.switch_to_block(helper);
+                let moved = self.b.ins().iconst(types::I64, i64::from(*moved));
+                let call = self.b.ins().call(self.rc_reuse, &[self.ctx, s, moved]);
+                let slot = self.b.inst_results(call)[0];
+                self.b.ins().jump(done, &[slot.into()]);
+                self.b.switch_to_block(done);
+                let slot = self.b.block_params(done)[0];
+                self.set(f, *dest, slot);
+            }
+            MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
                 let words = elems;
+                // A slot `RcReuse` kept (`0`: none).
+                let reuse = match inst {
+                    MirInst::AllocAt { slot: Some(slot), .. } => {
+                        let s = self.get(f, *slot);
+                        Some(self.coerce(s, types::I64))
+                    }
+                    _ => None,
+                };
+                // Payload words the frame's owner moves into (`0`: none).
+                let owned = match inst {
+                    MirInst::AllocAt { owned, .. } => *owned,
+                    _ => 0,
+                };
                 // An opaque body's `int` words may be objects: their kinds
                 // stay unknown.
-                let packed = || if f.opaque_words { 0 } else { common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w)))) };
+                let packed = || {
+                    common::pack_word_kinds(words.iter().map(|w| match ty_of(f, *w) {
+                        MirTy::I64 if f.opaque_words => common::WORD_UNKNOWN,
+                        t => word_kind(t),
+                    }))
+                };
                 let AllocCall { code, n, extra, last } =
                     alloc_call(*kind, words.len(), *kinds, packed, |t| self.plan.pcs.get(&t).copied()).map_err(|_| {
                         if matches!(kind, MirAllocKind::Coro { .. }) {
@@ -4596,9 +4491,13 @@ impl<'a> Lower<'a> {
                 let join = inline.map(|obj| {
                     let join = self.b.create_block();
                     self.b.append_block_param(join, types::I64);
-                    self.inline_alloc(f, &obj, *kind, words, join);
+                    self.inline_alloc(f, &obj, *kind, words, extra, join, reuse, owned);
                     join
                 });
+                // The runtime's allocation takes the slot (or gives it back).
+                if let Some(slot) = reuse {
+                    self.b.ins().call(self.offer_slot, &[self.ctx, slot]);
+                }
                 let p = match last {
                     Some(w) => self.words_slot_with(f, words, Some(w as i64)),
                     None => self.words_slot(f, words),
@@ -4608,6 +4507,20 @@ impl<'a> Lower<'a> {
                 let extra = self.b.ins().iconst(types::I64, extra as i64);
                 let call = self.call_checked(self.alloc, &[self.ctx, code, p, n, extra]);
                 let mut w = self.b.inst_results(call)[0];
+                // The runtime counted every word: an owned one gives the
+                // frame's owner back (the object holds one, so none frees).
+                for (i, &e) in words.iter().enumerate() {
+                    if i < 32 && owned & (1 << i) != 0 {
+                        let x = self.get(f, e);
+                        let x = self.coerce(x, types::I64);
+                        if counted_inline(ty_of(f, e)) {
+                            self.emit_rc(x, true);
+                        } else {
+                            let one = self.b.ins().iconst(types::I64, 1);
+                            self.b.ins().call(self.rc, &[self.ctx, x, one]);
+                        }
+                    }
+                }
                 if let Some(join) = join {
                     self.b.ins().jump(join, &[w.into()]);
                     self.b.switch_to_block(join);
@@ -4662,10 +4575,8 @@ impl<'a> Lower<'a> {
                 let (fast, slow) = self.in_lane_view(f, *array, i);
                 let join = self.b.create_block();
                 self.b.switch_to_block(fast);
-                let at = self.lane_element(*array, i);
-                self.b.ins().store(MemFlagsData::trusted(), lo, at, 0);
-                self.b.ins().store(MemFlagsData::trusted(), hi, at, 8);
-                self.b.ins().jump(join, &[]);
+                // The helper counts the store.
+                self.b.ins().jump(slow, &[]);
                 self.b.switch_to_block(slow);
                 let [t, p, u] = self.lane_shape(shape);
                 self.call_checked(self.lane_store, &[self.ctx, a, i, lo, hi, t, p, u]);
@@ -4721,14 +4632,14 @@ impl<'a> Lower<'a> {
                 // `gc_collect` collects, and a host call through the runtime may:
                 // this frame's words are roots.
                 let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.on_machine);
-                let roots = if collect { self.push_roots(f) } else { None };
+                let roots = if collect { self.epoch_mark() } else { None };
                 let prev = if collect { Some(self.push_call()) } else { None };
                 let call = self.b.ins().call(self.host, &[self.ctx, fp, lay, p, n]);
                 let w = self.b.inst_results(call)[0];
                 if let Some(prev) = prev {
                     self.pop_call(prev);
                 }
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.bail_on_helper();
                 // A two-word result's tag, which the runtime left in the
                 // context (`HOST_ENUM_LAYOUT_PAIR`).
@@ -4779,11 +4690,11 @@ impl<'a> Lower<'a> {
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
                 let d = self.b.ins().iconst(types::I64, i64::from(*deep));
-                let roots = self.push_roots(f);
+                let roots = self.epoch_mark();
                 let prev = self.push_call();
                 self.b.ins().call(self.free_early, &[self.ctx, v, d]);
                 self.pop_call(prev);
-                self.pop_roots(roots);
+                self.epoch_check(roots);
                 self.drop_views();
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(fast);
@@ -4883,15 +4794,17 @@ impl<'a> Lower<'a> {
                 if self.pins {
                     self.b.ins().brif(either, test, &[], join, &[s.into()]);
                     self.b.switch_to_block(test);
-                    let pinned = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
+                    let bits = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_FLAGS_OFFSET);
+                    let pinned = self.b.ins().band_imm_u(bits, i64::from(machine::FLAG_PINNED));
                     self.b.ins().brif(pinned, copy, &[], mark, &[]);
                 } else {
                     // No body pins: no object is pinned, so no copy path.
                     self.b.ins().brif(either, mark, &[], join, &[s.into()]);
                 }
                 self.b.switch_to_block(mark);
-                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_SHARED_SET));
-                self.b.ins().store(flags, set, o, machine::COW_SHARED_OFFSET);
+                let bits = self.b.ins().uload8(types::I32, flags, o, machine::HEADER_FLAGS_OFFSET);
+                let set = self.b.ins().bor_imm_u(bits, i64::from(machine::FLAG_SHARED));
+                self.b.ins().istore8(flags, set, o, machine::HEADER_FLAGS_OFFSET);
                 self.b.ins().jump(join, &[s.into()]);
                 if self.pins {
                     self.b.set_cold_block(copy);
@@ -4906,7 +4819,7 @@ impl<'a> Lower<'a> {
                 self.set_word(f, *dest, word);
                 self.view_of(f, *dest);
             }
-            // The pin is a header byte beside the shared flag, set for a class
+            // The pin is a header flag beside the shared one, set for a class
             // instance or an array only, as a share marks only those.
             MirInst::CowPin { dest, src } => {
                 let s = self.get(f, *src);
@@ -4924,9 +4837,11 @@ impl<'a> Lower<'a> {
                 let either = self.b.ins().bor(inst, arr);
                 self.b.ins().brif(either, pin, &[], join, &[zero.into()]);
                 self.b.switch_to_block(pin);
-                let p = self.b.ins().uload8(types::I64, flags, o, machine::COW_PINNED_OFFSET);
-                let set = self.b.ins().iconst(types::I8, i64::from(machine::COW_PINNED_SET));
-                self.b.ins().store(flags, set, o, machine::COW_PINNED_OFFSET);
+                let bits = self.b.ins().uload8(types::I64, flags, o, machine::HEADER_FLAGS_OFFSET);
+                let set = self.b.ins().bor_imm_u(bits, i64::from(machine::FLAG_PINNED));
+                self.b.ins().istore8(flags, set, o, machine::HEADER_FLAGS_OFFSET);
+                let bit = self.b.ins().ushr_imm_u(bits, i64::from(machine::FLAG_PINNED.trailing_zeros()));
+                let p = self.b.ins().band_imm_u(bit, 1);
                 self.b.ins().jump(join, &[p.into()]);
                 self.b.switch_to_block(join);
                 self.set(f, *dest, was);
@@ -4949,10 +4864,48 @@ impl<'a> Lower<'a> {
                 let either = self.b.ins().bor(inst, arr);
                 self.b.ins().brif(either, unpin, &[], join, &[]);
                 self.b.switch_to_block(unpin);
-                let clear = self.b.ins().iconst(types::I8, 0);
-                self.b.ins().store(flags, clear, o, machine::COW_PINNED_OFFSET);
+                let bits = self.b.ins().uload8(types::I32, flags, o, machine::HEADER_FLAGS_OFFSET);
+                let clear = self.b.ins().band_imm_u(bits, i64::from(!machine::FLAG_PINNED));
+                self.b.ins().istore8(flags, clear, o, machine::HEADER_FLAGS_OFFSET);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, zero);
+            }
+            // A word that is an object or null by its type: the count is
+            // read and written inline (reference-count plan step 6).
+            MirInst::RcInc { dest, src, guard: None } | MirInst::RcDec { dest, src, guard: None } if counted_inline(ty_of(f, *src)) => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                self.emit_rc(s, matches!(inst, MirInst::RcDec { .. }));
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.set(f, *dest, zero);
+            }
+            // A runtime call for now: the count is kept only in a check run
+            // until frames own their words (plan steps 4 and 6).
+            MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                let dec = self.b.ins().iconst(types::I64, i64::from(matches!(inst, MirInst::RcDec { .. })));
+                match guard {
+                    Some(g) => {
+                        let g = self.get(f, *g);
+                        let g = self.coerce(g, types::I64);
+                        let (call, join) = (self.b.create_block(), self.b.create_block());
+                        self.b.ins().brif(g, call, &[], join, &[]);
+                        self.b.switch_to_block(call);
+                        self.b.ins().call(self.rc, &[self.ctx, s, dec]);
+                        self.b.ins().jump(join, &[]);
+                        self.b.switch_to_block(join);
+                    }
+                    None => {
+                        let (call, join) = self.maybe_object(s);
+                        self.b.switch_to_block(call);
+                        self.b.ins().call(self.rc, &[self.ctx, s, dec]);
+                        self.b.ins().jump(join, &[]);
+                        self.b.switch_to_block(join);
+                    }
+                }
                 let zero = self.b.ins().iconst(types::I64, 0);
                 self.set(f, *dest, zero);
             }
@@ -5025,14 +4978,14 @@ impl<'a> Lower<'a> {
     fn call(&mut self, f: &MirFunc, dest: ValueId, dest_hi: Option<ValueId>, target: Label, args: &[ValueId]) -> Result<(), String> {
         let (dest, dest_hi) = (&dest, &dest_hi);
         let (callee, fref, vals) = self.call_words(f, target, args)?;
-        let roots = if self.plan.may_gc.contains(&callee) { self.push_roots(f) } else { None };
+        let roots = if self.plan.may_gc.contains(&callee) { self.epoch_mark() } else { None };
         let prev = if self.plan.runtime_reach.contains(&callee) { Some(self.push_call()) } else { None };
         let call = self.b.ins().call(fref, &vals);
         let results = self.b.inst_results(call).to_vec();
         if let Some(prev) = prev {
             self.pop_call(prev);
         }
-        self.pop_roots(roots);
+        self.epoch_check(roots);
         self.bail_on_helper();
         if self.plan.moves.contains(&callee) {
             self.drop_views();
@@ -5095,10 +5048,12 @@ impl<'a> Lower<'a> {
     /// slot's image with `words` in place and count the object, then jump
     /// to `join` with its address. Otherwise the code after this (the
     /// current block, on return) calls the helper, which refills.
-    fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], join: Block) {
+    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
+    fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], extra: u64, join: Block, reuse: Option<cranelift_codegen::ir::Value>, owned: u32) {
         use machine::native::{
-            BUMP_BYTES, BUMP_END, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
-            COUNTS_LIVE_COUNT, COUNTS_YOUNG_BYTES, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
+            BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
+            COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
         };
         let mem = MemFlagsData::trusted();
         let slow = self.b.create_block();
@@ -5106,35 +5061,74 @@ impl<'a> Lower<'a> {
         let fast = self.b.create_block();
         let counts = self.b.ins().load(types::I64, mem, self.ctx, NATIVE_CTX_ALLOC_COUNTS);
         let gate = self.b.ins().load(types::I64, mem, counts, COUNTS_INLINE_GATE);
-        if let MirAllocKind::Object { type_id, .. } = kind {
-            // A type with a `drop` stays out of the nursery: the helper
-            // allocates it old and lists it.
-            let check = self.b.create_block();
-            self.b.ins().brif(gate, check, &[], slow, &[]);
-            self.b.switch_to_block(check);
+        self.b.append_block_param(fast, types::I64);
+        // A type with a `drop` stays out of the nursery: the helper
+        // allocates it old and lists it. Jumps to `ok` (with `args`) when
+        // the inline allocation may go on.
+        let young_ok = |this: &mut Self, ok: Block, args: &[cranelift_codegen::ir::BlockArg]| {
+            let MirAllocKind::Object { type_id, .. } = kind else {
+                this.b.ins().brif(gate, ok, args, slow, &[]);
+                return;
+            };
+            let check = this.b.create_block();
+            this.b.ins().brif(gate, check, &[], slow, &[]);
+            this.b.switch_to_block(check);
             let word = i64::from(type_id / 64);
-            let len = self.b.ins().load(types::I64, mem, counts, COUNTS_FIN_LEN);
-            let past = self.b.ins().icmp_imm_s(IntCC::UnsignedLessThanOrEqual, len, word);
-            let test = self.b.create_block();
-            self.b.ins().brif(past, bump, &[], test, &[]);
-            self.b.switch_to_block(test);
-            let base = self.b.ins().load(types::I64, mem, counts, COUNTS_FIN_WORDS);
-            let bits = self.b.ins().load(types::I64, mem, base, (word * 8) as i32);
-            let bit = self.b.ins().band_imm_s(bits, 1_i64 << (type_id % 64));
-            self.b.ins().brif(bit, slow, &[], bump, &[]);
-        } else {
-            self.b.ins().brif(gate, bump, &[], slow, &[]);
+            let len = this.b.ins().load(types::I64, mem, counts, COUNTS_FIN_LEN);
+            let past = this.b.ins().icmp_imm_s(IntCC::UnsignedLessThanOrEqual, len, word);
+            let test = this.b.create_block();
+            this.b.ins().brif(past, ok, args, test, &[]);
+            this.b.switch_to_block(test);
+            let base = this.b.ins().load(types::I64, mem, counts, COUNTS_FIN_WORDS);
+            let bits = this.b.ins().load(types::I64, mem, base, (word * 8) as i32);
+            let bit = this.b.ins().band_imm_s(bits, 1_i64 << (type_id % 64));
+            this.b.ins().brif(bit, slow, &[], ok, args);
+        };
+        // A slot `RcReuse` kept, a young enum's or instance's (one layout):
+        // the image goes there, with no bump and no free list.
+        if let Some(slot) = reuse {
+            let (kept, take, fresh) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(slot, kept, &[], fresh, &[]);
+            self.b.switch_to_block(kept);
+            young_ok(self, take, &[]);
+            // The placeholder the slot holds goes (`Heap::hold_slot`): the
+            // new object is counted in below.
+            self.b.switch_to_block(take);
+            for (off, by) in [(COUNTS_ALLOC_BYTES, machine::Heap::HELD_SLOT_BYTES as i64), (COUNTS_LIVE_COUNT, 1)] {
+                let c = self.b.ins().load(types::I64, mem, counts, off);
+                let c = self.b.ins().iadd_imm_s(c, -by);
+                self.b.ins().store(mem, c, counts, off);
+            }
+            self.b.ins().jump(fast, &[slot.into()]);
+            self.b.switch_to_block(fresh);
         }
+        young_ok(self, bump, &[]);
         self.b.switch_to_block(bump);
         let bumps = self.b.ins().load(types::I64, mem, self.ctx, NATIVE_CTX_ALLOC_BUMPS);
         let cursor = self.b.ins().iadd_imm_s(bumps, i64::from(obj.class) * i64::from(BUMP_BYTES));
+        // The bump pointer first; when its chunk is spent, a slot freed
+        // early since the last minor (#2881), else the helper. Programs that
+        // free nothing pay no extra load on the fast path.
         let at = self.b.ins().load(types::I64, mem, cursor, BUMP_NEXT);
         let end = self.b.ins().load(types::I64, mem, cursor, BUMP_END);
         let next = self.b.ins().iadd_imm_s(at, i64::from(obj.slot));
         let fits = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, next, end);
-        self.b.ins().brif(fits, fast, &[], slow, &[]);
-        self.b.switch_to_block(fast);
+        let bumped = self.b.create_block();
+        let spent = self.b.create_block();
+        self.b.ins().brif(fits, bumped, &[], spent, &[]);
+        self.b.switch_to_block(bumped);
         self.b.ins().store(mem, next, cursor, BUMP_NEXT);
+        self.b.ins().jump(fast, &[at.into()]);
+        self.b.switch_to_block(spent);
+        let free = self.b.ins().load(types::I64, mem, cursor, BUMP_FREE);
+        let reuse = self.b.create_block();
+        self.b.ins().brif(free, reuse, &[], slow, &[]);
+        self.b.switch_to_block(reuse);
+        let link = self.b.ins().load(types::I64, mem, free, BUMP_FREE_LINK);
+        self.b.ins().store(mem, link, cursor, BUMP_FREE);
+        self.b.ins().jump(fast, &[free.into()]);
+        self.b.switch_to_block(fast);
+        let at = self.b.block_params(fast)[0];
         let first = obj.words_at as usize;
         for (i, &img) in obj.image.iter().enumerate() {
             let x = match i.checked_sub(first).and_then(|k| words.get(k)) {
@@ -5146,7 +5140,35 @@ impl<'a> Lower<'a> {
             };
             self.b.ins().store(mem, x, at, (i * 8) as i32);
         }
-        for (off, by) in [(COUNTS_ALLOC_BYTES, i64::from(obj.size)), (COUNTS_YOUNG_BYTES, i64::from(obj.size)), (COUNTS_LIVE_COUNT, 1)] {
+        // Each payload word that names an object gains an owner, as the
+        // runtime's allocation counts them (an instance's fields are stored
+        // after it is made), but for one the frame's owner moves into.
+        if matches!(kind, MirAllocKind::Enum { .. }) {
+            let kinds = (extra >> 32) as u32;
+            for (k, &v) in words.iter().enumerate() {
+                let word_kind = if k < 16 { ((kinds >> (2 * k)) & 3) as u8 } else { common::WORD_UNKNOWN };
+                let vt = ty_of(f, v);
+                if matches!(word_kind, common::WORD_SCALAR | common::WORD_BYTE) || matches!(vt, MirTy::F64 | MirTy::Bool) {
+                    continue;
+                }
+                if k < 32 && owned & (1 << k) != 0 {
+                    continue;
+                }
+                let x = self.get(f, v);
+                let x = self.coerce(x, types::I64);
+                if counted_inline(vt) {
+                    self.emit_rc(x, false);
+                } else {
+                    let (call, done) = self.maybe_object(x);
+                    self.b.switch_to_block(call);
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    self.b.ins().call(self.rc, &[self.ctx, x, zero]);
+                    self.b.ins().jump(done, &[]);
+                    self.b.switch_to_block(done);
+                }
+            }
+        }
+        for (off, by) in [(COUNTS_ALLOC_BYTES, i64::from(obj.size)), (COUNTS_LIVE_COUNT, 1)] {
             let c = self.b.ins().load(types::I64, mem, counts, off);
             let c = self.b.ins().iadd_imm_s(c, by);
             self.b.ins().store(mem, c, counts, off);
@@ -5155,17 +5177,15 @@ impl<'a> Lower<'a> {
         self.b.switch_to_block(slow);
     }
 
-    /// Before a return: use every `gc::root` handle, so the stack maps keep
-    /// each one (and what it roots) alive until the body returns, as an
-    /// unused `let r = root(h)` asks.
+    /// Before a return: use every `gc::root` handle, so each one stays
+    /// live until the body returns, as an unused `let r = root(h)` asks.
     fn keep_roots(&mut self, f: &MirFunc) {
         for v in self.root_handles.clone() {
             self.keep_word(f, v);
         }
     }
 
-    /// A use of `v` that does nothing else: its word stays live to here,
-    /// so the stack maps hold it.
+    /// A use of `v` that does nothing else: its word stays live to here.
     fn keep_word(&mut self, f: &MirFunc, v: ValueId) {
         let slot = *self.keep_slot.get_or_insert_with(|| {
             self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 8, 3))
@@ -5195,12 +5215,12 @@ impl<'a> Lower<'a> {
         let x = self.b.ins().iconst(types::I64, operand as i64);
         let p = self.words_slot_consts(f, &words, &tags);
         let n = self.b.ins().iconst(types::I64, (words.len() + tags.len()) as i64);
-        let roots = self.push_roots(f);
+        let roots = self.epoch_mark();
         let prev = self.push_call();
         let call = self.b.ins().call(self.ffi, &[self.ctx, o, x, p, n]);
         let w = self.b.inst_results(call)[0];
         self.pop_call(prev);
-        self.pop_roots(roots);
+        self.epoch_check(roots);
         self.bail_on_helper();
         self.coerce(w, cl_ty(ty_of(f, dest)))
     }
@@ -5369,19 +5389,18 @@ impl<'a> Lower<'a> {
             addr = self.b.ins().func_addr(types::I64, self.va_call_f);
         }
         let results: Vec<_> = if let Some(cb) = &self.cb {
-            // A callback may run coil code, which may collect: the caller's
-            // words are rooted, the trampoline records its frame and the
+            // A callback may run coil code: the trampoline records the
             // context the callback runs in, and a panic in it bails here.
             let shape = (csig.params.iter().map(|p| p.value_type).collect(), csig.returns.iter().map(|p| p.value_type).collect());
             let tramp = cb.calls[&shape];
             let mut targs = vec![self.ctx, addr];
             targs.extend(cargs);
-            let roots = self.push_roots(f);
+            let roots = self.epoch_mark();
             let prev = self.push_call();
             let call = self.b.ins().call(tramp, &targs);
             let results = self.b.inst_results(call).to_vec();
             self.pop_call(prev);
-            self.pop_roots(roots);
+            self.epoch_check(roots);
             self.bail_on_helper();
             results
         } else {
@@ -5452,6 +5471,54 @@ impl<'a> Lower<'a> {
         self.product_load(s, index)
     }
 
+    /// Enum object `o`'s `tag | payload length << 32`, read in place, or
+    /// from `coil_native_enum_tag` for anything the inline read does not
+    /// know (`0`, another kind, another payload storage).
+    fn enum_tag_word(&mut self, o: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        let o = self.coerce(o, types::I64);
+        let l = machine::native::product_slots();
+        let flags = MemFlagsData::trusted();
+        let (kind, storage, inline, spill_test, spill, slow, done) = (
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+        );
+        self.b.append_block_param(done, types::I64);
+        self.b.ins().brif(o, kind, &[], slow, &[]);
+        self.b.switch_to_block(kind);
+        let k = self.b.ins().uload8(types::I64, flags, o, l.kind_at as i32);
+        let is_enum = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.enum_kind));
+        self.b.ins().brif(is_enum, storage, &[], slow, &[]);
+        self.b.switch_to_block(storage);
+        let tag = self.b.ins().uload32(flags, o, l.enum_tag_at as i32);
+        let st = self.b.ins().uload8(types::I64, flags, o, l.storage_at as i32);
+        let is_inline = self.b.ins().icmp_imm_s(IntCC::Equal, st, i64::from(l.inline_tag));
+        self.b.ins().brif(is_inline, inline, &[], spill_test, &[]);
+        self.b.switch_to_block(inline);
+        let len = self.b.ins().uload8(types::I64, flags, o, l.inline_len_at as i32);
+        let hi = self.b.ins().ishl_imm_u(len, 32);
+        let tl = self.b.ins().bor(tag, hi);
+        self.b.ins().jump(done, &[tl.into()]);
+        self.b.switch_to_block(spill_test);
+        let is_spill = self.b.ins().icmp_imm_s(IntCC::Equal, st, i64::from(l.spill_tag));
+        self.b.ins().brif(is_spill, spill, &[], slow, &[]);
+        self.b.switch_to_block(spill);
+        let len = self.b.ins().load(types::I64, flags, o, l.spill_len_at as i32);
+        let hi = self.b.ins().ishl_imm_u(len, 32);
+        let tl = self.b.ins().bor(tag, hi);
+        self.b.ins().jump(done, &[tl.into()]);
+        self.b.switch_to_block(slow);
+        let call = self.b.ins().call(self.enum_tag, &[o]);
+        let tl = self.b.inst_results(call)[0];
+        self.b.ins().jump(done, &[tl.into()]);
+        self.b.switch_to_block(done);
+        self.b.block_params(done)[0]
+    }
+
     /// Word `slot` of product object `o`, read in place
     /// ([`Self::product_slot`]). Only a compiler bug reads a slot of
     /// anything else, or past the object: that bails (a panic).
@@ -5503,10 +5570,6 @@ impl<'a> Lower<'a> {
         self.b.def_var(ok, r);
         self.b.def_var(ptr, p);
         self.b.def_var(len, n);
-        if let Some(&cards) = self.view_cards.get(&v) {
-            let c = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 16);
-            self.b.def_var(cards, c);
-        }
     }
 
     /// Fill `v`'s lane view right after `v` is defined, when the body
@@ -5838,8 +5901,8 @@ impl<'a> Lower<'a> {
         self.b.ins().band(inb, has)
     }
 
-    /// Whether word-view state `ok` is a view ([`machine::VIEW_PLAIN`] or
-    /// [`machine::VIEW_TRACKED`]): above `0` (none) and [`VIEW_UNKNOWN`].
+    /// Whether word-view state `ok` is a view ([`machine::VIEW_PLAIN`]):
+    /// above `0` (none) and [`VIEW_UNKNOWN`].
     fn view_known(&mut self, ok: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
         self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, ok, 0)
     }
@@ -5848,8 +5911,84 @@ impl<'a> Lower<'a> {
     /// it (`machine::native::product_slots`): an instance's field or an
     /// enum's payload word (a tuple's item), one store at one offset.
     /// Branches to the first block, with the slot's address as its
-    /// parameter, or to the second. A `store` takes instances only, and an
-    /// object the write barrier must log takes the second.
+    /// parameter, or to the second. A `store` takes instances only.
+    /// An inline `RcInc` / `RcDec` of `s`, a word that is an object or null
+    /// (a tag bit allowed): the header count is read and written here, and
+    /// the runtime is called only for a decrement that may release the
+    /// object. Nothing in a steal epoch (its workers keep no counts) or for
+    /// an immortal object. Leaves the builder after it.
+    /// Branch to the returned block when the word `s` (of a type that may
+    /// hold a number) may name an object: 8-aligned but for a `Result`'s
+    /// `Err` bit, and inside the heap's chunk span. Anything else goes on to
+    /// the join block, which the caller switches to after the first.
+    fn maybe_object(&mut self, s: cranelift_codegen::ir::Value) -> (Block, Block) {
+        let t = MemFlagsData::trusted();
+        let (aligned, has_heap, low, call, join) =
+            (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        let odd = self.b.ins().band_imm_u(s, 6);
+        self.b.ins().brif(odd, join, &[], aligned, &[]);
+        self.b.switch_to_block(aligned);
+        let heap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HEAP);
+        self.b.ins().brif(heap, has_heap, &[], join, &[]);
+        self.b.switch_to_block(has_heap);
+        let o = self.b.ins().band_imm_u(s, !1i64);
+        let lo = self.b.ins().load(types::I64, t, heap, machine::HEAP_SLAB_LO_OFFSET);
+        let below = self.b.ins().icmp(IntCC::UnsignedLessThan, o, lo);
+        self.b.ins().brif(below, join, &[], low, &[]);
+        self.b.switch_to_block(low);
+        let hi = self.b.ins().load(types::I64, t, heap, machine::HEAP_SLAB_HI_OFFSET);
+        let inside = self.b.ins().icmp(IntCC::UnsignedLessThan, o, hi);
+        self.b.ins().brif(inside, call, &[], join, &[]);
+        (call, join)
+    }
+
+    fn emit_rc(&mut self, s: cranelift_codegen::ir::Value, dec: bool) {
+        let t = MemFlagsData::trusted();
+        // A word of an object type may still name none (a function value's
+        // code offset, a static's): only one in the heap's span is counted.
+        let (lock_b, join) = self.maybe_object(s);
+        let (count_b, change, logged) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.switch_to_block(lock_b);
+        let o = self.b.ins().band_imm_u(s, !1i64);
+        let heap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HEAP);
+        let lock = self.b.ins().load(types::I64, t, heap, machine::HEAP_ALLOC_LOCK_OFFSET);
+        self.b.ins().brif(lock, logged, &[], count_b, &[]);
+        // In a steal epoch the runtime logs the change (plan step 8): the
+        // headers are shared with the other mutators.
+        self.b.set_cold_block(logged);
+        self.b.switch_to_block(logged);
+        let flag = self.b.ins().iconst(types::I64, i64::from(dec));
+        self.b.ins().call(self.rc, &[self.ctx, s, flag]);
+        self.b.ins().jump(join, &[]);
+        self.b.switch_to_block(count_b);
+        let c = self.b.ins().uload32(t, o, machine::HEADER_COUNT_OFFSET);
+        let immortal = self.b.ins().icmp_imm_s(IntCC::Equal, c, i64::from(machine::COUNT_IMMORTAL));
+        if dec {
+            let (test, slow) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(immortal, join, &[], test, &[]);
+            self.b.switch_to_block(test);
+            // At one, the runtime takes the last owner and frees.
+            let last = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, c, 1);
+            self.b.ins().brif(last, slow, &[], change, &[]);
+            self.b.switch_to_block(change);
+            let n = self.b.ins().iadd_imm_s(c, -1);
+            self.b.ins().istore32(t, n, o, machine::HEADER_COUNT_OFFSET);
+            self.b.ins().jump(join, &[]);
+            self.b.set_cold_block(slow);
+            self.b.switch_to_block(slow);
+            let one = self.b.ins().iconst(types::I64, 1);
+            self.b.ins().call(self.rc, &[self.ctx, s, one]);
+            self.b.ins().jump(join, &[]);
+        } else {
+            self.b.ins().brif(immortal, join, &[], change, &[]);
+            self.b.switch_to_block(change);
+            let n = self.b.ins().iadd_imm_s(c, 1);
+            self.b.ins().istore32(t, n, o, machine::HEADER_COUNT_OFFSET);
+            self.b.ins().jump(join, &[]);
+        }
+        self.b.switch_to_block(join);
+    }
+
     fn product_slot(&mut self, o: cranelift_codegen::ir::Value, index: u32, store: bool) -> (Block, Block) {
         let l = machine::native::product_slots();
         let flags = MemFlagsData::trusted();
@@ -5864,11 +6003,7 @@ impl<'a> Lower<'a> {
         let k = self.b.ins().uload8(types::I64, flags, o, l.kind_at as i32);
         if store {
             let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
-            let g = self.b.ins().uload8(types::I64, flags, o, l.generation_at as i32);
-            let logged = self.b.ins().band_imm_u(g, i64::from(l.unlogged));
-            let clear = self.b.ins().icmp_imm_s(IntCC::Equal, logged, 0);
-            let both = self.b.ins().band(is, clear);
-            self.b.ins().brif(both, storage, &[], slow, &[]);
+            self.b.ins().brif(is, storage, &[], slow, &[]);
         } else {
             // The two kinds differ in one bit: one test for both.
             let bit = l.kind ^ l.enum_kind;
@@ -6086,8 +6221,7 @@ impl<'a> Lower<'a> {
                         // A boxed enum: `tag | payload length << 32`. A tag
                         // match with another payload width than the arm
                         // binds is left to the runtime.
-                        let call = self.b.ins().call(self.enum_tag, &[s]);
-                        let tl = self.b.inst_results(call)[0];
+                        let tl = self.enum_tag_word(s);
                         let not_enum = self.b.ins().icmp_imm_s(IntCC::Equal, tl, -1);
                         self.bail_if(not_enum, TRAP_HELPER);
                         let low = self.b.ins().band_imm_u(tl, 0xffff_ffff);
@@ -6123,12 +6257,14 @@ impl<'a> Lower<'a> {
 /// Body names compiled per call to [`jit`], for `COIL_NATIVE_STATS`.
 pub fn describe(p: &NativeProgram) -> String {
     let refused: HashSet<&str> = p.refused.iter().map(|(n, _)| n.as_str()).collect();
-    format!(
-        "native: {} compiled, {} installed, {} refused",
-        p.compiled.len(),
-        p.entries.len(),
-        refused.len()
-    )
+    let mut out = format!("native: {} compiled, {} installed, {} refused", p.compiled.len(), p.entries.len(), refused.len());
+    // `COIL_NATIVE_STATS=why`: each refusal's reason too.
+    if std::env::var_os("COIL_NATIVE_STATS").is_some_and(|v| v == "why") {
+        for (name, why) in &p.refused {
+            out.push_str(&format!("\n  refused {name}: {why}"));
+        }
+    }
+    out
 }
 
 /// Whether every operand of scan predicate `e` names one of `streams`
@@ -6145,6 +6281,12 @@ fn lane_expr_fits(e: &compiler::native_mir::LaneExpr, streams: usize, scalars: u
         LaneExpr::And(a, b) | LaneExpr::Or(a, b) => lane_expr_fits(a, streams, scalars) && lane_expr_fits(b, streams, scalars),
         LaneExpr::Not(a) => lane_expr_fits(a, streams, scalars),
     }
+}
+
+/// Whether a word of type `t` is an object or null by its type, so native
+/// code counts it inline ([`Lower::emit_rc`]).
+fn counted_inline(t: MirTy) -> bool {
+    matches!(t, MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes)
 }
 
 #[cfg(test)]
@@ -6194,6 +6336,67 @@ mod tests {
         let p = jit(&bodies, &pcs).expect("jit");
         assert_eq!(p.entries.len(), 1, "refused: {:?}", p.refused);
         assert_eq!(run(&p.entries[0], &[1.5f64.to_bits()]), (0, 1.5f64.to_bits()));
+    }
+
+    /// `f(v0, v1)`: two `rc.inc v0`, then `rc.dec v0 if v1`; returns `v1`.
+    /// `g(v0)`: `rc.dec v0`.
+    fn counting_bodies() -> Vec<NativeBody> {
+        let mut f = MirFunc::new("f");
+        f.blocks.clear();
+        f.types = vec![MirTy::HeapRef, MirTy::Bool, MirTy::Bool, MirTy::Bool, MirTy::Bool];
+        f.params = vec![ValueId(0), ValueId(1)];
+        f.ret_ty = Some(MirTy::Bool);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::RcInc { dest: ValueId(2), src: ValueId(0), guard: None });
+        b.insts.push(MirInst::RcInc { dest: ValueId(3), src: ValueId(0), guard: None });
+        b.insts.push(MirInst::RcDec { dest: ValueId(4), src: ValueId(0), guard: Some(ValueId(1)) });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        f.blocks.push(b);
+        let mut g = MirFunc::new("g");
+        g.blocks.clear();
+        g.types = vec![MirTy::HeapRef, MirTy::Bool];
+        g.params = vec![ValueId(0)];
+        g.ret_ty = Some(MirTy::Bool);
+        let mut b = MirBlock::new(BlockId(0));
+        b.insts.push(MirInst::RcDec { dest: ValueId(1), src: ValueId(0), guard: None });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        g.blocks.push(b);
+        vec![NativeBody { name: "f".into(), entry: Some(Label(0)), mir: f }, NativeBody { name: "g".into(), entry: Some(Label(1)), mir: g }]
+    }
+
+    /// The reference count ops (plan step 3): an increment, a guarded
+    /// decrement that applies only when its guard is true, and a decrement
+    /// of the last owner that frees the object.
+    #[test]
+    fn the_count_ops_move_the_count_and_the_last_one_frees() {
+        let mut heap = machine::Heap::default();
+        heap.set_rc_counting(true);
+        heap.set_rc_frees(true);
+        let (obj, _) = heap.alloc(machine::ObjString::from("counted"), machine::Object::String);
+        obj.rc_inc();
+        let pcs = HashMap::from([("f".to_string(), 0u32), ("g".to_string(), 1u32)]);
+        let p = jit(&counting_bodies(), &pcs).expect("jit");
+        assert!(p.refused.is_empty(), "refused: {:?}", p.refused);
+        let entry = |name: u32| p.entries.iter().find(|e| e.pc == name).expect("entry");
+        let call = |heap: &mut machine::Heap, pc: u32, args: &[u64]| {
+            let marker = 0u8;
+            let mut ctx = NativeCtx::new((std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET));
+            ctx.heap = heap;
+            // SAFETY: compiled for `args.len()` argument words.
+            unsafe { (entry(pc).entry)(&mut ctx, args.as_ptr()) };
+            assert_eq!(ctx.bail, 0);
+        };
+        call(&mut heap, 0, &[obj.addr(), 0]);
+        assert_eq!(obj.rc_count(), 3, "the guarded decrement did not run");
+        call(&mut heap, 0, &[obj.addr(), 1]);
+        assert_eq!(obj.rc_count(), 4);
+        let live = heap.live_object_count();
+        for _ in 0..3 {
+            call(&mut heap, 1, &[obj.addr()]);
+        }
+        assert_eq!((obj.rc_count(), heap.live_object_count()), (1, live));
+        call(&mut heap, 1, &[obj.addr()]);
+        assert_eq!(heap.live_object_count(), live - 1, "the last owner's decrement frees it");
     }
 
     /// `f(v0)`: pin `v0`, share it, pin it again and unpin twice, the

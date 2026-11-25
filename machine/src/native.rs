@@ -54,10 +54,6 @@ pub struct NativeCtx {
     pub host: NativeHost,
     /// runtime calls the call made: the runtime then checks for a collection.
     pub host_calls: u64,
-    /// The native frames' heap words while a runtime call runs (a collection
-    /// may run then): a chain of `[next, n, word × n]` records on the
-    /// native stack, newest first, `0`-terminated. The runtime pins them.
-    pub roots: u64,
     /// Non-zero when a collection is due and the call can no longer bail
     /// for the runtime to run it: native code collects at its next safepoint
     /// ([`coil_native_collect`]).
@@ -79,10 +75,6 @@ pub struct NativeCtx {
     /// heap.
     pub alloc_counts: *mut crate::memory::HeapCounts,
     pub alloc_bumps: *mut crate::memory::Bump,
-    /// While the call is in a helper that may collect: the frame pointer
-    /// of the trampoline native code called it through. The collector
-    /// walks the native frames from there ([`register_stack_maps`]).
-    pub native_fp: u64,
     /// The running entry's [`NativeEntry::data`] (or a pad's
     /// [`NativePad::data`]): an engine with one entry function for every
     /// body reads which body to run here.
@@ -105,7 +97,6 @@ pub struct NativeCtx {
     pub park_kind: u64,
     /// What a parked call left, for [`ParkedCall`] (null: it did not park).
     pub parked: *mut std::ffi::c_void,
-    pub park_scan: Option<RootScanFn>,
     pub park_free: Option<unsafe fn(*mut std::ffi::c_void)>,
     /// A parked call this one goes on with (null: a new call), and how.
     pub resume: *mut std::ffi::c_void,
@@ -115,88 +106,19 @@ pub struct NativeCtx {
     /// enter a plain function value's body on this context (null: through
     /// the runtime).
     pub code: *const NativeCode,
+    /// A generator body about to yield names its frame's homes here, and
+    /// in [`Self::gen_mask`] the ones that own a count (`0`: unknown, so
+    /// the cycle collector keeps the generator; [`GEN_FRAME_EMPTY`] when it
+    /// has no homes). [`coil_native_yield`] takes both.
+    pub gen_homes: u64,
+    pub gen_mask: u64,
 }
 
-/// Byte offset of [`NativeCtx::native_fp`].
-pub const NATIVE_CTX_NATIVE_FP: i32 = std::mem::offset_of!(NativeCtx, native_fp) as i32;
-
-/// Native code's stack maps (Cranelift user stack maps): the code ranges
-/// of the compiled bodies, and per call that holds heap words across it,
-/// its return address and the offsets from the stack pointer at that call
-/// of the slots holding them. A program's code leaves with
-/// [`unregister_stack_maps`].
-#[derive(Default)]
-struct StackMaps {
-    /// Start → end of each compiled body's code.
-    code: std::collections::BTreeMap<u64, u64>,
-    maps: std::collections::HashMap<u64, Box<[u32]>>,
-}
-
-static STACK_MAPS: std::sync::LazyLock<std::sync::RwLock<StackMaps>> = std::sync::LazyLock::new(Default::default);
-
-impl StackMaps {
-    fn in_code(&self, ra: u64) -> bool {
-        self.code.range(..=ra).next_back().is_some_and(|(_, &end)| ra < end)
-    }
-}
-
-/// Add a compiled body's code (`size` bytes at `start`) and its stack maps:
-/// `(return address offset, slot offsets)`. A frame walk goes on through
-/// a body's frame whose call holds no heap word, and stops at the first
-/// return address outside every body (the entry wrapper or a helper).
-pub fn register_stack_maps(start: u64, size: u32, maps: impl IntoIterator<Item = (u32, Vec<u32>)>) {
-    let mut table = STACK_MAPS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    table.code.insert(start, start + u64::from(size));
-    for (ra, offsets) in maps {
-        table.maps.insert(start + u64::from(ra), offsets.into_boxed_slice());
-    }
-}
-
-/// Forget `bodies` (`(start, size)`, as registered), whose code is about to go.
-/// Its addresses will be some other program's.
-pub fn unregister_stack_maps(bodies: &[(u64, u32)]) {
-    let gone: std::collections::BTreeMap<u64, u64> = bodies.iter().map(|&(start, size)| (start, start + u64::from(size))).collect();
-    let mut table = STACK_MAPS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    table.code.retain(|start, _| !gone.contains_key(start));
-    // A call that does not return can end its body: `ra` is then the end.
-    table.maps.retain(|ra, _| !gone.range(..ra).next_back().is_some_and(|(_, end)| ra <= end));
-}
-
-/// One AOT stack map record, as `coil_native::aot` writes it: a body's
-/// address and code size and the count of its maps, then each map as its
-/// return address's offset, its slot count and the slot offsets (`u32`
-/// each), the record padded to 8 bytes.
-#[repr(C)]
-pub struct AotStackMap {
-    pub func: u64,
-    pub size: u32,
-    pub count: u32,
-}
-
-/// Register the stack maps an AOT object defines: `n` [`AotStackMap`]
-/// records.
-///
-/// # Safety
-/// `maps` points at `n` records as `coil_native::aot` wrote them.
-pub unsafe fn install_aot_stack_maps(maps: *const u8, n: usize) {
-    let mut at = maps;
-    for _ in 0..n {
-        // SAFETY: the caller's.
-        unsafe {
-            let rec = &*at.cast::<AotStackMap>();
-            let mut w = at.add(std::mem::size_of::<AotStackMap>()).cast::<u32>();
-            let mut out = Vec::with_capacity(rec.count as usize);
-            for _ in 0..rec.count {
-                let (ra, k) = (*w, *w.add(1) as usize);
-                out.push((ra, std::slice::from_raw_parts(w.add(2), k).to_vec()));
-                w = w.add(2 + k);
-            }
-            register_stack_maps(rec.func, rec.size, out);
-            let used = w as usize - at as usize;
-            at = at.add(used.next_multiple_of(8));
-        }
-    }
-}
+/// [`NativeCtx::gen_homes`] of a generator frame without homes: it owns
+/// nothing while suspended.
+pub const GEN_FRAME_EMPTY: u64 = 8;
+pub const NATIVE_CTX_GEN_HOMES: i32 = std::mem::offset_of!(NativeCtx, gen_homes) as i32;
+pub const NATIVE_CTX_GEN_MASK: i32 = std::mem::offset_of!(NativeCtx, gen_mask) as i32;
 
 /// The host-native groups an AOT executable links ([`install_aot_host_groups`]).
 static AOT_HOST_GROUPS: std::sync::OnceLock<Vec<(crate::host_natives::HostPush, u32, u32)>> = std::sync::OnceLock::new();
@@ -222,19 +144,11 @@ pub fn aot_host_natives() -> Vec<std::sync::Arc<dyn crate::ffi::NativeFn>> {
 /// A `defer` cleanup pad: called with its frame's homes.
 pub type NativePadFn = unsafe extern "C" fn(ctx: *mut NativeCtx, homes: *const u64) -> u64;
 
-/// Walks an engine's own frames for [`NativeCtx::for_each_root`]: `data`
-/// is the record's, and each word the frames hold goes to `visit`, with
-/// whether it is ambiguous.
-pub type RootScanFn = unsafe fn(data: *mut std::ffi::c_void, visit: &mut dyn FnMut(*mut u64, bool));
-
 /// Walks an engine's own frames for [`NativeCtx::call_sites`]: `data` is
 /// the record's, and each frame's call site goes to `out`, innermost first.
 pub type SiteScanFn = unsafe fn(data: *mut std::ffi::c_void, out: &mut Vec<u32>);
 
-/// The pad of one native frame a panic unwound, with a copy of its homes
-/// laid out as a masked root record (`[next, n | ROOTS_MASKED, masks...,
-/// words...]`, see [`NativeCtx::roots`] and [`mask_words`]): a collection
-/// while pads run keeps (and may move) the heap words among them.
+/// The pad of one native frame a panic unwound, with a copy of its homes.
 pub struct NativePad {
     pub func: NativePadFn,
     pub homes: Vec<u64>,
@@ -242,39 +156,13 @@ pub struct NativePad {
     pub data: usize,
 }
 
-/// Set in a root record's count: the next [`mask_words`] words are a mask
-/// of which words are heap words (the rest are scalars to skip), bit `i`
-/// of word `i / 64` for word `i`.
-pub const ROOTS_MASKED: u64 = 1 << 63;
-
-/// How many mask words a masked root record of `n` words carries: one per
-/// 64 words, and at least one.
-pub const fn mask_words(n: usize) -> usize {
-    if n == 0 { 1 } else { n.div_ceil(64) }
-}
-
-/// The masks of a masked root record of `n` words whose heap words are
-/// `heap` ([`ROOTS_MASKED`]).
-pub fn root_masks(n: usize, heap: impl IntoIterator<Item = usize>) -> Vec<u64> {
-    let mut masks = vec![0u64; mask_words(n)];
-    for h in heap {
-        masks[h / 64] |= 1 << (h % 64);
-    }
-    masks
-}
-
-/// Set in a root record's count: its words are ambiguous (an opaque word
-/// of a generic body may be an immediate), so the collector pins what they
-/// hit instead of moving it, and never rewrites them.
-pub const ROOTS_AMBIGUOUS: u64 = 1 << 62;
-/// A [`NativeCtx::roots`] record of an engine that keeps its frames itself:
-/// `[next, ROOTS_SCAN, RootScanFn, data]`. Native code copies its words
-/// into a record around each call; such an engine has them in place, so
-/// the collector asks for them only when it runs.
-pub const ROOTS_SCAN: u64 = 1 << 61;
 /// In a [`NativeCtx::calls`] record's site word: `[next, SITES_SCAN,
-/// SiteScanFn, data]`, as [`ROOTS_SCAN`] for call sites.
+/// SiteScanFn, data]`, a record of an engine that keeps its frames itself
+/// and names their call sites only when asked.
 pub const SITES_SCAN: u64 = u64::MAX;
+
+/// Byte offset of [`NativeCtx::heap`].
+pub const NATIVE_CTX_HEAP: i32 = std::mem::offset_of!(NativeCtx, heap) as i32;
 
 /// Byte offset of [`NativeCtx::gc_epoch`].
 pub const NATIVE_CTX_GC_EPOCH: i32 = std::mem::offset_of!(NativeCtx, gc_epoch) as i32;
@@ -286,9 +174,6 @@ pub const NATIVE_CTX_HAS_FINALIZERS: i32 = std::mem::offset_of!(NativeCtx, has_f
 
 /// Byte offset of [`NativeCtx::calls`].
 pub const NATIVE_CTX_CALLS: i32 = std::mem::offset_of!(NativeCtx, calls) as i32;
-
-/// Byte offset of [`NativeCtx::roots`].
-pub const NATIVE_CTX_ROOTS: i32 = std::mem::offset_of!(NativeCtx, roots) as i32;
 
 pub use crate::memory::{InlineObject, InlineShape, ProductSlots, inline_object, product_slots, layout_fingerprint};
 
@@ -302,17 +187,16 @@ pub const COUNTS_INLINE_GATE: i32 = std::mem::offset_of!(crate::memory::HeapCoun
 pub const COUNTS_FIN_WORDS: i32 = std::mem::offset_of!(crate::memory::HeapCounts, fin_words) as i32;
 pub const COUNTS_FIN_LEN: i32 = std::mem::offset_of!(crate::memory::HeapCounts, fin_len) as i32;
 pub const COUNTS_ALLOC_BYTES: i32 = std::mem::offset_of!(crate::memory::HeapCounts, alloc_bytes) as i32;
-pub const COUNTS_YOUNG_BYTES: i32 = std::mem::offset_of!(crate::memory::HeapCounts, young_bytes) as i32;
 pub const COUNTS_LIVE_COUNT: i32 = std::mem::offset_of!(crate::memory::HeapCounts, live_count) as i32;
 pub const BUMP_NEXT: i32 = std::mem::offset_of!(crate::memory::Bump, next) as i32;
 pub const BUMP_END: i32 = std::mem::offset_of!(crate::memory::Bump, end) as i32;
+/// Head of a nursery class's early-freed slots ([`crate::memory::Bump::free`]).
+pub const BUMP_FREE: i32 = std::mem::offset_of!(crate::memory::Bump, free) as i32;
+/// Where a freed young slot links the next one ([`crate::memory::FREE_LINK`]).
+pub const BUMP_FREE_LINK: i32 = crate::memory::FREE_LINK as i32;
 pub const BUMP_BYTES: i32 = std::mem::size_of::<crate::memory::Bump>() as i32;
 
 impl NativeCtx {
-    /// Every heap word the call's native frames hold while it is in a runtime
-    /// call: the root chain.
-    /// The words are native code's to reload: a moving collection may
-    /// rewrite them.
     /// The sites of [`Self::calls`], innermost first.
     pub(crate) fn call_sites(&self) -> Vec<u32> {
         let mut out = Vec::new();
@@ -331,63 +215,6 @@ impl NativeCtx {
             }
         }
         out
-    }
-
-    pub(crate) fn for_each_root(&self, mut visit: impl FnMut(*mut u64, bool)) {
-        self.for_each_frame_root(&mut visit);
-        let mut at = self.roots as *mut u64;
-        while !at.is_null() {
-            // SAFETY: native code links only live records of its frames.
-            unsafe {
-                let n = *at.add(1);
-                let ambiguous = n & ROOTS_AMBIGUOUS != 0;
-                let count = n & !(ROOTS_MASKED | ROOTS_AMBIGUOUS);
-                if n & ROOTS_SCAN != 0 {
-                    let scan = std::mem::transmute::<usize, RootScanFn>(*at.add(2) as usize);
-                    scan(*at.add(3) as *mut std::ffi::c_void, &mut visit);
-                } else if n & ROOTS_MASKED != 0 {
-                    let words = mask_words(count as usize);
-                    for i in 0..count as usize {
-                        if *at.add(2 + i / 64) & (1 << (i % 64)) != 0 {
-                            visit(at.add(2 + words + i), ambiguous);
-                        }
-                    }
-                } else {
-                    for i in 0..count as usize {
-                        visit(at.add(2 + i), ambiguous);
-                    }
-                }
-                at = *at as *mut u64;
-            }
-        }
-    }
-}
-
-impl NativeCtx {
-    /// The heap words the native frames of this call hold while it is in
-    /// a helper that may collect: from the trampoline's frame
-    /// ([`Self::native_fp`]) up the frame-pointer chain, each frame's
-    /// stack map at the call it is in. A collection may rewrite the slots
-    /// (native code reloads them after the call).
-    fn for_each_frame_root(&self, visit: &mut impl FnMut(*mut u64, bool)) {
-        let mut fp = self.native_fp;
-        if fp == 0 {
-            return;
-        }
-        let maps = STACK_MAPS.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        while fp != 0 {
-            // SAFETY: native code keeps frame pointers: `[fp]` is the
-            // caller's frame pointer and `[fp + 8]` the return address into
-            // it. Slots are by their distance below that frame pointer.
-            let (next, ra) = unsafe { (*(fp as *const u64), *(fp as *const u64).add(1)) };
-            if !maps.in_code(ra) {
-                break;
-            }
-            for &off in maps.maps.get(&ra).into_iter().flatten() {
-                visit((next - u64::from(off)) as *mut u64, false);
-            }
-            fp = next;
-        }
     }
 }
 
@@ -619,14 +446,12 @@ impl NativeCtx {
             machine: std::ptr::null_mut(),
             host: NativeHost::NONE,
             host_calls: 0,
-            roots: 0,
             gc_due: 0,
             gc_epoch: 0,
             pads: std::ptr::null_mut(),
             calls: 0,
             alloc_counts: std::ptr::null_mut(),
             alloc_bumps: std::ptr::null_mut(),
-            native_fp: 0,
             entry_data: 0,
             fuel: std::ptr::null_mut(),
             natives: std::ptr::null(),
@@ -635,12 +460,13 @@ impl NativeCtx {
             park_word: 0,
             park_kind: 0,
             parked: std::ptr::null_mut(),
-            park_scan: None,
             park_free: None,
             resume: std::ptr::null_mut(),
             resume_word: 0,
             resume_how: 0,
             code: std::ptr::null(),
+            gen_homes: 0,
+            gen_mask: 0,
         }
     }
 
@@ -967,7 +793,6 @@ pub(crate) struct ParkedCall {
     /// Why it parked (`PARK_*`).
     pub(crate) kind: u64,
     state: *mut std::ffi::c_void,
-    scan: RootScanFn,
     free: unsafe fn(*mut std::ffi::c_void),
 }
 
@@ -991,18 +816,6 @@ impl ParkedCall {
     /// Whether its body has `defer`s, which a close must run.
     pub(crate) fn cleanup(&self) -> bool {
         self.entry.cleanup
-    }
-
-    /// Its heap words, for a root that pins them.
-    pub(crate) fn for_each_word(&self, mut visit: impl FnMut(u64)) {
-        // SAFETY: the engine's own state, read only.
-        unsafe { (self.scan)(self.state, &mut |w, _| visit(*w)) };
-    }
-
-    /// Its heap words, as [`NativeCtx::for_each_root`] walks a live call's.
-    pub(crate) fn for_each_root(&mut self, mut visit: impl FnMut(*mut u64, bool)) {
-        // SAFETY: the engine's own state, which nothing else runs.
-        unsafe { (self.scan)(self.state, &mut visit) };
     }
 
     /// Go on, in the way `how` says (`RESUME_*`) with `word`.
@@ -1085,10 +898,10 @@ fn run_call(entry: &NativeEntry, args: &[u64], resume: Option<(*mut std::ffi::c_
     let out = unsafe { (entry.entry)(&mut ctx, args.as_ptr()) };
     drop(cancel);
     if !ctx.parked.is_null() {
-        let (Some(scan), Some(free)) = (ctx.park_scan, ctx.park_free) else {
+        let Some(free) = ctx.park_free else {
             unreachable!("a parked call names its engine's hooks");
         };
-        let call = ParkedCall { entry: *entry, kind: ctx.park_kind, state: ctx.parked, scan, free };
+        let call = ParkedCall { entry: *entry, kind: ctx.park_kind, state: ctx.parked, free };
         return NativeOutcome::Parked(call, ctx.park_word);
     }
     match ctx.bail {
@@ -1281,11 +1094,18 @@ pub unsafe extern "C" fn coil_native_store_index(ctx: *mut NativeCtx, addr: u64,
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
-    if gc.as_ref().read_indexed(index, false).is_none() {
+    let Some(old) = gc.as_ref().read_indexed(index, false) else {
         unsafe { (*ctx).trap = TRAP_OUT_OF_BOUNDS };
         return unsafe { bail(ctx) };
-    }
+    };
     gc.as_mut().store_indexed(index, common::Value::from(value), false);
+    if let Some(heap) = unsafe { heap(ctx) }
+        && heap.rc_counting()
+    {
+        let kind = gc.as_ref().elem_kind();
+        heap.rc_inc_word(common::Value::from(value), kind);
+        heap.rc_dec_word(old, kind);
+    }
     value
 }
 
@@ -1387,11 +1207,26 @@ pub unsafe extern "C" fn coil_native_lane_store(
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
-    let stored = if gc.as_ref().lanes() == 2 {
-        usize::try_from(index).is_ok_and(|i| gc.as_mut().set_lanes(i, &[common::Value::from(lo), common::Value::from(hi)]))
-    } else if gc.as_ref().read_indexed(index, false).is_some() {
+    if gc.as_ref().lanes() == 2 {
+        // One element's words: no diff of the whole array.
+        let before = usize::try_from(index).ok().and_then(|i| heap.rc_before_lane(common::Value::from(addr), i));
+        let stored = usize::try_from(index).is_ok_and(|i| gc.as_mut().set_lanes(i, &[common::Value::from(lo), common::Value::from(hi)]));
+        if !stored {
+            unsafe { (*ctx).trap = TRAP_OUT_OF_BOUNDS };
+            return unsafe { bail(ctx) };
+        }
+        heap.rc_after_lane(before);
+        return 1;
+    }
+    let old = gc.as_ref().read_indexed(index, false);
+    let stored = if let Some(old) = old {
         let boxed = lane_box(heap, lo, hi, [tag_mask, payload_mask, unit_mask]);
         gc.as_mut().store_indexed(index, common::Value::from(boxed), false);
+        if heap.rc_counting() {
+            let kind = gc.as_ref().elem_kind();
+            heap.rc_inc_word(common::Value::from(boxed), kind);
+            heap.rc_dec_word(old, kind);
+        }
         unsafe { note_alloc(ctx, heap) };
         true
     } else {
@@ -1417,11 +1252,17 @@ pub unsafe extern "C" fn coil_native_lane_push(ctx: *mut NativeCtx, addr: u64, l
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
+    // The new element's words gain an owner (no diff of the whole array).
     if gc.as_ref().lanes() == 2 {
         gc.as_mut().push_lanes(&[common::Value::from(lo), common::Value::from(hi)]);
+        let last = gc.as_ref().len().saturating_sub(1);
+        heap.rc_after_lane(heap.rc_before_lane(common::Value::from(addr), last).map(|(o, _, i)| (o, Vec::new(), i)));
     } else {
         let boxed = lane_box(heap, lo, hi, [tag_mask, payload_mask, unit_mask]);
         gc.as_mut().push(common::Value::from(boxed));
+        if heap.rc_counting() {
+            heap.rc_inc_word(common::Value::from(boxed), gc.as_ref().elem_kind());
+        }
     }
     heap.account_array(gc.as_mut());
     unsafe { note_alloc(ctx, heap) };
@@ -1445,6 +1286,7 @@ pub unsafe extern "C" fn coil_native_lanes_to_words(ctx: *mut NativeCtx, addr: u
     let Some(words) = gc.as_ref().lane_words().filter(|_| gc.as_ref().lanes() == 2).map(<[common::Value]>::to_vec) else {
         return addr;
     };
+    let before = heap.rc_before(common::Value::from(addr));
     // No collection runs inside an allocation, so the boxes made so far
     // stay alive until the array holds them.
     let boxes = words
@@ -1454,6 +1296,7 @@ pub unsafe extern "C" fn coil_native_lanes_to_words(ctx: *mut NativeCtx, addr: u
         .map(|w| common::Value::from(lane_box(heap, w[0].bits(), w[1].bits(), [tag_mask, payload_mask, unit_mask])))
         .collect();
     gc.as_mut().lanes_into_words(boxes);
+    heap.rc_after(before);
     heap.account_array(gc.as_mut());
     unsafe { note_alloc(ctx, heap) };
     addr
@@ -1473,21 +1316,48 @@ pub unsafe extern "C" fn coil_native_set_field(ctx: *mut NativeCtx, addr: u64, i
     if slot >= gc.as_ref().slot_len() {
         return unsafe { bail(ctx) };
     }
-    gc.as_mut().set_slot(slot, common::Value::from(value));
+    match unsafe { heap(ctx) } {
+        Some(heap) => heap.rc_set_instance_slot(&mut gc, slot, common::Value::from(value)),
+        None => gc.as_mut().set_slot(slot, common::Value::from(value)),
+    }
     value
+}
+
+/// Whether host native `id` may write a word into an object it is passed,
+/// so a run that keeps counts diffs its arguments around the call. One
+/// whose row says it neither mutates the heap nor does anything unknown
+/// (a probe, a hash, a read) only reads them, or makes new objects, which
+/// count their own words.
+pub(crate) fn host_writes_words(id: u64) -> bool {
+    use common::EffectFlags as E;
+    // `vec_stamp` counts the one object it changes itself. The lock
+    // primitives change only the lock, whose value is a portable copy, and
+    // never a word of an argument.
+    fn exempt(id: u64) -> bool {
+        id == u64::from(common::VEC_STAMP_ID) || common::host_writes_only_numbers(id) || (u64::from(common::LOCK_ACQUIRE_ID)..=u64::from(common::RW_STORE_ID)).contains(&id)
+    }
+    // One look per id, made once: this runs on every host call.
+    static WRITES: std::sync::LazyLock<Vec<bool>> = std::sync::LazyLock::new(|| {
+        let n = common::HOST_NATIVES.iter().map(|n| usize::from(n.id) + 1).max().unwrap_or(0);
+        (0..n)
+            .map(|i| match common::HOST_NATIVES.get(i).filter(|n| usize::from(n.id) == i) {
+                _ if exempt(i as u64) => false,
+                Some(n) => {
+                    let e = n.effects;
+                    [E::HEAP_MUT, E::UNKNOWN, E::FFI, E::GC, E::THREAD, E::YIELD, E::SUSPEND, E::ATTACH_PARK].iter().any(|&b| e.contains(b))
+                }
+                None => true,
+            })
+            .collect()
+    });
+    usize::try_from(id).ok().and_then(|i| WRITES.get(i).copied()).unwrap_or(true)
 }
 
 /// An array's element words, for native code to index in place: writes
 /// `[pointer, length]` to `out` and returns [`crate::memory::VIEW_PLAIN`]
 /// for an array that stores words, `0` for anything else (a byte array, a
 /// tuple, not an array), which native code then reads through the helpers
-/// above. A store view of an array with a card table returns
-/// [`crate::memory::VIEW_TRACKED`] and writes the card bytes' address as a
-/// third word: loads and stores stay in place, and a store also writes `1`
-/// at `cards + (index >> CARD_SHIFT)` (#2687). The cards cover the length,
-/// and only a push, a runtime call or a collection grows or clears them,
-/// which all drop the view. With
-/// `for_store` set, marks the array as possibly holding references, as
+/// above. With `for_store` set, marks the array as possibly holding references, as
 /// every runtime store does. The pointer stays valid while native code runs:
 /// it never grows or shrinks an array, and storing into a word array never
 /// moves its storage.
@@ -1499,22 +1369,14 @@ pub unsafe extern "C" fn coil_native_view(addr: u64, for_store: u64, out: *mut u
     let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
         return 0;
     };
-    let view = if for_store != 0 {
-        let view = gc.as_mut().words_view_for_store();
-        gc.note_store_view();
-        view
-    } else {
-        gc.as_ref().words_view_for_load().map(|(p, n)| (p, n, std::ptr::null_mut()))
-    };
+    let view = if for_store != 0 { gc.as_mut().words_view_for_store() } else { gc.as_ref().words_view_for_load() };
     match view {
-        Some((ptr, len, cards)) => {
+        Some((ptr, len)) => {
             unsafe {
                 out.write(ptr as u64);
                 out.add(1).write(len as u64);
-                out.add(2).write(cards as u64);
             }
-            // An array with a card table: native code marks each store's card.
-            if cards.is_null() { crate::memory::VIEW_PLAIN } else { crate::memory::VIEW_TRACKED }
+            crate::memory::VIEW_PLAIN
         }
         None => 0,
     }
@@ -1534,9 +1396,7 @@ pub unsafe extern "C" fn coil_native_lane_view(addr: u64, for_store: u64, out: *
         return 0;
     };
     let view = if for_store != 0 {
-        let view = gc.as_mut().lanes_view();
-        gc.note_store_view();
-        view
+        gc.as_mut().lanes_view()
     } else {
         gc.as_ref().lanes_view_for_load()
     };
@@ -1590,7 +1450,7 @@ unsafe fn heap<'a>(ctx: *mut NativeCtx) -> Option<&'a mut crate::memory::Heap> {
 unsafe fn note_alloc(ctx: *mut NativeCtx, heap: &crate::memory::Heap) {
     let ctx = unsafe { &mut *ctx };
     ctx.allocs += 1;
-    if !heap.gc_is_idle() || heap.should_collect() {
+    if heap.safepoint_due() {
         ctx.gc_due = 1;
     }
 }
@@ -1725,6 +1585,73 @@ pub unsafe fn cow_unpin(ctx: *mut NativeCtx, word: u64, saved: u64) {
     }
 }
 
+/// `RcInc` (`dec` zero) or `RcDec` of the heap word `word`: its object
+/// gains or loses an owner, and one that lost its last is released
+/// ([`crate::memory::Heap::rc_drop`]). Nothing when counts are not kept or
+/// `word` names no object. Returns `0`.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_rc(ctx: *mut NativeCtx, word: u64, dec: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return 0;
+    };
+    let w = common::Value::from(word);
+    if dec == 0 {
+        heap.rc_retain(w);
+    } else {
+        heap.rc_drop(w);
+    }
+    0
+}
+
+/// `RcReuse`: `word` loses an owner, as [`coil_native_rc`]'s decrement.
+/// When that was its last and it is a plain young enum with a payload, its
+/// words are released but its slot is kept: returns the slot's address for
+/// the `AllocAt` that follows, else `0` (`Heap::rc_take_slot`).
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_rc_reuse(ctx: *mut NativeCtx, word: u64, moved: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return 0;
+    };
+    heap.rc_take_slot(common::Value::from(word), moved as u32)
+}
+
+/// [`coil_native_rc_reuse`] where native code read the word as an object
+/// of this heap whose owner is its last, with no steal epoch open: no slot
+/// search ([`Heap::rc_take_last`]).
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `word` is a typed object word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_rc_take(ctx: *mut NativeCtx, word: u64, moved: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return 0;
+    };
+    heap.rc_take_last(common::Value::from(word), moved as u32)
+}
+
+/// `AllocAt` through [`coil_native_alloc`]: `slot`, kept by
+/// [`coil_native_rc_reuse`] (`0`: none), goes to that allocation, which
+/// takes it when the layouts match and gives it back otherwise.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `slot` is `0` or a slot
+/// [`coil_native_rc_reuse`] returned and nothing took.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_offer_slot(ctx: *mut NativeCtx, slot: u64) -> u64 {
+    if slot != 0
+        && let Some(heap) = (unsafe { heap(ctx) })
+    {
+        heap.offer_enum_slot(slot);
+    }
+    0
+}
+
 /// `Cow` of field `field` of the instance `obj`: `obj.f = unique(obj.f)`,
 /// writing the slot back only when it copied.
 /// Returns `obj`.
@@ -1740,7 +1667,9 @@ pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, fi
         && let Some(v) = gc.as_ref().slot(field as usize)
         && let Some(copy) = heap.cow_unique(v)
     {
+        let before = heap.rc_before(common::Value::from(obj));
         gc.as_mut().set_slot(field as usize, copy);
+        heap.rc_after(before);
         unsafe { note_alloc(ctx, heap) };
     }
     obj
@@ -1761,8 +1690,9 @@ pub use common::native_alloc::{
 /// - [`ALLOC_ARRAY`]: `extra` is the element word kind (`0`: none);
 /// - [`ALLOC_ENUM`]: `extra` is `tag | kinds << 32`, a tuple's tag
 ///   [`common::PRODUCT_TAG`];
-/// - [`ALLOC_OBJECT`]: `extra` is the type id and `n` the field count
-///   (`words` unused: stores fill the fields);
+/// - [`ALLOC_OBJECT`]: `extra` is `type_id | kinds << 32`, `kinds` the
+///   packed kinds of its generic fields ([`ObjInstance::own_kinds`]), and
+///   `n` the field count (`words` unused: stores fill the fields);
 /// - [`ALLOC_FN`]: a function value, as `MakeFn`: `extra` is the entry id
 ///   `| operand << 32`, the words its captures and filled parameters, then
 ///   the filled mask;
@@ -1785,15 +1715,28 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
         return unsafe { bail(ctx) };
     };
     let n = n as usize;
-    let values: Vec<common::Value> = if kind == ALLOC_OBJECT || n == 0 {
-        Vec::new()
+    // The words, on the stack when few: an enum or a closure copies them
+    // into its own storage, so most allocations need no buffer on the heap.
+    let mut buf = [common::Value::default(); 8];
+    let spill: Vec<common::Value>;
+    let values: &[common::Value] = if kind == ALLOC_OBJECT || n == 0 {
+        &[]
     } else {
         // SAFETY: the caller passes `n` words.
-        unsafe { std::slice::from_raw_parts(words, n) }.iter().map(|&w| common::Value::from(w)).collect()
+        let words = unsafe { std::slice::from_raw_parts(words, n) };
+        if n <= buf.len() {
+            for (b, &w) in buf.iter_mut().zip(words) {
+                *b = common::Value::from(w);
+            }
+            &buf[..n]
+        } else {
+            spill = words.iter().map(|&w| common::Value::from(w)).collect();
+            &spill
+        }
     };
     let addr = match kind {
         ALLOC_ARRAY => {
-            let mut arr = ObjArray::from_values(values, heap);
+            let mut arr = ObjArray::from_values(values.to_vec(), heap);
             if extra != 0 {
                 arr.set_elem_kind(extra as u8 & 0x3);
                 // Not allocated yet: the allocation counts the packed size.
@@ -1805,7 +1748,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             if !n.is_multiple_of(2) {
                 return unsafe { bail(ctx) };
             }
-            heap.alloc(ObjArray::from_lanes(values, 2, extra), Object::Array).0.addr()
+            heap.alloc(ObjArray::from_lanes(values.to_vec(), 2, extra), Object::Array).0.addr()
         }
         ALLOC_DROP_ENUM => {
             let Some((&type_id, payload)) = values.split_last() else {
@@ -1820,7 +1763,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 [a, b] => EnumPayload::two(*a, *b),
                 v => EnumPayload::from_slice(v),
             }
-            .with_kinds((extra >> 32) as u8);
+            .with_kinds((extra >> 32) as u32);
             let (obj, mut gc) = heap.alloc(ObjEnum::new(extra as u32, payload), Object::Enum);
             let type_id = type_id.bits() as u32;
             gc.as_mut().type_id = type_id;
@@ -1833,16 +1776,17 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 // A payload-less variant is shared, as `MakeEnum`.
                 return heap.immortal_unit_enum(tag).addr();
             }
-            let payload = match values.as_slice() {
+            let payload = match values {
                 [a] => EnumPayload::one(*a),
                 [a, b] => EnumPayload::two(*a, *b),
                 v => EnumPayload::from_slice(v),
             }
-            .with_kinds((extra >> 32) as u8);
+            .with_kinds((extra >> 32) as u32);
             heap.alloc(ObjEnum::new(tag, payload), Object::Enum).0.addr()
         }
         ALLOC_OBJECT => {
-            let (_, r) = heap.alloc(ObjInstance::with_type_id_and_fields(extra as u32, n), Object::Instance);
+            let inst = ObjInstance::with_type_id_and_fields(extra as u32, n).with_own_kinds((extra >> 32) as u32);
+            let (_, r) = heap.alloc(inst, Object::Instance);
             r.as_ptr().addr() as u64
         }
         ALLOC_CORO => {
@@ -1857,11 +1801,12 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             let coro = crate::memory::ObjCoroutine {
                 state: crate::CoroState::Suspended,
                 resume_ip: target,
-                saved_stack: values,
+                saved_stack: values.to_vec(),
                 saved_live_mask: live_mask,
                 started: false,
                 closeable: false,
                 native: None,
+                frame: (0, 0),
             };
             heap.alloc(coro, Object::Coroutine).0.addr()
         }
@@ -1886,6 +1831,8 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 captured_args: filled.to_vec(),
                 captures: captures.to_vec(),
                 dicts: None,
+                // The mask word's high half: the words' packed kinds.
+                word_kinds: (mask.bits() >> 32) as u32,
             };
             heap.alloc(pfn, Object::Fn).0.addr()
         }
@@ -1933,6 +1880,9 @@ pub unsafe extern "C" fn coil_native_array_push(ctx: *mut NativeCtx, addr: u64, 
         return unsafe { bail(ctx) };
     };
     gc.as_mut().push(common::Value::from(value));
+    if heap.rc_counting() {
+        heap.rc_inc_word(common::Value::from(value), gc.as_ref().elem_kind());
+    }
     heap.account_array(gc.as_mut());
     unsafe { note_alloc(ctx, heap) };
     addr
@@ -1979,7 +1929,12 @@ pub unsafe extern "C" fn coil_native_string(ctx: *mut NativeCtx, idx: u64) -> u6
         return unsafe { bail(ctx) };
     };
     let data = unsafe { &*c.strings.add(idx as usize) };
-    let handle = common::Value::from(heap.intern_str(data).as_ptr() as *mut u8 as u64);
+    let s = heap.intern_str(data);
+    // A program string is constant data: counts leave it to the program's end.
+    if heap.rc_counting() {
+        crate::memory::Object::String(s).rc_set_immortal();
+    }
+    let handle = common::Value::from(s.as_ptr() as *mut u8 as u64);
     // No collection runs during native code, so the cache entry stays
     // valid until the runtime's next sweep clears it, as after `STRING`.
     unsafe { *c.string_cache.add(idx as usize) = handle };
@@ -2416,7 +2371,7 @@ pub struct DirectHost {
     /// with native code's words rooted around the call.
     pub collect: bool,
     /// An ordinary native that needs the runtime (it may park the task, open
-    /// descriptors, ...), a task op, a `region` hook (a minor collection)
+    /// descriptors, ...), a task op, a `region` hook
     /// or the finalizer registry's `gc_register_finalizer`:
     /// native code runs it through a host-call stub
     /// ([`host_stubs`]) in a nested interpreter execution, as a runtime call.
@@ -2468,7 +2423,19 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         Some(f) if !host.on_machine => f,
         _ if host.on_machine || host.func.is_some() => {
             crate::host_enum::take_pair_tag();
-            return match unsafe { host_invoke(ctx, id, layout, args, n) } {
+            // SAFETY: `args` holds `n` words.
+            let before = if host.writes_words {
+                heap.rc_before_all(unsafe { std::slice::from_raw_parts(args.cast::<common::Value>(), n as usize) })
+            } else {
+                Vec::new()
+            };
+            let out = unsafe { host_invoke(ctx, id, layout, args, n) };
+            if !before.is_empty()
+                && let Some(heap) = unsafe { crate::native::heap(ctx) }
+            {
+                heap.rc_after_all(before);
+            }
+            return match out {
                 Some(out) if layout as u32 == common::HOST_ENUM_LAYOUT_PAIR => unsafe { split_pair(ctx, out) },
                 Some(out) => out,
                 None => unsafe { bail(ctx) },
@@ -2488,11 +2455,19 @@ pub unsafe extern "C" fn coil_native_host(ctx: *mut NativeCtx, id: u64, layout: 
         return unsafe { bail(ctx) };
     }
     let live_before = heap.live_object_count();
-    let layout = crate::host_enum::HostEnumLayout::from_u32(layout as u32);
+    let bits = layout as u32;
+    let layout = crate::host_enum::HostEnumLayout::from_u32(bits);
     if layout == crate::host_enum::HostEnumLayout::Pair {
         crate::host_enum::take_pair_tag();
     }
-    let v = crate::host_enum::in_host_enum_layout(layout, || f(heap, args));
+    let v = if host.writes_words {
+        let before = heap.rc_before_all(args);
+        let v = crate::host_enum::in_host_enum_bits(bits, || f(heap, args));
+        heap.rc_after_all(before);
+        v
+    } else {
+        crate::host_enum::in_host_enum_bits(bits, || f(heap, args))
+    };
     // The runtime checks for a collection once the call returns.
     let made = heap.live_object_count().saturating_sub(live_before) as u64;
     if made != 0 {
@@ -2532,6 +2507,10 @@ unsafe fn split_pair(ctx: *mut NativeCtx, word: u64) -> u64 {
 /// `ctx` is the call's [`NativeCtx`], on a generator's fiber.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn coil_native_yield(ctx: *mut NativeCtx, value: u64) -> u64 {
+    {
+        let c = unsafe { &mut *ctx };
+        GEN_FRAME.set((std::mem::take(&mut c.gen_homes), std::mem::take(&mut c.gen_mask)));
+    }
     if parks() {
         let c = unsafe { &mut *ctx };
         c.park = PARK_YIELD;
@@ -2554,6 +2533,10 @@ pub unsafe extern "C" fn coil_native_yield(ctx: *mut NativeCtx, value: u64) -> u
 thread_local! {
     /// The next generator resume is a close ([`coil_native_yield`]).
     pub(crate) static GEN_CLOSING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The frame of the generator that just yielded: its homes and the
+    /// counted ones ([`NativeCtx::gen_homes`]), for the resumer to keep on
+    /// the generator while it is suspended (`gen_fiber.rs`).
+    pub(crate) static GEN_FRAME: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -2978,25 +2961,20 @@ unsafe fn host_on_machine(ctx: *mut NativeCtx, host: MachineHostFn, id: u64, lay
 }
 
 /// A frame with `defer`s on its way out: after a panic, keep its
-/// cleanup pad `func` and a copy of its `n` homes at `homes` (`masks`, at
-/// [`mask_words`] words: the heap words among them) for the runtime to run
-/// ([`NativeCtx::pads`]).
+/// cleanup pad `func` and a copy of its `n` homes at `homes` for the
+/// runtime to run ([`NativeCtx::pads`]).
 ///
 /// # Safety
-/// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words and
-/// `masks` at the mask words for them.
+/// `ctx` is the call's [`NativeCtx`]; `homes` points at `n` words.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64, masks: *const u64) {
+pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes: *const u64, n: u64) {
     if func == 0 {
         return;
     }
     // SAFETY: the backend passes a function with the `NativePadFn` ABI.
     let func = unsafe { std::mem::transmute::<usize, NativePadFn>(func as usize) };
-    let words = mask_words((n & !ROOTS_AMBIGUOUS) as usize);
-    // SAFETY: the backend passes that many mask words.
-    let masks = unsafe { std::slice::from_raw_parts(masks, words) };
     // SAFETY: as this function's.
-    unsafe { defer_pad(ctx, func, 0, homes, n, masks) };
+    unsafe { defer_pad(ctx, func, 0, homes, n) };
 }
 
 /// [`coil_native_defer`] of a pad that reads `data` from
@@ -3004,38 +2982,26 @@ pub unsafe extern "C" fn coil_native_defer(ctx: *mut NativeCtx, func: u64, homes
 ///
 /// # Safety
 /// As [`coil_native_defer`].
-pub unsafe fn defer_pad(ctx: *mut NativeCtx, func: NativePadFn, data: usize, homes: *const u64, n: u64, masks: &[u64]) {
+pub unsafe fn defer_pad(ctx: *mut NativeCtx, func: NativePadFn, data: usize, homes: *const u64, n: u64) {
     let c = unsafe { &mut *ctx };
     if c.bail != BAIL_PANIC || c.pads.is_null() {
         return;
     }
-    // `n` may carry `ROOTS_AMBIGUOUS` (an opaque body's `int` homes).
-    let (flags, n) = (n & ROOTS_AMBIGUOUS, n & !ROOTS_AMBIGUOUS);
-    debug_assert_eq!(masks.len(), mask_words(n as usize));
-    let mut rec = vec![0, n | ROOTS_MASKED | flags];
-    rec.extend_from_slice(masks);
     // SAFETY: `homes` holds `n` words.
-    rec.extend((0..n as usize).map(|i| unsafe { *homes.add(i) }));
-    unsafe { (*c.pads).push(NativePad { func, homes: rec, data }) };
+    let homes = (0..n as usize).map(|i| unsafe { *homes.add(i) }).collect();
+    unsafe { (*c.pads).push(NativePad { func, homes, data }) };
 }
 
 /// Run the cleanup pads of a native panic, innermost first, on `env`'s
-/// machine. Each pad's homes,
-/// and those of the pads still to run, are roots meanwhile.
+/// machine.
 pub(crate) fn run_pads(
-    mut pads: Vec<NativePad>,
+    pads: Vec<NativePad>,
     env: &NativeEnv,
     on_panic: &mut dyn FnMut(NativePanic),
 ) {
     let marker = 0u8;
     let sp = std::ptr::addr_of!(marker) as u64;
-    // Link every record: the chain is innermost-last so each pad's own
-    // homes stay listed while it runs.
-    for i in 1..pads.len() {
-        let next = pads[i - 1].homes.as_mut_ptr() as u64;
-        pads[i].homes[0] = next;
-    }
-    for i in 0..pads.len() {
+    for pad in &pads {
         let mut ctx = unsafe { NativeCtx::with_heap(stack_limit_at(sp), env.heap) };
         ctx.machine = env.machine;
         ctx.host = env.host;
@@ -3052,16 +3018,11 @@ pub(crate) fn run_pads(
         ctx.trace = &mut trace;
         let mut message = String::new();
         ctx.message = &mut message;
-        // The last record links all before it.
-        let last = pads.len() - 1;
-        ctx.roots = pads[last].homes.as_mut_ptr() as u64;
         let mut inner = Vec::new();
         ctx.pads = &mut inner;
-        ctx.entry_data = pads[i].data as u64;
-        let words = mask_words((pads[i].homes[1] & !(ROOTS_MASKED | ROOTS_AMBIGUOUS)) as usize);
-        let homes = pads[i].homes[2 + words..].as_ptr();
+        ctx.entry_data = pad.data as u64;
         // SAFETY: the backend compiled `func` as this frame's pad.
-        let _ = unsafe { (pads[i].func)(&mut ctx, homes) };
+        let _ = unsafe { (pad.func)(&mut ctx, pad.homes.as_ptr()) };
         if ctx.bail == BAIL_PANIC {
             on_panic(NativePanic {
                 code: ctx.trap,
@@ -3172,7 +3133,11 @@ pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flag
     let frame = unsafe { std::slice::from_raw_parts_mut(slots, nslots as usize) };
     // SAFETY: `call` set `heap` to the machine's live heap.
     let heap = unsafe { &mut *c.heap };
-    match crate::lanes::lanes_on_frame(heap, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64) {
+    // The loop's arrays: what it pushes and stores counts once it ends.
+    let before = heap.rc_before_all(&frame.iter().map(|&w| common::Value::from(w)).collect::<Vec<_>>());
+    let out = crate::lanes::lanes_on_frame(heap, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64);
+    heap.rc_after_all(before);
+    match out {
         Ok(p) => {
             VECTOR_OPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             p as u64
@@ -3209,6 +3174,10 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_fn_entry_pair", coil_native_fn_entry_pair as *const u8),
         ("coil_native_cow", coil_native_cow as *const u8),
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
+        ("coil_native_rc", coil_native_rc as *const u8),
+        ("coil_native_rc_reuse", coil_native_rc_reuse as *const u8),
+        ("coil_native_rc_take", coil_native_rc_take as *const u8),
+        ("coil_native_offer_slot", coil_native_offer_slot as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
         ("coil_native_array_push", coil_native_array_push as *const u8),
         ("coil_native_lane_index", coil_native_lane_index as *const u8),
@@ -3250,7 +3219,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 51;
+const HELPERS: usize = 55;
 
 #[cfg(test)]
 mod pin_tests {

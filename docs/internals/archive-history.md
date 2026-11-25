@@ -5,8 +5,8 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs` (19 today; a reader takes
-19, 18, 17 and 16 and refuses any other).
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (23 today; a reader takes
+23 only and refuses any other).
 
 ## Major 8
 
@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 4, below, is the
-current version, 8.4 with MIR section `FORMAT` 20). A runtime refuses a major
+only add something to the format raise the minor (minor 11, below, is the
+current version, 8.11 with MIR section `FORMAT` 23). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -127,6 +127,71 @@ Native code places such a struct in registers or memory by the platform's C call
 convention from that layout. Format 19 is format 20 without the layouts; the reader
 takes it (and 18 to 16), and an extern call of it that passes a struct goes through
 the runtime's call. An 8.3 archive loads and runs unchanged.
+
+Minor 5 (reference counts, plan step 2) changes what words mean, so its MIR
+section is a new `FORMAT`, 21, and the reader refuses 16 to 20: a shared generic
+entry's `kinds` word holds two bits per type parameter `p`, bit `2p` for a
+copy-on-write object and bit `2p + 1` for a heap reference (31 parameters, 16 for
+a dictionary's word, 28 for a call through a function value), where older formats'
+constant `kinds` words have one bit per parameter; and an `Alloc`'s construction
+`kinds` is a `u32` (it was a byte): packed word kinds, two bits a word, of up to 16
+words (`common::PackedKinds`, `PACKED_KIND_WORDS`); and a `HostInvoke`'s layout
+byte, with `HOST_ENUM_LAYOUT_BOXED`, carries the word kinds of the boxed `Some` /
+`Ok` payload at bits 2-3 and of the `Err` payload at bits 4-5
+(`common::host_layout_with_kinds`). Its layout is format 20's
+otherwise, so an 8.4 archive's code is compiled again. The snapshot additions are
+additive: an enum object's header `aux` field holds the packed kinds of up to 12
+payload words in its 24 bits (it held 4 words' kinds in its low byte) and its type id
+word's high half the next 4 words' (an older reader ignores it); an instance's
+`aux`, `0` before, holds the packed kinds of its first 12 own slots that its class row leaves
+unknown (generic fields, `ObjInstance::own_kinds`); and an array's element kind may
+be `WORD_SCALAR` as well as `WORD_POINTER`. An 8.4 snapshot reads as before.
+Format 21 also holds the reference count ops of plan step 3, `RcInc` (tag 52) and
+`RcDec` (tag 53): a dest, a source word and an optional `bool` guard, each a value
+id (the guard as an optional one).
+
+Minor 6 (reference counts, plan step 9) marks the classes whose objects can close
+a reference cycle: the finalizer registry's `gc_register_finalizer` (**101**) call
+for such a class sets `common::CYCLIC_TYPE_FLAG` (bit 16) on its type id, and one
+for a class with no `drop` passes `0` as the entry. The cycle collector starts its
+walks from those classes' objects. An 8.5 archive loads unchanged and marks none:
+its cycles are left to the collector.
+
+Minor 7 (reference counts, plan step 10) adds MIR tag 54 to format 21: a
+`HeapFieldStore` of a field whose static type is a number (`scalar`), laid out
+as tag 13's. Its old and new words are numbers, so native code stores it in place
+in a run that keeps counts instead of calling the runtime. An 8.6 archive loads
+unchanged: its field stores all take the counted path.
+
+Minor 8 (reference counts, plan step 10) keeps counts by default: the compiler
+inserts `RcInc` / `RcDec` in every body and the runtime frees at count zero with
+no tracing collector (`COIL_RC_CHECK=0` is the old collector, until step 10 deletes
+it). A body that counts nothing would have its words freed under it, so the MIR
+section is a new `FORMAT`, 22, with format 21's layout, and the reader refuses 21:
+an 8.7 archive's code is compiled again.
+
+Minor 9 (reference counts, plan step 10) adds MIR tag 55 to format 22: a
+`StoreIndex` of an element whose static type is a number (`scalar`), laid out
+as tag 12's. Its old and new words are numbers, so native code stores it in place
+with no count change and no test of either word. An 8.8 archive loads unchanged:
+its index stores all take the counted path.
+
+Minor 10 (reference counts, plan step 10) drops the live-root records: frames
+are no longer collector roots, so nothing read them. A `GcBarrier` (tag 15)
+writes its dest and then its object (the word of the allocating op before it)
+where it wrote a counted list of live roots, and a body writes neither its
+IL slot snapshots (`slot_env`) nor its live roots at each safepoint (`gc_roots`)
+before its debug slots. The layout changes, so the MIR section is a new `FORMAT`,
+23, and the reader refuses 22: an 8.9 archive's code is compiled again.
+
+Minor 11 (reuse in place, #2889) adds MIR tags 56 and 57 to format 23:
+`RcReuse` (dest, src, moved mask), a decrement that keeps a dead plain
+enum's or instance's slot and returns its address (`0` when the object lives
+on or cannot be reused), and `AllocAt` (owned mask, a `u8` that says whether a
+slot follows, the slot, then tag 16's `Alloc` layout), an enum allocation into
+that slot when there is one and it is not `0`, which takes the frame's owner
+of the payload words in the owned mask. An 8.10 archive loads unchanged:
+it holds neither op.
 
 ## Major 7
 

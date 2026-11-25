@@ -2592,6 +2592,30 @@ impl Plan {
         // keeps its shape (unique is idempotent: running it a little
         // earlier changes nothing a program sees).
         let mut before = Before::default();
+        // A store whose value shares the object the write path makes
+        // unique (`a.next = Some(a)`, #2880): the value is computed first,
+        // so the unique below sees the share and copies, and the stored
+        // value is the object as it was.
+        let shared: HashSet<HirId> = self.share.iter().map(|&(v, _)| v).collect();
+        let mut hoisted: HashSet<HirId> = HashSet::new();
+        for &(w, at) in &self.unique {
+            if hoisted.contains(&w.at) {
+                continue;
+            }
+            let HirKind::Assign { place, value } = out.expr(w.at).kind else { continue };
+            let Some(root) = place_root_local(out, place) else { continue };
+            if !shares_root(out, value, root, &shared) {
+                continue;
+            }
+            hoisted.insert(w.at);
+            let span = span_of(out, value);
+            let (t, stmt) = bind_temp(out, "$cv", value, span);
+            before.add(at, stmt);
+            let read = out.push_new(HirKind::Local(t), out.local(t).ty.clone(), span);
+            if let HirKind::Assign { value, .. } = &mut out.exprs[w.at.0 as usize].kind {
+                *value = read;
+            }
+        }
         for &(w, at) in &self.unique {
             let held = self.held.get(&(w.at, w.path)).copied().unwrap_or(0);
             let walked = self.walked.contains(&(w.at, w.path));
@@ -3008,6 +3032,29 @@ fn dup(out: &mut HirBody, id: HirId) -> HirId {
 }
 
 /// `let $tN = init` and the temp it binds, typed as `init`.
+/// The local a place (`a`, `a.f`, `a[i].f`) starts from.
+fn place_root_local(body: &HirBody, mut v: HirId) -> Option<LocalId> {
+    loop {
+        match &body.expr(v).kind {
+            HirKind::Local(l) => return Some(*l),
+            HirKind::Field { base, .. } | HirKind::Index { base, .. } => v = *base,
+            _ => return None,
+        }
+    }
+}
+
+/// Whether `value` holds a share of a place rooted at `root`.
+fn shares_root(body: &HirBody, value: HirId, root: LocalId, shared: &HashSet<HirId>) -> bool {
+    let mut work = vec![value];
+    while let Some(n) = work.pop() {
+        if shared.contains(&n) && place_root_local(body, n) == Some(root) {
+            return true;
+        }
+        work.extend(body.children(n));
+    }
+    false
+}
+
 fn bind_temp(out: &mut HirBody, prefix: &str, init: HirId, span: Span) -> (LocalId, HirId) {
     let ty = out.expr(init).ty.clone();
     let t = out.temp(prefix, ty);

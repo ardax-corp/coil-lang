@@ -924,6 +924,82 @@ fn ffi_calls_run_from_native_code() {
     // The FFI ops run in Rust, no stubs.
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn a_struct_passed_on_the_stack_while_heap_words_are_live() {
+    // `Triple` is passed in memory on the stack (a copy the call makes),
+    // and the struct object `t` stays live across the call: its count is
+    // dropped after it.
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-ffi-stack-struct", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lib = dir.join("libsum.so");
+    let cc = Command::new("cc").args(["-shared", "-fPIC", "-o"]).arg(&lib).arg(manifest.join("examples/sum.c")).status();
+    if !cc.is_ok_and(|s| s.success()) {
+        eprintln!("skipped: no C compiler");
+        return;
+    }
+    let file = dir.join("ffi.coil");
+    std::fs::write(
+        &file,
+        format!(
+            "{HEADER}extern struct Triple {{\n    a: int,\n    b: int,\n    c: int,\n}};\n\
+             extern \"sum\" {{\n    fn triple_sum(int k, Triple t) -> int;\n}}\n\
+             #[inline(never)]\nfn total(int k) -> int {{ let t = {{ a: k, b: 2, c: 3 }}; let n = triple_sum(2, t); return n + t.a; }}\n\
+             fn main() {{ let _ = println(format(\"%i\", total(1))); }}\n"
+        ),
+    )
+    .expect("write source");
+    let mut cmd = Command::new(coil_bin());
+    cmd.arg(&file).args(["--no-build-cache", "--fold-calls", "off", "--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"]).arg(&dir);
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    let out = cmd.env("COIL_NATIVE_STATS", "2").output().expect("spawn coil");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "13\n", "stderr: {stderr}");
+    assert!(compiled(&stderr, "total"), "stats: {stderr}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_nested_struct_result_owns_its_inner_record() {
+    // `flag_flip` returns a `Flag` whose `at` is a record of its own: the
+    // outer record owns it, so reading `g.at` and dropping that word frees
+    // nothing, and records made after it do not reuse it. Both engines.
+    let dir = std::env::temp_dir().join(format!("coil-native-{}-ffi-nested", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lib = dir.join("libsum.so");
+    let cc = Command::new("cc").args(["-shared", "-fPIC", "-o"]).arg(&lib).arg(manifest.join("examples/sum.c")).status();
+    if !cc.is_ok_and(|s| s.success()) {
+        eprintln!("skipped: no C compiler");
+        return;
+    }
+    let file = dir.join("ffi.coil");
+    std::fs::write(
+        &file,
+        format!(
+            "{HEADER}extern struct Point {{\n    x: int32,\n    y: int32,\n}};\n\
+             extern struct Flag {{\n    at: Point,\n    on: bool,\n}};\n\
+             extern \"sum\" {{\n    fn flag_flip(Flag f) -> Flag;\n    fn point_make(int x, int y) -> Point;\n}}\n\
+             fn main() {{\n  let g = flag_flip({{ at: {{ x: 7, y: 8 }}, on: false }});\n  let a = g.at.x;\n\
+               let p = point_make(100, 200);\n  let q = point_make(300, 400);\n\
+               let _ = println(format(\"%i %i %i %i\", a, g.at.x, p.x, q.x));\n}}\n"
+        ),
+    )
+    .expect("write source");
+    for engine in [&["--mir"][..], &[]] {
+        let mut cmd = Command::new(coil_bin());
+        cmd.arg(&file).args(["--no-build-cache", "--allow-dload", "sum", "--dload-trusted", "sum", "--ffi-search-path"]).arg(&dir).args(engine);
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        let out = cmd.output().expect("spawn coil");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "8 8 100 300\n", "{engine:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+}
+
 #[test]
 fn yield_from_runs_in_native_generator_bodies() {
     // `outer`, `relay` and `talk` delegate natively: values, sends passed
@@ -1029,22 +1105,6 @@ fn an_archive_carries_generators_and_vector_loops() {
     assert_eq!(jit.status.code(), mir.status.code());
     let stats = String::from_utf8_lossy(&jit.stderr);
     assert!(stats.contains("calls ran natively") && vector_ops(&stats) >= 1, "stats: {stats}");
-}
-
-#[test]
-fn region_blocks_run_from_native_code() {
-    // `region { }` enters and leaves through host calls that collect:
-    // native code's words stay rooted (and forwarded) across both.
-    let src = format!(
-        "{HEADER}class Node {{ pub v: int, pub next: Option<Node> }}\n\
-         #[inline(never)]\nfn build(int n) -> Option<Node> {{ let head: Option<Node> = Option::None; let i = 0; while i < n {{ head = Option::Some(new Node(i, head)); i += 1; }} return head; }}\n\
-         #[inline(never)]\nfn total(Option<Node> head) -> int {{ let n = 0; let cur = head; while let Option::Some(node) = cur {{ n += node.v; cur = node.next; }} return n; }}\n\
-         #[inline(never)]\nfn rounds(Option<Node> kept, int k) -> int {{ let sum = 0; let r = 0; while r < k {{ sum += region {{ let list = build(100 + r); total(list) + total(kept) }}; r += 1; }} return sum + total(kept); }}\n\
-         fn main() {{ let kept = build(50); let _ = println(format(\"%i\", rounds(kept, 200))); }}\n"
-    );
-    let stats = same_as_mir("native_region", &src);
-    assert!(compiled(&stats, "rounds"), "stats: {stats}");
-    // The region hooks run in Rust: no stubs.
 }
 
 #[test]

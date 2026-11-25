@@ -36,7 +36,7 @@ code compiles.
 
 ## How long code lives
 
-`NativeProgram::keep` owns a program's code and stack maps, and they go with its
+`NativeProgram::keep` owns a program's code, and it goes with its
 last handle. `coil test` gives it to `NativeCode`, so each file's code leaves with
 the file: a JIT reserves 64 MiB or more, and Windows charges all of it to the commit
 limit. A run of one program forgets `keep`: the code stays for the process.
@@ -120,14 +120,9 @@ into a word array never moves its storage; a push may, and another value may nam
 the same array, so after an `ArrayPush` every view reads through the helpers until
 its value is defined again. A vector loop drops the views too.
 
-A store view has a state (`machine::VIEW_PLAIN` = 1, `VIEW_TRACKED` = 2) and,
-for a tracked one, a third word: the card bytes of an old array with a card table
-([escape-memory.md](escape-memory.md#remembered-arrays-2687)). A plain view stores
-in place (`ok == 1`). A tracked view stores in place too, and also writes `1` at
-`cards + (index >> CARD_SHIFT)`: three instructions more, on the block a plain
-store skips to. Loads take either state (`ok != 0`). The states and the card
-constants are part of `layout_fingerprint`, so AOT code built for another
-protocol is refused.
+A view has a state word (`machine::VIEW_PLAIN` = 1): a view stores and loads in
+place when it is set (`ok != 0`). The state is part of `layout_fingerprint`, so
+AOT code built for another protocol is refused.
 
 `Cow`, `Alloc` and `ArrayPush` call `coil_native_cow`, `_cow_field`, `_alloc` and
 `_array_push`. More ops follow the same pattern:
@@ -181,40 +176,23 @@ interpreter's frames do not use the machine stack, and its limit is
 
 ## Calls and collections
 
-A collection runs at a *safepoint*: the entry and loop headers of a body that may
-allocate, taken when an allocation found one due (`NativeCtx::gc_due`), and inside
-helpers that may collect. `gc_epoch` moves at each, so native code reloads its
-rooted words.
+A safepoint is the entry and loop headers of a body that may allocate, taken when
+an allocation found work due (`NativeCtx::gc_due`: a `drop` counts left due, or the
+cycle collector on allocation pressure), and inside helpers that may run code. Nothing
+moves, so native code keeps its words in registers across them; only array views are
+re-read when `gc_epoch` moved (`epoch_mark` / `epoch_check` around such calls).
 
-Native frames hand the collector their heap words through Cranelift stack maps. Every
-value of a heap type (and every `int` value a heap word moved into, `pointer_words`)
-is declared `declare_var_needs_stack_map`: Cranelift keeps it in a stack slot across
-each call and records, per call's return address, which slots hold live heap words.
-Liveness is Cranelift's: **a word lives until its last use**. A `gc::root` handle is
-the exception: `keep_roots` uses each one before every return, so an unused `let r =
-root(h)` keeps `h` until the function returns. A weak reference or a finalizer can
-therefore see an object die at its last use, not at the end of its scope. The
-interpreter follows the same rule ([mir-interp.md](mir-interp.md#how-it-runs)).
+Frames are no roots. The count operations the compiler inserts (`RcInc` / `RcDec`,
+inline in native code) make every word a frame uses owned by a count, the frame's own
+or a holder's that outlives the use, so the cycle collector needs nothing from frames
+([memory.md](memory.md#why-frames-are-no-roots)). There are no stack maps, root
+records or helper trampolines. Code is still compiled with frame pointers, for
+profilers and backtraces. A word dies at its last use (its owned count is dropped
+there); a `gc::root` handle keeps its value until `unroot`. A weak reference or a
+finalizer can therefore see an object die at its last use, not at the end of its
+scope. The interpreter follows the same rule ([mir-interp.md](mir-interp.md#how-it-runs)).
 
-Code is compiled with frame pointers. Native code calls a helper that may collect
-through a local trampoline that stores its frame pointer in `NativeCtx::native_fp`.
-The collector walks from there: `[fp + 8]` is the return address into the caller,
-`fp + 16` the caller's stack pointer at that call, `[fp]` the caller's frame pointer.
-Each return address inside a compiled body looks up its stack map
-(`machine::native::register_stack_maps`; an AOT object carries them as
-`coil_aot_stack_maps`); the walk stops at the first return address outside every
-body. The slots are precise roots: a minor collection forwards them in place, and
-native code reloads them after the call. A suspended task or generator keeps its
-context's `native_fp`, so its frames are walked the same way.
-
-Two kinds of word stay in a record linked into `NativeCtx::roots` (`[next, n,
-words…]` on the stack): the heap homes, which live in memory and are written back
-when `gc_epoch` moved (array views are then re-read), and the ambiguous words
-(`ROOTS_AMBIGUOUS`): the low word of a pair that may carry an object, a call's result
-or a parameter (`MirFunc::heap_pair_words`, and the φs that copy one: `pair_words`),
-and an opaque body's `int` words. Those are pinned and never rewritten.
-
-`compiler/src/mir/frame_words.rs` holds these analyses for both engines.
+`compiler/src/mir/frame_words.rs` holds the word-kind analyses the count insertion uses.
 
 ## Host calls
 
@@ -222,7 +200,12 @@ Host natives keep frozen ids: the `*_ID` consts in `common/src/host.rs`, with a 
 in `machine/src/host_natives.rs`. Retired ids stay as panic stubs, so later ids do not
 move. A `HostInvoke` carries a layout for `Option` / `Result` results (`0` boxed
 `ObjEnum`, `1` `Option` pointer niche or `Result<(), E>` with heap `E`, `2` heap-heap
-`Result`), and natives build that layout once through `machine::host_enum`.
+`Result`, `3` two words), and natives build that layout once through
+`machine::host_enum`. A boxed layout's higher bits give the word kinds of the
+`Some` / `Ok` and `Err` payloads, from the call's type in a ground body
+(`common::host_layout_with_kinds`, read back with `host_enum::host_payload_kind`);
+`Vec::pop` / `remove`, one thunk for every `T`, take theirs from the array's
+element kind.
 
 A native with a plain function (`machine::native::direct_host_natives`, resolved at
 compile time since ids are frozen) is called straight from `coil_native_host`. One
@@ -292,13 +275,11 @@ native code reloads its words.
   (`common::encode_callback_sig`), so the archive is unchanged. In a program that may
   make a C callback into coil (an extern function that takes one: a library may keep
   a callback and run it during a later call, `may_call_back`), every direct extern call goes through a trampoline
-  per call shape, `coil_cb_call_<k>`, between `push_roots` / `pop_roots`: it saves
-  the frame pointer for the collector, calls `coil_native_cb_enter` (which makes
+  per call shape, `coil_cb_call_<k>`: it calls `coil_native_cb_enter` (which makes
   this thread's context the one a callback runs on), calls C, and then
   `coil_native_cb_leave`, which reports a panic in a callback as the call's. A call
-  with a struct on the stack or through a hidden result pointer (special parameters
-  a trampoline does not forward) or a buffer (`bytes`, `Vec`: the collector may move
-  the object a copy writes back to) still goes through the runtime there. A call into `sum` costs about 3.5 ns direct against 270 ns through
+  with a pointer argument other than a C string (`bytes`, `Vec`, a struct) still goes
+  through the runtime there. A call into `sum` costs about 3.5 ns direct against 270 ns through
   `invoke` on a tuple, and about 10 ns against 125 ns through the trampoline in a
   program that may call back; one passing a 12-byte string about 40 ns against
   315 ns; one passing a 16-byte struct about 18 ns against 400 ns through the
@@ -353,7 +334,7 @@ first (`coil_native_claim`) and skips a `drop` that ran.
 
 A body with `defer`s compiles with its cleanup pad (`MirFunc::cleanup`, a separate
 function `(ctx, *const u64 homes) -> u64`). Its homes live in a zeroed stack slot;
-heap homes are rooted with the body's heap words. The normal exits run the defers
+a heap home owns a count of its word. The normal exits run the defers
 inline, as in MIR. After a panic, each unwound frame's exit path hands its pad and a
 copy of its homes to `coil_native_defer`, and `Driver::run_pads` runs them once the
 panic is reported, innermost first: panic and backtrace, then the defers inside out.
@@ -368,7 +349,6 @@ that waits suspends its fiber back to that loop.
 - A switch fences its owner (`stacks::fiber_switch_fence`): what runs on the other
   side reaches the same object through a raw pointer, which `&mut`'s `noalias` does
   not account for.
-- The collector walks a suspended fiber's frames from the `native_fp` it kept.
 - A task that never resumes (its scope torn down after a root panic) drops its fiber
   with `force_reset`: native frames have no unwind tables, so what they own leaks.
 - wasm has no fibers: the interpreter parks its frames on the heap there
@@ -383,11 +363,10 @@ them (`coil_native_coro_done`) and resumes them (`coil_native_resume`). A genera
 body compiles too (`NativeEntry::generator`, `AotEntry` byte `generator`); no call
 enters it. Its first resume makes a fiber for it (`machine/src/gen_fiber.rs`) and runs
 the body there on the generator's saved arguments. `Yield` calls `coil_native_yield`,
-which suspends the fiber with the value and its call's context. The resumer then
-copies that call's root words into the generator's `saved_stack`, so the collector
-traces and forwards them, and the `ObjCoroutine` owns the fiber. The next resume
-writes the words back, sends its word, and native code reloads after the yield
-(`gc_epoch`). A resume of a finished or invalid handle panics at native code's own
+which suspends the fiber with the value and its call's context, and the
+`ObjCoroutine` owns the fiber. The frame's words stay on the fiber's stack, owned by
+the frame's counts; the generator's saved words are cleared once it starts, and only an
+unstarted generator owns its arguments. The next resume sends its word. A resume of a finished or invalid handle panics at native code's own
 site. `yield from h` in a native body is a loop of resume, done check and yield, the
 sends passed through. Two-word returns are refused.
 
@@ -478,18 +457,17 @@ driver.
 
 ## Inline allocation
 
-An `Alloc` of a fixed-size nursery object (an enum variant or tuple, an enum object of
+An `Alloc` of a fixed-size bump-allocated object (an enum variant or tuple, an enum object of
 `PRODUCT_TAG`, of 1 to 4 words, an
 instance of a class with 1 to 4 fields) does not call `coil_native_alloc` on its fast
-path. Native code loads the heap's gate (`HeapCounts::inline_gate`, closed while the
-nursery is off, a mark is open, pretenuring after a mostly surviving minor, a steal
-epoch, and under `gc-stress`), and for an instance tests its type's bit in the
+path. Native code loads the heap's gate (`HeapCounts::inline_gate`, closed in a steal
+epoch and under `rc-check`), and for an instance tests its type's bit in the
 finalizer types (a type with a `drop` stays old). It then bumps its size class's cursor
 (`Bump`, boxed in the slab, indexed by a class fixed for every heap), writes the slot's
-image with the payload words in place, and adds the object to `alloc_bytes`,
-`young_bytes` and `live_count`. A full chunk, a closed gate or a `drop` type falls back
-to the helper, which refills the chunk and sets `gc_due` when a minor collection is
-due, so collections still come at safepoints on time.
+image with the payload words in place, and adds the object to `alloc_bytes` and
+`live_count`. A full chunk, a closed gate or a `drop` type falls back to the helper,
+which refills the chunk and sets `gc_due` when the cycle collector is due, so it still
+runs at a safepoint on time. A free pushes the slot on its class's free list inline.
 
 The images come from `machine::memory::inline_object`, probed from real objects:
 `ObjEnum`, `ObjInstance` and their payloads are `repr(C)` / `repr(u8)`, so
@@ -510,12 +488,11 @@ bytes, where the store sits, its `Inline` and `Spill` tags, the inline length by
 and slots, and the `Vec` pointer and length words of a spilled store. Native code
 checks, in order, that the object is not null, that its kind is an instance or an
 enum (one test: the two kinds differ in one bit; a store takes instances only), for
-a store that the generation byte has no unlogged bit (the write barrier would have
-to log the object), that the store is inline or spilled, and that the slot is under
+that the store is inline or spilled, and that the slot is under
 the length. It then loads or stores the slot word. A failed load check is a
 compiler bug and bails, a panic, with no helper call; the interpreter's
 `coil_native_product_load` bails on the same objects. A failed store check calls
-`_set_field`, which handles logged objects and panics as before.
+`_set_field`, which panics as before.
 `layout_fingerprint` covers these offsets, so an AOT object made against another
 layout is refused.
 
@@ -524,27 +501,38 @@ layout is refused.
 A copy-on-write share of a word (`Cow` with `unique` false and no field) sets
 the object's shared flag in place, with no call (#2506): the word with its low
 tag bit cleared, nothing for null, then the header's kind byte, and for a class
-instance or an array (`KIND_INSTANCE`, `KIND_ARRAY`) a store of
-`COW_SHARED_SET` at `COW_SHARED_OFFSET`. Those constants sit next to
+instance or an array (`KIND_INSTANCE`, `KIND_ARRAY`) an or of `FLAG_SHARED`
+into the flags byte at `HEADER_FLAGS_OFFSET`. Those constants sit next to
 `GcHeader` (`machine/src/memory/heap.rs`), tied to it by `offset_of!` and
-size asserts, and `Object::set_shared` writes the flag through the same pair;
+size asserts, and `Object::set_shared` sets the same bit;
 `layout_fingerprint` covers them. Any other word is left as it is, as
 `Heap::cow_share` leaves it. A share allocates nothing (`OpProps` of a share
 `Cow`: no `allocates`, no `gc_edge`), so a body whose only copy-on-write op on
 a type parameter is a share behind its `kinds` test stays without a GC poll
-and with no helper call. The flag is a `Cell<bool>` the runtime sets from a
+and with no helper call. The flags byte is a `Cell<u8>` the runtime sets from a
 shared reference, never through `GcData::as_mut`, so the inline store is the
-same in debug and `gc-stress` builds. The interpreter keeps `coil_native_cow`,
+same in debug and `rc-check` builds. The interpreter keeps `coil_native_cow`,
 which also counts the share for `--cow-report`'s summary line; native code's
 inline shares are not in that count (the copies are).
 
+The reference count ops `RcInc` / `RcDec` (archive 8.5, reference counts plan
+step 3) call `coil_native_rc` (`ctx`, the word, `1` for a decrement), behind a
+branch on the op's guard when it has one. The helper does nothing unless the heap
+keeps counts (`COIL_RC_CHECK` today) and the word names an object
+(`Heap::rc_retain` / `Heap::rc_drop`); a decrement of the last owner releases the
+object once `Heap::set_rc_frees` is on: what it names loses an owner in turn, and
+it is freed (strings, arrays, enums and instances; anything else, an object with
+a pending `drop`, and everything during a collection or a steal epoch stays for
+the collector at count zero). The interpreter calls the same helper. An inline
+increment and decrement come with the insertion pass (steps 4 and 6).
+
 A pinned object (archive 8.2, [cow-calls.md](cow-calls.md), "Pinned objects") is
-never marked: after the kind byte the share loads the pin at `COW_PINNED_OFFSET`
+never marked: after the kind byte the share tests `FLAG_PINNED` in the flags byte
 and, when it is set, branches to a cold block that calls `coil_native_cow`, whose
 copy is the share's result. That helper allocates and never collects, so the share
 stays no GC edge and allocates nothing as far as the body's `OpProps` go: a copy
 it makes is counted, and the next safepoint collects. `CowPin` and `CowUnpin`
-are inline byte operations on the same header byte, for a class instance or an
+are inline or / and operations on the same flags byte, for a class instance or an
 array only (null and other kinds: `CowPin` gives `0`, `CowUnpin` does nothing).
 The pin test and its cold call are emitted only in the bodies that may run
 while an object is pinned (`Plan::pins`, `pin_reach`): the bodies with a
@@ -562,8 +550,8 @@ a stand-in `bbox` +14.5%, and `bint` at `--clone-budget 0` +2.2%. With one
 `split` (which pins) in a `bbox` program, testing every body cost +14.2%. With
 the reach it costs +0.15%.
 
-In-place stores are compiled only into release builds without `gc-stress`
-(`ProductSlots::inline_stores`): debug and `gc-stress` builds check epoch writes in
+In-place stores are compiled only into release builds without `rc-check`
+(`ProductSlots::inline_stores`): debug and `rc-check` builds check epoch writes in
 `GcData::as_mut`, which native code would skip. Loads are in place in every build.
 
 ## Operation semantics
@@ -669,7 +657,7 @@ repeat run loads it: 482 ms becomes 9 ms there. `--no-build-cache` skips it. Nei
 - **Key:** sha256 of the MIR section, the build id, the host's target and CPU features
   (`coil_native::image_fingerprint`) and every `COIL_*` variable. A hit skips decoding.
 - **Entry:** a code image (`coil-native/src/image.rs`): each function's bytes and
-  relocations, the stack maps, entries and sites. `load_image` declares the same
+  relocations, entries and sites. `load_image` declares the same
   functions in the same order, so `FuncId`s match, and hands the bytes to
   `define_function_bytes`, which relocates them for this process. Code holds no
   addresses of its own: the AOT object relocates the same lowering.
@@ -679,7 +667,7 @@ repeat run loads it: 482 ms becomes 9 ms there. `--no-build-cache` skips it. Nei
 - **Size:** at most 256 entries, least recently used first, as the build cache.
 
 `COIL_CODE_IMAGE_CHECK=1` sends every JIT through an image and runs the copy, and fails
-if the code does not fit one. CI's `native` cell runs the corpus so, and GC stress runs
+if the code does not fit one. CI's `native` cell runs the corpus so, and the rc-check cell runs
 `memory` so: any program a cache hit would break fails there.
 
 ### JIT runner
@@ -828,7 +816,7 @@ through the `dload` gate.
 | Module setup | `compiler/src/codegen/module_setup.rs` |
 | Driver, start | `machine/src/driver.rs`, `machine/src/start.rs` (`run_natively`), `machine/src/worker.rs` |
 | Machine stacks | `machine/src/stacks.rs` |
-| Stack maps, frame walk | `coil-native` (`stack_maps`, `define_trampolines`), `machine::native` (`register_stack_maps`, `install_aot_stack_maps`, `for_each_frame_root`) |
+| Count ops, safepoints | `compiler/src/mir/rc_insert.rs`, `coil-native` (`emit_rc`, `epoch_mark` / `epoch_check`), `machine/src/memory/rc.rs`, `machine/src/collect.rs` |
 | Inline allocation | `machine/src/memory/inline.rs` (`inline_object`, `layout_fingerprint`), `HeapCounts` |
 | Static and shared `extern` libraries | `--link-static` in `src/cli.rs`, `src/package_app.rs` (`LinkInputs`, `shared_links`), `coil-native` `static_symbol_table`, `machine/src/ffi/static_libs.rs` |
 | Tests | `tests/native_jit_cli.rs`, `tests/package_cli.rs` (`aot_package_links_extern_libraries_statically`) |

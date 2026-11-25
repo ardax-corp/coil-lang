@@ -3754,7 +3754,7 @@ impl Checker {
             Expression::TestCase { name, body } => self.infer_test_case(name, body, &range),
             // Left in place only when it could not be expanded, which
             // was reported.
-            Expression::ComptimeBlock(_) | Expression::RegionMark => unit_ty(),
+            Expression::ComptimeBlock(_) => unit_ty(),
             Expression::Implementation {
                 what,
                 owner,
@@ -18213,7 +18213,7 @@ impl Checker {
                 self.pre_register_enums_walk(body, errors);
             }
             // Expanded before this runs; its body is the expansion program's.
-            Expression::ComptimeBlock(_) | Expression::RegionMark => {}
+            Expression::ComptimeBlock(_) => {}
 
             Expression::Branch(cond, body) => {
                 if let Some(c) = cond {

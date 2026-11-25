@@ -20,7 +20,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Locality and loop optimizations](locality.md) | `feature/locality`: vectorize nested and mixed loops, field scalar promotion, mod/ref summaries, array-order GC copying, prefetch, loop interchange; semantics rules and probe numbers |
 | [Copy-on-write across calls](cow-calls.md) | who shares an argument or result at a call: summary bits `returns_arg` / `returns_inner`, moves into a call (`v = f(v)`, `self.f = g(self.f)`), lazy share for opaque callees (#2206); loop views of nested write paths (#2351) |
 | [View classes](view-classes.md) | `view class` and `mut` fields: borrows a class can hold under copy-on-write; E0149 / E0150 / E0151 rules, COW handling, spliced views at zero cost |
-| [Escape facts and early freeing](escape-memory.md) | `feature/escape-memory`: escape summaries across calls, freeing at scope end, static uniqueness, nursery; the GC stays as backstop |
+| [Escape facts and early freeing](escape-memory.md) | `feature/escape-memory`: escape summaries across calls, freeing at scope end, static uniqueness; early frees run before the counts of [memory.md](memory.md) |
 | [Language quirks](language-quirks.md) | Locked Q1–Q9 (2026-09-10): `[T; N]` box-once, class field-SROA, grow type error, defined `i % N`, panic vs raise, roadmap Q6–Q9 |
 | [`if` expression](if-expression.md) | #1877: `if … else …` / `if let … else …` as a value; primary precedence like `match`; E0137 for a missing `else`; reuses the `If` / `Match` HIR |
 | [Q6 iterator protocol](q6-iterator-protocol.md) | Counted desugar for `for` (array / literal range / B5 locals / C2 param+returned Range / C2b heap-field + user `Iterator::next` + dict + coro) |
@@ -36,8 +36,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; landed opts (#304–#318); hit-bench prove rule; PGO removed (#301). Extra benches: `gc_churn`, Option/Result churn, `iv_mul_sr` / `licm_nested_chains` / `tail_sibling` / `cse_*` / `dest_prop_field_alias` |
 | [Packed byte arrays](packed-bytes.md) | #927: `Vec<byte>` / `Vec<bool>` one byte per element; lossless `Bytes` storage, `WORD_BYTE` construction stamp, byte copies for I/O / FFI / threads; measurements |
 | [Heap identity](heap-identity.md) | Mapped slab + header poison for `find_object_by_addr` (COI-200) |
-| [Incremental GC](gc-incremental.md) | COI-309 S4: safepoint mark (no write barrier) + lazy sweep; moving GC deferred |
-| [GC evacuation](gc-evacuation.md) | Mostly-copying evacuation of sparse chunks (always on; `COIL_GC_COMPACT=0` off in unit tests); precise refs rewritten, ambiguous ones pin |
+| [Memory](memory.md) | Reference counts the compiler inserts and mostly elides, the cycle collector for cyclic classes, the allocator, rc-check and `COIL_RC_LEAKS`, known gaps (replaced the tracing GC, #2889) |
 | [SIMD](simd.md) | `coil-simd`: packed LA and the lane kernels behind `VecLoop` and `ByteScan` |
 | [Auto-par](auto-par.md) | Purity + parameterized AlwaysPar IPA (COI-366 F1 hop/grain); F2 broader admission (COI-368); loop IPA (COI-362 E4); C1/C2 shared-heap spawn (E6/E7); [branch-miss notes](auto-par-branch-misses.md) |
 | [Optimizer hints](opt-hints.md) | `#[inline]` / `#[cold]` / `#[hot]`: surface, precedence, cold inference, `feature/opt-hints` steps (no PGO) |
@@ -45,7 +44,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [MIR interpreter](mir-interp.md) | `--mir`, `--engine mir`: raw MIR as the reference output; the native ABI with frames of its own; comptime, debugger and parking on it; the engine plan |
 | [Par lock hints](par-lock-hints.md) | F3 (COI-369): userland locks + E0805 call-bag escape hints (no compiler locks) |
 | [Shared-heap sendability](shared-heap-sendability.md) | COI-363 C0 whitelist; C1 loop steal (E6); C2 expression IPA without PortableValue copy (E7) |
-| [Shared-heap guard](shared-heap-guard.md) | #1892: debug / gc-stress check that a shared-heap job writes only objects allocated in its epoch (header epoch stamp, per-thread job scope); mutation-path inventory; what release relies on |
+| [Shared-heap guard](shared-heap-guard.md) | #1892: debug / rc-check check that a shared-heap job writes only objects allocated in its epoch (header epoch stamp, per-thread job scope); mutation-path inventory; what release relies on |
 | [Contracts](contracts.md) | `requires` / `ensures`: syntax, typing, effect-free clauses, HIR checks, caller blame (`contract_fail`, HostInvoke **159**), `--contracts` levels, generated tests, `coil verify` (SMT) |
 | [Tasks](tasks.md) | `task::scope` / `spawn` / `join` / `sleep` / `yield_now` / `cancel` / `timeout` / `shield` / `channel` / `blocking` on one runtime: scheduler, suspension points, child panics, cancellation, the `defer` unwinder, waits on other threads; HostInvoke **144–158** |
 | [IO reactor](io-reactor.md) | Sync adapter waits + `wait_readable` / `wait_writable` (task-aware) / CPU help-steal; HostInvoke **119**/`stream_attach`, **120**/`stream_park` (panic stubs); clocks **121–123**; M1 math **125–135** (archive minor 5: `atan`…`tanh`). `PI`/`E`/`TAU` → coil-stdlib `num` |
@@ -69,7 +68,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 |-------|------|
 | `parser` | Pratt parser and AST |
 | `compiler` | HM typechecker, HIR (optimizations, layout plan), MIR (HIR → SSA, passes, archive format), pipeline |
-| `machine` | Runtime: driver, heap/GC, tasks, reactor, FFI (libffi), host natives, the native ABI |
+| `machine` | Runtime: driver, heap (counts, cycle collector), tasks, reactor, FFI (libffi), host natives, the native ABI |
 | `coil-native` | MIR to Cranelift, JIT and AOT objects |
 | `coil-mir-interp` | The MIR interpreter |
 | `coil-rt` | Runtime library an AOT executable links (`libcoil_rt.a`) |

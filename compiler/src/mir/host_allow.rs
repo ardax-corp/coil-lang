@@ -166,13 +166,17 @@ pub fn host_result_ok(id: u16, expected: MirTy, actual: MirTy) -> bool {
 /// Host Option/Result layouts the dense edge can reconstruct: the one-word
 /// ones and the two-word pair.
 pub fn dense_host_layout_ok(layout: u8) -> bool {
-    matches!(
-        layout as u32,
-        common::HOST_ENUM_LAYOUT_BOXED
-            | common::HOST_ENUM_LAYOUT_OPTION_NICHE
-            | common::HOST_ENUM_LAYOUT_RESULT_NICHE
-            | common::HOST_ENUM_LAYOUT_PAIR
-    )
+    let base = common::host_layout_base(u32::from(layout));
+    // Payload kinds ride above the layout of a boxed result only.
+    (base == common::HOST_ENUM_LAYOUT_BOXED || base == u32::from(layout))
+        && u32::from(layout) >> 6 == 0
+        && matches!(
+            base,
+            common::HOST_ENUM_LAYOUT_BOXED
+                | common::HOST_ENUM_LAYOUT_OPTION_NICHE
+                | common::HOST_ENUM_LAYOUT_RESULT_NICHE
+                | common::HOST_ENUM_LAYOUT_PAIR
+        )
 }
 
 pub fn host_edge_spec_by_name(name: &str) -> Option<HostSpec> {

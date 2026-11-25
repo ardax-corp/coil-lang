@@ -48,9 +48,9 @@ class instances by identity (#1618).
 
 **Allocation and collection.** `Alloc`, `ArrayPush`, `Format`, `Stringify` and
 `Cow` are the ops that make or grow objects. A `GcBarrier` follows each as its
-safepoint. `fill_live_roots` (`gc.rs`) records the live heap words at those edges
-in `GcBarrier.roots` and `MirFunc.gc_roots`. The engines do not read that sidecar:
-they work out their roots from `frame_words` ([native.md](native.md#calls-and-collections)).
+safepoint and names the word that op made (`GcBarrier.object`, which also keeps
+the op alive through dead-code elimination). Frames are no roots under reference
+counts, so a barrier records nothing else ([memory.md](memory.md)).
 
 ## Passes by level
 

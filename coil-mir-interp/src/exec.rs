@@ -2,11 +2,11 @@
 //! does, through the same helpers.
 
 use compiler::native_mir::{
-    AllocCall, MirBinOp, alloc_call, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, heap_word, ty_of, vector_op, word_kind,
+    AllocCall, MirBinOp, alloc_call, MirCastKind, MirCmpOp, MirConst, MirFunc, MirInst, MirTy, MirUnaryOp, Terminator, ValueId, ty_of, vector_op, word_kind,
 };
 use machine::native::{
     self as rt, Applied, NOT_AN_ENUM, NativeCtx,
-    ROOTS_AMBIGUOUS, TRAP_BUDGET, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_NEGATIVE_EXPONENT, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
+    TRAP_BUDGET, TRAP_DIV_ZERO, TRAP_HELPER, TRAP_NEGATIVE_EXPONENT, TRAP_OVERFLOW, TRAP_SHIFT, TRAP_STACK,
 };
 
 use crate::frame::{AT_BLOCK_START, Activation, Frame, MAX_WORDS, frame_homes};
@@ -71,7 +71,6 @@ unsafe fn finish(mut act: Activation, ctx: *mut NativeCtx) {
         if act.parked {
             act.parked = false;
             (*ctx).parked = Box::into_raw(Box::new(act)).cast();
-            (*ctx).park_scan = Some(crate::frame::scan_roots);
             (*ctx).park_free = Some(free_parked);
         } else {
             act.release();
@@ -182,11 +181,12 @@ fn push(act: &mut Activation, body: &Body, homes: *mut u64) -> bool {
 }
 
 /// A word's kinds for an object's packed kinds.
-fn packed_kinds(f: &MirFunc, words: &[ValueId]) -> u8 {
-    if f.opaque_words {
-        return 0;
-    }
-    common::pack_word_kinds(words.iter().map(|w| word_kind(ty_of(f, *w))))
+fn packed_kinds(f: &MirFunc, words: &[ValueId]) -> common::PackedKinds {
+    // An opaque body's `int` words may be objects: their kinds stay unknown.
+    common::pack_word_kinds(words.iter().map(|w| match ty_of(f, *w) {
+        MirTy::I64 if f.opaque_words => common::WORD_UNKNOWN,
+        t => word_kind(t),
+    }))
 }
 
 /// `a op b` on ints, as [`common::int_arith`] defines it (and the constant
@@ -288,11 +288,7 @@ unsafe fn unwind(act: *mut Activation, code: u64) -> u64 {
                 let f = &body.mir;
                 let regs = (*act).regs.as_mut_ptr().add(frame.base);
                 let homes = frame_homes(frame, regs, f);
-                let heap = (0..f.homes.len()).filter(|&h| heap_word(f.homes[h]));
-                let amb: Vec<usize> = if f.opaque_words { (0..f.homes.len()).filter(|&h| f.homes[h] == MirTy::I64).collect() } else { Vec::new() };
-                let masks = rt::root_masks(f.homes.len(), heap.chain(amb.iter().copied()));
-                let flags = if amb.is_empty() { 0 } else { ROOTS_AMBIGUOUS };
-                rt::defer_pad(ctx, pad_entry, std::ptr::from_ref::<Body>(pad) as usize, homes, f.homes.len() as u64 | flags, &masks);
+                rt::defer_pad(ctx, pad_entry, std::ptr::from_ref::<Body>(pad) as usize, homes, f.homes.len() as u64);
             }
             let base = frame.base;
             (*act).frames.pop();
@@ -303,10 +299,18 @@ unsafe fn unwind(act: *mut Activation, code: u64) -> u64 {
 }
 
 /// Yield `word`. Under a debugger the generator's frames leave the task's
-/// stack meanwhile: a resume may come from another task, or never.
-unsafe fn yield_word(act: *mut Activation, ctx: *mut NativeCtx, word: u64) -> u64 {
+/// stack meanwhile: a resume may come from another task, or never. The
+/// frame's counted homes go with it, for the cycle collector.
+unsafe fn yield_word(act: *mut Activation, ctx: *mut NativeCtx, regs: *mut u64, word: u64) -> u64 {
     // SAFETY: the running activation and its context.
     unsafe {
+        let top = (&(*act).frames).last().expect("a running frame");
+        let body = &*top.body;
+        if let Some(mask) = body.exec().counted_homes {
+            let f = &body.mir;
+            (*ctx).gen_homes = if f.homes.is_empty() { rt::GEN_FRAME_EMPTY } else { frame_homes(top, regs, f) as u64 };
+            (*ctx).gen_mask = mask;
+        }
         let debug = crate::debug::active();
         if debug {
             crate::debug::leave(act);
@@ -742,14 +746,14 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                         break;
                     }
                     (*act).rerun_op = rt::parks();
-                    send = yield_word(act, ctx, w);
+                    send = yield_word(act, ctx, regs, w);
                     // A close unwinds from the yield.
                     check!();
                 }
                 set_word(f, regs, *dest, 0);
             }
             MirInst::Yield { dest, value, .. } => {
-                let w = yield_word(act, ctx, get!(*value));
+                let w = yield_word(act, ctx, regs, get!(*value));
                 check!();
                 set_word(f, regs, *dest, w);
             }
@@ -812,12 +816,15 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 check!();
                 set!(*dest, v);
             }
-            MirInst::HeapFieldStore { dest, object, value, index } => {
+            MirInst::HeapFieldStore { dest, object, value, index, .. } => {
                 let w = rt::coil_native_set_field(ctx, get!(*object), u64::from(*index), get!(*value));
                 check!();
                 set!(*dest, w);
             }
-            MirInst::Alloc { dest, kind, elems, kinds } => {
+            MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
+                if let MirInst::AllocAt { slot: Some(slot), .. } = inst {
+                    rt::coil_native_offer_slot(ctx, get!(*slot));
+                }
                 let pc_of = |t| program(body).body_at(t).map(|b| b.pc).filter(|&pc| pc != u32::MAX);
                 let Ok(AllocCall { code, n, extra, last }) = alloc_call(*kind, elems.len(), *kinds, || packed_kinds(f, elems), pc_of) else {
                     return Flow::Trap(TRAP_HELPER);
@@ -828,6 +835,15 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 s.extend(last);
                 let w = rt::coil_native_alloc(ctx, code, s.as_ptr(), n, extra);
                 check!();
+                // The allocation counted each word: an owned one gives the
+                // frame's owner back.
+                if let MirInst::AllocAt { owned, .. } = inst {
+                    for (i, e) in elems.iter().enumerate() {
+                        if i < 32 && owned & (1 << i) != 0 {
+                            rt::coil_native_rc(ctx, get!(*e), 1);
+                        }
+                    }
+                }
                 set!(*dest, w);
             }
             MirInst::ArrayPush { dest, array, value } => {
@@ -959,6 +975,17 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
             MirInst::CowUnpin { dest, src, saved } => {
                 let (s, saved) = (get!(*src), get!(*saved));
                 rt::cow_unpin(ctx, s, saved);
+                set!(*dest, 0);
+            }
+            MirInst::RcReuse { dest, src, moved } => {
+                let s = get!(*src);
+                set!(*dest, rt::coil_native_rc_reuse(ctx, s, u64::from(*moved)));
+            }
+            MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                if guard.is_none_or(|g| get!(g) != 0) {
+                    let s = get!(*src);
+                    rt::coil_native_rc(ctx, s, u64::from(matches!(inst, MirInst::RcDec { .. })));
+                }
                 set!(*dest, 0);
             }
         }

@@ -535,9 +535,6 @@ impl MirBuilder {
             layout,
             args,
         })?;
-        if !super::effects::host_is_pure(native_id) {
-            self.snapshot_slots(dest);
-        }
         Ok(dest)
     }
 
@@ -569,7 +566,6 @@ impl MirBuilder {
         }
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::Ffi { dest, op, operand, args })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -584,7 +580,6 @@ impl MirBuilder {
         }
         let dest = self.alloc(ret);
         self.push(MirInst::ExternCall { dest, sig: Box::new(sig), args })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -635,7 +630,6 @@ impl MirBuilder {
             target,
             args,
         })?;
-        self.snapshot_slots(dest);
         Ok((dest, dest_hi))
     }
 
@@ -703,7 +697,6 @@ impl MirBuilder {
             dicts,
             pair,
         })?;
-        self.snapshot_slots(dest);
         Ok((dest, pair.map(|(h, _)| h)))
     }
 
@@ -805,6 +798,18 @@ impl MirBuilder {
         value: ValueId,
         index: u32,
     ) -> Result<ValueId, MirError> {
+        self.ins_field_store(object, value, index, false)
+    }
+
+    /// [`Self::ins_heap_field_store`] of a field whose static type is a
+    /// number when `scalar` (`MirInst::HeapFieldStore::scalar`).
+    pub fn ins_field_store(
+        &mut self,
+        object: ValueId,
+        value: ValueId,
+        index: u32,
+        scalar: bool,
+    ) -> Result<ValueId, MirError> {
         if !self.field_object_ok(object) {
             return Err(MirError::msg(format!(
                 "HeapFieldStore object {}",
@@ -815,6 +820,8 @@ impl MirBuilder {
         if !ty.is_specialized() {
             return Err(MirError::msg(format!("HeapFieldStore value {ty}")));
         }
+        // Only a number word is stored as one (a boxed word is an object).
+        let scalar = scalar && matches!(ty, MirTy::I64 | MirTy::F64 | MirTy::Bool);
         let dest = self.alloc(ty);
         let value = self.resolve(value);
         self.push(MirInst::HeapFieldStore {
@@ -822,6 +829,7 @@ impl MirBuilder {
             object: self.resolve(object),
             value,
             index,
+            scalar,
         })?;
         Ok(dest)
     }
@@ -893,7 +901,6 @@ impl MirBuilder {
         }
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::LanePush { dest, array: self.resolve(array), lo: self.resolve(lo), hi: self.resolve(hi), shape })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -905,7 +912,6 @@ impl MirBuilder {
         }
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::LanesToWords { dest, array: self.resolve(array), shape })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -916,6 +922,19 @@ impl MirBuilder {
         index: ValueId,
         value: ValueId,
         unchecked: bool,
+    ) -> Result<ValueId, MirError> {
+        self.ins_index_store(array, index, value, unchecked, false)
+    }
+
+    /// [`Self::ins_store_index`] of an element whose static type is a
+    /// number when `scalar` (`MirInst::StoreIndex::scalar`).
+    pub fn ins_index_store(
+        &mut self,
+        array: ValueId,
+        index: ValueId,
+        value: ValueId,
+        unchecked: bool,
+        scalar: bool,
     ) -> Result<ValueId, MirError> {
         let at = self.resolve_ty(array);
         if at != MirTy::HeapRef && at != MirTy::Value {
@@ -929,6 +948,8 @@ impl MirBuilder {
         if !vt.is_word_lane() {
             return Err(MirError::msg(format!("StoreIndex value is {vt}")));
         }
+        // Only a number word is stored as one (a boxed word is an object).
+        let scalar = scalar && matches!(vt, MirTy::I64 | MirTy::F64 | MirTy::Bool);
         let dest = self.alloc(vt);
         self.push(MirInst::StoreIndex {
             dest,
@@ -936,6 +957,7 @@ impl MirBuilder {
             index: self.resolve(index),
             value: self.resolve(value),
             unchecked,
+            scalar,
         })?;
         Ok(dest)
     }
@@ -1156,7 +1178,6 @@ impl MirBuilder {
             array: self.resolve(array),
             value: self.resolve(value),
         })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -1176,7 +1197,7 @@ impl MirBuilder {
         &mut self,
         kind: super::inst::MirAllocKind,
         elems: Vec<ValueId>,
-        kinds: u8,
+        kinds: common::PackedKinds,
     ) -> Result<ValueId, MirError> {
         let elems: Vec<ValueId> = elems.into_iter().map(|v| self.resolve(v)).collect();
         for (i, &e) in elems.iter().enumerate() {
@@ -1189,29 +1210,18 @@ impl MirBuilder {
         }
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::Alloc { dest, kind, elems, kinds })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
-    /// GC safepoint (I5). Dest is a heapref token. `roots` is a seed;
-    /// [`super::gc::fill_live_roots`] replaces it with live heap words.
-    pub fn ins_gc_barrier(
-        &mut self,
-        kind: super::inst::MirGcKind,
-        roots: Vec<ValueId>,
-    ) -> Result<ValueId, MirError> {
-        let roots: Vec<ValueId> = roots.into_iter().map(|v| self.resolve(v)).collect();
-        for (i, &r) in roots.iter().enumerate() {
-            if !self.resolve_ty(r).is_heap_word() {
-                return Err(MirError::msg(format!(
-                    "GcBarrier root {i} is {}",
-                    self.resolve_ty(r)
-                )));
-            }
+    /// GC safepoint (I5) after the allocating op that made `object`. Dest
+    /// is that word from the safepoint on ([`super::barrier_pairs`]).
+    pub fn ins_gc_barrier(&mut self, kind: super::inst::MirGcKind, object: ValueId) -> Result<ValueId, MirError> {
+        let object = self.resolve(object);
+        if !self.resolve_ty(object).is_heap_word() {
+            return Err(MirError::msg(format!("GcBarrier object is {}", self.resolve_ty(object))));
         }
         let dest = self.alloc(MirTy::HeapRef);
-        self.push(MirInst::GcBarrier { dest, kind, roots })?;
-        self.snapshot_slots(dest);
+        self.push(MirInst::GcBarrier { dest, kind, object })?;
         Ok(dest)
     }
 
@@ -1266,7 +1276,6 @@ impl MirBuilder {
             fmt: self.resolve(fmt),
             args,
         })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -1283,7 +1292,6 @@ impl MirBuilder {
         let src = self.resolve(src);
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::Cow { dest, src, unique, field })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -1315,7 +1323,6 @@ impl MirBuilder {
             src: self.resolve(src),
             tag,
         })?;
-        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -1430,9 +1437,6 @@ impl MirBuilder {
         binds.sort_unstable_by_key(|&(l, v)| (l.0, v.0));
         binds.dedup();
         self.func.local_binds = binds;
-        if self.func.has_gc_edge() {
-            super::gc::fill_live_roots(&mut self.func);
-        }
         self.func.verify().map_err(MirError::msg)?;
         Ok(self.func)
     }
@@ -1464,18 +1468,6 @@ impl MirBuilder {
             }
         }
         out
-    }
-
-    fn snapshot_slots(&mut self, at: ValueId) {
-        let Ok(b) = self.cur() else {
-            return;
-        };
-        let mut env: Vec<(LocalId, ValueId)> = self.current_def[b.index()]
-            .iter()
-            .map(|(&l, &v)| (l, self.resolve(v)))
-            .collect();
-        env.sort_by_key(|(l, _)| l.0);
-        self.func.slot_env.insert(at, env);
     }
 
     fn cur(&self) -> Result<BlockId, MirError> {
@@ -1733,12 +1725,6 @@ impl MirBuilder {
         for p in &mut self.func.params {
             *p = map(*p);
         }
-        // Trivial-phi subst must follow into IL slot snapshots (D0).
-        for env in self.func.slot_env.values_mut() {
-            for (_, v) in env.iter_mut() {
-                *v = map(*v);
-            }
-        }
     }
 }
 
@@ -1802,14 +1788,14 @@ mod tests {
     }
 
     #[test]
-    fn array_push_loop_slot_env_survives_trivial_phi() {
+    fn array_push_loop_survives_trivial_phi() {
         use crate::mir::inst::{MirAllocKind, MirBinOp, MirCmpOp, MirConst, MirGcKind};
         let mut b = MirBuilder::new("grow");
         let n = b.add_param(MirTy::I64).unwrap();
         b.def_local(LocalId(0), n).unwrap();
         let empty = b.ins_alloc(MirAllocKind::Array, Vec::new()).unwrap();
         let g0 = b
-            .ins_gc_barrier(MirGcKind::Safepoint, vec![empty])
+            .ins_gc_barrier(MirGcKind::Safepoint, empty)
             .unwrap();
         b.def_local(LocalId(1), g0).unwrap();
         let i0 = b.ins_const(MirConst::I64(0)).unwrap();
@@ -1829,7 +1815,7 @@ mod tests {
         let one = b.ins_const(MirConst::I64(1)).unwrap();
         let grown = b.ins_array_push(xs, one).unwrap();
         let g = b
-            .ins_gc_barrier(MirGcKind::Safepoint, vec![grown])
+            .ins_gc_barrier(MirGcKind::Safepoint, grown)
             .unwrap();
         b.def_local(LocalId(1), g).unwrap();
         let i1 = b.ins_binop(MirBinOp::Add, i, one).unwrap();
@@ -1869,7 +1855,7 @@ mod tests {
         let mut b = MirBuilder::new("mk");
         let n = b.ins_const(MirConst::I64(1)).unwrap();
         let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
-        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
+        let g = b.ins_gc_barrier(MirGcKind::Safepoint, a).unwrap();
         b.ret(Some(g)).unwrap();
         let f = b.finish().unwrap();
         assert_eq!(f.ty(a), MirTy::HeapRef);

@@ -2240,7 +2240,9 @@ impl Compiler {
         }
         // A body kept for splicing is the one before its frees.
         let frees = passes.frees() && self.opt_options.early_free && quiet && !self.hir_kept_splice_off.get();
-        if body.is_none() && !frees {
+        // A stream closes at the end of its local's scope at every level.
+        let streams = if frees { None } else { crate::hir::effects::ProgramEffects::keep_streams(body.as_ref().unwrap_or(hir)) };
+        if body.is_none() && !frees && streams.is_none() {
             return Ok(None);
         }
         let fail = |reason, freed: bool| HirRewriteFail { reason, inlined: !spliced.is_empty(), freed };
@@ -2285,7 +2287,7 @@ impl Compiler {
             };
             self.program_effects.early_frees(&self.checker, &module_path, module, at, &host, &slots)
         } else {
-            None
+            streams
         };
         if body.is_none() && freed.is_none() {
             return Ok(None);
@@ -8790,7 +8792,7 @@ impl Compiler {
                     words.push(item(b, it, v)?);
                 }
                 let t = b.ins_alloc_kinds(MirAllocKind::TUPLE, words, *kinds).map_err(err)?;
-                b.ins_gc_barrier(MirGcKind::Safepoint, vec![t]).map_err(err)
+                b.ins_gc_barrier(MirGcKind::Safepoint, t).map_err(err)
             }
             HirRetItems::Enum { variants } => {
                 let join = b.create_block();
@@ -8811,7 +8813,7 @@ impl Compiler {
                         words.push(item(b, it, v)?);
                     }
                     let e = b.ins_alloc_kinds(MirAllocKind::Enum { tag: *tag }, words, *kinds).map_err(err)?;
-                    let e = b.ins_gc_barrier(MirGcKind::Safepoint, vec![e]).map_err(err)?;
+                    let e = b.ins_gc_barrier(MirGcKind::Safepoint, e).map_err(err)?;
                     b.jump(join).map_err(err)?;
                     arms.push((hit, e));
                     b.switch_to_block(miss);
@@ -8914,7 +8916,7 @@ impl Compiler {
             Some(HirFnRet::Unit) => {
                 b.ins_call_indirect(f, args, MirTy::I64).map_err(err)?;
                 let obj = b.ins_alloc(crate::mir::MirAllocKind::TUPLE, Vec::new()).map_err(err)?;
-                let obj = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, vec![obj]).map_err(err)?;
+                let obj = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, obj).map_err(err)?;
                 b.ret(Some(obj)).map_err(err)?;
                 return b.finish().map_err(err);
             }
@@ -8941,7 +8943,7 @@ impl Compiler {
         let err = |e: crate::mir::MirError| format!("mir: {e}");
         let make = |b: &mut crate::mir::MirBuilder, tag: u32, payload: Vec<crate::mir::ValueId>| {
             let obj = b.ins_alloc(MirAllocKind::Enum { tag }, payload)?;
-            b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
+            b.ins_gc_barrier(MirGcKind::Safepoint, obj)
         };
         let zero = b.ins_const(MirConst::I64(0)).map_err(err)?;
         let second = if layout == ValueLayout::NicheResult {
@@ -11104,7 +11106,6 @@ impl Compiler {
         match &hir.expr(id).kind {
             HirKind::Clear(_) => Ok(()),
             // An early free reads a one-word object reference.
-            HirKind::Builtin { op: Builtin::Region { .. }, .. } => Ok(()),
             // A share as a statement: its operand's word, then dropped.
             HirKind::Builtin { op: Builtin::Cow { .. }, args } => {
                 let want = self.hir_natural(hir, emit, args[0]).or_else(|| self.hir_natural(hir, emit, id)).ok_or("cow-shape")?;
@@ -13007,6 +13008,10 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         crate::layout::array_elem_stamp(&self.c().checker, t)
     }
 
+    fn pair_pointer_tags(&self, t: &Ty) -> Option<u64> {
+        crate::layout::pair_pointer_tags(&self.c().checker, t)
+    }
+
     fn boxed_enum(&self, t: &Ty, variant: Option<&str>) -> Option<Vec<Ty>> {
         let checker = &self.c().checker;
         let t = apply_ty_prune(checker.subst(), t);
@@ -13489,7 +13494,29 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
             ),
             None => None,
         };
-        let layout = u8::try_from(call.ret.host_enum_layout()).ok()?;
+        let mut layout = u8::try_from(call.ret.host_enum_layout()).ok()?;
+        // The builtin `Vec<T>` thunks serve every `T` with an `int` standing
+        // in (`Compiler::emit_vec_method_thunks`); their natives take the
+        // kind from the array.
+        let any_t = self.hir.span == crate::hir::synth::SPAN
+            && self.hir.name.strip_prefix(common::BUILTIN_VEC_TYPE).is_some_and(|m| m.starts_with("::"));
+        if u32::from(layout) == common::HOST_ENUM_LAYOUT_BOXED && !any_t {
+            // A boxed `Option` / `Result` the native makes takes its
+            // payloads' word kinds from the call's type. In a generic body a
+            // type parameter's word stays unknown; `Thread<T>` or `Vec<T>`
+            // is a handle whatever `T` is.
+            let kind = |t: &Ty| crate::layout::word_kind(&c.checker, t);
+            let payloads = ty
+                .as_ref()
+                .and_then(|t| match (t.as_option(), t.as_result()) {
+                    (Some(some), _) => Some((kind(some), common::WORD_UNKNOWN)),
+                    (_, Some((ok, err))) => Some((kind(ok), kind(err))),
+                    _ => None,
+                });
+            if let Some((some_ok, err)) = payloads {
+                layout |= common::host_layout_with_kinds(some_ok, err);
+            }
+        }
         Some((u16::try_from(native).ok()?, layout, unbox))
     }
 

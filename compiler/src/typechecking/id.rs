@@ -361,7 +361,7 @@ fn visit_children<'n, 's>(node: &'n Output<'s>, visit: &mut dyn FnMut(&'n Output
             visit(body);
         }
         // Expanded before this runs; its body is the expansion program's.
-        Expression::ComptimeBlock(_) | Expression::RegionMark => {}
+        Expression::ComptimeBlock(_) => {}
 
         Expression::Branch(cond, body) => {
             if let Some(c) = cond {

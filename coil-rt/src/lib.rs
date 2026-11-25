@@ -17,8 +17,6 @@ unsafe extern "C" {
     static coil_aot_site_count: u64;
     static coil_aot_refused_count: u64;
     static coil_aot_layout: u64;
-    static coil_aot_stack_maps: u8;
-    static coil_aot_stack_map_count: u64;
     static coil_static_syms: machine::StaticSymbol;
     static coil_static_sym_count: u64;
     static coil_aot_host_groups: machine::AotHostGroup;
@@ -65,7 +63,6 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
             eprintln!("coil: {e}");
             exit(1);
         }
-        machine::native::install_aot_stack_maps(&raw const coil_aot_stack_maps, coil_aot_stack_map_count as usize);
         machine::install_static_symbols(&raw const coil_static_syms, coil_static_sym_count as usize);
         machine::native::install_aot_host_groups(&raw const coil_aot_host_groups, coil_aot_host_group_count as usize);
     }

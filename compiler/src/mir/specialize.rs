@@ -112,6 +112,17 @@ fn check_after(func: &crate::mir::MirFunc, pass: &str) {
     }
 }
 
+/// Verify a body after the count insertion ([`crate::mir::rc_insert::insert_rc_all`]),
+/// which runs on expanded bodies: dominance only, as [`check_expanded`],
+/// since an expansion's join block may follow its uses in block order.
+pub(super) fn check_after_rc(func: &crate::mir::MirFunc) {
+    if (cfg!(debug_assertions) || verify_asked())
+        && let Err(e) = func.verify_dominance()
+    {
+        panic!("MIR verify failed after insert_rc in {}: {e}", func.name);
+    }
+}
+
 /// Under `COIL_MIR_VERIFY`, verify a body as an engine gets it from
 /// lowering, before any pass: what `-O0` and the interpreter run.
 pub(super) fn check_lowered(func: &crate::mir::MirFunc) {

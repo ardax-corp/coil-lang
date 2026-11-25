@@ -1,0 +1,64 @@
+// A boxed `Option` / `Result` a host native makes takes its payload's word
+// kind from the call's type: collections in between keep every object a
+// result holds and leave every number alone.
+// @flags --clone-budget 0
+use tests::assert;
+use gc::collect;
+use env::{remove_var, set_var, var, EnvError};
+
+class Node {
+    pub v: int,
+}
+
+test("popped objects and numbers survive a collection") {
+    let nodes: Vec<Node> = Vec::new();
+    let nums: Vec<int> = Vec::new();
+    let i = 0;
+    while i < 200 {
+        nodes.push(new Node(i));
+        nums.push(i);
+        i += 1;
+    }
+    let held: Vec<Option<Node>> = Vec::new();
+    let counts: Vec<Option<int>> = Vec::new();
+    while nodes.len() > 0 {
+        held.push(nodes.pop());
+        counts.push(nums.pop());
+    }
+    collect();
+    let total = 0;
+    for n in held {
+        total += match n {
+            Option::Some(x) => x.v,
+            Option::None => 0,
+        };
+    }
+    for k in counts {
+        total += k.unwrap_or(0);
+    }
+    assert!(total == 2 * (199 * 200 / 2));
+}
+
+test("host strings in a result survive a collection") {
+    let _ = set_var("COIL_HOST_RESULT_KINDS", "kept");
+    let got: Vec<Result<string, EnvError>> = Vec::new();
+    let i = 0;
+    while i < 100 {
+        got.push(var("COIL_HOST_RESULT_KINDS"));
+        i += 1;
+    }
+    let _ = remove_var("COIL_HOST_RESULT_KINDS");
+    collect();
+    let n = 0;
+    for r in got {
+        match r {
+            Result::Ok(s) => {
+                if s == "kept" {
+                    n += 1;
+                }
+            },
+            Result::Err(_) => {},
+        }
+    }
+    assert!(n == 100);
+}

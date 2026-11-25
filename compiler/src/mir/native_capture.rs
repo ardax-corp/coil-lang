@@ -75,6 +75,17 @@ pub fn peek_native_capture() -> Vec<NativeBody> {
 /// `bodies` as an engine runs them.
 fn finished(mut bodies: Vec<NativeBody>) -> Vec<NativeBody> {
     super::native_expand::apply_all(bodies.iter_mut().map(|b| &mut b.mir));
+    // Frames own their words (reference counts plan step 4); a tail call
+    // enters its callee's twin that owns its parameters.
+    let owning = super::rc_insert::owning_tail_twins(&mut bodies);
+    super::rc_insert::insert_rc_all(bodies.iter_mut().map(|b| (b.entry, &mut b.mir)), &owning);
+    // A dead enum's slot goes to the enum built next to its death.
+    for body in &mut bodies {
+        super::rc_reuse::insert_reuse(&mut body.mir);
+    }
+    for body in &bodies {
+        super::specialize::check_after_rc(&body.mir);
+    }
     for body in &bodies {
         super::specialize::check_expanded(&body.mir);
     }

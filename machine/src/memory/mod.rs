@@ -7,10 +7,10 @@ mod strbuf;
 
 pub use addr_hash::*;
 pub use heap::*;
-pub use slab::Bump;
+pub use slab::{Bump, FREE_LINK};
 pub use strbuf::StrData;
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// What a run does at a compiled early free (`--early-free`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,18 +24,7 @@ pub enum EarlyFreeMode {
     Check,
 }
 
-static NURSERY: AtomicBool = AtomicBool::new(true);
 static EARLY_FREE: AtomicU8 = AtomicU8::new(0);
-
-/// Allocate young objects in a copying nursery (`--nursery on|off`, on by
-/// default). Read when a runtime starts, so set it before running.
-pub fn set_nursery(on: bool) {
-    NURSERY.store(on, Ordering::Relaxed);
-}
-
-pub fn nursery_enabled() -> bool {
-    NURSERY.load(Ordering::Relaxed)
-}
 
 /// What compiled early frees do in this process (`--early-free`).
 pub fn set_early_free_mode(mode: EarlyFreeMode) {

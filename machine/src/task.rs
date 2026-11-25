@@ -178,6 +178,9 @@ pub(crate) struct Scheduler {
     pub current: TaskId,
     /// Child tasks not finished yet.
     pub live: usize,
+    /// Coroutines of removed task records: each record owned a count on
+    /// its coroutine, which the runtime drops at its next safepoint.
+    pub released: Vec<RefCoroutine>,
     next_task: TaskId,
     next_scope: ScopeId,
     next_timer: u64,
@@ -231,6 +234,7 @@ impl Scheduler {
             reactor: crate::io_reactor::IoReactor::new(),
             current: ROOT,
             live: 0,
+            released: Vec::new(),
             next_task: 1,
             next_scope: 1,
             next_timer: 0,
@@ -402,7 +406,9 @@ impl Scheduler {
     pub(crate) fn remove_scope(&mut self, scope: ScopeId) -> Option<ScopeRec> {
         let s = self.scopes.remove(&scope)?;
         for c in &s.children {
-            self.tasks.remove(c);
+            if let Some(coro) = self.tasks.remove(c).and_then(|r| r.coro) {
+                self.released.push(coro);
+            }
         }
         Some(s)
     }
@@ -1050,8 +1056,24 @@ impl crate::runtime::Runtime {
     /// Forget the scheduler once no scope or task is left.
     pub(crate) fn task_drop_idle_scheduler(&mut self) {
         if self.sched.as_ref().is_some_and(|s| s.idle()) {
-            self.sched = None;
+            self.task_drop_scheduler();
         }
+    }
+
+    /// Forget the scheduler: its removed records' coroutines lose the count
+    /// each record held, since no safepoint will find them once it is gone.
+    pub(crate) fn task_drop_scheduler(&mut self) {
+        if let Some(s) = self.sched.take() {
+            for coro in s.released {
+                self.heap.rc_drop(common::Value::from(crate::memory::Object::Coroutine(coro).addr()));
+            }
+        }
+    }
+
+    /// Removed task records owe their coroutines a release
+    /// ([`Scheduler::released`]), which the next safepoint makes.
+    pub(crate) fn task_coros_released(&self) -> bool {
+        self.sched.as_ref().is_some_and(|s| !s.released.is_empty())
     }
 
     pub(crate) fn task_string(&mut self, text: String) -> common::Value {

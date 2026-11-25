@@ -4,7 +4,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use common::DebugLoc;
 
-use super::gc::LiveRootSet;
 use super::inst::{BlockId, LocalId, MirConst, MirInst, Terminator, ValueId};
 use crate::layout::MirLayout;
 use super::ty::MirTy;
@@ -37,10 +36,6 @@ pub struct MirFunc {
     pub blocks: Vec<MirBlock>,
     /// Type of each allocated value, indexed by [`ValueId::index`].
     pub types: Vec<MirTy>,
-    /// IL slot → SSA value at each Alloc / GcBarrier dest (S2a).
-    pub slot_env: HashMap<ValueId, Vec<(LocalId, ValueId)>>,
-    /// Live heap words at each Alloc / GcBarrier (S2a).
-    pub gc_roots: Vec<LiveRootSet>,
     /// Dest → source loc from the IL op that produced it (C3 sparse DebugLoc).
     pub value_locs: HashMap<ValueId, DebugLoc>,
     /// A call's or trapping op's own loc where a variable's defining store
@@ -179,15 +174,42 @@ impl MirFunc {
             b.insts.shrink_to_fit();
         }
         self.types.shrink_to_fit();
-        self.gc_roots.shrink_to_fit();
-        for g in &mut self.gc_roots {
-            g.values.shrink_to_fit();
-            g.slots.shrink_to_fit();
-        }
         self.homes.shrink_to_fit();
         if let Some(c) = &mut self.cleanup {
             c.shrink_to_fit();
         }
+    }
+
+    /// The homes that own a count, as a mask (bit `h` for home `h`): the
+    /// ones this body's cleanup pad loads and releases. A generator's
+    /// suspended frame owns exactly these words, so the cycle collector
+    /// can see through it. `None` when a counted home is past the 64th.
+    pub fn counted_homes(&self) -> Option<u64> {
+        Self::counted_homes_of(self.cleanup.as_deref())
+    }
+
+    /// [`Self::counted_homes`] of the body whose cleanup pad is `pad`.
+    pub fn counted_homes_of(pad: Option<&MirFunc>) -> Option<u64> {
+        let Some(pad) = pad else { return Some(0) };
+        let mut loaded: HashMap<ValueId, u16> = HashMap::new();
+        let mut mask = 0u64;
+        for inst in pad.blocks.iter().flat_map(|b| &b.insts) {
+            match inst {
+                MirInst::HomeLoad { dest, home } => {
+                    loaded.insert(*dest, *home);
+                }
+                MirInst::RcDec { src, .. } => {
+                    if let Some(&h) = loaded.get(src) {
+                        if h >= 64 {
+                            return None;
+                        }
+                        mask |= 1 << h;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(mask)
     }
 
     /// The function entries this body's code names: the callees of its
@@ -299,8 +321,6 @@ impl MirFunc {
             entry: BlockId(0),
             blocks: vec![MirBlock::new(BlockId(0))],
             types: Vec::new(),
-            slot_env: HashMap::new(),
-            gc_roots: Vec::new(),
             value_locs: HashMap::new(),
             op_locs: HashMap::new(),
             term_locs: HashMap::new(),
@@ -345,11 +365,6 @@ impl MirFunc {
             .get(&b)
             .copied()
             .unwrap_or_else(DebugLoc::unknown)
-    }
-
-    #[cfg(test)]
-    pub fn live_roots_at(&self, at: ValueId) -> Option<&LiveRootSet> {
-        self.gc_roots.iter().find(|s| s.at == at)
     }
 
     pub fn ty(&self, v: ValueId) -> MirTy {
@@ -847,8 +862,12 @@ impl MirFunc {
                 array,
                 index,
                 value,
+                scalar,
                 ..
             } => {
+                if *scalar && !matches!(self.ty(*value), MirTy::I64 | MirTy::F64 | MirTy::Bool) {
+                    return Err(format!("{dest} StoreIndex of a number element stores an object word"));
+                }
                 if self.ty(*array) != MirTy::HeapRef {
                     return Err(format!("{dest} StoreIndex array is not heapref"));
                 }
@@ -1009,9 +1028,13 @@ impl MirFunc {
                 // Any slot index: the dense form packs one that fits a
                 // byte, and the stack form takes a full word (#1498).
                 index: _,
+                scalar,
             } => {
                 if self.ty(*object) != MirTy::HeapRef {
                     return Err(format!("{dest} HeapFieldStore object type"));
+                }
+                if *scalar && !matches!(self.ty(*value), MirTy::I64 | MirTy::F64 | MirTy::Bool) {
+                    return Err(format!("{dest} HeapFieldStore of a number field stores an object word"));
                 }
                 if !self.ty(*value).is_specialized() {
                     return Err(format!("{dest} HeapFieldStore value type"));
@@ -1030,14 +1053,27 @@ impl MirFunc {
                     }
                 }
             }
-            MirInst::GcBarrier { dest, roots, .. } => {
+            MirInst::AllocAt { dest, slot, elems, .. } => {
+                if self.ty(*dest) != MirTy::HeapRef || slot.is_some_and(|s| self.ty(s) != MirTy::I64) {
+                    return Err(format!("{dest} AllocAt type"));
+                }
+                for (i, e) in elems.iter().enumerate() {
+                    if !self.ty(*e).is_specialized() {
+                        return Err(format!("{dest} AllocAt elem {i} type"));
+                    }
+                }
+            }
+            MirInst::RcReuse { dest, src, .. } => {
+                if self.ty(*dest) != MirTy::I64 || !matches!(self.ty(*src), MirTy::HeapRef | MirTy::Value) {
+                    return Err(format!("{dest} RcReuse type"));
+                }
+            }
+            MirInst::GcBarrier { dest, object, .. } => {
                 if self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} GcBarrier dest is not heapref"));
                 }
-                for (i, r) in roots.iter().enumerate() {
-                    if !self.ty(*r).is_heap_word() {
-                        return Err(format!("{dest} GcBarrier root {i} is not a heap word"));
-                    }
+                if !self.ty(*object).is_heap_word() {
+                    return Err(format!("{dest} GcBarrier object is not a heap word"));
                 }
             }
             MirInst::String { dest, .. } => {
@@ -1100,6 +1136,14 @@ impl MirFunc {
             MirInst::CowUnpin { dest, src, saved } => {
                 if self.ty(*dest) != MirTy::Bool || self.ty(*src) != MirTy::HeapRef || self.ty(*saved) != MirTy::Bool {
                     return Err(format!("{dest} CowUnpin type"));
+                }
+            }
+            MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+                if self.ty(*dest) != MirTy::Bool || !matches!(self.ty(*src), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64 | MirTy::Value) {
+                    return Err(format!("{dest} reference count op type"));
+                }
+                if guard.is_some_and(|g| self.ty(g) != MirTy::Bool) {
+                    return Err(format!("{dest} reference count op guard is not bool"));
                 }
             }
             MirInst::Stringify { dest, src, .. } => {

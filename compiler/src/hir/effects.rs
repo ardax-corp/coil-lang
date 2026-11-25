@@ -452,6 +452,12 @@ impl ProgramEffects {
         early_free::rewrite(checker, module, body, &lookup, host, slots)
     }
 
+    /// `body` with a free at the end of each `Stream` local's scope, for a
+    /// body [`Self::early_frees`] does not run on.
+    pub fn keep_streams(body: &HirBody) -> Option<HirBody> {
+        early_free::keep_streams(body)
+    }
+
     /// `body` with its copy-on-write ops ([`cow`]), when it needs any.
     /// `mutates` is the body's own summary bits: the parameters it writes
     /// in place for its caller.
@@ -1147,37 +1153,6 @@ impl<'a> ModuleEffects<'a> {
                     span.clone(),
                 );
                 msg.with_help("a fresh result holds only objects the call made and nothing else keeps; remove the attribute or return a new object".to_string());
-                out.push(msg);
-            }
-        }
-        out
-    }
-
-    /// E0140: an object made inside a `region { … }` block that can leave
-    /// it (see [`escape::region_leaks`]).
-    pub fn region_messages(&self) -> Vec<reporting::Message> {
-        use reporting::{ErrorCode, Label, Message};
-        let mut out = Vec::new();
-        for (i, body) in self.cx.module.bodies.iter().enumerate() {
-            if !body.exprs.iter().any(|x| matches!(x.kind, HirKind::Builtin { op: Builtin::Region { enter: true }, .. })) {
-                continue;
-            }
-            let w = self.cx.walk(i, &self.summaries, false);
-            let lookup = |callee: &Callee, args: &[HirId]| match callee {
-                Callee::Named { name, def, .. } => Some(self.cx.named(&w, name, *def)),
-                Callee::Method { name } => self.cx.method(&w, None, *args.first()?, name).map(|(s, _)| s),
-                Callee::Value(f) => self.cx.fn_value(&w, *f),
-                Callee::Resolved(_) => None,
-            };
-            for leak in escape::region_leaks(self.cx.module, body, &lookup) {
-                let mut msg = Message::error(
-                    ErrorCode::RegionEscape,
-                    format!("an object made inside this region {}, so it would outlive the region", leak.how),
-                    leak.at.0..leak.at.1,
-                );
-                msg.push(Label::new("leaves the region here".to_string(), leak.at.0..leak.at.1));
-                msg.push(Label::new("the region".to_string(), leak.region.0..leak.region.1));
-                msg.with_help("objects made in a region are freed when it ends; make the object before the region, or copy what you need out as plain values".to_string());
                 out.push(msg);
             }
         }
@@ -2718,8 +2693,6 @@ impl Cx<'_> {
                 }
                 Builtin::TypeOf | Builtin::Done | Builtin::Default | Builtin::Retype | Builtin::Stringify { .. } | Builtin::Relayout | Builtin::FreeEarly { .. } | Builtin::Cow { .. } | Builtin::CowPin | Builtin::CowUnpin => {}
                 Builtin::Print => self.note(w, id, EffectFlags::WRITE, || "prints".into()),
-                // Runs a minor collection: no effect a caller can see.
-                Builtin::Region { .. } => self.note_hidden(w, id, EffectFlags::GC, || "has a `region`".into()),
             },
             // Workers of a parallel region have no statics, and another
             // call may change one (coil-lang#793).

@@ -4670,7 +4670,7 @@ fn is_resume_with_keyword(source: &str, with_start: usize) -> bool {
 }
 
 /// `gen` is only a keyword directly before `fn`; elsewhere it is a name.
-/// Contextual words of copy-on-write and regions: `region {`, `shared
+/// Contextual words of copy-on-write: `shared
 /// class`, `view class`, and `mut` before the name it borrows (`let c = mut a`, `for mut
 /// x`, `use (mut x)`). Anywhere else they are ordinary names.
 fn is_borrow_keyword(source: &str, word: &str, end: usize) -> bool {
@@ -4679,7 +4679,6 @@ fn is_borrow_keyword(source: &str, word: &str, end: usize) -> bool {
         after.starts_with(w) && !after[w.len()..].starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
     };
     match word {
-        "region" => after.starts_with('{'),
         "shared" => next_word("class") || next_word("readonly"),
         "view" => next_word("class"),
         "mut" => after.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && !next_word("in"),
@@ -4691,7 +4690,7 @@ fn is_borrow_keyword(source: &str, word: &str, end: usize) -> bool {
 /// highlighted only where [`is_borrow_keyword`] or the parser treats them
 /// as keywords.
 fn contextual_keywords() -> &'static [&'static str] {
-    &["region", "mut", "shared", "view", "gen"]
+    &["mut", "shared", "view", "gen"]
 }
 
 fn is_gen_fn_keyword(source: &str, gen_end: usize) -> bool {
@@ -5526,9 +5525,9 @@ fn main() {
 
     #[test]
     fn semantic_tokens_copy_on_write_words_are_contextual() {
-        let source = "shared class Log {\n    pub n: int,\n}\n\nview class Tally {\n    mut log: Log,\n}\n\nfn main() {\n    let v: Vec<int> = [];\n    let w = mut v;\n    let r = region { 1 };\n}\n";
+        let source = "shared class Log {\n    pub n: int,\n}\n\nview class Tally {\n    mut log: Log,\n}\n\nfn main() {\n    let v: Vec<int> = [];\n    let w = mut v;\n}\n";
         let tokens = semantic_tokens(source, Some(PathBuf::from("test.coil")), None);
-        for word in ["shared", "view", "mut", "region"] {
+        for word in ["shared", "view", "mut"] {
             assert!(token_types_at_word(source, &tokens, word).contains(&TOKEN_KEYWORD), "{word}");
         }
 

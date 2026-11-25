@@ -662,10 +662,6 @@ pub enum Expression<'expr> {
     /// the body alone: it is not code of the enclosing function.
     ComptimeBlock(Output<'expr>),
 
-    /// First item of the block a `region { … }` parses to (escape step 5):
-    /// what the block allocates is reclaimed when it ends. A leaf, so the
-    /// block itself stays an ordinary [`Self::Block`] for every walker.
-    RegionMark,
 
     /// Top-level `enum` declaration.
     EnumDecl {
@@ -997,7 +993,6 @@ impl Clone for Expression<'_> {
             },
             E::TestCase { name, body } => E::TestCase { name: Clone::clone(name), body: Clone::clone(body) },
             E::ComptimeBlock(a0) => E::ComptimeBlock(Clone::clone(a0)),
-            E::RegionMark => E::RegionMark,
             E::EnumDecl { docs, attrs, name, type_params, variants } => E::EnumDecl {
                 docs: Clone::clone(docs),
                 attrs: Clone::clone(attrs),
@@ -1634,7 +1629,6 @@ impl<'a> Display for Expression<'a> {
                 write!(f, "test({}) {{\n{}}}", name.1, body.1)
             }
             Self::ComptimeBlock(body) => write!(f, "comptime {}", body.1),
-            Self::RegionMark => write!(f, "region"),
             Self::Call { name, args: Some(args) } if matches!(name.1.as_ref(), Self::Identifier("__mut")) && args.len() == 1 => {
                 write!(f, "mut {}", args[0].1)
             }
@@ -2253,7 +2247,6 @@ impl<'expr> Expression<'expr> {
             | E::Float(_)
             | E::String(_)
             | E::Bool(_)
-            | E::RegionMark
             | E::Identifier(_)
             | E::Type(_)
             | E::Default(_)
@@ -2500,7 +2493,6 @@ impl<'expr> Expression<'expr> {
             | E::Float(_)
             | E::String(_)
             | E::Bool(_)
-            | E::RegionMark
             | E::Identifier(_)
             | E::Type(_)
             | E::Default(_)
@@ -2782,7 +2774,6 @@ impl Expression<'_> {
             E::AttrDecl { where_constraints, .. } => shift_where(where_constraints, delta),
             // The walkers skip its body.
             E::ComptimeBlock(body) => shift_spans(body, delta),
-            E::RegionMark => {}
             E::Function { where_constraints, effects, contracts, .. } => {
                 shift_where(where_constraints, delta);
                 if let Some(effects) = effects {

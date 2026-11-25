@@ -14,7 +14,7 @@ The index owns no keys. It maps keys to dense slot numbers `0, 1, 2, …` in ins
 | `hashes` | each slot's key hash, as the caller computed it |
 | `live` | `1` while the slot holds an entry, `0` once removed |
 
-All three are ordinary `Vec<int>`s: copy-on-write, GC, evacuation and thread sends treat them like any other array. There is no `Object::KeyIndex`. A host native that writes the heap makes its `Vec` arguments unique first (the copy-on-write call summary marks every argument mutated).
+All three are ordinary `Vec<int>`s: copy-on-write, counts and thread sends treat them like any other array. There is no `Object::KeyIndex`. A host native that writes the heap makes its `Vec` arguments unique first (the copy-on-write call summary marks every argument mutated).
 
 Probing is linear from `home(h)` (the hash's high bits folded into the low ones, so float bit patterns spread). The table grows when it would pass half full. Slots never move on their own: only `compact` renumbers them, after the owner has compacted its own `Vec`s with `retain` in the same order.
 

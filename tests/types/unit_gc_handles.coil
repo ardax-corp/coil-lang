@@ -1,14 +1,14 @@
-// `gc::root` and `gc::weak` take a `()` value as the empty tuple object, as
-// `format` and plain calls do (#1428).
+// `gc::root` takes a `()` value as the empty tuple object, as `format` and
+// plain calls do (#1428). `gc::weak(())` is refused (E0119): a `()` has no
+// object of its own to observe.
 use tests::assert;
-use gc::{root, weak, Root, Weak};
+use gc::{root, Root};
 
 fn unit_root() -> Root<unit> {
     return root(());
 }
 
-test("root and weak take a unit value") {
+test("root takes a unit value") {
     let r = unit_root();
-    let w: Weak<unit> = weak(());
     assert!(true);
 }

@@ -1,0 +1,41 @@
+// A tail call hands its callee the frame, so the caller releases nothing
+// after it. The objects it passed were once never released: every `Cell`
+// `count` built stayed allocated. The callee's twin now owns its
+// parameters, and a deep tail recursion still runs in constant stack.
+use tests::assert;
+use gc::heap_bytes;
+
+class Cell {
+    pub n: int,
+}
+
+fn grow(int n, string s) -> int {
+    if n == 0 {
+        return s.len();
+    }
+    return grow(n - 1, s + "x");
+}
+
+fn count(int n, Cell c) -> int {
+    if n == 0 {
+        return c.n;
+    }
+    return count(n - 1, new Cell(c.n + 1));
+}
+
+test("strings passed to a tail call are freed") {
+    let before = heap_bytes();
+    let i = 0;
+    while i < 20 {
+        assert!(grow(2000, "") == 2000);
+        i += 1;
+    }
+    // Each call builds 2000 strings of 1 to 2000 bytes, about 2 MB.
+    assert!(heap_bytes() - before < 1000000);
+}
+
+test("a deep tail recursion frees each object it passes on") {
+    let before = heap_bytes();
+    assert!(count(1000000, new Cell(0)) == 1000000);
+    assert!(heap_bytes() - before < 1000000);
+}

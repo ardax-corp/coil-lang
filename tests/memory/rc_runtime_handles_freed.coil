@@ -1,0 +1,43 @@
+// Thread handles, channel ends and thread locks are freed when their last
+// owner goes: no collector sweeps them, so a loop of them keeps the heap
+// flat.
+use tests::assert;
+use gc::{collect, heap_bytes};
+use thread::{join, spawn, channel, mutex};
+
+fn work() -> int {
+    return 1;
+}
+
+fn round() -> int {
+    let t = match spawn(work) {
+        Result::Ok(t) => t,
+        Result::Err(_) => panic "spawn failed",
+    };
+    let n = match join(t) {
+        Result::Ok(v) => v,
+        Result::Err(_) => -1,
+    };
+    let c = match channel() {
+        Result::Ok(_) => 1,
+        Result::Err(_) => 0,
+    };
+    let m = match mutex(n) {
+        Result::Ok(_) => 1,
+        Result::Err(_) => 0,
+    };
+    return n * c * m;
+}
+
+test("a loop of threads, channels and locks keeps the heap flat") {
+    assert!(round() == 1);
+    collect();
+    let before = heap_bytes();
+    let i = 0;
+    while i < 200 {
+        assert!(round() == 1);
+        i += 1;
+    }
+    collect();
+    assert!(heap_bytes() - before < 4000);
+}

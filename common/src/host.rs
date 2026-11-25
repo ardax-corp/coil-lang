@@ -168,7 +168,7 @@ host_natives! {
     64 "env_exec" (2) EXEC, Caps::NONE;
     65 "ord" (1) HOST_R, NO_CAP;
     66 "char" (1) HOST_R, NO_CAP;
-    67 "hash_string" (1) HOST_R, NO_CAP;
+    67 "hash_string" (1) HOST_R, NO_CAP => HASH_STRING_ID;
     68 "thread_spawn" (1) THREAD_R, NO_CAP;
     69 "thread_join" (1) THREAD_R, NO_CAP;
     70 "thread_detach" (1) THREAD_R, NO_CAP;
@@ -373,14 +373,14 @@ host_natives! {
     /// `docs/internals/key-index.md`.
     191 "key_index_table" (1) TEXT_R, NO_CAP => KEY_INDEX_TABLE_ID, KEY_INDEX_TABLE_NATIVE;
     192 "key_index_probe" (4) HOST_R, NO_CAP => _, KEY_INDEX_PROBE_NATIVE;
-    193 "key_index_insert" (4) HEAP_R, NO_CAP => _, KEY_INDEX_INSERT_NATIVE;
-    194 "key_index_remove" (4) HEAP_R, NO_CAP => _, KEY_INDEX_REMOVE_NATIVE;
-    195 "key_index_compact" (3) HEAP_R, NO_CAP => _, KEY_INDEX_COMPACT_NATIVE;
+    193 "key_index_insert" (4) HEAP_R, NO_CAP => KEY_INDEX_INSERT_ID, KEY_INDEX_INSERT_NATIVE;
+    194 "key_index_remove" (4) HEAP_R, NO_CAP => KEY_INDEX_REMOVE_ID, KEY_INDEX_REMOVE_NATIVE;
+    195 "key_index_compact" (3) HEAP_R, NO_CAP => KEY_INDEX_COMPACT_ID, KEY_INDEX_COMPACT_NATIVE;
     196 "key_index_retain" (2) HEAP_R, NO_CAP => _, KEY_INDEX_RETAIN_NATIVE;
     197 "key_index_clear" (3) HEAP_R, NO_CAP => KEY_INDEX_CLEAR_ID, KEY_INDEX_CLEAR_NATIVE;
     /// `key_index::find(table, hashes, keys, h, k, mode)`: the slot whose key
     /// equals `k` by `mode` (one of the `KEY_EQ_*` below), or `-1`.
-    198 "key_index_find" (6) HOST_R, NO_CAP => _, KEY_INDEX_FIND_NATIVE;
+    198 "key_index_find" (6) HOST_R, NO_CAP => KEY_INDEX_FIND_ID, KEY_INDEX_FIND_NATIVE;
     /// `key_index::eq_mode(k)`: how `find` may compare keys of `k`'s type. The
     /// compiler folds it to a constant in every body it plans; the native
     /// answers [`KEY_EQ_COIL`].
@@ -414,6 +414,12 @@ host_natives! {
     /// `HostOp::Restore`): an AOT executable's native `__start` runs it where
     /// the startup restored a snapshot. Compiler-emitted only.
     214 "startup_restore" (1) SUSPEND, NO_CAP => STARTUP_RESTORE_ID, STARTUP_RESTORE_NATIVE;
+    /// `vec_stamp(v, kind)` (MIR section format 19, compiler lowering
+    /// only): stamp array `v`'s element kind (`WORD_SCALAR` or
+    /// `WORD_POINTER`), as a shared generic body does for an array of a type
+    /// parameter it makes, from its `kinds` word (reference counts plan
+    /// step 2).
+    215 "vec_stamp" (2) HEAP_R, NO_CAP => VEC_STAMP_ID, VEC_STAMP_NATIVE;
 }
 
 /// `eq_mode`: the type's `==` is not one the runtime runs; the caller compares
@@ -432,6 +438,12 @@ pub const KEY_EQ_STRING: i64 = 2;
 /// flag is never flagged.
 pub const EARLY_DROP_FLAG: u32 = 1 << 15;
 
+/// Set on the `type_id` argument of `gc_register_finalizer` when the
+/// class's objects can close a reference cycle (reference-count plan step
+/// 9): the cycle collector starts from them. The drop entry is `0` for a
+/// class with no `drop` (archive minor 6).
+pub const CYCLIC_TYPE_FLAG: u32 = 1 << 16;
+
 /// Low 16 bits of a `HostInvoke` operand are the argument count.
 pub const HOST_INVOKE_ARITY_MASK: u32 = 0xFFFF;
 /// Bits `[17:16]` select the Option/Result host-edge layout (archive minor 2).
@@ -447,6 +459,34 @@ pub const HOST_ENUM_LAYOUT_RESULT_NICHE: u32 = 2;
 /// has none) and leaves its tag in the native context's second return
 /// word, with no enum object made (`Option<int>`, `Result<int, E>`).
 pub const HOST_ENUM_LAYOUT_PAIR: u32 = 3;
+
+/// A MIR `HostInvoke` layout byte's bits above the layout (its low 2 bits,
+/// [`HOST_ENUM_LAYOUT_MASK`]), with [`HOST_ENUM_LAYOUT_BOXED`] only: the
+/// word kind (`WORD_*`) of a boxed result's `Some` / `Ok` payload at bits
+/// `[3:2]` and of its `Err` payload at bits `[5:4]` (MIR section format 21).
+pub const HOST_PAYLOAD_KINDS_SHIFT: u32 = 2;
+
+/// A boxed host result's layout byte with its payloads' word kinds.
+pub const fn host_layout_with_kinds(some_ok: u8, err: u8) -> u8 {
+    ((some_ok & 3) << HOST_PAYLOAD_KINDS_SHIFT) | ((err & 3) << (HOST_PAYLOAD_KINDS_SHIFT + 2))
+}
+
+/// The layout of a `HostInvoke` layout byte, without its payload kinds.
+pub const fn host_layout_base(layout: u32) -> u32 {
+    layout & HOST_ENUM_LAYOUT_MASK
+}
+
+/// The word kind a boxed host result's payload of `variant` takes from its
+/// layout bits: `0` is `Some` / `Ok`, `1` is `Err`.
+pub const fn host_payload_kind(layout: u32, variant: u32) -> u8 {
+    ((layout >> (HOST_PAYLOAD_KINDS_SHIFT + 2 * variant)) & 3) as u8
+}
+
+/// A `vec_stamp` kinds argument with this bit set stamps an enum by its tag:
+/// byte `t` of the argument (`t` < 4) is the packed payload kinds a variant of
+/// tag `t` takes, so one stamp covers a shared body's boxed `Option` /
+/// `Result` whichever variant a native made.
+pub const VEC_STAMP_BY_TAG: i64 = 1 << 62;
 
 /// Pack `HostInvoke` arity and host-edge Option/Result layout into one operand.
 pub const fn pack_host_invoke_operand(arity: u32, layout: u32) -> u32 {
@@ -472,7 +512,7 @@ pub const PACKED_VEC_ARITH: &str = "packed_vec_arith";
 // Every row's id is its index (so its consts name their row), and the
 // table only grows.
 const _: () = {
-    assert!(HOST_NATIVES.len() == 215);
+    assert!(HOST_NATIVES.len() == 216);
     let mut i = 0;
     while i < HOST_NATIVES.len() {
         assert!(HOST_NATIVES[i].id as usize == i, "a host native's id is not its index");
@@ -505,6 +545,7 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "vec_with_capacity",
     "vec_capacity",
     "vec_reserve",
+    "vec_stamp",
     "vec_clear",
     "vec_pop",
     "vec_remove",
@@ -526,6 +567,20 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
 ];
 
 /// Whether standard native `id` is in [`DIRECT_HOST_NATIVES`].
+/// Whether host native `id` writes only number words, into arrays of
+/// numbers (the key index's table, hashes and live flags): it drops and
+/// stores no reference, so the counts need no look at its arguments and a
+/// borrowed load stays valid across it.
+/// Host natives whose result is always a number (a hash, a slot index):
+/// it never names an object, so a frame does not count it.
+pub fn host_returns_number(id: u64) -> bool {
+    [HASH_STRING_ID, KEY_INDEX_FIND_ID].iter().any(|&k| u64::from(k) == id)
+}
+
+pub fn host_writes_only_numbers(id: u64) -> bool {
+    [KEY_INDEX_INSERT_ID, KEY_INDEX_REMOVE_ID, KEY_INDEX_COMPACT_ID, KEY_INDEX_CLEAR_ID].iter().any(|&k| u64::from(k) == id)
+}
+
 pub fn host_native_is_direct(id: usize) -> bool {
     HOST_NATIVES
         .get(id)
@@ -610,6 +665,15 @@ pub fn library_stem(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_boxed_layout_carries_its_payload_kinds() {
+        let bits = HOST_ENUM_LAYOUT_BOXED | u32::from(host_layout_with_kinds(crate::WORD_POINTER, crate::WORD_SCALAR));
+        assert_eq!(host_layout_base(bits), HOST_ENUM_LAYOUT_BOXED);
+        assert_eq!(host_payload_kind(bits, 0), crate::WORD_POINTER);
+        assert_eq!(host_payload_kind(bits, 1), crate::WORD_SCALAR);
+        assert_eq!(host_payload_kind(HOST_ENUM_LAYOUT_PAIR, 0), crate::WORD_UNKNOWN);
+    }
 
     #[test]
     fn frozen_tail_ids() {

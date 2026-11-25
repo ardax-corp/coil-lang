@@ -22,10 +22,12 @@ pub enum InlineShape {
     /// `ALLOC_ENUM` of a variant (a tuple: [`common::PRODUCT_TAG`]) with
     /// `n` payload words (1 to [`ENUM_INLINE_ARITY`]), `kinds` their packed
     /// word kinds.
-    Enum { tag: u32, kinds: u8, n: u8 },
+    Enum { tag: u32, kinds: common::PackedKinds, n: u8 },
     /// `ALLOC_OBJECT` of a class with `n` fields (1 to
     /// [`INSTANCE_INLINE_FIELDS`]); its fields stay zero until stored.
-    Instance { type_id: u32, n: u8 },
+    /// `kinds`: its own kinds of the slots its row leaves unknown
+    /// (`ObjInstance::own_kinds`).
+    Instance { type_id: u32, kinds: common::PackedKinds, n: u8 },
 }
 
 /// How to allocate one [`InlineShape`] inline.
@@ -112,26 +114,27 @@ pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
             let (d, len, k, slots, words) = payload_probe(&obj.payload);
             put(&mut img, base, &[d]);
             put(&mut img, base + len, &[n as u8]);
-            put(&mut img, base + k, &[kinds]);
+            put(&mut img, base + k, &kinds.to_le_bytes());
             for (i, w) in words.iter().enumerate() {
                 put(&mut img, base + slots + i * 8, &w.to_le_bytes());
             }
             (classes[0], layout, data, PACED_HEADER_BYTES + obj.size(), img, base + slots)
         }
-        InlineShape::Instance { type_id, n } => {
+        InlineShape::Instance { type_id, kinds, n } => {
             if type_id == 0 || n == 0 || usize::from(n) > INSTANCE_INLINE_FIELDS {
                 return None;
             }
-            let obj = ObjInstance::with_type_id_and_fields(type_id, usize::from(n));
+            let obj = ObjInstance::with_type_id_and_fields(type_id, usize::from(n)).with_own_kinds(kinds);
             let layout = Layout::new::<GcData<ObjInstance>>();
             let data = std::mem::offset_of!(GcData<ObjInstance>, data);
             let mut img = vec![0u8; layout.size()];
             put_header(&mut img, KIND_INSTANCE);
             put(&mut img, data + off(&obj, &obj.type_id), &obj.type_id.to_le_bytes());
             let base = data + off(&obj, &obj.storage);
-            let (d, len, _, slots, words) = payload_probe(&obj.storage);
+            let (d, len, k, slots, words) = payload_probe(&obj.storage);
             put(&mut img, base, &[d]);
             put(&mut img, base + len, &[n]);
+            put(&mut img, base + k, &kinds.to_le_bytes());
             for (i, w) in words.iter().enumerate() {
                 put(&mut img, base + slots + i * 8, &w.to_le_bytes());
             }
@@ -159,10 +162,8 @@ pub struct ProductSlots {
     pub kind_at: u32,
     pub kind: u8,
     pub enum_kind: u8,
-    /// The header's generation byte, and the bit the write barrier takes
-    /// the slow path on ([`GEN_UNLOGGED`]).
-    pub generation_at: u32,
-    pub unlogged: u8,
+    /// An enum's `u32` tag.
+    pub enum_tag_at: u32,
     /// The storage's discriminant byte.
     pub storage_at: u32,
     /// Inline slots: the discriminant, the `u8` slot count and the words.
@@ -212,8 +213,7 @@ pub fn product_slots() -> ProductSlots {
         kind_at: off(&header, &header.kind) as u32,
         kind: KIND_INSTANCE,
         enum_kind: KIND_ENUM,
-        generation_at: off(&header, &header.generation) as u32,
-        unlogged: GEN_UNLOGGED,
+        enum_tag_at: (enum_data + off(&variant, &variant.tag)) as u32,
         storage_at: storage as u32,
         inline_tag,
         inline_len_at: inline_len_at as u32,
@@ -221,7 +221,7 @@ pub fn product_slots() -> ProductSlots {
         spill_tag,
         spill_ptr_at: (vec_at + ptr * 8) as u32,
         spill_len_at: (vec_at + len_word * 8) as u32,
-        inline_stores: !cfg!(any(debug_assertions, feature = "gc-stress")),
+        inline_stores: !cfg!(any(debug_assertions, feature = "rc-check")),
     }
 }
 
@@ -236,28 +236,30 @@ pub fn layout_fingerprint() -> u64 {
         inline_object(InlineShape::Enum { tag: 0x0102_0304, kinds: 0x5a, n }).hash(&mut h);
     }
     for n in 1..=INSTANCE_INLINE_FIELDS as u8 {
-        inline_object(InlineShape::Instance { type_id: 0x0607_0809, n }).hash(&mut h);
+        inline_object(InlineShape::Instance { type_id: 0x0607_0809, kinds: 0x5a, n }).hash(&mut h);
     }
     let counts = [
         std::mem::offset_of!(HeapCounts, inline_gate),
         std::mem::offset_of!(HeapCounts, fin_words),
         std::mem::offset_of!(HeapCounts, fin_len),
         std::mem::offset_of!(HeapCounts, alloc_bytes),
-        std::mem::offset_of!(HeapCounts, young_bytes),
         std::mem::offset_of!(HeapCounts, live_count),
         std::mem::offset_of!(super::super::slab::Bump, next),
         std::mem::offset_of!(super::super::slab::Bump, end),
+        std::mem::offset_of!(super::super::slab::Bump, free),
+        super::super::slab::FREE_LINK as usize,
         std::mem::size_of::<super::super::slab::Bump>(),
     ];
     counts.hash(&mut h);
     product_slots().hash(&mut h);
     // The inline share (#2506).
-    (super::HEADER_KIND_OFFSET, super::COW_SHARED_OFFSET, super::COW_SHARED_SET, super::KIND_ARRAY).hash(&mut h);
+    (super::HEADER_KIND_OFFSET, super::HEADER_FLAGS_OFFSET, super::FLAG_SHARED, super::KIND_ARRAY).hash(&mut h);
     // The pin the inline share tests, and `CowPin` / `CowUnpin` write.
-    (super::COW_PINNED_OFFSET, super::COW_PINNED_SET).hash(&mut h);
-    // The store view protocol (#2687): code built for plain views only
-    // would store in place into an array with a card table.
-    (super::VIEW_PLAIN, super::VIEW_TRACKED, super::CARD_SHIFT, super::CARD_MIN_WORDS).hash(&mut h);
+    (super::FLAG_PINNED, super::HEADER_COUNT_OFFSET).hash(&mut h);
+    // The inline count ops (reference-count plan step 6).
+    (super::HEAP_ALLOC_LOCK_OFFSET, super::COUNT_IMMORTAL, super::HEAP_SLAB_LO_OFFSET, super::HEAP_SLAB_HI_OFFSET).hash(&mut h);
+    // The store view protocol: plain views only, no card table.
+    (super::VIEW_PLAIN, "no cards").hash(&mut h);
     h.finish()
 }
 
@@ -272,7 +274,7 @@ mod tests {
         let mut heap = Heap::default();
         heap.set_nursery(true);
         let (counts, bumps) = heap.inline_alloc_ptrs();
-        assert_eq!(unsafe { (*counts).inline_gate }, u64::from(!cfg!(feature = "gc-stress")));
+        assert_eq!(unsafe { (*counts).inline_gate }, u64::from(!cfg!(feature = "rc-check")));
         let words = [Value::from(7_i64), Value::from(8_i64), Value::from(9_i64)];
         let mut alloc = |shape: InlineShape, payload: &[Value]| -> u64 {
             let o = inline_object(shape).expect("inline shape");
@@ -285,7 +287,6 @@ mod tests {
             b.next += u64::from(o.slot);
             let c = unsafe { &mut *counts };
             c.alloc_bytes += o.size as usize;
-            c.young_bytes += o.size as usize;
             c.live_count += 1;
             let p = at as *mut u64;
             for (i, w) in o.image.iter().enumerate() {
@@ -299,7 +300,7 @@ mod tests {
         let e = alloc(InlineShape::Enum { tag: 4, kinds: 0, n: 2 }, &words[1..]);
         let tuple = InlineShape::Enum { tag: common::PRODUCT_TAG, kinds: 0, n: 3 };
         let t = alloc(tuple, &words);
-        let i = alloc(InlineShape::Instance { type_id: 5, n: 2 }, &[]);
+        let i = alloc(InlineShape::Instance { type_id: 5, kinds: 0, n: 2 }, &[]);
         let Some(Object::Enum(gc)) = heap.find_object_by_addr(e) else { panic!("not an enum") };
         assert_eq!(gc.as_ref().tag, 4);
         assert_eq!(gc.as_ref().payload.as_slice(), &words[1..]);
@@ -310,7 +311,7 @@ mod tests {
         assert_eq!(gc.as_ref().type_id, 5);
         assert_eq!(gc.as_ref().slot(1), Some(Value::from(0_i64)));
         assert_eq!(gc.as_ref().slot(2), None);
-        for (a, s) in [(e, InlineShape::Enum { tag: 4, kinds: 0, n: 2 }), (t, tuple), (i, InlineShape::Instance { type_id: 5, n: 2 })] {
+        for (a, s) in [(e, InlineShape::Enum { tag: 4, kinds: 0, n: 2 }), (t, tuple), (i, InlineShape::Instance { type_id: 5, kinds: 0, n: 2 })] {
             assert_eq!(heap.find_object_by_addr(a).map(|o| o.size()), inline_object(s).map(|o| o.size as usize));
         }
     }
@@ -319,8 +320,8 @@ mod tests {
     fn wide_payloads_and_untyped_instances_stay_on_the_helper() {
         assert!(inline_object(InlineShape::Enum { tag: 0, kinds: 0, n: 5 }).is_none());
         assert!(inline_object(InlineShape::Enum { tag: common::PRODUCT_TAG, kinds: 0, n: 0 }).is_none());
-        assert!(inline_object(InlineShape::Instance { type_id: 0, n: 1 }).is_none());
-        assert!(inline_object(InlineShape::Instance { type_id: 1, n: 5 }).is_none());
+        assert!(inline_object(InlineShape::Instance { type_id: 0, kinds: 0, n: 1 }).is_none());
+        assert!(inline_object(InlineShape::Instance { type_id: 1, kinds: 0, n: 5 }).is_none());
     }
 
     /// Slots read and written at [`product_slots`]' offsets are the

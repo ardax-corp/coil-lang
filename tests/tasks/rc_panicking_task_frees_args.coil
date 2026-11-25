@@ -1,0 +1,34 @@
+// A task whose body panics unwinds its coroutine's frame, which owns the
+// task's handle and closure: the frame's cleanup releases them, so a loop
+// of failing scopes keeps the heap flat.
+use tests::assert;
+use gc::{collect, heap_bytes};
+use task::{scope, Scope};
+
+fn boom() -> int {
+    panic "boom";
+}
+
+fn failed_scope() -> bool {
+    let r = scope(fn (Scope s) {
+        let _ = s.spawn(fn () => boom());
+        return 0;
+    });
+    return match r {
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    };
+}
+
+test("a loop of failing scopes keeps the heap flat") {
+    assert!(failed_scope());
+    collect();
+    let before = heap_bytes();
+    let i = 0;
+    while i < 200 {
+        assert!(failed_scope());
+        i += 1;
+    }
+    collect();
+    assert!(heap_bytes() - before < 4000);
+}

@@ -45,7 +45,7 @@
 - Generators: `Alloc` of `MirAllocKind::Coro`, `ResumeCoro`, `Yield`, `DoneCoro`.
 - `panic` aborts the run; the test harness treats it as failure.
 - Panic locations: `ProgramDebug::line_of` over `debug_locs` / `debug_lines`.
-- Roots: Cranelift stack maps and `NativeCtx::roots` records on native code, one `ROOTS_SCAN` record per activation on the interpreter. A word lives until its last use, a `gc::root` handle until the function returns.
+- Memory: reference counts (`RcInc` / `RcDec` from `mir/rc_insert.rs`), a cycle collector for cyclic classes; frames are no roots, nothing moves. A word dies at its last use; a `gc::root` handle keeps its value until `unroot`. See `docs/internals/memory.md`.
 
 ## Typechecker limitations (known)
 

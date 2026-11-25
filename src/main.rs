@@ -905,9 +905,6 @@ fn main() {
                     machine::set_early_free_mode(machine::EarlyFreeMode::Check);
                 }
             }
-            if let Some(on) = cli.nursery {
-                machine::set_nursery(on);
-            }
             if cli.cow_report {
                 // SAFETY: set before any thread starts.
                 unsafe { std::env::set_var("COIL_COW_REPORT", "1") };

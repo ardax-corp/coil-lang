@@ -21,7 +21,7 @@ coil/
 ├── common/          # Value, archive (ARCHIVE_MAJOR/MINOR), host native table, StartupOp
 ├── parser/          # Pratt parser, AST
 ├── compiler/        # HM typechecker, HIR (src/hir/), MIR (src/mir/), codegen plan (src/codegen/), pipeline
-├── machine/         # Runtime: driver, heap/GC, tasks, reactor, FFI, host natives, native ABI
+├── machine/         # Runtime: driver, heap (counts, cycle collector), tasks, reactor, FFI, host natives, native ABI
 ├── coil-native/     # MIR to Cranelift: JIT, AOT objects
 ├── coil-mir-interp/ # MIR interpreter
 ├── coil-rt/         # Runtime library AOT executables link
@@ -53,7 +53,7 @@ Single compilation path: HIR → MIR (`compiler/src/mir/from_hir.rs`, planned by
 
 ## Hard invariants (never skip)
 
-1. **Archive version** — `ARCHIVE_MAJOR` / `ARCHIVE_MINOR` in `common/src/archive.rs`. An additive change bumps the minor; any other change to the format bumps the major (reset minor). Loaders accept the same major with archive minor ≤ runtime minor. A change to the MIR section's layout bumps `FORMAT` in `compiler/src/mir/archive.rs`; a reader takes the current format and the older ones of major 8 (16 to 19) and refuses any other. Today: archive 8.4, MIR section format 20 (history in `docs/internals/archive-history.md`).
+1. **Archive version** — `ARCHIVE_MAJOR` / `ARCHIVE_MINOR` in `common/src/archive.rs`. An additive change bumps the minor; any other change to the format bumps the major (reset minor). Loaders accept the same major with archive minor ≤ runtime minor. A change to the MIR section's layout bumps `FORMAT` in `compiler/src/mir/archive.rs`; a reader takes the current format only and refuses any other. Today: archive 8.8, MIR section format 22 (history in `docs/internals/archive-history.md`).
 2. **Virtual module natives** — use `HostInvoke`, wired in `machine/`. Frozen ids are the `*_ID` consts in `common/src/host.rs`: never renumber them.
 3. **MIR is what every engine runs** — a new op needs both engines, and they must agree: `coil test` and `coil test --engine mir`. No case-specific optimizations that only serve a bench (see AGENTS.md).
 4. **New language features** — full HM integration + user-doc updates in [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`) + internals here when needed + minimal runnable example. Prefer **method-based APIs** (`impl` methods on classes) over free functions for operations tied to a receiver type; free generic fns returning enums are codegen-fragile (see [limitations.md](docs/internals/limitations.md)).

@@ -31,8 +31,8 @@ pub(crate) struct Runtime {
     /// zeros the table so unmarked literals can die; STRING still stacks
     /// the handle before `maybe_gc`.
     pub(crate) program_string_cache: Vec<Value>,
-    /// Native calls in a runtime call, innermost last: the heap words their
-    /// frames hold are pinned roots ([`crate::native::NativeCtx::for_each_root`]).
+    /// Native calls in a runtime call, innermost last: their call sites
+    /// make a panic's backtrace.
     pub(crate) native_roots: Vec<(*mut crate::native::NativeCtx, usize)>,
     /// Arguments of the native FFI calls in flight (nested when a callback
     /// re-enters the runtime and calls out again). `FfiInvoke` pops them off the
@@ -162,9 +162,17 @@ impl Runtime {
     /// emptied, unmapped when it grew past one slab chunk so RSS cannot
     /// climb with successive jobs.
     pub(crate) fn reset_isolate(&mut self) {
+        // The job's statics owned their words: released with them.
+        if !self.heap.is_borrowed() {
+            let heap = self.heap.owned_mut();
+            for &v in &self.statics {
+                heap.rc_drop(v);
+            }
+            heap.rc_release_pending();
+        }
         self.statics.fill(Value::default());
         self.program_string_cache.fill(Value::default());
-        self.sched = None;
+        self.task_drop_scheduler();
         self.ffi.userland_libraries.clear();
         self.ffi.adopted.clear();
         self.ffi.closures.clear();
@@ -180,19 +188,17 @@ impl Runtime {
             return;
         }
         self.heap.owned_mut().clear_finalizer_types();
-        if self.heap.owned_mut().slab_chunk_count() > 1 {
+        // Counts freed what the job let go; what it leaked goes with its
+        // chunks.
+        if self.heap.owned_mut().slab_chunk_count() > 0 {
             let emptied = self.heap.owned_mut().emptied();
             *self.heap.owned_mut() = emptied;
-        } else if self.heap.owned_mut().slab_chunk_count() == 1 {
-            self.heap.owned_mut().collect(&[]);
-            self.heap.owned_mut().clear_young();
-            self.program_string_cache.fill(Value::default());
         }
     }
 
     /// After a shared-heap job (the epoch's heap unbound).
     pub(crate) fn reset_shared(&mut self) {
-        self.sched = None;
+        self.task_drop_scheduler();
         self.gc_in_progress = false;
         self.gc_deferred = false;
     }
@@ -248,8 +254,19 @@ impl Runtime {
     /// and worker cap.
     pub(crate) fn new() -> Self {
         let mut heap = crate::memory::HeapSlot::default();
-        heap.get_mut().set_nursery(crate::memory::nursery_enabled());
+        heap.get_mut().set_nursery(true);
         Self { heap, natives: crate::ffi::Natives::new(), sched: None, reactor: crate::reactor::Reactor::new(0), io_reactor: crate::io_reactor::IoReactor::new(), live_threads: crate::thread::new_live_thread_registry(), worker_cap: crate::thread::WorkerCap::new(), statics: Vec::new(), program_strings: Arc::new(Vec::new()), program_string_cache: Vec::new(), native_roots: Vec::new(), ffi_arg_roots: Vec::new(), finalizer_by_type: std::collections::HashMap::default(), finalizer_pcs: std::collections::HashSet::default(), output: None, shared_stdout: None, shared_stderr: None, ffi: FfiState::default(), native: None, closeables: false, gc_in_progress: false, gc_deferred: false, shared_epoch: None, speculative_out: crate::thread::SpeculativeOut::default(), probes: Vec::new(), fuel: u64::MAX, step_budget_hit: false, fuel_start: u64::MAX, heap_cap: usize::MAX, heap_cap_hit: false }
+    }
+}
+
+impl Drop for Runtime {
+    /// The statics' values live as long as the program: the leak report
+    /// (`COIL_RC_LEAKS=1`) of the heap that goes next leaves them out.
+    fn drop(&mut self) {
+        if crate::memory::rc_leaks_shown() && !self.statics.is_empty() {
+            let statics = std::mem::take(&mut self.statics);
+            self.heap.owned_mut().rc_leaks_exempt(&statics);
+        }
     }
 }
 
@@ -311,9 +328,16 @@ impl Runtime {
     /// drop method runs at `pc` (`EARLY_DROP_FLAG`: freed early too).
     pub(crate) fn register_finalizer(&mut self, type_id: u32, pc: u32) {
         let early = type_id & common::EARLY_DROP_FLAG != 0;
-        let type_id = type_id & !common::EARLY_DROP_FLAG;
+        let cyclic = type_id & common::CYCLIC_TYPE_FLAG != 0;
+        let type_id = type_id & !(common::EARLY_DROP_FLAG | common::CYCLIC_TYPE_FLAG);
         if type_id == 0 {
             return;
+        }
+        if cyclic {
+            self.heap.register_cyclic_type(type_id);
+            if pc == 0 {
+                return;
+            }
         }
         if early {
             self.heap.register_early_drop_type(type_id);
@@ -357,7 +381,8 @@ pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::Na
     if park_tasks && !h.on_fiber() {
         return None;
     }
-    let layout = crate::host_enum::HostEnumLayout::from_u32(layout as u32);
+    let bits = layout as u32;
+    let layout = crate::host_enum::HostEnumLayout::from_u32(bits);
     if fn_id == common::CLOCK_SLEEP_MS_ID as usize && park_tasks {
         // Inside a scope, `clock::sleep_ms` suspends the task.
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(args.first().map_or(0, |v| v.as_int()).max(0) as u64);
@@ -384,7 +409,7 @@ pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::Na
         let rt = h.rt();
         rt.native_roots.push((ctx, depth));
         let native = rt.natives.get_by_id(fn_id).expect("the caller checked");
-        let mut invoked = crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut rt.heap, args));
+        let mut invoked = crate::host_enum::with_host_enum_bits(bits, || native.invoke(&mut rt.heap, args));
         if opens_fd && crate::io::take_fd_exhausted() {
             // Streams nothing reaches may hold the descriptors: collect
             // (native frames' words pinned) and try once more.
@@ -394,7 +419,7 @@ pub(crate) fn invoke_ordinary<H: HostEnv>(h: &mut H, ctx: *mut crate::native::Na
             let rt = h.rt();
             rt.ffi_arg_roots.truncate(roots_len);
             let native = rt.natives.get_by_id(fn_id).expect("checked above");
-            invoked = crate::host_enum::with_host_enum_layout(layout, || native.invoke(&mut rt.heap, args));
+            invoked = crate::host_enum::with_host_enum_bits(bits, || native.invoke(&mut rt.heap, args));
         }
         h.rt().native_roots.pop();
         if park_tasks {

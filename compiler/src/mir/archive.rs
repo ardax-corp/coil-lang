@@ -25,24 +25,27 @@ use common::DebugLoc;
 
 use crate::bodies::Label;
 use crate::layout::MirLayout;
-use crate::mir::gc::LiveRootSet;
 use crate::mir::inst::LocalId;
 use crate::mir::{
     BlockId, LaneExpr, LaneVal, MirAllocKind, MirBinOp, MirBlock, MirCastKind, MirCmpOp, MirConst, MirCStruct, MirExternSig, MirFfiOp, MirFunc, MirGcKind, MirInst, MirLaneShape, MirTy, MirUnaryOp, NativeBody, Terminator, ValueId, VecExpr, VecLoopKind,
 };
 
 const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
-/// Bump when the layout changes. A reader takes this format,
-/// [`FORMAT_EXTERN`], [`FORMAT_PINS`], [`FORMAT_SCOPED`] and [`FORMAT_UNSCOPED`], and refuses
-/// any other.
-const FORMAT: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
-/// The format before [`FORMAT`]: `ExternCall` without struct layouts.
+/// Bump when the layout or the meaning of a body's words changes. A reader
+/// takes this format only: older sections' `kinds` words have one bit per
+/// type parameter. The older formats remain for tests of what their
+/// sections hold.
+const FORMAT: u8 = common::MIR_SECTION_ROOTLESS_FORMAT;
+/// The format before two-bit `kinds` words (archive 8.4): `ExternCall`
+/// signatures carry struct layouts from it on.
+const FORMAT_STRUCTS: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
+/// `ExternCall` without struct layouts (archive 8.3).
 const FORMAT_EXTERN: u8 = common::MIR_SECTION_EXTERN_FORMAT;
-/// The format before `ExternCall` (archive 8.2): the same layout, with no
-/// extern call in it.
+/// The format before `ExternCall` (archive 8.2).
 const FORMAT_PINS: u8 = common::MIR_SECTION_COW_PIN_FORMAT;
 /// The format before the pin ops (archive 8.1): the same layout, with no
 /// `CowPin` / `CowUnpin` in it.
+#[cfg(test)]
 const FORMAT_SCOPED: u8 = common::MIR_SECTION_SCOPES_FORMAT;
 /// The format before inline scopes: no scope table, no scope in a location
 /// (each is `0`). Archives of minor 0 of major 8 have it.
@@ -59,7 +62,7 @@ pub fn encode(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[
 /// section of an older archive has none.
 fn encode_as(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, scopes: &[common::InlineScope], format: u8) -> Vec<u8> {
     let scoped = format != FORMAT_UNSCOPED;
-    let mut w = Writer(Vec::new(), scoped, format >= FORMAT);
+    let mut w = Writer(Vec::new(), scoped, format >= FORMAT_STRUCTS);
     w.0.extend_from_slice(MAGIC);
     w.u8(format);
     if scoped {
@@ -83,13 +86,13 @@ pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), S
         return Err("not a native MIR section".into());
     }
     let format = r.u8()?;
-    if ![FORMAT, FORMAT_EXTERN, FORMAT_PINS, FORMAT_SCOPED, FORMAT_UNSCOPED].contains(&format) {
-        return Err(format!("native MIR format {format}, this coil reads {FORMAT_UNSCOPED} to {FORMAT}"));
+    if format != FORMAT {
+        return Err(format!("native MIR format {format}, this coil reads {FORMAT}"));
     }
     r.scoped = format != FORMAT_UNSCOPED;
     r.pins = format >= FORMAT_PINS;
     r.externs = format >= FORMAT_EXTERN;
-    r.structs = format >= FORMAT;
+    r.structs = format >= FORMAT_STRUCTS;
     if r.scoped {
         common::read_inline_scopes(r.b, &mut r.i).ok_or("native MIR section has a bad inline scope table")?;
     }
@@ -207,6 +210,16 @@ const I_COW_PIN: u8 = 49;
 const I_COW_UNPIN: u8 = 50;
 // Format 19 (archive 8.3).
 const I_EXTERN_CALL: u8 = 51;
+/// Reference count ops (format 21 on, reference counts plan step 3).
+const I_RC_INC: u8 = 52;
+const I_RC_DEC: u8 = 53;
+/// A `HeapFieldStore` of a number field (archive 8.7).
+const I_SET_FIELD_SCALAR: u8 = 54;
+/// A `StoreIndex` of a number element (archive 8.9).
+const I_STORE_INDEX_SCALAR: u8 = 55;
+/// Reuse in place (format 24, archive 8.11).
+const I_RC_REUSE: u8 = 56;
+const I_ALLOC_AT: u8 = 57;
 
 const FFI_OPS: [MirFfiOp; 4] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke, MirFfiOp::Addr];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -363,20 +376,7 @@ fn func(w: &mut Writer, f: &MirFunc) {
     w.locs(f.value_locs.iter().map(|(v, l)| (v.0, *l)));
     w.locs(f.op_locs.iter().map(|(v, l)| (v.0, *l)));
     w.locs(f.term_locs.iter().map(|(b, l)| (b.0, *l)));
-    // The tables the root analyses and the passes read.
-    let mut slot_env: Vec<_> = f.slot_env.iter().collect();
-    slot_env.sort_unstable_by_key(|(v, _)| v.0);
-    w.u32(slot_env.len() as u32);
-    for (v, binds) in slot_env {
-        w.v(*v);
-        w.binds(binds);
-    }
-    w.u32(f.gc_roots.len() as u32);
-    for set in &f.gc_roots {
-        w.v(set.at);
-        w.vs(&set.values);
-        w.locals(set.slots.iter().copied());
-    }
+    // The tables the passes read.
     let mut debug_slots: Vec<_> = f.debug_slots.iter().map(|(&l, &v)| (l, v)).collect();
     debug_slots.sort_unstable_by_key(|(l, _)| l.0);
     w.binds(&debug_slots);
@@ -536,16 +536,16 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*object);
             w.u32(*slot);
         }
-        MirInst::StoreIndex { dest, array, index, value, unchecked } => {
-            w.u8(I_STORE_INDEX);
+        MirInst::StoreIndex { dest, array, index, value, unchecked, scalar } => {
+            w.u8(if *scalar { I_STORE_INDEX_SCALAR } else { I_STORE_INDEX });
             w.v(*dest);
             w.v(*array);
             w.v(*index);
             w.v(*value);
             w.u8(*unchecked as u8);
         }
-        MirInst::HeapFieldStore { dest, object, value, index } => {
-            w.u8(I_SET_FIELD);
+        MirInst::HeapFieldStore { dest, object, value, index, scalar } => {
+            w.u8(if *scalar { I_SET_FIELD_SCALAR } else { I_SET_FIELD });
             w.v(*dest);
             w.v(*object);
             w.v(*value);
@@ -569,8 +569,32 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*src);
             w.v(*saved);
         }
-        MirInst::Alloc { dest, kind, elems, kinds } => {
-            w.u8(I_ALLOC);
+        MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+            w.u8(if matches!(inst, MirInst::RcInc { .. }) { I_RC_INC } else { I_RC_DEC });
+            w.v(*dest);
+            w.v(*src);
+            w.opt_v(*guard);
+        }
+        MirInst::RcReuse { dest, src, moved } => {
+            w.u8(I_RC_REUSE);
+            w.v(*dest);
+            w.v(*src);
+            w.u32(*moved);
+        }
+        MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
+            if let MirInst::AllocAt { slot, owned, .. } = inst {
+                w.u8(I_ALLOC_AT);
+                w.u32(*owned);
+                match slot {
+                    Some(slot) => {
+                        w.u8(1);
+                        w.v(*slot);
+                    }
+                    None => w.u8(0),
+                }
+            } else {
+                w.u8(I_ALLOC);
+            }
             w.v(*dest);
             match *kind {
                 MirAllocKind::Array => w.u8(0),
@@ -616,7 +640,7 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             for e in elems {
                 w.v(*e);
             }
-            w.u8(*kinds);
+            w.u32(*kinds);
         }
         MirInst::ArrayPush { dest, array, value } => {
             w.u8(I_ARRAY_PUSH);
@@ -731,10 +755,10 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*scrutinee);
             w.u32(*index);
         }
-        MirInst::GcBarrier { dest, kind: MirGcKind::Safepoint, roots } => {
+        MirInst::GcBarrier { dest, kind: MirGcKind::Safepoint, object } => {
             w.u8(I_GC_BARRIER);
             w.v(*dest);
-            w.vs(roots);
+            w.v(*object);
         }
         MirInst::ResumeCoro { dest, handle, send } => {
             w.u8(I_RESUME);
@@ -1073,15 +1097,6 @@ fn read_func(r: &mut Reader) -> Result<MirFunc, String> {
     f.value_locs = r.locs()?.into_iter().map(|(k, l)| (ValueId(k), l)).collect();
     f.op_locs = r.locs()?.into_iter().map(|(k, l)| (ValueId(k), l)).collect();
     f.term_locs = r.locs()?.into_iter().map(|(k, l)| (BlockId(k), l)).collect();
-    let n = r.len()?;
-    for _ in 0..n {
-        let v = r.v()?;
-        f.slot_env.insert(v, r.binds()?);
-    }
-    let n = r.len()?;
-    for _ in 0..n {
-        f.gc_roots.push(LiveRootSet { at: r.v()?, values: r.vs()?, slots: r.locals()? });
-    }
     f.debug_slots = r.binds()?.into_iter().collect();
     f.heap_slots = r.locals()?.into_iter().collect::<BTreeSet<_>>();
     f.word_slots = r.locals()?.into_iter().collect::<BTreeSet<_>>();
@@ -1164,15 +1179,26 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_INDEX => MirInst::Index { dest: r.v()?, array: r.v()?, index: r.v()?, unchecked: r.u8()? != 0 },
         I_LEN => MirInst::ArrayLen { dest: r.v()?, array: r.v()? },
         I_FIELD => MirInst::ProductLoad { dest: r.v()?, object: r.v()?, slot: r.u32()? },
-        I_STORE_INDEX => MirInst::StoreIndex {
+        tag @ (I_STORE_INDEX | I_STORE_INDEX_SCALAR) => MirInst::StoreIndex {
             dest: r.v()?,
             array: r.v()?,
             index: r.v()?,
             value: r.v()?,
             unchecked: r.u8()? != 0,
+            scalar: tag == I_STORE_INDEX_SCALAR,
         },
-        I_SET_FIELD => MirInst::HeapFieldStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()? },
-        I_ALLOC => {
+        tag @ (I_SET_FIELD | I_SET_FIELD_SCALAR) => {
+            MirInst::HeapFieldStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()?, scalar: tag == I_SET_FIELD_SCALAR }
+        }
+        tag @ (I_ALLOC | I_ALLOC_AT) => {
+            // `AllocAt`: its owned words, then its slot if it has one.
+            let at = if tag == I_ALLOC_AT {
+                let owned = r.u32()?;
+                let slot = if r.u8()? != 0 { Some(r.v()?) } else { None };
+                Some((slot, owned))
+            } else {
+                None
+            };
             let dest = r.v()?;
             let kind = match r.u8()? {
                 0 => MirAllocKind::Array,
@@ -1188,8 +1214,13 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             };
             let n = r.len()?;
             let elems = (0..n).map(|_| r.v()).collect::<Result<Vec<_>, _>>()?;
-            MirInst::Alloc { dest, kind, elems, kinds: r.u8()? }
+            let kinds = r.u32()?;
+            match at {
+                Some((slot, owned)) => MirInst::AllocAt { dest, slot, owned, kind, elems, kinds },
+                None => MirInst::Alloc { dest, kind, elems, kinds },
+            }
         }
+        I_RC_REUSE => MirInst::RcReuse { dest: r.v()?, src: r.v()?, moved: r.u32()? },
         I_STRING => MirInst::String { dest: r.v()?, idx: r.u32()? },
         I_LOAD_STATIC => MirInst::LoadStatic { dest: r.v()?, slot: r.u32()? },
         I_STORE_STATIC => MirInst::StoreStatic { dest: r.v()?, slot: r.u32()?, value: r.v()? },
@@ -1227,7 +1258,7 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         I_LANE_STORE => MirInst::LaneStore { dest: r.v()?, array: r.v()?, index: r.v()?, lo: r.v()?, hi: r.v()?, shape: read_lane_shape(r)? },
         I_LANE_PUSH => MirInst::LanePush { dest: r.v()?, array: r.v()?, lo: r.v()?, hi: r.v()?, shape: read_lane_shape(r)? },
         I_LANES_TO_WORDS => MirInst::LanesToWords { dest: r.v()?, array: r.v()?, shape: read_lane_shape(r)? },
-        I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, roots: r.vs()? },
+        I_GC_BARRIER => MirInst::GcBarrier { dest: r.v()?, kind: MirGcKind::Safepoint, object: r.v()? },
         I_COW => {
             let (dest, src, unique) = (r.v()?, r.v()?, r.u8()? != 0);
             let field = Some(r.u32()?).filter(|&f| f != u32::MAX);
@@ -1235,6 +1266,8 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         }
         I_COW_PIN if r.pins => MirInst::CowPin { dest: r.v()?, src: r.v()? },
         I_COW_UNPIN if r.pins => MirInst::CowUnpin { dest: r.v()?, src: r.v()?, saved: r.v()? },
+        I_RC_INC => MirInst::RcInc { dest: r.v()?, src: r.v()?, guard: r.opt_v()? },
+        I_RC_DEC => MirInst::RcDec { dest: r.v()?, src: r.v()?, guard: r.opt_v()? },
         I_RESUME => MirInst::ResumeCoro { dest: r.v()?, handle: r.v()?, send: r.opt_v()? },
         I_DONE => MirInst::DoneCoro { dest: r.v()?, handle: r.v()? },
         I_YIELD => MirInst::Yield { dest: r.v()?, value: r.v()?, from: r.u8()? != 0, receive: r.u8()? != 0 },
@@ -1349,8 +1382,7 @@ fn read_vec_stores(r: &mut Reader) -> Result<Vec<(ValueId, ValueId, u8, VecExpr)
 mod tests {
     use super::*;
 
-    /// A body with a value in the fields the code tiers and the root
-    /// analyses read, and a cleanup pad of its own name.
+    /// A body with a value in the fields the code tiers read, and a cleanup pad of its own name.
     fn body() -> NativeBody {
         let mut pad = MirFunc::new("pad of f");
         pad.homes = vec![MirTy::HeapRef];
@@ -1364,7 +1396,7 @@ mod tests {
         let loc = DebugLoc { file: 1, start_byte: 2, end_byte: 3, scope: 1 };
         let mut b = MirBlock::new(BlockId(0));
         b.insts.push(MirInst::Probe { dest: ValueId(1), id: 7 });
-        b.insts.push(MirInst::GcBarrier { dest: ValueId(2), kind: MirGcKind::Safepoint, roots: vec![ValueId(0)] });
+        b.insts.push(MirInst::GcBarrier { dest: ValueId(2), kind: MirGcKind::Safepoint, object: ValueId(0) });
         f.blocks.push(b);
         let mut last = MirBlock::new(BlockId(1));
         last.term = Some(Terminator::Unreachable);
@@ -1372,8 +1404,6 @@ mod tests {
         f.value_locs.insert(ValueId(1), loc);
         f.op_locs.insert(ValueId(2), loc);
         f.term_locs.insert(BlockId(1), loc);
-        f.slot_env.insert(ValueId(1), vec![(LocalId(3), ValueId(0))]);
-        f.gc_roots.push(LiveRootSet { at: ValueId(1), values: vec![ValueId(0)], slots: vec![LocalId(3)] });
         f.debug_slots.insert(LocalId(3), ValueId(0));
         f.heap_slots.insert(LocalId(3));
         f.word_slots.insert(LocalId(4));
@@ -1405,16 +1435,15 @@ mod tests {
         assert_eq!(back[0].mir.op_loc(ValueId(2)).scope, 1);
     }
 
-    /// A section of an archive before inline scopes (format 16) reads, with
-    /// no scope table and no location in a scope.
+    /// A section of an archive before two-bit `kinds` words (formats 16 to
+    /// 20) is refused: its constant `kinds` words mean otherwise.
     #[test]
-    fn a_section_without_scopes_reads() {
+    fn a_section_of_an_older_format_is_refused() {
         let b = body();
-        let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), FORMAT_UNSCOPED);
-        assert!(common::section_inline_scopes(&old).is_empty());
-        let (back, pcs) = decode(&old).expect("decode format 16");
-        assert_eq!(pcs.get("f"), Some(&42));
-        assert_eq!(back[0].mir.op_loc(ValueId(2)), DebugLoc { scope: 0, ..b.mir.op_loc(ValueId(2)) });
+        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, FORMAT_PINS, FORMAT_EXTERN, FORMAT_STRUCTS] {
+            let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), format);
+            assert!(decode(&old).is_err(), "format {format}");
+        }
     }
 
     /// `f` with a copy-on-write pin pair around nothing: `v3 = cow.pin v0`,
@@ -1433,25 +1462,33 @@ mod tests {
     fn the_pin_ops_come_back() {
         let b = pinned_body();
         let bytes = bytes(&b);
-        assert_eq!(bytes[MAGIC.len()], 20, "archive 8.4 writes format 20");
+        assert_eq!(bytes[MAGIC.len()], FORMAT);
         let (back, _) = decode(&bytes).expect("decode");
         assert_eq!(back[0].mir, b.mir);
     }
 
-    /// A section of an 8.1 archive (format 17) reads; one that holds a pin
-    /// op is no section 8.1 wrote, and is refused.
+    /// `f` with reference count ops, guarded and not: `v3 = rc.inc v0`,
+    /// `v5 = rc.dec v0 if v4` (and the verifier takes them).
     #[test]
-    fn a_format_17_section_reads_and_holds_no_pin() {
-        let b = body();
-        let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), FORMAT_SCOPED);
-        assert_eq!(old[MAGIC.len()], 17);
-        assert_eq!(common::section_inline_scopes(&old), scopes());
-        let (back, pcs) = decode(&old).expect("decode format 17");
-        assert_eq!(pcs.get("f"), Some(&42));
+    fn the_reference_count_ops_come_back() {
+        let mut b = body();
+        b.mir.types.extend([MirTy::Bool, MirTy::Bool, MirTy::Bool]);
+        b.mir.types[0] = MirTy::HeapRef;
+        let insts = &mut b.mir.blocks[0].insts;
+        insts.insert(1, MirInst::RcInc { dest: ValueId(3), src: ValueId(0), guard: None });
+        insts.insert(2, MirInst::Const { dest: ValueId(4), c: MirConst::Bool(true) });
+        insts.insert(3, MirInst::RcDec { dest: ValueId(5), src: ValueId(0), guard: Some(ValueId(4)) });
+        let bytes = bytes(&b);
+        let (back, _) = decode(&bytes).expect("decode");
         assert_eq!(back[0].mir, b.mir);
-        let p = pinned_body();
-        let bad = encode_as(std::slice::from_ref(&p), &HashMap::new(), &scopes(), FORMAT_SCOPED);
-        assert!(decode(&bad).is_err());
+        let text = b.mir.to_string();
+        assert!(text.contains("rc.dec v0 if v4") || text.contains("rc.dec %0 if %4"), "{text}");
+        assert_eq!(crate::mir::parse_func(&text).expect(&text).blocks[0].insts[1..4], b.mir.blocks[0].insts[1..4]);
+        // The verifier takes them, and a guard is a `bool`.
+        let ok = "func @f(v0: heapref, v1: bool) -> heapref {\nbb0:\n    v2 = rc.inc v0\n    v3 = rc.dec v0 if v1\n    return v0\n}\n";
+        crate::mir::parse_func(ok).expect(ok).verify().expect("verify");
+        let bad = ok.replace("v1: bool", "v1: i64");
+        assert!(crate::mir::parse_func(&bad).expect(&bad).verify().is_err());
     }
 
     /// `f` with extern calls: `v3 = extern sum v0, v0, v0, v0` on a struct
@@ -1473,38 +1510,6 @@ mod tests {
         let b = extern_body();
         let (back, _) = decode(&bytes(&b)).expect("decode");
         assert_eq!(back[0].mir, b.mir);
-    }
-
-    /// A section of an 8.2 archive (format 18) reads; one that holds an
-    /// extern call is no section 8.2 wrote, and is refused.
-    #[test]
-    fn a_format_18_section_reads_and_holds_no_extern_call() {
-        let p = pinned_body();
-        let old = encode_as(std::slice::from_ref(&p), &HashMap::new(), &scopes(), FORMAT_PINS);
-        assert_eq!(old[MAGIC.len()], 18);
-        assert_eq!(decode(&old).expect("decode format 18").0[0].mir, p.mir);
-        let e = extern_body();
-        let bad = encode_as(std::slice::from_ref(&e), &HashMap::new(), &scopes(), FORMAT_PINS);
-        assert!(decode(&bad).is_err());
-    }
-
-    /// A section of an 8.3 archive (format 19) reads: its extern calls come
-    /// back without struct layouts, so a struct argument takes the runtime's
-    /// call.
-    #[test]
-    fn a_format_19_section_reads_without_struct_layouts() {
-        let e = extern_body();
-        let old = encode_as(std::slice::from_ref(&e), &HashMap::new(), &scopes(), FORMAT_EXTERN);
-        assert_eq!(old[MAGIC.len()], 19);
-        let back = decode(&old).expect("decode format 19").0;
-        let sigs: Vec<&MirExternSig> = back[0].mir.blocks[0]
-            .insts
-            .iter()
-            .filter_map(|i| if let MirInst::ExternCall { sig, .. } = i { Some(&**sig) } else { None })
-            .collect();
-        assert_eq!(sigs.len(), 2);
-        assert!(sigs.iter().all(|s| s.structs.is_empty()));
-        assert_eq!(sigs[0].params, vec![1, 14]);
     }
 
     #[test]

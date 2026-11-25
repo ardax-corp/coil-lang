@@ -712,9 +712,6 @@ pub enum Builtin {
     /// Clear the pin of operand 0's object unless operand 1, the `bool` its
     /// `CowPin` gave, is `true` (the `CowUnpin` instruction).
     CowUnpin,
-    /// Enter (`true`) or leave a `region { … }` block (escape step 5): the
-    /// `gc_region_enter` / `gc_region_exit` HostInvoke. No arguments.
-    Region { enter: bool },
 }
 
 #[derive(Debug, Clone, PartialEq)]

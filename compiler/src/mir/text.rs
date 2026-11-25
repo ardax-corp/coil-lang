@@ -243,7 +243,8 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             object,
             value,
             index,
-        } => write!(f, "{dest} = heapsetfield.slot {object}, {value}, {index}"),
+            scalar,
+        } => write!(f, "{dest} = heapsetfield.{} {object}, {value}, {index}", if *scalar { "num" } else { "slot" }),
         MirInst::Index {
             dest,
             array,
@@ -259,11 +260,13 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             index,
             value,
             unchecked,
+            scalar,
         } => {
-            let name = if *unchecked {
-                "storeindex.u"
-            } else {
-                "storeindex"
+            let name = match (*unchecked, *scalar) {
+                (true, true) => "storeindex.num.u",
+                (true, false) => "storeindex.u",
+                (false, true) => "storeindex.num",
+                (false, false) => "storeindex",
             };
             write!(f, "{dest} = {name} {array}, {index}, {value}")
         }
@@ -305,10 +308,20 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             array,
             value,
         } => write!(f, "{dest} = arraypush {array}, {value}"),
-        MirInst::Alloc { dest, kind, elems, kinds } => {
-            write!(f, "{dest} = alloc.{}", kind.as_str())?;
+        MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
+            let at = if let MirInst::AllocAt { slot, owned, .. } = inst { Some((*slot, *owned)) } else { None };
+            write!(f, "{dest} = {}.{}", if at.is_some() { "allocat" } else { "alloc" }, kind.as_str())?;
             if *kinds != 0 {
                 write!(f, "[{kinds}]")?;
+            }
+            if let Some((slot, owned)) = at {
+                match slot {
+                    Some(slot) => write!(f, " {slot},")?,
+                    None => write!(f, " -,")?,
+                }
+                if owned != 0 {
+                    write!(f, " owned {owned},")?;
+                }
             }
             match *kind {
                 MirAllocKind::Object { type_id, nfields } => {
@@ -348,17 +361,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::GcBarrier { dest, kind, roots } => {
-            write!(f, "{dest} = gcbarrier.{}", kind.as_str())?;
-            for (i, r) in roots.iter().enumerate() {
-                if i == 0 {
-                    write!(f, " {r}")?;
-                } else {
-                    write!(f, ", {r}")?;
-                }
-            }
-            Ok(())
-        }
+        MirInst::GcBarrier { dest, kind, object } => write!(f, "{dest} = gcbarrier.{} {object}", kind.as_str()),
         MirInst::String { dest, idx } => write!(f, "{dest} = string {idx}"),
         MirInst::CodePtr { dest, target } => write!(f, "{dest} = codeptr {}", target.0),
         MirInst::Print { dest, src } => write!(f, "{dest} = print {src}"),
@@ -377,6 +380,16 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::Cow { dest, src, field: Some(i), .. } => write!(f, "{dest} = cow.unique_field {src} {i}"),
         MirInst::CowPin { dest, src } => write!(f, "{dest} = cow.pin {src}"),
         MirInst::CowUnpin { dest, src, saved } => write!(f, "{dest} = cow.unpin {src}, {saved}"),
+        MirInst::RcReuse { dest, src, moved: 0 } => write!(f, "{dest} = rc.reuse {src}"),
+        MirInst::RcReuse { dest, src, moved } => write!(f, "{dest} = rc.reuse {src}, moved {moved}"),
+        MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
+            let op = if matches!(inst, MirInst::RcInc { .. }) { "rc.inc" } else { "rc.dec" };
+            write!(f, "{dest} = {op} {src}")?;
+            match guard {
+                Some(g) => write!(f, " if {g}"),
+                None => Ok(()),
+            }
+        }
         MirInst::StrEq { dest, lhs, rhs, ne } => {
             write!(f, "{dest} = {} {lhs}, {rhs}", if *ne { "strne" } else { "streq" })
         }
@@ -462,9 +475,6 @@ impl<'a> Parser<'a> {
             return Err(ParseError("no blocks".into()));
         }
         func.entry = func.blocks[0].id;
-        if func.has_gc_edge() {
-            super::gc::fill_live_roots(&mut func);
-        }
         Ok(func)
     }
 
@@ -618,7 +628,7 @@ impl<'a> Parser<'a> {
                 ensure_ty(types, dest, MirTy::I64);
                 return Ok(MirInst::ProductLoad { dest, object, slot: index });
             }
-            if op == "heapsetfield.slot" {
+            if op == "heapsetfield.slot" || op == "heapsetfield.num" {
                 let object = self.value()?;
                 self.expect(',')?;
                 let value = self.value()?;
@@ -630,6 +640,7 @@ impl<'a> Parser<'a> {
                     object,
                     value,
                     index,
+                    scalar: op == "heapsetfield.num",
                 });
             }
         }
@@ -645,7 +656,7 @@ impl<'a> Parser<'a> {
                 unchecked: op.ends_with(".u"),
             });
         }
-        if op == "storeindex" || op == "storeindex.u" {
+        if matches!(op.as_str(), "storeindex" | "storeindex.u" | "storeindex.num" | "storeindex.num.u") {
             let array = self.value()?;
             self.expect(',')?;
             let index = self.value()?;
@@ -658,6 +669,7 @@ impl<'a> Parser<'a> {
                 index,
                 value,
                 unchecked: op.ends_with(".u"),
+                scalar: op.starts_with("storeindex.num"),
             });
         }
         if op == "arraylen" {
@@ -925,13 +937,29 @@ impl<'a> Parser<'a> {
                 args,
             });
         }
-        if let Some(kind_s) = op.strip_prefix("alloc.") {
+        let at = op.strip_prefix("allocat.");
+        if let Some(kind_s) = at.or_else(|| op.strip_prefix("alloc.")) {
             let kinds = if self.eat('[') {
-                let k = u8::try_from(self.uint()?).map_err(|_| ParseError("alloc kinds".into()))?;
+                let k = common::PackedKinds::try_from(self.uint()?).map_err(|_| ParseError("alloc kinds".into()))?;
                 self.expect(']')?;
                 k
             } else {
                 0
+            };
+            let slot = match at {
+                Some(_) => {
+                    let s = if self.eat('-') { None } else { Some(self.value()?) };
+                    self.expect(',')?;
+                    let owned = if self.eat_str("owned ") {
+                        let m = self.uint()? as u32;
+                        self.expect(',')?;
+                        m
+                    } else {
+                        0
+                    };
+                    Some((s, owned))
+                }
+                None => None,
             };
             let kind = match kind_s {
                 "array" => MirAllocKind::Array,
@@ -982,20 +1010,18 @@ impl<'a> Parser<'a> {
                 }
             }
             ensure_ty(types, dest, MirTy::HeapRef);
+            if let Some(slot) = slot {
+                let (slot, owned) = slot;
+                return Ok(MirInst::AllocAt { dest, slot, owned, kind, elems, kinds });
+            }
             return Ok(MirInst::Alloc { dest, kind, elems, kinds });
         }
         if let Some(kind_s) = op.strip_prefix("gcbarrier.") {
             let kind = MirGcKind::parse(kind_s)
                 .ok_or_else(|| ParseError(format!("unknown gc {kind_s}")))?;
-            let mut roots = Vec::new();
-            if self.peek('v') {
-                roots.push(self.value()?);
-                while self.eat(',') {
-                    roots.push(self.value()?);
-                }
-            }
+            let object = self.value()?;
             ensure_ty(types, dest, MirTy::HeapRef);
-            return Ok(MirInst::GcBarrier { dest, kind, roots });
+            return Ok(MirInst::GcBarrier { dest, kind, object });
         }
         if op == "codeptr" {
             let target = crate::bodies::Label(self.uint()? as u32);
@@ -1047,6 +1073,24 @@ impl<'a> Parser<'a> {
             let saved = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::CowUnpin { dest, src, saved });
+        }
+        if op == "rc.reuse" {
+            let src = self.value()?;
+            let moved = if self.eat_str(", moved ") { self.uint()? as u32 } else { 0 };
+            ensure_ty(types, dest, MirTy::I64);
+            return Ok(MirInst::RcReuse { dest, src, moved });
+        }
+        if op == "rc.inc" || op == "rc.dec" {
+            let src = self.value()?;
+            // The guard is on the op's own line.
+            let guard = if self.starts(" if ") {
+                self.i += 4;
+                Some(self.value()?)
+            } else {
+                None
+            };
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(if op == "rc.inc" { MirInst::RcInc { dest, src, guard } } else { MirInst::RcDec { dest, src, guard } });
         }
         if op == "cow.unique_field" {
             let src = self.value()?;
@@ -1429,9 +1473,9 @@ bb3:
             mask: 0,
         };
         let f = b.ins_alloc(kind, vec![k]).unwrap();
-        let f = b.ins_gc_barrier(MirGcKind::Safepoint, vec![f]).unwrap();
+        let f = b.ins_gc_barrier(MirGcKind::Safepoint, f).unwrap();
         let g = b.ins_alloc(MirAllocKind::PolyFn { target: crate::bodies::Label(9) }, Vec::new()).unwrap();
-        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![g]).unwrap();
+        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, g).unwrap();
         // A partial application: its first parameter filled.
         let partial = MirAllocKind::Fn {
             target: crate::bodies::Label(8),
@@ -1439,15 +1483,15 @@ bb3:
             mask: 1,
         };
         let p = b.ins_alloc(partial, vec![x]).unwrap();
-        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, vec![p]).unwrap();
+        let _ = b.ins_gc_barrier(MirGcKind::Safepoint, p).unwrap();
         // An instance dictionary: a method's code pointer in a tuple.
         let code = b.ins_code_ptr(crate::bodies::Label(11)).unwrap();
         let dict = b.ins_alloc(MirAllocKind::TUPLE, vec![code]).unwrap();
-        let dict = b.ins_gc_barrier(MirGcKind::Safepoint, vec![dict]).unwrap();
+        let dict = b.ins_gc_barrier(MirGcKind::Safepoint, dict).unwrap();
         // A constrained generic's value over its dictionary, called with
         // the call site's.
         let poly = b.ins_alloc(MirAllocKind::PolyFnCapture { target: crate::bodies::Label(12), params: 0 }, vec![dict]).unwrap();
-        let poly = b.ins_gc_barrier(MirGcKind::Safepoint, vec![poly]).unwrap();
+        let poly = b.ins_gc_barrier(MirGcKind::Safepoint, poly).unwrap();
         let _ = b.ins_call_indirect_dicts(poly, vec![x, dict], 1, MirTy::I64).unwrap();
         let y = b.ins_call_indirect(f, vec![x], MirTy::I64).unwrap();
         // A dictionary method: the code pointer itself is the callee.

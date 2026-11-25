@@ -41,7 +41,8 @@ pub fn alloc_tty_error(heap: &mut Heap, fail: TtyFail) -> Value {
         TtyFail::NotATerminal => heap.alloc_enum_value(0, EnumPayload::empty()),
         TtyFail::Io(tag) => {
             let io = alloc_io_error(heap, tag);
-            heap.alloc_enum_value(1, EnumPayload::one(io))
+            let kinds = common::pack_word_kinds([common::WORD_POINTER]);
+            heap.alloc_enum_value(1, EnumPayload::one(io).with_kinds(kinds))
         }
     }
 }
@@ -189,7 +190,7 @@ enum Wait {
 
 fn alloc_size(heap: &mut Heap, (cols, rows): (i64, i64)) -> Value {
     let (obj, _) = heap.alloc(
-        ObjEnum::tuple(&[Value::from(cols), Value::from(rows)], 0),
+        ObjEnum::tuple(&[Value::from(cols), Value::from(rows)], common::pack_word_kinds([common::WORD_SCALAR; 2])),
         Object::Enum,
     );
     Value::from(obj.addr())

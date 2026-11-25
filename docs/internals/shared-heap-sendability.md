@@ -16,7 +16,7 @@ allocate and publish pointers on the shared Heap; join reconstructs
 keeps isolate + copy. No region bump (Q5 conservative). Do **not** merge
 [#403](https://github.com/ardax-corp/coil-lang/pull/403).
 
-Related: [auto-par.md](auto-par.md), [gc-incremental.md](gc-incremental.md),
+Related: [auto-par.md](auto-par.md), [memory.md](memory.md),
 [native.md](native.md#calls-and-collections), [heap-identity.md](heap-identity.md),
 [io-reactor.md](io-reactor.md). Findings that ranked the ladder:
 PR [#403](https://github.com/ardax-corp/coil-lang/pull/403) (do **not** merge
@@ -41,9 +41,9 @@ C0 answers four questions:
 
 ## Non-goals (this note and C1)
 
-- Concurrent / on-the-side mark while mutators run. [gc-incremental.md](gc-incremental.md)
-  already defers “concurrent mark on OS worker threads”. C0 does **not** lift
-  that. Incremental S4 stays a **single-mutator** path.
+- Concurrent collection while mutators run. Under reference counts
+  ([memory.md](memory.md)) epoch workers write no counts of pre-epoch objects,
+  and the cycle collector runs on the single mutator outside epochs.
 - Moving / compacting GC. Objects still do not move
   ([heap-identity.md](heap-identity.md)). Mapped-slot relocate stays identity.
 - Treating `--auto-par` as a runtime `.ccoil` switch.
@@ -181,28 +181,12 @@ next mark — not required for C1 int reduce.
 
 ## Multi-worker GC handshake
 
-### How the collector sees every stack
+### The cycle collector and steal
 
-Every engine reports exact roots: native frames through stack maps and root
-records, interpreter activations through a `ROOTS_SCAN` record
-([native.md](native.md#calls-and-collections)). Layer A forbids a collect
-in-epoch (abort instead). A Layer B handshake must visit **every** mutator's
-frames, records, statics and generators' saved words.
-
-### Incremental S4 vs steal
-
-Today mark finishes at the **alloc** safepoint so a single mutator never
-runs with gray objects, which is why no store needs a write barrier.
-
-C0 rule: **no mutator runs while the shared Heap is Marking or Sweeping.**
-
-Before `begin_steal`:
-
-1. Finish any in-flight incremental cycle on the root (same drain as an
-   explicit `gc::collect`).
-2. Raise / ignore the incremental threshold for the epoch **or** switch the
-   Heap to epoch-STW (below). Do not start a new incremental slice on a
-   worker.
+Under reference counts ([memory.md](memory.md)) frames are no roots, and the
+cycle collector runs on the single mutator outside epochs. Layer A forbids a
+collect in-epoch (abort instead); epoch workers write no counts of objects from
+before the epoch.
 
 Host vec mutations in a stolen body are already a purity refuse.
 
@@ -210,7 +194,7 @@ Host vec mutations in a stolen body are already a purity refuse.
 
 **Layer A — epoch STW (C1 default).** No collect between `begin_steal` and
 `end_steal`. Allocations may bump `alloc_bytes` and map extra slabs. Inside
-the epoch `should_collect` compares against an epoch ceiling instead of the
+the epoch `cycles_due` compares against an epoch ceiling instead of the
 normal threshold: 4x the threshold at entry, and at least 256 MiB past the
 entry heap size. Past that ceiling, or on an explicit `gc::collect` / OOM:
 **abort the epoch** (sequential leftover or isolate fallback). Opening an
@@ -348,7 +332,7 @@ Mark **Q** items that E6 must not guess silently.
    collect). Discard if C1 must GC while chunks run — then back-edge polls
    are mandatory before steal ships.
 2. **Runtime freeze bit** vs type-only `readonly` / purity. Defense in depth
-   vs hot-path header checks. Debug and `gc-stress` builds check it
+   vs hot-path header checks. Debug and `rc-check` builds check it
    ([shared-heap-guard.md](shared-heap-guard.md), #1892): a shared-heap job
    may write only objects allocated in its epoch. Release relies on the proof.
 3. **Heap lock.** Mutex around heap-structure mutation (interning, unit

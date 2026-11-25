@@ -20,8 +20,8 @@ pub fn sroa(func: &mut MirFunc) -> usize {
         // Reconstruct may Alloc the same elems immediately after StoreIndex.
         // A later sibling zip with the same recipe must stay a fresh object.
         let mut pending_reuse: Option<(Vec<ValueId>, ValueId)> = None;
-        // Identity for a barrier dest is the paired Alloc/ArrayPush, not
-        // `roots.first()` — intern keys / other HeapRefs sort first (D2).
+        // Identity for a barrier dest is the Alloc/ArrayPush right before
+        // it, as [`super::barrier_pairs`] pairs them (D2).
         let mut pending_alloc: Option<ValueId> = None;
         for inst in &block.insts {
             match inst {
@@ -50,13 +50,8 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                     pending_alloc = Some(*dest);
                     pending_reuse = None;
                 }
-                MirInst::GcBarrier { dest, roots, .. } => {
-                    let ident = pending_alloc
-                        .filter(|a| roots.is_empty() || roots.contains(a))
-                        .or_else(|| {
-                            roots.iter().copied().find(|r| alloc_of.contains_key(r))
-                        });
-                    if let Some(r0) = ident {
+                MirInst::GcBarrier { dest, object, .. } => {
+                    if let Some(r0) = pending_alloc.filter(|a| a == object) {
                         let obj = subst.get(&r0).copied().unwrap_or(r0);
                         subst.insert(*dest, obj);
                         if let Some(elems) = alloc_of.get(&r0).cloned() {
@@ -73,12 +68,16 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                     pending_alloc = None;
                 }
                 MirInst::StoreIndex { array, .. } => {
+                    pending_alloc = None;
                     let arr = subst.get(array).copied().unwrap_or(*array);
                     if let Some(elems) = alloc_of.get(&arr).cloned() {
                         pending_reuse = Some((elems, arr));
                     }
                 }
-                _ => pending_reuse = None,
+                _ => {
+                    pending_reuse = None;
+                    pending_alloc = None;
+                }
             }
         }
     }
@@ -128,12 +127,12 @@ mod tests {
         let z = b.ins_const(MirConst::I64(0)).unwrap();
         let a0 = b.ins_alloc(MirAllocKind::Array, vec![z, z, z]).unwrap();
         let g0 = b
-            .ins_gc_barrier(crate::mir::MirGcKind::Safepoint, vec![a0])
+            .ins_gc_barrier(crate::mir::MirGcKind::Safepoint, a0)
             .unwrap();
         let _st = b.ins_store_index(g0, i, i, false).unwrap();
         let a1 = b.ins_alloc(MirAllocKind::Array, vec![z, z, z]).unwrap();
         let g1 = b
-            .ins_gc_barrier(crate::mir::MirGcKind::Safepoint, vec![a1])
+            .ins_gc_barrier(crate::mir::MirGcKind::Safepoint, a1)
             .unwrap();
         let v = b.ins_index(g1, i, MirTy::I64, false).unwrap();
         b.set_ret_ty(MirTy::I64);
@@ -189,7 +188,7 @@ mod tests {
             )
             .unwrap();
         let live = b
-            .ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
+            .ins_gc_barrier(MirGcKind::Safepoint, obj)
             .unwrap();
         let _st = b
             .ins_heap_field_store(live, val, 0)
@@ -197,20 +196,6 @@ mod tests {
         b.set_ret_ty(MirTy::I64);
         b.ret(Some(val)).unwrap();
         let mut func = b.finish().unwrap();
-        let barrier_roots: Vec<_> = func
-            .blocks
-            .iter()
-            .flat_map(|bl| bl.insts.iter())
-            .find_map(|i| match i {
-                MirInst::GcBarrier { roots, .. } => Some(roots.clone()),
-                _ => None,
-            })
-            .expect("gc barrier");
-        assert_eq!(
-            barrier_roots.first().copied(),
-            Some(intern),
-            "intern sorts first among live roots; {func}"
-        );
         let _ = sroa(&mut func);
         let mut intern_id = None;
         let mut alloc_id = None;

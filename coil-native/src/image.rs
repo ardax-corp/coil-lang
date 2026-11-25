@@ -10,10 +10,10 @@ use cranelift_module::{FuncId, Linkage, Module, ModuleReloc, ModuleRelocTarget};
 use machine::native::{NativeEntry, NativeEntryFn, NativeSite};
 use sha2::{Digest, Sha256};
 
-use crate::{FuncMaps, NativeProgram};
+use crate::NativeProgram;
 
 /// Bump when the layout changes; a reader refuses any other format.
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 const MAGIC: &[u8; 8] = b"COILCODE";
 const DIGEST: usize = 32;
 
@@ -175,7 +175,6 @@ pub(crate) struct Parts<'a> {
     pub(crate) module: &'a JITModule,
     pub(crate) reserve: usize,
     pub(crate) recorder: Recorder,
-    pub(crate) maps: &'a [(FuncId, FuncMaps)],
     pub(crate) entries: &'a [Entry],
     pub(crate) sites: &'a [NativeSite],
     pub(crate) compiled: &'a [String],
@@ -199,17 +198,6 @@ pub(crate) fn encode(parts: Parts<'_>) -> Option<Vec<u8>> {
         w.len(f.relocs.len());
         for r in &f.relocs {
             write_reloc(&mut w, r)?;
-        }
-    }
-    w.len(parts.maps.len());
-    for (id, (size, maps)) in parts.maps {
-        w.u32(id.as_u32());
-        w.u32(*size);
-        w.len(maps.len());
-        for (ra, offsets) in maps {
-            w.u32(*ra);
-            w.len(offsets.len());
-            offsets.iter().for_each(|o| w.u32(*o));
         }
     }
     w.len(parts.entries.len());
@@ -268,20 +256,6 @@ pub fn load(image: &[u8]) -> Result<NativeProgram, String> {
         module.define_function_bytes(id, align, bytes, &relocs).map_err(|e| e.to_string())?;
     }
     module.finalize_definitions().map_err(|e| e.to_string())?;
-    let mut mapped = Vec::new();
-    for _ in 0..r.len()? {
-        let id = FuncId::from_u32(r.u32()?);
-        let size = r.u32()?;
-        let mut maps = Vec::new();
-        for _ in 0..r.len()? {
-            let ra = r.u32()?;
-            let offsets = (0..r.len()?).map(|_| r.u32()).collect::<Result<Vec<_>, _>>()?;
-            maps.push((ra, offsets));
-        }
-        let start = module.get_finalized_function(id) as u64;
-        machine::native::register_stack_maps(start, size, maps);
-        mapped.push((start, size));
-    }
     let mut entries = Vec::new();
     for _ in 0..r.len()? {
         let func = FuncId::from_u32(r.u32()?);
@@ -297,5 +271,5 @@ pub fn load(image: &[u8]) -> Result<NativeProgram, String> {
         sites.push(NativeSite { body_id, loc: common::DebugLoc { file, start_byte, end_byte, scope } });
     }
     let compiled = (0..r.len()?).map(|_| r.text()).collect::<Result<Vec<_>, _>>()?;
-    Ok(NativeProgram { entries, compiled, refused: Vec::new(), sites, image: None, keep: crate::Code::keep(module, mapped) })
+    Ok(NativeProgram { entries, compiled, refused: Vec::new(), sites, image: None, keep: crate::Code::keep(module) })
 }

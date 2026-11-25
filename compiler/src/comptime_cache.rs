@@ -400,7 +400,7 @@ pub fn remap(
                 Some(&new) => *type_id = new,
                 None => return false,
             },
-            common::SnapObject::Instance { type_id, words } => {
+            common::SnapObject::Instance { type_id, words, .. } => {
                 let Some(&new) = map.get(type_id) else { return false };
                 if fields.get(&new).is_some_and(|&n| n != words.len()) {
                     return false;
@@ -495,7 +495,7 @@ mod tests {
     #[test]
     fn types_move_by_key() {
         let mut snapshot = common::HeapSnapshot {
-            objects: vec![common::SnapObject::Instance { type_id: 4, words: vec![common::SnapWord::Raw(1)] }],
+            objects: vec![common::SnapObject::Instance { type_id: 4, kinds: 0, words: vec![common::SnapWord::Raw(1)] }],
             statics: vec![(0, common::SnapWord::Ref { index: 0, err_bit: false })],
         };
         let keys = HashMap::from([(4, "class P".to_string())]);

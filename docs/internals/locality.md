@@ -20,7 +20,7 @@ Every time on this page comes from that VM. The passes below run in `mir::specia
 | 2 | Vectorize one loop that both stores a map and folds a reduction | `fusion.coil`: fused 417 ms vs split 162 ms (2.6x) | done |
 | 3 | Field-sensitive mod/ref summaries (which fields a call may read or write) | lets step 4 keep a field across a call that cannot touch it; `promocall.coil`: 1327 vs 985 ms | done |
 | 4 | Scalar promotion: keep an object field in a register across a loop, store it back on exit and on the panic path | `promo.coil`: 3.1x (8 vs 3 VM instructions per iteration) | the pass exists; nothing runs it (see below) |
-| 5 | Copy the objects a pointer array holds in index order when the nursery promotes them | `objorder.coil`: 24 vs 147 ns per object (6.2x); `young_shuffle.coil` | done (minor collections) |
+| 5 | Copy the objects a pointer array holds in index order when the nursery promotes them | `objorder.coil`: 24 vs 147 ns per object (6.2x); `young_shuffle.coil` | done, then removed with minor collections (#2889) |
 | 6 | Prefetch the object behind `a[i + k]` in counted scans of pointer arrays | part of step 5's gap; `scattered_scan.coil` | marked in MIR; no engine reads the mark (see below) |
 | 7 | Loop interchange for affine nests | `interchange.coil`: rows 277 ms vs columns 749 ms (2.7x); `fmapcols.coil` | done (non-trapping map bodies) |
 
@@ -81,7 +81,8 @@ Numbers land here as each step merges.
   field holds there, which a backend must store before the unwind goes on.
   `promo.coil` 1M x 20 on the VM: field accumulation 820 → 270 ms, equal to the
   hand-written locals (265-300 ms); the loop body went from 8 ops to 4.
-- **Step 5** (GC copy order): a minor collection copies the young objects
+- **Step 5** (GC copy order; **removed** with the tracing GC, coil-lang#2889:
+  nothing moves under reference counts): a minor collection copies the young objects
   an array reached first, in the array's index order, then the rest in
   nursery (allocation) order as before (`Heap::minor_plan`). Marking pushes
   only what it newly marks, so an array's share of the gray stack is its

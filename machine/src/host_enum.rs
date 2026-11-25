@@ -40,18 +40,21 @@ pub fn take_pair_tag() -> Option<u64> {
 /// its pack left, or, for a native that built its enum object anyway, the
 /// object's first payload word and tag. `None` when the word is no enum
 /// object of at most one payload word.
-pub fn split_pair_result(heap: &Heap, word: Value) -> Option<(u64, u64)> {
+pub fn split_pair_result(heap: &mut Heap, word: Value) -> Option<(u64, u64)> {
     if let Some(tag) = take_pair_tag() {
         return Some((word.bits(), tag));
     }
     match heap.find_object_by_addr(word.bits())? {
-        Object::Enum(e) => {
+        obj @ Object::Enum(e) => {
             let e = e.as_ref();
             if e.payload.len() > 1 {
                 return None;
             }
             let payload = if e.payload.is_empty() { 0 } else { e.payload[0].bits() };
-            Some((payload, u64::from(e.tag)))
+            let tag = u64::from(e.tag);
+            // The words go to the caller; a fresh box with them.
+            heap.rc_unbox(obj);
+            Some((payload, tag))
         }
         _ => None,
     }
@@ -78,7 +81,7 @@ impl HostEnumLayout {
     /// Any other code maps to [`Self::Boxed`] on purpose: an unknown layout
     /// must not select a niche (immediates would panic in pack).
     pub fn from_u32(bits: u32) -> Self {
-        match bits {
+        match common::host_layout_base(bits) {
             HOST_ENUM_LAYOUT_OPTION_NICHE => Self::OptionNiche,
             HOST_ENUM_LAYOUT_RESULT_NICHE => Self::ResultNiche,
             HOST_ENUM_LAYOUT_PAIR => Self::Pair,
@@ -117,6 +120,35 @@ pub fn with_host_enum_layout<T>(layout: HostEnumLayout, f: impl FnOnce() -> T) -
     })
 }
 
+/// [`with_host_enum_layout`] of a `HostInvoke`'s whole layout bits: its
+/// layout and, for a boxed result, its payloads' word kinds
+/// ([`host_payload_kind`]).
+pub fn with_host_enum_bits<T>(bits: u32, f: impl FnOnce() -> T) -> T {
+    HOST_ENUM_LAYOUT.with(|cell| {
+        let prev = cell.replace(bits);
+        let out = f();
+        cell.set(prev);
+        out
+    })
+}
+
+/// [`with_host_enum_bits`], skipping the set and restore when `bits` are
+/// already current.
+#[inline(always)]
+pub fn in_host_enum_bits<T>(bits: u32, f: impl FnOnce() -> T) -> T {
+    if HOST_ENUM_LAYOUT.with(Cell::get) == bits {
+        f()
+    } else {
+        with_host_enum_bits(bits, f)
+    }
+}
+
+/// The word kind the current `HostInvoke` gives a boxed result's payload of
+/// `variant` (`0`: `Some` / `Ok`, `1`: `Err`); unknown outside one.
+pub fn host_payload_kind(variant: u32) -> u8 {
+    HOST_ENUM_LAYOUT.with(|cell| common::host_payload_kind(cell.get(), variant))
+}
+
 /// [`with_host_enum_layout`], skipping the set and restore when `layout` is
 /// already current (the common case: most natives run under `Boxed`).
 #[inline(always)]
@@ -126,6 +158,11 @@ pub fn in_host_enum_layout<T>(layout: HostEnumLayout, f: impl FnOnce() -> T) -> 
     } else {
         with_host_enum_layout(layout, f)
     }
+}
+
+/// The current `HostInvoke`'s whole layout bits ([`with_host_enum_bits`]).
+pub fn current_host_enum_bits() -> u32 {
+    HOST_ENUM_LAYOUT.with(Cell::get)
 }
 
 /// Layout the current HostInvoke asked the native to construct.
@@ -544,22 +581,23 @@ mod tests {
         let mut heap = Heap::default();
         let live = heap.live_object_count();
         let some = pack_option(&mut heap, HostEnumLayout::Pair, Some(Value::from(7i64))).unwrap();
-        assert_eq!(split_pair_result(&heap, some), Some((7, 1)));
+        assert_eq!(split_pair_result(&mut heap, some), Some((7, 1)));
         let none = pack_option(&mut heap, HostEnumLayout::Pair, None).unwrap();
-        assert_eq!(split_pair_result(&heap, none), Some((0, 0)));
+        assert_eq!(split_pair_result(&mut heap, none), Some((0, 0)));
         let err = pack_result(&mut heap, HostEnumLayout::Pair, Err(Value::from(3i64))).unwrap();
-        assert_eq!(split_pair_result(&heap, err), Some((3, 1)));
+        assert_eq!(split_pair_result(&mut heap, err), Some((3, 1)));
         assert_eq!(heap.live_object_count(), live, "a pair pack makes no object");
         // A native that built its enum object anyway: read off the object.
         let boxed = alloc_option_some(&mut heap, Value::from(9i64));
-        assert_eq!(split_pair_result(&heap, boxed), Some((9, 1)));
-        assert_eq!(split_pair_result(&heap, Value::from(12i64)), None);
+        assert_eq!(split_pair_result(&mut heap, boxed), Some((9, 1)));
+        assert_eq!(split_pair_result(&mut heap, Value::from(12i64)), None);
     }
 
     #[test]
     fn layout_3_decodes_as_pair() {
         assert_eq!(HostEnumLayout::from_u32(common::HOST_ENUM_LAYOUT_PAIR), HostEnumLayout::Pair);
-        assert_eq!(HostEnumLayout::from_u32(99), HostEnumLayout::Boxed);
+        // The bits above the base are payload word kinds.
+        assert_eq!(HostEnumLayout::from_u32(HOST_ENUM_LAYOUT_BOXED | 0b1100), HostEnumLayout::Boxed);
     }
 
     #[test]

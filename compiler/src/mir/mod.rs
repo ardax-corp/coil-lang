@@ -6,9 +6,8 @@
 //!
 //! `CALL` uses the one-word or two-slot typed ABI ([`abi`];
 //! COI-291 / B3 / C1). SSA models dest + `dest_hi`; N>2 return words
-//! refuse. Typed HostInvoke boxes at the host edge. Allocating bodies
-//! carry `Alloc` + `GcBarrier` with live-heap `roots`; their GC frame maps
-//! are the precise maps of their final code ([`stackmap`]). Impure HostInvoke / CALL are SSA barriers
+//! refuse. Typed HostInvoke boxes at the host edge. Allocating ops pair
+//! with a `GcBarrier` safepoint ([`barrier_pairs`]). Impure HostInvoke / CALL are SSA barriers
 //! (I6); LICM hoist uses purity bits. Debugger-attached / `-Og` builds use
 //! the same tiers. History of each
 //! piece: `docs/internals/mir.md`.
@@ -24,7 +23,6 @@ mod destprop;
 mod effects;
 mod vector_body;
 mod error;
-mod gc;
 mod host_allow;
 mod func;
 mod inst;
@@ -40,6 +38,8 @@ mod sroa;
 mod vectorize;
 mod bool_thread;
 mod phi_sroa;
+mod rc_insert;
+mod rc_reuse;
 mod strength;
 mod text;
 mod ty;
@@ -50,7 +50,6 @@ pub use cse::{cse, cse_lir, gvn};
 pub use destprop::destprop;
 pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirLaneCall, HirLaneElem, HirRetItem, HirRetItems, HirOpCall, HirPacks, HirSite, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, LowerCx, PairVariants, ScalarLit, HirFieldFact, HirFieldWord, HirHost, HirLaneUses, HirNew, LocalFrame, LocalWords};
 pub use func::MirFunc;
-pub use gc::liveness;
 pub use func::{MirBlock, is_tail_call_inst};
 pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, EXTERN_CALL_MAX_WORDS, MirCStruct, MirExternSig, MirFfiOp, MirGcKind, MirInst, MirLaneShape, ValueId};
 pub use inst::{LaneExpr, LaneVal, MirCmpOp, VecExpr, VecLoopKind};
@@ -66,7 +65,7 @@ pub use native_alloc::{AllocCall, alloc_call};
 mod native_capture;
 pub mod coverage;
 pub mod native_expand;
-pub use frame_words::{allocates, barrier_pairs, heap_word, held_words, is_generator, numeric, opaque_words, pointer_words, root_handles, scalar, ty_of, used_params, word_kind, pair_words};
+pub use frame_words::{allocates, barrier_pairs, heap_word, is_generator, numeric, opaque_words, pointer_words, root_handles, scalar, ty_of, used_params, word_kind, pair_words};
 pub(crate) use native_capture::capture_open;
 pub use native_capture::{ComptimeCapture, ConstArg, ConstCall, ConstResult, NativeBody, VectorOp, ffi_use, capture_const_calls, replace_const_calls, capture_native_bodies, vector_op, peek_native_capture, start_native_capture, start_raw_capture, take_native_capture, without_native_capture};
 pub use instcombine::{instcombine, };

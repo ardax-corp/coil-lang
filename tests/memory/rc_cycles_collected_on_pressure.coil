@@ -1,0 +1,28 @@
+// Cycles no count frees are collected on allocation pressure alone: a loop
+// that drops two-node rings keeps the heap bounded without a `collect()`.
+// The cycle collector's threshold once counted only objects allocated
+// outside the bump chunks, and every ring lives in them.
+use tests::assert;
+use gc::heap_bytes;
+
+shared class Ring {
+    pub payload: Vec<int>,
+    pub next: Option<Ring>,
+}
+
+fn ring(int i) {
+    let a = new Ring(Vec::from([i, i + 1, i + 2]), Option::None);
+    let b = new Ring(Vec::from([i]), Option::Some(a));
+    a.next = Option::Some(b);
+}
+
+test("dropped rings do not pile up") {
+    let before = heap_bytes();
+    let i = 0;
+    while i < 200000 {
+        ring(i);
+        i += 1;
+    }
+    // 200k rings are over 50 MB; the collector runs well before that.
+    assert!(heap_bytes() - before < 16000000);
+}
