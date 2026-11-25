@@ -19,8 +19,11 @@
 //! module's `const`s, the elements of a `readonly` array literal, and
 //! calls of the module's functions: the range of what the body returns
 //! for the ranges of the call's arguments. Anything else is the whole
-//! range of its type: unknown means not proved. A call of a function
-//! already being worked out (a recursive one) is unknown.
+//! range of its type: unknown means not proved. A function that calls
+//! itself returns the least range that holds when each of its own calls
+//! returns that range, found from nothing upward and widened to a sign
+//! ([`Signs::solve_recursive`]); a call of another function already being
+//! worked out (mutual recursion) is unknown.
 //!
 //! A sign that depends on values the loop never writes (a capture it
 //! scales by, a start read at run time) is proved for narrowed ranges of
@@ -278,6 +281,11 @@ pub struct Signs<'a> {
     stack: RefCell<Vec<String>>,
     /// Bodies evaluated so far: past [`BUDGET`], a call is unknown.
     evaluated: Cell<usize>,
+    /// The functions that called themselves while being worked out.
+    recursed: RefCell<HashSet<String>>,
+    /// The range a self-recursive function's own calls return while its
+    /// result is solved ([`Self::solve_recursive`]): `None` for none yet.
+    solving: RefCell<HashMap<String, Range>>,
     /// What each module `const` holds: an `int`'s range, or the range of
     /// the elements of an array literal.
     consts: RefCell<HashMap<String, Range>>,
@@ -285,6 +293,9 @@ pub struct Signs<'a> {
 
 /// Function bodies one module's analysis evaluates.
 const BUDGET: usize = 4096;
+
+/// Rounds [`Signs::solve_recursive`] takes before it gives up.
+const SOLVE_ROUNDS: usize = 8;
 
 impl<'a> Signs<'a> {
     pub fn new(module: &'a HirModule, checker: &'a Checker, module_path: &'a str) -> Self {
@@ -295,6 +306,8 @@ impl<'a> Signs<'a> {
             results: RefCell::new(HashMap::new()),
             stack: RefCell::new(Vec::new()),
             evaluated: Cell::new(0),
+            recursed: RefCell::new(HashSet::new()),
+            solving: RefCell::new(HashMap::new()),
             consts: RefCell::new(HashMap::new()),
         }
     }
@@ -323,15 +336,68 @@ impl<'a> Signs<'a> {
         if let Some(&known) = self.results.borrow().get(&key) {
             return known;
         }
+        if let Some(top) = self.stack.borrow().last()
+            && top == name
+        {
+            // Its own call, before its range is solved: noted, and unknown.
+            self.recursed.borrow_mut().insert(name.to_string());
+            return Interval::FULL;
+        }
         if self.stack.borrow().iter().any(|n| n == name) || self.evaluated.get() >= BUDGET {
             return Interval::FULL;
         }
         self.evaluated.set(self.evaluated.get() + 1);
         self.stack.borrow_mut().push(name.to_string());
-        let result = self.returned(name, args);
+        let mut result = self.returned(name, args);
+        if self.recursed.borrow_mut().remove(name) {
+            result = self.solve_recursive(name, args);
+        }
         self.stack.borrow_mut().pop();
         self.results.borrow_mut().insert(key, result);
         result
+    }
+
+    /// The range of a call of `name`, which calls itself, on `args`. Its
+    /// own calls (whatever their arguments) return `R`, the least range
+    /// for which the body returns within `R` on any arguments: found from
+    /// no value upward, joined each round and widened to a sign from the
+    /// third. Then the body on `args`, its own calls returning `R`. Past
+    /// [`SOLVE_ROUNDS`], or out of budget, unknown. `name` is on the stack.
+    fn solve_recursive(&self, name: &str, args: &[Interval]) -> Interval {
+        let mut approx: Range = None;
+        let mut stable = false;
+        for round in 0..SOLVE_ROUNDS {
+            if self.evaluated.get() >= BUDGET {
+                break;
+            }
+            self.evaluated.set(self.evaluated.get() + 1);
+            self.solving.borrow_mut().insert(name.to_string(), approx);
+            let got = self.returned_range(name, &[]);
+            let mut next = join(approx, got);
+            if let (Some(n), Some(o)) = (next, approx)
+                && round >= 2
+            {
+                next = Some(n.widen(o));
+            }
+            if next == approx {
+                stable = true;
+                break;
+            }
+            approx = next;
+        }
+        let result = if stable {
+            self.solving.borrow_mut().insert(name.to_string(), approx);
+            self.returned_range(name, args).unwrap_or(Interval::FULL)
+        } else {
+            Interval::FULL
+        };
+        self.solving.borrow_mut().remove(name);
+        result
+    }
+
+    /// While `name` is solved, what its own calls return.
+    fn solving_range(&self, name: &str) -> Option<Range> {
+        self.solving.borrow().get(name).copied()
     }
 
     fn local(&self, body: &HirBody, name: &str) -> bool {
@@ -339,14 +405,29 @@ impl<'a> Signs<'a> {
     }
 
     fn returned(&self, name: &str, args: &[Interval]) -> Interval {
-        // A function at the top of this module, by its one body: a nested
-        // `fn` or an overload is not known by its bare name.
+        let floor = self.body_named(name).map_or(Interval::FULL, |b| of_type(b.ret.as_ref()));
+        // A function that never returns is not one to reason from.
+        self.returned_range(name, args).map_or(floor, |r| r.meet(floor).unwrap_or(floor))
+    }
+
+    /// A function at the top of this module, by its one body: a nested
+    /// `fn` or an overload is not known by its bare name.
+    fn body_named(&self, name: &str) -> Option<&'a HirBody> {
         let mut named = self.module.bodies.iter().filter(|b| b.kind == BodyKind::Function && self.local(b, name));
-        let (Some(body), None) = (named.next(), named.next()) else { return Interval::FULL };
-        let Some(root) = body.root else { return Interval::FULL };
+        match (named.next(), named.next()) {
+            (Some(body), None) => Some(body),
+            _ => None,
+        }
+    }
+
+    /// What the body of `name` returns on `args` (`None`: it never
+    /// returns), within the range of its type.
+    fn returned_range(&self, name: &str, args: &[Interval]) -> Range {
+        let Some(body) = self.body_named(name) else { return Some(Interval::FULL) };
+        let Some(root) = body.root else { return Some(Interval::FULL) };
         let floor = of_type(body.ret.as_ref());
         if body.is_coro || body.result_mode || !is_int(body.ret.as_ref()) {
-            return floor;
+            return Some(floor);
         }
         let mut eval = Eval::new(self, body, true);
         let mut env = Env::new();
@@ -357,8 +438,7 @@ impl<'a> Signs<'a> {
                 }
             }
         }
-        // A function that never returns is not one to reason from.
-        eval.returns(root, &env).and_then(|r| r.meet(floor)).unwrap_or(floor)
+        eval.returns(root, &env).and_then(|r| r.meet(floor))
     }
 
     /// The initializer of module `const` `name`, in the body that holds it.
@@ -579,9 +659,15 @@ impl<'a, 'm> Eval<'a, 'm> {
                     Callee::Method { name } if name == "len" && args.len() == 1 && query::structural_len(body, self.signs.checker, args[0]) => {
                         Some(Interval::NONNEG)
                     }
-                    Callee::Named { .. } => super::par_profit::bare_callee(self.signs.checker, body, id)
-                        .filter(|_| is_int(e.ty.as_ref()))
-                        .map(|name| self.signs.result_of(name, if placed { &given } else { &[] })),
+                    Callee::Named { .. } => match super::par_profit::bare_callee(self.signs.checker, body, id).filter(|_| is_int(e.ty.as_ref())) {
+                        // A call of the function being solved, from its own
+                        // body: the round's range (none yet: no value).
+                        Some(name) if self.signs.local(body, name) && let Some(r) = self.signs.solving_range(name) => {
+                            return r.and_then(|k| k.meet(of_type(e.ty.as_ref())));
+                        }
+                        Some(name) => Some(self.signs.result_of(name, if placed { &given } else { &[] })),
+                        None => None,
+                    },
                     _ => None,
                 };
                 known.and_then(|k| k.meet(of_type(e.ty.as_ref()))).or(typed)

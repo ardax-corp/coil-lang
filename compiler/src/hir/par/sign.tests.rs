@@ -247,8 +247,8 @@ fn main() { return; }
 "#;
     assert_eq!(result(src, "twice", &[iv(0, 100)]), iv(0, 12));
     assert_eq!(any(src, "twice"), iv(-12, 12));
-    // A function that calls itself is unknown where it does.
-    assert_eq!(any(src, "down"), iv(i64::MIN + 1, i64::MAX));
+    // A function that calls itself: the range its own calls settle on.
+    assert_eq!(any(src, "down"), Interval::NONNEG);
 }
 
 #[test]
@@ -306,4 +306,65 @@ fn guarded(int k) -> int {
 fn main() { return; }
 "#;
     assert_eq!(any(src, "guarded"), iv(1, i64::MAX));
+}
+
+#[test]
+fn a_function_that_calls_itself_returns_the_range_its_calls_settle_on() {
+    let src = r#"
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+fn count(Tree t) -> int {
+    return match t {
+        Tree::Leaf => 1,
+        Tree::Node(l, r) => 1 + count(l) + count(r),
+    };
+}
+fn fib(int n) -> int {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+fn down(int n) -> int {
+    if n <= 0 {
+        return 0;
+    }
+    return down(n - 1) - 1;
+}
+fn steps(int n) -> int {
+    if n <= 0 {
+        return 3;
+    }
+    return steps(n - 1);
+}
+fn forever(int n) -> int {
+    return forever(n) + 1;
+}
+fn even(int n) -> int {
+    if n == 0 {
+        return 1;
+    }
+    return odd(n - 1);
+}
+fn odd(int n) -> int {
+    if n == 0 {
+        return 0;
+    }
+    return even(n - 1);
+}
+fn main() { return; }
+"#;
+    assert_eq!(any(src, "count"), iv(1, i64::MAX));
+    // Any `int` may come in, so a negative one comes back as it is. Its
+    // own calls are solved for any argument too, so a narrower one is
+    // no help here.
+    assert_eq!(any(src, "fib").lo, i64::MIN);
+    assert_eq!(any(src, "down"), iv(i64::MIN, 0));
+    assert_eq!(any(src, "steps"), iv(3, 3));
+    // It never returns: nothing to reason from.
+    assert_eq!(any(src, "forever"), Interval::FULL);
+    // Mutual recursion stays unknown.
+    assert_eq!(any(src, "even"), Interval::FULL);
 }
