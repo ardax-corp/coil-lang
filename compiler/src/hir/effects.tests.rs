@@ -1570,3 +1570,107 @@ fn names_carry_the_module_path_and_match_whole() {
     assert!(crate::pure_call::name_in(&names, "util::sq") && crate::pure_call::name_in(&names, "sq"));
     assert!(!crate::pure_call::name_in(&names, "other::sq") && !crate::pure_call::name_in(&names, "Type::sq"));
 }
+
+/// The `unique` ops copy-on-write puts in body `name` of `src`, and the
+/// copy warnings it gives there.
+fn uniques_in(src: &str, name: &str) -> (usize, Vec<String>) {
+    let owned = Box::leak(src.to_string().into_boxed_str());
+    let ast = parser::Pratt::default().parse(owned).expect("parse");
+    let mut checker = Checker::new();
+    let _ = checker.check_program(&ast);
+    let sidecar = checker.typed_sidecar();
+    let module = build_module(&checker, &sidecar, "", &ast);
+    let mut program = ProgramEffects::default();
+    let summaries = ModuleEffects::solve(&module, &checker, "", &program).summaries;
+    program.record(&module, &checker, "", &summaries);
+    let i = module.bodies.iter().position(|b| b.name == name).unwrap_or_else(|| panic!("no body `{name}`"));
+    let (out, notes, _) = program.cow_rewrite(&checker, "", &module, &module.bodies[i], summaries[i].mutates);
+    let body = out.unwrap_or_else(|| module.bodies[i].clone());
+    let mut n = 0;
+    body.visit(body.root.expect("root"), &mut |e| {
+        n += usize::from(matches!(e.kind, HirKind::Builtin { op: crate::hir::Builtin::Cow { unique: true }, .. }));
+    });
+    (n, notes.iter().map(|m| m.message().to_string()).collect())
+}
+
+// #2921: a trait call through a bound does not write a parameter the trait
+// declares `readonly`, so neither the generic body nor its caller copies
+// the buffer it passes there. (This checker loads no `io::Write`: that a
+// method of the same name in another trait does not come into it is
+// `tests/traits/readonly_trait_param_bound_call.coil`.)
+#[test]
+fn a_bound_call_does_not_copy_what_the_trait_keeps_readonly() {
+    let src = "
+use io::IoError;
+trait Put<S> {
+    fn put(S s, readonly Vec<byte> buf) -> Result<int, IoError> {}
+}
+shared class Sink {
+    pub n: int,
+}
+impl Put for Sink {
+    fn put(Sink s, readonly Vec<byte> buf) -> Result<int, IoError> {
+        s.n += buf.len();
+        return Ok(buf.len());
+    }
+}
+fn send<W: Put>(W w, readonly Vec<byte> buf) -> Result<int, IoError> {
+    return w.put(buf);
+}
+fn send_qualified<W: Put>(W w, readonly Vec<byte> buf) -> Result<int, IoError> {
+    return Put::put(w, buf);
+}
+fn main() {
+    let a: Vec<byte> = [1, 2, 3];
+    let b = a;
+    let s = new Sink(0);
+    let _ = send(s, b);
+    let _ = send(s, a);
+}
+";
+    assert!(readonly_errors(src).is_empty(), "{:?}", readonly_errors(src));
+    assert_eq!(uniques_in(src, "send"), (0, vec![]));
+    assert_eq!(uniques_in(src, "send_qualified"), (0, vec![]));
+    assert_eq!(uniques_in(src, "main"), (0, vec![]));
+}
+
+// #2921: `io::Write` declares `write`'s and `write_from`'s buffer
+// `readonly`, so a generic writer call does not copy a shared buffer.
+#[test]
+fn a_shared_buffer_through_a_write_bound_is_not_copied() {
+    let src = "
+use io::{IoError, Write};
+shared class Sink {
+    pub n: int,
+}
+impl Write for Sink {
+    fn write(Sink s, Vec<byte> buf) -> Result<int, IoError> {
+        s.n += buf.len();
+        return Ok(buf.len());
+    }
+    fn wait_writable(Sink s) -> Result<unit, IoError> {
+        return Ok(());
+    }
+}
+fn put<W: Write>(W w, Vec<byte> buf) -> Result<int, IoError> {
+    let _ = w.write_from(buf, 1);
+    return w.write(buf);
+}
+fn main() {
+    let a: Vec<byte> = [1, 2, 3];
+    let b = a;
+    let s = new Sink(0);
+    let _ = put(s, b);
+    let _ = put(s, a);
+}
+";
+    let mut pipeline = crate::Pipeline::new();
+    pipeline.compile_src(src).expect("compile");
+    let copies: Vec<String> = pipeline
+        .messages()
+        .iter()
+        .filter(|m| m.code() == Some(reporting::ErrorCode::CowCopy))
+        .map(|m| m.message().to_string())
+        .collect();
+    assert!(copies.is_empty(), "{copies:?}");
+}

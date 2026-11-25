@@ -1002,8 +1002,8 @@ impl Checker {
             IoBuiltin::Open => Ty::fun(&[string(), string()], res_stream),
             IoBuiltin::Close => Ty::fun(&[stream], res_unit),
             IoBuiltin::Read => Ty::fun(&[stream, bytes], res_opt_int),
-            IoBuiltin::Write => Ty::fun(&[stream, bytes], res_int),
-            IoBuiltin::WriteFrom => Ty::fun(&[stream, bytes, int()], res_int),
+            IoBuiltin::Write => Ty::fun(&[stream, readonly_ty(bytes.clone())], res_int),
+            IoBuiltin::WriteFrom => Ty::fun(&[stream, readonly_ty(bytes.clone()), int()], res_int),
             IoBuiltin::AwaitReadable
             | IoBuiltin::AwaitWritable
             | IoBuiltin::WaitReadable

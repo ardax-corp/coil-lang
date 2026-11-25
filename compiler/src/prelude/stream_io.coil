@@ -23,13 +23,13 @@ trait Read<S> {
 /// sends anything the writer holds back; it does nothing unless the type
 /// says otherwise.
 trait Write<S> {
-    fn write(S s, Vec<byte> buf) -> Result<int, IoError> {}
+    fn write(S s, readonly Vec<byte> buf) -> Result<int, IoError> {}
     fn wait_writable(S s) -> Result<unit, IoError> {}
 
     /// `write` of `buf` from index `offset` on. By default it writes a copy
     /// of that part; a type that can write from the middle (`Stream`)
     /// overrides it.
-    fn write_from(S s, Vec<byte> buf, int offset) -> Result<int, IoError> {
+    fn write_from(S s, readonly Vec<byte> buf, int offset) -> Result<int, IoError> {
         if offset == 0 {
             return s.write(buf);
         }
@@ -61,7 +61,7 @@ impl Read for Stream {
 }
 
 impl Write for Stream {
-    fn write(Stream s, Vec<byte> buf) -> Result<int, IoError> {
+    fn write(Stream s, readonly Vec<byte> buf) -> Result<int, IoError> {
         return stream_write(s, buf);
     }
 
@@ -69,7 +69,7 @@ impl Write for Stream {
         return stream_wait_writable(s);
     }
 
-    fn write_from(Stream s, Vec<byte> buf, int offset) -> Result<int, IoError> {
+    fn write_from(Stream s, readonly Vec<byte> buf, int offset) -> Result<int, IoError> {
         return stream_write_from(s, buf, offset);
     }
 }
@@ -93,7 +93,7 @@ impl Read for Read {
 }
 
 impl Write for Write {
-    fn write(Write w, Vec<byte> buf) -> Result<int, IoError> {
+    fn write(Write w, readonly Vec<byte> buf) -> Result<int, IoError> {
         return w.write(buf);
     }
 
@@ -101,7 +101,7 @@ impl Write for Write {
         return w.wait_writable();
     }
 
-    fn write_from(Write w, Vec<byte> buf, int offset) -> Result<int, IoError> {
+    fn write_from(Write w, readonly Vec<byte> buf, int offset) -> Result<int, IoError> {
         return w.write_from(buf, offset);
     }
 

@@ -71,6 +71,10 @@ pub struct HirModule {
     /// A trait instance's method bodies by the key its calls name
     /// (`Class__Ty__method`, the instance's `method_fqns`).
     pub instance_fns: std::collections::HashMap<String, usize>,
+    /// A trait's default method bodies by their key
+    /// (`Class__default__method`): what an instance that leaves the method
+    /// out runs.
+    pub default_fns: std::collections::HashMap<String, usize>,
 }
 
 /// A trait method and its declared effects (`None`: undeclared, so a call

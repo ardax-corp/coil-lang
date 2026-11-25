@@ -1,0 +1,82 @@
+// A generic call whose impl leaves a method to the trait's default body
+// has the effects of that default body at the impl's type: the default
+// calls trait methods on its receiver, which are the impl's own (#2921).
+use tests::assert;
+use io::{stdout, Write, IoError};
+use string::to_bytes;
+
+trait Sized<S> {
+    fn size(S s) -> int {}
+
+    fn twice(S s) -> int {
+        return s.size() * 2;
+    }
+}
+
+class Box {
+    pub n: int,
+}
+
+impl Sized for Box {
+    fn size(Box b) -> int {
+        return b.n;
+    }
+}
+
+fn twice_of<T: Sized>(T t) -> int {
+    return t.twice();
+}
+
+fn doubled(int n) -> int uses {} {
+    return twice_of(new Box(n));
+}
+
+// `Write`'s default `write_from` calls `.write()`: through a writer that
+// only counts, what is left is the default body's own writes to the
+// copy it makes.
+class Counter {
+    pub n: int,
+}
+
+impl Write for Counter {
+    fn write(Counter c, readonly Vec<byte> buf) -> Result<int, IoError> {
+        return Ok(buf.len());
+    }
+
+    fn wait_writable(Counter c) -> Result<unit, IoError> {
+        return Ok(());
+    }
+}
+
+fn put_from<W: Write>(W w, Vec<byte> buf, int offset) -> Result<int, IoError> {
+    return w.write_from(buf, offset);
+}
+
+fn counted(string s) -> int uses {mutate} {
+    match put_from(new Counter(0), to_bytes(s), 1) {
+        Ok(n) => {
+            return n;
+        },
+        Err(_) => {
+            return -1;
+        },
+    }
+}
+
+// `Stream` overrides `write_from`: its own impl's effects, as before.
+fn say(string s) uses {write, suspend} {
+    let _ = put_from(stdout(), to_bytes(s), 0);
+}
+
+test("a default method through a pure impl is pure") {
+    assert!(doubled(4) == 8);
+}
+
+test("a default writer method through a counting impl") {
+    assert!(counted("abc") == 2);
+}
+
+test("an overriding impl keeps its own effects") {
+    say("");
+    assert!(true);
+}
