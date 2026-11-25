@@ -91,6 +91,11 @@ pub struct LoopParSite {
     /// its own thread when one fails. Empty: the terms have one sign
     /// whatever the values.
     pub guard: Vec<SignTest>,
+    /// The body computes a heap value (it builds a tree, a string, a
+    /// collection), which a chunk worker allocates and frees in the
+    /// shared-heap steal epoch. Not worth it today, as a heap-building
+    /// fork is not ([`Self::worth_forking`]).
+    pub heap_values: bool,
 }
 
 /// `local >= bound` (`at_least`) or `local <= bound`, of a live capture or
@@ -112,6 +117,14 @@ impl std::fmt::Display for SignTest {
 pub const LOOP_PAR_MAX_CHUNKS: i64 = 4;
 
 impl LoopParSite {
+    /// Whether the cost model forks this loop: as
+    /// [`super::ParForkSite::worth_forking`], a body that computes heap
+    /// values stays sequential unless `heap_forks`. Such an epoch frees
+    /// what died in it only after the join, on the joining thread.
+    pub fn worth_forking(&self, heap_forks: bool) -> bool {
+        heap_forks || !self.heap_values
+    }
+
     pub fn is_dynamic(&self) -> bool {
         self.begin_local.is_some() || self.end_local.is_some()
     }
@@ -305,13 +318,16 @@ impl Scan<'_> {
     ///
     /// Everything the loop assigns is dropped first: a const local's
     /// binding no longer describes every visit to a program point inside a
-    /// loop.
+    /// loop. An `int` it assigns still holds an `int`, of any value: a
+    /// loop nested in this one may read it as a bound or a capture.
     fn walk_loop_body(&mut self, loop_id: HirId, body: HirId, consts: &ConstLocals, ints: &IntLocals) {
         let mut inner = consts.clone();
         let mut inner_ints = ints.clone();
         for l in self.assigned(loop_id) {
             inner.remove(&l);
-            inner_ints.remove(&l);
+            if let Some(held) = inner_ints.get_mut(&l) {
+                *held = Some(Interval::of_type(self.body.local(l).ty.as_ref()));
+            }
         }
         self.walk(body, &mut inner, &mut inner_ints);
     }
@@ -565,6 +581,15 @@ impl Scan<'_> {
         let guard = self.sign_guard(&invariants, ints, &|ints| self.one_signed(&forms, &checks, (index, over(ints)), consts, ints));
         let signed = guard.is_some();
         let name = |l: LocalId| self.name(l).to_string();
+        let mut heap_values = false;
+        // A call or a constructor whose value is no scalar: what it makes
+        // is allocated (a literal string is the program's own).
+        self.body.visit(loop_body, &mut |e| {
+            heap_values |= matches!(e.kind, HirKind::Call { .. } | HirKind::Make { .. })
+                && e.ty.as_ref().is_some_and(|t| {
+                    *t != coil_ty::never() && !matches!(t, Ty::Con(n) if [coil_ty::INT, coil_ty::BYTE, coil_ty::FLOAT, coil_ty::BOOL, coil_ty::UNIT].contains(&n.as_str()))
+                });
+        });
         let site = LoopParSite {
             index: name(index),
             begin,
@@ -583,6 +608,7 @@ impl Scan<'_> {
                 .into_iter()
                 .map(|(l, at_least, bound)| SignTest { local: name(l), at_least, bound })
                 .collect(),
+            heap_values,
         };
         Some((site, signed))
     }
@@ -1208,6 +1234,9 @@ fn is_int_expr(body: &HirBody, id: HirId, ints: &IntLocals) -> bool {
         HirKind::Bin { op, lhs, rhs } => {
             matches!(source_op(op), "+" | "-" | "*" | "<<" | ">>" | "^" | "&" | "|") && is_int_expr(body, lhs, ints) && is_int_expr(body, rhs, ints)
         }
+        // A call that returns an `int` (a size read from the arguments):
+        // what it returns, the range says.
+        HirKind::Call { .. } => matches!(&body.expr(id).ty, Some(Ty::Con(n)) if n == coil_ty::INT),
         _ => false,
     }
 }

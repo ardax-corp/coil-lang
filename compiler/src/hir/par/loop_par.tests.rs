@@ -1187,3 +1187,50 @@ fn a_loop_in_a_trait_method_is_a_site() {
     assert!(ends.contains(&101) && ends.contains(&102), "{ends:?}");
     assert_eq!(ends, [101, 102, 103, 104, 105, 106]);
 }
+
+#[test]
+fn admits_a_fold_of_a_recursive_count_over_built_trees() {
+    let src = r#"
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+fn bottom_up(int depth) -> Tree {
+    if depth == 0 {
+        return Tree::Leaf();
+    }
+    return Tree::Node(bottom_up(depth - 1), bottom_up(depth - 1));
+}
+fn item_check(Tree t) -> int {
+    return match t {
+        Tree::Leaf => 1,
+        Tree::Node(left, right) => 1 + item_check(left) + item_check(right),
+    };
+}
+fn arg_n(int f) -> int { return f; }
+fn main() {
+    let n = arg_n(16);
+    let sum = item_check(bottom_up(n + 1));
+    let long_lived = bottom_up(n);
+    let depth = 4;
+    while depth <= n {
+        let iterations = 1 << (n - depth + 4);
+        let i = 0;
+        let c = 0;
+        while i < iterations {
+            c = c + item_check(bottom_up(depth + ((i & 268435456) >> 28)));
+            i = i + 1;
+        }
+        sum = sum + c;
+        depth = depth + 2;
+    }
+    sum = sum + item_check(long_lived);
+    let _ = sum;
+}
+"#;
+    // A recursive count is at least 1, and the nested loop's bound reads
+    // a local the outer loop writes, from a size a call returned.
+    let site = one_site(src);
+    // Its body builds a tree: a heap-building loop.
+    assert!(site.heap_values);
+}
