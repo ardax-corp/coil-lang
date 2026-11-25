@@ -1669,15 +1669,28 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
         return unsafe { bail(ctx) };
     };
     let n = n as usize;
-    let values: Vec<common::Value> = if kind == ALLOC_OBJECT || n == 0 {
-        Vec::new()
+    // The words, on the stack when few: an enum or a closure copies them
+    // into its own storage, so most allocations need no buffer on the heap.
+    let mut buf = [common::Value::default(); 8];
+    let spill: Vec<common::Value>;
+    let values: &[common::Value] = if kind == ALLOC_OBJECT || n == 0 {
+        &[]
     } else {
         // SAFETY: the caller passes `n` words.
-        unsafe { std::slice::from_raw_parts(words, n) }.iter().map(|&w| common::Value::from(w)).collect()
+        let words = unsafe { std::slice::from_raw_parts(words, n) };
+        if n <= buf.len() {
+            for (b, &w) in buf.iter_mut().zip(words) {
+                *b = common::Value::from(w);
+            }
+            &buf[..n]
+        } else {
+            spill = words.iter().map(|&w| common::Value::from(w)).collect();
+            &spill
+        }
     };
     let addr = match kind {
         ALLOC_ARRAY => {
-            let mut arr = ObjArray::from_values(values, heap);
+            let mut arr = ObjArray::from_values(values.to_vec(), heap);
             if extra != 0 {
                 arr.set_elem_kind(extra as u8 & 0x3);
                 // Not allocated yet: the allocation counts the packed size.
@@ -1689,7 +1702,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             if !n.is_multiple_of(2) {
                 return unsafe { bail(ctx) };
             }
-            heap.alloc(ObjArray::from_lanes(values, 2, extra), Object::Array).0.addr()
+            heap.alloc(ObjArray::from_lanes(values.to_vec(), 2, extra), Object::Array).0.addr()
         }
         ALLOC_DROP_ENUM => {
             let Some((&type_id, payload)) = values.split_last() else {
@@ -1717,7 +1730,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 // A payload-less variant is shared, as `MakeEnum`.
                 return heap.immortal_unit_enum(tag).addr();
             }
-            let payload = match values.as_slice() {
+            let payload = match values {
                 [a] => EnumPayload::one(*a),
                 [a, b] => EnumPayload::two(*a, *b),
                 v => EnumPayload::from_slice(v),
@@ -1742,7 +1755,7 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
             let coro = crate::memory::ObjCoroutine {
                 state: crate::CoroState::Suspended,
                 resume_ip: target,
-                saved_stack: values,
+                saved_stack: values.to_vec(),
                 saved_live_mask: live_mask,
                 started: false,
                 closeable: false,
