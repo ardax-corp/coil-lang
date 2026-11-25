@@ -152,6 +152,14 @@ impl Heap {
         }
     }
 
+    /// A `FreeEarly` has nothing to do: counts free what dies, and with no
+    /// type that has a `drop` (and none owed) no scope end runs one
+    /// ([`Self::rc_doomed_drops`]).
+    #[inline]
+    pub fn free_early_is_noop(&self) -> bool {
+        self.rc_on && self.finalizer_types.is_empty() && self.rc_due.is_empty()
+    }
+
     /// Keep counts in this heap, or not (tests that count by hand).
     pub fn set_rc_counting(&mut self, on: bool) {
         self.rc_on = on;
@@ -372,7 +380,8 @@ impl Heap {
             return Vec::new();
         }
         let mut seen: Vec<(Object, Vec<u64>)> = Vec::new();
-        for &w in words {
+        // Null words (a frame's unused slots, unit) name nothing: no call.
+        for &w in words.iter().filter(|w| w.heap_addr() & !1 != 0) {
             if let Some((o, refs)) = self.rc_before(w)
                 && !seen.iter().any(|(s, _)| s.addr() == o.addr())
             {

@@ -22,7 +22,9 @@ pub(crate) fn render_format(format_rest: &str, next: impl FnMut() -> Value) -> S
 /// written in place, so a short message needs no allocation of its own.
 pub(crate) fn render_format_into(message: &mut String, format_rest: &str, mut next: impl FnMut() -> Value) {
     let mut rest = format_rest;
-    while let Some(at) = rest.find('%') {
+    // A byte scan: `%` is ASCII, and a format string is short, where
+    // `str::find`'s searcher costs more than the loop.
+    while let Some(at) = rest.bytes().position(|b| b == b'%') {
         message.push_str(&rest[..at]);
         let spec = rest.as_bytes().get(at + 1).copied();
         rest = &rest[at + 1..];

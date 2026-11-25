@@ -2112,6 +2112,14 @@ pub unsafe extern "C" fn coil_native_free_early(ctx: *mut NativeCtx, word: u64, 
     if c.machine.is_null() {
         return unsafe { bail(ctx) };
     }
+    // Counts free what dies; with no `drop` to run there is nothing to do
+    // here, so the host's call (its roots and panic guard) is skipped.
+    if c.has_finalizers == 0
+        && let Some(heap) = (unsafe { heap(ctx) })
+        && heap.free_early_is_noop()
+    {
+        return 0;
+    }
     if c.has_finalizers != 0 {
         c.host_calls += 1;
         c.gc_epoch += 1;
@@ -3139,7 +3147,8 @@ pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flag
     // SAFETY: `call` set `heap` to the machine's live heap.
     let heap = unsafe { &mut *c.heap };
     // The loop's arrays: what it pushes and stores counts once it ends.
-    let before = heap.rc_before_all(&frame.iter().map(|&w| common::Value::from(w)).collect::<Vec<_>>());
+    // SAFETY: a `Value` is one word (no copy of the frame per call).
+    let before = heap.rc_before_all(unsafe { std::slice::from_raw_parts(frame.as_ptr().cast::<common::Value>(), frame.len()) });
     let out = crate::lanes::lanes_on_frame(heap, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64);
     heap.rc_after_all(before);
     match out {
