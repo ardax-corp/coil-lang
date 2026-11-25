@@ -188,6 +188,7 @@ pub const COUNTS_FIN_WORDS: i32 = std::mem::offset_of!(crate::memory::HeapCounts
 pub const COUNTS_FIN_LEN: i32 = std::mem::offset_of!(crate::memory::HeapCounts, fin_len) as i32;
 pub const COUNTS_ALLOC_BYTES: i32 = std::mem::offset_of!(crate::memory::HeapCounts, alloc_bytes) as i32;
 pub const COUNTS_LIVE_COUNT: i32 = std::mem::offset_of!(crate::memory::HeapCounts, live_count) as i32;
+pub const COUNTS_HEADER_XOR: i32 = std::mem::offset_of!(crate::memory::HeapCounts, header_xor) as i32;
 pub const BUMP_NEXT: i32 = std::mem::offset_of!(crate::memory::Bump, next) as i32;
 pub const BUMP_END: i32 = std::mem::offset_of!(crate::memory::Bump, end) as i32;
 /// Head of a nursery class's early-freed slots ([`crate::memory::Bump::free`]).

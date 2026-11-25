@@ -51,6 +51,10 @@ struct EpochBatch {
     /// [`Heap::finalizable`].
     weaks: Vec<u64>,
     finalizable: Vec<u64>,
+    /// Native code's inline allocation in the epoch, on this thread: its
+    /// own counters and cursors ([`Heap::inline_alloc_ptrs`]). Boxed, as
+    /// native code holds their address.
+    inline: Option<Box<EpochInline>>,
     /// Count changes made in the epoch, for [`Heap::epoch_rc`]: an object's
     /// address, with bit 0 set for a decrement (reference-count plan step 8),
     /// or with [`EPOCH_RC_ZERO`] for an object born in the epoch whose last
@@ -58,9 +62,25 @@ struct EpochBatch {
     rc: Vec<u64>,
 }
 
+/// One thread's inline allocation in a steal epoch: the counters native
+/// code bumps (folded into the heap's with the batch's) and, per nursery
+/// cursor, a run of old-space slots to bump through (a whole chunk taken
+/// under the lock, [`Slab::alloc_run`]). The free lists stay empty.
+struct EpochInline {
+    counts: HeapCounts,
+    bumps: [super::slab::Bump; super::slab::YOUNG_CLASSES],
+}
+
+impl EpochInline {
+    fn is_empty(&self) -> bool {
+        self.counts.alloc_bytes == 0 && self.counts.live_count == 0 && self.bumps.iter().all(|b| b.next == b.end)
+    }
+}
+
 impl EpochBatch {
     fn is_empty(&self) -> bool {
-        self.classes.iter().all(|(_, v)| v.is_empty())
+        self.inline.as_ref().is_none_or(|i| i.is_empty())
+            && self.classes.iter().all(|(_, v)| v.is_empty())
             && self.bytes == 0
             && self.objects == 0
             && self.weaks.is_empty()
@@ -212,6 +232,10 @@ pub struct HeapCounts {
     pub alloc_bytes: usize,
     /// Live object count (alloc +1, sweep/dealloc −1). Not a membership set.
     pub live_count: usize,
+    /// XORed into an inline image's header word: zero for the heap's own
+    /// counters; a steal epoch's mutator clears the nursery bit and stamps
+    /// the epoch ([`EpochInline`]).
+    pub header_xor: u64,
 }
 
 /// How far the slab's resident bytes may run past twice the live bytes
@@ -526,6 +550,9 @@ impl Heap {
     {
         let layout = Layout::new::<GcData<T>>();
         let key = Slab::class_of(layout);
+        // A class native code allocates inline keeps its slots on this
+        // thread's free list for it ([`EpochInline`]).
+        let cursor = T::NURSERY.then(|| self.slab.young_cursor(key)).flatten();
         let me: *const Heap = self;
         let slot = EPOCH_BATCH_TLS.with(|cell| {
             let mut batch = cell.borrow_mut();
@@ -534,6 +561,24 @@ impl Heap {
                 "epoch batch left over from another heap"
             );
             batch.heap = me;
+            if let Some(c) = cursor {
+                let size = u64::from(key.0);
+                let b = &mut self.epoch_inline(&mut batch).bumps[c];
+                if b.next + size > b.end {
+                    let _epoch_guard = self.epoch_guard();
+                    let b = &mut batch.inline.as_mut().expect("epoch inline state").bumps[c];
+                    if b.next != b.end {
+                        self.slab.give_back_run(key, b.next, b.end);
+                    }
+                    (b.next, b.end) = self.slab.alloc_run(layout);
+                    self.fold_epoch_counts(&mut batch);
+                }
+                let b = &mut batch.inline.as_mut().expect("epoch inline state").bumps[c];
+                let p = b.next;
+                b.next += size;
+                // SAFETY: a slot of the run, never handed out.
+                return unsafe { NonNull::new_unchecked(p as *mut u8) };
+            }
             let at = match batch.classes.iter().position(|(k, _)| *k == key) {
                 Some(at) => at,
                 None => {
@@ -565,8 +610,29 @@ impl Heap {
         (object, content)
     }
 
+    /// This thread's inline allocation state in the open epoch, made and
+    /// stamped for it ([`EpochInline`]): no nursery (an epoch allocates old),
+    /// the epoch's generation in each header, and the heap's finalizer types.
+    fn epoch_inline<'b>(&self, batch: &'b mut EpochBatch) -> &'b mut EpochInline {
+        let inline = batch.inline.get_or_insert_with(|| {
+            Box::new(EpochInline { counts: HeapCounts::default(), bumps: [super::slab::Bump::default(); super::slab::YOUNG_CLASSES] })
+        });
+        let probe = GcHeader::new();
+        let at = |f: *const u8| 8 * (f as usize - std::ptr::from_ref(&probe) as usize);
+        let c = &mut inline.counts;
+        c.inline_gate = u64::from(!cfg!(feature = "rc-check"));
+        c.header_xor = (u64::from(GEN_YOUNG) << at(probe.generation.as_ptr())) | (u64::from(self.epoch_gen) << at(probe.epoch.as_ptr()));
+        c.fin_words = self.counts.fin_words;
+        c.fin_len = self.counts.fin_len;
+        inline
+    }
+
     /// Add a batch's pending byte / object counts to the heap (lock held).
     fn fold_epoch_counts(&mut self, batch: &mut EpochBatch) {
+        if let Some(inline) = batch.inline.as_mut() {
+            batch.bytes += std::mem::take(&mut inline.counts.alloc_bytes);
+            batch.objects += std::mem::take(&mut inline.counts.live_count);
+        }
         self.counts.alloc_bytes += std::mem::take(&mut batch.bytes);
         self.counts.live_count += std::mem::take(&mut batch.objects);
         self.weaks.append(&mut batch.weaks);
@@ -661,6 +727,12 @@ impl Heap {
             );
             let _epoch_guard = self.epoch_guard();
             self.fold_epoch_counts(&mut batch);
+            if let Some(inline) = batch.inline.as_mut() {
+                for (c, b) in inline.bumps.iter_mut().enumerate().filter(|(_, b)| b.next != b.end) {
+                    self.slab.give_back_run(self.slab.young_key(c), b.next, b.end);
+                    (b.next, b.end) = (0, 0);
+                }
+            }
             for (key, slots) in &mut batch.classes {
                 self.slab.give_back(*key, slots);
             }
@@ -747,7 +819,20 @@ impl Heap {
 
     /// Where native code's inline allocation reads and bumps: the
     /// counters and the nursery cursors ([`InlineLayout`]).
+    ///
+    /// In a steal epoch, this thread's own ([`EpochInline`]): its mutators
+    /// share the heap, so each allocates inline from its batch.
     pub fn inline_alloc_ptrs(&mut self) -> (*mut HeapCounts, *mut super::slab::Bump) {
+        if !self.alloc_lock.is_null() {
+            let me: *const Heap = self;
+            return EPOCH_BATCH_TLS.with(|cell| {
+                let mut batch = cell.borrow_mut();
+                debug_assert!(batch.heap.is_null() || batch.heap == me, "epoch batch left over from another heap");
+                batch.heap = me;
+                let inline = self.epoch_inline(&mut batch);
+                (std::ptr::from_mut(&mut inline.counts), inline.bumps.as_mut_ptr())
+            });
+        }
         (std::ptr::from_mut(self.counts.as_mut()), self.slab.bumps_ptr())
     }
 

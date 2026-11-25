@@ -244,6 +244,7 @@ pub fn layout_fingerprint() -> u64 {
         std::mem::offset_of!(HeapCounts, fin_len),
         std::mem::offset_of!(HeapCounts, alloc_bytes),
         std::mem::offset_of!(HeapCounts, live_count),
+        std::mem::offset_of!(HeapCounts, header_xor),
         std::mem::offset_of!(super::super::slab::Bump, next),
         std::mem::offset_of!(super::super::slab::Bump, end),
         std::mem::offset_of!(super::super::slab::Bump, free),

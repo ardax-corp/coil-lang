@@ -5136,7 +5136,7 @@ impl<'a> Lower<'a> {
     fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], extra: u64, join: Block, reuse: Option<cranelift_codegen::ir::Value>, owned: u32) {
         use machine::native::{
             BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
-            COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
+            COUNTS_HEADER_XOR, COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
         };
         let mem = MemFlagsData::trusted();
         let slow = self.b.create_block();
@@ -5218,6 +5218,12 @@ impl<'a> Lower<'a> {
                 Some(&v) => {
                     let x = self.get(f, v);
                     self.coerce(x, types::I64)
+                }
+                // The header: a steal epoch's mutator makes it old and
+                // stamps its epoch (`HeapCounts::header_xor`, zero else).
+                None if i == 0 => {
+                    let xor = self.b.ins().load(types::I64, mem, counts, COUNTS_HEADER_XOR);
+                    self.b.ins().bxor_imm_s(xor, img as i64)
                 }
                 None => self.b.ins().iconst(types::I64, img as i64),
             };
