@@ -222,7 +222,7 @@ pub(crate) const RELEASE_CHECK_FREES: usize = 4096;
 
 /// Unit enum tags below this are found without a lock
 /// ([`Heap::immortal_unit_enum`]).
-const UNIT_ENUM_FAST: usize = 64;
+pub const UNIT_ENUM_FAST: usize = 64;
 
 /// Managed heap. Objects are linked in an intrusive list for traversal.
 /// `Gc<T>` handles are copyable; the runtime controls when objects become unreachable.
@@ -4387,6 +4387,10 @@ pub const HEADER_FLAGS_OFFSET: i32 = std::mem::offset_of!(GcHeader, flags) as i3
 /// counts are not kept ([`Heap::rc_counting`]); native code's inline count
 /// ops test it.
 pub const HEAP_ALLOC_LOCK_OFFSET: i32 = std::mem::offset_of!(Heap, alloc_lock) as i32;
+/// Byte offset of [`Heap`]'s unit-variant table: `tag` below
+/// [`UNIT_ENUM_FAST`] reads the shared immortal variant at `8 * tag` past it,
+/// `0` until [`Heap::immortal_unit_enum`] made it.
+pub const HEAP_UNIT_ENUMS_OFFSET: i32 = std::mem::offset_of!(Heap, unit_enums) as i32;
 /// Offsets of the heap's chunk span `[lo, hi)`: every object lies in it.
 pub const HEAP_SLAB_LO_OFFSET: i32 = (std::mem::offset_of!(Heap, slab) + super::slab::SLAB_LO_OFFSET) as i32;
 pub const HEAP_SLAB_HI_OFFSET: i32 = (std::mem::offset_of!(Heap, slab) + super::slab::SLAB_HI_OFFSET) as i32;

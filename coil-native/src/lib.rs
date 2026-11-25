@@ -4487,6 +4487,27 @@ impl<'a> Lower<'a> {
                             "function value of a body with no body id"
                         }
                     })?;
+                // A unit variant is one shared immortal object per tag: read
+                // from the heap's table once it exists, without a call.
+                let unit_join = match kind {
+                    MirAllocKind::Enum { tag } if words.is_empty() && reuse.is_none() && (*tag as usize) < machine::UNIT_ENUM_FAST => {
+                        let t = MemFlagsData::trusted();
+                        let (have_heap, hit, slow, uj) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+                        self.b.append_block_param(uj, types::I64);
+                        let heap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HEAP);
+                        self.b.ins().brif(heap, have_heap, &[], slow, &[]);
+                        self.b.switch_to_block(have_heap);
+                        let at = machine::HEAP_UNIT_ENUMS_OFFSET + 8 * (*tag as i32);
+                        let w = self.b.ins().load(types::I64, t, heap, at);
+                        self.b.ins().brif(w, hit, &[], slow, &[]);
+                        self.b.switch_to_block(hit);
+                        self.b.ins().jump(uj, &[w.into()]);
+                        self.b.set_cold_block(slow);
+                        self.b.switch_to_block(slow);
+                        Some(uj)
+                    }
+                    _ => None,
+                };
                 let inline = inline_shape(*kind, words.len(), extra).and_then(machine::native::inline_object);
                 let join = inline.map(|obj| {
                     let join = self.b.create_block();
@@ -4525,6 +4546,11 @@ impl<'a> Lower<'a> {
                     self.b.ins().jump(join, &[w.into()]);
                     self.b.switch_to_block(join);
                     w = self.b.block_params(join)[0];
+                }
+                if let Some(uj) = unit_join {
+                    self.b.ins().jump(uj, &[w.into()]);
+                    self.b.switch_to_block(uj);
+                    w = self.b.block_params(uj)[0];
                 }
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
