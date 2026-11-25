@@ -67,7 +67,7 @@ pub fn build_module<'a>(checker: &Checker, sidecar: &TypedSidecar, module_path: 
         module.bodies.insert(0, body);
         // Lambdas and trait instance methods name their body by index;
         // the top body now comes first.
-        for index in module.instance_fns.values_mut() {
+        for index in module.instance_fns.values_mut().chain(module.default_fns.values_mut()) {
             *index += 1;
         }
         for body in &mut module.bodies {
@@ -733,6 +733,14 @@ impl<'c, 'm, 'ast> Cx<'c, 'm, 'ast> {
                     let keys = vec![crate::typechecking::generics::Generics::default_method_fqn(name, m)];
                     let full = join(&join(prefix, name), m);
                     self.function(fn_node(method), &full, BodyKind::Method, None, &keys, &[]);
+                    let has_default = self
+                        .checker
+                        .generics()
+                        .typeclass(name)
+                        .is_some_and(|t| t.methods.iter().any(|d| d.name == m && d.has_default));
+                    if has_default && let Some(key) = keys.into_iter().next() {
+                        self.module.default_fns.insert(key, self.module.bodies.len() - 1);
+                    }
                 }
             }
             Expression::TestCase { name, body } => {

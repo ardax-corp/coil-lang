@@ -53,10 +53,13 @@ effects undeclared, stays open the same way (`Summary::dispatch`): the call
 site adds the impl of that method for the type it passes there, from the
 instances the checker picked for the call, or passes the call on when that
 is its own such parameter again. So `write_all<W: Write>(stdout(), ..)`
-costs `Stream`'s `write`, which writes and may wait. An impl the call does
-not name (a default or builtin body, another trait's method of that name
-reached through a bound's superclasses) or one whose own effects depend on
-what it is passed is unknown. A `uses {…}` or `pure` declaration on the
+costs `Stream`'s `write`, which writes and may wait. When the instance
+leaves the method to its trait's default body, that body counts, and its
+own trait method calls on its receiver resolve against the same instances
+(four levels of defaults deep). An impl the call does not name (a builtin
+body, another trait's method of that name reached through a bound's
+superclasses) or one whose own effects depend on what it is passed other
+than its receiver is unknown. A `uses {…}` or `pure` declaration on the
 generic function covers what it does itself, as for a function parameter.
 A lambda, a named `fn` or a
 `let f = fn …` never reassigned is a known callee; a function value from

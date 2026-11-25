@@ -141,6 +141,11 @@ fn open_mode_summary(body: &HirBody, name: &str, args: &[HirId], s: Summary) -> 
     }
 }
 
+/// How many levels of default method bodies a generic call's trait method
+/// calls on its receiver are resolved through at a call site
+/// ([`Cx::dispatch_impl`]) before they are unknown.
+const DISPATCH_DEPTH: u32 = 4;
+
 /// An interned set of `(parameter, trait method)` calls a body makes on
 /// its parameters of a type parameter's type ([`Summary::dispatch`]).
 /// Interned so that [`Summary`] stays `Copy` and every lookup of a
@@ -335,6 +340,9 @@ pub struct ProgramEffects {
     /// of its `impl` and the key its calls name (the instance's
     /// `method_fqns`): what a later module's call of that instance runs.
     instance_bodies: HashMap<(String, String), String>,
+    /// Trait default method bodies by their key (`Class__default__m`):
+    /// the body's name.
+    default_bodies: HashMap<String, String>,
     /// The same by the key alone (`IntoIterator__Bag__into_iter`): the
     /// instance a `for` loop's desugar names (#2821).
     instance_by_key: HashMap<String, String>,
@@ -385,6 +393,13 @@ impl ProgramEffects {
         // A method of another class or trait says nothing of this call; a
         // name that is also some trait method's may still be a function.
         first(short_name(key), &of_owner).or_else(|| if method || trait_name.is_some() { None } else { first(key, &|_| true) })
+    }
+
+    /// A trait's default method body by its key (`Write__default__write_from`),
+    /// as an earlier module recorded it: its name and summary.
+    fn default_body(&self, fqn: &str) -> Option<(&str, Summary)> {
+        let name = self.default_bodies.get(fqn)?;
+        Some((name.as_str(), *self.by_name.get(name)?))
     }
 
     /// The impl body an earlier module recorded for the method `fqn` of an
@@ -563,6 +578,9 @@ impl ProgramEffects {
         for (fqn, &i) in &module.instance_fns {
             self.instance_bodies.insert((module_path.to_string(), fqn.clone()), module.bodies[i].name.clone());
             self.instance_by_key.insert(fqn.clone(), module.bodies[i].name.clone());
+        }
+        for (fqn, &i) in &module.default_fns {
+            self.default_bodies.insert(fqn.clone(), module.bodies[i].name.clone());
         }
         // The overloads of a name share it and its def: a later module's
         // call may run any of them.
@@ -2986,7 +3004,7 @@ impl Cx<'_> {
             w.out.dispatch = w.out.dispatch.with(j, m);
             return;
         }
-        match self.dispatch_impl(w, at, arg, m) {
+        match self.dispatch_impl(w, at, arg, m, 0) {
             Some((s, called)) => self.record(w, at, s, 0, || Some(called), || format!("calls `{shown}`, which calls `.{m}()`")),
             None => self.note(w, at, UNKNOWN.bits(), || {
                 format!("calls `{shown}`, whose `.{m}()` on what it is passed this analysis does not resolve")
@@ -2996,11 +3014,15 @@ impl Cx<'_> {
 
     /// What `.m()` costs on the value `arg` the call `at` passes, and the
     /// impl body that says so: the impls of `m` for `arg`'s type among the
-    /// instances the checker picked for the call, joined. `None` (unknown)
-    /// when the call has no such instance, one of them runs a default or a
-    /// builtin body, a bound reaches another trait's `m` through its
-    /// superclasses, or an impl's own effects depend on what it is passed.
-    fn dispatch_impl(&self, w: &Walk<'_>, at: HirId, arg: HirId, m: &str) -> Option<(Summary, Called)> {
+    /// instances the checker picked for the call, joined. A default body
+    /// the instance leaves `m` to has its own trait method calls on its
+    /// receiver resolved against the same instances, `depth` levels so
+    /// far. `None` (unknown) when the call has no such instance, one of
+    /// them runs a builtin body, a bound reaches another trait's `m`
+    /// through its superclasses, or an impl's own effects depend on what
+    /// it is passed other than its receiver, or on calls past
+    /// [`DISPATCH_DEPTH`] levels of defaults.
+    fn dispatch_impl(&self, w: &Walk<'_>, at: HirId, arg: HirId, m: &str, depth: u32) -> Option<(Summary, Called)> {
         let body = &self.module.bodies[w.index];
         let owner = class_of(body.expr(arg).ty.as_ref())?;
         let of_owner: Vec<&crate::typechecking::generics::InstanceDef> =
@@ -3026,17 +3048,43 @@ impl Cx<'_> {
         let mut out: Option<(Summary, Called)> = None;
         for inst in of_owner {
             let Some(fqn) = inst.method_fqns.get(m) else { continue };
-            let (s, called) = if inst.defined_module == self.module_path {
-                let i = *self.module.instance_fns.get(fqn)?;
+            let local = |i: usize| {
                 let name = &self.module.bodies[i].name;
                 let shown = local_name(self.module_path, name).unwrap_or(name).to_string();
                 (w.summaries[i], Called { name: shown, body: Some(i) })
+            };
+            let (mut s, called) = if fqn.ends_with(&format!("__default__{m}")) {
+                // A default body is its trait's, in the trait's module.
+                match self.module.default_fns.get(fqn) {
+                    Some(&i) => local(i),
+                    None => {
+                        let (name, s) = self.program.default_body(fqn)?;
+                        (s, Called { name: name.to_string(), body: None })
+                    }
+                }
+            } else if inst.defined_module == self.module_path {
+                local(*self.module.instance_fns.get(fqn)?)
             } else {
                 let (name, s) = self.program.instance_body(&inst.defined_module, fqn)?;
                 (s, Called { name: name.to_string(), body: None })
             };
-            if s.depends_on_args() {
+            if s.latent != 0 {
                 return None;
+            }
+            // A body generic in its receiver (a default) calls trait
+            // methods on it: those of the same instances, a few deep.
+            if !s.dispatch.is_empty() {
+                if depth >= DISPATCH_DEPTH {
+                    return None;
+                }
+                for (p, m2) in s.dispatch.calls().iter() {
+                    if *p != 0 {
+                        return None;
+                    }
+                    let (r, _) = self.dispatch_impl(w, at, arg, m2, depth + 1)?;
+                    s = s.join(r);
+                }
+                s.dispatch = Dispatch::default();
             }
             out = Some(match out {
                 Some((o, first)) => (o.join(s), first),
