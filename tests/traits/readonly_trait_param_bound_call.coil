@@ -1,0 +1,39 @@
+// A trait method that declares a parameter other than `self` `readonly`
+// may be passed a `readonly` value through a bound, also when another
+// trait in scope has a method of that name that writes it
+// (`io::Write::write`) (#2921).
+use tests::assert;
+use io::IoError;
+
+trait Put<S> {
+    fn write(S s, readonly Vec<byte> buf) -> Result<int, IoError> {}
+}
+
+shared class Sink {
+    pub n: int,
+}
+
+impl Put for Sink {
+    fn write(Sink s, readonly Vec<byte> buf) -> Result<int, IoError> {
+        s.n += buf.len();
+        return Ok(buf.len());
+    }
+}
+
+fn send<W: Put>(W w, readonly Vec<byte> buf) -> Result<int, IoError> {
+    return w.write(buf);
+}
+
+fn send_qualified<W: Put>(W w, readonly Vec<byte> buf) -> Result<int, IoError> {
+    return Put::write(w, buf);
+}
+
+test("a readonly buffer goes through a bound's readonly parameter") {
+    let a: Vec<byte> = [1, 2, 3];
+    let b = a;
+    let s = new Sink(0);
+    assert!(send(s, b) == Ok(3));
+    assert!(send_qualified(s, a) == Ok(3));
+    assert!(s.n == 6);
+    assert!(a.len() == 3 && b.len() == 3);
+}
