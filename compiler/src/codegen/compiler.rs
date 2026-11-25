@@ -7344,6 +7344,10 @@ impl Compiler {
             && let Some(hir) = self.hir_module.as_ref()
         {
             self.loop_par_sites = hir.loop_par_sites(&self.checker, module, &self.pure_fns);
+            // A loop whose body builds heap values stays sequential, as a
+            // heap-building fork does (`LoopParSite::worth_forking`).
+            let heap_forks = self.par_heap_forks;
+            self.loop_par_sites.retain(|_, site| site.worth_forking(heap_forks));
         }
         // E0805: the same detector with every user function an arm. The hint
         // is advice about the source, not about what auto-par did, so
