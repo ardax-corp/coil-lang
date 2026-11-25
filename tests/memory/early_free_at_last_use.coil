@@ -1,3 +1,4 @@
+// @skip rc-check the heap check at every safepoint walks the 100k-node list each time
 // A local the early-free pass frees goes after the statement that last
 // names it, not at the end of its block: a big structure does not live on
 // through the rest of the block. A type with a `drop` still waits for the
