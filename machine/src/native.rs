@@ -188,6 +188,7 @@ pub const COUNTS_FIN_WORDS: i32 = std::mem::offset_of!(crate::memory::HeapCounts
 pub const COUNTS_FIN_LEN: i32 = std::mem::offset_of!(crate::memory::HeapCounts, fin_len) as i32;
 pub const COUNTS_ALLOC_BYTES: i32 = std::mem::offset_of!(crate::memory::HeapCounts, alloc_bytes) as i32;
 pub const COUNTS_LIVE_COUNT: i32 = std::mem::offset_of!(crate::memory::HeapCounts, live_count) as i32;
+pub const COUNTS_HEADER_XOR: i32 = std::mem::offset_of!(crate::memory::HeapCounts, header_xor) as i32;
 pub const BUMP_NEXT: i32 = std::mem::offset_of!(crate::memory::Bump, next) as i32;
 pub const BUMP_END: i32 = std::mem::offset_of!(crate::memory::Bump, end) as i32;
 /// Head of a nursery class's early-freed slots ([`crate::memory::Bump::free`]).
@@ -1585,10 +1586,11 @@ pub unsafe fn cow_unpin(ctx: *mut NativeCtx, word: u64, saved: u64) {
     }
 }
 
-/// `RcInc` (`dec` zero) or `RcDec` of the heap word `word`: its object
+/// `RcInc` (`dec` zero) or `RcDec` (one) of the heap word `word`: its object
 /// gains or loses an owner, and one that lost its last is released
 /// ([`crate::memory::Heap::rc_drop`]). Nothing when counts are not kept or
-/// `word` names no object. Returns `0`.
+/// `word` names no object. `dec` two: native code counted `word`, born in
+/// the open steal epoch, in place and took its last owner. Returns `0`.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
@@ -1598,10 +1600,13 @@ pub unsafe extern "C" fn coil_native_rc(ctx: *mut NativeCtx, word: u64, dec: u64
         return 0;
     };
     let w = common::Value::from(word);
-    if dec == 0 {
-        heap.rc_retain(w);
-    } else {
-        heap.rc_drop(w);
+    match dec {
+        0 => heap.rc_retain(w),
+        // Native code counted it in place and took its last owner.
+        2 => heap.rc_epoch_zero(w),
+        _ => {
+            heap.rc_drop(w);
+        }
     }
     0
 }

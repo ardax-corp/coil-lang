@@ -28,7 +28,7 @@ use compiler::native_mir::{
 };
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::isa::CallConv;
-use cranelift_codegen::ir::{AbiParam, Block, FuncRef, InstBuilder, MemFlagsData, Signature, Type, types};
+use cranelift_codegen::ir::{AbiParam, AtomicRmwOp, Block, FuncRef, InstBuilder, MemFlagsData, Signature, Type, types};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -5136,7 +5136,7 @@ impl<'a> Lower<'a> {
     fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], extra: u64, join: Block, reuse: Option<cranelift_codegen::ir::Value>, owned: u32) {
         use machine::native::{
             BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
-            COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
+            COUNTS_HEADER_XOR, COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
         };
         let mem = MemFlagsData::trusted();
         let slow = self.b.create_block();
@@ -5218,6 +5218,12 @@ impl<'a> Lower<'a> {
                 Some(&v) => {
                     let x = self.get(f, v);
                     self.coerce(x, types::I64)
+                }
+                // The header: a steal epoch's mutator makes it old and
+                // stamps its epoch (`HeapCounts::header_xor`, zero else).
+                None if i == 0 => {
+                    let xor = self.b.ins().load(types::I64, mem, counts, COUNTS_HEADER_XOR);
+                    self.b.ins().bxor_imm_s(xor, img as i64)
                 }
                 None => self.b.ins().iconst(types::I64, img as i64),
             };
@@ -5998,8 +6004,9 @@ impl<'a> Lower<'a> {
     /// An inline `RcInc` / `RcDec` of `s`, a word that is an object or null
     /// (a tag bit allowed): the header count is read and written here, and
     /// the runtime is called only for a decrement that may release the
-    /// object. Nothing in a steal epoch (its workers keep no counts) or for
-    /// an immortal object. Leaves the builder after it.
+    /// object. In a steal epoch only an object born in it is counted here
+    /// (atomically); nothing for an immortal object. Leaves the builder
+    /// after it.
     /// Branch to the returned block when the word `s` (of a type that may
     /// hold a number) may name an object: 8-aligned but for a `Result`'s
     /// `Err` bit, and inside the heap's chunk span. Anything else goes on to
@@ -6036,10 +6043,48 @@ impl<'a> Lower<'a> {
         let heap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HEAP);
         let lock = self.b.ins().load(types::I64, t, heap, machine::HEAP_ALLOC_LOCK_OFFSET);
         self.b.ins().brif(lock, logged, &[], count_b, &[]);
-        // In a steal epoch the runtime logs the change (plan step 8): the
-        // headers are shared with the other mutators.
+        // In a steal epoch an object born in it is counted in place, with
+        // an atomic change (its mutators share it); the runtime logs the
+        // change to any other (plan step 8, #2927).
+        let (born, runtime, shared) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
         self.b.set_cold_block(logged);
         self.b.switch_to_block(logged);
+        let g = self.b.ins().uload8(types::I64, t, heap, machine::HEAP_EPOCH_GEN_OFFSET);
+        let e = self.b.ins().uload8(types::I64, t, o, machine::HEADER_EPOCH_OFFSET);
+        let same = self.b.ins().icmp(IntCC::Equal, g, e);
+        self.b.ins().brif(same, born, &[], runtime, &[]);
+        self.b.switch_to_block(born);
+        let c = self.b.ins().uload32(t, o, machine::HEADER_COUNT_OFFSET);
+        // Immortal, or (a decrement) already at zero: unchanged, as the
+        // runtime's [`machine::memory::Heap::rc_dec_obj`] leaves it.
+        let fixed = self.b.ins().icmp_imm_s(IntCC::Equal, c, i64::from(machine::COUNT_IMMORTAL));
+        let fixed = if dec {
+            let zero = self.b.ins().icmp_imm_s(IntCC::Equal, c, 0);
+            self.b.ins().bor(fixed, zero)
+        } else {
+            fixed
+        };
+        self.b.ins().brif(fixed, join, &[], shared, &[]);
+        self.b.switch_to_block(shared);
+        let at = self.b.ins().iadd_imm_s(o, i64::from(machine::HEADER_COUNT_OFFSET));
+        let one = self.b.ins().iconst(types::I32, 1);
+        let op = if dec { AtomicRmwOp::Sub } else { AtomicRmwOp::Add };
+        let was = self.b.ins().atomic_rmw(types::I32, t, op, at, one);
+        if dec {
+            // Its last owner went: the epoch's end releases it.
+            let zero_b = self.b.create_block();
+            let last = self.b.ins().icmp_imm_s(IntCC::Equal, was, 1);
+            self.b.ins().brif(last, zero_b, &[], join, &[]);
+            self.b.set_cold_block(zero_b);
+            self.b.switch_to_block(zero_b);
+            let flag = self.b.ins().iconst(types::I64, 2);
+            self.b.ins().call(self.rc, &[self.ctx, s, flag]);
+            self.b.ins().jump(join, &[]);
+        } else {
+            self.b.ins().jump(join, &[]);
+        }
+        self.b.set_cold_block(runtime);
+        self.b.switch_to_block(runtime);
         let flag = self.b.ins().iconst(types::I64, i64::from(dec));
         self.b.ins().call(self.rc, &[self.ctx, s, flag]);
         self.b.ins().jump(join, &[]);

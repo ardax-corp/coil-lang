@@ -5,7 +5,7 @@ use std::alloc::Layout;
 use std::collections::HashMap;
 use std::ptr::{self, NonNull};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use common::{promise, unlikely};
 
@@ -51,14 +51,36 @@ struct EpochBatch {
     /// [`Heap::finalizable`].
     weaks: Vec<u64>,
     finalizable: Vec<u64>,
+    /// Native code's inline allocation in the epoch, on this thread: its
+    /// own counters and cursors ([`Heap::inline_alloc_ptrs`]). Boxed, as
+    /// native code holds their address.
+    inline: Option<Box<EpochInline>>,
     /// Count changes made in the epoch, for [`Heap::epoch_rc`]: an object's
-    /// address, with bit 0 set for a decrement (reference-count plan step 8).
+    /// address, with bit 0 set for a decrement (reference-count plan step 8),
+    /// or with [`EPOCH_RC_ZERO`] for an object born in the epoch whose last
+    /// owner went there (its count is kept in place).
     rc: Vec<u64>,
+}
+
+/// One thread's inline allocation in a steal epoch: the counters native
+/// code bumps (folded into the heap's with the batch's) and, per nursery
+/// cursor, a run of old-space slots to bump through (a whole chunk taken
+/// under the lock, [`Slab::alloc_run`]). The free lists stay empty.
+struct EpochInline {
+    counts: HeapCounts,
+    bumps: [super::slab::Bump; super::slab::YOUNG_CLASSES],
+}
+
+impl EpochInline {
+    fn is_empty(&self) -> bool {
+        self.counts.alloc_bytes == 0 && self.counts.live_count == 0 && self.bumps.iter().all(|b| b.next == b.end)
+    }
 }
 
 impl EpochBatch {
     fn is_empty(&self) -> bool {
-        self.classes.iter().all(|(_, v)| v.is_empty())
+        self.inline.as_ref().is_none_or(|i| i.is_empty())
+            && self.classes.iter().all(|(_, v)| v.is_empty())
             && self.bytes == 0
             && self.objects == 0
             && self.weaks.is_empty()
@@ -210,6 +232,10 @@ pub struct HeapCounts {
     pub alloc_bytes: usize,
     /// Live object count (alloc +1, sweep/dealloc −1). Not a membership set.
     pub live_count: usize,
+    /// XORed into an inline image's header word: zero for the heap's own
+    /// counters; a steal epoch's mutator clears the nursery bit and stamps
+    /// the epoch ([`EpochInline`]).
+    pub header_xor: u64,
 }
 
 /// How far the slab's resident bytes may run past twice the live bytes
@@ -326,10 +352,10 @@ pub struct Heap {
     /// `alloc_bytes` past which a steal epoch aborts (see
     /// [`EPOCH_GC_HEADROOM_FACTOR`]); only meaningful while `epoch_stw`.
     epoch_gc_ceiling: usize,
-    /// Debug / rc-check: generation of the current (or last) steal epoch,
-    /// never 0 once an epoch opened; stamped on objects allocated in it
-    /// ([`EpochWriteScope`]).
-    #[cfg(any(debug_assertions, feature = "rc-check"))]
+    /// Generation of the current (or last) steal epoch, never 0 once an
+    /// epoch opened; stamped on objects allocated in it. Their counts are
+    /// kept in place while it is open ([`Heap::rc_inc_obj`]); debug and
+    /// rc-check builds also guard writes with it ([`EpochWriteScope`]).
     epoch_gen: u8,
 }
 
@@ -380,7 +406,6 @@ impl Default for Heap {
             epoch_stw: false,
             epoch_gc_ceiling: 0,
             alloc_lock: ptr::null(),
-            #[cfg(any(debug_assertions, feature = "rc-check"))]
             epoch_gen: 0,
         };
         inline::make_inline_classes(&mut heap.slab);
@@ -491,11 +516,8 @@ impl Heap {
             .saturating_mul(EPOCH_GC_HEADROOM_FACTOR)
             .max(self.counts.alloc_bytes.saturating_add(EPOCH_GC_HEADROOM_MIN));
         self.alloc_lock = lock as *const Mutex<()>;
-        #[cfg(any(debug_assertions, feature = "rc-check"))]
-        {
-            // Skip 0, which marks objects allocated outside any epoch.
-            self.epoch_gen = self.epoch_gen.wrapping_add(1).max(1);
-        }
+        // Skip 0, which marks objects allocated outside any epoch.
+        self.epoch_gen = self.epoch_gen.wrapping_add(1).max(1);
     }
 
     pub fn exit_epoch_stw(&mut self) {
@@ -528,6 +550,9 @@ impl Heap {
     {
         let layout = Layout::new::<GcData<T>>();
         let key = Slab::class_of(layout);
+        // A class native code allocates inline keeps its slots on this
+        // thread's free list for it ([`EpochInline`]).
+        let cursor = T::NURSERY.then(|| self.slab.young_cursor(key)).flatten();
         let me: *const Heap = self;
         let slot = EPOCH_BATCH_TLS.with(|cell| {
             let mut batch = cell.borrow_mut();
@@ -536,6 +561,24 @@ impl Heap {
                 "epoch batch left over from another heap"
             );
             batch.heap = me;
+            if let Some(c) = cursor {
+                let size = u64::from(key.0);
+                let b = &mut self.epoch_inline(&mut batch).bumps[c];
+                if b.next + size > b.end {
+                    let _epoch_guard = self.epoch_guard();
+                    let b = &mut batch.inline.as_mut().expect("epoch inline state").bumps[c];
+                    if b.next != b.end {
+                        self.slab.give_back_run(key, b.next, b.end);
+                    }
+                    (b.next, b.end) = self.slab.alloc_run(layout);
+                    self.fold_epoch_counts(&mut batch);
+                }
+                let b = &mut batch.inline.as_mut().expect("epoch inline state").bumps[c];
+                let p = b.next;
+                b.next += size;
+                // SAFETY: a slot of the run, never handed out.
+                return unsafe { NonNull::new_unchecked(p as *mut u8) };
+            }
             let at = match batch.classes.iter().position(|(k, _)| *k == key) {
                 Some(at) => at,
                 None => {
@@ -553,7 +596,6 @@ impl Heap {
             slots.pop().expect("epoch batch refill")
         });
         let (object, content) = Self::init_slot(slot.cast::<GcData<T>>(), data, map);
-        #[cfg(any(debug_assertions, feature = "rc-check"))]
         content.header.epoch.set(self.epoch_gen);
         EPOCH_BATCH_TLS.with(|cell| {
             let mut batch = cell.borrow_mut();
@@ -568,8 +610,29 @@ impl Heap {
         (object, content)
     }
 
+    /// This thread's inline allocation state in the open epoch, made and
+    /// stamped for it ([`EpochInline`]): no nursery (an epoch allocates old),
+    /// the epoch's generation in each header, and the heap's finalizer types.
+    fn epoch_inline<'b>(&self, batch: &'b mut EpochBatch) -> &'b mut EpochInline {
+        let inline = batch.inline.get_or_insert_with(|| {
+            Box::new(EpochInline { counts: HeapCounts::default(), bumps: [super::slab::Bump::default(); super::slab::YOUNG_CLASSES] })
+        });
+        let probe = GcHeader::new();
+        let at = |f: *const u8| 8 * (f as usize - std::ptr::from_ref(&probe) as usize);
+        let c = &mut inline.counts;
+        c.inline_gate = u64::from(!cfg!(feature = "rc-check"));
+        c.header_xor = (u64::from(GEN_YOUNG) << at(probe.generation.as_ptr())) | (u64::from(self.epoch_gen) << at(probe.epoch.as_ptr()));
+        c.fin_words = self.counts.fin_words;
+        c.fin_len = self.counts.fin_len;
+        inline
+    }
+
     /// Add a batch's pending byte / object counts to the heap (lock held).
     fn fold_epoch_counts(&mut self, batch: &mut EpochBatch) {
+        if let Some(inline) = batch.inline.as_mut() {
+            batch.bytes += std::mem::take(&mut inline.counts.alloc_bytes);
+            batch.objects += std::mem::take(&mut inline.counts.live_count);
+        }
         self.counts.alloc_bytes += std::mem::take(&mut batch.bytes);
         self.counts.live_count += std::mem::take(&mut batch.objects);
         self.weaks.append(&mut batch.weaks);
@@ -582,12 +645,23 @@ impl Heap {
     /// is written. This thread's batch logs the change; the epoch's end
     /// sums the logs into the counts ([`Self::apply_epoch_rc`]).
     pub(crate) fn rc_log(&self, o: Object, dec: bool) {
+        self.rc_log_word(o.addr() | u64::from(dec));
+    }
+
+    /// An object born in the open epoch lost its last owner there: its end
+    /// releases it, as nothing is freed while mutators share the heap.
+    #[cold]
+    pub(crate) fn rc_log_zero(&self, o: Object) {
+        self.rc_log_word(o.addr() | EPOCH_RC_ZERO);
+    }
+
+    fn rc_log_word(&self, w: u64) {
         let me: *const Heap = self;
         EPOCH_BATCH_TLS.with(|cell| {
             let mut batch = cell.borrow_mut();
             debug_assert!(batch.heap.is_null() || batch.heap == me, "epoch batch left over from another heap");
             batch.heap = me;
-            batch.rc.push(o.addr() | u64::from(dec));
+            batch.rc.push(w);
         });
     }
 
@@ -601,10 +675,15 @@ impl Heap {
         let mut log = std::mem::take(&mut self.epoch_rc);
         let mut delta: HashMap<u64, i64, super::addr_hash::AddrHashBuilder> =
             HashMap::with_capacity_and_hasher(log.len() / 2, Default::default());
+        let mut zero = Vec::new();
         for &w in &log {
+            if w & EPOCH_RC_ZERO != 0 {
+                // Counted in place: no owner came back after the last went.
+                zero.push(w & !EPOCH_RC_ZERO);
+                continue;
+            }
             *delta.entry(w & !1).or_default() += if w & 1 == 0 { 1 } else { -1 };
         }
-        let mut zero = Vec::new();
         for (addr, d) in delta {
             // SAFETY: nothing is freed while an epoch is open: a logged
             // address still names its object.
@@ -648,6 +727,12 @@ impl Heap {
             );
             let _epoch_guard = self.epoch_guard();
             self.fold_epoch_counts(&mut batch);
+            if let Some(inline) = batch.inline.as_mut() {
+                for (c, b) in inline.bumps.iter_mut().enumerate().filter(|(_, b)| b.next != b.end) {
+                    self.slab.give_back_run(self.slab.young_key(c), b.next, b.end);
+                    (b.next, b.end) = (0, 0);
+                }
+            }
             for (key, slots) in &mut batch.classes {
                 self.slab.give_back(*key, slots);
             }
@@ -734,7 +819,20 @@ impl Heap {
 
     /// Where native code's inline allocation reads and bumps: the
     /// counters and the nursery cursors ([`InlineLayout`]).
+    ///
+    /// In a steal epoch, this thread's own ([`EpochInline`]): its mutators
+    /// share the heap, so each allocates inline from its batch.
     pub fn inline_alloc_ptrs(&mut self) -> (*mut HeapCounts, *mut super::slab::Bump) {
+        if !self.alloc_lock.is_null() {
+            let me: *const Heap = self;
+            return EPOCH_BATCH_TLS.with(|cell| {
+                let mut batch = cell.borrow_mut();
+                debug_assert!(batch.heap.is_null() || batch.heap == me, "epoch batch left over from another heap");
+                batch.heap = me;
+                let inline = self.epoch_inline(&mut batch);
+                (std::ptr::from_mut(&mut inline.counts), inline.bumps.as_mut_ptr())
+            });
+        }
         (std::ptr::from_mut(self.counts.as_mut()), self.slab.bumps_ptr())
     }
 
@@ -1623,7 +1721,7 @@ impl Heap {
             }
             (*p).header.kind.set(KIND_INSTANCE);
             (*p).header.generation.set(GEN_YOUNG);
-            (*p).header.count.set(1);
+            (*p).header.count.store(1, Ordering::Relaxed);
         }
     }
 
@@ -4332,15 +4430,16 @@ struct GcHeader {
     flags: Cell<u8>,
     /// Nursery bits ([`GEN_YOUNG`], [`GEN_PINNED`]).
     generation: Cell<u8>,
-    /// Debug / rc-check: generation of the steal epoch the object was
-    /// allocated in, 0 outside any epoch ([`EpochWriteScope`]). It takes the
-    /// byte before the count; release builds leave it as padding.
-    #[cfg(any(debug_assertions, feature = "rc-check"))]
+    /// Generation of the steal epoch the object was allocated in, 0 outside
+    /// any epoch: while that epoch is open its count is kept in place, with
+    /// atomic updates ([`Heap::rc_inc_obj`]); debug and rc-check builds also
+    /// guard writes with it ([`EpochWriteScope`]).
     epoch: Cell<u8>,
     /// Reference count: the number of places that own this object.
-    /// [`COUNT_IMMORTAL`] never changes. Not maintained yet (#2881 plan
-    /// step 2).
-    count: Cell<u32>,
+    /// [`COUNT_IMMORTAL`] never changes. Atomic, as an epoch's mutators
+    /// count the objects born in it in place (relaxed loads and stores
+    /// otherwise, plain moves).
+    count: AtomicU32,
 }
 
 /// Marked by the collector's current mark.
@@ -4387,6 +4486,11 @@ pub const HEADER_FLAGS_OFFSET: i32 = std::mem::offset_of!(GcHeader, flags) as i3
 /// counts are not kept ([`Heap::rc_counting`]); native code's inline count
 /// ops test it.
 pub const HEAP_ALLOC_LOCK_OFFSET: i32 = std::mem::offset_of!(Heap, alloc_lock) as i32;
+
+/// Byte offset of [`Heap`]'s steal-epoch generation, a byte: native code
+/// counts an object born in the open epoch in place when its header's
+/// [`HEADER_EPOCH_OFFSET`] byte matches.
+pub const HEAP_EPOCH_GEN_OFFSET: i32 = std::mem::offset_of!(Heap, epoch_gen) as i32;
 /// Byte offset of [`Heap`]'s unit-variant table: `tag` below
 /// [`UNIT_ENUM_FAST`] reads the shared immortal variant at `8 * tag` past it,
 /// `0` until [`Heap::immortal_unit_enum`] made it.
@@ -4398,6 +4502,9 @@ pub const HEAP_SLAB_HI_OFFSET: i32 = (std::mem::offset_of!(Heap, slab) + super::
 /// Byte offset of a header's reference count ([`GcHeader::count`]), a
 /// 32-bit word.
 pub const HEADER_COUNT_OFFSET: i32 = std::mem::offset_of!(GcHeader, count) as i32;
+
+/// Byte offset of a header's steal-epoch generation ([`GcHeader::epoch`]).
+pub const HEADER_EPOCH_OFFSET: i32 = std::mem::offset_of!(GcHeader, epoch) as i32;
 
 // Native code reads and writes the kind and the flags as bytes.
 const _: () = assert!(std::mem::size_of::<Cell<u8>>() == 1);
@@ -4419,9 +4526,8 @@ impl GcHeader {
             kind: Cell::new(0),
             flags: Cell::new(0),
             generation: Cell::new(0),
-            #[cfg(any(debug_assertions, feature = "rc-check"))]
             epoch: Cell::new(0),
-            count: Cell::new(0),
+            count: AtomicU32::new(0),
         }
     }
 
@@ -4507,6 +4613,10 @@ impl<T> GcData<T> {
     }
 }
 
+/// [`EpochBatch::rc`]'s mark for a last owner's going (an object address is
+/// 8-aligned, and bit 0 marks a decrement).
+const EPOCH_RC_ZERO: u64 = 2;
+
 /// Header bytes charged to the collection trigger per object. The header
 /// shrank to one word when the intrusive `next` link went away; charging
 /// the old three words keeps collection pacing (cycles per object) as it
@@ -4548,7 +4658,8 @@ impl<T> Gc<T> {
             // shared a byte.
             (*p).header.flags.set((*p).header.flags.get() & FLAG_FINALIZED);
             (*p).header.generation.set(0);
-            (*p).header.count.set(0);
+            (*p).header.epoch.set(0);
+            (*p).header.count.store(0, Ordering::Relaxed);
         }
     }
 
@@ -5358,9 +5469,11 @@ mod tests {
     /// A thread that waits mid-epoch on heap A and helps with a job in heap
     /// B's epoch keeps the two batches apart (#766, #779): B's objects land
     /// in B, and A's batch comes back intact for A's flush.
-    /// In a steal epoch a count change is logged, not written: the header
-    /// stays as it was until the epoch ends and the logs are summed in
-    /// (reference-count plan step 8). One released to zero is freed then.
+    /// In a steal epoch a count change to an object from before it is
+    /// logged, not written: its header stays as it was until the epoch ends
+    /// and the logs are summed in (reference-count plan step 8). An object
+    /// born in the epoch is counted in place. One released to zero is freed
+    /// at the end.
     #[test]
     fn epoch_count_changes_apply_at_its_end() {
         let lock = Mutex::new(());
@@ -5380,13 +5493,13 @@ mod tests {
         assert!(!heap.rc_dec_obj(gone), "no release inside the epoch");
         heap.rc_inc_obj(born);
         assert!(!heap.rc_dec_obj(dropped));
-        assert_eq!((old.rc_count(), born.rc_count(), dropped.rc_count()), (1, 0, 1), "headers untouched in the epoch");
+        assert_eq!((old.rc_count(), dropped.rc_count()), (1, 1), "older headers untouched in the epoch");
+        assert_eq!((born.rc_count(), gone.rc_count()), (2, 0), "objects born in it counted in place");
         heap.flush_epoch_batch();
         heap.exit_epoch_stw();
         assert_eq!((old.rc_count(), born.rc_count()), (2, 2));
         // `dropped` reached zero and was freed; so was `gone`, born in the
-        // epoch, whose owners came and went (changes that sum to nothing
-        // from a count of zero).
+        // epoch, whose owners came and went.
         assert_eq!(heap.live_object_count(), 2);
     }
 

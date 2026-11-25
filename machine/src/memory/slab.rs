@@ -424,6 +424,17 @@ impl Slab {
         cursor
     }
 
+    /// The index of class `key`'s nursery cursor, if it has one
+    /// ([`Self::young_class`]).
+    pub fn young_cursor(&self, key: (u32, u32)) -> Option<usize> {
+        self.young.iter().position(|c| c.key == key)
+    }
+
+    /// The size class of nursery cursor `cursor`.
+    pub fn young_key(&self, cursor: usize) -> (u32, u32) {
+        self.young[cursor].key
+    }
+
     /// The nursery cursors, indexed by [`Self::young_class`].
     pub fn bumps_ptr(&mut self) -> *mut Bump {
         self.bumps.as_mut_ptr()
@@ -828,6 +839,44 @@ impl Slab {
         }
         let ptr = map_chunk(CHUNK);
         self.carve_slots(ptr, slot_size, align, true)
+    }
+
+    /// A whole chunk of `layout`'s class, fresh or released, for one
+    /// steal-epoch mutator to bump-allocate from: its slots' range
+    /// `(first, end)`. Its objects then sit in allocation order, as in the
+    /// nursery; what is left goes back through [`Self::give_back_run`].
+    pub fn alloc_run(&mut self, layout: Layout) -> (u64, u64) {
+        let (slot_size, align) = slot_dims(layout);
+        let key = (slot_size as u32, align as u32);
+        let reused = if let Some((_, list)) = self.released.iter_mut().find(|(k, _)| *k == key)
+            && let Some(i) = list.pop()
+            && let Some(c) = self.chunks.get(i)
+        {
+            let ptr = c.ptr;
+            self.set_released(i, false);
+            Some(ptr)
+        } else {
+            None
+        };
+        let ptr = reused.unwrap_or_else(|| map_chunk(CHUNK));
+        let first = align_up(ptr as usize, align);
+        if reused.is_none() {
+            self.chunks.push(Chunk {
+                ptr,
+                meta: PageMeta::new(slot_size as u32, align as u32, (first - ptr as usize) as u32),
+            });
+        }
+        let n = (ptr as usize + CHUNK - first) / slot_size;
+        (first as u64, (first + n * slot_size) as u64)
+    }
+
+    /// The untaken slots `[first, end)` of a run ([`Self::alloc_run`]) go
+    /// to `layout`'s free list, to be handed out in address order.
+    pub fn give_back_run(&mut self, key: (u32, u32), first: u64, end: u64) {
+        let size = u64::from(key.0);
+        let mut slots: Vec<NonNull<u8>> =
+            (0..(end - first) / size).rev().map(|i| unsafe { NonNull::new_unchecked((first + i * size) as *mut u8) }).collect();
+        self.give_back(key, &mut slots);
     }
 
     fn carve_slots(&mut self, ptr: *mut u8, slot_size: usize, align: usize, new_chunk: bool) -> NonNull<u8> {
