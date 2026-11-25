@@ -1827,10 +1827,20 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 return unsafe { bail(ctx) };
             };
             let (captures, filled) = rest.split_at(n_captures);
+            let (arity, is_rest) = ((op >> 16) & 0xFF, op & (1 << 24) != 0);
+            // Nothing captured or filled: the one shared value, as the
+            // value holds only its entry and arity (#2251). No allocation
+            // to note.
+            if rest.is_empty()
+                && mask.bits() == 0
+                && let Some(obj) = heap.immortal_plain_fn(extra as u32, arity, is_rest)
+            {
+                return obj.addr();
+            }
             let pfn = crate::memory::ObjFn {
                 entry: extra as u32,
-                arity: (op >> 16) & 0xFF,
-                is_rest: op & (1 << 24) != 0,
+                arity,
+                is_rest,
                 // `Const mask` then `as_int() as u64`, as `MakeFn` reads it.
                 filled_mask: i64::from(mask.bits() as u32 as i32) as u64,
                 captured_args: filled.to_vec(),

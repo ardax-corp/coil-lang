@@ -1766,17 +1766,23 @@ impl Heap {
     /// nothing. Such a value holds only its entry and arity, so every
     /// evaluation of a lambda without captures (one per loop pass) can be
     /// one object instead of a nursery allocation per pass (#2251).
-    pub fn immortal_plain_fn(&mut self, entry: u32, arity: u32, is_rest: bool) -> Object {
+    ///
+    /// While a steal epoch is open other workers share the heap, so the
+    /// table is only read: `None` when this one is not in it yet, and the
+    /// caller allocates as for any function value.
+    pub fn immortal_plain_fn(&mut self, entry: u32, arity: u32, is_rest: bool) -> Option<Object> {
         if let Some(obj) = self.immortal_fns.get(&(entry, arity, is_rest)) {
-            return *obj;
+            return Some(*obj);
         }
-        let _epoch_guard = self.epoch_guard();
+        if !self.alloc_lock.is_null() {
+            return None;
+        }
         let pfn = ObjFn { entry, arity, is_rest, filled_mask: 0, captured_args: Vec::new(), captures: Vec::new(), dicts: None, word_kinds: 0 };
         // Old: a root for the runtime's lifetime, never worth a nursery copy.
         let (object, _) = self.alloc_unlocked_in(pfn, Object::Fn, false);
         object.rc_set_immortal();
         self.immortal_fns.insert((entry, arity, is_rest), object);
-        object
+        Some(object)
     }
 
     /// The shared empty tuple `()`. It has no elements to change, so every
