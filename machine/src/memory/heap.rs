@@ -3100,6 +3100,12 @@ pub struct ArraySlots {
     pub ptr_at: u32,
     pub len_at: u32,
     pub cap_at: u32,
+    /// Packed byte storage's discriminant and its `Vec`'s pointer, length
+    /// and capacity words.
+    pub bytes_tag: u8,
+    pub bytes_ptr_at: u32,
+    pub bytes_len_at: u32,
+    pub bytes_cap_at: u32,
     /// [`ObjArray::may_hold_refs`], a `bool` byte.
     pub refs_at: u32,
     /// Pushes may be written in place. A debug or rc-check runtime checks
@@ -3107,35 +3113,50 @@ pub struct ArraySlots {
     pub inline_push: bool,
 }
 
-/// The [`ArraySlots`] of this build.
-#[must_use]
-pub fn array_slots() -> ArraySlots {
-    let data = std::mem::offset_of!(GcData<ObjArray>, data);
-    let header = GcHeader::new();
-    let at = |base: *const u8, field: *const u8| (field as usize - base as usize) as u32;
-    let mut a = ObjArray::new(Vec::with_capacity(5));
-    a.push(Value::from(1_i64));
-    let base = std::ptr::from_ref(&a).cast::<u8>();
-    let data_at = data as u32 + at(base, std::ptr::from_ref(&a.data).cast());
-    // SAFETY: `repr(u8)`: the discriminant is the first byte.
-    let words_tag = unsafe { *std::ptr::from_ref(&a.data).cast::<u8>() };
-    let ArrayData::Words(v) = &a.data else { unreachable!("a new array holds words") };
-    let vec_at = data as u32 + at(base, std::ptr::from_ref(v).cast());
-    // A `Vec`'s words are its capacity, pointer and length in some order.
-    // SAFETY: a `Vec` is three words.
+/// Where a `Vec`'s pointer, length and capacity words sit, as offsets from
+/// `base`, probed from `v` (its length differs from its capacity).
+fn vec_slots<T>(base: *const u8, v: &Vec<T>) -> [u32; 3] {
+    // SAFETY: a `Vec` is three words, its capacity, pointer and length in
+    // some order.
     let words: [usize; 3] = unsafe { std::mem::transmute_copy(v) };
     let find = |w: usize| words.iter().position(|&x| x == w).expect("a Vec word") as u32;
     let (ptr, len, cap) = (find(v.as_ptr() as usize), find(v.len()), find(v.capacity()));
     assert!(v.len() != v.capacity() && ptr != len && ptr != cap);
+    let at = std::ptr::from_ref(v) as usize - base as usize;
+    [ptr, len, cap].map(|i| at as u32 + i * 8)
+}
+
+/// The [`ArraySlots`] of this build.
+#[must_use]
+pub fn array_slots() -> ArraySlots {
+    let data = std::mem::offset_of!(GcData<ObjArray>, data) as u32;
+    let header = GcHeader::new();
+    let at = |base: *const u8, field: *const u8| (field as usize - base as usize) as u32;
+    // SAFETY: `repr(u8)`: the discriminant is the first byte.
+    let tag_of = |a: &ObjArray| unsafe { *std::ptr::from_ref(&a.data).cast::<u8>() };
+    let mut a = ObjArray::new(Vec::with_capacity(5));
+    a.push(Value::from(1_i64));
+    let base = std::ptr::from_ref(&a).cast::<u8>();
+    let ArrayData::Words(v) = &a.data else { unreachable!("a new array holds words") };
+    let [ptr_at, len_at, cap_at] = vec_slots(base, v).map(|o| data + o);
+    let mut bytes = Vec::with_capacity(5);
+    bytes.push(1u8);
+    let b = ObjArray::from_bytes(bytes);
+    let ArrayData::Bytes(bv) = &b.data else { unreachable!("an array from bytes holds bytes") };
+    let [bytes_ptr_at, bytes_len_at, bytes_cap_at] = vec_slots(std::ptr::from_ref(&b).cast(), bv).map(|o| data + o);
     ArraySlots {
         kind_at: at(std::ptr::from_ref(&header).cast(), header.kind.as_ptr()),
         kind: KIND_ARRAY,
-        data_at,
-        words_tag,
-        ptr_at: vec_at + ptr * 8,
-        len_at: vec_at + len * 8,
-        cap_at: vec_at + cap * 8,
-        refs_at: data as u32 + at(base, std::ptr::from_ref(&a.may_hold_refs).cast()),
+        data_at: data + at(base, std::ptr::from_ref(&a.data).cast()),
+        words_tag: tag_of(&a),
+        ptr_at,
+        len_at,
+        cap_at,
+        bytes_tag: tag_of(&b),
+        bytes_ptr_at,
+        bytes_len_at,
+        bytes_cap_at,
+        refs_at: data + at(base, std::ptr::from_ref(&a.may_hold_refs).cast()),
         inline_push: !cfg!(any(debug_assertions, feature = "rc-check")),
     }
 }
@@ -5137,6 +5158,29 @@ mod tests {
         let arr = gc.as_ref();
         assert_eq!((arr.len(), arr.get(1).map(|v| v.as_int())), (2, Some(8)));
         assert!(arr.may_hold_refs());
+    }
+
+    #[test]
+    fn a_byte_push_through_the_array_slots_is_seen_by_the_array() {
+        let s = array_slots();
+        let mut heap = Heap::default();
+        let mut bytes = Vec::with_capacity(4);
+        bytes.push(3u8);
+        let (a, _) = heap.alloc(ObjArray::from_bytes(bytes), Object::Array);
+        let base = a.addr() as *mut u8;
+        // SAFETY: `base` is a live byte array and the slots come from its layout.
+        unsafe {
+            assert_eq!(*base.add(s.data_at as usize), s.bytes_tag);
+            assert_ne!(s.bytes_tag, s.words_tag);
+            let len = *base.add(s.bytes_len_at as usize).cast::<usize>();
+            assert!(len == 1 && len < *base.add(s.bytes_cap_at as usize).cast::<usize>());
+            let ptr = *base.add(s.bytes_ptr_at as usize).cast::<*mut u8>();
+            *ptr.add(len) = 200;
+            *base.add(s.bytes_len_at as usize).cast::<usize>() = len + 1;
+        }
+        let Some(Object::Array(gc)) = heap.find_object_by_addr(a.addr()) else { panic!("an array") };
+        let arr = gc.as_ref();
+        assert_eq!((arr.len(), arr.get(1).map(|v| v.as_int())), (2, Some(200)));
     }
 
     #[test]
