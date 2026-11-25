@@ -1583,6 +1583,7 @@ impl Heap {
     ///
     /// # Safety
     /// Nothing that will be read again names `object`.
+    #[inline]
     pub(super) unsafe fn empty_slot(&mut self, object: Object) {
         debug_assert!(matches!(object, Object::Enum(_)));
         let size = object.size();

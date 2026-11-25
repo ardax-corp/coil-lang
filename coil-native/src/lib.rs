@@ -1746,8 +1746,10 @@ struct Ids {
     cow_field: FuncId,
     /// Reference count ops (`coil_native_rc`).
     rc: FuncId,
-    /// Reuse in place (`coil_native_rc_reuse`, `coil_native_offer_slot`).
+    /// Reuse in place (`coil_native_rc_reuse`, `coil_native_rc_take`,
+    /// `coil_native_offer_slot`).
     rc_reuse: FuncId,
+    rc_take: FuncId,
     offer_slot: FuncId,
     /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
     alloc: FuncId,
@@ -2295,6 +2297,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let rc = module.declare_function("coil_native_rc", Linkage::Import, &s3).map_err(e)?;
     let rc_reuse = module.declare_function("coil_native_rc_reuse", Linkage::Import, &s3).map_err(e)?;
+    let rc_take = module.declare_function("coil_native_rc_take", Linkage::Import, &s3).map_err(e)?;
     let offer_slot = module.declare_function("coil_native_offer_slot", Linkage::Import, &s2).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
@@ -2362,6 +2365,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         cow_field,
         rc,
         rc_reuse,
+        rc_take,
         offer_slot,
         alloc,
         array_push,
@@ -2646,6 +2650,7 @@ struct Lower<'a> {
     cow_field: FuncRef,
     rc: FuncRef,
     rc_reuse: FuncRef,
+    rc_take: FuncRef,
     offer_slot: FuncRef,
     alloc: FuncRef,
     array_push: FuncRef,
@@ -2796,6 +2801,7 @@ impl<'a> Lower<'a> {
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
         let rc = module.declare_func_in_func(ids.rc, func);
         let rc_reuse = module.declare_func_in_func(ids.rc_reuse, func);
+        let rc_take = module.declare_func_in_func(ids.rc_take, func);
         let offer_slot = module.declare_func_in_func(ids.offer_slot, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
         let array_push = module.declare_func_in_func(ids.array_push, func);
@@ -2894,6 +2900,7 @@ impl<'a> Lower<'a> {
             cow_field,
             rc,
             rc_reuse,
+            rc_take,
             offer_slot,
             alloc,
             array_push,
@@ -4382,9 +4389,71 @@ impl<'a> Lower<'a> {
             MirInst::RcReuse { dest, src, moved } => {
                 let s = self.get(f, *src);
                 let s = self.coerce(s, types::I64);
+                let t = MemFlagsData::trusted();
+                let done = self.b.create_block();
+                self.b.append_block_param(done, types::I64);
+                let (helper, shared) = (self.b.create_block(), self.b.create_block());
+                // An object someone else still owns loses this owner in
+                // place, as `rc.dec` does, and keeps no slot: the helper is
+                // for a last owner (or a steal epoch, an immortal).
+                let (object, none) = self.maybe_object(s);
+                self.b.switch_to_block(none);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.b.ins().jump(done, &[zero.into()]);
+                self.b.switch_to_block(object);
+                let o = self.b.ins().band_imm_u(s, !1i64);
+                let heap = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_HEAP);
+                let lock = self.b.ins().load(types::I64, t, heap, machine::HEAP_ALLOC_LOCK_OFFSET);
+                let count_b = self.b.create_block();
+                self.b.ins().brif(lock, helper, &[], count_b, &[]);
+                self.b.switch_to_block(count_b);
+                let c = self.b.ins().uload32(t, o, machine::HEADER_COUNT_OFFSET);
+                let (last, test) = (self.b.create_block(), self.b.create_block());
+                let one = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, c, 1);
+                self.b.ins().brif(one, last, &[], test, &[]);
+                self.b.switch_to_block(test);
+                let immortal = self.b.ins().icmp_imm_s(IntCC::Equal, c, i64::from(machine::COUNT_IMMORTAL));
+                self.b.ins().brif(immortal, helper, &[], shared, &[]);
+                // The last owner: the lean helper, which knows the word an
+                // object of this heap and no epoch open.
+                self.b.switch_to_block(last);
+                let m = self.b.ins().iconst(types::I64, i64::from(*moved));
+                let call = self.b.ins().call(self.rc_take, &[self.ctx, s, m]);
+                let slot = self.b.inst_results(call)[0];
+                self.b.ins().jump(done, &[slot.into()]);
+                self.b.switch_to_block(shared);
+                let n = self.b.ins().iadd_imm_s(c, -1);
+                self.b.ins().istore32(t, n, o, machine::HEADER_COUNT_OFFSET);
+                // The moved words gain the owners the body did not count.
+                for i in 0..32u32 {
+                    if *moved & (1 << i) == 0 {
+                        continue;
+                    }
+                    let ty = f.blocks.iter().flat_map(|b| &b.insts).find_map(|inst| match inst {
+                        MirInst::MatchPayload { dest, scrutinee, index } if scrutinee == src && *index == i => Some(ty_of(f, *dest)),
+                        _ => None,
+                    });
+                    let w = self.payload(f, *src, s, i);
+                    if ty.is_some_and(counted_inline) {
+                        self.emit_rc(w, false);
+                    } else {
+                        let (call, join) = self.maybe_object(w);
+                        self.b.switch_to_block(call);
+                        let zero = self.b.ins().iconst(types::I64, 0);
+                        self.b.ins().call(self.rc, &[self.ctx, w, zero]);
+                        self.b.ins().jump(join, &[]);
+                        self.b.switch_to_block(join);
+                    }
+                }
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.b.ins().jump(done, &[zero.into()]);
+                self.b.switch_to_block(helper);
                 let moved = self.b.ins().iconst(types::I64, i64::from(*moved));
                 let call = self.b.ins().call(self.rc_reuse, &[self.ctx, s, moved]);
                 let slot = self.b.inst_results(call)[0];
+                self.b.ins().jump(done, &[slot.into()]);
+                self.b.switch_to_block(done);
+                let slot = self.b.block_params(done)[0];
                 self.set(f, *dest, slot);
             }
             MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {

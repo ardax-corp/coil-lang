@@ -657,6 +657,34 @@ impl Heap {
             return 0;
         }
         let Some(o) = self.rc_object(v) else { return 0 };
+        self.rc_take_object(o, v, moved)
+    }
+
+    /// [`Self::rc_take_slot`] of a typed object word (a slot start when it
+    /// is in the slab's span), as native code's inline count reads one: no
+    /// slot search.
+    pub fn rc_take_last(&mut self, v: Value, moved: u32) -> u64 {
+        if !self.rc_counting() {
+            return 0;
+        }
+        let Some(o) = self.rc_typed(v) else { return 0 };
+        self.rc_take_object(o, v, moved)
+    }
+
+    /// A typed object word's object: one in the slab's span, read by its
+    /// header (a typed word names a slot start), without the slot search
+    /// of [`Self::rc_object`].
+    #[inline(always)]
+    fn rc_typed(&self, v: Value) -> Option<Object> {
+        let addr = v.heap_addr() & !1;
+        if addr == 0 || !addr.is_multiple_of(8) || !self.slab.may_contain(addr) {
+            return None;
+        }
+        // SAFETY: the slab's span stays mapped and the word names a slot start.
+        unsafe { Object::from_header(addr) }
+    }
+
+    fn rc_take_object(&mut self, o: Object, v: Value, moved: u32) -> u64 {
         let Object::Enum(e) = o else {
             self.rc_drop(v);
             return 0;
@@ -687,9 +715,15 @@ impl Heap {
         let mut stack = std::mem::take(&mut self.rc_stack);
         for (i, w) in payload.as_slice().iter().enumerate() {
             let kind = common::packed_word_kind(kinds, i);
-            if (i >= 32 || moved & (1 << i) == 0)
-                && (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
-                && let Some(c) = self.rc_object(*w)
+            if i < 32 && moved & (1 << i) != 0 {
+                continue;
+            }
+            let c = match kind {
+                common::WORD_POINTER => self.rc_typed(*w),
+                common::WORD_UNKNOWN => self.rc_object(*w),
+                _ => None,
+            };
+            if let Some(c) = c
                 && self.rc_dec_obj(c)
             {
                 stack.push(c);
@@ -703,7 +737,9 @@ impl Heap {
         } else {
             self.rc_release_worklist(stack);
         }
-        self.rc_release_pending();
+        if !self.rc_pending.get_mut().is_empty() {
+            self.rc_release_pending();
+        }
         o.addr()
     }
 

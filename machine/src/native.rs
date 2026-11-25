@@ -1621,6 +1621,20 @@ pub unsafe extern "C" fn coil_native_rc_reuse(ctx: *mut NativeCtx, word: u64, mo
     heap.rc_take_slot(common::Value::from(word), moved as u32)
 }
 
+/// [`coil_native_rc_reuse`] where native code read the word as an object
+/// of this heap whose owner is its last, with no steal epoch open: no slot
+/// search ([`Heap::rc_take_last`]).
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `word` is a typed object word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_rc_take(ctx: *mut NativeCtx, word: u64, moved: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return 0;
+    };
+    heap.rc_take_last(common::Value::from(word), moved as u32)
+}
+
 /// `AllocAt` through [`coil_native_alloc`]: `slot`, kept by
 /// [`coil_native_rc_reuse`] (`0`: none), goes to that allocation, which
 /// takes it when the layouts match and gives it back otherwise.
@@ -3162,6 +3176,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_rc", coil_native_rc as *const u8),
         ("coil_native_rc_reuse", coil_native_rc_reuse as *const u8),
+        ("coil_native_rc_take", coil_native_rc_take as *const u8),
         ("coil_native_offer_slot", coil_native_offer_slot as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
         ("coil_native_array_push", coil_native_array_push as *const u8),
@@ -3204,7 +3219,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 54;
+const HELPERS: usize = 55;
 
 #[cfg(test)]
 mod pin_tests {
