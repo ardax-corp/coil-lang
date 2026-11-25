@@ -1,0 +1,149 @@
+// Reuse in place: a function that takes an enum it is the last owner of
+// builds its result in the dead node's slot. A node someone else still
+// holds is not reused: both trees must read back whole.
+use tests::assert;
+
+enum Tree {
+    Leaf(int),
+    Node(Tree, Tree),
+}
+
+enum Search {
+    Empty,
+    Node(Search, int, Search),
+}
+
+enum List {
+    Nil,
+    Cons(int, List),
+}
+
+fn build(int depth, int at) -> Tree {
+    if depth == 0 {
+        return Tree::Leaf(at);
+    }
+    return Tree::Node(build(depth - 1, at * 2), build(depth - 1, at * 2 + 1));
+}
+
+fn mirror(Tree t) -> Tree {
+    return match t {
+        Tree::Leaf(v) => Tree::Leaf(v),
+        Tree::Node(l, r) => Tree::Node(mirror(r), mirror(l)),
+    };
+}
+
+fn leaves(Tree t) -> List {
+    return match t {
+        Tree::Leaf(v) => List::Cons(v, List::Nil()),
+        Tree::Node(l, r) => append(leaves(l), leaves(r)),
+    };
+}
+
+fn append(List a, List b) -> List {
+    return match a {
+        List::Nil => b,
+        List::Cons(v, rest) => List::Cons(v, append(rest, b)),
+    };
+}
+
+fn sum(List l) -> int {
+    return match l {
+        List::Nil => 0,
+        List::Cons(v, rest) => v + sum(rest),
+    };
+}
+
+fn first(List l) -> int {
+    return match l {
+        List::Nil => -1,
+        List::Cons(v, _) => v,
+    };
+}
+
+fn add_each(List l, int k) -> List {
+    return match l {
+        List::Nil => List::Nil(),
+        List::Cons(v, rest) => List::Cons(v + k, add_each(rest, k)),
+    };
+}
+
+fn insert(Search t, int k) -> Search {
+    return match t {
+        Search::Empty => Search::Node(Search::Empty(), k, Search::Empty()),
+        Search::Node(l, v, r) => if k < v {
+            Search::Node(insert(l, k), v, r)
+        } else if k > v {
+            Search::Node(l, v, insert(r, k))
+        } else {
+            Search::Node(l, v, r)
+        },
+    };
+}
+
+fn size(Search t) -> int {
+    return match t {
+        Search::Empty => 0,
+        Search::Node(l, _, r) => size(l) + 1 + size(r),
+    };
+}
+
+fn in_order(Search t, List acc) -> List {
+    return match t {
+        Search::Empty => acc,
+        Search::Node(l, v, r) => in_order(l, List::Cons(v, in_order(r, acc))),
+    };
+}
+
+test("a tree mirrored in place reads back whole") {
+    let t = build(6, 0);
+    let pass = 0;
+    while pass < 3 {
+        t = mirror(t);
+        pass += 1;
+    }
+    // An odd number of mirrors: leaves read back reversed.
+    let l = leaves(t);
+    assert!(first(l) == 63);
+    assert!(sum(l) == 63 * 64 / 2);
+}
+
+test("a tree someone else holds is not reused") {
+    let t = build(5, 0);
+    let keep = t;
+    let m = mirror(t);
+    assert!(first(leaves(keep)) == 0);
+    assert!(first(leaves(m)) == 31);
+    assert!(sum(leaves(keep)) == sum(leaves(m)));
+}
+
+test("a shared list tail stays as it was") {
+    let tail = add_each(List::Cons(1, List::Cons(2, List::Nil())), 0);
+    let a = List::Cons(10, tail);
+    let b = add_each(a, 100);
+    assert!(sum(a) == 13);
+    assert!(sum(b) == 313);
+    assert!(sum(tail) == 3);
+}
+
+test("an old version of a search tree survives later inserts") {
+    let t = Search::Empty();
+    let i = 0;
+    let x = 7;
+    let half = Search::Empty();
+    let half_size = 0;
+    let half_sum = 0;
+    while i < 200 {
+        x = (x * 31 + 11) % 1000;
+        t = insert(t, x);
+        if i == 99 {
+            half = t;
+            half_size = size(t);
+            half_sum = sum(in_order(t, List::Nil()));
+        }
+        i += 1;
+    }
+    // Unchanged by the later inserts, which rebuilt paths through it.
+    assert!(size(half) == half_size);
+    assert!(sum(in_order(half, List::Nil())) == half_sum);
+    assert!(size(t) >= half_size);
+}

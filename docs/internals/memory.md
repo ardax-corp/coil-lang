@@ -43,6 +43,20 @@ interpreter, wasm) runs the same counted bodies. Its module doc is the reference
   `name$own` (`owning_tail_twins`), that owns its parameters: an argument that dies at the call
   moves in, one that lives on is incremented. The twin keeps no unwind homes, so the engines still
   reuse the frame. Coroutine bodies own their parameters the same way.
+- a direct call whose argument dies at the call enters the twin too, when the callee *consumes*
+  that parameter (matches it or reads its payload, and allocates an enum or an object): the
+  argument moves in instead of living on in the caller until after the call. Runtime entries,
+  call folding and indirect calls keep the borrowed body.
+
+Reuse in place (`compiler/src/mir/rc_reuse.rs`, after the insertion pass): a decrement of an enum
+the body matched on and an enum allocation after it (in its block, or on every way out of it)
+become `RcReuse` and `AllocAt`. When the decrement takes the last owner of a young enum with a
+payload, `Heap::rc_take_slot` releases its words and keeps its slot as raw memory (no object
+kind), and the allocation writes the new object there; otherwise it is the plain decrement and the
+allocation takes a fresh slot. Payload words incremented on their way out just before the
+decrement (`moved`) keep the old object's owner when the slot is kept, so a rebuilt node changes no
+count of the children it carries over. A frame that unwinds between the two leaves the slot
+unused; `COIL_RC_REUSE=0` turns the pass off.
 
 Elision: numbers are never counted (constants, arithmetic, φs of them, a word a number store
 writes, scalar array elements), and an inc / dec pair of one word in a block cancels when nothing

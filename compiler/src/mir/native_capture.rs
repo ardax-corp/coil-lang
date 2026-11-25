@@ -79,6 +79,10 @@ fn finished(mut bodies: Vec<NativeBody>) -> Vec<NativeBody> {
     // enters its callee's twin that owns its parameters.
     let owning = super::rc_insert::owning_tail_twins(&mut bodies);
     super::rc_insert::insert_rc_all(bodies.iter_mut().map(|b| (b.entry, &mut b.mir)), &owning);
+    // A dead enum's slot goes to the enum built next to its death.
+    for body in &mut bodies {
+        super::rc_reuse::insert_reuse(&mut body.mir);
+    }
     for body in &bodies {
         super::specialize::check_after_rc(&body.mir);
     }

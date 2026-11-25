@@ -39,6 +39,7 @@ mod vectorize;
 mod bool_thread;
 mod phi_sroa;
 mod rc_insert;
+mod rc_reuse;
 mod strength;
 mod text;
 mod ty;
