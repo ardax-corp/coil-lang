@@ -253,6 +253,7 @@ pub fn layout_fingerprint() -> u64 {
     ];
     counts.hash(&mut h);
     product_slots().hash(&mut h);
+    super::array_slots().hash(&mut h);
     // The inline share (#2506).
     (super::HEADER_KIND_OFFSET, super::HEADER_FLAGS_OFFSET, super::FLAG_SHARED, super::KIND_ARRAY).hash(&mut h);
     // The pin the inline share tests, and `CowPin` / `CowUnpin` write.

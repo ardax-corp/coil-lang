@@ -175,7 +175,7 @@ pub const NATIVE_CTX_HAS_FINALIZERS: i32 = std::mem::offset_of!(NativeCtx, has_f
 /// Byte offset of [`NativeCtx::calls`].
 pub const NATIVE_CTX_CALLS: i32 = std::mem::offset_of!(NativeCtx, calls) as i32;
 
-pub use crate::memory::{InlineObject, InlineShape, ProductSlots, inline_object, product_slots, layout_fingerprint};
+pub use crate::memory::{ArraySlots, InlineObject, InlineShape, ProductSlots, array_slots, inline_object, product_slots, layout_fingerprint};
 
 /// Byte offsets of [`NativeCtx::alloc_counts`] and [`NativeCtx::alloc_bumps`].
 pub const NATIVE_CTX_ALLOC_COUNTS: i32 = std::mem::offset_of!(NativeCtx, alloc_counts) as i32;
@@ -1827,10 +1827,20 @@ pub unsafe extern "C" fn coil_native_alloc(ctx: *mut NativeCtx, kind: u64, words
                 return unsafe { bail(ctx) };
             };
             let (captures, filled) = rest.split_at(n_captures);
+            let (arity, is_rest) = ((op >> 16) & 0xFF, op & (1 << 24) != 0);
+            // Nothing captured or filled: the one shared value, as the
+            // value holds only its entry and arity (#2251). No allocation
+            // to note.
+            if rest.is_empty()
+                && mask.bits() == 0
+                && let Some(obj) = heap.immortal_plain_fn(extra as u32, arity, is_rest)
+            {
+                return obj.addr();
+            }
             let pfn = crate::memory::ObjFn {
                 entry: extra as u32,
-                arity: (op >> 16) & 0xFF,
-                is_rest: op & (1 << 24) != 0,
+                arity,
+                is_rest,
                 // `Const mask` then `as_int() as u64`, as `MakeFn` reads it.
                 filled_mask: i64::from(mask.bits() as u32 as i32) as u64,
                 captured_args: filled.to_vec(),
@@ -3238,6 +3248,31 @@ const HELPERS: usize = 55;
 #[cfg(test)]
 mod pin_tests {
     use super::*;
+
+    /// A function value that captures and fills nothing is one shared
+    /// object, so a lambda evaluated on every loop pass allocates once.
+    #[test]
+    fn a_capture_free_fn_value_is_allocated_once() {
+        let mut heap = crate::memory::Heap::default();
+        let mut ctx = NativeCtx::new(0);
+        ctx.heap = &mut heap;
+        // Arity 1 in the operand's third byte; the only word is the mask.
+        let extra = 7 | (1u64 << 16) << 32;
+        let mask = [0u64];
+        // SAFETY: `ctx` names a live heap; one word is passed.
+        let (a, b) = unsafe {
+            (coil_native_alloc(&mut ctx, ALLOC_FN, mask.as_ptr(), 1, extra), coil_native_alloc(&mut ctx, ALLOC_FN, mask.as_ptr(), 1, extra))
+        };
+        assert_ne!(a, 0);
+        assert_eq!(a, b, "both evaluations name one object");
+        // A capture is its own object each time.
+        let words = [5u64, 0];
+        // SAFETY: as above, two words.
+        let (c, d) = unsafe {
+            (coil_native_alloc(&mut ctx, ALLOC_FN, words.as_ptr(), 2, extra), coil_native_alloc(&mut ctx, ALLOC_FN, words.as_ptr(), 2, extra))
+        };
+        assert!(c != d && c != a);
+    }
 
     /// The interpreter's `CowPin` / `CowUnpin` ([`cow_pin`], [`cow_unpin`]):
     /// the pin nests, and a share between them copies.

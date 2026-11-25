@@ -1766,17 +1766,23 @@ impl Heap {
     /// nothing. Such a value holds only its entry and arity, so every
     /// evaluation of a lambda without captures (one per loop pass) can be
     /// one object instead of a nursery allocation per pass (#2251).
-    pub fn immortal_plain_fn(&mut self, entry: u32, arity: u32, is_rest: bool) -> Object {
+    ///
+    /// While a steal epoch is open other workers share the heap, so the
+    /// table is only read: `None` when this one is not in it yet, and the
+    /// caller allocates as for any function value.
+    pub fn immortal_plain_fn(&mut self, entry: u32, arity: u32, is_rest: bool) -> Option<Object> {
         if let Some(obj) = self.immortal_fns.get(&(entry, arity, is_rest)) {
-            return *obj;
+            return Some(*obj);
         }
-        let _epoch_guard = self.epoch_guard();
+        if !self.alloc_lock.is_null() {
+            return None;
+        }
         let pfn = ObjFn { entry, arity, is_rest, filled_mask: 0, captured_args: Vec::new(), captures: Vec::new(), dicts: None, word_kinds: 0 };
         // Old: a root for the runtime's lifetime, never worth a nursery copy.
         let (object, _) = self.alloc_unlocked_in(pfn, Object::Fn, false);
         object.rc_set_immortal();
         self.immortal_fns.insert((entry, arity, is_rest), object);
-        object
+        Some(object)
     }
 
     /// The shared empty tuple `()`. It has no elements to change, so every
@@ -2977,6 +2983,9 @@ impl From<&str> for ObjString {
 /// fit (a larger int, a boxed value from a shared generic body, any heap
 /// reference) unpacks the array to `Words` first, so the packing is a pure
 /// space optimisation and never depends on the static element type.
+/// `repr(u8)`: the discriminant is the first byte, so native code tells
+/// word storage apart in place ([`array_slots`]).
+#[repr(u8)]
 enum ArrayData {
     /// One word per element.
     Words(Vec<Value>),
@@ -3075,6 +3084,61 @@ pub struct ObjArray {
 
 #[cfg(target_pointer_width = "64")]
 const _: () = assert!(mem::size_of::<GcData<ObjArray>>() <= 64);
+
+/// Where native code's inline `ArrayPush` reads and writes an array
+/// (`docs/internals/native.md`, "Inline field access"): byte offsets from
+/// the object's address, probed from a real array.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ArraySlots {
+    /// The header's kind byte and an array's kind.
+    pub kind_at: u32,
+    pub kind: u8,
+    /// The storage's discriminant byte, and word storage's.
+    pub data_at: u32,
+    pub words_tag: u8,
+    /// Word storage's `Vec`: its pointer, length and capacity words.
+    pub ptr_at: u32,
+    pub len_at: u32,
+    pub cap_at: u32,
+    /// [`ObjArray::may_hold_refs`], a `bool` byte.
+    pub refs_at: u32,
+    /// Pushes may be written in place. A debug or rc-check runtime checks
+    /// every write ([`GcData::as_mut`]), so its pushes take the helper.
+    pub inline_push: bool,
+}
+
+/// The [`ArraySlots`] of this build.
+#[must_use]
+pub fn array_slots() -> ArraySlots {
+    let data = std::mem::offset_of!(GcData<ObjArray>, data);
+    let header = GcHeader::new();
+    let at = |base: *const u8, field: *const u8| (field as usize - base as usize) as u32;
+    let mut a = ObjArray::new(Vec::with_capacity(5));
+    a.push(Value::from(1_i64));
+    let base = std::ptr::from_ref(&a).cast::<u8>();
+    let data_at = data as u32 + at(base, std::ptr::from_ref(&a.data).cast());
+    // SAFETY: `repr(u8)`: the discriminant is the first byte.
+    let words_tag = unsafe { *std::ptr::from_ref(&a.data).cast::<u8>() };
+    let ArrayData::Words(v) = &a.data else { unreachable!("a new array holds words") };
+    let vec_at = data as u32 + at(base, std::ptr::from_ref(v).cast());
+    // A `Vec`'s words are its capacity, pointer and length in some order.
+    // SAFETY: a `Vec` is three words.
+    let words: [usize; 3] = unsafe { std::mem::transmute_copy(v) };
+    let find = |w: usize| words.iter().position(|&x| x == w).expect("a Vec word") as u32;
+    let (ptr, len, cap) = (find(v.as_ptr() as usize), find(v.len()), find(v.capacity()));
+    assert!(v.len() != v.capacity() && ptr != len && ptr != cap);
+    ArraySlots {
+        kind_at: at(std::ptr::from_ref(&header).cast(), header.kind.as_ptr()),
+        kind: KIND_ARRAY,
+        data_at,
+        words_tag,
+        ptr_at: vec_at + ptr * 8,
+        len_at: vec_at + len * 8,
+        cap_at: vec_at + cap * 8,
+        refs_at: data as u32 + at(base, std::ptr::from_ref(&a.may_hold_refs).cast()),
+        inline_push: !cfg!(any(debug_assertions, feature = "rc-check")),
+    }
+}
 
 impl ObjArray {
     /// Conservative: any element may be a reference.
@@ -5048,6 +5112,31 @@ mod tests {
     fn slot_of(heap: &Heap, obj: u64, i: usize) -> Value {
         let Some(Object::Instance(gc)) = heap.find_object_by_addr(obj) else { panic!("an instance") };
         gc.as_ref().slot(i).expect("a slot")
+    }
+
+    #[test]
+    fn a_push_through_the_array_slots_is_seen_by_the_array() {
+        let s = array_slots();
+        let mut heap = Heap::default();
+        let mut arr = ObjArray::new(Vec::with_capacity(4));
+        arr.push(Value::from(7i64));
+        let (a, _) = heap.alloc(arr, Object::Array);
+        let base = a.addr() as *mut u8;
+        // SAFETY: `base` is a live array and the slots come from its layout.
+        unsafe {
+            assert_eq!(*base.add(s.kind_at as usize), s.kind);
+            assert_eq!(*base.add(s.data_at as usize), s.words_tag);
+            let len = *base.add(s.len_at as usize).cast::<usize>();
+            assert!(len == 1 && len < *base.add(s.cap_at as usize).cast::<usize>());
+            let ptr = *base.add(s.ptr_at as usize).cast::<*mut Value>();
+            *ptr.add(len) = Value::from(8i64);
+            *base.add(s.len_at as usize).cast::<usize>() = len + 1;
+            *base.add(s.refs_at as usize) = 1;
+        }
+        let Some(Object::Array(gc)) = heap.find_object_by_addr(a.addr()) else { panic!("an array") };
+        let arr = gc.as_ref();
+        assert_eq!((arr.len(), arr.get(1).map(|v| v.as_int())), (2, Some(8)));
+        assert!(arr.may_hold_refs());
     }
 
     #[test]

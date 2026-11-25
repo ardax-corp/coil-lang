@@ -1178,8 +1178,12 @@ fn drop_transfer(inst: &MirInst, viewed: &HashSet<ValueId>, set: &mut HashSet<Va
         set.extend(viewed.iter().copied());
     }
     match inst {
+        // A φ's word view comes from its sources, which may have dropped
+        // theirs ([`Lower::edge_phis`]).
         MirInst::Phi { dest, .. } => {
-            set.remove(dest);
+            if viewed.contains(dest) {
+                set.insert(*dest);
+            }
         }
         MirInst::Index { array, .. } | MirInst::StoreIndex { array, .. } | MirInst::ArrayLen { array, .. } => {
             set.remove(array);
@@ -3935,7 +3939,8 @@ impl<'a> Lower<'a> {
                 };
                 self.set(f, *dest, x);
             }
-            MirInst::Phi { dest, .. } => self.view_of(f, *dest),
+            // Its word view came along each edge ([`Self::edge_phis`]).
+            MirInst::Phi { dest, .. } => self.lane_view_of(f, *dest),
             MirInst::CodePtr { dest, target } => {
                 let pc = *self.plan.pcs.get(target).ok_or("code pointer of a body with no body id")?;
                 let x = self.b.ins().iconst(types::I64, i64::from(pc));
@@ -4559,11 +4564,92 @@ impl<'a> Lower<'a> {
                 let a = self.get(f, *array);
                 let v = self.get(f, *value);
                 let v = self.coerce(v, types::I64);
-                let call = self.call_checked(self.array_push, &[self.ctx, a, v]);
-                let w = self.b.inst_results(call)[0];
-                self.drop_views();
-                self.set(f, *dest, w);
-                self.view_of(f, *dest);
+                let l = machine::native::array_slots();
+                if !l.inline_push {
+                    let call = self.call_checked(self.array_push, &[self.ctx, a, v]);
+                    let w = self.b.inst_results(call)[0];
+                    self.drop_views();
+                    self.set(f, *dest, w);
+                    self.view_of(f, *dest);
+                } else {
+                    // In place when the array holds words and has room: the
+                    // element goes after the last, the length grows by one and
+                    // the element gains an owner, as the helper does. Otherwise
+                    // (bytes, lanes, a full `Vec`) the helper, which may move
+                    // the storage.
+                    let t = MemFlagsData::trusted();
+                    let (kind_b, words_b, room_b, fast, slow, join) =
+                        (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+                    self.b.ins().brif(a, kind_b, &[], slow, &[]);
+                    self.b.switch_to_block(kind_b);
+                    let k = self.b.ins().uload8(types::I64, t, a, l.kind_at as i32);
+                    let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
+                    self.b.ins().brif(is, words_b, &[], slow, &[]);
+                    self.b.switch_to_block(words_b);
+                    let tag = self.b.ins().uload8(types::I64, t, a, l.data_at as i32);
+                    let is = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.words_tag));
+                    self.b.ins().brif(is, room_b, &[], slow, &[]);
+                    self.b.switch_to_block(room_b);
+                    let len = self.b.ins().load(types::I64, t, a, l.len_at as i32);
+                    let cap = self.b.ins().load(types::I64, t, a, l.cap_at as i32);
+                    let room = self.b.ins().icmp(IntCC::UnsignedLessThan, len, cap);
+                    self.b.ins().brif(room, fast, &[], slow, &[]);
+                    self.b.switch_to_block(fast);
+                    let ptr = self.b.ins().load(types::I64, t, a, l.ptr_at as i32);
+                    let off = self.b.ins().ishl_imm_u(len, 3);
+                    let at = self.b.ins().iadd(ptr, off);
+                    self.b.ins().store(t, v, at, 0);
+                    let n = self.b.ins().iadd_imm_s(len, 1);
+                    self.b.ins().store(t, n, a, l.len_at as i32);
+                    let one = self.b.ins().iconst(types::I8, 1);
+                    self.b.ins().store(t, one, a, l.refs_at as i32);
+                    let vt = ty_of(f, *value);
+                    if counted_inline(vt) {
+                        self.emit_rc(v, false);
+                    } else if !matches!(vt, MirTy::F64 | MirTy::Bool) {
+                        // A word that may name an object: the runtime counts it
+                        // by the array's element kind.
+                        let (call, done) = self.maybe_object(v);
+                        self.b.switch_to_block(call);
+                        let zero = self.b.ins().iconst(types::I64, 0);
+                        self.b.ins().call(self.rc, &[self.ctx, v, zero]);
+                        self.b.ins().jump(done, &[]);
+                        self.b.switch_to_block(done);
+                    }
+                    // The storage did not move: another array's view stays,
+                    // and one of this array's storage (another name of it,
+                    // with the old length) is taken again at its next access.
+                    // Its own view is in hand.
+                    let others: Vec<_> = self.views.iter().filter(|(id, _)| **id != *array && **id != *dest).map(|(_, v)| *v).collect();
+                    let lanes: Vec<_> = self.lane_views.values().map(|v| (v.0, v.1, 0)).collect();
+                    for (ok, vp, gone) in others.into_iter().map(|(o, p, _)| (o, p, VIEW_UNKNOWN)).chain(lanes) {
+                        let p = self.b.use_var(vp);
+                        let st = self.b.use_var(ok);
+                        let same = self.b.ins().icmp(IntCC::Equal, p, ptr);
+                        let unknown = self.b.ins().iconst(types::I64, gone);
+                        let st = self.b.ins().select(same, unknown, st);
+                        self.b.def_var(ok, st);
+                    }
+                    self.set(f, *dest, a);
+                    for id in [*array, *dest] {
+                        if let Some(&(ok, vp, vl)) = self.views.get(&id) {
+                            let plain = self.b.ins().iconst(types::I64, machine::VIEW_PLAIN as i64);
+                            self.b.def_var(ok, plain);
+                            self.b.def_var(vp, ptr);
+                            self.b.def_var(vl, n);
+                        }
+                    }
+                    self.b.ins().jump(join, &[]);
+                    self.b.set_cold_block(slow);
+                    self.b.switch_to_block(slow);
+                    let call = self.call_checked(self.array_push, &[self.ctx, a, v]);
+                    let w = self.b.inst_results(call)[0];
+                    self.drop_views();
+                    self.set(f, *dest, w);
+                    self.view_of(f, *dest);
+                    self.b.ins().jump(join, &[]);
+                    self.b.switch_to_block(join);
+                }
             }
             MirInst::LaneIndex { dest, dest_hi, array, index } => {
                 let a = self.get(f, *array);
@@ -6278,8 +6364,32 @@ impl<'a> Lower<'a> {
         }
         // Read every source first: one φ may read another φ of this block.
         let vals: Vec<_> = moves.iter().map(|&(_, v)| self.get(f, v)).collect();
+        // A viewed φ takes its source's word view along the edge (no
+        // runtime call per iteration); with none, its view is taken at its
+        // first access ([`drop_transfer`] marks it maybe dropped).
+        let mut view_moves = Vec::new();
+        for &(dest, v) in &moves {
+            let Some(&(ok, ptr, len)) = self.views.get(&dest) else { continue };
+            let from = match self.views.get(&v) {
+                Some(&(o, p, l)) => {
+                    let (o, p, l) = (self.b.use_var(o), self.b.use_var(p), self.b.use_var(l));
+                    (o, p, l)
+                }
+                None => {
+                    let unknown = self.b.ins().iconst(types::I64, VIEW_UNKNOWN);
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    (unknown, zero, zero)
+                }
+            };
+            view_moves.push(((ok, ptr, len), from));
+        }
         for ((dest, _), x) in moves.into_iter().zip(vals) {
             self.set(f, dest, x);
+        }
+        for ((ok, ptr, len), (o, p, l)) in view_moves {
+            self.b.def_var(ok, o);
+            self.b.def_var(ptr, p);
+            self.b.def_var(len, l);
         }
         Ok(())
     }
