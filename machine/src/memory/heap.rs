@@ -220,6 +220,10 @@ pub const RELEASE_SLACK: usize = 32 << 20;
 /// due back to the OS ([`Heap::release_chunks_if_due`]).
 pub(crate) const RELEASE_CHECK_FREES: usize = 4096;
 
+/// Unit enum tags below this are found without a lock
+/// ([`Heap::immortal_unit_enum`]).
+const UNIT_ENUM_FAST: usize = 64;
+
 /// Managed heap. Objects are linked in an intrusive list for traversal.
 /// `Gc<T>` handles are copyable; the runtime controls when objects become unreachable.
 pub struct Heap {
@@ -264,9 +268,11 @@ pub struct Heap {
     finalizable: Vec<u64>,
     /// Immortal arity-0 enum singletons keyed by tag (never swept).
     immortal_enums: HashMap<u32, Object, AddrHashBuilder>,
-    /// Last tag returned by [`Self::immortal_unit_enum`]. Unit constructors
-    /// (binary-tree leaves) hit this instead of the map.
-    unit_enum: Option<(u32, Object)>,
+    /// [`Self::immortal_unit_enum`]'s objects of the low tags, by tag (`0`:
+    /// none yet). Read without the epoch lock: unit constructors (binary
+    /// tree leaves) are common in parallel sections, and a slot is written
+    /// once, under the lock.
+    unit_enums: [AtomicU64; UNIT_ENUM_FAST],
     /// Shared function values that capture and fill nothing, by entry,
     /// arity and rest flag ([`Self::immortal_plain_fn`]), never swept.
     immortal_fns: HashMap<(u32, u32, bool), Object>,
@@ -351,7 +357,7 @@ impl Default for Heap {
             cow_sites: None,
             finalizable: Vec::new(),
             immortal_enums: HashMap::default(),
-            unit_enum: None,
+            unit_enums: [const { AtomicU64::new(0) }; UNIT_ENUM_FAST],
             immortal_fns: HashMap::new(),
             early_freed: Vec::new(),
             early_scratch: (Vec::new(), Vec::new(), Vec::new()),
@@ -1593,22 +1599,30 @@ impl Heap {
 
     /// Return a shared arity-0 enum for `tag`, allocating once per tag.
     pub fn immortal_unit_enum(&mut self, tag: u32) -> Object {
-        let _epoch_guard = self.epoch_guard();
-        if let Some((cached, obj)) = self.unit_enum
-            && cached == tag
+        let fast = self.unit_enums.get(tag as usize);
+        if let Some(slot) = fast
+            && let addr = slot.load(Ordering::Acquire)
+            && addr != 0
+            // SAFETY: the slot names the immortal enum it was given.
+            && let Some(obj) = unsafe { Object::from_header(addr) }
         {
             return obj;
         }
-        if let Some(obj) = self.immortal_enums.get(&tag) {
-            self.unit_enum = Some((tag, *obj));
-            return *obj;
+        let _epoch_guard = self.epoch_guard();
+        let obj = match self.immortal_enums.get(&tag) {
+            Some(obj) => *obj,
+            None => {
+                let obj_enum = crate::memory::ObjEnum::new(tag, EnumPayload::empty());
+                let (object, _) = self.alloc_unlocked(obj_enum, Object::Enum);
+                object.rc_set_immortal();
+                self.immortal_enums.insert(tag, object);
+                object
+            }
+        };
+        if let Some(slot) = self.unit_enums.get(tag as usize) {
+            slot.store(obj.addr(), Ordering::Release);
         }
-        let obj_enum = crate::memory::ObjEnum::new(tag, EnumPayload::empty());
-        let (object, _) = self.alloc_unlocked(obj_enum, Object::Enum);
-        object.rc_set_immortal();
-        self.immortal_enums.insert(tag, object);
-        self.unit_enum = Some((tag, object));
-        object
+        obj
     }
 
     /// Install the program's per-class field word kinds.
