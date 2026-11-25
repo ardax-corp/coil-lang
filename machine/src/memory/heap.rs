@@ -1119,6 +1119,7 @@ impl Heap {
             let hash = data.hash_code();
             return self.intern_new(data.data.to_string(), hash);
         }
+        data.mark_interned();
         self.strings.insert(string, ());
         string
     }
@@ -1126,6 +1127,7 @@ impl Heap {
     fn intern_new(&mut self, data: String, hash: u32) -> RefString {
         let obj_string = ObjString::with_hash(data, hash);
         let (_, s) = self.alloc_unlocked_in(obj_string, Object::String, false);
+        s.as_ref().mark_interned();
         self.strings.insert(s, ());
         s
     }
@@ -1419,7 +1421,7 @@ impl Heap {
             Object::String(s) => {
                 // Interning hashes a string first; an unhashed one is not interned.
                 let s_ref = s.as_ref();
-                !s_ref.hash_set() || self.strings.find(&s_ref.data, s_ref.hash_code()).is_none_or(|i| i.as_ptr() != s.as_ptr())
+                !s_ref.interned() || self.strings.find(&s_ref.data, s_ref.hash_code()).is_none_or(|i| i.as_ptr() != s.as_ptr())
             }
             Object::Array(_) => true,
             // An object whose `drop` is pending is walked; [`Self::free_early`]
@@ -2788,6 +2790,11 @@ pub struct ObjString {
 }
 
 const HASH_SET: u64 = 1 << 32;
+/// The string is (or was) a key of the heap's intern table
+/// ([`Heap::intern`], [`Heap::intern_ref`]): its release removes it there.
+/// Set only after [`HASH_SET`], so [`ObjString::hash_code`]'s first store
+/// never clears it.
+const HASH_INTERNED: u64 = 1 << 33;
 
 impl ObjString {
     /// A string whose hash is computed lazily.
@@ -2816,13 +2823,19 @@ impl ObjString {
         }
     }
 
-    /// Content hash ([`Self::hash`] of `data`), cached after the first call.
+    /// Whether the intern table took this string as a key: its release
+    /// looks it up there, a string that was only hashed (a map key) does not.
     #[inline]
-    /// Whether [`Self::hash_code`] ran (interning computes it first).
-    fn hash_set(&self) -> bool {
-        self.hash.load(Ordering::Relaxed) & HASH_SET != 0
+    pub(crate) fn interned(&self) -> bool {
+        self.hash.load(Ordering::Relaxed) & HASH_INTERNED != 0
     }
 
+    fn mark_interned(&self) {
+        self.hash.fetch_or(HASH_INTERNED, Ordering::Relaxed);
+    }
+
+    /// Content hash ([`Self::hash`] of `data`), cached after the first call.
+    #[inline]
     pub fn hash_code(&self) -> u32 {
         let cached = self.hash.load(Ordering::Relaxed);
         if cached & HASH_SET != 0 {

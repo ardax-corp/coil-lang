@@ -361,14 +361,34 @@ impl Heap {
         self.find_object_by_addr(addr)
     }
 
+    /// The object a heap word of kind `kind` names, if any. A pointer word
+    /// names a live object or nothing (`0`, or an object outside the slab,
+    /// which is immortal): a range test and its header say which, as native
+    /// code's inline counts do, without [`Self::find_object_by_addr`]'s slot
+    /// search. A word of unknown kind takes that search; a number none.
+    #[inline(always)]
+    pub(super) fn rc_object_of_kind(&self, v: Value, kind: u8) -> Option<Object> {
+        if kind == common::WORD_POINTER {
+            let addr = v.heap_addr() & !1;
+            if addr == 0 || !addr.is_multiple_of(8) || !self.slab.may_contain(addr) {
+                return None;
+            }
+            // SAFETY: a pointer word in the slab's range is a live object's
+            // slot start (the count invariant: its owner keeps it alive).
+            return unsafe { Object::from_header(addr) };
+        }
+        if kind == common::WORD_UNKNOWN {
+            return self.rc_object(v);
+        }
+        None
+    }
+
     /// A heap word `v` of kind `kind` was stored: its object gains an owner.
     /// A word of unknown kind names an object only when the address is one
     /// (the census keeps those to the few the kinds cannot say).
     #[inline]
     pub fn rc_inc_word(&self, v: Value, kind: u8) {
-        if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
-            && let Some(o) = self.rc_object(v)
-        {
+        if let Some(o) = self.rc_object_of_kind(v, kind) {
             self.rc_inc_obj(o);
         }
     }
@@ -377,9 +397,7 @@ impl Heap {
     /// its object loses an owner.
     #[inline]
     pub fn rc_dec_word(&self, v: Value, kind: u8) {
-        if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
-            && let Some(o) = self.rc_object(v)
-        {
+        if let Some(o) = self.rc_object_of_kind(v, kind) {
             self.rc_dec_pending(o);
         }
     }
@@ -574,7 +592,7 @@ impl Heap {
             // SAFETY: the array is live until this release frees it, and
             // freeing its elements does not touch its storage.
             let v = unsafe { *ptr.add(i) };
-            let Some(o) = self.rc_object(v) else { continue };
+            let Some(o) = self.rc_object_of_kind(v, kind) else { continue };
             if !self.rc_dec_obj(o) {
                 continue;
             }
@@ -602,7 +620,7 @@ impl Heap {
         // An interned string leaves the table first (a program string
         // is immortal and never gets here).
         if let Object::String(st) = obj
-            && st.as_ref().hash_set()
+            && st.as_ref().interned()
             && self.strings.find(&st.as_ref().data, st.as_ref().hash_code()).is_some_and(|i| i.as_ptr() == st.as_ptr())
         {
             self.strings.remove(st);
@@ -780,8 +798,7 @@ impl Heap {
         let kinds = payload.kinds();
         for (i, v) in payload.as_slice().iter().enumerate() {
             let kind = common::packed_word_kind(kinds, i);
-            if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
-                && let Some(o) = self.rc_object(*v)
+            if let Some(o) = self.rc_object_of_kind(*v, kind)
                 && self.rc_dec_obj(o)
             {
                 stack.push(o);
@@ -801,8 +818,7 @@ impl Heap {
         let mut kinds = common::ClassSlotKinds::new(self.class_field_kinds(inst.type_id), slots.len()).with_own(inst.storage.kinds());
         for v in slots {
             let kind = kinds.next_kind(slots);
-            if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
-                && let Some(o) = self.rc_object(*v)
+            if let Some(o) = self.rc_object_of_kind(*v, kind)
                 && self.rc_dec_obj(o)
             {
                 stack.push(o);
@@ -823,8 +839,7 @@ impl Heap {
         impl SlotVisitor for Dec<'_> {
             #[inline(always)]
             fn word(&mut self, v: &Value, kind: u8) {
-                if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
-                    && let Some(o) = self.0.rc_object(*v)
+                if let Some(o) = self.0.rc_object_of_kind(*v, kind)
                     && self.0.rc_dec_obj(o)
                 {
                     self.1.push(o);
