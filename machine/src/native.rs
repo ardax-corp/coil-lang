@@ -3239,6 +3239,31 @@ const HELPERS: usize = 55;
 mod pin_tests {
     use super::*;
 
+    /// A function value that captures and fills nothing is one shared
+    /// object, so a lambda evaluated on every loop pass allocates once.
+    #[test]
+    fn a_capture_free_fn_value_is_allocated_once() {
+        let mut heap = crate::memory::Heap::default();
+        let mut ctx = NativeCtx::new(0);
+        ctx.heap = &mut heap;
+        // Arity 1 in the operand's third byte; the only word is the mask.
+        let extra = 7 | (1u64 << 16) << 32;
+        let mask = [0u64];
+        // SAFETY: `ctx` names a live heap; one word is passed.
+        let (a, b) = unsafe {
+            (coil_native_alloc(&mut ctx, ALLOC_FN, mask.as_ptr(), 1, extra), coil_native_alloc(&mut ctx, ALLOC_FN, mask.as_ptr(), 1, extra))
+        };
+        assert_ne!(a, 0);
+        assert_eq!(a, b, "both evaluations name one object");
+        // A capture is its own object each time.
+        let words = [5u64, 0];
+        // SAFETY: as above, two words.
+        let (c, d) = unsafe {
+            (coil_native_alloc(&mut ctx, ALLOC_FN, words.as_ptr(), 2, extra), coil_native_alloc(&mut ctx, ALLOC_FN, words.as_ptr(), 2, extra))
+        };
+        assert!(c != d && c != a);
+    }
+
     /// The interpreter's `CowPin` / `CowUnpin` ([`cow_pin`], [`cow_unpin`]):
     /// the pin nests, and a share between them copies.
     #[test]
