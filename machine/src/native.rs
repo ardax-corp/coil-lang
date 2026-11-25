@@ -1606,6 +1606,38 @@ pub unsafe extern "C" fn coil_native_rc(ctx: *mut NativeCtx, word: u64, dec: u64
     0
 }
 
+/// `RcReuse`: `word` loses an owner, as [`coil_native_rc`]'s decrement.
+/// When that was its last and it is a plain young enum with a payload, its
+/// words are released but its slot is kept: returns the slot's address for
+/// the `AllocAt` that follows, else `0` (`Heap::rc_take_slot`).
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_rc_reuse(ctx: *mut NativeCtx, word: u64, moved: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return 0;
+    };
+    heap.rc_take_slot(common::Value::from(word), moved as u32)
+}
+
+/// `AllocAt` through [`coil_native_alloc`]: `slot`, kept by
+/// [`coil_native_rc_reuse`] (`0`: none), goes to that allocation, which
+/// takes it when the layouts match and gives it back otherwise.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `slot` is `0` or a slot
+/// [`coil_native_rc_reuse`] returned and nothing took.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_offer_slot(ctx: *mut NativeCtx, slot: u64) -> u64 {
+    if slot != 0
+        && let Some(heap) = (unsafe { heap(ctx) })
+    {
+        heap.offer_enum_slot(slot);
+    }
+    0
+}
+
 /// `Cow` of field `field` of the instance `obj`: `obj.f = unique(obj.f)`,
 /// writing the slot back only when it copied.
 /// Returns `obj`.
@@ -3129,6 +3161,8 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_cow", coil_native_cow as *const u8),
         ("coil_native_cow_field", coil_native_cow_field as *const u8),
         ("coil_native_rc", coil_native_rc as *const u8),
+        ("coil_native_rc_reuse", coil_native_rc_reuse as *const u8),
+        ("coil_native_offer_slot", coil_native_offer_slot as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
         ("coil_native_array_push", coil_native_array_push as *const u8),
         ("coil_native_lane_index", coil_native_lane_index as *const u8),
@@ -3170,7 +3204,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 52;
+const HELPERS: usize = 54;
 
 #[cfg(test)]
 mod pin_tests {

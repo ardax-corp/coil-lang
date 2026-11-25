@@ -821,7 +821,10 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 check!();
                 set!(*dest, w);
             }
-            MirInst::Alloc { dest, kind, elems, kinds } => {
+            MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
+                if let MirInst::AllocAt { slot, .. } = inst {
+                    rt::coil_native_offer_slot(ctx, get!(*slot));
+                }
                 let pc_of = |t| program(body).body_at(t).map(|b| b.pc).filter(|&pc| pc != u32::MAX);
                 let Ok(AllocCall { code, n, extra, last }) = alloc_call(*kind, elems.len(), *kinds, || packed_kinds(f, elems), pc_of) else {
                     return Flow::Trap(TRAP_HELPER);
@@ -964,6 +967,10 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 let (s, saved) = (get!(*src), get!(*saved));
                 rt::cow_unpin(ctx, s, saved);
                 set!(*dest, 0);
+            }
+            MirInst::RcReuse { dest, src, moved } => {
+                let s = get!(*src);
+                set!(*dest, rt::coil_native_rc_reuse(ctx, s, u64::from(*moved)));
             }
             MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
                 if guard.is_none_or(|g| get!(g) != 0) {

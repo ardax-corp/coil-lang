@@ -131,7 +131,7 @@ impl MirInst {
                 OpProps { barrier: true, effects: Effects::Yes, allocates: true, vector_barrier: true, ..P }
             }
             Self::ResumeCoro { .. } | Self::Yield { .. } => OpProps { barrier: true, effects: Effects::Yes, allocates: true, vector_barrier: true, ..P },
-            Self::Alloc { .. } => OpProps { barrier: true, gc_edge: true, allocates: true, ..P },
+            Self::Alloc { .. } | Self::AllocAt { .. } => OpProps { barrier: true, gc_edge: true, allocates: true, ..P },
             Self::GcBarrier { .. } => OpProps { barrier: true, gc_edge: true, ..P },
             Self::ArrayPush { .. } | Self::LanePush { .. } => OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, ..P },
             Self::LanesToWords { .. } => OpProps { barrier: true, gc_edge: true, allocates: true, ..P },
@@ -147,6 +147,8 @@ impl MirInst {
             // A count in the header; a decrement to zero frees what only the
             // object kept, and allocates nothing.
             Self::RcInc { .. } | Self::RcDec { .. } => OpProps { barrier: true, effects: Effects::Yes, vector_barrier: true, ..P },
+            // A decrement that may keep the object's slot for an `AllocAt`.
+            Self::RcReuse { .. } => OpProps { barrier: true, effects: Effects::Yes, vector_barrier: true, ..P },
             Self::Format { .. } | Self::Stringify { .. } | Self::Cow { .. } => {
                 OpProps { barrier: true, effects: Effects::Yes, gc_edge: true, allocates: true, vector_barrier: true, ..P }
             }
@@ -212,7 +214,7 @@ impl MirInst {
     pub fn may_resize(&self, calls: &CallFacts) -> bool {
         match self {
             Self::Call { dest, .. } => !calls.lengths_steady || !calls.pure.contains(dest) && !calls.steady.contains(dest),
-            Self::Alloc { .. } | Self::GcBarrier { .. } => !calls.lengths_steady,
+            Self::Alloc { .. } | Self::AllocAt { .. } | Self::GcBarrier { .. } => !calls.lengths_steady,
             _ => self.runs_effects(calls),
         }
     }

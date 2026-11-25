@@ -165,6 +165,7 @@ pub fn barrier_pairs(f: &MirFunc) -> HashMap<ValueId, ValueId> {
         for inst in &b.insts {
             match inst {
                 MirInst::Alloc { dest, .. }
+                | MirInst::AllocAt { dest, .. }
                 | MirInst::ArrayPush { dest, .. }
                 | MirInst::LanePush { dest, .. }
                 | MirInst::LanesToWords { dest, .. }

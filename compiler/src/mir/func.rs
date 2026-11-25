@@ -1053,6 +1053,21 @@ impl MirFunc {
                     }
                 }
             }
+            MirInst::AllocAt { dest, slot, elems, .. } => {
+                if self.ty(*dest) != MirTy::HeapRef || self.ty(*slot) != MirTy::I64 {
+                    return Err(format!("{dest} AllocAt type"));
+                }
+                for (i, e) in elems.iter().enumerate() {
+                    if !self.ty(*e).is_specialized() {
+                        return Err(format!("{dest} AllocAt elem {i} type"));
+                    }
+                }
+            }
+            MirInst::RcReuse { dest, src, .. } => {
+                if self.ty(*dest) != MirTy::I64 || !matches!(self.ty(*src), MirTy::HeapRef | MirTy::Value) {
+                    return Err(format!("{dest} RcReuse type"));
+                }
+            }
             MirInst::GcBarrier { dest, object, .. } => {
                 if self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} GcBarrier dest is not heapref"));

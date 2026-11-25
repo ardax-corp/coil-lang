@@ -308,10 +308,14 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             array,
             value,
         } => write!(f, "{dest} = arraypush {array}, {value}"),
-        MirInst::Alloc { dest, kind, elems, kinds } => {
-            write!(f, "{dest} = alloc.{}", kind.as_str())?;
+        MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
+            let at = if let MirInst::AllocAt { slot, .. } = inst { Some(*slot) } else { None };
+            write!(f, "{dest} = {}.{}", if at.is_some() { "allocat" } else { "alloc" }, kind.as_str())?;
             if *kinds != 0 {
                 write!(f, "[{kinds}]")?;
+            }
+            if let Some(slot) = at {
+                write!(f, " {slot},")?;
             }
             match *kind {
                 MirAllocKind::Object { type_id, nfields } => {
@@ -370,6 +374,8 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::Cow { dest, src, field: Some(i), .. } => write!(f, "{dest} = cow.unique_field {src} {i}"),
         MirInst::CowPin { dest, src } => write!(f, "{dest} = cow.pin {src}"),
         MirInst::CowUnpin { dest, src, saved } => write!(f, "{dest} = cow.unpin {src}, {saved}"),
+        MirInst::RcReuse { dest, src, moved: 0 } => write!(f, "{dest} = rc.reuse {src}"),
+        MirInst::RcReuse { dest, src, moved } => write!(f, "{dest} = rc.reuse {src}, moved {moved}"),
         MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
             let op = if matches!(inst, MirInst::RcInc { .. }) { "rc.inc" } else { "rc.dec" };
             write!(f, "{dest} = {op} {src}")?;
@@ -925,13 +931,22 @@ impl<'a> Parser<'a> {
                 args,
             });
         }
-        if let Some(kind_s) = op.strip_prefix("alloc.") {
+        let at = op.strip_prefix("allocat.");
+        if let Some(kind_s) = at.or_else(|| op.strip_prefix("alloc.")) {
             let kinds = if self.eat('[') {
                 let k = common::PackedKinds::try_from(self.uint()?).map_err(|_| ParseError("alloc kinds".into()))?;
                 self.expect(']')?;
                 k
             } else {
                 0
+            };
+            let slot = match at {
+                Some(_) => {
+                    let s = self.value()?;
+                    self.expect(',')?;
+                    Some(s)
+                }
+                None => None,
             };
             let kind = match kind_s {
                 "array" => MirAllocKind::Array,
@@ -982,6 +997,9 @@ impl<'a> Parser<'a> {
                 }
             }
             ensure_ty(types, dest, MirTy::HeapRef);
+            if let Some(slot) = slot {
+                return Ok(MirInst::AllocAt { dest, slot, kind, elems, kinds });
+            }
             return Ok(MirInst::Alloc { dest, kind, elems, kinds });
         }
         if let Some(kind_s) = op.strip_prefix("gcbarrier.") {
@@ -1041,6 +1059,12 @@ impl<'a> Parser<'a> {
             let saved = self.value()?;
             ensure_ty(types, dest, MirTy::Bool);
             return Ok(MirInst::CowUnpin { dest, src, saved });
+        }
+        if op == "rc.reuse" {
+            let src = self.value()?;
+            let moved = if self.eat_str(", moved ") { self.uint()? as u32 } else { 0 };
+            ensure_ty(types, dest, MirTy::I64);
+            return Ok(MirInst::RcReuse { dest, src, moved });
         }
         if op == "rc.inc" || op == "rc.dec" {
             let src = self.value()?;

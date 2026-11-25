@@ -817,6 +817,30 @@ pub enum MirInst {
         src: ValueId,
         guard: Option<ValueId>,
     },
+    /// Reuse in place: `src`'s object loses an owner, as [`Self::RcDec`].
+    /// When that was its last and it is a plain enum or instance (no
+    /// `drop`, no weak handle), its words are released but its slot is
+    /// kept: dest (`i64`) is the slot's address for the [`Self::AllocAt`]
+    /// that follows in the block, else `0` (`machine::Heap::rc_take_slot`).
+    ///
+    /// `moved`: payload words (bit `i`: word `i`) the body took from the
+    /// object without counting them: a kept slot hands its owner to them,
+    /// and otherwise each gains an owner before the decrement.
+    RcReuse {
+        dest: ValueId,
+        src: ValueId,
+        moved: u32,
+    },
+    /// [`Self::Alloc`] (an enum or an instance) into `slot` when it is not
+    /// `0`: a slot [`Self::RcReuse`] kept, of the same layout. Nothing that
+    /// may unwind sits between the two.
+    AllocAt {
+        dest: ValueId,
+        slot: ValueId,
+        kind: MirAllocKind,
+        elems: Vec<ValueId>,
+        kinds: common::PackedKinds,
+    },
     /// String `==` (`!=` when `ne`): structural equality, which compare strings
     /// by content. Dest is `bool`; `lhs` / `rhs` are string
     /// [`MirTy::HeapRef`] words. Also a user type's `==` with no `Eq`
@@ -1253,6 +1277,8 @@ impl MirInst {
             | Self::CowUnpin { dest, .. }
             | Self::RcInc { dest, .. }
             | Self::RcDec { dest, .. }
+            | Self::RcReuse { dest, .. }
+            | Self::AllocAt { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
             | Self::VecLoop { dest, .. } => dest,
@@ -1308,6 +1334,8 @@ impl MirInst {
             | Self::CowUnpin { dest, .. }
             | Self::RcInc { dest, .. }
             | Self::RcDec { dest, .. }
+            | Self::RcReuse { dest, .. }
+            | Self::AllocAt { dest, .. }
             | Self::StrEq { dest, .. }
             | Self::ByteScan { dest, .. }
             | Self::VecLoop { dest, .. } => dest,
@@ -1374,6 +1402,8 @@ impl MirInst {
             Self::Print { src, .. } | Self::FreeEarly { value: src, .. } | Self::Stringify { src, .. } | Self::Cow { src, .. } | Self::CowPin { src, .. } | Self::Panic { msg: src, .. } => vec![*src],
             Self::CowUnpin { src, saved, .. } => vec![*src, *saved],
             Self::RcInc { src, guard, .. } | Self::RcDec { src, guard, .. } => std::iter::once(*src).chain(*guard).collect(),
+            Self::RcReuse { src, .. } => vec![*src],
+            Self::AllocAt { slot, elems, .. } => std::iter::once(*slot).chain(elems.iter().copied()).collect(),
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -1474,6 +1504,13 @@ impl MirInst {
             Self::CowUnpin { src, saved, .. } => {
                 *src = map(*src);
                 *saved = map(*saved);
+            }
+            Self::RcReuse { src, .. } => *src = map(*src),
+            Self::AllocAt { slot, elems, .. } => {
+                *slot = map(*slot);
+                for e in elems {
+                    *e = map(*e);
+                }
             }
             Self::RcInc { src, guard, .. } | Self::RcDec { src, guard, .. } => {
                 *src = map(*src);

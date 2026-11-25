@@ -1166,6 +1166,7 @@ fn may_drop_views(inst: &MirInst) -> bool {
             // A count change frees only objects the frame no longer reads.
             | MirInst::RcInc { .. }
             | MirInst::RcDec { .. }
+            | MirInst::RcReuse { .. }
     )
 }
 
@@ -1481,6 +1482,20 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         need(src)?;
                         need_scalar(saved)?;
                     }
+                    MirInst::RcReuse { dest, src, .. } => {
+                        need_scalar(dest)?;
+                        need(src)?;
+                    }
+                    MirInst::AllocAt { dest, slot, kind, elems, .. } => {
+                        need(dest)?;
+                        need_scalar(slot)?;
+                        for e in elems {
+                            need(e)?;
+                        }
+                        if !matches!(kind, MirAllocKind::Enum { .. }) {
+                            return Err("an allocation in place of a kind other than an enum".to_string());
+                        }
+                    }
                     MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
                         need_scalar(dest)?;
                         need(src)?;
@@ -1729,6 +1744,9 @@ struct Ids {
     cow_field: FuncId,
     /// Reference count ops (`coil_native_rc`).
     rc: FuncId,
+    /// Reuse in place (`coil_native_rc_reuse`, `coil_native_offer_slot`).
+    rc_reuse: FuncId,
+    offer_slot: FuncId,
     /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
     alloc: FuncId,
     array_push: FuncId,
@@ -2274,6 +2292,8 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let cow = module.declare_function("coil_native_cow", Linkage::Import, &s3).map_err(e)?;
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let rc = module.declare_function("coil_native_rc", Linkage::Import, &s3).map_err(e)?;
+    let rc_reuse = module.declare_function("coil_native_rc_reuse", Linkage::Import, &s3).map_err(e)?;
+    let offer_slot = module.declare_function("coil_native_offer_slot", Linkage::Import, &s2).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
     let lane_index = module.declare_function("coil_native_lane_index", Linkage::Import, &s3).map_err(e)?;
@@ -2339,6 +2359,8 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         cow,
         cow_field,
         rc,
+        rc_reuse,
+        offer_slot,
         alloc,
         array_push,
         lane_index,
@@ -2621,6 +2643,8 @@ struct Lower<'a> {
     cow: FuncRef,
     cow_field: FuncRef,
     rc: FuncRef,
+    rc_reuse: FuncRef,
+    offer_slot: FuncRef,
     alloc: FuncRef,
     array_push: FuncRef,
     lane_index: FuncRef,
@@ -2769,6 +2793,8 @@ impl<'a> Lower<'a> {
         let cow = module.declare_func_in_func(ids.cow, func);
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
         let rc = module.declare_func_in_func(ids.rc, func);
+        let rc_reuse = module.declare_func_in_func(ids.rc_reuse, func);
+        let offer_slot = module.declare_func_in_func(ids.offer_slot, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
         let array_push = module.declare_func_in_func(ids.array_push, func);
         let lane_index = module.declare_func_in_func(ids.lane_index, func);
@@ -2865,6 +2891,8 @@ impl<'a> Lower<'a> {
             cow,
             cow_field,
             rc,
+            rc_reuse,
+            offer_slot,
             alloc,
             array_push,
             lane_index,
@@ -4349,8 +4377,24 @@ impl<'a> Lower<'a> {
                 self.b.switch_to_block(join);
                 self.set(f, *dest, v);
             }
-            MirInst::Alloc { dest, kind, elems, kinds } => {
+            MirInst::RcReuse { dest, src, moved } => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                let moved = self.b.ins().iconst(types::I64, i64::from(*moved));
+                let call = self.b.ins().call(self.rc_reuse, &[self.ctx, s, moved]);
+                let slot = self.b.inst_results(call)[0];
+                self.set(f, *dest, slot);
+            }
+            MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
                 let words = elems;
+                // A slot `RcReuse` kept (`0`: none).
+                let reuse = match inst {
+                    MirInst::AllocAt { slot, .. } => {
+                        let s = self.get(f, *slot);
+                        Some(self.coerce(s, types::I64))
+                    }
+                    _ => None,
+                };
                 // An opaque body's `int` words may be objects: their kinds
                 // stay unknown.
                 let packed = || {
@@ -4371,9 +4415,13 @@ impl<'a> Lower<'a> {
                 let join = inline.map(|obj| {
                     let join = self.b.create_block();
                     self.b.append_block_param(join, types::I64);
-                    self.inline_alloc(f, &obj, *kind, words, extra, join);
+                    self.inline_alloc(f, &obj, *kind, words, extra, join, reuse);
                     join
                 });
+                // The runtime's allocation takes the slot (or gives it back).
+                if let Some(slot) = reuse {
+                    self.b.ins().call(self.offer_slot, &[self.ctx, slot]);
+                }
                 let p = match last {
                     Some(w) => self.words_slot_with(f, words, Some(w as i64)),
                     None => self.words_slot(f, words),
@@ -4910,7 +4958,8 @@ impl<'a> Lower<'a> {
     /// slot's image with `words` in place and count the object, then jump
     /// to `join` with its address. Otherwise the code after this (the
     /// current block, on return) calls the helper, which refills.
-    fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], extra: u64, join: Block) {
+    #[allow(clippy::too_many_arguments)]
+    fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], extra: u64, join: Block, reuse: Option<cranelift_codegen::ir::Value>) {
         use machine::native::{
             BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
             COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
@@ -4921,6 +4970,16 @@ impl<'a> Lower<'a> {
         let fast = self.b.create_block();
         let counts = self.b.ins().load(types::I64, mem, self.ctx, NATIVE_CTX_ALLOC_COUNTS);
         let gate = self.b.ins().load(types::I64, mem, counts, COUNTS_INLINE_GATE);
+        self.b.append_block_param(fast, types::I64);
+        // A slot `RcReuse` kept, a young enum's of this layout: the image
+        // goes there, with no bump and no free list.
+        if let Some(slot) = reuse {
+            let (kept, fresh) = (self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(slot, kept, &[], fresh, &[]);
+            self.b.switch_to_block(kept);
+            self.b.ins().brif(gate, fast, &[slot.into()], slow, &[]);
+            self.b.switch_to_block(fresh);
+        }
         if let MirAllocKind::Object { type_id, .. } = kind {
             // A type with a `drop` stays out of the nursery: the helper
             // allocates it old and lists it.
@@ -4946,7 +5005,6 @@ impl<'a> Lower<'a> {
         // The bump pointer first; when its chunk is spent, a slot freed
         // early since the last minor (#2881), else the helper. Programs that
         // free nothing pay no extra load on the fast path.
-        self.b.append_block_param(fast, types::I64);
         let at = self.b.ins().load(types::I64, mem, cursor, BUMP_NEXT);
         let end = self.b.ins().load(types::I64, mem, cursor, BUMP_END);
         let next = self.b.ins().iadd_imm_s(at, i64::from(obj.slot));

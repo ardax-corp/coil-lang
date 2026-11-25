@@ -585,6 +585,8 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::CowUnpin { .. }
         | MirInst::RcInc { .. }
         | MirInst::RcDec { .. }
+        | MirInst::RcReuse { .. }
+        | MirInst::AllocAt { .. }
         | MirInst::StrEq { .. }
         | MirInst::ByteScan { .. }
         | MirInst::VecLoop { .. } => {

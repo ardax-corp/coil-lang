@@ -495,6 +495,13 @@ impl Heap {
         }
         let mut stack = std::mem::take(&mut self.rc_stack);
         stack.push(obj);
+        self.rc_release_worklist(stack)
+    }
+
+    /// [`Self::rc_release`]'s worklist: free each object on `stack` whose
+    /// count is zero, pushing what its words name that reaches zero in
+    /// turn. Keeps `stack` (emptied) as [`Self::rc_stack`].
+    fn rc_release_worklist(&mut self, mut stack: Vec<Object>) -> usize {
         let mut n = 0;
         while let Some(obj) = stack.pop() {
             // The common case, an enum with a payload: its words released
@@ -638,6 +645,68 @@ impl Heap {
     fn close_owed(obj: Object) -> bool {
         matches!(obj, Object::Coroutine(c) if c.as_ref().state == CoroState::Suspended && c.as_ref().started)
     }
+
+    /// `RcReuse`: `v`'s object loses an owner, as [`Self::rc_drop`]. When
+    /// that was its last and it is a plain young enum with a payload (no
+    /// `drop`, no weak handle, no pin), its words are released but its slot
+    /// is kept for the `AllocAt` that follows: returns the slot's address,
+    /// else `0`. The slot is no object: nothing may read it as one until
+    /// that allocation fills it.
+    pub fn rc_take_slot(&mut self, v: Value, moved: u32) -> u64 {
+        if !self.rc_counting() {
+            return 0;
+        }
+        let Some(o) = self.rc_object(v) else { return 0 };
+        let Object::Enum(e) = o else {
+            self.rc_drop(v);
+            return 0;
+        };
+        let payload = &e.as_ref().payload;
+        let kinds = payload.kinds();
+        let keep = !payload.is_empty()
+            && o.generation() & GEN_YOUNG != 0
+            && self.rc_frees
+            && !self.epoch_stw
+            && self.alloc_lock.is_null()
+            && o.rc_count() == 1
+            && !o.is_weak_target()
+            && !o.is_pinned()
+            && !self.finalizer_object(o);
+        if !keep {
+            // The moved words gain the owners the body did not count.
+            for (i, w) in payload.as_slice().iter().enumerate() {
+                if i < 32 && moved & (1 << i) != 0 {
+                    self.rc_inc_word(*w, common::packed_word_kind(kinds, i));
+                }
+            }
+            self.rc_drop(v);
+            return 0;
+        }
+        o.rc_dec();
+        // The moved words keep the owner the object held; the rest lose it.
+        let mut stack = std::mem::take(&mut self.rc_stack);
+        for (i, w) in payload.as_slice().iter().enumerate() {
+            let kind = common::packed_word_kind(kinds, i);
+            if (i >= 32 || moved & (1 << i) == 0)
+                && (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
+                && let Some(c) = self.rc_object(*w)
+                && self.rc_dec_obj(c)
+            {
+                stack.push(c);
+            }
+        }
+        self.freed_early = true;
+        // SAFETY: its count is zero and its words are released or moved.
+        unsafe { self.empty_slot(o) };
+        if stack.is_empty() {
+            self.rc_stack = stack;
+        } else {
+            self.rc_release_worklist(stack);
+        }
+        self.rc_release_pending();
+        o.addr()
+    }
+
 
     /// Each object an enum payload's words name loses an owner; those that
     /// reach zero go on `stack`. The words [`Self::rc_dec_children`] reads

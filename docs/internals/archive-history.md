@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 10, below, is the
-current version, 8.10 with MIR section `FORMAT` 23). A runtime refuses a major
+only add something to the format raise the minor (minor 11, below, is the
+current version, 8.11 with MIR section `FORMAT` 23). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -183,6 +183,13 @@ where it wrote a counted list of live roots, and a body writes neither its
 IL slot snapshots (`slot_env`) nor its live roots at each safepoint (`gc_roots`)
 before its debug slots. The layout changes, so the MIR section is a new `FORMAT`,
 23, and the reader refuses 22: an 8.9 archive's code is compiled again.
+
+Minor 11 (reuse in place, #2889) adds MIR tags 56 and 57 to format 23:
+`RcReuse` (dest, src), a decrement that keeps a dead plain enum's or
+instance's slot and returns its address (`0` when the object lives on or
+cannot be reused), and `AllocAt` (slot, then tag 16's `Alloc` layout), an
+allocation into that slot when it is not `0`. An 8.10 archive loads unchanged:
+it holds neither op.
 
 ## Major 7
 

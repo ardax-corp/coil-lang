@@ -273,6 +273,10 @@ pub struct Heap {
     /// tree leaves) are common in parallel sections, and a slot is written
     /// once, under the lock.
     unit_enums: [AtomicU64; UNIT_ENUM_FAST],
+    /// A slot [`Self::rc_take_slot`] emptied, offered to the next
+    /// allocation, which takes it when its layout and generation are these
+    /// and gives it back otherwise (`0`: none).
+    reuse: (u64, Layout, bool),
     /// Shared function values that capture and fill nothing, by entry,
     /// arity and rest flag ([`Self::immortal_plain_fn`]), never swept.
     immortal_fns: HashMap<(u32, u32, bool), Object>,
@@ -358,6 +362,7 @@ impl Default for Heap {
             finalizable: Vec::new(),
             immortal_enums: HashMap::default(),
             unit_enums: [const { AtomicU64::new(0) }; UNIT_ENUM_FAST],
+            reuse: (0, Layout::new::<u8>(), false),
             immortal_fns: HashMap::new(),
             early_freed: Vec::new(),
             early_scratch: (Vec::new(), Vec::new(), Vec::new()),
@@ -678,7 +683,20 @@ impl Heap {
             && !self.epoch_stw
             && (self.finalizer_types.is_empty()
                 || data.finalizer_type_id().is_none_or(|t| !self.has_finalizer(t)));
-        let slot = if young { self.slab.alloc_young(layout) } else { self.slab.alloc(layout) };
+        let slot = match self.reuse {
+            (0, ..) if young => self.slab.alloc_young(layout),
+            (0, ..) => self.slab.alloc(layout),
+            (addr, l, was_young) if l == layout && was_young == young => {
+                self.reuse = (0, layout, false);
+                // SAFETY: an emptied slot of this layout ([`Self::rc_take_slot`]).
+                unsafe { NonNull::new_unchecked(addr as *mut u8) }
+            }
+            // An offered slot lasts to the next allocation only.
+            _ => {
+                self.drop_offered_slot();
+                if young { self.slab.alloc_young(layout) } else { self.slab.alloc(layout) }
+            }
+        };
         let (object, content) = Self::init_slot(slot.cast::<GcData<T>>(), data, map);
         let size = object.size();
         self.counts.alloc_bytes += size;
@@ -1535,6 +1553,45 @@ impl Heap {
         } else {
             self.counts.alloc_bytes -= old_size - new_size;
         }
+    }
+
+    /// Offer `slot`, a young enum slot [`Self::rc_take_slot`] emptied, to
+    /// the next allocation ([`Self::alloc_unlocked_in`]).
+    pub(crate) fn offer_enum_slot(&mut self, slot: u64) {
+        self.drop_offered_slot();
+        self.reuse = (slot, Layout::new::<GcData<ObjEnum>>(), true);
+    }
+
+    /// Give an offered slot no allocation took back to the slab.
+    pub(crate) fn drop_offered_slot(&mut self) {
+        let (addr, _, young) = std::mem::replace(&mut self.reuse, (0, Layout::new::<u8>(), false));
+        if addr == 0 {
+            return;
+        }
+        // SAFETY: an emptied slot, named by nothing.
+        let ptr = unsafe { NonNull::new_unchecked(addr as *mut u8) };
+        if young {
+            self.slab.free_young(ptr);
+        } else {
+            self.slab.free(ptr);
+        }
+    }
+
+    /// Empty `object`, an enum whose count reached zero, without giving its
+    /// slot back: its payload goes and it is counted out, as
+    /// [`Self::dealloc`] does.
+    ///
+    /// # Safety
+    /// Nothing that will be read again names `object`.
+    pub(super) unsafe fn empty_slot(&mut self, object: Object) {
+        debug_assert!(matches!(object, Object::Enum(_)));
+        let size = object.size();
+        self.counts.alloc_bytes -= size;
+        debug_assert!(self.counts.live_count > 0);
+        self.counts.live_count -= 1;
+        unsafe { object.recycle_payload() };
+        // No kind: a walk of the heap reads no object here.
+        unsafe { (*(object.addr() as *const GcHeader)).kind.set(0) };
     }
 
     /// Deallocates an object.

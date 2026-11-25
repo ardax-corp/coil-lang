@@ -217,6 +217,9 @@ const I_RC_DEC: u8 = 53;
 const I_SET_FIELD_SCALAR: u8 = 54;
 /// A `StoreIndex` of a number element (archive 8.9).
 const I_STORE_INDEX_SCALAR: u8 = 55;
+/// Reuse in place (format 24, archive 8.11).
+const I_RC_REUSE: u8 = 56;
+const I_ALLOC_AT: u8 = 57;
 
 const FFI_OPS: [MirFfiOp; 4] = [MirFfiOp::Load, MirFfiOp::Declare, MirFfiOp::Invoke, MirFfiOp::Addr];
 /// Deepest lane / vector expression tree a reader takes (a corrupt section
@@ -572,8 +575,19 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.v(*src);
             w.opt_v(*guard);
         }
-        MirInst::Alloc { dest, kind, elems, kinds } => {
-            w.u8(I_ALLOC);
+        MirInst::RcReuse { dest, src, moved } => {
+            w.u8(I_RC_REUSE);
+            w.v(*dest);
+            w.v(*src);
+            w.u32(*moved);
+        }
+        MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
+            if let MirInst::AllocAt { slot, .. } = inst {
+                w.u8(I_ALLOC_AT);
+                w.v(*slot);
+            } else {
+                w.u8(I_ALLOC);
+            }
             w.v(*dest);
             match *kind {
                 MirAllocKind::Array => w.u8(0),
@@ -1169,7 +1183,8 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
         tag @ (I_SET_FIELD | I_SET_FIELD_SCALAR) => {
             MirInst::HeapFieldStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()?, scalar: tag == I_SET_FIELD_SCALAR }
         }
-        I_ALLOC => {
+        tag @ (I_ALLOC | I_ALLOC_AT) => {
+            let slot = if tag == I_ALLOC_AT { Some(r.v()?) } else { None };
             let dest = r.v()?;
             let kind = match r.u8()? {
                 0 => MirAllocKind::Array,
@@ -1185,8 +1200,13 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             };
             let n = r.len()?;
             let elems = (0..n).map(|_| r.v()).collect::<Result<Vec<_>, _>>()?;
-            MirInst::Alloc { dest, kind, elems, kinds: r.u32()? }
+            let kinds = r.u32()?;
+            match slot {
+                Some(slot) => MirInst::AllocAt { dest, slot, kind, elems, kinds },
+                None => MirInst::Alloc { dest, kind, elems, kinds },
+            }
         }
+        I_RC_REUSE => MirInst::RcReuse { dest: r.v()?, src: r.v()?, moved: r.u32()? },
         I_STRING => MirInst::String { dest: r.v()?, idx: r.u32()? },
         I_LOAD_STATIC => MirInst::LoadStatic { dest: r.v()?, slot: r.u32()? },
         I_STORE_STATIC => MirInst::StoreStatic { dest: r.v()?, slot: r.u32()?, value: r.v()? },
