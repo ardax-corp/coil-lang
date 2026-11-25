@@ -1073,6 +1073,39 @@ pub(super) fn kind_name(obj: Object) -> &'static str {
     }
 }
 
+/// The kinds of an enum's payload words or an instance's fields, in order,
+/// as a release reads them.
+enum WordKinds<'a> {
+    Enum(common::PackedKinds, usize),
+    Class(common::ClassSlotKinds<'a>),
+}
+
+impl<'a> WordKinds<'a> {
+    #[inline(always)]
+    fn of(heap: &'a Heap, o: Object) -> Self {
+        match o {
+            Object::Instance(i) => {
+                let i = i.as_ref();
+                Self::Class(common::ClassSlotKinds::new(heap.class_field_kinds(i.type_id), i.storage.as_slice().len()).with_own(i.storage.kinds()))
+            }
+            Object::Enum(e) => Self::Enum(e.as_ref().payload.kinds(), 0),
+            _ => Self::Enum(0, 0),
+        }
+    }
+
+    #[inline(always)]
+    fn next(&mut self, slots: &[Value]) -> u8 {
+        match self {
+            Self::Enum(k, i) => {
+                let kind = common::packed_word_kind(*k, *i);
+                *i += 1;
+                kind
+            }
+            Self::Class(c) => c.next_kind(slots),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1176,35 +1209,3 @@ mod tests {
     }
 }
 
-/// The kinds of an enum's payload words or an instance's fields, in order,
-/// as a release reads them.
-enum WordKinds<'a> {
-    Enum(common::PackedKinds, usize),
-    Class(common::ClassSlotKinds<'a>),
-}
-
-impl<'a> WordKinds<'a> {
-    #[inline(always)]
-    fn of(heap: &'a Heap, o: Object) -> Self {
-        match o {
-            Object::Instance(i) => {
-                let i = i.as_ref();
-                Self::Class(common::ClassSlotKinds::new(heap.class_field_kinds(i.type_id), i.storage.as_slice().len()).with_own(i.storage.kinds()))
-            }
-            Object::Enum(e) => Self::Enum(e.as_ref().payload.kinds(), 0),
-            _ => Self::Enum(0, 0),
-        }
-    }
-
-    #[inline(always)]
-    fn next(&mut self, slots: &[Value]) -> u8 {
-        match self {
-            Self::Enum(k, i) => {
-                let kind = common::packed_word_kind(*k, *i);
-                *i += 1;
-                kind
-            }
-            Self::Class(c) => c.next_kind(slots),
-        }
-    }
-}
