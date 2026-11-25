@@ -50,13 +50,14 @@ fn unwind_homes_on() -> bool {
 /// gives no word to count. The bodies in `owning` (the tail twins
 /// [`owning_tail_twins`] made) own their parameters. Returns how many ops
 /// it inserted.
-pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mut MirFunc)>, owning: &HashSet<Label>) -> usize {
+pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mut MirFunc)>, twins: &HashMap<Label, Label>) -> usize {
     let mut bodies: Vec<(Option<Label>, &mut MirFunc)> = bodies.into_iter().collect();
+    let owning: HashSet<Label> = twins.values().copied().collect();
     let numbers = number_returns(bodies.iter().map(|(l, f)| (*l, &**f)));
     let mut coros = owning_bodies(bodies.iter().map(|(_, f)| &**f));
     coros.extend(owning.iter().copied());
     let quiet = quiet_bodies(bodies.iter().map(|(l, f)| (*l, &**f)), &coros);
-    let mut facts = Facts { numbers, quiet, owned_params: HashMap::new() };
+    let mut facts = Facts { numbers, quiet, owned_params: HashMap::new(), twin_of: twins.clone() };
     // Which parameters a tail twin releases: its caller hands each an owner.
     let owned_params: HashMap<Label, Vec<bool>> = bodies
         .iter()
@@ -75,8 +76,15 @@ pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mu
 /// targets that takes a parameter that may hold an object gets a twin
 /// that owns its parameters (`name$own`, a fresh label), and every tail
 /// call to it, in its twin too, enters the twin with its arguments'
-/// owners handed over. Returns the twins' labels.
-pub fn owning_tail_twins(bodies: &mut Vec<super::native_capture::NativeBody>) -> HashSet<Label> {
+/// owners handed over.
+///
+/// A body a direct call targets that takes a parameter apart and builds
+/// objects ([`consumes`]) gets one too: a call whose argument dies there
+/// enters the twin and moves it in ([`Pass::run`]), so the body owns what
+/// it takes apart and may reuse its memory. The body itself keeps borrowed
+/// parameters for every caller that cannot know (the runtime's entries,
+/// call folding, function values). Returns each twin by its body.
+pub fn owning_tail_twins(bodies: &mut Vec<super::native_capture::NativeBody>) -> HashMap<Label, Label> {
     let by_label: HashMap<Label, usize> = bodies.iter().enumerate().filter_map(|(i, b)| Some((b.entry?, i))).collect();
     let may_hold = |f: &MirFunc| {
         f.params.iter().any(|&p| matches!(ty_of(f, p), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes) || f.heap_pair_words.contains(&p))
@@ -97,8 +105,22 @@ pub fn owning_tail_twins(bodies: &mut Vec<super::native_capture::NativeBody>) ->
             }
         }
     }
+    // Bodies a direct call targets that take a parameter apart.
+    let mut direct: Vec<Label> = bodies.iter().flat_map(|b| &b.mir.blocks).flat_map(|bl| &bl.insts).filter_map(|i| match i {
+        MirInst::Call { target, .. } => Some(*target),
+        _ => None,
+    }).collect();
+    direct.sort_unstable_by_key(|l| l.0);
+    direct.dedup();
+    for t in direct {
+        let Some(&i) = by_label.get(&t) else { continue };
+        let c = &bodies[i];
+        if !targets.contains(&t) && !c.name.ends_with("::drop") && !super::frame_words::is_generator(&c.mir) && may_hold(&c.mir) && consumes(&c.mir) {
+            targets.push(t);
+        }
+    }
     if targets.is_empty() {
-        return HashSet::new();
+        return HashMap::new();
     }
     let first = bodies
         .iter()
@@ -131,7 +153,23 @@ pub fn owning_tail_twins(bodies: &mut Vec<super::native_capture::NativeBody>) ->
         }
         f.tail_targets.extend(redirected);
     }
-    twin_of.into_values().collect()
+    twin_of
+}
+
+/// Whether `f` takes a parameter apart (matches on it or reads its
+/// payload) and builds an enum or an instance: owning the parameter, it
+/// may reuse the memory of the object it takes apart.
+fn consumes(f: &MirFunc) -> bool {
+    let params: HashSet<ValueId> = f.params.iter().copied().filter(|&p| matches!(ty_of(f, p), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64 | MirTy::Value)).collect();
+    if params.is_empty() {
+        return false;
+    }
+    let builds = f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, MirInst::Alloc { kind: super::MirAllocKind::Enum { .. } | super::MirAllocKind::Object { .. }, .. }));
+    builds
+        && f.blocks.iter().any(|b| {
+            matches!(&b.term, Some(Terminator::JumpIfMatch { scrutinee, .. }) if params.contains(scrutinee))
+                || b.insts.iter().any(|i| matches!(i, MirInst::MatchPayload { scrutinee, .. } if params.contains(scrutinee)))
+        })
 }
 
 /// What the pass knows of the other bodies.
@@ -143,6 +181,9 @@ struct Facts {
     /// The tail twins ([`owning_tail_twins`]): for each parameter, whether
     /// the twin releases it, so a tail call hands it an owner.
     owned_params: HashMap<Label, Vec<bool>>,
+    /// Each body's owning twin: a direct call that moves an argument
+    /// enters it.
+    twin_of: HashMap<Label, Label>,
 }
 
 /// The calls of `func` that write no word into an object: of a pure
@@ -416,7 +457,8 @@ fn insert_rc_in(func: &mut MirFunc, pad: bool, facts: &Facts, own: Option<Label>
     // A tail twin keeps no homes, which would end its own tail calls (an
     // unwind through it leaks what it owned, as one through a tail call
     // did before).
-    let twin = own.is_some_and(|l| facts.owned_params.contains_key(&l));
+    let twin = own.is_some_and(|l| facts.owned_params.contains_key(&l))
+        && func.blocks.iter().any(|b| b.insts.last().is_some_and(|i| is_tail_call_inst(func, b, i)));
     let (ops, homes) = pass.run(func, !pad && !twin);
     n += ops;
     if let Some(p) = func.cleanup.as_deref_mut() {
@@ -676,6 +718,8 @@ struct Pass {
     scalar: HashSet<ValueId>,
     /// The tail twins' released parameters ([`Facts::owned_params`]).
     owned_params: HashMap<Label, Vec<bool>>,
+    /// [`Facts::twin_of`].
+    twin_of: HashMap<Label, Label>,
 }
 
 /// The value an alias-defining instruction names the same object as.
@@ -924,7 +968,7 @@ impl Pass {
         let mut scalar: HashSet<ValueId> = scalar;
         // A φ of numbers only is a number (a loop's running sum).
         scalar.extend(number_words(func, numbers).into_iter().filter(|d| !base.contains_key(d)));
-        let mut pass = Self { base, borrowed, owned_at_def, scalar, owned_params: facts.owned_params.clone() };
+        let mut pass = Self { base, borrowed, owned_at_def, scalar, owned_params: facts.owned_params.clone(), twin_of: facts.twin_of.clone() };
         pass.borrow_loads_of_live_holders(func, &quiet);
         pass
     }
@@ -1154,6 +1198,10 @@ impl Pass {
             v
         };
         let mut inserted = 0usize;
+        // Calls that enter an owning twin: (block, instruction, twin).
+        let mut retarget: Vec<(usize, usize, Label)> = Vec::new();
+        // Per block, the frees of moved roots, which go.
+        let mut strip: Vec<HashSet<usize>> = vec![HashSet::new(); n];
         // The `defer` homes that hold an object: each owns its word, from a
         // store (the old word released after it) to the next, and to the
         // frame's end, where a return (or the pad, [`release_object_homes`])
@@ -1185,6 +1233,27 @@ impl Pass {
                     live.extend(self.used_roots(inst));
                 }
             }
+            // Roots this block moves into an owning twin, past which it
+            // neither releases nor frees them.
+            let mut moved_here: HashSet<ValueId> = HashSet::new();
+            // The uses after call `ii` of root `r`, when all of them are
+            // frees (`FreeEarly`) and slot clears up to its last use in the
+            // block: the call is its last real use.
+            let only_frees_after = |ii: usize, r: ValueId| -> Option<Vec<usize>> {
+                let mut out = Vec::new();
+                for (j, i) in block.insts.iter().enumerate().skip(ii + 1) {
+                    if self.used_roots(i).contains(&r) {
+                        match i {
+                            MirInst::FreeEarly { value, .. } | MirInst::ClearWord { value, .. } if self.root(*value) == Some(r) => out.push(j),
+                            _ => return None,
+                        }
+                    }
+                    if !live_after[j].contains(&r) {
+                        return Some(out);
+                    }
+                }
+                None
+            };
             // Forward: increments of new owned roots, decrements at last uses.
             for (ii, inst) in block.insts.iter().enumerate() {
                 let mut ops = Vec::new();
@@ -1231,9 +1300,52 @@ impl Pass {
                         }
                     }
                 }
+                // A direct call to a body with an owning twin, an argument of
+                // which this frame owns and passes for the last time, enters
+                // the twin: that argument moves, any other it releases
+                // gains an owner (as at a tail call).
+                let mut moved: HashSet<ValueId> = HashSet::new();
+                let dying = |r: ValueId| !live_after[ii].contains(&r) || only_frees_after(ii, r).is_some();
+                if let MirInst::Call { target, args, .. } = inst
+                    && !is_tail_call_inst(func, block, inst)
+                    && let Some(&twin) = self.twin_of.get(target)
+                    && let Some(mask) = self.owned_params.get(&twin)
+                    && args.iter().enumerate().any(|(k, &a)| mask.get(k).copied().unwrap_or(false) && self.owned(a).is_some_and(dying))
+                {
+                    retarget.push((bi, ii, twin));
+                    for (k, &a) in args.iter().enumerate() {
+                        if !mask.get(k).copied().unwrap_or(false) {
+                            continue;
+                        }
+                        match self.owned(a) {
+                            Some(r) if dying(r) && moved.insert(r) => {
+                                // Its frees after the call would read what
+                                // the callee owns now: they go.
+                                if let Some(frees) = only_frees_after(ii, r) {
+                                    strip[bi].extend(frees);
+                                }
+                                moved_here.insert(r);
+                                // The callee owns it now: a panic in it is
+                                // the callee's to release.
+                                if let Some(&h) = homes.get(&r) {
+                                    let zero = tok(&mut new_types);
+                                    *new_types.last_mut().expect("the word's type") = MirTy::I64;
+                                    let at = before[bi].entry(ii).or_default();
+                                    at.push(MirInst::Const { dest: zero, c: super::inst::MirConst::I64(0) });
+                                    at.push(MirInst::HomeStore { dest: tok(&mut new_types), home: h, value: zero });
+                                    inserted += 2;
+                                }
+                            }
+                            _ => {
+                                before[bi].entry(ii).or_default().push(MirInst::RcInc { dest: tok(&mut new_types), src: a, guard: None });
+                                inserted += 1;
+                            }
+                        }
+                    }
+                }
                 if !inst.is_phi() && !is_tail_call_inst(func, block, inst) {
                     for r in self.used_roots(inst) {
-                        if !live_after[ii].contains(&r) {
+                        if !live_after[ii].contains(&r) && !moved.contains(&r) && !moved_here.contains(&r) {
                             ops.push(MirInst::RcDec { dest: tok(&mut new_types), src: r, guard: None });
                         }
                     }
@@ -1430,9 +1542,14 @@ impl Pass {
             }
         }
         func.types.extend(new_types);
+        for (bi, ii, twin) in retarget {
+            if let MirInst::Call { target, .. } = &mut func.blocks[bi].insts[ii] {
+                *target = twin;
+            }
+        }
         // Materialize: in-block code first (positions are the old ones).
         for (bi, block) in func.blocks.iter_mut().enumerate() {
-            if after[bi].is_empty() && before[bi].is_empty() && before_term[bi].is_empty() {
+            if after[bi].is_empty() && before[bi].is_empty() && before_term[bi].is_empty() && strip[bi].is_empty() {
                 continue;
             }
             let old = std::mem::take(&mut block.insts);
@@ -1455,7 +1572,9 @@ impl Pass {
                 if let Some(ops) = before[bi].remove(&ii) {
                     block.insts.extend(ops);
                 }
-                block.insts.push(inst);
+                if !strip[bi].contains(&ii) {
+                    block.insts.push(inst);
+                }
                 if let Some(ops) = after[bi].remove(&ii) {
                     pending.extend(ops);
                 }
@@ -1636,11 +1755,11 @@ mod tests {
     fn a_walk_of_a_borrowed_enum_counts_nothing() {
         let walk = "func @w(v0: heapref) -> i64 {\nbb0:\n    jumpifmatch v0, 0, bb2, bb1\nbb1:\n    v1 = matchpayload v0, 0\n    v2 = call.i64 7 v1\n    v3 = iconst.i64 1\n    v4 = iadd v2, v3\n    return v4\nbb2:\n    v5 = iconst.i64 1\n    return v5\n}\n";
         let mut f = crate::mir::parse_func(walk).expect(walk);
-        insert_rc_all([(Some(Label(7)), &mut f)], &HashSet::new());
+        insert_rc_all([(Some(Label(7)), &mut f)], &HashMap::new());
         assert_eq!(all_rc_ops(&f), 0, "{f}");
         // Called under another label, its result is a word to count.
         let mut g = crate::mir::parse_func(walk).expect(walk);
-        insert_rc_all([(Some(Label(8)), &mut g)], &HashSet::new());
+        insert_rc_all([(Some(Label(8)), &mut g)], &HashMap::new());
         assert_eq!(all_rc_ops(&g), 1, "{g}");
     }
 
@@ -1650,11 +1769,11 @@ mod tests {
     fn an_int_field_summed_counts_nothing() {
         let sum = "func @s(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = iadd v1, v2\n    return v3\n}\n";
         let mut f = crate::mir::parse_func(sum).expect(sum);
-        insert_rc_all([(None, &mut f)], &HashSet::new());
+        insert_rc_all([(None, &mut f)], &HashMap::new());
         assert_eq!(all_rc_ops(&f), 0, "{f}");
         let kept = "func @k(v0: heapref) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    return v2\n}\n";
         let mut g = crate::mir::parse_func(kept).expect(kept);
-        insert_rc_all([(None, &mut g)], &HashSet::new());
+        insert_rc_all([(None, &mut g)], &HashMap::new());
         assert!(all_rc_ops(&g) > 0, "{g}");
     }
 
@@ -1665,11 +1784,11 @@ mod tests {
     fn a_borrowed_field_read_by_a_host_counts_nothing() {
         let read = "func @r(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = host.key_index_probe v2, v2, v1, v1\n    v4 = iadd v3, v1\n    return v4\n}\n";
         let mut f = crate::mir::parse_func(read).expect(read);
-        insert_rc_all([(None, &mut f)], &HashSet::new());
+        insert_rc_all([(None, &mut f)], &HashMap::new());
         assert_eq!(all_rc_ops(&f), 0, "{f}");
         let call = "func @c(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = call.i64 7 v2\n    v4 = iadd v3, v1\n    return v4\n}\n";
         let mut g = crate::mir::parse_func(call).expect(call);
-        insert_rc_all([(None, &mut g)], &HashSet::new());
+        insert_rc_all([(None, &mut g)], &HashMap::new());
         assert!(all_rc_ops(&g) > 0, "{g}");
     }
 
