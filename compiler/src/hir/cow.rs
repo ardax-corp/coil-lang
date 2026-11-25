@@ -906,12 +906,17 @@ fn host_short(name: &str) -> Option<&str> {
     common::host_native_id(short).map(|_| short)
 }
 
-/// Host natives write only buffers they are handed, and keep arguments
-/// only when they hand them to another thread, task or the collector.
+/// Host natives write only buffers they are handed, never a `readonly`
+/// one (a native that writes its buffer does not take one: `io::write`
+/// does), and keep arguments only when they hand them to another thread,
+/// task or the collector.
 fn host_use(body: &HirBody, short: &str, args: &[HirId], all: u64) -> ArgUse {
     let mut used = ArgUse::default();
     for (i, a) in args.iter().enumerate().take(64) {
         let ty = body.expr(*a).ty.as_ref();
+        if matches!(ty, Some(Ty::Readonly(_))) {
+            continue;
+        }
         if is_vec(ty) || matches!(ty, Some(Ty::Array { .. })) {
             used.written |= 1 << i;
         }

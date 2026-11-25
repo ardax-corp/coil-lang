@@ -187,14 +187,14 @@ trait Read<S> {
 /// ```
 trait Write<S> {
     /// Writes from `buf`; see `io::write`.
-    fn write(S s, Vec<byte> buf) -> Result<int, IoError> {}
+    fn write(S s, readonly Vec<byte> buf) -> Result<int, IoError> {}
 
     /// Waits until a `write` can make progress; see `io::wait_writable`.
     fn wait_writable(S s) -> Result<unit, IoError> {}
 
     /// Writes from `buf[offset]` on; see `io::write_from`. By default it
     /// writes a copy of that part.
-    fn write_from(S s, Vec<byte> buf, int offset) -> Result<int, IoError> {}
+    fn write_from(S s, readonly Vec<byte> buf, int offset) -> Result<int, IoError> {}
 
     /// Sends what the writer holds back; does nothing by default.
     fn flush(S s) -> Result<unit, IoError> {}
@@ -468,7 +468,7 @@ fn read(Stream s, Vec<byte> buf) -> Result<Option<int>, IoError> {}
 /// };
 /// assert!(n == 3);
 /// ```
-fn write(Stream s, Vec<byte> buf) -> Result<int, IoError> {}
+fn write(Stream s, readonly Vec<byte> buf) -> Result<int, IoError> {}
 
 /// Writes `buf[offset..]` to `s` without waiting and returns how many bytes were written.
 ///
@@ -490,7 +490,7 @@ fn write(Stream s, Vec<byte> buf) -> Result<int, IoError> {}
 /// };
 /// assert!(n == 6);
 /// ```
-fn write_from(Stream s, Vec<byte> buf, int offset) -> Result<int, IoError> {}
+fn write_from(Stream s, readonly Vec<byte> buf, int offset) -> Result<int, IoError> {}
 
 /// Waits until `s` is readable.
 ///
