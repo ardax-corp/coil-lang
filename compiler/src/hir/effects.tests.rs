@@ -1633,3 +1633,44 @@ fn main() {
     assert_eq!(uniques_in(src, "send_qualified"), (0, vec![]));
     assert_eq!(uniques_in(src, "main"), (0, vec![]));
 }
+
+// #2921: `io::Write` declares `write`'s and `write_from`'s buffer
+// `readonly`, so a generic writer call does not copy a shared buffer.
+#[test]
+fn a_shared_buffer_through_a_write_bound_is_not_copied() {
+    let src = "
+use io::{IoError, Write};
+shared class Sink {
+    pub n: int,
+}
+impl Write for Sink {
+    fn write(Sink s, Vec<byte> buf) -> Result<int, IoError> {
+        s.n += buf.len();
+        return Ok(buf.len());
+    }
+    fn wait_writable(Sink s) -> Result<unit, IoError> {
+        return Ok(());
+    }
+}
+fn put<W: Write>(W w, Vec<byte> buf) -> Result<int, IoError> {
+    let _ = w.write_from(buf, 1);
+    return w.write(buf);
+}
+fn main() {
+    let a: Vec<byte> = [1, 2, 3];
+    let b = a;
+    let s = new Sink(0);
+    let _ = put(s, b);
+    let _ = put(s, a);
+}
+";
+    let mut pipeline = crate::Pipeline::new();
+    pipeline.compile_src(src).expect("compile");
+    let copies: Vec<String> = pipeline
+        .messages()
+        .iter()
+        .filter(|m| m.code() == Some(reporting::ErrorCode::CowCopy))
+        .map(|m| m.message().to_string())
+        .collect();
+    assert!(copies.is_empty(), "{copies:?}");
+}
