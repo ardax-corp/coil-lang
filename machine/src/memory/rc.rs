@@ -497,6 +497,19 @@ impl Heap {
         stack.push(obj);
         let mut n = 0;
         while let Some(obj) = stack.pop() {
+            // The common case, an enum with a payload: its words released
+            // straight from their packed kinds, without the slot visitor.
+            if let Object::Enum(e) = obj
+                && obj.rc_count() == 0
+                && !e.as_ref().payload.is_empty()
+                && !self.pending_drop(obj)
+            {
+                self.rc_dec_payload(&e.as_ref().payload, &mut stack);
+                n += 1;
+                // SAFETY: as below.
+                unsafe { self.rc_free(obj) };
+                continue;
+            }
             if !self.rc_releasable(obj) {
                 // Its `drop` runs first, at the runtime's next safepoint.
                 if obj.rc_count() == 0 && (self.pending_drop(obj) || Self::close_owed(obj)) && !self.rc_due.contains(&obj.addr()) {
@@ -615,6 +628,23 @@ impl Heap {
         matches!(obj, Object::Coroutine(c) if c.as_ref().state == CoroState::Suspended && c.as_ref().started)
     }
 
+    /// Each object an enum payload's words name loses an owner; those that
+    /// reach zero go on `stack`. The words [`Self::rc_dec_children`] reads
+    /// for an enum.
+    #[inline(always)]
+    fn rc_dec_payload(&self, payload: &EnumPayload, stack: &mut Vec<Object>) {
+        let kinds = payload.kinds();
+        for (i, v) in payload.as_slice().iter().enumerate() {
+            let kind = common::packed_word_kind(kinds, i);
+            if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
+                && let Some(o) = self.rc_object(*v)
+                && self.rc_dec_obj(o)
+            {
+                stack.push(o);
+            }
+        }
+    }
+
     /// Each object `obj`'s words name loses an owner; those that reach zero
     /// go on `stack` ([`Self::rc_release`]'s worklist). A started
     /// coroutine's saved words are its frame's, which counted them itself;
@@ -626,6 +656,7 @@ impl Heap {
         }
         struct Dec<'a>(&'a Heap, &'a mut Vec<Object>);
         impl SlotVisitor for Dec<'_> {
+            #[inline(always)]
             fn word(&mut self, v: &Value, kind: u8) {
                 if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
                     && let Some(o) = self.0.rc_object(*v)
