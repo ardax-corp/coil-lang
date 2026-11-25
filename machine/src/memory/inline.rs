@@ -162,6 +162,8 @@ pub struct ProductSlots {
     pub kind_at: u32,
     pub kind: u8,
     pub enum_kind: u8,
+    /// An enum's `u32` tag.
+    pub enum_tag_at: u32,
     /// The storage's discriminant byte.
     pub storage_at: u32,
     /// Inline slots: the discriminant, the `u8` slot count and the words.
@@ -211,6 +213,7 @@ pub fn product_slots() -> ProductSlots {
         kind_at: off(&header, &header.kind) as u32,
         kind: KIND_INSTANCE,
         enum_kind: KIND_ENUM,
+        enum_tag_at: (enum_data + off(&variant, &variant.tag)) as u32,
         storage_at: storage as u32,
         inline_tag,
         inline_len_at: inline_len_at as u32,

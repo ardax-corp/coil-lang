@@ -5306,6 +5306,54 @@ impl<'a> Lower<'a> {
         self.product_load(s, index)
     }
 
+    /// Enum object `o`'s `tag | payload length << 32`, read in place, or
+    /// from `coil_native_enum_tag` for anything the inline read does not
+    /// know (`0`, another kind, another payload storage).
+    fn enum_tag_word(&mut self, o: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        let o = self.coerce(o, types::I64);
+        let l = machine::native::product_slots();
+        let flags = MemFlagsData::trusted();
+        let (kind, storage, inline, spill_test, spill, slow, done) = (
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+            self.b.create_block(),
+        );
+        self.b.append_block_param(done, types::I64);
+        self.b.ins().brif(o, kind, &[], slow, &[]);
+        self.b.switch_to_block(kind);
+        let k = self.b.ins().uload8(types::I64, flags, o, l.kind_at as i32);
+        let is_enum = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.enum_kind));
+        self.b.ins().brif(is_enum, storage, &[], slow, &[]);
+        self.b.switch_to_block(storage);
+        let tag = self.b.ins().uload32(flags, o, l.enum_tag_at as i32);
+        let st = self.b.ins().uload8(types::I64, flags, o, l.storage_at as i32);
+        let is_inline = self.b.ins().icmp_imm_s(IntCC::Equal, st, i64::from(l.inline_tag));
+        self.b.ins().brif(is_inline, inline, &[], spill_test, &[]);
+        self.b.switch_to_block(inline);
+        let len = self.b.ins().uload8(types::I64, flags, o, l.inline_len_at as i32);
+        let hi = self.b.ins().ishl_imm_u(len, 32);
+        let tl = self.b.ins().bor(tag, hi);
+        self.b.ins().jump(done, &[tl.into()]);
+        self.b.switch_to_block(spill_test);
+        let is_spill = self.b.ins().icmp_imm_s(IntCC::Equal, st, i64::from(l.spill_tag));
+        self.b.ins().brif(is_spill, spill, &[], slow, &[]);
+        self.b.switch_to_block(spill);
+        let len = self.b.ins().load(types::I64, flags, o, l.spill_len_at as i32);
+        let hi = self.b.ins().ishl_imm_u(len, 32);
+        let tl = self.b.ins().bor(tag, hi);
+        self.b.ins().jump(done, &[tl.into()]);
+        self.b.switch_to_block(slow);
+        let call = self.b.ins().call(self.enum_tag, &[o]);
+        let tl = self.b.inst_results(call)[0];
+        self.b.ins().jump(done, &[tl.into()]);
+        self.b.switch_to_block(done);
+        self.b.block_params(done)[0]
+    }
+
     /// Word `slot` of product object `o`, read in place
     /// ([`Self::product_slot`]). Only a compiler bug reads a slot of
     /// anything else, or past the object: that bails (a panic).
@@ -6008,8 +6056,7 @@ impl<'a> Lower<'a> {
                         // A boxed enum: `tag | payload length << 32`. A tag
                         // match with another payload width than the arm
                         // binds is left to the runtime.
-                        let call = self.b.ins().call(self.enum_tag, &[s]);
-                        let tl = self.b.inst_results(call)[0];
+                        let tl = self.enum_tag_word(s);
                         let not_enum = self.b.ins().icmp_imm_s(IntCC::Equal, tl, -1);
                         self.bail_if(not_enum, TRAP_HELPER);
                         let low = self.b.ins().band_imm_u(tl, 0xffff_ffff);
