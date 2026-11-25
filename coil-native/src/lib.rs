@@ -4909,6 +4909,63 @@ impl<'a> Lower<'a> {
                 let zero = self.b.ins().iconst(types::I64, 0);
                 self.set(f, *dest, zero);
             }
+            // A write's copy test: only a class instance or an array marked
+            // shared may need a copy (`Heap::cow_unique` copies it when its
+            // count is above one too), so a word that names anything else, or
+            // an object not marked, skips the helper. For a field, the test
+            // reads the field's word in place when the object is an instance
+            // whose slots native code can address; otherwise the helper.
+            MirInst::Cow { dest, src, unique: true, field } => {
+                let s = self.get(f, *src);
+                let s = self.coerce(s, types::I64);
+                let t = MemFlagsData::trusted();
+                let (call_b, done) = (self.b.create_block(), self.b.create_block());
+                let word = self.b.append_block_param(done, types::I64);
+                let tested = match field {
+                    Some(i) => {
+                        let (fast, slow) = self.product_slot(s, *i, true);
+                        self.b.switch_to_block(slow);
+                        self.b.ins().jump(call_b, &[]);
+                        self.b.switch_to_block(fast);
+                        let at = self.b.block_params(fast)[0];
+                        self.b.ins().load(types::I64, t, at, 0)
+                    }
+                    None => s,
+                };
+                let (object, plain) = self.maybe_object(tested);
+                self.b.switch_to_block(plain);
+                self.b.ins().jump(done, &[s.into()]);
+                self.b.switch_to_block(object);
+                let o = self.b.ins().band_imm_u(tested, !1i64);
+                let k = self.b.ins().uload8(types::I64, t, o, machine::HEADER_KIND_OFFSET);
+                let inst = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_INSTANCE));
+                let arr = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(machine::KIND_ARRAY));
+                let either = self.b.ins().bor(inst, arr);
+                let flag_b = self.b.create_block();
+                self.b.ins().brif(either, flag_b, &[], done, &[s.into()]);
+                self.b.switch_to_block(flag_b);
+                let bits = self.b.ins().uload8(types::I64, t, o, machine::HEADER_FLAGS_OFFSET);
+                let shared = self.b.ins().band_imm_u(bits, i64::from(machine::FLAG_SHARED));
+                self.b.ins().brif(shared, call_b, &[], done, &[s.into()]);
+                self.b.set_cold_block(call_b);
+                self.b.switch_to_block(call_b);
+                let call = match field {
+                    Some(i) => {
+                        let i = self.b.ins().iconst(types::I64, i64::from(*i));
+                        self.b.ins().call(self.cow_field, &[self.ctx, s, i])
+                    }
+                    None => {
+                        let u = self.b.ins().iconst(types::I64, 1);
+                        self.b.ins().call(self.cow, &[self.ctx, s, u])
+                    }
+                };
+                let w = self.b.inst_results(call)[0];
+                self.bail_on_helper();
+                self.b.ins().jump(done, &[w.into()]);
+                self.b.switch_to_block(done);
+                self.set_word(f, *dest, word);
+                self.view_of(f, *dest);
+            }
             MirInst::Cow { dest, src, unique, field } => {
                 let s = self.get(f, *src);
                 let s = self.coerce(s, types::I64);
