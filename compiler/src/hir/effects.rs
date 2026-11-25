@@ -452,12 +452,18 @@ impl ProgramEffects {
     /// its fixed point. `None` (unknown) where that view needs more.
     fn call_summary(&self, checker: &Checker, module_path: &str, body: &HirBody, callee: &Callee, args: &[HirId]) -> Option<Summary> {
         match callee {
-            Callee::Named { name, def, .. } => self.named_summary(checker, module_path, name, *def),
+            Callee::Named { name, def, .. } => self.named_summary(checker, module_path, name, *def).or_else(|| {
+                // `Trait::m(p)` on a value of a type parameter's type.
+                let method = name.rsplit("::").next().unwrap_or(name);
+                bound_call_summary(checker, body, *args.first()?, method, true)
+            }),
             Callee::Method { name } => {
                 let recv = body.expr(*args.first()?);
                 let ty = recv.ty.as_ref();
-                if matches!(ty.map(crate::typechecking::ty::strip_readonly), Some(Ty::Existential { .. })) {
-                    return None;
+                match ty.map(crate::typechecking::ty::strip_readonly) {
+                    Some(Ty::Existential { class }) => return trait_mutates(checker, Some(class), name).map(trait_call_summary),
+                    Some(Ty::Var(_)) => return bound_call_summary(checker, body, args[0], name, false),
+                    _ => {}
                 }
                 let owner = checker.class_owner_at_span(recv.span).or_else(|| class_of(ty).map(str::to_string))?;
                 let key = format!("{owner}::{name}");
@@ -1841,6 +1847,95 @@ fn class_of(ty: Option<&Ty>) -> Option<&str> {
     }
 }
 
+/// The parameters of trait method `trait_name::method` that its trait
+/// does not declare `readonly`: what a call through the trait may change,
+/// as every impl keeps to the trait's `readonly` parameters (#2845).
+fn trait_method_mutates(checker: &Checker, trait_name: &str, method: &str) -> u64 {
+    let arity = checker.typeclass_method_scheme(trait_name, method).map_or(64, |s| {
+        let mut n = 0;
+        let mut ty = &s.ty;
+        while let Ty::Fun(_, r) = ty {
+            n += 1;
+            ty = r;
+        }
+        n
+    });
+    let all = if arity >= 64 { u64::MAX } else { (1u64 << arity) - 1 };
+    all & !checker.trait_readonly_params(trait_name, method)
+}
+
+/// What a call of trait method `method` of `trait_name` (of every trait
+/// with that method, when not given) mutates, whether or not the trait
+/// declares its effects. `None` when no such trait has it.
+fn trait_mutates(checker: &Checker, trait_name: Option<&str>, method: &str) -> Option<u64> {
+    let mut found = None;
+    for (name, def) in checker.generics().typeclasses.iter() {
+        if trait_name.is_none_or(|t| short_name(t) == short_name(name)) && def.methods.iter().any(|m| m.name == method) {
+            found = Some(found.unwrap_or(0) | trait_method_mutates(checker, name, method));
+        }
+    }
+    found
+}
+
+/// What a call through a trait may do that changes the parameters in
+/// `mutates` (the ones the trait does not declare `readonly`): code not
+/// known here otherwise.
+fn trait_call_summary(mutates: u64) -> Summary {
+    Summary {
+        flags: UNKNOWN,
+        visible: UNKNOWN,
+        latent: 0,
+        dispatch: Dispatch::default(),
+        mutates,
+        statics: true,
+        param_only: 0,
+        escapes: u64::MAX,
+        keeps: 0,
+        returns_arg: 0,
+        returns_inner: 0,
+        opaque_args: u64::MAX,
+        returns: u64::MAX,
+        shared_ret: true,
+    }
+}
+
+/// What the call in `body` of trait method `method` on `recv`, a value of a
+/// type parameter's type, may do ([`trait_call_summary`]): it changes what
+/// the receiver's bound does not declare `readonly`, or, with no bound
+/// recorded for the call, what some trait with that method does not.
+/// `None` when `recv` is not such a value or no trait has `method`, or,
+/// with `bound`, when the checker recorded no bound for the call (a
+/// function call that is no trait method's).
+fn bound_call_summary(checker: &Checker, body: &HirBody, recv: HirId, method: &str, bound: bool) -> Option<Summary> {
+    if !matches!(body.expr(recv).ty.as_ref().map(crate::typechecking::ty::strip_readonly), Some(Ty::Var(_))) {
+        return None;
+    }
+    let call = (0..body.exprs.len()).map(|i| HirId(i as u32)).find(|&id| {
+        matches!(&body.expr(id).kind, HirKind::Call { args, .. } if args.first() == Some(&recv))
+    });
+    let class = call.and_then(|at| bound_trait(checker, body, at, recv));
+    if bound && class.is_none() {
+        return None;
+    }
+    trait_mutates(checker, class, method).map(trait_call_summary)
+}
+
+/// The trait whose method the call `at` runs on `recv`, when `recv` is a
+/// value of a type parameter's type: the bound (or its superclass) the
+/// checker dispatched the call through, so that another trait's method of
+/// the same name does not come into it (#2921).
+fn bound_trait<'c>(checker: &'c Checker, body: &HirBody, at: HirId, recv: HirId) -> Option<&'c str> {
+    if !matches!(body.expr(recv).ty.as_ref().map(crate::typechecking::ty::strip_readonly), Some(Ty::Var(_))) {
+        return None;
+    }
+    let e = body.expr(at);
+    let call = e
+        .node
+        .and_then(|n| checker.bound_method_call_at(n))
+        .or_else(|| checker.bound_method_call_for_span(e.span.0, e.span.1))?;
+    Some(call.class.as_str())
+}
+
 struct Cx<'a> {
     module: &'a HirModule,
     checker: &'a Checker,
@@ -2172,7 +2267,9 @@ impl Cx<'_> {
             } else {
                 format!("Cannot pass a `readonly` value to `{shown}`: it mutates {param}{because}")
             };
-            let help = if trait_decl {
+            let help = if trait_decl && j != 0 {
+                format!("a trait method may be passed a `readonly` value only where its trait declares that parameter `readonly` (`fn {what}(A self, readonly B b)`)")
+            } else if trait_decl {
                 format!(
                     "a trait method may be called on a `readonly` value only when the trait declares that parameter `readonly` (`fn {what}(readonly A self)`)"
                 )
@@ -2682,9 +2779,20 @@ impl Cx<'_> {
                 }
                 let host = callee.is_none() && self.known_named(w, name, *def).is_none();
                 let trait_decl = host && self.is_trait_method(name);
+                let (owner, method) = name.rsplit_once("::").map_or((None, name.as_str()), |(o, m)| (Some(o), m));
+                // `Trait::m(p)` on a value of a type parameter's type costs
+                // what the bound the checker dispatched it through declares,
+                // as `p.m()`, never another trait's `m`.
+                let bound = args.first().filter(|_| trait_decl).and_then(|&recv| self.bound_trait(w, at, recv));
+                let owner = bound.or(owner);
+                if let Some(class) = bound {
+                    match self.trait_method(Some(class), method) {
+                        Some(declared) => s = declared,
+                        None => s.mutates = self.trait_mutates(Some(class), method).unwrap_or(s.mutates),
+                    }
+                }
                 // `Trait::m(p)` with an undeclared `m`, on a parameter of a
                 // type parameter's type: as `p.m()`, the call site's impl.
-                let (owner, method) = name.rsplit_once("::").map_or((None, name.as_str()), |(o, m)| (Some(o), m));
                 let dispatch = args
                     .first()
                     .filter(|_| trait_decl && self.trait_method(owner, method).is_none())
@@ -2753,7 +2861,7 @@ impl Cx<'_> {
                         // A trait method whose trait leaves its effects
                         // undeclared still says which parameters it keeps
                         // `readonly`.
-                        if let Some((mutates, callee)) = self.trait_call_mutates(w, recv, name) {
+                        if let Some((mutates, callee)) = self.trait_call_mutates(w, at, recv, name) {
                             let trait_decl = callee.is_none();
                             self.call_mutates(w, at, &shown, mutates, callee, Some(&shown), args, trait_decl);
                         }
@@ -3059,7 +3167,7 @@ impl Cx<'_> {
         }
         // A call through the trait mutates every parameter the trait does
         // not declare `readonly` (#1558).
-        let mutates = full.iter().fold(0u64, |m, t| m | self.trait_method_mutates(t, method));
+        let mutates = full.iter().fold(0u64, |m, t| m | trait_method_mutates(self.checker, t, method));
         let traits: Vec<String> = full.iter().map(|n| short(n)).collect();
         let mut visible = EffectFlags::empty();
         for t in &traits {
@@ -3096,22 +3204,26 @@ impl Cx<'_> {
     /// What a call of trait method `method` (of `trait_name` only, when
     /// given) mutates, whether or not the trait declares its effects.
     fn trait_mutates(&self, trait_name: Option<&str>, method: &str) -> Option<u64> {
-        let short = |n: &str| short_name(n).to_string();
-        let mut found = None;
-        for (name, def) in self.checker.generics().typeclasses.iter() {
-            if trait_name.is_none_or(|t| short(t) == short(name)) && def.methods.iter().any(|m| m.name == method) {
-                found = Some(found.unwrap_or(0) | self.trait_method_mutates(name, method));
-            }
-        }
-        found
+        trait_mutates(self.checker, trait_name, method)
+    }
+
+    /// The trait whose method the call `at` runs on `recv`, when `recv` is
+    /// a value of a type parameter's type: the bound the checker
+    /// dispatched it through ([`bound_trait`]).
+    fn bound_trait(&self, w: &Walk<'_>, at: HirId, recv: HirId) -> Option<&str> {
+        bound_trait(self.checker, &self.module.bodies[w.index], at, recv)
     }
 
     /// What `recv.name()` mutates when it dispatches through a trait: the
     /// impl body's own summary on a concrete receiver whose impl was seen,
-    /// else what the trait declares.
-    fn trait_call_mutates(&self, w: &Walk<'_>, recv: HirId, name: &str) -> Option<(u64, Option<usize>)> {
+    /// else what the trait declares: the receiver's bound's, on a value of
+    /// a type parameter's type.
+    fn trait_call_mutates(&self, w: &Walk<'_>, at: HirId, recv: HirId, name: &str) -> Option<(u64, Option<usize>)> {
         let e = self.module.bodies[w.index].expr(recv);
         if let Some(Ty::Existential { class }) = e.ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+            return self.trait_mutates(Some(class), name).map(|m| (m, None));
+        }
+        if let Some(class) = self.bound_trait(w, at, recv) {
             return self.trait_mutates(Some(class), name).map(|m| (m, None));
         }
         let owner = self.checker.class_owner_at_span(e.span).or_else(|| class_of(e.ty.as_ref()).map(str::to_string));
@@ -3121,22 +3233,6 @@ impl Cx<'_> {
             return Some(found);
         }
         self.trait_mutates(None, name).map(|m| (m, None))
-    }
-
-    /// The parameters of trait method `trait_name::method` that its trait
-    /// does not declare `readonly`.
-    fn trait_method_mutates(&self, trait_name: &str, method: &str) -> u64 {
-        let arity = self.checker.typeclass_method_scheme(trait_name, method).map_or(64, |s| {
-            let mut n = 0;
-            let mut ty = &s.ty;
-            while let Ty::Fun(_, r) = ty {
-                n += 1;
-                ty = r;
-            }
-            n
-        });
-        let all = if arity >= 64 { u64::MAX } else { (1u64 << arity) - 1 };
-        all & !self.checker.trait_readonly_params(trait_name, method)
     }
 
     /// Whether `name` (`m`, `Trait::m`) names a trait method.
@@ -3447,6 +3543,10 @@ impl Cx<'_> {
         let body = &self.module.bodies[w.index];
         let e = body.expr(recv);
         if let Some(Ty::Existential { class }) = e.ty.as_ref().map(crate::typechecking::ty::strip_readonly) {
+            return self.trait_method(Some(class), name).map(|s| (s, None));
+        }
+        // On a value of a type parameter's type: what its bound declares.
+        if let Some(class) = at.and_then(|at| self.bound_trait(w, at, recv)) {
             return self.trait_method(Some(class), name).map(|s| (s, None));
         }
         let owner = self
