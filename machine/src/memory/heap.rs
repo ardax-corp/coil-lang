@@ -586,8 +586,11 @@ impl Heap {
         if self.epoch_rc.is_empty() {
             return;
         }
-        let mut delta: HashMap<u64, i64> = HashMap::new();
-        for w in std::mem::take(&mut self.epoch_rc) {
+        // An address hash (no SipHash), sized for the log up front.
+        let mut log = std::mem::take(&mut self.epoch_rc);
+        let mut delta: HashMap<u64, i64, super::addr_hash::AddrHashBuilder> =
+            HashMap::with_capacity_and_hasher(log.len() / 2, Default::default());
+        for &w in &log {
             *delta.entry(w & !1).or_default() += if w & 1 == 0 { 1 } else { -1 };
         }
         let mut zero = Vec::new();
@@ -608,6 +611,8 @@ impl Heap {
                 zero.push(addr);
             }
         }
+        log.clear();
+        self.epoch_rc = log;
         if self.rc_frees() {
             self.rc_pending.get_mut().extend(zero);
             self.rc_release_pending();
