@@ -4580,6 +4580,7 @@ impl<'a> Lower<'a> {
                     let t = MemFlagsData::trusted();
                     let (kind_b, words_b, room_b, fast, slow, join) =
                         (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+                    let (bytes_b, byte_fits, bytes_fast) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
                     self.b.ins().brif(a, kind_b, &[], slow, &[]);
                     self.b.switch_to_block(kind_b);
                     let k = self.b.ins().uload8(types::I64, t, a, l.kind_at as i32);
@@ -4588,7 +4589,35 @@ impl<'a> Lower<'a> {
                     self.b.switch_to_block(words_b);
                     let tag = self.b.ins().uload8(types::I64, t, a, l.data_at as i32);
                     let is = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.words_tag));
-                    self.b.ins().brif(is, room_b, &[], slow, &[]);
+                    self.b.ins().brif(is, room_b, &[], bytes_b, &[]);
+                    // Packed bytes: a value that fits a byte goes in place
+                    // when there is room. Byte storage has no word view and
+                    // holds no references, so only the new name's view is
+                    // taken again at its next access.
+                    self.b.switch_to_block(bytes_b);
+                    let is = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.bytes_tag));
+                    let small = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, v, 255);
+                    let ok = self.b.ins().band(is, small);
+                    self.b.ins().brif(ok, byte_fits, &[], slow, &[]);
+                    self.b.switch_to_block(byte_fits);
+                    let blen = self.b.ins().load(types::I64, t, a, l.bytes_len_at as i32);
+                    let bcap = self.b.ins().load(types::I64, t, a, l.bytes_cap_at as i32);
+                    let room = self.b.ins().icmp(IntCC::UnsignedLessThan, blen, bcap);
+                    self.b.ins().brif(room, bytes_fast, &[], slow, &[]);
+                    self.b.switch_to_block(bytes_fast);
+                    let bptr = self.b.ins().load(types::I64, t, a, l.bytes_ptr_at as i32);
+                    let at = self.b.ins().iadd(bptr, blen);
+                    self.b.ins().istore8(t, v, at, 0);
+                    let bn = self.b.ins().iadd_imm_s(blen, 1);
+                    self.b.ins().store(t, bn, a, l.bytes_len_at as i32);
+                    self.set(f, *dest, a);
+                    if *dest != *array
+                        && let Some(&(ok, _, _)) = self.views.get(dest)
+                    {
+                        let unknown = self.b.ins().iconst(types::I64, VIEW_UNKNOWN);
+                        self.b.def_var(ok, unknown);
+                    }
+                    self.b.ins().jump(join, &[]);
                     self.b.switch_to_block(room_b);
                     let len = self.b.ins().load(types::I64, t, a, l.len_at as i32);
                     let cap = self.b.ins().load(types::I64, t, a, l.cap_at as i32);
