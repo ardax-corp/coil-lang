@@ -11,6 +11,11 @@
 //! effects, which are none: each instance of a generic function gets the
 //! effects of the functions it is passed, without a copy per instance.
 //!
+//! A generic function's calls of trait methods on its type-parameter
+//! parameters stay open the same way (`dispatch`): `fn put<W: Write>(W w)`
+//! calling `w.write(..)` has the effects of the `Write` impl of the type a
+//! call site passes for `w`, which that call site looks up.
+//!
 //! Summaries are solved per module to a fixed point and kept for the whole
 //! program in [`ProgramEffects`] (modules compile in dependency order), so
 //! a call into an earlier module sees the callee's summary.
@@ -55,6 +60,12 @@ pub struct Summary {
     /// Bit `i`: the body calls its parameter `i` (a function value), so a
     /// call also has the effects of the function passed there.
     pub latent: u64,
+    /// The trait methods the body calls on its parameters of a type
+    /// parameter's type (`w.write(..)` on `W w`), itself or through a
+    /// callee, as an interned set of `(parameter, method)` ([`Dispatch`]):
+    /// a call also has the effects of the impls of those methods for the
+    /// types passed there.
+    pub dispatch: Dispatch,
     /// Bit `i`: the body may change what its parameter `i` reaches (a
     /// field, an element, a `Vec`), itself or through a callee. A
     /// `readonly` argument there is E0107.
@@ -130,15 +141,87 @@ fn open_mode_summary(body: &HirBody, name: &str, args: &[HirId], s: Summary) -> 
     }
 }
 
+/// An interned set of `(parameter, trait method)` calls a body makes on
+/// its parameters of a type parameter's type ([`Summary::dispatch`]).
+/// Interned so that [`Summary`] stays `Copy` and every lookup of a
+/// callee's summary carries the set along; the empty set is the default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dispatch(u32);
+
+/// The sets [`Dispatch`] ids name, the empty one first.
+struct DispatchSets {
+    sets: Vec<std::sync::Arc<[(u32, String)]>>,
+    ids: HashMap<std::sync::Arc<[(u32, String)]>, u32>,
+}
+
+static DISPATCH_SETS: std::sync::LazyLock<std::sync::Mutex<DispatchSets>> = std::sync::LazyLock::new(|| {
+    let empty: std::sync::Arc<[(u32, String)]> = std::sync::Arc::from(Vec::new());
+    std::sync::Mutex::new(DispatchSets {
+        sets: vec![empty.clone()],
+        ids: HashMap::from([(empty, 0)]),
+    })
+});
+
+impl Dispatch {
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The `(parameter, method)` pairs, sorted.
+    pub fn calls(self) -> std::sync::Arc<[(u32, String)]> {
+        let sets = DISPATCH_SETS.lock().unwrap_or_else(|e| e.into_inner());
+        sets.sets[self.0 as usize].clone()
+    }
+
+    fn intern(mut calls: Vec<(u32, String)>) -> Self {
+        calls.sort_unstable();
+        calls.dedup();
+        let calls: std::sync::Arc<[(u32, String)]> = calls.into();
+        let mut sets = DISPATCH_SETS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(&id) = sets.ids.get(&calls) {
+            return Self(id);
+        }
+        let id = u32::try_from(sets.sets.len()).expect("dispatch sets fit in u32");
+        sets.sets.push(calls.clone());
+        sets.ids.insert(calls, id);
+        Self(id)
+    }
+
+    fn union(self, other: Self) -> Self {
+        if other.is_empty() || self == other {
+            return self;
+        }
+        if self.is_empty() {
+            return other;
+        }
+        Self::intern(self.calls().iter().chain(other.calls().iter()).cloned().collect())
+    }
+
+    fn with(self, param: u32, method: &str) -> Self {
+        let calls = self.calls();
+        if calls.iter().any(|(p, m)| *p == param && m == method) {
+            return self;
+        }
+        Self::intern(calls.iter().cloned().chain([(param, method.to_string())]).collect())
+    }
+}
+
 impl Summary {
     /// Pure whatever it is passed.
     pub fn is_pure(self) -> bool {
-        self.flags.is_pure() && self.latent == 0
+        self.flags.is_pure() && !self.depends_on_args()
     }
 
     /// Never changes the length of an array or `Vec`, whatever it is passed.
     pub fn is_steady(self) -> bool {
-        self.latent == 0 && !self.flags.contains(EffectFlags::RESIZE | EffectFlags::YIELD)
+        !self.depends_on_args() && !self.flags.contains(EffectFlags::RESIZE | EffectFlags::YIELD)
+    }
+
+    /// A call also has effects that depend on what it is passed: the
+    /// functions it calls among its parameters (`latent`), or the impls of
+    /// the trait methods it calls on them (`dispatch`).
+    pub fn depends_on_args(self) -> bool {
+        self.latent != 0 || !self.dispatch.is_empty()
     }
 
     /// What a call costs that runs this body or `other`, the caller not
@@ -148,6 +231,7 @@ impl Summary {
             flags: self.flags.union(other.flags),
             visible: self.visible.union(other.visible),
             latent: self.latent | other.latent,
+            dispatch: self.dispatch.union(other.dispatch),
             mutates: self.mutates | other.mutates,
             statics: self.statics || other.statics,
             // Discharged only where both bodies' bits are.
@@ -170,6 +254,7 @@ impl Summary {
             flags,
             visible: EffectFlags::from_bits(flags.bits() & !hidden),
             latent: 0,
+            dispatch: Dispatch::default(),
             mutates: 0,
             statics: false,
             param_only: 0,
@@ -1095,12 +1180,15 @@ impl<'a> ModuleEffects<'a> {
         if self.summaries[index].latent != 0 {
             parts.push("calls a parameter".into());
         }
+        if !self.summaries[index].dispatch.is_empty() {
+            parts.push("calls a trait method on a parameter".into());
+        }
         parts.join("; ")
     }
 
     pub fn describe(&self, index: usize) -> String {
         let s = self.summaries[index];
-        if s.visible.is_pure() && s.latent == 0 {
+        if s.visible.is_pure() && !s.depends_on_args() {
             return "pure".into();
         }
         let body = &self.cx.module.bodies[index];
@@ -1114,6 +1202,11 @@ impl<'a> ModuleEffects<'a> {
         for (i, p) in body.params.iter().enumerate().take(64) {
             if s.latent & (1 << i) != 0 {
                 parts.push(format!("calls parameter `{}`", body.local(*p).name));
+            }
+        }
+        for (i, m) in s.dispatch.calls().iter() {
+            if let Some(p) = body.params.get(*i as usize) {
+                parts.push(format!("calls `.{m}()` on parameter `{}`", body.local(*p).name));
             }
         }
         for (i, p) in body.params.iter().enumerate().take(64) {
@@ -1327,8 +1420,11 @@ impl<'a> ModuleEffects<'a> {
             return Some(format!("{} ({})", cause.what, names.join(", ")));
         }
         let body = &self.cx.module.bodies[index];
-        let i = (0..64).find(|i| s.latent & (1 << i) != 0)?;
-        Some(format!("calls parameter `{}`", body.local(body.params[i]).name))
+        if let Some(i) = (0..64).find(|i| s.latent & (1 << i) != 0) {
+            return Some(format!("calls parameter `{}`", body.local(body.params[i]).name));
+        }
+        let (i, m) = s.dispatch.calls().first().cloned()?;
+        Some(format!("calls `.{m}()` on parameter `{}`", body.local(*body.params.get(i as usize)?).name))
     }
 }
 
@@ -2584,9 +2680,19 @@ impl Cx<'_> {
                 if callee.is_none() {
                     s = open_mode_summary(body, name, args, s);
                 }
-                self.apply(w, at, name, s, callee, args);
                 let host = callee.is_none() && self.known_named(w, name, *def).is_none();
                 let trait_decl = host && self.is_trait_method(name);
+                // `Trait::m(p)` with an undeclared `m`, on a parameter of a
+                // type parameter's type: as `p.m()`, the call site's impl.
+                let (owner, method) = name.rsplit_once("::").map_or((None, name.as_str()), |(o, m)| (Some(o), m));
+                let dispatch = args
+                    .first()
+                    .filter(|_| trait_decl && self.trait_method(owner, method).is_none())
+                    .and_then(|&recv| self.dispatch_param(w, recv));
+                match dispatch {
+                    Some(i) => w.out.dispatch = w.out.dispatch.with(i, method),
+                    None => self.apply(w, at, name, s, callee, args),
+                }
                 // `Trait::m(p)` on a concrete receiver runs its impl, whose
                 // body says what it mutates, as `p.m()` (#1647).
                 if trait_decl && let Some((mutates, impl_body)) = self.named_instance_mutates(w, at, name, args) {
@@ -2627,15 +2733,23 @@ impl Cx<'_> {
                         let trait_decl = callee.is_none() && self.method_is_trait_dispatch(w, recv, name);
                         self.call_mutates(w, at, &shown, s.mutates, callee, Some(&shown), args, trait_decl);
                     }
-                    // As the AST walk: an unresolved method is unknown code,
-                    // but `len` / `capacity` cannot resize.
                     None => {
-                        let bits = if matches!(name.as_str(), "len" | "capacity") {
-                            EffectFlags::UNKNOWN
-                        } else {
-                            EffectFlags::UNKNOWN | EffectFlags::RESIZE
-                        };
-                        self.note(w, at, bits, || format!("calls `{shown}`, which this analysis does not resolve"));
+                        match self.dispatch_param(w, recv) {
+                            // On a parameter of a type parameter's type: the
+                            // impl of the type a call site passes there.
+                            Some(i) => w.out.dispatch = w.out.dispatch.with(i, name),
+                            // As the AST walk: an unresolved method is
+                            // unknown code, but `len` / `capacity` cannot
+                            // resize.
+                            None => {
+                                let bits = if matches!(name.as_str(), "len" | "capacity") {
+                                    EffectFlags::UNKNOWN
+                                } else {
+                                    EffectFlags::UNKNOWN | EffectFlags::RESIZE
+                                };
+                                self.note(w, at, bits, || format!("calls `{shown}`, which this analysis does not resolve"));
+                            }
+                        }
                         // A trait method whose trait leaves its effects
                         // undeclared still says which parameters it keeps
                         // `readonly`.
@@ -2700,6 +2814,11 @@ impl Cx<'_> {
             .all(|a| !matches!(body.expr(*a).kind, HirKind::Named { .. } | HirKind::Spread(_)));
         let (callee_cost, through) = self.owned_discharge(w, callee, args, positional);
         self.record(w, at, callee_cost, through, link, || format!("calls `{shown}`"));
+        if !callee.dispatch.is_empty() {
+            for (i, m) in callee.dispatch.calls().iter() {
+                self.dispatch_call(w, at, shown, *i, m, args, positional);
+            }
+        }
         if callee.latent == 0 {
             return;
         }
@@ -2719,7 +2838,7 @@ impl Cx<'_> {
             match self.fn_value(w, arg) {
                 // A function that calls its own function parameters gets
                 // arguments this call site does not see.
-                Some(s) if s.latent == 0 => {
+                Some(s) if !s.depends_on_args() => {
                     let index = w.index;
                     let passed = || {
                         Some(Called {
@@ -2732,6 +2851,91 @@ impl Cx<'_> {
                 _ => self.note(w, arg, UNKNOWN.bits(), || format!("passes `{shown}` a function it cannot resolve")),
             }
         }
+    }
+
+    /// The parameter `recv` reads, when it is one of the walked body's
+    /// parameters of a type parameter's type: a trait method called on it
+    /// runs the impl of the type a call site passes there.
+    fn dispatch_param(&self, w: &Walk<'_>, recv: HirId) -> Option<u32> {
+        let ty = self.module.bodies[w.index].expr(recv).ty.as_ref();
+        if !matches!(ty.map(crate::typechecking::ty::strip_readonly), Some(Ty::Var(_))) {
+            return None;
+        }
+        self.param_index(w.index, recv)
+    }
+
+    /// Fold into `w` what the call `at` of `shown` costs through the trait
+    /// method `m` the callee calls on its parameter `i` ([`Summary::dispatch`]):
+    /// the impl for the type passed there, or this body's own dispatch when
+    /// that is its parameter of a type parameter's type again.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_call(&self, w: &mut Walk<'_>, at: HirId, shown: &str, i: u32, m: &str, args: &[HirId], positional: bool) {
+        let Some(arg) = args.get(i as usize).copied().filter(|_| positional) else {
+            self.note(w, at, UNKNOWN.bits(), || format!("calls `{shown}`, whose `.{m}()` on what it is passed this analysis does not resolve"));
+            return;
+        };
+        if let Some(j) = self.dispatch_param(w, arg) {
+            w.out.dispatch = w.out.dispatch.with(j, m);
+            return;
+        }
+        match self.dispatch_impl(w, at, arg, m) {
+            Some((s, called)) => self.record(w, at, s, 0, || Some(called), || format!("calls `{shown}`, which calls `.{m}()`")),
+            None => self.note(w, at, UNKNOWN.bits(), || {
+                format!("calls `{shown}`, whose `.{m}()` on what it is passed this analysis does not resolve")
+            }),
+        }
+    }
+
+    /// What `.m()` costs on the value `arg` the call `at` passes, and the
+    /// impl body that says so: the impls of `m` for `arg`'s type among the
+    /// instances the checker picked for the call, joined. `None` (unknown)
+    /// when the call has no such instance, one of them runs a default or a
+    /// builtin body, a bound reaches another trait's `m` through its
+    /// superclasses, or an impl's own effects depend on what it is passed.
+    fn dispatch_impl(&self, w: &Walk<'_>, at: HirId, arg: HirId, m: &str) -> Option<(Summary, Called)> {
+        let body = &self.module.bodies[w.index];
+        let owner = class_of(body.expr(arg).ty.as_ref())?;
+        let of_owner: Vec<&crate::typechecking::generics::InstanceDef> =
+            self.call_dicts(body, at)?.iter().filter(|inst| class_of(inst.args.first()) == Some(owner)).collect();
+        // Every trait among the bounds and their superclasses that has an
+        // `m` must have its instance here: the callee's `.m()` may be any
+        // of theirs.
+        let traits = &self.checker.generics().typeclasses;
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut stack: Vec<&str> = of_owner.iter().map(|inst| inst.class.as_str()).collect();
+        while let Some(t) = stack.pop() {
+            if !seen.insert(short_name(t)) {
+                continue;
+            }
+            let def = traits.get(t).or_else(|| traits.iter().find(|(n, _)| short_name(n) == short_name(t)).map(|(_, d)| d))?;
+            if def.methods.iter().any(|d| d.name == m)
+                && !of_owner.iter().any(|inst| short_name(&inst.class) == short_name(t) && inst.method_fqns.contains_key(m))
+            {
+                return None;
+            }
+            stack.extend(def.superclasses.iter().map(String::as_str));
+        }
+        let mut out: Option<(Summary, Called)> = None;
+        for inst in of_owner {
+            let Some(fqn) = inst.method_fqns.get(m) else { continue };
+            let (s, called) = if inst.defined_module == self.module_path {
+                let i = *self.module.instance_fns.get(fqn)?;
+                let name = &self.module.bodies[i].name;
+                let shown = local_name(self.module_path, name).unwrap_or(name).to_string();
+                (w.summaries[i], Called { name: shown, body: Some(i) })
+            } else {
+                let (name, s) = self.program.instance_body(&inst.defined_module, fqn)?;
+                (s, Called { name: name.to_string(), body: None })
+            };
+            if s.depends_on_args() {
+                return None;
+            }
+            out = Some(match out {
+                Some((o, first)) => (o.join(s), first),
+                None => (s, called),
+            });
+        }
+        out
     }
 
     /// What a call of `callee` costs here, and which of that comes only
@@ -2872,6 +3076,7 @@ impl Cx<'_> {
             flags: visible.union(UNKNOWN),
             visible,
             latent: 0,
+            dispatch: Dispatch::default(),
             mutates,
             // An impl may reach a static wherever its declaration allows
             // reads or writes.

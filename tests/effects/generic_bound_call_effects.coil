@@ -1,0 +1,67 @@
+// A call of a generic function at concrete types has the effects of the impl
+// methods it runs there, as a higher-order function's call has those of the
+// function it is passed. `put` calls `.write_from()` on its `W: Write`
+// parameter: passed `stdout()`, that is `Stream`'s impl, which writes and may
+// wait, so a caller declares `uses {write, suspend}` and no more.
+use tests::assert;
+use io::{stdout, Write, IoError};
+use string::to_bytes;
+
+fn put<W: Write>(W w, Vec<byte> buf) -> Result<int, IoError> {
+    return w.write_from(buf, 0);
+}
+
+// A generic function passing its own type parameter on: the caller of
+// `put_twice` pays for `put`'s `.write_from()` at its own type.
+fn put_twice<W: Write>(W w, Vec<byte> buf) -> Result<int, IoError> {
+    let _ = put(w, buf);
+    return put(w, buf);
+}
+
+fn say(string s) uses {write, suspend} {
+    let _ = put(stdout(), to_bytes(s));
+}
+
+fn say_twice(string s) uses {write, suspend} {
+    let _ = put_twice(stdout(), to_bytes(s));
+}
+
+// A writer that only counts: through it, the generic call has no effects.
+class Counter {
+    pub n: int,
+}
+
+impl Write for Counter {
+    fn write(Counter c, Vec<byte> buf) -> Result<int, IoError> {
+        return Ok(buf.len());
+    }
+
+    fn wait_writable(Counter c) -> Result<unit, IoError> {
+        return Ok(());
+    }
+}
+
+fn send<W: Write>(W w, Vec<byte> buf) -> Result<int, IoError> {
+    return w.write(buf);
+}
+
+fn counted(string s) -> int uses {} {
+    match send(new Counter(0), to_bytes(s)) {
+        Ok(n) => {
+            return n;
+        },
+        Err(_) => {
+            return -1;
+        },
+    }
+}
+
+test("a generic writer call takes the effects of stdout's impl") {
+    say("");
+    say_twice("");
+    assert!(true);
+}
+
+test("a generic writer call through a counting impl is pure") {
+    assert!(counted("abc") == 3);
+}

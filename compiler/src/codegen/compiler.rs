@@ -313,7 +313,7 @@ impl Compiler {
             return false;
         };
         let harmless = common::EffectFlags::READ | common::EffectFlags::HOST | common::EffectFlags::HEAP_MUT;
-        summary.visible.bits() & !harmless == 0 && summary.latent == 0
+        summary.visible.bits() & !harmless == 0 && !summary.depends_on_args()
     }
 
     /// Generated contract test cases: case name to the function it calls.
@@ -8447,11 +8447,11 @@ fn const_effect_messages(
         let module = name.rsplit_once("::").map_or("", |(m, _)| m);
         let granted = checker.host_grants().comptime_io.for_module(module).effects();
         let missing = if granted == 0 { s.visible.bits() } else { s.visible.bits() & common::EffectFlags::UNKNOWN };
-        if missing == 0 && s.latent == 0 && !(granted != 0 && s.statics) {
+        if missing == 0 && !s.depends_on_args() && !(granted != 0 && s.statics) {
             continue;
         }
         let short = name.rsplit("::").next().unwrap_or(name);
-        if !crate::comptime_expr::is_comptime_const(short) && !s.statics && s.latent == 0 && opens_handles_only(fx, i) {
+        if !crate::comptime_expr::is_comptime_const(short) && !s.statics && !s.depends_on_args() && opens_handles_only(fx, i) {
             startup.insert(name.to_string());
             continue;
         }
@@ -8464,7 +8464,7 @@ fn const_effect_messages(
             },
             body.span.0..body.span.1,
         );
-        msg.with_help(match grant_hint(missing).filter(|_| !s.statics && s.latent == 0) {
+        msg.with_help(match grant_hint(missing).filter(|_| !s.statics && !s.depends_on_args()) {
             Some(hint) => hint,
             None if crate::comptime_expr::is_comptime_const(short) => {
                 "a `comptime` expression cannot read or change the program's state; without `comptime` it is computed when the program runs".to_string()
@@ -8533,7 +8533,7 @@ fn fold_bodies(hir: &crate::hir::HirModule, fx: &crate::hir::effects::ModuleEffe
                 && body.captures.is_empty()
                 && body.name != "main"
                 && s.visible.is_pure()
-                && s.latent == 0
+                && !s.depends_on_args()
         })
         .filter_map(|(body, _)| match body.ret.as_ref().map(crate::typechecking::ty::strip_readonly) {
             Some(Ty::Con(n)) if [INT, FLOAT, BOOL, BYTE].contains(&n.as_str()) => Some((body.name.clone(), false)),
@@ -8549,7 +8549,7 @@ fn pure_static_inits(checker: &crate::typechecking::infer::Checker, hir: &crate:
     hir.bodies
         .iter()
         .zip(&fx.summaries)
-        .filter(|(body, s)| body.kind == crate::hir::BodyKind::Static && s.visible.is_pure() && s.latent == 0)
+        .filter(|(body, s)| body.kind == crate::hir::BodyKind::Static && s.visible.is_pure() && !s.depends_on_args())
         .filter_map(|(body, _)| body.name.strip_suffix("$init"))
         .filter(|name| !checker.is_const_static(name))
         .map(str::to_string)
