@@ -17,23 +17,42 @@ pub(crate) fn rc_leaks_shown() -> bool {
 impl GcHeader {
     #[inline]
     fn inc(&self) {
-        let c = self.count.get();
+        let c = self.count.load(Ordering::Relaxed);
         if c != COUNT_IMMORTAL {
             // A count that would reach the immortal one stays one below it:
             // the object then lives as long as the program.
-            self.count.set(c.saturating_add(1).min(COUNT_IMMORTAL - 1));
+            self.count.store(c.saturating_add(1).min(COUNT_IMMORTAL - 1), Ordering::Relaxed);
         }
     }
 
     /// One owner fewer. Returns whether that was the last.
     #[inline]
     fn dec(&self) -> bool {
-        let c = self.count.get();
+        let c = self.count.load(Ordering::Relaxed);
         if c == COUNT_IMMORTAL || c == 0 {
             return false;
         }
-        self.count.set(c - 1);
+        self.count.store(c - 1, Ordering::Relaxed);
         c == 1
+    }
+
+    /// [`Self::inc`] by an epoch's mutators, which share the object.
+    #[inline]
+    fn inc_shared(&self) {
+        let _ = self.count.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+            (c < COUNT_IMMORTAL - 1).then_some(c + 1)
+        });
+    }
+
+    /// [`Self::dec`] by an epoch's mutators. Returns whether that was the
+    /// last owner.
+    #[inline]
+    fn dec_shared(&self) -> bool {
+        self.count
+            .fetch_update(Ordering::Release, Ordering::Relaxed, |c| {
+                (c != COUNT_IMMORTAL && c != 0).then(|| c - 1)
+            })
+            == Ok(1)
     }
 }
 
@@ -42,13 +61,13 @@ impl Object {
     /// as long as the program).
     #[inline]
     pub fn rc_count(&self) -> u32 {
-        self.header().count.get()
+        self.header().count.load(Ordering::Relaxed)
     }
 
     /// Make the object immortal: its count never changes again.
     #[inline]
     pub fn rc_set_immortal(&self) {
-        self.header().count.set(COUNT_IMMORTAL);
+        self.header().count.store(COUNT_IMMORTAL, Ordering::Relaxed);
     }
 
     #[inline]
@@ -59,7 +78,7 @@ impl Object {
     /// Set the count (a steal epoch's logged changes, summed at its end).
     #[inline]
     pub(crate) fn rc_set_count(&self, n: u32) {
-        self.header().count.set(n);
+        self.header().count.store(n, Ordering::Relaxed);
     }
 
     /// One owner fewer; nothing is freed at zero yet (step 2). Returns
@@ -86,27 +105,51 @@ impl Heap {
         self.rc_on && self.alloc_lock.is_null()
     }
 
-    /// `o` gains an owner (logged while a steal epoch is open).
+    /// Born in the open steal epoch: its mutators count it in place
+    /// (atomically), as no count of it predates the epoch. One from before
+    /// keeps its header count until the epoch ends (plan step 8).
+    #[inline]
+    fn epoch_born(&self, o: Object) -> bool {
+        o.header().epoch.get() == self.epoch_gen
+    }
+
+    /// `o` gains an owner (logged while a steal epoch is open, unless it was
+    /// born in it).
     #[inline]
     pub(crate) fn rc_inc_obj(&self, o: Object) {
         if self.alloc_lock.is_null() {
             o.rc_inc();
+        } else if self.epoch_born(o) {
+            o.header().inc_shared();
         } else if o.rc_count() != COUNT_IMMORTAL {
             self.rc_log(o, false);
         }
     }
 
     /// `o` loses an owner; whether that was the last. Never while a steal
-    /// epoch is open: the change is logged and its end releases.
+    /// epoch is open: the change is logged (or, for an object born in it,
+    /// made in place, and a last owner's going noted) and its end releases.
     #[inline]
     pub(crate) fn rc_dec_obj(&self, o: Object) -> bool {
         if self.alloc_lock.is_null() {
             return o.rc_dec();
         }
-        if o.rc_count() != COUNT_IMMORTAL {
+        if self.epoch_born(o) {
+            if o.header().dec_shared() {
+                self.rc_log_zero(o);
+            }
+        } else if o.rc_count() != COUNT_IMMORTAL {
             self.rc_log(o, true);
         }
         false
+    }
+
+    /// Native code took the last owner of `w`, an object born in the open
+    /// steal epoch, counting it in place: its end releases it.
+    pub fn rc_epoch_zero(&self, w: Value) {
+        if let Some(o) = self.rc_object(w) {
+            self.rc_log_zero(o);
+        }
     }
 
     /// Keep counts in this heap, or not (tests that count by hand).
