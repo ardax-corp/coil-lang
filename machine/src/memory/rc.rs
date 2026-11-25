@@ -721,7 +721,25 @@ impl Heap {
         o.rc_dec();
         // The moved words keep the owner the object held; the rest lose it.
         let mut stack = std::mem::take(&mut self.rc_stack);
-        if !(instance && moved == 0 && self.rc_leaf(o)) {
+        if !instance {
+            // An enum's kinds are packed in its payload.
+            let packed = words.kinds();
+            for (i, w) in slots.iter().enumerate() {
+                if i < 32 && moved & (1 << i) != 0 {
+                    continue;
+                }
+                let c = match common::packed_word_kind(packed, i) {
+                    common::WORD_POINTER => self.rc_typed(*w),
+                    common::WORD_UNKNOWN => self.rc_object(*w),
+                    _ => None,
+                };
+                if let Some(c) = c
+                    && self.rc_dec_obj(c)
+                {
+                    stack.push(c);
+                }
+            }
+        } else if !(moved == 0 && self.rc_leaf(o)) {
             let mut kinds = WordKinds::of(self, o);
             for (i, w) in slots.iter().enumerate() {
                 let kind = kinds.next(slots);
@@ -742,7 +760,7 @@ impl Heap {
         }
         self.freed_early = true;
         // SAFETY: its count is zero and its words are released or moved.
-        unsafe { self.empty_slot(o) };
+        unsafe { self.hold_slot(o) };
         if stack.is_empty() {
             self.rc_stack = stack;
         } else {

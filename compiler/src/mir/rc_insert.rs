@@ -40,7 +40,7 @@ use super::ty::MirTy;
 
 /// Whether an unwound frame releases what it owned ([`unwind_homes`]):
 /// on unless `COIL_RC_UNWIND=0`.
-fn unwind_homes_on() -> bool {
+pub(super) fn unwind_homes_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("COIL_RC_UNWIND").map_or(true, |v| v != "0"))
 }
@@ -576,7 +576,7 @@ fn unwind_homes(func: &mut MirFunc, homes: &HashMap<ValueId, u16>) -> usize {
 }
 
 /// A cleanup pad that only resumes the unwind, over `func`'s homes.
-fn new_pad(func: &MirFunc) -> Option<MirFunc> {
+pub(super) fn new_pad(func: &MirFunc) -> Option<MirFunc> {
     let mut b = super::MirBuilder::new(format!("{}$pad", func.name));
     b.allow_host_edges = true;
     b.set_ret_ty(MirTy::I64);

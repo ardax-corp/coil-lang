@@ -5087,10 +5087,19 @@ impl<'a> Lower<'a> {
         // A slot `RcReuse` kept, a young enum's or instance's (one layout):
         // the image goes there, with no bump and no free list.
         if let Some(slot) = reuse {
-            let (kept, fresh) = (self.b.create_block(), self.b.create_block());
+            let (kept, take, fresh) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
             self.b.ins().brif(slot, kept, &[], fresh, &[]);
             self.b.switch_to_block(kept);
-            young_ok(self, fast, &[slot.into()]);
+            young_ok(self, take, &[]);
+            // The placeholder the slot holds goes (`Heap::hold_slot`): the
+            // new object is counted in below.
+            self.b.switch_to_block(take);
+            for (off, by) in [(COUNTS_ALLOC_BYTES, machine::Heap::HELD_SLOT_BYTES as i64), (COUNTS_LIVE_COUNT, 1)] {
+                let c = self.b.ins().load(types::I64, mem, counts, off);
+                let c = self.b.ins().iadd_imm_s(c, -by);
+                self.b.ins().store(mem, c, counts, off);
+            }
+            self.b.ins().jump(fast, &[slot.into()]);
             self.b.switch_to_block(fresh);
         }
         young_ok(self, bump, &[]);

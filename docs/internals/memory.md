@@ -49,14 +49,21 @@ interpreter, wasm) runs the same counted bodies. Its module doc is the reference
   call folding and indirect calls keep the borrowed body.
 
 Reuse in place (`compiler/src/mir/rc_reuse.rs`, after the insertion pass): a decrement of an enum
-the body matched on and an enum allocation after it (in its block, or on every way out of it)
-become `RcReuse` and `AllocAt`. When the decrement takes the last owner of a young enum with a
-payload, `Heap::rc_take_slot` releases its words and keeps its slot as raw memory (no object
-kind), and the allocation writes the new object there; otherwise it is the plain decrement and the
-allocation takes a fresh slot. Payload words incremented on their way out just before the
-decrement (`moved`) keep the old object's owner when the slot is kept, so a rebuilt node changes no
-count of the children it carries over. A frame that unwinds between the two leaves the slot
-unused; `COIL_RC_REUSE=0` turns the pass off.
+the body matched on, or of an instance whose fields it read, and an enum or object allocation after
+it (in its block, or on every way out of it) become `RcReuse` and `AllocAt`. An enum's and an
+instance's slots are one layout, so either takes the other's. When the decrement takes the last
+owner of a young enum with a payload or a young instance (no `drop`, no weak handle, no pin),
+`Heap::rc_take_slot` releases its words and leaves a placeholder in the slot (`Heap::hold_slot`: an
+instance of no class with no fields, count one, counted live), and the allocation writes the new
+object over it; otherwise it is the plain decrement and the allocation takes a fresh slot. Payload
+words or fields incremented on their way out just before the decrement (`moved`) keep the old
+object's owner when the slot is kept, so a rebuilt node changes no count of the children it carries
+over. A slot kept across an op that may unwind (a call, a panic, an allocation) waits in a frame
+home, cleared at its allocation, and the cleanup pad releases the placeholder, so an unwound frame
+leaves nothing behind (a body with a tail call keeps no homes and leaks it, as it leaks its other
+words). Native code reads the count first: an object someone else still owns loses this owner in
+place, and a last owner goes to `coil_native_rc_take`, which reads the typed word by its header
+with no slot search. `COIL_RC_REUSE=0` turns the pass off.
 
 The same pass lets an enum allocation take the frame's owner of a payload word the frame
 decrements right after it (a call's result built into a node, `Cons(v, f(rest))`): `AllocAt`'s

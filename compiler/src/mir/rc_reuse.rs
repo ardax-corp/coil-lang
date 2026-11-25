@@ -13,7 +13,9 @@
 //! words (a payload word the old object owns would be released before the
 //! new one counts it). Whether the object is an enum, young and last owned
 //! is the runtime's test; any other object is decremented as before. A
-//! frame that unwinds between the two leaves the slot unused.
+//! kept slot holds a placeholder the frame owns until the allocation
+//! fills it; one kept across an op that may unwind waits in a home, so
+//! the cleanup pad frees it ([`home_slots`]).
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,7 +32,110 @@ pub fn insert_reuse(f: &mut MirFunc) -> usize {
     for bi in 0..f.blocks.len() {
         take_owned(f, bi);
     }
+    if paired > 0 {
+        home_slots(f);
+    }
     paired
+}
+
+/// An op between a reuse and its allocation that may unwind the frame (a
+/// call, a panic, an allocation): the kept slot's placeholder would be left
+/// behind.
+fn may_unwind(f: &MirFunc, inst: &MirInst) -> bool {
+    use super::effects::Effects;
+    let quiet = matches!(
+        inst,
+        MirInst::RcInc { .. }
+            | MirInst::RcDec { .. }
+            | MirInst::Const { .. }
+            | MirInst::HomeStore { .. }
+            | MirInst::HomeLoad { .. }
+            | MirInst::Cast { .. }
+            | MirInst::MatchPayload { .. }
+            | MirInst::ProductLoad { .. }
+            | MirInst::ClearWord { .. }
+            | MirInst::HeapFieldStore { .. }
+    );
+    let props = inst.props();
+    !quiet && (inst.may_trap(f) || !matches!(props.effects, Effects::No) || props.allocates || matches!(inst, MirInst::Panic { .. }))
+}
+
+/// A slot kept across an op that may unwind waits in a home of its own,
+/// cleared at its allocation, and the cleanup pad releases what the home
+/// holds: an unwound frame frees the slot's placeholder
+/// (`Heap::hold_slot`). A body with a tail call keeps no homes (they would
+/// end its tail calls), as the insertion pass does.
+fn home_slots(f: &mut MirFunc) {
+    if !super::rc_insert::unwind_homes_on() || f.blocks.iter().any(|b| b.insts.last().is_some_and(|i| super::func::is_tail_call_inst(f, b, i))) {
+        return;
+    }
+    let mut held: Vec<ValueId> = Vec::new();
+    for b in &f.blocks {
+        for (k, inst) in b.insts.iter().enumerate() {
+            let MirInst::RcReuse { dest: slot, .. } = inst else { continue };
+            let rest = &b.insts[k + 1..];
+            let unwinds = match rest.iter().position(|i| matches!(i, MirInst::AllocAt { slot: Some(s), .. } if s == slot)) {
+                Some(a) => rest[..a].iter().any(|i| may_unwind(f, i)),
+                // Its allocation is past the block's end.
+                None => true,
+            };
+            if unwinds {
+                held.push(*slot);
+            }
+        }
+    }
+    if held.is_empty() {
+        return;
+    }
+    let fresh = |f: &mut MirFunc, ty: MirTy| {
+        let v = ValueId(f.types.len() as u32);
+        f.types.push(ty);
+        v
+    };
+    let mut homes: Vec<u16> = Vec::new();
+    for slot in held {
+        let Ok(h) = u16::try_from(f.homes.len()) else { return };
+        f.homes.push(MirTy::I64);
+        homes.push(h);
+        for bi in 0..f.blocks.len() {
+            let old = std::mem::take(&mut f.blocks[bi].insts);
+            let mut out = Vec::with_capacity(old.len() + 2);
+            for inst in old {
+                let at = matches!(&inst, MirInst::AllocAt { slot: Some(s), .. } if *s == slot);
+                if at {
+                    let zero = fresh(f, MirTy::I64);
+                    out.push(MirInst::Const { dest: zero, c: super::inst::MirConst::I64(0) });
+                    out.push(MirInst::HomeStore { dest: fresh(f, MirTy::Bool), home: h, value: zero });
+                }
+                let reuse = matches!(&inst, MirInst::RcReuse { dest, .. } if *dest == slot);
+                out.push(inst);
+                if reuse {
+                    out.push(MirInst::HomeStore { dest: fresh(f, MirTy::Bool), home: h, value: slot });
+                }
+            }
+            f.blocks[bi].insts = out;
+        }
+    }
+    let mut pad = match f.cleanup.take() {
+        Some(pad) => *pad,
+        None => match super::rc_insert::new_pad(f) {
+            Some(pad) => pad,
+            None => return,
+        },
+    };
+    pad.homes.clone_from(&f.homes);
+    let mut ops = Vec::new();
+    for h in homes {
+        let v = fresh(&mut pad, MirTy::I64);
+        let t = fresh(&mut pad, MirTy::Bool);
+        ops.push(MirInst::HomeLoad { dest: v, home: h });
+        ops.push(MirInst::RcDec { dest: t, src: v, guard: None });
+    }
+    let entry = pad.entry.index();
+    let tail = std::mem::take(&mut pad.blocks[entry].insts);
+    pad.blocks[entry].insts = ops;
+    pad.blocks[entry].insts.extend(tail);
+    f.cleanup = Some(Box::new(pad));
 }
 
 fn pair_all(f: &mut MirFunc) -> usize {

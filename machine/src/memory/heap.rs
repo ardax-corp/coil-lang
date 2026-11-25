@@ -688,7 +688,10 @@ impl Heap {
             (0, ..) => self.slab.alloc(layout),
             (addr, l, was_young) if l == layout && was_young == young => {
                 self.reuse = (0, layout, false);
-                // SAFETY: an emptied slot of this layout ([`Self::rc_take_slot`]).
+                // The placeholder there goes ([`Self::hold_slot`]).
+                self.counts.alloc_bytes -= Self::HELD_SLOT_BYTES;
+                self.counts.live_count -= 1;
+                // SAFETY: a held slot of this layout ([`Self::rc_take_slot`]).
                 unsafe { NonNull::new_unchecked(addr as *mut u8) }
             }
             // An offered slot lasts to the next allocation only.
@@ -1565,37 +1568,61 @@ impl Heap {
         self.reuse = (slot, Layout::new::<GcData<ObjEnum>>(), true);
     }
 
-    /// Give an offered slot no allocation took back to the slab.
+    /// Free an offered slot no allocation took: the placeholder
+    /// [`Self::hold_slot`] left there, named by nothing else.
     pub(crate) fn drop_offered_slot(&mut self) {
-        let (addr, _, young) = std::mem::replace(&mut self.reuse, (0, Layout::new::<u8>(), false));
+        let (addr, ..) = std::mem::replace(&mut self.reuse, (0, Layout::new::<u8>(), false));
         if addr == 0 {
             return;
         }
-        // SAFETY: an emptied slot, named by nothing.
-        let ptr = unsafe { NonNull::new_unchecked(addr as *mut u8) };
-        if young {
-            self.slab.free_young(ptr);
-        } else {
-            self.slab.free(ptr);
-        }
+        // SAFETY: a held slot's placeholder, which only the offer names.
+        unsafe { self.dealloc(Object::Instance(Gc::from_addr(addr))) };
     }
 
-    /// Empty `object`, an enum whose count reached zero, without giving its
-    /// slot back: its payload goes and it is counted out, as
-    /// [`Self::dealloc`] does.
+    /// Bytes a held slot's placeholder counts ([`Self::hold_slot`]), as
+    /// [`Object::size`] counts an instance with no spilled fields.
+    pub const HELD_SLOT_BYTES: usize = PACED_HEADER_BYTES + std::mem::size_of::<ObjInstance>();
+
+    /// Empty `object`, an enum or instance whose count reached zero and
+    /// whose words were released, into a placeholder for the `AllocAt` that
+    /// will fill its slot: an instance of no class with no fields, count
+    /// one (the frame's), counted live. A frame that unwinds before the
+    /// allocation releases it as any object it owned.
     ///
     /// # Safety
-    /// Nothing that will be read again names `object`.
+    /// Nothing that will be read again names `object` as what it was.
     #[inline]
-    pub(super) unsafe fn empty_slot(&mut self, object: Object) {
-        debug_assert!(matches!(object, Object::Enum(_) | Object::Instance(_)));
-        let size = object.size();
-        self.counts.alloc_bytes -= size;
-        debug_assert!(self.counts.live_count > 0);
-        self.counts.live_count -= 1;
-        unsafe { object.recycle_payload() };
-        // No kind: a walk of the heap reads no object here.
-        unsafe { (*(object.addr() as *const GcHeader)).kind.set(0) };
+    pub(super) unsafe fn hold_slot(&mut self, object: Object) {
+        const { assert!(size_of::<ObjEnum>() == size_of::<ObjInstance>()) };
+        let spilled = match object {
+            Object::Enum(e) => e.as_ref().payload.spill_capacity() != 0,
+            Object::Instance(i) => i.as_ref().storage.spill_capacity() != 0,
+            _ => unreachable!("only an enum's or an instance's slot is held"),
+        };
+        let addr = object.addr();
+        // Inline words own nothing to drop, and count what the
+        // placeholder does.
+        if spilled {
+            let size = object.size();
+            unsafe { object.recycle_payload() };
+            self.counts.alloc_bytes = self.counts.alloc_bytes - size + Self::HELD_SLOT_BYTES;
+        }
+        let p = addr as *mut GcData<ObjInstance>;
+        // SAFETY: the slot is this layout ([`Self::offer_enum_slot`]). An
+        // inline payload sits where an instance's fields do (both
+        // `repr(C)`, [`ObjInstance`]), so it is emptied in place; a spilled
+        // one was dropped.
+        unsafe {
+            if spilled {
+                ptr::addr_of_mut!((*p).data).write(ObjInstance::default());
+            } else {
+                (*p).data.type_id = 0;
+                (*p).data.storage.clear_inline();
+            }
+            (*p).header.kind.set(KIND_INSTANCE);
+            (*p).header.generation.set(GEN_YOUNG);
+            (*p).header.count.set(1);
+        }
     }
 
     /// Deallocates an object.
@@ -2511,6 +2538,15 @@ enum EnumPayloadInner {
 }
 
 impl EnumPayload {
+    /// An inline store's words go (they own nothing): it reads empty.
+    #[inline(always)]
+    fn clear_inline(&mut self) {
+        if let EnumPayloadInner::Inline { len, kinds, .. } = &mut self.inner {
+            *len = 0;
+            *kinds = 0;
+        }
+    }
+
     /// Empty payload (arity-0). Immortal unit enums use this, not a `Vec`.
     #[inline]
     pub fn empty() -> Self {
