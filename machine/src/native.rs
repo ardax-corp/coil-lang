@@ -1585,10 +1585,11 @@ pub unsafe fn cow_unpin(ctx: *mut NativeCtx, word: u64, saved: u64) {
     }
 }
 
-/// `RcInc` (`dec` zero) or `RcDec` of the heap word `word`: its object
+/// `RcInc` (`dec` zero) or `RcDec` (one) of the heap word `word`: its object
 /// gains or loses an owner, and one that lost its last is released
 /// ([`crate::memory::Heap::rc_drop`]). Nothing when counts are not kept or
-/// `word` names no object. Returns `0`.
+/// `word` names no object. `dec` two: native code counted `word`, born in
+/// the open steal epoch, in place and took its last owner. Returns `0`.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
@@ -1598,10 +1599,13 @@ pub unsafe extern "C" fn coil_native_rc(ctx: *mut NativeCtx, word: u64, dec: u64
         return 0;
     };
     let w = common::Value::from(word);
-    if dec == 0 {
-        heap.rc_retain(w);
-    } else {
-        heap.rc_drop(w);
+    match dec {
+        0 => heap.rc_retain(w),
+        // Native code counted it in place and took its last owner.
+        2 => heap.rc_epoch_zero(w),
+        _ => {
+            heap.rc_drop(w);
+        }
     }
     0
 }

@@ -259,6 +259,8 @@ pub fn layout_fingerprint() -> u64 {
     // The inline count ops (reference-count plan step 6).
     (super::HEAP_ALLOC_LOCK_OFFSET, super::COUNT_IMMORTAL, super::HEAP_SLAB_LO_OFFSET, super::HEAP_SLAB_HI_OFFSET).hash(&mut h);
     (super::HEAP_UNIT_ENUMS_OFFSET, super::UNIT_ENUM_FAST).hash(&mut h);
+    // Counts in place for objects born in the open steal epoch (#2927).
+    (super::HEAP_EPOCH_GEN_OFFSET, super::HEADER_EPOCH_OFFSET).hash(&mut h);
     // The store view protocol: plain views only, no card table.
     (super::VIEW_PLAIN, "no cards").hash(&mut h);
     h.finish()
