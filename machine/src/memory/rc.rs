@@ -510,6 +510,17 @@ impl Heap {
                 unsafe { self.rc_free(obj) };
                 continue;
             }
+            // An instance likewise, from its class row's kinds.
+            if let Object::Instance(i) = obj
+                && obj.rc_count() == 0
+                && !self.pending_drop(obj)
+            {
+                self.rc_dec_fields(i.as_ref(), &mut stack);
+                n += 1;
+                // SAFETY: as below.
+                unsafe { self.rc_free(obj) };
+                continue;
+            }
             if !self.rc_releasable(obj) {
                 // Its `drop` runs first, at the runtime's next safepoint.
                 if obj.rc_count() == 0 && (self.pending_drop(obj) || Self::close_owed(obj)) && !self.rc_due.contains(&obj.addr()) {
@@ -636,6 +647,27 @@ impl Heap {
         let kinds = payload.kinds();
         for (i, v) in payload.as_slice().iter().enumerate() {
             let kind = common::packed_word_kind(kinds, i);
+            if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
+                && let Some(o) = self.rc_object(*v)
+                && self.rc_dec_obj(o)
+            {
+                stack.push(o);
+            }
+        }
+    }
+
+    /// Each object an instance's fields name loses an owner; those that
+    /// reach zero go on `stack`. The words [`Self::rc_dec_children`] reads
+    /// for an instance; a class of numbers only has none.
+    #[inline(always)]
+    fn rc_dec_fields(&self, inst: &ObjInstance, stack: &mut Vec<Object>) {
+        let slots = inst.storage.as_slice();
+        if self.class_leaf(inst.type_id, slots.len()) {
+            return;
+        }
+        let mut kinds = common::ClassSlotKinds::new(self.class_field_kinds(inst.type_id), slots.len()).with_own(inst.storage.kinds());
+        for v in slots {
+            let kind = kinds.next_kind(slots);
             if (kind == common::WORD_POINTER || kind == common::WORD_UNKNOWN)
                 && let Some(o) = self.rc_object(*v)
                 && self.rc_dec_obj(o)
