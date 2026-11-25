@@ -324,6 +324,20 @@ unknown structure still only refuses. Old fib-unit `N` corresponds to grain
 `Fib(N+1)-1` (for `n <= 1` fib). One worker per site also means lowering the
 floor cannot explode archive size via extra clones.
 
+### Heap-building forks stay sequential
+
+A site whose function returns a heap object (an enum such as
+`Tree::Node(f(a), f(b))`, a tuple, a class, a string, a collection) is
+detected but gets no worker (`ParForkSite::heap_result`,
+`ParForkSite::worth_forking`). Its arms allocate what they return, and inside
+a shared-heap steal epoch every count change of those objects is a logged
+runtime call applied at the join, and every allocation takes the epoch batch
+path: the fork ran about 1.8x slower than the sequential call on one worker
+and on four (binary_trees, ab35b5b). The function keeps its place in
+`fork_fns`, so its calls stay calls as with `--auto-par off`.
+`Pipeline::set_par_heap_forks(true)` admits them again for tests of the
+worker; the gate goes once epochs count the objects born in them in place.
+
 ## Loop IPA: chunked fork-join over an induction range
 
 A counted loop is the same idea with the arms spread over an induction range.

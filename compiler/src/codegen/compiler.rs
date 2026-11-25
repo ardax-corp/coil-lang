@@ -361,6 +361,13 @@ impl Compiler {
         self.auto_par = on;
     }
 
+    /// Fork sites whose arms build heap results too (off by default:
+    /// [`crate::hir::par::ParForkSite::worth_forking`]). For tests of the
+    /// worker those sites get.
+    pub fn set_par_heap_forks(&mut self, on: bool) {
+        self.par_heap_forks = on;
+    }
+
     /// Turn typed inlining of HIR bodies on (the default) or off.
     pub fn set_hir_inline(&mut self, on: bool) {
         self.opt_options.hir_inline = on;
@@ -7326,8 +7333,11 @@ impl Compiler {
             let shapes = hir.par_fork_sites(&self.checker, &self.pure_fns);
             self.fork_fns = hir.par_worker_fns(&self.checker, &shapes);
             if self.auto_par {
+                // A function whose fork the cost model declines keeps its
+                // place in `fork_fns` (its calls stay calls), as with
+                // `--auto-par off`, and gets no worker.
+                self.par_workers = self.fork_fns.iter().filter(|q| shapes.values().find(|s| &s.qualified == *q).is_none_or(|s| s.worth_forking(self.par_heap_forks))).cloned().collect();
                 self.par_shapes = shapes;
-                self.par_workers = self.fork_fns.clone();
             }
         }
         if self.auto_par && self.opt_options.auto_par
