@@ -1558,6 +1558,9 @@ impl Heap {
     /// Offer `slot`, a young enum slot [`Self::rc_take_slot`] emptied, to
     /// the next allocation ([`Self::alloc_unlocked_in`]).
     pub(crate) fn offer_enum_slot(&mut self, slot: u64) {
+        // An enum's and an instance's slots are one layout, so either takes
+        // the other's.
+        const { assert!(size_of::<GcData<ObjEnum>>() == size_of::<GcData<ObjInstance>>() && align_of::<GcData<ObjEnum>>() == align_of::<GcData<ObjInstance>>()) };
         self.drop_offered_slot();
         self.reuse = (slot, Layout::new::<GcData<ObjEnum>>(), true);
     }
@@ -1585,7 +1588,7 @@ impl Heap {
     /// Nothing that will be read again names `object`.
     #[inline]
     pub(super) unsafe fn empty_slot(&mut self, object: Object) {
-        debug_assert!(matches!(object, Object::Enum(_)));
+        debug_assert!(matches!(object, Object::Enum(_) | Object::Instance(_)));
         let size = object.size();
         self.counts.alloc_bytes -= size;
         debug_assert!(self.counts.live_count > 0);

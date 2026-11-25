@@ -685,13 +685,16 @@ impl Heap {
     }
 
     fn rc_take_object(&mut self, o: Object, v: Value, moved: u32) -> u64 {
-        let Object::Enum(e) = o else {
-            self.rc_drop(v);
-            return 0;
+        let (words, instance) = match &o {
+            Object::Enum(e) => (&e.as_ref().payload, false),
+            Object::Instance(i) => (&i.as_ref().storage, true),
+            _ => {
+                self.rc_drop(v);
+                return 0;
+            }
         };
-        let payload = &e.as_ref().payload;
-        let kinds = payload.kinds();
-        let keep = !payload.is_empty()
+        // An enum with no payload is a shared unit variant.
+        let keep = (instance || !words.is_empty())
             && o.generation() & GEN_YOUNG != 0
             && self.rc_frees
             && !self.epoch_stw
@@ -700,11 +703,16 @@ impl Heap {
             && !o.is_weak_target()
             && !o.is_pinned()
             && !self.finalizer_object(o);
+        let slots = words.as_slice();
         if !keep {
             // The moved words gain the owners the body did not count.
-            for (i, w) in payload.as_slice().iter().enumerate() {
-                if i < 32 && moved & (1 << i) != 0 {
-                    self.rc_inc_word(*w, common::packed_word_kind(kinds, i));
+            if moved != 0 {
+                let mut kinds = WordKinds::of(self, o);
+                for (i, w) in slots.iter().enumerate() {
+                    let kind = kinds.next(slots);
+                    if i < 32 && moved & (1 << i) != 0 {
+                        self.rc_inc_word(*w, kind);
+                    }
                 }
             }
             self.rc_drop(v);
@@ -713,20 +721,23 @@ impl Heap {
         o.rc_dec();
         // The moved words keep the owner the object held; the rest lose it.
         let mut stack = std::mem::take(&mut self.rc_stack);
-        for (i, w) in payload.as_slice().iter().enumerate() {
-            let kind = common::packed_word_kind(kinds, i);
-            if i < 32 && moved & (1 << i) != 0 {
-                continue;
-            }
-            let c = match kind {
-                common::WORD_POINTER => self.rc_typed(*w),
-                common::WORD_UNKNOWN => self.rc_object(*w),
-                _ => None,
-            };
-            if let Some(c) = c
-                && self.rc_dec_obj(c)
-            {
-                stack.push(c);
+        if !(instance && moved == 0 && self.rc_leaf(o)) {
+            let mut kinds = WordKinds::of(self, o);
+            for (i, w) in slots.iter().enumerate() {
+                let kind = kinds.next(slots);
+                if i < 32 && moved & (1 << i) != 0 {
+                    continue;
+                }
+                let c = match kind {
+                    common::WORD_POINTER => self.rc_typed(*w),
+                    common::WORD_UNKNOWN => self.rc_object(*w),
+                    _ => None,
+                };
+                if let Some(c) = c
+                    && self.rc_dec_obj(c)
+                {
+                    stack.push(c);
+                }
             }
         }
         self.freed_early = true;
@@ -742,7 +753,6 @@ impl Heap {
         }
         o.addr()
     }
-
 
     /// Each object an enum payload's words name loses an owner; those that
     /// reach zero go on `stack`. The words [`Self::rc_dec_children`] reads
@@ -1145,5 +1155,38 @@ mod tests {
         // A count at zero stays there.
         assert!(!a.rc_dec());
         assert_eq!(a.rc_count(), 0);
+    }
+}
+
+/// The kinds of an enum's payload words or an instance's fields, in order,
+/// as a release reads them.
+enum WordKinds<'a> {
+    Enum(common::PackedKinds, usize),
+    Class(common::ClassSlotKinds<'a>),
+}
+
+impl<'a> WordKinds<'a> {
+    #[inline(always)]
+    fn of(heap: &'a Heap, o: Object) -> Self {
+        match o {
+            Object::Instance(i) => {
+                let i = i.as_ref();
+                Self::Class(common::ClassSlotKinds::new(heap.class_field_kinds(i.type_id), i.storage.as_slice().len()).with_own(i.storage.kinds()))
+            }
+            Object::Enum(e) => Self::Enum(e.as_ref().payload.kinds(), 0),
+            _ => Self::Enum(0, 0),
+        }
+    }
+
+    #[inline(always)]
+    fn next(&mut self, slots: &[Value]) -> u8 {
+        match self {
+            Self::Enum(k, i) => {
+                let kind = common::packed_word_kind(*k, *i);
+                *i += 1;
+                kind
+            }
+            Self::Class(c) => c.next_kind(slots),
+        }
     }
 }

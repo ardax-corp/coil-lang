@@ -136,13 +136,16 @@ pub fn owning_tail_twins(bodies: &mut Vec<super::native_capture::NativeBody>) ->
         twin_of.insert(*t, twin);
         bodies.push(super::native_capture::NativeBody { name: format!("{}$own", body.name), entry: Some(twin), mir: body.mir.clone() });
     }
+    // A call may pass fewer words than its callee takes (the ones it never
+    // reads): the twin, which releases its parameters, takes every one.
+    let arity: HashMap<Label, usize> = twin_of.keys().map(|t| (*t, bodies[by_label[t]].mir.params.len())).collect();
     for b in bodies.iter_mut() {
         let f = &mut b.mir;
         let mut redirected = Vec::new();
         for bi in 0..f.blocks.len() {
             let block = &f.blocks[bi];
-            let Some(inst @ MirInst::Call { target, .. }) = block.insts.last() else { continue };
-            if !is_tail_call_inst(f, block, inst) {
+            let Some(inst @ MirInst::Call { target, args, .. }) = block.insts.last() else { continue };
+            if !is_tail_call_inst(f, block, inst) || arity.get(target).is_some_and(|&n| args.len() < n) {
                 continue;
             }
             let Some(&twin) = twin_of.get(target) else { continue };
@@ -168,7 +171,7 @@ fn consumes(f: &MirFunc) -> bool {
     builds
         && f.blocks.iter().any(|b| {
             matches!(&b.term, Some(Terminator::JumpIfMatch { scrutinee, .. }) if params.contains(scrutinee))
-                || b.insts.iter().any(|i| matches!(i, MirInst::MatchPayload { scrutinee, .. } if params.contains(scrutinee)))
+                || b.insts.iter().any(|i| matches!(i, MirInst::MatchPayload { scrutinee, .. } | MirInst::ProductLoad { object: scrutinee, .. } if params.contains(scrutinee)))
         })
 }
 
@@ -1310,6 +1313,9 @@ impl Pass {
                     && !is_tail_call_inst(func, block, inst)
                     && let Some(&twin) = self.twin_of.get(target)
                     && let Some(mask) = self.owned_params.get(&twin)
+                    // A call may pass fewer words than the body takes (the
+                    // ones it never reads): the twin would release those.
+                    && mask.iter().skip(args.len()).all(|&m| !m)
                     && args.iter().enumerate().any(|(k, &a)| mask.get(k).copied().unwrap_or(false) && self.owned(a).is_some_and(dying))
                 {
                     retarget.push((bi, ii, twin));

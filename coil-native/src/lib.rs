@@ -1494,8 +1494,8 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                         for e in elems {
                             need(e)?;
                         }
-                        if !matches!(kind, MirAllocKind::Enum { .. }) {
-                            return Err("an allocation in place of a kind other than an enum".to_string());
+                        if !matches!(kind, MirAllocKind::Enum { .. } | MirAllocKind::Object { .. }) {
+                            return Err("an allocation in place of a kind other than an enum or an instance".to_string());
                         }
                     }
                     MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
@@ -4430,7 +4430,7 @@ impl<'a> Lower<'a> {
                         continue;
                     }
                     let ty = f.blocks.iter().flat_map(|b| &b.insts).find_map(|inst| match inst {
-                        MirInst::MatchPayload { dest, scrutinee, index } if scrutinee == src && *index == i => Some(ty_of(f, *dest)),
+                        MirInst::MatchPayload { dest, scrutinee, index } | MirInst::ProductLoad { dest, object: scrutinee, slot: index } if scrutinee == src && *index == i => Some(ty_of(f, *dest)),
                         _ => None,
                     });
                     let w = self.payload(f, *src, s, i);
@@ -5062,34 +5062,38 @@ impl<'a> Lower<'a> {
         let counts = self.b.ins().load(types::I64, mem, self.ctx, NATIVE_CTX_ALLOC_COUNTS);
         let gate = self.b.ins().load(types::I64, mem, counts, COUNTS_INLINE_GATE);
         self.b.append_block_param(fast, types::I64);
-        // A slot `RcReuse` kept, a young enum's of this layout: the image
-        // goes there, with no bump and no free list.
+        // A type with a `drop` stays out of the nursery: the helper
+        // allocates it old and lists it. Jumps to `ok` (with `args`) when
+        // the inline allocation may go on.
+        let young_ok = |this: &mut Self, ok: Block, args: &[cranelift_codegen::ir::BlockArg]| {
+            let MirAllocKind::Object { type_id, .. } = kind else {
+                this.b.ins().brif(gate, ok, args, slow, &[]);
+                return;
+            };
+            let check = this.b.create_block();
+            this.b.ins().brif(gate, check, &[], slow, &[]);
+            this.b.switch_to_block(check);
+            let word = i64::from(type_id / 64);
+            let len = this.b.ins().load(types::I64, mem, counts, COUNTS_FIN_LEN);
+            let past = this.b.ins().icmp_imm_s(IntCC::UnsignedLessThanOrEqual, len, word);
+            let test = this.b.create_block();
+            this.b.ins().brif(past, ok, args, test, &[]);
+            this.b.switch_to_block(test);
+            let base = this.b.ins().load(types::I64, mem, counts, COUNTS_FIN_WORDS);
+            let bits = this.b.ins().load(types::I64, mem, base, (word * 8) as i32);
+            let bit = this.b.ins().band_imm_s(bits, 1_i64 << (type_id % 64));
+            this.b.ins().brif(bit, slow, &[], ok, args);
+        };
+        // A slot `RcReuse` kept, a young enum's or instance's (one layout):
+        // the image goes there, with no bump and no free list.
         if let Some(slot) = reuse {
             let (kept, fresh) = (self.b.create_block(), self.b.create_block());
             self.b.ins().brif(slot, kept, &[], fresh, &[]);
             self.b.switch_to_block(kept);
-            self.b.ins().brif(gate, fast, &[slot.into()], slow, &[]);
+            young_ok(self, fast, &[slot.into()]);
             self.b.switch_to_block(fresh);
         }
-        if let MirAllocKind::Object { type_id, .. } = kind {
-            // A type with a `drop` stays out of the nursery: the helper
-            // allocates it old and lists it.
-            let check = self.b.create_block();
-            self.b.ins().brif(gate, check, &[], slow, &[]);
-            self.b.switch_to_block(check);
-            let word = i64::from(type_id / 64);
-            let len = self.b.ins().load(types::I64, mem, counts, COUNTS_FIN_LEN);
-            let past = self.b.ins().icmp_imm_s(IntCC::UnsignedLessThanOrEqual, len, word);
-            let test = self.b.create_block();
-            self.b.ins().brif(past, bump, &[], test, &[]);
-            self.b.switch_to_block(test);
-            let base = self.b.ins().load(types::I64, mem, counts, COUNTS_FIN_WORDS);
-            let bits = self.b.ins().load(types::I64, mem, base, (word * 8) as i32);
-            let bit = self.b.ins().band_imm_s(bits, 1_i64 << (type_id % 64));
-            self.b.ins().brif(bit, slow, &[], bump, &[]);
-        } else {
-            self.b.ins().brif(gate, bump, &[], slow, &[]);
-        }
+        young_ok(self, bump, &[]);
         self.b.switch_to_block(bump);
         let bumps = self.b.ins().load(types::I64, mem, self.ctx, NATIVE_CTX_ALLOC_BUMPS);
         let cursor = self.b.ins().iadd_imm_s(bumps, i64::from(obj.class) * i64::from(BUMP_BYTES));

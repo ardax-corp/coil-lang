@@ -1,0 +1,28 @@
+// Reuse in place for instances: a body that rebuilds an immutable value
+// object from the one it was handed, which dies there, a few million times.
+use io::sync::println;
+use string::format;
+
+class Body {
+    pub x: int,
+    pub v: int,
+    pub steps: int,
+}
+
+fn step(Body b) -> Body {
+    return new Body(b.x + b.v, b.v - b.x % 7, b.steps + 1);
+}
+
+fn run(Body b, int n) -> Body {
+    let i = 0;
+    while i < n {
+        b = step(b);
+        i += 1;
+    }
+    return b;
+}
+
+fn main() {
+    let b = run(new Body(1, 3, 0), 4000000);
+    let _ = println(format("%i %i %i", b.x, b.v, b.steps));
+}

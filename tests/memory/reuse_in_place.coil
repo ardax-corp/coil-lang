@@ -2,6 +2,7 @@
 // builds its result in the dead node's slot. A node someone else still
 // holds is not reused: both trees must read back whole.
 use tests::assert;
+use gc::collect;
 
 enum Tree {
     Leaf(int),
@@ -146,4 +147,61 @@ test("an old version of a search tree survives later inserts") {
     assert!(size(half) == half_size);
     assert!(sum(in_order(half, List::Nil())) == half_sum);
     assert!(size(t) >= half_size);
+}
+
+class Point {
+    pub x: int,
+    pub y: int,
+    pub tail: List,
+}
+
+fn shift(Point p, int n) -> Point {
+    if n == 0 {
+        return p;
+    }
+    let q = new Point(p.x + 1, p.y * 2, List::Cons(n, p.tail));
+    return shift(q, n - 1);
+}
+
+test("an instance rebuilt from the one before it reads back whole") {
+    let p = shift(new Point(0, 1, List::Nil()), 20);
+    assert!(p.x == 20);
+    assert!(p.y == 1048576);
+    assert!(sum(p.tail) == 210);
+    assert!(first(p.tail) == 1);
+}
+
+test("an instance someone else holds is not reused") {
+    let p = new Point(5, 6, List::Cons(7, List::Nil()));
+    let keep = p;
+    let q = shift(p, 3);
+    assert!(keep.x == 5 && keep.y == 6 && sum(keep.tail) == 7);
+    assert!(q.x == 8 && q.y == 48 && sum(q.tail) == 13);
+}
+
+class Handle {
+    pub id: int,
+}
+
+static let handles_dropped: int = 0;
+
+impl Handle {
+    fn drop() {
+        handles_dropped = handles_dropped + 1;
+    }
+}
+
+fn renew(Handle h, int n) -> Handle {
+    if n == 0 {
+        return h;
+    }
+    return renew(new Handle(h.id + 1), n - 1);
+}
+
+test("an instance with a drop still drops when the next one is built") {
+    let h = renew(new Handle(0), 5);
+    assert!(h.id == 5);
+    // A `drop` runs at the next safepoint.
+    collect();
+    assert!(handles_dropped == 5);
 }

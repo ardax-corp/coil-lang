@@ -35,12 +35,14 @@ pub fn insert_reuse(f: &mut MirFunc) -> usize {
 
 fn pair_all(f: &mut MirFunc) -> usize {
     // The words the body matched on as enums, and what was read from them.
-    // Only a boxed enum's word names its own slot (a niche word names its
-    // payload's).
+    // The words the body matched on as enums or read fields of, whose
+    // objects may keep a slot. Only a boxed word names its own slot (a
+    // niche word names its payload's). A tuple read the same way keeps
+    // none: the runtime tells.
     let mut enums: HashSet<ValueId> = HashSet::new();
     for b in &f.blocks {
         for inst in &b.insts {
-            if let MirInst::MatchPayload { scrutinee, .. } = inst {
+            if let MirInst::MatchPayload { scrutinee, .. } | MirInst::ProductLoad { object: scrutinee, .. } = inst {
                 enums.insert(*scrutinee);
             }
         }
@@ -88,8 +90,8 @@ fn pair_block(f: &mut MirFunc, bi: usize, enums: &HashSet<ValueId>, read_from: &
         let mut used = vec![false; insts.len()];
         let is_dec = |i: usize| matches!(&insts[i], MirInst::RcDec { src, guard: None, .. } if enums.contains(src) && !unit.contains(&(id, *src)));
         for (j, inst) in insts.iter().enumerate() {
-            let MirInst::Alloc { kind: MirAllocKind::Enum { .. }, elems, .. } = inst else { continue };
-            if elems.is_empty() {
+            let MirInst::Alloc { kind, elems, .. } = inst else { continue };
+            if !takes_slot(*kind, elems) {
                 continue;
             }
             // The nearest unpaired decrement before it.
@@ -110,7 +112,12 @@ fn pair_block(f: &mut MirFunc, bi: usize, enums: &HashSet<ValueId>, read_from: &
                 }
                 if is_dec(i) {
                     let MirInst::RcDec { src, .. } = &insts[i] else { unreachable!() };
-                    let reads = |k: usize| insts[k].operands().iter().any(|o| o == src || read_from.contains(&(*o, *src)));
+                    // A number stored into the new object was read before,
+                    // and clearing the frame's word reads no object.
+                    let reads = |k: usize| {
+                        !matches!(insts[k], MirInst::HeapFieldStore { scalar: true, .. } | MirInst::ClearWord { .. })
+                            && insts[k].operands().iter().any(|o| o == src || read_from.contains(&(*o, *src)))
+                    };
                     if !(j + 1..i).any(reads) {
                         used[i] = true;
                         used[j] = true;
@@ -118,8 +125,15 @@ fn pair_block(f: &mut MirFunc, bi: usize, enums: &HashSet<ValueId>, read_from: &
                     }
                     break;
                 }
-                // Only count ops and home writes may sit between.
-                if !matches!(insts[i], MirInst::RcInc { .. } | MirInst::RcDec { .. } | MirInst::HomeStore { .. } | MirInst::Const { .. } | MirInst::Cast { kind: MirCastKind::Word, .. }) {
+                // Only count ops, home writes and number stores into the
+                // new object may sit between.
+                let dest = insts[j].dest();
+                let ok = match &insts[i] {
+                    MirInst::RcInc { .. } | MirInst::RcDec { .. } | MirInst::HomeStore { .. } | MirInst::Const { .. } | MirInst::Cast { kind: MirCastKind::Word, .. } | MirInst::ClearWord { .. } => true,
+                    MirInst::HeapFieldStore { object, scalar: true, .. } => *object == dest,
+                    _ => false,
+                };
+                if !ok {
                     break;
                 }
             }
@@ -258,12 +272,24 @@ fn take_owned(f: &mut MirFunc, bi: usize) {
     }
 }
 
+/// An allocation that may fill a kept slot: an enum with a payload (one
+/// without is a shared unit variant) or an instance. Their slots are one
+/// layout.
+fn takes_slot(kind: MirAllocKind, elems: &[ValueId]) -> bool {
+    match kind {
+        MirAllocKind::Enum { .. } => !elems.is_empty(),
+        MirAllocKind::Object { .. } => true,
+        _ => false,
+    }
+}
+
 /// Each payload word a `MatchPayload` of `insts` reads: its object and index.
 fn payloads(insts: &[MirInst]) -> HashMap<ValueId, (ValueId, u32)> {
     insts
         .iter()
         .filter_map(|inst| match inst {
             MirInst::MatchPayload { dest, scrutinee, index } if *index < 32 => Some((*dest, (*scrutinee, *index))),
+            MirInst::ProductLoad { dest, object, slot } if *slot < 32 => Some((*dest, (*object, *slot))),
             _ => None,
         })
         .collect()
@@ -288,7 +314,7 @@ fn moved_mask(insts: &[MirInst], i: usize, x: ValueId, payload_of: &HashMap<Valu
                     incs.push(k);
                 }
             }
-            MirInst::MatchPayload { .. } | MirInst::HomeStore { .. } | MirInst::Const { .. } | MirInst::Cast { kind: MirCastKind::Word, .. } => {}
+            MirInst::MatchPayload { .. } | MirInst::ProductLoad { .. } | MirInst::HomeStore { .. } | MirInst::Const { .. } | MirInst::Cast { kind: MirCastKind::Word, .. } => {}
             _ => break,
         }
     }
@@ -332,7 +358,7 @@ fn pair_across(f: &mut MirFunc, enums: &HashSet<ValueId>, unit: &HashSet<(BlockI
             if si == b || preds.get(&s).copied() != Some(1) {
                 return false;
             }
-            let first = f.blocks[si].insts.iter().position(|inst| matches!(inst, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, elems, .. } if !elems.is_empty()));
+            let first = f.blocks[si].insts.iter().position(|inst| matches!(inst, MirInst::Alloc { kind, elems, .. } if takes_slot(*kind, elems)));
             match first {
                 Some(j) if !taken.contains(&(si, j)) => out.push((si, j)),
                 Some(_) => return false,
@@ -355,7 +381,7 @@ fn pair_across(f: &mut MirFunc, enums: &HashSet<ValueId>, unit: &HashSet<(BlockI
         let Some(i) = insts.iter().rposition(|inst| matches!(inst, MirInst::RcDec { src, guard: None, .. } if enums.contains(src) && !unit.contains(&(id, *src)))) else {
             continue;
         };
-        if insts[i + 1..].iter().any(|inst| matches!(inst, MirInst::Alloc { kind: MirAllocKind::Enum { .. }, .. } | MirInst::AllocAt { .. })) {
+        if insts[i + 1..].iter().any(|inst| matches!(inst, MirInst::Alloc { kind: MirAllocKind::Enum { .. } | MirAllocKind::Object { .. }, .. } | MirInst::AllocAt { .. })) {
             continue;
         }
         let mut out = Vec::new();
