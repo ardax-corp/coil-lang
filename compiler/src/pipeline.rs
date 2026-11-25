@@ -149,6 +149,7 @@ pub struct Pipeline {
     keep_fns_in: Option<KeepFnFilter>,
     /// When false (`--auto-par off`), skip auto fork-join.
     auto_par: bool,
+    par_heap_forks: bool,
     /// Typed inlining of HIR bodies, when set; `None` keeps the compiler's
     /// [`crate::opt::OptimizeOptions::hir_inline`] (on).
     hir_inline: Option<bool>,
@@ -254,6 +255,7 @@ impl Pipeline {
             c.set_opt_level(self.opt_level);
             c.set_debugger_attached(self.debugger_attached);
             c.set_auto_par(self.auto_par);
+            c.set_par_heap_forks(self.par_heap_forks);
             if let Some(on) = self.hir_inline {
                 c.set_hir_inline(on);
             }
@@ -599,6 +601,7 @@ impl Pipeline {
             contract_sources: Vec::new(),
             keep_fns_in: None,
             auto_par: true,
+            par_heap_forks: false,
             hir_inline: None,
             early_free: None,
             extra_dload_grants: Vec::new(),
@@ -2022,6 +2025,15 @@ impl Pipeline {
         self.auto_par = on;
         if self.compiler.get().is_some() {
             self.compiler_lazy_mut().set_auto_par(on);
+        }
+    }
+
+    /// Let auto-par fork sites whose arms build heap results, which its
+    /// cost model leaves sequential (tests of their worker).
+    pub fn set_par_heap_forks(&mut self, on: bool) {
+        self.par_heap_forks = on;
+        if self.compiler.get().is_some() {
+            self.compiler_lazy_mut().set_par_heap_forks(on);
         }
     }
 
