@@ -831,12 +831,16 @@ pub enum MirInst {
         src: ValueId,
         moved: u32,
     },
-    /// [`Self::Alloc`] (an enum or an instance) into `slot` when it is not
-    /// `0`: a slot [`Self::RcReuse`] kept, of the same layout. Nothing that
-    /// may unwind sits between the two.
+    /// [`Self::Alloc`] of an enum into `slot` when there is one and it is
+    /// not `0`: a slot [`Self::RcReuse`] kept, of the same layout.
+    ///
+    /// `owned`: payload words (bit `i`: word `i`) whose owner the frame
+    /// hands to the new object, so the allocation counts them no owner
+    /// more and the frame decrements them no more.
     AllocAt {
         dest: ValueId,
-        slot: ValueId,
+        slot: Option<ValueId>,
+        owned: u32,
         kind: MirAllocKind,
         elems: Vec<ValueId>,
         kinds: common::PackedKinds,
@@ -1403,7 +1407,7 @@ impl MirInst {
             Self::CowUnpin { src, saved, .. } => vec![*src, *saved],
             Self::RcInc { src, guard, .. } | Self::RcDec { src, guard, .. } => std::iter::once(*src).chain(*guard).collect(),
             Self::RcReuse { src, .. } => vec![*src],
-            Self::AllocAt { slot, elems, .. } => std::iter::once(*slot).chain(elems.iter().copied()).collect(),
+            Self::AllocAt { slot, elems, .. } => slot.iter().copied().chain(elems.iter().copied()).collect(),
             Self::Format { fmt, args, .. } => {
                 let mut v = vec![*fmt];
                 v.extend(args.iter().copied());
@@ -1507,7 +1511,9 @@ impl MirInst {
             }
             Self::RcReuse { src, .. } => *src = map(*src),
             Self::AllocAt { slot, elems, .. } => {
-                *slot = map(*slot);
+                if let Some(slot) = slot {
+                    *slot = map(*slot);
+                }
                 for e in elems {
                     *e = map(*e);
                 }

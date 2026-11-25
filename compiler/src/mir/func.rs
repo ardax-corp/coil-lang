@@ -1054,7 +1054,7 @@ impl MirFunc {
                 }
             }
             MirInst::AllocAt { dest, slot, elems, .. } => {
-                if self.ty(*dest) != MirTy::HeapRef || self.ty(*slot) != MirTy::I64 {
+                if self.ty(*dest) != MirTy::HeapRef || slot.is_some_and(|s| self.ty(s) != MirTy::I64) {
                     return Err(format!("{dest} AllocAt type"));
                 }
                 for (i, e) in elems.iter().enumerate() {

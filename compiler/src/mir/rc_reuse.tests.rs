@@ -99,3 +99,42 @@ bb0:
 fn an_unmatched_word_is_left_alone() {
     assert_eq!(reused(NOT_MATCHED).0, 0);
 }
+
+/// `Cons(v + k, g(rest))`: the call's result is owned and dies at the
+/// allocation, which takes its owner.
+const OWNED: &str = "func @f(v0: heapref, v1: i64) -> heapref {
+bb0:
+    v2 = call.heapref 1 v0
+    v3 = alloc.enum[9] 1, v1, v2
+    v4 = rc.inc v3
+    v5 = rc.dec v2
+    return v3
+}
+";
+
+#[test]
+fn an_allocation_takes_the_owner_of_a_word_that_dies_there() {
+    let (_, f) = reused(OWNED);
+    assert_eq!(count(&f, |i| matches!(i, MirInst::AllocAt { slot: None, owned: 2, .. })), 1);
+    assert_eq!(count(&f, |i| matches!(i, MirInst::RcDec { .. })), 0);
+}
+
+/// The word is read after the allocation: its owner stays with the frame.
+const READ_AFTER: &str = "func @f(v0: heapref, v1: i64) -> heapref {
+bb0:
+    v2 = call.heapref 1 v0
+    v3 = alloc.enum[9] 1, v1, v2
+    v4 = rc.inc v3
+    v6 = call.heapref 1 v2
+    v5 = rc.dec v2
+    v7 = rc.dec v6
+    return v3
+}
+";
+
+#[test]
+fn a_word_read_after_the_allocation_keeps_its_owner() {
+    let (_, f) = reused(READ_AFTER);
+    assert_eq!(count(&f, |i| matches!(i, MirInst::AllocAt { .. })), 0);
+    assert_eq!(count(&f, |i| matches!(i, MirInst::RcDec { .. })), 2);
+}

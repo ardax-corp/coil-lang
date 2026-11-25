@@ -58,6 +58,11 @@ decrement (`moved`) keep the old object's owner when the slot is kept, so a rebu
 count of the children it carries over. A frame that unwinds between the two leaves the slot
 unused; `COIL_RC_REUSE=0` turns the pass off.
 
+The same pass lets an enum allocation take the frame's owner of a payload word the frame
+decrements right after it (a call's result built into a node, `Cons(v, f(rest))`): `AllocAt`'s
+`owned` mask, with or without a slot. The allocation does not count that word and the decrement
+goes, when nothing between the two reads the word or may release the new object.
+
 Elision: numbers are never counted (constants, arithmetic, φs of them, a word a number store
 writes, scalar array elements), and an inc / dec pair of one word in a block cancels when nothing
 between them can release an object. `hir/early_free.rs` frees whole fresh graphs before MIR

@@ -185,10 +185,12 @@ before its debug slots. The layout changes, so the MIR section is a new `FORMAT`
 23, and the reader refuses 22: an 8.9 archive's code is compiled again.
 
 Minor 11 (reuse in place, #2889) adds MIR tags 56 and 57 to format 23:
-`RcReuse` (dest, src), a decrement that keeps a dead plain enum's or
-instance's slot and returns its address (`0` when the object lives on or
-cannot be reused), and `AllocAt` (slot, then tag 16's `Alloc` layout), an
-allocation into that slot when it is not `0`. An 8.10 archive loads unchanged:
+`RcReuse` (dest, src, moved mask), a decrement that keeps a dead plain
+enum's or instance's slot and returns its address (`0` when the object lives
+on or cannot be reused), and `AllocAt` (owned mask, a `u8` that says whether a
+slot follows, the slot, then tag 16's `Alloc` layout), an enum allocation into
+that slot when there is one and it is not `0`, which takes the frame's owner
+of the payload words in the owned mask. An 8.10 archive loads unchanged:
 it holds neither op.
 
 ## Major 7

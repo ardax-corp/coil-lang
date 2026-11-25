@@ -822,7 +822,7 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 set!(*dest, w);
             }
             MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
-                if let MirInst::AllocAt { slot, .. } = inst {
+                if let MirInst::AllocAt { slot: Some(slot), .. } = inst {
                     rt::coil_native_offer_slot(ctx, get!(*slot));
                 }
                 let pc_of = |t| program(body).body_at(t).map(|b| b.pc).filter(|&pc| pc != u32::MAX);
@@ -835,6 +835,15 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 s.extend(last);
                 let w = rt::coil_native_alloc(ctx, code, s.as_ptr(), n, extra);
                 check!();
+                // The allocation counted each word: an owned one gives the
+                // frame's owner back.
+                if let MirInst::AllocAt { owned, .. } = inst {
+                    for (i, e) in elems.iter().enumerate() {
+                        if i < 32 && owned & (1 << i) != 0 {
+                            rt::coil_native_rc(ctx, get!(*e), 1);
+                        }
+                    }
+                }
                 set!(*dest, w);
             }
             MirInst::ArrayPush { dest, array, value } => {

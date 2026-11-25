@@ -26,7 +26,17 @@ pub fn insert_reuse(f: &mut MirFunc) -> usize {
     if std::env::var_os("COIL_RC_REUSE").is_some_and(|v| v == "0") {
         return 0;
     }
+    let paired = pair_all(f);
+    for bi in 0..f.blocks.len() {
+        take_owned(f, bi);
+    }
+    paired
+}
+
+fn pair_all(f: &mut MirFunc) -> usize {
     // The words the body matched on as enums, and what was read from them.
+    // Only a boxed enum's word names its own slot (a niche word names its
+    // payload's).
     let mut enums: HashSet<ValueId> = HashSet::new();
     for b in &f.blocks {
         for inst in &b.insts {
@@ -38,6 +48,7 @@ pub fn insert_reuse(f: &mut MirFunc) -> usize {
             enums.insert(*scrutinee);
         }
     }
+    enums.retain(|&v| f.ty(v) == MirTy::HeapRef);
     if enums.is_empty() {
         return 0;
     }
@@ -172,13 +183,79 @@ fn pair_block(f: &mut MirFunc, bi: usize, enums: &HashSet<ValueId>, read_from: &
                 out.push(reuse);
             }
             let MirInst::Alloc { dest, kind, elems, kinds } = inst else { unreachable!() };
-            out.push(MirInst::AllocAt { dest, slot, kind, elems, kinds });
+            out.push(MirInst::AllocAt { dest, slot: Some(slot), owned: 0, kind, elems, kinds });
             continue;
         }
         out.push(inst);
     }
     f.blocks[bi].insts = out;
     n
+}
+
+/// An enum allocation whose payload word the frame decrements after it,
+/// with nothing between that reads the word or may release the new object:
+/// the frame's owner moves into the object (`AllocAt`'s `owned`), so
+/// neither the allocation's increment nor the decrement is made.
+fn take_owned(f: &mut MirFunc, bi: usize) {
+    let insts = &f.blocks[bi].insts;
+    // (allocation index, owned mask, decrements that go)
+    let mut found: Vec<(usize, u32, Vec<usize>)> = Vec::new();
+    let mut gone: HashSet<usize> = HashSet::new();
+    for (j, inst) in insts.iter().enumerate() {
+        let (dest, elems, kinds) = match inst {
+            MirInst::Alloc { dest, kind: MirAllocKind::Enum { .. }, elems, kinds } | MirInst::AllocAt { dest, kind: MirAllocKind::Enum { .. }, elems, kinds, .. } => (*dest, elems, *kinds),
+            _ => continue,
+        };
+        let mut owned = 0u32;
+        let mut decs = Vec::new();
+        for (k, &e) in elems.iter().enumerate().take(32) {
+            // Counted by the allocation as the decrement counts it: an
+            // object word of a kind that is one.
+            if !matches!(f.ty(e), MirTy::HeapRef) || elems[..k].contains(&e) {
+                continue;
+            }
+            if kinds != 0 && k < common::PACKED_KIND_WORDS && !matches!(common::packed_word_kind(kinds, k), common::WORD_POINTER | common::WORD_UNKNOWN) {
+                continue;
+            }
+            for (i, later) in insts.iter().enumerate().skip(j + 1) {
+                match later {
+                    MirInst::RcDec { src, guard: None, .. } if *src == e => {
+                        if !gone.contains(&i) {
+                            owned |= 1 << k;
+                            decs.push(i);
+                        }
+                        break;
+                    }
+                    // The new object dies, or something reads the word.
+                    MirInst::RcDec { src, .. } if *src == dest => break,
+                    _ if later.operands().contains(&e) => break,
+                    MirInst::RcInc { .. } | MirInst::RcDec { .. } | MirInst::HomeStore { .. } | MirInst::Const { .. } | MirInst::Cast { kind: MirCastKind::Word, .. } => {}
+                    _ => break,
+                }
+            }
+        }
+        if owned != 0 {
+            gone.extend(decs.iter().copied());
+            found.push((j, owned, decs));
+        }
+    }
+    if found.is_empty() {
+        return;
+    }
+    let block = &mut f.blocks[bi].insts;
+    for (j, mask, _) in &found {
+        let inst = std::mem::replace(&mut block[*j], MirInst::Probe { dest: ValueId(0), id: 0 });
+        block[*j] = match inst {
+            MirInst::Alloc { dest, kind, elems, kinds } => MirInst::AllocAt { dest, slot: None, owned: *mask, kind, elems, kinds },
+            MirInst::AllocAt { dest, slot, owned, kind, elems, kinds } => MirInst::AllocAt { dest, slot, owned: owned | mask, kind, elems, kinds },
+            other => other,
+        };
+    }
+    let mut gone: Vec<usize> = gone.into_iter().collect();
+    gone.sort_unstable();
+    for i in gone.into_iter().rev() {
+        block.remove(i);
+    }
 }
 
 /// Each payload word a `MatchPayload` of `insts` reads: its object and index.
@@ -301,7 +378,7 @@ fn pair_across(f: &mut MirFunc, enums: &HashSet<ValueId>, unit: &HashSet<(BlockI
             taken.insert((si, j));
             let inst = &mut f.blocks[si].insts[j];
             let MirInst::Alloc { dest, kind, elems, kinds } = std::mem::replace(inst, MirInst::Probe { dest: ValueId(0), id: 0 }) else { unreachable!() };
-            *inst = MirInst::AllocAt { dest, slot, kind, elems, kinds };
+            *inst = MirInst::AllocAt { dest, slot: Some(slot), owned: 0, kind, elems, kinds };
         }
         n += 1;
     }

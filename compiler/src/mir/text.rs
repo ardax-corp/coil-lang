@@ -309,13 +309,19 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             value,
         } => write!(f, "{dest} = arraypush {array}, {value}"),
         MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
-            let at = if let MirInst::AllocAt { slot, .. } = inst { Some(*slot) } else { None };
+            let at = if let MirInst::AllocAt { slot, owned, .. } = inst { Some((*slot, *owned)) } else { None };
             write!(f, "{dest} = {}.{}", if at.is_some() { "allocat" } else { "alloc" }, kind.as_str())?;
             if *kinds != 0 {
                 write!(f, "[{kinds}]")?;
             }
-            if let Some(slot) = at {
-                write!(f, " {slot},")?;
+            if let Some((slot, owned)) = at {
+                match slot {
+                    Some(slot) => write!(f, " {slot},")?,
+                    None => write!(f, " -,")?,
+                }
+                if owned != 0 {
+                    write!(f, " owned {owned},")?;
+                }
             }
             match *kind {
                 MirAllocKind::Object { type_id, nfields } => {
@@ -942,9 +948,16 @@ impl<'a> Parser<'a> {
             };
             let slot = match at {
                 Some(_) => {
-                    let s = self.value()?;
+                    let s = if self.eat('-') { None } else { Some(self.value()?) };
                     self.expect(',')?;
-                    Some(s)
+                    let owned = if self.eat_str("owned ") {
+                        let m = self.uint()? as u32;
+                        self.expect(',')?;
+                        m
+                    } else {
+                        0
+                    };
+                    Some((s, owned))
                 }
                 None => None,
             };
@@ -998,7 +1011,8 @@ impl<'a> Parser<'a> {
             }
             ensure_ty(types, dest, MirTy::HeapRef);
             if let Some(slot) = slot {
-                return Ok(MirInst::AllocAt { dest, slot, kind, elems, kinds });
+                let (slot, owned) = slot;
+                return Ok(MirInst::AllocAt { dest, slot, owned, kind, elems, kinds });
             }
             return Ok(MirInst::Alloc { dest, kind, elems, kinds });
         }

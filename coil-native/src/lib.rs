@@ -1488,7 +1488,9 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                     }
                     MirInst::AllocAt { dest, slot, kind, elems, .. } => {
                         need(dest)?;
-                        need_scalar(slot)?;
+                        if let Some(slot) = slot {
+                            need_scalar(slot)?;
+                        }
                         for e in elems {
                             need(e)?;
                         }
@@ -4389,11 +4391,16 @@ impl<'a> Lower<'a> {
                 let words = elems;
                 // A slot `RcReuse` kept (`0`: none).
                 let reuse = match inst {
-                    MirInst::AllocAt { slot, .. } => {
+                    MirInst::AllocAt { slot: Some(slot), .. } => {
                         let s = self.get(f, *slot);
                         Some(self.coerce(s, types::I64))
                     }
                     _ => None,
+                };
+                // Payload words the frame's owner moves into (`0`: none).
+                let owned = match inst {
+                    MirInst::AllocAt { owned, .. } => *owned,
+                    _ => 0,
                 };
                 // An opaque body's `int` words may be objects: their kinds
                 // stay unknown.
@@ -4415,7 +4422,7 @@ impl<'a> Lower<'a> {
                 let join = inline.map(|obj| {
                     let join = self.b.create_block();
                     self.b.append_block_param(join, types::I64);
-                    self.inline_alloc(f, &obj, *kind, words, extra, join, reuse);
+                    self.inline_alloc(f, &obj, *kind, words, extra, join, reuse, owned);
                     join
                 });
                 // The runtime's allocation takes the slot (or gives it back).
@@ -4431,6 +4438,20 @@ impl<'a> Lower<'a> {
                 let extra = self.b.ins().iconst(types::I64, extra as i64);
                 let call = self.call_checked(self.alloc, &[self.ctx, code, p, n, extra]);
                 let mut w = self.b.inst_results(call)[0];
+                // The runtime counted every word: an owned one gives the
+                // frame's owner back (the object holds one, so none frees).
+                for (i, &e) in words.iter().enumerate() {
+                    if i < 32 && owned & (1 << i) != 0 {
+                        let x = self.get(f, e);
+                        let x = self.coerce(x, types::I64);
+                        if counted_inline(ty_of(f, e)) {
+                            self.emit_rc(x, true);
+                        } else {
+                            let one = self.b.ins().iconst(types::I64, 1);
+                            self.b.ins().call(self.rc, &[self.ctx, x, one]);
+                        }
+                    }
+                }
                 if let Some(join) = join {
                     self.b.ins().jump(join, &[w.into()]);
                     self.b.switch_to_block(join);
@@ -4959,7 +4980,8 @@ impl<'a> Lower<'a> {
     /// to `join` with its address. Otherwise the code after this (the
     /// current block, on return) calls the helper, which refills.
     #[allow(clippy::too_many_arguments)]
-    fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], extra: u64, join: Block, reuse: Option<cranelift_codegen::ir::Value>) {
+    #[allow(clippy::too_many_arguments)]
+    fn inline_alloc(&mut self, f: &MirFunc, obj: &machine::native::InlineObject, kind: MirAllocKind, words: &[ValueId], extra: u64, join: Block, reuse: Option<cranelift_codegen::ir::Value>, owned: u32) {
         use machine::native::{
             BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_FIN_LEN, COUNTS_FIN_WORDS, COUNTS_INLINE_GATE,
             COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS,
@@ -5038,13 +5060,16 @@ impl<'a> Lower<'a> {
         }
         // Each payload word that names an object gains an owner, as the
         // runtime's allocation counts them (an instance's fields are stored
-        // after it is made).
+        // after it is made), but for one the frame's owner moves into.
         if matches!(kind, MirAllocKind::Enum { .. }) {
             let kinds = (extra >> 32) as u32;
             for (k, &v) in words.iter().enumerate() {
                 let word_kind = if k < 16 { ((kinds >> (2 * k)) & 3) as u8 } else { common::WORD_UNKNOWN };
                 let vt = ty_of(f, v);
                 if matches!(word_kind, common::WORD_SCALAR | common::WORD_BYTE) || matches!(vt, MirTy::F64 | MirTy::Bool) {
+                    continue;
+                }
+                if k < 32 && owned & (1 << k) != 0 {
                     continue;
                 }
                 let x = self.get(f, v);

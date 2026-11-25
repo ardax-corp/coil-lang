@@ -582,9 +582,16 @@ fn inst(w: &mut Writer, inst: &MirInst) {
             w.u32(*moved);
         }
         MirInst::Alloc { dest, kind, elems, kinds } | MirInst::AllocAt { dest, kind, elems, kinds, .. } => {
-            if let MirInst::AllocAt { slot, .. } = inst {
+            if let MirInst::AllocAt { slot, owned, .. } = inst {
                 w.u8(I_ALLOC_AT);
-                w.v(*slot);
+                w.u32(*owned);
+                match slot {
+                    Some(slot) => {
+                        w.u8(1);
+                        w.v(*slot);
+                    }
+                    None => w.u8(0),
+                }
             } else {
                 w.u8(I_ALLOC);
             }
@@ -1184,7 +1191,14 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             MirInst::HeapFieldStore { dest: r.v()?, object: r.v()?, value: r.v()?, index: r.u32()?, scalar: tag == I_SET_FIELD_SCALAR }
         }
         tag @ (I_ALLOC | I_ALLOC_AT) => {
-            let slot = if tag == I_ALLOC_AT { Some(r.v()?) } else { None };
+            // `AllocAt`: its owned words, then its slot if it has one.
+            let at = if tag == I_ALLOC_AT {
+                let owned = r.u32()?;
+                let slot = if r.u8()? != 0 { Some(r.v()?) } else { None };
+                Some((slot, owned))
+            } else {
+                None
+            };
             let dest = r.v()?;
             let kind = match r.u8()? {
                 0 => MirAllocKind::Array,
@@ -1201,8 +1215,8 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             let n = r.len()?;
             let elems = (0..n).map(|_| r.v()).collect::<Result<Vec<_>, _>>()?;
             let kinds = r.u32()?;
-            match slot {
-                Some(slot) => MirInst::AllocAt { dest, slot, kind, elems, kinds },
+            match at {
+                Some((slot, owned)) => MirInst::AllocAt { dest, slot, owned, kind, elems, kinds },
                 None => MirInst::Alloc { dest, kind, elems, kinds },
             }
         }
