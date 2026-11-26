@@ -715,6 +715,9 @@ pub trait LowerCx {
     /// heap pointer ([`crate::layout::scalar_pair`]): a flat field of it
     /// keeps both words in number slots.
     fn scalar_pair(&self, ty: &Ty) -> bool;
+    /// The word kinds of a closed two-word type's two words
+    /// ([`crate::layout::pair_word_kinds`]).
+    fn pair_kinds(&self, ty: &Ty) -> Option<[u8; 2]>;
     /// The element of a `Vec` of a closed two-word type: a lane array,
     /// each element's two words in place (`MirAllocKind::Lanes`,
     /// `LaneIndex` / `LaneStore` / `LanePush`).
@@ -7863,7 +7866,26 @@ impl Lower<'_> {
                 }
             })
             .collect();
-        let kinds = common::pack_word_kinds(tys.iter().map(|t| t.as_ref().map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t))));
+        let mut slot_kinds: Vec<u8> = tys.iter().map(|t| t.as_ref().map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t))).collect();
+        slot_kinds.resize(words.len(), common::WORD_UNKNOWN);
+        // A flat field's words, for a generic class's instance whose row
+        // leaves them unknown (`Checker::class_instance_tails`).
+        for (i, &a) in args.iter().enumerate() {
+            if let Some(&Some(tail)) = tails.get(i)
+                && let Some([lo, hi]) = self.expr_ty(a).and_then(|t| self.cx.pair_kinds(t))
+            {
+                slot_kinds[i] = lo;
+                if let Some(k) = slot_kinds.get_mut(tail as usize) {
+                    *k = hi;
+                }
+            }
+            if let Some(&Some((tail, extra))) = wide.get(i) {
+                for k in slot_kinds.iter_mut().skip(tail as usize).take(extra as usize) {
+                    *k = common::WORD_SCALAR;
+                }
+            }
+        }
+        let kinds = common::pack_word_kinds(slot_kinds);
         let nfields = words.len() as u32;
         let obj = self.b.ins_alloc_kinds(MirAllocKind::Object { type_id, nfields }, Vec::new(), kinds).map_err(mir)?;
         let obj = self.b.ins_gc_barrier(MirGcKind::Safepoint, obj).map_err(mir)?;

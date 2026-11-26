@@ -1508,7 +1508,8 @@ impl Compiler {
         let past_budget = !needed
             && self.inst_clones.len() >= self.checker.host_grants().clone_budget()
             && !self.is_hot_fn(fqn)
-            && !self.fn_sig_split(fqn);
+            && !self.fn_sig_split(fqn)
+            && !self.fn_flat_split(fqn, lookup);
         if past_budget || self.inst_clone_recursive(fqn) {
             return None;
         }
@@ -1592,7 +1593,10 @@ impl Compiler {
         src.program == self.program_seq
             || self.module_ctxs.get(&src.program).is_some_and(|ctx| {
                 ctx.knows_tys(lookup)
-                    && (ctx.layout_safe(src.span) || self.checker.enum_variants(&src.class).is_some() || self.fn_sig_split(fqn))
+                    && (ctx.layout_safe(src.span)
+                        || self.checker.enum_variants(&src.class).is_some()
+                        || self.fn_sig_split(fqn)
+                        || self.fn_flat_split(fqn, lookup))
             })
     }
 
@@ -1613,6 +1617,44 @@ impl Compiler {
             return false;
         }
         !self.module_ctxs.values().any(|ctx| ctx.namespace == module && ctx.knows_tys(args))
+    }
+
+    /// [`Checker::class_instance_tails`] where every body that reads the
+    /// instance agrees on them: none for another module's class at types
+    /// that module does not know ([`Self::shared_only_class`]), whose
+    /// methods there are all its shared bodies, so the field stays one
+    /// word (a two-word value boxed, E0808).
+    pub(super) fn instance_tails(&self, class: &str, args: &[Ty]) -> Vec<(usize, crate::typechecking::InstanceTail)> {
+        if self.instance_shared_only(class, args) {
+            return Vec::new();
+        }
+        self.checker.class_instance_tails(class, args)
+    }
+
+    /// [`Checker::class_flat_tails_at`] at the instances
+    /// [`Self::instance_tails`] holds flat.
+    pub(super) fn flat_tails_at(&self, class: &str, args: &[Ty]) -> Vec<Option<u32>> {
+        if self.instance_shared_only(class, args) {
+            return self.checker.class_flat_tails(class);
+        }
+        self.checker.class_flat_tails_at(class, args)
+    }
+
+    /// [`Checker::class_wide_tails_at`] at the instances
+    /// [`Self::instance_tails`] holds flat.
+    pub(super) fn wide_tails_at(&self, class: &str, args: &[Ty]) -> Vec<Option<(u32, u32)>> {
+        if self.instance_shared_only(class, args) {
+            return self.checker.class_wide_tails(class);
+        }
+        self.checker.class_wide_tails_at(class, args)
+    }
+
+    /// [`Self::shared_only_class`] of an instance, a variant's constructor
+    /// type among `args` (`Some(3)`'s, a call's lookup) read as its enum's,
+    /// as the instance's type names it.
+    fn instance_shared_only(&self, class: &str, args: &[Ty]) -> bool {
+        let args: Vec<Ty> = args.iter().map(crate::typechecking::ty::nominal_enum_deep).collect();
+        self.shared_only_class(class, &args)
     }
 
     /// Whether a new clone of `fqn` would repeat a clone source already on
@@ -1650,7 +1692,8 @@ impl Compiler {
         }
         let room = (self.inst_clones.len() + planned.len() < self.checker.host_grants().clone_budget()
             || self.is_hot_fn(fqn)
-            || self.fn_sig_split(fqn))
+            || self.fn_sig_split(fqn)
+            || self.fn_flat_split(fqn, lookup))
             && !self.inst_clone_recursive(fqn)
             && planned.len() < self.inst_clone_labels.len();
         if room {
@@ -1673,6 +1716,26 @@ impl Compiler {
             let label = self.bodies.fresh_label();
             self.inst_clone_labels.push(label);
         }
+    }
+
+    /// Whether the clone source `fqn` at ground `lookup` reaches a flat
+    /// generic class instance ([`Self::sig_flat_split`]) in its signature
+    /// or its instance head (a method's `self`, a trait instance's type):
+    /// its shared body reads that instance's flat field as one word, so
+    /// its clone is made past the clone budget, compiled from its body.
+    pub(super) fn fn_flat_split(&self, fqn: &str, lookup: &[Ty]) -> bool {
+        let Some(src) = self.inst_clone_srcs.get(fqn) else {
+            return false;
+        };
+        let Some(vars) = self.inst_clone_vars(&src.head, lookup) else {
+            return false;
+        };
+        let own = self
+            .checker
+            .is_class(&src.class)
+            .then(|| if src.head.is_empty() { Ty::Con(src.class.clone()) } else { Ty::App(Box::new(Ty::Con(src.class.clone())), src.head.clone()) });
+        let sig: Vec<Ty> = self.checker.fn_param_tys(fqn).into_iter().flatten().chain(self.checker.fn_return_ty(fqn)).collect();
+        self.sig_flat_split(sig.iter().chain(&src.head).chain(own.as_ref()), &vars)
     }
 
     /// The instance head's type variables bound to `lookup` (with their
@@ -1720,7 +1783,8 @@ impl Compiler {
                         ctx.knows_tys(&req.lookup)
                             && (ctx.layout_safe(src.span)
                                 || self.checker.enum_variants(&src.class).is_some()
-                                || self.fn_sig_split(&req.src))
+                                || self.fn_sig_split(&req.src)
+                                || self.fn_flat_split(&req.src, &req.lookup))
                     })
             {
                 self.foreign_clone_queue.push(req.clone());
@@ -2110,7 +2174,8 @@ impl Compiler {
             let src = &self.inst_clone_srcs[&req.src];
             let foreign = src.method_of.is_some()
                 && self.module_ctxs.get(&src.program).is_some_and(|ctx| {
-                    ctx.knows_tys(&req.lookup) && (ctx.layout_safe(src.span) || self.fn_sig_split(&req.src))
+                    ctx.knows_tys(&req.lookup)
+                        && (ctx.layout_safe(src.span) || self.fn_sig_split(&req.src) || self.fn_flat_split(&req.src, &req.lookup))
                 });
             if foreign {
                 self.foreign_clone_queue.push(req);
@@ -2924,7 +2989,9 @@ impl Compiler {
                 ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult
             )
         };
-        head.iter().any(|h| crate::layout::nested_open_enum(&self.checker, h, true, &look, &mut niche))
+        // A flat generic class instance its methods' shared bodies read as
+        // one word (`Checker::class_instance_tails`).
+        head.iter().any(|h| crate::layout::nested_open_enum(&self.checker, h, true, &look, &mut niche)) || self.sig_flat_split(head, &vars)
     }
 
     fn plan_instance_dict_steps(
@@ -3029,7 +3096,13 @@ impl Compiler {
                 let Some(name) = owner.and_then(|inst| inst.method_fqns.get(&method_def.name).cloned()) else {
                     return false;
                 };
-                nested_slots.push(owner.filter(|inst| self.nested_head(&inst.args, lookup)).map(|_| format!("{owner_class}::{}", method_def.name)));
+                // So is one whose own signature reaches a flat instance
+                // (`HashMapIter::next -> Option<Pair<K, V>>`).
+                nested_slots.push(
+                    owner
+                        .filter(|inst| self.nested_head(&inst.args, lookup) || self.fn_flat_split(&name, lookup))
+                        .map(|_| format!("{owner_class}::{}", method_def.name)),
+                );
                 niche_slots.push(owner.filter(|inst| self.niche_head(&inst.args, lookup)).map(|_| {
                     (!Self::is_default_method_fqn(owner_class, &method_def.name, &name)).then(|| format!("{owner_class}::{}", method_def.name))
                 }));
@@ -3121,7 +3194,7 @@ impl Compiler {
                     let takes_object = niche.flatten().map(|method| {
                         format!("its `{method}` takes the value as an enum object, and has no per-type clone that takes the value's own word (coil-lang#2477)")
                     }).or_else(|| nested_slots.get(slot).cloned().flatten().map(|method| {
-                        format!("its `{method}` reads the `Option` / `Result` the value holds as an enum object, and has no per-type clone that reads its own word (coil-lang#2446)")
+                        format!("its `{method}` reads the `Option` / `Result` the value holds as an enum object, or a generic class instance's field as one word where this instance holds it flat, and has no per-type clone that reads its own words (coil-lang#2446)")
                     }));
                     // Past the budget too for a dictionary-reading
                     // superclass method: its clone is a direct call, a
