@@ -20970,9 +20970,116 @@ impl Checker {
 
     /// Whether field type `ty` of class `key` names one of the class's
     /// type parameters: such a field holds one word in every instance
-    /// (a shared body reads it so), a two-word value boxed.
+    /// (a shared body reads it so), a two-word value boxed, unless the
+    /// instance is flat there ([`Self::class_instance_tails`]).
     pub fn field_names_class_param(&self, key: &str, ty: &Ty) -> bool {
         self.generics().generic_type_ctors.get(key).is_some_and(|params| ty_names_param(ty, params))
+    }
+
+    /// The flat fields of generic class `key`'s instance at ground `args`:
+    /// a field typed by a bare class parameter whose argument is a closed
+    /// two-word type ([`crate::layout::pair_word_kinds`], both words of a
+    /// kind the instance's own packed kinds can say) or a tuple of three or
+    /// four immediates ([`crate::layout::wide_scalar_items`]). Each gets
+    /// its tail slots after the class's own ([`Self::class_slot_count`]),
+    /// in field order, so the class row (one per class) stays right for
+    /// every slot it names, and the instance's own kinds
+    /// (`ObjInstance::own_kinds`) say the rest. Per field: the tail of a
+    /// pair, or the first tail and extra word count of a wide one. Empty
+    /// when the instance has none, or the class cannot hold them: a
+    /// `shared`, `view` or readonly pair class (as for its own flat
+    /// fields), one with a `drop` (its finalizer is the shared body), one
+    /// whose row has tagged slots (its trailer follows the class's slots),
+    /// or one whose slots would pass the twelve own kinds a snapshot keeps.
+    /// No code of such an instance reaches a shared body, which reads the
+    /// field as one word ("Flat instances",
+    /// `docs/internals/layout.md`).
+    pub fn class_instance_tails(&self, key: &str, args: &[Ty]) -> Vec<(usize, InstanceTail)> {
+        if args.is_empty() || args.iter().any(Ty::has_var) {
+            return Vec::new();
+        }
+        // A variant's constructor type (`Some(3)`'s) is its enum's.
+        let args: Vec<Ty> = args.iter().map(|t| nominal_enum_deep(&apply_ty_prune(&self.subst, t))).collect();
+        let Some(params) = self.generics().generic_type_ctors.get(key).cloned() else {
+            return Vec::new();
+        };
+        let Some(fields) = self.class_fields(key) else {
+            return Vec::new();
+        };
+        if params.len() != args.len()
+            || self.is_shared_class(key)
+            || self.is_view_class(key)
+            || self.classes_with_drop.contains(key)
+            || crate::layout::readonly_pair_class(self, &Ty::Con(key.to_string())).is_some()
+        {
+            return Vec::new();
+        }
+        // A tagged slot's trailer entry sits right after the class's slots.
+        let tagged = fields.iter().zip(self.class_flat_tails(key)).any(|((_, ty), tail)| {
+            tail.is_some() && crate::layout::pair_word_kinds(self, ty).is_none_or(|k| k[0] == common::WORD_UNKNOWN)
+        });
+        if tagged {
+            return Vec::new();
+        }
+        let mut next = self.class_slot_count(key) as u32;
+        let mut out = Vec::new();
+        for (i, (name, ty)) in fields.iter().enumerate() {
+            let Some(p) = (match strip_readonly(ty) {
+                Ty::Con(p) => params.iter().position(|q| q == p),
+                _ => None,
+            }) else {
+                continue;
+            };
+            if self.is_borrow_field(key, name) {
+                continue;
+            }
+            let at = &args[p];
+            if crate::layout::pair_word_kinds(self, at).is_some_and(|k| !k.contains(&common::WORD_UNKNOWN)) {
+                out.push((i, InstanceTail::Pair(next)));
+                next += 1;
+            } else if let Some(items) = crate::layout::wide_scalar_items(self, at) {
+                let extra = items.len() as u32 - 1;
+                out.push((i, InstanceTail::Wide(next, extra)));
+                next += extra;
+            }
+        }
+        if next as usize > INSTANCE_OWN_KIND_WORDS {
+            return Vec::new();
+        }
+        out
+    }
+
+    /// The ground type arguments of class type `ty` (none if it has none
+    /// or one is still open): the instance whose layout its fields take
+    /// ([`Self::class_instance_tails`]).
+    pub fn class_ty_args(&self, ty: &Ty) -> Vec<Ty> {
+        match strip_readonly(&apply_ty_prune(&self.subst, ty)) {
+            Ty::App(_, args) if !args.iter().any(Ty::has_var) => args.iter().map(crate::typechecking::ty::strip_readonly_deep).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// [`Self::class_flat_tails`] at instance `args`: the class's own flat
+    /// fields and the instance's ([`Self::class_instance_tails`]).
+    pub fn class_flat_tails_at(&self, key: &str, args: &[Ty]) -> Vec<Option<u32>> {
+        let mut tails = self.class_flat_tails(key);
+        for (i, tail) in self.class_instance_tails(key, args) {
+            if let (InstanceTail::Pair(t), Some(slot)) = (tail, tails.get_mut(i)) {
+                *slot = Some(t);
+            }
+        }
+        tails
+    }
+
+    /// [`Self::class_wide_tails`] at instance `args`.
+    pub fn class_wide_tails_at(&self, key: &str, args: &[Ty]) -> Vec<Option<(u32, u32)>> {
+        let mut tails = self.class_wide_tails(key);
+        for (i, tail) in self.class_instance_tails(key, args) {
+            if let (InstanceTail::Wide(t, n), Some(slot)) = (tail, tails.get_mut(i)) {
+                *slot = Some((t, n));
+            }
+        }
+        tails
     }
 
     /// Slots an instance of class `key` holds: its fields, then the tail
@@ -23067,6 +23174,21 @@ fn if_value_without_else(e: &Output) -> bool {
         _ => false,
     }
 }
+
+/// Where a flat instance field's other words live
+/// ([`Checker::class_instance_tails`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstanceTail {
+    /// A two-word field's second word, in this tail slot.
+    Pair(u32),
+    /// A wide field's words 2.., from this tail slot, this many.
+    Wide(u32, u32),
+}
+
+/// The slots of an instance whose own packed kinds a snapshot keeps (its
+/// header's 24-bit `aux` field, `common::snapshot`): a flat instance's tail
+/// slots are said by those kinds alone.
+const INSTANCE_OWN_KIND_WORDS: usize = 12;
 
 /// Whether `ty` holds an inference variable or one of `params`, a generic
 /// class's parameter names as its field types spell them.

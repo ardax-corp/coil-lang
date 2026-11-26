@@ -1160,6 +1160,20 @@ impl Compiler {
         instance_args: &[Ty],
         is_default: bool,
     ) -> Option<BoundarySig> {
+        self.trait_method_boundary_sig_own(class, method, instance_args, is_default, None)
+    }
+
+    /// [`Self::trait_method_boundary_sig`] with the instance method's own
+    /// parameter and result types given (`own`): a generic instance's
+    /// clone's, at the clone's types ([`Self::instance_clone_own_sig`]).
+    fn trait_method_boundary_sig_own(
+        &self,
+        class: &str,
+        method: &str,
+        instance_args: &[Ty],
+        is_default: bool,
+        own: Option<&(Vec<Ty>, Ty)>,
+    ) -> Option<BoundarySig> {
         let scheme = self.checker.typeclass_method_scheme(class, method)?;
         let mut inst = crate::typechecking::subst::Subst::empty();
         for (bound, ty) in scheme.bounds.iter().zip(instance_args) {
@@ -1170,13 +1184,17 @@ impl Compiler {
         // arguments leave it open and its layout would read as the boxed
         // one; the method takes and returns it at its own closed type, a
         // niche word for `Option<string>` (#2478).
-        let own = (!is_default)
-            .then(|| self.checker.generics().find_instance_relaxed(class, instance_args))
-            .flatten()
-            .and_then(|instance| instance.method_fqns.get(method))
-            .filter(|fqn| !Self::is_default_method_fqn(class, method, fqn));
-        let own_params = own.and_then(|fqn| self.checker.fn_param_tys(fqn)).unwrap_or_default();
-        let own_ret = own.and_then(|fqn| self.checker.fn_return_ty(fqn));
+        let (own_params, own_ret) = match own {
+            Some((params, ret)) => (params.clone(), Some(ret.clone())),
+            None => {
+                let own = (!is_default)
+                    .then(|| self.checker.generics().find_instance_relaxed(class, instance_args))
+                    .flatten()
+                    .and_then(|instance| instance.method_fqns.get(method))
+                    .filter(|fqn| !Self::is_default_method_fqn(class, method, fqn));
+                (own.and_then(|fqn| self.checker.fn_param_tys(fqn)).unwrap_or_default(), own.and_then(|fqn| self.checker.fn_return_ty(fqn)))
+            }
+        };
         let layout_of = |ty: &Ty, own: Option<&Ty>| -> Option<ValueLayout> {
             let generic = self.generic_enum_layout(ty)?;
             if is_default {
@@ -1508,7 +1526,8 @@ impl Compiler {
         let past_budget = !needed
             && self.inst_clones.len() >= self.checker.host_grants().clone_budget()
             && !self.is_hot_fn(fqn)
-            && !self.fn_sig_split(fqn);
+            && !self.fn_sig_split(fqn)
+            && !self.fn_flat_split(fqn, lookup);
         if past_budget || self.inst_clone_recursive(fqn) {
             return None;
         }
@@ -1527,8 +1546,12 @@ impl Compiler {
         // own layouts.)
         // A method with bounds of its own takes their dictionaries, which a
         // clone (no dictionary) has no room for (#1471).
+        // A trait instance's method whose signature reaches a flat
+        // instance has no shared entry a dictionary may hold: its clone's
+        // `$dict` adapter takes and returns the trait's layouts.
+        let flat_only = self.fn_flat_split(fqn, lookup);
         if !inherent
-            && (self.trait_method_boundary_sig(&class, &method, trait_lookup, false).is_some()
+            && ((self.trait_method_boundary_sig(&class, &method, trait_lookup, false).is_some() && !flat_only)
                 || self.checker.typeclass_method_scheme(&class, &method).is_none()
                 || self.trait_method_own_bounds(&class, &method).len() != own_bounds)
         {
@@ -1592,7 +1615,10 @@ impl Compiler {
         src.program == self.program_seq
             || self.module_ctxs.get(&src.program).is_some_and(|ctx| {
                 ctx.knows_tys(lookup)
-                    && (ctx.layout_safe(src.span) || self.checker.enum_variants(&src.class).is_some() || self.fn_sig_split(fqn))
+                    && (ctx.layout_safe(src.span)
+                        || self.checker.enum_variants(&src.class).is_some()
+                        || self.fn_sig_split(fqn)
+                        || self.fn_flat_split(fqn, lookup))
             })
     }
 
@@ -1613,6 +1639,44 @@ impl Compiler {
             return false;
         }
         !self.module_ctxs.values().any(|ctx| ctx.namespace == module && ctx.knows_tys(args))
+    }
+
+    /// [`Checker::class_instance_tails`] where every body that reads the
+    /// instance agrees on them: none for another module's class at types
+    /// that module does not know ([`Self::shared_only_class`]), whose
+    /// methods there are all its shared bodies, so the field stays one
+    /// word (a two-word value boxed, E0808).
+    pub(super) fn instance_tails(&self, class: &str, args: &[Ty]) -> Vec<(usize, crate::typechecking::InstanceTail)> {
+        if self.instance_shared_only(class, args) {
+            return Vec::new();
+        }
+        self.checker.class_instance_tails(class, args)
+    }
+
+    /// [`Checker::class_flat_tails_at`] at the instances
+    /// [`Self::instance_tails`] holds flat.
+    pub(super) fn flat_tails_at(&self, class: &str, args: &[Ty]) -> Vec<Option<u32>> {
+        if self.instance_shared_only(class, args) {
+            return self.checker.class_flat_tails(class);
+        }
+        self.checker.class_flat_tails_at(class, args)
+    }
+
+    /// [`Checker::class_wide_tails_at`] at the instances
+    /// [`Self::instance_tails`] holds flat.
+    pub(super) fn wide_tails_at(&self, class: &str, args: &[Ty]) -> Vec<Option<(u32, u32)>> {
+        if self.instance_shared_only(class, args) {
+            return self.checker.class_wide_tails(class);
+        }
+        self.checker.class_wide_tails_at(class, args)
+    }
+
+    /// [`Self::shared_only_class`] of an instance, a variant's constructor
+    /// type among `args` (`Some(3)`'s, a call's lookup) read as its enum's,
+    /// as the instance's type names it.
+    fn instance_shared_only(&self, class: &str, args: &[Ty]) -> bool {
+        let args: Vec<Ty> = args.iter().map(crate::typechecking::ty::nominal_enum_deep).collect();
+        self.shared_only_class(class, &args)
     }
 
     /// Whether a new clone of `fqn` would repeat a clone source already on
@@ -1650,7 +1714,8 @@ impl Compiler {
         }
         let room = (self.inst_clones.len() + planned.len() < self.checker.host_grants().clone_budget()
             || self.is_hot_fn(fqn)
-            || self.fn_sig_split(fqn))
+            || self.fn_sig_split(fqn)
+            || self.fn_flat_split(fqn, lookup))
             && !self.inst_clone_recursive(fqn)
             && planned.len() < self.inst_clone_labels.len();
         if room {
@@ -1673,6 +1738,26 @@ impl Compiler {
             let label = self.bodies.fresh_label();
             self.inst_clone_labels.push(label);
         }
+    }
+
+    /// Whether the clone source `fqn` at ground `lookup` reaches a flat
+    /// generic class instance ([`Self::sig_flat_split`]) in its signature
+    /// or its instance head (a method's `self`, a trait instance's type):
+    /// its shared body reads that instance's flat field as one word, so
+    /// its clone is made past the clone budget, compiled from its body.
+    pub(super) fn fn_flat_split(&self, fqn: &str, lookup: &[Ty]) -> bool {
+        let Some(src) = self.inst_clone_srcs.get(fqn) else {
+            return false;
+        };
+        let Some(vars) = self.inst_clone_vars(&src.head, lookup) else {
+            return false;
+        };
+        let own = self
+            .checker
+            .is_class(&src.class)
+            .then(|| if src.head.is_empty() { Ty::Con(src.class.clone()) } else { Ty::App(Box::new(Ty::Con(src.class.clone())), src.head.clone()) });
+        let sig: Vec<Ty> = self.checker.fn_param_tys(fqn).into_iter().flatten().chain(self.checker.fn_return_ty(fqn)).collect();
+        self.sig_flat_split(sig.iter().chain(&src.head).chain(own.as_ref()), &vars)
     }
 
     /// The instance head's type variables bound to `lookup` (with their
@@ -1720,7 +1805,8 @@ impl Compiler {
                         ctx.knows_tys(&req.lookup)
                             && (ctx.layout_safe(src.span)
                                 || self.checker.enum_variants(&src.class).is_some()
-                                || self.fn_sig_split(&req.src))
+                                || self.fn_sig_split(&req.src)
+                                || self.fn_flat_split(&req.src, &req.lookup))
                     })
             {
                 self.foreign_clone_queue.push(req.clone());
@@ -2110,7 +2196,8 @@ impl Compiler {
             let src = &self.inst_clone_srcs[&req.src];
             let foreign = src.method_of.is_some()
                 && self.module_ctxs.get(&src.program).is_some_and(|ctx| {
-                    ctx.knows_tys(&req.lookup) && (ctx.layout_safe(src.span) || self.fn_sig_split(&req.src))
+                    ctx.knows_tys(&req.lookup)
+                        && (ctx.layout_safe(src.span) || self.fn_sig_split(&req.src) || self.fn_flat_split(&req.src, &req.lookup))
                 });
             if foreign {
                 self.foreign_clone_queue.push(req);
@@ -2350,7 +2437,16 @@ impl Compiler {
             .map(|inst| inst.args.clone());
         let inst_args = head.as_deref().unwrap_or(inst_args);
         let raw = self.raw_instance_methods.contains(fqn);
-        let sig = self.trait_method_boundary_sig(class, method, inst_args, false);
+        let mut sig = self.trait_method_boundary_sig(class, method, inst_args, false);
+        // A generic instance's clone at ground `inst_args` whose signature
+        // has a boundary (`next -> Option<Pair<K, V>>`, made only at a flat
+        // instance, `instance_clone_at`): it takes and returns its own
+        // types' layouts, which the adapter converts from and to the
+        // trait's.
+        let clone_own = sig.as_ref().and(head.as_ref().map_or_else(|| self.instance_clone_own_sig(class, method, inst_args), |_| None));
+        if let Some(own) = &clone_own {
+            sig = self.trait_method_boundary_sig_own(class, method, inst_args, false, Some(own));
+        }
         let unit_ret = self.trait_method_unit_ret(class, method, inst_args);
         let lanes_ret = self.trait_method_lanes_ret(class, method, inst_args, fqn);
         if sig.is_none() && !raw && !unit_ret && !lanes_ret {
@@ -2387,11 +2483,19 @@ impl Compiler {
             Some(own) if !crate::layout::ty_is_closed(&applied) && crate::layout::ty_is_closed(&own) => own,
             _ => applied,
         };
-        let own_params = self.checker.fn_param_tys(fqn).unwrap_or_default();
+        let own_params = match &clone_own {
+            Some((params, _)) => params.clone(),
+            None => self.checker.fn_param_tys(fqn).unwrap_or_default(),
+        };
         let converted = lanes_ret || sig.as_ref().is_some_and(|s| s.ret.is_some());
         let ret = own_side(
             crate::typechecking::subst::apply_ty(&inst, &open_ret),
-            converted.then(|| self.checker.fn_return_ty(fqn)).flatten(),
+            converted
+                .then(|| match &clone_own {
+                    Some((_, ret)) => Some(ret.clone()),
+                    None => self.checker.fn_return_ty(fqn),
+                })
+                .flatten(),
         );
         // Its result, boxed back from the layout the method returns it in.
         let ret_from = sig.as_ref().and_then(|s| s.ret).filter(|&l| l != ValueLayout::Boxed);
@@ -2490,6 +2594,24 @@ impl Compiler {
         // No `CALL` names it: dictionaries hold it.
         self.emit_synth_fn(&adapter, &hir, calls);
         self.hir_synth_callees.clear();
+    }
+
+    /// The parameter and result types of generic instance method
+    /// `class::method`'s clone at ground `inst_args`: the method's own,
+    /// its instance head's variables bound to them. `None` for a ground
+    /// instance, a default body, or types left open.
+    fn instance_clone_own_sig(&self, class: &str, method: &str, inst_args: &[Ty]) -> Option<(Vec<Ty>, Ty)> {
+        let instance = self.checker.generics().find_instance_relaxed(class, inst_args)?;
+        let shared = instance.method_fqns.get(method)?;
+        if !instance.args.iter().any(Ty::has_var) || Self::is_default_method_fqn(class, method, shared) {
+            return None;
+        }
+        let vars = self.inst_clone_vars(&instance.args, inst_args)?;
+        let at = |t: &Ty| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(t, &vars));
+        let params: Vec<Ty> = self.checker.fn_param_tys(shared)?.iter().map(at).collect();
+        let ret = at(&self.checker.fn_return_ty(shared)?);
+        let open = params.iter().chain([&ret]).any(Ty::has_var);
+        (!open).then_some((params, ret))
     }
 
     /// Compiler-made body `hir` marked generic when a type variable's word
@@ -2924,7 +3046,9 @@ impl Compiler {
                 ValueLayout::NicheOption | ValueLayout::NicheResult | ValueLayout::NicheUnitResult
             )
         };
-        head.iter().any(|h| crate::layout::nested_open_enum(&self.checker, h, true, &look, &mut niche))
+        // A flat generic class instance its methods' shared bodies read as
+        // one word (`Checker::class_instance_tails`).
+        head.iter().any(|h| crate::layout::nested_open_enum(&self.checker, h, true, &look, &mut niche)) || self.sig_flat_split(head, &vars)
     }
 
     fn plan_instance_dict_steps(
@@ -3029,7 +3153,13 @@ impl Compiler {
                 let Some(name) = owner.and_then(|inst| inst.method_fqns.get(&method_def.name).cloned()) else {
                     return false;
                 };
-                nested_slots.push(owner.filter(|inst| self.nested_head(&inst.args, lookup)).map(|_| format!("{owner_class}::{}", method_def.name)));
+                // So is one whose own signature reaches a flat instance
+                // (`HashMapIter::next -> Option<Pair<K, V>>`).
+                nested_slots.push(
+                    owner
+                        .filter(|inst| self.nested_head(&inst.args, lookup) || self.fn_flat_split(&name, lookup))
+                        .map(|_| format!("{owner_class}::{}", method_def.name)),
+                );
                 niche_slots.push(owner.filter(|inst| self.niche_head(&inst.args, lookup)).map(|_| {
                     (!Self::is_default_method_fqn(owner_class, &method_def.name, &name)).then(|| format!("{owner_class}::{}", method_def.name))
                 }));
@@ -3121,12 +3251,16 @@ impl Compiler {
                     let takes_object = niche.flatten().map(|method| {
                         format!("its `{method}` takes the value as an enum object, and has no per-type clone that takes the value's own word (coil-lang#2477)")
                     }).or_else(|| nested_slots.get(slot).cloned().flatten().map(|method| {
-                        format!("its `{method}` reads the `Option` / `Result` the value holds as an enum object, and has no per-type clone that reads its own word (coil-lang#2446)")
+                        format!("its `{method}` reads the `Option` / `Result` the value holds as an enum object, or a generic class instance's field as one word where this instance holds it flat, and has no per-type clone that reads its own words (coil-lang#2446)")
                     }));
                     // Past the budget too for a dictionary-reading
                     // superclass method: its clone is a direct call, a
                     // forwarder one more indirect call into the shared body.
-                    match self.instance_clone_at(&name, lookup, takes_object.is_some() || reads.is_some()) {
+                    // The method a `$dict` adapter (a boundary signature's,
+                    // `Option<Item>`) stands for: its clone has an adapter
+                    // of its own.
+                    let method = name.strip_suffix("$dict").filter(|m| self.inst_clone_srcs.contains_key(*m)).unwrap_or(&name).to_string();
+                    match self.instance_clone_at(&method, lookup, takes_object.is_some() || reads.is_some()) {
                         Some(clone) => Self::dict_adapter_name(&clone),
                         None => {
                             if let Some(why) = takes_object {

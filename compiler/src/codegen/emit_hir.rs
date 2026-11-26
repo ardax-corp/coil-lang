@@ -1333,7 +1333,7 @@ impl Compiler {
                 at.0..at.1,
             );
             msg.with_help(format!(
-                "`{callee}` holds an `Option` or `Result` of a type parameter inside another value (a `Vec`, an array, a tuple, a field or payload of a generic class or enum), which its shared generic body and this call's types lay out differently, so it runs only as a per-type clone, and this call has none (another module's generic at a type declared after that module, or a call on a polymorphic recursion chain); declare the type in or before the generic's module, or keep the `Option` / `Result` at the top of the parameter or field (coil-lang#2446)"
+                "`{callee}` holds an `Option` or `Result` of a type parameter inside another value (a `Vec`, an array, a tuple, a field or payload of a generic class or enum), or a generic class instance whose field of a class parameter's type keeps a two-word value in place at this call's types (`Cell<Option<int>>`), which its shared generic body and this call's types lay out differently, so it runs only as a per-type clone, and this call has none (another module's generic at a type declared after that module, or a call on a polymorphic recursion chain); declare the type in or before the generic's module, or keep the `Option` / `Result` at the top of the parameter or field (coil-lang#2446)"
             ));
             self.messages.push(msg);
             return;
@@ -5722,9 +5722,12 @@ impl Compiler {
         }
         let call_ty = apply_ty_prune(self.checker.subst(), Self::hir_ty(hir, call)?);
         Self::bind_scheme_vars(&ret_ty, &call_ty, &mut map);
-        // A `readonly` type argument is its type's: one clone for both (#1806).
+        // A `readonly` type argument is its type's: one clone for both
+        // (#1806). So is a variant's constructor type (`Some(3)`'s) its
+        // enum's, the type the instance it makes names (a flat one's
+        // clone is compiled from its body, `fn_flat_split`).
         for ty in map.values_mut() {
-            *ty = crate::typechecking::ty::strip_readonly_deep(ty);
+            *ty = crate::typechecking::ty::nominal_enum_deep(&crate::typechecking::ty::strip_readonly_deep(ty));
         }
         // Each type argument one word in its own layout (no pair): a niche
         // word is the same word in the shared body (rep(ground T)), so a
@@ -7887,7 +7890,27 @@ impl Compiler {
             crate::layout::nested_open_enum(&self.checker, ty, true, &look, &mut niche)
                 || crate::layout::nested_fn_var_result(ty, true, &mut unit)
                 || crate::layout::nested_fn_unit_slot(&self.checker, ty, &look, &mut unit)
-        })
+        }) || self.sig_flat_split(params.iter().chain([&ret]), &vars)
+    }
+
+    /// Whether a signature's types `tys`, their variables bound by `vars`,
+    /// reach a generic class instance that is flat there
+    /// ([`crate::layout::nested_flat_instance`],
+    /// `Checker::class_instance_tails`): its shared body reads the flat
+    /// field as one word, so such a call takes a clone, past the clone
+    /// budget too, or is refused.
+    pub(super) fn sig_flat_split<'t>(
+        &self,
+        tys: impl IntoIterator<Item = &'t Ty>,
+        vars: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
+    ) -> bool {
+        let ground = |open: &Ty| {
+            crate::typechecking::ty::strip_readonly_deep(&apply_ty_prune(self.checker.subst(), &Self::apply_ty_var_map(open, vars)))
+        };
+        let mut flat = |class: &str, args: &[Ty]| {
+            !self.instance_tails(class, &args.iter().map(&ground).collect::<Vec<_>>()).is_empty()
+        };
+        tys.into_iter().any(|ty| crate::layout::nested_flat_instance(&self.checker, ty, &mut flat))
     }
 
     /// Whether `key` is a generator's entry: a `gen fn`, its clone, or an
@@ -9567,6 +9590,31 @@ impl Compiler {
             Ty::Record { fields } => Some(fields.len() as u32),
             _ => None,
         })
+    }
+
+    /// [`Checker::class_ty_args`] of expression `id`'s type.
+    /// A generic class's method clone types `self` as the bare class: its
+    /// type arguments are then the clone's.
+    fn hir_class_args(&self, hir: &HirBody, id: HirId) -> Vec<Ty> {
+        let Some(ty) = Self::hir_ty(hir, id) else {
+            return Vec::new();
+        };
+        if let Ty::Con(name) = crate::typechecking::ty::strip_readonly(&apply_ty_prune(self.checker.subst(), ty))
+            && self.compiling_mono_clone
+            && let Some((src, req)) = self.inst_clone_fallback.as_ref()
+            && src.method_of.as_ref().is_some_and(|m| !m.free)
+            && let Some(fqn) = self.checker.resolve_class_key(&src.class)
+            && self.checker.resolve_class_key(name).as_ref() == Some(&fqn)
+            && let Some(n) = self.checker.generics().generic_type_ctors.get(&fqn).map(Vec::len)
+            && let Some(args) = req.lookup.get(..n)
+        {
+            return args.iter().map(crate::typechecking::ty::strip_readonly_deep).collect();
+        }
+        // A clone's types still open in its own type variables.
+        match self.mono_var_tys.last().filter(|_| self.compiling_mono_clone) {
+            Some(vars) => self.checker.class_ty_args(&Self::apply_ty_var_map(&apply_ty_prune(self.checker.subst(), ty), vars)),
+            None => self.checker.class_ty_args(ty),
+        }
     }
 
     /// The resolved class of an object-typed node.
@@ -12854,8 +12902,11 @@ impl<'a> HirLowerCx<'a> {
         let (Some((class, _)), HirKind::Make { args, .. }) = (c.hir_new_layout(hir, id), &hir.expr(id).kind) else {
             return;
         };
-        for ((name, field_ty), &arg) in checker.class_fields(&class).unwrap_or_default().iter().zip(args) {
+        // A field the instance holds flat is no box.
+        let flat = c.instance_tails(&class, &c.hir_class_args(hir, id));
+        for (i, ((name, field_ty), &arg)) in checker.class_fields(&class).unwrap_or_default().iter().zip(args).enumerate() {
             if checker.field_names_class_param(&class, field_ty)
+                && !flat.iter().any(|&(f, _)| f == i)
                 && let Some(at) = Compiler::hir_ty(hir, arg)
             {
                 let shown = crate::typechecking::pretty::format_ty_for_diag(&Default::default(), &apply_ty_prune(checker.subst(), at));
@@ -12990,8 +13041,8 @@ impl<'a> HirLowerCx<'a> {
         if base_ty.is_some_and(|t| self.is_class(t))
             && let Some((FieldAt::Slot(idx), fty)) = c.hir_field(hir, base, name)
             && let Some(key) = c.hir_class_of(hir, base)
-            && let Some(&Some(tail)) = checker.class_flat_tails(&key).get(idx as usize)
-            && let Some((lo, hi)) = c.hir_mir_pair_tys(&fty)
+            && let Some(&Some(tail)) = c.flat_tails_at(&key, &c.hir_class_args(hir, base)).get(idx as usize)
+            && let Some((lo, hi)) = c.hir_mir_pair_tys(&fty).or_else(|| ty.and_then(|t| c.hir_mir_pair_tys(t)))
             && ty.and_then(|t| c.hir_mir_pair_tys(t)) == Some((lo, hi))
         {
             return HirFieldWord::Pair { slot: idx, tail, lo, hi };
@@ -13000,8 +13051,8 @@ impl<'a> HirLowerCx<'a> {
         if base_ty.is_some_and(|t| self.is_class(t))
             && let Some((FieldAt::Slot(idx), fty)) = c.hir_field(hir, base, name)
             && let Some(key) = c.hir_class_of(hir, base)
-            && let Some(&Some((tail, extra))) = checker.class_wide_tails(&key).get(idx as usize)
-            && let Some(items) = crate::layout::wide_scalar_items(checker, &fty)
+            && let Some(&Some((tail, extra))) = c.wide_tails_at(&key, &c.hir_class_args(hir, base)).get(idx as usize)
+            && let Some(items) = crate::layout::wide_scalar_items(checker, &fty).or_else(|| ty.and_then(|t| crate::layout::wide_scalar_items(checker, t)))
             && items.len() as u32 == extra + 1
             && ty.is_some_and(|t| crate::layout::wide_scalar_items(checker, t).is_some_and(|i| i.len() == items.len()))
         {
@@ -13179,6 +13230,11 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
 
     fn scalar_pair(&self, t: &Ty) -> bool {
         crate::layout::scalar_pair(&self.c().checker, t)
+    }
+
+    fn pair_kinds(&self, t: &Ty) -> Option<[u8; 2]> {
+        let checker = &self.c().checker;
+        crate::layout::pair_word_kinds(checker, &apply_ty_prune(checker.subst(), t))
     }
 
     fn lane_elem(&self, t: &Ty) -> Option<crate::mir::HirLaneElem> {
@@ -13541,11 +13597,12 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
             })
             .collect::<Option<Vec<_>>>();
         if let Some(words) = words {
-            let tails = checker.class_flat_tails(&class);
+            let args = c.hir_class_args(hir, id);
+            let tails = c.flat_tails_at(&class, &args);
             if tails.iter().any(Option::is_some) {
                 out.tails = tails;
             }
-            let wide = checker.class_wide_tails(&class);
+            let wide = c.wide_tails_at(&class, &args);
             if wide.iter().any(Option::is_some) {
                 out.wide = wide;
             }

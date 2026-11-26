@@ -87,7 +87,7 @@ pub fn nested_open_enum(
     look: &dyn Fn(&str, &[Ty]) -> bool,
     split: &mut dyn FnMut(&Ty) -> bool,
 ) -> bool {
-    NestedOpen { checker, look, split, seen: Vec::new() }.ty(ty, top)
+    NestedOpen { checker, look, split, flat: None, seen: Vec::new() }.ty(ty, top)
 }
 
 /// The nominal types [`nested_open_enum`] reads through: every user enum
@@ -118,10 +118,33 @@ pub fn nested_open_type(checker: &Checker, ty: &Ty) -> bool {
     nested_open_enum(checker, ty, true, &nested_open_look(checker), &mut |_| true)
 }
 
+/// Whether a parameter or result of declared type `ty` reaches, through
+/// the declarations of the user classes and enums it names as
+/// [`nested_open_enum`] reads them, a generic class instance over open
+/// arguments one of whose fields is a bare class parameter, where `flat`
+/// says the instance is flat at the call's types (`flat(class, args)`,
+/// the open arguments; `Checker::class_instance_tails`). A shared body
+/// reads such a field as one word, a flat instance holds both words (or a
+/// wide tuple's items) in place, so a call at those types takes a clone
+/// ("Flat instances", `docs/internals/layout.md`). Every
+/// user class counts, another module's too: a shared body of a class
+/// whose module cannot clone it at those types reads the same field.
+pub fn nested_flat_instance(checker: &Checker, ty: &Ty, flat: &mut FlatAt<'_>) -> bool {
+    let look = nested_open_look(checker);
+    NestedOpen { checker, look: &look, split: &mut |_| false, flat: Some(flat), seen: Vec::new() }.ty(ty, true)
+}
+
+/// [`nested_flat_instance`]'s question of a generic class instance over
+/// open arguments (`flat(class, args)`).
+pub type FlatAt<'a> = dyn FnMut(&str, &[Ty]) -> bool + 'a;
+
 struct NestedOpen<'a, 'b> {
     checker: &'a Checker,
     look: &'a dyn Fn(&str, &[Ty]) -> bool,
     split: &'b mut dyn FnMut(&Ty) -> bool,
+    /// [`nested_flat_instance`]'s question, asked of each generic class
+    /// instance with a bare class-parameter field open in its argument.
+    flat: Option<&'b mut FlatAt<'b>>,
     /// The nominal instances on the walk, against recursive declarations.
     seen: Vec<String>,
 }
@@ -172,6 +195,20 @@ impl NestedOpen<'_, '_> {
         };
         if params.len() != args.len() {
             return false;
+        }
+        // A bare class-parameter field open in the instance's argument, at
+        // an instance that is flat at the call's types.
+        if let Some(flat) = self.flat.as_mut()
+            && self.checker.enum_variants(name).is_none()
+            && self.checker.class_fields(name).is_some_and(|fields| {
+                fields.iter().any(|(_, t)| match crate::typechecking::ty::strip_readonly(t) {
+                    Ty::Con(p) => params.iter().position(|q| q == p).is_some_and(|i| args[i].has_var()),
+                    _ => false,
+                })
+            })
+            && flat(name, args)
+        {
+            return true;
         }
         // A class's field is a top unless it is a function; an enum's
         // payload is below the enum's top.

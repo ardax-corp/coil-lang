@@ -194,7 +194,8 @@ words:
   user enum or class whose payloads or fields, at its arguments, are
   such holders (`List<T>` with `Cons(T, List<T>)`, #2512; `Box<T>` with
   `v: T`, #2511): a payload item is one word whatever its type, a field
-  typed by a class parameter is one word in every instance, a field whose
+  typed by a class parameter is one word in every instance a shared body
+  sees (a flat instance's take clones, "Flat instances"), a field whose
   top is an open `Option` / `Result` (`r: Result<T, string>`) is the enum
   object in its declared layout on both sides, holding the words of its
   arguments (`hir_field_rep`), and an item
@@ -357,15 +358,81 @@ ground type) is a plain word only where every closure was made with the
 enum open (`open_enum`: a closure literal's type, a function argument,
 a value read from a nested open enum).
 
+### Flat instances
+
+A generic class's field typed by a bare class parameter (`class Cell<V> {
+v: V }`) holds its argument in place at an instance where that argument
+is a closed two-word type whose words' kinds are fixed
+(`layout::pair_word_kinds`: `Option<int>`, `(int, int)`, `Option<float>`)
+or a tuple of three or four immediates (`layout::wide_scalar_items`):
+`Cell<Option<int>>` keeps both words, as `class G { v: Option<int> }`
+does, and `Cell<int>`, `Cell<string>` and `Cell<Option<string>>` (a
+niche word) keep the shared layout (`Checker::class_instance_tails`).
+The first word or item sits in the field's own slot and the others in
+tail slots after the class's own, in field order, so the class row (one
+per class, its generic fields unknown) stays right for every slot it
+names. The instance's own packed kinds, which `new` records
+(`make_object`, `ObjInstance::own_kinds`), say the kinds of the field's
+words and of the tail slots past the row: the RC walk, the cycle
+collector, thread copies and snapshots already read a slot the row leaves
+unknown or does not reach from them. So a flat instance needs no type id
+or row of its own; its slots are capped at the twelve own kinds a
+snapshot header keeps. A class whose row has a tagged slot (its trailer
+follows the class's slots), a `shared`, `view` or readonly pair class
+and one with a `drop` (its finalizer is the shared body) have no flat
+instances. Field reads and writes (`field_slot`), `new` (`HirNew.tails`
+/ `wide`, `object_words`) and the field residue lint answer per
+instance, the class key with the base's type arguments
+(`hir_class_args`; in a method clone `self`'s are the clone's).
+
+A shared body reads such a field as one word, so the rule is the nested
+open enum one above: clone-only at flat instances. A signature that
+reaches a flat instance through the declarations it names
+(`layout::nested_flat_instance`, the same walk with the class's
+parameters bound) takes its clone at every ground call, past the clone
+budget too: a free function's (`monomorphize::flat_split`, beside
+`GenericFnSig::split`), a method's, `self` included
+(`Compiler::fn_flat_split` in `instance_clone_at` and
+`method_clone_room`), another module's clone compiled from its body
+(`layout_safe` passed), and every dictionary for such an instance holds
+clones (`nested_head` in `plan_instance_dict_steps`, and a slot whose
+method's own signature reaches one, `HashMapIter::next -> Option<Pair<K,
+V>>`). A trait instance's method with an `Option` / `Result` in its
+signature (a boundary signature) is cloned there too, which no other
+instance does: its dictionary slot holds the clone's `$dict` adapter,
+which converts the result from the clone's own layout to the trait's
+(`instance_clone_own_sig`); a ground call, a direct trait call and
+for-in (`hir_flat_next`) call the clone where the result is wanted in its
+own layout, and the adapter where it is wanted in the open type's (a
+mono clone's bound `next`). A call that would
+still reach a shared body there (an instance another module cannot
+clone, a call on a polymorphic recursion chain) is refused with E0801
+`callee-generic` (`hir_sig_split`). Another module's class at types that
+module does not know (`shared_only_class`: a type declared after it, a
+tuple) is no flat instance: its methods are all its shared bodies there,
+so the field stays one word and E0808 warns. A variant's constructor type
+(`Some(3)`'s) is its enum's in these decisions and in a clone's key.
+
+Test: `tests/generics/flat_instance_fields.coil`,
+`tests/generics/flat_instance_iterators.coil`,
+`tests/modules/flat_instance_across_modules.coil`; benches:
+`examples/perf/generic_flat_field.coil`,
+`examples/perf/generic_flat_method.coil`,
+`examples/perf/map_flat_values.coil`.
+
 ### Residue boxes (E0808)
 
 A two-word value has no two-word form where the code that reads it takes
 one word for every type. Those places box it, and the project's own code
 warns there (`ErrorCode::BoxedResidue`, `Compiler::note_box_residue`):
 
-- a class field typed by a class parameter (`v: V` at `Option<int>`),
-  which is one word in every instance because the class's shared bodies
-  read it so; it warns at the `new`, once per field and type;
+- a class field typed by a class parameter (`v: V`) at an instance that
+  is not flat ("Flat instances"): a two-word argument whose first word is
+  a heap word only under some tags (`Result<int, string>`), a class that
+  cannot hold the words (`shared`, `view`, a `drop`, a tagged row, more
+  than twelve slots), or another module's class at types that module
+  does not know (a tuple); the class's shared bodies read the field as one
+  word. It warns at the `new`, once per field and type;
 - a value packed as a bare-trait existential (`let s: Named = pick`);
 - an argument to a `forall` function value (`PolyFn`), whose shared body
   takes one word.
@@ -530,19 +597,22 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   (`layout::pair_pointer_tags`), so the collector reads the word as a
   precise pointer or a scalar by its current tag and an object it
   reaches can move. A payload whose kind is unknown leaves it unknown. `new` stores both words, and a read or write
-  is two loads or stores (`pair_fields`). In a generic class only a
-  field whose type names no class parameter is flat (`G<T> { v: T, o:
-  Option<int> }` flattens `o`): its layout is the same in every
-  instance, so a shared body and a clone read it alike. A `shared` (a
+  is two loads or stores (`pair_fields`). In a generic class a field
+  whose type names no class parameter is flat in every instance (`G<T> {
+  v: T, o: Option<int> }` flattens `o`), so a shared body and a clone
+  read it alike; a field typed by a bare class parameter is flat only at
+  the instances below ("Flat instances"). A `shared` (a
   two-word store is not atomic) or `view` class keeps one word per field,
-  and a class with a flat field is never scalar-replaced into frame slots.
+  and a class with a flat field, or an instance of one, is never
+  scalar-replaced into frame slots (`query::sroa_class`).
   A pair field's words are stored as numbers when its class row says they
   are: the tail always, the first word for a scalar pair.
 - A class field of a tuple of three or four immediates (`(int, int,
   int)`, `(float, float, float, int)`, `layout::wide_scalar_items`) sits
   flat too, under the same rules: its first item in the field's slot,
   the others in tail slots after the pair tails
-  (`Checker::class_wide_tails`), all marked scalar. `new` and a write
+  (`Checker::class_wide_tails`), all marked scalar (a flat instance's,
+  below, take the same places). `new` and a write
   store each item (a tuple made in place gives its items; any other value
   is loaded item by item), and a read loads them into a fresh tuple,
   which `mir::forward_tuple_loads` takes apart again when the reader only

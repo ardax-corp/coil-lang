@@ -946,6 +946,7 @@ impl Default for Checker {
 }
 
 mod checker;
+pub use checker::InstanceTail;
 mod coverage;
 mod side_table;
 mod sidecar;

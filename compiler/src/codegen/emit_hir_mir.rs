@@ -1015,13 +1015,19 @@ impl Compiler {
         let (Some(next_fqn), &HirPat::Bind(local)) = (next_fqn, pat) else {
             return;
         };
+        // A generic instance's `next` whose signature reaches a flat
+        // instance at the iterator's ground type (`HashMapIter::next ->
+        // Option<Pair<K, V>>`) runs as its clone, which returns the ground
+        // item's layout (`Compiler::fn_flat_split`).
+        let flat_next = self.hir_flat_next(hir, iterable, into_iter_fqn.as_deref(), next_fqn);
+        let next_fqn = flat_next.as_ref().unwrap_or(next_fqn);
         // `next` may be a generic instance's shared body (`Iterator for
         // ListIter<T>`): its declared `Option<Item>`, open in the head's
         // variables, is what it returns, not the loop's ground item (#1912).
         let declared = self
             .fn_return_ty(next_fqn)
             .and_then(|r| crate::typechecking::ty::option_inner(&r))
-            .filter(|t| !crate::layout::ty_is_closed(t));
+            .filter(|t| flat_next.is_none() && !crate::layout::ty_is_closed(t));
         let item = declared.or_else(|| hir.local(local).ty.clone());
         let niche = item
             .as_ref()
@@ -1041,7 +1047,7 @@ impl Compiler {
                 None => return,
             },
         };
-        self.raw_instance_call = false;
+        self.raw_instance_call = flat_next.is_some() && self.raw_instance_methods.contains(next_fqn);
         let next = self.named_entry_target(next_fqn, true);
         if let Some(next) = next {
             let shape = if niche {
@@ -1066,12 +1072,32 @@ impl Compiler {
                     (Some(f), Some(ty)) => self.hir_iter_dicts(f, ty),
                     _ => Some(Vec::new()),
                 },
-                iterator_ty.as_ref().map_or(Some(Vec::new()), |ty| self.hir_iter_dicts(next_fqn, ty)),
+                match &flat_next {
+                    // A clone reads no dictionary.
+                    Some(_) => Some(Vec::new()),
+                    None => iterator_ty.as_ref().map_or(Some(Vec::new()), |ty| self.hir_iter_dicts(next_fqn, ty)),
+                },
             ) else {
                 return;
             };
             t.iter_loop = Some(crate::mir::HirIterLoop { into_iter, next, iter_ty, shape, into_iter_dicts, next_dicts });
         }
+    }
+
+    /// The clone of for-in's generic instance `next_fqn` at the loop's
+    /// ground iterator type, when its signature reaches a flat instance
+    /// there ([`Compiler::fn_flat_split`]).
+    fn hir_flat_next(&mut self, hir: &HirBody, iterable: HirId, into_iter_fqn: Option<&str>, next_fqn: &str) -> Option<String> {
+        let iterable_ty = apply_ty_prune(self.checker.subst(), hir.expr(iterable).ty.as_ref()?);
+        let iterator_ty = match into_iter_fqn {
+            Some(f) => self.hir_iter_ty_at(f, &iterable_ty, &self.fn_return_ty(f)?)?,
+            None => iterable_ty,
+        };
+        let lookup = [crate::typechecking::ty::strip_readonly_deep(&iterator_ty)];
+        if lookup[0].has_var() || !self.fn_flat_split(next_fqn, &lookup) {
+            return None;
+        }
+        self.instance_clone(next_fqn, &lookup)
     }
 
     /// User operator `id` on `operands` calling its instance method
@@ -1259,10 +1285,19 @@ impl Compiler {
             // A niche result the shared entry returns as its enum object
             // (`fn id(T x) -> T` at `Option<T>`, #1595): direct MIR calls
             // that entry, as emission does, and moves it to the niche word.
+            // A method whose signature reaches a flat instance takes its
+            // clone, which returns its own layout, never the shared
+            // entry's enum object (`Compiler::fn_flat_split`).
+            let flat = self.fn_flat_split(&call.key, &inst.args);
             let key = match self.hir_ret_shape(hir, id, &natural) {
-                Some(true) => call.key.clone(),
+                Some(true) if !flat => call.key.clone(),
                 _ => self.ground_instance_clone(call, &inst.args).unwrap_or_else(|| call.key.clone()),
             };
+            // Where the result is wanted in the open type's layout (a mono
+            // clone's bound `next` over `Option<I::Item>`) the clone's
+            // `$dict` adapter takes and returns the shared entry's layouts.
+            let flat_clone = flat && key != call.key && self.hir_ret_shape(hir, id, &natural) == Some(true);
+            let flat_adapter = flat && key != call.key && !flat_clone;
             let steps = self.hir_mir_once(|this| {
                 let mut steps = Vec::new();
                 this.plan_call_instance_dict(&mut steps, (&inst.class, method, &key), &inst.args, span.0..span.1);
@@ -1276,7 +1311,7 @@ impl Compiler {
                 d.extend(self.hir_mir_own_dicts(own_dicts)?);
                 Some(d)
             });
-            let raw = self.raw_instance_methods.contains(&key);
+            let raw = self.raw_instance_methods.contains(&key) && !flat_adapter;
             self.raw_instance_call = raw;
             let target = self.named_entry_target(&key, true);
             // Raw words, or each argument as its word where the instance
@@ -1294,7 +1329,7 @@ impl Compiler {
             // A niche word a generic instance's shared entry takes as its
             // enum object (#1579); its clone at the call's types takes the
             // niche word itself.
-            let clone = key != call.key;
+            let clone = key != call.key && !flat_adapter;
             let niches: Vec<Option<ValueLayout>> = args
                 .iter()
                 .zip(&call.params)
@@ -1304,7 +1339,7 @@ impl Compiler {
                 && unpaired
                 && args.iter().zip(&call.params).zip(&niches).all(|((&a, &p), n)| n.is_some() || self.hir_arg_passes(hir, emit, a, p))
                 && let Some(target) = target
-                && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
+                && let Some(boxed_ret) = if flat_clone { Some(false) } else { self.hir_ret_shape(hir, id, &natural) }
             {
                 for (&arg, &layout) in args.iter().zip(&niches) {
                     if let Some(layout) = layout
@@ -1316,7 +1351,7 @@ impl Compiler {
                 t.call = Some(crate::mir::HirCallSite {
                         target,
                         pair_args: vec![false; args.len()],
-                        pair_ret: natural.words() == 2,
+                        pair_ret: if flat_clone { self.two_word_return_kind(&key).is_some() } else { natural.words() == 2 },
                         coro: false,
                         boxed_ret,
                         dicts,
@@ -1336,8 +1371,22 @@ impl Compiler {
                 Some(recv) if call.generic.is_none() => self.ground_instance_clone(call, &[recv]).unwrap_or_else(|| call.key.clone()),
                 _ => call.key.clone(),
             };
-            let raw = self.raw_instance_methods.contains(&key);
-            let instance = instance.filter(|_| !raw);
+            // A trait method whose signature reaches a flat instance at the
+            // instance's ground types (`Iterator::next(it)` over
+            // `Option<Cell<Option<int>>>`) takes its clone, which returns
+            // the result in its own layout (`Compiler::fn_flat_split`).
+            let flat_key = instance
+                .filter(|i| key == call.key && call.generic.is_none() && self.fn_flat_split(&call.key, &i.args))
+                .and_then(|i| self.instance_clone(&call.key, &i.args));
+            // Its own layout where the call's type is ground; else its
+            // `$dict` adapter, in the shared entry's layouts, without the
+            // instance's dictionary.
+            let own_ty = Self::hir_ty(hir, id).map(|t| apply_ty_prune(self.checker.subst(), t)).filter(|t| !t.has_var());
+            let flat_clone = flat_key.is_some() && own_ty.is_some();
+            let flat_adapter = flat_key.is_some() && !flat_clone;
+            let key = flat_key.unwrap_or(key);
+            let raw = self.raw_instance_methods.contains(&key) && !flat_adapter;
+            let instance = instance.filter(|_| !raw && !flat_adapter);
             // Bare type parameter arguments (and a generic-head instance's
             // receiver) as their words, the result read back from its word.
             let tag = |ty: Option<&Ty>| ty.and_then(Self::ty_to_value_tag).is_some();
@@ -1430,6 +1479,11 @@ impl Compiler {
                 })
                 .collect();
             let natural = match natural {
+                // A flat instance's clone returns the call's own layout.
+                _ if flat_clone => match self.two_word_return_kind(&key) {
+                    Some(kind) => Rep::Pair(kind),
+                    None => Rep::Word(own_ty.as_ref().map_or(ValueLayout::Boxed, |t| self.value_layout(t))),
+                },
                 Rep::Word(_) if open(self.checker.fn_return_ty(&key)) || as_receiver(default_sig.as_ref().map(|(_, ret)| ret)) => {
                     Rep::Word(ValueLayout::Boxed)
                 }

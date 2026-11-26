@@ -12,6 +12,7 @@ use parser::{
 };
 
 use crate::typechecking::{Checker, DefId, Ty};
+use crate::typechecking::ty::TyVarId;
 use crate::typechecking::subst::apply_ty_prune;
 
 /// Default backstop on the clones one module's plan (and, separately, a
@@ -285,6 +286,50 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
     }
 }
 
+/// The type variables of generic `sig`'s parameters and type parameters
+/// bound to clone `spec`'s types; `None` if `sig` has no parameter types.
+fn spec_var_map(checker: &Checker, sig: &GenericFnSig, spec: &MonoSpecialization, intern: &TyInterner) -> Option<HashMap<TyVarId, Ty>> {
+    let params = checker.fn_param_tys(&spec.fn_name)?;
+    let mut map = HashMap::new();
+    for (param, tp) in params.iter().zip(&sig.param_type_params) {
+        if let (Ty::Var(v), Some(i)) = (apply_ty_prune(checker.subst(), param), tp)
+            && let Some(ty) = spec.key.subst.get(*i).and_then(|id| intern.get(*id))
+        {
+            map.insert(v, ty.clone());
+        }
+    }
+    // Type parameters no bare formal names, by declaration order.
+    for (var, id) in checker
+        .fn_type_param_vars(&spec.fn_name, spec.key.subst.len())
+        .unwrap_or_default()
+        .into_iter()
+        .zip(&spec.key.subst)
+    {
+        if let Some(ty) = intern.get(*id) {
+            map.entry(var).or_insert_with(|| ty.clone());
+        }
+    }
+    Some(map)
+}
+
+/// Whether generic `name`'s signature, its variables bound by `map`,
+/// reaches a flat generic class instance
+/// ([`crate::layout::nested_flat_instance`]): its shared body reads the
+/// flat field as one word, so every such call takes its clone, past the
+/// clone budget, as a `split` signature's does.
+fn flat_split(checker: &Checker, name: &str, map: &HashMap<TyVarId, Ty>) -> bool {
+    let ground = |open: &Ty| {
+        crate::typechecking::ty::strip_readonly_deep(&apply_ty_prune(checker.subst(), &crate::codegen::Compiler::apply_ty_var_map(open, map)))
+    };
+    let mut flat = |class: &str, args: &[Ty]| !checker.class_instance_tails(class, &args.iter().map(&ground).collect::<Vec<_>>()).is_empty();
+    checker
+        .fn_param_tys(name)
+        .into_iter()
+        .flatten()
+        .chain(checker.fn_return_ty(name))
+        .any(|ty| crate::layout::nested_flat_instance(checker, &ty, &mut flat))
+}
+
 /// The generic calls inside each planned clone's body whose arguments are
 /// ground at the clone's type arguments (`fn twice<T>(T x) { wrap(x) }`
 /// planned at `int` needs `wrap<int>`, #915): a clone calling the shared
@@ -314,30 +359,11 @@ fn collect_transitive(
         let Some(sig) = sigs.get(&spec.fn_name) else {
             continue;
         };
-        if seen.len() > budget && !sig.hot && !sig.split {
-            continue;
-        }
-        let Some(params) = checker.fn_param_tys(&spec.fn_name) else {
+        let Some(map) = spec_var_map(checker, sig, &spec, intern) else {
             continue;
         };
-        let mut map = HashMap::new();
-        for (param, tp) in params.iter().zip(&sig.param_type_params) {
-            if let (Ty::Var(v), Some(i)) = (apply_ty_prune(checker.subst(), param), tp)
-                && let Some(ty) = spec.key.subst.get(*i).and_then(|id| intern.get(*id))
-            {
-                map.insert(v, ty.clone());
-            }
-        }
-        // Type parameters no bare formal names, by declaration order.
-        for (var, id) in checker
-            .fn_type_param_vars(&spec.fn_name, spec.key.subst.len())
-            .unwrap_or_default()
-            .into_iter()
-            .zip(&spec.key.subst)
-        {
-            if let Some(ty) = intern.get(*id) {
-                map.entry(var).or_insert_with(|| ty.clone());
-            }
+        if seen.len() > budget && !sig.hot && !sig.split && !flat_split(checker, &spec.fn_name, &map) {
+            continue;
         }
         if map.is_empty() {
             continue;
@@ -676,10 +702,11 @@ fn collect_candidates(
             && let Some(specialization) =
                 candidate_for_call(fn_name, sig, node, args.as_deref(), checker, ty_of, intern)
         {
+            let flat = spec_var_map(checker, sig, &specialization, intern).is_some_and(|map| flat_split(checker, &specialization.fn_name, &map));
             out.push(MonoCandidate {
                 span: node.0,
                 specialization,
-                value: sig.alias || sig.keyed || sig.hot || sig.split,
+                value: sig.alias || sig.keyed || sig.hot || sig.split || flat,
                 recursive: false,
             });
         }
@@ -705,10 +732,11 @@ fn collect_candidates(
         && let Some(sig) = sigs.get(*fn_name).filter(|sig| if sig.coro { !sig.alias } else { !crate::hir::classify::plain_generic_fn(checker, fn_name) })
         && let Some(specialization) = candidate_for_value(fn_name, sig, node, checker, ty_of, intern)
     {
+        let flat = spec_var_map(checker, sig, &specialization, intern).is_some_and(|map| flat_split(checker, &specialization.fn_name, &map));
         out.push(MonoCandidate {
             span: node.0,
             specialization,
-            value: sig.coro || sig.alias || sig.keyed || sig.hot || sig.split,
+            value: sig.coro || sig.alias || sig.keyed || sig.hot || sig.split || flat,
             recursive: false,
         });
         return;

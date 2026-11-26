@@ -1,0 +1,45 @@
+// CPU: a generic class's methods reading and writing its field at a
+// two-word argument, called in a loop.
+use io::sync::print;
+use string::format;
+
+class Cell<V> {
+    pub v: V,
+}
+
+impl Cell<V> {
+    pub fn get() -> V {
+        return self.v;
+    }
+
+    pub fn swap(V x) -> V {
+        let old = self.v;
+        self.v = x;
+        return old;
+    }
+}
+
+fn main() {
+    let c: Cell<Option<int>> = new Cell(None);
+    let s = 0;
+    let i = 0;
+    while i < 20000000 {
+        let old = c.swap(
+            if i % 3 == 0 {
+                None
+            } else {
+                Some(i)
+            },
+        );
+        s += match old {
+            Some(x) => x,
+            None => 1,
+        };
+        s += match c.get() {
+            Some(x) => x & 1,
+            None => 0,
+        };
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}
