@@ -13152,6 +13152,10 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         self.c().hir_pair_holds_heap(t)
     }
 
+    fn scalar_pair(&self, t: &Ty) -> bool {
+        crate::layout::scalar_pair(&self.c().checker, t)
+    }
+
     fn lane_elem(&self, t: &Ty) -> Option<crate::mir::HirLaneElem> {
         self.c().hir_lane_elem(t)
     }
