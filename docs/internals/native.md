@@ -435,6 +435,30 @@ fills first, slot 1 its block position, then each operand); native code stores t
 words in a stack slot and the helper runs the body and copies the slots back. A trap
 panics at native code's own site. `COIL_NATIVE_STATS` counts these ops.
 
+A reduce with no stores and a store map over `int` / `float` word arrays compile to
+native loops (`native_reduce`, `native_store` in `coil-native/src/lib.rs`). A guard in
+front checks every lane's element is in its array's view; then blocks of 8 lanes run
+on 128-bit vectors (`i64x2` / `f64x2`, four per block, `vlane`), and the last lanes, and
+any block with a lane that would trap, one lane at a time (`lane`), which traps where the
+scalar loop does or hands the rest to the runtime's lane code. In a block:
+
+- Every value is read and computed before any is stored, the order `vec_loop` already
+  requires of the runtime's 8-lane blocks.
+- `int` `+` / `-` check overflow by the sign bits of the result and operands; `*`, `/`
+  and float-to-int casts have no vector form and run per lane inside the vector (a zero
+  divisor divides by `1` and flags its lane); a product with a `0` / `1` compare is a
+  mask.
+- Folds whose `int` result is the same in any order keep an accumulator per lane:
+  and / or / xor, a min or max (ties are one value), and an add while every term is in
+  `-2^52 .. 2^52` and the sum before the lane sums below `2^61` in size, for 64 blocks
+  at a time (then no partial of the scalar loop's left fold can overflow, so it is the
+  sum that loop gets). Past those, a block folds one lane at a time. Float folds and
+  `int` products fold the block's terms in lane order.
+
+A rough per-lane cost (`lane_cost`, `vectors_pay`) picks the vector loop only when it
+beats one lane at a time: a body mostly of per-lane ops (`spectral_norm`'s `/` and `*`)
+stays scalar.
+
 `optimize_mir` gives native code the same bulk rewrites (`copy_until`, `bulk_push`) and
 runtime kernels (`vec_extend_range` / `vec_fill`).
 

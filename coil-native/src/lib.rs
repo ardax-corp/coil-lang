@@ -1225,6 +1225,65 @@ fn views_dropped_in(f: &MirFunc, viewed: &HashSet<ValueId>) -> HashMap<BlockId, 
 }
 
 /// Every `(array, off, false)` load of `e`.
+/// Lanes in one vector of a native lane loop (128-bit vectors of 64-bit
+/// lanes), and lanes per iteration of its vector loop (four vectors).
+const VEC_LANES: i64 = 2;
+const VEC_BLOCK: i64 = 4 * VEC_LANES;
+
+/// A native int add fold keeps a sum per lane while each term is in
+/// `-2^REDUCE_ADD_TERM .. 2^REDUCE_ADD_TERM` and the loop's sum before the
+/// lane sums is below `2^61` in size, for `REDUCE_ADD_BLOCKS` blocks at a
+/// time: then every partial the scalar loop's left fold takes is below
+/// `2^61 + 512 * 2^52 = 2^62`, so none overflows and the sum is the one it
+/// gets. Past that the lane sums go into the loop's sum and start again.
+const REDUCE_ADD_TERM: i64 = 52;
+const REDUCE_ADD_BLOCKS: i64 = 512 / VEC_BLOCK;
+
+/// What a native vector block found that it cannot take as it is: lanes
+/// that would trap (a sign bit set in `vec`'s lanes, or `scal` non-zero).
+/// The block then runs again one lane at a time.
+#[derive(Default)]
+struct VecBad {
+    vec: Option<cranelift_codegen::ir::Value>,
+    /// Lanes flagged when not zero (an `i64x2`).
+    nz: Option<cranelift_codegen::ir::Value>,
+    scal: Option<cranelift_codegen::ir::Value>,
+}
+
+impl VecBad {
+    /// Flag the lanes of `of` (an `i64x2`) whose sign bit is set.
+    fn vector(&mut self, g: &mut Lower<'_>, of: cranelift_codegen::ir::Value) {
+        let of = g.vcoerce(of, types::I64X2);
+        self.vec = Some(match self.vec {
+            None => of,
+            Some(v) => g.b.ins().bor(v, of),
+        });
+    }
+
+    /// Flag the lanes of `x` (an `i64x2`) that are not zero.
+    fn nonzero(&mut self, g: &mut Lower<'_>, x: cranelift_codegen::ir::Value) {
+        self.nz = Some(match self.nz {
+            None => x,
+            Some(v) => g.b.ins().bor(v, x),
+        });
+    }
+
+    /// Flag a lane when `flag` (an `i8`) is non-zero.
+    fn scalar(&mut self, g: &mut Lower<'_>, flag: cranelift_codegen::ir::Value) {
+        self.scal = Some(match self.scal {
+            None => flag,
+            Some(v) => g.b.ins().bor(v, flag),
+        });
+    }
+
+    /// An `i8`, non-zero when any lane was flagged; `None` when none can be.
+    fn any(&self, g: &mut Lower<'_>) -> Option<cranelift_codegen::ir::Value> {
+        let v = self.vec.map(|v| g.b.ins().vhigh_bits(types::I8, v));
+        let z = self.nz.map(|v| g.b.ins().vany_true(v));
+        [v, z, self.scal].into_iter().flatten().reduce(|a, b| g.b.ins().bor(a, b))
+    }
+}
+
 fn lane_refs(e: &compiler::native_mir::VecExpr, store: bool, out: &mut Vec<(ValueId, ValueId, bool)>) {
     use compiler::native_mir::VecExpr;
     match e {
@@ -3141,14 +3200,21 @@ impl<'a> Lower<'a> {
     /// Branch to the bail block when `cond` is non-zero, stopping at the
     /// current op for reason `code` (a `TRAP_*`); continue in a new block.
     /// A `VecLoop` reduce with no stores as a native loop over its lanes,
-    /// one lane at a time, folding left to right as the runtime does. Anything
-    /// the runtime's lanes would trap on, or a load outside its array's view,
-    /// leaves the loop and runs the whole op on the runtime's lane code from the
-    /// start (a pure reduce: nothing it did shows), which gives the runtime's
-    /// own result or trap. `false`: not such a reduce (nothing emitted).
+    /// folding left to right as the runtime does. Blocks of [`VEC_BLOCK`]
+    /// lanes compute their terms on vectors ([`Self::vlane`]). An int fold
+    /// that comes out the same in any order (and / or / xor, a min or max,
+    /// an add while no partial can overflow, [`REDUCE_ADD_TERM`]) keeps
+    /// one accumulator per lane; any other folds the block's terms in lane
+    /// order. A block with a lane that would trap, or an add term out of
+    /// that range, and the last lanes, fold one lane at a time. Anything the
+    /// runtime's lanes would trap on, or a load outside its array's view,
+    /// leaves the loop and runs the whole op on the runtime's lane code from
+    /// the start (a pure reduce: nothing it did shows), which gives the
+    /// runtime's own result or trap. `false`: not such a reduce (nothing
+    /// emitted).
     fn native_reduce(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
-        use compiler::native_mir::VecLoopKind;
         use common::{dense, simd};
+        use compiler::native_mir::VecLoopKind;
         let MirInst::VecLoop { dest, pos, from, to, kind: VecLoopKind::Reduce { init, ty, fold, term, stores } } = inst else {
             return Ok(false);
         };
@@ -3165,57 +3231,249 @@ impl<'a> Lower<'a> {
         if !stores.is_empty() || !fold_ok || pos.is_some_and(|p| value_used(f, p)) || !self.lanes_native(term, 0) {
             return Ok(false);
         }
+        // Folds whose int result is the same in any order keep a vector
+        // accumulator; a min or max needs an order only between ties,
+        // which are one value on ints.
+        let lanewise = !float
+            && match *fold {
+                simd::REDUCE_ADD | simd::REDUCE_AND | simd::REDUCE_OR | simd::REDUCE_XOR => true,
+                k => (simd::REDUCE_TAKE + dense::CMP_LT..=simd::REDUCE_TAKE + dense::CMP_GE).contains(&k),
+            };
+        let add = lanewise && *fold == simd::REDUCE_ADD;
+        // The fold's own cost per lane, one at a time and on vectors.
+        let fold_cost = match *fold {
+            simd::REDUCE_ADD if add && Self::lane_is_01(term) => (2.0, 0.5),
+            simd::REDUCE_ADD | simd::REDUCE_MUL if !float => (2.0, if add { 1.5 } else { 3.0 }),
+            simd::REDUCE_AND | simd::REDUCE_OR | simd::REDUCE_XOR => (1.0, 0.5),
+            _ if lanewise => (2.0, 1.5),
+            _ => (2.0, 3.0),
+        };
+        let vec = Self::vectors_pay([term], fold_cost);
         let lane_ty = if float { types::F64 } else { types::I64 };
-        let lp = self.b.create_block();
-        self.b.append_block_param(lp, types::I64);
-        self.b.append_block_param(lp, lane_ty);
-        let body = self.b.create_block();
-        let slow = self.b.create_block();
-        let exit = self.b.create_block();
-        self.b.append_block_param(exit, lane_ty);
+        let vty = Self::vec_ty(lane_ty);
         let lo = self.get(f, *from);
         let lo = self.coerce(lo, types::I64);
         let hi = self.get(f, *to);
         let hi = self.coerce(hi, types::I64);
         let acc0 = self.get(f, *init);
         let acc0 = self.coerce(acc0, lane_ty);
+        let slow = self.b.create_block();
+        let exit = self.b.create_block();
+        self.b.append_block_param(exit, lane_ty);
+        // lp(p, acc, stop): one lane at a time up to `stop`; after(p, acc):
+        // back to the blocks, or out at `hi`.
+        let lp = self.b.create_block();
+        for t in [types::I64, lane_ty, types::I64] {
+            self.b.append_block_param(lp, t);
+        }
+        let body = self.b.create_block();
+        let after = self.b.create_block();
+        self.b.append_block_param(after, types::I64);
+        self.b.append_block_param(after, lane_ty);
+        // venter(p, acc) starts the blocks; vhead(p, acc[, lane
+        // accumulators, left]). `nv` vectors per block.
+        let venter = self.b.create_block();
+        self.b.append_block_param(venter, types::I64);
+        self.b.append_block_param(venter, lane_ty);
+        let vhead = self.b.create_block();
+        self.b.append_block_param(vhead, types::I64);
+        self.b.append_block_param(vhead, lane_ty);
+        let nv = (VEC_BLOCK / VEC_LANES) as usize;
+        if lanewise {
+            for _ in 0..nv {
+                self.b.append_block_param(vhead, types::I64X2);
+            }
+        }
+        if add {
+            self.b.append_block_param(vhead, types::I64);
+        }
+        // vflush(p, acc, lane accumulators, stop): the lane accumulators
+        // into `acc`, then one lane at a time up to `stop`.
+        let vflush = self.b.create_block();
+        if lanewise {
+            self.b.append_block_param(vflush, types::I64);
+            self.b.append_block_param(vflush, types::I64);
+            for _ in 0..nv {
+                self.b.append_block_param(vflush, types::I64X2);
+            }
+            self.b.append_block_param(vflush, types::I64);
+        }
+        let vbody = self.b.create_block();
         let mut refs = Vec::new();
         lane_refs(term, false, &mut refs);
         self.lanes_guard(f, &refs, lo, hi, slow);
-        self.b.ins().jump(lp, &[lo.into(), acc0.into()]);
+        let limit = self.vec_block_limit(hi);
+        self.b.ins().jump(venter, &[lo.into(), acc0.into()]);
+
+        self.b.switch_to_block(venter);
+        let (p, acc) = (self.b.block_params(venter)[0], self.b.block_params(venter)[1]);
+        if !vec {
+            self.b.ins().jump(lp, &[p.into(), acc.into(), hi.into()]);
+        } else {
+            let mut head_args: Vec<cranelift_codegen::ir::BlockArg> = vec![p.into(), acc.into()];
+            if lanewise {
+                let ident = match *fold {
+                    simd::REDUCE_ADD | simd::REDUCE_OR | simd::REDUCE_XOR => self.vsplat_i(0),
+                    simd::REDUCE_AND => self.vsplat_i(-1),
+                    _ => self.b.ins().splat(types::I64X2, acc),
+                };
+                head_args.extend(std::iter::repeat_n(cranelift_codegen::ir::BlockArg::from(ident), nv));
+            }
+            if add {
+                // The lane sums start only from an `acc` that leaves room for
+                // `REDUCE_ADD_BLOCKS` blocks of terms below `2^52`.
+                let left = self.b.ins().iconst(types::I64, REDUCE_ADD_BLOCKS);
+                head_args.push(left.into());
+                let room = self.b.ins().iadd_imm_s(acc, 1 << 61);
+                let room = self.b.ins().ushr_imm_u(room, 62);
+                let go = self.b.create_block();
+                self.b.ins().brif(room, lp, &[p.into(), acc.into(), hi.into()], go, &[]);
+                self.b.switch_to_block(go);
+            }
+            self.b.ins().jump(vhead, &head_args);
+
+            self.b.switch_to_block(vhead);
+            let hp: Vec<_> = self.b.block_params(vhead).to_vec();
+            let (p, acc) = (hp[0], hp[1]);
+            let fits = self.vec_block_fits(p, limit);
+            // vflush's arguments: from `p` with `acc` and lane accumulators `a`, up to `stop`.
+            let flush_args = |p, acc, a: &[cranelift_codegen::ir::Value], stop| {
+                let mut v: Vec<cranelift_codegen::ir::BlockArg> = vec![cranelift_codegen::ir::BlockArg::from(p), acc];
+                v.extend(a.iter().map(|&x| cranelift_codegen::ir::BlockArg::from(x)));
+                v.push(stop);
+                v
+            };
+            if lanewise {
+                let args = flush_args(p, acc.into(), &hp[2..2 + nv], hi.into());
+                self.b.ins().brif(fits, vbody, &[], vflush, &args);
+            } else {
+                self.b.ins().brif(fits, vbody, &[], lp, &[p.into(), acc.into(), hi.into()]);
+            }
+
+            self.b.switch_to_block(vbody);
+            let mut bad = VecBad::default();
+            let mut terms = Vec::new();
+            for half in 0..VEC_BLOCK / VEC_LANES {
+                let at = self.b.ins().iadd_imm_s(p, half * VEC_LANES);
+                let t = self.vlane(f, term, at, &mut bad);
+                terms.push(self.vcoerce(t, vty));
+            }
+            let stop = self.b.ins().iadd_imm_s(p, VEC_BLOCK);
+            if lanewise {
+                if add {
+                    // A term outside `-2^52 .. 2^52` folds lane by lane.
+                    // A 0 / 1 term is in range. Biased, a term in range is
+                    // below `2^53`, so the bits above of all of them at once.
+                    if !Self::lane_is_01(term) {
+                        let bias = self.vsplat_i(1 << REDUCE_ADD_TERM);
+                        let mut any = None;
+                        for &t in &terms {
+                            let u = self.b.ins().iadd(t, bias);
+                            any = Some(match any {
+                                None => u,
+                                Some(a) => self.b.ins().bor(a, u),
+                            });
+                        }
+                        let h = self.b.ins().ushr_imm_u(any.expect("a term per vector"), REDUCE_ADD_TERM + 1);
+                        bad.nonzero(self, h);
+                    }
+                }
+                if let Some(trap) = bad.any(self) {
+                    let go = self.b.create_block();
+                    let args = flush_args(p, acc.into(), &hp[2..2 + nv], stop.into());
+                    self.b.ins().brif(trap, vflush, &args, go, &[]);
+                    self.b.switch_to_block(go);
+                }
+                let mut lanes = Vec::new();
+                for (k, &t) in terms.iter().enumerate() {
+                    let a = hp[2 + k];
+                    lanes.push(match *fold {
+                        simd::REDUCE_ADD => self.b.ins().iadd(a, t),
+                        simd::REDUCE_AND => self.b.ins().band(a, t),
+                        simd::REDUCE_OR => self.b.ins().bor(a, t),
+                        simd::REDUCE_XOR => self.b.ins().bxor(a, t),
+                        k => {
+                            let take = self.vlane_cmp(k - simd::REDUCE_TAKE, false, t, a);
+                            self.b.ins().bitselect(take, t, a)
+                        }
+                    });
+                }
+                let mut next: Vec<cranelift_codegen::ir::BlockArg> = vec![stop.into(), acc.into()];
+                next.extend(lanes.iter().map(|&x| cranelift_codegen::ir::BlockArg::from(x)));
+                if add {
+                    // Out of blocks: the lane sums into `acc`, which starts again.
+                    let left = self.b.ins().iadd_imm_s(hp[2 + nv], -1);
+                    next.push(left.into());
+                    let go = self.b.create_block();
+                    let args = flush_args(stop, acc.into(), &lanes, stop.into());
+                    self.b.ins().brif(left, go, &[], vflush, &args);
+                    self.b.switch_to_block(go);
+                }
+                self.b.ins().jump(vhead, &next);
+                // vflush
+                self.b.switch_to_block(vflush);
+                let fp: Vec<_> = self.b.block_params(vflush).to_vec();
+                let mut acc = fp[1];
+                for &v in &fp[2..2 + nv] {
+                    for k in 0..VEC_LANES as u8 {
+                        let x = self.b.ins().extractlane(v, k);
+                        acc = match *fold {
+                            // In range: no partial overflows (see `REDUCE_ADD_BLOCKS`).
+                            simd::REDUCE_ADD => self.b.ins().iadd(acc, x),
+                            simd::REDUCE_AND => self.b.ins().band(acc, x),
+                            simd::REDUCE_OR => self.b.ins().bor(acc, x),
+                            simd::REDUCE_XOR => self.b.ins().bxor(acc, x),
+                            k => {
+                                let take = self.lane_cmp(k - simd::REDUCE_TAKE, false, x, acc);
+                                self.b.ins().select(take, x, acc)
+                            }
+                        };
+                    }
+                }
+                self.b.ins().jump(lp, &[fp[0].into(), acc.into(), fp[2 + nv].into()]);
+            } else {
+                // In lane order, each step as the scalar loop takes it.
+                let mut next = acc;
+                for &t in &terms {
+                    for k in 0..VEC_LANES as u8 {
+                        let x = self.b.ins().extractlane(t, k);
+                        let (r, of) = self.fold_step(*fold, float, next, x);
+                        if let Some(of) = of {
+                            bad.scalar(self, of);
+                        }
+                        next = r;
+                    }
+                }
+                match bad.any(self) {
+                    Some(trap) => {
+                        self.b.ins().brif(trap, lp, &[p.into(), acc.into(), stop.into()], vhead, &[stop.into(), next.into()]);
+                    }
+                    None => {
+                        self.b.ins().jump(vhead, &[stop.into(), next.into()]);
+                    }
+                }
+            }
+        }
+
         self.b.switch_to_block(lp);
-        let p = self.b.block_params(lp)[0];
-        let acc = self.b.block_params(lp)[1];
-        let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, hi);
-        self.b.ins().brif(done, exit, &[acc.into()], body, &[]);
+        let (p, acc, stop) = (self.b.block_params(lp)[0], self.b.block_params(lp)[1], self.b.block_params(lp)[2]);
+        let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, stop);
+        self.b.ins().brif(done, after, &[p.into(), acc.into()], body, &[]);
         self.b.switch_to_block(body);
         self.lanes_checked = true;
         let x = self.lane(f, term, p, slow);
         self.lanes_checked = false;
         let x = self.coerce(x, lane_ty);
-        let next = match *fold {
-            simd::REDUCE_ADD if float => self.b.ins().fadd(acc, x),
-            simd::REDUCE_MUL if float => self.b.ins().fmul(acc, x),
-            simd::REDUCE_ADD => {
-                let (r, of) = self.b.ins().sadd_overflow(acc, x);
-                self.leave_if(of, slow);
-                r
-            }
-            simd::REDUCE_MUL => {
-                let (r, of) = self.b.ins().smul_overflow(acc, x);
-                self.leave_if(of, slow);
-                r
-            }
-            simd::REDUCE_AND => self.b.ins().band(acc, x),
-            simd::REDUCE_OR => self.b.ins().bor(acc, x),
-            simd::REDUCE_XOR => self.b.ins().bxor(acc, x),
-            k => {
-                let take = self.lane_cmp(k - simd::REDUCE_TAKE, float, x, acc);
-                self.b.ins().select(take, x, acc)
-            }
-        };
+        let (next, of) = self.fold_step(*fold, float, acc, x);
+        if let Some(of) = of {
+            self.leave_if(of, slow);
+        }
         let p1 = self.b.ins().iadd_imm_s(p, 1);
-        self.b.ins().jump(lp, &[p1.into(), next.into()]);
+        self.b.ins().jump(lp, &[p1.into(), next.into(), stop.into()]);
+        self.b.switch_to_block(after);
+        let (p, acc) = (self.b.block_params(after)[0], self.b.block_params(after)[1]);
+        let end = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, hi);
+        self.b.ins().brif(end, exit, &[acc.into()], venter, &[p.into(), acc.into()]);
         self.b.switch_to_block(slow);
         // The loop's result is its `dest` slot, as `VLoop` leaves it.
         let (_, frame) = self.vector_lanes(f, inst);
@@ -3231,16 +3489,50 @@ impl<'a> Lower<'a> {
         Ok(true)
     }
 
-    /// A `VecLoop` of stores as a native loop, one lane at a time: every
-    /// value of lane `p` is read and computed first, then each store's
-    /// element is checked in its view, then all are stored, which is the
-    /// scalar loop's order (`vec_loop` takes only bodies whose reads come
-    /// before their stores). A trap, or an element outside its view, leaves
-    /// with lane `p` untouched and runs the rest, from `p`, on the runtime's
-    /// lane code. `false`: not such a loop (nothing emitted).
+    /// `acc ⊕ x` for fold `fold` (a `REDUCE_*`), and for an int add or
+    /// multiply its overflow flag (an `i8`; the runtime traps there).
+    fn fold_step(
+        &mut self,
+        fold: u8,
+        float: bool,
+        acc: cranelift_codegen::ir::Value,
+        x: cranelift_codegen::ir::Value,
+    ) -> (cranelift_codegen::ir::Value, Option<cranelift_codegen::ir::Value>) {
+        use common::simd;
+        match fold {
+            simd::REDUCE_ADD if float => (self.b.ins().fadd(acc, x), None),
+            simd::REDUCE_MUL if float => (self.b.ins().fmul(acc, x), None),
+            simd::REDUCE_ADD => {
+                let (r, of) = self.b.ins().sadd_overflow(acc, x);
+                (r, Some(of))
+            }
+            simd::REDUCE_MUL => {
+                let (r, of) = self.b.ins().smul_overflow(acc, x);
+                (r, Some(of))
+            }
+            simd::REDUCE_AND => (self.b.ins().band(acc, x), None),
+            simd::REDUCE_OR => (self.b.ins().bor(acc, x), None),
+            simd::REDUCE_XOR => (self.b.ins().bxor(acc, x), None),
+            k => {
+                let take = self.lane_cmp(k - simd::REDUCE_TAKE, float, x, acc);
+                (self.b.ins().select(take, x, acc), None)
+            }
+        }
+    }
+
+    /// A `VecLoop` of stores as a native loop. Blocks of [`VEC_BLOCK`] lanes
+    /// run on vectors ([`Self::vlane`]): every value of the block is read
+    /// and computed first, then all are stored. `vec_loop` takes only bodies
+    /// whose reads come before their stores and no read below a store's
+    /// offset, so a block in that order stores what the scalar loop does.
+    /// A block with a lane that would trap, and the last lanes, run one
+    /// lane at a time: every value of lane `p` is computed, then stored. A
+    /// trap there, or an element outside its view, leaves with lane `p`
+    /// untouched and runs the rest, from `p`, on the runtime's lane code.
+    /// `false`: not such a loop (nothing emitted).
     fn native_store(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
-        use compiler::native_mir::VecLoopKind;
         use common::dense;
+        use compiler::native_mir::VecLoopKind;
         let MirInst::VecLoop { dest, pos, from, to, kind: VecLoopKind::Store { stores } } = inst else {
             return Ok(false);
         };
@@ -3257,9 +3549,20 @@ impl<'a> Lower<'a> {
                 return Ok(false);
             }
         }
+        // Each store's value, and the store, per lane.
+        let vec = Self::vectors_pay(stores.iter().map(|s| &s.3), (stores.len() as f32, stores.len() as f32 * 0.5));
+        // vhead(p): a whole block left? vbody: the block on vectors.
+        // lp(p, stop): one lane at a time up to `stop`; after(p): on to
+        // the next block, or out at `hi`.
+        let vhead = self.b.create_block();
+        self.b.append_block_param(vhead, types::I64);
+        let vbody = self.b.create_block();
         let lp = self.b.create_block();
         self.b.append_block_param(lp, types::I64);
+        self.b.append_block_param(lp, types::I64);
         let body = self.b.create_block();
+        let after = self.b.create_block();
+        self.b.append_block_param(after, types::I64);
         let slow = self.b.create_block();
         let whole = self.b.create_block();
         let exit = self.b.create_block();
@@ -3273,11 +3576,53 @@ impl<'a> Lower<'a> {
             refs.push((*array, *off, true));
         }
         self.lanes_guard(f, &refs, lo, hi, whole);
-        self.b.ins().jump(lp, &[lo.into()]);
+        let limit = self.vec_block_limit(hi);
+        self.b.ins().jump(vhead, &[lo.into()]);
+
+        self.b.switch_to_block(vhead);
+        let p = self.b.block_params(vhead)[0];
+        if !vec {
+            self.b.ins().jump(lp, &[p.into(), hi.into()]);
+        } else {
+            let fits = self.vec_block_fits(p, limit);
+            self.b.ins().brif(fits, vbody, &[], lp, &[p.into(), hi.into()]);
+            self.b.switch_to_block(vbody);
+            let mut bad = VecBad::default();
+            let mut values = Vec::with_capacity(stores.len() * 2);
+            for (_, _, ty, value) in stores {
+                let want = if *ty == dense::TY_F64 { types::F64X2 } else { types::I64X2 };
+                for half in 0..VEC_BLOCK / VEC_LANES {
+                    let at = self.b.ins().iadd_imm_s(p, half * VEC_LANES);
+                    let x = self.vlane(f, value, at, &mut bad);
+                    values.push(self.vcoerce(x, want));
+                }
+            }
+            let stop = self.b.ins().iadd_imm_s(p, VEC_BLOCK);
+            if let Some(trap) = bad.any(self) {
+                let go = self.b.create_block();
+                self.b.ins().brif(trap, lp, &[p.into(), stop.into()], go, &[]);
+                self.b.switch_to_block(go);
+            }
+            let mut values = values.into_iter();
+            for (array, off, _, _) in stores {
+                let o = self.get(f, *off);
+                let o = self.coerce(o, types::I64);
+                for half in 0..VEC_BLOCK / VEC_LANES {
+                    let i = self.b.ins().iadd(p, o);
+                    let i = self.b.ins().iadd_imm_s(i, half * VEC_LANES);
+                    let at = self.element(*array, i);
+                    let w = values.next().expect("a value per store and half");
+                    self.b.ins().store(MemFlagsData::new().with_notrap(), w, at, 0);
+                }
+            }
+            self.b.ins().jump(vhead, &[stop.into()]);
+        }
+
         self.b.switch_to_block(lp);
         let p = self.b.block_params(lp)[0];
-        let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, hi);
-        self.b.ins().brif(done, exit, &[], body, &[]);
+        let stop = self.b.block_params(lp)[1];
+        let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, stop);
+        self.b.ins().brif(done, after, &[p.into()], body, &[]);
         self.b.switch_to_block(body);
         self.lanes_checked = true;
         let mut values = Vec::with_capacity(stores.len());
@@ -3294,7 +3639,11 @@ impl<'a> Lower<'a> {
             self.b.ins().store(MemFlagsData::trusted(), w, at, 0);
         }
         let p1 = self.b.ins().iadd_imm_s(p, 1);
-        self.b.ins().jump(lp, &[p1.into()]);
+        self.b.ins().jump(lp, &[p1.into(), stop.into()]);
+        self.b.switch_to_block(after);
+        let q = self.b.block_params(after)[0];
+        let end = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, q, hi);
+        self.b.ins().brif(end, exit, &[], vhead, &[q.into()]);
         // A trap in lane `p`: the runtime's lane code from `p` on.
         self.b.switch_to_block(slow);
         self.vector_lanes_at(f, inst, Some(p));
@@ -3312,6 +3661,22 @@ impl<'a> Lower<'a> {
             self.set(f, *p, zero);
         }
         Ok(true)
+    }
+
+    /// In front of a native vector loop up to `hi`: the bound below which
+    /// a block may start, so that its lanes `p .. p + VEC_BLOCK` are all
+    /// below `hi` ([`Self::vec_block_fits`]). Near `i64::MIN` no block fits.
+    fn vec_block_limit(&mut self, hi: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        let room = self.b.ins().iconst(types::I64, VEC_BLOCK - 1);
+        let (limit, under) = self.b.ins().ssub_overflow(hi, room);
+        let min = self.b.ins().iconst(types::I64, i64::MIN);
+        self.b.ins().select(under, min, limit)
+    }
+
+    /// Whether a block starting at `p` fits below the loop's bound (an
+    /// `i8`), given [`Self::vec_block_limit`]'s `limit`.
+    fn vec_block_fits(&mut self, p: cranelift_codegen::ir::Value, limit: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        self.b.ins().icmp(IntCC::SignedLessThan, p, limit)
     }
 
     /// In front of a native lane loop over lanes `lo .. hi`: take each
@@ -3539,6 +3904,336 @@ impl<'a> Lower<'a> {
                 _ => FloatCC::NotEqual,
             };
             self.b.ins().fcmp(cc, a, b)
+        } else {
+            let cc = match pred {
+                dense::CMP_LT => IntCC::SignedLessThan,
+                dense::CMP_LE => IntCC::SignedLessThanOrEqual,
+                dense::CMP_GT => IntCC::SignedGreaterThan,
+                dense::CMP_GE => IntCC::SignedGreaterThanOrEqual,
+                dense::CMP_EQ => IntCC::Equal,
+                _ => IntCC::NotEqual,
+            };
+            self.b.ins().icmp(cc, a, b)
+        }
+    }
+
+    /// Whether every lane of `e` is `0` or `1` (a compare, or bit logic of
+    /// such lanes), so a product with it is a mask and cannot overflow.
+    fn lane_is_01(e: &compiler::native_mir::VecExpr) -> bool {
+        use common::simd;
+        use compiler::native_mir::VecExpr;
+        match e {
+            VecExpr::Bin { kind, lhs, rhs } => {
+                (simd::ICMP..simd::ICMP + 6).contains(kind)
+                    || (simd::FCMP..simd::FCMP + 6).contains(kind)
+                    || (matches!(*kind, simd::IAND64 | simd::IOR64 | simd::IXOR64) && Self::lane_is_01(lhs) && Self::lane_is_01(rhs))
+            }
+            _ => false,
+        }
+    }
+
+    /// Rough machine instructions per lane of `e`: run one lane at a time
+    /// ([`Self::lane`]) and on vectors ([`Self::vlane`]). An op with no
+    /// vector form runs per lane inside the vector and pays for taking its
+    /// lanes out and back in; an int add checks overflow by bit logic
+    /// instead of a flag. Invariants cost nothing in the loop.
+    fn lane_cost(e: &compiler::native_mir::VecExpr) -> (f32, f32) {
+        use common::simd;
+        use compiler::native_mir::VecExpr;
+        // Taking two lanes out of a vector and one back.
+        const PER_LANE: f32 = 3.0;
+        let (s, v) = match e {
+            VecExpr::Splat { .. } => (0.0, 0.0),
+            VecExpr::Index => (0.0, 1.0),
+            VecExpr::Load { .. } => (1.0, 0.5),
+            VecExpr::Bin { kind, lhs, rhs } => {
+                let (a, b) = (Self::lane_cost(lhs), Self::lane_cost(rhs));
+                let own = match *kind {
+                    simd::FADD64 | simd::FSUB64 | simd::FMUL64 | simd::IAND64 | simd::IOR64 | simd::IXOR64 => (1.0, 0.5),
+                    simd::FDIV64 => (4.0, 2.0),
+                    simd::IADD64 | simd::ISUB64 => (2.0, 2.5),
+                    simd::IMUL64 if Self::lane_is_01(lhs) || Self::lane_is_01(rhs) => (2.0, 1.0),
+                    simd::IMUL64 => (2.0, 2.0 + PER_LANE),
+                    simd::IDIV64 => (8.0, 8.0 + PER_LANE),
+                    _ => (2.0, 1.0),
+                };
+                (a.0 + b.0 + own.0, a.1 + b.1 + own.1)
+            }
+            VecExpr::Unary { kind, src } => {
+                let a = Self::lane_cost(src);
+                let own = match *kind {
+                    simd::INEG => (2.0, 1.5),
+                    simd::FNEG => (1.0, 0.5),
+                    simd::I2F => (1.0, 1.5),
+                    _ => (4.0, 4.0 + PER_LANE),
+                };
+                (a.0 + own.0, a.1 + own.1)
+            }
+            VecExpr::Select { mask, then, els } => {
+                let (m, t, x) = (Self::lane_cost(mask), Self::lane_cost(then), Self::lane_cost(els));
+                (m.0 + t.0 + x.0 + 2.0, m.1 + t.1 + x.1 + 2.0)
+            }
+            VecExpr::Fma { ty, a, b, c } => {
+                let (x, y, z) = (Self::lane_cost(a), Self::lane_cost(b), Self::lane_cost(c));
+                let own = if *ty == common::dense::TY_F64 { (2.0, 1.0) } else { (4.0, 4.5 + PER_LANE) };
+                (x.0 + y.0 + z.0 + own.0, x.1 + y.1 + z.1 + own.1)
+            }
+        };
+        (s, v)
+    }
+
+    /// Whether a native lane loop computing `values` (and folding with
+    /// `fold`: its own cost per lane, one lane at a time and on vectors)
+    /// is cheaper on vectors: their loop's own work is shared by a block's
+    /// [`VEC_BLOCK`] lanes, a scalar loop pays it per lane.
+    fn vectors_pay<'e>(values: impl IntoIterator<Item = &'e compiler::native_mir::VecExpr>, fold: (f32, f32)) -> bool {
+        // Compare, branch and step of the index, per iteration.
+        const LOOP: f32 = 4.0;
+        let (mut s, mut v) = (LOOP + fold.0, LOOP / VEC_BLOCK as f32 + fold.1);
+        for e in values {
+            let (a, b) = Self::lane_cost(e);
+            s += a;
+            v += b;
+        }
+        v < s
+    }
+
+    /// The vector type a lane value of scalar type `ty` takes: two lanes
+    /// of 64 bits ([`VEC_LANES`]).
+    fn vec_ty(ty: Type) -> Type {
+        if ty == types::F64 { types::F64X2 } else { types::I64X2 }
+    }
+
+    /// `x` as vector type `want` (the same bits, lane by lane).
+    fn vcoerce(&mut self, x: cranelift_codegen::ir::Value, want: Type) -> cranelift_codegen::ir::Value {
+        if self.b.func.dfg.value_type(x) == want {
+            x
+        } else {
+            let flags = MemFlagsData::new().with_endianness(cranelift_codegen::ir::Endianness::Little);
+            self.b.ins().bitcast(want, flags, x)
+        }
+    }
+
+    /// An `i64x2` of `x` in both lanes.
+    fn vsplat_i(&mut self, x: i64) -> cranelift_codegen::ir::Value {
+        let c = self.b.ins().iconst(types::I64, x);
+        self.b.ins().splat(types::I64X2, c)
+    }
+
+    /// `op` on each lane of vectors `a` and `c` as scalars of type
+    /// `lane` (`c` is ignored by a unary `op`), and the vector of its
+    /// results (of type `out`). `op` may flag its lane (an `i8`, non-zero:
+    /// it would trap), which goes into `bad`.
+    #[allow(clippy::type_complexity)]
+    fn per_lane(
+        &mut self,
+        a: cranelift_codegen::ir::Value,
+        c: cranelift_codegen::ir::Value,
+        lane: Type,
+        out: Type,
+        bad: &mut VecBad,
+        op: &dyn Fn(
+            &mut Self,
+            cranelift_codegen::ir::Value,
+            cranelift_codegen::ir::Value,
+        ) -> (cranelift_codegen::ir::Value, Option<cranelift_codegen::ir::Value>),
+    ) -> cranelift_codegen::ir::Value {
+        let vin = Self::vec_ty(lane);
+        let a = self.vcoerce(a, vin);
+        let c = self.vcoerce(c, vin);
+        let mut v = None;
+        for k in 0..VEC_LANES as u8 {
+            let x = self.b.ins().extractlane(a, k);
+            let y = self.b.ins().extractlane(c, k);
+            let (r, flag) = op(self, x, y);
+            if let Some(flag) = flag {
+                bad.scalar(self, flag);
+            }
+            let r = self.coerce(r, out);
+            v = Some(match v {
+                None => self.b.ins().scalar_to_vector(Self::vec_ty(out), r),
+                Some(v) => self.b.ins().insertlane(v, r, k),
+            });
+        }
+        v.expect("two lanes")
+    }
+
+    /// Lanes `p`, `p + 1` of `e` as one vector (`i64x2` or `f64x2`), every
+    /// load in place (after [`Self::lanes_guard`]). A lane that would trap
+    /// is not taken: it is flagged in `bad`, and the vector holds some value
+    /// there (a division by zero divides by `1`), so the caller runs those
+    /// lanes again with [`Self::lane`], which traps as the scalar loop does.
+    fn vlane(&mut self, f: &MirFunc, e: &compiler::native_mir::VecExpr, p: cranelift_codegen::ir::Value, bad: &mut VecBad) -> cranelift_codegen::ir::Value {
+        use common::{dense, simd};
+        use compiler::native_mir::VecExpr;
+        let iv = |me: &mut Self, v| me.vcoerce(v, types::I64X2);
+        let fv = |me: &mut Self, v| me.vcoerce(v, types::F64X2);
+        match e {
+            VecExpr::Splat { v, ty } => {
+                let x = self.get(f, *v);
+                let lane = if *ty == dense::TY_F64 { types::F64 } else { types::I64 };
+                let x = self.coerce(x, lane);
+                self.b.ins().splat(Self::vec_ty(lane), x)
+            }
+            VecExpr::Index => {
+                let v = self.b.ins().scalar_to_vector(types::I64X2, p);
+                let p1 = self.b.ins().iadd_imm_s(p, 1);
+                self.b.ins().insertlane(v, p1, 1)
+            }
+            VecExpr::Load { array, off, ty } => {
+                let o = self.get(f, *off);
+                let o = self.coerce(o, types::I64);
+                let i = self.b.ins().iadd(p, o);
+                let at = self.element(*array, i);
+                let vt = if *ty == dense::TY_F64 { types::F64X2 } else { types::I64X2 };
+                self.b.ins().load(vt, MemFlagsData::new().with_notrap(), at, 0)
+            }
+            VecExpr::Bin { kind, lhs, rhs } => {
+                // A product with a 0 / 1 lane is that lane as a mask.
+                if *kind == simd::IMUL64 && (Self::lane_is_01(lhs) || Self::lane_is_01(rhs)) {
+                    let (m, x) = if Self::lane_is_01(lhs) { (lhs, rhs) } else { (rhs, lhs) };
+                    let m = self.vlane(f, m, p, bad);
+                    let x = self.vlane(f, x, p, bad);
+                    let (m, x) = (iv(self, m), iv(self, x));
+                    let full = self.b.ins().ineg(m);
+                    return self.b.ins().band(x, full);
+                }
+                let a = self.vlane(f, lhs, p, bad);
+                let c = self.vlane(f, rhs, p, bad);
+                match *kind {
+                    simd::FADD64 | simd::FSUB64 | simd::FMUL64 | simd::FDIV64 => {
+                        let (a, c) = (fv(self, a), fv(self, c));
+                        match *kind {
+                            simd::FADD64 => self.b.ins().fadd(a, c),
+                            simd::FSUB64 => self.b.ins().fsub(a, c),
+                            simd::FMUL64 => self.b.ins().fmul(a, c),
+                            _ => self.b.ins().fdiv(a, c),
+                        }
+                    }
+                    k if (simd::FCMP..simd::FCMP + 6).contains(&k) => {
+                        let (a, c) = (fv(self, a), fv(self, c));
+                        let m = self.vlane_cmp(k - simd::FCMP, true, a, c);
+                        self.b.ins().ushr_imm_u(m, 63)
+                    }
+                    k => {
+                        let (a, c) = (iv(self, a), iv(self, c));
+                        match k {
+                            // Signed overflow: the result's sign differs
+                            // from both operands' (an add) or from the
+                            // minuend's when the operands' differ (a subtract).
+                            simd::IADD64 => {
+                                let r = self.b.ins().iadd(a, c);
+                                let x = self.b.ins().bxor(a, r);
+                                let y = self.b.ins().bxor(c, r);
+                                let of = self.b.ins().band(x, y);
+                                bad.vector(self, of);
+                                r
+                            }
+                            simd::ISUB64 => {
+                                let r = self.b.ins().isub(a, c);
+                                let x = self.b.ins().bxor(a, c);
+                                let y = self.b.ins().bxor(a, r);
+                                let of = self.b.ins().band(x, y);
+                                bad.vector(self, of);
+                                r
+                            }
+                            simd::IMUL64 => self.per_lane(a, c, types::I64, types::I64, bad, &|me, x, y| {
+                                let (r, of) = me.b.ins().smul_overflow(x, y);
+                                (r, Some(of))
+                            }),
+                            simd::IDIV64 => self.per_lane(a, c, types::I64, types::I64, bad, &|me, x, y| {
+                                let z = me.b.ins().icmp_imm_s(IntCC::Equal, y, 0);
+                                let m = me.b.ins().icmp_imm_s(IntCC::Equal, x, i64::MIN);
+                                let n = me.b.ins().icmp_imm_s(IntCC::Equal, y, -1);
+                                let mn = me.b.ins().band(m, n);
+                                let trap = me.b.ins().bor(z, mn);
+                                let one = me.b.ins().iconst(types::I64, 1);
+                                let y = me.b.ins().select(trap, one, y);
+                                (me.b.ins().sdiv(x, y), Some(trap))
+                            }),
+                            simd::IAND64 => self.b.ins().band(a, c),
+                            simd::IOR64 => self.b.ins().bor(a, c),
+                            simd::IXOR64 => self.b.ins().bxor(a, c),
+                            k => {
+                                let m = self.vlane_cmp(k - simd::ICMP, false, a, c);
+                                self.b.ins().ushr_imm_u(m, 63)
+                            }
+                        }
+                    }
+                }
+            }
+            VecExpr::Unary { kind, src } => {
+                let a = self.vlane(f, src, p, bad);
+                match *kind {
+                    simd::INEG => {
+                        let a = iv(self, a);
+                        let min = self.vsplat_i(i64::MIN);
+                        let of = self.b.ins().icmp(IntCC::Equal, a, min);
+                        bad.vector(self, of);
+                        self.b.ins().ineg(a)
+                    }
+                    simd::FNEG => {
+                        let a = fv(self, a);
+                        self.b.ins().fneg(a)
+                    }
+                    simd::I2F => {
+                        let a = iv(self, a);
+                        self.b.ins().fcvt_from_sint(types::F64X2, a)
+                    }
+                    _ => self.per_lane(a, a, types::F64, types::I64, bad, &|me, x, _| (me.b.ins().fcvt_to_sint_sat(types::I64, x), None)),
+                }
+            }
+            VecExpr::Select { mask, then, els } => {
+                let m = self.vlane(f, mask, p, bad);
+                let m = iv(self, m);
+                let t = self.vlane(f, then, p, bad);
+                let e = self.vlane(f, els, p, bad);
+                let ty = self.b.func.dfg.value_type(t);
+                let zero = self.vsplat_i(0);
+                let full = self.b.ins().icmp(IntCC::NotEqual, m, zero);
+                let (t, e) = (iv(self, t), iv(self, e));
+                let r = self.b.ins().bitselect(full, t, e);
+                self.vcoerce(r, ty)
+            }
+            VecExpr::Fma { ty, a, b, c } => {
+                let x = self.vlane(f, a, p, bad);
+                let y = self.vlane(f, b, p, bad);
+                let z = self.vlane(f, c, p, bad);
+                if *ty == dense::TY_F64 {
+                    let (x, y, z) = (fv(self, x), fv(self, y), fv(self, z));
+                    let m = self.b.ins().fmul(x, y);
+                    self.b.ins().fadd(m, z)
+                } else {
+                    let m = self.per_lane(x, y, types::I64, types::I64, bad, &|me, x, y| {
+                        let (r, of) = me.b.ins().smul_overflow(x, y);
+                        (r, Some(of))
+                    });
+                    let z = iv(self, z);
+                    let r = self.b.ins().iadd(m, z);
+                    let u = self.b.ins().bxor(m, r);
+                    let w = self.b.ins().bxor(z, r);
+                    let of = self.b.ins().band(u, w);
+                    bad.vector(self, of);
+                    r
+                }
+            }
+        }
+    }
+
+    /// [`Self::lane_cmp`] on vectors: all-ones lanes where `a pred b`.
+    fn vlane_cmp(&mut self, pred: u8, float: bool, a: cranelift_codegen::ir::Value, b: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        use common::dense;
+        if float {
+            let cc = match pred {
+                dense::CMP_LT => FloatCC::LessThan,
+                dense::CMP_LE => FloatCC::LessThanOrEqual,
+                dense::CMP_GT => FloatCC::GreaterThan,
+                dense::CMP_GE => FloatCC::GreaterThanOrEqual,
+                dense::CMP_EQ => FloatCC::Equal,
+                _ => FloatCC::NotEqual,
+            };
+            let m = self.b.ins().fcmp(cc, a, b);
+            self.vcoerce(m, types::I64X2)
         } else {
             let cc = match pred {
                 dense::CMP_LT => IntCC::SignedLessThan,

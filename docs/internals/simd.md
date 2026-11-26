@@ -72,10 +72,11 @@ deleted.
   counted stride-1 store loop (`a[i + k] = value(i)`) or add / mul
   reduction (`s = s ⊕ term(i)`) over `i64` / `f64`, anywhere in a
   function, becomes one `VecLoop` MIR instruction.
-  Native code compiles a reduce with no stores to a loop of its own
-  (`native_reduce`); every other `VecLoop` goes through
-  `coil_native_vector` to `machine::lanes::vloop`, as it does on the MIR
-  interpreter. `vectorize.rs` matches the loop and reads its body as a
+  Native code compiles a reduce with no stores (`native_reduce`) and a
+  store map over `int` / `float` word arrays (`native_store`) to loops of
+  their own, on 128-bit vectors ([native.md](native.md#vector-loops));
+  every other `VecLoop` goes through `coil_native_vector` to
+  `machine::lanes::vloop`, as it does on the MIR interpreter. `vectorize.rs` matches the loop and reads its body as a
   tree: loads `a[i + k]`, splats of invariants, the index, `+ - * /`,
   negation, casts between int and float lanes (`VBin` `I2F` / `F2I`,
   archive 6.11; a cast of an invariant is done once in front), selects
