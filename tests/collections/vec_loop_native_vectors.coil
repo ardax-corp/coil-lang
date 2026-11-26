@@ -4,6 +4,7 @@
 // lane at a time. Each loop is checked against the same loop kept scalar
 // (`black_box` in its body), over long arrays and at the edges of `int`.
 use tests::assert;
+use string::{slice_bytes, to_bytes};
 use thread::{join, spawn, ThreadError};
 
 const MAX = 9223372036854775807;
@@ -289,4 +290,147 @@ test("float to int lanes saturate and take NaN as 0") {
     }
     assert!(out[2] == 0);
     assert!(out[3] == MAX);
+}
+
+fn lower_into(string s, Vec<byte> out) {
+    let i = 0;
+    while i < s.len() {
+        let c = s[i];
+        if c >= "A" && c <= "Z" {
+            out.push(((c as int) + 32) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+}
+
+fn lower_into_scalar(string s, Vec<byte> out) {
+    let i = 0;
+    while i < s.len() {
+        let c = black_box(s[i]);
+        if c >= "A" && c <= "Z" {
+            out.push(((c as int) + 32) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+}
+
+fn scaled_push(Vec<float> a, Vec<float> out) {
+    let i = 0;
+    while i < a.len() {
+        out.push(a[i] * 0.5 - 1.0);
+        i = i + 1;
+    }
+}
+
+fn scaled_push_scalar(Vec<float> a, Vec<float> out) {
+    let i = 0;
+    while i < a.len() {
+        out.push(black_box(a[i]) * 0.5 - 1.0);
+        i = i + 1;
+    }
+}
+
+test("pushes from a string onto bytes, and floats onto floats, as they grow") {
+    let s = "";
+    let k = 0;
+    while k < 130 {
+        s = s + "The Quick BROWN fox; ";
+        k = k + 1;
+    }
+    for n in [0, 1, 7, 8, 9, 17, 100, 2730] {
+        let part = match slice_bytes(s, 0, n) {
+            Result::Ok(p) => p,
+            Result::Err(_) => panic "slice failed",
+        };
+        let p: Vec<byte> = Vec::new();
+        let q: Vec<byte> = Vec::new();
+        lower_into(part, p);
+        lower_into_scalar(part, q);
+        assert!(p.len() == n);
+        assert!(p == q);
+        // Onto an array that already holds a few, with room for some.
+        let x: Vec<byte> = Vec::with_capacity(12);
+        x.push(65 as byte);
+        let y: Vec<byte> = Vec::new();
+        y.push(65 as byte);
+        lower_into(part, x);
+        lower_into_scalar(part, y);
+        assert!(x == y);
+        let a: Vec<float> = Vec::new();
+        let i = 0;
+        while i < n {
+            a.push((i as float) * 1.25);
+            i = i + 1;
+        }
+        let f: Vec<float> = Vec::new();
+        let g: Vec<float> = Vec::new();
+        scaled_push(a, f);
+        scaled_push_scalar(a, g);
+        assert!(f == g);
+    }
+}
+
+fn lower_bytes(Vec<byte> out, Vec<byte> b, int from) {
+    let i = from;
+    while i < b.len() {
+        let c = b[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+fn lower_bytes_scalar(Vec<byte> out, Vec<byte> b, int from) {
+    let i = from;
+    while i < b.len() {
+        let c = black_box(b[i]);
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+fn lower_str(Vec<byte> out, string s) {
+    let i = 0;
+    while i < s.len() {
+        let c = s[i];
+        if c >= "A" && c <= "Z" {
+            out[i] = ((c as int) + 32) as byte;
+        } else {
+            out[i] = c;
+        }
+        i = i + 1;
+    }
+}
+
+test("stores into bytes from bytes and from a string, at any start") {
+    let s = "";
+    let k = 0;
+    while k < 60 {
+        s = s + "Hello, WORLD of Bytes! ";
+        k = k + 1;
+    }
+    let b = to_bytes(s);
+    for from in [0, 1, 5, 8, 9, 100, 1379, 1380] {
+        let out: Vec<byte> = to_bytes(s);
+        let out_s: Vec<byte> = to_bytes(s);
+        lower_bytes(out, b, from);
+        lower_bytes_scalar(out_s, b, from);
+        assert!(out == out_s);
+    }
+    let out: Vec<byte> = to_bytes(s);
+    let out_s: Vec<byte> = to_bytes(s);
+    lower_str(out, s);
+    lower_bytes_scalar(out_s, b, 0);
+    assert!(out == out_s);
 }

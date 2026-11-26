@@ -1,0 +1,132 @@
+// A push loop whose block panics pushes exactly what the scalar loop
+// would have before the panic: the block runs again one lane at a time.
+// `a[18] * 2` overflows after 18 pushes, in the middle of the third
+// 8-lane block; a `defer` counts the pushes made.
+// @output push 18\npush scalar 18\nbytes 300\nbytes scalar 300\n
+use io::sync::println;
+use string::format;
+use thread::{join, spawn};
+
+const BIG = 4611686018427387904;
+
+shared class Out {
+    pub b: Vec<int>,
+}
+
+fn input() -> Vec<int> {
+    let a: Vec<int> = Vec::new();
+    let i = 0;
+    while i < 40 {
+        a.push(if i == 18 {
+            BIG
+        } else {
+            i
+        });
+        i = i + 1;
+    }
+    return a;
+}
+
+fn twice(Vec<int> a, Vec<int> out) {
+    let i = 0;
+    while i < a.len() {
+        out.push(a[i] * 2);
+        i = i + 1;
+    }
+}
+
+fn twice_scalar(Vec<int> a, Vec<int> out) {
+    let i = 0;
+    while i < a.len() {
+        out.push(black_box(a[i]) * 2);
+        i = i + 1;
+    }
+}
+
+fn run_push() -> int {
+    let o = new Out(Vec::new());
+    defer use (o) {
+        let _ = println(format("push %i", o.b.len()));
+    }
+    twice(input(), o.b);
+    return 0;
+}
+
+fn run_push_scalar() -> int {
+    let o = new Out(Vec::new());
+    defer use (o) {
+        let _ = println(format("push scalar %i", o.b.len()));
+    }
+    twice_scalar(input(), o.b);
+    return 0;
+}
+
+// Bytes from a string, pushed as bytes: 300 pushes, then the read past the
+// string's end panics (its last 8-lane block is cut short at the end).
+fn upper(string s, int n, Vec<byte> out) {
+    let i = 0;
+    while i < n {
+        let c = s[i];
+        if c >= "a" && c <= "z" {
+            out.push(((c as int) - 32) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+}
+
+fn text() -> string {
+    let s = "";
+    let i = 0;
+    while i < 30 {
+        s = s + "Hello, Wor";
+        i = i + 1;
+    }
+    return s;
+}
+
+shared class Bytes {
+    pub b: Vec<byte>,
+}
+
+fn run_bytes() -> int {
+    let o = new Bytes(Vec::new());
+    defer use (o) {
+        let _ = println(format("bytes %i", o.b.len()));
+    }
+    upper(text(), 310, o.b);
+    return 0;
+}
+
+fn upper_scalar(string s, int n, Vec<byte> out) {
+    let i = 0;
+    while i < n {
+        let c = black_box(s[i]);
+        if c >= "a" && c <= "z" {
+            out.push(((c as int) - 32) as byte);
+        } else {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+}
+
+fn run_bytes_scalar() -> int {
+    let o = new Bytes(Vec::new());
+    defer use (o) {
+        let _ = println(format("bytes scalar %i", o.b.len()));
+    }
+    upper_scalar(text(), 310, o.b);
+    return 0;
+}
+
+fn main() {
+    for f in [run_push, run_push_scalar, run_bytes, run_bytes_scalar] {
+        let t = match spawn(f) {
+            Result::Ok(t) => t,
+            Result::Err(_) => panic "spawn failed",
+        };
+        let _ = join(t);
+    }
+}

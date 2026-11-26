@@ -2069,6 +2069,26 @@ pub unsafe extern "C" fn coil_native_array_push(ctx: *mut NativeCtx, addr: u64, 
     addr
 }
 
+/// Room for `extra` more elements in the array `addr`, for native code's
+/// vector pushes, which then append in place; returns `addr`. Not an
+/// array: bail, where the runtime panics.
+///
+/// # Safety
+/// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_array_reserve(ctx: *mut NativeCtx, addr: u64, extra: u64) -> u64 {
+    let Some(heap) = (unsafe { heap(ctx) }) else {
+        return unsafe { bail(ctx) };
+    };
+    let Some(crate::memory::Object::Array(mut gc)) = object(addr) else {
+        return unsafe { bail(ctx) };
+    };
+    gc.as_mut().reserve(extra as usize);
+    heap.account_array(gc.as_mut());
+    unsafe { note_alloc(ctx, heap) };
+    addr
+}
+
 // ---------------------------------------------------------------------------
 // Boxed enum matches (`JumpIfMatch`, `MatchPayload` on an enum object).
 
@@ -3372,6 +3392,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_offer_slot", coil_native_offer_slot as *const u8),
         ("coil_native_alloc", coil_native_alloc as *const u8),
         ("coil_native_array_push", coil_native_array_push as *const u8),
+        ("coil_native_array_reserve", coil_native_array_reserve as *const u8),
         ("coil_native_lane_index", coil_native_lane_index as *const u8),
         ("coil_native_lane_store", coil_native_lane_store as *const u8),
         ("coil_native_lane_push", coil_native_lane_push as *const u8),
@@ -3414,7 +3435,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 58;
+const HELPERS: usize = 59;
 
 #[cfg(test)]
 mod pin_tests {
