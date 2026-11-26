@@ -2741,6 +2741,13 @@ struct Lower<'a> {
     /// defined or the views were dropped (`machine::native::coil_native_str_view`;
     /// length 0 when the word is not a string object itself).
     str_views: HashMap<ValueId, (Variable, Variable, Variable)>,
+    /// Enums this body reads payload words of: `(pointer, length)` of
+    /// their payload words, taken at the first tag test or payload read
+    /// after the value is defined (length 0 until then), so the other
+    /// reads of the same match skip the layout tests. An enum's payload
+    /// is never written once made; a value the body also reads or writes
+    /// as a class's fields is left out.
+    payload_views: HashMap<ValueId, (Variable, Variable)>,
     /// Lane arrays this body reads or writes elements of in place:
     /// `(state, pointer, element count)` of their element words
     /// (`machine::native::coil_native_lane_view`). `state` is 1 for a view
@@ -2958,6 +2965,7 @@ impl<'a> Lower<'a> {
             cur_site: None,
             views: HashMap::new(),
             str_views: HashMap::new(),
+            payload_views: HashMap::new(),
             lane_views: HashMap::new(),
             stored: HashSet::new(),
             barriers: HashMap::new(),
@@ -3012,6 +3020,10 @@ impl<'a> Lower<'a> {
         if let Some(&(known, _, _)) = self.str_views.get(&v) {
             let zero = self.b.ins().iconst(types::I64, 0);
             self.b.def_var(known, zero);
+        }
+        if let Some(&(_, len)) = self.payload_views.get(&v) {
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.b.def_var(len, zero);
         }
     }
 
@@ -3650,6 +3662,14 @@ impl<'a> Lower<'a> {
         self.barriers = barrier_pairs(f);
         self.root_handles = root_handles(f);
         self.in_range = in_range_steps(f);
+        self.payload_views.clear();
+        for s in payload_scrutinees(f) {
+            let vars = (self.b.declare_var(types::I64), self.b.declare_var(types::I64));
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.b.def_var(vars.0, zero);
+            self.b.def_var(vars.1, zero);
+            self.payload_views.insert(s, vars);
+        }
         for blk in &f.blocks {
             for inst in &blk.insts {
                 let read: Vec<ValueId> = match inst {
@@ -5672,13 +5692,42 @@ impl<'a> Lower<'a> {
         if matches!(ty_of(f, scrutinee), MirTy::NicheOpt | MirTy::NicheRes) {
             return s;
         }
-        self.product_load(s, index)
+        let Some(&(ptr, len)) = self.payload_views.get(&scrutinee) else {
+            return self.product_load(s, index);
+        };
+        // The view when it has the word; otherwise the in-place read,
+        // which takes the view for the next read.
+        let (have, take, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(done, types::I64);
+        let n = self.b.use_var(len);
+        let p = self.b.use_var(ptr);
+        let has = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, n, i64::from(index));
+        self.b.ins().brif(has, have, &[], take, &[]);
+        self.b.switch_to_block(have);
+        let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), p, i64::from(index) as i32 * 8);
+        self.b.ins().jump(done, &[w.into()]);
+        self.b.switch_to_block(take);
+        let (fast, slow, view) = self.product_slot_view(s, index, false);
+        self.b.switch_to_block(slow);
+        let args = self.bail_args(TRAP_HELPER);
+        self.b.ins().jump(self.bail, &args);
+        self.b.switch_to_block(fast);
+        let (vp, vn) = view;
+        self.b.def_var(ptr, vp);
+        self.b.def_var(len, vn);
+        let at = self.b.block_params(fast)[0];
+        let w = self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 0);
+        self.b.ins().jump(done, &[w.into()]);
+        self.b.switch_to_block(done);
+        self.b.block_params(done)[0]
     }
 
     /// Enum object `o`'s `tag | payload length << 32`, read in place, or
     /// from `coil_native_enum_tag` for anything the inline read does not
     /// know (`0`, another kind, another payload storage).
-    fn enum_tag_word(&mut self, o: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+    /// With `view`, it takes the payload's `(pointer, length)` too on the
+    /// in-place paths ([`Self::payload_views`]).
+    fn enum_tag_word(&mut self, o: cranelift_codegen::ir::Value, view: Option<(Variable, Variable)>) -> cranelift_codegen::ir::Value {
         let o = self.coerce(o, types::I64);
         let l = machine::native::product_slots();
         let flags = MemFlagsData::trusted();
@@ -5704,6 +5753,11 @@ impl<'a> Lower<'a> {
         self.b.ins().brif(is_inline, inline, &[], spill_test, &[]);
         self.b.switch_to_block(inline);
         let len = self.b.ins().uload8(types::I64, flags, o, l.inline_len_at as i32);
+        if let Some((vp, vn)) = view {
+            let ptr = self.b.ins().iadd_imm_s(o, i64::from(l.inline_slots_at));
+            self.b.def_var(vp, ptr);
+            self.b.def_var(vn, len);
+        }
         let hi = self.b.ins().ishl_imm_u(len, 32);
         let tl = self.b.ins().bor(tag, hi);
         self.b.ins().jump(done, &[tl.into()]);
@@ -5712,6 +5766,11 @@ impl<'a> Lower<'a> {
         self.b.ins().brif(is_spill, spill, &[], slow, &[]);
         self.b.switch_to_block(spill);
         let len = self.b.ins().load(types::I64, flags, o, l.spill_len_at as i32);
+        if let Some((vp, vn)) = view {
+            let ptr = self.b.ins().load(types::I64, flags, o, l.spill_ptr_at as i32);
+            self.b.def_var(vp, ptr);
+            self.b.def_var(vn, len);
+        }
         let hi = self.b.ins().ishl_imm_u(len, 32);
         let tl = self.b.ins().bor(tag, hi);
         self.b.ins().jump(done, &[tl.into()]);
@@ -6280,6 +6339,18 @@ impl<'a> Lower<'a> {
     }
 
     fn product_slot(&mut self, o: cranelift_codegen::ir::Value, index: u32, store: bool) -> (Block, Block) {
+        let (fast, slow, _) = self.product_slot_view(o, index, store);
+        (fast, slow)
+    }
+
+    /// [`Self::product_slot`], with the object's `(pointer, length)` of
+    /// its slot words as well, defined where `fast` is entered.
+    fn product_slot_view(
+        &mut self,
+        o: cranelift_codegen::ir::Value,
+        index: u32,
+        store: bool,
+    ) -> (Block, Block, (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)) {
         let l = machine::native::product_slots();
         let flags = MemFlagsData::trusted();
         let (fast, slow) = (self.b.create_block(), self.b.create_block());
@@ -6327,7 +6398,7 @@ impl<'a> Lower<'a> {
         let has = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, len, i64::from(index));
         let at = self.b.ins().iadd_imm_s(ptr, i64::from(index) * 8);
         self.b.ins().brif(has, fast, &[at.into()], slow, &[]);
-        (fast, slow)
+        (fast, slow, (ptr, len))
     }
 
     /// Address of `array[i]` in its view.
@@ -6535,7 +6606,8 @@ impl<'a> Lower<'a> {
                         // A boxed enum: `tag | payload length << 32`. A tag
                         // match with another payload width than the arm
                         // binds is left to the runtime.
-                        let tl = self.enum_tag_word(s);
+                        let view = self.payload_views.get(scrutinee).copied();
+                        let tl = self.enum_tag_word(s, view);
                         let not_enum = self.b.ins().icmp_imm_s(IntCC::Equal, tl, -1);
                         self.bail_if(not_enum, TRAP_HELPER);
                         let low = self.b.ins().band_imm_u(tl, 0xffff_ffff);
@@ -6566,6 +6638,35 @@ impl<'a> Lower<'a> {
         }
         Ok(())
     }
+}
+
+/// Boxed enum values `f` reads two or more payload words of (a tag test
+/// counts as one read), and never reads or writes as a class's fields:
+/// the values worth a payload view.
+fn payload_scrutinees(f: &MirFunc) -> Vec<ValueId> {
+    let mut reads: HashMap<ValueId, u32> = HashMap::new();
+    let mut fields = HashSet::new();
+    for blk in &f.blocks {
+        for inst in &blk.insts {
+            match inst {
+                MirInst::MatchPayload { scrutinee, .. } => *reads.entry(*scrutinee).or_default() += 1,
+                MirInst::ProductLoad { object, .. } | MirInst::HeapFieldStore { object, .. } => {
+                    fields.insert(*object);
+                }
+                _ => {}
+            }
+        }
+        if let Some(Terminator::JumpIfMatch { scrutinee, .. }) = &blk.term {
+            *reads.entry(*scrutinee).or_default() += 1;
+        }
+    }
+    let mut out: Vec<_> = reads
+        .into_iter()
+        .filter(|&(v, n)| n >= 2 && !fields.contains(&v) && !matches!(ty_of(f, v), MirTy::NicheOpt | MirTy::NicheRes))
+        .map(|(v, _)| v)
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 /// Body names compiled per call to [`jit`], for `COIL_NATIVE_STATS`.
