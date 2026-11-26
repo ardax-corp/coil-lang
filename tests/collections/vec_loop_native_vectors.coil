@@ -434,3 +434,103 @@ test("stores into bytes from bytes and from a string, at any start") {
     lower_bytes_scalar(out_s, b, 0);
     assert!(out == out_s);
 }
+
+fn scale_sum(Vec<int> a, Vec<int> b) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        let v = a[i];
+        b[i] = v * 3 - 1;
+        s = s + v;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn scale_sum_scalar(Vec<int> a, Vec<int> b) -> int {
+    let s = 0;
+    let i = 0;
+    while i < a.len() {
+        let v = a[i];
+        b[i] = black_box(v * 3 - 1);
+        s = s + v;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn triple_in_place(Vec<int> a) -> int {
+    let m = 0 - MAX;
+    let i = 0;
+    while i < a.len() {
+        let v = a[i] * 3;
+        a[i] = v;
+        if v > m {
+            m = v;
+        }
+        i = i + 1;
+    }
+    return m;
+}
+
+fn fdot_into(Vec<float> a, Vec<float> b, Vec<float> out) -> float {
+    let s = 0.0;
+    let i = 0;
+    while i < a.len() {
+        let x = a[i] * b[i];
+        out[i] = x;
+        s = s + x;
+        i = i + 1;
+    }
+    return s;
+}
+
+fn fdot_into_scalar(Vec<float> a, Vec<float> b, Vec<float> out) -> float {
+    let s = 0.0;
+    let i = 0;
+    while i < a.len() {
+        let x = a[i] * b[i];
+        out[i] = black_box(x);
+        s = s + x;
+        i = i + 1;
+    }
+    return s;
+}
+
+test("sums and maxima that also store, against the scalar loop") {
+    for n in [0, 1, 7, 8, 9, 17, 511, 512, 513, 1000] {
+        let a = ints(n, 1024, n);
+        let b = ints(n, 0, 0);
+        let c = ints(n, 0, 0);
+        assert!(scale_sum(a, b) == scale_sum_scalar(a, c));
+        assert!(b == c);
+        let x = ints(n, 7, 1);
+        let y = ints(n, 7, 1);
+        let m = triple_in_place(x);
+        let j = 0;
+        let m2 = 0 - MAX;
+        while j < y.len() {
+            y[j] = y[j] * 3;
+            if y[j] > m2 {
+                m2 = y[j];
+            }
+            j = j + 1;
+        }
+        assert!(m == m2);
+        assert!(x == y);
+        let fa: Vec<float> = Vec::new();
+        let fb: Vec<float> = Vec::new();
+        let o1: Vec<float> = Vec::new();
+        let o2: Vec<float> = Vec::new();
+        let k = 0;
+        while k < n {
+            fa.push((k as float) * 0.37 - 20.0);
+            fb.push(1.0 / ((k + 1) as float));
+            o1.push(0.0);
+            o2.push(0.0);
+            k = k + 1;
+        }
+        assert!(fdot_into(fa, fb, o1) == fdot_into_scalar(fa, fb, o2));
+        assert!(o1 == o2);
+    }
+}

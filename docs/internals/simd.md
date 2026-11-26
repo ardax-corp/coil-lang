@@ -72,7 +72,8 @@ deleted.
   counted stride-1 store loop (`a[i + k] = value(i)`) or add / mul
   reduction (`s = s ⊕ term(i)`) over `i64` / `f64`, anywhere in a
   function, becomes one `VecLoop` MIR instruction.
-  Native code compiles a reduce with no stores (`native_reduce`), a
+  Native code compiles a reduce (`native_reduce`, with or without
+  stores), a
   store map (`native_store`) and a push (`native_push`) over word arrays
   or packed bytes to loops of their own, on 128-bit vectors
   ([native.md](native.md#vector-loops)); every other `VecLoop` goes
