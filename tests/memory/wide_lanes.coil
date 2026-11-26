@@ -1,0 +1,146 @@
+// A `Vec` (or array) of a tuple of three or four immediates
+// (`(int, int, int)`, `(float, float, float, int)`) keeps every word of
+// each element in place (a lane array of three or four words per
+// element). Element reads, stores, pushes, `pop` / `remove` / `insert`,
+// lengths and `for` loops work on the words; an array that goes on to
+// code reading one word per element turns into boxed tuples in place
+// first, and lane code still reads and writes it after that.
+use tests::assert;
+use gc::collect;
+
+fn first<T>(Vec<T> v) -> T {
+    return v[0];
+}
+
+fn count<T>(Vec<T> v) -> int {
+    return v.len();
+}
+
+fn grow<T>(Vec<T> v, T x) -> Vec<T> {
+    v.push(x);
+    return v;
+}
+
+#[inline(never)]
+fn make(int i) -> (int, int, int) {
+    return (i, i * 10, i * 100);
+}
+
+#[inline(never)]
+fn sum3(Vec<(int, int, int)> v) -> int {
+    let s = 0;
+    for (a, b, c) in v {
+        s += a + b + c;
+    }
+    return s;
+}
+
+test("three-int elements are pushed, read, stored and looped over") {
+    let v: Vec<(int, int, int)> = Vec::new();
+    let i = 0;
+    while i < 10 {
+        v.push((i, i + 1, i + 2));
+        i += 1;
+    }
+    assert!(v.len() == 10);
+    let (a, b, c) = v[3];
+    assert!(a == 3 && b == 4 && c == 5);
+    v[3] = (30, 40, 50);
+    assert!(v[3] == (30, 40, 50));
+    v[4] = make(7);
+    let t = v[4];
+    assert!(t == (7, 70, 700));
+    let s = 0;
+    for x in v {
+        let (p, q, r) = x;
+        s += p + q + r;
+    }
+    assert!(s == sum3(v));
+    let w = 0;
+    for (p, _, r) in v {
+        w += p + r;
+    }
+    assert!(w > 0);
+}
+
+test("four items, floats and bools") {
+    let v: Vec<(float, float, float, int)> = [(1.0, 2.0, 3.0, 4), (0.5, 0.25, 0.125, 8)];
+    v.push((10.0, 20.0, 30.0, 40));
+    let (x, y, z, n) = v[1];
+    assert!(x == 0.5 && y == 0.25 && z == 0.125 && n == 8);
+    v[0] = (-1.0, -2.0, -3.0, -4);
+    let total = 0.0;
+    let ns = 0;
+    for (a, b, c, d) in v {
+        total += a + b + c;
+        ns += d;
+    }
+    assert!(total == 60.0 - 6.0 + 0.875);
+    assert!(ns == 44);
+    let flags: Vec<(bool, int, bool)> = [(true, 1, false)];
+    flags.push((false, 2, true));
+    let (f0, k, f1) = flags[1];
+    assert!(!f0 && k == 2 && f1);
+    assert!(flags[0] == (true, 1, false));
+}
+
+test("a fixed array literal of wide elements") {
+    let a = [(1, 2, 3), (4, 5, 6)];
+    let (p, q, r) = a[1];
+    assert!(p == 4 && q == 5 && r == 6);
+    a[0] = (7, 8, 9);
+    let s = 0;
+    for (x, y, z) in a {
+        s += x * y * z;
+    }
+    assert!(s == 504 + 120);
+}
+
+test("pop, remove and insert") {
+    let v: Vec<(int, int, int)> = [(1, 2, 3), (4, 5, 6), (7, 8, 9)];
+    assert!(v.pop() == Some((7, 8, 9)));
+    v.insert(0, (0, 0, 1));
+    assert!(v.len() == 3 && v[0] == (0, 0, 1) && v[1] == (1, 2, 3));
+    assert!(v.remove(1) == Some((1, 2, 3)));
+    assert!(v.len() == 2 && v[1] == (4, 5, 6));
+    v.insert(2, (9, 9, 9));
+    assert!(v[2] == (9, 9, 9));
+    let e: Vec<(int, int, int)> = Vec::new();
+    assert!(e.pop() == None);
+    assert!(e.remove(0) == None);
+}
+
+test("a wide lane array passed to generic code is still read after it") {
+    let v: Vec<(int, int, int)> = [(1, 2, 3), (4, 5, 6)];
+    assert!(count(v) == 2);
+    assert!(first(v) == (1, 2, 3));
+    v.push(make(2));
+    v[0] = (9, 9, 9);
+    let want: Vec<(int, int, int)> = [(9, 9, 9), (4, 5, 6), (2, 20, 200)];
+    assert!(v == want);
+    let w = grow(v, (5, 5, 5));
+    assert!(w.len() == 4 && w[3] == (5, 5, 5) && w[2] == (2, 20, 200));
+    assert!(w.pop() == Some((5, 5, 5)));
+    w.insert(1, (3, 3, 3));
+    assert!(w.remove(0) == Some((9, 9, 9)));
+    assert!(sum3(w) == 9 + 15 + 222);
+}
+
+test("elements read out stay after the array changes") {
+    let v: Vec<(int, int, int)> = Vec::new();
+    v.push((1, 1, 1));
+    let kept = v[0];
+    v[0] = (2, 2, 2);
+    let i = 0;
+    while i < 1000 {
+        v.push(make(i));
+        i += 1;
+    }
+    collect();
+    assert!(kept == (1, 1, 1));
+    assert!(v[0] == (2, 2, 2) && v[1000] == (999, 9990, 99900));
+    let popped = v.pop();
+    v.clear();
+    assert!(popped == Some((999, 9990, 99900)));
+    assert!(v.len() == 0);
+}
