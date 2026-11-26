@@ -671,7 +671,7 @@ impl Slab {
         self.free_in_class(key, ptr);
     }
 
-    fn free_in_class(&mut self, key: (u32, u32), ptr: NonNull<u8>) {
+    pub fn free_in_class(&mut self, key: (u32, u32), ptr: NonNull<u8>) {
         if let Some(class) = self.free.iter_mut().find(|c| c.key == key) {
             class.slots.push(ptr);
             return;

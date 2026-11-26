@@ -60,12 +60,18 @@ struct EpochBatch {
     /// or with [`EPOCH_RC_ZERO`] for an object born in the epoch whose last
     /// owner went there (its count is kept in place).
     rc: Vec<u64>,
+    /// Bytes and objects this thread freed in place in the epoch
+    /// ([`Heap::epoch_dealloc`]), taken off the heap's counts with the rest.
+    freed_bytes: usize,
+    freed_objects: usize,
 }
 
 /// One thread's inline allocation in a steal epoch: the counters native
 /// code bumps (folded into the heap's with the batch's) and, per nursery
 /// cursor, a run of old-space slots to bump through (a whole chunk taken
-/// under the lock, [`Slab::alloc_run`]). The free lists stay empty.
+/// under the lock, [`Slab::alloc_run`]). A cursor's free list holds the
+/// slots this thread freed in place in the epoch ([`Heap::epoch_dealloc`]),
+/// taken once the run is spent, as in the nursery.
 struct EpochInline {
     counts: HeapCounts,
     bumps: [super::slab::Bump; super::slab::YOUNG_CLASSES],
@@ -73,7 +79,7 @@ struct EpochInline {
 
 impl EpochInline {
     fn is_empty(&self) -> bool {
-        self.counts.alloc_bytes == 0 && self.counts.live_count == 0 && self.bumps.iter().all(|b| b.next == b.end)
+        self.counts.alloc_bytes == 0 && self.counts.live_count == 0 && self.bumps.iter().all(|b| b.next == b.end && b.free == 0)
     }
 }
 
@@ -83,6 +89,7 @@ impl EpochBatch {
             && self.classes.iter().all(|(_, v)| v.is_empty())
             && self.bytes == 0
             && self.objects == 0
+            && self.freed_objects == 0
             && self.weaks.is_empty()
             && self.finalizable.is_empty()
             && self.rc.is_empty()
@@ -91,7 +98,7 @@ impl EpochBatch {
 
 /// The GC side lists ([`Heap::weaks`], [`Heap::finalizable`]).
 #[derive(Clone, Copy)]
-enum SideList {
+pub(super) enum SideList {
     Weak,
     Finalizable,
 }
@@ -564,6 +571,14 @@ impl Heap {
             if let Some(c) = cursor {
                 let size = u64::from(key.0);
                 let b = &mut self.epoch_inline(&mut batch).bumps[c];
+                if b.next + size > b.end && b.free != 0 {
+                    // A slot this thread freed in the epoch.
+                    let p = b.free;
+                    // SAFETY: a freed slot links the next at `FREE_LINK`.
+                    b.free = unsafe { *((p + super::slab::FREE_LINK) as *const u64) };
+                    // SAFETY: a slot of the class, freed and poisoned.
+                    return unsafe { NonNull::new_unchecked(p as *mut u8) };
+                }
                 if b.next + size > b.end {
                     let _epoch_guard = self.epoch_guard();
                     let b = &mut batch.inline.as_mut().expect("epoch inline state").bumps[c];
@@ -633,8 +648,14 @@ impl Heap {
             batch.bytes += std::mem::take(&mut inline.counts.alloc_bytes);
             batch.objects += std::mem::take(&mut inline.counts.live_count);
         }
-        self.counts.alloc_bytes += std::mem::take(&mut batch.bytes);
-        self.counts.live_count += std::mem::take(&mut batch.objects);
+        // Another thread's batch may hold what this one freed: the sums
+        // are right once every batch is in.
+        self.counts.alloc_bytes = self.counts.alloc_bytes.wrapping_add(std::mem::take(&mut batch.bytes)).wrapping_sub(std::mem::take(&mut batch.freed_bytes));
+        let freed = std::mem::take(&mut batch.freed_objects);
+        self.counts.live_count = self.counts.live_count.wrapping_add(std::mem::take(&mut batch.objects)).wrapping_sub(freed);
+        if freed != 0 {
+            self.freed_early = true;
+        }
         self.weaks.append(&mut batch.weaks);
         self.finalizable.append(&mut batch.finalizable);
         self.epoch_rc.append(&mut batch.rc);
@@ -662,6 +683,43 @@ impl Heap {
             debug_assert!(batch.heap.is_null() || batch.heap == me, "epoch batch left over from another heap");
             batch.heap = me;
             batch.rc.push(w);
+        });
+    }
+
+    /// Free `object`, born in the open steal epoch, on this thread: its
+    /// payload drops and its slot goes on this thread's batch for its next
+    /// allocation of the class (the heap's lists take what is left when the
+    /// batch is flushed). No lock: nothing the other mutators read changes.
+    ///
+    /// # Safety
+    /// `object` was born in the open epoch and nothing will read it again:
+    /// its count reached zero, and its words were released.
+    pub(crate) unsafe fn epoch_dealloc(&self, object: Object) {
+        let size = object.size();
+        let key = object.slot_key();
+        let cursor = self.slab.young_cursor(key).filter(|_| u64::from(key.0) >= super::slab::FREE_LINK + 8);
+        let addr = object.addr();
+        // SAFETY: the caller's.
+        unsafe { object.recycle_payload() };
+        let me: *const Heap = self;
+        EPOCH_BATCH_TLS.with(|cell| {
+            let mut batch = cell.borrow_mut();
+            debug_assert!(batch.heap.is_null() || batch.heap == me, "epoch batch left over from another heap");
+            batch.heap = me;
+            batch.freed_bytes += size;
+            batch.freed_objects += 1;
+            let slot = unsafe { NonNull::new_unchecked(addr as *mut u8) };
+            if let Some(c) = cursor {
+                let b = &mut self.epoch_inline(&mut batch).bumps[c];
+                // SAFETY: the slot is freed and poisoned; its first payload
+                // word is free to hold the link.
+                unsafe { *((addr + super::slab::FREE_LINK) as *mut u64) = b.free };
+                b.free = addr;
+            } else if let Some((_, slots)) = batch.classes.iter_mut().find(|(k, _)| *k == key) {
+                slots.push(slot);
+            } else {
+                batch.classes.push((key, vec![slot]));
+            }
         });
     }
 
@@ -728,9 +786,22 @@ impl Heap {
             let _epoch_guard = self.epoch_guard();
             self.fold_epoch_counts(&mut batch);
             if let Some(inline) = batch.inline.as_mut() {
-                for (c, b) in inline.bumps.iter_mut().enumerate().filter(|(_, b)| b.next != b.end) {
-                    self.slab.give_back_run(self.slab.young_key(c), b.next, b.end);
-                    (b.next, b.end) = (0, 0);
+                for (c, b) in inline.bumps.iter_mut().enumerate() {
+                    if b.next != b.end {
+                        self.slab.give_back_run(self.slab.young_key(c), b.next, b.end);
+                        (b.next, b.end) = (0, 0);
+                    }
+                    if b.free == 0 {
+                        continue;
+                    }
+                    let key = self.slab.young_key(c);
+                    while b.free != 0 {
+                        let p = b.free;
+                        // SAFETY: a freed slot links the next at `FREE_LINK`.
+                        b.free = unsafe { *((p + super::slab::FREE_LINK) as *const u64) };
+                        // SAFETY: a slot of class `key`, freed and poisoned.
+                        self.slab.free_in_class(key, unsafe { NonNull::new_unchecked(p as *mut u8) });
+                    }
                 }
             }
             for (key, slots) in &mut batch.classes {
@@ -838,7 +909,7 @@ impl Heap {
 
     /// The GC side list a fresh object joins, if any.
     #[inline(always)]
-    fn side_list_of(&self, object: Object) -> Option<SideList> {
+    pub(super) fn side_list_of(&self, object: Object) -> Option<SideList> {
         match object {
             Object::Weak(_) => Some(SideList::Weak),
             Object::Instance(_) | Object::Enum(_)
@@ -1507,7 +1578,7 @@ impl Heap {
     }
 
     /// Whether `obj` has a `drop` that has not run yet.
-    fn pending_drop(&self, obj: Object) -> bool {
+    pub(super) fn pending_drop(&self, obj: Object) -> bool {
         self.finalizer_object(obj)
             && matches!(obj, Object::Instance(_) | Object::Enum(_))
             && !obj.is_finalized()
@@ -2422,6 +2493,11 @@ impl Object {
             Self::Mutex(_) => 17,
             Self::RwLock(_) => 18,
         }
+    }
+
+    /// The slab size class of the object's slot.
+    fn slot_key(self) -> (u32, u32) {
+        each_kind!(self, r => Slab::class_of(r.data_layout()))
     }
 
     /// Drop the payload and poison `kind = 0`. Slot memory stays mapped.
@@ -4729,6 +4805,11 @@ pub struct Gc<T> {
 }
 
 impl<T> Gc<T> {
+    /// The layout of the slot an object of this type takes.
+    fn data_layout(&self) -> Layout {
+        Layout::new::<GcData<T>>()
+    }
+
     fn from_slot(ptr: NonNull<GcData<T>>) -> Self {
         Self { ptr }
     }
@@ -5605,8 +5686,8 @@ mod tests {
     /// In a steal epoch a count change to an object from before it is
     /// logged, not written: its header stays as it was until the epoch ends
     /// and the logs are summed in (reference-count plan step 8). An object
-    /// born in the epoch is counted in place. One released to zero is freed
-    /// at the end.
+    /// born in the epoch is counted in place, and freed there when its last
+    /// owner goes; one from before released to zero is freed at the end.
     #[test]
     fn epoch_count_changes_apply_at_its_end() {
         let lock = Mutex::new(());
@@ -5623,16 +5704,18 @@ mod tests {
         heap.rc_inc_obj(old);
         heap.rc_inc_obj(born);
         heap.rc_inc_obj(gone);
-        assert!(!heap.rc_dec_obj(gone), "no release inside the epoch");
+        let gone_addr = gone.addr();
+        assert!(!heap.rc_dec_obj(gone), "freed in place, not released by the caller");
+        // SAFETY: the slot stays mapped; a freed one reads as no object.
+        assert!(unsafe { Object::from_header(gone_addr) }.is_none(), "born in the epoch: freed there");
         heap.rc_inc_obj(born);
         assert!(!heap.rc_dec_obj(dropped));
         assert_eq!((old.rc_count(), dropped.rc_count()), (1, 1), "older headers untouched in the epoch");
-        assert_eq!((born.rc_count(), gone.rc_count()), (2, 0), "objects born in it counted in place");
+        assert_eq!(born.rc_count(), 2, "objects born in it counted in place");
         heap.flush_epoch_batch();
         heap.exit_epoch_stw();
         assert_eq!((old.rc_count(), born.rc_count()), (2, 2));
-        // `dropped` reached zero and was freed; so was `gone`, born in the
-        // epoch, whose owners came and went.
+        // `dropped` reached zero and was freed at the end.
         assert_eq!(heap.live_object_count(), 2);
     }
 

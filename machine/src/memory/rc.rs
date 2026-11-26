@@ -6,6 +6,16 @@
 
 use super::*;
 
+thread_local! {
+    /// Set while this thread frees objects born in the open steal epoch
+    /// ([`Heap::rc_epoch_free`]): one of them whose count reaches zero
+    /// goes on its worklist ([`Heap::rc_dec_obj`] says it was the last)
+    /// instead of starting a release of its own.
+    static EPOCH_FREEING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// That worklist, kept between releases.
+    static EPOCH_FREE_STACK: std::cell::Cell<Vec<Object>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
 /// `COIL_RC_LEAKS=1`: a heap that goes away names on stderr the objects
 /// still in it that are not immortal: what a static still held, or what
 /// counts leaked (no collector frees it).
@@ -126,9 +136,10 @@ impl Heap {
         }
     }
 
-    /// `o` loses an owner; whether that was the last. Never while a steal
-    /// epoch is open: the change is logged (or, for an object born in it,
-    /// made in place, and a last owner's going noted) and its end releases.
+    /// `o` loses an owner; whether that was the last. While a steal epoch
+    /// is open the change is logged and its end releases, unless `o` was
+    /// born in it: then it is counted in place and freed on this thread
+    /// when that was its last owner ([`Self::rc_epoch_free`]).
     #[inline]
     pub(crate) fn rc_dec_obj(&self, o: Object) -> bool {
         if self.alloc_lock.is_null() {
@@ -136,7 +147,10 @@ impl Heap {
         }
         if self.epoch_born(o) {
             if o.header().dec_shared() {
-                self.rc_log_zero(o);
+                if EPOCH_FREEING.get() {
+                    return true;
+                }
+                self.rc_epoch_free(o);
             }
         } else if o.rc_count() != COUNT_IMMORTAL {
             self.rc_log(o, true);
@@ -145,11 +159,72 @@ impl Heap {
     }
 
     /// Native code took the last owner of `w`, an object born in the open
-    /// steal epoch, counting it in place: its end releases it.
+    /// steal epoch, counting it in place: it is freed here
+    /// ([`Self::rc_epoch_free`]).
     pub fn rc_epoch_zero(&self, w: Value) {
         if let Some(o) = self.rc_object(w) {
-            self.rc_log_zero(o);
+            self.rc_epoch_free(o);
         }
+    }
+
+    /// Free `obj`, born in the open steal epoch, whose last owner just
+    /// went: on this thread, without the lock. Its words lose an owner;
+    /// those born in the epoch that reach zero are freed in turn (a
+    /// worklist), those from before are logged as any count change in an
+    /// epoch is. Its slot is this thread's for its next allocation of the
+    /// class ([`Self::epoch_dealloc`]).
+    ///
+    /// Sound because an object born in the epoch is counted in place by
+    /// every mutator: a zero is its last owner, on any thread. A fork's
+    /// arguments are no exception: its spawner owns them until the join.
+    /// What owes more than its slot at its end (a `drop`, a close, a weak
+    /// handle to clear, an interned string's table entry) is left to the
+    /// epoch's end, as before ([`Self::rc_log_zero`]).
+    #[inline(never)]
+    pub(crate) fn rc_epoch_free(&self, obj: Object) {
+        if !self.rc_frees() {
+            self.rc_log_zero(obj);
+            return;
+        }
+        EPOCH_FREEING.set(true);
+        let mut stack = EPOCH_FREE_STACK.take();
+        stack.push(obj);
+        while let Some(obj) = stack.pop() {
+            if !self.epoch_freeable(obj) {
+                self.rc_log_zero(obj);
+                continue;
+            }
+            // Its last owner may have gone on another thread: see what it
+            // wrote before (the decrement's release).
+            std::sync::atomic::fence(Ordering::Acquire);
+            match obj {
+                Object::Enum(e) => self.rc_dec_payload(&e.as_ref().payload, &mut stack),
+                Object::Instance(i) => self.rc_dec_fields(i.as_ref(), &mut stack),
+                _ if self.rc_leaf(obj) => {}
+                _ => self.rc_dec_children(obj, &mut stack),
+            }
+            // SAFETY: born in the epoch, its count is zero and its words
+            // were released.
+            unsafe { self.epoch_dealloc(obj) };
+        }
+        EPOCH_FREE_STACK.set(stack);
+        EPOCH_FREEING.set(false);
+    }
+
+    /// Whether [`Self::rc_epoch_free`] frees `obj` in place: a plain enum,
+    /// instance, array, closure or string with nothing owed at its end.
+    fn epoch_freeable(&self, obj: Object) -> bool {
+        let kind = match obj {
+            Object::Enum(e) => !e.as_ref().payload.is_empty(),
+            Object::String(s) => !s.as_ref().interned(),
+            Object::Instance(_) | Object::Array(_) | Object::Fn(_) => true,
+            _ => false,
+        };
+        kind && obj.rc_count() == 0
+            && !obj.is_weak_target()
+            && !obj.is_pinned()
+            && !self.pending_drop(obj)
+            && self.side_list_of(obj).is_none()
     }
 
     /// A `FreeEarly` has nothing to do: counts free what dies, and with no
@@ -458,6 +533,16 @@ impl Heap {
     /// in [`Heap::rc_pending`] for the next `RcDec`.
     #[inline]
     fn rc_dec_pending(&self, o: Object) {
+        if !self.alloc_lock.is_null() && self.epoch_born(o) {
+            // Not freed in place ([`Self::rc_epoch_free`]): a host's zero
+            // may come back, as a join hands its result over before the
+            // joiner's code counts it. The epoch's end releases what stays
+            // at zero.
+            if o.header().dec_shared() {
+                self.rc_log_zero(o);
+            }
+            return;
+        }
         if self.rc_dec_obj(o) && self.rc_frees {
             self.rc_pending.borrow_mut().push(o.addr());
         }
@@ -1222,6 +1307,36 @@ mod tests {
         let _ = heap.alloc(ObjArray::new(vec![Value::from(s.addr())]).of_kind(common::WORD_POINTER), Object::Array);
         let why = heap.early_free_violation(&[arr, s]).expect("a second holder owns the string");
         assert!(why.contains("count 2, 1 owners"), "{why}");
+    }
+
+    /// In a steal epoch an object born in it is freed on the thread that
+    /// took its last owner: what only it named from the epoch goes too, an
+    /// object from before loses the owner at the epoch's end.
+    #[test]
+    fn an_object_born_in_an_epoch_is_freed_there() {
+        let lock = std::sync::Mutex::new(());
+        let mut heap = Heap::default();
+        heap.set_rc_counting(true);
+        heap.set_rc_frees(true);
+        let ptr = |o: Object| Value::from(o.addr());
+        let (old, _) = heap.alloc(ObjString::from("old"), Object::String);
+        old.rc_inc();
+        let live = heap.live_object_count();
+        heap.enter_epoch_stw(&lock);
+        let (child, _) = heap.alloc(ObjString::from("child"), Object::String);
+        let (arr, _) = heap.alloc(ObjArray::new(vec![ptr(child), ptr(old)]).of_kind(common::WORD_POINTER), Object::Array);
+        heap.rc_inc_obj(arr);
+        assert_eq!(child.rc_count(), 1, "the array owns it");
+        let (arr_addr, child_addr) = (arr.addr(), child.addr());
+        assert!(!heap.rc_dec_obj(arr));
+        // SAFETY: the slots stay mapped; a freed one reads as no object.
+        assert!(unsafe { Object::from_header(arr_addr) }.is_none(), "the array is freed");
+        assert!(unsafe { Object::from_header(child_addr) }.is_none(), "so is what only it named");
+        assert_eq!(old.rc_count(), 1, "an older header waits for the epoch's end");
+        heap.flush_epoch_batch();
+        heap.exit_epoch_stw();
+        assert_eq!(old.rc_count(), 1, "the array's owner came and went");
+        assert_eq!(heap.live_object_count(), live);
     }
 
     #[test]
