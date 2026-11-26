@@ -3778,23 +3778,24 @@ impl ObjArray {
         }
     }
 
-    /// A two-word lane array's words in place, for native code, with its
-    /// element count (`None` for any other array). Loads only: no write to
-    /// the object ([`Self::words_view_for_load`]).
-    pub(crate) fn lanes_view_for_load(&self) -> Option<(*mut Value, usize)> {
+    /// A lane array's words in place when it has `k` words per element,
+    /// for native code, with its element count (`None` for any other
+    /// array). Loads only: no write to the object
+    /// ([`Self::words_view_for_load`]).
+    pub(crate) fn lanes_view_for_load(&self, k: usize) -> Option<(*mut Value, usize)> {
         match &self.data {
-            ArrayData::Lanes { words } if self.stride == 2 => Some((words.as_ptr().cast_mut(), words.len() / 2)),
+            ArrayData::Lanes { words } if usize::from(self.stride) == k => Some((words.as_ptr().cast_mut(), words.len() / k)),
             _ => None,
         }
     }
 
     /// [`Self::lanes_view_for_load`] for stores: marks the array as
     /// [`Self::set_lanes`] does when an element may hold a reference.
-    pub(crate) fn lanes_view(&mut self) -> Option<(*mut Value, usize)> {
+    pub(crate) fn lanes_view(&mut self, k: usize) -> Option<(*mut Value, usize)> {
         if self.tag_mask != 0 {
             self.note();
         }
-        self.lanes_view_for_load()
+        self.lanes_view_for_load(k)
     }
 
     /// A write may add a reference: the next mark rescans.
