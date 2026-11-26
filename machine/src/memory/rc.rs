@@ -12,8 +12,8 @@ thread_local! {
     /// goes on its worklist ([`Heap::rc_dec_obj`] says it was the last)
     /// instead of starting a release of its own.
     static EPOCH_FREEING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// That worklist, kept between releases.
-    static EPOCH_FREE_STACK: std::cell::Cell<Vec<Object>> = const { std::cell::Cell::new(Vec::new()) };
+    /// That worklist and what it freed, kept between releases.
+    static EPOCH_FREE_STACK: std::cell::Cell<(Vec<Object>, EpochFreed)> = std::cell::Cell::new(Default::default());
 }
 
 /// `COIL_RC_LEAKS=1`: a heap that goes away names on stderr the objects
@@ -58,11 +58,13 @@ impl GcHeader {
     /// last owner.
     #[inline]
     fn dec_shared(&self) -> bool {
-        self.count
-            .fetch_update(Ordering::Release, Ordering::Relaxed, |c| {
-                (c != COUNT_IMMORTAL && c != 0).then(|| c - 1)
-            })
-            == Ok(1)
+        // Only a count kept outside an epoch becomes immortal, and an owner
+        // that goes had a count: one subtraction.
+        let c = self.count.load(Ordering::Relaxed);
+        if c == COUNT_IMMORTAL || c == 0 {
+            return false;
+        }
+        self.count.fetch_sub(1, Ordering::Release) == 1
     }
 }
 
@@ -187,7 +189,7 @@ impl Heap {
             return;
         }
         EPOCH_FREEING.set(true);
-        let mut stack = EPOCH_FREE_STACK.take();
+        let (mut stack, mut freed) = EPOCH_FREE_STACK.take();
         stack.push(obj);
         while let Some(obj) = stack.pop() {
             if !self.epoch_freeable(obj) {
@@ -205,10 +207,11 @@ impl Heap {
             }
             // SAFETY: born in the epoch, its count is zero and its words
             // were released.
-            unsafe { self.epoch_dealloc(obj) };
+            unsafe { self.epoch_dealloc(obj, &mut freed) };
         }
-        EPOCH_FREE_STACK.set(stack);
         EPOCH_FREEING.set(false);
+        self.epoch_keep_freed(&mut freed);
+        EPOCH_FREE_STACK.set((stack, freed));
     }
 
     /// Whether [`Self::rc_epoch_free`] frees `obj` in place: a plain enum,

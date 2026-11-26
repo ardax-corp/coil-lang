@@ -66,6 +66,14 @@ struct EpochBatch {
     freed_objects: usize,
 }
 
+/// What one [`Heap::rc_epoch_free`] freed, kept for this thread's batch in
+/// one go ([`Heap::epoch_keep_freed`]): the bytes, and each slot by class.
+#[derive(Default)]
+pub(crate) struct EpochFreed {
+    bytes: usize,
+    slots: Vec<((u32, u32), u64)>,
+}
+
 /// One thread's inline allocation in a steal epoch: the counters native
 /// code bumps (folded into the heap's with the batch's) and, per nursery
 /// cursor, a run of old-space slots to bump through (a whole chunk taken
@@ -687,38 +695,68 @@ impl Heap {
     }
 
     /// Free `object`, born in the open steal epoch, on this thread: its
-    /// payload drops and its slot goes on this thread's batch for its next
-    /// allocation of the class (the heap's lists take what is left when the
-    /// batch is flushed). No lock: nothing the other mutators read changes.
+    /// payload drops and its slot goes on `freed`, which
+    /// [`Self::epoch_keep_freed`] hands to this thread's batch for its next
+    /// allocations of the class (the heap's lists take what is left when
+    /// the batch is flushed). No lock: nothing the other mutators read
+    /// changes.
     ///
     /// # Safety
     /// `object` was born in the open epoch and nothing will read it again:
     /// its count reached zero, and its words were released.
-    pub(crate) unsafe fn epoch_dealloc(&self, object: Object) {
-        let size = object.size();
+    pub(crate) unsafe fn epoch_dealloc(&self, object: Object, freed: &mut EpochFreed) {
+        freed.bytes += object.size();
         let key = object.slot_key();
-        let cursor = self.slab.young_cursor(key).filter(|_| u64::from(key.0) >= super::slab::FREE_LINK + 8);
         let addr = object.addr();
         // SAFETY: the caller's.
         unsafe { object.recycle_payload() };
+        freed.slots.push((key, addr));
+    }
+
+    /// Put what [`Self::epoch_dealloc`] freed on this thread's batch: a
+    /// nursery class's slots on its cursor's free list (native code's
+    /// inline allocation takes them too), any other class's on its list.
+    pub(crate) fn epoch_keep_freed(&self, freed: &mut EpochFreed) {
+        if freed.slots.is_empty() {
+            return;
+        }
         let me: *const Heap = self;
         EPOCH_BATCH_TLS.with(|cell| {
             let mut batch = cell.borrow_mut();
             debug_assert!(batch.heap.is_null() || batch.heap == me, "epoch batch left over from another heap");
             batch.heap = me;
-            batch.freed_bytes += size;
-            batch.freed_objects += 1;
-            let slot = unsafe { NonNull::new_unchecked(addr as *mut u8) };
-            if let Some(c) = cursor {
-                let b = &mut self.epoch_inline(&mut batch).bumps[c];
-                // SAFETY: the slot is freed and poisoned; its first payload
-                // word is free to hold the link.
-                unsafe { *((addr + super::slab::FREE_LINK) as *mut u64) = b.free };
-                b.free = addr;
-            } else if let Some((_, slots)) = batch.classes.iter_mut().find(|(k, _)| *k == key) {
-                slots.push(slot);
-            } else {
-                batch.classes.push((key, vec![slot]));
+            batch.freed_bytes += std::mem::take(&mut freed.bytes);
+            batch.freed_objects += freed.slots.len();
+            if batch.inline.is_none() {
+                self.epoch_inline(&mut batch);
+            }
+            let batch = &mut *batch;
+            let inline = batch.inline.as_mut().expect("epoch inline state");
+            let mut last: Option<((u32, u32), Option<usize>)> = None;
+            for (key, addr) in freed.slots.drain(..) {
+                let cursor = match last {
+                    Some((k, c)) if k == key => c,
+                    _ => {
+                        let c = self.slab.young_cursor(key).filter(|_| u64::from(key.0) >= super::slab::FREE_LINK + 8);
+                        last = Some((key, c));
+                        c
+                    }
+                };
+                if let Some(c) = cursor {
+                    let b = &mut inline.bumps[c];
+                    // SAFETY: the slot is freed and poisoned; its first
+                    // payload word is free to hold the link.
+                    unsafe { *((addr + super::slab::FREE_LINK) as *mut u64) = b.free };
+                    b.free = addr;
+                    continue;
+                }
+                // SAFETY: a slot address, never null.
+                let slot = unsafe { NonNull::new_unchecked(addr as *mut u8) };
+                if let Some((_, slots)) = batch.classes.iter_mut().find(|(k, _)| *k == key) {
+                    slots.push(slot);
+                } else {
+                    batch.classes.push((key, vec![slot]));
+                }
             }
         });
     }
