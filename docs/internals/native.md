@@ -435,8 +435,8 @@ fills first, slot 1 its block position, then each operand); native code stores t
 words in a stack slot and the helper runs the body and copies the slots back. A trap
 panics at native code's own site. `COIL_NATIVE_STATS` counts these ops.
 
-A reduce with no stores, a store map and a push compile to native loops
-(`native_reduce`, `native_store`, `native_push` in `coil-native/src/lib.rs`) over two
+A reduce (with or without stores into word arrays), a store map and a push compile to
+native loops (`native_reduce`, `native_store`, `native_push` in `coil-native/src/lib.rs`) over two
 layouts: `int` / `float` word arrays, and packed bytes, where a map or push stores
 `int` lanes into a byte array from strings and byte arrays (an ASCII lower case). A
 guard in front checks every lane's element is in its array's view (word arrays) or
@@ -446,7 +446,10 @@ any block with a lane that would trap, one lane at a time (`lane`), which traps 
 scalar loop does or hands the rest to the runtime's lane code. In a block:
 
 - Every value is read and computed before any is stored, the order `vec_loop` already
-  requires of the runtime's 8-lane blocks.
+  requires of the runtime's 8-lane blocks. A reduce that stores also checks its fold
+  for a trap first, so a block run again one lane at a time reads what the scalar loop
+  does; one lane at a time, a trap leaves its lane untouched and the runtime's lane
+  code goes on from there with the fold so far (`vector_lanes_from`).
 - `int` `+` / `-` check overflow by the sign bits of the result and operands; `*`, `/`
   and float-to-int casts have no vector form and run per lane inside the vector (a zero
   divisor divides by `1` and flags its lane); a product with a `0` / `1` compare is a
