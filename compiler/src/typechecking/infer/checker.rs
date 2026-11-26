@@ -20812,6 +20812,7 @@ impl Checker {
             .filter_map(|(key, type_id)| {
                 let fields = self.class_fields(key)?;
                 let tails = self.class_flat_tails(key);
+                let wide = self.class_wide_tails(key);
                 let flat = |ty: &Ty| crate::layout::pair_word_kinds(self, ty).unwrap_or([common::WORD_UNKNOWN; 2]);
                 // A flat field's first word whose payload is a pointer only
                 // under some tags is tagged by its tail slot: (slot, mask).
@@ -20819,7 +20820,8 @@ impl Checker {
                 let mut kinds: Vec<u8> = fields
                     .iter()
                     .zip(&tails)
-                    .map(|((_, ty), tail)| match tail {
+                    .enumerate()
+                    .map(|(i, ((_, ty), tail))| match tail {
                         Some(tail) if flat(ty)[0] == common::WORD_UNKNOWN => {
                             match (u16::try_from(*tail), crate::layout::pair_pointer_tags(self, ty)) {
                                 (Ok(slot), Some(mask)) => {
@@ -20830,11 +20832,14 @@ impl Checker {
                             }
                         }
                         Some(_) => flat(ty)[0],
+                        None if wide[i].is_some() => common::WORD_SCALAR,
                         None => crate::layout::word_kind(self, ty),
                     })
                     .collect();
                 // A flat field's second word, in its tail slot.
                 kinds.extend(fields.iter().zip(&tails).filter(|(_, t)| t.is_some()).map(|((_, ty), _)| flat(ty)[1]));
+                // A flat wide field's other words, all numbers.
+                kinds.extend(wide.iter().flatten().flat_map(|&(_, n)| std::iter::repeat_n(common::WORD_SCALAR, n as usize)));
                 for (slot, mask) in tagged {
                     common::push_tagged_entry(&mut kinds, slot, mask);
                 }
@@ -20929,6 +20934,40 @@ impl Checker {
         tails
     }
 
+    /// For each field of class `key`, in declaration order, the first of
+    /// the tail slots that hold words 2.. of a flat wide field and how many
+    /// there are: a field of a tuple of three or four immediates
+    /// ([`crate::layout::wide_scalar_items`]) keeps its first item in its
+    /// own slot and the others after the pair tails
+    /// ([`Self::class_flat_tails`]), all number slots. The same classes and
+    /// fields as a flat pair field qualify.
+    pub fn class_wide_tails(&self, key: &str) -> Vec<Option<(u32, u32)>> {
+        let Some(fields) = self.class_fields(key) else {
+            return Vec::new();
+        };
+        let mut tails = vec![None; fields.len()];
+        let params = self.generics().generic_type_ctors.get(key).cloned().unwrap_or_default();
+        if self.is_shared_class(key)
+            || self.is_view_class(key)
+            || crate::layout::readonly_pair_class(self, &Ty::Con(key.to_string())).is_some()
+        {
+            return tails;
+        }
+        let pairs = self.class_flat_tails(key);
+        let mut next = (fields.len() + pairs.iter().flatten().count()) as u32;
+        for (i, (name, ty)) in fields.iter().enumerate() {
+            if !self.is_borrow_field(key, name)
+                && !ty_names_param(ty, &params)
+                && let Some(items) = crate::layout::wide_scalar_items(self, ty)
+            {
+                let extra = items.len() as u32 - 1;
+                tails[i] = Some((next, extra));
+                next += extra;
+            }
+        }
+        tails
+    }
+
     /// Whether field type `ty` of class `key` names one of the class's
     /// type parameters: such a field holds one word in every instance
     /// (a shared body reads it so), a two-word value boxed.
@@ -20940,7 +20979,8 @@ impl Checker {
     /// slots of its flat fields ([`Self::class_flat_tails`]).
     pub fn class_slot_count(&self, key: &str) -> usize {
         let tails = self.class_flat_tails(key);
-        tails.len() + tails.iter().flatten().count()
+        let wide: usize = self.class_wide_tails(key).iter().flatten().map(|&(_, n)| n as usize).sum();
+        tails.len() + tails.iter().flatten().count() + wide
     }
 
     /// Compile-time type id for `InitTyped` (`0` if the name is not a class).
