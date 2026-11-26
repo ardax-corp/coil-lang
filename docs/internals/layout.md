@@ -395,7 +395,16 @@ budget too: a free function's (`monomorphize::flat_split`, beside
 (`Compiler::fn_flat_split` in `instance_clone_at` and
 `method_clone_room`), another module's clone compiled from its body
 (`layout_safe` passed), and every dictionary for such an instance holds
-clones (`nested_head` in `plan_instance_dict_steps`). A call that would
+clones (`nested_head` in `plan_instance_dict_steps`, and a slot whose
+method's own signature reaches one, `HashMapIter::next -> Option<Pair<K,
+V>>`). A trait instance's method with an `Option` / `Result` in its
+signature (a boundary signature) is cloned there too, which no other
+instance does: its dictionary slot holds the clone's `$dict` adapter,
+which converts the result from the clone's own layout to the trait's
+(`instance_clone_own_sig`); a ground call, a direct trait call and
+for-in (`hir_flat_next`) call the clone where the result is wanted in its
+own layout, and the adapter where it is wanted in the open type's (a
+mono clone's bound `next`). A call that would
 still reach a shared body there (an instance another module cannot
 clone, a call on a polymorphic recursion chain) is refused with E0801
 `callee-generic` (`hir_sig_split`). Another module's class at types that
@@ -405,8 +414,11 @@ so the field stays one word and E0808 warns. A variant's constructor type
 (`Some(3)`'s) is its enum's in these decisions and in a clone's key.
 
 Test: `tests/generics/flat_instance_fields.coil`,
-`tests/modules/flat_instance_across_modules.coil`; bench:
-`examples/perf/generic_flat_field.coil`.
+`tests/generics/flat_instance_iterators.coil`,
+`tests/modules/flat_instance_across_modules.coil`; benches:
+`examples/perf/generic_flat_field.coil`,
+`examples/perf/generic_flat_method.coil`,
+`examples/perf/map_flat_values.coil`.
 
 ### Residue boxes (E0808)
 
