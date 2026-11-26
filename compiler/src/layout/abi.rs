@@ -33,8 +33,9 @@
 //! tag or second product word of a two-slot return (B3 / C1). Niche
 //! `Option` / `Result` and heap references are one-word lanes (Q8).
 //!
-//! SSA models at most dest + `dest_hi`. N>2 is the same `ret_words` field
-//! but needs extra dests + archive encoding — not a self-vs-helper wall.
+//! SSA models dest + `dest_hi`, and up to two more words of a direct call
+//! (`MirInst::Call::dest_more`, `Terminator::Return::more`,
+//! `MirFunc::ret_more_tys`); this ABI does not choose them yet.
 
 
 use super::rep::{Layout, PairKind, is_immediate, of_resolved};

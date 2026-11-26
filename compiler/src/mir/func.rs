@@ -31,6 +31,10 @@ pub struct MirFunc {
     pub params: Vec<ValueId>,
     pub ret_ty: Option<MirTy>,
     pub ret_hi_ty: Option<MirTy>,
+    /// Types of result words 3.. of a body that returns more than two to
+    /// its direct calls (`Terminator::Return::more`, `MirInst::Call::dest_more`).
+    /// Empty unless `ret_hi_ty` is set; at most `MAX_RET_MORE` entries.
+    pub ret_more_tys: Vec<MirTy>,
     pub ret_layout: MirLayout,
     pub entry: BlockId,
     pub blocks: Vec<MirBlock>,
@@ -317,6 +321,7 @@ impl MirFunc {
             params: Vec::new(),
             ret_ty: None,
             ret_hi_ty: None,
+            ret_more_tys: Vec::new(),
             ret_layout: MirLayout::Word,
             entry: BlockId(0),
             blocks: vec![MirBlock::new(BlockId(0))],
@@ -469,6 +474,12 @@ impl MirFunc {
         if self.entry.index() >= self.blocks.len() {
             return Err("entry block out of range".into());
         }
+        if !self.ret_more_tys.is_empty() && self.ret_hi_ty.is_none() {
+            return Err("result words past the second without a second".into());
+        }
+        if self.ret_more_tys.len() > crate::mir::MAX_RET_MORE {
+            return Err(format!("function returns {} words", 2 + self.ret_more_tys.len()));
+        }
         let mut defined = vec![false; self.types.len()];
         for &p in &self.params {
             if p.index() >= self.types.len() {
@@ -548,9 +559,26 @@ impl MirFunc {
                         }
                     }
                 }
-                Terminator::Return { lo, hi } => {
+                Terminator::Return { lo, hi, more } => {
                     if hi.is_some() && lo.is_none() {
                         return Err("two-slot return missing payload word".into());
+                    }
+                    if !more.is_empty() || !self.ret_more_tys.is_empty() {
+                        if hi.is_none() {
+                            return Err("return of more than two words missing its second word".into());
+                        }
+                        if more.len() != self.ret_more_tys.len() {
+                            return Err(format!(
+                                "return carries {} words past the second, the function {}",
+                                more.len(),
+                                self.ret_more_tys.len()
+                            ));
+                        }
+                        for (v, rt) in more.iter().zip(&self.ret_more_tys) {
+                            if !self.ty(*v).le(*rt) && self.ty(*v) != *rt {
+                                return Err(format!("return word {} : {} vs {rt}", v, self.ty(*v)));
+                            }
+                        }
                     }
                     if let Some(v) = lo
                         && let Some(rt) = self.ret_ty
@@ -825,6 +853,7 @@ impl MirFunc {
             MirInst::Call {
                 dest,
                 dest_hi,
+                dest_more,
                 args,
                 ..
             } => {
@@ -835,6 +864,15 @@ impl MirFunc {
                     && !self.ty(*hi).is_word_lane() {
                         return Err(format!("{hi} call hi dest is not a word lane"));
                     }
+                if !dest_more.is_empty() && dest_hi.is_none() {
+                    return Err(format!("{dest} call has more result words but no second"));
+                }
+                if dest_more.len() > crate::mir::MAX_RET_MORE {
+                    return Err(format!("{dest} call returns {} words", 2 + dest_more.len()));
+                }
+                if let Some(w) = dest_more.iter().find(|w| !self.ty(**w).is_word_lane()) {
+                    return Err(format!("{w} call result word is not a word lane"));
+                }
                 for (i, a) in args.iter().enumerate() {
                     if !self.ty(*a).is_word_lane() {
                         return Err(format!("{dest} call arg {i} type"));
@@ -1191,17 +1229,17 @@ impl MirFunc {
 /// `block` returns. Any other call keeps the caller's frame, which a failed
 /// `requires` in the callee blames and a backtrace names.
 pub fn is_tail_call_inst(func: &MirFunc, block: &MirBlock, inst: &MirInst) -> bool {
-    let MirInst::Call { dest, dest_hi, target, .. } = inst else {
+    let MirInst::Call { dest, dest_hi, dest_more, target, .. } = inst else {
         return false;
     };
     if !func.tail_targets.contains(target) {
         return false;
     }
-    match block.term {
-        Some(Terminator::Return { lo: Some(v), hi }) if v == *dest && hi == *dest_hi => {
+    match &block.term {
+        Some(Terminator::Return { lo: Some(v), hi, more }) if v == dest && hi == dest_hi && more == dest_more => {
             matches!(
                 block.insts.last(),
-                Some(MirInst::Call { dest: d, dest_hi: h, .. }) if d == dest && h == dest_hi
+                Some(MirInst::Call { dest: d, dest_hi: h, dest_more: m, .. }) if d == dest && h == dest_hi && m == dest_more
             )
         }
         _ => false,

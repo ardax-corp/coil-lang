@@ -147,7 +147,7 @@ fn read_key(
         }
         MirInst::ProductLoad { object, slot, .. } => ReadKey::Field { object: *object, index: *slot },
         MirInst::ArrayLen { array, .. } => ReadKey::Len { array: *array },
-        MirInst::Call { dest, target, args, dest_hi: None } if pure_calls.contains(dest) => ReadKey::Call { target: *target, args: args.clone() },
+        MirInst::Call { dest, target, args, dest_hi: None, .. } if pure_calls.contains(dest) => ReadKey::Call { target: *target, args: args.clone() },
         _ => return None,
     })
 }
@@ -649,7 +649,7 @@ mod tests {
             layout: common::HOST_ENUM_LAYOUT_PAIR as u8,
             args: vec![x],
         });
-        f.blocks[entry].term = Some(super::super::inst::Terminator::Return { lo: Some(hi), hi: None });
+        f.blocks[entry].term = Some(super::super::inst::Terminator::Return { lo: Some(hi), hi: None, more: Vec::new() });
         dce(&mut f);
         assert!(f.blocks[entry].insts.iter().any(|i| i.dests().any(|d| d == hi)), "{f}");
     }

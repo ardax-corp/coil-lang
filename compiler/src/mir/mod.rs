@@ -5,8 +5,8 @@
 //! HostInvoke packs (P12), compiler-only `V*` SIMD (COI-310), and SROA.
 //!
 //! `CALL` uses the one-word or two-slot typed ABI ([`abi`];
-//! COI-291 / B3 / C1). SSA models dest + `dest_hi`; N>2 return words
-//! refuse. Typed HostInvoke boxes at the host edge. Allocating ops pair
+//! COI-291 / B3 / C1). SSA models dest + `dest_hi`, and words 3..4 of a
+//! wider direct return in `dest_more` (no lowering makes one yet). Typed HostInvoke boxes at the host edge. Allocating ops pair
 //! with a `GcBarrier` safepoint ([`barrier_pairs`]). Impure HostInvoke / CALL are SSA barriers
 //! (I6); LICM hoist uses purity bits. Debugger-attached / `-Og` builds use
 //! the same tiers. History of each
@@ -40,6 +40,7 @@ mod bool_thread;
 mod phi_sroa;
 mod rc_insert;
 mod rc_reuse;
+mod wide_ret;
 mod strength;
 mod text;
 mod ty;
@@ -51,7 +52,7 @@ pub use destprop::destprop;
 pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirLaneCall, HirLaneElem, HirRetItem, HirRetItems, HirOpCall, HirPacks, HirSite, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, LowerCx, PairVariants, ScalarLit, HirFieldFact, HirFieldWord, HirHost, HirLaneUses, HirNew, LocalFrame, LocalWords};
 pub use func::MirFunc;
 pub use func::{MirBlock, is_tail_call_inst};
-pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, EXTERN_CALL_MAX_WORDS, MirCStruct, MirExternSig, MirFfiOp, MirGcKind, MirInst, MirLaneShape, ValueId};
+pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, EXTERN_CALL_MAX_WORDS, MAX_RET_MORE, MirCStruct, MirExternSig, MirFfiOp, MirGcKind, MirInst, MirLaneShape, ValueId};
 pub use inst::{LaneExpr, LaneVal, MirCmpOp, VecExpr, VecLoopKind};
 pub use inst::{BlockId, MirUnaryOp, Terminator};
 #[cfg(test)]

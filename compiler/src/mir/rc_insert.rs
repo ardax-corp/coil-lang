@@ -251,7 +251,7 @@ fn owning_bodies<'a>(bodies: impl Iterator<Item = &'a MirFunc>) -> HashSet<Label
 fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>) -> HashSet<Label> {
     let cands: Vec<(Label, &MirFunc)> = bodies
         .filter_map(|(l, f)| Some((l?, f)))
-        .filter(|(_, f)| f.ret_ty == Some(MirTy::I64) && !super::frame_words::is_generator(f) && f.blocks.iter().any(|b| matches!(b.term, Some(Terminator::Return { .. }))))
+        .filter(|(_, f)| (f.ret_ty == Some(MirTy::I64) || wide_scalar_ret(f)) && !super::frame_words::is_generator(f) && f.blocks.iter().any(|b| matches!(b.term, Some(Terminator::Return { .. }))))
         .collect();
     let mut set: HashSet<Label> = cands.iter().map(|(l, _)| *l).collect();
     loop {
@@ -263,7 +263,12 @@ fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>
             let nums = number_words(f, &set);
             let used = used_as_numbers(f, true);
             let all = f.blocks.iter().all(|b| match &b.term {
-                Some(Terminator::Return { lo, hi }) => hi.is_none() && lo.is_none_or(|v| nums.contains(&v) || used.contains(&v) && computed_with(f, v)),
+                // A wide return's words are numbers only by their definition
+                // (a scalar or a number), never by their use.
+                Some(Terminator::Return { lo, hi, more }) if !more.is_empty() => {
+                    lo.iter().chain(hi.iter()).chain(more.iter()).all(|v| ty_of(f, *v) != MirTy::I64 || nums.contains(v))
+                }
+                Some(Terminator::Return { lo, hi, .. }) => hi.is_none() && lo.is_none_or(|v| nums.contains(&v) || used.contains(&v) && computed_with(f, v)),
                 _ => true,
             });
             if !all {
@@ -276,6 +281,12 @@ fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>
     }
 }
 
+/// `f` returns more than two words, none of them a heap word
+/// ([`super::wide_ret`]'s twins).
+fn wide_scalar_ret(f: &MirFunc) -> bool {
+    !f.ret_more_tys.is_empty() && f.ret_ty.into_iter().chain(f.ret_hi_ty).chain(f.ret_more_tys.iter().copied()).all(|t| matches!(t, MirTy::I64 | MirTy::F64 | MirTy::Bool))
+}
+
 /// The words of `func` that are numbers by their definition, a call of a
 /// body in `numbers` included (φs optimistically).
 fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
@@ -285,10 +296,11 @@ fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
             MirInst::Const { .. } | MirInst::Cmp { .. } => true,
             MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
             MirInst::Call { target, dest_hi: None, .. } => numbers.contains(target),
+            MirInst::Call { target, dest_more, .. } if !dest_more.is_empty() => numbers.contains(target),
             MirInst::Phi { .. } => true,
             _ => false,
         })
-        .map(MirInst::dest)
+        .flat_map(MirInst::dests)
         .collect();
     // A ground body's `int` parameter is a number, unless it is a pair's
     // low word (which may carry a heap payload).
@@ -844,13 +856,13 @@ impl Pass {
                 if counted.contains(&dest) {
                     base.insert(dest, dest);
                     match inst {
-                        MirInst::Call { dest_hi, .. } => {
+                        MirInst::Call { dest_hi, dest_more, .. } => {
                             owned_at_def.insert(dest);
-                            if let Some(h) = dest_hi
-                                && counted.contains(h)
-                            {
-                                base.insert(*h, *h);
-                                owned_at_def.insert(*h);
+                            for h in dest_hi.iter().chain(dest_more) {
+                                if counted.contains(h) {
+                                    base.insert(*h, *h);
+                                    owned_at_def.insert(*h);
+                                }
                             }
                         }
                         MirInst::CallIndirect { pair, .. } => {
@@ -1406,10 +1418,10 @@ impl Pass {
             }
             // The terminator.
             match &term {
-                Terminator::Return { lo, hi } => {
+                Terminator::Return { lo, hi, more } => {
                     let mut moved: HashSet<ValueId> = HashSet::new();
                     let tail = block.insts.last().is_some_and(|i| is_tail_call_inst(func, block, i));
-                    for v in [*lo, *hi].into_iter().flatten() {
+                    for v in [*lo, *hi].into_iter().flatten().chain(more.iter().copied()) {
                         match self.owned(v) {
                             Some(r) if end.contains(&r) && moved.insert(r) => {}
                             _ if tail => {}

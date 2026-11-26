@@ -25,6 +25,14 @@ pub(crate) unsafe extern "C" fn entry(ctx: *mut NativeCtx, args: *const u64) -> 
             return resume(ctx);
         }
         let body = &*((*ctx).entry_data as *const Body);
+        // A body that returns more than two words is entered only by a
+        // direct call: the entry has no place for its words 3.., so it
+        // panics rather than give the runtime part of the result (as
+        // native code's entry does).
+        if !body.mir.ret_more_tys.is_empty() {
+            rt::coil_native_unwind(ctx, TRAP_HELPER, u64::from(body.entry_site));
+            return 0;
+        }
         // Frames cost no thread stack, but a callback nests an activation.
         let marker = 0u8;
         // Another thread may poison the limit to cancel the call.
@@ -419,9 +427,14 @@ unsafe fn run<const DEBUG: bool>(act: *mut Activation) -> u64 {
                         }
                         usize::from(!taken)
                     }
-                    Terminator::Return { lo, hi } => {
+                    Terminator::Return { lo, hi, more } => {
                         let lo = lo.map_or(0, |v| *regs.add(reg(v)));
                         let hi = hi.map(|v| *regs.add(reg(v)));
+                        // Words 3.. of a wide return (at most `MAX_RET_MORE`).
+                        let mut words = [0u64; compiler::native_mir::MAX_RET_MORE];
+                        for (w, v) in words.iter_mut().zip(more) {
+                            *w = *regs.add(reg(*v));
+                        }
                         let base = (*frame).base;
                         (&mut (*act).frames).pop();
                         (*act).regs.truncate(base);
@@ -435,10 +448,13 @@ unsafe fn run<const DEBUG: bool>(act: *mut Activation) -> u64 {
                         let cf = &(*caller.body).mir;
                         let at = (*act).regs.as_mut_ptr().add(caller.base);
                         match &cf.blocks[caller.block as usize].insts[caller.ip as usize] {
-                            MirInst::Call { dest, dest_hi, .. } => {
+                            MirInst::Call { dest, dest_hi, dest_more, .. } => {
                                 *at.add(reg(*dest)) = lo;
                                 if let Some(d) = dest_hi {
                                     *at.add(reg(*d)) = hi.unwrap_or(0);
+                                }
+                                for (d, w) in dest_more.iter().zip(words) {
+                                    *at.add(reg(*d)) = w;
                                 }
                             }
                             // A two-word call's callee gave its one word:
@@ -623,7 +639,7 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 rt::coil_native_probe(ctx, u64::from(*id));
                 set!(*dest, 0);
             }
-            MirInst::Call { dest, dest_hi, target, args } => {
+            MirInst::Call { dest, dest_hi, dest_more, target, args } => {
                 let Some(callee) = program(body).body_at(*target) else {
                     return Flow::Trap(TRAP_HELPER);
                 };
@@ -631,7 +647,7 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 // skip the call when it ran.
                 if callee.is_drop && args.len() == 1 && callee.pc != u32::MAX && rt::coil_native_claim(ctx, u64::from(callee.pc), get!(args[0])) == 0 {
                     set!(*dest, 0);
-                    if let Some(h) = dest_hi {
+                    for h in dest_hi.iter().chain(dest_more) {
                         set!(*h, 0);
                     }
                     return Flow::Next;

@@ -330,7 +330,8 @@ pub fn start_body(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, startu
         let target = body.entry.ok_or_else(|| format!("`{}` has no entry label", body.name))?;
         let dest = val(f, body.mir.ret_ty.unwrap_or(MirTy::I64));
         let dest_hi = body.mir.ret_hi_ty.map(|t| val(f, t));
-        b.insts.push(MirInst::Call { dest, dest_hi, target, args: Vec::new() });
+        let dest_more = body.mir.ret_more_tys.iter().map(|&t| val(f, t)).collect();
+        b.insts.push(MirInst::Call { dest, dest_hi, dest_more, target, args: Vec::new() });
         Ok(dest)
     };
     for op in startup {
@@ -356,7 +357,7 @@ pub fn start_body(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, startu
     }
     let zero = val(&mut f, MirTy::I64);
     b.insts.push(MirInst::Const { dest: zero, c: MirConst::I64(0) });
-    b.term = Some(Terminator::Return { lo: Some(zero), hi: None });
+    b.term = Some(Terminator::Return { lo: Some(zero), hi: None, more: Vec::new() });
     f.blocks = vec![b];
     Ok(NativeBody { name: START_NAME.to_string(), entry: None, mir: f })
 }
@@ -605,7 +606,7 @@ fn twin_of(bodies: &[NativeBody], body_ids: &HashMap<String, u32>, plan: &Plan, 
         return 0;
     };
     let twin = &bodies[t];
-    if !plan.compile.contains(&t) || twin.mir.ret_hi_ty.is_none() || twin.mir.params.len() != bodies[i].mir.params.len() {
+    if !plan.compile.contains(&t) || twin.mir.ret_hi_ty.is_none() || !twin.mir.ret_more_tys.is_empty() || twin.mir.params.len() != bodies[i].mir.params.len() {
         return 0;
     }
     body_ids.get(&twin.name).map_or(0, |&pc| pc + 1)
@@ -737,7 +738,7 @@ fn define_all<M: Module>(
             }
 
             ctx.func.signature = entry_signature(&*module);
-            build_entry(module, &mut ctx.func, &mut fbc, ids.imp[&i], &body.mir);
+            build_entry(module, &mut ctx.func, &mut fbc, &ids, ids.imp[&i], &body.mir);
             submit(Job::take(ids.entry[&i], i, " entry", &mut ctx));
             module.clear_context(&mut ctx);
             defined.push(i);
@@ -963,6 +964,9 @@ fn plan_without(bodies: &[NativeBody], excluded: &HashMap<usize, String>, body_i
     let used_params = compile_used_params(bodies, ok.keys());
     let tail_sites = tail_sites(bodies, &ok, &by_label, &drops);
     let mut tail_conv: HashSet<usize> = tail_sites.keys().copied().collect();
+    // A body that returns more than two words: the platform's convention
+    // returns two in registers, the `tail` one up to eight.
+    tail_conv.extend(ok.keys().copied().filter(|&i| !bodies[i].mir.ret_more_tys.is_empty()));
     for (i, blocks) in &tail_sites {
         let f = &bodies[*i].mir;
         tail_conv.extend(f.blocks.iter().filter(|b| blocks.contains(&b.id)).filter_map(|b| match b.insts.last() {
@@ -1116,7 +1120,7 @@ fn compile_used_params<'a>(bodies: &[NativeBody], which: impl Iterator<Item = &'
 /// also none that holds a `gc::root` handle until it returns, and only where
 /// both bodies return the same words, which `return_call` needs.
 fn tail_sites(bodies: &[NativeBody], ok: &HashMap<usize, Vec<usize>>, by_label: &HashMap<Label, usize>, drops: &HashSet<usize>) -> HashMap<usize, HashSet<BlockId>> {
-    let returns = |f: &MirFunc| (cl_ty(f.ret_ty.unwrap_or(MirTy::I64)), f.ret_hi_ty.map(cl_ty));
+    let returns = |f: &MirFunc| (cl_ty(f.ret_ty.unwrap_or(MirTy::I64)), f.ret_hi_ty.map(cl_ty), f.ret_more_tys.iter().map(|&t| cl_ty(t)).collect::<Vec<_>>());
     let mut sites: HashMap<usize, HashSet<BlockId>> = HashMap::new();
     for &i in ok.keys() {
         let f = &bodies[i].mir;
@@ -1318,6 +1322,13 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
         (Some(t), Some(h)) if numeric(t) && numeric(h) => {}
         other => return Err(format!("return type {other:?}")),
     }
+    // Words 3.. of a wide return, beside `lo` and `hi`.
+    if let Some(t) = f.ret_more_tys.iter().find(|t| !numeric(**t)) {
+        return Err(format!("return type {t:?}"));
+    }
+    if f.ret_more_tys.len() > compiler::native_mir::MAX_RET_MORE || (!f.ret_more_tys.is_empty() && f.ret_hi_ty.is_none()) {
+        return Err(format!("return of {} words past the second", f.ret_more_tys.len()));
+    }
     let mut callees = Vec::new();
     let pairs = barrier_pairs(f);
     let need = |v: &ValueId| -> Result<(), String> {
@@ -1515,9 +1526,12 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
                             need(v)?;
                         }
                     }
-                    MirInst::Call { dest, dest_hi, target, args } => {
+                    MirInst::Call { dest, dest_hi, dest_more, target, args } => {
                         if let Some(h) = dest_hi {
                             need(h)?;
+                        }
+                        for w in dest_more {
+                            need(w)?;
                         }
                         need(dest)?;
                         for a in args {
@@ -1683,11 +1697,11 @@ fn eligible_in(f: &MirFunc, by_label: &HashMap<Label, usize>, pad: bool) -> Resu
         match &b.term {
             Some(Terminator::Jump { .. }) | Some(Terminator::Unreachable) => {}
             Some(Terminator::Br { cond, .. }) => need_scalar(cond)?,
-            Some(Terminator::Return { lo, hi }) => {
-                if lo.is_some() != f.ret_ty.is_some() || hi.is_some() != f.ret_hi_ty.is_some() {
+            Some(Terminator::Return { lo, hi, more }) => {
+                if lo.is_some() != f.ret_ty.is_some() || hi.is_some() != f.ret_hi_ty.is_some() || more.len() != f.ret_more_tys.len() {
                     return Err("return width".into());
                 }
-                for v in lo.iter().chain(hi) {
+                for v in lo.iter().chain(hi).chain(more) {
                     need(v)?;
                 }
             }
@@ -2242,6 +2256,9 @@ fn impl_signature(module: &impl Module, f: &MirFunc, tail: bool) -> Signature {
     if let Some(h) = f.ret_hi_ty {
         sig.returns.push(AbiParam::new(cl_ty(h)));
     }
+    for &t in &f.ret_more_tys {
+        sig.returns.push(AbiParam::new(cl_ty(t)));
+    }
     sig
 }
 
@@ -2581,6 +2598,7 @@ fn build_entry(
     module: &mut impl Module,
     func: &mut cranelift_codegen::ir::Function,
     fbc: &mut FunctionBuilderContext,
+    ids: &Ids,
     imp: FuncId,
     f: &MirFunc,
 ) {
@@ -2591,6 +2609,20 @@ fn build_entry(
     b.switch_to_block(blk);
     let ctx = b.block_params(blk)[0];
     let argp = b.block_params(blk)[1];
+    // A body that returns more than two words is entered only by a direct
+    // call: the runtime's entry has no place for its words 3.., so it
+    // panics here rather than give the caller part of the result.
+    if !f.ret_more_tys.is_empty() {
+        let unwind = module.declare_func_in_func(ids.unwind, b.func);
+        let code = b.ins().iconst(types::I64, TRAP_HELPER as i64);
+        let site = b.ins().iconst(types::I64, NO_SITE as i64);
+        b.ins().call(unwind, &[ctx, code, site]);
+        let zero = b.ins().iconst(types::I64, 0);
+        b.ins().return_(&[zero]);
+        b.seal_all_blocks();
+        b.finalize(module.isa().frontend_config());
+        return;
+    }
     let mut args = vec![ctx];
     for (i, &p) in f.params.iter().enumerate() {
         let w = b.ins().load(types::I64, MemFlagsData::trusted(), argp, (i * 8) as i32);
@@ -2771,6 +2803,8 @@ struct Lower<'a> {
     ret: Type,
     /// The second result's type of a two-word return.
     ret_hi: Option<Type>,
+    /// The types of results 3.. of a wider return (`MirFunc::ret_more_tys`).
+    ret_more: Vec<Type>,
 }
 
 impl<'a> Lower<'a> {
@@ -2878,6 +2912,7 @@ impl<'a> Lower<'a> {
         ));
         let ret = func.signature.returns[0].value_type;
         let ret_hi = func.signature.returns.get(1).map(|r| r.value_type);
+        let ret_more: Vec<Type> = func.signature.returns.iter().skip(2).map(|r| r.value_type).collect();
         let mut b = FunctionBuilder::new(func, fbc);
         // Params: the `TRAP_*` code and the site.
         let bail = b.create_block();
@@ -2978,6 +3013,7 @@ impl<'a> Lower<'a> {
             bail,
             ret,
             ret_hi,
+            ret_more,
             cb,
         }
     }
@@ -3871,7 +3907,7 @@ impl<'a> Lower<'a> {
             self.b.ins().call(self.defer, &[self.ctx, fp, at, n]);
         }
         let mut zeros = Vec::new();
-        for t in std::iter::once(self.ret).chain(self.ret_hi) {
+        for t in std::iter::once(self.ret).chain(self.ret_hi).chain(self.ret_more.clone()) {
             zeros.push(if t == types::F64 { self.b.ins().f64const(0.0) } else { self.b.ins().iconst(types::I64, 0) });
         }
         self.b.ins().return_(&zeros);
@@ -3995,7 +4031,7 @@ impl<'a> Lower<'a> {
                 let zero = self.b.ins().iconst(types::I64, 0);
                 self.set(f, *dest, zero);
             }
-            MirInst::Call { dest, dest_hi, target, args } => {
+            MirInst::Call { dest, dest_hi, dest_more, target, args } => {
                 // A `drop` called as a method: claim its finalizer first, and skip the call when it ran.
                 let drop_pc = self
                     .by_label
@@ -4003,7 +4039,7 @@ impl<'a> Lower<'a> {
                     .filter(|c| args.len() == 1 && self.plan.drops.contains(c))
                     .and_then(|_| self.plan.pcs.get(target).copied());
                 let Some(pc) = drop_pc else {
-                    return self.call(f, *dest, *dest_hi, *target, args);
+                    return self.call(f, *dest, *dest_hi, dest_more, *target, args);
                 };
                 let pcv = self.b.ins().iconst(types::I64, i64::from(pc));
                 let w = self.get(f, args[0]);
@@ -4015,12 +4051,12 @@ impl<'a> Lower<'a> {
                 self.b.switch_to_block(skip);
                 let zero = self.b.ins().iconst(types::I64, 0);
                 self.set(f, *dest, zero);
-                if let Some(h) = dest_hi {
+                for h in dest_hi.iter().chain(dest_more) {
                     self.set(f, *h, zero);
                 }
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(go);
-                self.call(f, *dest, *dest_hi, *target, args)?;
+                self.call(f, *dest, *dest_hi, dest_more, *target, args)?;
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
                 self.view_of(f, *dest);
@@ -5193,7 +5229,7 @@ impl<'a> Lower<'a> {
     }
 
     /// A direct call of the body at `target`.
-    fn call(&mut self, f: &MirFunc, dest: ValueId, dest_hi: Option<ValueId>, target: Label, args: &[ValueId]) -> Result<(), String> {
+    fn call(&mut self, f: &MirFunc, dest: ValueId, dest_hi: Option<ValueId>, dest_more: &[ValueId], target: Label, args: &[ValueId]) -> Result<(), String> {
         let (dest, dest_hi) = (&dest, &dest_hi);
         let (callee, fref, vals) = self.call_words(f, target, args)?;
         let roots = if self.plan.may_gc.contains(&callee) { self.epoch_mark() } else { None };
@@ -5212,6 +5248,14 @@ impl<'a> Lower<'a> {
         if let Some(h) = dest_hi {
             let x = *results.get(1).ok_or("two-word call of a one-word body")?;
             self.set(f, *h, x);
+        }
+        if !dest_more.is_empty() {
+            if results.len() != 2 + dest_more.len() {
+                return Err(format!("call of {} words to a body that returns {}", 2 + dest_more.len(), results.len()));
+            }
+            for (w, &x) in dest_more.iter().zip(&results[2..]) {
+                self.set(f, *w, x);
+            }
         }
         self.view_of(f, *dest);
         Ok(())
@@ -6562,13 +6606,16 @@ impl<'a> Lower<'a> {
                     self.b.ins().jump(to, &[]);
                 }
             }
-            Terminator::Return { lo, hi } => {
+            Terminator::Return { lo, hi, more } => {
                 self.keep_roots(f);
                 let x = match lo {
                     Some(v) => self.get(f, *v),
                     None => self.b.ins().iconst(types::I64, 0),
                 };
                 let x = self.coerce(x, self.ret);
+                if more.len() != self.ret_more.len() {
+                    return Err("return width differs from the signature".into());
+                }
                 match (hi, self.ret_hi) {
                     (None, None) => {
                         self.b.ins().return_(&[x]);
@@ -6576,7 +6623,12 @@ impl<'a> Lower<'a> {
                     (Some(h), Some(t)) => {
                         let y = self.get(f, *h);
                         let y = self.coerce(y, t);
-                        self.b.ins().return_(&[x, y]);
+                        let mut words = vec![x, y];
+                        for (w, t) in more.iter().zip(self.ret_more.clone()) {
+                            let z = self.get(f, *w);
+                            words.push(self.coerce(z, t));
+                        }
+                        self.b.ins().return_(&words);
                     }
                     _ => return Err("return width differs from the signature".into()),
                 }
@@ -6726,7 +6778,7 @@ mod tests {
         f.params = vec![ValueId(0)];
         f.ret_ty = Some(ret);
         let mut b = MirBlock::new(BlockId(0));
-        b.term = Some(Terminator::Return { lo: Some(ValueId(0)), hi: None });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(0)), hi: None, more: Vec::new() });
         f.blocks.push(b);
         f
     }
@@ -6740,8 +6792,8 @@ mod tests {
         f.params = vec![ValueId(0)];
         f.ret_ty = Some(MirTy::I64);
         let mut b = MirBlock::new(BlockId(0));
-        b.insts.push(MirInst::Call { dest: ValueId(1), dest_hi: None, target: Label(1), args: vec![ValueId(0)] });
-        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        b.insts.push(MirInst::Call { dest: ValueId(1), dest_hi: None, dest_more: Vec::new(), target: Label(1), args: vec![ValueId(0)] });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None, more: Vec::new() });
         f.blocks.push(b);
         let bodies = vec![
             NativeBody { name: "f".into(), entry: Some(Label(0)), mir: f },
@@ -6765,7 +6817,7 @@ mod tests {
         b.insts.push(MirInst::RcInc { dest: ValueId(2), src: ValueId(0), guard: None });
         b.insts.push(MirInst::RcInc { dest: ValueId(3), src: ValueId(0), guard: None });
         b.insts.push(MirInst::RcDec { dest: ValueId(4), src: ValueId(0), guard: Some(ValueId(1)) });
-        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None, more: Vec::new() });
         f.blocks.push(b);
         let mut g = MirFunc::new("g");
         g.blocks.clear();
@@ -6774,7 +6826,7 @@ mod tests {
         g.ret_ty = Some(MirTy::Bool);
         let mut b = MirBlock::new(BlockId(0));
         b.insts.push(MirInst::RcDec { dest: ValueId(1), src: ValueId(0), guard: None });
-        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None, more: Vec::new() });
         g.blocks.push(b);
         vec![NativeBody { name: "f".into(), entry: Some(Label(0)), mir: f }, NativeBody { name: "g".into(), entry: Some(Label(1)), mir: g }]
     }
@@ -6830,7 +6882,7 @@ mod tests {
         b.insts.push(MirInst::CowUnpin { dest: ValueId(4), src: ValueId(0), saved: ValueId(3) });
         b.insts.push(MirInst::CowUnpin { dest: ValueId(5), src: ValueId(0), saved: ValueId(1) });
         b.insts.push(MirInst::Cast { dest: ValueId(6), src: ValueId(3), kind: compiler::native_mir::MirCastKind::Word, to: MirTy::I64 });
-        b.term = Some(Terminator::Return { lo: Some(ValueId(if second { 6 } else { 2 })), hi: None });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(if second { 6 } else { 2 })), hi: None, more: Vec::new() });
         f.blocks.push(b);
         f
     }
@@ -6868,7 +6920,7 @@ mod tests {
             let mut g = ident("g", MirTy::HeapRef, MirTy::HeapRef);
             g.types.push(MirTy::HeapRef);
             g.blocks[0].insts.push(MirInst::Cow { dest: ValueId(1), src: ValueId(0), unique: false, field: None });
-            g.blocks[0].term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+            g.blocks[0].term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None, more: Vec::new() });
             g
         } }];
         let p = jit(&bodies, &HashMap::from([("g".to_string(), 0u32)])).expect("jit");
@@ -6899,7 +6951,7 @@ mod tests {
             scalars: vec![ValueId(3)],
             expr: LaneExpr::Cmp { op: MirCmpOp::Eq, lhs: LaneVal::Stream(0), rhs: LaneVal::Scalar(0) },
         });
-        b.term = Some(Terminator::Return { lo: Some(ValueId(5)), hi: None });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(5)), hi: None, more: Vec::new() });
         f.blocks.push(b);
         let bodies = vec![NativeBody { name: "scan".into(), entry: Some(Label(0)), mir: f }];
         let pcs = HashMap::from([("scan".to_string(), 0u32)]);
@@ -6917,7 +6969,7 @@ mod tests {
         g.ret_ty = Some(MirTy::Bool);
         let mut b = MirBlock::new(BlockId(0));
         b.insts.push(MirInst::Unary { dest: ValueId(1), op: MirUnaryOp::Not, src: ValueId(0) });
-        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None, more: Vec::new() });
         g.blocks.push(b);
         let mut f = MirFunc::new("f");
         f.blocks.clear();
@@ -6925,8 +6977,8 @@ mod tests {
         f.params = vec![ValueId(0)];
         f.ret_ty = Some(MirTy::Bool);
         let mut b = MirBlock::new(BlockId(0));
-        b.insts.push(MirInst::Call { dest: ValueId(1), dest_hi: None, target: Label(1), args: vec![ValueId(0)] });
-        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None });
+        b.insts.push(MirInst::Call { dest: ValueId(1), dest_hi: None, dest_more: Vec::new(), target: Label(1), args: vec![ValueId(0)] });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(1)), hi: None, more: Vec::new() });
         f.blocks.push(b);
         let h = ident("h", MirTy::I64, MirTy::I64);
         let bodies = vec![
@@ -6939,5 +6991,95 @@ mod tests {
         assert_eq!(p.compiled, vec!["h".to_string()]);
         assert_eq!(run(&p.entries[0], &[7]), (0, 7));
     }
-}
 
+    /// Bodies that return three and four words to direct calls
+    /// (`MirFunc::ret_more_tys`) and callers that fold the words in order:
+    /// `sum3` (label 0) calls `wide3` (1); `sum4` (4) calls `pass4` (3),
+    /// which tail-calls `wide4` (2). Each `wide` returns `x`, `x + 10`,
+    /// `x * 10` and (`wide4`) `x - 10`.
+    fn wide_bodies() -> Vec<NativeBody> {
+        use compiler::native_mir::{MirBinOp, MirConst, MirTy};
+        let v = ValueId;
+        let i64s = |n: usize| vec![MirTy::I64; n];
+        let body = |name: &str, label: u32, types: usize, more: usize, insts: Vec<MirInst>, ret: Vec<u32>| {
+            let mut f = MirFunc::new(name);
+            f.blocks.clear();
+            f.types = i64s(types);
+            f.params = vec![v(0)];
+            f.ret_ty = Some(MirTy::I64);
+            // (`ret_layout` stays `Word`: the engines read the word types.)
+            if ret.len() > 1 {
+                f.ret_hi_ty = Some(MirTy::I64);
+            }
+            f.ret_more_tys = i64s(more);
+            let mut b = MirBlock::new(BlockId(0));
+            b.insts = insts;
+            b.term = Some(Terminator::Return { lo: Some(v(ret[0])), hi: ret.get(1).map(|&r| v(r)), more: ret[2.min(ret.len())..].iter().map(|&r| v(r)).collect() });
+            f.blocks.push(b);
+            NativeBody { name: name.into(), entry: Some(Label(label)), mir: f }
+        };
+        let bin = |dest: u32, op: MirBinOp, lhs: u32, rhs: u32| MirInst::Bin { dest: v(dest), op, ty: MirTy::I64, lhs: v(lhs), rhs: v(rhs) };
+        let konst = |dest: u32, k: i64| MirInst::Const { dest: v(dest), c: MirConst::I64(k) };
+        let call = |dests: &[u32], target: u32| MirInst::Call { dest: v(dests[0]), dest_hi: Some(v(dests[1])), dest_more: dests[2..].iter().map(|&d| v(d)).collect(), target: Label(target), args: vec![v(0)] };
+        // `((w1 * 1000 + w2) * 1000 + w3) ...`, from value `at` on.
+        let fold = |words: &[u32], at: u32| {
+            let mut insts = vec![konst(at, 1000)];
+            let (mut acc, mut next) = (words[0], at + 1);
+            for &w in &words[1..] {
+                insts.push(bin(next, MirBinOp::Mul, acc, at));
+                insts.push(bin(next + 1, MirBinOp::Add, next, w));
+                acc = next + 1;
+                next += 2;
+            }
+            (insts, acc, next as usize)
+        };
+        let wide = |name: &str, label: u32, words: usize| {
+            let mut insts = vec![konst(1, 10), bin(2, MirBinOp::Add, 0, 1), bin(3, MirBinOp::Mul, 0, 1)];
+            if words == 4 {
+                insts.push(bin(4, MirBinOp::Sub, 0, 1));
+            }
+            body(name, label, words + 1, words - 2, insts, (0..words as u32).map(|w| if w == 0 { 0 } else { w + 1 }).collect())
+        };
+        let sum = |name: &str, label: u32, target: u32, words: usize| {
+            let dests: Vec<u32> = (1..=words as u32).collect();
+            let (mut insts, out, types) = fold(&dests, words as u32 + 1);
+            insts.insert(0, call(&dests, target));
+            body(name, label, types, 0, insts, vec![out])
+        };
+        let mut pass = body("pass4", 3, 5, 2, vec![call(&[1, 2, 3, 4], 2)], vec![1, 2, 3, 4]);
+        pass.mir.tail_targets.insert(Label(2));
+        vec![sum("sum3", 0, 1, 3), wide("wide3", 1, 3), wide("wide4", 2, 4), pass, sum("sum4", 4, 3, 4)]
+    }
+
+    /// What `sum3` / `sum4` return for `x`: the words folded in order.
+    fn wide_sums(x: i64) -> (u64, u64) {
+        let k = 1000i64;
+        let s3 = (x * k + (x + 10)) * k + x * 10;
+        let s4 = ((x * k + (x + 10)) * k + x * 10) * k + (x - 10);
+        (s3 as u64, s4 as u64)
+    }
+
+    /// A direct call reads three and four result words, a tail call passes
+    /// four on, and the runtime's entry of a four-word body panics rather
+    /// than hand back two of them.
+    #[test]
+    fn a_direct_call_reads_three_and_four_words() {
+        let pcs = HashMap::from([("sum3".to_string(), 0u32), ("sum4".to_string(), 1u32), ("wide4".to_string(), 2u32)]);
+        let p = jit(&wide_bodies(), &pcs).expect("jit");
+        assert!(p.refused.is_empty(), "refused: {:?}", p.refused);
+        let entry = |pc: u32| p.entries.iter().find(|e| e.pc == pc).expect("entry");
+        for x in [7i64, -3, 1 << 20] {
+            let (s3, s4) = wide_sums(x);
+            assert_eq!(run(entry(0), &[x as u64]), (0, s3), "sum3({x})");
+            assert_eq!(run(entry(1), &[x as u64]), (0, s4), "sum4({x})");
+        }
+        assert_eq!(entry(2).ret_words, 2);
+        let marker = 0u8;
+        let mut ctx = NativeCtx::new((std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET));
+        let mut trace = Vec::new();
+        ctx.trace = &mut trace;
+        // SAFETY: compiled for one argument word.
+        unsafe { (entry(2).entry)(&mut ctx, [7u64].as_ptr()) };
+        assert_ne!(ctx.bail, 0, "an entry of a four-word body panics");
+    }
+}

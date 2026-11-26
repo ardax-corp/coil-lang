@@ -5,8 +5,8 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs` (23 today; a reader takes
-23 only and refuses any other).
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (24 today; a reader takes
+24 only and refuses any other).
 
 ## Major 8
 
@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 12, below, is the
-current version, 8.12 with MIR section `FORMAT` 23). A runtime refuses a major
+only add something to the format raise the minor (minor 13, below, is the
+current version, 8.13 with MIR section `FORMAT` 24). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -197,6 +197,16 @@ Minor 12 (auto-par scheduling) adds host native **216**, `thread_par_room`:
 whether the worker pool has a worker free for another job. Auto-par's loop
 fork-joins ask it before they spawn and run their range on the calling thread
 when it says no. An 8.11 archive loads unchanged: it never calls it.
+
+Minor 13 (wide direct returns) lets a direct call return up to four words:
+a body writes the types of its result words 3.. (`MirFunc::ret_more_tys`, a
+counted list of types) after its second result type, a `Call` (tag 8) its
+further dests (`dest_more`, a counted list) after `dest_hi`, and a `Return`
+terminator its further words (`more`, a counted list) after `hi`. Each list
+is empty in a body that returns at most two words. The layout changes, so
+the MIR section is a new `FORMAT`, 24
+(`common::MIR_SECTION_WIDE_RETURN_FORMAT`), and the reader refuses 23: an
+8.12 archive's code is compiled again.
 
 ## Major 7
 

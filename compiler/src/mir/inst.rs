@@ -494,6 +494,10 @@ pub enum MirInst {
     Call {
         dest: ValueId,
         dest_hi: Option<ValueId>,
+        /// Result words 3.. of a callee that returns more than two
+        /// (`MirFunc::ret_more_tys`), in order. Empty unless `dest_hi` is
+        /// set; at most [`MAX_RET_MORE`] entries.
+        dest_more: Vec<ValueId>,
         target: crate::bodies::Label,
         args: Vec<ValueId>,
     },
@@ -1055,6 +1059,11 @@ impl VecLoopKind {
 /// with more keeps the argument tuple.
 pub const EXTERN_CALL_MAX_WORDS: usize = common::FFI_CALL_MAX_WORDS;
 
+/// The most result words past the second a direct `Call` / `Return`
+/// carries (`dest_more` / `more` / `MirFunc::ret_more_tys`): a direct call
+/// returns at most `2 + MAX_RET_MORE` words.
+pub const MAX_RET_MORE: usize = 2;
+
 /// The signature of an [`MirInst::ExternCall`]: the C symbol, the
 /// declared parameters' and the result's FFI type tags (each
 /// `encode_tag_operand(tag, aux)`) and, for a variadic function, the tags
@@ -1346,8 +1355,9 @@ impl MirInst {
         }
     }
 
-    /// `dest` plus a two-slot CALL tag / second word when present.
-    pub fn dests(&self) -> impl Iterator<Item = ValueId> {
+    /// `dest` plus a two-slot CALL tag / second word when present, then a
+    /// CALL's further words (`dest_more`).
+    pub fn dests(&self) -> impl Iterator<Item = ValueId> + '_ {
         let hi = match *self {
             Self::Call {
                 dest_hi: Some(h), ..
@@ -1358,7 +1368,11 @@ impl MirInst {
             Self::LaneIndex { dest_hi, .. } => Some(dest_hi),
             _ => None,
         };
-        std::iter::once(self.dest()).chain(hi)
+        let more: &[ValueId] = match self {
+            Self::Call { dest_more, .. } => dest_more,
+            _ => &[],
+        };
+        std::iter::once(self.dest()).chain(hi).chain(more.iter().copied())
     }
 
     pub fn is_phi(&self) -> bool {
@@ -1579,6 +1593,10 @@ pub enum Terminator {
     Return {
         lo: Option<ValueId>,
         hi: Option<ValueId>,
+        /// Words 3.. of a body that returns more than two
+        /// (`MirFunc::ret_more_tys`), in order. Empty unless `hi` is set; at
+        /// most [`MAX_RET_MORE`] entries.
+        more: Vec<ValueId>,
     },
     Unreachable,
 }
@@ -1611,14 +1629,14 @@ impl Terminator {
 
     /// The values this terminator reads: a branch's condition, a match's
     /// scrutinee, the returned words. Not a match's [`Self::binds`].
-    pub fn uses(&self) -> impl Iterator<Item = ValueId> {
-        let words = match *self {
-            Self::Br { cond, .. } => [Some(cond), None],
-            Self::JumpIfMatch { scrutinee, .. } => [Some(scrutinee), None],
-            Self::Return { lo, hi } => [lo, hi],
-            Self::Jump { .. } | Self::Unreachable => [None, None],
+    pub fn uses(&self) -> impl Iterator<Item = ValueId> + '_ {
+        let (words, more): ([Option<ValueId>; 2], &[ValueId]) = match self {
+            Self::Br { cond, .. } => ([Some(*cond), None], &[]),
+            Self::JumpIfMatch { scrutinee, .. } => ([Some(*scrutinee), None], &[]),
+            Self::Return { lo, hi, more } => ([*lo, *hi], more),
+            Self::Jump { .. } | Self::Unreachable => ([None, None], &[]),
         };
-        words.into_iter().flatten()
+        words.into_iter().flatten().chain(more.iter().copied())
     }
 
     /// The payload words a `JumpIfMatch` binds on its taken edge. Each is
@@ -1645,11 +1663,14 @@ impl Terminator {
                     *v = map(*v);
                 }
             }
-            Self::Return { lo, hi } => {
+            Self::Return { lo, hi, more } => {
                 if let Some(v) = lo {
                     *v = map(*v);
                 }
                 if let Some(v) = hi {
+                    *v = map(*v);
+                }
+                for v in more {
                     *v = map(*v);
                 }
             }
@@ -1697,9 +1718,11 @@ mod tests {
         let m = Terminator::JumpIfMatch { scrutinee: s, tag: 1, payloads: vec![p, q], taken: BlockId(1), not_taken: BlockId(2) };
         assert_eq!(m.uses().collect::<Vec<_>>(), [s]);
         assert_eq!(m.binds(), [p, q]);
-        let r = Terminator::Return { lo: Some(p), hi: Some(q) };
+        let r = Terminator::Return { lo: Some(p), hi: Some(q), more: Vec::new() };
         assert_eq!(r.uses().collect::<Vec<_>>(), [p, q]);
         assert!(r.binds().is_empty());
+        let r4 = Terminator::Return { lo: Some(p), hi: Some(q), more: vec![s, ValueId(4)] };
+        assert_eq!(r4.uses().collect::<Vec<_>>(), [p, q, s, ValueId(4)]);
         assert_eq!(Terminator::Jump { dest: BlockId(0) }.uses().count(), 0);
     }
 

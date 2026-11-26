@@ -62,18 +62,25 @@ pub(crate) fn capture_open() -> bool {
 
 /// End the capture and return its bodies.
 pub fn take_native_capture() -> Vec<NativeBody> {
-    finished(NATIVE_CAPTURE.with(|c| c.borrow_mut().take()).map(|c| c.bodies).unwrap_or_default())
+    let (bodies, raw) = NATIVE_CAPTURE.with(|c| c.borrow_mut().take()).map(|c| (c.bodies, c.raw)).unwrap_or_default();
+    finished(bodies, raw)
 }
 
 /// The bodies captured so far, as [`take_native_capture`] would return
 /// them, with the capture left open: compile-time evaluation runs in the
 /// middle of a compile.
 pub fn peek_native_capture() -> Vec<NativeBody> {
-    finished(NATIVE_CAPTURE.with(|c| c.borrow().as_ref().map(|c| c.bodies.clone())).unwrap_or_default())
+    let (bodies, raw) = NATIVE_CAPTURE.with(|c| c.borrow().as_ref().map(|c| (c.bodies.clone(), c.raw))).unwrap_or_default();
+    finished(bodies, raw)
 }
 
-/// `bodies` as an engine runs them.
-fn finished(mut bodies: Vec<NativeBody>) -> Vec<NativeBody> {
+/// `bodies` as an engine runs them. A raw capture keeps every call's
+/// one-word result object; an optimized one returns small objects of
+/// immediates in registers ([`super::wide_ret`]).
+fn finished(mut bodies: Vec<NativeBody>, raw: bool) -> Vec<NativeBody> {
+    if !raw {
+        super::wide_ret::wide_return_twins(&mut bodies);
+    }
     super::native_expand::apply_all(bodies.iter_mut().map(|b| &mut b.mir));
     // Frames own their words (reference counts plan step 4); a tail call
     // enters its callee's twin that owns its parameters.
@@ -297,7 +304,7 @@ pub fn capture_const_calls() -> Vec<ConstCall> {
                 .collect();
             for (blk_i, blk) in b.mir.blocks.iter().enumerate() {
                 for (i, inst) in blk.insts.iter().enumerate() {
-                    let super::MirInst::Call { dest, dest_hi: None, target, args } = inst else { continue };
+                    let super::MirInst::Call { dest, dest_hi: None, target, args, .. } = inst else { continue };
                     let Some(args) = args.iter().map(|a| consts.get(a).copied()).collect::<Option<Vec<_>>>() else { continue };
                     out.push(ConstCall { at: (bi, blk_i, i), body: b.name.clone(), target: *target, args, loc: b.mir.op_loc(*dest) });
                 }

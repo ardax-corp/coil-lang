@@ -546,6 +546,28 @@ capture (`compiler::start_box_capture`).
 they build `CalleeFacts` and ask `abi`, so there is no second copy of the
 policy.
 
+### Wide direct returns
+
+A three- or four-word value of scalars (an arity-3 or arity-4 tuple of
+immediates, or an `Option` of a tuple of immediates, which is a niche word
+over the tuple object) is an object in every layout, but a direct call can
+still return its words in registers. `mir::wide_ret` runs on the captured
+bodies before counts are inserted (not on the interpreter's raw capture): a
+body whose every return builds a fresh tuple of scalars read by nothing but
+that return (or, for an `Option`, returns `None`) gets a twin, `name$words`,
+that returns the items (and a `bool` that is `true` for `Some`) as
+`Return { lo, hi, more }`. Each direct call whose result is only read item
+by item (`ProductLoad`) and tested for `Some` calls the twin instead, so
+neither side allocates. Every other caller (a function value, the
+runtime's entries, a call that keeps the object) calls the body itself.
+The twin's words are numbers to count insertion
+(`rc_insert::number_returns`), so its callers count nothing. The MIR carries
+up to four result words on a direct call (`MirInst::Call::dest_more`,
+`Terminator::Return::more`, `MirFunc::ret_more_tys`); native code returns
+them as Cranelift values, and a runtime entry into such a body panics.
+Hit benches: `examples/perf/wide_ret_option_tuple`,
+`examples/perf/wide_ret_tuple3`.
+
 ## Host calls
 
 Host natives pack their result into one word at the `HostInvoke` edge

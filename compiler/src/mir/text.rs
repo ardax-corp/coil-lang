@@ -26,6 +26,9 @@ impl std::fmt::Display for MirFunc {
             write!(f, " -> {rt}")?;
             if let Some(hi) = self.ret_hi_ty {
                 write!(f, ", {hi}")?;
+                for ty in &self.ret_more_tys {
+                    write!(f, ", {ty}")?;
+                }
             }
         }
         writeln!(f, " {{")?;
@@ -71,10 +74,18 @@ fn write_block(
         Some(Terminator::Return {
             lo: Some(v),
             hi: Some(h),
-        }) => writeln!(f, "return {v}, {h}")?,
+            more,
+        }) => {
+            write!(f, "return {v}, {h}")?;
+            for w in more {
+                write!(f, ", {w}")?;
+            }
+            writeln!(f)?
+        }
         Some(Terminator::Return {
             lo: Some(v),
             hi: None,
+            ..
         }) => writeln!(f, "return {v}")?,
         Some(Terminator::Return { lo: None, .. }) => writeln!(f, "return")?,
         Some(Terminator::Unreachable) => writeln!(f, "unreachable")?,
@@ -199,11 +210,16 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::Call {
             dest,
             dest_hi,
+            dest_more,
             target,
             args,
         } => {
             if let Some(hi) = dest_hi {
-                write!(f, "{dest}, {hi} = call.{} {}", func.ty(*dest), target.0)?;
+                write!(f, "{dest}, {hi}")?;
+                for w in dest_more {
+                    write!(f, ", {w}")?;
+                }
+                write!(f, " = call.{} {}", func.ty(*dest), target.0)?;
             } else {
                 write!(f, "{dest} = call.{} {}", func.ty(*dest), target.0)?;
             }
@@ -464,6 +480,9 @@ impl<'a> Parser<'a> {
             if self.eat(',') {
                 func.ret_hi_ty = Some(self.ty()?);
                 func.ret_layout = crate::layout::MirLayout::TwoSlot;
+                while self.eat(',') {
+                    func.ret_more_tys.push(self.ty()?);
+                }
             }
         }
         self.expect('{')?;
@@ -503,8 +522,15 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
+        let mut dest_more = Vec::new();
+        while dest_hi.is_some() && self.eat(',') {
+            dest_more.push(self.value()?);
+        }
         self.expect('=')?;
         let op = self.ident_dots()?;
+        if !dest_more.is_empty() && !op.starts_with("call.") {
+            return Err(ParseError("more than two dests is call-only".into()));
+        }
         if let Some(rest) = op.strip_prefix("laneindex.") {
             let (lo_s, hi_s) = rest.split_once('.').ok_or_else(|| ParseError(op.clone()))?;
             let lo = MirTy::parse(lo_s).ok_or_else(|| ParseError(op.clone()))?;
@@ -930,9 +956,13 @@ impl<'a> Parser<'a> {
             if let Some(hi) = dest_hi {
                 ensure_ty(types, hi, MirTy::I64);
             }
+            for &w in &dest_more {
+                ensure_ty(types, w, MirTy::I64);
+            }
             return Ok(MirInst::Call {
                 dest,
                 dest_hi,
+                dest_more,
                 target,
                 args,
             });
@@ -1181,9 +1211,13 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
-                    Ok(Terminator::Return { lo: Some(lo), hi })
+                    let mut more = Vec::new();
+                    while hi.is_some() && self.eat(',') {
+                        more.push(self.value()?);
+                    }
+                    Ok(Terminator::Return { lo: Some(lo), hi, more })
                 } else {
-                    Ok(Terminator::Return { lo: None, hi: None })
+                    Ok(Terminator::Return { lo: None, hi: None, more: Vec::new() })
                 }
             }
             "unreachable" => Ok(Terminator::Unreachable),
@@ -1514,5 +1548,91 @@ bb3:
         assert_eq!(again.to_string(), text);
         let call = again.blocks[0].insts.iter().find(|i| matches!(i, MirInst::CallIndirect { .. })).unwrap();
         assert!(call.is_effect_barrier());
+    }
+
+    /// A body that returns four words and a caller that reads three of
+    /// another's: words 3.. print after the second and parse back.
+    #[test]
+    fn round_trip_wide_returns() {
+        let callee = r#"
+func @wide(v0: i64) -> i64, i64, i64, i64 {
+bb0:
+    v1 = iconst.i64 10
+    v2 = iadd v0, v1
+    v3 = imul v0, v1
+    v4 = isub v0, v1
+    return v0, v2, v3, v4
+}
+"#;
+        let caller = r#"
+func @sum(v0: i64) -> i64 {
+bb0:
+    v1, v2, v3 = call.i64 1 v0
+    v4 = iadd v1, v2
+    v5 = iadd v4, v3
+    return v5
+}
+"#;
+        let f = parse_func(callee).expect(callee);
+        f.verify().unwrap();
+        assert_eq!(f.ret_more_tys, [MirTy::I64, MirTy::I64]);
+        match &f.blocks[0].term {
+            Some(Terminator::Return { more, .. }) => assert_eq!(more, &[ValueId(3), ValueId(4)]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(parse_func(&f.to_string()).unwrap(), f);
+        let g = parse_func(caller).expect(caller);
+        g.verify().unwrap();
+        match &g.blocks[0].insts[0] {
+            MirInst::Call { dest_hi: Some(h), dest_more, .. } => {
+                assert_eq!((*h, dest_more.as_slice()), (ValueId(2), &[ValueId(3)][..]));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(g.blocks[0].insts[0].dests().collect::<Vec<_>>(), [ValueId(1), ValueId(2), ValueId(3)]);
+        assert_eq!(parse_func(&g.to_string()).unwrap(), g);
+        // Words past the second are a call's only.
+        assert!(parse_func("func @x() -> i64 {\nbb0:\n    v0, v1, v2 = iconst.i64 1\n    return v0\n}\n").is_err());
+    }
+
+    /// The builder's wide forms: `ret_words` types words 3.. on the
+    /// function, `ins_call_more` gives a call's; both verify and print.
+    #[test]
+    fn builder_makes_wide_calls_and_returns() {
+        let mut b = MirBuilder::new("wide");
+        let x = b.add_param(MirTy::I64).unwrap();
+        let y = b.ins_cast(MirCastKind::IntToFloat, MirTy::F64, x).unwrap();
+        b.ret_words(x, x, &[y, x]).unwrap();
+        let f = b.finish().unwrap();
+        assert_eq!(f.ret_more_tys, [MirTy::F64, MirTy::I64]);
+        assert!(f.to_string().contains("-> i64, i64, f64, i64"), "{f}");
+        let mut b = MirBuilder::new("caller");
+        let x = b.add_param(MirTy::I64).unwrap();
+        let abi = crate::layout::CallAbi { params: vec![MirTy::I64], ret: MirTy::I64, ret_hi: Some(MirTy::I64) };
+        let (lo, hi, more) = b.ins_call_more(crate::bodies::Label(1), vec![x], &abi, &[MirTy::F64, MirTy::I64]).unwrap();
+        let hi = hi.expect("a second word");
+        assert_eq!(more.len(), 2);
+        let s = b.ins_binop(MirBinOp::Add, lo, hi).unwrap();
+        let s = b.ins_binop(MirBinOp::Add, s, more[1]).unwrap();
+        b.ret(Some(s)).unwrap();
+        let g = b.finish().unwrap();
+        assert!(g.blocks[0].insts[0].dests().eq([lo, hi, more[0], more[1]]));
+        let mut b = MirBuilder::new("bad");
+        let x = b.add_param(MirTy::I64).unwrap();
+        let one = crate::layout::CallAbi { params: vec![MirTy::I64], ret: MirTy::I64, ret_hi: None };
+        assert!(b.ins_call_more(crate::bodies::Label(1), vec![x], &one, &[MirTy::I64]).is_err(), "words 3.. need a second");
+    }
+
+    /// The verifier holds a return to the function's word count.
+    #[test]
+    fn verify_rejects_a_return_of_the_wrong_width() {
+        let src = "func @w(v0: i64) -> i64, i64, i64 {\nbb0:\n    return v0, v0\n}\n";
+        assert!(parse_func(src).unwrap().verify().is_err());
+        let src = "func @w(v0: i64) -> i64, i64 {\nbb0:\n    return v0, v0, v0\n}\n";
+        assert!(parse_func(src).unwrap().verify().is_err());
+        let src = "func @w(v0: i64) -> i64, i64, i64, i64, i64 {\nbb0:\n    return v0, v0, v0, v0, v0\n}\n";
+        assert!(parse_func(src).unwrap().verify().is_err(), "five words");
+        let src = "func @w(v0: i64) -> i64, i64, i64 {\nbb0:\n    return v0, v0, v0\n}\n";
+        parse_func(src).unwrap().verify().unwrap();
     }
 }
