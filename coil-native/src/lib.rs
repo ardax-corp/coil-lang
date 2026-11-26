@@ -1229,6 +1229,8 @@ fn views_dropped_in(f: &MirFunc, viewed: &HashSet<ValueId>) -> HashMap<BlockId, 
 /// lanes), and lanes per iteration of its vector loop (four vectors).
 const VEC_LANES: i64 = 2;
 const VEC_BLOCK: i64 = 4 * VEC_LANES;
+// A block's bytes are one 8-byte load (`vlane`).
+const _: () = assert!(VEC_BLOCK == 8);
 
 /// A native int add fold keeps a sum per lane while each term is in
 /// `-2^REDUCE_ADD_TERM .. 2^REDUCE_ADD_TERM` and the loop's sum before the
@@ -1238,6 +1240,15 @@ const VEC_BLOCK: i64 = 4 * VEC_LANES;
 /// gets. Past that the lane sums go into the loop's sum and start again.
 const REDUCE_ADD_TERM: i64 = 52;
 const REDUCE_ADD_BLOCKS: i64 = 512 / VEC_BLOCK;
+
+/// Where a vector of a native lane loop's block sits: lanes `p`, `p + 1`,
+/// vector `half` of the block from lane `p0`.
+#[derive(Clone, Copy)]
+struct VecAt {
+    p0: cranelift_codegen::ir::Value,
+    half: usize,
+    p: cranelift_codegen::ir::Value,
+}
 
 /// What a native vector block found that it cannot take as it is: lanes
 /// that would trap (a sign bit set in `vec`'s lanes, or `scal` non-zero).
@@ -1345,6 +1356,20 @@ fn vec_loop_arrays(kind: &compiler::native_mir::VecLoopKind, out: &mut Vec<(Valu
             }
         }
         VecLoopKind::Push { value, .. } => reads(value, out),
+    }
+}
+
+/// Whether a lane value can differ from lane to lane: it reads an array
+/// or the lane's index.
+fn lane_varies(e: &compiler::native_mir::VecExpr) -> bool {
+    use compiler::native_mir::VecExpr;
+    match e {
+        VecExpr::Splat { .. } => false,
+        VecExpr::Index | VecExpr::Load { .. } => true,
+        VecExpr::Bin { lhs, rhs, .. } => lane_varies(lhs) || lane_varies(rhs),
+        VecExpr::Unary { src, .. } => lane_varies(src),
+        VecExpr::Select { mask, then, els } => lane_varies(mask) || lane_varies(then) || lane_varies(els),
+        VecExpr::Fma { a, b, c, .. } => lane_varies(a) || lane_varies(b) || lane_varies(c),
     }
 }
 
@@ -1828,9 +1853,11 @@ struct Ids {
     rc_reuse: FuncId,
     rc_take: FuncId,
     offer_slot: FuncId,
-    /// Allocation (`coil_native_alloc`, `coil_native_array_push`).
+    /// Allocation (`coil_native_alloc`, `coil_native_array_push`,
+    /// `coil_native_array_reserve`).
     alloc: FuncId,
     array_push: FuncId,
+    array_reserve: FuncId,
     /// Lane array element ops (`LaneIndex` / `LaneStore` / `LanePush`)
     /// and the in-place `LanesToWords`.
     lane_index: FuncId,
@@ -2381,6 +2408,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let offer_slot = module.declare_function("coil_native_offer_slot", Linkage::Import, &s2).map_err(e)?;
     let alloc = module.declare_function("coil_native_alloc", Linkage::Import, &s5).map_err(e)?;
     let array_push = module.declare_function("coil_native_array_push", Linkage::Import, &s3).map_err(e)?;
+    let array_reserve = module.declare_function("coil_native_array_reserve", Linkage::Import, &s3).map_err(e)?;
     let lane_index = module.declare_function("coil_native_lane_index", Linkage::Import, &s3).map_err(e)?;
     let lane_store = module.declare_function("coil_native_lane_store", Linkage::Import, &s8).map_err(e)?;
     let lane_push = module.declare_function("coil_native_lane_push", Linkage::Import, &s7).map_err(e)?;
@@ -2449,6 +2477,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         offer_slot,
         alloc,
         array_push,
+        array_reserve,
         lane_index,
         lane_store,
         lane_push,
@@ -2749,6 +2778,7 @@ struct Lower<'a> {
     offer_slot: FuncRef,
     alloc: FuncRef,
     array_push: FuncRef,
+    array_reserve: FuncRef,
     lane_index: FuncRef,
     lane_store: FuncRef,
     lane_push: FuncRef,
@@ -2791,6 +2821,12 @@ struct Lower<'a> {
     /// Inside a native lane loop whose every element access was checked in
     /// front of it ([`Lower::lanes_guard`]): loads read in place unchecked.
     lanes_checked: bool,
+    /// In a native lane loop over bytes: each byte source's first byte
+    /// (its loads read bytes at `base + index`, [`Self::lane`], [`Self::vlane`]).
+    lane_bytes: HashMap<ValueId, cranelift_codegen::ir::Value>,
+    /// A vector block's byte loads, widened once per block: `(array, off)`
+    /// to its vectors.
+    vec_bytes: HashMap<(ValueId, ValueId), Vec<cranelift_codegen::ir::Value>>,
     /// The arrays whose word view an op before this one may have dropped
     /// ([`views_dropped_in`]): only their element accesses take a dropped
     /// view again.
@@ -2909,6 +2945,7 @@ impl<'a> Lower<'a> {
         let offer_slot = module.declare_func_in_func(ids.offer_slot, func);
         let alloc = module.declare_func_in_func(ids.alloc, func);
         let array_push = module.declare_func_in_func(ids.array_push, func);
+        let array_reserve = module.declare_func_in_func(ids.array_reserve, func);
         let lane_index = module.declare_func_in_func(ids.lane_index, func);
         let lane_store = module.declare_func_in_func(ids.lane_store, func);
         let lane_push = module.declare_func_in_func(ids.lane_push, func);
@@ -3009,6 +3046,7 @@ impl<'a> Lower<'a> {
             offer_slot,
             alloc,
             array_push,
+            array_reserve,
             lane_index,
             lane_store,
             lane_push,
@@ -3042,6 +3080,8 @@ impl<'a> Lower<'a> {
             pins: false,
             is_pad: false,
             lanes_checked: false,
+            lane_bytes: HashMap::new(),
+            vec_bytes: HashMap::new(),
             maybe_dropped: HashSet::new(),
             homes_slot: None,
             homes_ptr: None,
@@ -3352,9 +3392,11 @@ impl<'a> Lower<'a> {
 
             self.b.switch_to_block(vbody);
             let mut bad = VecBad::default();
+            self.vec_bytes.clear();
             let mut terms = Vec::new();
             for half in 0..VEC_BLOCK / VEC_LANES {
-                let at = self.b.ins().iadd_imm_s(p, half * VEC_LANES);
+                let lp0 = self.b.ins().iadd_imm_s(p, half * VEC_LANES);
+                let at = VecAt { p0: p, half: half as usize, p: lp0 };
                 let t = self.vlane(f, term, at, &mut bad);
                 terms.push(self.vcoerce(t, vty));
             }
@@ -3544,13 +3586,123 @@ impl<'a> Lower<'a> {
         if stores.is_empty() || pos.is_some_and(|p| value_used(f, p)) {
             return Ok(false);
         }
-        for (array, _, ty, value) in stores {
-            if !matches!(*ty, dense::TY_I64 | dense::TY_F64) || !self.views.contains_key(array) || !self.lanes_native(value, 0) {
-                return Ok(false);
-            }
+        let words_ok = stores.iter().all(|(array, _, ty, value)| matches!(*ty, dense::TY_I64 | dense::TY_F64) && self.views.contains_key(array) && self.lanes_native(value, 0));
+        // Bytes: each store goes into packed bytes, every source can be read
+        // as bytes, every lane is an int.
+        let mut reads = Vec::new();
+        for (_, _, _, value) in stores {
+            lane_refs(value, false, &mut reads);
+        }
+        let bytes_ok = stores.iter().all(|s| s.2 == dense::TY_I64 && self.lanes_native_bytes(&s.3, 0)) && reads.iter().all(|&(a, _, _)| self.str_views.contains_key(&a));
+        if !words_ok && !bytes_ok {
+            return Ok(false);
         }
         // Each store's value, and the store, per lane.
         let vec = Self::vectors_pay(stores.iter().map(|s| &s.3), (stores.len() as f32, stores.len() as f32 * 0.5));
+        let whole = self.b.create_block();
+        let exit = self.b.create_block();
+        let try_bytes = self.b.create_block();
+        let rt = self.b.create_block();
+        self.b.append_block_param(rt, types::I64);
+        let lo = self.get(f, *from);
+        let lo = self.coerce(lo, types::I64);
+        let hi = self.get(f, *to);
+        let hi = self.coerce(hi, types::I64);
+        if words_ok {
+            let mut refs = Vec::new();
+            for (array, off, _, value) in stores {
+                lane_refs(value, false, &mut refs);
+                refs.push((*array, *off, true));
+            }
+            self.lanes_guard(f, &refs, lo, hi, try_bytes);
+            self.store_loop(f, stores, false, vec, lo, hi, rt, exit);
+        } else {
+            self.b.ins().jump(try_bytes, &[]);
+        }
+        self.b.switch_to_block(try_bytes);
+        if bytes_ok {
+            self.bytes_guard(f, &reads, lo, hi, whole);
+            self.bytes_store_guard(f, stores, lo, hi, whole);
+            self.store_loop(f, stores, true, vec, lo, hi, rt, exit);
+            self.lane_bytes.clear();
+        } else {
+            self.b.ins().jump(whole, &[]);
+        }
+        // An access the guard could not show in place: the whole op there.
+        self.b.switch_to_block(whole);
+        self.b.ins().jump(rt, &[lo.into()]);
+        // The runtime's lane code from lane `at` on: one call for every
+        // way out of the native loop, as a copy of the op is long.
+        self.b.switch_to_block(rt);
+        let at = self.b.block_params(rt)[0];
+        self.vector_lanes_at(f, inst, Some(at));
+        self.drop_views();
+        self.b.ins().jump(exit, &[]);
+        self.b.switch_to_block(exit);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        self.set(f, *dest, zero);
+        if let Some(p) = pos {
+            self.set(f, *p, zero);
+        }
+        Ok(true)
+    }
+
+    /// In front of [`Self::native_store`]'s loop over bytes, after
+    /// [`Self::bytes_guard`]: each store's array holds packed bytes, and
+    /// every lane `lo .. hi` stores in them, or branch to `fail`. Their
+    /// bytes go into [`Self::lane_bytes`].
+    fn bytes_store_guard(&mut self, f: &MirFunc, stores: &[(ValueId, ValueId, u8, compiler::native_mir::VecExpr)], lo: cranelift_codegen::ir::Value, hi: cranelift_codegen::ir::Value, fail: Block) {
+        let l = machine::native::array_slots();
+        let t = MemFlagsData::trusted();
+        for (array, off, _, _) in stores {
+            let a = self.get(f, *array);
+            let a = self.coerce(a, types::I64);
+            let (kind_b, tag_b, go) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+            self.b.ins().brif(a, kind_b, &[], fail, &[]);
+            self.b.switch_to_block(kind_b);
+            let k = self.b.ins().uload8(types::I64, t, a, l.kind_at as i32);
+            let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
+            self.b.ins().brif(is, tag_b, &[], fail, &[]);
+            self.b.switch_to_block(tag_b);
+            let tag = self.b.ins().uload8(types::I64, t, a, l.data_at as i32);
+            let is = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.bytes_tag));
+            let ptr = self.b.ins().load(types::I64, t, a, l.bytes_ptr_at as i32);
+            let len = self.b.ins().load(types::I64, t, a, l.bytes_len_at as i32);
+            let o = self.get(f, *off);
+            let o = self.coerce(o, types::I64);
+            let (first, of1) = self.b.ins().sadd_overflow(lo, o);
+            let (last, of2) = self.b.ins().sadd_overflow(hi, o);
+            let of = self.b.ins().bor(of1, of2);
+            let fine = self.b.ins().icmp_imm_s(IntCC::Equal, of, 0);
+            let ge = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, first, 0);
+            let le = self.b.ins().icmp(IntCC::SignedLessThanOrEqual, last, len);
+            let x = self.b.ins().band(is, fine);
+            let y = self.b.ins().band(ge, le);
+            let all = self.b.ins().band(x, y);
+            self.b.ins().brif(all, go, &[], fail, &[]);
+            self.b.switch_to_block(go);
+            self.lane_bytes.insert(*array, ptr);
+        }
+    }
+
+    /// [`Self::native_store`]'s loop for one layout, after its guard: word
+    /// arrays through their views, or (`bytes`) packed bytes through
+    /// [`Self::lane_bytes`]. Blocks on vectors when `vec`, else one lane at
+    /// a time, to `exit`. A trap, and over bytes a value that is no byte,
+    /// goes to `rt`, the runtime's lane code from its lane on.
+    #[allow(clippy::too_many_arguments)]
+    fn store_loop(
+        &mut self,
+        f: &MirFunc,
+        stores: &[(ValueId, ValueId, u8, compiler::native_mir::VecExpr)],
+        bytes: bool,
+        vec: bool,
+        lo: cranelift_codegen::ir::Value,
+        hi: cranelift_codegen::ir::Value,
+        rt: Block,
+        exit: Block,
+    ) {
+        use common::dense;
         // vhead(p): a whole block left? vbody: the block on vectors.
         // lp(p, stop): one lane at a time up to `stop`; after(p): on to
         // the next block, or out at `hi`.
@@ -3564,18 +3716,6 @@ impl<'a> Lower<'a> {
         let after = self.b.create_block();
         self.b.append_block_param(after, types::I64);
         let slow = self.b.create_block();
-        let whole = self.b.create_block();
-        let exit = self.b.create_block();
-        let lo = self.get(f, *from);
-        let lo = self.coerce(lo, types::I64);
-        let hi = self.get(f, *to);
-        let hi = self.coerce(hi, types::I64);
-        let mut refs = Vec::new();
-        for (array, off, _, value) in stores {
-            lane_refs(value, false, &mut refs);
-            refs.push((*array, *off, true));
-        }
-        self.lanes_guard(f, &refs, lo, hi, whole);
         let limit = self.vec_block_limit(hi);
         self.b.ins().jump(vhead, &[lo.into()]);
 
@@ -3588,14 +3728,25 @@ impl<'a> Lower<'a> {
             self.b.ins().brif(fits, vbody, &[], lp, &[p.into(), hi.into()]);
             self.b.switch_to_block(vbody);
             let mut bad = VecBad::default();
-            let mut values = Vec::with_capacity(stores.len() * 2);
+            self.vec_bytes.clear();
+            let mut values = Vec::with_capacity(stores.len() * 4);
             for (_, _, ty, value) in stores {
                 let want = if *ty == dense::TY_F64 { types::F64X2 } else { types::I64X2 };
                 for half in 0..VEC_BLOCK / VEC_LANES {
-                    let at = self.b.ins().iadd_imm_s(p, half * VEC_LANES);
+                    let lp0 = self.b.ins().iadd_imm_s(p, half * VEC_LANES);
+                    let at = VecAt { p0: p, half: half as usize, p: lp0 };
                     let x = self.vlane(f, value, at, &mut bad);
                     values.push(self.vcoerce(x, want));
                 }
+            }
+            if bytes {
+                // A value that is no byte stores one lane at a time.
+                let mut any = values[0];
+                for &v in &values[1..] {
+                    any = self.b.ins().bor(any, v);
+                }
+                let h = self.b.ins().ushr_imm_u(any, 8);
+                bad.nonzero(self, h);
             }
             let stop = self.b.ins().iadd_imm_s(p, VEC_BLOCK);
             if let Some(trap) = bad.any(self) {
@@ -3603,16 +3754,20 @@ impl<'a> Lower<'a> {
                 self.b.ins().brif(trap, lp, &[p.into(), stop.into()], go, &[]);
                 self.b.switch_to_block(go);
             }
-            let mut values = values.into_iter();
-            for (array, off, _, _) in stores {
+            let quarters = VEC_BLOCK as usize / VEC_LANES as usize;
+            for ((array, off, _, _), w) in stores.iter().zip(values.chunks(quarters)) {
                 let o = self.get(f, *off);
                 let o = self.coerce(o, types::I64);
-                for half in 0..VEC_BLOCK / VEC_LANES {
-                    let i = self.b.ins().iadd(p, o);
-                    let i = self.b.ins().iadd_imm_s(i, half * VEC_LANES);
-                    let at = self.element(*array, i);
-                    let w = values.next().expect("a value per store and half");
+                let i = self.b.ins().iadd(p, o);
+                if bytes {
+                    let w = self.vec_pack_bytes(w);
+                    let at = self.b.ins().iadd(self.lane_bytes[array], i);
                     self.b.ins().store(MemFlagsData::new().with_notrap(), w, at, 0);
+                } else {
+                    let at = self.element(*array, i);
+                    for (k, &v) in w.iter().enumerate() {
+                        self.b.ins().store(MemFlagsData::new().with_notrap(), v, at, (k as i64 * VEC_LANES * 8) as i32);
+                    }
                 }
             }
             self.b.ins().jump(vhead, &[stop.into()]);
@@ -3631,12 +3786,27 @@ impl<'a> Lower<'a> {
             values.push(self.coerce(x, types::I64));
         }
         self.lanes_checked = false;
+        if bytes {
+            let mut any = values[0];
+            for &v in &values[1..] {
+                any = self.b.ins().bor(any, v);
+            }
+            let no_byte = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, any, 255);
+            let go = self.b.create_block();
+            self.b.ins().brif(no_byte, slow, &[], go, &[]);
+            self.b.switch_to_block(go);
+        }
         for ((array, off, _, _), w) in stores.iter().zip(values) {
             let o = self.get(f, *off);
             let o = self.coerce(o, types::I64);
             let i = self.b.ins().iadd(p, o);
-            let at = self.element(*array, i);
-            self.b.ins().store(MemFlagsData::trusted(), w, at, 0);
+            if bytes {
+                let at = self.b.ins().iadd(self.lane_bytes[array], i);
+                self.b.ins().istore8(MemFlagsData::trusted(), w, at, 0);
+            } else {
+                let at = self.element(*array, i);
+                self.b.ins().store(MemFlagsData::trusted(), w, at, 0);
+            }
         }
         let p1 = self.b.ins().iadd_imm_s(p, 1);
         self.b.ins().jump(lp, &[p1.into(), stop.into()]);
@@ -3646,21 +3816,7 @@ impl<'a> Lower<'a> {
         self.b.ins().brif(end, exit, &[], vhead, &[q.into()]);
         // A trap in lane `p`: the runtime's lane code from `p` on.
         self.b.switch_to_block(slow);
-        self.vector_lanes_at(f, inst, Some(p));
-        self.drop_views();
-        self.b.ins().jump(exit, &[]);
-        // An access the guard could not show in place: the whole op there.
-        self.b.switch_to_block(whole);
-        self.vector_lanes_at(f, inst, None);
-        self.drop_views();
-        self.b.ins().jump(exit, &[]);
-        self.b.switch_to_block(exit);
-        let zero = self.b.ins().iconst(types::I64, 0);
-        self.set(f, *dest, zero);
-        if let Some(p) = pos {
-            self.set(f, *p, zero);
-        }
-        Ok(true)
+        self.b.ins().jump(rt, &[p.into()]);
     }
 
     /// In front of a native vector loop up to `hi`: the bound below which
@@ -3677,6 +3833,402 @@ impl<'a> Lower<'a> {
     /// `i8`), given [`Self::vec_block_limit`]'s `limit`.
     fn vec_block_fits(&mut self, p: cranelift_codegen::ir::Value, limit: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
         self.b.ins().icmp(IntCC::SignedLessThan, p, limit)
+    }
+
+    /// A `VecLoop` push (`out.push(value(p))` for each lane, in order) as a
+    /// native loop. Two layouts run in place: `out` and every array the
+    /// body reads hold words (`int` / `float` lanes), or `out` holds packed
+    /// bytes and every source is a string or packed bytes (`int` lanes
+    /// that are bytes: [`Self::lane_bytes`]). A block of [`VEC_BLOCK`] lanes
+    /// computes its values on vectors, then appends them in one store when
+    /// `out` has room for them (and, for bytes, each value is one). A block
+    /// with a lane that would trap, a value that is no byte, a full `out`,
+    /// and the last lanes push one lane at a time through the runtime's
+    /// push, which grows `out`. A trap leaves the pushes before it and runs
+    /// the rest, from that lane, on the runtime's lane code; any other
+    /// layout runs the whole op there. `false`: not such a loop.
+    fn native_push(&mut self, f: &MirFunc, inst: &MirInst) -> Result<bool, String> {
+        use common::dense;
+        use compiler::native_mir::VecLoopKind;
+        let MirInst::VecLoop { dest, pos, from, to, kind: VecLoopKind::Push { out, ty, value } } = inst else {
+            return Ok(false);
+        };
+        if !matches!(*ty, dense::TY_I64 | dense::TY_F64) || pos.is_some_and(|p| value_used(f, p)) {
+            return Ok(false);
+        }
+        // The same value each lane: MIR fills that in one host call
+        // (`vec_fill`), and the loop it keeps runs only where the fill did
+        // not apply. The runtime takes it there; native code for it would
+        // only grow the function.
+        if !lane_varies(value) {
+            return Ok(false);
+        }
+        let mut reads = Vec::new();
+        lane_refs(value, false, &mut reads);
+        let words_ok = self.lanes_native(value, 0);
+        // Bytes: every source can be read as bytes, every lane is an int.
+        let bytes_ok = *ty == dense::TY_I64 && reads.iter().all(|&(a, _, _)| self.str_views.contains_key(&a)) && self.lanes_native_bytes(value, 0);
+        if !words_ok && !bytes_ok {
+            return Ok(false);
+        }
+        let l = machine::native::array_slots();
+        let t = MemFlagsData::trusted();
+        let lo = self.get(f, *from);
+        let lo = self.coerce(lo, types::I64);
+        let hi = self.get(f, *to);
+        let hi = self.coerce(hi, types::I64);
+        let a = self.get(f, *out);
+        let a = self.coerce(a, types::I64);
+        let whole = self.b.create_block();
+        let exit = self.b.create_block();
+        let rt = self.b.create_block();
+        self.b.append_block_param(rt, types::I64);
+        // `out`'s layout: words, packed bytes, or anything else (the runtime).
+        let (kind_b, tag_b, words_b, bytes_b) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(a, kind_b, &[], whole, &[]);
+        self.b.switch_to_block(kind_b);
+        let k = self.b.ins().uload8(types::I64, t, a, l.kind_at as i32);
+        let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
+        self.b.ins().brif(is, tag_b, &[], whole, &[]);
+        self.b.switch_to_block(tag_b);
+        let tag = self.b.ins().uload8(types::I64, t, a, l.data_at as i32);
+        let is_words = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.words_tag));
+        let is_bytes = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.bytes_tag));
+        let other = self.b.create_block();
+        self.b.ins().brif(is_words, words_b, &[], other, &[]);
+        self.b.switch_to_block(other);
+        self.b.ins().brif(is_bytes, bytes_b, &[], whole, &[]);
+        let vec = l.inline_push && Self::vectors_pay([value], (4.0, 1.0));
+        for bytes in [false, true] {
+            self.b.switch_to_block(if bytes { bytes_b } else { words_b });
+            if (bytes && !bytes_ok) || (!bytes && !words_ok) {
+                self.b.ins().jump(whole, &[]);
+                continue;
+            }
+            if bytes {
+                self.bytes_guard(f, &reads, lo, hi, whole);
+            } else {
+                self.lanes_guard(f, &reads, lo, hi, whole);
+            }
+            self.push_loop(f, value, a, bytes, vec, lo, hi, rt, exit);
+            self.lane_bytes.clear();
+        }
+        // An access the guard could not show in place: the whole op there.
+        self.b.switch_to_block(whole);
+        self.b.ins().jump(rt, &[lo.into()]);
+        // The runtime's lane code from lane `at` on: one call for every
+        // way out of the native loop, as a copy of the op is long.
+        self.b.switch_to_block(rt);
+        let at = self.b.block_params(rt)[0];
+        self.vector_lanes_at(f, inst, Some(at));
+        self.b.ins().jump(exit, &[]);
+        self.b.switch_to_block(exit);
+        // A push keeps the array's identity; its storage may have moved.
+        self.drop_views();
+        self.set(f, *dest, a);
+        if let Some(p) = pos {
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.set(f, *p, zero);
+        }
+        Ok(true)
+    }
+
+    /// [`Self::native_push`]'s loop for one layout of `out` (`a`), after its
+    /// guard, to `exit` (or `rt`, the runtime's lane code from a lane on).
+    /// With `vec`, blocks of [`VEC_BLOCK`] lanes append on
+    /// vectors into room `out` already has, its length kept in a register
+    /// and stored when the run ends; with too little room, `out` grows
+    /// first ([`machine::native::coil_native_array_reserve`]: to twice its
+    /// length at most, so a loop that traps early does not take room for
+    /// all its lanes). A block that would trap (for bytes, or hold a value
+    /// that is no byte) and the last lanes push one lane at a time through
+    /// the runtime's push.
+    #[allow(clippy::too_many_arguments)]
+    fn push_loop(
+        &mut self,
+        f: &MirFunc,
+        value: &compiler::native_mir::VecExpr,
+        a: cranelift_codegen::ir::Value,
+        bytes: bool,
+        vec: bool,
+        lo: cranelift_codegen::ir::Value,
+        hi: cranelift_codegen::ir::Value,
+        rt: Block,
+        exit: Block,
+    ) {
+        let l = machine::native::array_slots();
+        let t = MemFlagsData::trusted();
+        let float = !bytes && Self::lane_is_float(value);
+        let vty = if float { types::F64X2 } else { types::I64X2 };
+        let (len_at, cap_at, ptr_at) = if bytes { (l.bytes_len_at, l.bytes_cap_at, l.bytes_ptr_at) } else { (l.len_at, l.cap_at, l.ptr_at) };
+        let lp = self.b.create_block();
+        self.b.append_block_param(lp, types::I64);
+        self.b.append_block_param(lp, types::I64);
+        let body = self.b.create_block();
+        let after = self.b.create_block();
+        self.b.append_block_param(after, types::I64);
+        let slow = self.b.create_block();
+        // enter(p): a run of blocks from lane `p`, or the last lanes.
+        let enter = self.b.create_block();
+        self.b.append_block_param(enter, types::I64);
+        if !vec {
+            self.b.ins().jump(lp, &[lo.into(), hi.into()]);
+        } else {
+            self.b.ins().jump(enter, &[lo.into()]);
+            self.b.switch_to_block(enter);
+            let p = self.b.block_params(enter)[0];
+            let (blocks, room_b, grow, run) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+            for _ in 0..2 {
+                self.b.append_block_param(run, types::I64);
+            }
+            let (rbody, rbad, rdone) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+            for blk in [rbad, rdone] {
+                self.b.append_block_param(blk, types::I64);
+                self.b.append_block_param(blk, types::I64);
+            }
+            // A whole block left, and `out` still in this layout (a value
+            // that is no byte, pushed one lane at a time, turns bytes into
+            // words).
+            let (rest, of) = self.b.ins().ssub_overflow(hi, p);
+            let one = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, rest, VEC_BLOCK);
+            let fine = self.b.ins().icmp_imm_s(IntCC::Equal, of, 0);
+            let tag = self.b.ins().uload8(types::I64, t, a, l.data_at as i32);
+            let want = if bytes { l.bytes_tag } else { l.words_tag };
+            let same = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(want));
+            let go = self.b.ins().band(one, fine);
+            let go = self.b.ins().band(go, same);
+            self.b.ins().brif(go, blocks, &[], lp, &[p.into(), hi.into()]);
+            self.b.switch_to_block(blocks);
+            let len = self.b.ins().load(types::I64, t, a, len_at as i32);
+            let cap = self.b.ins().load(types::I64, t, a, cap_at as i32);
+            let room = self.b.ins().isub(cap, len);
+            let has = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, room, VEC_BLOCK);
+            self.b.ins().brif(has, room_b, &[], grow, &[]);
+            // Room for `min(rest, max(len, 64))` more, then again from `p`.
+            self.b.switch_to_block(grow);
+            let floor = self.b.ins().iconst(types::I64, 64);
+            let want_n = self.b.ins().smax(len, floor);
+            let want_n = self.b.ins().smin(want_n, rest);
+            self.call_checked(self.array_reserve, &[self.ctx, a, want_n]);
+            self.b.ins().jump(enter, &[p.into()]);
+            // A run while there is room: blocks start below `end - 7`.
+            self.b.switch_to_block(room_b);
+            let ptr = self.b.ins().load(types::I64, t, a, ptr_at as i32);
+            let avail = self.b.ins().smin(room, rest);
+            let end = self.b.ins().iadd(p, avail);
+            let limit = self.b.ins().iadd_imm_s(end, -(VEC_BLOCK - 1));
+            if !bytes {
+                let one = self.b.ins().iconst(types::I8, 1);
+                self.b.ins().store(t, one, a, l.refs_at as i32);
+            }
+            self.b.ins().jump(run, &[p.into(), len.into()]);
+            self.b.switch_to_block(run);
+            let (p, n) = (self.b.block_params(run)[0], self.b.block_params(run)[1]);
+            let fits = self.vec_block_fits(p, limit);
+            self.b.ins().brif(fits, rbody, &[], rdone, &[p.into(), n.into()]);
+            self.b.switch_to_block(rbody);
+            let (values, bad) = self.push_values(f, value, p, bytes, vty);
+            if let Some(b) = bad.any(self) {
+                let go = self.b.create_block();
+                self.b.ins().brif(b, rbad, &[p.into(), n.into()], go, &[]);
+                self.b.switch_to_block(go);
+            }
+            self.push_store(ptr, n, &values, bytes);
+            let stop = self.b.ins().iadd_imm_s(p, VEC_BLOCK);
+            let n2 = self.b.ins().iadd_imm_s(n, VEC_BLOCK);
+            self.b.ins().jump(run, &[stop.into(), n2.into()]);
+            // A block that would trap, or a value that is no byte: one lane
+            // at a time, then on from the next block.
+            self.b.switch_to_block(rbad);
+            let (p, n) = (self.b.block_params(rbad)[0], self.b.block_params(rbad)[1]);
+            self.b.ins().store(t, n, a, len_at as i32);
+            let stop = self.b.ins().iadd_imm_s(p, VEC_BLOCK);
+            self.b.ins().jump(lp, &[p.into(), stop.into()]);
+            // Out of room or of whole blocks: on from `p`.
+            self.b.switch_to_block(rdone);
+            let (p, n) = (self.b.block_params(rdone)[0], self.b.block_params(rdone)[1]);
+            self.b.ins().store(t, n, a, len_at as i32);
+            self.b.ins().jump(enter, &[p.into()]);
+        }
+        // One lane at a time, through the runtime's push.
+        self.b.switch_to_block(lp);
+        let (p, stop) = (self.b.block_params(lp)[0], self.b.block_params(lp)[1]);
+        let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, stop);
+        self.b.ins().brif(done, after, &[p.into()], body, &[]);
+        self.b.switch_to_block(body);
+        self.lanes_checked = true;
+        let x = self.lane(f, value, p, slow);
+        self.lanes_checked = false;
+        let x = self.coerce(x, types::I64);
+        self.call_checked(self.array_push, &[self.ctx, a, x]);
+        let p1 = self.b.ins().iadd_imm_s(p, 1);
+        self.b.ins().jump(lp, &[p1.into(), stop.into()]);
+        self.b.switch_to_block(after);
+        let q = self.b.block_params(after)[0];
+        let end = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, q, hi);
+        if vec {
+            self.b.ins().brif(end, exit, &[], enter, &[q.into()]);
+        } else {
+            self.b.ins().jump(exit, &[]);
+            let _ = end;
+        }
+        // A trap in lane `p`: the runtime's lane code from `p` on.
+        self.b.switch_to_block(slow);
+        self.b.ins().jump(rt, &[p.into()]);
+    }
+
+    /// [`Self::push_loop`]'s values of the block from lane `p`, four
+    /// vectors of `vty`, and what would trap (for bytes, also a value that
+    /// is no byte: it goes through the runtime's push).
+    fn push_values(&mut self, f: &MirFunc, value: &compiler::native_mir::VecExpr, p: cranelift_codegen::ir::Value, bytes: bool, vty: Type) -> (Vec<cranelift_codegen::ir::Value>, VecBad) {
+        let mut bad = VecBad::default();
+        self.vec_bytes.clear();
+        let mut values = Vec::new();
+        for half in 0..VEC_BLOCK / VEC_LANES {
+            let lp0 = self.b.ins().iadd_imm_s(p, half * VEC_LANES);
+            let at = VecAt { p0: p, half: half as usize, p: lp0 };
+            let x = self.vlane(f, value, at, &mut bad);
+            values.push(self.vcoerce(x, vty));
+        }
+        if bytes {
+            let mut any = values[0];
+            for &v in &values[1..] {
+                any = self.b.ins().bor(any, v);
+            }
+            let h = self.b.ins().ushr_imm_u(any, 8);
+            bad.nonzero(self, h);
+        }
+        (values, bad)
+    }
+
+    /// Append a block's values at element `len` of `out`'s storage `ptr`,
+    /// which has room for them; the caller sets the length (and, for
+    /// words, marks the array as a store does).
+    fn push_store(&mut self, ptr: cranelift_codegen::ir::Value, len: cranelift_codegen::ir::Value, values: &[cranelift_codegen::ir::Value], bytes: bool) {
+        if bytes {
+            let w = self.vec_pack_bytes(values);
+            let at = self.b.ins().iadd(ptr, len);
+            self.b.ins().store(MemFlagsData::new().with_notrap(), w, at, 0);
+        } else {
+            let off = self.b.ins().ishl_imm_u(len, 3);
+            let at = self.b.ins().iadd(ptr, off);
+            for (k, &v) in values.iter().enumerate() {
+                self.b.ins().store(MemFlagsData::new().with_notrap(), v, at, (k as i64 * VEC_LANES * 8) as i32);
+            }
+        }
+    }
+
+    /// The low byte of each lane of four `i64x2` (lanes in order) as one
+    /// `i64`: eight bytes, the first lane lowest. Each vector moves its two
+    /// bytes into place on its own (a `swizzle`, `pshufb` on x64; a
+    /// two-operand `shuffle` may take AVX-512, which valgrind cannot run).
+    fn vec_pack_bytes(&mut self, v: &[cranelift_codegen::ir::Value]) -> cranelift_codegen::ir::Value {
+        let mut out = None;
+        for (k, &x) in v.iter().enumerate() {
+            let b = self.vcoerce(x, types::I8X16);
+            // Bytes 0 and 8 to `2k` and `2k + 1`; an index past 15 is a 0.
+            let mut lanes = [0x80u8; 16];
+            lanes[2 * k] = 0;
+            lanes[2 * k + 1] = 8;
+            let c = self.b.func.dfg.constants.insert(cranelift_codegen::ir::ConstantData::from(lanes.to_vec()));
+            let mask = self.b.ins().vconst(types::I8X16, c);
+            let y = self.b.ins().swizzle(b, mask);
+            out = Some(match out {
+                None => y,
+                Some(o) => self.b.ins().bor(o, y),
+            });
+        }
+        let z = self.vcoerce(out.expect("four vectors"), types::I64X2);
+        self.b.ins().extractlane(z, 0)
+    }
+
+    /// In front of a native lane loop over bytes: each source's bytes
+    /// ([`Self::stream_bytes`], a string or packed bytes) into
+    /// [`Self::lane_bytes`], and a check that every read of every lane
+    /// `lo .. hi` is in them, or branch to `fail`.
+    fn bytes_guard(&mut self, f: &MirFunc, reads: &[(ValueId, ValueId, bool)], lo: cranelift_codegen::ir::Value, hi: cranelift_codegen::ir::Value, fail: Block) {
+        self.lane_bytes.clear();
+        let mut all = self.b.ins().iconst(types::I8, 1);
+        let mut seen = HashMap::new();
+        for &(array, off, _) in reads {
+            let (_, len) = match seen.get(&array) {
+                Some(&x) => x,
+                None => {
+                    let (p, n, known) = self.stream_bytes(f, array);
+                    let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, known, 0);
+                    all = self.b.ins().band(all, ok);
+                    self.lane_bytes.insert(array, p);
+                    seen.insert(array, (p, n));
+                    (p, n)
+                }
+            };
+            let o = self.get(f, off);
+            let o = self.coerce(o, types::I64);
+            let (first, of1) = self.b.ins().sadd_overflow(lo, o);
+            let (last, of2) = self.b.ins().sadd_overflow(hi, o);
+            let of = self.b.ins().bor(of1, of2);
+            let fine = self.b.ins().icmp_imm_s(IntCC::Equal, of, 0);
+            let ge = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, first, 0);
+            let le = self.b.ins().icmp(IntCC::SignedLessThanOrEqual, last, len);
+            let x = self.b.ins().band(fine, ge);
+            let x = self.b.ins().band(x, le);
+            all = self.b.ins().band(all, x);
+        }
+        let go = self.b.create_block();
+        self.b.ins().brif(all, go, &[], fail, &[]);
+        self.b.switch_to_block(go);
+    }
+
+    /// Whether `e` lowers to native lane code over bytes: int lanes only,
+    /// every load an int load (of a byte source), the kinds [`Self::lane`] knows.
+    fn lanes_native_bytes(&self, e: &compiler::native_mir::VecExpr, depth: u32) -> bool {
+        use common::dense;
+        use compiler::native_mir::VecExpr;
+        if depth > 32 || Self::lane_is_float(e) {
+            return false;
+        }
+        match e {
+            VecExpr::Splat { ty, .. } => *ty == dense::TY_I64,
+            VecExpr::Index => true,
+            VecExpr::Load { ty, .. } => *ty == dense::TY_I64,
+            VecExpr::Bin { lhs, rhs, .. } => self.lanes_native_shape(e) && self.lanes_native_bytes(lhs, depth + 1) && self.lanes_native_bytes(rhs, depth + 1),
+            VecExpr::Unary { src, .. } => self.lanes_native_shape(e) && self.lanes_native_bytes(src, depth + 1),
+            VecExpr::Select { mask, then, els } => {
+                self.lanes_native_bytes(mask, depth + 1) && self.lanes_native_bytes(then, depth + 1) && self.lanes_native_bytes(els, depth + 1)
+            }
+            VecExpr::Fma { .. } => false,
+        }
+    }
+
+    /// Whether the lanes of `e` are floats.
+    fn lane_is_float(e: &compiler::native_mir::VecExpr) -> bool {
+        use common::{dense, simd};
+        use compiler::native_mir::VecExpr;
+        match e {
+            VecExpr::Splat { ty, .. } | VecExpr::Load { ty, .. } | VecExpr::Fma { ty, .. } => *ty == dense::TY_F64,
+            VecExpr::Index => false,
+            VecExpr::Bin { kind, .. } => matches!(*kind, simd::FADD64 | simd::FSUB64 | simd::FMUL64 | simd::FDIV64),
+            VecExpr::Unary { kind, .. } => matches!(*kind, simd::FNEG | simd::I2F),
+            VecExpr::Select { then, .. } => Self::lane_is_float(then),
+        }
+    }
+
+    /// Whether [`Self::lane`] knows the op of `e` itself (a `Bin` or `Unary`
+    /// kind), whatever its operands.
+    fn lanes_native_shape(&self, e: &compiler::native_mir::VecExpr) -> bool {
+        use common::simd;
+        use compiler::native_mir::VecExpr;
+        match e {
+            VecExpr::Bin { kind, .. } => {
+                matches!(
+                    *kind,
+                    simd::IADD64 | simd::ISUB64 | simd::IMUL64 | simd::IDIV64 | simd::FADD64 | simd::FSUB64 | simd::FMUL64 | simd::FDIV64 | simd::IAND64 | simd::IOR64 | simd::IXOR64
+                ) || (simd::ICMP..simd::ICMP + 6).contains(kind)
+                    || (simd::FCMP..simd::FCMP + 6).contains(kind)
+            }
+            VecExpr::Unary { kind, .. } => matches!(*kind, simd::INEG | simd::FNEG | simd::I2F | simd::F2I),
+            _ => true,
+        }
     }
 
     /// In front of a native lane loop over lanes `lo .. hi`: take each
@@ -3761,6 +4313,13 @@ impl<'a> Lower<'a> {
                 self.coerce(x, if *ty == dense::TY_F64 { types::F64 } else { types::I64 })
             }
             VecExpr::Index => p,
+            VecExpr::Load { array, off, .. } if self.lanes_checked && self.lane_bytes.contains_key(array) => {
+                let o = self.get(f, *off);
+                let o = int(self, o);
+                let i = self.b.ins().iadd(p, o);
+                let addr = self.b.ins().iadd(self.lane_bytes[array], i);
+                self.b.ins().uload8(types::I64, MemFlagsData::new().with_notrap(), addr, 0)
+            }
             VecExpr::Load { array, off, ty } if self.lanes_checked => {
                 let o = self.get(f, *off);
                 let o = int(self, o);
@@ -4063,7 +4622,7 @@ impl<'a> Lower<'a> {
     /// is not taken: it is flagged in `bad`, and the vector holds some value
     /// there (a division by zero divides by `1`), so the caller runs those
     /// lanes again with [`Self::lane`], which traps as the scalar loop does.
-    fn vlane(&mut self, f: &MirFunc, e: &compiler::native_mir::VecExpr, p: cranelift_codegen::ir::Value, bad: &mut VecBad) -> cranelift_codegen::ir::Value {
+    fn vlane(&mut self, f: &MirFunc, e: &compiler::native_mir::VecExpr, at: VecAt, bad: &mut VecBad) -> cranelift_codegen::ir::Value {
         use common::{dense, simd};
         use compiler::native_mir::VecExpr;
         let iv = |me: &mut Self, v| me.vcoerce(v, types::I64X2);
@@ -4076,30 +4635,53 @@ impl<'a> Lower<'a> {
                 self.b.ins().splat(Self::vec_ty(lane), x)
             }
             VecExpr::Index => {
+                let p = at.p;
                 let v = self.b.ins().scalar_to_vector(types::I64X2, p);
                 let p1 = self.b.ins().iadd_imm_s(p, 1);
                 self.b.ins().insertlane(v, p1, 1)
             }
+            VecExpr::Load { array, off, .. } if self.lane_bytes.contains_key(array) => {
+                // The block's bytes from `array`, read once and widened.
+                if let Some(v) = self.vec_bytes.get(&(*array, *off)) {
+                    return v[at.half];
+                }
+                let base = self.lane_bytes[array];
+                let o = self.get(f, *off);
+                let o = self.coerce(o, types::I64);
+                let i = self.b.ins().iadd(at.p0, o);
+                let addr = self.b.ins().iadd(base, i);
+                let h = self.b.ins().uload8x8(MemFlagsData::new().with_notrap(), addr, 0);
+                let lo = self.b.ins().uwiden_low(h);
+                let hi = self.b.ins().uwiden_high(h);
+                let mut v = Vec::with_capacity(4);
+                for w in [lo, hi] {
+                    v.push(self.b.ins().uwiden_low(w));
+                    v.push(self.b.ins().uwiden_high(w));
+                }
+                let x = v[at.half];
+                self.vec_bytes.insert((*array, *off), v);
+                x
+            }
             VecExpr::Load { array, off, ty } => {
                 let o = self.get(f, *off);
                 let o = self.coerce(o, types::I64);
-                let i = self.b.ins().iadd(p, o);
-                let at = self.element(*array, i);
+                let i = self.b.ins().iadd(at.p, o);
+                let addr = self.element(*array, i);
                 let vt = if *ty == dense::TY_F64 { types::F64X2 } else { types::I64X2 };
-                self.b.ins().load(vt, MemFlagsData::new().with_notrap(), at, 0)
+                self.b.ins().load(vt, MemFlagsData::new().with_notrap(), addr, 0)
             }
             VecExpr::Bin { kind, lhs, rhs } => {
                 // A product with a 0 / 1 lane is that lane as a mask.
                 if *kind == simd::IMUL64 && (Self::lane_is_01(lhs) || Self::lane_is_01(rhs)) {
                     let (m, x) = if Self::lane_is_01(lhs) { (lhs, rhs) } else { (rhs, lhs) };
-                    let m = self.vlane(f, m, p, bad);
-                    let x = self.vlane(f, x, p, bad);
+                    let m = self.vlane(f, m, at, bad);
+                    let x = self.vlane(f, x, at, bad);
                     let (m, x) = (iv(self, m), iv(self, x));
                     let full = self.b.ins().ineg(m);
                     return self.b.ins().band(x, full);
                 }
-                let a = self.vlane(f, lhs, p, bad);
-                let c = self.vlane(f, rhs, p, bad);
+                let a = self.vlane(f, lhs, at, bad);
+                let c = self.vlane(f, rhs, at, bad);
                 match *kind {
                     simd::FADD64 | simd::FSUB64 | simd::FMUL64 | simd::FDIV64 => {
                         let (a, c) = (fv(self, a), fv(self, c));
@@ -4163,7 +4745,7 @@ impl<'a> Lower<'a> {
                 }
             }
             VecExpr::Unary { kind, src } => {
-                let a = self.vlane(f, src, p, bad);
+                let a = self.vlane(f, src, at, bad);
                 match *kind {
                     simd::INEG => {
                         let a = iv(self, a);
@@ -4184,10 +4766,10 @@ impl<'a> Lower<'a> {
                 }
             }
             VecExpr::Select { mask, then, els } => {
-                let m = self.vlane(f, mask, p, bad);
+                let m = self.vlane(f, mask, at, bad);
                 let m = iv(self, m);
-                let t = self.vlane(f, then, p, bad);
-                let e = self.vlane(f, els, p, bad);
+                let t = self.vlane(f, then, at, bad);
+                let e = self.vlane(f, els, at, bad);
                 let ty = self.b.func.dfg.value_type(t);
                 let zero = self.vsplat_i(0);
                 let full = self.b.ins().icmp(IntCC::NotEqual, m, zero);
@@ -4196,9 +4778,9 @@ impl<'a> Lower<'a> {
                 self.vcoerce(r, ty)
             }
             VecExpr::Fma { ty, a, b, c } => {
-                let x = self.vlane(f, a, p, bad);
-                let y = self.vlane(f, b, p, bad);
-                let z = self.vlane(f, c, p, bad);
+                let x = self.vlane(f, a, at, bad);
+                let y = self.vlane(f, b, at, bad);
+                let z = self.vlane(f, c, at, bad);
                 if *ty == dense::TY_F64 {
                     let (x, y, z) = (fv(self, x), fv(self, y), fv(self, z));
                     let m = self.b.ins().fmul(x, y);
@@ -4442,6 +5024,22 @@ impl<'a> Lower<'a> {
                 if let MirInst::VecLoop { kind, .. } = inst {
                     let mut arrays = Vec::new();
                     vec_loop_arrays(kind, &mut arrays);
+                    // A push's or a store's sources as bytes too
+                    // (`native_push`, `native_store`). Only those it reads:
+                    // each view is one more variable every op that may move
+                    // storage sets again.
+                    if let compiler::native_mir::VecLoopKind::Push { .. } | compiler::native_mir::VecLoopKind::Store { .. } = kind {
+                        for &(array, store) in &arrays {
+                            if !store && !self.str_views.contains_key(&array) {
+                                let vars = (self.b.declare_var(types::I64), self.b.declare_var(types::I64), self.b.declare_var(types::I64));
+                                let zero = self.b.ins().iconst(types::I64, 0);
+                                for v in [vars.0, vars.1, vars.2] {
+                                    self.b.def_var(v, zero);
+                                }
+                                self.str_views.insert(array, vars);
+                            }
+                        }
+                    }
                     for (array, store) in arrays {
                         if store {
                             self.stored.insert(array);
@@ -4877,7 +5475,7 @@ impl<'a> Lower<'a> {
             MirInst::ByteScan { .. } | MirInst::VecLoop { .. } => {
                 // A pure reduce compiles to a native loop; the rest runs the
                 // runtime's `VScan` / `VLoop` kernels (`coil_native_vector`).
-                if self.native_reduce(f, inst)? || self.native_store(f, inst)? {
+                if self.native_reduce(f, inst)? || self.native_store(f, inst)? || self.native_push(f, inst)? {
                     return Ok(());
                 }
                 if let (MirInst::ByteScan { dest, .. }, Some(w)) = (inst, self.scan_in_place(f, inst)) {
