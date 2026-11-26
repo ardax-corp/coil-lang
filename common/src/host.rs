@@ -420,6 +420,12 @@ host_natives! {
     /// parameter it makes, from its `kinds` word (reference counts plan
     /// step 2).
     215 "vec_stamp" (2) HEAP_R, NO_CAP => VEC_STAMP_ID, VEC_STAMP_NATIVE;
+    /// `thread_par_room()` (archive 8 minor 12, auto-par only): whether the
+    /// worker pool has a worker free for one more job. A fork-join site
+    /// asks before it spawns and runs its work on this thread when none is
+    /// (a forked loop called from inside another runs sequentially once
+    /// the outer one fills the pool).
+    216 "thread_par_room" (0) THREAD_R, NO_CAP => THREAD_PAR_ROOM_ID, THREAD_PAR_ROOM_NATIVE;
 }
 
 /// `eq_mode`: the type's `==` is not one the runtime runs; the caller compares
@@ -512,7 +518,7 @@ pub const PACKED_VEC_ARITH: &str = "packed_vec_arith";
 // Every row's id is its index (so its consts name their row), and the
 // table only grows.
 const _: () = {
-    assert!(HOST_NATIVES.len() == 216);
+    assert!(HOST_NATIVES.len() == 217);
     let mut i = 0;
     while i < HOST_NATIVES.len() {
         assert!(HOST_NATIVES[i].id as usize == i, "a host native's id is not its index");

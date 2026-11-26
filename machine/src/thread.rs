@@ -1037,6 +1037,18 @@ fn host_spawn_context() -> Result<ThreadSpawnContext, ThreadErrorTag> {
     })
 }
 
+/// `thread_par_room()`: whether the pool this runtime submits to has a
+/// worker free for another job ([`crate::reactor::Reactor::has_room`]).
+/// No: auto-par's fork-join runs its work on this thread, as a job would
+/// only wait in the queue behind the ones that fill the pool.
+fn host_par_room(_heap: &mut Heap, _args: &[Value]) -> Value {
+    let room = HOST_STATE.with(|c| c.borrow().as_ref().and_then(|s| s.cpu_reactor.as_ref().map(|r| r.has_room())));
+    Value::from(room.unwrap_or(false))
+}
+
+/// The host wiring of [`host_par_room`].
+pub const PAR_ROOM_WIRING: &[(&str, usize, crate::HostValueFn)] = &[(common::THREAD_PAR_ROOM_NATIVE, 0, host_par_room)];
+
 /// The running runtime's static words as they are now.
 fn host_static_words() -> Option<Arc<Vec<u64>>> {
     HOST_STATE.with(|c| c.borrow().as_ref().map(|s| unsafe { (s.static_words)(s.raw) }))
