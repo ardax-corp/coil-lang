@@ -195,7 +195,9 @@ fn run_as_case(compiled: Compiled, pipeline: &Pipeline, entry: Option<&Path>) ->
     let main = pipeline.main_offset().expect("main");
     let code = interpreted(compiled.bodies, &body_ids(pipeline));
     let program = thread_program(&compiled.constants, pipeline);
-    let reactor = Reactor::new(1);
+    // Two workers: the case counts as a job in flight while it runs, so a
+    // pool of one has no room for a fork's arms (`thread_par_room`).
+    let reactor = Reactor::new(2);
     let print = Arc::new(Mutex::new(Vec::new()));
     let report = run_case(pipeline, &program, &code, &reactor, test_case(main, false), entry, Arc::clone(&print));
     let jobs = reactor.jobs_submitted();

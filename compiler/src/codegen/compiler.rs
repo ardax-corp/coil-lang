@@ -4210,6 +4210,14 @@ impl Compiler {
             let missed = b.bin(missed, l, r, coil_ty::boolean());
             fallback = b.push(HirKind::Logic { and: false, lhs: missed, rhs: fallback }, coil_ty::boolean());
         }
+        // No worker free for an arm: the function on this thread. A fork
+        // inside a job of another (a forked loop's chunk) otherwise spawns
+        // jobs no worker takes, which its joiner runs one after another.
+        if self.native_id(common::THREAD_PAR_ROOM_NATIVE).is_some() {
+            let free = b.call(common::THREAD_PAR_ROOM_NATIVE, Vec::new(), coil_ty::boolean());
+            let full = b.push(HirKind::Un { op: crate::hir::UnOp::Not, operand: free }, coil_ty::boolean());
+            fallback = b.push(HirKind::Logic { and: false, lhs: fallback, rhs: full }, coil_ty::boolean());
+        }
         let orig = sequential(&mut b);
         let orig = b.block(vec![orig], None, coil_ty::never());
         stmts.push(b.if_(fallback, orig, None, coil_ty::unit()));
