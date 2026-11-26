@@ -637,6 +637,10 @@ pub trait LowerCx {
     /// Whether a two-word value of this type may carry a heap payload in
     /// its low word ([`MirFunc::heap_pair_words`]).
     fn pair_holds_heap(&self, ty: &Ty) -> bool;
+    /// Whether neither word of a two-word value of this type is ever a
+    /// heap pointer ([`crate::layout::scalar_pair`]): a flat field of it
+    /// keeps both words in number slots.
+    fn scalar_pair(&self, ty: &Ty) -> bool;
     /// The element of a `Vec` of a closed two-word type: a lane array,
     /// each element's two words in place (`MirAllocKind::Lanes`,
     /// `LaneIndex` / `LaneStore` / `LanePush`).
@@ -4113,8 +4117,11 @@ impl Lower<'_> {
                 let Some(obj) = self.word(base)? else {
                     return Ok(Val::Never);
                 };
-                self.b.ins_heap_field_store(obj, lo, slot).map_err(mir)?;
-                self.b.ins_heap_field_store(obj, hi, tail).map_err(mir)?;
+                // Both slots are number slots of a scalar pair, and the
+                // tail always is ([`crate::layout::pair_word_kinds`]).
+                let scalar_lo = self.expr_ty(*place).is_some_and(|t| self.cx.scalar_pair(t));
+                self.b.ins_field_store(obj, lo, slot, scalar_lo).map_err(mir)?;
+                self.b.ins_field_store(obj, hi, tail, true).map_err(mir)?;
                 Ok(Val::Unit)
             }
             // A field of a readonly class kept as its pair (#1562): that
