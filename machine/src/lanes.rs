@@ -116,8 +116,16 @@ pub(crate) fn lanes_on_frame(heap: &mut Heap, scan: bool, flags: u8, body: &[Lan
         static VREGS: std::cell::RefCell<[[u64; common::simd::LANES]; common::simd::NREGS]> =
             const { std::cell::RefCell::new([[0; common::simd::LANES]; common::simd::NREGS]) };
     }
-    // The frame as values: on the stack for the usual small frame, since a
-    // hit-dense scan comes back here once per hit.
+    if scan {
+        // A scan only reads its frame, so it reads the words in place (a
+        // `Value` is one word): a hit-dense scan comes back here once per hit.
+        // SAFETY: `Value` is `repr(transparent)` over `u64`.
+        let frame: &[Value] = unsafe { std::slice::from_raw_parts(slots.as_ptr().cast::<Value>(), slots.len()) };
+        let inclusive = flags & common::simd::SCAN_INCLUSIVE != 0;
+        let backward = flags & common::simd::SCAN_BACKWARD != 0;
+        return VREGS.with(|r| vscan(heap, frame, 0, &mut r.borrow_mut(), body, from, bound, inclusive, backward));
+    }
+    // The frame as values: on the stack for the usual small frame.
     const SMALL: usize = 64;
     let mut small = [Value::default(); SMALL];
     let mut big = Vec::new();
@@ -132,15 +140,8 @@ pub(crate) fn lanes_on_frame(heap: &mut Heap, scan: bool, flags: u8, body: &[Lan
         &mut big[..]
     };
     let out = VREGS.with(|r| {
-        let mut regs = r.borrow_mut();
-        if scan {
-            let inclusive = flags & common::simd::SCAN_INCLUSIVE != 0;
-            let backward = flags & common::simd::SCAN_BACKWARD != 0;
-            vscan(heap, &frame[..], 0, &mut regs, body, from, bound, inclusive, backward)
-        } else {
-            let pos = flags & common::simd::LOOP_POS != 0;
-            vloop(heap, &mut frame[..], 0, &mut regs, body, usize::from(pos), from, bound, pos).map(|()| 0)
-        }
+        let pos = flags & common::simd::LOOP_POS != 0;
+        vloop(heap, &mut frame[..], 0, &mut r.borrow_mut(), body, usize::from(pos), from, bound, pos).map(|()| 0)
     });
     for (w, v) in slots.iter_mut().zip(frame.iter()) {
         *w = v.bits();

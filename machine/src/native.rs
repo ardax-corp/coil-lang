@@ -3156,10 +3156,12 @@ pub unsafe extern "C" fn coil_native_vector(ctx: *mut NativeCtx, kind: u64, flag
     let frame = unsafe { std::slice::from_raw_parts_mut(slots, nslots as usize) };
     // SAFETY: `call` set `heap` to the machine's live heap.
     let heap = unsafe { &mut *c.heap };
-    // The loop's arrays: what it pushes and stores counts once it ends.
+    let scan = kind & 1 == 0;
+    // The loop's arrays: what it pushes and stores counts once it ends. A
+    // scan (`vscan` takes the heap and the frame read-only) changes no count.
     // SAFETY: a `Value` is one word (no copy of the frame per call).
-    let before = heap.rc_before_all(unsafe { std::slice::from_raw_parts(frame.as_ptr().cast::<common::Value>(), frame.len()) });
-    let out = crate::lanes::lanes_on_frame(heap, kind & 1 == 0, flags as u8, code, frame, from as i64, bound as i64);
+    let before = if scan { Vec::new() } else { heap.rc_before_all(unsafe { std::slice::from_raw_parts(frame.as_ptr().cast::<common::Value>(), frame.len()) }) };
+    let out = crate::lanes::lanes_on_frame(heap, scan, flags as u8, code, frame, from as i64, bound as i64);
     heap.rc_after_all(before);
     match out {
         Ok(p) => {
