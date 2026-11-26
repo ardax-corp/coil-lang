@@ -435,9 +435,12 @@ fills first, slot 1 its block position, then each operand); native code stores t
 words in a stack slot and the helper runs the body and copies the slots back. A trap
 panics at native code's own site. `COIL_NATIVE_STATS` counts these ops.
 
-A reduce with no stores and a store map over `int` / `float` word arrays compile to
-native loops (`native_reduce`, `native_store` in `coil-native/src/lib.rs`). A guard in
-front checks every lane's element is in its array's view; then blocks of 8 lanes run
+A reduce with no stores, a store map and a push compile to native loops
+(`native_reduce`, `native_store`, `native_push` in `coil-native/src/lib.rs`) over two
+layouts: `int` / `float` word arrays, and packed bytes, where a map or push stores
+`int` lanes into a byte array from strings and byte arrays (an ASCII lower case). A
+guard in front checks every lane's element is in its array's view (word arrays) or
+bytes (`bytes_guard`, `bytes_store_guard`); then blocks of 8 lanes run
 on 128-bit vectors (`i64x2` / `f64x2`, four per block, `vlane`), and the last lanes, and
 any block with a lane that would trap, one lane at a time (`lane`), which traps where the
 scalar loop does or hands the rest to the runtime's lane code. In a block:
@@ -454,6 +457,24 @@ scalar loop does or hands the rest to the runtime's lane code. In a block:
   at a time (then no partial of the scalar loop's left fold can overflow, so it is the
   sum that loop gets). Past those, a block folds one lane at a time. Float folds and
   `int` products fold the block's terms in lane order.
+
+Over bytes, a block reads 8 bytes of a source in one load and widens them to four
+`i64x2`; its values go back as one 8-byte store (`vec_pack_bytes`, a `pshufb` per
+vector: a two-operand shuffle may lower to AVX-512, which valgrind cannot run). A
+value that is no byte (`> 255`) leaves the block to one lane at a time, where it goes
+to the runtime's lane code from that lane.
+
+A push appends a block in place while `out` has room, its length in a register and
+stored when the run ends. With less room than a block, `out` grows first
+(`coil_native_array_reserve`, by the lanes left but at most its length, or 64, so a loop
+that traps early does not take room for every lane). A block that would trap, and the
+last lanes, push one at a time through `coil_native_array_push`, which grows `out` (and
+turns bytes into words for a value that is no byte; the next run checks the layout
+again). A push of the same value in every lane stays with the runtime: MIR fills that
+in one `vec_fill` and keeps the loop only for where the fill did not apply. Every way
+out of a native loop to the runtime's lane code (a trap from its lane on, or an access
+the guard could not show in place) shares one call (`vector_lanes_at`), which copies
+the op's body into the frame.
 
 A rough per-lane cost (`lane_cost`, `vectors_pay`) picks the vector loop only when it
 beats one lane at a time: a body mostly of per-lane ops (`spectral_norm`'s `/` and `*`)
