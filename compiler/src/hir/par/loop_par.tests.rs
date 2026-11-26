@@ -1263,7 +1263,7 @@ fn a_light_body_needs_many_trips_a_chunk() {
 "#,
     ));
     assert!(site.grain > 1000, "a few nodes a trip: {}", site.grain);
-    assert!(!site.worth_forking(true), "100 light trips are not worth a job");
+    assert!(!site.worth_forking(), "100 light trips are not worth a job");
 }
 
 #[test]
@@ -1291,7 +1291,7 @@ fn main() {
     );
     let site = sites.iter().find(|s| s.index == "i").expect("the outer loop is a site");
     assert_eq!(site.grain, HEAVY_LOOP_GRAIN);
-    assert!(site.worth_forking(false));
+    assert!(site.worth_forking());
     assert_eq!(site.chunk_bounds(site.grain), Some(vec![0, 2, 4, 5, 6]));
 }
 

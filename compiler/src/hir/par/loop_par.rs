@@ -93,8 +93,9 @@ pub struct LoopParSite {
     pub guard: Vec<SignTest>,
     /// The body computes a heap value (it builds a tree, a string, a
     /// collection), which a chunk worker allocates and frees in the
-    /// shared-heap steal epoch. Not worth it today, as a heap-building
-    /// fork is not ([`Self::worth_forking`]).
+    /// shared-heap steal epoch, freeing what dies there in place. Such a
+    /// loop forks like any other (unlike a heap-building call fork,
+    /// [`super::ParForkSite::worth_forking`]).
     pub heap_values: bool,
     /// Trips a chunk needs before a spawn pays for itself, from how much
     /// one trip costs ([`loop_grain`]): [`HEAVY_LOOP_GRAIN`] for a body
@@ -187,13 +188,11 @@ impl<'a> Weigh<'a> {
 }
 
 impl LoopParSite {
-    /// Whether the cost model forks this loop: as
-    /// [`super::ParForkSite::worth_forking`], a body that computes heap
-    /// values stays sequential unless `heap_forks`.
-    /// A const range of no more than [`Self::grain`] trips runs on its
-    /// own thread too (a range read at run time is tested as it starts).
-    pub fn worth_forking(&self, heap_forks: bool) -> bool {
-        (heap_forks || !self.heap_values) && (self.is_dynamic() || self.trip_count() > self.grain)
+    /// Whether the cost model forks this loop: a const range of no more
+    /// than [`Self::grain`] trips runs on its own thread (a range read at
+    /// run time is tested as it starts).
+    pub fn worth_forking(&self) -> bool {
+        self.is_dynamic() || self.trip_count() > self.grain
     }
 
     pub fn is_dynamic(&self) -> bool {
