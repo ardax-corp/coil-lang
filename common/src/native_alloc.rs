@@ -10,3 +10,6 @@ pub const ALLOC_POLY_FN: u64 = 5;
 pub const ALLOC_DROP_ENUM: u64 = 6;
 pub const ALLOC_CORO: u64 = 7;
 pub const ALLOC_LANES: u64 = 8;
+/// A lane array of wide elements (three or four number words each): `extra`
+/// is the words per element.
+pub const ALLOC_WIDE_LANES: u64 = 9;

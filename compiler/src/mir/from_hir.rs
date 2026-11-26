@@ -217,12 +217,32 @@ pub struct HirIterLoop {
 
 /// A lane array's element: its two words' types and how it is boxed as
 /// one word ([`MirLaneShape`], whose `tag_mask` is the tags under which
-/// the first word is a heap reference).
+/// the first word is a heap reference). A wide element (a tuple of three
+/// or four immediates) has the types of its words past two in `more`, its
+/// shape the default one (a tuple of number words).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HirLaneElem {
     pub lo: MirTy,
     pub hi: MirTy,
+    pub more: [Option<MirTy>; super::MAX_RET_MORE],
     pub shape: MirLaneShape,
+}
+
+impl HirLaneElem {
+    /// Every word's type, in order.
+    pub fn tys(&self) -> Vec<MirTy> {
+        [self.lo, self.hi].into_iter().chain(self.more.iter().flatten().copied()).collect()
+    }
+
+    /// A wide element: a tuple of more than two number words.
+    pub fn is_wide(&self) -> bool {
+        self.more[0].is_some()
+    }
+
+    /// The `Alloc` of a lane array of this element.
+    pub fn alloc_kind(&self) -> MirAllocKind {
+        MirAllocKind::Lanes { tag_mask: self.shape.tag_mask, more: self.more.iter().flatten().count() as u8 }
+    }
 }
 
 /// A `Vec` method call that works on a lane array's lanes
@@ -7319,7 +7339,7 @@ impl Lower<'_> {
                     },
                     _ => None,
                 };
-                let arr = self.at_expr(id, |l| l.b.ins_alloc(MirAllocKind::Lanes { tag_mask: lane.shape.tag_mask }, Vec::new()).map_err(mir))?;
+                let arr = self.at_expr(id, |l| l.b.ins_alloc(lane.alloc_kind(), Vec::new()).map_err(mir))?;
                 let arr = self.b.ins_gc_barrier(MirGcKind::Safepoint, arr).map_err(mir)?;
                 if let Some(n) = n {
                     let reserve = common::host_native_id("vec_reserve").ok_or("vec_reserve")? as u16;
@@ -7389,11 +7409,16 @@ impl Lower<'_> {
                     i
                 }
             };
-            let (lo, hi) = l.b.ins_lane_index(arr, i, lane.lo, lane.hi).map_err(mir)?;
+            let words = l.b.ins_lane_index_words(arr, i, &lane.tys()).map_err(mir)?;
             // Boxed before the array drops it: a heap payload is then held
             // by its box, a reference.
-            let Val::V(boxed) = l.box_pair_val(&elem, lo, hi)? else {
-                return Err("lane element box".into());
+            let boxed = if lane.is_wide() {
+                l.wide_tuple(words)?
+            } else {
+                let Val::V(boxed) = l.box_pair_val(&elem, words[0], words[1])? else {
+                    return Err("lane element box".into());
+                };
+                boxed
             };
             let next = l.b.ins_binop(MirBinOp::Add, i, one).map_err(mir)?;
             l.b.ins_host_invoke(common::VEC_DRAIN_ID, vec![arr, i, next]).map_err(mir)?;
@@ -7430,7 +7455,7 @@ impl Lower<'_> {
         let Some(i) = self.index_word(args[1])? else {
             return Ok(Val::Never);
         };
-        let Some((lo, hi)) = self.pair(args[2])? else {
+        let Some(words) = self.lane_words(args[2], &lane)? else {
             return Ok(Val::Never);
         };
         let insert = common::host_native_id("vec_insert").ok_or("vec_insert")? as u16;
@@ -7451,7 +7476,7 @@ impl Lower<'_> {
             l.b.unreachable().map_err(mir)?;
             l.mark_cold(start);
             l.switch(inside);
-            let out = l.b.ins_lane_push(arr, lo, hi, lane.shape).map_err(mir)?;
+            let out = l.b.ins_lane_push_words(arr, &words, lane.shape).map_err(mir)?;
             let out = l.b.ins_gc_barrier(MirGcKind::Safepoint, out).map_err(mir)?;
             let end = l.b.ins_cmp(MirCmpOp::Eq, i, n).map_err(mir)?;
             l.b.branch(end, done, rotate).map_err(mir)?;
@@ -7465,7 +7490,9 @@ impl Lower<'_> {
         Ok(Val::Unit)
     }
 
-    /// `xs[i]` of lane array `base`: the element's two words.
+    /// `xs[i]` of lane array `base`: the element's two words, or a wide
+    /// element's tuple of its words (which `forward_tuple_loads` reads
+    /// from the words when the tuple is only destructured).
     fn lane_index(&mut self, base: HirId, index: HirId, lane: HirLaneElem) -> Result<Val, Refusal> {
         let Some(arr) = self.word(base)? else {
             return Ok(Val::Never);
@@ -7473,8 +7500,22 @@ impl Lower<'_> {
         let Some(idx) = self.index_word(index)? else {
             return Ok(Val::Never);
         };
+        if lane.is_wide() {
+            let words = self.b.ins_lane_index_words(arr, idx, &lane.tys()).map_err(mir)?;
+            return Ok(Val::V(self.wide_tuple(words)?));
+        }
         let (lo, hi) = self.b.ins_lane_index(arr, idx, lane.lo, lane.hi).map_err(mir)?;
         Ok(Val::Pair(lo, hi))
+    }
+
+    /// The words of lane element value `id` for a lane array of `lane`: a
+    /// pair's two words, or a wide element's items. `None` if it never
+    /// returns.
+    fn lane_words(&mut self, id: HirId, lane: &HirLaneElem) -> Result<Option<Vec<ValueId>>, Refusal> {
+        if lane.is_wide() {
+            return self.tuple_item_words(id, &lane.tys());
+        }
+        Ok(self.pair(id)?.map(|(lo, hi)| vec![lo, hi]))
     }
 
     /// `xs[i]` on a heap array: the array, then the index, as HIR emission
@@ -7556,8 +7597,8 @@ impl Lower<'_> {
     /// index, as HIR emission stages them. The bounds check stays unless
     /// the checker proved the index and the value cannot change the array.
     fn heap_store(&mut self, place: HirId, base: HirId, index: HirId, value: HirId) -> Result<Val, Refusal> {
-        if self.lane(base).is_some() {
-            let Some((lo, hi)) = self.pair(value)? else {
+        if let Some(lane) = self.lane(base) {
+            let Some(words) = self.lane_words(value, &lane)? else {
                 return Ok(Val::Never);
             };
             let Some(arr) = self.word(base)? else {
@@ -7566,7 +7607,7 @@ impl Lower<'_> {
             let Some(idx) = self.index_word(index)? else {
                 return Ok(Val::Never);
             };
-            self.b.ins_lane_store(arr, idx, lo, hi, self.lane(base).ok_or("lane array")?.shape).map_err(mir)?;
+            self.b.ins_lane_store_words(arr, idx, &words, lane.shape).map_err(mir)?;
             return Ok(Val::Unit);
         }
         let ty = self.expr_ty(base).and_then(|t| self.elem_word(t)).ok_or("element type")?;
@@ -7600,14 +7641,14 @@ impl Lower<'_> {
     /// its element stamp.
     fn make_array(&mut self, id: HirId, args: &[HirId]) -> Result<Val, Refusal> {
         if let Some(lane) = self.lane(id) {
-            let mut words = Vec::with_capacity(args.len() * 2);
+            let mut words = Vec::with_capacity(args.len() * lane.tys().len());
             for &arg in args {
-                let Some((lo, hi)) = self.pair(arg)? else {
+                let Some(w) = self.lane_words(arg, &lane)? else {
                     return Ok(Val::Never);
                 };
-                words.extend([lo, hi]);
+                words.extend(w);
             }
-            let arr = self.b.ins_alloc(MirAllocKind::Lanes { tag_mask: lane.shape.tag_mask }, words).map_err(mir)?;
+            let arr = self.b.ins_alloc(lane.alloc_kind(), words).map_err(mir)?;
             return Ok(Val::V(self.b.ins_gc_barrier(MirGcKind::Safepoint, arr).map_err(mir)?));
         }
         let ty = self
@@ -7999,10 +8040,10 @@ impl Lower<'_> {
             return Ok(Val::Never);
         };
         if let Some(lane) = self.lane(recv) {
-            let Some((lo, hi)) = self.pair(value)? else {
+            let Some(words) = self.lane_words(value, &lane)? else {
                 return Ok(Val::Never);
             };
-            let out = self.b.ins_lane_push(arr, lo, hi, lane.shape).map_err(mir)?;
+            let out = self.b.ins_lane_push_words(arr, &words, lane.shape).map_err(mir)?;
             let out = self.b.ins_gc_barrier(MirGcKind::Safepoint, out).map_err(mir)?;
             return self.pushed(recv, out);
         }
@@ -8833,18 +8874,28 @@ impl Lower<'_> {
     }
 
     /// `for x in xs` over lane array `iterable`: each element's two words
-    /// into pair local `x`.
+    /// into pair local `x`, or a wide element's tuple of its words into
+    /// local `x`; a tuple pattern binds each part from its word.
     fn for_lanes(&mut self, pat: &HirPat, iterable: HirId, body: HirId, lane: HirLaneElem) -> Result<Val, Refusal> {
+        let n = lane.tys().len();
         // Where each word goes: a pair local's two slots, or a tuple
         // pattern's parts.
-        let mut slots: [Option<(LocalId, MirTy)>; 2] = [None, None];
+        let mut slots: Vec<Option<(LocalId, MirTy)>> = vec![None; n];
+        // A wide element bound whole: its tuple's local.
+        let mut whole = None;
         match pat {
+            HirPat::Bind(local) if lane.is_wide() => {
+                if self.local_ty(*local)? != MirTy::HeapRef {
+                    return Err("for in lane binding".into());
+                }
+                whole = Some(self.slot(*local)?);
+            }
             HirPat::Bind(local) => {
                 let (lo, hi, lo_ty, hi_ty) = self.pair_local(*local).ok_or("for in lane binding")?;
-                slots = [Some((lo, lo_ty)), Some((hi, hi_ty))];
+                slots = vec![Some((lo, lo_ty)), Some((hi, hi_ty))];
             }
             HirPat::Wild => {}
-            HirPat::Tuple(pats) if pats.len() == 2 => {
+            HirPat::Tuple(pats) if pats.len() == n => {
                 for (slot, p) in slots.iter_mut().zip(pats) {
                     match p {
                         HirPat::Wild => {}
@@ -8872,13 +8923,18 @@ impl Lower<'_> {
         let more = self.b.ins_cmp(MirCmpOp::Lt, cur, len).map_err(mir)?;
         self.b.branch(more, body_b, exit).map_err(mir)?;
         self.switch(body_b);
-        if slots.iter().any(Option::is_some) {
+        if whole.is_some() || slots.iter().any(Option::is_some) {
             let cur = self.b.use_local(i, MirTy::I64).map_err(mir)?;
-            let (a, b) = self.b.ins_lane_index(arr, cur, lane.lo, lane.hi).map_err(mir)?;
-            for (slot, w) in slots.into_iter().zip([a, b]) {
-                if let Some((slot, ty)) = slot {
-                    let w = self.fit(w, ty)?;
-                    self.b.def_local(slot, w).map_err(mir)?;
+            let words = self.b.ins_lane_index_words(arr, cur, &lane.tys()).map_err(mir)?;
+            if let Some(slot) = whole {
+                let tuple = self.wide_tuple(words)?;
+                self.b.def_local(slot, tuple).map_err(mir)?;
+            } else {
+                for (slot, w) in slots.into_iter().zip(words) {
+                    if let Some((slot, ty)) = slot {
+                        let w = self.fit(w, ty)?;
+                        self.b.def_local(slot, w).map_err(mir)?;
+                    }
                 }
             }
         }

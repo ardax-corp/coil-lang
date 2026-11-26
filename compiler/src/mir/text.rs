@@ -287,13 +287,31 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             write!(f, "{dest} = {name} {array}, {index}, {value}")
         }
         MirInst::ArrayLen { dest, array } => write!(f, "{dest} = arraylen {array}"),
-        MirInst::LaneIndex { dest, dest_hi, array, index } => {
-            write!(f, "{dest}, {dest_hi} = laneindex.{}.{} {array}, {index}", func.ty(*dest), func.ty(*dest_hi))
+        MirInst::LaneIndex { dest, dest_hi, dest_more, array, index } => {
+            write!(f, "{dest}, {dest_hi}")?;
+            for w in dest_more {
+                write!(f, ", {w}")?;
+            }
+            write!(f, " = laneindex.{}.{}", func.ty(*dest), func.ty(*dest_hi))?;
+            for w in dest_more {
+                write!(f, ".{}", func.ty(*w))?;
+            }
+            write!(f, " {array}, {index}")
         }
-        MirInst::LaneStore { dest, array, index, lo, hi, shape } => {
-            write!(f, "{dest} = lanestore {array}, {index}, {lo}, {hi}, {}", lane_shape(shape))
+        MirInst::LaneStore { dest, array, index, lo, hi, more, shape } => {
+            write!(f, "{dest} = lanestore {array}, {index}, {lo}, {hi}, ")?;
+            for w in more {
+                write!(f, "{w}, ")?;
+            }
+            write!(f, "{}", lane_shape(shape))
         }
-        MirInst::LanePush { dest, array, lo, hi, shape } => write!(f, "{dest} = lanepush {array}, {lo}, {hi}, {}", lane_shape(shape)),
+        MirInst::LanePush { dest, array, lo, hi, more, shape } => {
+            write!(f, "{dest} = lanepush {array}, {lo}, {hi}, ")?;
+            for w in more {
+                write!(f, "{w}, ")?;
+            }
+            write!(f, "{}", lane_shape(shape))
+        }
         MirInst::LanesToWords { dest, array, shape } => write!(f, "{dest} = lanestowords {array}, {}", lane_shape(shape)),
         MirInst::ResumeCoro {
             dest,
@@ -363,7 +381,9 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                         write!(f, ", params {params}")?;
                     }
                 }
-                MirAllocKind::Lanes { tag_mask } => write!(f, " {tag_mask}")?,
+                MirAllocKind::Lanes { tag_mask, more: 0 } => write!(f, " {tag_mask}")?,
+                // A wide element's words per element after the mask.
+                MirAllocKind::Lanes { tag_mask, more } => write!(f, " {tag_mask}/{}", 2 + more)?,
                 MirAllocKind::Array => {}
             }
             for (i, e) in elems.iter().enumerate() {
@@ -528,20 +548,22 @@ impl<'a> Parser<'a> {
         }
         self.expect('=')?;
         let op = self.ident_dots()?;
-        if !dest_more.is_empty() && !op.starts_with("call.") {
+        if !dest_more.is_empty() && !op.starts_with("call.") && !op.starts_with("laneindex.") {
             return Err(ParseError("more than two dests is call-only".into()));
         }
         if let Some(rest) = op.strip_prefix("laneindex.") {
-            let (lo_s, hi_s) = rest.split_once('.').ok_or_else(|| ParseError(op.clone()))?;
-            let lo = MirTy::parse(lo_s).ok_or_else(|| ParseError(op.clone()))?;
-            let hi_ty = MirTy::parse(hi_s).ok_or_else(|| ParseError(op.clone()))?;
+            let tys = rest.split('.').map(|t| MirTy::parse(t).ok_or_else(|| ParseError(op.clone()))).collect::<Result<Vec<_>, _>>()?;
             let hi = dest_hi.ok_or_else(|| ParseError("laneindex takes two dests".into()))?;
+            if tys.len() != 2 + dest_more.len() {
+                return Err(ParseError(op.clone()));
+            }
             let array = self.value()?;
             self.expect(',')?;
             let index = self.value()?;
-            ensure_ty(types, dest, lo);
-            ensure_ty(types, hi, hi_ty);
-            return Ok(MirInst::LaneIndex { dest, dest_hi: hi, array, index });
+            for (&v, &ty) in [dest, hi].iter().chain(&dest_more).zip(&tys) {
+                ensure_ty(types, v, ty);
+            }
+            return Ok(MirInst::LaneIndex { dest, dest_hi: hi, dest_more, array, index });
         }
         if dest_hi.is_some() && !op.starts_with("call.") && !op.starts_with("callind.") && !op.starts_with("host.") {
             return Err(ParseError("pair dest is call-only".into()));
@@ -774,15 +796,21 @@ impl<'a> Parser<'a> {
             self.expect(',')?;
             let hi = self.value()?;
             self.expect(',')?;
+            // A wide element's further words, then the shape.
+            let mut more = Vec::new();
+            while self.peek('v') {
+                more.push(self.value()?);
+                self.expect(',')?;
+            }
             let shape = self.lane_shape()?;
             return Ok(match index {
                 Some(index) => {
                     ensure_ty(types, dest, MirTy::Bool);
-                    MirInst::LaneStore { dest, array, index, lo, hi, shape }
+                    MirInst::LaneStore { dest, array, index, lo, hi, more, shape }
                 }
                 None => {
                     ensure_ty(types, dest, MirTy::HeapRef);
-                    MirInst::LanePush { dest, array, lo, hi, shape }
+                    MirInst::LanePush { dest, array, lo, hi, more, shape }
                 }
             });
         }
@@ -993,7 +1021,11 @@ impl<'a> Parser<'a> {
             };
             let kind = match kind_s {
                 "array" => MirAllocKind::Array,
-                "lanes" => MirAllocKind::Lanes { tag_mask: self.uint()? },
+                "lanes" => {
+                    let tag_mask = self.uint()?;
+                    let more = if self.eat('/') { (self.uint()? as u8).checked_sub(2).ok_or_else(|| ParseError("lane words".into()))? } else { 0 };
+                    MirAllocKind::Lanes { tag_mask, more }
+                }
                 "tuple" => MirAllocKind::TUPLE,
                 "object" => {
                     let type_id = self.uint()? as u32;
@@ -1593,6 +1625,35 @@ bb0:
         assert_eq!(parse_func(&g.to_string()).unwrap(), g);
         // Words past the second are a call's only.
         assert!(parse_func("func @x() -> i64 {\nbb0:\n    v0, v1, v2 = iconst.i64 1\n    return v0\n}\n").is_err());
+    }
+
+    /// A lane array of wide elements: its alloc's words per element, an
+    /// element read's further dests and a store's and push's further
+    /// words print, parse back and verify.
+    #[test]
+    fn wide_lane_ops_round_trip() {
+        let src = r#"
+func @lanes(v0: i64) -> f64 {
+bb0:
+    v1 = alloc.lanes 0/3, v0, v0, v0
+    v2 = iconst.i64 1
+    v3 = fcvt.f64.i64 v0
+    v4 = lanepush v1, v0, v2, v3, 0/0/0
+    v5 = lanestore v4, v2, v2, v0, v3, 0/0/0
+    v6, v7, v8 = laneindex.i64.i64.f64 v4, v2
+    return v8
+}
+"#;
+        let f = parse_func(src).expect(src);
+        f.verify().unwrap();
+        match &f.blocks[0].insts[0] {
+            MirInst::Alloc { kind: MirAllocKind::Lanes { tag_mask: 0, more: 1 }, .. } => {}
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(f.blocks[0].insts[5].dests().count(), 3);
+        assert_eq!(parse_func(&f.to_string()).unwrap(), f);
+        // A wide word must be a number, and a wide shape untagged.
+        assert!(parse_func(&src.replace("0/0/0\n    v5", "1/1/0\n    v5")).unwrap().verify().is_err());
     }
 
     /// The builder's wide forms: `ret_words` types words 3.. on the

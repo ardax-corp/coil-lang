@@ -423,6 +423,24 @@ of a lane type allocate an empty lane array. An early free or a
 copy-on-write copy of the array keeps it in lanes as well. `coil dissect
 --boxes` lists each place an array still converts (`lane array`).
 
+A *wide* element, a tuple of three or four immediates (`(int, int, int)`,
+`(float, float, float, int)`, `layout::wide_scalar_items`), is a lane
+array of `k` = 3 or 4 words per element, all numbers (`tag_mask` 0). Its
+`Alloc` is `Lanes { more: k - 2 }` (`alloc.lanes 0/3` in the text form,
+runtime kind `ALLOC_WIDE_LANES`), and the lane ops carry the words past
+the second: `LaneIndex::dest_more`, `LaneStore::more`, `LanePush::more`
+(at most `MAX_RET_MORE`, verified to be numbers, the shape the default
+one). An element read is a fresh tuple of its words, which
+`forward_tuple_loads` drops when the tuple is only destructured; a store
+or push of a tuple made in place takes its items directly. A wide element
+boxes as the tuple `alloc.tuple` makes (every word `WORD_SCALAR`), and
+`LanesToWords` boxes a `k`-word array's elements so whatever its shape.
+Native code reads and stores the `k` words in place at stride `k` (the
+lane view checks the array's `k`) and calls `coil_native_lane_*_wide`
+with the words in a stack buffer otherwise; a push always calls it. Wide
+elements holding a heap word, and open `T` elements, stay one word per
+element.
+
 ## The two-slot calling convention
 
 The two-slot form of a `Layout::Pair` type is a calling convention, not a

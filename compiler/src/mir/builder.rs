@@ -889,43 +889,55 @@ impl MirBuilder {
 
     /// Element `index` of a lane array: its two words, typed `lo` / `hi`.
     pub fn ins_lane_index(&mut self, array: ValueId, index: ValueId, lo: MirTy, hi: MirTy) -> Result<(ValueId, ValueId), MirError> {
+        let w = self.ins_lane_index_words(array, index, &[lo, hi])?;
+        Ok((w[0], w[1]))
+    }
+
+    /// Element `index` of a lane array of `tys.len()` words per element
+    /// (two, or a wide element's three or four): its words, typed `tys`.
+    pub fn ins_lane_index_words(&mut self, array: ValueId, index: ValueId, tys: &[MirTy]) -> Result<Vec<ValueId>, MirError> {
         if self.resolve_ty(array) != MirTy::HeapRef || !self.resolve_ty(index).is_int() {
             return Err(MirError::msg("LaneIndex operand type"));
         }
-        if !lo.is_word_lane() || !hi.is_word_lane() {
-            return Err(MirError::msg(format!("LaneIndex dest is {lo}, {hi}")));
+        if !(2..=2 + super::MAX_RET_MORE).contains(&tys.len()) || tys.iter().any(|t| !t.is_word_lane()) {
+            return Err(MirError::msg(format!("LaneIndex dest is {tys:?}")));
         }
-        let dest = self.alloc(lo);
-        let dest_hi = self.alloc(hi);
-        self.push(MirInst::LaneIndex { dest, dest_hi, array: self.resolve(array), index: self.resolve(index) })?;
-        Ok((dest, dest_hi))
+        let words: Vec<ValueId> = tys.iter().map(|&t| self.alloc(t)).collect();
+        self.push(MirInst::LaneIndex { dest: words[0], dest_hi: words[1], dest_more: words[2..].to_vec(), array: self.resolve(array), index: self.resolve(index) })?;
+        Ok(words)
     }
 
-    /// Store `[lo, hi]` as element `index` of a lane array.
-    pub fn ins_lane_store(&mut self, array: ValueId, index: ValueId, lo: ValueId, hi: ValueId, shape: MirLaneShape) -> Result<ValueId, MirError> {
+    /// Store `words` (an element's two words, or a wide element's three or
+    /// four) as element `index` of a lane array.
+    pub fn ins_lane_store_words(&mut self, array: ValueId, index: ValueId, words: &[ValueId], shape: MirLaneShape) -> Result<ValueId, MirError> {
         if self.resolve_ty(array) != MirTy::HeapRef || !self.resolve_ty(index).is_int() {
             return Err(MirError::msg("LaneStore operand type"));
         }
-        if !self.resolve_ty(lo).is_word_lane() || !self.resolve_ty(hi).is_word_lane() {
-            return Err(MirError::msg("LaneStore value type"));
-        }
+        let words = self.lane_words(words, "LaneStore")?;
         let dest = self.alloc(MirTy::Bool);
-        self.push(MirInst::LaneStore { dest, array: self.resolve(array), index: self.resolve(index), lo: self.resolve(lo), hi: self.resolve(hi), shape })?;
+        self.push(MirInst::LaneStore { dest, array: self.resolve(array), index: self.resolve(index), lo: words[0], hi: words[1], more: words[2..].to_vec(), shape })?;
         Ok(dest)
     }
 
-    /// Append `[lo, hi]` to a lane array in place (a safepoint, as
+    /// Append the element of `words` (two, or a wide element's three or
+    /// four) to a lane array in place (a safepoint, as
     /// [`Self::ins_array_push`]).
-    pub fn ins_lane_push(&mut self, array: ValueId, lo: ValueId, hi: ValueId, shape: MirLaneShape) -> Result<ValueId, MirError> {
+    pub fn ins_lane_push_words(&mut self, array: ValueId, words: &[ValueId], shape: MirLaneShape) -> Result<ValueId, MirError> {
         if self.resolve_ty(array) != MirTy::HeapRef {
             return Err(MirError::msg("LanePush array type"));
         }
-        if !self.resolve_ty(lo).is_word_lane() || !self.resolve_ty(hi).is_word_lane() {
-            return Err(MirError::msg("LanePush value type"));
-        }
+        let words = self.lane_words(words, "LanePush")?;
         let dest = self.alloc(MirTy::HeapRef);
-        self.push(MirInst::LanePush { dest, array: self.resolve(array), lo: self.resolve(lo), hi: self.resolve(hi), shape })?;
+        self.push(MirInst::LanePush { dest, array: self.resolve(array), lo: words[0], hi: words[1], more: words[2..].to_vec(), shape })?;
         Ok(dest)
+    }
+
+    /// A lane element's words, resolved: two to four word lanes.
+    fn lane_words(&mut self, words: &[ValueId], op: &str) -> Result<Vec<ValueId>, MirError> {
+        if !(2..=2 + super::MAX_RET_MORE).contains(&words.len()) || words.iter().any(|&w| !self.resolve_ty(w).is_word_lane()) {
+            return Err(MirError::msg(format!("{op} value type")));
+        }
+        Ok(words.iter().map(|&w| self.resolve(w)).collect())
     }
 
     /// A lane array turned into one word per element in place (a
@@ -1524,7 +1536,7 @@ impl MirBuilder {
         let b = self.cur()?;
         let dest = inst.dest();
         let dest_more = match &inst {
-            MirInst::Call { dest_more, .. } => dest_more.clone(),
+            MirInst::Call { dest_more, .. } | MirInst::LaneIndex { dest_more, .. } => dest_more.clone(),
             _ => Vec::new(),
         };
         let dest_hi = match inst {

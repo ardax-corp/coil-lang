@@ -650,6 +650,25 @@ impl MirFunc {
         Ok(())
     }
 
+    /// A lane op's element words past two (`more`, `n` of them): at most
+    /// [`crate::mir::MAX_RET_MORE`], and when there are any, every word of
+    /// the element a number and its shape a plain tuple's (no tags).
+    fn check_wide_lane<'a>(&self, at: ValueId, words: impl Iterator<Item = &'a ValueId>, n: usize, shape: Option<&super::MirLaneShape>) -> Result<(), String> {
+        if n > crate::mir::MAX_RET_MORE {
+            return Err(format!("{at} lane element of {} words", 2 + n));
+        }
+        if n == 0 {
+            return Ok(());
+        }
+        if shape.is_some_and(|s| *s != super::MirLaneShape::default()) {
+            return Err(format!("{at} wide lane element with a tagged shape"));
+        }
+        if let Some(w) = words.copied().find(|w| !matches!(self.ty(*w), MirTy::I64 | MirTy::F64 | MirTy::Bool)) {
+            return Err(format!("{w} wide lane word is not a number"));
+        }
+        Ok(())
+    }
+
     fn check_inst(&self, inst: &MirInst, preds: &[BlockId]) -> Result<(), String> {
         match inst {
             MirInst::Const { dest, c } => {
@@ -916,34 +935,37 @@ impl MirFunc {
                     return Err(format!("{dest} StoreIndex value type"));
                 }
             }
-            MirInst::LaneIndex { dest, dest_hi, array, index } => {
+            MirInst::LaneIndex { dest, dest_hi, dest_more, array, index } => {
                 if self.ty(*array) != MirTy::HeapRef || !self.ty(*index).is_int() {
                     return Err(format!("{dest} LaneIndex operand type"));
                 }
                 if !self.ty(*dest).is_word_lane() || !self.ty(*dest_hi).is_word_lane() {
                     return Err(format!("{dest} LaneIndex dest type"));
                 }
+                self.check_wide_lane(*dest, [*dest, *dest_hi].iter().chain(dest_more), dest_more.len(), None)?;
             }
-            MirInst::LaneStore { dest, array, index, lo, hi, .. } => {
+            MirInst::LaneStore { dest, array, index, lo, hi, more, shape } => {
                 if self.ty(*array) != MirTy::HeapRef || !self.ty(*index).is_int() {
                     return Err(format!("{dest} LaneStore operand type"));
                 }
                 if !self.ty(*lo).is_word_lane() || !self.ty(*hi).is_word_lane() || self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} LaneStore value type"));
                 }
+                self.check_wide_lane(*dest, [*lo, *hi].iter().chain(more), more.len(), Some(shape))?;
             }
             MirInst::LanesToWords { dest, array, .. } => {
                 if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} LanesToWords array type"));
                 }
             }
-            MirInst::LanePush { dest, array, lo, hi, .. } => {
+            MirInst::LanePush { dest, array, lo, hi, more, shape } => {
                 if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} LanePush array type"));
                 }
                 if !self.ty(*lo).is_word_lane() || !self.ty(*hi).is_word_lane() {
                     return Err(format!("{dest} LanePush value type"));
                 }
+                self.check_wide_lane(*dest, [*lo, *hi].iter().chain(more), more.len(), Some(shape))?;
             }
             MirInst::ArrayLen { dest, array } => {
                 if self.ty(*array) != MirTy::HeapRef {
@@ -1081,9 +1103,15 @@ impl MirFunc {
                     return Err(format!("{dest} HeapFieldStore dest type"));
                 }
             }
-            MirInst::Alloc { dest, elems, .. } => {
+            MirInst::Alloc { dest, elems, kind, .. } => {
                 if self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} Alloc dest is not heapref"));
+                }
+                if let super::MirAllocKind::Lanes { tag_mask, more } = *kind {
+                    let k = 2 + usize::from(more);
+                    if usize::from(more) > crate::mir::MAX_RET_MORE || !elems.len().is_multiple_of(k) || (more != 0 && tag_mask != 0) {
+                        return Err(format!("{dest} lane Alloc of {} words, {k} per element", elems.len()));
+                    }
                 }
                 for (i, e) in elems.iter().enumerate() {
                     if !self.ty(*e).is_specialized() {
