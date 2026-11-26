@@ -1,0 +1,184 @@
+// A generic class's field typed by a class parameter keeps both words of a
+// closed two-word argument (`Cell<Option<int>>`, `Cell<(int, int)>`) or the
+// items of a tuple of 3-4 immediates in the instance. Such an instance's
+// methods, the generics over it and its dictionaries take per-type clones;
+// one-word instances (`Cell<int>`, `Cell<string>`, `Cell<Option<string>>`)
+// keep the shared layout.
+use tests::assert;
+
+class Cell<V> {
+    pub v: V,
+}
+
+impl Cell<V> {
+    pub fn get() -> V {
+        return self.v;
+    }
+
+    pub fn set(V x) {
+        self.v = x;
+    }
+
+    pub fn swap(V x) -> V {
+        let old = self.v;
+        self.v = x;
+        return old;
+    }
+}
+
+class Pair2<A, B> {
+    pub a: A,
+    pub b: B,
+    pub n: int,
+}
+
+impl Pair2<A, B> {
+    pub fn flip(A x, B y) {
+        self.a = x;
+        self.b = y;
+        self.n += 1;
+    }
+}
+
+trait Weight<T> {
+    fn weight(T x) -> int {}
+}
+
+impl Weight for Option<int> {
+    fn weight(Option<int> x) -> int {
+        return match x {
+            Some(n) => n,
+            None => 0,
+        };
+    }
+}
+
+impl Weight for int {
+    fn weight(int x) -> int {
+        return x;
+    }
+}
+
+impl Weight for Cell<T: Weight> {
+    fn weight(Cell<T> c) -> int {
+        return 1 + c.v.weight();
+    }
+}
+
+fn total<T: Weight>(Vec<T> xs) -> int {
+    let s = 0;
+    for x in xs {
+        s += x.weight();
+    }
+    return s;
+}
+
+fn read<T>(Cell<T> c) -> T {
+    return c.v;
+}
+
+fn write<T>(Cell<T> c, T x) {
+    c.v = x;
+}
+
+#[inline(never)]
+fn opt_sum(Cell<Option<int>> c, int k) -> int {
+    let s = 0;
+    let i = 0;
+    while i < k {
+        c.set(if i % 2 == 0 { None } else { Some(i) });
+        s += match c.get() {
+            Some(x) => x,
+            None => 100,
+        };
+        i += 1;
+    }
+    return s;
+}
+
+test("Option<int> field: new, read, write") {
+    let c: Cell<Option<int>> = new Cell(None);
+    assert!(c.v == None);
+    c.v = Some(5);
+    assert!(c.v == Some(5));
+    assert!(c.get() == Some(5));
+    c.set(Some(7));
+    assert!(c.v == Some(7));
+    assert!(c.swap(None) == Some(7));
+    assert!(c.v == None);
+    assert!(opt_sum(c, 6) == 300 + 1 + 3 + 5);
+}
+
+test("tuples: two and three immediates") {
+    let p = new Cell((1, 2));
+    let (a, b) = p.v;
+    assert!(a == 1 && b == 2);
+    p.set((3, 4));
+    assert!(p.get() == (3, 4));
+    let t = new Cell((1, 2, 3));
+    assert!(t.v == (1, 2, 3));
+    t.v = (4, 5, 6);
+    let (x, y, z) = t.get();
+    assert!(x == 4 && y == 5 && z == 6);
+    assert!(t.swap((7, 8, 9)) == (4, 5, 6));
+    assert!(t.v == (7, 8, 9));
+}
+
+test("Result<int, string> and Option<string>") {
+    let r: Cell<Result<int, string>> = new Cell(Ok(3));
+    assert!(r.v == Ok(3));
+    r.set(Err("no"));
+    assert!(r.get() == Err("no"));
+    r.v = Ok(4);
+    assert!(r.v == Ok(4));
+    let s: Cell<Option<string>> = new Cell(Some("a"));
+    s.set(None);
+    assert!(s.get() == None);
+    s.v = Some("b" + "c");
+    assert!(s.v == Some("bc"));
+}
+
+test("one-word instances beside flat ones") {
+    let i = new Cell(1);
+    let s = new Cell("x");
+    let o: Cell<Option<int>> = new Cell(Some(1));
+    i.set(i.get() + 1);
+    s.set(s.get() + "y");
+    o.set(Some(2));
+    assert!(i.v == 2);
+    assert!(s.v == "xy");
+    assert!(o.v == Some(2));
+}
+
+test("generic functions at flat and one-word instances") {
+    let o: Cell<Option<int>> = new Cell(None);
+    write(o, Some(9));
+    assert!(read(o) == Some(9));
+    let t = new Cell((1, 2, 3));
+    write(t, (3, 2, 1));
+    assert!(read(t) == (3, 2, 1));
+    let i = new Cell(4);
+    write(i, 5);
+    assert!(read(i) == 5);
+    let s = new Cell("a");
+    write(s, "b");
+    assert!(read(s) == "b");
+}
+
+test("two parameters") {
+    let p: Pair2<Option<int>, (int, int)> = new Pair2(None, (1, 2), 0);
+    p.flip(Some(3), (4, 5));
+    assert!(p.a == Some(3));
+    assert!(p.b == (4, 5));
+    assert!(p.n == 1);
+    let q = new Pair2("s", 2, 0);
+    q.flip("t", 3);
+    assert!(q.a == "t" && q.b == 3 && q.n == 1);
+}
+
+test("a bound's dictionary at a flat instance") {
+    let xs: Vec<Cell<Option<int>>> = [new Cell(Some(2)), new Cell(None)];
+    assert!(total(xs) == 3 + 1);
+    let ys: Vec<Cell<int>> = [new Cell(5), new Cell(6)];
+    assert!(total(ys) == 13);
+}
