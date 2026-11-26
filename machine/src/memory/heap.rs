@@ -1993,6 +1993,21 @@ impl Heap {
         (header.kind.get() == 12).then(|| unsafe { Gc::from_addr(addr) })
     }
 
+    /// The string object at `addr`, for a word whose static type is
+    /// `string`: a range check and the header kind, as [`Self::fn_at`]
+    /// reads a function. `None` for anything else.
+    #[inline]
+    pub fn str_at(&self, addr: u64) -> Option<RefString> {
+        if addr == 0 || !addr.is_multiple_of(8) || !self.slab.may_contain(addr) {
+            return None;
+        }
+        // SAFETY: as in `fn_at`: a string value's word is a slot start in
+        // the slab's mapped range.
+        let header = unsafe { &*(addr as *const GcHeader) };
+        // Kind 1 is `Object::String` (see `Object::from_header`).
+        (header.kind.get() == 1).then(|| unsafe { Gc::from_addr(addr) })
+    }
+
     /// Classify a raw payload / field word as an object or an immediate.
     #[cfg(test)]
     pub(crate) fn member_of(&self, v: Value) -> Member {
