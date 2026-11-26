@@ -1,0 +1,27 @@
+// CPU: an Option<(int, int)> from a direct call: three words in registers (`mir::wide_ret`).
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn divmod(int a, int b) -> Option<(int, int)> {
+    if b == 0 {
+        return None;
+    }
+    return Some((a / b, a % b));
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 20000000 {
+        s += match divmod(i, i % 7) {
+            Some(t) => {
+                let (q, r) = t;
+                q + r
+            },
+            None => 1,
+        };
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}
