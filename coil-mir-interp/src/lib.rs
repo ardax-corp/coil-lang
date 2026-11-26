@@ -354,7 +354,7 @@ mod tests {
             f.ret_ty = Some(MirTy::Bool);
             let mut b = MirBlock::new(BlockId(0));
             b.insts = ops;
-            b.term = Some(Terminator::Return { lo: Some(ValueId(params - 1)), hi: None });
+            b.term = Some(Terminator::Return { lo: Some(ValueId(params - 1)), hi: None, more: Vec::new() });
             f.blocks.push(b);
             NativeBody { name: name.into(), entry: Some(Label(label)), mir: f }
         };
@@ -404,5 +404,103 @@ mod tests {
         assert_eq!((obj.rc_count(), heap.live_object_count()), (1, live));
         call(&mut heap, 1, &[obj.addr()]);
         assert_eq!(heap.live_object_count(), live - 1, "the last owner's decrement frees it");
+    }
+
+    /// Bodies that return three and four words to direct calls
+    /// (`MirFunc::ret_more_tys`) and callers that fold the words in order:
+    /// `sum3` (label 0) calls `wide3` (1); `sum4` (4) calls `pass4` (3),
+    /// which tail-calls `wide4` (2). Each `wide` returns `x`, `x + 10`,
+    /// `x * 10` and (`wide4`) `x - 10`.
+    fn wide_bodies() -> Vec<NativeBody> {
+        use compiler::native_mir::{MirBinOp, MirConst, MirTy};
+        let v = ValueId;
+        let i64s = |n: usize| vec![MirTy::I64; n];
+        let body = |name: &str, label: u32, types: usize, more: usize, insts: Vec<MirInst>, ret: Vec<u32>| {
+            let mut f = MirFunc::new(name);
+            f.blocks.clear();
+            f.types = i64s(types);
+            f.params = vec![v(0)];
+            f.ret_ty = Some(MirTy::I64);
+            // (`ret_layout` stays `Word`: the engines read the word types.)
+            if ret.len() > 1 {
+                f.ret_hi_ty = Some(MirTy::I64);
+            }
+            f.ret_more_tys = i64s(more);
+            let mut b = MirBlock::new(BlockId(0));
+            b.insts = insts;
+            b.term = Some(Terminator::Return { lo: Some(v(ret[0])), hi: ret.get(1).map(|&r| v(r)), more: ret[2.min(ret.len())..].iter().map(|&r| v(r)).collect() });
+            f.blocks.push(b);
+            NativeBody { name: name.into(), entry: Some(Label(label)), mir: f }
+        };
+        let bin = |dest: u32, op: MirBinOp, lhs: u32, rhs: u32| MirInst::Bin { dest: v(dest), op, ty: MirTy::I64, lhs: v(lhs), rhs: v(rhs) };
+        let konst = |dest: u32, k: i64| MirInst::Const { dest: v(dest), c: MirConst::I64(k) };
+        let call = |dests: &[u32], target: u32| MirInst::Call { dest: v(dests[0]), dest_hi: Some(v(dests[1])), dest_more: dests[2..].iter().map(|&d| v(d)).collect(), target: Label(target), args: vec![v(0)] };
+        // `((w1 * 1000 + w2) * 1000 + w3) ...`, from value `at` on.
+        let fold = |words: &[u32], at: u32| {
+            let mut insts = vec![konst(at, 1000)];
+            let (mut acc, mut next) = (words[0], at + 1);
+            for &w in &words[1..] {
+                insts.push(bin(next, MirBinOp::Mul, acc, at));
+                insts.push(bin(next + 1, MirBinOp::Add, next, w));
+                acc = next + 1;
+                next += 2;
+            }
+            (insts, acc, next as usize)
+        };
+        let wide = |name: &str, label: u32, words: usize| {
+            let mut insts = vec![konst(1, 10), bin(2, MirBinOp::Add, 0, 1), bin(3, MirBinOp::Mul, 0, 1)];
+            if words == 4 {
+                insts.push(bin(4, MirBinOp::Sub, 0, 1));
+            }
+            body(name, label, words + 1, words - 2, insts, (0..words as u32).map(|w| if w == 0 { 0 } else { w + 1 }).collect())
+        };
+        let sum = |name: &str, label: u32, target: u32, words: usize| {
+            let dests: Vec<u32> = (1..=words as u32).collect();
+            let (mut insts, out, types) = fold(&dests, words as u32 + 1);
+            insts.insert(0, call(&dests, target));
+            body(name, label, types, 0, insts, vec![out])
+        };
+        let mut pass = body("pass4", 3, 5, 2, vec![call(&[1, 2, 3, 4], 2)], vec![1, 2, 3, 4]);
+        pass.mir.tail_targets.insert(Label(2));
+        vec![sum("sum3", 0, 1, 3), wide("wide3", 1, 3), wide("wide4", 2, 4), pass, sum("sum4", 4, 3, 4)]
+    }
+
+    /// What `sum3` / `sum4` return for `x`: the words folded in order.
+    fn wide_sums(x: i64) -> (u64, u64) {
+        let k = 1000i64;
+        let s3 = (x * k + (x + 10)) * k + x * 10;
+        let s4 = ((x * k + (x + 10)) * k + x * 10) * k + (x - 10);
+        (s3 as u64, s4 as u64)
+    }
+
+    /// The same bodies as `coil_native`'s test: a direct call reads three
+    /// and four result words, a tail call passes four on, and the entry of
+    /// a four-word body panics rather than hand back two of them.
+    #[test]
+    fn a_direct_call_reads_three_and_four_words() {
+        let pcs = HashMap::from([("sum3".to_string(), 0u32), ("sum4".to_string(), 1u32), ("wide4".to_string(), 2u32)]);
+        let p = prepare(wide_bodies(), &pcs);
+        assert!(p.refused.is_empty(), "refused: {:?}", p.refused);
+        let run = |pc: u32, args: &[u64]| {
+            let e = p.entries.iter().find(|e| e.pc == pc).expect("entry");
+            let marker = 0u8;
+            let mut ctx = NativeCtx::new((std::ptr::addr_of!(marker) as u64).saturating_sub(NATIVE_STACK_BUDGET));
+            ctx.entry_data = e.data as u64;
+            let mut fuel = u64::MAX;
+            ctx.fuel = &mut fuel;
+            let mut heap = machine::Heap::default();
+            ctx.heap = &mut heap;
+            let mut trace = Vec::new();
+            ctx.trace = &mut trace;
+            // SAFETY: `e` runs a body of `args.len()` parameters.
+            let out = unsafe { (e.entry)(&mut ctx, args.as_ptr()) };
+            (ctx.bail, out)
+        };
+        for x in [7i64, -3, 1 << 20] {
+            let (s3, s4) = wide_sums(x);
+            assert_eq!(run(0, &[x as u64]), (0, s3), "sum3({x})");
+            assert_eq!(run(1, &[x as u64]), (0, s4), "sum4({x})");
+        }
+        assert_ne!(run(2, &[7]).0, 0, "an entry of a four-word body panics");
     }
 }
