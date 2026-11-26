@@ -2079,10 +2079,20 @@ impl Compiler {
         if Ty::has_var(elem) {
             return None;
         }
+        // A tuple of three or four immediates: its number words in place,
+        // boxed as a tuple of them.
+        if let Some(items) = crate::layout::wide_scalar_items(&self.checker, elem) {
+            let tys = items.iter().map(crate::mir::scalar_mir_ty).collect::<Option<Vec<_>>>()?;
+            let mut more = [None; crate::mir::MAX_RET_MORE];
+            for (m, &t) in more.iter_mut().zip(&tys[2..]) {
+                *m = Some(t);
+            }
+            return Some(crate::mir::HirLaneElem { lo: tys[0], hi: tys[1], more, shape: crate::mir::MirLaneShape::default() });
+        }
         let (lo, hi) = self.hir_mir_pair_tys(elem)?;
         let (tag_mask, payload_mask, unit_mask) = crate::layout::pair_lane_shape(&self.checker, elem)?;
         let shape = crate::mir::MirLaneShape { tag_mask, payload_mask, unit_mask };
-        Some(crate::mir::HirLaneElem { lo, hi, shape })
+        Some(crate::mir::HirLaneElem { lo, hi, more: [None; crate::mir::MAX_RET_MORE], shape })
     }
 
     fn hir_mir_pair_tys(&self, ty: &Ty) -> Option<(crate::mir::MirTy, crate::mir::MirTy)> {

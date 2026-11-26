@@ -307,6 +307,13 @@ pub const MIR_SECTION_ROOTLESS_FORMAT: u8 = 23;
 /// format 23, whose words sit elsewhere.
 pub const MIR_SECTION_WIDE_RETURN_FORMAT: u8 = 24;
 
+/// The first MIR section format whose lane arrays may hold wide elements
+/// (archive 8.14): `LaneIndex` writes its further dests (`dest_more`),
+/// `LaneStore` / `LanePush` their further words (`more`), each a counted
+/// list, and a lane `Alloc` its words per element past two. A reader
+/// refuses format 24, whose lane ops sit elsewhere.
+pub const MIR_SECTION_WIDE_LANES_FORMAT: u8 = 25;
+
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and
 /// scope and an `at_call` byte; little-endian `u32`s.

@@ -647,34 +647,40 @@ pub enum MirInst {
         dest: ValueId,
         id: u32,
     },
-    /// Element `index` of a lane array (two words per element): its first
-    /// word in `dest`, its second (an enum's tag) in `dest_hi`. Out of
-    /// bounds panics, as [`Self::Index`] does.
+    /// Element `index` of a lane array (`k` words per element): its first
+    /// word in `dest`, its second (an enum's tag) in `dest_hi`, words 3..k
+    /// of a wide element (a tuple of three or four numbers) in
+    /// `dest_more`. Out of bounds panics, as [`Self::Index`] does.
     LaneIndex {
         dest: ValueId,
         dest_hi: ValueId,
+        dest_more: Vec<ValueId>,
         array: ValueId,
         index: ValueId,
     },
-    /// Store `lo` and `hi` as element `index` of a lane array (or, on an
-    /// array of one word per element, the element boxed as `shape` says).
-    /// Dest is a `bool` unit token.
+    /// Store `lo`, `hi` and `more` as element `index` of a lane array
+    /// (or, on an array of one word per element, the element boxed as
+    /// `shape` says; a wide element as a tuple of its words). Dest is a
+    /// `bool` unit token.
     LaneStore {
         dest: ValueId,
         array: ValueId,
         index: ValueId,
         lo: ValueId,
         hi: ValueId,
+        more: Vec<ValueId>,
         shape: MirLaneShape,
     },
-    /// Append the element `[lo, hi]` to a lane array in place (boxed as
-    /// `shape` says on an array of one word per element). Dest is the same
-    /// `HeapRef` identity; a GC safepoint like [`Self::ArrayPush`].
+    /// Append the element `[lo, hi, more..]` to a lane array in place
+    /// (boxed as `shape` says on an array of one word per element, a wide
+    /// element as a tuple). Dest is the same `HeapRef` identity; a GC
+    /// safepoint like [`Self::ArrayPush`].
     LanePush {
         dest: ValueId,
         array: ValueId,
         lo: ValueId,
         hi: ValueId,
+        more: Vec<ValueId>,
         shape: MirLaneShape,
     },
     /// Turn a lane array into one word per element in place, each element
@@ -1149,11 +1155,13 @@ pub struct MirLaneShape {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MirAllocKind {
     Array,
-    /// A lane array of two-word elements, `elems` their words in order
-    /// (`ObjArray::from_lanes`); lane 0 is a heap reference under the tags
-    /// set in `tag_mask`.
+    /// A lane array of `2 + more` words per element, `elems` their words
+    /// in order (`ObjArray::from_lanes`); lane 0 is a heap reference under
+    /// the tags set in `tag_mask` (`0` for a wide element, whose words are
+    /// all numbers).
     Lanes {
         tag_mask: u64,
+        more: u8,
     },
     /// `InitTyped` (`type_id`, `nfields`). Heap fields are SSA for maps (D1);
     /// dense Object `DenseMakeObject` is D2.
@@ -1369,7 +1377,7 @@ impl MirInst {
             _ => None,
         };
         let more: &[ValueId] = match self {
-            Self::Call { dest_more, .. } => dest_more,
+            Self::Call { dest_more, .. } | Self::LaneIndex { dest_more, .. } => dest_more,
             _ => &[],
         };
         std::iter::once(self.dest()).chain(hi).chain(more.iter().copied())
@@ -1411,8 +1419,8 @@ impl MirInst {
             Self::StoreStatic { value, .. } | Self::HomeStore { value, .. } | Self::ClearWord { value, .. } | Self::KeepAlive { value, .. } => vec![*value],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
             Self::LaneIndex { array, index, .. } => vec![*array, *index],
-            Self::LaneStore { array, index, lo, hi, .. } => vec![*array, *index, *lo, *hi],
-            Self::LanePush { array, lo, hi, .. } => vec![*array, *lo, *hi],
+            Self::LaneStore { array, index, lo, hi, more, .. } => [*array, *index, *lo, *hi].into_iter().chain(more.iter().copied()).collect(),
+            Self::LanePush { array, lo, hi, more, .. } => [*array, *lo, *hi].into_iter().chain(more.iter().copied()).collect(),
             Self::LanesToWords { array, .. } => vec![*array],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { object, .. } => vec![*object],
@@ -1499,16 +1507,22 @@ impl MirInst {
                 *array = map(*array);
                 *index = map(*index);
             }
-            Self::LaneStore { array, index, lo, hi, .. } => {
+            Self::LaneStore { array, index, lo, hi, more, .. } => {
                 *array = map(*array);
                 *index = map(*index);
                 *lo = map(*lo);
                 *hi = map(*hi);
+                for v in more.iter_mut() {
+                    *v = map(*v);
+                }
             }
-            Self::LanePush { array, lo, hi, .. } => {
+            Self::LanePush { array, lo, hi, more, .. } => {
                 *array = map(*array);
                 *lo = map(*lo);
                 *hi = map(*hi);
+                for v in more.iter_mut() {
+                    *v = map(*v);
+                }
             }
             Self::LanesToWords { array, .. } => *array = map(*array),
             Self::Alloc { elems, .. } => {

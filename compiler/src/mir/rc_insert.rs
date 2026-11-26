@@ -297,6 +297,8 @@ fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
             MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
             MirInst::Call { target, dest_hi: None, .. } => numbers.contains(target),
             MirInst::Call { target, dest_more, .. } if !dest_more.is_empty() => numbers.contains(target),
+            // A wide lane element's words are all numbers.
+            MirInst::LaneIndex { dest_more, .. } => !dest_more.is_empty(),
             MirInst::Phi { .. } => true,
             _ => false,
         })
@@ -774,6 +776,8 @@ impl Pass {
         let maybe = |v: ValueId| matches!(ty_of(func, v), MirTy::I64 | MirTy::Value);
         for inst in func.blocks.iter().flat_map(|b| &b.insts) {
             match inst {
+                // A wide lane element's words are all numbers.
+                MirInst::LaneIndex { dest_more, .. } if !dest_more.is_empty() => {}
                 MirInst::MatchPayload { .. }
                 | MirInst::ProductLoad { .. }
                 | MirInst::Index { .. }

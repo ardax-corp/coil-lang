@@ -5,8 +5,8 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs` (24 today; a reader takes
-24 only and refuses any other).
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (25 today; a reader takes
+25 only and refuses any other).
 
 ## Major 8
 
@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 13, below, is the
-current version, 8.13 with MIR section `FORMAT` 24). A runtime refuses a major
+only add something to the format raise the minor (minor 14, below, is the
+current version, 8.14 with MIR section `FORMAT` 25). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -207,6 +207,17 @@ is empty in a body that returns at most two words. The layout changes, so
 the MIR section is a new `FORMAT`, 24
 (`common::MIR_SECTION_WIDE_RETURN_FORMAT`), and the reader refuses 23: an
 8.12 archive's code is compiled again.
+
+Minor 14 (wide lane arrays) lets a lane array hold three or four number
+words per element: a `LaneIndex` (tag 45) writes its further dests
+(`dest_more`, a counted list) after `dest_hi`, a `LaneStore` / `LanePush`
+(46 / 47) its further words (`more`, a counted list) after `hi`, and a lane
+`Alloc` (kind 9) a byte of words per element past two after its tag mask. Each list is empty, and the byte 0, for a two-word
+element. The runtime gains `ALLOC_WIDE_LANES` (9) and the helpers
+`coil_native_lane_index_wide` / `_store_wide` / `_push_wide`. The layout
+changes, so the MIR section is a new `FORMAT`, 25
+(`common::MIR_SECTION_WIDE_LANES_FORMAT`), and the reader refuses 24: an
+8.13 archive's code is compiled again.
 
 ## Major 7
 

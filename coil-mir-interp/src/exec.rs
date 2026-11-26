@@ -867,18 +867,46 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 check!();
                 set!(*dest, w);
             }
-            MirInst::LaneIndex { dest, dest_hi, array, index } => {
+            MirInst::LaneIndex { dest, dest_hi, dest_more, array, index } if !dest_more.is_empty() => {
+                // A wide element: its words through a buffer.
+                let mut buf = [0u64; 4];
+                let k = 2 + dest_more.len();
+                rt::coil_native_lane_index_wide(ctx, get!(*array), get!(*index) as i64, k as u64, buf.as_mut_ptr());
+                check!();
+                for (d, w) in [*dest, *dest_hi].iter().chain(dest_more).zip(buf) {
+                    set_word(f, regs, *d, w);
+                }
+            }
+            MirInst::LaneIndex { dest, dest_hi, array, index, .. } => {
                 let w = rt::coil_native_lane_index(ctx, get!(*array), get!(*index) as i64);
                 check!();
                 set_word(f, regs, *dest, w);
                 set_word(f, regs, *dest_hi, (*ctx).ret_hi);
             }
-            MirInst::LaneStore { dest, array, index, lo, hi, shape } => {
+            MirInst::LaneStore { dest, array, index, lo, hi, more, .. } if !more.is_empty() => {
+                let mut buf = [0u64; 4];
+                for (b, v) in buf.iter_mut().zip([*lo, *hi].iter().chain(more)) {
+                    *b = get!(*v);
+                }
+                rt::coil_native_lane_store_wide(ctx, get!(*array), get!(*index) as i64, buf.as_ptr(), 2 + more.len() as u64);
+                check!();
+                set!(*dest, 1);
+            }
+            MirInst::LaneStore { dest, array, index, lo, hi, shape, .. } => {
                 rt::coil_native_lane_store(ctx, get!(*array), get!(*index) as i64, get!(*lo), get!(*hi), shape.tag_mask, shape.payload_mask, shape.unit_mask);
                 check!();
                 set!(*dest, 1);
             }
-            MirInst::LanePush { dest, array, lo, hi, shape } => {
+            MirInst::LanePush { dest, array, lo, hi, more, .. } if !more.is_empty() => {
+                let mut buf = [0u64; 4];
+                for (b, v) in buf.iter_mut().zip([*lo, *hi].iter().chain(more)) {
+                    *b = get!(*v);
+                }
+                let w = rt::coil_native_lane_push_wide(ctx, get!(*array), buf.as_ptr(), 2 + more.len() as u64);
+                check!();
+                set!(*dest, w);
+            }
+            MirInst::LanePush { dest, array, lo, hi, shape, .. } => {
                 let w = rt::coil_native_lane_push(ctx, get!(*array), get!(*lo), get!(*hi), shape.tag_mask, shape.payload_mask, shape.unit_mask);
                 check!();
                 set!(*dest, w);
