@@ -251,7 +251,7 @@ fn owning_bodies<'a>(bodies: impl Iterator<Item = &'a MirFunc>) -> HashSet<Label
 fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>) -> HashSet<Label> {
     let cands: Vec<(Label, &MirFunc)> = bodies
         .filter_map(|(l, f)| Some((l?, f)))
-        .filter(|(_, f)| f.ret_ty == Some(MirTy::I64) && !super::frame_words::is_generator(f) && f.blocks.iter().any(|b| matches!(b.term, Some(Terminator::Return { .. }))))
+        .filter(|(_, f)| (f.ret_ty == Some(MirTy::I64) || wide_scalar_ret(f)) && !super::frame_words::is_generator(f) && f.blocks.iter().any(|b| matches!(b.term, Some(Terminator::Return { .. }))))
         .collect();
     let mut set: HashSet<Label> = cands.iter().map(|(l, _)| *l).collect();
     loop {
@@ -263,6 +263,11 @@ fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>
             let nums = number_words(f, &set);
             let used = used_as_numbers(f, true);
             let all = f.blocks.iter().all(|b| match &b.term {
+                // A wide return's words are numbers only by their definition
+                // (a scalar or a number), never by their use.
+                Some(Terminator::Return { lo, hi, more }) if !more.is_empty() => {
+                    lo.iter().chain(hi.iter()).chain(more.iter()).all(|v| ty_of(f, *v) != MirTy::I64 || nums.contains(v))
+                }
                 Some(Terminator::Return { lo, hi, .. }) => hi.is_none() && lo.is_none_or(|v| nums.contains(&v) || used.contains(&v) && computed_with(f, v)),
                 _ => true,
             });
@@ -276,6 +281,12 @@ fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>
     }
 }
 
+/// `f` returns more than two words, none of them a heap word
+/// ([`super::wide_ret`]'s twins).
+fn wide_scalar_ret(f: &MirFunc) -> bool {
+    !f.ret_more_tys.is_empty() && f.ret_ty.into_iter().chain(f.ret_hi_ty).chain(f.ret_more_tys.iter().copied()).all(|t| matches!(t, MirTy::I64 | MirTy::F64 | MirTy::Bool))
+}
+
 /// The words of `func` that are numbers by their definition, a call of a
 /// body in `numbers` included (φs optimistically).
 fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
@@ -285,10 +296,11 @@ fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
             MirInst::Const { .. } | MirInst::Cmp { .. } => true,
             MirInst::Bin { op, .. } => !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor),
             MirInst::Call { target, dest_hi: None, .. } => numbers.contains(target),
+            MirInst::Call { target, dest_more, .. } if !dest_more.is_empty() => numbers.contains(target),
             MirInst::Phi { .. } => true,
             _ => false,
         })
-        .map(MirInst::dest)
+        .flat_map(MirInst::dests)
         .collect();
     // A ground body's `int` parameter is a number, unless it is a pair's
     // low word (which may carry a heap payload).
