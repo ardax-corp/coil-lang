@@ -1,0 +1,96 @@
+// Hit-dense byte scans over a `Vec<byte>`: a tokenizer's loops (the end of
+// a quoted string, a run of digits, whitespace) over a 2 MiB JSON-like
+// buffer, where each scan ends within a few bytes. Prints the token count
+// and a checksum.
+use io::sync::println;
+use string::{format, to_bytes};
+use env::args;
+use conv::parse_int;
+
+fn arg_n(int fallback) -> int {
+    let argv = match args() {
+        Result::Ok(a) => a,
+        Result::Err(_) => Vec::new(),
+    };
+    if argv.len() < 2 {
+        return fallback;
+    }
+    return match parse_int(argv[argv.len() - 1]) {
+        Result::Ok(n) => n,
+        Result::Err(_) => fallback,
+    };
+}
+
+/// The closing quote of the string whose body starts at `from`.
+fn string_end(Vec<byte> s, int from) -> int {
+    let i = from;
+    while i < s.len() {
+        let c = s[i];
+        if c == 34 as byte || c == 92 as byte {
+            return i;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+/// The first byte at or after `from` that is not a digit.
+fn digits_end(Vec<byte> s, int from) -> int {
+    let i = from;
+    while i < s.len() && s[i] >= 48 as byte && s[i] <= 57 as byte {
+        i = i + 1;
+    }
+    return i;
+}
+
+/// The first byte at or after `from` that is not a space or a newline.
+fn skip_ws(Vec<byte> s, int from) -> int {
+    let i = from;
+    while i < s.len() {
+        let c = s[i];
+        if c != 32 as byte && c != 10 as byte {
+            return i;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+fn main() {
+    let n = arg_n(2097152);
+    let doc: Vec<byte> = Vec::with_capacity(n + 64);
+    let x = 7;
+    while doc.len() < n {
+        x = (x * 48271) % 2147483647;
+        let piece = format("\"k%i\": %i, ", x % 97, x % 100000);
+        if x % 5 == 0 {
+            piece = piece + "\n  ";
+        }
+        for b in to_bytes(piece) {
+            doc.push(b);
+        }
+    }
+    let tokens = 0;
+    let sum = 0;
+    let i = 0;
+    while i < doc.len() {
+        i = skip_ws(doc, i);
+        if i >= doc.len() {
+            break;
+        }
+        let c = doc[i];
+        if c == 34 as byte {
+            let e = string_end(doc, i + 1);
+            sum = sum + e - i;
+            i = e + 1;
+        } else if c >= 48 as byte && c <= 57 as byte {
+            let e = digits_end(doc, i);
+            sum = sum + e - i;
+            i = e;
+        } else {
+            i = i + 1;
+        }
+        tokens = tokens + 1;
+    }
+    let _ = println(format("%i %i", tokens, sum));
+}
