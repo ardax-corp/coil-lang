@@ -499,6 +499,60 @@ impl Lower<'_> {
         }
     }
 
+    /// A flat wide class field `id`: its first slot, first tail slot and
+    /// its items' word types.
+    fn wide_field(&self, id: HirId) -> Option<(u32, u32, Vec<MirTy>)> {
+        match self.field(id).word {
+            HirFieldWord::Wide { slot, tail, n, tys } => Some((slot, tail, tys[..n as usize].to_vec())),
+            _ => None,
+        }
+    }
+
+    /// The slot of item `i` of a flat wide field at `slot` / `tail`.
+    fn wide_slot(slot: u32, tail: u32, i: usize) -> u32 {
+        if i == 0 { slot } else { tail + i as u32 - 1 }
+    }
+
+    /// The `n` items of tuple value `id` as words: a tuple made in place
+    /// gives its items, any other its object's loads. `None` if it never
+    /// returns.
+    fn tuple_item_words(&mut self, id: HirId, tys: &[MirTy]) -> Result<Option<Vec<ValueId>>, Refusal> {
+        if let HirKind::Make { kind: MakeKind::Tuple, args } = &self.hir.expr(id).kind
+            && args.len() == tys.len()
+        {
+            let args = args.clone();
+            let mut words = Vec::with_capacity(args.len());
+            for (&a, &ty) in args.iter().zip(tys) {
+                let Some(v) = self.word(a)? else {
+                    return Ok(None);
+                };
+                if self.b.value_ty(v) != ty {
+                    return Err("wide item type".into());
+                }
+                words.push(v);
+            }
+            return Ok(Some(words));
+        }
+        let Some(obj) = self.word(id)? else {
+            return Ok(None);
+        };
+        if self.b.value_ty(obj) != MirTy::HeapRef {
+            return Err("wide value".into());
+        }
+        let mut words = Vec::with_capacity(tys.len());
+        for (i, &ty) in tys.iter().enumerate() {
+            words.push(self.b.ins_product_load(obj, i as u32, ty).map_err(mir)?);
+        }
+        Ok(Some(words))
+    }
+
+    /// A tuple object of number words `words`, as `make_tuple` makes one.
+    fn wide_tuple(&mut self, words: Vec<ValueId>) -> Result<ValueId, Refusal> {
+        let kinds = common::pack_word_kinds(std::iter::repeat_n(common::WORD_SCALAR, words.len()));
+        let obj = self.b.ins_alloc_kinds(MirAllocKind::TUPLE, words, kinds).map_err(mir)?;
+        self.b.ins_gc_barrier(MirGcKind::Safepoint, obj).map_err(mir)
+    }
+
     /// A stack array local's first slot, length and element type.
     fn stack(&self, local: u32) -> Option<(u32, usize, MirTy)> {
         let cell = self.facts.stacks.get(local as usize)?;
@@ -540,7 +594,7 @@ impl Lower<'_> {
 
     /// What `new` `id` makes.
     fn new_fact(&self, id: HirId) -> &HirNew {
-        static NONE: HirNew = HirNew { object: None, tails: Vec::new(), arg_niches: Vec::new() };
+        static NONE: HirNew = HirNew { object: None, tails: Vec::new(), wide: Vec::new(), arg_niches: Vec::new() };
         match self.facts.news.get(id.0 as usize) {
             Some(cell) => cell.get_or_init(|| self.cx.new_object(id)),
             None => &NONE,
@@ -783,6 +837,9 @@ pub struct HirNew {
     /// Each field's tail slot when the class has flat two-word fields
     /// (`Checker::class_flat_tails`): its second word.
     pub tails: Vec<Option<u32>>,
+    /// Each field's first tail slot and extra word count when the class
+    /// has flat wide fields (`Checker::class_wide_tails`).
+    pub wide: Vec<Option<(u32, u32)>>,
     /// The arguments for a field open in a class parameter whose own word
     /// is a niche layout: boxed to the enum object the field holds.
     pub arg_niches: Vec<(u32, ValueLayout)>,
@@ -807,6 +864,10 @@ pub enum HirFieldWord {
     /// A flat two-word class field: its slot (the first word), its tail
     /// slot (the second) and their word types.
     Pair { slot: u32, tail: u32, lo: MirTy, hi: MirTy },
+    /// A flat wide class field (`Checker::class_wide_tails`): the slot of
+    /// its first item, the first of its tail slots (items `1..n`, in
+    /// order) and its `n` items' word types (`tys[..n]`), all numbers.
+    Wide { slot: u32, tail: u32, n: u32, tys: [MirTy; 4] },
     /// A heap class object's field (or a record variant's payload) that
     /// holds the word its type says: its slot and word type.
     Heap { slot: u32, ty: MirTy },
@@ -4102,6 +4163,41 @@ impl Lower<'_> {
                     self.b.mark_invariant_load(hi);
                 }
                 Ok(Val::Pair(lo, hi))
+            }
+            // A flat wide field: its items from their slots, as a tuple.
+            HirKind::Field { base, .. } if let Some((slot, tail, tys)) = self.wide_field(id) => {
+                let Some(obj) = self.word(*base)? else {
+                    return Ok(Val::Never);
+                };
+                if self.b.value_ty(obj) != MirTy::HeapRef {
+                    return Err("wide field base".into());
+                }
+                let invariant = self.field(id).invariant;
+                let mut words = Vec::with_capacity(tys.len());
+                for (i, &ty) in tys.iter().enumerate() {
+                    let w = self.b.ins_product_load(obj, Self::wide_slot(slot, tail, i), ty).map_err(mir)?;
+                    if invariant {
+                        self.b.mark_invariant_load(w);
+                    }
+                    words.push(w);
+                }
+                Ok(Val::V(self.wide_tuple(words)?))
+            }
+            HirKind::Assign { place, value }
+                if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
+                    && let Some((slot, tail, tys)) = self.wide_field(*place) =>
+            {
+                // The value, then the object, as a pair field's.
+                let Some(words) = self.tuple_item_words(*value, &tys)? else {
+                    return Ok(Val::Never);
+                };
+                let Some(obj) = self.word(base)? else {
+                    return Ok(Val::Never);
+                };
+                for (i, w) in words.into_iter().enumerate() {
+                    self.b.ins_field_store(obj, w, Self::wide_slot(slot, tail, i), true).map_err(mir)?;
+                }
+                Ok(Val::Unit)
             }
             HirKind::Assign { place, value }
                 if let HirKind::Field { base, .. } = self.hir.expr(*place).kind
@@ -7708,10 +7804,23 @@ impl Lower<'_> {
         // A flat two-word field's first word is the row's (its tail slot
         // follows the fields).
         let tails = self.new_fact(id).tails.clone();
+        let wide = self.new_fact(id).wide.clone();
         let tys: Vec<Option<Ty>> = args
             .iter()
             .enumerate()
-            .map(|(i, &a)| if matches!(tails.get(i), Some(Some(_))) { None } else { self.expr_ty(a).cloned() })
+            .map(|(i, &a)| {
+                if matches!(tails.get(i), Some(Some(_))) {
+                    None
+                } else if matches!(wide.get(i), Some(Some(_))) {
+                    // A wide field's first item, a number.
+                    match self.expr_ty(a).map(strip_readonly) {
+                        Some(Ty::Tuple(items)) => items.first().cloned(),
+                        _ => None,
+                    }
+                } else {
+                    self.expr_ty(a).cloned()
+                }
+            })
             .collect();
         let kinds = common::pack_word_kinds(tys.iter().map(|t| t.as_ref().map_or(common::WORD_UNKNOWN, |t| self.cx.word_kind(t))));
         let nfields = words.len() as u32;
@@ -7731,9 +7840,28 @@ impl Lower<'_> {
     fn object_words(&mut self, id: HirId, args: &[HirId]) -> Result<Option<Vec<ValueId>>, Refusal> {
         let tys = self.news(id).expect("new object").1.clone();
         let tails = self.new_fact(id).tails.clone();
+        let wide = self.new_fact(id).wide.clone();
         let mut words = Vec::with_capacity(args.len());
         let mut tail_words = Vec::new();
         for (i, (&arg, ty)) in args.iter().zip(tys).enumerate() {
+            // A flat wide field: its first item here, the others in its
+            // tail slots.
+            if let Some(&Some((tail, extra))) = wide.get(i) {
+                let item_tys = self.expr_ty(arg).and_then(|t| match strip_readonly(t) {
+                    Ty::Tuple(items) if items.len() as u32 == extra + 1 => items.iter().map(scalar).collect::<Option<Vec<_>>>(),
+                    _ => None,
+                });
+                let item_tys = item_tys.ok_or("wide field argument")?;
+                let Some(items) = self.tuple_item_words(arg, &item_tys)? else {
+                    return Ok(None);
+                };
+                let mut items = items.into_iter();
+                words.push(items.next().ok_or("wide field argument")?);
+                for (k, w) in items.enumerate() {
+                    tail_words.push((tail + k as u32, w));
+                }
+                continue;
+            }
             // A flat two-word field: its first word here, its second in
             // its tail slot.
             if let Some(&Some(tail)) = tails.get(i) {

@@ -72,7 +72,7 @@ pub use native_capture::{ComptimeCapture, ConstArg, ConstCall, ConstResult, Nati
 pub use instcombine::{instcombine, };
 pub use licm::{licm, mark_frozen_arrays, spin_headers};
 pub use sccp::sccp;
-pub use sroa::sroa;
+pub use sroa::{forward_tuple_loads, sroa};
 pub use bool_thread::thread_bool_phis;
 pub use phi_sroa::phi_sroa;
 pub use bulk::bulk_push;

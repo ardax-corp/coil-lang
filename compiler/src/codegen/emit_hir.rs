@@ -12986,6 +12986,21 @@ impl<'a> HirLowerCx<'a> {
         {
             return HirFieldWord::Pair { slot: idx, tail, lo, hi };
         }
+        // A flat wide field: its first item's slot and its tail slots.
+        if base_ty.is_some_and(|t| self.is_class(t))
+            && let Some((FieldAt::Slot(idx), fty)) = c.hir_field(hir, base, name)
+            && let Some(key) = c.hir_class_of(hir, base)
+            && let Some(&Some((tail, extra))) = checker.class_wide_tails(&key).get(idx as usize)
+            && let Some(items) = crate::layout::wide_scalar_items(checker, &fty)
+            && items.len() as u32 == extra + 1
+            && ty.is_some_and(|t| crate::layout::wide_scalar_items(checker, t).is_some_and(|i| i.len() == items.len()))
+        {
+            let mut tys = [crate::mir::MirTy::I64; 4];
+            for (t, item) in tys.iter_mut().zip(&items) {
+                *t = crate::mir::scalar_mir_ty(item).unwrap_or(crate::mir::MirTy::I64);
+            }
+            return HirFieldWord::Wide { slot: idx, tail, n: extra + 1, tys };
+        }
         if base_ty.is_some_and(|t| {
             self.is_class(t) || {
                 // A record variant's field: its payload slot of the boxed
@@ -13519,6 +13534,10 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
             let tails = checker.class_flat_tails(&class);
             if tails.iter().any(Option::is_some) {
                 out.tails = tails;
+            }
+            let wide = checker.class_wide_tails(&class);
+            if wide.iter().any(Option::is_some) {
+                out.wide = wide;
             }
             out.object = Some((checker.class_type_id(&class), words));
         }

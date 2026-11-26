@@ -28,7 +28,7 @@ pub fn sroa_class(body: &HirBody, checker: &Checker, init: HirId) -> Option<Stri
     let n = checker.class_fields(&key)?.len();
     // A flat two-word field takes two slots in the object (its tail), which
     // frame slots of one word per field do not model.
-    let flat = checker.class_flat_tails(&key).iter().any(Option::is_some);
+    let flat = checker.class_flat_tails(&key).iter().any(Option::is_some) || checker.class_wide_tails(&key).iter().any(Option::is_some);
     (!checker.class_has_drop(&key) && !flat && (1..=32).contains(&n)).then_some(key)
 }
 

@@ -99,6 +99,83 @@ pub fn sroa(func: &mut MirFunc) -> usize {
     removed
 }
 
+/// Read a fresh tuple's items from the words it was made of: each
+/// `productload` of an `alloc.tuple` (or of a safepoint barrier on one)
+/// becomes the item, and a tuple nothing else reads goes. A tuple is never
+/// written after it is made, so its items are the words it was made of.
+/// A flat wide field's read ([`crate::mir::HirFieldWord::Wide`]) makes
+/// such a tuple, which a destructuring then reads item by item.
+/// Returns how many loads it forwarded.
+pub fn forward_tuple_loads(func: &mut MirFunc) -> usize {
+    let mut items: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        match inst {
+            MirInst::Alloc { dest, kind: MirAllocKind::TUPLE, elems, .. } => {
+                items.insert(*dest, elems.clone());
+            }
+            MirInst::GcBarrier { dest, object, .. } if items.contains_key(object) => {
+                let elems = items[object].clone();
+                items.insert(*dest, elems);
+            }
+            _ => {}
+        }
+    }
+    if items.is_empty() {
+        return 0;
+    }
+    // Anything that may write into an object keeps its loads as they are.
+    let written: std::collections::HashSet<ValueId> = func
+        .blocks
+        .iter()
+        .flat_map(|b| &b.insts)
+        .filter_map(|i| match i {
+            MirInst::HeapFieldStore { object, .. } => Some(*object),
+            MirInst::StoreIndex { array, .. } => Some(*array),
+            MirInst::Cow { src, .. } => Some(*src),
+            _ => None,
+        })
+        .collect();
+    let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
+    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+        if let MirInst::ProductLoad { dest, object, slot } = inst
+            && !written.contains(object)
+            && let Some(&item) = items.get(object).and_then(|e| e.get(*slot as usize))
+            && super::frame_words::ty_of(func, item) == super::frame_words::ty_of(func, *dest)
+        {
+            subst.insert(*dest, item);
+        }
+    }
+    if subst.is_empty() {
+        return 0;
+    }
+    let n = subst.len();
+    func.map_values(|v| *subst.get(&v).unwrap_or(&v));
+    // Drop the forwarded loads, then the tuples (and their barriers) no
+    // one reads any more, last made first.
+    for block in &mut func.blocks {
+        block.insts.retain(|i| !subst.contains_key(&i.dest()) || !matches!(i, MirInst::ProductLoad { .. }));
+    }
+    loop {
+        let used = used_values(func);
+        let mut gone = false;
+        for block in &mut func.blocks {
+            let before = block.insts.len();
+            block.insts.retain(|inst| match inst {
+                MirInst::Alloc { dest, kind: MirAllocKind::TUPLE, .. } | MirInst::GcBarrier { dest, .. } => {
+                    !items.contains_key(dest) || used.contains(dest)
+                }
+                _ => true,
+            });
+            gone |= block.insts.len() != before;
+        }
+        if !gone {
+            break;
+        }
+    }
+    dce(func);
+    n
+}
+
 fn used_values(func: &MirFunc) -> std::collections::HashSet<ValueId> {
     let mut used = std::collections::HashSet::new();
     for block in &func.blocks {
@@ -146,6 +223,22 @@ mod tests {
             .filter(|i| matches!(i, MirInst::Alloc { .. }))
             .count();
         assert_eq!(allocs, 1, "second Alloc must die; {func:?}");
+    }
+
+    #[test]
+    fn forwards_fresh_tuple_items() {
+        let mut b = MirBuilder::new("items");
+        let i = b.add_param(MirTy::I64).unwrap();
+        let x = b.add_param(MirTy::F64).unwrap();
+        let t = b.ins_alloc(MirAllocKind::TUPLE, vec![i, x, i]).unwrap();
+        let g = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, t).unwrap();
+        let v = b.ins_product_load(g, 2, MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(v)).unwrap();
+        let mut func = b.finish().unwrap();
+        assert_eq!(forward_tuple_loads(&mut func), 1);
+        let left = func.blocks.iter().flat_map(|bl| bl.insts.iter()).filter(|i| matches!(i, MirInst::Alloc { .. } | MirInst::ProductLoad { .. })).count();
+        assert_eq!(left, 0, "the tuple and its load go; {func:?}");
     }
 
     #[test]

@@ -34,6 +34,10 @@ pub fn optimize_mir(func: &mut crate::mir::MirFunc, opts: &OptimizeOptions) {
         crate::mir::gvn(func);
         check_after(func, "gvn");
     }
+    // A fresh tuple read item by item (a flat wide field's) is its items.
+    if opts.mir_fold && crate::mir::forward_tuple_loads(func) > 0 {
+        check_after(func, "forward_tuple_loads");
+    }
     // S2f: reuse the mutated array after StoreIndex (drop rematerialized Alloc).
     crate::mir::sroa(func);
     check_after(func, "sroa");

@@ -518,6 +518,18 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   instance, so a shared body and a clone read it alike. A `shared` (a
   two-word store is not atomic) or `view` class keeps one word per field,
   and a class with a flat field is never scalar-replaced into frame slots.
+  A pair field's words are stored as numbers when its class row says they
+  are: the tail always, the first word for a scalar pair.
+- A class field of a tuple of three or four immediates (`(int, int,
+  int)`, `(float, float, float, int)`, `layout::wide_scalar_items`) sits
+  flat too, under the same rules: its first item in the field's slot,
+  the others in tail slots after the pair tails
+  (`Checker::class_wide_tails`), all marked scalar. `new` and a write
+  store each item (a tuple made in place gives its items; any other value
+  is loaded item by item), and a read loads them into a fresh tuple,
+  which `mir::forward_tuple_loads` takes apart again when the reader only
+  reads its items (`let (a, b, c) = p.t`). A read that keeps the tuple
+  (pushes it, returns it) allocates one.
 - A `static let` of a closed two-word type keeps its second word in a
   tail slot after every declared static (`Checker::finalize_static_tails`,
   `static_tail`): its initializer returns both words and `__module_setup`
