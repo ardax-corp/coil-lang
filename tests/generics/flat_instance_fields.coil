@@ -4,8 +4,10 @@
 // methods, the generics over it and its dictionaries take per-type clones;
 // one-word instances (`Cell<int>`, `Cell<string>`, `Cell<Option<string>>`)
 // keep the shared layout.
+use string::format;
 use tests::assert;
 
+#[derive(Show, Eq)]
 class Cell<V> {
     pub v: V,
 }
@@ -13,6 +15,10 @@ class Cell<V> {
 impl Cell<V> {
     pub fn get() -> V {
         return self.v;
+    }
+
+    pub fn map<U>(fn(V) -> U f) -> Cell<U> {
+        return new Cell(f(self.v));
     }
 
     pub fn set(V x) {
@@ -24,6 +30,21 @@ impl Cell<V> {
         self.v = x;
         return old;
     }
+}
+
+class Holder<T> {
+    pub c: Cell<T>,
+    pub k: int,
+}
+
+impl Holder<T> {
+    pub fn inner() -> T {
+        return self.c.v;
+    }
+}
+
+class Outer {
+    pub c: Cell<Option<int>>,
 }
 
 class Pair2<A, B> {
@@ -73,6 +94,15 @@ fn total<T: Weight>(Vec<T> xs) -> int {
     return s;
 }
 
+fn weigh_new<T: Weight>(T x) -> int {
+    let c = new Cell(x);
+    return c.weight();
+}
+
+fn hold<T>(T x) -> Holder<T> {
+    return new Holder(new Cell(x), 0);
+}
+
 fn read<T>(Cell<T> c) -> T {
     return c.v;
 }
@@ -86,7 +116,11 @@ fn opt_sum(Cell<Option<int>> c, int k) -> int {
     let s = 0;
     let i = 0;
     while i < k {
-        c.set(if i % 2 == 0 { None } else { Some(i) });
+        c.set(if i % 2 == 0 {
+            None
+        } else {
+            Some(i)
+        });
         s += match c.get() {
             Some(x) => x,
             None => 100,
@@ -181,4 +215,82 @@ test("a bound's dictionary at a flat instance") {
     assert!(total(xs) == 3 + 1);
     let ys: Vec<Cell<int>> = [new Cell(5), new Cell(6)];
     assert!(total(ys) == 13);
+}
+
+test("derived Show and Eq") {
+    let a: Cell<Option<int>> = new Cell(Some(1));
+    let b: Cell<Option<int>> = new Cell(Some(1));
+    assert!(a == b);
+    b.v = None;
+    assert!(a != b);
+    assert!(format("%v", a) == "Cell { v: Some(1) }");
+    assert!(b.show() == "Cell { v: None }");
+    assert!(format("%v", new Cell((1, 2, 3))) == "Cell { v: (1, 2, 3) }");
+}
+
+test("a flat instance in another class's field and a closure") {
+    let h = hold(Some(4));
+    assert!(h.inner() == Some(4));
+    h.c.v = None;
+    assert!(h.c.v == None);
+    let o = new Outer(new Cell(Some(2)));
+    o.c.v = Some(3);
+    assert!(o.c.get() == Some(3));
+    let f = fn () use (o) => o.c.v;
+    assert!(f() == Some(3));
+}
+
+test("a method making a flat instance") {
+    let i = new Cell(3);
+    let m = i.map(fn (int x) => Some(x + 1));
+    assert!(m.v == Some(4));
+    let t = i.map(fn (int x) => (x, x * 2, x * 3));
+    assert!(t.v == (3, 6, 9));
+}
+
+test("a shared body's own instance and its dictionary") {
+    assert!(weigh_new(Some(3)) == 4);
+    assert!(weigh_new(5) == 6);
+}
+
+test("floats and bools") {
+    let a: Cell<Option<float>> = new Cell(Some(1.5));
+    a.v = Some(2.5);
+    assert!(a.get() == Some(2.5));
+    let b = new Cell((1.5, 2));
+    b.v = (3.5, 4);
+    let (x, y) = b.get();
+    assert!(x == 3.5 && y == 4);
+    let c = new Cell((true, 2, 0.5));
+    let (p, q, r) = c.get();
+    assert!(p && q == 2 && r == 0.5);
+    let d: Cell<Option<bool>> = new Cell(Some(false));
+    assert!(d.v == Some(false));
+}
+
+test("a Vec of flat instances") {
+    let xs: Vec<Cell<Option<int>>> = [];
+    let i = 0;
+    while i < 10 {
+        xs.push(
+            new Cell(
+                if i % 2 == 0 {
+                    Some(i)
+                } else {
+                    None
+                },
+            ),
+        );
+        i += 1;
+    }
+    let s = 0;
+    for c in xs {
+        s += match c.v {
+            Some(n) => n,
+            None => 100,
+        };
+    }
+    assert!(s == 0 + 2 + 4 + 6 + 8 + 500);
+    let r = readonly new Cell(Some(5));
+    assert!(r.v == Some(5));
 }

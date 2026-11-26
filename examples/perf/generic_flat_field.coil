@@ -11,7 +11,11 @@ fn main() {
     let s = 0;
     let i = 0;
     while i < 20000000 {
-        c.v = if i % 3 == 0 { None } else { Some(i) };
+        c.v = if i % 3 == 0 {
+            None
+        } else {
+            Some(i)
+        };
         s += match c.v {
             Some(x) => x,
             None => 1,

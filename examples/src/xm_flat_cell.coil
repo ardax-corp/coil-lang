@@ -1,0 +1,20 @@
+// A generic class whose field has its class parameter's type, and a
+// generic function making one, for another module's flat instances
+// (`tests/modules/flat_instance_across_modules.coil`).
+class Cell<V> {
+    pub v: V,
+}
+
+impl Cell<V> {
+    pub fn get() -> V {
+        return self.v;
+    }
+
+    pub fn set(V x) {
+        self.v = x;
+    }
+}
+
+fn cell<T>(T x) -> Cell<T> {
+    return new Cell(x);
+}
