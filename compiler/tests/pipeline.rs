@@ -2719,6 +2719,37 @@ fn main() {
     assert_eq!(output, "1");
 }
 
+/// The grain the loop tests below fork their small loops at: their light
+/// bodies are far from worth a job under the cost model
+/// (`LoopParSite::grain`).
+const LIGHT_LOOP_GRAIN: i64 = 20;
+
+/// A light loop of a hundred trips runs on its own thread: a chunk of it
+/// costs less than a job.
+#[test]
+fn auto_par_leaves_a_small_light_loop_sequential() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn main() {
+    let acc = 0;
+    let i = 0;
+    while i < 100 {
+        acc = acc + sq(i);
+        i = i + 1;
+    }
+    write(stdout(), to_bytes(format("%i,%i", acc, i)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let compiled = compile(&mut pipeline, src).expect("the loop should compile");
+    assert!(pipeline.function_offset("__coil_par_loop_1").is_none(), "a light loop of 100 trips is not worth a fork");
+    assert_eq!(run_compiled(compiled, &pipeline, None), "328350,100");
+}
+
 /// A pure counted loop above the threshold must split into chunk workers and
 /// still fold to the sequential sum.
 #[test]
@@ -2740,6 +2771,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("auto-par loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
@@ -2786,6 +2818,7 @@ fn main() {{
         )
     };
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, &body("fn (int x) => x + 2")).expect("pure lambda loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
@@ -2860,6 +2893,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("captured int loop should compile");
     assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
     let output = run_compiled(compiled, &pipeline, None);
@@ -2885,6 +2919,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("branched loop should compile");
     assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
     let output = run_compiled(compiled, &pipeline, None);
@@ -2908,6 +2943,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("stride loop should compile");
     assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
     let output = run_compiled(compiled, &pipeline, None);
@@ -2967,6 +3003,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("auto-par loop should compile");
     assert!(
         spawns_shared(&compiled),
@@ -3121,6 +3158,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("two auto-par loops should compile");
     for name in ["__coil_par_loop_1", "__coil_par_loop_2"] {
         assert!(
@@ -3204,6 +3242,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("auto-par for-range should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
@@ -3231,6 +3270,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("inclusive for-range should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
@@ -3259,6 +3299,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("auto-par const range local should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
@@ -3285,6 +3326,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("auto-par xor loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
@@ -3313,6 +3355,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("auto-par const-scale loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
@@ -3340,6 +3383,7 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
+    pipeline.set_par_loop_grain_cap(Some(LIGHT_LOOP_GRAIN));
     let compiled = compile(&mut pipeline, src).expect("commuted add loop should compile");
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
