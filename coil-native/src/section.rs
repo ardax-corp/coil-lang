@@ -36,7 +36,7 @@ mod tests {
         b.insts.push(MirInst::Const { dest: ValueId(2), c: MirConst::I64(2) });
         b.insts.push(MirInst::Bin { dest: ValueId(3), op: MirBinOp::Mul, ty: MirTy::I64, lhs: ValueId(1), rhs: ValueId(2) });
         b.insts.push(MirInst::Bin { dest: ValueId(4), op: MirBinOp::Add, ty: MirTy::I64, lhs: ValueId(0), rhs: ValueId(3) });
-        b.term = Some(Terminator::Return { lo: Some(ValueId(4)), hi: None });
+        b.term = Some(Terminator::Return { lo: Some(ValueId(4)), hi: None, more: Vec::new() });
         f.blocks.push(b);
         NativeBody { name: "f".into(), entry: Some(Label(7)), mir: f }
     }
