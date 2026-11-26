@@ -105,7 +105,12 @@ their own layout and bounds resolve statically.
   signature holds a nested open enum (clone-only, `fn_sig_split`), are
   compiled from their body anyway: no ground call of the latter reaches
   its shared body, so nothing reads its values in the other layout
-  ([layout.md](layout.md), "Open enums", #2547).
+  ([layout.md](layout.md), "Open enums", #2547). So is a generic whose
+  signature or instance head reaches a generic class instance holding a
+  field flat at the call's types (`Cell<Option<int>>`, `fn_flat_split`;
+  layout.md, "Flat instances"). A class whose module does not know the
+  types has no flat instance there, so its shared bodies agree with the
+  instance's one-word field.
 
 Tests: `perf_metrics::foreign_method_clone_is_specialized`,
 `perf_metrics::foreign_fn_clone_is_specialized`.
@@ -131,7 +136,9 @@ take the shared body instead (warning E0804):
   `monomorphize::MAX_TOTAL_SPECIALIZATIONS`) bounds one module's plan and,
   separately, a program's instance and foreign clones, against fan-out
   through many functions at distinct types. Tests that need the shared
-  body set it low (`// @flags --clone-budget 8`).
+  body set it low (`// @flags --clone-budget 8`). A clone-only generic
+  (a nested open enum, a function in a field, a flat instance) is cloned
+  past it.
 
 Until 2026-10 these were counts (8 clones per function or method, 64 per
 module, 256 instance clones per program), which real code did not reach
