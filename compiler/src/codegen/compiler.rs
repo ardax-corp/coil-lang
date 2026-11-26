@@ -368,6 +368,13 @@ impl Compiler {
         self.par_heap_forks = on;
     }
 
+    /// At most this grain for a counted loop
+    /// ([`crate::hir::par::LoopParSite::grain`]). For tests of the chunk
+    /// worker on loops too small for the cost model.
+    pub fn set_par_loop_grain_cap(&mut self, cap: Option<i64>) {
+        self.par_loop_grain_cap = cap;
+    }
+
     /// Turn typed inlining of HIR bodies on (the default) or off.
     pub fn set_hir_inline(&mut self, on: bool) {
         self.opt_options.hir_inline = on;
@@ -7347,7 +7354,13 @@ impl Compiler {
             // A loop whose body builds heap values stays sequential, as a
             // heap-building fork does (`LoopParSite::worth_forking`).
             let heap_forks = self.par_heap_forks;
-            self.loop_par_sites.retain(|_, site| site.worth_forking(heap_forks));
+            let cap = self.par_loop_grain_cap;
+            self.loop_par_sites.retain(|_, site| {
+                if let Some(cap) = cap {
+                    site.grain = site.grain.min(cap);
+                }
+                site.worth_forking(heap_forks)
+            });
         }
         // E0805: the same detector with every user function an arm. The hint
         // is advice about the source, not about what auto-par did, so

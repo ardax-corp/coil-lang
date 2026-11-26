@@ -96,6 +96,10 @@ pub struct LoopParSite {
     /// shared-heap steal epoch. Not worth it today, as a heap-building
     /// fork is not ([`Self::worth_forking`]).
     pub heap_values: bool,
+    /// Trips a chunk needs before a spawn pays for itself, from how much
+    /// one trip costs ([`loop_grain`]): [`HEAVY_LOOP_GRAIN`] for a body
+    /// that loops or recurses, more for a light one.
+    pub grain: i64,
 }
 
 /// `local >= bound` (`at_least`) or `local <= bound`, of a live capture or
@@ -113,16 +117,83 @@ impl std::fmt::Display for SignTest {
     }
 }
 
-/// Upper bound on chunks for one counted loop. The joiner runs the first.
+/// Upper bound on chunks for one counted loop. The joiner runs the last.
 pub const LOOP_PAR_MAX_CHUNKS: i64 = 4;
+
+/// The grain of a loop whose body loops or recurses (a nested loop, or a
+/// call to a function that loops or calls itself): one trip is work
+/// enough for a job of its own.
+pub const HEAVY_LOOP_GRAIN: i64 = 1;
+
+/// HIR nodes a chunk of a light loop runs before forking it pays: a job
+/// costs some microseconds to hand over and set up, which a chunk of
+/// fewer nodes than this does not win back.
+pub const LOOP_CHUNK_NODES: i64 = 1 << 16;
+
+/// How deep [`Weigh`] follows calls into the functions they name.
+const WEIGH_DEPTH: usize = 4;
+
+/// A loop's grain ([`LoopParSite::grain`]) from what one trip costs:
+/// `None` is a heavy trip, else its HIR nodes.
+pub fn loop_grain(trip_nodes: Option<i64>) -> i64 {
+    match trip_nodes {
+        None => HEAVY_LOOP_GRAIN,
+        Some(nodes) => DEFAULT_LOOP_GRAIN.max(LOOP_CHUNK_NODES / nodes.max(1)),
+    }
+}
+
+/// What one trip of a loop body costs, roughly ([`loop_grain`]): the nodes
+/// it runs, counting those of the module's functions it calls, or `None`
+/// when it loops or recurses.
+struct Weigh<'a> {
+    fns: &'a HashMap<&'a str, &'a HirBody>,
+    checker: &'a Checker,
+    /// The functions being weighed: a call back into one is recursion.
+    open: Vec<&'a str>,
+}
+
+impl<'a> Weigh<'a> {
+    fn of(&mut self, body: &'a HirBody, id: HirId) -> Option<i64> {
+        let mut nodes = 0i64;
+        let mut heavy = false;
+        let mut calls = Vec::new();
+        body.visit_ids(id, &mut |k| {
+            nodes += 1;
+            match &body.expr(k).kind {
+                HirKind::Loop { .. } | HirKind::ForIn { .. } => heavy = true,
+                HirKind::Call { .. } => calls.extend(super::par_profit::bare_callee(self.checker, body, k)),
+                _ => {}
+            }
+        });
+        if heavy {
+            return None;
+        }
+        for name in calls {
+            if self.open.contains(&name) {
+                return None;
+            }
+            let Some(&callee) = self.fns.get(name) else { continue };
+            let Some(root) = callee.root else { continue };
+            if self.open.len() >= WEIGH_DEPTH {
+                continue;
+            }
+            self.open.push(name);
+            let inner = self.of(callee, root);
+            self.open.pop();
+            nodes = nodes.saturating_add(inner?);
+        }
+        Some(nodes)
+    }
+}
 
 impl LoopParSite {
     /// Whether the cost model forks this loop: as
     /// [`super::ParForkSite::worth_forking`], a body that computes heap
-    /// values stays sequential unless `heap_forks`. Such an epoch frees
-    /// what died in it only after the join, on the joining thread.
+    /// values stays sequential unless `heap_forks`.
+    /// A const range of no more than [`Self::grain`] trips runs on its
+    /// own thread too (a range read at run time is tested as it starts).
     pub fn worth_forking(&self, heap_forks: bool) -> bool {
-        heap_forks || !self.heap_values
+        (heap_forks || !self.heap_values) && (self.is_dynamic() || self.trip_count() > self.grain)
     }
 
     pub fn is_dynamic(&self) -> bool {
@@ -147,7 +218,8 @@ impl LoopParSite {
     ///
     /// `None` for a dynamic range (the split is computed at runtime) or a
     /// trip count that does not clear `grain`. At most [`LOOP_PAR_MAX_CHUNKS`]
-    /// pieces; each piece except the last has `trips / n` iterations.
+    /// pieces, of `trips / n` iterations each, the first `trips % n` one
+    /// more.
     pub fn chunk_bounds(&self, grain: i64) -> Option<Vec<i64>> {
         if self.is_dynamic() {
             return None;
@@ -158,11 +230,11 @@ impl LoopParSite {
             return None;
         }
         let n = (trips / grain).clamp(2, LOOP_PAR_MAX_CHUNKS);
-        let base = trips / n;
+        let (base, rem) = (trips / n, trips % n);
         let mut bounds = Vec::with_capacity(n as usize + 1);
         bounds.push(self.begin);
         for i in 1..n {
-            bounds.push(self.begin + i * base * self.stride);
+            bounds.push(self.begin + (i * base + i.min(rem)) * self.stride);
         }
         bounds.push(self.end);
         Some(bounds)
@@ -198,6 +270,7 @@ impl HirModule {
         let mut out = LoopParSites::new();
         let mut unsigned = LoopParSites::new();
         let signs = Signs::new(self, checker, module_path);
+        let fns: HashMap<&str, &HirBody> = self.fork_bodies().into_iter().map(|b| (super::par_profit::bare(&b.name), b)).collect();
         for body in &self.bodies {
             let Some(root) = body.root else { continue };
             // The top level holds declarations only; a lambda, a test and
@@ -214,7 +287,7 @@ impl HirModule {
                 .collect();
             let mut written = HashSet::new();
             assigned_in(self, body, root, &mut written);
-            let mut scan = Scan { module: self, checker, body, pure_fns, signs: &signs, written, out: &mut out, unsigned: &mut unsigned };
+            let mut scan = Scan { module: self, checker, body, pure_fns, fns: &fns, signs: &signs, written, out: &mut out, unsigned: &mut unsigned };
             scan.walk(root, &mut ConstLocals::new(), &mut ints);
         }
         (out, unsigned)
@@ -244,6 +317,8 @@ struct Scan<'a> {
     checker: &'a Checker,
     body: &'a HirBody,
     pure_fns: &'a HashSet<String>,
+    /// The module's functions by bare name ([`HirModule::fork_bodies`]).
+    fns: &'a HashMap<&'a str, &'a HirBody>,
     signs: &'a Signs<'a>,
     /// The locals something in the body assigns after their `let`.
     written: HashSet<LocalId>,
@@ -503,7 +578,9 @@ impl Scan<'_> {
         if stride <= 0 {
             return None;
         }
-        if !dynamic && iteration_count(begin, end, stride)? <= DEFAULT_LOOP_GRAIN {
+        let trip_nodes = Weigh { fns: self.fns, checker: self.checker, open: Vec::new() }.of(self.body, loop_body);
+        let floor = if trip_nodes.is_none() { HEAVY_LOOP_GRAIN } else { DEFAULT_LOOP_GRAIN };
+        if !dynamic && iteration_count(begin, end, stride)? <= floor {
             return None;
         }
         let (acc, op) = *reduces.first()?;
@@ -609,6 +686,7 @@ impl Scan<'_> {
                 .map(|(l, at_least, bound)| SignTest { local: name(l), at_least, bound })
                 .collect(),
             heap_values,
+            grain: loop_grain(trip_nodes),
         };
         Some((site, signed))
     }

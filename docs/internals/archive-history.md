@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 11, below, is the
-current version, 8.11 with MIR section `FORMAT` 23). A runtime refuses a major
+only add something to the format raise the minor (minor 12, below, is the
+current version, 8.12 with MIR section `FORMAT` 23). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -192,6 +192,11 @@ slot follows, the slot, then tag 16's `Alloc` layout), an enum allocation into
 that slot when there is one and it is not `0`, which takes the frame's owner
 of the payload words in the owned mask. An 8.10 archive loads unchanged:
 it holds neither op.
+
+Minor 12 (auto-par scheduling) adds host native **216**, `thread_par_room`:
+whether the worker pool has a worker free for another job. Auto-par's loop
+fork-joins ask it before they spawn and run their range on the calling thread
+when it says no. An 8.11 archive loads unchanged: it never calls it.
 
 ## Major 7
 

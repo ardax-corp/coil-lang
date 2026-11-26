@@ -1234,3 +1234,86 @@ fn main() {
     // Its body builds a tree: a heap-building loop.
     assert!(site.heap_values);
 }
+
+#[test]
+fn spreads_the_remainder_over_the_first_chunks() {
+    let site = one_site(&program(
+        r#"
+    let acc = 0;
+    let i = 0;
+    while i < 103 {
+        acc = acc + sq(i);
+        i = i + 1;
+    }
+"#,
+    ));
+    assert_eq!(site.chunk_bounds(20), Some(vec![0, 26, 52, 78, 103]));
+}
+
+#[test]
+fn a_light_body_needs_many_trips_a_chunk() {
+    let site = one_site(&program(
+        r#"
+    let acc = 0;
+    let i = 0;
+    while i < 100 {
+        acc = acc + sq(i);
+        i = i + 1;
+    }
+"#,
+    ));
+    assert!(site.grain > 1000, "a few nodes a trip: {}", site.grain);
+    assert!(!site.worth_forking(true), "100 light trips are not worth a job");
+}
+
+#[test]
+fn a_body_that_calls_a_loop_forks_few_trips() {
+    let sites = sites_of(
+        r#"
+fn work(int k) -> int {
+    let s = 0;
+    let j = 0;
+    while j < 1000 {
+        s = s + k * j;
+        j = j + 1;
+    }
+    return s;
+}
+fn main() {
+    let acc = 0;
+    let i = 0;
+    while i < 6 {
+        acc = acc + work(i);
+        i = i + 1;
+    }
+}
+"#,
+    );
+    let site = sites.iter().find(|s| s.index == "i").expect("the outer loop is a site");
+    assert_eq!(site.grain, HEAVY_LOOP_GRAIN);
+    assert!(site.worth_forking(false));
+    assert_eq!(site.chunk_bounds(site.grain), Some(vec![0, 2, 4, 5, 6]));
+}
+
+#[test]
+fn a_body_that_recurses_forks_few_trips() {
+    let site = one_site(
+        r#"
+fn depth(int n) -> int {
+    if n <= 0 {
+        return 1;
+    }
+    return 1 + depth(n - 1);
+}
+fn main() {
+    let acc = 0;
+    let i = 0;
+    while i < 8 {
+        acc = acc + depth(i);
+        i = i + 1;
+    }
+}
+"#,
+    );
+    assert_eq!(site.grain, HEAVY_LOOP_GRAIN);
+}

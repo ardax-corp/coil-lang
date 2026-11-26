@@ -147,6 +147,10 @@ pub struct Reactor {
     stealers: RwLock<Vec<Stealer<Job>>>,
     sleep: Mutex<()>,
     sleep_cvar: Condvar,
+    /// Threads parked on `sleep_cvar` (idle workers and joiners), so a
+    /// submit or a finished job with nobody asleep skips the lock and the
+    /// wake-up (see [`Self::notify`]).
+    sleepers: AtomicUsize,
     n_workers: AtomicUsize,
     started: OnceLock<()>,
     inflight: AtomicUsize,
@@ -176,6 +180,7 @@ impl Reactor {
             stealers: RwLock::new(Vec::with_capacity(n_workers.max(1))),
             sleep: Mutex::new(()),
             sleep_cvar: Condvar::new(),
+            sleepers: AtomicUsize::new(0),
             n_workers: AtomicUsize::new(n_workers),
             started: OnceLock::new(),
             inflight: AtomicUsize::new(0),
@@ -199,6 +204,17 @@ impl Reactor {
 
     pub fn inflight(&self) -> usize {
         self.inflight.load(Ordering::SeqCst)
+    }
+
+    /// Whether a job submitted now would find a worker free: fewer jobs in
+    /// flight than workers (before the pool starts, it has them all).
+    /// Never on a build without threads.
+    pub fn has_room(&self) -> bool {
+        if NO_THREADS {
+            return false;
+        }
+        let n = self.n_workers.load(Ordering::Relaxed);
+        n == 0 || self.inflight.load(Ordering::Relaxed) < n
     }
 
     /// Jobs pushed since this reactor was created (each AlwaysPar `thread_spawn`).
@@ -261,7 +277,17 @@ impl Reactor {
         self.notify();
     }
 
+    /// The caller changed what a parked thread waits for (queued a job,
+    /// stored a result, asked to shut down) before this. A parked thread
+    /// counted itself in [`Self::sleepers`] before it looked: the fences
+    /// make one of the two see the other's write, so no parker sleeps
+    /// through a change it missed, and with nobody parked this is two
+    /// loads.
     fn notify(&self) {
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.sleepers.load(Ordering::SeqCst) == 0 {
+            return;
+        }
         let _g = self.sleep.lock().unwrap_or_else(|e| e.into_inner());
         self.sleep_cvar.notify_all();
     }
@@ -599,7 +625,13 @@ fn refuse_job(job: Job) {
 /// Recheck shutdown/steal under `sleep` then wait until `notify` (submit /
 /// job done / shutdown). No 2 ms poll — same handshake as [`park_join`].
 fn park_idle_worker(reactor: &Reactor) -> Option<Job> {
+    // A fork-join's jobs come in bursts: a worker that just ran out looks
+    // again for a while before it pays a sleep and a wake-up per job.
+    if let Some(job) = spin_for(|| with_owned_local_worker(reactor, |local_ref| reactor.find_job(local_ref)).flatten()) {
+        return Some(job);
+    }
     let g = reactor.sleep.lock().unwrap_or_else(|e| e.into_inner());
+    let _asleep = Sleeper::count(reactor);
     if reactor.shutdown.load(Ordering::SeqCst) {
         return None;
     }
@@ -613,6 +645,46 @@ fn park_idle_worker(reactor: &Reactor) -> Option<Job> {
     match reactor.sleep_cvar.wait(g) {
         Ok(guard) => drop(guard),
         Err(poisoned) => drop(poisoned.into_inner()),
+    }
+    None
+}
+
+/// A thread counted in [`Reactor::sleepers`] while it checks and parks.
+struct Sleeper<'a>(&'a Reactor);
+
+impl<'a> Sleeper<'a> {
+    fn count(reactor: &'a Reactor) -> Self {
+        reactor.sleepers.fetch_add(1, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+        Self(reactor)
+    }
+}
+
+impl Drop for Sleeper<'_> {
+    fn drop(&mut self) {
+        self.0.sleepers.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// How many times a thread with nothing to do looks again before it parks
+/// ([`spin_for`]): with [`SPIN_PAUSES`], some tens of microseconds, about
+/// what a park and a wake-up cost.
+const SPIN_ROUNDS: u32 = 64;
+const SPIN_PAUSES: u32 = 16;
+
+/// `look` until it finds something, a bounded number of times, pausing
+/// between tries. `None` when the spin ran out: park.
+fn spin_for<T>(mut look: impl FnMut() -> Option<T>) -> Option<T> {
+    if NO_THREADS {
+        return None;
+    }
+    for _ in 0..SPIN_ROUNDS {
+        if let Some(found) = look() {
+            return Some(found);
+        }
+        for _ in 0..SPIN_PAUSES {
+            std::hint::spin_loop();
+        }
     }
     None
 }
@@ -632,6 +704,17 @@ fn wait_join_loop(
             run_help_job(reactor, job);
             continue;
         }
+        // A chunk out on another worker often ends soon: look again for a
+        // while before paying a sleep and a wake-up.
+        // `Some(None)`: the result is in, taken at the top.
+        match spin_for(|| if state.is_done() { Some(None) } else { steal().map(Some) }) {
+            Some(Some(job)) => {
+                run_help_job(reactor, job);
+                continue;
+            }
+            Some(None) => continue,
+            None => {}
+        }
         if let Some(r) = park_join(reactor, state, &steal) {
             return r;
         }
@@ -646,10 +729,12 @@ fn park_join(
     steal: &impl Fn() -> Option<Job>,
 ) -> Option<Result<PortableValue, ThreadErrorTag>> {
     let g = reactor.sleep.lock().unwrap_or_else(|e| e.into_inner());
+    let asleep = Sleeper::count(reactor);
     if let Some(r) = state.try_take_result() {
         return Some(r);
     }
     if let Some(job) = steal() {
+        drop(asleep);
         drop(g);
         run_help_job(reactor, job);
         return None;

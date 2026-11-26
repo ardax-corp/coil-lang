@@ -12086,13 +12086,20 @@ impl Compiler {
             }
         };
 
-        // A range of one or more chunks: spawn each, then join and fold.
+        // A range of two or more chunks: spawn each but the last, run the
+        // last on this thread, then join the others and fold.
         let fork = |b: &mut Synth, chunks: &[(Bound, Bound)], whole: (Bound, Bound)| -> HirId {
+            let spawned = chunks.len() - 1;
             let handles: Vec<LocalId> =
-                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(coil_ty::int()), LocalKind::Pattern)).collect();
-            let partials: Vec<LocalId> =
-                (0..chunks.len()).map(|i| b.local(&format!("__coil_par_part{i}"), coil_ty::int(), LocalKind::Pattern)).collect();
-            // Innermost first: the fold, then each join, then each spawn.
+                (0..spawned).map(|i| b.local(&format!("__coil_par_handle{i}"), coil_ty::thread_ty(coil_ty::int()), LocalKind::Pattern)).collect();
+            let partials: Vec<LocalId> = (0..chunks.len())
+                .map(|i| {
+                    let kind = if i < spawned { LocalKind::Pattern } else { LocalKind::Temp };
+                    b.local(&format!("__coil_par_part{i}"), coil_ty::int(), kind)
+                })
+                .collect();
+            // Innermost first: the fold, then each join, then this
+            // thread's chunk, then each spawn.
             // A step of the fold that would overflow is one the sequential
             // loop takes too, so the whole range runs here instead and
             // panics where that loop does.
@@ -12113,7 +12120,7 @@ impl Compiler {
             let value = b.read(value);
             fold.push(b.ret(value));
             let mut tail = b.block(fold, None, coil_ty::never());
-            for j in (0..chunks.len()).rev() {
+            for j in (0..spawned).rev() {
                 let mut failed = Vec::new();
                 discard(b, &handles[j + 1..], &mut failed);
                 failed.push(seq(b, whole.0, whole.1));
@@ -12123,7 +12130,15 @@ impl Compiler {
                 let (ok, err) = (b.result_pat(true, HirPat::Bind(partials[j])), b.result_pat(false, HirPat::Wild));
                 tail = b.match_(joining, vec![(ok, tail), (err, failed)], coil_ty::never());
             }
-            for i in (0..chunks.len()).rev() {
+            // The joiner's own chunk, while the others run: a thread that
+            // only waited would leave a worker's share idle.
+            let (lo, hi) = chunks[spawned];
+            let mut args = vec![read(b, lo), read(b, hi), b.int(site.op.identity())];
+            args.extend(live.iter().map(|&l| b.read(l)));
+            let own = b.call(worker, args, coil_ty::int());
+            let own = b.let_(partials[spawned], own);
+            tail = b.block(vec![own, tail], None, coil_ty::never());
+            for i in (0..spawned).rev() {
                 let mut failed = Vec::new();
                 discard(b, &handles[..i], &mut failed);
                 failed.push(seq(b, whole.0, whole.1));
@@ -12166,13 +12181,27 @@ impl Compiler {
             }
         };
 
+        // No worker free for a chunk: the whole range on this thread. A
+        // loop forked inside a job of another (a function with a loop,
+        // called from a forked loop) otherwise spawns on every call.
+        let room = self.native_id(common::THREAD_PAR_ROOM_NATIVE).map(|_| common::THREAD_PAR_ROOM_NATIVE);
+        let busy = |b: &mut Synth, whole: (Bound, Bound), stmts: &mut Vec<HirId>| {
+            let Some(room) = room else { return };
+            let free = b.call(room, Vec::new(), coil_ty::boolean());
+            let none = b.push(HirKind::Un { op: crate::hir::UnOp::Not, operand: free }, coil_ty::boolean());
+            let here = seq(b, whole.0, whole.1);
+            let here = b.block(vec![here], None, coil_ty::never());
+            stmts.push(b.if_(none, here, None, coil_ty::unit()));
+        };
+
         if !site.is_dynamic() {
             let bounds = site
-                .chunk_bounds(crate::hir::par::DEFAULT_LOOP_GRAIN)
+                .chunk_bounds(site.grain)
                 .unwrap_or_else(|| vec![site.begin, site.midpoint(), site.end]);
             let chunks: Vec<_> = bounds.windows(2).map(|w| (Bound::Const(w[0]), Bound::Const(w[1]))).collect();
             let whole = (Bound::Const(bounds[0]), Bound::Const(*bounds.last().expect("chunk bounds")));
             guarded(&mut b, whole, &mut stmts);
+            busy(&mut b, whole, &mut stmts);
             stmts.push(fork(&mut b, &chunks, whole));
         } else {
             // `[lo, hi)` and its trip count.
@@ -12190,7 +12219,6 @@ impl Compiler {
             let lo = b.local("__coil_par_lo", int.clone(), LocalKind::Temp);
             let hi = b.local("__coil_par_hi", int.clone(), LocalKind::Temp);
             let trip = b.local("__coil_par_trip", int.clone(), LocalKind::Temp);
-            let mid = b.local("__coil_par_mid", int.clone(), LocalKind::Temp);
             let v = bound(&mut b, begin, site.begin, 0);
             stmts.push(b.let_(lo, v));
             let v = bound(&mut b, end, site.end, site.end_bias);
@@ -12238,26 +12266,58 @@ impl Compiler {
                 b.read(span)
             };
             stmts.push(b.let_(trip, trips));
-            // Up to the grain: on this thread.
+            // Up to the grain, or too few trips for every chunk to get
+            // one: on this thread.
+            let pieces = crate::hir::par::loop_par::LOOP_PAR_MAX_CHUNKS;
             let small = {
                 let t = b.read(trip);
-                let g = b.int(crate::hir::par::DEFAULT_LOOP_GRAIN.max(1));
+                let g = b.int(site.grain.max(pieces - 1));
                 b.bin(BinOp::Le, t, g, coil_ty::boolean())
             };
             let here = seq(&mut b, Bound::Local(lo), Bound::Local(hi));
             let here = b.block(vec![here], None, coil_ty::never());
             stmts.push(b.if_(small, here, None, coil_ty::unit()));
-            let half = {
-                let t = b.read(trip);
-                let two = b.int(2);
-                let h = b.bin(BinOp::IntDiv, t, two, coil_ty::int());
-                let s = b.int(site.stride);
-                let span = b.bin(BinOp::IntMul, h, s, coil_ty::int());
-                let l = b.read(lo);
-                b.bin(BinOp::IntAdd, span, l, coil_ty::int())
+            busy(&mut b, (Bound::Local(lo), Bound::Local(hi)), &mut stmts);
+            // As many chunks as a const range of this length gets
+            // ([`crate::hir::par::LoopParSite::chunk_bounds`]): past the
+            // grain, `trip` is at least that many, so none is empty. The
+            // first `trip % pieces` chunks take one trip more.
+            let base = b.local("__coil_par_base", int.clone(), LocalKind::Temp);
+            let per = {
+                let (t, n) = (b.read(trip), b.int(pieces));
+                b.bin(BinOp::IntDiv, t, n, coil_ty::int())
             };
-            stmts.push(b.let_(mid, half));
-            let chunks = [(Bound::Local(lo), Bound::Local(mid)), (Bound::Local(mid), Bound::Local(hi))];
+            stmts.push(b.let_(base, per));
+            let rem = b.local("__coil_par_rem", int.clone(), LocalKind::Temp);
+            let left = {
+                let (t, n) = (b.read(trip), b.int(pieces));
+                b.bin(BinOp::IntRem, t, n, coil_ty::int())
+            };
+            stmts.push(b.let_(rem, left));
+            let mut edges = vec![Bound::Local(lo)];
+            for i in 1..pieces {
+                let edge = b.local(&format!("__coil_par_edge{i}"), int.clone(), LocalKind::Temp);
+                let at = {
+                    // `lo + (base * i + min(i, rem)) * stride`.
+                    let (k, s) = (b.read(base), b.int(i));
+                    let whole = b.bin(BinOp::IntMul, k, s, coil_ty::int());
+                    let extra = {
+                        let (r, k) = (b.read(rem), b.int(i));
+                        let more = b.bin(BinOp::Gt, r, k, coil_ty::boolean());
+                        let (k, r) = (b.int(i), b.read(rem));
+                        b.if_(more, k, Some(r), coil_ty::int())
+                    };
+                    let trips = b.bin(BinOp::IntAdd, whole, extra, coil_ty::int());
+                    let s = b.int(site.stride);
+                    let span = b.bin(BinOp::IntMul, trips, s, coil_ty::int());
+                    let l = b.read(lo);
+                    b.bin(BinOp::IntAdd, span, l, coil_ty::int())
+                };
+                stmts.push(b.let_(edge, at));
+                edges.push(Bound::Local(edge));
+            }
+            edges.push(Bound::Local(hi));
+            let chunks: Vec<_> = edges.windows(2).map(|w| (w[0], w[1])).collect();
             stmts.push(fork(&mut b, &chunks, (Bound::Local(lo), Bound::Local(hi))));
         }
         let root = b.block(stmts, None, coil_ty::never());
