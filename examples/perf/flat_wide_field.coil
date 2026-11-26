@@ -1,0 +1,27 @@
+// CPU: a three-word tuple field of an object passed to a loop: its items
+// sit flat in the object (`Checker::class_wide_tails`), so a write
+// allocates no tuple.
+use io::sync::print;
+use string::format;
+
+class P {
+    pub t: (int, int, int),
+    pub n: int,
+}
+
+#[inline(never)]
+fn run(P p, int n) {
+    let i = 0;
+    while i < n {
+        let (a, b, c) = p.t;
+        p.t = (b, c, a + i % 7);
+        p.n += a;
+        i += 1;
+    }
+}
+
+fn main() {
+    let p = new P((0, 1, 2), 0);
+    run(p, 10000000);
+    let _ = print(format("%i\n", p.n));
+}
