@@ -2135,16 +2135,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", leaves(build(21)))));
 }
 "#;
-    // The cost model leaves a heap-building fork sequential by default.
     let mut pipeline = test_pipeline();
-    let compiled = compile(&mut pipeline, src).expect("auto-par enum-ctor should compile");
-    assert!(
-        pipeline.function_offset("__coil_par_build").is_none(),
-        "a fork that builds heap results gets no worker by default"
-    );
-    assert_eq!(run_compiled(compiled, &pipeline, None), "17711");
-    let mut pipeline = test_pipeline();
-    pipeline.set_par_heap_forks(true);
     let compiled = compile(&mut pipeline, src).expect("auto-par enum-ctor should compile");
     assert!(
         pipeline.function_offset("__coil_par_build").is_some(),
@@ -3084,7 +3075,6 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    pipeline.set_par_heap_forks(true);
     let compiled = compile(&mut pipeline, src).expect("auto-par enum-ctor should compile");
     assert!(
         spawns_shared(&compiled),

@@ -615,8 +615,6 @@ pub struct Compiler {
     /// When false, skip auto fork-join even if
     /// [`crate::opt::OptimizeOptions::auto_par`] is on.
     auto_par: bool,
-    /// Fork heap-building sites too (`Compiler::set_par_heap_forks`).
-    par_heap_forks: bool,
     /// `Compiler::set_par_loop_grain_cap`.
     par_loop_grain_cap: Option<i64>,
 
@@ -882,7 +880,6 @@ impl Default for Compiler {
             hir_closure_adapters: HashMap::new(),
             hir_closure_adapter_tail: Vec::new(),
             auto_par: true,
-            par_heap_forks: false,
             par_loop_grain_cap: None,
             opt_options: crate::opt::OptimizeOptions::default(),
             inline_cost: inline_cost::InlineCostOptions::default(),
