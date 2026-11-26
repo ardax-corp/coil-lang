@@ -3268,8 +3268,14 @@ impl<'a> Lower<'a> {
             simd::REDUCE_AND | simd::REDUCE_OR | simd::REDUCE_XOR => !float,
             k => (simd::REDUCE_TAKE..simd::REDUCE_TAKE + 6).contains(&k),
         };
-        if !stores.is_empty() || !fold_ok || pos.is_some_and(|p| value_used(f, p)) || !self.lanes_native(term, 0) {
+        if !fold_ok || pos.is_some_and(|p| value_used(f, p)) || !self.lanes_native(term, 0) {
             return Ok(false);
+        }
+        // Stores of numbers into word arrays, as `native_store` takes them.
+        for (array, _, ty, value) in stores {
+            if !matches!(*ty, dense::TY_I64 | dense::TY_F64) || !self.views.contains_key(array) || !self.lanes_native(value, 0) {
+                return Ok(false);
+            }
         }
         // Folds whose int result is the same in any order keep a vector
         // accumulator; a min or max needs an order only between ties,
@@ -3288,7 +3294,8 @@ impl<'a> Lower<'a> {
             _ if lanewise => (2.0, 1.5),
             _ => (2.0, 3.0),
         };
-        let vec = Self::vectors_pay([term], fold_cost);
+        let fold_cost = (fold_cost.0 + stores.len() as f32, fold_cost.1 + stores.len() as f32 * 0.5);
+        let vec = Self::vectors_pay(std::iter::once(term).chain(stores.iter().map(|s| &s.3)), fold_cost);
         let lane_ty = if float { types::F64 } else { types::I64 };
         let vty = Self::vec_ty(lane_ty);
         let lo = self.get(f, *from);
@@ -3339,8 +3346,17 @@ impl<'a> Lower<'a> {
             self.b.append_block_param(vflush, types::I64);
         }
         let vbody = self.b.create_block();
+        // A trap in lane `p` with the fold at `acc`: the runtime's lane
+        // code from there, lane `p` untouched.
+        let resume = self.b.create_block();
+        self.b.append_block_param(resume, types::I64);
+        self.b.append_block_param(resume, lane_ty);
         let mut refs = Vec::new();
         lane_refs(term, false, &mut refs);
+        for (array, off, _, value) in stores {
+            lane_refs(value, false, &mut refs);
+            refs.push((*array, *off, true));
+        }
         self.lanes_guard(f, &refs, lo, hi, slow);
         let limit = self.vec_block_limit(hi);
         self.b.ins().jump(venter, &[lo.into(), acc0.into()]);
@@ -3400,6 +3416,19 @@ impl<'a> Lower<'a> {
                 let t = self.vlane(f, term, at, &mut bad);
                 terms.push(self.vcoerce(t, vty));
             }
+            // The stores' values too; they are stored once nothing of the
+            // block traps, so a block run again lane by lane reads what the
+            // scalar loop does.
+            let mut values = Vec::with_capacity(stores.len() * nv);
+            for (_, _, ty, value) in stores {
+                let want = if *ty == dense::TY_F64 { types::F64X2 } else { types::I64X2 };
+                for half in 0..VEC_BLOCK / VEC_LANES {
+                    let lp0 = self.b.ins().iadd_imm_s(p, half * VEC_LANES);
+                    let at = VecAt { p0: p, half: half as usize, p: lp0 };
+                    let x = self.vlane(f, value, at, &mut bad);
+                    values.push(self.vcoerce(x, want));
+                }
+            }
             let stop = self.b.ins().iadd_imm_s(p, VEC_BLOCK);
             if lanewise {
                 if add {
@@ -3426,6 +3455,7 @@ impl<'a> Lower<'a> {
                     self.b.ins().brif(trap, vflush, &args, go, &[]);
                     self.b.switch_to_block(go);
                 }
+                self.vec_stores(f, stores, p, &values);
                 let mut lanes = Vec::new();
                 for (k, &t) in terms.iter().enumerate() {
                     let a = hp[2 + k];
@@ -3486,14 +3516,13 @@ impl<'a> Lower<'a> {
                         next = r;
                     }
                 }
-                match bad.any(self) {
-                    Some(trap) => {
-                        self.b.ins().brif(trap, lp, &[p.into(), acc.into(), stop.into()], vhead, &[stop.into(), next.into()]);
-                    }
-                    None => {
-                        self.b.ins().jump(vhead, &[stop.into(), next.into()]);
-                    }
+                if let Some(trap) = bad.any(self) {
+                    let go = self.b.create_block();
+                    self.b.ins().brif(trap, lp, &[p.into(), acc.into(), stop.into()], go, &[]);
+                    self.b.switch_to_block(go);
                 }
+                self.vec_stores(f, stores, p, &values);
+                self.b.ins().jump(vhead, &[stop.into(), next.into()]);
             }
         }
 
@@ -3502,25 +3531,49 @@ impl<'a> Lower<'a> {
         let done = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, stop);
         self.b.ins().brif(done, after, &[p.into(), acc.into()], body, &[]);
         self.b.switch_to_block(body);
+        // Every value and the fold first: a trap leaves lane `p` untouched.
+        let lslow = self.b.create_block();
         self.lanes_checked = true;
-        let x = self.lane(f, term, p, slow);
+        let mut values = Vec::with_capacity(stores.len());
+        for (_, _, _, value) in stores {
+            let v = self.lane(f, value, p, lslow);
+            values.push(self.coerce(v, types::I64));
+        }
+        let x = self.lane(f, term, p, lslow);
         self.lanes_checked = false;
         let x = self.coerce(x, lane_ty);
         let (next, of) = self.fold_step(*fold, float, acc, x);
         if let Some(of) = of {
-            self.leave_if(of, slow);
+            self.leave_if(of, lslow);
+        }
+        for ((array, off, _, _), w) in stores.iter().zip(values) {
+            let o = self.get(f, *off);
+            let o = self.coerce(o, types::I64);
+            let i = self.b.ins().iadd(p, o);
+            let at = self.element(*array, i);
+            self.b.ins().store(MemFlagsData::trusted(), w, at, 0);
         }
         let p1 = self.b.ins().iadd_imm_s(p, 1);
         self.b.ins().jump(lp, &[p1.into(), next.into(), stop.into()]);
+        self.b.switch_to_block(lslow);
+        self.b.ins().jump(resume, &[p.into(), acc.into()]);
+        self.b.switch_to_block(resume);
+        let (at, acc_at) = (self.b.block_params(resume)[0], self.b.block_params(resume)[1]);
+        let acc_w = self.coerce(acc_at, types::I64);
+        let (_, frame) = self.vector_lanes_from(f, inst, Some(at), Some(acc_w));
+        let w = self.b.ins().stack_load(types::I64, lane_ty, frame, 0);
+        if !stores.is_empty() {
+            self.drop_views();
+        }
+        self.b.ins().jump(exit, &[w.into()]);
         self.b.switch_to_block(after);
         let (p, acc) = (self.b.block_params(after)[0], self.b.block_params(after)[1]);
         let end = self.b.ins().icmp(IntCC::SignedGreaterThanOrEqual, p, hi);
         self.b.ins().brif(end, exit, &[acc.into()], venter, &[p.into(), acc.into()]);
         self.b.switch_to_block(slow);
-        // The loop's result is its `dest` slot, as `VLoop` leaves it.
-        let (_, frame) = self.vector_lanes(f, inst);
-        let w = self.b.ins().stack_load(types::I64, lane_ty, frame, 0);
-        self.b.ins().jump(exit, &[w.into()]);
+        // An access the guard could not show in place: the whole op on the
+        // runtime. The loop's result is its `dest` slot, as `VLoop` leaves it.
+        self.b.ins().jump(resume, &[lo.into(), acc0.into()]);
         self.b.switch_to_block(exit);
         let r = self.b.block_params(exit)[0];
         self.set(f, *dest, r);
@@ -3529,6 +3582,21 @@ impl<'a> Lower<'a> {
             self.set(f, *p, zero);
         }
         Ok(true)
+    }
+
+    /// A block's store values (four vectors per store, in `stores`' order)
+    /// into their word arrays at lanes `p ..`.
+    fn vec_stores(&mut self, f: &MirFunc, stores: &[(ValueId, ValueId, u8, compiler::native_mir::VecExpr)], p: cranelift_codegen::ir::Value, values: &[cranelift_codegen::ir::Value]) {
+        let nv = (VEC_BLOCK / VEC_LANES) as usize;
+        for ((array, off, _, _), w) in stores.iter().zip(values.chunks(nv)) {
+            let o = self.get(f, *off);
+            let o = self.coerce(o, types::I64);
+            let i = self.b.ins().iadd(p, o);
+            let at = self.element(*array, i);
+            for (k, &v) in w.iter().enumerate() {
+                self.b.ins().store(MemFlagsData::new().with_notrap(), v, at, (k as i64 * VEC_LANES * 8) as i32);
+            }
+        }
     }
 
     /// `acc ⊕ x` for fold `fold` (a `REDUCE_*`), and for an int add or
@@ -4845,6 +4913,19 @@ impl<'a> Lower<'a> {
 
     /// [`Self::vector_lanes`] from lane `at` instead of the op's `from`.
     fn vector_lanes_at(&mut self, f: &MirFunc, inst: &MirInst, at: Option<cranelift_codegen::ir::Value>) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::StackSlot) {
+        self.vector_lanes_from(f, inst, at, None)
+    }
+
+    /// [`Self::vector_lanes_at`] with slot 0 starting at `acc` (a word)
+    /// instead of the op's start value: a reduce resumed with the fold so
+    /// far.
+    fn vector_lanes_from(
+        &mut self,
+        f: &MirFunc,
+        inst: &MirInst,
+        at: Option<cranelift_codegen::ir::Value>,
+        acc: Option<cranelift_codegen::ir::Value>,
+    ) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::StackSlot) {
         let op = compiler::native_mir::vector_op(inst).expect("a vector op checked at planning");
         let n = op.inputs.len() + 2;
         let frame = self.b.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
@@ -4853,12 +4934,13 @@ impl<'a> Lower<'a> {
             3,
         ));
         let zero = self.b.ins().iconst(types::I64, 0);
-        let start = match op.start {
-            Some(v) => {
+        let start = match (acc, op.start) {
+            (Some(a), _) => a,
+            (None, Some(v)) => {
                 let x = self.get(f, v);
                 self.coerce(x, types::I64)
             }
-            None => zero,
+            (None, None) => zero,
         };
         self.b.ins().stack_store(types::I64, start, frame, 0);
         self.b.ins().stack_store(types::I64, zero, frame, 8);
