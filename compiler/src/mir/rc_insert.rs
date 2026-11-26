@@ -263,7 +263,7 @@ fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>
             let nums = number_words(f, &set);
             let used = used_as_numbers(f, true);
             let all = f.blocks.iter().all(|b| match &b.term {
-                Some(Terminator::Return { lo, hi }) => hi.is_none() && lo.is_none_or(|v| nums.contains(&v) || used.contains(&v) && computed_with(f, v)),
+                Some(Terminator::Return { lo, hi, .. }) => hi.is_none() && lo.is_none_or(|v| nums.contains(&v) || used.contains(&v) && computed_with(f, v)),
                 _ => true,
             });
             if !all {
@@ -844,13 +844,13 @@ impl Pass {
                 if counted.contains(&dest) {
                     base.insert(dest, dest);
                     match inst {
-                        MirInst::Call { dest_hi, .. } => {
+                        MirInst::Call { dest_hi, dest_more, .. } => {
                             owned_at_def.insert(dest);
-                            if let Some(h) = dest_hi
-                                && counted.contains(h)
-                            {
-                                base.insert(*h, *h);
-                                owned_at_def.insert(*h);
+                            for h in dest_hi.iter().chain(dest_more) {
+                                if counted.contains(h) {
+                                    base.insert(*h, *h);
+                                    owned_at_def.insert(*h);
+                                }
                             }
                         }
                         MirInst::CallIndirect { pair, .. } => {
@@ -1406,10 +1406,10 @@ impl Pass {
             }
             // The terminator.
             match &term {
-                Terminator::Return { lo, hi } => {
+                Terminator::Return { lo, hi, more } => {
                     let mut moved: HashSet<ValueId> = HashSet::new();
                     let tail = block.insts.last().is_some_and(|i| is_tail_call_inst(func, block, i));
-                    for v in [*lo, *hi].into_iter().flatten() {
+                    for v in [*lo, *hi].into_iter().flatten().chain(more.iter().copied()) {
                         match self.owned(v) {
                             Some(r) if end.contains(&r) && moved.insert(r) => {}
                             _ if tail => {}

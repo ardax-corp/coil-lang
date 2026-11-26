@@ -589,6 +589,28 @@ impl MirBuilder {
         args: Vec<ValueId>,
         abi: &crate::layout::CallAbi,
     ) -> Result<(ValueId, Option<ValueId>), MirError> {
+        self.ins_call_more(target, args, abi, &[]).map(|(dest, dest_hi, _)| (dest, dest_hi))
+    }
+
+    /// [`Self::ins_call`] of a callee that returns more than two words:
+    /// `more` types words 3.. (`MirInst::Call::dest_more`), which needs the
+    /// two-word `abi.ret_hi`.
+    pub fn ins_call_more(
+        &mut self,
+        target: crate::bodies::Label,
+        args: Vec<ValueId>,
+        abi: &crate::layout::CallAbi,
+        more: &[MirTy],
+    ) -> Result<(ValueId, Option<ValueId>, Vec<ValueId>), MirError> {
+        if !more.is_empty() && abi.ret_hi.is_none() {
+            return Err(MirError::msg("call of more than two words without a second"));
+        }
+        if more.len() > super::MAX_RET_MORE {
+            return Err(MirError::msg(format!("call returns {} words", 2 + more.len())));
+        }
+        if let Some(ty) = more.iter().find(|t| !t.is_word_lane()) {
+            return Err(MirError::msg(format!("call result word is {ty}")));
+        }
         if abi.params.len() != args.len() {
             return Err(MirError::msg(format!(
                 "call arity {} vs {}",
@@ -624,13 +646,15 @@ impl MirBuilder {
             }
             None => None,
         };
+        let dest_more: Vec<ValueId> = more.iter().map(|&ty| self.alloc(ty)).collect();
         self.push(MirInst::Call {
             dest,
             dest_hi,
+            dest_more: dest_more.clone(),
             target,
             args,
         })?;
-        Ok((dest, dest_hi))
+        Ok((dest, dest_hi, dest_more))
     }
 
     /// `CallIndirect`: call the function value `callee` (or an `i64` code
@@ -1404,18 +1428,33 @@ impl MirBuilder {
                 self.func.ret_layout = ty.layout();
             }
         }
-        self.set_term(Terminator::Return { lo, hi: None })
+        self.set_term(Terminator::Return { lo, hi: None, more: Vec::new() })
     }
 
     pub fn ret_pair(&mut self, lo: ValueId, hi: ValueId) -> Result<(), MirError> {
+        self.ret_words(lo, hi, &[])
+    }
+
+    /// A return of `2 + more.len()` words to direct calls: [`Self::ret_pair`]
+    /// plus words 3.. (`Terminator::Return::more`, typed on
+    /// `MirFunc::ret_more_tys`).
+    pub fn ret_words(&mut self, lo: ValueId, hi: ValueId, more: &[ValueId]) -> Result<(), MirError> {
+        if more.len() > super::MAX_RET_MORE {
+            return Err(MirError::msg(format!("return of {} words", 2 + more.len())));
+        }
         let lo = self.resolve(lo);
         let hi = self.resolve(hi);
+        let more: Vec<ValueId> = more.iter().map(|&v| self.resolve(v)).collect();
         self.func.ret_ty = Some(self.func.ret_ty.unwrap_or_else(|| self.resolve_ty(lo)));
         self.func.ret_hi_ty = Some(self.func.ret_hi_ty.unwrap_or_else(|| self.resolve_ty(hi)));
+        if self.func.ret_more_tys.is_empty() {
+            self.func.ret_more_tys = more.iter().map(|&v| self.resolve_ty(v)).collect();
+        }
         self.func.ret_layout = crate::layout::MirLayout::TwoSlot;
         self.set_term(Terminator::Return {
             lo: Some(lo),
             hi: Some(hi),
+            more,
         })
     }
 
@@ -1484,6 +1523,10 @@ impl MirBuilder {
     fn push(&mut self, inst: MirInst) -> Result<(), MirError> {
         let b = self.cur()?;
         let dest = inst.dest();
+        let dest_more = match &inst {
+            MirInst::Call { dest_more, .. } => dest_more.clone(),
+            _ => Vec::new(),
+        };
         let dest_hi = match inst {
             MirInst::Call {
                 dest_hi: Some(h), ..
@@ -1510,6 +1553,9 @@ impl MirBuilder {
         self.func.value_locs.insert(dest, self.pending_loc);
         if let Some(h) = dest_hi {
             self.func.value_locs.insert(h, self.pending_loc);
+        }
+        for w in dest_more {
+            self.func.value_locs.insert(w, self.pending_loc);
         }
         Ok(())
     }

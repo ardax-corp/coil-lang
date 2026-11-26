@@ -208,7 +208,14 @@ an immediate `Ok` or `Option` inner.
 A two-slot return is `Terminator::Return { lo, hi }` (`lo` is the payload or first
 product word, `hi` the tag or second word). One-word niche, boxed and scalar
 returns keep `hi = None`. The layout sits on `MirFunc::ret_layout`. A `Call`'s
-second word is its `dest_hi`. A function returns at most two words.
+second word is its `dest_hi`. A function returns at most four words to a
+direct call: words 3 and 4 are `Return { more }`, typed on
+`MirFunc::ret_more_tys`, and a `Call`'s `dest_more` (each empty unless the
+second word is there; the text form lists them after it, `v1, v2, v3 = call.i64 7`
+and `return v1, v2, v3`). No lowering makes one yet. Both engines pass them
+beside the first two; the runtime's entry of such a body panics, since only a
+direct call enters it, and native code puts the body on the `tail`
+convention, which returns them in registers.
 
 Host `Option` / `Result<(), E>` / heap-heap `Result` values pack once at
 `HostInvoke` (`host_enum`). MIR adds no second pack.

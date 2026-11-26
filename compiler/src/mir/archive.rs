@@ -35,7 +35,7 @@ const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
 /// takes this format only: older sections' `kinds` words have one bit per
 /// type parameter. The older formats remain for tests of what their
 /// sections hold.
-const FORMAT: u8 = common::MIR_SECTION_ROOTLESS_FORMAT;
+const FORMAT: u8 = common::MIR_SECTION_WIDE_RETURN_FORMAT;
 /// The format before two-bit `kinds` words (archive 8.4): `ExternCall`
 /// signatures carry struct layouts from it on.
 const FORMAT_STRUCTS: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
@@ -334,6 +334,10 @@ fn func(w: &mut Writer, f: &MirFunc) {
     w.vs(&f.params);
     w.opt_ty(f.ret_ty);
     w.opt_ty(f.ret_hi_ty);
+    w.u32(f.ret_more_tys.len() as u32);
+    for &t in &f.ret_more_tys {
+        w.ty(t);
+    }
     w.u8(idx(&LAYOUTS, &f.ret_layout));
     w.u32(f.blocks.len() as u32);
     for b in &f.blocks {
@@ -353,10 +357,11 @@ fn func(w: &mut Writer, f: &MirFunc) {
                 w.u32(taken.0);
                 w.u32(not_taken.0);
             }
-            Some(Terminator::Return { lo, hi }) => {
+            Some(Terminator::Return { lo, hi, more }) => {
                 w.u8(T_RETURN);
                 w.opt_v(*lo);
                 w.opt_v(*hi);
+                w.vs(more);
             }
             Some(Terminator::JumpIfMatch { scrutinee, tag, payloads, taken, not_taken }) => {
                 w.u8(T_MATCH);
@@ -481,10 +486,11 @@ fn inst(w: &mut Writer, inst: &MirInst) {
                 w.v(*v);
             }
         }
-        MirInst::Call { dest, dest_hi, target, args } => {
+        MirInst::Call { dest, dest_hi, dest_more, target, args } => {
             w.u8(I_CALL);
             w.v(*dest);
             w.opt_v(*dest_hi);
+            w.vs(dest_more);
             w.u32(target.0);
             w.vs(args);
         }
@@ -1070,6 +1076,8 @@ fn read_func(r: &mut Reader) -> Result<MirFunc, String> {
     f.params = r.vs()?;
     f.ret_ty = r.opt_ty()?;
     f.ret_hi_ty = r.opt_ty()?;
+    let n = r.len()?;
+    f.ret_more_tys = (0..n).map(|_| r.ty()).collect::<Result<_, _>>()?;
     f.ret_layout = r.pick(&LAYOUTS, "layout")?;
     let nb = r.len()?;
     for _ in 0..nb {
@@ -1081,7 +1089,7 @@ fn read_func(r: &mut Reader) -> Result<MirFunc, String> {
         b.term = match r.u8()? {
             T_JUMP => Some(Terminator::Jump { dest: BlockId(r.u32()?) }),
             T_BR => Some(Terminator::Br { cond: r.v()?, taken: BlockId(r.u32()?), not_taken: BlockId(r.u32()?) }),
-            T_RETURN => Some(Terminator::Return { lo: r.opt_v()?, hi: r.opt_v()? }),
+            T_RETURN => Some(Terminator::Return { lo: r.opt_v()?, hi: r.opt_v()?, more: r.vs()? }),
             T_UNREACHABLE => Some(Terminator::Unreachable),
             T_MATCH => {
                 let (scrutinee, tag) = (r.v()?, r.u32()?);
@@ -1172,9 +1180,9 @@ fn read_inst(r: &mut Reader) -> Result<MirInst, String> {
             MirInst::Phi { dest, ty, args }
         }
         I_CALL => {
-            let (dest, dest_hi) = (r.v()?, r.opt_v()?);
+            let (dest, dest_hi, dest_more) = (r.v()?, r.opt_v()?, r.vs()?);
             let target = Label(r.u32()?);
-            MirInst::Call { dest, dest_hi, target, args: r.vs()? }
+            MirInst::Call { dest, dest_hi, dest_more, target, args: r.vs()? }
         }
         I_INDEX => MirInst::Index { dest: r.v()?, array: r.v()?, index: r.v()?, unchecked: r.u8()? != 0 },
         I_LEN => MirInst::ArrayLen { dest: r.v()?, array: r.v()? },
@@ -1436,11 +1444,12 @@ mod tests {
     }
 
     /// A section of an archive before two-bit `kinds` words (formats 16 to
-    /// 20) is refused: its constant `kinds` words mean otherwise.
+    /// 20) is refused: its constant `kinds` words mean otherwise. So is
+    /// format 23, whose calls and returns have no words past the second.
     #[test]
     fn a_section_of_an_older_format_is_refused() {
         let b = body();
-        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, FORMAT_PINS, FORMAT_EXTERN, FORMAT_STRUCTS] {
+        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, FORMAT_PINS, FORMAT_EXTERN, FORMAT_STRUCTS, common::MIR_SECTION_ROOTLESS_FORMAT] {
             let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), format);
             assert!(decode(&old).is_err(), "format {format}");
         }
@@ -1456,6 +1465,23 @@ mod tests {
         insts.insert(1, MirInst::CowPin { dest: ValueId(3), src: ValueId(0) });
         insts.insert(2, MirInst::CowUnpin { dest: ValueId(4), src: ValueId(0), saved: ValueId(3) });
         b
+    }
+
+    /// A body that returns four words and a call that reads three: the
+    /// words past the second and their types come back (format 24).
+    #[test]
+    fn wide_returns_come_back() {
+        let mut b = body();
+        b.mir.types.extend([MirTy::I64, MirTy::F64, MirTy::I64, MirTy::I64]);
+        b.mir.ret_hi_ty = Some(MirTy::I64);
+        b.mir.ret_more_tys = vec![MirTy::F64, MirTy::I64];
+        b.mir.blocks[0].insts.push(MirInst::Call { dest: ValueId(3), dest_hi: Some(ValueId(5)), dest_more: vec![ValueId(4), ValueId(6)], target: Label(9), args: vec![ValueId(0)] });
+        b.mir.blocks[1].term = Some(Terminator::Return { lo: Some(ValueId(3)), hi: Some(ValueId(5)), more: vec![ValueId(4), ValueId(6)] });
+        let bytes = bytes(&b);
+        assert_eq!(bytes[MAGIC.len()], FORMAT);
+        let (back, _) = decode(&bytes).expect("decode");
+        assert_eq!(back[0].mir, b.mir);
+        assert_eq!(back[0].mir.ret_more_tys, [MirTy::F64, MirTy::I64]);
     }
 
     #[test]

@@ -299,6 +299,14 @@ pub const MIR_SECTION_COUNTED_FORMAT: u8 = 22;
 /// since frames stopped being collector roots. A reader refuses format 22.
 pub const MIR_SECTION_ROOTLESS_FORMAT: u8 = 23;
 
+/// The first MIR section format whose direct calls and returns may carry
+/// more than two result words (archive 8.13): a body's result types end
+/// with the types of words 3.. (`MirFunc::ret_more_tys`), a `Call` its
+/// further dests (`dest_more`) after `dest_hi`, a `Return` its further
+/// words (`more`) after `hi`, each a counted list. A reader refuses
+/// format 23, whose words sit elsewhere.
+pub const MIR_SECTION_WIDE_RETURN_FORMAT: u8 = 24;
+
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and
 /// scope and an `at_call` byte; little-endian `u32`s.

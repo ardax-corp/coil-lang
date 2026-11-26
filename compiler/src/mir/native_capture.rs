@@ -297,7 +297,7 @@ pub fn capture_const_calls() -> Vec<ConstCall> {
                 .collect();
             for (blk_i, blk) in b.mir.blocks.iter().enumerate() {
                 for (i, inst) in blk.insts.iter().enumerate() {
-                    let super::MirInst::Call { dest, dest_hi: None, target, args } = inst else { continue };
+                    let super::MirInst::Call { dest, dest_hi: None, target, args, .. } = inst else { continue };
                     let Some(args) = args.iter().map(|a| consts.get(a).copied()).collect::<Option<Vec<_>>>() else { continue };
                     out.push(ConstCall { at: (bi, blk_i, i), body: b.name.clone(), target: *target, args, loc: b.mir.op_loc(*dest) });
                 }
