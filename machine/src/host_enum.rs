@@ -313,6 +313,9 @@ pub fn pack_result_unit_or_panic(heap: &mut Heap, value: Result<(), Value>) -> V
     pack_result_unit_edge(heap, value).unwrap_or_else(|e| panic!("{e}"))
 }
 
+// Packing checks that a payload names a heap object only in debug builds:
+// the payload is the native's own result, so a miss is a runtime bug, and
+// the slot search cost about a third of a short string slice.
 fn pack_option_niche_some(heap: &Heap, payload: Value) -> Result<Value, HostEnumMismatch> {
     let raw = payload.bits();
     if raw == 0 {
@@ -323,7 +326,7 @@ fn pack_option_niche_some(heap: &Heap, payload: Value) -> Result<Value, HostEnum
             "OptionNiche Some payload has Result Err bit set",
         ));
     }
-    if heap.find_object_by_addr(raw).is_none() {
+    if cfg!(debug_assertions) && heap.find_object_by_addr(raw).is_none() {
         return Err(HostEnumMismatch(
             "OptionNiche Some payload is not a heap object",
         ));
@@ -378,7 +381,7 @@ fn pack_result_niche_ok(heap: &Heap, payload: Value) -> Result<Value, HostEnumMi
             "ResultNiche Ok payload is not an aligned heap pointer",
         ));
     }
-    if heap.find_object_by_addr(raw).is_none() {
+    if cfg!(debug_assertions) && heap.find_object_by_addr(raw).is_none() {
         return Err(HostEnumMismatch("ResultNiche Ok payload is not a heap object"));
     }
     Ok(payload)
@@ -391,7 +394,7 @@ fn pack_result_niche_err(heap: &Heap, payload: Value) -> Result<Value, HostEnumM
             "ResultNiche Err payload is not an aligned heap pointer",
         ));
     }
-    if heap.find_object_by_addr(raw).is_none() {
+    if cfg!(debug_assertions) && heap.find_object_by_addr(raw).is_none() {
         return Err(HostEnumMismatch(
             "ResultNiche Err payload is not a heap object",
         ));

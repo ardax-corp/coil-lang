@@ -320,7 +320,7 @@ pub struct Heap {
     reuse: (u64, Layout, bool),
     /// Shared function values that capture and fill nothing, by entry,
     /// arity and rest flag ([`Self::immortal_plain_fn`]), never swept.
-    immortal_fns: HashMap<(u32, u32, bool), Object>,
+    immortal_fns: HashMap<u64, Object, AddrHashBuilder>,
     /// What the last [`Self::free_early`] gave back.
     early_freed: Vec<u64>,
     /// Scratch of a deep [`Heap::free_early`] walk (found, mark work,
@@ -404,7 +404,7 @@ impl Default for Heap {
             immortal_enums: HashMap::default(),
             unit_enums: [const { AtomicU64::new(0) }; UNIT_ENUM_FAST],
             reuse: (0, Layout::new::<u8>(), false),
-            immortal_fns: HashMap::new(),
+            immortal_fns: HashMap::default(),
             early_freed: Vec::new(),
             early_scratch: (Vec::new(), Vec::new(), Vec::new()),
             freed_early: false,
@@ -1880,7 +1880,10 @@ impl Heap {
     /// table is only read: `None` when this one is not in it yet, and the
     /// caller allocates as for any function value.
     pub fn immortal_plain_fn(&mut self, entry: u32, arity: u32, is_rest: bool) -> Option<Object> {
-        if let Some(obj) = self.immortal_fns.get(&(entry, arity, is_rest)) {
+        // One word per value (a lambda's evaluation looks it up each time):
+        // the entry, then the arity and the rest flag above it.
+        let key = u64::from(entry) | (u64::from(arity) << 32) | (u64::from(is_rest) << 63);
+        if let Some(obj) = self.immortal_fns.get(&key) {
             return Some(*obj);
         }
         if !self.alloc_lock.is_null() {
@@ -1890,7 +1893,7 @@ impl Heap {
         // Old: a root for the runtime's lifetime, never worth a nursery copy.
         let (object, _) = self.alloc_unlocked_in(pfn, Object::Fn, false);
         object.rc_set_immortal();
-        self.immortal_fns.insert((entry, arity, is_rest), object);
+        self.immortal_fns.insert(key, object);
         Some(object)
     }
 
