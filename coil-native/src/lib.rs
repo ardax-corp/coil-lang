@@ -5861,13 +5861,16 @@ impl<'a> Lower<'a> {
         (self.b.use_var(ptr), self.b.use_var(len))
     }
 
-    /// A forward `ByteScan` over strings: test 16 lanes at a time in place
-    /// for up to one kernel's width ([`common::simd::BYTE_LANES`]), so a
-    /// scan whose next hit is near ends without entering the lane kernel.
-    /// Past that, or where 16 lanes would leave the bound or a stream (or a
-    /// scalar is no byte), the kernel goes on from the lane reached.
-    /// Stopping at a lane the kernel would pass is never wrong: the loop
-    /// after the scan runs it. `None`: not such a scan (nothing emitted).
+    /// A forward `ByteScan` over strings and byte arrays: test 16 lanes at a
+    /// time in place for up to one kernel's width
+    /// ([`common::simd::BYTE_LANES`]), so a scan whose next hit is near ends
+    /// without entering the lane kernel. Past that width, or where a scalar
+    /// is no byte or a stream is neither, the kernel goes on from the lane
+    /// reached. Where 16 lanes would leave the bound or a stream, the scan
+    /// stops at the lane reached: fewer than 16 iterations are left to the
+    /// loop, cheaper than a kernel call. Stopping at a lane the kernel would
+    /// pass is never wrong: the loop after the scan runs it. `None`: not
+    /// such a scan (nothing emitted).
     fn scan_in_place(&mut self, f: &MirFunc, inst: &MirInst) -> Option<cranelift_codegen::ir::Value> {
         const WIDE: i64 = 16;
         let MirInst::ByteScan { from, bound, inclusive, backward: false, streams, scalars, expr, .. } = inst else {
@@ -5877,11 +5880,13 @@ impl<'a> Lower<'a> {
             return None;
         }
         let mut bytes = Vec::with_capacity(streams.len());
+        let mut kinds = Vec::with_capacity(streams.len());
         for &(st, off) in streams {
-            let (p, n) = self.str_bytes(f, st);
+            let (p, n, known) = self.stream_bytes(f, st);
             let o = self.get(f, off);
             let o = self.coerce(o, types::I64);
             bytes.push((p, n, o));
+            kinds.push(known);
         }
         let scal: Vec<_> = scalars
             .iter()
@@ -5913,9 +5918,14 @@ impl<'a> Lower<'a> {
         self.b.append_block_param(kern, types::I64);
         self.b.append_block_param(done, types::I64);
         // Lane compares are on bytes: a scalar outside `0..=255` leaves it to the kernel.
+        // So does a stream that is neither a string nor a byte array.
         let mut bytes_ok = self.b.ins().iconst(types::I8, 1);
         for &x in &scal {
             let ok = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, x, 255);
+            bytes_ok = self.b.ins().band(bytes_ok, ok);
+        }
+        for &k in &kinds {
+            let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, k, 0);
             bytes_ok = self.b.ins().band(bytes_ok, ok);
         }
         let budget = self.b.ins().iconst(types::I64, common::simd::BYTE_LANES as i64 / WIDE);
@@ -5933,7 +5943,7 @@ impl<'a> Lower<'a> {
         let below = self.b.ins().icmp(cc, last, bound);
         let fits = self.b.ins().bxor_imm_u(past, 1);
         let inb = self.b.ins().band(below, fits);
-        self.b.ins().brif(inb, test, &[], kern, &[p.into()]);
+        self.b.ins().brif(inb, test, &[], done, &[p.into()]);
         self.b.switch_to_block(test);
         let mut lanes = Vec::with_capacity(bytes.len());
         for &(ptr, n, o) in &bytes {
@@ -5943,7 +5953,7 @@ impl<'a> Lower<'a> {
             let hi = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, end, n);
             let ok = self.b.ins().band(lo, hi);
             let read = self.b.create_block();
-            self.b.ins().brif(ok, read, &[], kern, &[p.into()]);
+            self.b.ins().brif(ok, read, &[], done, &[p.into()]);
             self.b.switch_to_block(read);
             let a = self.b.ins().iadd(ptr, at);
             lanes.push(self.b.ins().load(types::I8X16, MemFlagsData::new().with_notrap(), a, 0));
@@ -5969,6 +5979,43 @@ impl<'a> Lower<'a> {
         self.b.ins().jump(done, &[w.into()]);
         self.b.switch_to_block(done);
         Some(self.b.block_params(done)[0])
+    }
+
+    /// `(pointer, length)` of the bytes of scan stream `s`: a string's from
+    /// its view, else a byte array's packed storage, read at this scan (a
+    /// byte array may change between scans), and whether it is either (the
+    /// lane kernel reads anything else).
+    fn stream_bytes(&mut self, f: &MirFunc, s: ValueId) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value, cranelift_codegen::ir::Value) {
+        let (p, n) = self.str_bytes(f, s);
+        let l = machine::native::array_slots();
+        let t = MemFlagsData::trusted();
+        let (arr, kind_b, tag_b, bytes_b, join) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+        for _ in 0..3 {
+            self.b.append_block_param(join, types::I64);
+        }
+        let (zero, one) = (self.b.ins().iconst(types::I64, 0), self.b.ins().iconst(types::I64, 1));
+        let neither = [zero.into(), zero.into(), zero.into()];
+        // A string with bytes. An empty one, or not a string, takes the array test.
+        self.b.ins().brif(n, join, &[p.into(), n.into(), one.into()], arr, &[]);
+        self.b.switch_to_block(arr);
+        let a = self.get(f, s);
+        let a = self.coerce(a, types::I64);
+        self.b.ins().brif(a, kind_b, &[], join, &neither);
+        self.b.switch_to_block(kind_b);
+        let k = self.b.ins().uload8(types::I64, t, a, l.kind_at as i32);
+        let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
+        self.b.ins().brif(is, tag_b, &[], join, &neither);
+        self.b.switch_to_block(tag_b);
+        let tag = self.b.ins().uload8(types::I64, t, a, l.data_at as i32);
+        let is = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.bytes_tag));
+        self.b.ins().brif(is, bytes_b, &[], join, &neither);
+        self.b.switch_to_block(bytes_b);
+        let bp = self.b.ins().load(types::I64, t, a, l.bytes_ptr_at as i32);
+        let bn = self.b.ins().load(types::I64, t, a, l.bytes_len_at as i32);
+        self.b.ins().jump(join, &[bp.into(), bn.into(), one.into()]);
+        self.b.switch_to_block(join);
+        let ps = self.b.block_params(join);
+        (ps[0], ps[1], ps[2])
     }
 
     /// A scan predicate on 16 lanes of bytes (`lanes[k]`, stream `k`) and
