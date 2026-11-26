@@ -1043,7 +1043,9 @@ fn host_spawn_context() -> Result<ThreadSpawnContext, ThreadErrorTag> {
 /// only wait in the queue behind the ones that fill the pool.
 fn host_par_room(_heap: &mut Heap, _args: &[Value]) -> Value {
     let room = HOST_STATE.with(|c| c.borrow().as_ref().and_then(|s| s.cpu_reactor.as_ref().map(|r| r.has_room())));
-    Value::from(room.unwrap_or(false))
+    // A runtime bound to no pool (no driver yet) spawns through the shared
+    // one, which has room unless this target has no threads.
+    Value::from(room.unwrap_or(!crate::reactor::NO_THREADS))
 }
 
 /// The host wiring of [`host_par_room`].

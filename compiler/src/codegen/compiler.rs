@@ -361,13 +361,6 @@ impl Compiler {
         self.auto_par = on;
     }
 
-    /// Fork sites whose arms build heap results too (off by default:
-    /// [`crate::hir::par::ParForkSite::worth_forking`]). For tests of the
-    /// worker those sites get.
-    pub fn set_par_heap_forks(&mut self, on: bool) {
-        self.par_heap_forks = on;
-    }
-
     /// At most this grain for a counted loop
     /// ([`crate::hir::par::LoopParSite::grain`]). For tests of the chunk
     /// worker on loops too small for the cost model.
@@ -4210,6 +4203,14 @@ impl Compiler {
             let missed = b.bin(missed, l, r, coil_ty::boolean());
             fallback = b.push(HirKind::Logic { and: false, lhs: missed, rhs: fallback }, coil_ty::boolean());
         }
+        // No worker free for an arm: the function on this thread. A fork
+        // inside a job of another (a forked loop's chunk) otherwise spawns
+        // jobs no worker takes, which its joiner runs one after another.
+        if self.native_id(common::THREAD_PAR_ROOM_NATIVE).is_some() {
+            let free = b.call(common::THREAD_PAR_ROOM_NATIVE, Vec::new(), coil_ty::boolean());
+            let full = b.push(HirKind::Un { op: crate::hir::UnOp::Not, operand: free }, coil_ty::boolean());
+            fallback = b.push(HirKind::Logic { and: false, lhs: fallback, rhs: full }, coil_ty::boolean());
+        }
         let orig = sequential(&mut b);
         let orig = b.block(vec![orig], None, coil_ty::never());
         stmts.push(b.if_(fallback, orig, None, coil_ty::unit()));
@@ -7340,10 +7341,7 @@ impl Compiler {
             let shapes = hir.par_fork_sites(&self.checker, &self.pure_fns);
             self.fork_fns = hir.par_worker_fns(&self.checker, &shapes);
             if self.auto_par {
-                // A function whose fork the cost model declines keeps its
-                // place in `fork_fns` (its calls stay calls), as with
-                // `--auto-par off`, and gets no worker.
-                self.par_workers = self.fork_fns.iter().filter(|q| shapes.values().find(|s| &s.qualified == *q).is_none_or(|s| s.worth_forking(self.par_heap_forks))).cloned().collect();
+                self.par_workers = self.fork_fns.clone();
                 self.par_shapes = shapes;
             }
         }

@@ -202,22 +202,9 @@ pub struct ParForkSite {
     /// Conditions, all of which must hold for the fork site to be reached.
     pub guards: Vec<ParGuard>,
     /// The function returns a heap object (an enum, a tuple, a class, a
-    /// string, a collection), so its arms build what they return. A fork
-    /// of one is not worth it today ([`ParForkSite::worth_forking`]).
+    /// string, a collection), so its arms build what they return in the
+    /// shared-heap steal epoch, which frees what dies there in place.
     pub heap_result: bool,
-}
-
-impl ParForkSite {
-    /// Whether the cost model forks this site. A shared-heap steal epoch
-    /// logs every count change of the objects its workers allocate and
-    /// applies the log at the join, so a fork whose arms build heap
-    /// results runs slower than the sequential call even on one worker
-    /// (a `Tree::Node(f(a), f(b))` builder about 1.8x). Such sites stay
-    /// sequential unless `heap_forks` (tests of the worker itself) until
-    /// epochs count in place.
-    pub fn worth_forking(&self, heap_forks: bool) -> bool {
-        heap_forks || !self.heap_result
-    }
 }
 
 /// True when every guard holds for a concrete arg vector.
