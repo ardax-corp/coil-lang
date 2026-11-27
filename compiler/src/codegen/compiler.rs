@@ -876,6 +876,12 @@ impl Compiler {
         if let Some((params, _)) = self.mono_clone_sig(name) {
             return Some((crate::layout::CalleeFacts::default(), params.clone()));
         }
+        // A structural `Show` / `Hash` thunk's raw entry: ground, never a
+        // function value (a dictionary holds its `$dict` adapter), its
+        // types its own.
+        if let Some(params) = self.structural_pair_thunk_params(name) {
+            return Some((crate::layout::CalleeFacts::default(), params.clone()));
+        }
         let lookup = strip_overload_key(name);
         let params = self
             .checker
@@ -1320,6 +1326,16 @@ impl Compiler {
     /// too, and every other caller reaches it through its `$dict` adapter.
     pub(super) fn is_raw_instance_key(&self, key: &str) -> bool {
         is_instance_method_fqn(&self.checker, key) && (self.raw_instance_methods.contains(key) || self.instance_method_fqn_raw(key))
+    }
+
+    /// The parameter types of `key` when it is the raw entry of a
+    /// structural instance's `show` or `hash` thunk
+    /// ([`Self::reserve_structural_thunks`]): like a raw instance method,
+    /// it takes a two-word value as its two words, and its `$dict` adapter
+    /// (a body of its own) the boxed word a dictionary caller passes.
+    pub(super) fn structural_pair_thunk_params(&self, key: &str) -> Option<&Vec<Ty>> {
+        let pair = (key.starts_with("Show__") && key.ends_with("__show")) || (key.starts_with("Hash__") && key.ends_with("__hash"));
+        self.structural_thunk_params.get(key).filter(|_| pair)
     }
 
     /// Per argument of a call of raw instance method `fqn`'s own entry with

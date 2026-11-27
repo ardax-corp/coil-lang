@@ -1671,9 +1671,12 @@ impl Compiler {
         let module = self.hir_module.take();
         // The frame starts with the parameters, as a declared function's.
         // An inherent method clone's thunk takes its two-word parameters
-        // in two slots, as its callers pass them ([`Self::hir_method_clone`]).
+        // in two slots, as its callers pass them ([`Self::hir_method_clone`]),
+        // as does a structural `Show` / `Hash` thunk's raw entry.
         let pairs = match self.current_function_table_key.as_deref() {
-            Some(key) if self.method_clone_plans.borrow().contains_key(key) => self.callee_param_pairs(key),
+            Some(key) if self.method_clone_plans.borrow().contains_key(key) || self.structural_pair_thunk_params(key).is_some() => {
+                self.callee_param_pairs(key)
+            }
             _ => Vec::new(),
         };
         let skip = pairs.len().saturating_sub(hir.params.len());
