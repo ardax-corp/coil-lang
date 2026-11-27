@@ -5546,6 +5546,12 @@ impl Compiler {
         if pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
             return Err("callee-pair");
         }
+        // Its two-word parameters as two words, as its own signature
+        // takes them ([`Self::mono_clone_sig`]).
+        let ranges = self.callee_param_pairs(&mono);
+        if !ranges.is_empty() && ranges.len() != args.len() {
+            return Err("callee-pair");
+        }
         let mut param_tys = self.hir_mono_param_tys(lookup, arg_tys.len()).ok_or("callee-signature")?;
         let mut ret_ty = self.checker.fn_return_ty(lookup).ok_or("callee-signature")?;
         // A returned function's parameters are flattened onto the
@@ -5620,7 +5626,7 @@ impl Compiler {
             builtin: None,
             generic: None,
             instance: None,
-            ranges: Vec::new(),
+            ranges,
             mono_of: Some(Box::new((lookup.to_string(), self.hir_mono_var_map(map)))),
             own_dicts: Vec::new(),
         })

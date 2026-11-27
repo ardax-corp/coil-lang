@@ -870,6 +870,12 @@ impl Compiler {
             let facts = crate::layout::CalleeFacts { coroutine: self.coroutine_fns.contains(&plan.src), ..crate::layout::CalleeFacts::default() };
             return Some((facts, plan.param_tys().to_vec()));
         }
+        // A mono clone: ground, never a function value (a generic's value
+        // is its shared body's `PolyFn` or a `$value` adapter calling the
+        // clone), its types its own signature's.
+        if let Some((params, _)) = self.mono_clone_sig(name) {
+            return Some((crate::layout::CalleeFacts::default(), params.clone()));
+        }
         let lookup = strip_overload_key(name);
         let params = self
             .checker
@@ -909,6 +915,13 @@ impl Compiler {
     /// The function being compiled's key that answers
     /// [`Self::callee_has_unboxed_range_params`], if any.
     pub(super) fn current_fn_pair_key(&self) -> Option<String> {
+        // A mono clone's parameters follow its own signature.
+        if let Some((mono, table_key)) = &self.current_mono_clone
+            && self.compiling_mono_clone
+            && self.current_function_table_key.as_deref() == Some(table_key.as_str())
+        {
+            return self.callee_has_unboxed_range_params(mono).then(|| mono.clone());
+        }
         // A trait instance method's parameters stay one word; an inherent
         // method's follow its signature, as a free function's.
         let inherent = |k: &str| self.checker.inherent_method_visibility(strip_overload_key(k)).is_some();
@@ -5746,6 +5759,67 @@ impl Compiler {
         format!("{}$mono${}${}", qualified, key.def_id.raw(), subst_ids)
     }
 
+    /// Record mono clone `name`'s own signature ([`Self::mono_clone_sig`]):
+    /// generic `qualified`'s parameters and declared result at `key`'s
+    /// type arguments. Named before any body is emitted, so a caller
+    /// planned first and the clone's body read the same answer.
+    fn note_mono_clone_sig<'compiler>(
+        &mut self,
+        name: &str,
+        qualified: &str,
+        source_name: &str,
+        type_params: &[parser::ast::TypeParam<'compiler>],
+        key: &MonoKey,
+    ) {
+        if self.mono_clone_sigs.contains_key(name) {
+            return;
+        }
+        let type_param_tys = self.mono_type_param_tys_for(type_params, key);
+        let vars = self.mono_var_tys_for(source_name, qualified, type_params, &type_param_tys);
+        let lookup = [qualified, source_name].into_iter().find(|n| self.checker.fn_param_tys(n).is_some());
+        let Some(lookup) = lookup else { return };
+        // A method's receiver, an instance method or an overload keeps
+        // the one-word ABI: its callers do not reach it as a mono clone's.
+        // A generator's clone takes each argument as one word, as its
+        // `MakeCoro` passes them.
+        if self.checker.has_receiver(lookup)
+            || is_instance_method_fqn(&self.checker, lookup)
+            || self.checker.is_overloaded(lookup)
+            || self.coroutine_fns.contains(qualified)
+            || self.coroutine_fns.contains(source_name)
+        {
+            return;
+        }
+        let (Some(params), Some(ret)) = (self.checker.fn_param_tys(lookup), self.checker.fn_declared_return_ty(lookup)) else {
+            return;
+        };
+        // A function of no parameters is typed `unit -> R`.
+        let none = !self.checker.fn_param_names(lookup).is_some_and(|names| !names.is_empty())
+            && matches!(params.as_slice(), [Ty::Con(unit)] if unit == "unit");
+        let mut params = if none { Vec::new() } else { params };
+        // A returned function's parameters, which the curried scheme
+        // flattens onto the function's own, are its result's.
+        if let Some(named) = self.checker.fn_param_names(lookup).map(<[String]>::len)
+            && params.len() > named
+        {
+            params.truncate(named);
+        }
+        let at = |ty: &Ty| {
+            let prune = |t: &Ty| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), t);
+            prune(&Self::apply_ty_var_map(&prune(ty), &vars))
+        };
+        let params: Vec<Ty> = params.iter().map(at).collect();
+        let ret = at(&ret);
+        self.mono_clone_sigs.insert(name.to_string(), (params, ret));
+    }
+
+    /// Mono clone `name`'s own parameter and result types: its calling
+    /// convention is a ground function's ([`Self::callee_param_facts`]).
+    /// A type still open there keeps its slot one word.
+    pub(super) fn mono_clone_sig(&self, name: &str) -> Option<&(Vec<Ty>, Ty)> {
+        self.mono_clone_sigs.get(name)
+    }
+
     /// Name and reserve every mono clone of a generic function before any
     /// body is emitted, so a clone emitted earlier can call one emitted
     /// later (`twice<int>` calling `wrap<int>`, #915).
@@ -5761,6 +5835,7 @@ impl Compiler {
             }
             let name = Self::mono_clone_name(qualified, &spec.key);
             self.reserve_function_entry(name.clone());
+            self.note_mono_clone_sig(&name, qualified, source_name, type_params, &spec.key);
             // A generic generator's clone is a generator too.
             if self.coroutine_fns.contains(qualified) {
                 self.coroutine_fns.insert(name.clone());
@@ -5799,6 +5874,7 @@ impl Compiler {
 
             let mono_name = Self::mono_clone_name(qualified, &specialization.key);
             let (clone_offset, _) = self.bind_function_entry(mono_name.clone());
+            self.note_mono_clone_sig(&mono_name, qualified, source_name, type_params, &specialization.key);
             if self.coroutine_fns.contains(qualified) {
                 self.coroutine_fns.insert(mono_name.clone());
             }
@@ -5815,6 +5891,7 @@ impl Compiler {
                 result_ok_is_result: self.checker.fn_result_ok_is_result(source_name),
                 two_word: self.mono_clone_pair(qualified).or_else(|| self.mono_clone_pair(source_name)),
             };
+            let prev_mono_name = self.current_mono_clone.replace((mono_name.clone(), qualified.to_string()));
             self.mono_codegen_var_types.push(overrides);
             let var_tys = self.mono_var_tys_for(source_name, qualified, type_params, &type_param_tys);
             let bounds = self.checker.env().lookup(qualified).or_else(|| self.checker.env().lookup(source_name)).map(|s| s.constraints.clone()).unwrap_or_default();
@@ -5839,6 +5916,7 @@ impl Compiler {
             self.mono_type_param_tys.pop();
             self.mono_var_tys.pop();
             self.compiling_mono_clone = prev_mono_clone;
+            self.current_mono_clone = prev_mono_name;
         }
     }
 

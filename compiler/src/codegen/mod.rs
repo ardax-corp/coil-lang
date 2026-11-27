@@ -384,6 +384,15 @@ pub struct Compiler {
     /// True while lowering a monomorphized clone. Bound-method hints still
     /// point at `__dictN`; the clone has ground types and must CALL instead.
     compiling_mono_clone: bool,
+    /// The mono clone whose body is being compiled, and the table key it
+    /// is compiled under (the generic's): its parameters follow the
+    /// clone's own signature ([`Compiler::current_fn_pair_key`]).
+    current_mono_clone: Option<(String, String)>,
+    /// Each mono clone's own signature, by its entry name: the generic's
+    /// parameters and declared result at the clone's type arguments
+    /// ([`Compiler::mono_clone_sig`]). Clone names are unique in a
+    /// compile, so this outlives the module that made them.
+    mono_clone_sigs: HashMap<String, (Vec<Ty>, Ty)>,
 
     /// True while compiling a function whose return type is inferred
     /// as `Result<T, E>` via `raise` / `?` (wrap bare `return` in `Ok`).
@@ -785,6 +794,8 @@ impl Default for Compiler {
             compiling_method: false,
             inherent_method_decl: false,
             compiling_mono_clone: false,
+            current_mono_clone: None,
+            mono_clone_sigs: HashMap::new(),
             compiling_result_mode: false,
             compiling_result_ok_is_result: false,
             compiling_two_word_enum: None,
