@@ -876,6 +876,23 @@ impl Compiler {
         if let Some((params, _)) = self.mono_clone_sig(name) {
             return Some((crate::layout::CalleeFacts::default(), params.clone()));
         }
+        // A trait instance method's clone: ground, never a function value
+        // (a dictionary holds its `$dict` adapter), its types the method's
+        // at the clone's.
+        if let Some(params) = self.instance_clone_param_tys(name) {
+            return Some((crate::layout::CalleeFacts::default(), params));
+        }
+        // A structural `Show` / `Hash` thunk's raw entry: ground, never a
+        // function value (a dictionary holds its `$dict` adapter), its
+        // types its own.
+        if let Some(params) = self.structural_pair_thunk_params(name) {
+            return Some((crate::layout::CalleeFacts::default(), params.clone()));
+        }
+        // A numeric range's `to_vec` thunk: called by name only, its
+        // receiver the range.
+        if let Some(range) = Self::range_to_vec_thunk_receiver(name) {
+            return Some((crate::layout::CalleeFacts::default(), vec![range]));
+        }
         let lookup = strip_overload_key(name);
         let params = self
             .checker
@@ -928,7 +945,11 @@ impl Compiler {
         // A trait instance method's parameters stay one word, a raw one's
         // excepted; an inherent method's follow its signature, as a free
         // function's.
-        let inherent = |k: &str| self.checker.inherent_method_visibility(strip_overload_key(k)).is_some() || self.is_raw_instance_key(k);
+        let inherent = |k: &str| {
+            self.checker.inherent_method_visibility(strip_overload_key(k)).is_some()
+                || self.is_raw_instance_key(k)
+                || self.inst_clone_of.contains_key(k)
+        };
         if self.compiling_method
             && !self.current_function_table_key.as_deref().into_iter().chain(self.current_function_qualified.as_deref()).any(inherent)
         {
@@ -1322,6 +1343,38 @@ impl Compiler {
         is_instance_method_fqn(&self.checker, key) && (self.raw_instance_methods.contains(key) || self.instance_method_fqn_raw(key))
     }
 
+    /// The parameter types of trait instance method clone `name`
+    /// ([`Self::instance_clone`]): its method's own signature at the clone's
+    /// types. Like a raw instance method, the clone takes a two-word value
+    /// as its two words; its `$dict` adapter takes the boxed word. `None`
+    /// for a default body's clone, a generator's, or types left open.
+    pub(super) fn instance_clone_param_tys(&self, name: &str) -> Option<Vec<Ty>> {
+        let (fqn, lookup) = self.inst_clone_of.get(name)?;
+        let src = self.inst_clone_srcs.get(fqn)?;
+        if Self::is_default_method_fqn(&src.class, &src.method, fqn) || self.coroutine_fns.contains(name) {
+            return None;
+        }
+        let vars = self.inst_clone_vars(&src.head, lookup)?;
+        let subst = self.checker.subst();
+        let params: Vec<Ty> = self
+            .checker
+            .fn_param_tys(fqn)?
+            .iter()
+            .map(|t| crate::typechecking::subst::apply_ty_prune(subst, &Self::apply_ty_var_map(t, &vars)))
+            .collect();
+        (!params.iter().any(Ty::has_var)).then_some(params)
+    }
+
+    /// The parameter types of `key` when it is the raw entry of a
+    /// structural instance's `show` or `hash` thunk
+    /// ([`Self::reserve_structural_thunks`]): like a raw instance method,
+    /// it takes a two-word value as its two words, and its `$dict` adapter
+    /// (a body of its own) the boxed word a dictionary caller passes.
+    pub(super) fn structural_pair_thunk_params(&self, key: &str) -> Option<&Vec<Ty>> {
+        let pair = (key.starts_with("Show__") && key.ends_with("__show")) || (key.starts_with("Hash__") && key.ends_with("__hash"));
+        self.structural_thunk_params.get(key).filter(|_| pair)
+    }
+
     /// Per argument of a call of raw instance method `fqn`'s own entry with
     /// `argc` arguments, whether it goes as its two words (`None`: the
     /// method's signature has another arity).
@@ -1355,10 +1408,16 @@ impl Compiler {
         else {
             return;
         };
-        if !instance.args.iter().any(Ty::has_var) {
+        // A method with bounds of its own (`fn pick<W: Show>`) is cloned at
+        // their ground types too, a ground instance's included: the clone
+        // takes no dictionary for them and is raw.
+        let own = self.instance_method_own_vars(class, method, fqn, &instance.args);
+        if !instance.args.iter().any(Ty::has_var) && own.is_none() {
             return;
         }
-        let head = instance.args.clone();
+        let mut head = instance.args.clone();
+        let own_bounds = own.as_ref().map_or(0, Vec::len);
+        head.extend(own.unwrap_or_default());
         self.inst_clone_srcs.insert(
             fqn.to_string(),
             InstCloneSrc {
@@ -1369,10 +1428,42 @@ impl Compiler {
                 compiled: false,
                 program: self.program_seq,
                 trait_params: None,
-                own_bounds: 0,
+                own_bounds,
                 method_of: None,
             },
         );
+    }
+
+    /// The type variables instance method `fqn` (of an instance at `head`)
+    /// has for its trait method's own bounds (`fn pick<W: Show>`), in the
+    /// order the trait declares them: what the trait's own variables are
+    /// in the method's signature. `None` when the method has no own bounds,
+    /// or one is not a single variable of the method's own.
+    fn instance_method_own_vars(&self, class: &str, method: &str, fqn: &str, head: &[Ty]) -> Option<Vec<Ty>> {
+        let bounds = self.trait_method_own_bounds(class, method);
+        if bounds.is_empty() || self.own_kinds_vars(class, method).is_some_and(|v| v.len() != bounds.len()) {
+            return None;
+        }
+        let scheme = self.checker.typeclass_method_scheme(class, method)?;
+        let (open, _) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let own = self.checker.fn_param_tys(fqn)?;
+        if open.len() != own.len() {
+            return None;
+        }
+        let mut map = HashMap::new();
+        for (o, t) in open.iter().zip(&own) {
+            Self::bind_scheme_vars(o, t, &mut map);
+        }
+        let head_vars: HashSet<_> = head.iter().flat_map(crate::typechecking::ty::ftv_ty).collect();
+        let vars: Vec<Ty> = bounds
+            .iter()
+            .map(|c| match c.args.as_slice() {
+                [Ty::Var(v)] => map.get(v).filter(|t| matches!(t, Ty::Var(w) if !head_vars.contains(w))).cloned(),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        let distinct = vars.iter().enumerate().all(|(i, v)| !vars[..i].contains(v));
+        distinct.then_some(vars)
     }
 
     /// Record default body `class::method` as a clone source: generic over
@@ -1585,8 +1676,12 @@ impl Compiler {
         // instance has no shared entry a dictionary may hold: its clone's
         // `$dict` adapter takes and returns the trait's layouts.
         let flat_only = self.fn_flat_split(fqn, lookup);
+        // An instance method's clone at its own bounds' types has no
+        // `$dict` adapter either: only ground call sites reach it, with
+        // its own types' layouts.
+        let own_only = own_bounds > 0 && !Self::is_default_method_fqn(&class, &method, fqn);
         if !inherent
-            && ((self.trait_method_boundary_sig(&class, &method, trait_lookup, false).is_some() && !flat_only)
+            && ((self.trait_method_boundary_sig(&class, &method, trait_lookup, false).is_some() && !flat_only && !own_only)
                 || self.checker.typeclass_method_scheme(&class, &method).is_none()
                 || self.trait_method_own_bounds(&class, &method).len() != own_bounds)
         {
@@ -1627,6 +1722,7 @@ impl Compiler {
             return Some(name);
         }
         self.raw_instance_methods.insert(name.clone());
+        self.inst_clone_of.insert(name.clone(), (fqn.to_string(), lookup.to_vec()));
         self.inst_clones.insert(key, name.clone());
         self.inst_clone_queue.push_back(InstClone {
             src: fqn.to_string(),
@@ -1651,10 +1747,19 @@ impl Compiler {
             || self.module_ctxs.get(&src.program).is_some_and(|ctx| {
                 ctx.knows_tys(lookup)
                     && (ctx.layout_safe(src.span)
-                        || self.checker.enum_variants(&src.class).is_some()
+                        || self.inst_clone_over_enum(src)
                         || self.fn_sig_split(fqn)
                         || self.fn_flat_split(fqn, lookup))
             })
+    }
+
+    /// Whether clone source `src` is a generic enum's method (`Option::map`)
+    /// or a trait instance's over a generic enum (`impl Hash for
+    /// Option<T>`): the enum holds no fields its shared methods read, so its
+    /// clone may give it its own layout.
+    fn inst_clone_over_enum(&self, src: &InstCloneSrc) -> bool {
+        let enum_app = |t: &Ty| matches!(t, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if self.checker.enum_variants(n).is_some()));
+        self.checker.enum_variants(&src.class).is_some() || (src.method_of.is_none() && src.own_bounds == 0 && src.head.iter().all(enum_app))
     }
 
     /// Whether another module's class `class` at ground `args` is one whose
@@ -1831,15 +1936,15 @@ impl Compiler {
                 && self
                     .module_ctxs
                     .get(&src.program)
-                    // A generic enum's method (`Option::map`) holds no fields
-                    // its shared methods read: its clone may give `Option<T>`
-                    // its own layout.
+                    // A generic enum's method (`Option::map`), or a trait
+                    // instance's over one, holds no fields its shared methods
+                    // read: its clone may give `Option<T>` its own layout.
                     // A clone-only signature (a nested open enum, #2547) has
                     // no use for the shared body either.
                     .is_some_and(|ctx| {
                         ctx.knows_tys(&req.lookup)
                             && (ctx.layout_safe(src.span)
-                                || self.checker.enum_variants(&src.class).is_some()
+                                || self.inst_clone_over_enum(&src)
                                 || self.fn_sig_split(&req.src)
                                 || self.fn_flat_split(&req.src, &req.lookup))
                     })
@@ -1871,6 +1976,19 @@ impl Compiler {
                     }
                     for (name, want) in src.trait_params.iter().flatten().zip(&req.lookup) {
                         names.insert(name.clone(), want.clone());
+                    }
+                    // An instance method's own type parameters (`fn pick<W:
+                    // Show>`), at the types of the clone's own bounds.
+                    if src.method_of.is_none()
+                        && src.trait_params.is_none()
+                        && src.own_bounds > 0
+                        && let Expression::Function { type_params, .. } = method.1.as_ref()
+                        && type_params.len() == src.own_bounds
+                    {
+                        let own = &req.lookup[req.lookup.len() - src.own_bounds..];
+                        for (param, want) in type_params.iter().zip(own) {
+                            names.insert(param.name.to_string(), want.clone());
+                        }
                     }
                     // An inherent method compiles as in its `impl`: `self`
                     // in slot 0 (an instance method), the class as namespace.
@@ -2407,10 +2525,18 @@ impl Compiler {
         let convert_ret = relayout(self, &own_ret, &ret, ret_layout);
         let calls = HashMap::from([(req.src.clone(), (layouts, ret_layout))]);
         let body_ret = if convert_ret { own_ret } else { ret.clone() };
+        // A two-word parameter the clone takes as its two words, read in
+        // its own type; the call boxes it for the shared entry.
+        let pairs = self.callee_param_pairs(&req.name);
+        let own_tys = self.instance_clone_param_tys(&req.name).unwrap_or_default();
         let mut b = Synth::new(&self.checker, &req.name, body_ret.clone());
         let mut args = Vec::with_capacity(params.len());
         for (i, t) in params.iter().enumerate() {
-            let arg = if convert[i] {
+            let pair_ty = own_tys.get(i).filter(|_| pairs.get(i).is_some_and(Option::is_some));
+            let arg = if let Some(ty) = pair_ty {
+                let local = b.local(&format!("arg{i}"), ty.clone(), LocalKind::Param);
+                b.read(local)
+            } else if convert[i] {
                 let local = b.local(&format!("arg{i}"), own[i].clone(), LocalKind::Param);
                 let word = b.read(local);
                 b.builtin(crate::hir::Builtin::Relayout, vec![word], t.clone())
@@ -5212,6 +5338,24 @@ impl Compiler {
             let root = b.ret(call);
             let hir = b.finish(root);
             self.emit_synth_fn(&fqn, &hir, HashMap::new());
+        }
+    }
+
+    /// The receiver type of range `to_vec` thunk `key`
+    /// ([`Self::emit_range_method_thunks`]), which takes it in two words as
+    /// a free function takes a range.
+    pub(super) fn range_to_vec_thunk_receiver(key: &str) -> Option<Ty> {
+        use crate::typechecking::ty as coil_ty;
+        let (owner, method) = key.split_once("::")?;
+        let elem = match method {
+            "to_vec" => coil_ty::int(),
+            "__float_to_vec" => coil_ty::float(),
+            _ => return None,
+        };
+        match owner {
+            "Range" => Some(coil_ty::range_ty(elem)),
+            "RangeInclusive" => Some(coil_ty::range_inclusive_ty(elem)),
+            _ => None,
         }
     }
 

@@ -446,8 +446,9 @@ method's result read through a dictionary slot (a shared body's bound, a
 trait value's call), which the `$dict` adapter returns as one word even
 where the trait declares it closed (`Write::write`'s `Result<int,
 IoError>`); and a two-word argument of a trait instance method that is
-not raw (a default body, a generic-head instance's shared entry, a method
-with bounds of its own), which takes one word per parameter. A
+not raw (a default body and its clones, a generic-head instance's shared
+entry, a method with bounds of its own called with an open bound), which
+takes one word per parameter. A
 dependency's code (a path outside the project or under `.deps`), a clone
 compiled for another module and compiler-made code never warn. `coil dissect --boxes`
 lists every box, these included.
@@ -573,7 +574,21 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   (`Compiler::raw_instance_pair_args`; its frame follows its signature by
   position): a dictionary caller, a `%v` and an element-wise operator
   reach it through its `$dict` adapter, which reads the one boxed word in
-  the method's own type and the call splits it. A generic function's per-type clone (`f$mono$..`) is a
+  the method's own type and the call splits it. A trait instance method's
+  per-type clone (`Hash__Option<T>__hash$inst$Option<int>`, a
+  generic-head instance's at ground types, or a method with bounds of its
+  own at their types, `Pick__int__pick$inst$int_string`) is raw the same
+  way at its own signature (`Compiler::instance_clone_param_tys`, the
+  method's parameters at the clone's types); a thunk clone that calls the
+  shared entry takes the pair and boxes it there. A default body's clone
+  keeps one word per parameter. Another module's instance over a generic
+  enum (`impl Hash for Option<T>` in the prelude) compiles its clone from
+  its body (`inst_clone_over_enum`), as a generic enum's inherent method
+  does. The compiler-made bodies take a two-word value in two words as
+  well: a structural instance's `show` / `hash` thunk's raw entry (`Show`
+  of `Option<int>`, `Hash` of `(int, float)`; its `$dict` adapter is a
+  body of its own over the boxed word) and a numeric range's `to_vec`
+  thunk's receiver. A generic function's per-type clone (`f$mono$..`) is a
   ground callee at its own types: the generic's parameters and declared
   result at the clone's type arguments (`Compiler::mono_clone_sig`,
   recorded when the clone is named), so a bare `T` or an open `(T, T)` /

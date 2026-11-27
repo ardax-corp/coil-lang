@@ -1,0 +1,93 @@
+// A compiler-made structural instance's method (`Show` of `Option<int>`,
+// `Show` / `Hash` of `(int, float)`) called on a two-word value: directly,
+// trait-qualified, through a bounded generic's dictionary, a mono clone,
+// `%v`, a nested tuple's item and a lambda. Every spelling reads the same
+// value.
+use tests::assert;
+use string::format;
+
+fn shown<W: Show>(W w) -> string {
+    return w.show();
+}
+
+fn hashed<W: Hash>(W w) -> int {
+    return w.hash();
+}
+
+#[inline(never)]
+fn shown_shared<W: Show>(W w, int n) -> string {
+    let out = "";
+    let i = 0;
+    while i < n {
+        out = out + w.show();
+        i += 1;
+    }
+    return out;
+}
+
+fn pick(int i) -> Option<int> {
+    return if i % 2 == 0 {
+        Some(i * 3)
+    } else {
+        None
+    };
+}
+
+fn pair(int i) -> (int, float) {
+    return (i, i as float + 0.5);
+}
+
+test("Show of Option<int> takes the value") {
+    let a: Option<int> = Some(7);
+    let b: Option<int> = None;
+    assert!(a.show() == "Some(7)");
+    assert!(b.show() == "None");
+    assert!(Show::show(a) == "Some(7)");
+    assert!(shown(a) == a.show());
+    assert!(shown(b) == b.show());
+    assert!(format("%v", a) == a.show());
+    assert!(shown_shared(a, 2) == "Some(7)Some(7)");
+    let i = 0;
+    while i < 6 {
+        let o = pick(i);
+        assert!(o.show() == shown(o));
+        assert!(o.show() == format("%v", o));
+        i += 1;
+    }
+}
+
+test("Show and Hash of (int, float) take the value") {
+    let a: (int, float) = (1, 2.5);
+    let b: (int, float) = (3, 0.5);
+    assert!(a.show() == "(1, 2.5)");
+    assert!(Show::show(b) == "(3, 0.5)");
+    assert!(shown(a) == a.show());
+    assert!(format("%v", b) == b.show());
+    assert!(hashed(a) == a.hash());
+    assert!(hashed(b) == b.hash());
+    assert!(Hash::hash(a) == a.hash());
+    assert!(a.hash() == (1, 2.5).hash());
+    assert!(a.hash() != b.hash());
+    let i = 0;
+    while i < 5 {
+        let p = pair(i);
+        assert!(p.hash() == hashed(p));
+        assert!(p.show() == shown(p));
+        i += 1;
+    }
+}
+
+test("a nested two-word item and a lambda") {
+    let n: ((int, float), int) = ((4, 1.5), 9);
+    assert!(n.show() == "((4, 1.5), 9)");
+    assert!(n.hash() == hashed(n));
+    let inner = n[0];
+    assert!(inner.hash() == (4, 1.5).hash());
+    let o: (Option<int>, int) = (Some(2), 1);
+    assert!(o.show() == "(Some(2), 1)");
+    let f = fn (Option<int> x) => x.show();
+    assert!(f(Some(5)) == "Some(5)");
+    assert!(f(None) == "None");
+    let g = fn ((int, float) p) => p.hash();
+    assert!(g((1, 2.5)) == (1, 2.5).hash());
+}

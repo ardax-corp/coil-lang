@@ -1,0 +1,61 @@
+// Trait instance clones taking a two-word value: the prelude's `Hash` of
+// `Option<T>` at `Option<int>`, this module's instance over a generic enum
+// at `Opt<int>`, and an instance method with a bound of its own
+// (`fn score<W: Hash>`) from a bounded generic's per-type clone. Each
+// takes the `Option<int>` in its two words, not boxed per call.
+use io::sync::print;
+use string::format;
+
+trait Weigh<S> {
+    fn weigh(S s, Option<int> o) -> int {}
+}
+
+trait Score<S> {
+    fn score<W: Hash>(S s, Option<int> o, W w) -> int {}
+}
+
+enum Opt<T> {
+    Has(T),
+    Not,
+}
+
+impl Weigh for Opt<T> {
+    #[inline(never)]
+    pub fn weigh(Opt<T> s, Option<int> o) -> int {
+        let b = match s {
+            Opt::Has(_) => 1,
+            Opt::Not => 0,
+        };
+        return b + (o ?? 5);
+    }
+}
+
+impl Score for int {
+    #[inline(never)]
+    pub fn score<W: Hash>(int s, Option<int> o, W w) -> int {
+        return s + (o ?? 3) + (w.hash() & 7);
+    }
+}
+
+fn scored<P: Score, W: Hash>(P p, Option<int> o, W w) -> int {
+    return p.score(o, w);
+}
+
+fn main() {
+    let a: Opt<int> = Opt::Has(1);
+    let s = 0;
+    let i = 0;
+    while i < 10000000 {
+        let o: Option<int> = if i % 3 == 0 {
+            None
+        } else {
+            Some(i & 255)
+        };
+        s += o.hash() & 63;
+        s += a.weigh(o);
+        s += scored(i & 7, o, i);
+        s = s & 0xffffff;
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}

@@ -208,7 +208,11 @@ impl Compiler {
         // A raw instance method's parameters, `self` too, follow its
         // signature by position (the checker names an instance method's
         // parameters under its trait's method).
-        let raw_instance = key.as_deref().filter(|k| self.is_raw_instance_key(k)).map(|k| self.callee_param_pairs(k));
+        // A trait instance method's clone's too.
+        let raw_instance = key
+            .as_deref()
+            .filter(|k| self.is_raw_instance_key(k) || self.instance_clone_param_tys(k).is_some())
+            .map(|k| self.callee_param_pairs(k));
         BodyFrame::function(
             hir,
             |i| {
