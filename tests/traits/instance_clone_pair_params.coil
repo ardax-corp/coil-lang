@@ -1,0 +1,119 @@
+// A generic-head trait instance's method cloned at ground types takes a
+// two-word argument: this module's instance over a generic enum (its
+// receiver and an `Option<int>` parameter), the prelude's `Hash`, `Eq` and
+// `Show` of `Option<T>` at `Option<int>` and `Result<int, string>`, called
+// directly, through a bounded generic's clone and through a dictionary.
+use tests::assert;
+use string::format;
+
+trait Weigh<S> {
+    fn weigh(S s, Option<int> o) -> int {}
+}
+
+enum Opt<T> {
+    Has(T),
+    Not,
+}
+
+impl Weigh for Opt<T> {
+    #[inline(never)]
+    pub fn weigh(Opt<T> s, Option<int> o) -> int {
+        let b = match s {
+            Opt::Has(_) => 1,
+            Opt::Not => 0,
+        };
+        return b + (o ?? 5);
+    }
+}
+
+trait Mix<S> {
+    fn mix(S s) -> int {}
+}
+
+impl Mix for Option<T: Hash> {
+    #[inline(never)]
+    pub fn mix(Option<T> o) -> int {
+        return match o {
+            Some(v) => 31 ^ v.hash(),
+            None => 0,
+        };
+    }
+}
+
+fn hashed<W: Hash>(W w) -> int {
+    return w.hash();
+}
+
+fn mixed<W: Mix>(W w) -> int {
+    return w.mix();
+}
+
+fn weighed<W: Weigh>(W w, Option<int> o) -> int {
+    return w.weigh(o);
+}
+
+#[inline(never)]
+fn shared_hash<W: Hash>(W w, int n) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s += w.hash();
+        i += 1;
+    }
+    return s;
+}
+
+fn pick(int i) -> Option<int> {
+    return if i % 3 == 0 {
+        None
+    } else {
+        Some(i)
+    };
+}
+
+test("this module's instance over a generic enum") {
+    let a: Opt<int> = Opt::Has(3);
+    let n: Opt<int> = Opt::Not;
+    let none: Option<int> = None;
+    assert!(a.weigh(Some(4)) == 5);
+    assert!(n.weigh(none) == 5);
+    assert!(Weigh::weigh(a, none) == 6);
+    assert!(weighed(a, Some(2)) == 3);
+    let o: Option<int> = Some(4);
+    assert!(o.mix() == 27);
+    assert!(mixed(o) == 27);
+    assert!(none.mix() == 0);
+    let total = 0;
+    let i = 0;
+    while i < 9 {
+        let p = pick(i);
+        total += a.weigh(p) + p.mix();
+        i += 1;
+    }
+    assert!(total == 210);
+}
+
+test("the prelude's instances over Option and Result") {
+    let a: Option<int> = Some(7);
+    let b: Option<int> = None;
+    assert!(a.hash() == hashed(a));
+    assert!(b.hash() == hashed(b));
+    assert!(a.hash() == (31 ^ hashed(7)));
+    assert!(b.hash() == 0);
+    assert!(shared_hash(a, 3) == 3 * a.hash());
+    assert!(a == Some(7));
+    assert!(a != b);
+    assert!(format("%v", a) == "Some(7)");
+    let r: Result<int, string> = Ok(3);
+    let e: Result<int, string> = Err("x");
+    assert!(r.hash() == hashed(r));
+    assert!(e.hash() == hashed(e));
+    assert!(r.hash() != e.hash());
+    let i = 0;
+    while i < 6 {
+        let p = pick(i);
+        assert!(p.hash() == hashed(p));
+        assert!(p.hash() == shared_hash(p, 1));
+        i += 1;
+    }
+}
