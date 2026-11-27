@@ -1678,7 +1678,8 @@ impl Compiler {
             Some(key)
                 if self.method_clone_plans.borrow().contains_key(key)
                     || self.structural_pair_thunk_params(key).is_some()
-                    || Self::range_to_vec_thunk_receiver(key).is_some() =>
+                    || Self::range_to_vec_thunk_receiver(key).is_some()
+                    || self.instance_clone_param_tys(key).is_some() =>
             {
                 self.callee_param_pairs(key)
             }

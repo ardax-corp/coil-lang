@@ -876,6 +876,12 @@ impl Compiler {
         if let Some((params, _)) = self.mono_clone_sig(name) {
             return Some((crate::layout::CalleeFacts::default(), params.clone()));
         }
+        // A trait instance method's clone: ground, never a function value
+        // (a dictionary holds its `$dict` adapter), its types the method's
+        // at the clone's.
+        if let Some(params) = self.instance_clone_param_tys(name) {
+            return Some((crate::layout::CalleeFacts::default(), params));
+        }
         // A structural `Show` / `Hash` thunk's raw entry: ground, never a
         // function value (a dictionary holds its `$dict` adapter), its
         // types its own.
@@ -939,7 +945,11 @@ impl Compiler {
         // A trait instance method's parameters stay one word, a raw one's
         // excepted; an inherent method's follow its signature, as a free
         // function's.
-        let inherent = |k: &str| self.checker.inherent_method_visibility(strip_overload_key(k)).is_some() || self.is_raw_instance_key(k);
+        let inherent = |k: &str| {
+            self.checker.inherent_method_visibility(strip_overload_key(k)).is_some()
+                || self.is_raw_instance_key(k)
+                || self.inst_clone_of.contains_key(k)
+        };
         if self.compiling_method
             && !self.current_function_table_key.as_deref().into_iter().chain(self.current_function_qualified.as_deref()).any(inherent)
         {
@@ -1333,6 +1343,28 @@ impl Compiler {
         is_instance_method_fqn(&self.checker, key) && (self.raw_instance_methods.contains(key) || self.instance_method_fqn_raw(key))
     }
 
+    /// The parameter types of trait instance method clone `name`
+    /// ([`Self::instance_clone`]): its method's own signature at the clone's
+    /// types. Like a raw instance method, the clone takes a two-word value
+    /// as its two words; its `$dict` adapter takes the boxed word. `None`
+    /// for a default body's clone, a generator's, or types left open.
+    pub(super) fn instance_clone_param_tys(&self, name: &str) -> Option<Vec<Ty>> {
+        let (fqn, lookup) = self.inst_clone_of.get(name)?;
+        let src = self.inst_clone_srcs.get(fqn)?;
+        if Self::is_default_method_fqn(&src.class, &src.method, fqn) || self.coroutine_fns.contains(name) {
+            return None;
+        }
+        let vars = self.inst_clone_vars(&src.head, lookup)?;
+        let subst = self.checker.subst();
+        let params: Vec<Ty> = self
+            .checker
+            .fn_param_tys(fqn)?
+            .iter()
+            .map(|t| crate::typechecking::subst::apply_ty_prune(subst, &Self::apply_ty_var_map(t, &vars)))
+            .collect();
+        (!params.iter().any(Ty::has_var)).then_some(params)
+    }
+
     /// The parameter types of `key` when it is the raw entry of a
     /// structural instance's `show` or `hash` thunk
     /// ([`Self::reserve_structural_thunks`]): like a raw instance method,
@@ -1648,6 +1680,7 @@ impl Compiler {
             return Some(name);
         }
         self.raw_instance_methods.insert(name.clone());
+        self.inst_clone_of.insert(name.clone(), (fqn.to_string(), lookup.to_vec()));
         self.inst_clones.insert(key, name.clone());
         self.inst_clone_queue.push_back(InstClone {
             src: fqn.to_string(),
@@ -1672,10 +1705,19 @@ impl Compiler {
             || self.module_ctxs.get(&src.program).is_some_and(|ctx| {
                 ctx.knows_tys(lookup)
                     && (ctx.layout_safe(src.span)
-                        || self.checker.enum_variants(&src.class).is_some()
+                        || self.inst_clone_over_enum(&src)
                         || self.fn_sig_split(fqn)
                         || self.fn_flat_split(fqn, lookup))
             })
+    }
+
+    /// Whether clone source `src` is a generic enum's method (`Option::map`)
+    /// or a trait instance's over a generic enum (`impl Hash for
+    /// Option<T>`): the enum holds no fields its shared methods read, so its
+    /// clone may give it its own layout.
+    fn inst_clone_over_enum(&self, src: &InstCloneSrc) -> bool {
+        let enum_app = |t: &Ty| matches!(t, Ty::App(head, _) if matches!(head.as_ref(), Ty::Con(n) if self.checker.enum_variants(n).is_some()));
+        self.checker.enum_variants(&src.class).is_some() || (src.method_of.is_none() && src.own_bounds == 0 && src.head.iter().all(enum_app))
     }
 
     /// Whether another module's class `class` at ground `args` is one whose
@@ -1852,15 +1894,15 @@ impl Compiler {
                 && self
                     .module_ctxs
                     .get(&src.program)
-                    // A generic enum's method (`Option::map`) holds no fields
-                    // its shared methods read: its clone may give `Option<T>`
-                    // its own layout.
+                    // A generic enum's method (`Option::map`), or a trait
+                    // instance's over one, holds no fields its shared methods
+                    // read: its clone may give `Option<T>` its own layout.
                     // A clone-only signature (a nested open enum, #2547) has
                     // no use for the shared body either.
                     .is_some_and(|ctx| {
                         ctx.knows_tys(&req.lookup)
                             && (ctx.layout_safe(src.span)
-                                || self.checker.enum_variants(&src.class).is_some()
+                                || self.inst_clone_over_enum(&src)
                                 || self.fn_sig_split(&req.src)
                                 || self.fn_flat_split(&req.src, &req.lookup))
                     })
@@ -2428,10 +2470,18 @@ impl Compiler {
         let convert_ret = relayout(self, &own_ret, &ret, ret_layout);
         let calls = HashMap::from([(req.src.clone(), (layouts, ret_layout))]);
         let body_ret = if convert_ret { own_ret } else { ret.clone() };
+        // A two-word parameter the clone takes as its two words, read in
+        // its own type; the call boxes it for the shared entry.
+        let pairs = self.callee_param_pairs(&req.name);
+        let own_tys = self.instance_clone_param_tys(&req.name).unwrap_or_default();
         let mut b = Synth::new(&self.checker, &req.name, body_ret.clone());
         let mut args = Vec::with_capacity(params.len());
         for (i, t) in params.iter().enumerate() {
-            let arg = if convert[i] {
+            let pair_ty = own_tys.get(i).filter(|_| pairs.get(i).is_some_and(Option::is_some));
+            let arg = if let Some(ty) = pair_ty {
+                let local = b.local(&format!("arg{i}"), ty.clone(), LocalKind::Param);
+                b.read(local)
+            } else if convert[i] {
                 let local = b.local(&format!("arg{i}"), own[i].clone(), LocalKind::Param);
                 let word = b.read(local);
                 b.builtin(crate::hir::Builtin::Relayout, vec![word], t.clone())

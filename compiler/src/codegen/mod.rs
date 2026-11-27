@@ -473,6 +473,9 @@ pub struct Compiler {
     inst_clone_srcs: HashMap<String, InstCloneSrc>,
     /// `(method fqn, ground instance types)` → its clone's name.
     inst_clones: HashMap<(String, Vec<Ty>), String>,
+    /// A trait instance method's clone → its method fqn and ground
+    /// instance types (the reverse of [`Self::inst_clones`]).
+    inst_clone_of: HashMap<String, (String, Vec<Ty>)>,
     /// Clones named but not emitted yet (emitted after their program).
     inst_clone_queue: std::collections::VecDeque<InstClone>,
     /// Programs compiled so far: a clone is compiled from its source's
@@ -829,6 +832,7 @@ impl Default for Compiler {
             raw_instance_call: false,
             inst_clone_srcs: HashMap::new(),
             inst_clones: HashMap::new(),
+            inst_clone_of: HashMap::new(),
             inst_clone_queue: Default::default(),
             module_ctxs: HashMap::new(),
             foreign_clone_queue: Vec::new(),
