@@ -1,0 +1,78 @@
+// A trait instance's method with bounds of its own (`fn pick<W: Show>`)
+// taking a two-word argument (`Option<int>`, `(int, float)`): called at
+// ground types directly and from a bounded generic's per-type clone.
+use tests::assert;
+use string::format;
+
+trait Pick<S> {
+    fn pick<W: Show>(S s, Option<int> o, W w) -> string {}
+    fn place<W: Show>(S s, (int, float) p, W w) -> string {}
+}
+
+class Pt {
+    pub x: int,
+}
+
+impl Pick for int {
+    #[inline(never)]
+    pub fn pick<W: Show>(int s, Option<int> o, W w) -> string {
+        return format("%i:", s + (o ?? 0)) + w.show();
+    }
+
+    #[inline(never)]
+    pub fn place<W: Show>(int s, (int, float) p, W w) -> string {
+        return format("%i %v ", s + p[0], p[1]) + w.show();
+    }
+}
+
+impl Pick for Pt {
+    #[inline(never)]
+    pub fn pick<W: Show>(Pt s, Option<int> o, W w) -> string {
+        return format("pt%i:", s.x * 10 + (o ?? 9)) + w.show();
+    }
+
+    #[inline(never)]
+    pub fn place<W: Show>(Pt s, (int, float) p, W w) -> string {
+        return format("pt%i %v ", s.x + p[0], p[1]) + w.show();
+    }
+}
+
+fn picked<P: Pick, W: Show>(P p, Option<int> o, W w) -> string {
+    return p.pick(o, w);
+}
+
+fn placed<P: Pick, W: Show>(P p, (int, float) q, W w) -> string {
+    return p.place(q, w);
+}
+
+fn opt(int i) -> Option<int> {
+    return if i % 2 == 0 {
+        Some(i)
+    } else {
+        None
+    };
+}
+
+test("a direct call at ground types") {
+    let none: Option<int> = None;
+    assert!(3.pick(Some(4), "a") == "7:a");
+    assert!(3.pick(none, 1.5) == "3:1.5");
+    assert!(new Pt(2).pick(Some(1), true) == "pt21:true");
+    assert!(Pick::pick(1, Some(1), "z") == "2:z");
+    assert!(5.place((1, 2.5), "b") == "6 2.5 b");
+}
+
+test("from a bounded generic's clone") {
+    let none: Option<int> = None;
+    assert!(picked(1, Some(2), "a") == "3:a");
+    assert!(picked(2, none, 4.5) == "2:4.5");
+    assert!(picked(new Pt(1), none, 7) == "pt19:7");
+    assert!(placed(new Pt(1), (2, 0.5), "q") == "pt3 0.5 q");
+    let out = "";
+    let i = 0;
+    while i < 4 {
+        out = out + picked(i, opt(i), i) + ",";
+        i += 1;
+    }
+    assert!(out == "0:0,1:1,4:2,3:3,");
+}
