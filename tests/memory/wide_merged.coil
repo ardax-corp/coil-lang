@@ -1,0 +1,89 @@
+// A three- or four-word tuple of scalars chosen by a branch or carried
+// around a loop, then passed to or returned from a direct call.
+use tests::assert;
+
+#[inline(never)]
+fn sum3((int, int, int) t) -> int {
+    return t[0] + t[1] * 10 + t[2] * 100;
+}
+
+#[inline(never)]
+fn split3(int a) -> (int, int, int) {
+    return (a % 10, a / 10 % 10, a / 100);
+}
+
+#[inline(never)]
+fn choose(bool c, int a) -> (int, int, int) {
+    let t = if c {
+        (a, a + 1, a + 2)
+    } else {
+        split3(a)
+    };
+    return t;
+}
+
+#[inline(never)]
+fn step((int, int, int) t) -> (int, int, int) {
+    return (t[1], t[2], t[0] + t[1]);
+}
+
+#[inline(never)]
+fn either(bool c, int a) -> Option<(int, int)> {
+    let o = if c {
+        Some((a, -a))
+    } else {
+        None
+    };
+    return o;
+}
+
+test("a branch picks the tuple a call takes") {
+    let s = 0;
+    let expect = 0;
+    let i = 0;
+    while i < 100 {
+        let t = if i % 2 == 0 {
+            (i, 1, 2)
+        } else {
+            split3(i * 7)
+        };
+        s += sum3(t);
+        expect += if i % 2 == 0 {
+            i + 210
+        } else {
+            i * 7
+        };
+        i += 1;
+    }
+    assert!(s == expect);
+}
+
+test("a branch picks the tuple a call returns") {
+    let a = choose(true, 5);
+    assert!(a[0] == 5 && a[1] == 6 && a[2] == 7);
+    let b = choose(false, 427);
+    assert!(b[0] == 7 && b[1] == 2 && b[2] == 4);
+    assert!(sum3(choose(false, 123)) == 123);
+}
+
+test("a tuple carried around a loop") {
+    let t = (0, 1, 1);
+    let i = 0;
+    while i < 10 {
+        t = step(t);
+        i += 1;
+    }
+    assert!(t[0] == 9 && t[1] == 12 && t[2] == 16);
+}
+
+test("an Option of a tuple chosen by a branch") {
+    match either(true, 3) {
+        Some(p) => {
+            assert!(p[0] == 3 && p[1] == -3);
+        },
+        None => {
+            assert!(false);
+        },
+    }
+    assert!(either(false, 3) == None);
+}
