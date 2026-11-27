@@ -1,15 +1,27 @@
-//! Wide direct returns: a body that returns a fresh object of three or four
-//! immediate words (an arity-3 or arity-4 tuple of scalars, or an `Option`
-//! of a tuple of scalars, which is a niche word over a tuple object) gets a
-//! twin returning those words in registers (`Return { lo, hi, more }`), and
-//! each direct call that only reads the object's fields and, for an
-//! `Option`, whether it is `Some`, calls the twin instead. Neither side then
-//! allocates the object.
+//! Wide direct calls: a small object of immediate words (an arity-3 or
+//! arity-4 tuple of scalars, or for a result an `Option` of a tuple of
+//! scalars, which is a niche word over a tuple object) crosses a direct
+//! call as its three or four words when neither side needs the object.
 //!
-//! The body itself stays for every other caller (function values, the
-//! runtime's entries, calls that keep the object). Runs on the captured
-//! bodies before counts are inserted ([`super::native_capture`]), so the
-//! object's counts never appear.
+//! A body gets a twin, `name$words`, that takes such a parameter as its
+//! words (one MIR parameter per word) and returns such a result as its
+//! words (`Return { lo, hi, more }`), and each direct call that can hand
+//! over and take the words calls the twin instead. So neither side builds
+//! the object: not the caller's argument, not the callee's result.
+//!
+//! What "can" means is one question per value of a body (a *node*: a
+//! value with its `Word` casts and safepoint barriers): whether its words
+//! are known where it is made (a fresh `alloc.tuple` of immediates, a
+//! twin's parameter, a switched call's result) and every read of it takes
+//! words (an item load, a `Some` test, an argument the twin takes as
+//! words, the twin's return). The answers depend on each other across
+//! calls, so they are a greatest fixpoint over the whole program: start
+//! from "every node dissolves", drop what breaks, repeat.
+//!
+//! The body itself stays for every other caller (function values,
+//! dictionaries, the runtime's entries, calls that cannot pass words).
+//! Runs on the captured bodies before counts are inserted
+//! ([`super::native_capture`]), so the object's counts never appear.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,128 +32,13 @@ use super::native_capture::NativeBody;
 use super::ty::MirTy;
 use crate::bodies::Label;
 
-/// The words a body returns in place of its object.
-#[derive(Clone, Debug, PartialEq)]
-struct Shape {
-    /// The tuple's item types, in order.
-    items: Vec<MirTy>,
-    /// An `Option` of the tuple: a `bool` word after the items, `true` for
-    /// `Some`.
-    niche: bool,
-}
-
-impl Shape {
-    fn words(&self) -> Vec<MirTy> {
-        let mut w = self.items.clone();
-        if self.niche {
-            w.push(MirTy::Bool);
-        }
-        w
-    }
-}
-
-/// What one `return` of a body returns.
-enum Ret {
-    /// The tuple object `alloc` with `items`, behind the cast chain `chain`.
-    Tuple { items: Vec<ValueId>, chain: Vec<ValueId> },
-    /// `None`: the niche word `0`.
-    None,
-}
+/// Whether a kept result counts: a call result passed on as an argument
+/// or returned, a parameter or a call result as a return's source, and a
+/// result rebuilt after the call where the caller keeps the object.
+const KEPT: bool = false;
 
 fn immediate(t: MirTy) -> bool {
     matches!(t, MirTy::I64 | MirTy::MaybeObj | MirTy::F64 | MirTy::Bool)
-}
-
-/// How many times each value is read (instructions and terminators).
-fn use_counts(f: &MirFunc) -> HashMap<ValueId, usize> {
-    let mut n: HashMap<ValueId, usize> = HashMap::new();
-    for b in &f.blocks {
-        for i in &b.insts {
-            for v in i.operands() {
-                *n.entry(v).or_default() += 1;
-            }
-        }
-        if let Some(t) = &b.term {
-            for v in t.uses() {
-                *n.entry(v).or_default() += 1;
-            }
-        }
-    }
-    n
-}
-
-/// `v` through `Word` casts to the value they reinterpret; the casts passed.
-fn through_casts(f: &MirFunc, mut v: ValueId) -> (ValueId, Vec<ValueId>) {
-    let mut chain = Vec::new();
-    while let Some(MirInst::Cast { kind: MirCastKind::Word, src, .. }) = f.def_inst(v) {
-        chain.push(v);
-        v = *src;
-    }
-    (v, chain)
-}
-
-fn classify_ret(f: &MirFunc, v: ValueId, niche: bool) -> Option<Ret> {
-    let (root, mut chain) = through_casts(f, v);
-    if niche && f.const_i64(root) == Some(0) {
-        return Some(Ret::None);
-    }
-    match f.def_inst(root)? {
-        // Each item a scalar by its type and by the kind the tuple records
-        // for it: an `i64` that may be a pointer stays in its object.
-        MirInst::Alloc { kind, elems, kinds, .. }
-            if *kind == MirAllocKind::TUPLE
-                && elems.len() < common::PACKED_KIND_WORDS
-                && elems.iter().enumerate().all(|(i, e)| immediate(f.ty(*e)) && common::packed_word_kind(*kinds, i) == common::WORD_SCALAR) =>
-        {
-            chain.push(root);
-            Some(Ret::Tuple { items: elems.clone(), chain })
-        }
-        _ => None,
-    }
-}
-
-/// The words `f` can return instead of its object, if every return builds
-/// a fresh tuple of immediates read by nothing but that return (or, for an
-/// `Option`, returns `None`), and they come to three or four words.
-fn shape_of(f: &MirFunc) -> Option<Shape> {
-    if f.ret_hi_ty.is_some() || !f.ret_more_tys.is_empty() || f.cleanup.is_some() || super::frame_words::is_generator(f) || f.debug_keep || f.keep_lines || f.opaque_words {
-        return None;
-    }
-    let niche = match f.ret_ty? {
-        MirTy::HeapRef => false,
-        MirTy::NicheOpt => true,
-        _ => return None,
-    };
-    let uses = use_counts(f);
-    let mut items: Option<Vec<MirTy>> = None;
-    let mut any = false;
-    for b in &f.blocks {
-        let Some(Terminator::Return { lo, hi, more }) = &b.term else { continue };
-        if hi.is_some() || !more.is_empty() {
-            return None;
-        }
-        let v = (*lo)?;
-        match classify_ret(f, v, niche)? {
-            Ret::None => {}
-            Ret::Tuple { items: elems, chain } => {
-                // The object and each cast of it are read once: by the next
-                // cast, or by the return.
-                if chain.iter().any(|c| uses.get(c).copied().unwrap_or(0) != 1) {
-                    return None;
-                }
-                let tys: Vec<MirTy> = elems.iter().map(|e| f.ty(*e)).collect();
-                match &items {
-                    Some(prev) if *prev != tys => return None,
-                    _ => items = Some(tys),
-                }
-                any = true;
-            }
-        }
-    }
-    let items = items.filter(|_| any)?;
-    let shape = Shape { items, niche };
-    let n = shape.words().len();
-    (3..=2 + MAX_RET_MORE).contains(&n).then_some(shape)
 }
 
 fn new_value(f: &mut MirFunc, ty: MirTy) -> ValueId {
@@ -158,66 +55,153 @@ fn zero(ty: MirTy) -> MirConst {
     }
 }
 
-/// `f` rewritten to return `shape`'s words.
-fn widen_body(f: &mut MirFunc, shape: &Shape) {
-    let words = shape.words();
-    for bi in 0..f.blocks.len() {
-        let Some(Terminator::Return { lo: Some(v), .. }) = f.blocks[bi].term.clone() else { continue };
-        let ret = classify_ret(f, v, shape.niche).expect("a return the shape admitted");
-        let mut out: Vec<ValueId> = Vec::with_capacity(words.len());
-        match ret {
-            Ret::Tuple { items, chain } => {
-                // The object and its casts were read only by this return.
-                let gone: HashSet<ValueId> = chain.into_iter().collect();
-                for b in &mut f.blocks {
-                    b.insts.retain(|i| !gone.contains(&i.dest()));
+/// `v` through `Word` casts to the value they reinterpret.
+fn through_casts(f: &MirFunc, mut v: ValueId) -> ValueId {
+    while let Some(MirInst::Cast { kind: MirCastKind::Word, src, .. }) = f.def_inst(v) {
+        v = *src;
+    }
+    v
+}
+
+/// Where a node's object comes from.
+#[derive(Clone, Debug)]
+enum Src {
+    /// A fresh tuple of immediates, each a scalar by its kind.
+    Alloc { items: Vec<ValueId>, kind: MirAllocKind, kinds: common::PackedKinds },
+    /// Parameter `j` of the body.
+    Param(usize),
+    /// The result of call `c` (an index into [`Body::calls`]).
+    Call(usize),
+    /// Anything else (another kind of tuple, a tuple of heap words).
+    Opaque,
+}
+
+/// A read of a node's object.
+#[derive(Clone, Debug)]
+enum Use {
+    /// `productload` of item `slot` into `dest`.
+    Load { dest: ValueId, slot: usize },
+    /// `lnot`: whether an `Option` is `None`.
+    Test,
+    /// Argument `j` of call `c`.
+    Arg { call: usize, j: usize },
+    /// The body's `return`.
+    Ret,
+}
+
+#[derive(Clone, Debug)]
+struct Node {
+    /// The value its casts and barriers start from, then those.
+    members: Vec<ValueId>,
+    src: Src,
+    uses: Vec<Use>,
+    /// Some read is none of [`Use`].
+    other: bool,
+    /// Some member is an `Option`'s niche word.
+    niche: bool,
+}
+
+#[derive(Clone, Debug)]
+struct CallSite {
+    dest: ValueId,
+    /// The callee's body, when it is one of the captured bodies.
+    callee: Option<usize>,
+    args: Vec<ValueId>,
+    /// The call reads its callee's one-word result (no `dest_hi`).
+    one_word: bool,
+}
+
+/// How a `return` of a body leaves.
+#[derive(Clone, Copy, Debug)]
+enum RetSite {
+    /// Node `n`'s object.
+    Node(usize),
+    /// `None`: the niche word `0`.
+    None,
+    /// Anything else.
+    Other,
+}
+
+/// One captured body, as the fixpoint reads it.
+struct Body {
+    nodes: Vec<Node>,
+    member: HashMap<ValueId, usize>,
+    calls: Vec<CallSite>,
+    rets: Vec<(usize, RetSite)>,
+    params: Vec<Option<usize>>,
+    /// The body may have a twin.
+    twinnable: bool,
+    /// Its one-word result is a heap word an object of words can stand for.
+    wide_ret: bool,
+}
+
+fn twinnable(name: &str, f: &MirFunc) -> bool {
+    !(f.cleanup.is_some()
+        || super::frame_words::is_generator(f)
+        || f.debug_keep
+        || f.keep_lines
+        || f.opaque_words
+        || f.emit_refusal.is_some()
+        || name.ends_with("::drop"))
+}
+
+fn object_word(t: MirTy) -> bool {
+    matches!(t, MirTy::HeapRef | MirTy::NicheOpt)
+}
+
+fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body {
+    let twin = twinnable(name, f);
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut member: HashMap<ValueId, usize> = HashMap::new();
+    let mut calls: Vec<CallSite> = Vec::new();
+    let mut call_of: HashMap<ValueId, usize> = HashMap::new();
+    let mut params = vec![None; f.params.len()];
+    let add = |root: ValueId, src: Src, nodes: &mut Vec<Node>, member: &mut HashMap<ValueId, usize>| {
+        member.insert(root, nodes.len());
+        nodes.push(Node { members: vec![root], src, uses: Vec::new(), other: false, niche: f.ty(root) == MirTy::NicheOpt });
+    };
+    for (j, &p) in f.params.iter().enumerate() {
+        if object_word(f.ty(p)) {
+            params[j] = Some(nodes.len());
+            add(p, Src::Param(j), &mut nodes, &mut member);
+        }
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            match i {
+                MirInst::Alloc { dest, kind, elems, kinds } if *kind == MirAllocKind::TUPLE => {
+                    let words = elems.len() < common::PACKED_KIND_WORDS
+                        && elems.iter().enumerate().all(|(k, e)| immediate(f.ty(*e)) && common::packed_word_kind(*kinds, k) == common::WORD_SCALAR);
+                    let src = if words { Src::Alloc { items: elems.clone(), kind: *kind, kinds: *kinds } } else { Src::Opaque };
+                    add(*dest, src, &mut nodes, &mut member);
                 }
-                out.extend(items);
-                if shape.niche {
-                    let t = new_value(f, MirTy::Bool);
-                    f.blocks[bi].insts.push(MirInst::Const { dest: t, c: MirConst::Bool(true) });
-                    out.push(t);
+                MirInst::Call { dest, dest_hi, target, args, .. } => {
+                    call_of.insert(*dest, calls.len());
+                    calls.push(CallSite { dest: *dest, callee: by_label.get(target).copied(), args: args.clone(), one_word: dest_hi.is_none() });
+                    if dest_hi.is_none() && object_word(f.ty(*dest)) {
+                        add(*dest, Src::Call(calls.len() - 1), &mut nodes, &mut member);
+                    }
                 }
-            }
-            Ret::None => {
-                for &ty in &words {
-                    let z = new_value(f, ty);
-                    f.blocks[bi].insts.push(MirInst::Const { dest: z, c: zero(ty) });
-                    out.push(z);
-                }
+                _ => {}
             }
         }
-        f.blocks[bi].term = Some(Terminator::Return { lo: Some(out[0]), hi: Some(out[1]), more: out[2..].to_vec() });
     }
-    f.ret_ty = Some(words[0]);
-    f.ret_hi_ty = Some(words[1]);
-    f.ret_more_tys = words[2..].to_vec();
-    f.ret_layout = crate::layout::MirLayout::TwoSlot;
-    dce(f);
-}
-
-/// A call's result `d` as the reads [`widen_call`] replaces: the casts of
-/// it, the field reads (`ProductLoad` of slot `i < items`) and, for an
-/// `Option`, its `Some` tests (`Unary Not`). `None` when anything else
-/// reads it.
-struct Reads {
-    casts: HashSet<ValueId>,
-    loads: Vec<(ValueId, usize)>,
-    tests: Vec<ValueId>,
-}
-
-fn reads_of(f: &MirFunc, d: ValueId, shape: &Shape) -> Option<Reads> {
-    let mut set: HashSet<ValueId> = HashSet::from([d]);
-    let mut casts = HashSet::new();
-    // Casts first, to a fixed point (a cast of a cast).
+    // Casts and barriers join their source's node, to a fixed point (a cast
+    // of a cast).
     loop {
         let mut grew = false;
         for i in f.blocks.iter().flat_map(|b| &b.insts) {
-            if let MirInst::Cast { kind: MirCastKind::Word, dest, src, .. } = i
-                && set.contains(src)
-                && set.insert(*dest)
+            let (dest, src) = match i {
+                MirInst::Cast { kind: MirCastKind::Word, dest, src, .. } => (*dest, *src),
+                MirInst::GcBarrier { dest, object, .. } => (*dest, *object),
+                _ => continue,
+            };
+            if let Some(&n) = member.get(&src)
+                && !member.contains_key(&dest)
             {
-                casts.insert(*dest);
+                member.insert(dest, n);
+                nodes[n].members.push(dest);
+                nodes[n].niche |= f.ty(dest) == MirTy::NicheOpt;
                 grew = true;
             }
         }
@@ -225,106 +209,622 @@ fn reads_of(f: &MirFunc, d: ValueId, shape: &Shape) -> Option<Reads> {
             break;
         }
     }
-    let mut loads = Vec::new();
-    let mut tests = Vec::new();
     for b in &f.blocks {
-        if b.term.as_ref().is_some_and(|t| t.uses().any(|u| set.contains(&u))) {
+        for i in &b.insts {
+            match i {
+                MirInst::Cast { kind: MirCastKind::Word, dest, src, .. } if member.contains_key(src) && member.get(dest) == member.get(src) => continue,
+                MirInst::GcBarrier { dest, object, .. } if member.contains_key(object) && member.get(dest) == member.get(object) => continue,
+                MirInst::ProductLoad { dest, object, slot } if member.contains_key(object) => {
+                    nodes[member[object]].uses.push(Use::Load { dest: *dest, slot: *slot as usize });
+                    continue;
+                }
+                MirInst::Unary { op: MirUnaryOp::Not, dest, src } if member.contains_key(src) && f.ty(*dest) == MirTy::Bool => {
+                    nodes[member[src]].uses.push(Use::Test);
+                    continue;
+                }
+                MirInst::Call { dest, args, .. } => {
+                    let c = call_of[dest];
+                    for (j, a) in args.iter().enumerate() {
+                        if let Some(&n) = member.get(a) {
+                            nodes[n].uses.push(Use::Arg { call: c, j });
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            for o in i.operands() {
+                if let Some(&n) = member.get(&o) {
+                    nodes[n].other = true;
+                }
+            }
+        }
+    }
+    let mut rets = Vec::new();
+    for (bi, b) in f.blocks.iter().enumerate() {
+        let Some(t) = &b.term else { continue };
+        if let Terminator::Return { lo: Some(v), hi: None, more } = t
+            && more.is_empty()
+        {
+            let site = if let Some(&n) = member.get(v) {
+                nodes[n].uses.push(Use::Ret);
+                RetSite::Node(n)
+            } else if f.ret_ty == Some(MirTy::NicheOpt) && f.const_i64(through_casts(f, *v)) == Some(0) {
+                RetSite::None
+            } else {
+                RetSite::Other
+            };
+            rets.push((bi, site));
+            continue;
+        }
+        if matches!(t, Terminator::Return { .. }) {
+            rets.push((bi, RetSite::Other));
+        }
+        for u in t.uses() {
+            if let Some(&n) = member.get(&u) {
+                nodes[n].other = true;
+            }
+        }
+    }
+    let wide_ret = twin && f.ret_ty.is_some_and(object_word) && f.ret_hi_ty.is_none() && f.ret_more_tys.is_empty();
+    Body { nodes, member, calls, rets, params, twinnable: twin, wide_ret }
+}
+
+/// A slot whose words several nodes share: a node, a body's parameter, a
+/// body's result.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Key {
+    Node(usize, usize),
+    Param(usize, usize),
+    Ret(usize),
+}
+
+/// A class of [`Key`]s that must agree on their words.
+#[derive(Clone, Debug, Default)]
+struct Class {
+    items: Option<Vec<MirTy>>,
+    kind: Option<MirAllocKind>,
+    kinds: common::PackedKinds,
+    niche: Option<bool>,
+    bad: bool,
+}
+
+impl Class {
+    fn words(&self) -> Option<Vec<MirTy>> {
+        if self.bad {
             return None;
         }
-        for i in &b.insts {
-            if !i.operands().iter().any(|o| set.contains(o)) {
+        let mut w = self.items.clone()?;
+        if self.niche == Some(true) {
+            w.push(MirTy::Bool);
+        }
+        (3..=2 + MAX_RET_MORE).contains(&w.len()).then_some(w)
+    }
+
+    fn set_niche(&mut self, niche: bool) {
+        match self.niche {
+            Some(n) if n != niche => self.bad = true,
+            _ => self.niche = Some(niche),
+        }
+    }
+}
+
+struct Classes {
+    parent: Vec<usize>,
+    index: HashMap<Key, usize>,
+}
+
+impl Classes {
+    fn id(&mut self, k: Key) -> usize {
+        if let Some(&i) = self.index.get(&k) {
+            return i;
+        }
+        let n = self.parent.len();
+        self.parent.push(n);
+        self.index.insert(k, n);
+        n
+    }
+
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.parent[x] != x {
+            self.parent[x] = self.parent[self.parent[x]];
+            x = self.parent[x];
+        }
+        x
+    }
+
+    fn union(&mut self, a: Key, b: Key) {
+        let (a, b) = (self.id(a), self.id(b));
+        let (a, b) = (self.find(a), self.find(b));
+        if a != b {
+            self.parent[a] = b;
+        }
+    }
+
+    fn of(&mut self, k: Key) -> usize {
+        let i = self.id(k);
+        self.find(i)
+    }
+}
+
+/// The two ways a body runs: as itself (its parameters and result are
+/// objects) and as its twin.
+const ORIG: usize = 0;
+const TWIN: usize = 1;
+
+struct Program<'a> {
+    bodies: &'a [NativeBody],
+    info: Vec<Body>,
+    /// Each node's class's words, by body and node (`None`: never words).
+    words: Vec<Vec<Option<Vec<MirTy>>>>,
+    /// Each node's class is an `Option`'s.
+    niche: Vec<Vec<bool>>,
+    param_words: Vec<Vec<Option<Vec<MirTy>>>>,
+    ret_words: Vec<Option<Vec<MirTy>>>,
+    ret_niche: Vec<bool>,
+    /// The allocation a rebuilt result makes: its class's tuple kind and
+    /// word kinds.
+    ret_alloc: Vec<(MirAllocKind, common::PackedKinds)>,
+    // The fixpoint's answers.
+    param_w: Vec<Vec<bool>>,
+    ret_w: Vec<bool>,
+    viable: [Vec<Vec<bool>>; 2],
+    switch: [Vec<Vec<bool>>; 2],
+}
+
+impl<'a> Program<'a> {
+    fn new(bodies: &'a [NativeBody]) -> Self {
+        let by_label: HashMap<Label, usize> = bodies.iter().enumerate().filter_map(|(i, b)| Some((b.entry?, i))).collect();
+        let info: Vec<Body> = bodies.iter().map(|b| read_body(&b.name, &b.mir, &by_label)).collect();
+        // Shapes: unify every edge words could cross.
+        let mut cls = Classes { parent: Vec::new(), index: HashMap::new() };
+        for (bi, b) in info.iter().enumerate() {
+            for (n, node) in b.nodes.iter().enumerate() {
+                let k = Key::Node(bi, n);
+                cls.id(k);
+                if let Src::Param(j) = node.src {
+                    cls.union(k, Key::Param(bi, j));
+                }
+                if let Src::Call(c) = node.src
+                    && let Some(t) = b.calls[c].callee
+                {
+                    cls.union(k, Key::Ret(t));
+                }
+                for u in &node.uses {
+                    match *u {
+                        Use::Arg { call, j } => {
+                            if let Some(t) = b.calls[call].callee {
+                                cls.union(k, Key::Param(t, j));
+                            }
+                        }
+                        Use::Ret => cls.union(k, Key::Ret(bi)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let mut classes: HashMap<usize, Class> = HashMap::new();
+        for (bi, b) in info.iter().enumerate() {
+            let f = &bodies[bi].mir;
+            for (n, node) in b.nodes.iter().enumerate() {
+                let c = cls.of(Key::Node(bi, n));
+                let class = classes.entry(c).or_default();
+                class.set_niche(node.niche);
+                match &node.src {
+                    Src::Alloc { items, kind, kinds } => {
+                        let tys: Vec<MirTy> = items.iter().map(|e| f.ty(*e)).collect();
+                        match &class.items {
+                            Some(prev) if *prev != tys => class.bad = true,
+                            Some(_) => {}
+                            None => {
+                                class.items = Some(tys);
+                                class.kind = Some(*kind);
+                                class.kinds = *kinds;
+                            }
+                        }
+                    }
+                    Src::Opaque => class.bad = true,
+                    _ => {}
+                }
+            }
+            if b.wide_ret {
+                let c = cls.of(Key::Ret(bi));
+                classes.entry(c).or_default().set_niche(f.ret_ty == Some(MirTy::NicheOpt));
+            }
+        }
+        // Item loads must read an item of its type.
+        for (bi, b) in info.iter().enumerate() {
+            let f = &bodies[bi].mir;
+            for (n, node) in b.nodes.iter().enumerate() {
+                let c = cls.of(Key::Node(bi, n));
+                let class = classes.entry(c).or_default();
+                for u in &node.uses {
+                    if let Use::Load { dest, slot } = u {
+                        let ok = class.items.as_ref().is_some_and(|items| items.get(*slot) == Some(&f.ty(*dest)));
+                        if !ok {
+                            class.bad = true;
+                        }
+                    }
+                }
+            }
+        }
+        let ret_alloc: Vec<(MirAllocKind, common::PackedKinds)> = (0..info.len())
+            .map(|bi| {
+                let c = cls.of(Key::Ret(bi));
+                classes.get(&c).and_then(|cl| Some((cl.kind?, cl.kinds))).unwrap_or((MirAllocKind::TUPLE, 0))
+            })
+            .collect();
+        let words_of = |k: Key, cls: &mut Classes| -> (Option<Vec<MirTy>>, bool) {
+            let c = cls.of(k);
+            classes.get(&c).map_or((None, false), |cl| (cl.words(), cl.niche == Some(true)))
+        };
+        let mut words = Vec::new();
+        let mut niche = Vec::new();
+        let mut param_words: Vec<Vec<Option<Vec<MirTy>>>> = Vec::new();
+        let mut ret_words = Vec::new();
+        let mut ret_niche = Vec::new();
+        for (bi, b) in info.iter().enumerate() {
+            let (w, ni): (Vec<_>, Vec<_>) = (0..b.nodes.len()).map(|n| words_of(Key::Node(bi, n), &mut cls)).unzip();
+            words.push(w);
+            niche.push(ni);
+            param_words.push(
+                (0..b.params.len())
+                    .map(|j| match b.params[j] {
+                        // A niche parameter would need a branch to split or
+                        // rebuild: it stays one word.
+                        Some(_) if b.twinnable => {
+                            let (w, ni) = words_of(Key::Param(bi, j), &mut cls);
+                            w.filter(|_| !ni)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            );
+            let (w, ni) = if b.wide_ret { words_of(Key::Ret(bi), &mut cls) } else { (None, false) };
+            ret_words.push(w);
+            ret_niche.push(ni);
+        }
+        let param_w = param_words.iter().map(|p| p.iter().map(Option::is_some).collect()).collect();
+        let ret_w = ret_words.iter().map(Option::is_some).collect();
+        let viable = [0, 1].map(|_| words.iter().map(|w| w.iter().map(Option::is_some).collect()).collect());
+        let switch = [0, 1].map(|_| info.iter().map(|b| vec![true; b.calls.len()]).collect());
+        Program { bodies, info, words, niche, param_words, ret_words, ret_niche, ret_alloc, param_w, ret_w, viable, switch }
+    }
+
+    fn has_twin(&self, t: usize) -> bool {
+        self.ret_w[t] || self.param_w[t].iter().any(|&w| w)
+    }
+
+    /// Whether node `n` of body `b` keeps no object when `b` runs as `ctx`.
+    fn node_ok(&self, b: usize, ctx: usize, n: usize) -> bool {
+        let node = &self.info[b].nodes[n];
+        if node.other || self.words[b][n].is_none() {
+            return false;
+        }
+        // A node no call edge touches is not this pass's (`forward_tuple_loads`).
+        if matches!(node.src, Src::Alloc { .. }) && !node.uses.iter().any(|u| matches!(u, Use::Arg { .. } | Use::Ret)) {
+            return false;
+        }
+        let src = match node.src {
+            Src::Alloc { .. } => true,
+            Src::Param(j) => ctx == TWIN && self.param_w[b][j],
+            Src::Call(c) => self.switch[ctx][b][c] && self.info[b].calls[c].callee.is_some_and(|t| self.ret_w[t]),
+            Src::Opaque => false,
+        };
+        // A result only read item by item, or only a twin's parameter.
+        let call_result = matches!(node.src, Src::Call(_));
+        src && node.uses.iter().all(|u| match *u {
+            Use::Load { .. } => true,
+            Use::Test => self.niche[b][n],
+            Use::Arg { call, j } => {
+                (KEPT || !call_result) && self.switch[ctx][b][call] && self.info[b].calls[call].callee.is_some_and(|t| self.param_w[t].get(j) == Some(&true))
+            }
+            Use::Ret => (KEPT || !call_result) && ctx == TWIN && self.ret_w[b],
+        })
+    }
+
+    /// Whether call `c` of body `b` running as `ctx` can enter its callee's
+    /// twin, and gains by it.
+    fn call_ok(&self, b: usize, ctx: usize, c: usize) -> bool {
+        let call = &self.info[b].calls[c];
+        let Some(t) = call.callee else { return false };
+        if !self.has_twin(t) || !call.one_word && self.ret_w[t] {
+            return false;
+        }
+        let body = &self.info[b];
+        let mut gain = false;
+        for (j, &w) in self.param_w[t].iter().enumerate() {
+            if !w {
                 continue;
             }
-            match i {
-                MirInst::Cast { kind: MirCastKind::Word, dest, .. } if casts.contains(dest) => {}
-                MirInst::ProductLoad { dest, slot, .. } if (*slot as usize) < shape.items.len() && f.ty(*dest) == shape.items[*slot as usize] => loads.push((*dest, *slot as usize)),
-                MirInst::Unary { op: MirUnaryOp::Not, dest, .. } if shape.niche && f.ty(*dest) == MirTy::Bool => tests.push(*dest),
-                _ => return None,
+            let Some(&n) = call.args.get(j).and_then(|a| body.member.get(a)) else { return false };
+            if !self.viable[ctx][b][n] {
+                return false;
+            }
+            gain = true;
+        }
+        if call.args.len() != self.param_w[t].len() {
+            return false;
+        }
+        if self.ret_w[t] {
+            let dest = body.member.get(&call.dest).copied();
+            let kept = dest.is_none_or(|n| !self.viable[ctx][b][n]);
+            if kept {
+                // A caller that keeps the object rebuilds it from the words.
+                if !KEPT || self.ret_niche[t] {
+                    return false;
+                }
+            } else {
+                gain = true;
+            }
+        }
+        gain
+    }
+
+    fn ret_ok(&self, b: usize) -> bool {
+        let info = &self.info[b];
+        !info.rets.is_empty()
+            && info.rets.iter().any(|(_, r)| matches!(r, RetSite::Node(_)))
+            && info.rets.iter().all(|&(_, r)| match r {
+                RetSite::Node(n) => self.viable[TWIN][b][n] && (KEPT || matches!(info.nodes[n].src, Src::Alloc { .. })),
+                RetSite::None => self.ret_niche[b],
+                RetSite::Other => false,
+            })
+    }
+
+    fn solve(&mut self) {
+        loop {
+            let mut changed = false;
+            for b in 0..self.info.len() {
+                for ctx in [ORIG, TWIN] {
+                    if ctx == TWIN && !self.info[b].twinnable {
+                        continue;
+                    }
+                    for n in 0..self.info[b].nodes.len() {
+                        if self.viable[ctx][b][n] && !self.node_ok(b, ctx, n) {
+                            self.viable[ctx][b][n] = false;
+                            changed = true;
+                        }
+                    }
+                    for c in 0..self.info[b].calls.len() {
+                        if self.switch[ctx][b][c] && !self.call_ok(b, ctx, c) {
+                            self.switch[ctx][b][c] = false;
+                            changed = true;
+                        }
+                    }
+                }
+                for j in 0..self.param_w[b].len() {
+                    if self.param_w[b][j] && !self.info[b].params[j].is_some_and(|n| self.viable[TWIN][b][n]) {
+                        self.param_w[b][j] = false;
+                        changed = true;
+                    }
+                }
+                if self.ret_w[b] && !self.ret_ok(b) {
+                    self.ret_w[b] = false;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
             }
         }
     }
-    Some(Reads { casts, loads, tests })
-}
 
-/// The call whose result is `dest` retargeted to `twin`: its words replace
-/// the field reads and `Some` tests of its result.
-fn widen_call(f: &mut MirFunc, dest: ValueId, twin: Label, shape: &Shape, reads: Reads) {
-    let words = shape.words();
-    let Some((bi, ii)) = f.blocks.iter().enumerate().find_map(|(bi, b)| b.insts.iter().position(|i| matches!(i, MirInst::Call { dest: d, .. } if *d == dest)).map(|ii| (bi, ii))) else {
-        return;
-    };
-    f.types[dest.index()] = words[0];
-    let hi = new_value(f, words[1]);
-    let more: Vec<ValueId> = words[2..].iter().map(|&t| new_value(f, t)).collect();
-    let all: Vec<ValueId> = std::iter::once(dest).chain(std::iter::once(hi)).chain(more.iter().copied()).collect();
-    if let MirInst::Call { target, dest_hi, dest_more, .. } = &mut f.blocks[bi].insts[ii] {
-        *target = twin;
-        *dest_hi = Some(hi);
-        *dest_more = more;
-    }
-    let flag = shape.niche.then(|| all[shape.items.len()]);
-    let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
-    for (load, i) in &reads.loads {
-        subst.insert(*load, all[*i]);
-    }
-    let tests: HashSet<ValueId> = reads.tests.iter().copied().collect();
-    let loads: HashSet<ValueId> = reads.loads.iter().map(|(d, _)| *d).collect();
-    for b in &mut f.blocks {
-        b.insts.retain(|i| !loads.contains(&i.dest()) && !matches!(i, MirInst::Cast { dest, .. } if reads.casts.contains(dest)));
-        for i in &mut b.insts {
-            if let MirInst::Unary { dest, src, .. } = i
-                && tests.contains(dest)
-            {
-                *src = flag.expect("a Some test of a niche result");
+    /// The twins some running body calls: the bodies' own switched calls,
+    /// then those of the twins they reach.
+    fn twins(&self) -> Vec<usize> {
+        let mut need: Vec<usize> = Vec::new();
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut work: Vec<(usize, usize)> = (0..self.info.len()).map(|b| (b, ORIG)).collect();
+        while let Some((b, ctx)) = work.pop() {
+            for (c, call) in self.info[b].calls.iter().enumerate() {
+                if self.switch[ctx][b][c]
+                    && let Some(t) = call.callee
+                    && seen.insert(t)
+                {
+                    need.push(t);
+                    work.push((t, TWIN));
+                }
             }
         }
+        need.sort_unstable();
+        need
     }
-    f.replace_uses(&subst);
+
+    /// Body `b` running as `ctx`, rewritten: its dissolved nodes' objects
+    /// gone, its switched calls entering twins (`twin_of`).
+    fn rewrite(&self, b: usize, ctx: usize, twin_of: &HashMap<usize, Label>) -> (MirFunc, usize) {
+        let mut f = self.bodies[b].mir.clone();
+        let info = &self.info[b];
+        let entry = f.entry.index();
+        let mut head: Vec<MirInst> = Vec::new();
+        // Each dissolved node's words.
+        let mut node_words: HashMap<usize, Vec<ValueId>> = HashMap::new();
+        let mut gone: HashSet<ValueId> = HashSet::new();
+        let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
+        if ctx == TWIN {
+            let mut params = Vec::new();
+            for (j, &p) in f.params.clone().iter().enumerate() {
+                if self.param_w[b][j] {
+                    let tys = self.param_words[b][j].clone().expect("a parameter's words");
+                    let ws: Vec<ValueId> = tys.iter().map(|&t| new_value(&mut f, t)).collect();
+                    params.extend(ws.iter().copied());
+                    node_words.insert(info.params[j].expect("a parameter's node"), ws);
+                } else {
+                    params.push(p);
+                }
+            }
+            f.params = params;
+        }
+        // Switched calls: their result words.
+        let mut call_words: HashMap<usize, Vec<ValueId>> = HashMap::new();
+        for (c, call) in info.calls.iter().enumerate() {
+            if !self.switch[ctx][b][c] {
+                continue;
+            }
+            let t = call.callee.expect("a switched call's callee");
+            if self.ret_w[t] {
+                let tys = self.ret_words[t].clone().expect("a result's words");
+                let ws: Vec<ValueId> = tys.iter().map(|&ty| new_value(&mut f, ty)).collect();
+                if let Some(&n) = info.member.get(&call.dest)
+                    && self.viable[ctx][b][n]
+                {
+                    node_words.insert(n, ws.clone());
+                }
+                call_words.insert(c, ws);
+            }
+        }
+        for (n, node) in info.nodes.iter().enumerate() {
+            if !self.viable[ctx][b][n] {
+                continue;
+            }
+            gone.extend(node.members.iter().copied());
+            if let Src::Alloc { items, .. } = &node.src {
+                let mut ws = items.clone();
+                if self.niche[b][n] {
+                    let t = new_value(&mut f, MirTy::Bool);
+                    head.push(MirInst::Const { dest: t, c: MirConst::Bool(true) });
+                    ws.push(t);
+                }
+                node_words.insert(n, ws);
+            }
+            for u in &node.uses {
+                if let Use::Load { dest, slot } = u {
+                    subst.insert(*dest, node_words[&n][*slot]);
+                    gone.insert(*dest);
+                }
+            }
+        }
+        let flag_of = |v: ValueId| -> Option<ValueId> {
+            let n = *info.member.get(&v)?;
+            self.viable[ctx][b][n].then(|| *node_words[&n].last().expect("words"))
+        };
+        let mut moved = 0;
+        let call_index: HashMap<ValueId, usize> = info.calls.iter().enumerate().map(|(c, call)| (call.dest, c)).collect();
+        for bi in 0..f.blocks.len() {
+            let insts = std::mem::take(&mut f.blocks[bi].insts);
+            let mut out = Vec::with_capacity(insts.len());
+            for mut inst in insts {
+                if let MirInst::Unary { op: MirUnaryOp::Not, src, .. } = &mut inst
+                    && let Some(flag) = flag_of(*src)
+                {
+                    *src = flag;
+                }
+                let mut rebuild = None;
+                if let MirInst::Call { dest, dest_hi, dest_more, target, args } = &mut inst
+                    && let Some(&c) = call_index.get(dest)
+                    && self.switch[ctx][b][c]
+                {
+                    let t = info.calls[c].callee.expect("callee");
+                    let mut out_args = Vec::new();
+                    for (j, a) in args.iter().enumerate() {
+                        if self.param_w[t][j] {
+                            out_args.extend(node_words[&info.member[a]].iter().copied());
+                        } else {
+                            out_args.push(*a);
+                        }
+                    }
+                    *args = out_args;
+                    let label = twin_of[&t];
+                    if f.tail_targets.contains(target) {
+                        f.tail_targets.insert(label);
+                    }
+                    *target = label;
+                    if let Some(ws) = call_words.get(&c) {
+                        let old = *dest;
+                        *dest = ws[0];
+                        *dest_hi = Some(ws[1]);
+                        *dest_more = ws[2..].to_vec();
+                        if let Some(loc) = f.value_locs.get(&old).copied() {
+                            f.value_locs.insert(ws[0], loc);
+                        }
+                        if !info.member.get(&old).is_some_and(|&n| self.viable[ctx][b][n]) {
+                            // The caller keeps the object: build it here.
+                            let (kind, kinds) = self.ret_alloc[t];
+                            rebuild = Some(MirInst::Alloc { dest: old, kind, elems: ws.clone(), kinds });
+                        }
+                    }
+                    moved += 1;
+                }
+                if !gone.contains(&inst.dest()) || matches!(inst, MirInst::Call { .. }) {
+                    out.push(inst);
+                }
+                out.extend(rebuild);
+            }
+            f.blocks[bi].insts = out;
+        }
+        // Returns of words.
+        if ctx == TWIN && self.ret_w[b] {
+            let tys = self.ret_words[b].clone().expect("a result's words");
+            for &(bi, site) in &info.rets {
+                let ws: Vec<ValueId> = match site {
+                    RetSite::Node(n) => node_words[&n].clone(),
+                    RetSite::None => tys
+                        .iter()
+                        .map(|&ty| {
+                            let z = new_value(&mut f, ty);
+                            head.push(MirInst::Const { dest: z, c: zero(ty) });
+                            z
+                        })
+                        .collect(),
+                    RetSite::Other => unreachable!("a twin returns words from every return"),
+                };
+                f.blocks[bi].term = Some(Terminator::Return { lo: Some(ws[0]), hi: Some(ws[1]), more: ws[2..].to_vec() });
+            }
+            f.ret_ty = Some(tys[0]);
+            f.ret_hi_ty = Some(tys[1]);
+            f.ret_more_tys = tys[2..].to_vec();
+            f.ret_layout = crate::layout::MirLayout::TwoSlot;
+        }
+        if !head.is_empty() {
+            let rest = std::mem::take(&mut f.blocks[entry].insts);
+            f.blocks[entry].insts = head.into_iter().chain(rest).collect();
+        }
+        f.replace_uses(&subst);
+        f.bound_words.retain(|v| !gone.contains(v));
+        f.local_binds.retain(|(_, v)| !gone.contains(v));
+        f.debug_slots.retain(|_, v| !gone.contains(v));
+        dce(&mut f);
+        (f, moved)
+    }
 }
 
-/// Give each body [`shape_of`] admits a `$words` twin when a direct call
-/// can use it, and point those calls at it. Returns how many calls moved.
+/// Give each body a `$words` twin when a direct call can use it, and point
+/// those calls at it. Returns how many calls moved.
 pub fn wide_return_twins(bodies: &mut Vec<NativeBody>) -> usize {
-    let shapes: HashMap<Label, Shape> = bodies.iter().filter_map(|b| Some((b.entry?, shape_of(&b.mir)?))).collect();
-    if shapes.is_empty() {
+    let mut prog = Program::new(bodies);
+    if !(0..prog.info.len()).any(|b| prog.has_twin(b)) {
         return 0;
     }
-    // Which calls can take the twin.
-    let mut sites: Vec<(usize, ValueId, Label)> = Vec::new();
-    for (k, b) in bodies.iter().enumerate() {
-        for inst in b.mir.blocks.iter().flat_map(|bl| &bl.insts) {
-            if let MirInst::Call { dest, dest_hi: None, target, .. } = inst
-                && let Some(shape) = shapes.get(target)
-                && reads_of(&b.mir, *dest, shape).is_some()
-            {
-                sites.push((k, *dest, *target));
-            }
-        }
-    }
-    if sites.is_empty() {
+    prog.solve();
+    let need = prog.twins();
+    if need.is_empty() {
         return 0;
     }
     let first = bodies.iter().flat_map(|b| b.entry.into_iter().chain(b.mir.code_targets())).map(|l| l.0).max().unwrap_or(0) + 1;
-    let by_label: HashMap<Label, usize> = bodies.iter().enumerate().filter_map(|(i, b)| Some((b.entry?, i))).collect();
-    let mut targets: Vec<Label> = sites.iter().map(|s| s.2).collect();
-    targets.sort_unstable_by_key(|l| l.0);
-    targets.dedup();
-    let mut twin_of: HashMap<Label, Label> = HashMap::new();
-    for (next, t) in (first..).zip(&targets) {
-        let src = &bodies[by_label[t]];
-        let mut mir = src.mir.clone();
-        widen_body(&mut mir, &shapes[t]);
-        let name = format!("{}$words", src.name);
-        mir.name = name.clone();
-        twin_of.insert(*t, Label(next));
-        bodies.push(NativeBody { name, entry: Some(Label(next)), mir });
+    let twin_of: HashMap<usize, Label> = need.iter().zip(first..).map(|(&t, l)| (t, Label(l))).collect();
+    let mut moved = 0;
+    let mut rewritten: Vec<(usize, MirFunc)> = Vec::new();
+    for b in 0..bodies.len() {
+        if prog.switch[ORIG][b].iter().any(|&s| s) {
+            let (f, n) = prog.rewrite(b, ORIG, &twin_of);
+            moved += n;
+            rewritten.push((b, f));
+        }
     }
-    let moved = sites.len();
-    for (k, dest, t) in sites {
-        let f = &mut bodies[k].mir;
-        // Read again: an earlier rewrite in this body removed other reads.
-        let Some(reads) = reads_of(f, dest, &shapes[&t]) else { continue };
-        widen_call(f, dest, twin_of[&t], &shapes[&t], reads);
+    let mut twins = Vec::new();
+    for &t in &need {
+        let (mut f, n) = prog.rewrite(t, TWIN, &twin_of);
+        moved += n;
+        let name = format!("{}$words", bodies[t].name);
+        f.name = name.clone();
+        twins.push(NativeBody { name, entry: Some(twin_of[&t]), mir: f });
     }
+    drop(prog);
+    for (b, f) in rewritten {
+        bodies[b].mir = f;
+    }
+    bodies.extend(twins);
     moved
 }
+
