@@ -1746,7 +1746,9 @@ pub unsafe fn cow_unpin(ctx: *mut NativeCtx, word: u64, saved: u64) {
 /// gains or loses an owner, and one that lost its last is released
 /// ([`crate::memory::Heap::rc_drop`]). Nothing when counts are not kept or
 /// `word` names no object. `dec` two: native code counted `word`, born in
-/// the open steal epoch, in place and took its last owner. Returns `0`.
+/// the open steal epoch, in place and took its last owner. `dec` three: a
+/// decrement of a typed object word (a slot start) whose count native code
+/// read as its last ([`crate::memory::Heap::rc_drop_typed`]). Returns `0`.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`].
@@ -1760,6 +1762,11 @@ pub unsafe extern "C" fn coil_native_rc(ctx: *mut NativeCtx, word: u64, dec: u64
         0 => heap.rc_retain(w),
         // Native code counted it in place and took its last owner.
         2 => heap.rc_epoch_zero(w),
+        // An inline decrement found the last owner of a typed object word
+        // with no steal epoch open: no slot search.
+        3 => {
+            heap.rc_drop_typed(w);
+        }
         _ => {
             heap.rc_drop(w);
         }

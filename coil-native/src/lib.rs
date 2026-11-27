@@ -7867,8 +7867,10 @@ impl<'a> Lower<'a> {
             self.b.ins().jump(join, &[]);
             self.b.set_cold_block(slow);
             self.b.switch_to_block(slow);
-            let one = self.b.ins().iconst(types::I64, 1);
-            self.b.ins().call(self.rc, &[self.ctx, s, one]);
+            // A typed word whose header was just read: the runtime takes
+            // it as a slot start, without a slot search (flag three).
+            let typed = self.b.ins().iconst(types::I64, 3);
+            self.b.ins().call(self.rc, &[self.ctx, s, typed]);
             self.b.ins().jump(join, &[]);
         } else {
             self.b.ins().brif(immortal, join, &[], change, &[]);
