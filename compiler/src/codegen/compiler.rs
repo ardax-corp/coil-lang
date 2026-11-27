@@ -883,7 +883,10 @@ impl Compiler {
             .or_else(|| self.checker.fn_param_tys(lookup))?;
         let facts = crate::layout::CalleeFacts {
             escaped: self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) || self.is_under_applied(name),
-            instance_method: is_instance_method_fqn(&self.checker, lookup) || is_instance_method_fqn(&self.checker, name),
+            // A raw instance method's direct calls pass its own words, a
+            // two-word value's two too; its `$dict` adapter takes the one
+            // word a dictionary caller passes and splits it.
+            instance_method: (is_instance_method_fqn(&self.checker, lookup) || is_instance_method_fqn(&self.checker, name)) && !self.is_raw_instance_key(lookup),
             overloaded_or_generic: self.checker.is_overloaded(lookup) || self.checker.is_generic_fn(lookup),
             coroutine: self.coroutine_fns.contains(name) || self.coroutine_fns.contains(lookup),
             host_native: false,
@@ -922,9 +925,10 @@ impl Compiler {
         {
             return self.callee_has_unboxed_range_params(mono).then(|| mono.clone());
         }
-        // A trait instance method's parameters stay one word; an inherent
-        // method's follow its signature, as a free function's.
-        let inherent = |k: &str| self.checker.inherent_method_visibility(strip_overload_key(k)).is_some();
+        // A trait instance method's parameters stay one word, a raw one's
+        // excepted; an inherent method's follow its signature, as a free
+        // function's.
+        let inherent = |k: &str| self.checker.inherent_method_visibility(strip_overload_key(k)).is_some() || self.is_raw_instance_key(k);
         if self.compiling_method
             && !self.current_function_table_key.as_deref().into_iter().chain(self.current_function_qualified.as_deref()).any(inherent)
         {
@@ -1309,6 +1313,24 @@ impl Compiler {
             return false;
         };
         self.instance_method_raw(&class, &method, &args, fqn, self.coroutine_fns.contains(fqn))
+    }
+
+    /// Whether `key` is a raw instance method ([`Self::instance_method_raw`]):
+    /// its own entry takes each parameter in its own convention, `self`'s
+    /// too, and every other caller reaches it through its `$dict` adapter.
+    pub(super) fn is_raw_instance_key(&self, key: &str) -> bool {
+        is_instance_method_fqn(&self.checker, key) && (self.raw_instance_methods.contains(key) || self.instance_method_fqn_raw(key))
+    }
+
+    /// Per argument of a call of raw instance method `fqn`'s own entry with
+    /// `argc` arguments, whether it goes as its two words (`None`: the
+    /// method's signature has another arity).
+    pub(super) fn raw_instance_pair_args(&self, fqn: &str, argc: usize) -> Option<Vec<bool>> {
+        let pairs = self.callee_param_pairs(fqn);
+        if pairs.is_empty() {
+            return Some(vec![false; argc]);
+        }
+        (pairs.len() == argc).then(|| pairs.iter().map(Option::is_some).collect())
     }
 
     /// Mark instance method `fqn` raw ([`Self::instance_method_raw`]) and
@@ -2534,6 +2556,9 @@ impl Compiler {
         } else {
             ret.clone()
         };
+        // The raw method's own entry takes a two-word parameter as its
+        // two words.
+        let pairs = if raw { self.callee_param_pairs(fqn) } else { Vec::new() };
         let mut b = Synth::new(&self.checker, &adapter, body_ret.clone());
         let mut args = Vec::with_capacity(nparams + 1);
         for slot in 0..nparams {
@@ -2555,6 +2580,13 @@ impl Compiler {
                 let word = b.read(local);
                 b.builtin(Builtin::Retype, vec![word], ty)
             } else {
+                // A two-word parameter of a raw method, its box read in the
+                // method's own type (the trait may spell it through an
+                // associated type), which the call splits.
+                let own = match own_params.get(slot) {
+                    Some(ty) if pairs.get(slot).is_some_and(Option::is_some) => ty.clone(),
+                    _ => own,
+                };
                 let local = b.local(&format!("arg{slot}"), own, LocalKind::Param);
                 b.read(local)
             };

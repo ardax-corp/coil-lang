@@ -205,9 +205,16 @@ impl Compiler {
     /// The frame of function body `hir` with dictionaries `dicts`.
     pub(crate) fn hir_function_frame(&self, hir: &HirBody, dicts: FrameDicts) -> BodyFrame {
         let key = self.current_fn_pair_key();
+        // A raw instance method's parameters, `self` too, follow its
+        // signature by position (the checker names an instance method's
+        // parameters under its trait's method).
+        let raw_instance = key.as_deref().filter(|k| self.is_raw_instance_key(k)).map(|k| self.callee_param_pairs(k));
         BodyFrame::function(
             hir,
             |i| {
+                if let Some(pairs) = &raw_instance {
+                    return pairs.get(i).cloned().flatten();
+                }
                 let local = hir.local(hir.params[i]);
                 // `self` is one word; the rest follow the signature every
                 // caller reads ([`Self::param_pair_kind`]).
