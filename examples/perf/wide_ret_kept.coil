@@ -1,0 +1,33 @@
+// CPU: an (int, int, int) a direct call returns and the caller keeps:
+// passes on to another function, returns from its own body, binds and
+// reads later. Its words stay in registers, no tuple built per call.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn split3(int a) -> (int, int, int) {
+    return (a % 10, a / 10 % 10, a / 100);
+}
+
+#[inline(never)]
+fn weigh((int, int, int) t) -> int {
+    return t[0] + t[1] * 2 + t[2] * 3;
+}
+
+#[inline(never)]
+fn relay(int a) -> (int, int, int) {
+    return split3(a + 1);
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 10000000 {
+        s += weigh(split3(i));
+        let t = relay(i);
+        s += t[0] - t[2];
+        s = s & 0xffffff;
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}
