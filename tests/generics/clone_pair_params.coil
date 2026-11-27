@@ -1,0 +1,101 @@
+// A mono clone of a generic function takes a two-word argument in its
+// own two words: a bare `T` or an open `(T, T)` at `Option<int>`,
+// `Result<int, string>`, `(int, float)`, a pair readonly class or a
+// payload enum, from a direct call, a sibling clone, a loop and a
+// function value made at the clone's types.
+use tests::assert;
+use string::format;
+
+readonly class P {
+    pub a: int,
+    pub b: int,
+}
+
+#[derive(Show, Eq)]
+enum Cell {
+    Num(int),
+    Empty,
+}
+
+#[inline(never)]
+fn same<W: Eq>(W a, W b) -> bool {
+    return a == b;
+}
+
+#[inline(never)]
+fn show_it<T: Show>(T x) -> string {
+    return format("%v", x);
+}
+
+#[inline(never)]
+fn first_of<T: Show>((T, T) p) -> string {
+    return format("%v", p[0]);
+}
+
+#[inline(never)]
+fn count_some<T>(Option<T> o, int n) -> int {
+    return match o {
+        Some(_) => n + 1,
+        None => n,
+    };
+}
+
+#[inline(never)]
+fn twice_same<W: Eq>(W a, W b) -> bool {
+    return same(a, b) && same(b, a);
+}
+
+#[inline(never)]
+fn depth<T: Show>(T x, int n) -> string {
+    if n == 0 {
+        return show_it(x);
+    }
+    return depth(x, n - 1);
+}
+
+fn apply(fn(Option<int>, int) -> int f, Option<int> o) -> int {
+    return f(o, 10);
+}
+
+test("a bare type parameter at a two-word type") {
+    assert!(same(Some(3), Some(3)));
+    assert!(!same(Some(3), None));
+    let r: Result<int, string> = Ok(4);
+    assert!(same(r, Ok(4)));
+    assert!(!same(r, Err("e")));
+    assert!(same((1, 2.5), (1, 2.5)));
+    assert!(!same((1, 2.5), (1, 3.5)));
+    assert!(same(new P(1, 2), new P(1, 2)));
+    assert!(same(Cell::Num(2), Cell::Num(2)));
+    assert!(!same(Cell::Num(2), Cell::Empty));
+    assert!(show_it(Some(7)) == "Some(7)");
+    assert!(show_it((1, 2.5)) == "(1, 2.5)");
+}
+
+test("an open tuple and an open option at a two-word instance") {
+    assert!(first_of((4, 5)) == "4");
+    assert!(first_of((Some(1), None)) == "Some(1)");
+    assert!(count_some(Some(1), 0) == 1);
+    let none: Option<int> = None;
+    assert!(count_some(none, 0) == 0);
+}
+
+test("a clone passes its two words on to a sibling clone and to itself") {
+    assert!(twice_same(Some(2), Some(2)));
+    assert!(!twice_same((1, 1.0), (1, 2.0)));
+    assert!(depth(Some(9), 3) == "Some(9)");
+    assert!(depth((1, 0.5), 2) == "(1, 0.5)");
+}
+
+test("two-word arguments in a loop and through a function value") {
+    let n = 0;
+    let i = 0;
+    while i < 100 {
+        let o: Option<int> = if i % 2 == 0 { Some(i) } else { None };
+        n = count_some(o, n);
+        i += 1;
+    }
+    assert!(n == 50);
+    assert!(apply(count_some, Some(1)) == 11);
+    assert!(apply(count_some, None) == 10);
+}
