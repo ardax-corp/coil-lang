@@ -91,7 +91,11 @@ test("two-word arguments in a loop and through a function value") {
     let n = 0;
     let i = 0;
     while i < 100 {
-        let o: Option<int> = if i % 2 == 0 { Some(i) } else { None };
+        let o: Option<int> = if i % 2 == 0 {
+            Some(i)
+        } else {
+            None
+        };
         n = count_some(o, n);
         i += 1;
     }
