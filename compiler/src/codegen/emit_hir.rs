@@ -4343,8 +4343,9 @@ impl Compiler {
                 let declared = hir.ret.as_ref().map(|ty| self.value_layout(ty));
                 // Tests return their `Result<(), string>` boxed.
                 let boxed_test = matches!(hir.kind, crate::hir::BodyKind::Test) && layout == ValueLayout::Boxed;
-                // A mono clone returns a generic `Option` / `Result` in the
-                // open type's layout; each `return` converts to it. A bare
+                // A mono clone returns a generic `Option` / `Result` of one
+                // word in the open type's layout; each `return` converts to
+                // it (a two-word one is the clone's pair, above). A bare
                 // `T` result is the concrete layout at its callers.
                 let boundary = self.compiling_mono_clone
                     && declared.is_some_and(|d| Self::hir_convertible(&Rep::Word(d), &Rep::Word(layout)))
@@ -5573,9 +5574,9 @@ impl Compiler {
             Self::bind_scheme_vars(param, arg, &mut map);
         }
         let at = |ty: &Ty| Self::apply_ty_var_map(ty, &map);
-        // A generic `Option` / `Result` result is boxed even in a clone: the
-        // open type's layout (`generic_enum_layout`), converted from after
-        // the call. A user enum (`Slot<T>`) has no open layout of its own:
+        // A generic `Option` / `Result` result of one word is boxed even in
+        // a clone: the open type's layout (`generic_enum_layout`), converted
+        // from after the call (a two-word one comes back as its `pair`). A user enum (`Slot<T>`) has no open layout of its own:
         // the clone builds it at its ground types (#1567).
         let enum_boundary = |generic: &Ty, concrete: &Ty| {
             !matches!(generic, Ty::Var(_))
