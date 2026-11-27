@@ -149,7 +149,9 @@ pub fn forward_tuple_loads(func: &mut MirFunc) -> usize {
         return 0;
     }
     let n = subst.len();
-    func.map_values(|v| *subst.get(&v).unwrap_or(&v));
+    // A load can forward to an item that is itself a forwarded load
+    // (`t = (e, t[1])` then `t[1]`): `replace_uses` follows the chain.
+    func.replace_uses(&subst);
     // Drop the forwarded loads, then the tuples (and their barriers) no
     // one reads any more, last made first.
     for block in &mut func.blocks {
