@@ -32,11 +32,6 @@ use super::native_capture::NativeBody;
 use super::ty::MirTy;
 use crate::bodies::Label;
 
-/// Whether a kept result counts: a call result passed on as an argument
-/// or returned, a parameter or a call result as a return's source, and a
-/// result rebuilt after the call where the caller keeps the object.
-const KEPT: bool = false;
-
 fn immediate(t: MirTy) -> bool {
     matches!(t, MirTy::I64 | MirTy::MaybeObj | MirTy::F64 | MirTy::Bool)
 }
@@ -511,15 +506,13 @@ impl<'a> Program<'a> {
             Src::Call(c) => self.switch[ctx][b][c] && self.info[b].calls[c].callee.is_some_and(|t| self.ret_w[t]),
             Src::Opaque => false,
         };
-        // A result only read item by item, or only a twin's parameter.
-        let call_result = matches!(node.src, Src::Call(_));
         src && node.uses.iter().all(|u| match *u {
             Use::Load { .. } => true,
             Use::Test => self.niche[b][n],
             Use::Arg { call, j } => {
-                (KEPT || !call_result) && self.switch[ctx][b][call] && self.info[b].calls[call].callee.is_some_and(|t| self.param_w[t].get(j) == Some(&true))
+                self.switch[ctx][b][call] && self.info[b].calls[call].callee.is_some_and(|t| self.param_w[t].get(j) == Some(&true))
             }
-            Use::Ret => (KEPT || !call_result) && ctx == TWIN && self.ret_w[b],
+            Use::Ret => ctx == TWIN && self.ret_w[b],
         })
     }
 
@@ -550,8 +543,9 @@ impl<'a> Program<'a> {
             let dest = body.member.get(&call.dest).copied();
             let kept = dest.is_none_or(|n| !self.viable[ctx][b][n]);
             if kept {
-                // A caller that keeps the object rebuilds it from the words.
-                if !KEPT || self.ret_niche[t] {
+                // A caller that keeps the object rebuilds it from the
+                // words, past the call; an `Option` would need a branch.
+                if self.ret_niche[t] {
                     return false;
                 }
             } else {
@@ -566,7 +560,7 @@ impl<'a> Program<'a> {
         !info.rets.is_empty()
             && info.rets.iter().any(|(_, r)| matches!(r, RetSite::Node(_)))
             && info.rets.iter().all(|&(_, r)| match r {
-                RetSite::Node(n) => self.viable[TWIN][b][n] && (KEPT || matches!(info.nodes[n].src, Src::Alloc { .. })),
+                RetSite::Node(n) => self.viable[TWIN][b][n],
                 RetSite::None => self.ret_niche[b],
                 RetSite::Other => false,
             })
@@ -636,8 +630,10 @@ impl<'a> Program<'a> {
     fn rewrite(&self, b: usize, ctx: usize, twin_of: &HashMap<usize, Label>) -> (MirFunc, usize) {
         let mut f = self.bodies[b].mir.clone();
         let info = &self.info[b];
-        let entry = f.entry.index();
-        let mut head: Vec<MirInst> = Vec::new();
+        // Constants a rewrite adds: in place of a dissolved tuple, and at
+        // the end of a block.
+        let mut at: HashMap<ValueId, MirInst> = HashMap::new();
+        let mut tail: HashMap<usize, Vec<MirInst>> = HashMap::new();
         // Each dissolved node's words.
         let mut node_words: HashMap<usize, Vec<ValueId>> = HashMap::new();
         let mut gone: HashSet<ValueId> = HashSet::new();
@@ -665,10 +661,19 @@ impl<'a> Program<'a> {
             let t = call.callee.expect("a switched call's callee");
             if self.ret_w[t] {
                 let tys = self.ret_words[t].clone().expect("a result's words");
-                let ws: Vec<ValueId> = tys.iter().map(|&ty| new_value(&mut f, ty)).collect();
-                if let Some(&n) = info.member.get(&call.dest)
-                    && self.viable[ctx][b][n]
-                {
+                let dissolved = info.member.get(&call.dest).copied().filter(|&n| self.viable[ctx][b][n]);
+                // A dissolved result's first word keeps the result's name;
+                // a kept one names the object rebuilt after the call.
+                let mut ws: Vec<ValueId> = Vec::with_capacity(tys.len());
+                for (k, &ty) in tys.iter().enumerate() {
+                    if k == 0 && dissolved.is_some() {
+                        f.types[call.dest.index()] = ty;
+                        ws.push(call.dest);
+                    } else {
+                        ws.push(new_value(&mut f, ty));
+                    }
+                }
+                if let Some(n) = dissolved {
                     node_words.insert(n, ws.clone());
                 }
                 call_words.insert(c, ws);
@@ -682,8 +687,17 @@ impl<'a> Program<'a> {
             if let Src::Alloc { items, .. } = &node.src {
                 let mut ws = items.clone();
                 if self.niche[b][n] {
+                    // `Some`'s flag: where the tuple was made, or, read by
+                    // nothing but a return, at the end of its block.
                     let t = new_value(&mut f, MirTy::Bool);
-                    head.push(MirInst::Const { dest: t, c: MirConst::Bool(true) });
+                    let flag = MirInst::Const { dest: t, c: MirConst::Bool(true) };
+                    let ret = info.rets.iter().find(|(_, r)| matches!(r, RetSite::Node(m) if *m == n)).map(|(bi, _)| *bi);
+                    match ret.filter(|_| !node.uses.iter().any(|u| matches!(u, Use::Test))) {
+                        Some(bi) => tail.entry(bi).or_default().push(flag),
+                        None => {
+                            at.insert(node.members[0], flag);
+                        }
+                    }
                     ws.push(t);
                 }
                 node_words.insert(n, ws);
@@ -735,8 +749,13 @@ impl<'a> Program<'a> {
                         *dest = ws[0];
                         *dest_hi = Some(ws[1]);
                         *dest_more = ws[2..].to_vec();
-                        if let Some(loc) = f.value_locs.get(&old).copied() {
+                        if old != ws[0]
+                            && let Some(loc) = f.value_locs.get(&old).copied()
+                        {
                             f.value_locs.insert(ws[0], loc);
+                        }
+                        if old != ws[0] && f.steady_calls.remove(&old) {
+                            f.steady_calls.insert(ws[0]);
                         }
                         if !info.member.get(&old).is_some_and(|&n| self.viable[ctx][b][n]) {
                             // The caller keeps the object: build it here.
@@ -746,8 +765,11 @@ impl<'a> Program<'a> {
                     }
                     moved += 1;
                 }
-                if !gone.contains(&inst.dest()) || matches!(inst, MirInst::Call { .. }) {
+                let d = inst.dest();
+                if !gone.contains(&d) || matches!(inst, MirInst::Call { .. }) {
                     out.push(inst);
+                } else if let Some(c) = at.remove(&d) {
+                    out.push(c);
                 }
                 out.extend(rebuild);
             }
@@ -763,7 +785,7 @@ impl<'a> Program<'a> {
                         .iter()
                         .map(|&ty| {
                             let z = new_value(&mut f, ty);
-                            head.push(MirInst::Const { dest: z, c: zero(ty) });
+                            tail.entry(bi).or_default().push(MirInst::Const { dest: z, c: zero(ty) });
                             z
                         })
                         .collect(),
@@ -776,9 +798,8 @@ impl<'a> Program<'a> {
             f.ret_more_tys = tys[2..].to_vec();
             f.ret_layout = crate::layout::MirLayout::TwoSlot;
         }
-        if !head.is_empty() {
-            let rest = std::mem::take(&mut f.blocks[entry].insts);
-            f.blocks[entry].insts = head.into_iter().chain(rest).collect();
+        for (bi, consts) in tail {
+            f.blocks[bi].insts.extend(consts);
         }
         f.replace_uses(&subst);
         f.bound_words.retain(|v| !gone.contains(v));
@@ -791,7 +812,7 @@ impl<'a> Program<'a> {
 
 /// Give each body a `$words` twin when a direct call can use it, and point
 /// those calls at it. Returns how many calls moved.
-pub fn wide_return_twins(bodies: &mut Vec<NativeBody>) -> usize {
+pub fn wide_call_twins(bodies: &mut Vec<NativeBody>) -> usize {
     let mut prog = Program::new(bodies);
     if !(0..prog.info.len()).any(|b| prog.has_twin(b)) {
         return 0;
@@ -818,6 +839,8 @@ pub fn wide_return_twins(bodies: &mut Vec<NativeBody>) -> usize {
         moved += n;
         let name = format!("{}$words", bodies[t].name);
         f.name = name.clone();
+        // Only direct calls reach a twin: no function value's entry.
+        f.pair_twin = None;
         twins.push(NativeBody { name, entry: Some(twin_of[&t]), mir: f });
     }
     drop(prog);
@@ -828,3 +851,98 @@ pub fn wide_return_twins(bodies: &mut Vec<NativeBody>) -> usize {
     moved
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::CallAbi;
+    use crate::mir::builder::MirBuilder;
+
+    fn scalar3() -> common::PackedKinds {
+        (0..3).fold(0, |k, i| k | (common::PackedKinds::from(common::WORD_SCALAR) << (2 * i)))
+    }
+
+    /// `sum3(t) = t.0 + t.1 + t.2` at label 1.
+    fn sum3() -> NativeBody {
+        let mut b = MirBuilder::new("sum3");
+        let t = b.add_param(MirTy::HeapRef).unwrap();
+        let x = b.ins_product_load(t, 0, MirTy::I64).unwrap();
+        let y = b.ins_product_load(t, 1, MirTy::I64).unwrap();
+        let z = b.ins_product_load(t, 2, MirTy::I64).unwrap();
+        let s = b.ins_binop(crate::mir::MirBinOp::Add, x, y).unwrap();
+        let s = b.ins_binop(crate::mir::MirBinOp::Add, s, z).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(s)).unwrap();
+        NativeBody { name: "sum3".into(), entry: Some(Label(1)), mir: b.finish().unwrap() }
+    }
+
+    /// `make3(a) = (a, a, a)` at label 2.
+    fn make3() -> NativeBody {
+        let mut b = MirBuilder::new("make3");
+        let a = b.add_param(MirTy::I64).unwrap();
+        let t = b.ins_alloc_kinds(MirAllocKind::TUPLE, vec![a, a, a], scalar3()).unwrap();
+        b.set_ret_ty(MirTy::HeapRef);
+        b.ret(Some(t)).unwrap();
+        NativeBody { name: "make3".into(), entry: Some(Label(2)), mir: b.finish().unwrap() }
+    }
+
+    fn word_abi(params: usize, ret: MirTy) -> CallAbi {
+        CallAbi { params: vec![MirTy::HeapRef; params], ret, ret_hi: None }
+    }
+
+    fn allocs(f: &MirFunc) -> usize {
+        f.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, MirInst::Alloc { .. })).count()
+    }
+
+    fn calls(f: &MirFunc) -> Vec<(Label, usize)> {
+        f.blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter_map(|i| match i {
+                MirInst::Call { target, args, .. } => Some((*target, args.len())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn twin(bodies: &[NativeBody], name: &str) -> Label {
+        bodies.iter().find(|b| b.name == name).and_then(|b| b.entry).expect("a twin")
+    }
+
+    #[test]
+    fn a_fresh_tuple_argument_goes_as_its_words() {
+        let mut b = MirBuilder::new("main");
+        let a = b.add_param(MirTy::I64).unwrap();
+        let t = b.ins_alloc_kinds(MirAllocKind::TUPLE, vec![a, a, a], scalar3()).unwrap();
+        let (r, _) = b.ins_call(Label(1), vec![t], &word_abi(1, MirTy::I64)).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(r)).unwrap();
+        let mut bodies = vec![sum3(), NativeBody { name: "main".into(), entry: Some(Label(3)), mir: b.finish().unwrap() }];
+        assert_eq!(wide_call_twins(&mut bodies), 1);
+        let sum = twin(&bodies, "sum3$words");
+        assert_eq!(bodies.iter().find(|b| b.entry == Some(sum)).unwrap().mir.params.len(), 3);
+        let main = &bodies[1].mir;
+        assert_eq!(allocs(main), 0);
+        assert_eq!(calls(main), vec![(sum, 3)]);
+    }
+
+    #[test]
+    fn a_result_passed_on_goes_as_its_words_and_a_kept_one_stays() {
+        // main(a) { k = make3(a); sum3(make3(a)); return k }
+        let mut b = MirBuilder::new("main");
+        let a = b.add_param(MirTy::I64).unwrap();
+        let (k, _) = b.ins_call(Label(2), vec![a], &word_abi(1, MirTy::HeapRef)).unwrap();
+        let (t, _) = b.ins_call(Label(2), vec![a], &word_abi(1, MirTy::HeapRef)).unwrap();
+        let _ = b.ins_call(Label(1), vec![t], &word_abi(1, MirTy::I64)).unwrap();
+        b.set_ret_ty(MirTy::HeapRef);
+        b.ret(Some(k)).unwrap();
+        let mut bodies = vec![sum3(), make3(), NativeBody { name: "main".into(), entry: Some(Label(3)), mir: b.finish().unwrap() }];
+        assert_eq!(wide_call_twins(&mut bodies), 2);
+        let (make, sum) = (twin(&bodies, "make3$words"), twin(&bodies, "sum3$words"));
+        // `main` has no twin, so the result it returns stays the object
+        // `make3` builds; the one it passes on is never built.
+        let main = &bodies[2].mir;
+        assert_eq!(calls(main), vec![(Label(2), 1), (make, 1), (sum, 3)]);
+        assert_eq!(allocs(main), 0);
+    }
+}

@@ -75,11 +75,11 @@ pub fn peek_native_capture() -> Vec<NativeBody> {
 }
 
 /// `bodies` as an engine runs them. A raw capture keeps every call's
-/// one-word result object; an optimized one returns small objects of
-/// immediates in registers ([`super::wide_ret`]).
+/// one-word result object; an optimized one passes and returns small
+/// objects of immediates in registers ([`super::wide_ret`]).
 fn finished(mut bodies: Vec<NativeBody>, raw: bool) -> Vec<NativeBody> {
     if !raw {
-        super::wide_ret::wide_return_twins(&mut bodies);
+        super::wide_ret::wide_call_twins(&mut bodies);
     }
     super::native_expand::apply_all(bodies.iter_mut().map(|b| &mut b.mir));
     // Frames own their words (reference counts plan step 4); a tail call
