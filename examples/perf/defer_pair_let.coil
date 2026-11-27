@@ -6,7 +6,11 @@ use string::format;
 static let ACC: int = 0;
 
 fn half(int n) -> Option<int> {
-    return if n % 3 == 0 { None } else { Some(n / 2) };
+    return if n % 3 == 0 {
+        None
+    } else {
+        Some(n / 2)
+    };
 }
 
 fn step(int i) -> int {

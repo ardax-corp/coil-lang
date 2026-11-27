@@ -7,7 +7,11 @@ use task::{scope, Scope, TaskError};
 static let LOG: int = 0;
 
 fn half(int n) -> Option<int> {
-    return if n % 2 == 0 { Some(n / 2) } else { None };
+    return if n % 2 == 0 {
+        Some(n / 2)
+    } else {
+        None
+    };
 }
 
 fn parse(int n) -> Result<int, string> {
