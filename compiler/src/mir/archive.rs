@@ -35,7 +35,7 @@ const MAGIC: &[u8; 5] = common::MIR_SECTION_MAGIC;
 /// takes this format only: older sections' `kinds` words have one bit per
 /// type parameter. The older formats remain for tests of what their
 /// sections hold.
-const FORMAT: u8 = common::MIR_SECTION_WIDE_LANES_FORMAT;
+const FORMAT: u8 = common::MIR_SECTION_MAYBE_OBJ_FORMAT;
 /// The format before two-bit `kinds` words (archive 8.4): `ExternCall`
 /// signatures carry struct layouts from it on.
 const FORMAT_STRUCTS: u8 = common::MIR_SECTION_EXTERN_STRUCT_FORMAT;
@@ -119,7 +119,7 @@ pub fn decode(bytes: &[u8]) -> Result<(Vec<NativeBody>, HashMap<String, u32>), S
 // ---------------------------------------------------------------------------
 // Encoding
 
-const TYS: [MirTy; 8] = [
+const TYS: [MirTy; 9] = [
     MirTy::I64,
     MirTy::F64,
     MirTy::Bool,
@@ -128,6 +128,7 @@ const TYS: [MirTy; 8] = [
     MirTy::NicheRes,
     MirTy::Bottom,
     MirTy::Value,
+    MirTy::MaybeObj,
 ];
 const LAYOUTS: [MirLayout; 3] = [MirLayout::Word, MirLayout::TwoSlot, MirLayout::HeapNiche];
 /// Every reason a body refuses emission: the field is a `&'static str`.
@@ -401,7 +402,6 @@ fn func(w: &mut Writer, f: &MirFunc) {
         w.u32(t);
     }
     for set in [
-        &f.heap_pair_words,
         &f.pure_calls,
         &f.invariant_loads,
         &f.byte_loads,
@@ -1124,7 +1124,6 @@ fn read_func(r: &mut Reader) -> Result<MirFunc, String> {
     f.lengths_steady = flags & 8 != 0;
     let n = r.len()?;
     f.tail_targets = (0..n).map(|_| r.u32().map(Label)).collect::<Result<_, _>>()?;
-    f.heap_pair_words = r.value_set()?;
     f.pure_calls = r.value_set()?;
     f.invariant_loads = r.value_set()?;
     f.byte_loads = r.value_set()?;
@@ -1401,7 +1400,7 @@ mod tests {
         pad.home_base = Some(255);
         let mut f = MirFunc::new("f");
         f.blocks.clear();
-        f.types = vec![MirTy::Value, MirTy::Bottom, MirTy::I64];
+        f.types = vec![MirTy::Value, MirTy::Bottom, MirTy::MaybeObj];
         f.params = vec![ValueId(0)];
         f.ret_ty = Some(MirTy::I64);
         f.ret_layout = MirLayout::TwoSlot;
@@ -1425,7 +1424,6 @@ mod tests {
         f.opaque_words = true;
         f.tail_targets.insert(Label(9));
         f.pair_twin = Some(Label(5));
-        f.heap_pair_words.extend([ValueId(0), ValueId(2), ValueId(1)]);
         f.pure_calls.insert(ValueId(1));
         f.cleanup = Some(Box::new(pad));
         NativeBody { name: "f".into(), entry: Some(Label(7)), mir: f }
@@ -1449,11 +1447,12 @@ mod tests {
 
     /// A section of an archive before two-bit `kinds` words (formats 16 to
     /// 20) is refused: its constant `kinds` words mean otherwise. So is
-    /// format 23, whose calls and returns have no words past the second.
+    /// format 23, whose calls and returns have no words past the second, and
+    /// format 25, which lists the maybe-object words in a value set.
     #[test]
     fn a_section_of_an_older_format_is_refused() {
         let b = body();
-        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, FORMAT_PINS, FORMAT_EXTERN, FORMAT_STRUCTS, common::MIR_SECTION_ROOTLESS_FORMAT] {
+        for format in [FORMAT_UNSCOPED, FORMAT_SCOPED, FORMAT_PINS, FORMAT_EXTERN, FORMAT_STRUCTS, common::MIR_SECTION_ROOTLESS_FORMAT, common::MIR_SECTION_WIDE_LANES_FORMAT] {
             let old = encode_as(std::slice::from_ref(&b), &HashMap::from([(b.name.clone(), 42)]), &scopes(), format);
             assert!(decode(&old).is_err(), "format {format}");
         }

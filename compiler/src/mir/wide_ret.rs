@@ -49,7 +49,7 @@ enum Ret {
 }
 
 fn immediate(t: MirTy) -> bool {
-    matches!(t, MirTy::I64 | MirTy::F64 | MirTy::Bool)
+    matches!(t, MirTy::I64 | MirTy::MaybeObj | MirTy::F64 | MirTy::Bool)
 }
 
 /// How many times each value is read (instructions and terminators).

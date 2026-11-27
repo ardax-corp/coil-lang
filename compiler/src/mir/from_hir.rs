@@ -453,7 +453,7 @@ impl Lower<'_> {
     }
 
     /// A two-word value `id` (a call's result) whose low word may carry a
-    /// heap payload ([`MirFunc::heap_pair_words`]).
+    /// heap payload, typed [`MirTy::MaybeObj`].
     fn heap_pair(&self, id: HirId) -> bool {
         self.pair_tys(id).is_some() && self.expr_ty(id).is_some_and(|t| self.cx.pair_holds_heap(t))
     }
@@ -709,7 +709,7 @@ pub trait LowerCx {
     /// The word types of a two-word (pair) type.
     fn pair_tys(&self, ty: &Ty) -> Option<(MirTy, MirTy)>;
     /// Whether a two-word value of this type may carry a heap payload in
-    /// its low word ([`MirFunc::heap_pair_words`]).
+    /// its low word, typed [`MirTy::MaybeObj`].
     fn pair_holds_heap(&self, ty: &Ty) -> bool;
     /// Whether neither word of a two-word value of this type is ever a
     /// heap pointer ([`crate::layout::scalar_pair`]): a flat field of it
@@ -1760,7 +1760,7 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
             let v = lower.b.add_param(ty).map_err(mir)?;
             lower.b.def_local(LocalId(next), v).map_err(mir)?;
             if heap_pair && i == 0 {
-                lower.b.mark_heap_pair_word(v);
+                lower.b.mark_maybe_obj(v);
             }
             next += 1;
         }
@@ -5764,7 +5764,7 @@ impl Lower<'_> {
             return self.unbox_niche(dest, want);
         }
         if dest_hi.is_some() && self.heap_pair(id) {
-            self.b.mark_heap_pair_word(dest);
+            self.b.mark_maybe_obj(dest);
         }
         Ok(match dest_hi {
             Some(hi) => Val::Pair(dest, hi),
@@ -6646,7 +6646,7 @@ impl Lower<'_> {
         if let (Some(&unpair), Some(tys)) = (self.site(id).value_pair_call.as_ref(), self.pair_tys(id)) {
             let (lo, hi) = self.at_expr(id, |l| l.b.ins_call_indirect_pair(callee, words, tys, unpair).map_err(mir))?;
             if self.heap_pair(id) {
-                self.b.mark_heap_pair_word(lo);
+                self.b.mark_maybe_obj(lo);
             }
             return Ok(Val::Pair(lo, hi));
         }
@@ -8546,7 +8546,7 @@ impl Lower<'_> {
         {
             let (lo, hi) = self.at_expr(id, |l| l.b.ins_host_invoke_pair(native, words, lo_ty).map_err(mir))?;
             if self.heap_pair(id) {
-                self.b.mark_heap_pair_word(lo);
+                self.b.mark_maybe_obj(lo);
             }
             return Ok(Val::Pair(lo, hi));
         }

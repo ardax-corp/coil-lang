@@ -18,12 +18,16 @@ use crate::layout::MirLayout;
 /// ```text
 ///                         Value (⊤)
 ///          /        /       |        \
-///        I64      F64     Bool   NicheOpt / NicheRes
-///                                     \   /
-///                                    HeapRef
+///     MaybeObj    F64     Bool   NicheOpt / NicheRes
+///        |                            \   /
+///       I64                          HeapRef
 ///                    \
 ///                  Bottom (⊥)
 /// ```
+///
+/// [`MirTy::MaybeObj`] is an `i64` word that may hold an object: every
+/// engine and pass treats it as an [`MirTy::I64`] word, and reference
+/// counting counts it with a run-time address test.
 ///
 /// Language `int` / `float` / `bool` map to [`MirTy::I64`] / [`MirTy::F64`].
 /// Heap/niche variants are one `Value` word (COI-92), not two-slot.
@@ -41,14 +45,33 @@ pub enum MirTy {
     NicheRes,
     /// Boxed runtime `Value`. Not specialized; P1+ keeps this ABI at edges.
     Value,
+    /// An `i64` word that is an immediate or a heap pointer, decided at run
+    /// time: the low word of a pair whose payload may be an object (a call's
+    /// result, a parameter, a host call's), and an element a `Vec`
+    /// expansion holds across its loop (`native_expand`). In registers,
+    /// frames and every operand position it is an `i64` ([`Self::is_int`],
+    /// [`Self::word_class`]); reference counting counts it, testing the
+    /// address at run time, where a plain `i64` it counts only when it is
+    /// read from memory or a call returns it (`rc_insert`).
+    MaybeObj,
 }
 
 impl MirTy {
     #[cfg(test)]
     pub const TOP: Self = Self::Value;
 
+    /// An `i64` word: [`Self::I64`] or [`Self::MaybeObj`].
     pub fn is_int(self) -> bool {
-        matches!(self, Self::I64)
+        matches!(self, Self::I64 | Self::MaybeObj)
+    }
+
+    /// The type an operand check compares: [`Self::MaybeObj`] is an `i64`
+    /// word wherever one is expected.
+    pub fn word_class(self) -> Self {
+        match self {
+            Self::MaybeObj => Self::I64,
+            t => t,
+        }
     }
 
     pub fn is_float(self) -> bool {
@@ -57,7 +80,7 @@ impl MirTy {
 
     /// Dense / numeric SSA lane (`i64`/`f64`/`bool`).
     pub fn is_numeric(self) -> bool {
-        matches!(self, Self::I64 | Self::F64 | Self::Bool)
+        matches!(self, Self::I64 | Self::MaybeObj | Self::F64 | Self::Bool)
     }
 
     /// One-word dense / CALL lane: numeric, heap pointer, or niche word (Q8).
@@ -97,6 +120,7 @@ impl MirTy {
         }
         match (self, other) {
             (HeapRef, HeapRef) => HeapRef,
+            (I64, MaybeObj) | (MaybeObj, I64) => MaybeObj,
             // An aligned heap pointer is a valid `Some` / `Ok` niche word.
             (NicheOpt, NicheOpt) | (HeapRef, NicheOpt) | (NicheOpt, HeapRef) => NicheOpt,
             (NicheRes, NicheRes) | (HeapRef, NicheRes) | (NicheRes, HeapRef) => NicheRes,
@@ -141,6 +165,7 @@ impl MirTy {
             Self::NicheOpt => "niche_opt",
             Self::NicheRes => "niche_res",
             Self::Value => "value",
+            Self::MaybeObj => "maybe_obj",
         }
     }
 
@@ -155,6 +180,7 @@ impl MirTy {
             "niche_opt" => Self::NicheOpt,
             "niche_res" => Self::NicheRes,
             "value" => Self::Value,
+            "maybe_obj" => Self::MaybeObj,
             "int" => Self::I64,
             "float" => Self::F64,
             _ => return None,
@@ -213,6 +239,18 @@ mod tests {
         assert_eq!(MirTy::I64.meet(MirTy::F64), MirTy::Bottom);
         assert!(MirTy::I64.le(MirTy::Value));
         assert!(MirTy::Bottom.le(MirTy::Bool));
+    }
+
+    #[test]
+    fn maybe_obj_is_an_int_word() {
+        assert!(MirTy::MaybeObj.is_int());
+        assert!(MirTy::MaybeObj.is_numeric());
+        assert!(!MirTy::MaybeObj.is_heap_word());
+        assert!(MirTy::MaybeObj.is_specialized());
+        assert_eq!(MirTy::MaybeObj.word_class(), MirTy::I64);
+        assert_eq!(MirTy::I64.join(MirTy::MaybeObj), MirTy::MaybeObj);
+        assert!(MirTy::I64.le(MirTy::MaybeObj));
+        assert_eq!(MirTy::parse("maybe_obj"), Some(MirTy::MaybeObj));
     }
 
     #[test]
