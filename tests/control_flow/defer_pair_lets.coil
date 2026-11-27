@@ -1,0 +1,102 @@
+// A `defer` body's own two-word `let`s (`Option<int>`, `Result<int,
+// string>`, `(int, float)`) keep both words, on a normal exit and in the
+// cleanup a panic runs.
+use tests::assert;
+use task::{scope, Scope, TaskError};
+
+static let LOG: int = 0;
+
+fn half(int n) -> Option<int> {
+    return if n % 2 == 0 { Some(n / 2) } else { None };
+}
+
+fn parse(int n) -> Result<int, string> {
+    if n < 0 {
+        return Err("negative");
+    }
+    return Ok(n * 3);
+}
+
+fn exits(int n) -> int {
+    defer use (n) {
+        let h = half(n);
+        let r = parse(n - 10);
+        let p = (n, 0.5);
+        let w = match h {
+            Some(v) => v,
+            None => 0 - 1,
+        };
+        let e = match r {
+            Ok(v) => v,
+            Err(m) => m.len(),
+        };
+        let (pn, pf) = p;
+        if pf != 0.5 {
+            panic "pair";
+        }
+        LOG = w + e + pn - n;
+        let k = half(n + 1);
+        if let Some(v) = k {
+            LOG = LOG + v * 1000;
+        }
+    }
+    return n + 1;
+}
+
+fn panics(int n) -> int {
+    defer use (n) {
+        let h = half(n);
+        let r = parse(n);
+        let a = match h {
+            Some(v) => v,
+            None => 100,
+        };
+        LOG = match r {
+            Ok(b) => a + b,
+            Err(_) => 0 - a,
+        };
+    }
+    if n > 0 {
+        panic "panics";
+    }
+    return n;
+}
+
+fn failed(Result<int, TaskError> r) -> bool {
+    return match r {
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    };
+}
+
+fn run(unit -> int body) -> bool {
+    return failed(scope(fn (Scope s) use (body) {
+        let _ = s.spawn(body);
+        0
+    }));
+}
+
+test("a defer body's two-word lets on a normal exit") {
+    LOG = 0;
+    assert!(exits(4) == 5);
+    // half(4) = 2, parse(-6) = Err("negative"), of length 8.
+    assert!(LOG == 10);
+    LOG = 0;
+    assert!(exits(13) == 14);
+    // half(13) = None (-1), parse(3) = 9; half(14) = 7.
+    assert!(LOG == 7008);
+}
+
+test("a defer body's two-word lets in the cleanup a panic runs") {
+    LOG = 0;
+    assert!(run(fn () => panics(6)));
+    // half(6) = 3, parse(6) = 18.
+    assert!(LOG == 21);
+    LOG = 0;
+    assert!(run(fn () => panics(5)));
+    // half(5) = None (100), parse(5) = 15.
+    assert!(LOG == 115);
+    LOG = 7;
+    assert!(panics(0) == 0);
+    assert!(LOG == 0);
+}
