@@ -1408,10 +1408,16 @@ impl Compiler {
         else {
             return;
         };
-        if !instance.args.iter().any(Ty::has_var) {
+        // A method with bounds of its own (`fn pick<W: Show>`) is cloned at
+        // their ground types too, a ground instance's included: the clone
+        // takes no dictionary for them and is raw.
+        let own = self.instance_method_own_vars(class, method, fqn, &instance.args);
+        if !instance.args.iter().any(Ty::has_var) && own.is_none() {
             return;
         }
-        let head = instance.args.clone();
+        let mut head = instance.args.clone();
+        let own_bounds = own.as_ref().map_or(0, Vec::len);
+        head.extend(own.unwrap_or_default());
         self.inst_clone_srcs.insert(
             fqn.to_string(),
             InstCloneSrc {
@@ -1422,10 +1428,42 @@ impl Compiler {
                 compiled: false,
                 program: self.program_seq,
                 trait_params: None,
-                own_bounds: 0,
+                own_bounds,
                 method_of: None,
             },
         );
+    }
+
+    /// The type variables instance method `fqn` (of an instance at `head`)
+    /// has for its trait method's own bounds (`fn pick<W: Show>`), in the
+    /// order the trait declares them: what the trait's own variables are
+    /// in the method's signature. `None` when the method has no own bounds,
+    /// or one is not a single variable of the method's own.
+    fn instance_method_own_vars(&self, class: &str, method: &str, fqn: &str, head: &[Ty]) -> Option<Vec<Ty>> {
+        let bounds = self.trait_method_own_bounds(class, method);
+        if bounds.is_empty() || self.own_kinds_vars(class, method).is_some_and(|v| v.len() != bounds.len()) {
+            return None;
+        }
+        let scheme = self.checker.typeclass_method_scheme(class, method)?;
+        let (open, _) = Self::fun_param_and_ret_tys(&scheme.ty);
+        let own = self.checker.fn_param_tys(fqn)?;
+        if open.len() != own.len() {
+            return None;
+        }
+        let mut map = HashMap::new();
+        for (o, t) in open.iter().zip(&own) {
+            Self::bind_scheme_vars(o, t, &mut map);
+        }
+        let head_vars: HashSet<_> = head.iter().flat_map(crate::typechecking::ty::ftv_ty).collect();
+        let vars: Vec<Ty> = bounds
+            .iter()
+            .map(|c| match c.args.as_slice() {
+                [Ty::Var(v)] => map.get(v).filter(|t| matches!(t, Ty::Var(w) if !head_vars.contains(w))).cloned(),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        let distinct = vars.iter().enumerate().all(|(i, v)| !vars[..i].contains(v));
+        distinct.then_some(vars)
     }
 
     /// Record default body `class::method` as a clone source: generic over
@@ -1638,8 +1676,12 @@ impl Compiler {
         // instance has no shared entry a dictionary may hold: its clone's
         // `$dict` adapter takes and returns the trait's layouts.
         let flat_only = self.fn_flat_split(fqn, lookup);
+        // An instance method's clone at its own bounds' types has no
+        // `$dict` adapter either: only ground call sites reach it, with
+        // its own types' layouts.
+        let own_only = own_bounds > 0 && !Self::is_default_method_fqn(&class, &method, fqn);
         if !inherent
-            && ((self.trait_method_boundary_sig(&class, &method, trait_lookup, false).is_some() && !flat_only)
+            && ((self.trait_method_boundary_sig(&class, &method, trait_lookup, false).is_some() && !flat_only && !own_only)
                 || self.checker.typeclass_method_scheme(&class, &method).is_none()
                 || self.trait_method_own_bounds(&class, &method).len() != own_bounds)
         {
@@ -1934,6 +1976,19 @@ impl Compiler {
                     }
                     for (name, want) in src.trait_params.iter().flatten().zip(&req.lookup) {
                         names.insert(name.clone(), want.clone());
+                    }
+                    // An instance method's own type parameters (`fn pick<W:
+                    // Show>`), at the types of the clone's own bounds.
+                    if src.method_of.is_none()
+                        && src.trait_params.is_none()
+                        && src.own_bounds > 0
+                        && let Expression::Function { type_params, .. } = method.1.as_ref()
+                        && type_params.len() == src.own_bounds
+                    {
+                        let own = &req.lookup[req.lookup.len() - src.own_bounds..];
+                        for (param, want) in type_params.iter().zip(own) {
+                            names.insert(param.name.to_string(), want.clone());
+                        }
                     }
                     // An inherent method compiles as in its `impl`: `self`
                     // in slot 0 (an instance method), the class as namespace.
