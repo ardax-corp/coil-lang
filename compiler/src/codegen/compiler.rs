@@ -5418,6 +5418,16 @@ impl Compiler {
         self.two_word_return_kind(name)
     }
 
+    /// How mono clone `mono` of generic `qualified` (or `source_name`)
+    /// returns: in its own result's two words when its signature is its
+    /// own ([`Self::mono_clone_sig`]), else as [`Self::mono_clone_pair`].
+    pub(super) fn mono_clone_ret_pair(&self, mono: &str, qualified: &str, source_name: &str) -> Option<PairKind> {
+        if self.mono_clone_sig(mono).is_some() {
+            return self.two_word_return_kind(mono);
+        }
+        self.mono_clone_pair(qualified).or_else(|| self.mono_clone_pair(source_name))
+    }
+
     /// Pin a verdict so later queries cannot disagree with it. Definition sites
     /// use this for shapes only they can see (a coroutine body never returns a
     /// pair, however its return type reads).
@@ -5434,6 +5444,11 @@ impl Compiler {
         if let Some(plan) = self.method_clone_plans.borrow().get(name) {
             let facts = crate::layout::CalleeFacts { coroutine: self.coroutine_fns.contains(&plan.src), ..crate::layout::CalleeFacts::default() };
             return crate::layout::convention_ret(&self.checker, &facts, plan.ret_ty());
+        }
+        // A mono clone returns its own result's two words, a bare `T`'s or
+        // an open tuple's at a two-word type too ([`Self::mono_clone_sig`]).
+        if let Some((_, ret)) = self.mono_clone_sig(name) {
+            return crate::layout::convention_ret(&self.checker, &crate::layout::CalleeFacts::default(), ret).filter(|kind| self.hir_pair_kind(kind));
         }
         let lookup = strip_overload_key(name);
         // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed
@@ -5814,8 +5829,9 @@ impl Compiler {
     }
 
     /// Mono clone `name`'s own parameter and result types: its calling
-    /// convention is a ground function's ([`Self::callee_param_facts`]).
-    /// A type still open there keeps its slot one word.
+    /// convention is a ground function's ([`Self::callee_param_facts`],
+    /// [`Self::compute_two_word_return_kind`]). A type still open there
+    /// keeps its slot one word.
     pub(super) fn mono_clone_sig(&self, name: &str) -> Option<&(Vec<Ty>, Ty)> {
         self.mono_clone_sigs.get(name)
     }
@@ -5889,7 +5905,7 @@ impl Compiler {
                 table_key: Some(qualified.to_string()),
                 result_mode: self.checker.fn_is_result_mode(source_name),
                 result_ok_is_result: self.checker.fn_result_ok_is_result(source_name),
-                two_word: self.mono_clone_pair(qualified).or_else(|| self.mono_clone_pair(source_name)),
+                two_word: self.mono_clone_ret_pair(&mono_name, qualified, source_name),
             };
             let prev_mono_name = self.current_mono_clone.replace((mono_name.clone(), qualified.to_string()));
             self.mono_codegen_var_types.push(overrides);

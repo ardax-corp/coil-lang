@@ -5540,9 +5540,11 @@ impl Compiler {
         }
         let spec = self.hir_mono_spec(hir, call, &key, lookup).ok_or("callee-generic")?;
         let mono = self.mono_names.get(&spec.key).ok_or("callee-generic")?.clone();
-        // A closed two-word result (`-> Option<int>`) comes back as its
-        // pair, as from the shared body.
-        let pair = self.mono_clone_pair(lookup);
+        // A two-word result comes back as its pair: a closed one
+        // (`-> Option<int>`) as from the shared body, a bare `T`, an open
+        // tuple or `Option<T>` at a two-word type as the clone's own
+        // signature returns it.
+        let pair = self.mono_clone_ret_pair(&mono, lookup, lookup);
         if pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
             return Err("callee-pair");
         }
