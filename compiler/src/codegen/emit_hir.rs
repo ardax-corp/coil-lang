@@ -1672,9 +1672,14 @@ impl Compiler {
         // The frame starts with the parameters, as a declared function's.
         // An inherent method clone's thunk takes its two-word parameters
         // in two slots, as its callers pass them ([`Self::hir_method_clone`]),
-        // as does a structural `Show` / `Hash` thunk's raw entry.
+        // as do a structural `Show` / `Hash` thunk's raw entry and a range's
+        // `to_vec` thunk.
         let pairs = match self.current_function_table_key.as_deref() {
-            Some(key) if self.method_clone_plans.borrow().contains_key(key) || self.structural_pair_thunk_params(key).is_some() => {
+            Some(key)
+                if self.method_clone_plans.borrow().contains_key(key)
+                    || self.structural_pair_thunk_params(key).is_some()
+                    || Self::range_to_vec_thunk_receiver(key).is_some() =>
+            {
                 self.callee_param_pairs(key)
             }
             _ => Vec::new(),
@@ -6170,8 +6175,8 @@ impl Compiler {
         // A constructor receiver (`E::A.tag()`) is typed as its variant.
         let recv_ty = crate::typechecking::ty::nominal_enum(apply_ty_prune(self.checker.subst(), recv_ty));
         let owner = Checker::class_name_of_ty(&recv_ty).ok_or("method-receiver")?;
-        // A numeric range's `to_vec` thunk takes the boxed range (the float
-        // thunk for a float range).
+        // A numeric range's `to_vec` thunk (the float thunk for a float
+        // range) takes the range in two words.
         if matches!(owner, "Range" | "RangeInclusive") && method == "to_vec" && args.len() == 1 {
             let key = if self.range_to_vec_elem_is_float(Some(&recv_ty)) {
                 format!("{owner}::__float_to_vec")
@@ -6182,6 +6187,7 @@ impl Compiler {
                 return Err("method-unknown");
             }
             let ret = Self::hir_ty(hir, call).ok_or("call-type")?;
+            let ranges = self.callee_param_pairs(&key);
             return Ok(HirCall {
                 key,
                 pair: None,
@@ -6192,7 +6198,7 @@ impl Compiler {
                 builtin: None,
                 generic: None,
                 instance: None,
-                ranges: Vec::new(),
+                ranges,
                 mono_of: None,
                 own_dicts: Vec::new(),
             });

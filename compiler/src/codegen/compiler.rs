@@ -882,6 +882,11 @@ impl Compiler {
         if let Some(params) = self.structural_pair_thunk_params(name) {
             return Some((crate::layout::CalleeFacts::default(), params.clone()));
         }
+        // A numeric range's `to_vec` thunk: called by name only, its
+        // receiver the range.
+        if let Some(range) = Self::range_to_vec_thunk_receiver(name) {
+            return Some((crate::layout::CalleeFacts::default(), vec![range]));
+        }
         let lookup = strip_overload_key(name);
         let params = self
             .checker
@@ -5228,6 +5233,24 @@ impl Compiler {
             let root = b.ret(call);
             let hir = b.finish(root);
             self.emit_synth_fn(&fqn, &hir, HashMap::new());
+        }
+    }
+
+    /// The receiver type of range `to_vec` thunk `key`
+    /// ([`Self::emit_range_method_thunks`]), which takes it in two words as
+    /// a free function takes a range.
+    pub(super) fn range_to_vec_thunk_receiver(key: &str) -> Option<Ty> {
+        use crate::typechecking::ty as coil_ty;
+        let (owner, method) = key.split_once("::")?;
+        let elem = match method {
+            "to_vec" => coil_ty::int(),
+            "__float_to_vec" => coil_ty::float(),
+            _ => return None,
+        };
+        match owner {
+            "Range" => Some(coil_ty::range_ty(elem)),
+            "RangeInclusive" => Some(coil_ty::range_inclusive_ty(elem)),
+            _ => None,
         }
     }
 
