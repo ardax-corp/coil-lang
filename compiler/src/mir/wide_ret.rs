@@ -10,7 +10,8 @@
 //! the object: not the caller's argument, not the callee's result.
 //!
 //! What "can" means is one question per value of a body (a *node*: a
-//! value with its `Word` casts and safepoint barriers): whether its words
+//! value with its `Word` casts, safepoint barriers and copy-on-write
+//! shares): whether its words
 //! are known where it is made (a fresh `alloc.tuple` of immediates, a
 //! twin's parameter, a switched call's result) and every read of it takes
 //! words (an item load, a `Some` test, an argument the twin takes as
@@ -67,6 +68,8 @@ enum Src {
     Param(usize),
     /// The result of call `c` (an index into [`Body::calls`]).
     Call(usize),
+    /// A φ of other nodes' objects: its incoming values, by block.
+    Phi(Vec<(super::inst::BlockId, ValueId)>),
     /// Anything else (another kind of tuple, a tuple of heap words).
     Opaque,
 }
@@ -82,6 +85,8 @@ enum Use {
     Arg { call: usize, j: usize },
     /// The body's `return`.
     Ret,
+    /// An incoming value of the φ of node `n`.
+    Phi(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +133,10 @@ struct Body {
     twinnable: bool,
     /// Its one-word result is a heap word an object of words can stand for.
     wide_ret: bool,
+    /// Per node: it, or a node a φ joins it with, meets a call edge (a
+    /// parameter, a call's result or argument, a return). Others are
+    /// `forward_tuple_loads`' to take apart, not this pass's.
+    touches: Vec<bool>,
 }
 
 fn twinnable(name: &str, f: &MirFunc) -> bool {
@@ -170,6 +179,9 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                     let src = if words { Src::Alloc { items: elems.clone(), kind: *kind, kinds: *kinds } } else { Src::Opaque };
                     add(*dest, src, &mut nodes, &mut member);
                 }
+                MirInst::Phi { dest, ty, args } if object_word(*ty) => {
+                    add(*dest, Src::Phi(args.clone()), &mut nodes, &mut member);
+                }
                 MirInst::Call { dest, dest_hi, target, args, .. } => {
                     call_of.insert(*dest, calls.len());
                     calls.push(CallSite { dest: *dest, callee: by_label.get(target).copied(), args: args.clone(), one_word: dest_hi.is_none() });
@@ -189,6 +201,8 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
             let (dest, src) = match i {
                 MirInst::Cast { kind: MirCastKind::Word, dest, src, .. } => (*dest, *src),
                 MirInst::GcBarrier { dest, object, .. } => (*dest, *object),
+                // A share of an object nothing writes (a tuple) is its word.
+                MirInst::Cow { dest, src, unique: false, field: None } => (*dest, *src),
                 _ => continue,
             };
             if let Some(&n) = member.get(&src)
@@ -209,8 +223,20 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
             match i {
                 MirInst::Cast { kind: MirCastKind::Word, dest, src, .. } if member.contains_key(src) && member.get(dest) == member.get(src) => continue,
                 MirInst::GcBarrier { dest, object, .. } if member.contains_key(object) && member.get(dest) == member.get(object) => continue,
+                MirInst::Cow { dest, src, unique: false, field: None } if member.contains_key(src) && member.get(dest) == member.get(src) => continue,
                 MirInst::ProductLoad { dest, object, slot } if member.contains_key(object) => {
                     nodes[member[object]].uses.push(Use::Load { dest: *dest, slot: *slot as usize });
+                    continue;
+                }
+                MirInst::Phi { dest, args, .. } if member.contains_key(dest) => {
+                    let p = member[dest];
+                    for (_, a) in args {
+                        if let Some(&n) = member.get(a) {
+                            nodes[n].uses.push(Use::Phi(p));
+                        } else {
+                            nodes[p].src = Src::Opaque;
+                        }
+                    }
                     continue;
                 }
                 MirInst::Unary { op: MirUnaryOp::Not, dest, src } if member.contains_key(src) && f.ty(*dest) == MirTy::Bool => {
@@ -262,7 +288,36 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
         }
     }
     let wide_ret = twin && f.ret_ty.is_some_and(object_word) && f.ret_hi_ty.is_none() && f.ret_more_tys.is_empty();
-    Body { nodes, member, calls, rets, params, twinnable: twin, wide_ret }
+    let touches = touches(&nodes);
+    Body { nodes, member, calls, rets, params, twinnable: twin, wide_ret, touches }
+}
+
+/// [`Body::touches`]: each node's φ-joined group meets a call edge.
+fn touches(nodes: &[Node]) -> Vec<bool> {
+    let mut group: Vec<usize> = (0..nodes.len()).collect();
+    fn find(g: &mut [usize], mut x: usize) -> usize {
+        while g[x] != x {
+            g[x] = g[g[x]];
+            x = g[x];
+        }
+        x
+    }
+    for (n, node) in nodes.iter().enumerate() {
+        for u in &node.uses {
+            if let Use::Phi(p) = *u {
+                let (a, b) = (find(&mut group, n), find(&mut group, p));
+                group[a] = b;
+            }
+        }
+    }
+    let mut hit = vec![false; nodes.len()];
+    for (n, node) in nodes.iter().enumerate() {
+        if matches!(node.src, Src::Param(_) | Src::Call(_)) || node.uses.iter().any(|u| matches!(u, Use::Arg { .. } | Use::Ret)) {
+            let g = find(&mut group, n);
+            hit[g] = true;
+        }
+    }
+    (0..nodes.len()).map(|n| hit[find(&mut group, n)]).collect()
 }
 
 /// A slot whose words several nodes share: a node, a body's parameter, a
@@ -393,6 +448,7 @@ impl<'a> Program<'a> {
                             }
                         }
                         Use::Ret => cls.union(k, Key::Ret(bi)),
+                        Use::Phi(p) => cls.union(k, Key::Node(bi, p)),
                         _ => {}
                     }
                 }
@@ -496,14 +552,14 @@ impl<'a> Program<'a> {
         if node.other || self.words[b][n].is_none() {
             return false;
         }
-        // A node no call edge touches is not this pass's (`forward_tuple_loads`).
-        if matches!(node.src, Src::Alloc { .. }) && !node.uses.iter().any(|u| matches!(u, Use::Arg { .. } | Use::Ret)) {
+        if !self.info[b].touches[n] {
             return false;
         }
         let src = match node.src {
             Src::Alloc { .. } => true,
             Src::Param(j) => ctx == TWIN && self.param_w[b][j],
             Src::Call(c) => self.switch[ctx][b][c] && self.info[b].calls[c].callee.is_some_and(|t| self.ret_w[t]),
+            Src::Phi(ref args) => args.iter().all(|(_, a)| self.info[b].member.get(a).is_some_and(|&m| self.viable[ctx][b][m])),
             Src::Opaque => false,
         };
         src && node.uses.iter().all(|u| match *u {
@@ -513,6 +569,7 @@ impl<'a> Program<'a> {
                 self.switch[ctx][b][call] && self.info[b].calls[call].callee.is_some_and(|t| self.param_w[t].get(j) == Some(&true))
             }
             Use::Ret => ctx == TWIN && self.ret_w[b],
+            Use::Phi(p) => self.viable[ctx][b][p],
         })
     }
 
@@ -632,7 +689,7 @@ impl<'a> Program<'a> {
         let info = &self.info[b];
         // Constants a rewrite adds: in place of a dissolved tuple, and at
         // the end of a block.
-        let mut at: HashMap<ValueId, MirInst> = HashMap::new();
+        let mut at: HashMap<ValueId, Vec<MirInst>> = HashMap::new();
         let mut tail: HashMap<usize, Vec<MirInst>> = HashMap::new();
         // Each dissolved node's words.
         let mut node_words: HashMap<usize, Vec<ValueId>> = HashMap::new();
@@ -679,6 +736,16 @@ impl<'a> Program<'a> {
                 call_words.insert(c, ws);
             }
         }
+        // A dissolved φ's words are φs of its incoming nodes' words.
+        for (n, node) in info.nodes.iter().enumerate() {
+            if self.viable[ctx][b][n]
+                && let Src::Phi(_) = node.src
+            {
+                let tys = self.words[b][n].clone().expect("a φ's words");
+                let ws = tys.iter().map(|&t| new_value(&mut f, t)).collect();
+                node_words.insert(n, ws);
+            }
+        }
         for (n, node) in info.nodes.iter().enumerate() {
             if !self.viable[ctx][b][n] {
                 continue;
@@ -694,9 +761,7 @@ impl<'a> Program<'a> {
                     let ret = info.rets.iter().find(|(_, r)| matches!(r, RetSite::Node(m) if *m == n)).map(|(bi, _)| *bi);
                     match ret.filter(|_| !node.uses.iter().any(|u| matches!(u, Use::Test))) {
                         Some(bi) => tail.entry(bi).or_default().push(flag),
-                        None => {
-                            at.insert(node.members[0], flag);
-                        }
+                        None => at.entry(node.members[0]).or_default().push(flag),
                     }
                     ws.push(t);
                 }
@@ -707,6 +772,17 @@ impl<'a> Program<'a> {
                     subst.insert(*dest, node_words[&n][*slot]);
                     gone.insert(*dest);
                 }
+            }
+        }
+        for (n, node) in info.nodes.iter().enumerate() {
+            if self.viable[ctx][b][n]
+                && let Src::Phi(args) = &node.src
+            {
+                let tys = self.words[b][n].clone().expect("a φ's words");
+                let phis = (0..tys.len())
+                    .map(|k| MirInst::Phi { dest: node_words[&n][k], ty: tys[k], args: args.iter().map(|&(blk, a)| (blk, node_words[&info.member[&a]][k])).collect() })
+                    .collect::<Vec<_>>();
+                at.entry(node.members[0]).or_default().extend(phis);
             }
         }
         let flag_of = |v: ValueId| -> Option<ValueId> {
@@ -769,7 +845,7 @@ impl<'a> Program<'a> {
                 if !gone.contains(&d) || matches!(inst, MirInst::Call { .. }) {
                     out.push(inst);
                 } else if let Some(c) = at.remove(&d) {
-                    out.push(c);
+                    out.extend(c);
                 }
                 out.extend(rebuild);
             }
