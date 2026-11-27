@@ -1,0 +1,22 @@
+// A structural instance's method on a two-word value: `Hash` of an
+// `(int, float)` called directly and through a bounded generic's per-type
+// clone. The tuple goes in its two words, not boxed per call.
+use io::sync::print;
+use string::format;
+
+fn hashed<W: Hash>(W w) -> int {
+    return w.hash();
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 10000000 {
+        let p: (int, float) = (i & 1023, (i & 7) as float);
+        s += p.hash() & 255;
+        s += hashed(p) & 15;
+        s = s & 0xffffff;
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}
