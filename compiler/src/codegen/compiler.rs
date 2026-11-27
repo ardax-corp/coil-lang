@@ -1747,7 +1747,7 @@ impl Compiler {
             || self.module_ctxs.get(&src.program).is_some_and(|ctx| {
                 ctx.knows_tys(lookup)
                     && (ctx.layout_safe(src.span)
-                        || self.inst_clone_over_enum(&src)
+                        || self.inst_clone_over_enum(src)
                         || self.fn_sig_split(fqn)
                         || self.fn_flat_split(fqn, lookup))
             })
