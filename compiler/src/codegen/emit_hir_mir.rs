@@ -1322,10 +1322,6 @@ impl Compiler {
             } else {
                 ground.boxed.iter().map(|ty| ty.as_ref().and_then(Self::ty_to_value_tag).is_some()).collect()
             };
-            let unpaired = args
-                .iter()
-                .zip(&words)
-                .all(|(&a, &w)| !w || !matches!(self.hir_natural(hir, emit, a), Some(Rep::Pair(_))));
             // A niche word a generic instance's shared entry takes as its
             // enum object (#1579); its clone at the call's types takes the
             // niche word itself.
@@ -1335,8 +1331,11 @@ impl Compiler {
                 .zip(&call.params)
                 .map(|(&a, &p)| (!self.hir_arg_passes(hir, emit, a, p)).then(|| self.hir_niche_arg(hir, emit, a, p)).flatten())
                 .collect();
+            // A two-word argument the instance takes as a bare type
+            // parameter's word goes boxed (a mono clone's two-word
+            // parameter, `x.wrap()` in `fn wrapped<T: Wrap>(T x)` at
+            // `Option<int>`), as any two-word value is that word.
             if let Some(dicts) = dicts
-                && unpaired
                 && args.iter().zip(&call.params).zip(&niches).all(|((&a, &p), n)| n.is_some() || self.hir_arg_passes(hir, emit, a, p))
                 && let Some(target) = target
                 && let Some(boxed_ret) = if flat_clone { Some(false) } else { self.hir_ret_shape(hir, id, &natural) }

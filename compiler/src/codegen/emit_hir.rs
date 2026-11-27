@@ -4343,8 +4343,9 @@ impl Compiler {
                 let declared = hir.ret.as_ref().map(|ty| self.value_layout(ty));
                 // Tests return their `Result<(), string>` boxed.
                 let boxed_test = matches!(hir.kind, crate::hir::BodyKind::Test) && layout == ValueLayout::Boxed;
-                // A mono clone returns a generic `Option` / `Result` in the
-                // open type's layout; each `return` converts to it. A bare
+                // A mono clone returns a generic `Option` / `Result` of one
+                // word in the open type's layout; each `return` converts to
+                // it (a two-word one is the clone's pair, above). A bare
                 // `T` result is the concrete layout at its callers.
                 let boundary = self.compiling_mono_clone
                     && declared.is_some_and(|d| Self::hir_convertible(&Rep::Word(d), &Rep::Word(layout)))
@@ -5540,10 +5541,18 @@ impl Compiler {
         }
         let spec = self.hir_mono_spec(hir, call, &key, lookup).ok_or("callee-generic")?;
         let mono = self.mono_names.get(&spec.key).ok_or("callee-generic")?.clone();
-        // A closed two-word result (`-> Option<int>`) comes back as its
-        // pair, as from the shared body.
-        let pair = self.mono_clone_pair(lookup);
+        // A two-word result comes back as its pair: a closed one
+        // (`-> Option<int>`) as from the shared body, a bare `T`, an open
+        // tuple or `Option<T>` at a two-word type as the clone's own
+        // signature returns it.
+        let pair = self.mono_clone_ret_pair(&mono, lookup, lookup);
         if pair.as_ref().is_some_and(|k| !self.hir_pair_kind(k)) {
+            return Err("callee-pair");
+        }
+        // Its two-word parameters as two words, as its own signature
+        // takes them ([`Self::mono_clone_sig`]).
+        let ranges = self.callee_param_pairs(&mono);
+        if !ranges.is_empty() && ranges.len() != args.len() {
             return Err("callee-pair");
         }
         let mut param_tys = self.hir_mono_param_tys(lookup, arg_tys.len()).ok_or("callee-signature")?;
@@ -5565,9 +5574,9 @@ impl Compiler {
             Self::bind_scheme_vars(param, arg, &mut map);
         }
         let at = |ty: &Ty| Self::apply_ty_var_map(ty, &map);
-        // A generic `Option` / `Result` result is boxed even in a clone: the
-        // open type's layout (`generic_enum_layout`), converted from after
-        // the call. A user enum (`Slot<T>`) has no open layout of its own:
+        // A generic `Option` / `Result` result of one word is boxed even in
+        // a clone: the open type's layout (`generic_enum_layout`), converted
+        // from after the call (a two-word one comes back as its `pair`). A user enum (`Slot<T>`) has no open layout of its own:
         // the clone builds it at its ground types (#1567).
         let enum_boundary = |generic: &Ty, concrete: &Ty| {
             !matches!(generic, Ty::Var(_))
@@ -5620,7 +5629,7 @@ impl Compiler {
             builtin: None,
             generic: None,
             instance: None,
-            ranges: Vec::new(),
+            ranges,
             mono_of: Some(Box::new((lookup.to_string(), self.hir_mono_var_map(map)))),
             own_dicts: Vec::new(),
         })
