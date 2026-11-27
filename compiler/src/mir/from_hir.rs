@@ -465,7 +465,8 @@ impl Lower<'_> {
         // inlining) has no second word: nothing reads it.
         *cell.get_or_init(|| {
             let (lo, hi) = self.cx.pair_local(local.0)?;
-            Some((*self.frame.tags.get(&local.0)?, lo, hi))
+            let tag = self.frame.tags.get(&local.0).or_else(|| self.defer_tags.get(&local.0))?;
+            Some((*tag, lo, hi))
         })
     }
 
@@ -1282,6 +1283,8 @@ struct Lower<'a> {
     /// `let`s in a `defer` body, which HIR emission slots in the thunk's
     /// own frame: a temp each.
     defer_locals: HashMap<u32, LocalId>,
+    /// The second word's temp of each two-word one of `defer_locals`.
+    defer_tags: HashMap<u32, u32>,
     /// Pinned locals ([`LowerCx::pinned`]) by HIR local: their slot and
     /// word type. Each word stays live until the local is rebound and to
     /// every exit, as HIR emission's frame slot holds it.
@@ -1347,6 +1350,7 @@ impl<'a> Lower<'a> {
             defers: Vec::new(),
             lowered_defers: Vec::new(),
             defer_locals: HashMap::new(),
+            defer_tags: HashMap::new(),
             pins: HashMap::new(),
             pad: None,
             packed: HashSet::new(),
@@ -1834,6 +1838,11 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
             for l in lets {
                 let t = lower.temp();
                 lower.defer_locals.insert(l, t);
+                // A two-word one keeps its words, its second in a temp too.
+                if cx.pair_local(l).is_some() {
+                    let hi = lower.temp();
+                    lower.defer_tags.insert(l, hi.0);
+                }
             }
             let flag = lower.temp();
             let off = lower.b.ins_const(MirConst::Bool(false)).map_err(mir)?;
@@ -1868,6 +1877,7 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
     let pad = lower.pad.take();
     let defers = std::mem::take(&mut lower.lowered_defers);
     let defer_locals = std::mem::take(&mut lower.defer_locals);
+    let defer_tags = std::mem::take(&mut lower.defer_tags);
     let next_temp = lower.next_temp;
     let boxed: HashSet<u32> = lower.boxes.keys().copied().collect();
     let packs = cx.packs();
@@ -1893,7 +1903,7 @@ fn lower_in(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites) 
     // A pad is an extra: a body without one stays pinned to HIR emission.
     if let (Some(pad), Some(native)) = (pad, cx.unwind_native())
         && !pad.caps.keys().any(|l| boxed.contains(l))
-        && let Ok(cleanup) = lower_pad(hir, cx, frame, sites, PadParts { defers: &defers, defer_locals, next_temp, homes: &pad, home_tys: &func.homes, native })
+        && let Ok(cleanup) = lower_pad(hir, cx, frame, sites, PadParts { defers: &defers, defer_locals, defer_tags, next_temp, homes: &pad, home_tys: &func.homes, native })
     {
         func.cleanup = Some(Box::new(cleanup));
     }
@@ -1917,6 +1927,7 @@ struct PadParts<'p> {
     /// The body's `defer`s, in the order they were lowered.
     defers: &'p [(LocalId, HirId)],
     defer_locals: HashMap<u32, LocalId>,
+    defer_tags: HashMap<u32, u32>,
     /// The body's next temporary: `defer_locals` are temporaries of the
     /// body, so the pad's own (a `for` loop's counter) start past them.
     next_temp: u32,
@@ -1941,6 +1952,7 @@ fn lower_pad(hir: &HirBody, cx: &dyn LowerCx, frame: &LocalFrame, sites: &Sites,
     pad.unit_ret = true;
     pad.next_temp = parts.next_temp;
     pad.defer_locals = parts.defer_locals;
+    pad.defer_tags = parts.defer_tags;
     let captures_of = |body: HirId| {
         hir.exprs.iter().find_map(|e| match &e.kind {
             HirKind::Defer { captures, body: b } if *b == body => Some(captures.clone()),

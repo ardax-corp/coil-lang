@@ -437,11 +437,17 @@ warns there (`ErrorCode::BoxedResidue`, `Compiler::note_box_residue`):
 - an argument to a `forall` function value (`PolyFn`), whose shared body
   takes one word.
 
-A call the clone budget sends to a shared body boxes its two-word
-arguments too; E0804 already warns at that call. Two other boxes stay
-without a warning, because nothing in the source chooses them: a
-generator's yielded value, which shared consumers resume as one word, and
-a two-word payload nested in another two-word value. A dependency's code
+A call the clone budget or a polymorphic recursion chain sends to a
+shared body boxes its two-word arguments too; E0804 already warns at that
+call. Other boxes stay without a warning, because nothing in the source
+chooses them: a generator's yielded value, which shared consumers resume
+as one word; a two-word payload nested in another two-word value; a trait
+method's result read through a dictionary slot (a shared body's bound, a
+trait value's call), which the `$dict` adapter returns as one word even
+where the trait declares it closed (`Write::write`'s `Result<int,
+IoError>`); and a bare `T` or an open tuple (`(T, T)`) of a generic
+function's signature, which its clones take and return as the declared
+signature's one word at a two-word type too (`mono_clone_pair`). A dependency's code
 (a path outside the project or under `.deps`), a clone compiled for
 another module and compiler-made code never warn. `coil dissect --boxes`
 lists every box, these included.
@@ -572,7 +578,9 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   boxed result) unpacks once at the `let`; `x = e` rebinds both slots,
   loops included. `?` compares the tag in place and shares one fail
   epilogue per function (#297, #307). Only a local captured by a
-  `defer`, or assigned as a value (`ADJUST`), stays one word.
+  `defer`, or assigned as a value (`ADJUST`), stays one word; a `defer`
+  body's own `let`s are temporaries of the body with two slots too, in
+  its cleanup pad as well.
 - A lambda captures a two-slot local by value as its two words
   (`HirLambda::pair_captures`): the function value's `MakeFn` carries
   both, and the lambda's frame takes them as a two-slot parameter

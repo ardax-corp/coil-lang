@@ -19,21 +19,25 @@ fn residue(src: &str) -> Vec<(String, String)> {
 
 #[test]
 fn class_parameter_field_warns_once() {
+    // A `Result<int, string>`'s first word is a heap word under one tag
+    // only, so `Cell` at it is no flat instance (an `Option<int>` one is).
     let notes = residue("
 class Cell<V> {
     pub v: V,
 }
 
 fn main() {
-    let a = new Cell(Some(1));
-    let b = new Cell(Some(2));
-    if a.v != b.v {
+    let x: Result<int, string> = Ok(1);
+    let y: Result<int, string> = Err(\"e\");
+    let a = new Cell(x);
+    let b = new Cell(y);
+    if a.v == b.v {
         let c = new Cell(3);
     }
 }
 ");
     assert_eq!(notes.len(), 1, "{notes:?}");
-    assert!(notes[0].0.contains("`Option<int>`") && notes[0].0.contains("field `v`"), "{notes:?}");
+    assert!(notes[0].0.contains("`Result<int, string>`") && notes[0].0.contains("field `v`"), "{notes:?}");
 }
 
 #[test]
@@ -123,4 +127,44 @@ fn main() {
 }
 ");
     assert!(notes.is_empty(), "{notes:?}");
+}
+
+/// The message of each E0804 warning in `src`.
+fn shared_calls(src: &str) -> Vec<String> {
+    let mut pipeline = Pipeline::new();
+    pipeline.compile_src(src).expect("compile");
+    pipeline
+        .messages()
+        .iter()
+        .filter(|m| m.code() == Some(ErrorCode::MonomorphizeCap))
+        .map(|m| m.message().to_string())
+        .collect()
+}
+
+#[test]
+fn polymorphic_recursion_with_a_pair_argument_warns() {
+    // `deep` calls itself at a growing type, so its `Option<int>` reaches
+    // the shared body boxed: E0804 says so at the recursive call, and
+    // E0808 stays quiet.
+    let src = "
+class Wrap<T> {
+    pub v: T,
+}
+
+fn deep<T>(T x, int n) -> int {
+    if n == 0 {
+        return 1;
+    }
+    return deep(new Wrap(x), n - 1) + 1;
+}
+
+fn main() {
+    if deep(Some(3), 4) != 5 {
+        panic \"deep\";
+    }
+}
+";
+    let notes = shared_calls(src);
+    assert!(notes.iter().any(|m| m.contains("`deep` instantiates itself at a growing type")), "{notes:?}");
+    assert!(residue(src).is_empty());
 }
