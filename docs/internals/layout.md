@@ -445,9 +445,9 @@ as one word; a two-word payload nested in another two-word value; a trait
 method's result read through a dictionary slot (a shared body's bound, a
 trait value's call), which the `$dict` adapter returns as one word even
 where the trait declares it closed (`Write::write`'s `Result<int,
-IoError>`); and a bare `T` or an open tuple (`(T, T)`) of a generic
-function's signature, which its clones take and return as the declared
-signature's one word at a two-word type too (`mono_clone_pair`). A dependency's code
+IoError>`); and a two-word argument of a trait instance method, which
+takes one word per parameter (a per-type clone's `a == b` at a pair class
+or payload enum calls its `eq` so). A dependency's code
 (a path outside the project or under `.deps`), a clone compiled for
 another module and compiler-made code never warn. `coil dissect --boxes`
 lists every box, these included.
@@ -565,9 +565,16 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   is (`fn get() -> fn(string) -> Option<string>`): its body's return layout
   is its declared result's, not the curried peel's (`fn_return_ty` reads
   the returned function's result, #2759). Whether a call takes the
-  method's clone does not depend on that (`hir_method_clone`). Overloaded and generic functions and trait
-  instance methods keep one-word parameters (a numeric range's two words
-  excepted). A free function's or inherent method's two-word parameter,
+  method's clone does not depend on that (`hir_method_clone`). Overloaded
+  functions, the shared body of a generic function and trait instance
+  methods keep one-word parameters (a numeric range's two words
+  excepted). A generic function's per-type clone (`f$mono$..`) is a
+  ground callee at its own types: the generic's parameters and declared
+  result at the clone's type arguments (`Compiler::mono_clone_sig`,
+  recorded when the clone is named), so a bare `T` or an open `(T, T)` /
+  `Option<T>` at a two-word type moves in two words to and from it, as an
+  inherent method clone's do (`MethodClonePlan`). A generator's clone
+  keeps one word per argument, as its `MakeCoro` passes them. A free function's or inherent method's two-word parameter,
   an arity-2 immediate tuple or two-field readonly class included, is two
   words like its result; a method's receiver stays one word. (The stack
   VM kept these boxed: splitting a box into `[a, b]` needed a temp slot
