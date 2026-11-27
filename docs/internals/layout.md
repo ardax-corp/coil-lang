@@ -685,27 +685,62 @@ capture (`compiler::start_box_capture`).
 they build `CalleeFacts` and ask `abi`, so there is no second copy of the
 policy.
 
-### Wide direct returns
+### Wide direct calls
 
 A three- or four-word value of scalars (an arity-3 or arity-4 tuple of
 immediates, or an `Option` of a tuple of immediates, which is a niche word
 over the tuple object) is an object in every layout, but a direct call can
-still return its words in registers. `mir::wide_ret` runs on the captured
-bodies before counts are inserted (not on the interpreter's raw capture): a
-body whose every return builds a fresh tuple of scalars read by nothing but
-that return (or, for an `Option`, returns `None`) gets a twin, `name$words`,
-that returns the items (and a `bool` that is `true` for `Some`) as
-`Return { lo, hi, more }`. Each direct call whose result is only read item
-by item (`ProductLoad`) and tested for `Some` calls the twin instead, so
-neither side allocates. Every other caller (a function value, the
-runtime's entries, a call that keeps the object) calls the body itself.
+still pass and return its words in registers. `mir::wide_ret` runs on the
+captured bodies before counts are inserted (not on the interpreter's raw
+capture), over the whole program at once. A body gets a twin, `name$words`,
+that takes such a parameter as its words (one MIR parameter per word) and
+returns such a result as its words (`Return { lo, hi, more }`, the items
+and, for an `Option`, a `bool` that is `true` for `Some`); a direct call
+that can hand over and take the words calls the twin instead.
+
+Per body, a *node* is a value with its `Word` casts, safepoint barriers
+and copy-on-write shares. Its object is never made when its words are
+known where it is made (a fresh `alloc.tuple` of scalars, a twin's
+parameter, the result of a call that enters a twin returning words, a φ
+of such nodes, `None`) and every read of it
+takes words: an item load (`ProductLoad`), a `Some` test, an argument the
+callee's twin takes as words, the twin's own return. Whether a parameter
+is taken as words, a result returned as words and a call switched depend
+on each other across calls (`relay(a) { return split3(a + 1); }` returns
+words only if `split3` does; `weigh(split3(i))` passes words only if
+`weigh` takes them), so the pass solves them as one greatest fixpoint:
+everything starts as words and what breaks drops out, to a fixed point.
+Shapes are unified along every call edge, and a class without a fresh
+tuple in it (its item count unknown) or with two shapes stays an object.
+A call switches only when some object of it dissolves; a caller that
+keeps a plain tuple result as an object (pushes it, shows it, passes it to
+a one-word callee) rebuilds it from the words right after the call, which
+moves the allocation from the callee to the caller. An `Option` is never
+split or rebuilt (that needs a branch), so an `Option` parameter stays one
+word and an `Option` result goes as words only to callers that dissolve it.
+A switched tail call stays a tail call (the twin joins `tail_targets`).
+
+Mono clones, method clones, raw trait instance methods and instance
+clones are ground bodies a direct `call` reaches, so they take and return
+words like any function (`pick<T>` at `(int, int, int)`); a function
+value, a dictionary slot, a `$dict` or `$value` adapter and the runtime's
+entries keep calling the one-word body, which stays, so no adapter splits
+words. Not twinned: generators, bodies with a cleanup pad, debugger and
+coverage builds' bodies, `opaque_words` bodies (a shared generic body's
+`T` is an `i64` word there, never taken apart).
+
 The twin's words are numbers to count insertion
 (`rc_insert::number_returns`), so its callers count nothing. The MIR carries
 up to four result words on a direct call (`MirInst::Call::dest_more`,
-`Terminator::Return::more`, `MirFunc::ret_more_tys`); native code returns
-them as Cranelift values, and a runtime entry into such a body panics.
+`Terminator::Return::more`, `MirFunc::ret_more_tys`) and any number of
+parameter words; native code passes and returns them as Cranelift values
+(the `tail` convention past two results), and a runtime entry into a twin
+returning words panics. No MIR shape is new: the archive's MIR section
+carries twins as ordinary bodies.
 Hit benches: `examples/perf/wide_ret_option_tuple`,
-`examples/perf/wide_ret_tuple3`.
+`examples/perf/wide_ret_tuple3`, `examples/perf/wide_param_ground`,
+`examples/perf/wide_ret_kept`, `examples/perf/wide_generic_clone`,
+`examples/perf/wide_instance_args`.
 
 ## Host calls
 

@@ -1,0 +1,98 @@
+// Mono clones, trait instance methods, inherent methods and method clones
+// at a three- or four-word tuple of scalars: the tuple goes in and out of
+// the callee as its words.
+use tests::assert;
+
+#[inline(never)]
+fn pick<T>(bool c, T a, T b) -> T {
+    if c {
+        return a;
+    }
+    return b;
+}
+
+#[inline(never)]
+fn first<A, B, C>((A, B, C) t) -> A {
+    return t[0];
+}
+
+#[inline(never)]
+fn twice<T>(T x) -> (T, T) {
+    return (x, x);
+}
+
+trait Weigh<S> {
+    fn weigh(S s, (int, int, int) t) -> int {}
+}
+
+impl Weigh for int {
+    #[inline(never)]
+    pub fn weigh(int s, (int, int, int) t) -> int {
+        return s + t[0] * 3 + t[1] - t[2];
+    }
+}
+
+class Acc {
+    pub n: int,
+}
+
+impl Acc {
+    #[inline(never)]
+    pub fn add((int, int, int) t) -> int {
+        self.n = self.n + t[0] + t[1] * t[2];
+        return self.n;
+    }
+
+    #[inline(never)]
+    pub fn spread(int k) -> (int, int, int, int) {
+        return (self.n, self.n + k, self.n + 2 * k, self.n + 3 * k);
+    }
+}
+
+class Box<T> {
+    pub v: T,
+}
+
+impl Box<T> {
+    #[inline(never)]
+    pub fn swap(T w) -> T {
+        let old = self.v;
+        self.v = w;
+        return old;
+    }
+}
+
+test("a mono clone's wide parameters and result") {
+    let t = pick(true, (1, 2, 3), (4, 5, 6));
+    assert!(t[0] == 1 && t[1] == 2 && t[2] == 3);
+    let u = pick(false, (1.5, 2.5, 3.5, 4.5), (0.5, 0.25, 0.125, 1.0));
+    assert!(u[0] == 0.5 && u[3] == 1.0);
+    assert!(first((7, 8, 9)) == 7);
+    assert!(first((2.5, true, 3)) == 2.5);
+    let p = twice((1, 2, 3));
+    assert!(p[1][2] == 3);
+}
+
+test("a raw trait instance method's wide parameter") {
+    let s = 0;
+    let i = 0;
+    while i < 100 {
+        s += (i & 7).weigh((i, 2, 1));
+        i += 1;
+    }
+    assert!(s == 342 + 3 * 4950 + 100);
+}
+
+test("an inherent method's wide parameter and result") {
+    let acc = new Acc(1);
+    assert!(acc.add((1, 2, 3)) == 8);
+    let w = acc.spread(2);
+    assert!(w[0] == 8 && w[1] == 10 && w[2] == 12 && w[3] == 14);
+}
+
+test("a method clone's wide parameter and result") {
+    let b = new Box((1, 2, 3));
+    let old = b.swap((4, 5, 6));
+    assert!(old[0] == 1 && old[2] == 3);
+    assert!(b.v[1] == 5);
+}

@@ -1,0 +1,113 @@
+// A three- or four-word tuple of scalars a direct call returns and the
+// caller keeps: passed on to another call, returned again, bound and read
+// later, or kept as an object (pushed, compared, shown).
+use string::format;
+use tests::assert;
+
+#[inline(never)]
+fn split3(int a) -> (int, int, int) {
+    return (a % 10, a / 10 % 10, a / 100);
+}
+
+#[inline(never)]
+fn weigh((int, int, int) t) -> int {
+    return t[0] + t[1] * 2 + t[2] * 3;
+}
+
+#[inline(never)]
+fn relay(int a) -> (int, int, int) {
+    return split3(a + 1);
+}
+
+#[inline(never)]
+fn same((int, int, int) t) -> (int, int, int) {
+    return t;
+}
+
+#[inline(never)]
+fn rotate((float, float, float, float) v) -> (float, float, float, float) {
+    return (v[1], v[2], v[3], v[0]);
+}
+
+#[inline(never)]
+fn either(bool c, (int, int, int) a, (int, int, int) b) -> (int, int, int) {
+    if c {
+        return a;
+    }
+    return b;
+}
+
+#[inline(never)]
+fn maybe(int a) -> Option<(int, int)> {
+    if a < 0 {
+        return None;
+    }
+    return Some((a / 2, a % 2));
+}
+
+#[inline(never)]
+fn relay_maybe(int a) -> Option<(int, int)> {
+    return maybe(a - 1);
+}
+
+#[inline(never)]
+fn countdown((int, int, int) t, int n) -> (int, int, int) {
+    if n == 0 {
+        return t;
+    }
+    return countdown((t[0] + 1, t[1], t[2] - 1), n - 1);
+}
+
+test("a result passed on to another call") {
+    assert!(weigh(split3(427)) == 7 + 4 + 12);
+    let s = 0;
+    let i = 0;
+    while i < 1000 {
+        s += weigh(split3(i));
+        i += 1;
+    }
+    assert!(s == 4500 + 9000 + 13500);
+}
+
+test("a result returned again") {
+    let t = relay(426);
+    assert!(t[0] == 7 && t[1] == 2 && t[2] == 4);
+    let (a, b, c) = same((1, 2, 3));
+    assert!(a == 1 && b == 2 && c == 3);
+    let r = rotate(rotate((1.0, 2.0, 3.0, 4.0)));
+    assert!(r[0] == 3.0 && r[1] == 4.0 && r[2] == 1.0 && r[3] == 2.0);
+    let e = either(false, (1, 1, 1), split3(589));
+    assert!(e[0] == 9 && e[1] == 8 && e[2] == 5);
+    let f = either(true, same((4, 5, 6)), (0, 0, 0));
+    assert!(weigh(f) == 4 + 10 + 18);
+}
+
+test("an Option of a tuple returned again") {
+    match relay_maybe(9) {
+        Some(t) => {
+            assert!(t[0] == 4 && t[1] == 0);
+        },
+        None => {
+            assert!(false);
+        },
+    }
+    assert!(relay_maybe(0) == None);
+}
+
+test("a result the caller keeps as an object") {
+    let kept: Vec<(int, int, int)> = [];
+    let i = 0;
+    while i < 5 {
+        kept.push(same(split3(i * 111)));
+        i += 1;
+    }
+    assert!(kept.len() == 5);
+    assert!(kept[3] == (3, 3, 3));
+    assert!(same((1, 2, 3)) == (1, 2, 3));
+    assert!(format("%v", relay(122)) == "(3, 2, 1)");
+}
+
+test("a tail call returning a wide result runs deep") {
+    let t = countdown((0, 5, 0), 300000);
+    assert!(t[0] == 300000 && t[1] == 5 && t[2] == -300000);
+}

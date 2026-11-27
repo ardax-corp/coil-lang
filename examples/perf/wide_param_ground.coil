@@ -1,0 +1,30 @@
+// CPU: a ground function taking an (int, int, int) and a
+// (float, float, float, float): three and four words in registers, no
+// tuple built per call.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn sum3((int, int, int) t) -> int {
+    let (a, b, c) = t;
+    return a + b * 3 + c * 7;
+}
+
+#[inline(never)]
+fn dot4((float, float, float, float) v) -> float {
+    return v[0] * 0.5 + v[1] + v[2] * 2.0 - v[3];
+}
+
+fn main() {
+    let s = 0;
+    let f = 0.0;
+    let i = 0;
+    while i < 10000000 {
+        s += sum3((i, s & 15, i & 7));
+        let x = (i & 255) as float;
+        f += dot4((x, 1.0, x * 0.25, 2.0));
+        s = s & 0xffffff;
+        i += 1;
+    }
+    let _ = print(format("%i %f\n", s, f));
+}
