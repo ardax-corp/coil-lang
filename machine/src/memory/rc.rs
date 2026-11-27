@@ -142,11 +142,17 @@ impl Heap {
     /// is open the change is logged and its end releases, unless `o` was
     /// born in it: then it is counted in place and freed on this thread
     /// when that was its last owner ([`Self::rc_epoch_free`]).
-    #[inline]
+    #[inline(always)]
     pub(crate) fn rc_dec_obj(&self, o: Object) -> bool {
         if self.alloc_lock.is_null() {
             return o.rc_dec();
         }
+        self.rc_dec_obj_epoch(o)
+    }
+
+    /// [`Self::rc_dec_obj`] while a steal epoch is open.
+    #[inline(never)]
+    fn rc_dec_obj_epoch(&self, o: Object) -> bool {
         if self.epoch_born(o) {
             if o.header().dec_shared() {
                 if EPOCH_FREEING.get() {
@@ -552,10 +558,16 @@ impl Heap {
     }
 
     /// Release what [`Self::rc_dec_pending`] left at zero and still is.
+    #[inline]
     pub(crate) fn rc_release_pending(&mut self) -> usize {
         if self.rc_pending.get_mut().is_empty() || !self.alloc_lock.is_null() {
             return 0;
         }
+        self.rc_release_pending_slow()
+    }
+
+    #[inline(never)]
+    fn rc_release_pending_slow(&mut self) -> usize {
         let mut n = 0;
         let mut pending = std::mem::take(self.rc_pending.get_mut());
         pending.sort_unstable();
@@ -624,6 +636,21 @@ impl Heap {
         self.rc_release_word(v) + self.rc_release_pending()
     }
 
+    /// [`Self::rc_drop`] of a typed object word, a slot start when it is in
+    /// the slab's span (native code's inline count read its header and
+    /// found its last owner): no slot search.
+    #[inline]
+    pub fn rc_drop_typed(&mut self, v: Value) -> usize {
+        if !self.rc_counting() {
+            return 0;
+        }
+        let n = match self.rc_typed(v) {
+            Some(o) if self.rc_dec_obj(o) && self.rc_frees => self.rc_release(o),
+            _ => 0,
+        };
+        n + self.rc_release_pending()
+    }
+
     /// [`Self::rc_drop`] in a heap that keeps counts.
     fn rc_release_word(&mut self, v: Value) -> usize {
         match self.rc_object(v) {
@@ -644,6 +671,9 @@ impl Heap {
     pub(super) fn rc_release(&mut self, obj: Object) -> usize {
         if self.epoch_stw || !self.alloc_lock.is_null() {
             return 0;
+        }
+        if self.rc_free_plain_string(obj) {
+            return 1;
         }
         // A leaf names nothing: free it without the worklist.
         if self.rc_leaf(obj) && self.rc_releasable(obj) {
@@ -736,6 +766,10 @@ impl Heap {
             if !self.rc_dec_obj(o) {
                 continue;
             }
+            if self.rc_free_plain_string(o) {
+                n += 1;
+                continue;
+            }
             if self.rc_leaf(o) && self.rc_releasable(o) {
                 n += 1;
                 // SAFETY: its count reached zero.
@@ -745,6 +779,25 @@ impl Heap {
             }
         }
         n
+    }
+
+    /// Free `obj` on the spot when it is a plain string at count zero
+    /// (no weak handle names it, the intern table never took it): what
+    /// [`Self::rc_leaf`], [`Self::rc_releasable`] and [`Self::rc_free`]
+    /// decide for one, in one test, the commonest release of all (a text
+    /// workload's words). Whether it freed it; anything else goes the
+    /// general way.
+    #[inline(always)]
+    fn rc_free_plain_string(&mut self, obj: Object) -> bool {
+        let Object::String(s) = obj else { return false };
+        if obj.rc_count() != 0 || s.as_ref().interned() || obj.is_weak_target() {
+            return false;
+        }
+        self.freed_early = true;
+        // SAFETY: its count is zero and a string names nothing, as
+        // [`Self::rc_release`]'s leaf path frees one.
+        unsafe { self.dealloc_gc(s) };
+        true
     }
 
     /// Free `obj`, whose owners are gone and whose words were released:
