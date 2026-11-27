@@ -5777,9 +5777,10 @@ impl Compiler {
             if !one(&ty) && !(unit_clone && crate::layout::is_unit(&ty)) {
                 return None;
             }
-            // `self` is one word in a method body: a two-word receiver
-            // (`Opt<int>`) keeps the shared body.
-            if receiver && slot == 0 && matches!(crate::layout::of_resolved(&self.checker, &ty), crate::layout::Layout::Pair(_)) {
+            // A generator's `self` is one word (its `MakeCoro` passes one
+            // per argument): a two-word receiver (`Opt<int>`) keeps the
+            // shared body. Any other clone takes it in its two words.
+            if coro && receiver && slot == 0 && matches!(crate::layout::of_resolved(&self.checker, &ty), crate::layout::Layout::Pair(_)) {
                 return None;
             }
             params.push(self.value_layout(&ty));

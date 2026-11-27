@@ -219,7 +219,10 @@ impl Compiler {
                 // `self` is one word; the rest follow the signature every
                 // caller reads ([`Self::param_pair_kind`]).
                 if self.compiling_method && i == 0 && local.name == "self" {
-                    return None;
+                    // A method clone's receiver is its signature's first
+                    // parameter.
+                    let key = key.as_deref().filter(|k| self.method_clone_plans.borrow().contains_key(*k))?;
+                    return self.callee_param_pairs(key).first().cloned().flatten();
                 }
                 self.param_pair_kind(key.as_deref()?, &local.name, local.ty.as_ref())
             },
