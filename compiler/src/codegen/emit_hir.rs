@@ -7491,8 +7491,9 @@ impl Compiler {
         // A plain free function takes its numeric range parameters as
         // `[start, end]`.
         let ranges = if self_layout.is_some() {
-            // An inherent method's: aligned with the arguments, the
-            // receiver (listed in the scheme or not) one word.
+            // An inherent method's shared body: aligned with the
+            // arguments, the receiver (listed in the scheme or not) one
+            // word (a clone's, `hir_method_clone`, follows its signature).
             let pairs = if self.callee_has_unboxed_range_params(&key) { self.callee_param_pairs(&key) } else { self.callee_param_pairs(&lookup) };
             match pairs.len() {
                 0 => Vec::new(),
