@@ -34,6 +34,11 @@ location (`mir::coverage`).
 
 Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`. `heapref`,
 `niche_opt` and `niche_res` carry heap and niche `Option` / `Result` words.
+`maybe_obj` is an `i64` word that may hold an object, decided at run time: the
+low word of a pair whose payload may be an object, where it is a parameter, a
+call's or host call's result, or a φ of a local that merges one. It is an `i64`
+in every operand position (`MirTy::word_class`), in registers and in frames;
+reference counting counts it with a run-time address test (`rc_insert`).
 
 **Records** (`{x: 1, y: 2}`) are slotted objects like classes, with their fields
 sorted by name, so `{y: 9, x: 8}` and `{x: 8, y: 9}` share one layout. `emit_hir.rs`

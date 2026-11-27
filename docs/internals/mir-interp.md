@@ -92,11 +92,13 @@ Most ops map one to one onto Cranelift's lowering. These needed a decision.
 
 ### Words with no static type
 
-A two-word enum passed by value keeps its heap payload in an `int` typed word. A
-body with such a parameter holds an object nothing marks as one, and a collection
-in it moved the object. `MirFunc::heap_pair_words` now lists these parameters
-beside call results, and `pair_words` follows the φs and casts that copy one. Both
-engines root them ambiguously (pinned, never rewritten).
+A two-word enum passed by value keeps its heap payload in an `int` word. A
+body with such a parameter held an object nothing marked as one, and a collection
+in it moved the object. Such a word is typed `maybe_obj` (`MirTy::MaybeObj`): the
+low word of a pair parameter or call result whose payload may be an object, and
+the element a `Vec` expansion holds across its loop. Every engine and pass treats
+it as an `i64` word; `rc_insert` counts it, and a φ or cast of it, with a run-time
+address test, and both engines root it ambiguously (pinned, never rewritten).
 
 ## Engine plan
 
@@ -209,8 +211,9 @@ native code.
   comptime's step limits count steps, not time.
 - **Words with no static type.** Three bugs came from an `int` typed word holding
   an object: a pair parameter, a `Vec` expansion's element, and a φ of an object
-  and a number. `pair_words` now covers each, but the rule is a list of known
-  cases. A type for "word that may be an object" in MIR would end the family.
+  and a number. The first two are typed `maybe_obj` now, and the third is a φ of
+  a counted word, which `rc_insert` counts. A plain `i64` read from memory or a
+  call is still counted by its definition, not by its type.
 
 ## Where the pieces are
 
