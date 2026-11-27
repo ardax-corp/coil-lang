@@ -1,0 +1,103 @@
+// A generic type's method clone whose receiver is a two-word value takes
+// `self` in its two words: the prelude's `Option<int>` / `Result<int,
+// string>` methods, a user generic enum's and a two-field readonly generic
+// class's, from a direct call, a chain, a loop and a sibling method.
+use tests::assert;
+
+enum Opt<T> {
+    Empty,
+    Value(T),
+}
+
+impl Opt<T> {
+    #[inline(never)]
+    pub fn get_or(T fallback) -> T {
+        return match self {
+            Opt::Value(v) => v,
+            Opt::Empty => fallback,
+        };
+    }
+
+    #[inline(never)]
+    pub fn present() -> bool {
+        return match self {
+            Opt::Value(_) => true,
+            Opt::Empty => false,
+        };
+    }
+
+    #[inline(never)]
+    pub fn or_twice(T fallback) -> (T, bool) {
+        return (self.get_or(fallback), self.present());
+    }
+}
+
+readonly class Two<T> {
+    pub a: T,
+    pub b: T,
+}
+
+impl Two<T> {
+    #[inline(never)]
+    pub fn first() -> T {
+        return self.a;
+    }
+
+    #[inline(never)]
+    pub fn swapped() -> Two<T> {
+        return new Two(self.b, self.a);
+    }
+}
+
+test("the prelude's methods on a two-word receiver") {
+    let some: Option<int> = Some(4);
+    let none: Option<int> = None;
+    assert!(some.unwrap_or(1) == 4);
+    assert!(none.unwrap_or(1) == 1);
+    assert!(some.is_some() && none.is_none());
+    let ok: Result<int, string> = Ok(9);
+    let err: Result<int, string> = Err("no");
+    assert!(ok.ok() == Some(9));
+    assert!(err.ok() == None);
+    assert!(ok.unwrap_or(0) == 9 && err.unwrap_or(0) == 0);
+    assert!(err.err() == Some("no"));
+    assert!((err.ok() ?? 3) == 3);
+}
+
+test("a user generic enum's and readonly class's methods") {
+    let v: Opt<int> = Opt::Value(5);
+    let e: Opt<int> = Opt::Empty;
+    assert!(v.get_or(0) == 5 && e.get_or(7) == 7);
+    assert!(v.present() && !e.present());
+    let (x, p) = e.or_twice(2);
+    assert!(x == 2 && !p);
+    let t = new Two(1, 2);
+    assert!(t.first() == 1);
+    assert!(t.swapped().first() == 2);
+    assert!(t.swapped().swapped().first() == 1);
+}
+
+test("a loop over two-word receivers") {
+    let total = 0;
+    let i = 0;
+    while i < 20 {
+        let o: Option<int> = if i % 4 == 0 {
+            None
+        } else {
+            Some(i)
+        };
+        let r: Result<int, string> = if i % 5 == 0 {
+            Err("e")
+        } else {
+            Ok(i * 2)
+        };
+        let u: Opt<int> = if i % 2 == 0 {
+            Opt::Value(i)
+        } else {
+            Opt::Empty
+        };
+        total += o.unwrap_or(100) + (r.ok() ?? 1) + u.get_or(3) + new Two(i, 1).swapped().first();
+        i += 1;
+    }
+    assert!(total == 1114);
+}

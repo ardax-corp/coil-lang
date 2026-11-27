@@ -269,7 +269,9 @@ pub struct CalleeFacts {
     pub host_native: bool,
     /// A trait instance method whose direct calls take its dictionary entry
     /// (`CodePtr`): not raw, and no definition site pinned its result's
-    /// pair. A raw one's `$dict` adapter boxes the pair instead.
+    /// pair. A raw one is a ground callee to its direct calls, two-word
+    /// parameters and result included; its `$dict` adapter boxes the pair
+    /// and splits a two-word argument instead.
     pub instance_method: bool,
     /// An overloaded or generic function: its parameters stay one word
     /// (a numeric range's two words excepted).

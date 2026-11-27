@@ -445,11 +445,11 @@ as one word; a two-word payload nested in another two-word value; a trait
 method's result read through a dictionary slot (a shared body's bound, a
 trait value's call), which the `$dict` adapter returns as one word even
 where the trait declares it closed (`Write::write`'s `Result<int,
-IoError>`); and a two-word argument of a trait instance method, which
-takes one word per parameter (a per-type clone's `a == b` at a pair class
-or payload enum calls its `eq` so). A dependency's code
-(a path outside the project or under `.deps`), a clone compiled for
-another module and compiler-made code never warn. `coil dissect --boxes`
+IoError>`); and a two-word argument of a trait instance method that is
+not raw (a default body, a generic-head instance's shared entry, a method
+with bounds of its own), which takes one word per parameter. A
+dependency's code (a path outside the project or under `.deps`), a clone
+compiled for another module and compiler-made code never warn. `coil dissect --boxes`
 lists every box, these included.
 
 ### Lane arrays
@@ -567,8 +567,13 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   the returned function's result, #2759). Whether a call takes the
   method's clone does not depend on that (`hir_method_clone`). Overloaded
   functions, the shared body of a generic function and trait instance
-  methods keep one-word parameters (a numeric range's two words
-  excepted). A generic function's per-type clone (`f$mono$..`) is a
+  methods that are not raw keep one-word parameters (a numeric range's
+  two words excepted). A raw trait instance method takes a two-word
+  parameter, its receiver included, as its two words at its direct calls
+  (`Compiler::raw_instance_pair_args`; its frame follows its signature by
+  position): a dictionary caller, a `%v` and an element-wise operator
+  reach it through its `$dict` adapter, which reads the one boxed word in
+  the method's own type and the call splits it. A generic function's per-type clone (`f$mono$..`) is a
   ground callee at its own types: the generic's parameters and declared
   result at the clone's type arguments (`Compiler::mono_clone_sig`,
   recorded when the clone is named), so a bare `T` or an open `(T, T)` /
@@ -576,7 +581,11 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   inherent method clone's do (`MethodClonePlan`). A generator's clone
   keeps one word per argument, as its `MakeCoro` passes them. A free function's or inherent method's two-word parameter,
   an arity-2 immediate tuple or two-field readonly class included, is two
-  words like its result; a method's receiver stays one word. (The stack
+  words like its result; a shared method body's receiver stays one word,
+  while a method clone's (`MethodClonePlan`, a generic type's method at
+  ground types, `Option<int>::unwrap_or`) is its first parameter, two
+  words at a two-word type; a generator's clone keeps the shared body
+  there. (The stack
   VM kept these boxed: splitting a box into `[a, b]` needed a temp slot
   above live operands, which MIR parameters do not.)
 - A local of a closed two-word type keeps two slots

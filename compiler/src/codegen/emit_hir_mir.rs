@@ -1174,9 +1174,18 @@ impl Compiler {
         // type parameter: each operand goes as its own word, a
         // scalar-backed enum's backing word included (#2462).
         let open = !elem && Self::is_default_method_fqn(class, method, &fqn);
+        // A raw method's own entry takes a two-word operand as its words.
+        let pair_args = if plain {
+            match self.raw_instance_pair_args(&fqn, arity) {
+                Some(pairs) => pairs,
+                None => return,
+            }
+        } else {
+            vec![false; arity]
+        };
         let site = crate::mir::HirCallSite {
             target,
-            pair_args: vec![false; arity],
+            pair_args,
             pair_ret: plain && !one_word,
             coro: false,
             boxed_ret: false,
@@ -1335,7 +1344,10 @@ impl Compiler {
             // parameter's word goes boxed (a mono clone's two-word
             // parameter, `x.wrap()` in `fn wrapped<T: Wrap>(T x)` at
             // `Option<int>`), as any two-word value is that word.
+            // A raw method's own entry takes a two-word argument as its words.
+            let pair_args = if raw { self.raw_instance_pair_args(&key, args.len()) } else { Some(vec![false; args.len()]) };
             if let Some(dicts) = dicts
+                && let Some(pair_args) = pair_args
                 && args.iter().zip(&call.params).zip(&niches).all(|((&a, &p), n)| n.is_some() || self.hir_arg_passes(hir, emit, a, p))
                 && let Some(target) = target
                 && let Some(boxed_ret) = if flat_clone { Some(false) } else { self.hir_ret_shape(hir, id, &natural) }
@@ -1349,7 +1361,7 @@ impl Compiler {
                 }
                 t.call = Some(crate::mir::HirCallSite {
                         target,
-                        pair_args: vec![false; args.len()],
+                        pair_args,
                         pair_ret: if flat_clone { self.two_word_return_kind(&key).is_some() } else { natural.words() == 2 },
                         coro: false,
                         boxed_ret,
@@ -1494,7 +1506,13 @@ impl Compiler {
                 .enumerate()
                 .map(|(i, (&a, &w))| (shared_entry && i == 0 && w).then(|| self.hir_niche_arg(hir, emit, a, ValueLayout::Boxed)).flatten())
                 .collect();
+            let pair_args = if raw && call.instance.is_some() {
+                self.raw_instance_pair_args(&key, args.len())
+            } else {
+                Some((0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect())
+            };
             if let Some(dicts) = dicts
+                && let Some(pair_args) = pair_args
                 && let Some(boxed_ret) = self.hir_ret_shape(hir, id, &natural)
                 && args.iter().zip(&params).zip(&words).zip(&niches).all(|(((&a, &p), &w), n)| {
                     // A boxed argument goes from its own word, its enum
@@ -1526,8 +1544,9 @@ impl Compiler {
                 }
                 t.call = Some(crate::mir::HirCallSite {
                         target,
-                        // An inherent method's two-word parameters.
-                        pair_args: (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect(),
+                        // An inherent method's two-word parameters, or a
+                        // raw instance method's.
+                        pair_args,
                         pair_ret: natural.words() == 2,
                         coro,
                         boxed_ret,
@@ -1567,7 +1586,17 @@ impl Compiler {
         // A ground call of a raw instance method that returns a pair (a
         // `?` converting through `Into`) passes its own words and takes
         // the pair: the method's entry, not its `$dict` adapter.
-        self.raw_instance_call = synth.as_ref().is_some_and(|s| s.raw) || (call.pair.is_some() && self.raw_instance_methods.contains(&call.key));
+        let raw = synth.as_ref().is_some_and(|s| s.raw) || (call.pair.is_some() && self.raw_instance_methods.contains(&call.key));
+        // A raw method's own entry takes a two-word argument as its words
+        // (a compiler-made body's call planned them so already).
+        let raw_pairs = match raw && call.ranges.is_empty() {
+            true => match self.raw_instance_pair_args(&call.key, args.len()) {
+                Some(pairs) => Some(pairs),
+                None => return,
+            },
+            false => None,
+        };
+        self.raw_instance_call = raw;
         let target = self.named_entry_target(&call.key, true);
         // A shared generic's call is plain, its dictionaries the ones
         // `plan_call_site_dicts` plans (none forwarded through a slot).
@@ -1597,7 +1626,7 @@ impl Compiler {
                 }
             }
             let adapt = self.hir_mir_adapters(hir, call, args);
-            let pair_args = (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect();
+            let pair_args = raw_pairs.unwrap_or_else(|| (0..args.len()).map(|i| Self::hir_arg_rep(call, i).words() == 2).collect());
             // A `TailCall`'s callee returns for this function, so in this
             // function's words, whatever the call's own rep.
             let pair_ret = if tail { matches!(emit.plan.ret, Rep::Pair(_)) } else { natural.words() == 2 };
@@ -2495,7 +2524,9 @@ impl Compiler {
             false => fqn,
         };
         let fqn = self.instance_clone(&fqn, std::slice::from_ref(&lookup_ty)).unwrap_or(fqn);
-        let raw = self.raw_instance_methods.contains(&fqn);
+        // A raw method taking the value as its two words is reached
+        // through its adapter, which takes the one word `%v` passes.
+        let raw = self.raw_instance_methods.contains(&fqn) && self.raw_instance_pair_args(&fqn, 1).is_some_and(|p| p == [false]);
         if niche && !raw {
             return None;
         }

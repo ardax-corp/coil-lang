@@ -5777,9 +5777,10 @@ impl Compiler {
             if !one(&ty) && !(unit_clone && crate::layout::is_unit(&ty)) {
                 return None;
             }
-            // `self` is one word in a method body: a two-word receiver
-            // (`Opt<int>`) keeps the shared body.
-            if receiver && slot == 0 && matches!(crate::layout::of_resolved(&self.checker, &ty), crate::layout::Layout::Pair(_)) {
+            // A generator's `self` is one word (its `MakeCoro` passes one
+            // per argument): a two-word receiver (`Opt<int>`) keeps the
+            // shared body. Any other clone takes it in its two words.
+            if coro && receiver && slot == 0 && matches!(crate::layout::of_resolved(&self.checker, &ty), crate::layout::Layout::Pair(_)) {
                 return None;
             }
             params.push(self.value_layout(&ty));
@@ -7490,8 +7491,9 @@ impl Compiler {
         // A plain free function takes its numeric range parameters as
         // `[start, end]`.
         let ranges = if self_layout.is_some() {
-            // An inherent method's: aligned with the arguments, the
-            // receiver (listed in the scheme or not) one word.
+            // An inherent method's shared body: aligned with the
+            // arguments, the receiver (listed in the scheme or not) one
+            // word (a clone's, `hir_method_clone`, follows its signature).
             let pairs = if self.callee_has_unboxed_range_params(&key) { self.callee_param_pairs(&key) } else { self.callee_param_pairs(&lookup) };
             match pairs.len() {
                 0 => Vec::new(),
