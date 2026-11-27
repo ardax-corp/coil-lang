@@ -242,6 +242,29 @@ mod tests {
     }
 
     #[test]
+    fn forwards_a_load_of_a_forwarded_item() {
+        // `t2 = (x, t1[1])` then `t2[1]`: the second load forwards to the
+        // first load, which itself forwards to `i`.
+        let mut b = MirBuilder::new("chain");
+        let i = b.add_param(MirTy::I64).unwrap();
+        let x = b.add_param(MirTy::F64).unwrap();
+        let t1 = b.ins_alloc(MirAllocKind::TUPLE, vec![x, i]).unwrap();
+        let g1 = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, t1).unwrap();
+        let a = b.ins_product_load(g1, 1, MirTy::I64).unwrap();
+        let t2 = b.ins_alloc(MirAllocKind::TUPLE, vec![x, a]).unwrap();
+        let g2 = b.ins_gc_barrier(crate::mir::MirGcKind::Safepoint, t2).unwrap();
+        let v = b.ins_product_load(g2, 1, MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(v)).unwrap();
+        let mut func = b.finish().unwrap();
+        assert_eq!(forward_tuple_loads(&mut func), 2);
+        let ret: Vec<ValueId> = func.blocks.iter().filter_map(|bl| bl.term.as_ref()).flat_map(|t| t.uses()).collect();
+        assert_eq!(ret, vec![i], "returns the first tuple's item; {func}");
+        let left = func.blocks.iter().flat_map(|bl| bl.insts.iter()).filter(|i| matches!(i, MirInst::Alloc { .. } | MirInst::ProductLoad { .. })).count();
+        assert_eq!(left, 0, "both tuples and loads go; {func:?}");
+    }
+
+    #[test]
     fn sibling_alloc_after_store_stays_fresh() {
         let mut b = MirBuilder::new("zip");
         let i = b.add_param(MirTy::I64).unwrap();
