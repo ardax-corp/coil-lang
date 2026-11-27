@@ -1,0 +1,28 @@
+// CPU: a push into an element of a vector of vectors, `g[i].push(r)`, in a
+// hot loop. Nothing shares `g` or its rows, so each push is in place; the
+// copy-on-write check on the row is all the write costs on top of the push.
+use io::sync::println;
+use string::format;
+
+fn fill(Vec<Vec<int>> g, int reps) {
+    let r = 0;
+    while r < reps {
+        let i = 0;
+        while i < g.len() {
+            g[i].push(r);
+            i = i + 1;
+        }
+        r = r + 1;
+    }
+}
+
+fn main() {
+    let g: Vec<Vec<int>> = Vec::new();
+    let i = 0;
+    while i < 1000 {
+        g.push(Vec::new());
+        i = i + 1;
+    }
+    fill(g, 3000);
+    let _ = println(format("rows=%i len=%i last=%i", g.len(), g[7].len(), g[7][2999]));
+}

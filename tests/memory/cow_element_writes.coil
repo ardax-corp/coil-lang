@@ -1,0 +1,214 @@
+// Writes into an element and through a chain of places (`g[i].push(x)`,
+// `ps[i].x = ..`, `ps[i].tags.push(x)`, `g[i][j] = ..`, `for mut`,
+// `let w = mut g[i]`, a parameter the callee writes): in place when nothing
+// shares the containers on the path, and a copy of each shared one first,
+// so another name never sees the write.
+use tests::assert;
+
+class P {
+    pub x: int,
+    pub tags: Vec<int>,
+}
+
+impl P {
+    pub fn bump(int d) {
+        self.x = self.x + d;
+    }
+}
+
+class Holder {
+    pub rows: Vec<Vec<int>>,
+}
+
+fn grid(int n, int m) -> Vec<Vec<int>> {
+    let g: Vec<Vec<int>> = Vec::new();
+    let i = 0;
+    while i < n {
+        let row: Vec<int> = Vec::new();
+        let j = 0;
+        while j < m {
+            row.push(i * 10 + j);
+            j += 1;
+        }
+        g.push(row);
+        i += 1;
+    }
+    return g;
+}
+
+fn points(int n) -> Vec<P> {
+    let ps: Vec<P> = Vec::new();
+    let i = 0;
+    while i < n {
+        ps.push(new P(i, Vec::from([i])));
+        i += 1;
+    }
+    return ps;
+}
+
+fn push_all(Vec<Vec<int>> g, int x) {
+    let i = 0;
+    while i < g.len() {
+        g[i].push(x);
+        i += 1;
+    }
+}
+
+fn add_to(Vec<int> row, int x) {
+    row.push(x);
+}
+
+fn bump_all(Vec<Vec<int>> g) {
+    let i = 0;
+    while i < g.len() {
+        let j = 0;
+        while j < g[i].len() {
+            g[i][j] = g[i][j] + j;
+            j += 1;
+        }
+        i += 1;
+    }
+}
+
+test("an element push on an unshared vector is in place") {
+    let g = grid(3, 2);
+    let r = 0;
+    while r < 100 {
+        g[1].push(r);
+        r += 1;
+    }
+    assert!(g[1].len() == 102 && g[1][101] == 99);
+    assert!(g[0].len() == 2 && g[2].len() == 2);
+}
+
+test("an element push copies a shared outer vector") {
+    let g = grid(3, 2);
+    let h = g;
+    g[0].push(7);
+    assert!(g[0].len() == 3 && g[0][2] == 7);
+    assert!(h[0].len() == 2);
+}
+
+test("an element push copies a shared element") {
+    let g = grid(2, 2);
+    let row = g[1];
+    g[1].push(9);
+    assert!(g[1].len() == 3);
+    assert!(row.len() == 2);
+    let kept = g[0];
+    push_all(g, 4);
+    assert!(kept.len() == 2 && g[0].len() == 3 && g[0][2] == 4);
+}
+
+test("a parameter's element writes stay the callee's") {
+    let g = grid(2, 1);
+    let h = g;
+    push_all(h, 5);
+    assert!(g[0].len() == 1 && g[1].len() == 1);
+    assert!(h[0].len() == 2 && h[1][1] == 5);
+}
+
+test("a field of an element is written in place or copied") {
+    let ps = points(3);
+    let i = 0;
+    while i < ps.len() {
+        ps[i].x = ps[i].x + 10;
+        ps[i].bump(1);
+        i += 1;
+    }
+    assert!(ps[0].x == 11 && ps[2].x == 13);
+    let qs = ps;
+    qs[1].x = 0;
+    assert!(ps[1].x == 12 && qs[1].x == 0);
+    let p = ps[2];
+    ps[2].bump(5);
+    assert!(p.x == 13 && ps[2].x == 18);
+}
+
+test("a vector field of an element is pushed in place or copied") {
+    let ps = points(2);
+    let r = 0;
+    while r < 50 {
+        ps[0].tags.push(r);
+        r += 1;
+    }
+    assert!(ps[0].tags.len() == 51 && ps[0].tags[50] == 49);
+    let tags = ps[1].tags;
+    ps[1].tags.push(3);
+    assert!(tags.len() == 1 && ps[1].tags.len() == 2);
+    let qs = ps;
+    qs[0].tags.push(1);
+    assert!(ps[0].tags.len() == 51 && qs[0].tags.len() == 52);
+    let p = ps[1];
+    ps[1].x = 40;
+    ps[1].tags.push(4);
+    assert!(p.x == 1 && p.tags.len() == 2);
+    assert!(ps[1].x == 40 && ps[1].tags.len() == 3);
+}
+
+test("nested element stores") {
+    let g = grid(3, 4);
+    bump_all(g);
+    assert!(g[0][3] == 6 && g[2][1] == 22);
+    let h = g;
+    let row = g[1];
+    bump_all(g);
+    assert!(h[1][3] == 16 && row[3] == 16);
+    assert!(g[1][3] == 19);
+    h[2][0] = -1;
+    assert!(g[2][0] == 20 && h[2][0] == -1);
+}
+
+test("an element of a field") {
+    let o = new Holder(grid(2, 2));
+    o.rows[1].push(5);
+    o.rows[0][0] = 100;
+    assert!(o.rows[1].len() == 3 && o.rows[0][0] == 100);
+    let rows = o.rows;
+    o.rows[1].push(6);
+    o.rows[0][1] = 50;
+    assert!(rows[1].len() == 3 && rows[0][1] == 1);
+    assert!(o.rows[1].len() == 4 && o.rows[0][1] == 50);
+}
+
+test("for mut writes each element") {
+    let g = grid(3, 1);
+    let h = g;
+    for mut row in g {
+        row.push(8);
+    }
+    assert!(g[0].len() == 2 && g[2][1] == 8);
+    assert!(h[0].len() == 1);
+    let ps = points(3);
+    let p = ps[0];
+    for mut q in ps {
+        q.x = q.x + 1;
+        q.tags.push(q.x);
+    }
+    assert!(ps[0].x == 1 && ps[2].x == 3 && ps[2].tags[1] == 3);
+    assert!(p.x == 0 && p.tags.len() == 1);
+}
+
+test("let mut borrows an element") {
+    let g = grid(2, 1);
+    let kept = g[0];
+    let w = mut g[0];
+    w.push(3);
+    w.push(4);
+    assert!(g[0].len() == 3 && g[0][2] == 4);
+    assert!(kept.len() == 1);
+    let ps = points(2);
+    let q = mut ps[1];
+    q.x = 77;
+    assert!(ps[1].x == 77);
+}
+
+test("an element passed to a parameter the callee writes") {
+    let g = grid(2, 1);
+    add_to(g[1], 6);
+    add_to(g[1], 7);
+    assert!(g[1].len() == 3 && g[1][2] == 7);
+    let h = g;
+    add_to(g[0], 1);
+    assert!(h[0].len() == 1 && g[0].len() == 2);
+}

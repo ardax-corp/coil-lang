@@ -1,0 +1,25 @@
+// CPU: `for mut row in g { row.push(r) }` in a hot loop: the borrow of each
+// element is in place, behind one copy-on-write check on the row.
+use io::sync::println;
+use string::format;
+
+fn fill(Vec<Vec<int>> g, int reps) {
+    let r = 0;
+    while r < reps {
+        for mut row in g {
+            row.push(r);
+        }
+        r = r + 1;
+    }
+}
+
+fn main() {
+    let g: Vec<Vec<int>> = Vec::new();
+    let i = 0;
+    while i < 1000 {
+        g.push(Vec::new());
+        i = i + 1;
+    }
+    fill(g, 3000);
+    let _ = println(format("rows=%i len=%i last=%i", g.len(), g[7].len(), g[7][2999]));
+}
