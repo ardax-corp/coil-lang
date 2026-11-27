@@ -1,0 +1,55 @@
+// Trait instance methods and builtin methods taking a two-word value: an
+// `Option<int>` argument and a two-field readonly class receiver of a
+// ground instance's method, and an `Option<int>` receiver of a builtin
+// `Option` method. Each goes in two words, no `Option` or instance boxed
+// per call.
+use io::sync::print;
+use string::format;
+
+trait Weigh<S> {
+    fn weigh(S s, Option<int> o) -> int {}
+}
+
+trait Area<S> {
+    fn area(S s) -> int {}
+}
+
+readonly class Pt {
+    pub x: int,
+    pub y: int,
+}
+
+impl Weigh for int {
+    #[inline(never)]
+    pub fn weigh(int s, Option<int> o) -> int {
+        return match o {
+            Some(v) => s + v,
+            None => s - 1,
+        };
+    }
+}
+
+impl Area for Pt {
+    #[inline(never)]
+    pub fn area(Pt p) -> int {
+        return p.x * (p.y & 15);
+    }
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 10000000 {
+        let o: Option<int> = if i % 3 == 0 {
+            None
+        } else {
+            Some(i & 255)
+        };
+        s += (i & 7).weigh(o);
+        s += new Pt(i & 63, s).area();
+        s += o.unwrap_or(2);
+        s = s & 0xffffff;
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}
