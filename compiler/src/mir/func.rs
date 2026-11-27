@@ -111,13 +111,6 @@ pub struct MirFunc {
     /// φs merging a local's definitions). The frame holds one from its
     /// definition until another of the same local's takes its place.
     pub local_binds: Vec<(LocalId, ValueId)>,
-    /// `i64` words that may hold an object, which an engine roots
-    /// ambiguously: the low words of the pairs calls return, and of the pair
-    /// parameters, whose enum may carry a heap payload there, and the element
-    /// a `Vec` expansion holds across a loop ([`super::native_expand`]).
-    /// Emission zeroes a call's past their last use like the payload words a
-    /// match reads (#1791). A pair of numbers (`Option<int>`) is not listed.
-    pub heap_pair_words: HashSet<ValueId>,
     /// This body returns a two-word result as its one word (its box), a
     /// function value's entry; `pair_twin` is the same function taking
     /// the same words and returning the two words. A
@@ -348,7 +341,6 @@ impl MirFunc {
             lengths_steady: true,
             bound_words: HashSet::new(),
             local_binds: Vec::new(),
-            heap_pair_words: HashSet::new(),
             pair_twin: None,
         }
     }
@@ -374,6 +366,13 @@ impl MirFunc {
 
     pub fn ty(&self, v: ValueId) -> MirTy {
         self.types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
+    }
+
+    /// `v`'s type as the verifier checks an operand: a
+    /// [`MirTy::MaybeObj`] word stands wherever an `i64` does
+    /// ([`MirTy::word_class`]).
+    fn vty(&self, v: ValueId) -> MirTy {
+        self.ty(v).word_class()
     }
 
     #[cfg(test)]
@@ -485,7 +484,7 @@ impl MirFunc {
             if p.index() >= self.types.len() {
                 return Err(format!("param {p} has no type"));
             }
-            if !self.ty(p).is_specialized() {
+            if !self.vty(p).is_specialized() {
                 return Err(format!("param {p} is not a specialized SSA type"));
             }
             defined[p.index()] = true;
@@ -535,8 +534,8 @@ impl MirFunc {
             }
             match term {
                 Terminator::Br { cond, .. } => {
-                    if self.ty(*cond) != MirTy::Bool {
-                        return Err(format!("br cond {} is {}", cond, self.ty(*cond)));
+                    if self.vty(*cond) != MirTy::Bool {
+                        return Err(format!("br cond {} is {}", cond, self.vty(*cond)));
                     }
                 }
                 Terminator::JumpIfMatch {
@@ -546,16 +545,16 @@ impl MirFunc {
                     ..
                 } => {
                     let _ = tag;
-                    if !self.ty(*scrutinee).is_specialized() {
+                    if !self.vty(*scrutinee).is_specialized() {
                         return Err(format!(
                             "JumpIfMatch scrutinee {} is {}",
                             scrutinee,
-                            self.ty(*scrutinee)
+                            self.vty(*scrutinee)
                         ));
                     }
                     for p in payloads {
-                        if !self.ty(*p).is_specialized() {
-                            return Err(format!("JumpIfMatch payload {p} is {}", self.ty(*p)));
+                        if !self.vty(*p).is_specialized() {
+                            return Err(format!("JumpIfMatch payload {p} is {}", self.vty(*p)));
                         }
                     }
                 }
@@ -575,23 +574,23 @@ impl MirFunc {
                             ));
                         }
                         for (v, rt) in more.iter().zip(&self.ret_more_tys) {
-                            if !self.ty(*v).le(*rt) && self.ty(*v) != *rt {
-                                return Err(format!("return word {} : {} vs {rt}", v, self.ty(*v)));
+                            if !self.vty(*v).le(*rt) && self.vty(*v) != *rt {
+                                return Err(format!("return word {} : {} vs {rt}", v, self.vty(*v)));
                             }
                         }
                     }
                     if let Some(v) = lo
                         && let Some(rt) = self.ret_ty
-                            && !self.ty(*v).le(rt) && self.ty(*v) != rt {
-                                return Err(format!("return {} : {} vs {rt}", v, self.ty(*v)));
+                            && !self.vty(*v).le(rt) && self.vty(*v) != rt {
+                                return Err(format!("return {} : {} vs {rt}", v, self.vty(*v)));
                             }
                     if let Some(v) = hi {
                         if self.ret_layout != MirLayout::TwoSlot {
                             return Err("hi return word requires twoslot layout".into());
                         }
                         if let Some(rt) = self.ret_hi_ty
-                            && !self.ty(*v).le(rt) && self.ty(*v) != rt {
-                                return Err(format!("return hi {} : {} vs {rt}", v, self.ty(*v)));
+                            && !self.vty(*v).le(rt) && self.vty(*v) != rt {
+                                return Err(format!("return hi {} : {} vs {rt}", v, self.vty(*v)));
                             }
                     }
                 }
@@ -663,7 +662,7 @@ impl MirFunc {
         if shape.is_some_and(|s| *s != super::MirLaneShape::default()) {
             return Err(format!("{at} wide lane element with a tagged shape"));
         }
-        if let Some(w) = words.copied().find(|w| !matches!(self.ty(*w), MirTy::I64 | MirTy::F64 | MirTy::Bool)) {
+        if let Some(w) = words.copied().find(|w| !matches!(self.vty(*w), MirTy::I64 | MirTy::F64 | MirTy::Bool)) {
             return Err(format!("{w} wide lane word is not a number"));
         }
         Ok(())
@@ -672,7 +671,7 @@ impl MirFunc {
     fn check_inst(&self, inst: &MirInst, preds: &[BlockId]) -> Result<(), String> {
         match inst {
             MirInst::Const { dest, c } => {
-                if self.ty(*dest) != c.ty() {
+                if self.vty(*dest) != c.ty() {
                     return Err(format!("{dest} const type mismatch"));
                 }
             }
@@ -683,8 +682,8 @@ impl MirFunc {
                 lhs,
                 rhs,
             } => {
-                let lt = self.ty(*lhs);
-                let rt = self.ty(*rhs);
+                let lt = self.vty(*lhs);
+                let rt = self.vty(*rhs);
                 // `word & 1` reads a niche `Result`'s tag as an `i64`.
                 let heap_bit = (ty.is_heap_word() || lt.is_heap_word() || rt.is_heap_word())
                     && matches!(
@@ -716,19 +715,19 @@ impl MirFunc {
                     if !op.takes(*ty) {
                         return Err(format!("{dest} pow on {ty}"));
                     }
-                    if lt != *ty || rt != *ty {
+                    if lt != ty.word_class() || rt != ty.word_class() {
                         return Err(format!("{dest} binop operand type"));
                     }
                 }
-                if self.ty(*dest) != *ty {
+                if self.vty(*dest) != ty.word_class() {
                     return Err(format!("{dest} binop dest type"));
                 }
             }
             MirInst::Cmp {
                 dest, ty, lhs, rhs, ..
             } => {
-                let lt = self.ty(*lhs);
-                let rt = self.ty(*rhs);
+                let lt = self.vty(*lhs);
+                let rt = self.vty(*rhs);
                 if ty.is_heap_word() {
                     let ok = |t: MirTy| t.is_heap_word() || t == MirTy::I64;
                     if !ok(lt) || !ok(rt) {
@@ -738,18 +737,18 @@ impl MirFunc {
                     if !ty.is_numeric() || *ty == MirTy::Bool {
                         return Err(format!("{dest} cmp on {ty}"));
                     }
-                    if lt != *ty || rt != *ty {
+                    if lt != ty.word_class() || rt != ty.word_class() {
                         return Err(format!("{dest} cmp operand type"));
                     }
                 }
-                if self.ty(*dest) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} cmp dest is not bool"));
                 }
             }
             MirInst::Unary { dest, op, src } => match op {
                 super::inst::MirUnaryOp::Not => {
-                    let t = self.ty(*src);
-                    if self.ty(*dest) != MirTy::Bool {
+                    let t = self.vty(*src);
+                    if self.vty(*dest) != MirTy::Bool {
                         return Err(format!("{dest} lnot dest is not bool"));
                     }
                     if t != MirTy::Bool && !t.is_int() && !t.is_heap_word() {
@@ -757,25 +756,25 @@ impl MirFunc {
                     }
                 }
                 super::inst::MirUnaryOp::Neg => {
-                    let t = self.ty(*src);
+                    let t = self.vty(*src);
                     if !t.is_int() && !t.is_float() {
                         return Err(format!("{dest} neg on {t}"));
                     }
-                    if self.ty(*dest) != t {
+                    if self.vty(*dest) != t {
                         return Err(format!("{dest} neg dest type"));
                     }
                 }
             },
             MirInst::VecLoop { dest, pos, from, to, kind } => {
-                if [*from, *to].iter().chain(pos.iter()).any(|&v| self.ty(v) != MirTy::I64) {
+                if [*from, *to].iter().chain(pos.iter()).any(|&v| self.vty(v) != MirTy::I64) {
                     return Err(format!("{dest} vec loop range is not i64"));
                 }
                 let want = match kind {
-                    super::inst::VecLoopKind::Reduce { init, .. } => self.ty(*init),
+                    super::inst::VecLoopKind::Reduce { init, .. } => self.vty(*init),
                     super::inst::VecLoopKind::Store { .. } => MirTy::I64,
-                    super::inst::VecLoopKind::Push { out, .. } => self.ty(*out),
+                    super::inst::VecLoopKind::Push { out, .. } => self.vty(*out),
                 };
-                if self.ty(*dest) != want {
+                if self.vty(*dest) != want {
                     return Err(format!("{dest} vec loop dest type"));
                 }
                 if pos.is_some() != kind.uses_index() {
@@ -783,11 +782,11 @@ impl MirFunc {
                 }
             }
             MirInst::ByteScan { dest, from, bound, streams, scalars, .. } => {
-                if [*dest, *from, *bound].iter().any(|&v| self.ty(v) != MirTy::I64) {
+                if [*dest, *from, *bound].iter().any(|&v| self.vty(v) != MirTy::I64) {
                     return Err(format!("{dest} byte scan position is not i64"));
                 }
-                if streams.iter().any(|&(a, i)| !self.ty(a).is_heap_word() || self.ty(i) != MirTy::I64)
-                    || scalars.iter().any(|&k| self.ty(k) != MirTy::I64)
+                if streams.iter().any(|&(a, i)| !self.vty(a).is_heap_word() || self.vty(i) != MirTy::I64)
+                    || scalars.iter().any(|&k| self.vty(k) != MirTy::I64)
                 {
                     return Err(format!("{dest} byte scan operand type"));
                 }
@@ -811,7 +810,7 @@ impl MirFunc {
                 ..
             } => {
                 if let Some(hi) = dest_hi
-                    && self.ty(*hi) != MirTy::I64
+                    && self.vty(*hi) != MirTy::I64
                 {
                     return Err(format!("{hi} host tag is not i64"));
                 }
@@ -822,20 +821,20 @@ impl MirFunc {
                     return Err(format!("{dest} host arity"));
                 }
                 for (i, (a, ty)) in args.iter().zip(spec.args.iter()).enumerate() {
-                    if !super::host_allow::host_arg_ok(*native_id, *ty, self.ty(*a)) {
+                    if !super::host_allow::host_arg_ok(*native_id, *ty, self.vty(*a)) {
                         return Err(format!("{dest} host arg {i} type"));
                     }
                 }
-                let payload = dest_hi.is_some() && self.ty(*dest).is_word_lane();
-                if !payload && !super::host_allow::host_result_ok(*native_id, spec.ret, self.ty(*dest)) {
+                let payload = dest_hi.is_some() && self.vty(*dest).is_word_lane();
+                if !payload && !super::host_allow::host_result_ok(*native_id, spec.ret, self.vty(*dest)) {
                     return Err(format!("{dest} host dest type"));
                 }
             }
             MirInst::Ffi { dest, args, .. } => {
-                if self.ty(*dest) != MirTy::HeapRef {
+                if self.vty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} ffi dest is not heapref"));
                 }
-                if args.iter().any(|a| !self.ty(*a).is_word_lane()) {
+                if args.iter().any(|a| !self.vty(*a).is_word_lane()) {
                     return Err(format!("{dest} ffi arg is not a word lane"));
                 }
             }
@@ -843,7 +842,7 @@ impl MirFunc {
                 if args.len() != 3 + sig.variadic.as_ref().map_or(sig.params.len(), Vec::len) {
                     return Err(format!("{dest} extern call arity"));
                 }
-                if args.iter().chain([dest]).any(|a| !self.ty(*a).is_word_lane()) {
+                if args.iter().chain([dest]).any(|a| !self.vty(*a).is_word_lane()) {
                     return Err(format!("{dest} extern call word is not a word lane"));
                 }
             }
@@ -855,17 +854,17 @@ impl MirFunc {
                     if *dicts != 0 {
                         return Err(format!("{dest} CallIndirect pair with dictionaries"));
                     }
-                    if !self.ty(*hi).is_word_lane() {
+                    if !self.vty(*hi).is_word_lane() {
                         return Err(format!("{dest} CallIndirect second word is not a word lane"));
                     }
                 }
-                if !self.ty(*dest).is_word_lane() {
+                if !self.vty(*dest).is_word_lane() {
                     return Err(format!("{dest} CallIndirect dest is not a word lane"));
                 }
-                if !matches!(self.ty(*callee), MirTy::HeapRef | MirTy::I64) {
+                if !matches!(self.vty(*callee), MirTy::HeapRef | MirTy::I64) {
                     return Err(format!("{dest} CallIndirect callee is not heapref or a code pointer"));
                 }
-                if args.iter().any(|a| !self.ty(*a).is_word_lane()) {
+                if args.iter().any(|a| !self.vty(*a).is_word_lane()) {
                     return Err(format!("{dest} CallIndirect arg is not a word lane"));
                 }
             }
@@ -876,11 +875,11 @@ impl MirFunc {
                 args,
                 ..
             } => {
-                if !self.ty(*dest).is_word_lane() {
+                if !self.vty(*dest).is_word_lane() {
                     return Err(format!("{dest} call dest is not a word lane"));
                 }
                 if let Some(hi) = dest_hi
-                    && !self.ty(*hi).is_word_lane() {
+                    && !self.vty(*hi).is_word_lane() {
                         return Err(format!("{hi} call hi dest is not a word lane"));
                     }
                 if !dest_more.is_empty() && dest_hi.is_none() {
@@ -889,11 +888,11 @@ impl MirFunc {
                 if dest_more.len() > crate::mir::MAX_RET_MORE {
                     return Err(format!("{dest} call returns {} words", 2 + dest_more.len()));
                 }
-                if let Some(w) = dest_more.iter().find(|w| !self.ty(**w).is_word_lane()) {
+                if let Some(w) = dest_more.iter().find(|w| !self.vty(**w).is_word_lane()) {
                     return Err(format!("{w} call result word is not a word lane"));
                 }
                 for (i, a) in args.iter().enumerate() {
-                    if !self.ty(*a).is_word_lane() {
+                    if !self.vty(*a).is_word_lane() {
                         return Err(format!("{dest} call arg {i} type"));
                     }
                 }
@@ -904,13 +903,13 @@ impl MirFunc {
                 index,
                 ..
             } => {
-                if self.ty(*array) != MirTy::HeapRef {
+                if self.vty(*array) != MirTy::HeapRef {
                     return Err(format!("{dest} Index array is not heapref"));
                 }
-                if !self.ty(*index).is_int() {
+                if !self.vty(*index).is_int() {
                     return Err(format!("{dest} Index index type"));
                 }
-                if !self.ty(*dest).is_word_lane() {
+                if !self.vty(*dest).is_word_lane() {
                     return Err(format!("{dest} Index dest type"));
                 }
             }
@@ -922,124 +921,124 @@ impl MirFunc {
                 scalar,
                 ..
             } => {
-                if *scalar && !matches!(self.ty(*value), MirTy::I64 | MirTy::F64 | MirTy::Bool) {
+                if *scalar && !matches!(self.vty(*value), MirTy::I64 | MirTy::F64 | MirTy::Bool) {
                     return Err(format!("{dest} StoreIndex of a number element stores an object word"));
                 }
-                if self.ty(*array) != MirTy::HeapRef {
+                if self.vty(*array) != MirTy::HeapRef {
                     return Err(format!("{dest} StoreIndex array is not heapref"));
                 }
-                if !self.ty(*index).is_int() {
+                if !self.vty(*index).is_int() {
                     return Err(format!("{dest} StoreIndex index type"));
                 }
-                if !self.ty(*value).is_word_lane() || self.ty(*dest) != self.ty(*value) {
+                if !self.vty(*value).is_word_lane() || self.vty(*dest) != self.vty(*value) {
                     return Err(format!("{dest} StoreIndex value type"));
                 }
             }
             MirInst::LaneIndex { dest, dest_hi, dest_more, array, index } => {
-                if self.ty(*array) != MirTy::HeapRef || !self.ty(*index).is_int() {
+                if self.vty(*array) != MirTy::HeapRef || !self.vty(*index).is_int() {
                     return Err(format!("{dest} LaneIndex operand type"));
                 }
-                if !self.ty(*dest).is_word_lane() || !self.ty(*dest_hi).is_word_lane() {
+                if !self.vty(*dest).is_word_lane() || !self.vty(*dest_hi).is_word_lane() {
                     return Err(format!("{dest} LaneIndex dest type"));
                 }
                 self.check_wide_lane(*dest, [*dest, *dest_hi].iter().chain(dest_more), dest_more.len(), None)?;
             }
             MirInst::LaneStore { dest, array, index, lo, hi, more, shape } => {
-                if self.ty(*array) != MirTy::HeapRef || !self.ty(*index).is_int() {
+                if self.vty(*array) != MirTy::HeapRef || !self.vty(*index).is_int() {
                     return Err(format!("{dest} LaneStore operand type"));
                 }
-                if !self.ty(*lo).is_word_lane() || !self.ty(*hi).is_word_lane() || self.ty(*dest) != MirTy::Bool {
+                if !self.vty(*lo).is_word_lane() || !self.vty(*hi).is_word_lane() || self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} LaneStore value type"));
                 }
                 self.check_wide_lane(*dest, [*lo, *hi].iter().chain(more), more.len(), Some(shape))?;
             }
             MirInst::LanesToWords { dest, array, .. } => {
-                if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
+                if self.vty(*array) != MirTy::HeapRef || self.vty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} LanesToWords array type"));
                 }
             }
             MirInst::LanePush { dest, array, lo, hi, more, shape } => {
-                if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
+                if self.vty(*array) != MirTy::HeapRef || self.vty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} LanePush array type"));
                 }
-                if !self.ty(*lo).is_word_lane() || !self.ty(*hi).is_word_lane() {
+                if !self.vty(*lo).is_word_lane() || !self.vty(*hi).is_word_lane() {
                     return Err(format!("{dest} LanePush value type"));
                 }
                 self.check_wide_lane(*dest, [*lo, *hi].iter().chain(more), more.len(), Some(shape))?;
             }
             MirInst::ArrayLen { dest, array } => {
-                if self.ty(*array) != MirTy::HeapRef {
+                if self.vty(*array) != MirTy::HeapRef {
                     return Err(format!("{dest} ArrayLen array is not heapref"));
                 }
-                if self.ty(*dest) != MirTy::I64 {
+                if self.vty(*dest) != MirTy::I64 {
                     return Err(format!("{dest} ArrayLen dest type"));
                 }
             }
             MirInst::ResumeCoro { dest, handle, send } => {
-                if self.ty(*handle) != MirTy::HeapRef {
+                if self.vty(*handle) != MirTy::HeapRef {
                     return Err(format!("{dest} ResumeCoro handle is not heapref"));
                 }
-                if !self.ty(*dest).is_word_lane() {
+                if !self.vty(*dest).is_word_lane() {
                     return Err(format!("{dest} ResumeCoro dest type"));
                 }
                 if let Some(s) = send
-                    && !self.ty(*s).is_word_lane() {
+                    && !self.vty(*s).is_word_lane() {
                         return Err(format!("{dest} ResumeCoro send type"));
                     }
             }
             MirInst::Yield { dest, value, from, receive } => {
-                if !self.ty(*value).is_word_lane() || (*from && self.ty(*value) != MirTy::HeapRef) {
+                if !self.vty(*value).is_word_lane() || (*from && self.vty(*value) != MirTy::HeapRef) {
                     return Err(format!("{dest} Yield value type"));
                 }
-                if (*from && *receive) || (!*receive && self.ty(*dest) != MirTy::Bool) || !self.ty(*dest).is_word_lane() {
+                if (*from && *receive) || (!*receive && self.vty(*dest) != MirTy::Bool) || !self.vty(*dest).is_word_lane() {
                     return Err(format!("{dest} Yield dest type"));
                 }
             }
             MirInst::DoneCoro { dest, handle } => {
-                if self.ty(*handle) != MirTy::HeapRef {
+                if self.vty(*handle) != MirTy::HeapRef {
                     return Err(format!("{dest} DoneCoro handle is not heapref"));
                 }
-                if self.ty(*dest) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} DoneCoro dest type"));
                 }
             }
             MirInst::LoadStatic { dest, .. } => {
-                if !self.ty(*dest).is_word_lane() {
+                if !self.vty(*dest).is_word_lane() {
                     return Err(format!("{dest} LoadStatic dest type"));
                 }
             }
             MirInst::HomeLoad { dest, home } => {
-                if self.homes.get(usize::from(*home)) != Some(&self.ty(*dest)) {
+                if self.homes.get(usize::from(*home)) != Some(&self.vty(*dest)) {
                     return Err(format!("{dest} HomeLoad type"));
                 }
             }
             MirInst::HomeStore { dest, home, value } => {
-                if self.ty(*dest) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} HomeStore dest is not bool"));
                 }
-                let (have, want) = (self.ty(*value), self.homes.get(usize::from(*home)).copied().unwrap_or(MirTy::Bottom));
+                let (have, want) = (self.vty(*value), self.homes.get(usize::from(*home)).copied().unwrap_or(MirTy::Bottom));
                 if !have.is_word_lane() || have.is_heap_word() != want.is_heap_word() {
                     return Err(format!("{dest} HomeStore value type"));
                 }
             }
             MirInst::StoreStatic { dest, value, .. } => {
-                if self.ty(*dest) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} StoreStatic dest is not bool"));
                 }
-                if !self.ty(*value).is_word_lane() {
+                if !self.vty(*value).is_word_lane() {
                     return Err(format!("{dest} StoreStatic value type"));
                 }
             }
             MirInst::Probe { dest, .. } => {
-                if self.ty(*dest) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} Probe dest is not bool"));
                 }
             }
             MirInst::ClearWord { dest, value } | MirInst::KeepAlive { dest, value } => {
-                if self.ty(*dest) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} ClearWord dest is not bool"));
                 }
-                if !self.ty(*value).is_word_lane() {
+                if !self.vty(*value).is_word_lane() {
                     return Err(format!("{dest} ClearWord value type"));
                 }
             }
@@ -1048,10 +1047,10 @@ impl MirFunc {
                 array,
                 value,
             } => {
-                if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
+                if self.vty(*array) != MirTy::HeapRef || self.vty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} ArrayPush array type"));
                 }
-                if !self.ty(*value).is_word_lane() {
+                if !self.vty(*value).is_word_lane() {
                     return Err(format!("{dest} ArrayPush value type"));
                 }
             }
@@ -1060,10 +1059,10 @@ impl MirFunc {
                 scrutinee,
                 index: _,
             } => {
-                if !self.ty(*scrutinee).is_specialized() {
+                if !self.vty(*scrutinee).is_specialized() {
                     return Err(format!("{dest} MatchPayload scrutinee type"));
                 }
-                if !self.ty(*dest).is_specialized() {
+                if !self.vty(*dest).is_specialized() {
                     return Err(format!("{dest} MatchPayload dest type"));
                 }
             }
@@ -1074,10 +1073,10 @@ impl MirFunc {
                 // byte, and the stack form takes a full word (#1498).
                 slot: _,
             } => {
-                if self.ty(*object) != MirTy::HeapRef {
+                if self.vty(*object) != MirTy::HeapRef {
                     return Err(format!("{dest} ProductLoad object type"));
                 }
-                if !self.ty(*dest).is_specialized() {
+                if !self.vty(*dest).is_specialized() {
                     return Err(format!("{dest} ProductLoad dest type"));
                 }
             }
@@ -1090,21 +1089,21 @@ impl MirFunc {
                 index: _,
                 scalar,
             } => {
-                if self.ty(*object) != MirTy::HeapRef {
+                if self.vty(*object) != MirTy::HeapRef {
                     return Err(format!("{dest} HeapFieldStore object type"));
                 }
-                if *scalar && !matches!(self.ty(*value), MirTy::I64 | MirTy::F64 | MirTy::Bool) {
+                if *scalar && !matches!(self.vty(*value), MirTy::I64 | MirTy::F64 | MirTy::Bool) {
                     return Err(format!("{dest} HeapFieldStore of a number field stores an object word"));
                 }
-                if !self.ty(*value).is_specialized() {
+                if !self.vty(*value).is_specialized() {
                     return Err(format!("{dest} HeapFieldStore value type"));
                 }
-                if self.ty(*dest) != self.ty(*value) {
+                if self.vty(*dest) != self.vty(*value) {
                     return Err(format!("{dest} HeapFieldStore dest type"));
                 }
             }
             MirInst::Alloc { dest, elems, kind, .. } => {
-                if self.ty(*dest) != MirTy::HeapRef {
+                if self.vty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} Alloc dest is not heapref"));
                 }
                 if let super::MirAllocKind::Lanes { tag_mask, more } = *kind {
@@ -1114,122 +1113,122 @@ impl MirFunc {
                     }
                 }
                 for (i, e) in elems.iter().enumerate() {
-                    if !self.ty(*e).is_specialized() {
+                    if !self.vty(*e).is_specialized() {
                         return Err(format!("{dest} Alloc elem {i} type"));
                     }
                 }
             }
             MirInst::AllocAt { dest, slot, elems, .. } => {
-                if self.ty(*dest) != MirTy::HeapRef || slot.is_some_and(|s| self.ty(s) != MirTy::I64) {
+                if self.vty(*dest) != MirTy::HeapRef || slot.is_some_and(|s| self.vty(s) != MirTy::I64) {
                     return Err(format!("{dest} AllocAt type"));
                 }
                 for (i, e) in elems.iter().enumerate() {
-                    if !self.ty(*e).is_specialized() {
+                    if !self.vty(*e).is_specialized() {
                         return Err(format!("{dest} AllocAt elem {i} type"));
                     }
                 }
             }
             MirInst::RcReuse { dest, src, .. } => {
-                if self.ty(*dest) != MirTy::I64 || !matches!(self.ty(*src), MirTy::HeapRef | MirTy::Value) {
+                if self.vty(*dest) != MirTy::I64 || !matches!(self.vty(*src), MirTy::HeapRef | MirTy::Value) {
                     return Err(format!("{dest} RcReuse type"));
                 }
             }
             MirInst::GcBarrier { dest, object, .. } => {
-                if self.ty(*dest) != MirTy::HeapRef {
+                if self.vty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} GcBarrier dest is not heapref"));
                 }
-                if !self.ty(*object).is_heap_word() {
+                if !self.vty(*object).is_heap_word() {
                     return Err(format!("{dest} GcBarrier object is not a heap word"));
                 }
             }
             MirInst::String { dest, .. } => {
-                if self.ty(*dest) != MirTy::HeapRef {
+                if self.vty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} String dest is not heapref"));
                 }
             }
             MirInst::CodePtr { dest, .. } => {
-                if self.ty(*dest) != MirTy::I64 {
+                if self.vty(*dest) != MirTy::I64 {
                     return Err(format!("{dest} CodePtr dest is not i64"));
                 }
             }
             MirInst::FreeEarly { dest, value, .. } => {
-                if self.ty(*dest) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} FreeEarly dest is not bool"));
                 }
-                if !matches!(self.ty(*value), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64) {
+                if !matches!(self.vty(*value), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64) {
                     return Err(format!("{dest} FreeEarly value type"));
                 }
             }
             MirInst::Print { dest, src } => {
-                if self.ty(*dest) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} Print dest is not bool"));
                 }
-                if !self.ty(*src).is_specialized() {
+                if !self.vty(*src).is_specialized() {
                     return Err(format!("{dest} Print src type"));
                 }
             }
             MirInst::Panic { dest, msg } => {
-                if self.ty(*dest) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} Panic dest is not bool"));
                 }
-                if self.ty(*msg) != MirTy::HeapRef {
+                if self.vty(*msg) != MirTy::HeapRef {
                     return Err(format!("{dest} Panic msg is not heapref"));
                 }
             }
             MirInst::Format { dest, fmt, args } => {
-                if self.ty(*dest) != MirTy::HeapRef {
+                if self.vty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} Format dest is not heapref"));
                 }
-                if self.ty(*fmt) != MirTy::HeapRef && self.ty(*fmt) != MirTy::Value {
+                if self.vty(*fmt) != MirTy::HeapRef && self.vty(*fmt) != MirTy::Value {
                     return Err(format!("{dest} Format fmt type"));
                 }
                 for (i, a) in args.iter().enumerate() {
-                    if !self.ty(*a).is_specialized() {
+                    if !self.vty(*a).is_specialized() {
                         return Err(format!("{dest} Format arg {i} type"));
                     }
                 }
             }
             MirInst::Cow { dest, src, .. } => {
-                if self.ty(*dest) != MirTy::HeapRef || self.ty(*src) != MirTy::HeapRef {
+                if self.vty(*dest) != MirTy::HeapRef || self.vty(*src) != MirTy::HeapRef {
                     return Err(format!("{dest} Cow type"));
                 }
             }
             MirInst::CowPin { dest, src } => {
-                if self.ty(*dest) != MirTy::Bool || self.ty(*src) != MirTy::HeapRef {
+                if self.vty(*dest) != MirTy::Bool || self.vty(*src) != MirTy::HeapRef {
                     return Err(format!("{dest} CowPin type"));
                 }
             }
             MirInst::CowUnpin { dest, src, saved } => {
-                if self.ty(*dest) != MirTy::Bool || self.ty(*src) != MirTy::HeapRef || self.ty(*saved) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool || self.vty(*src) != MirTy::HeapRef || self.vty(*saved) != MirTy::Bool {
                     return Err(format!("{dest} CowUnpin type"));
                 }
             }
             MirInst::RcInc { dest, src, guard } | MirInst::RcDec { dest, src, guard } => {
-                if self.ty(*dest) != MirTy::Bool || !matches!(self.ty(*src), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64 | MirTy::Value) {
+                if self.vty(*dest) != MirTy::Bool || !matches!(self.vty(*src), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64 | MirTy::Value) {
                     return Err(format!("{dest} reference count op type"));
                 }
-                if guard.is_some_and(|g| self.ty(g) != MirTy::Bool) {
+                if guard.is_some_and(|g| self.vty(g) != MirTy::Bool) {
                     return Err(format!("{dest} reference count op guard is not bool"));
                 }
             }
             MirInst::Stringify { dest, src, .. } => {
-                if self.ty(*dest) != MirTy::HeapRef {
+                if self.vty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} Stringify dest is not heapref"));
                 }
-                if !self.ty(*src).is_specialized() {
+                if !self.vty(*src).is_specialized() {
                     return Err(format!("{dest} Stringify src type"));
                 }
             }
             MirInst::StrEq { dest, lhs, rhs, .. } => {
-                if self.ty(*dest) != MirTy::Bool {
+                if self.vty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} StrEq dest is not bool"));
                 }
-                if self.ty(*lhs) != MirTy::HeapRef || self.ty(*rhs) != MirTy::HeapRef {
+                if self.vty(*lhs) != MirTy::HeapRef || self.vty(*rhs) != MirTy::HeapRef {
                     return Err(format!("{dest} StrEq operand type"));
                 }
             }
             MirInst::Phi { dest, ty, args } => {
-                if self.ty(*dest) != *ty {
+                if self.vty(*dest) != ty.word_class() {
                     return Err(format!("{dest} phi type"));
                 }
                 if !ty.is_specialized() {
@@ -1243,7 +1242,7 @@ impl MirFunc {
                     return Err(format!("{dest} phi preds {got:?} != block preds {seen:?}"));
                 }
                 for (_, v) in args {
-                    if self.ty(*v) != *ty {
+                    if self.vty(*v) != ty.word_class() {
                         return Err(format!("{dest} phi arg {v} type"));
                     }
                 }

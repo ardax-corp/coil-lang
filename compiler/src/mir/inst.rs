@@ -148,7 +148,7 @@ impl MirBinOp {
 
     /// `**` is a float or an `i64` op (no narrow int `**`).
     pub fn takes(self, ty: MirTy) -> bool {
-        self != Self::Pow || ty.is_float() || ty == MirTy::I64
+        self != Self::Pow || ty.is_float() || ty.is_int()
     }
 
     pub fn requires_int(self) -> bool {
@@ -401,8 +401,12 @@ impl MirCastKind {
     pub fn allows(self, from: MirTy, to: MirTy) -> bool {
         match self {
             Self::IntToFloat => from.is_int() && to.is_float(),
-            Self::FloatToInt => from == MirTy::F64 && to == MirTy::I64,
+            Self::FloatToInt => from == MirTy::F64 && to.is_int(),
+            // An `i64` and a maybe-object word are the same word.
+            Self::Word if from.is_int() && to.is_int() => from != to,
             Self::Word => {
+                // A maybe-object word casts as the `i64` it is.
+                let (from, to) = (from.word_class(), to.word_class());
                 let niche = |t: MirTy| matches!(t, MirTy::NicheOpt | MirTy::NicheRes);
                 (niche(to) && matches!(from, MirTy::I64 | MirTy::HeapRef))
                     || (niche(from) && matches!(to, MirTy::HeapRef | MirTy::I64))

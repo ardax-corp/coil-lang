@@ -181,7 +181,7 @@ fn pair_all(f: &mut MirFunc) -> usize {
 fn number_word(f: &MirFunc, v: ValueId) -> bool {
     match f.ty(v) {
         MirTy::F64 | MirTy::Bool => true,
-        MirTy::I64 => !f.opaque_words,
+        MirTy::I64 | MirTy::MaybeObj => !f.opaque_words,
         _ => false,
     }
 }

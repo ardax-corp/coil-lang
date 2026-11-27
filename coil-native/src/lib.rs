@@ -5948,7 +5948,7 @@ impl<'a> Lower<'a> {
                 // stay unknown.
                 let packed = || {
                     common::pack_word_kinds(words.iter().map(|w| match ty_of(f, *w) {
-                        MirTy::I64 if f.opaque_words => common::WORD_UNKNOWN,
+                        MirTy::I64 | MirTy::MaybeObj if f.opaque_words => common::WORD_UNKNOWN,
                         t => word_kind(t),
                     }))
                 };

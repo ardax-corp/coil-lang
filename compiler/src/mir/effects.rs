@@ -102,14 +102,13 @@ impl MirInst {
     /// This op's row of the property table ([`OpProps`]).
     pub fn props(&self) -> OpProps {
         use super::inst::{MirBinOp, MirUnaryOp, VecLoopKind};
-        use super::ty::MirTy;
         const P: OpProps = OpProps::PURE;
         match self {
             Self::Const { .. } | Self::Cmp { .. } | Self::Cast { .. } | Self::Phi { .. } | Self::ArrayLen { .. } | Self::DoneCoro { .. } | Self::ByteScan { .. } => P,
             // Int arithmetic traps on overflow, a zero divisor or a negative
             // exponent (#925); bit ops and floats never trap.
             Self::Bin { op, ty, .. } => OpProps {
-                traps: if *ty == MirTy::I64 && !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor) { Traps::Yes } else { Traps::No },
+                traps: if ty.is_int() && !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor) { Traps::Yes } else { Traps::No },
                 ..P
             },
             Self::Unary { op, .. } => OpProps { traps: if *op == MirUnaryOp::Neg { Traps::IfIntOperand } else { Traps::No }, ..P },
@@ -173,7 +172,7 @@ impl MirInst {
         match self.props().traps {
             Traps::No => false,
             Traps::Yes => true,
-            Traps::IfIntOperand => matches!(self, Self::Unary { src, .. } if func.ty(*src) == super::ty::MirTy::I64),
+            Traps::IfIntOperand => matches!(self, Self::Unary { src, .. } if func.ty(*src).is_int()),
         }
     }
 

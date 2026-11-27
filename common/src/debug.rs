@@ -314,6 +314,12 @@ pub const MIR_SECTION_WIDE_RETURN_FORMAT: u8 = 24;
 /// refuses format 24, whose lane ops sit elsewhere.
 pub const MIR_SECTION_WIDE_LANES_FORMAT: u8 = 25;
 
+/// The first MIR section format whose types may be `MaybeObj` (archive
+/// 8.15): an `i64` word that may hold an object is typed so, type 8, where
+/// format 25 listed these words in a value set of their own after the tail
+/// targets. A reader refuses format 25, whose sets sit elsewhere.
+pub const MIR_SECTION_MAYBE_OBJ_FORMAT: u8 = 26;
+
 /// Append `scopes` as a MIR section stores them: a count, then per scope
 /// the callee's name (length, UTF-8), the call's file, start, end and
 /// scope and an `at_call` byte; little-endian `u32`s.

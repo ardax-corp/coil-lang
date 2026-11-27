@@ -2,7 +2,7 @@
 //! `RcInc` / `RcDec` ops that make a frame own the objects its words name.
 //!
 //! Each value that may hold an object (a heap word, or an `int` word the
-//! collector roots: [`pointer_words`], [`opaque_words`], [`pair_words`]) is
+//! collector roots: [`pointer_words`], [`opaque_words`], [`maybe_obj_words`]) is
 //! a *root* or an *alias* of one. An alias is the same object under another
 //! word: a cast, the untagging bit op of a niche word, a store's dest (the
 //! stored word) or an in-place push's (the array). A root is *borrowed*
@@ -33,7 +33,7 @@
 use std::collections::{HashMap, HashSet};
 use crate::bodies::Label;
 
-use super::frame_words::{barrier_pairs, heap_word, opaque_words, pair_words, pointer_words, ty_of};
+use super::frame_words::{barrier_pairs, heap_word, maybe_obj_words, opaque_words, pointer_words, ty_of};
 use super::func::{MirBlock, MirFunc, is_tail_call_inst};
 use super::inst::{BlockId, MirBinOp, MirCastKind, MirInst, Terminator, ValueId};
 use super::ty::MirTy;
@@ -87,7 +87,7 @@ pub fn insert_rc_all<'a>(bodies: impl IntoIterator<Item = (Option<Label>, &'a mu
 pub fn owning_tail_twins(bodies: &mut Vec<super::native_capture::NativeBody>) -> HashMap<Label, Label> {
     let by_label: HashMap<Label, usize> = bodies.iter().enumerate().filter_map(|(i, b)| Some((b.entry?, i))).collect();
     let may_hold = |f: &MirFunc| {
-        f.params.iter().any(|&p| matches!(ty_of(f, p), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes) || f.heap_pair_words.contains(&p))
+        f.params.iter().any(|&p| matches!(ty_of(f, p), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::MaybeObj))
             || (f.opaque_words && !f.params.is_empty())
     };
     let mut targets: Vec<Label> = Vec::new();
@@ -163,7 +163,7 @@ pub fn owning_tail_twins(bodies: &mut Vec<super::native_capture::NativeBody>) ->
 /// payload) and builds an enum or an instance: owning the parameter, it
 /// may reuse the memory of the object it takes apart.
 fn consumes(f: &MirFunc) -> bool {
-    let params: HashSet<ValueId> = f.params.iter().copied().filter(|&p| matches!(ty_of(f, p), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64 | MirTy::Value)).collect();
+    let params: HashSet<ValueId> = f.params.iter().copied().filter(|&p| matches!(ty_of(f, p), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64 | MirTy::MaybeObj | MirTy::Value)).collect();
     if params.is_empty() {
         return false;
     }
@@ -266,7 +266,7 @@ fn number_returns<'a>(bodies: impl Iterator<Item = (Option<Label>, &'a MirFunc)>
                 // A wide return's words are numbers only by their definition
                 // (a scalar or a number), never by their use.
                 Some(Terminator::Return { lo, hi, more }) if !more.is_empty() => {
-                    lo.iter().chain(hi.iter()).chain(more.iter()).all(|v| ty_of(f, *v) != MirTy::I64 || nums.contains(v))
+                    lo.iter().chain(hi.iter()).chain(more.iter()).all(|v| !ty_of(f, *v).is_int() || nums.contains(v))
                 }
                 Some(Terminator::Return { lo, hi, .. }) => hi.is_none() && lo.is_none_or(|v| nums.contains(&v) || used.contains(&v) && computed_with(f, v)),
                 _ => true,
@@ -305,9 +305,9 @@ fn number_words(func: &MirFunc, numbers: &HashSet<Label>) -> HashSet<ValueId> {
         .flat_map(MirInst::dests)
         .collect();
     // A ground body's `int` parameter is a number, unless it is a pair's
-    // low word (which may carry a heap payload).
+    // low word, typed [`MirTy::MaybeObj`] (it may carry a heap payload).
     if !func.opaque_words {
-        out.extend(func.params.iter().copied().filter(|p| ty_of(func, *p) == MirTy::I64 && !func.heap_pair_words.contains(p)));
+        out.extend(func.params.iter().copied().filter(|p| ty_of(func, *p) == MirTy::I64));
     }
     loop {
         let before = out.len();
@@ -348,7 +348,7 @@ fn used_as_numbers(func: &MirFunc, returns_number: bool) -> HashSet<ValueId> {
             )
         })
         .flat_map(MirInst::dests)
-        .filter(|v| ty_of(func, *v) == MirTy::I64)
+        .filter(|v| ty_of(func, *v).is_int())
         .collect();
     loop {
         let before = set.len();
@@ -759,7 +759,7 @@ impl Pass {
         let pointers = pointer_words(func);
         let mut counted: HashSet<ValueId> = (0..func.types.len() as u32).map(ValueId).filter(|v| matches!(ty_of(func, *v), t if heap_word(t) || t == MirTy::Value)).collect();
         counted.extend(opaque_words(func));
-        counted.extend(pair_words(func, &pointers));
+        counted.extend(maybe_obj_words(func));
         counted.extend(pointers);
         // A call of a body that only returns numbers hands back no object.
         let number_calls: HashSet<ValueId> = if numbers.is_empty() {
@@ -767,13 +767,13 @@ impl Pass {
         } else {
             number_words(func, numbers)
                 .into_iter()
-                .filter(|v| ty_of(func, *v) == MirTy::I64)
+                .filter(|v| ty_of(func, *v).is_int())
                 .collect()
         };
         // An `int` word read from an object or handed back by a call may
         // be a pointer the types do not say (a pair's low word, a payload
         // of a type variable): counted, the runtime tests the address.
-        let maybe = |v: ValueId| matches!(ty_of(func, v), MirTy::I64 | MirTy::Value);
+        let maybe = |v: ValueId| matches!(ty_of(func, v), MirTy::I64 | MirTy::MaybeObj | MirTy::Value);
         for inst in func.blocks.iter().flat_map(|b| &b.insts) {
             match inst {
                 // A wide lane element's words are all numbers.
@@ -1066,7 +1066,7 @@ impl Pass {
     /// Whether `v`, which is no counted word, may still name an object the
     /// types do not say (an `int` or untyped word that is no number).
     fn maybe_object(&self, func: &MirFunc, v: ValueId) -> bool {
-        matches!(ty_of(func, v), MirTy::I64 | MirTy::Value) && !self.scalar.contains(&v)
+        matches!(ty_of(func, v), MirTy::I64 | MirTy::MaybeObj | MirTy::Value) && !self.scalar.contains(&v)
     }
 
     fn root(&self, v: ValueId) -> Option<ValueId> {
@@ -1169,7 +1169,7 @@ impl Pass {
     /// [`unwind_homes`] keeps it in.
     fn unwind_roots(&self, func: &MirFunc, live_in: &[HashSet<ValueId>]) -> HashMap<ValueId, u16> {
         let mut out: HashMap<ValueId, u16> = HashMap::new();
-        let storable = |r: ValueId| matches!(ty_of(func, r), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64);
+        let storable = |r: ValueId| matches!(ty_of(func, r), MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes | MirTy::I64 | MirTy::MaybeObj);
         let mut found: Vec<ValueId> = Vec::new();
         for (bi, block) in func.blocks.iter().enumerate() {
             let mut live = self.live_end(func, BlockId(bi as u32), live_in);
@@ -1284,7 +1284,7 @@ impl Pass {
                         ops.push(MirInst::RcInc { dest: tok(&mut new_types), src: d, guard: None });
                     }
                     if let Some(&h) = homes.get(&d) {
-                        let w = if ty_of(func, d) == MirTy::I64 {
+                        let w = if ty_of(func, d).is_int() {
                             d
                         } else {
                             let w = tok(&mut new_types);
@@ -1472,7 +1472,7 @@ impl Pass {
                                 if self.root(p) == Some(p) && !self.borrowed.contains(&p) && (into.contains(&p) || args.contains(&p)) {
                                     ops.push(MirInst::RcInc { dest: tok(&mut new_types), src: p, guard: None });
                                     if let Some(&h) = homes.get(&p) {
-                                        let w = if ty_of(func, p) == MirTy::I64 {
+                                        let w = if ty_of(func, p).is_int() {
                                             p
                                         } else {
                                             let w = tok(&mut new_types);
@@ -1540,7 +1540,7 @@ impl Pass {
                     continue;
                 }
                 let Some(&h) = homes.get(&p) else { continue };
-                let w = if ty_of(func, p) == MirTy::I64 {
+                let w = if ty_of(func, p).is_int() {
                     p
                 } else {
                     let w = tok(&mut new_types);

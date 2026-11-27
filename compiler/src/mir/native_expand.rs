@@ -10,7 +10,7 @@
 //! element `insert` adds and `remove` takes out is the exception: it stays
 //! in a value across the shifting loop, whose header is a safepoint, and
 //! the array no longer holds it. As an `i64` it may be an object, so it is
-//! listed in [`MirFunc::heap_pair_words`].
+//! held as a [`MirTy::MaybeObj`] word.
 //!
 //! What stays a runtime call: `vec_from_array`, the copy primitive (it
 //! keeps the source's representation, a packed byte or float array stays
@@ -81,14 +81,14 @@ pub fn apply(func: &mut MirFunc) {
 fn expandable(func: &MirFunc, which: VecNative, dest: ValueId, layout: u8, args: &[ValueId]) -> bool {
     let arg = |i: usize| args.get(i).map(|v| func.ty(*v));
     let heap = |t: Option<MirTy>| t == Some(MirTy::HeapRef);
-    let int = |t: Option<MirTy>| t == Some(MirTy::I64);
+    let int = |t: Option<MirTy>| t.is_some_and(MirTy::is_int);
     match which {
         VecNative::Insert => {
             args.len() == 3
                 && heap(arg(0))
                 && int(arg(1))
                 && arg(2).is_some_and(MirTy::is_specialized)
-                && matches!(func.ty(dest), MirTy::I64 | MirTy::Bool)
+                && matches!(func.ty(dest).word_class(), MirTy::I64 | MirTy::Bool)
         }
         VecNative::Remove => {
             args.len() == 2
@@ -223,9 +223,6 @@ fn expand(func: &mut MirFunc, b: BlockId, k: usize, which: VecNative, ids: &Ids)
 fn insert(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, args: &[ValueId], native: u16) {
     let (v, i, x) = (args[0], args[1], args[2]);
     let elem = ex.f.ty(x);
-    if elem == MirTy::I64 {
-        ex.f.heap_pair_words.insert(x);
-    }
     let check_hi = ex.block();
     let oob = ex.block();
     let grow = ex.block();
@@ -233,6 +230,14 @@ fn insert(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, arg
     let body = ex.block();
     let done = ex.block();
 
+    // An `i64` element held across the loop may be an object.
+    let x = if elem == MirTy::I64 {
+        let held = ex.value(MirTy::MaybeObj);
+        ex.push(b, MirInst::Cast { dest: held, kind: MirCastKind::Word, to: MirTy::MaybeObj, src: x });
+        held
+    } else {
+        x
+    };
     let n = ex.len(b, v);
     let zero = ex.int(b, 0);
     let one = ex.int(b, 1);
@@ -303,8 +308,7 @@ fn remove(ex: &mut Ex, b: BlockId, rest: BlockId, dest: ValueId, layout: u8, arg
     ex.jump(none, join);
 
     // x = v[i]; for j = i; j < n - 1; j += 1 { v[j] = v[j + 1] }; v[n - 1] = x
-    let x = ex.index(take, v, i, MirTy::I64);
-    ex.f.heap_pair_words.insert(x);
+    let x = ex.index(take, v, i, MirTy::MaybeObj);
     let last = ex.bin(take, MirBinOp::Sub, n, one);
     ex.jump(take, head);
 

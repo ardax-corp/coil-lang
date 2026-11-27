@@ -41,7 +41,7 @@ pub fn numeric(t: MirTy) -> bool {
 
 /// A value native arithmetic works on.
 pub fn scalar(t: MirTy) -> bool {
-    matches!(t, MirTy::I64 | MirTy::F64 | MirTy::Bool)
+    matches!(t, MirTy::I64 | MirTy::MaybeObj | MirTy::F64 | MirTy::Bool)
 }
 
 /// The `gc::root` handles `f` makes (the results of its `gc_root` host
@@ -86,7 +86,7 @@ pub fn opaque_words(f: &MirFunc) -> Vec<ValueId> {
         .collect();
     (0..f.types.len() as u32)
         .map(ValueId)
-        .filter(|v| ty_of(f, *v) == MirTy::I64 && !scalar.contains(v))
+        .filter(|v| ty_of(f, *v).is_int() && !scalar.contains(v))
         .collect()
 }
 
@@ -98,7 +98,9 @@ pub fn ty_of(f: &MirFunc, v: ValueId) -> MirTy {
 /// records them.
 pub fn word_kind(t: MirTy) -> u8 {
     match t {
-        MirTy::I64 | MirTy::F64 | MirTy::Bool => common::WORD_SCALAR,
+        // A maybe-object word is recorded as the `i64` it is typed as
+        // elsewhere: an object's kinds are what its emission says.
+        MirTy::I64 | MirTy::MaybeObj | MirTy::F64 | MirTy::Bool => common::WORD_SCALAR,
         MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes => common::WORD_POINTER,
         MirTy::Value | MirTy::Bottom => common::WORD_UNKNOWN,
     }
@@ -118,7 +120,7 @@ pub fn pointer_words(f: &MirFunc) -> HashSet<ValueId> {
                 MirInst::Phi { dest, args, .. } => (*dest, !args.is_empty() && args.iter().all(|(_, a)| heap_word(ty_of(f, *a)) || out.contains(a))),
                 _ => continue,
             };
-            if ok && !heap_word(ty_of(f, dest)) && ty_of(f, dest) == MirTy::I64 && out.insert(dest) {
+            if ok && ty_of(f, dest).is_int() && out.insert(dest) {
                 changed = true;
             }
         }
@@ -126,33 +128,13 @@ pub fn pointer_words(f: &MirFunc) -> HashSet<ValueId> {
     out
 }
 
-/// The `int` words that may hold an object with no static type to say so:
-/// the low word of a pair that may carry a heap payload
-/// ([`MirFunc::heap_pair_words`]), the φs and casts that copy one, and a φ
-/// that merges an object with a number (an inlined `Result<int, string>`'s
-/// low word: `Ok`'s `int`, `Err`'s string). An engine roots them ambiguously
-/// (a pair of numbers reads the same). `pointers` are [`pointer_words`],
-/// which are precise roots already.
-pub fn pair_words(f: &MirFunc, pointers: &HashSet<ValueId>) -> Vec<ValueId> {
-    let mut out: HashSet<ValueId> = f.heap_pair_words.iter().copied().filter(|&v| !heap_word(ty_of(f, v))).collect();
-    let object = |v: &ValueId, out: &HashSet<ValueId>| out.contains(v) || pointers.contains(v) || heap_word(ty_of(f, *v));
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for inst in f.blocks.iter().flat_map(|b| &b.insts) {
-            let copies = match inst {
-                MirInst::Phi { dest, args, .. } => ty_of(f, *dest) == MirTy::I64 && args.iter().any(|(_, a)| object(a, &out)),
-                MirInst::Cast { dest, src, .. } => ty_of(f, *dest) == MirTy::I64 && out.contains(src),
-                _ => false,
-            };
-            if copies && out.insert(inst.dest()) {
-                changed = true;
-            }
-        }
-    }
-    let mut words: Vec<ValueId> = out.into_iter().filter(|v| !pointers.contains(v)).collect();
-    words.sort_unstable_by_key(|v| v.0);
-    words
+/// The words typed [`MirTy::MaybeObj`]: an `i64` that may hold an object
+/// (a pair's low word whose payload may be one), which reference counting
+/// counts with a run-time address test. The φs that merge one with other
+/// words are counted with it as any `i64` φ of a counted word is
+/// (`rc_insert`).
+pub fn maybe_obj_words(f: &MirFunc) -> impl Iterator<Item = ValueId> + '_ {
+    (0..f.types.len() as u32).map(ValueId).filter(|&v| ty_of(f, v) == MirTy::MaybeObj)
 }
 
 /// Each `GcBarrier`'s object: the dest of the allocating instruction right

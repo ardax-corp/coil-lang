@@ -139,10 +139,14 @@ impl MirBuilder {
         self.func.steady_calls.insert(dest);
     }
 
-    /// `dest` is the low word of a pair that may carry a heap payload: a
-    /// call's result or a parameter ([`MirFunc::heap_pair_words`]).
-    pub fn mark_heap_pair_word(&mut self, dest: ValueId) {
-        self.func.heap_pair_words.insert(dest);
+    /// `dest`, an `i64` word, is the low word of a pair that may carry a
+    /// heap payload (a call's result or a parameter): it becomes a
+    /// [`MirTy::MaybeObj`]. A heap word stays what it is.
+    pub fn mark_maybe_obj(&mut self, dest: ValueId) {
+        let v = self.resolve(dest);
+        if self.func.ty(v) == MirTy::I64 {
+            self.func.types[v.index()] = MirTy::MaybeObj;
+        }
     }
 
     pub fn entry(&self) -> BlockId {
@@ -1661,14 +1665,22 @@ impl MirBuilder {
             args.push((pred, self.resolve(v)));
         }
         args.sort_by_key(|(b, _)| *b);
+        // A φ of an `i64` local that merges a maybe-object word is one.
+        let ty = if ty == MirTy::I64 && args.iter().any(|&(_, v)| self.func.ty(v) == MirTy::MaybeObj) {
+            self.func.types[phi.index()] = MirTy::MaybeObj;
+            MirTy::MaybeObj
+        } else {
+            ty
+        };
         if let Some(inst) = self
             .func
             .block_mut(block)
             .insts
             .iter_mut()
             .find(|i| i.dest() == phi)
-            && let MirInst::Phi { args: slot, .. } = inst {
+            && let MirInst::Phi { args: slot, ty: phi_ty, .. } = inst {
                 *slot = args;
+                *phi_ty = ty;
             }
         self.try_remove_trivial_phi(phi, block);
     }
@@ -1753,8 +1765,11 @@ impl MirBuilder {
         self.resolve_ty(v)
     }
 
+    /// `v`'s type as the builder checks and derives types: a
+    /// [`MirTy::MaybeObj`] word is the `i64` it stands for
+    /// ([`MirTy::word_class`]).
     fn resolve_ty(&self, v: ValueId) -> MirTy {
-        self.func.ty(self.resolve(v))
+        self.func.ty(self.resolve(v)).word_class()
     }
 
     fn rewrite_subst(&mut self) {

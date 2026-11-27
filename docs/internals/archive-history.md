@@ -5,8 +5,8 @@ The current archive version is `ARCHIVE_MAJOR.ARCHIVE_MINOR` in
 additive change; any other change to the format bumps the major and resets the
 minor. A runtime loads an archive of its own major and a minor it knows, and no
 other: there are no legacy decoders. The format of the MIR section has a version of
-its own, `FORMAT` in `compiler/src/mir/archive.rs` (25 today; a reader takes
-25 only and refuses any other).
+its own, `FORMAT` in `compiler/src/mir/archive.rs` (26 today; a reader takes
+26 only and refuses any other).
 
 ## Major 8
 
@@ -14,8 +14,8 @@ Major 8 minor 0 drops what no engine reads or makes any more. It is the one
 format break of the 2026-11 cleanup: feature/native is not merged to `main`
 (#2265), so no 8.x archive has shipped, and later PRs of the same wave that
 change the format again stay on major 8 and list their change here: those that
-only add something to the format raise the minor (minor 14, below, is the
-current version, 8.14 with MIR section `FORMAT` 25). A runtime refuses a major
+only add something to the format raise the minor (minor 15, below, is the
+current version, 8.15 with MIR section `FORMAT` 26). A runtime refuses a major
 7 archive with its version error, as any other major.
 
 - MIR section `FORMAT` 14: a body no longer writes `deopt_sites` (always
@@ -218,6 +218,16 @@ element. The runtime gains `ALLOC_WIDE_LANES` (9) and the helpers
 changes, so the MIR section is a new `FORMAT`, 25
 (`common::MIR_SECTION_WIDE_LANES_FORMAT`), and the reader refuses 24: an
 8.13 archive's code is compiled again.
+
+Minor 15 (maybe-object words) gives MIR the type `maybe_obj`
+(`MirTy::MaybeObj`, type 8): an `i64` word that may hold an object, the low
+word of a pair whose payload may be one (a call's result, a parameter, a
+host call's) and the element a `Vec` expansion holds across its loop. A body
+no longer writes the value set that listed these words
+(`MirFunc::heap_pair_words`, the first of its value sets after the tail
+targets). The layout changes, so the MIR section is a new `FORMAT`, 26
+(`common::MIR_SECTION_MAYBE_OBJ_FORMAT`), and the reader refuses 25: an
+8.14 archive's code is compiled again.
 
 ## Major 7
 
