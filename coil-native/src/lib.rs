@@ -686,6 +686,7 @@ fn define_all<M: Module>(
     if let Some(cb) = &ids.cb {
         define_callbacks(module, cb, recorder.as_deref_mut())?;
     }
+    define_rc_last(module, &ids, recorder.as_deref_mut())?;
     let fcfg = module.isa().frontend_config();
     let mut fbc = FunctionBuilderContext::new();
     let mut ctx = module.make_context();
@@ -1864,6 +1865,8 @@ struct Ids {
     cow_index: FuncId,
     /// Reference count ops (`coil_native_rc`).
     rc: FuncId,
+    /// A decrement's last owner ([`define_rc_last`]), generated per module.
+    rc_last: FuncId,
     /// Reuse in place (`coil_native_rc_reuse`, `coil_native_rc_take`,
     /// `coil_native_offer_slot`).
     rc_reuse: FuncId,
@@ -2469,6 +2472,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let cow_field = module.declare_function("coil_native_cow_field", Linkage::Import, &s3).map_err(e)?;
     let cow_index = module.declare_function("coil_native_cow_index", Linkage::Import, &s3).map_err(e)?;
     let rc = module.declare_function("coil_native_rc", Linkage::Import, &s3).map_err(e)?;
+    let rc_last = module.declare_function("coil_rc_last", Linkage::Local, &s2).map_err(e)?;
     let rc_reuse = module.declare_function("coil_native_rc_reuse", Linkage::Import, &s3).map_err(e)?;
     let rc_take = module.declare_function("coil_native_rc_take", Linkage::Import, &s3).map_err(e)?;
     let offer_slot = module.declare_function("coil_native_offer_slot", Linkage::Import, &s2).map_err(e)?;
@@ -2543,6 +2547,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         cow_field,
         cow_index,
         rc,
+        rc_last,
         rc_reuse,
         rc_take,
         offer_slot,
@@ -2654,6 +2659,112 @@ fn callback_signature(module: &impl Module, aux: u32) -> Option<Signature> {
     sig.params.extend(params.iter().map(|&t| AbiParam::new(t)));
     sig.returns.extend(ret.map(AbiParam::new));
     Some(sig)
+}
+
+/// Define the module's `coil_rc_last(ctx, word)`, which an inline
+/// decrement calls when it reads the last owner of a typed object word with
+/// no steal epoch open: a young string that no weak handle names, held
+/// inline or as a view of a buffer some other string still holds, is freed
+/// here, in generated code, when the heap's free gate is open
+/// (`machine::native::string_free`): it drops its hold on the buffer, the
+/// header is poisoned, the counters are taken down and the slot goes on the
+/// string class's nursery free list. Anything else, and a view that held
+/// its buffer's last reference, goes to the runtime (`coil_native_rc`, flag
+/// three: a slot start, no slot search). Returns `0`.
+fn define_rc_last<M: Module>(module: &mut M, ids: &Ids, recorder: Option<&mut image::Recorder>) -> Result<(), String> {
+    use machine::native::{BUMP_BYTES, BUMP_FREE, BUMP_FREE_LINK, COUNTS_ALLOC_BYTES, COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS};
+    let fcfg = module.isa().frontend_config();
+    let mut fbc = FunctionBuilderContext::new();
+    let mut ctx = module.make_context();
+    let mut sig = module.make_signature();
+    sig.params.extend([AbiParam::new(types::I64), AbiParam::new(types::I64)]);
+    sig.returns.push(AbiParam::new(types::I64));
+    ctx.func.signature = sig;
+    let rc = module.declare_func_in_func(ids.rc, &mut ctx.func);
+    let t = MemFlagsData::trusted();
+    let sf = machine::native::string_free();
+    let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbc);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    let (gated, header, tagged, view_test, view, kept_buf, last_buf, free, call) =
+        (b.create_block(), b.create_block(), b.create_block(), b.create_block(), b.create_block(), b.create_block(), b.create_block(), b.create_block(), b.create_block());
+    b.append_block_param(free, types::I64);
+    b.switch_to_block(entry);
+    let (c_ctx, s) = (b.block_params(entry)[0], b.block_params(entry)[1]);
+    let o = b.ins().band_imm_u(s, !1i64);
+    // At zero already (a count the runtime keeps): the runtime's.
+    let c = b.ins().uload32(t, o, machine::HEADER_COUNT_OFFSET);
+    let one = b.ins().icmp_imm_s(IntCC::Equal, c, 1);
+    b.ins().brif(one, gated, &[], call, &[]);
+    b.switch_to_block(gated);
+    let heap = b.ins().load(types::I64, t, c_ctx, NATIVE_CTX_HEAP);
+    let gate = b.ins().uload8(types::I64, t, heap, machine::HEAP_FREE_GATE_OFFSET);
+    b.ins().brif(gate, header, &[], call, &[]);
+    b.switch_to_block(header);
+    let h = b.ins().load(types::I64, t, o, 0);
+    let bits = b.ins().band_imm_u(h, sf.header_mask as i64);
+    let plain = b.ins().icmp_imm_s(IntCC::Equal, bits, sf.header_want as i64);
+    b.ins().brif(plain, tagged, &[], call, &[]);
+    b.switch_to_block(tagged);
+    let tag = b.ins().uload8(types::I64, t, o, sf.tag_at as i32);
+    let is_inline = b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(sf.inline_tag));
+    let no_bytes = b.ins().iconst(types::I64, 0);
+    b.ins().brif(is_inline, free, &[no_bytes.into()], view_test, &[]);
+    b.switch_to_block(view_test);
+    let is_view = b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(sf.shared_tag));
+    b.ins().brif(is_view, view, &[], call, &[]);
+    // A view lets go of its buffer as `SharedBuf`'s drop does; when it held
+    // the last reference, it takes it back (no other holder can see it) and
+    // the runtime frees both.
+    b.switch_to_block(view);
+    let buf = b.ins().load(types::I64, t, o, sf.buf_at as i32);
+    let refs = b.ins().iadd_imm_s(buf, i64::from(sf.refs_at));
+    let one = b.ins().iconst(types::I64, 1);
+    let was = b.ins().atomic_rmw(types::I64, t, AtomicRmwOp::Sub, refs, one);
+    let last = b.ins().icmp_imm_s(IntCC::Equal, was, 1);
+    b.ins().brif(last, last_buf, &[], kept_buf, &[]);
+    b.set_cold_block(last_buf);
+    b.switch_to_block(last_buf);
+    b.ins().atomic_rmw(types::I64, t, AtomicRmwOp::Add, refs, one);
+    b.ins().jump(call, &[]);
+    b.switch_to_block(kept_buf);
+    let accounted = b.ins().uload32(t, o, sf.accounted_at as i32);
+    b.ins().jump(free, &[accounted.into()]);
+    b.switch_to_block(free);
+    let accounted = b.block_params(free)[0];
+    let kept = b.ins().band_imm_u(h, sf.header_keep as i64);
+    b.ins().store(t, kept, o, 0);
+    let counts = b.ins().load(types::I64, t, c_ctx, NATIVE_CTX_ALLOC_COUNTS);
+    let bytes = b.ins().load(types::I64, t, counts, COUNTS_ALLOC_BYTES);
+    let bytes = b.ins().isub(bytes, accounted);
+    let bytes = b.ins().iadd_imm_s(bytes, -i64::from(sf.size));
+    b.ins().store(t, bytes, counts, COUNTS_ALLOC_BYTES);
+    let live = b.ins().load(types::I64, t, counts, COUNTS_LIVE_COUNT);
+    let live = b.ins().iadd_imm_s(live, -1);
+    b.ins().store(t, live, counts, COUNTS_LIVE_COUNT);
+    let bumps = b.ins().load(types::I64, t, c_ctx, NATIVE_CTX_ALLOC_BUMPS);
+    let cursor = b.ins().iadd_imm_s(bumps, i64::from(sf.class) * i64::from(BUMP_BYTES));
+    let head = b.ins().load(types::I64, t, cursor, BUMP_FREE);
+    b.ins().store(t, head, o, BUMP_FREE_LINK);
+    b.ins().store(t, o, cursor, BUMP_FREE);
+    let yes = b.ins().iconst(types::I8, 1);
+    b.ins().store(t, yes, heap, machine::HEAP_FREED_EARLY_OFFSET);
+    let zero = b.ins().iconst(types::I64, 0);
+    b.ins().return_(&[zero]);
+    b.set_cold_block(call);
+    b.switch_to_block(call);
+    let typed = b.ins().iconst(types::I64, 3);
+    b.ins().call(rc, &[c_ctx, s, typed]);
+    let zero = b.ins().iconst(types::I64, 0);
+    b.ins().return_(&[zero]);
+    b.seal_all_blocks();
+    b.finalize(fcfg);
+    module.define_function(ids.rc_last, &mut ctx).map_err(|e| format!("cranelift rc_last: {e:?}"))?;
+    if let (Some(r), Some(func)) = (recorder, image::Func::of(ids.rc_last, &ctx)) {
+        r.add(func);
+    }
+    module.clear_context(&mut ctx);
+    Ok(())
 }
 
 /// Define [`CbIds`]' trampolines and thunks.
@@ -2850,6 +2961,7 @@ struct Lower<'a> {
     cow_field: FuncRef,
     cow_index: FuncRef,
     rc: FuncRef,
+    rc_last: FuncRef,
     rc_reuse: FuncRef,
     rc_take: FuncRef,
     offer_slot: FuncRef,
@@ -3025,6 +3137,7 @@ impl<'a> Lower<'a> {
         let cow_field = module.declare_func_in_func(ids.cow_field, func);
         let cow_index = module.declare_func_in_func(ids.cow_index, func);
         let rc = module.declare_func_in_func(ids.rc, func);
+        let rc_last = module.declare_func_in_func(ids.rc_last, func);
         let rc_reuse = module.declare_func_in_func(ids.rc_reuse, func);
         let rc_take = module.declare_func_in_func(ids.rc_take, func);
         let offer_slot = module.declare_func_in_func(ids.offer_slot, func);
@@ -3132,6 +3245,7 @@ impl<'a> Lower<'a> {
             cow_field,
             cow_index,
             rc,
+            rc_last,
             rc_reuse,
             rc_take,
             offer_slot,
@@ -8242,15 +8356,12 @@ impl<'a> Lower<'a> {
             let n = self.b.ins().iadd_imm_s(c, -1);
             self.b.ins().istore32(t, n, o, machine::HEADER_COUNT_OFFSET);
             self.b.ins().jump(join, &[]);
+            // The last owner: the module's `coil_rc_last` frees a young
+            // string in place, anything else through the runtime. One call
+            // here, out of line, as the runtime call it stands for was.
+            self.b.set_cold_block(slow);
             self.b.switch_to_block(slow);
-            let call = self.b.create_block();
-            self.inline_string_free(o, c, heap, join, call);
-            self.b.set_cold_block(call);
-            self.b.switch_to_block(call);
-            // A typed word whose header was just read: the runtime takes
-            // it as a slot start, without a slot search (flag three).
-            let typed = self.b.ins().iconst(types::I64, 3);
-            self.b.ins().call(self.rc, &[self.ctx, s, typed]);
+            self.b.ins().call(self.rc_last, &[self.ctx, s]);
             self.b.ins().jump(join, &[]);
         } else {
             self.b.ins().brif(immortal, join, &[], change, &[]);
@@ -8260,87 +8371,6 @@ impl<'a> Lower<'a> {
             self.b.ins().jump(join, &[]);
         }
         self.b.switch_to_block(join);
-    }
-
-    /// The last owner of `o` (count `c`, read from its header) goes: when
-    /// it is a young string no weak handle names, held inline or as a view
-    /// of a buffer some other string still holds, and the heap's free gate
-    /// is open, free it here as the runtime's release would
-    /// (`machine::native::string_free`): drop its hold on the buffer,
-    /// poison the header, take it off the counters and push its slot on the
-    /// string class's free list, then jump to `join`. Anything else goes to
-    /// `call`, the runtime.
-    fn inline_string_free(
-        &mut self,
-        o: cranelift_codegen::ir::Value,
-        c: cranelift_codegen::ir::Value,
-        heap: cranelift_codegen::ir::Value,
-        join: Block,
-        call: Block,
-    ) {
-        use machine::native::{BUMP_BYTES, BUMP_FREE, BUMP_FREE_LINK, COUNTS_ALLOC_BYTES, COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS};
-        let t = MemFlagsData::trusted();
-        let sf = machine::native::string_free();
-        let (gated, header, tagged) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
-        let (view_test, view, kept_buf, last_buf, free) =
-            (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
-        self.b.append_block_param(free, types::I64);
-        // At zero already (a count the runtime keeps): the runtime's.
-        let one = self.b.ins().icmp_imm_s(IntCC::Equal, c, 1);
-        self.b.ins().brif(one, gated, &[], call, &[]);
-        self.b.switch_to_block(gated);
-        let gate = self.b.ins().uload8(types::I64, t, heap, machine::HEAP_FREE_GATE_OFFSET);
-        self.b.ins().brif(gate, header, &[], call, &[]);
-        self.b.switch_to_block(header);
-        let h = self.b.ins().load(types::I64, t, o, 0);
-        let bits = self.b.ins().band_imm_u(h, sf.header_mask as i64);
-        let plain = self.b.ins().icmp_imm_s(IntCC::Equal, bits, sf.header_want as i64);
-        self.b.ins().brif(plain, tagged, &[], call, &[]);
-        self.b.switch_to_block(tagged);
-        let tag = self.b.ins().uload8(types::I64, t, o, sf.tag_at as i32);
-        let is_inline = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(sf.inline_tag));
-        let no_bytes = self.b.ins().iconst(types::I64, 0);
-        self.b.ins().brif(is_inline, free, &[no_bytes.into()], view_test, &[]);
-        self.b.switch_to_block(view_test);
-        let is_view = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(sf.shared_tag));
-        self.b.ins().brif(is_view, view, &[], call, &[]);
-        // A view lets go of its buffer as `SharedBuf`'s drop does; when it
-        // held the last reference, it takes it back (no other holder can see
-        // it) and the runtime frees both.
-        self.b.switch_to_block(view);
-        let buf = self.b.ins().load(types::I64, t, o, sf.buf_at as i32);
-        let refs = self.b.ins().iadd_imm_s(buf, i64::from(sf.refs_at));
-        let one = self.b.ins().iconst(types::I64, 1);
-        let was = self.b.ins().atomic_rmw(types::I64, t, AtomicRmwOp::Sub, refs, one);
-        let last = self.b.ins().icmp_imm_s(IntCC::Equal, was, 1);
-        self.b.ins().brif(last, last_buf, &[], kept_buf, &[]);
-        self.b.set_cold_block(last_buf);
-        self.b.switch_to_block(last_buf);
-        self.b.ins().atomic_rmw(types::I64, t, AtomicRmwOp::Add, refs, one);
-        self.b.ins().jump(call, &[]);
-        self.b.switch_to_block(kept_buf);
-        let accounted = self.b.ins().uload32(t, o, sf.accounted_at as i32);
-        self.b.ins().jump(free, &[accounted.into()]);
-        self.b.switch_to_block(free);
-        let accounted = self.b.block_params(free)[0];
-        let kept = self.b.ins().band_imm_u(h, sf.header_keep as i64);
-        self.b.ins().store(t, kept, o, 0);
-        let counts = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ALLOC_COUNTS);
-        let bytes = self.b.ins().load(types::I64, t, counts, COUNTS_ALLOC_BYTES);
-        let bytes = self.b.ins().isub(bytes, accounted);
-        let bytes = self.b.ins().iadd_imm_s(bytes, -i64::from(sf.size));
-        self.b.ins().store(t, bytes, counts, COUNTS_ALLOC_BYTES);
-        let live = self.b.ins().load(types::I64, t, counts, COUNTS_LIVE_COUNT);
-        let live = self.b.ins().iadd_imm_s(live, -1);
-        self.b.ins().store(t, live, counts, COUNTS_LIVE_COUNT);
-        let bumps = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ALLOC_BUMPS);
-        let cursor = self.b.ins().iadd_imm_s(bumps, i64::from(sf.class) * i64::from(BUMP_BYTES));
-        let head = self.b.ins().load(types::I64, t, cursor, BUMP_FREE);
-        self.b.ins().store(t, head, o, BUMP_FREE_LINK);
-        self.b.ins().store(t, o, cursor, BUMP_FREE);
-        let yes = self.b.ins().iconst(types::I8, 1);
-        self.b.ins().store(t, yes, heap, machine::HEAP_FREED_EARLY_OFFSET);
-        self.b.ins().jump(join, &[]);
     }
 
     fn product_slot(&mut self, o: cranelift_codegen::ir::Value, index: u32, store: bool) -> (Block, Block) {

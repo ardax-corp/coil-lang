@@ -770,13 +770,24 @@ impl Heap {
             // SAFETY: the array is live until this release frees it, and
             // freeing its elements does not touch its storage.
             let v = unsafe { *ptr.add(i) };
-            if let Some(sf) = &strings
-                && self.rc_free_young_string(v, sf)
-            {
-                n += 1;
-                continue;
-            }
-            let Some(o) = self.rc_object_of_kind(v, kind) else { continue };
+            let o = if let Some(sf) = &strings {
+                let addr = v.heap_addr() & !1;
+                if addr == 0 || !addr.is_multiple_of(8) || !self.slab.may_contain(addr) {
+                    continue;
+                }
+                // SAFETY: a pointer word in the slab's range is a live
+                // object's slot start (the count invariant).
+                if unsafe { self.rc_free_young_string(addr, sf) } {
+                    n += 1;
+                    continue;
+                }
+                // SAFETY: as above.
+                let Some(o) = (unsafe { Object::from_header(addr) }) else { continue };
+                o
+            } else {
+                let Some(o) = self.rc_object_of_kind(v, kind) else { continue };
+                o
+            };
             if !self.rc_dec_obj(o) {
                 continue;
             }
@@ -795,23 +806,21 @@ impl Heap {
         n
     }
 
-    /// Take the last owner of pointer word `v` and free its object when it
+    /// Take the last owner of the object at `addr` and free it when it
     /// is a young inline string at count one that no weak handle names, as
     /// native code's inline free does ([`StringFree`]): one test of its
     /// header word and one of its tag, then its slot goes on the string
     /// class's nursery free list. Whether it did; anything else is left
     /// as it was.
+    ///
+    /// # Safety
+    /// `addr` is a live object's slot start.
     #[inline(always)]
-    fn rc_free_young_string(&mut self, v: Value, sf: &StringFree) -> bool {
-        let addr = v.heap_addr() & !1;
-        if addr == 0 || !addr.is_multiple_of(8) || !self.slab.may_contain(addr) {
-            return false;
-        }
+    unsafe fn rc_free_young_string(&mut self, addr: u64, sf: &StringFree) -> bool {
         let one = 1u64 << (8 * HEADER_COUNT_OFFSET);
         let count_bits = u64::from(u32::MAX) << (8 * HEADER_COUNT_OFFSET);
         let p = addr as *mut u64;
-        // SAFETY: a pointer word in the slab's range is a live object's
-        // slot start, its header word first.
+        // SAFETY: the caller's: its header word first.
         let h = unsafe { p.read() };
         if h & (sf.header_mask | count_bits) != sf.header_want | one {
             return false;
