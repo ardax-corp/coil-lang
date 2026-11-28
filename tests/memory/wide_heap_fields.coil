@@ -85,13 +85,23 @@ fn swapped() -> int {
     return kept.id + o.held[0][0].id;
 }
 
+#[inline(never)]
+fn owned() -> bool {
+    let o = owner();
+    return o.held[0][0].id == 6 &&
+           o.held[0][1] + o.held[1] == 11 &&
+           o.list[0].len() == 3 &&
+           o.list[1][0] == "v" &&
+           o.list[1][1] == 1.5;
+}
+
+// Counted after the frames that held them are gone: a collection may
+// still see a word a live frame left behind.
 test("a leaf of a class with a drop is released with its field") {
     drops = 0;
-    let o = owner();
+    assert!(owned());
     collect();
-    assert!(drops == 1);
-    assert!(o.held[0][0].id == 6 && o.held[0][1] + o.held[1] == 11);
-    assert!(o.list[0].len() == 3 && o.list[1][0] == "v" && o.list[1][1] == 1.5);
+    assert!(drops == 2);
 }
 
 test("a heap leaf read out of its field outlives the write over it") {
