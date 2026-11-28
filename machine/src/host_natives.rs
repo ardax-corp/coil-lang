@@ -519,9 +519,10 @@ fn push_string_bytes(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnM
 /// that moves the bytes out of a buffer nothing reads again.
 fn push_from_bytes_take(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     register(out, register_id, common::FROM_BYTES_TAKE_NATIVE, FfiType::Int, |sig| {
-        HostClosureFn::new(sig, |heap, args| {
+        // Direct, as `from_bytes` is: it only moves the buffer's bytes.
+        HostClosureFn::new_direct(sig, |heap, args| {
             let r = crate::io::from_bytes_take(heap, args[0]);
-            Ok(Some(crate::str_bytes::as_string_result_value(heap, r)))
+            crate::str_bytes::as_string_result_value(heap, r)
         })
     });
 }
