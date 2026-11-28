@@ -1850,6 +1850,7 @@ struct Ids {
     view: FuncId,
     lane_view: FuncId,
     str_view: FuncId,
+    map_str_eq: FuncId,
     fn_entry: FuncId,
     fn_entry_pair: FuncId,
     /// Copy-on-write (these allocate, never collect).
@@ -2339,6 +2340,49 @@ fn direct_extern(sig: &compiler::native_mir::MirExternSig, abi: CAbi) -> Option<
     Some((params, ret, Some(va)))
 }
 
+/// A host call native code runs in place (`Lower::lower_map_op`).
+#[derive(Clone, Copy, Debug)]
+enum MapOp {
+    /// `hash_string`: the string's cached hash.
+    StrHash,
+    /// `map_len`.
+    Len,
+    /// `map_live`.
+    Live,
+    /// `map_find` with keys compared as words, or as strings.
+    Find { string: bool },
+    /// `map_upsert`, likewise.
+    Upsert { string: bool },
+}
+
+/// The constant `v` holds, when a `Const` defines it.
+fn const_i64(f: &MirFunc, v: ValueId) -> Option<i64> {
+    f.blocks.iter().flat_map(|b| &b.insts).find_map(|i| match i {
+        MirInst::Const { dest, c: MirConst::I64(k) } if *dest == v => Some(*k),
+        _ => None,
+    })
+}
+
+/// Which map table op host call `native_id(args)` is, when native code
+/// runs it in place: a find or upsert only with its key mode a constant the
+/// probe compares itself (word or string), and an upsert only where pushes
+/// may be written in place (`ArraySlots::inline_push`).
+fn map_op(f: &MirFunc, native_id: u16, args: &[ValueId]) -> Option<MapOp> {
+    let mode = |at: usize| match args.get(at).and_then(|&m| const_i64(f, m)) {
+        Some(common::KEY_EQ_WORD) => Some(false),
+        Some(common::KEY_EQ_STRING) => Some(true),
+        _ => None,
+    };
+    match (native_id, args.len()) {
+        (common::HASH_STRING_ID, 1) => Some(MapOp::StrHash),
+        (common::MAP_LEN_ID, 1) => Some(MapOp::Len),
+        (common::MAP_LIVE_ID, 2) => Some(MapOp::Live),
+        (common::MAP_FIND_ID, 5) => mode(4).map(|string| MapOp::Find { string }),
+        (common::MAP_UPSERT_ID, 5) if machine::native::array_slots().inline_push => mode(4).map(|string| MapOp::Upsert { string }),
+        _ => None,
+    }
+}
+
 fn cl_ty(t: MirTy) -> Type {
     if t == MirTy::F64 { types::F64 } else { types::I64 }
 }
@@ -2410,6 +2454,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let view = module.declare_function("coil_native_view", Linkage::Import, &s3).map_err(e)?;
     let lane_view = module.declare_function("coil_native_lane_view", Linkage::Import, &s4).map_err(e)?;
     let str_view = module.declare_function("coil_native_str_view", Linkage::Import, &s2).map_err(e)?;
+    let map_str_eq = module.declare_function("coil_native_map_str_eq", Linkage::Import, &s2).map_err(e)?;
     let fn_entry = module.declare_function("coil_native_fn_entry", Linkage::Import, &s5).map_err(e)?;
     let fn_entry_pair = module.declare_function("coil_native_fn_entry_pair", Linkage::Import, &s5).map_err(e)?;
     let mut s1v = module.make_signature();
@@ -2484,6 +2529,7 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
         view,
         lane_view,
         str_view,
+        map_str_eq,
         fn_entry,
         fn_entry_pair,
         cow,
@@ -2777,6 +2823,8 @@ struct Lower<'a> {
     view: FuncRef,
     lane_view: FuncRef,
     str_view: FuncRef,
+    /// `coil_native_map_str_eq`: the map probe's string key compare.
+    map_str_eq: FuncRef,
     fn_entry: FuncRef,
     fn_entry_pair: FuncRef,
     /// [`entry_signature`], for a call of a body's entry by address.
@@ -2960,6 +3008,7 @@ impl<'a> Lower<'a> {
         let view = module.declare_func_in_func(ids.view, func);
         let lane_view = module.declare_func_in_func(ids.lane_view, func);
         let str_view = module.declare_func_in_func(ids.str_view, func);
+        let map_str_eq = module.declare_func_in_func(ids.map_str_eq, func);
         let fn_entry = module.declare_func_in_func(ids.fn_entry, func);
         let fn_entry_pair = module.declare_func_in_func(ids.fn_entry_pair, func);
         let entry_sig = func.import_signature(entry_signature(module));
@@ -3061,6 +3110,7 @@ impl<'a> Lower<'a> {
             view,
             lane_view,
             str_view,
+            map_str_eq,
             fn_entry,
             fn_entry_pair,
             entry_sig,
@@ -6301,27 +6351,16 @@ impl<'a> Lower<'a> {
                     self.set(f, *dest, zero);
                 }
             }
+            MirInst::HostInvoke { dest, dest_hi: None, native_id, layout, args } if map_op(f, *native_id, args).is_some() => {
+                let op = map_op(f, *native_id, args).expect("guarded");
+                self.lower_map_op(f, op, *dest, *native_id, *layout, args);
+            }
             MirInst::HostInvoke { dest, dest_hi, native_id, layout, args } => {
                 // `s[i]` on a string: the byte in place when `i` is in range,
                 // else the host call (out of range, a boxed string).
                 let byte_read = *native_id == common::STRING_BYTE_AT_ID && args.len() == 2 && self.str_views.contains_key(&args[0]);
                 let join = if byte_read { Some(self.byte_in_place(f, args[0], args[1])) } else { None };
-                let fp = self.b.ins().iconst(types::I64, i64::from(*native_id));
-                let lay = self.b.ins().iconst(types::I64, i64::from(*layout));
-                let p = self.words_slot(f, args);
-                let n = self.b.ins().iconst(types::I64, args.len() as i64);
-                // `gc_collect` collects, and a host call through the runtime may:
-                // this frame's words are roots.
-                let collect = machine::native::direct_host_natives().get(usize::from(*native_id)).is_some_and(|h| h.collect || h.on_machine);
-                let roots = if collect { self.epoch_mark() } else { None };
-                let prev = if collect { Some(self.push_call()) } else { None };
-                let call = self.b.ins().call(self.host, &[self.ctx, fp, lay, p, n]);
-                let w = self.b.inst_results(call)[0];
-                if let Some(prev) = prev {
-                    self.pop_call(prev);
-                }
-                self.epoch_check(roots);
-                self.bail_on_helper();
+                let w = self.host_call(f, *native_id, *layout, args);
                 // A two-word result's tag, which the runtime left in the
                 // context (`HOST_ENUM_LAYOUT_PAIR`).
                 if let Some(h) = dest_hi {
@@ -7676,6 +7715,287 @@ impl<'a> Lower<'a> {
                 self.b.ins().bnot(a)
             }
         }
+    }
+
+    /// A host call through the runtime's dispatcher (`coil_native_host`):
+    /// its result word. The second word of a pair result is left in the
+    /// context for the caller to read.
+    fn host_call(&mut self, f: &MirFunc, native_id: u16, layout: u8, args: &[ValueId]) -> cranelift_codegen::ir::Value {
+        let fp = self.b.ins().iconst(types::I64, i64::from(native_id));
+        let lay = self.b.ins().iconst(types::I64, i64::from(layout));
+        let p = self.words_slot(f, args);
+        let n = self.b.ins().iconst(types::I64, args.len() as i64);
+        // `gc_collect` collects, and a host call through the runtime may:
+        // this frame's words are roots.
+        let collect = machine::native::direct_host_natives().get(usize::from(native_id)).is_some_and(|h| h.collect || h.on_machine);
+        let roots = if collect { self.epoch_mark() } else { None };
+        let prev = if collect { Some(self.push_call()) } else { None };
+        let call = self.b.ins().call(self.host, &[self.ctx, fp, lay, p, n]);
+        let w = self.b.inst_results(call)[0];
+        if let Some(prev) = prev {
+            self.pop_call(prev);
+        }
+        self.epoch_check(roots);
+        self.bail_on_helper();
+        w
+    }
+
+    /// The word storage of array `a`: `(pointer, length, capacity)` in the
+    /// current block, which is reached only when `a` is a non-null array
+    /// holding words; anything else branches to `slow`.
+    fn array_words(&mut self, a: cranelift_codegen::ir::Value, slow: Block) -> [cranelift_codegen::ir::Value; 3] {
+        let l = machine::native::array_slots();
+        let t = MemFlagsData::trusted();
+        let (kind_b, tag_b, words_b) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+        self.b.ins().brif(a, kind_b, &[], slow, &[]);
+        self.b.switch_to_block(kind_b);
+        let k = self.b.ins().uload8(types::I64, t, a, l.kind_at as i32);
+        let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(l.kind));
+        self.b.ins().brif(is, tag_b, &[], slow, &[]);
+        self.b.switch_to_block(tag_b);
+        let tag = self.b.ins().uload8(types::I64, t, a, l.data_at as i32);
+        let is = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.words_tag));
+        self.b.ins().brif(is, words_b, &[], slow, &[]);
+        self.b.switch_to_block(words_b);
+        let ptr = self.b.ins().load(types::I64, t, a, l.ptr_at as i32);
+        let len = self.b.ins().load(types::I64, t, a, l.len_at as i32);
+        let cap = self.b.ins().load(types::I64, t, a, l.cap_at as i32);
+        [ptr, len, cap]
+    }
+
+    /// A well-formed map table `ix` (`machine::map_table::table_cap`):
+    /// `(pointer, length, capacity, mask)` of its words in the current
+    /// block; a malformed one, or anything but a word array, goes to `slow`.
+    fn map_table_words(&mut self, ix: cranelift_codegen::ir::Value, slow: Block) -> [cranelift_codegen::ir::Value; 4] {
+        let t = MemFlagsData::trusted();
+        let [ptr, len, cap] = self.array_words(ix, slow);
+        let (has_mask, ok) = (self.b.create_block(), self.b.create_block());
+        let hdr = self.b.ins().icmp_imm_u(IntCC::UnsignedGreaterThanOrEqual, len, machine::map_table::HEADER as i64);
+        self.b.ins().brif(hdr, has_mask, &[], slow, &[]);
+        self.b.switch_to_block(has_mask);
+        let mask = self.b.ins().load(types::I64, t, ptr, 0);
+        // `mask + 1` a power of two (and small enough that the cells'
+        // size cannot wrap), the words long enough for the cells.
+        let small = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, mask, 1 << 40);
+        let cells = self.b.ins().iadd_imm_s(mask, 1);
+        let pow = self.b.ins().band(mask, cells);
+        let pow = self.b.ins().icmp_imm_s(IntCC::Equal, pow, 0);
+        let need = self.b.ins().ishl_imm_u(cells, 1);
+        let need = self.b.ins().iadd_imm_s(need, machine::map_table::HEADER as i64);
+        let fits = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, len, need);
+        let good = self.b.ins().band(small, pow);
+        let good = self.b.ins().band(good, fits);
+        self.b.ins().brif(good, ok, &[], slow, &[]);
+        self.b.switch_to_block(ok);
+        [ptr, len, cap, mask]
+    }
+
+    /// `map_table::home(h, mask)`: the probe start.
+    fn map_home(&mut self, h: cranelift_codegen::ir::Value, mask: cranelift_codegen::ir::Value) -> cranelift_codegen::ir::Value {
+        let s32 = self.b.ins().iconst(types::I64, 32);
+        let hi = self.b.ins().sshr(h, s32);
+        let h = self.b.ins().bxor(h, hi);
+        let s16 = self.b.ins().iconst(types::I64, 16);
+        let hi = self.b.ins().sshr(h, s16);
+        let h = self.b.ins().bxor(h, hi);
+        self.b.ins().band(h, mask)
+    }
+
+    /// A map table op, a string hash, in place, with the host call as its
+    /// slow path (`docs/internals/native.md`, "Map table ops"). Each reads
+    /// what the native reads and gives the same result; `map_upsert` also
+    /// writes what the native writes when no growth is due and the table's
+    /// storage has room, else leaves everything to the native.
+    fn lower_map_op(&mut self, f: &MirFunc, op: MapOp, dest: ValueId, native_id: u16, layout: u8, args: &[ValueId]) {
+        let t = MemFlagsData::trusted();
+        let (slow, join) = (self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(join, types::I64);
+        let arg = |this: &mut Self, i: usize| {
+            let v = this.get(f, args[i]);
+            this.coerce(v, types::I64)
+        };
+        let hdr = machine::map_table::HEADER as i32 * 8;
+        match op {
+            MapOp::StrHash => {
+                let sl = machine::native::string_slots();
+                let s = arg(self, 0);
+                let (kind_b, str_b, have) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(s, kind_b, &[], slow, &[]);
+                self.b.switch_to_block(kind_b);
+                let k = self.b.ins().uload8(types::I64, t, s, sl.kind_at as i32);
+                let is = self.b.ins().icmp_imm_s(IntCC::Equal, k, i64::from(sl.kind));
+                self.b.ins().brif(is, str_b, &[], slow, &[]);
+                self.b.switch_to_block(str_b);
+                let w = self.b.ins().load(types::I64, t, s, sl.hash_at as i32);
+                let set = self.b.ins().band_imm_u(w, sl.hash_set as i64);
+                self.b.ins().brif(set, have, &[], slow, &[]);
+                self.b.switch_to_block(have);
+                let h = self.b.ins().band_imm_u(w, 0xFFFF_FFFF);
+                self.b.ins().jump(join, &[h.into()]);
+            }
+            MapOp::Len => {
+                let ix = arg(self, 0);
+                let [p, ..] = self.map_table_words(ix, slow);
+                let n = self.b.ins().load(types::I64, t, p, 16);
+                self.b.ins().jump(join, &[n.into()]);
+            }
+            MapOp::Live => {
+                let ix = arg(self, 0);
+                let s = arg(self, 1);
+                let [p, len, _, mask] = self.map_table_words(ix, slow);
+                // Slot `s`'s word in the tail: its cell, live while in `0..cap`.
+                let cells = self.b.ins().iadd_imm_s(mask, 1);
+                let tail = self.b.ins().ishl_imm_u(cells, 1);
+                let tail = self.b.ins().iadd_imm_s(tail, machine::map_table::HEADER as i64);
+                let at = self.b.ins().iadd(tail, s);
+                let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, at, len);
+                let nonneg = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, s, 0);
+                let inb = self.b.ins().band(inb, nonneg);
+                let (read, no) = (self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(inb, read, &[], no, &[]);
+                self.b.switch_to_block(no);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                self.b.ins().jump(join, &[zero.into()]);
+                self.b.switch_to_block(read);
+                let off = self.b.ins().ishl_imm_u(at, 3);
+                let addr = self.b.ins().iadd(p, off);
+                let c = self.b.ins().load(types::I64, t, addr, 0);
+                let live = self.b.ins().icmp(IntCC::UnsignedLessThan, c, cells);
+                let live = self.b.ins().uextend(types::I64, live);
+                self.b.ins().jump(join, &[live.into()]);
+            }
+            MapOp::Find { string } | MapOp::Upsert { string } => {
+                let upsert = matches!(op, MapOp::Upsert { .. });
+                let ix = arg(self, 0);
+                let keys = arg(self, 1);
+                let h = arg(self, 2);
+                let k = arg(self, 3);
+                let [p, len, room, mask] = self.map_table_words(ix, slow);
+                let [kp, klen, _] = self.array_words(keys, slow);
+                let start = self.map_home(h, mask);
+                // The probe: `(cell, cells seen, first tombstone or -1)`.
+                let (head, body, cand, next, empty) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
+                for blk in [head, next] {
+                    for _ in 0..3 {
+                        self.b.append_block_param(blk, types::I64);
+                    }
+                }
+                let (zero, none) = (self.b.ins().iconst(types::I64, 0), self.b.ins().iconst(types::I64, -1));
+                self.b.ins().jump(head, &[start.into(), zero.into(), none.into()]);
+                self.b.switch_to_block(head);
+                let [i, seen, tomb] = [0, 1, 2].map(|n| self.b.block_params(head)[n]);
+                let cells = self.b.ins().iadd_imm_s(mask, 1);
+                // A table full of tombstones and keys: the native's answer.
+                let full = self.b.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, seen, cells);
+                self.b.ins().brif(full, slow, &[], body, &[]);
+                self.b.switch_to_block(body);
+                let off = self.b.ins().ishl_imm_u(i, 4);
+                let cell = self.b.ins().iadd(p, off);
+                let r = self.b.ins().load(types::I64, t, cell, hdr + 8);
+                let (nonempty, live_b, tomb_b) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                self.b.ins().brif(r, nonempty, &[], empty, &[]);
+                self.b.switch_to_block(nonempty);
+                let pos = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThan, r, 0);
+                self.b.ins().brif(pos, live_b, &[], tomb_b, &[]);
+                // A tombstone: remember the first, for an insert to reuse.
+                self.b.switch_to_block(tomb_b);
+                let first = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, tomb, 0);
+                let tomb2 = self.b.ins().select(first, i, tomb);
+                self.b.ins().jump(next, &[i.into(), seen.into(), tomb2.into()]);
+                self.b.switch_to_block(live_b);
+                let ch = self.b.ins().load(types::I64, t, cell, hdr);
+                let same_h = self.b.ins().icmp(IntCC::Equal, ch, h);
+                let s = self.b.ins().iadd_imm_s(r, -1);
+                let in_keys = self.b.ins().icmp(IntCC::UnsignedLessThan, s, klen);
+                let try_key = self.b.ins().band(same_h, in_keys);
+                self.b.ins().brif(try_key, cand, &[], next, &[i.into(), seen.into(), tomb.into()]);
+                self.b.switch_to_block(cand);
+                let koff = self.b.ins().ishl_imm_u(s, 3);
+                let kaddr = self.b.ins().iadd(kp, koff);
+                let kw = self.b.ins().load(types::I64, t, kaddr, 0);
+                let eq = self.b.ins().icmp(IntCC::Equal, kw, k);
+                let hit = self.b.create_block();
+                self.b.append_block_param(hit, types::I64);
+                if string {
+                    let cmp = self.b.create_block();
+                    self.b.ins().brif(eq, hit, &[s.into()], cmp, &[]);
+                    self.b.switch_to_block(cmp);
+                    let call = self.b.ins().call(self.map_str_eq, &[kw, k]);
+                    let same = self.b.inst_results(call)[0];
+                    self.b.ins().brif(same, hit, &[s.into()], next, &[i.into(), seen.into(), tomb.into()]);
+                } else {
+                    self.b.ins().brif(eq, hit, &[s.into()], next, &[i.into(), seen.into(), tomb.into()]);
+                }
+                self.b.switch_to_block(hit);
+                let found = self.b.block_params(hit)[0];
+                self.b.ins().jump(join, &[found.into()]);
+                self.b.switch_to_block(next);
+                let [ni, nseen, ntomb] = [0, 1, 2].map(|n| self.b.block_params(next)[n]);
+                let ni = self.b.ins().iadd_imm_s(ni, 1);
+                let ni = self.b.ins().band(ni, mask);
+                let nseen = self.b.ins().iadd_imm_s(nseen, 1);
+                self.b.ins().jump(head, &[ni.into(), nseen.into(), ntomb.into()]);
+                // An empty cell: the key is absent.
+                self.b.switch_to_block(empty);
+                if !upsert {
+                    let none = self.b.ins().iconst(types::I64, -1);
+                    self.b.ins().jump(join, &[none.into()]);
+                } else {
+                    // Register slot `n` (the slot count) in the first
+                    // tombstone or this empty cell, as `map_table::add`
+                    // does, when that needs no growth and the storage has
+                    // room for the slot's word; else the native.
+                    let used = self.b.ins().load(types::I64, t, p, 8);
+                    let reuse = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, tomb, 0);
+                    let used1 = self.b.ins().iadd_imm_s(used, 1);
+                    let twice = self.b.ins().ishl_imm_u(used1, 1);
+                    let no_grow = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, twice, cells);
+                    let has_room = self.b.ins().icmp(IntCC::UnsignedLessThan, len, room);
+                    let ok = self.b.ins().band(no_grow, has_room);
+                    let write = self.b.create_block();
+                    self.b.ins().brif(ok, write, &[], slow, &[]);
+                    self.b.switch_to_block(write);
+                    let at = self.b.ins().select(reuse, tomb, i);
+                    let tail = self.b.ins().ishl_imm_u(cells, 1);
+                    let tail = self.b.ins().iadd_imm_s(tail, machine::map_table::HEADER as i64);
+                    let n = self.b.ins().isub(len, tail);
+                    let off = self.b.ins().ishl_imm_u(at, 4);
+                    let cell = self.b.ins().iadd(p, off);
+                    self.b.ins().store(t, h, cell, hdr);
+                    let r = self.b.ins().iadd_imm_s(n, 1);
+                    self.b.ins().store(t, r, cell, hdr + 8);
+                    // A tombstone reused keeps the count of cells in use.
+                    let one = self.b.ins().iconst(types::I64, 1);
+                    let add = self.b.ins().select(reuse, zero, one);
+                    let used2 = self.b.ins().iadd(used, add);
+                    self.b.ins().store(t, used2, p, 8);
+                    let live = self.b.ins().load(types::I64, t, p, 16);
+                    let live = self.b.ins().iadd_imm_s(live, 1);
+                    self.b.ins().store(t, live, p, 16);
+                    let loff = self.b.ins().ishl_imm_u(len, 3);
+                    let end = self.b.ins().iadd(p, loff);
+                    self.b.ins().store(t, at, end, 0);
+                    let len1 = self.b.ins().iadd_imm_s(len, 1);
+                    let l = machine::native::array_slots();
+                    self.b.ins().store(t, len1, ix, l.len_at as i32);
+                    let res = self.b.ins().isub(none, n);
+                    self.b.ins().jump(join, &[res.into()]);
+                }
+            }
+        }
+        self.b.set_cold_block(slow);
+        self.b.switch_to_block(slow);
+        let w = self.host_call(f, native_id, layout, args);
+        self.drop_views();
+        self.b.ins().jump(join, &[w.into()]);
+        self.b.switch_to_block(join);
+        let w = self.b.block_params(join)[0];
+        // An upsert's table may have grown a word in place: its views (and
+        // any other name's of the same storage) are taken again.
+        if matches!(op, MapOp::Upsert { .. }) {
+            self.drop_views();
+        }
+        self.set(f, dest, w);
     }
 
     /// `s[i]` read in place: fill `s`'s byte view when it is not known,

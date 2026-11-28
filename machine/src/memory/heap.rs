@@ -2566,7 +2566,7 @@ impl Object {
     pub(crate) unsafe fn from_header(addr: u64) -> Option<Self> {
         let header = unsafe { &*(addr as *const GcHeader) };
         Some(match header.kind.get() {
-            1 => Self::String(unsafe { Gc::from_addr(addr) }),
+            KIND_STRING => Self::String(unsafe { Gc::from_addr(addr) }),
             KIND_INSTANCE => Self::Instance(unsafe { Gc::from_addr(addr) }),
             3 => Self::Enum(unsafe { Gc::from_addr(addr) }),
             4 => Self::Library(unsafe { Gc::from_addr(addr) }),
@@ -3243,6 +3243,29 @@ pub struct ArraySlots {
     /// Pushes may be written in place. A debug or rc-check runtime checks
     /// every write ([`GcData::as_mut`]), so its pushes take the helper.
     pub inline_push: bool,
+}
+
+/// Where native code reads a string's cached hash in place
+/// (`docs/internals/native.md`, "Map table ops"): byte offsets from the
+/// object's address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StringSlots {
+    /// The header's kind byte and a string's kind.
+    pub kind_at: u32,
+    pub kind: u8,
+    /// [`ObjString`]'s hash word: `hash_set | hash` once computed, `0`
+    /// before.
+    pub hash_at: u32,
+    pub hash_set: u64,
+}
+
+/// The [`StringSlots`] of this build.
+#[must_use]
+pub fn string_slots() -> StringSlots {
+    let header = GcHeader::new();
+    let kind_at = (header.kind.as_ptr() as usize - std::ptr::from_ref(&header) as usize) as u32;
+    let hash_at = (std::mem::offset_of!(GcData<ObjString>, data) + std::mem::offset_of!(ObjString, hash)) as u32;
+    StringSlots { kind_at, kind: KIND_STRING, hash_at, hash_set: HASH_SET }
 }
 
 /// Where a `Vec`'s pointer, length and capacity words sit, as offsets from
@@ -4629,6 +4652,8 @@ pub trait GcSized {
 /// [`GcHeader::kind`] of the objects native code allocates inline, and of
 /// those a share marks (an instance, an array).
 pub const KIND_INSTANCE: u8 = 2;
+/// [`GcHeader::kind`] of a string ([`StringSlots`]).
+pub const KIND_STRING: u8 = 1;
 const KIND_ENUM: u8 = 3;
 pub const KIND_ARRAY: u8 = 6;
 
