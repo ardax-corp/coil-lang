@@ -1,0 +1,56 @@
+// CPU: a write through a `Vec` field, `self.counts[k] += 1`, next to a
+// number field's write, `self.total += 1`, in a method inlined into a hot
+// loop. The number store writes another slot, so the read of `counts`
+// moves out of the loop. `n` is the last argument (default 1000000).
+// Needs the stdlib root (`--root .deps/coil-stdlib/src`).
+use conv::parse_int;
+use env::args;
+use io::sync::print;
+use string::format;
+
+class Hist {
+    pub counts: Vec<int>,
+    pub total: int,
+}
+
+impl Hist {
+    pub fn add(int k) {
+        self.counts[k] = self.counts[k] + 1;
+        self.total += 1;
+    }
+}
+
+fn arg_n(int fallback) -> int {
+    let argv = match args() {
+        Result::Ok(a) => a,
+        Result::Err(_) => Vec::new(),
+    };
+    if argv.len() < 2 {
+        return fallback;
+    }
+    return match parse_int(argv[argv.len() - 1]) {
+        Result::Ok(n) => n,
+        Result::Err(_) => fallback,
+    };
+}
+
+fn fill(Hist h, int n) {
+    let i = 0;
+    while i < n {
+        h.add((i * 31) & 63);
+        i += 1;
+    }
+}
+
+fn main() {
+    let n = arg_n(1000000);
+    let zeros: Vec<int> = Vec::new();
+    let k = 0;
+    while k < 64 {
+        zeros.push(0);
+        k += 1;
+    }
+    let h = new Hist(zeros, 0);
+    fill(h, n);
+    let _ = print(format("%i %i %i\n", h.total, h.counts[0], h.counts[63]));
+}
