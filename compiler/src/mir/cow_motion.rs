@@ -6,17 +6,20 @@
 //! again or put another object in the slot. So:
 //!
 //! - [`dedup_cow_checks`] drops a check a block already made on the same
-//!   array and index (or object and field) when nothing in between may do
-//!   that (`ps[i].x = ..; ps[i].tags.push(r)` checks `ps[i]` once);
+//!   array and index (or object and field, or a word's own unique of a
+//!   word a unique made) when nothing in between may do that
+//!   (`ps[i].x = ..; ps[i].tags.push(r)` checks `ps` and `ps[i]` once);
 //! - [`hoist_cow_checks`] moves a loop's checks whose operands the loop does
 //!   not define ahead of it, behind a copy of its test, when nothing in the
 //!   loop may do that and every iteration makes them (`g[i][j] = ..` in a
 //!   `j` loop checks `g[i]` once per row).
 //!
 //! What may share an object again or replace one in a slot: a share or a
-//! pin, a unique check of another place (a copy marks the children it
-//! copied shared), a store of a word that may be an object, a count
-//! increment, and any call, native or coroutine step.
+//! pin, a store of a word that may be an object, a count increment, and
+//! any call, native or coroutine step. A check of another place is not
+//! one: a copy marks the children of what it copied shared, and an object
+//! a check made unique is a child of its holder only, which the write path
+//! made unique before it, so no copy reaches it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,12 +33,23 @@ use super::licm::{LoopInfo, ensure_preheader, every_iteration, guard_hoisted, gu
 enum Slot {
     Elem(ValueId, ValueId),
     Field(ValueId, u32),
+    /// A word's own unique (`Cow` with no field): its dest names an object
+    /// nothing else shares.
+    Word(ValueId),
 }
 
 fn check_slot(inst: &MirInst) -> Option<Slot> {
     match *inst {
         MirInst::CowIndex { array, index, .. } => Some(Slot::Elem(array, index)),
         MirInst::Cow { src, unique: true, field: Some(f), .. } => Some(Slot::Field(src, f)),
+        _ => None,
+    }
+}
+
+/// A word's unique: `Cow` with no field.
+fn word_unique(inst: &MirInst) -> Option<ValueId> {
+    match *inst {
+        MirInst::Cow { src, unique: true, field: None, .. } => Some(src),
         _ => None,
     }
 }
@@ -89,16 +103,18 @@ pub fn dedup_cow_checks(func: &mut MirFunc) -> usize {
         let mut i = 0;
         while i < block.insts.len() {
             let inst = &block.insts[i];
-            match check_slot(inst) {
-                Some(slot) => {
-                    let slot = match slot {
-                        Slot::Elem(a, x) => Slot::Elem(*rename.get(&a).unwrap_or(&a), *rename.get(&x).unwrap_or(&x)),
-                        Slot::Field(o, f) => Slot::Field(*rename.get(&o).unwrap_or(&o), f),
-                    };
-                    let word = match slot {
-                        Slot::Elem(a, _) => a,
-                        Slot::Field(o, _) => o,
-                    };
+            let r = |v: ValueId| *rename.get(&v).unwrap_or(&v);
+            // What the check makes unique, the word its dest reads as when
+            // it goes, and what `seen` holds once it ran.
+            let found = match (check_slot(inst), word_unique(inst)) {
+                (Some(Slot::Elem(a, x)), _) => Some((Slot::Elem(r(a), r(x)), r(a), Slot::Elem(r(a), r(x)))),
+                (Some(Slot::Field(o, f)), _) => Some((Slot::Field(r(o), f), r(o), Slot::Field(r(o), f))),
+                // A unique of a word a unique made: the same object.
+                (_, Some(w)) => Some((Slot::Word(r(w)), r(w), Slot::Word(inst.dest()))),
+                _ => None,
+            };
+            match found {
+                Some((slot, word, ran)) => {
                     if seen.contains(&slot) {
                         keep[i] = false;
                         rename.insert(inst.dest(), word);
@@ -111,12 +127,14 @@ pub fn dedup_cow_checks(func: &mut MirFunc) -> usize {
                         }
                         dropped += 1;
                     } else {
-                        // A copy marks what it copied's children shared.
-                        seen.clear();
-                        seen.insert(slot);
+                        // A copy marks the children of what it copied
+                        // shared, and what an earlier check made unique is
+                        // no child of anything but its holder, which a
+                        // write path made unique first: no copy reaches it.
+                        seen.insert(ran);
                     }
                 }
-                None if may_reshare(inst) || matches!(inst, MirInst::Cow { unique: true, .. }) => seen.clear(),
+                None if may_reshare(inst) || matches!(inst, MirInst::Cow { .. }) => seen.clear(),
                 None => {}
             }
             i += 1;
@@ -221,7 +239,7 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
                 continue;
             };
             let word = match slot {
-                Slot::Elem(a, _) => a,
+                Slot::Elem(a, _) | Slot::Word(a) => a,
                 Slot::Field(o, _) => o,
             };
             rename.insert(inst.dest(), word);
