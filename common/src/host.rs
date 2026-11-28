@@ -260,7 +260,7 @@ host_natives! {
     /// First byte-offset `string` native (`string_byte_at`); the block runs
     /// through [`STRING_MATCH_AT_ID`] (archive minor 31).
     139 "string_byte_at" (2) TEXT_R, NO_CAP => STRING_BYTE_AT_ID;
-    140 "string_slice_bytes" (3) TEXT_R, NO_CAP;
+    140 "string_slice_bytes" (3) TEXT_R, NO_CAP => STRING_SLICE_BYTES_ID;
     141 "string_find_from" (3) TEXT_R, NO_CAP;
     142 "string_rfind" (2) TEXT_R, NO_CAP;
     /// Last byte-offset `string` native (`string_match_at`).

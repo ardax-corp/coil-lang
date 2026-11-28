@@ -49,13 +49,25 @@ pub struct InlineObject {
 
 /// The nursery classes of the inline shapes, made first in every heap so
 /// their cursor indexes are the same in every build.
-fn inline_layouts() -> [Layout; 2] {
-    [Layout::new::<GcData<ObjEnum>>(), Layout::new::<GcData<ObjInstance>>()]
+fn inline_layouts() -> [Layout; 3] {
+    [Layout::new::<GcData<ObjEnum>>(), Layout::new::<GcData<ObjInstance>>(), Layout::new::<GcData<ObjString>>()]
 }
 
-/// Make the inline shapes' nursery classes (a new heap, first).
-pub(super) fn make_inline_classes(slab: &mut Slab) -> [usize; 2] {
+/// Make the inline shapes' nursery classes (a new heap, first); the
+/// last is the strings' that native code frees inline onto
+/// ([`string_free`]). Two layouts of one size class share a cursor.
+pub(super) fn make_inline_classes(slab: &mut Slab) -> [usize; 3] {
     inline_layouts().map(|l| slab.young_class(l))
+}
+
+/// The cursors [`make_inline_classes`] gives a new slab's classes, without
+/// making one: each new class key takes the next cursor.
+fn inline_class_indices() -> [usize; 3] {
+    let keys = inline_layouts().map(Slab::class_of);
+    std::array::from_fn(|i| {
+        let first = keys.iter().position(|k| *k == keys[i]).expect("its own key");
+        (0..first).filter(|&j| keys[..j].iter().all(|k| *k != keys[j])).count()
+    })
 }
 
 /// Offset of `field` within `base`, both inside one object.
@@ -94,8 +106,7 @@ fn words(img: &[u8]) -> Vec<u64> {
 /// spilled payload, a fieldless or untyped instance).
 #[must_use]
 pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
-    let mut slab = Slab::new();
-    let classes = make_inline_classes(&mut slab);
+    let classes = inline_class_indices();
     let placeholder = [Value::default(); ENUM_INLINE_ARITY];
     let (class, layout, data, size, img, words_at) = match shape {
         InlineShape::Enum { tag, kinds, n } => {
@@ -225,6 +236,128 @@ pub fn product_slots() -> ProductSlots {
     }
 }
 
+/// What native code's inline free of a string reads and writes: an `RcDec`
+/// that takes the last owner of a young string no weak handle names, held
+/// inline or as a view of a buffer another string still holds, poisons its
+/// header and pushes its slot on the string class's intrusive free list, as
+/// [`Heap::rc_release`] would, without a call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StringFree {
+    /// Index of the string class's nursery cursor
+    /// ([`Heap::inline_alloc_ptrs`]).
+    pub class: u32,
+    /// Bytes the heap accounts for an inline string
+    /// ([`HeapCounts::alloc_bytes`]); a view adds its `accounted` count.
+    pub size: u32,
+    /// Byte offset in the slot of the string's `StrData` discriminant.
+    pub tag_at: u32,
+    /// That discriminant for an inline string (no buffer to drop).
+    pub inline_tag: u8,
+    /// That discriminant for a view of a shared buffer
+    /// ([`crate::StrData::Shared`]).
+    pub shared_tag: u8,
+    /// Byte offsets in the slot of a view's buffer pointer and of its
+    /// `accounted` count (a `u32`), and in the buffer of its reference count
+    /// (a `usize`, changed atomically). Native code frees a view only when
+    /// its decrement leaves the buffer another owner; the last one's buffer
+    /// goes back through the runtime.
+    pub buf_at: u32,
+    pub accounted_at: u32,
+    pub refs_at: u32,
+    /// Header word bits the test reads, and the value they must have: the
+    /// string kind, the nursery bit, no weak handle.
+    pub header_mask: u64,
+    pub header_want: u64,
+    /// Header word bits a freed slot keeps (the finalizer's claim, as
+    /// `Gc::recycle` leaves it).
+    pub header_keep: u64,
+}
+
+/// [`StringFree`] of this build, probed from a real string.
+#[must_use]
+pub fn string_free() -> StringFree {
+    static PROBED: std::sync::OnceLock<StringFree> = std::sync::OnceLock::new();
+    *PROBED.get_or_init(probe_string_free)
+}
+
+fn probe_string_free() -> StringFree {
+    let classes = inline_class_indices();
+    let obj = ObjString::from("ab");
+    let data = std::mem::offset_of!(GcData<ObjString>, data);
+    // SAFETY: `StrData` is `repr(u8)`: the discriminant is its first byte.
+    let inline_tag = unsafe { *std::ptr::from_ref(&obj.data).cast::<u8>() };
+    debug_assert!(matches!(obj.data, crate::StrData::Inline { .. }));
+    let probe = GcHeader::new();
+    let at = |f: *const u8| 8 * (f as usize - std::ptr::from_ref(&probe) as usize);
+    let (kind, flags, generation) = (at(probe.kind.as_ptr()), at(probe.flags.as_ptr()), at(probe.generation.as_ptr()));
+    let tag_at = data + off(&obj, &obj.data);
+    let shared = crate::memory::shared_layout();
+    StringFree {
+        class: classes[2] as u32,
+        size: (PACED_HEADER_BYTES + obj.size()) as u32,
+        tag_at: tag_at as u32,
+        inline_tag,
+        shared_tag: shared.tag,
+        buf_at: (tag_at + shared.buf_at) as u32,
+        accounted_at: (tag_at + shared.accounted_at) as u32,
+        refs_at: shared.refs_at as u32,
+        header_mask: (0xff << kind) | (u64::from(FLAG_WEAK_TARGET) << flags) | (u64::from(GEN_YOUNG) << generation),
+        header_want: (u64::from(KIND_STRING) << kind) | (u64::from(GEN_YOUNG) << generation),
+        header_keep: u64::from(FLAG_FINALIZED) << flags,
+    }
+}
+
+/// How native code allocates a short string inline (a slice of up to
+/// [`crate::memory::INLINE_MAX`] bytes, `string_slice_bytes`): the slot of
+/// a fresh young empty inline string from the string class's cursor, then
+/// its length byte and its bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StringAlloc {
+    /// Index of the string class's nursery cursor (as [`StringFree::class`]).
+    pub class: u32,
+    /// Bytes the cursor moves by (the slot).
+    pub slot: u32,
+    /// Bytes the heap accounts for an inline string.
+    pub size: u32,
+    /// The slot's words as a fresh young empty inline string, header first.
+    pub image: Vec<u64>,
+    /// Byte offsets in the slot of the inline length and of the first byte.
+    pub len_at: u32,
+    pub bytes_at: u32,
+    /// Longest string held inline.
+    pub max: u32,
+}
+
+/// [`StringAlloc`] of this build, probed from a real string.
+#[must_use]
+pub fn string_alloc() -> &'static StringAlloc {
+    static PROBED: std::sync::OnceLock<StringAlloc> = std::sync::OnceLock::new();
+    PROBED.get_or_init(probe_string_alloc)
+}
+
+fn probe_string_alloc() -> StringAlloc {
+    let obj = ObjString::from("");
+    let layout = Layout::new::<GcData<ObjString>>();
+    let data = std::mem::offset_of!(GcData<ObjString>, data);
+    let crate::StrData::Inline { len, bytes } = &obj.data else { unreachable!("an empty string is inline") };
+    let mut img = vec![0u8; layout.size()];
+    put_header(&mut img, KIND_STRING);
+    // SAFETY: `ObjString`'s bytes, all initialized for an inline string
+    // (a tag, a length, 30 bytes and the hash word: no padding).
+    let raw = unsafe { std::slice::from_raw_parts(std::ptr::from_ref(&obj).cast::<u8>(), std::mem::size_of::<ObjString>()) };
+    put(&mut img, data, raw);
+    debug_assert!(layout.size().is_multiple_of(8) && layout.align() <= 8);
+    StringAlloc {
+        class: inline_class_indices()[2] as u32,
+        slot: layout.size() as u32,
+        size: (PACED_HEADER_BYTES + obj.size()) as u32,
+        image: words(&img),
+        len_at: (data + off(&obj, len)) as u32,
+        bytes_at: (data + off(&obj, bytes)) as u32,
+        max: bytes.len() as u32,
+    }
+}
+
 /// A digest of everything inline allocation assumes: every shape's image,
 /// the counter and cursor layouts. An AOT object records the compiler's,
 /// and the runtime refuses it when its own differs
@@ -256,6 +389,9 @@ pub fn layout_fingerprint() -> u64 {
     super::array_slots().hash(&mut h);
     // The map table ops' cached string hash read.
     super::string_slots().hash(&mut h);
+    // The inline string free.
+    string_free().hash(&mut h);
+    string_alloc().hash(&mut h);
     // The inline share (#2506).
     (super::HEADER_KIND_OFFSET, super::HEADER_FLAGS_OFFSET, super::FLAG_SHARED, super::KIND_ARRAY).hash(&mut h);
     // The pin the inline share tests, and `CowPin` / `CowUnpin` write.
@@ -273,6 +409,41 @@ pub fn layout_fingerprint() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A short string written from [`string_alloc`]'s image, its length
+    /// byte and its bytes reads back as the string the runtime makes, and
+    /// is charged what the runtime charges for one.
+    #[test]
+    fn string_image_builds_the_string_the_runtime_makes() {
+        let sa = string_alloc();
+        let mut slot = sa.image.clone();
+        let bytes: &mut [u8] = bytemuck_bytes(&mut slot);
+        let text = b"word42";
+        bytes[sa.len_at as usize] = text.len() as u8;
+        bytes[sa.bytes_at as usize..][..text.len()].copy_from_slice(text);
+        // SAFETY: the slot holds a whole `GcData<ObjString>`.
+        let made = unsafe { &*slot.as_ptr().cast::<GcData<ObjString>>() };
+        assert_eq!(made.as_ref().data.as_str(), "word42");
+        assert!(!made.as_ref().interned());
+        assert_eq!(made.header.generation.get(), GEN_YOUNG);
+        assert_eq!(made.header.kind.get(), KIND_STRING);
+        let real = ObjString::from("word42");
+        assert_eq!(sa.size as usize, PACED_HEADER_BYTES + real.size());
+        assert_eq!(sa.slot as usize, std::mem::size_of::<GcData<ObjString>>());
+        assert_eq!(sa.class as usize, make_inline_classes(&mut Slab::new())[2]);
+        assert_eq!(sa.class, string_free().class);
+    }
+
+    fn bytemuck_bytes(words: &mut [u64]) -> &mut [u8] {
+        // SAFETY: any bytes are valid `u8`s; the length covers the words.
+        unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), words.len() * 8) }
+    }
+
+    /// The computed cursors are the ones a new slab's classes get.
+    #[test]
+    fn class_indices_match_a_new_slab() {
+        assert_eq!(inline_class_indices(), make_inline_classes(&mut Slab::new()));
+    }
 
     /// An inline enum, tuple and instance written from their images read
     /// back as the objects the runtime would have made.

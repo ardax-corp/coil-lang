@@ -303,6 +303,9 @@ pub struct Slab {
     released_mask: Vec<bool>,
     /// Nursery state per size class.
     young: Vec<YoungClass>,
+    /// Index + 1 in [`Self::young`] of the small 8-aligned classes, as
+    /// [`Self::small`] is for the old space's (0: none yet).
+    young_small: [u8; SMALL_CLASSES],
     /// Each nursery class's bump cursor, at [`YoungClass::cursor`]. Boxed so
     /// native code bumps it in place ([`super::heap::InlineLayout`]).
     bumps: Box<[Bump; YOUNG_CLASSES]>,
@@ -380,6 +383,7 @@ impl Slab {
             recent: std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut())),
             released_mask: Vec::new(),
             young: Vec::new(),
+            young_small: [0; SMALL_CLASSES],
             bumps: Box::new([Bump::default(); YOUNG_CLASSES]),
         }
     }
@@ -392,8 +396,8 @@ impl Slab {
     pub fn alloc_young(&mut self, layout: Layout) -> NonNull<u8> {
         let (slot_size, align) = slot_dims(layout);
         let key = (slot_size as u32, align as u32);
-        if let Some(class) = self.young.iter_mut().find(|c| c.key == key) {
-            let bump = &mut self.bumps[class.cursor];
+        if let Some(cursor) = self.young_cursor(key) {
+            let bump = &mut self.bumps[cursor];
             if bump.next + slot_size as u64 <= bump.end {
                 let p = bump.next;
                 bump.next += slot_size as u64;
@@ -420,10 +424,13 @@ impl Slab {
 
     fn young_class_at(&mut self, slot_size: usize, align: usize) -> usize {
         let key = (slot_size as u32, align as u32);
-        if let Some(at) = self.young.iter().position(|c| c.key == key) {
+        if let Some(at) = self.young_cursor(key) {
             return at;
         }
         let cursor = self.young.len();
+        if let Some(i) = small_index(key) {
+            self.young_small[i] = u8::try_from(cursor + 1).expect("few nursery classes");
+        }
         assert!(cursor < YOUNG_CLASSES, "more than {YOUNG_CLASSES} nursery size classes");
         self.young.push(YoungClass {
             key,
@@ -436,8 +443,14 @@ impl Slab {
 
     /// The index of class `key`'s nursery cursor, if it has one
     /// ([`Self::young_class`]).
+    #[inline]
     pub fn young_cursor(&self, key: (u32, u32)) -> Option<usize> {
-        self.young.iter().position(|c| c.key == key)
+        // A class's cursor is its index in `young` (classes are only ever
+        // appended).
+        match small_index(key) {
+            Some(i) => (self.young_small[i] as usize).checked_sub(1),
+            None => self.young.iter().position(|c| c.key == key),
+        }
     }
 
     /// The size class of nursery cursor `cursor`.
@@ -507,8 +520,7 @@ impl Slab {
     #[inline]
     pub fn free_young_in_class(&mut self, key: (u32, u32), ptr: NonNull<u8>) {
         self.debug_check_class(key, ptr);
-        let cursor = self.young.iter().find(|c| c.key == key).map(|c| c.cursor);
-        if let Some(cursor) = cursor
+        if let Some(cursor) = self.young_cursor(key)
             && u64::from(key.0) >= FREE_LINK + 8
         {
             let bump = &mut self.bumps[cursor];
@@ -517,6 +529,20 @@ impl Slab {
             unsafe { *((ptr.as_ptr() as u64 + FREE_LINK) as *mut u64) = bump.free };
             bump.free = ptr.as_ptr() as u64;
         }
+    }
+
+    /// Push `ptr`, a poisoned young slot of the class whose cursor is
+    /// `cursor` (one [`FREE_LINK`] fits in), on that class's free list.
+    ///
+    /// # Safety
+    /// `ptr` is a freed slot of that class.
+    #[inline]
+    pub unsafe fn push_young_free(&mut self, cursor: usize, ptr: NonNull<u8>) {
+        self.debug_check_class(self.young[cursor].key, ptr);
+        let bump = &mut self.bumps[cursor];
+        // SAFETY: the caller's; its first payload word holds the link.
+        unsafe { *((ptr.as_ptr() as u64 + FREE_LINK) as *mut u64) = bump.free };
+        bump.free = ptr.as_ptr() as u64;
     }
 
     /// Whether any nursery chunk holds objects.

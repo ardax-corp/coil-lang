@@ -796,11 +796,13 @@ pub enum MirInst {
     /// Copy-on-write unique of element `index` of the array `array`, in
     /// place (archive 8.17): `array[index] = unique(array[index])` in one
     /// instruction, writing the element back only when it copied. Traps
-    /// out of bounds as [`Self::Index`] does. Dest is `array`'s word, as
-    /// [`Self::Cow`]'s with a field is its object's. Neither takes nor drops
-    /// an owner of `array` (a copy replaces a shared element, whose other
-    /// owner keeps it). A side effect and an allocating safepoint; pair
-    /// with [`Self::GcBarrier`].
+    /// out of bounds as [`Self::Index`] does. Dest is the element once
+    /// unique (the copy when it copied), what an `Index` of `array` at
+    /// `index` reads right after it (archive 8.18; 8.17's dest was `array`'s
+    /// word). Neither takes nor drops an owner of `array` (a copy replaces a
+    /// shared element, whose other owner keeps it); the dest is read out of
+    /// `array` as an `Index` reads, which owns it. A side effect and an
+    /// allocating safepoint; pair with [`Self::GcBarrier`].
     CowIndex {
         dest: ValueId,
         array: ValueId,

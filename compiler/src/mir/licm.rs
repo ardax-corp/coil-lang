@@ -492,6 +492,11 @@ struct LoopEffects {
     /// An element store, an append, or code that may write: an impure
     /// call or native, a coroutine step.
     elements: bool,
+    /// An element store of a word that may be an object, or code that may
+    /// write: what may change an element an array of objects holds. A
+    /// number stored into an array (`storeindex.num`) writes an array of
+    /// numbers, never one whose elements are objects.
+    object_elements: bool,
     /// A field store, or code that may write. An element store does not
     /// change a field, nor a field store an element (#1559).
     fields: bool,
@@ -508,7 +513,7 @@ impl LoopEffects {
 }
 
 fn loop_effects(func: &MirFunc, lp: &LoopInfo) -> LoopEffects {
-    let mut fx = LoopEffects { elements: false, fields: false, lengths: false };
+    let mut fx = LoopEffects { elements: false, object_elements: false, fields: false, lengths: false };
     let calls = func.call_facts();
     for b in &func.blocks {
         if !lp.blocks.contains(&b.id) {
@@ -516,6 +521,7 @@ fn loop_effects(func: &MirFunc, lp: &LoopInfo) -> LoopEffects {
         }
         for inst in &b.insts {
             fx.elements |= inst.writes_elements(&calls);
+            fx.object_elements |= inst.writes_elements(&calls) && !matches!(inst, MirInst::StoreIndex { scalar: true, .. });
             fx.fields |= inst.writes_fields(&calls);
             fx.lengths |= inst.may_resize(&calls);
         }
@@ -677,7 +683,11 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
                     continue;
                 }
                 let behind = ops.iter().any(|o| guarded.contains(o));
-                let numeric = func.ty(inst.dest()).is_numeric();
+                // An object element read (a grid's row) moves behind the guard
+                // too: on the path that runs no iteration its φ reads `0`, which
+                // only code that reads any word safely (a length, a vector
+                // loop's range test) may read there.
+                let numeric = func.ty(inst.dest()).is_numeric() || dense && matches!(inst, MirInst::Index { dest, .. } if func.ty(*dest) == MirTy::HeapRef);
                 let place = match motion {
                     // In the header, ahead of anything observable: the loop
                     // computes it whenever it is entered.
@@ -838,7 +848,15 @@ pub(super) fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, g
                     super::ty::MirTy::Bool => super::inst::MirConst::Bool(false),
                     _ => super::inst::MirConst::I64(0),
                 };
-                copies.push(MirInst::Const { dest: z, c });
+                if c.ty() == ty {
+                    copies.push(MirInst::Const { dest: z, c });
+                } else {
+                    // A heap word's dummy: the `i64` zero, retyped.
+                    let k = ValueId(func.types.len() as u32);
+                    func.types.push(super::ty::MirTy::I64);
+                    copies.push(MirInst::Const { dest: k, c });
+                    copies.push(MirInst::Cast { dest: z, kind: super::inst::MirCastKind::Word, to: ty, src: k });
+                }
                 zeros.push((ty, z));
                 z
             }
@@ -938,6 +956,9 @@ fn motion(
         MirInst::ArrayLen { dest, .. } | MirInst::LoadStatic { dest, .. } if func.invariant_loads.contains(dest) => {
             Some(Motion::Free)
         }
+        // An object element (a row of a grid) is no number a number store
+        // writes.
+        MirInst::Index { dest, .. } if func.ty(*dest).is_heap_word() => (!fx.object_elements && !fx.lengths).then_some(Motion::Traps),
         MirInst::Index { .. } => (!fx.elements && !fx.lengths).then_some(Motion::Traps),
         MirInst::ArrayLen { .. } => free(!fx.lengths),
         // A readonly class's field never changes (#1560).
@@ -1416,7 +1437,14 @@ mod tests {
     /// A counted loop `while v4 < v0 { s += <body>; v4 += 1 }` with
     /// `body` spliced in (it defines `v6`, read by the sum).
     fn counted(params: &str, body: &str) -> MirFunc {
-        let src = format!(
+        let src = counted_src(params, body);
+        let f = crate::mir::parse_func(&src).expect(&src);
+        f.verify().unwrap();
+        f
+    }
+
+    fn counted_src(params: &str, body: &str) -> String {
+        format!(
             r#"
 func @f({params}) -> i64 {{
 bb0:
@@ -1437,10 +1465,7 @@ bb3:
     return v5
 }}
 "#
-        );
-        let f = crate::mir::parse_func(&src).expect(&src);
-        f.verify().unwrap();
-        f
+        )
     }
 
     fn in_loop(func: &MirFunc, pred: impl Fn(&MirInst) -> bool) -> usize {
@@ -1617,6 +1642,31 @@ bb5:
         licm(&mut f, true);
         f.verify().unwrap();
         assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Index { .. })), 1);
+    }
+
+    /// A grid's row (`g[i]`, an object element) leaves a loop that stores
+    /// numbers into it; a store of an object word, which may replace the
+    /// row, keeps it in.
+    #[test]
+    fn a_row_read_moves_past_number_stores() {
+        let row = |store: &str| {
+            let src = counted_src("v0: i64, v1: heapref", &format!("    v11 = index v1, v3\n    v6 = index v11, v4\n{store}"));
+            let mut f = crate::mir::parse_func(&src).expect(&src);
+            f.types[11] = MirTy::HeapRef;
+            if let Some(t) = f.types.get_mut(12) {
+                *t = if store.contains(".num") { MirTy::I64 } else { MirTy::HeapRef };
+            }
+            f.verify().unwrap();
+            f
+        };
+        let mut f = row("    v12 = storeindex.num v11, v4, v6");
+        assert!(licm(&mut f, true) >= 1);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Index { array, .. } if *array == ValueId(1))), 0, "{f}");
+        let mut f = row("    v12 = storeindex v1, v4, v11");
+        licm(&mut f, true);
+        f.verify().unwrap();
+        assert_eq!(in_loop(&f, |i| matches!(i, MirInst::Index { array, .. } if *array == ValueId(1))), 1, "{f}");
     }
 
     /// `while` loops over `v0` from 0: `test` is the header's compare of
