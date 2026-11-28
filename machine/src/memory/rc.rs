@@ -384,6 +384,30 @@ impl Heap {
         }
     }
 
+    /// The words appended to array `a` from element `from` on gain an
+    /// owner each, as a [`Self::rc_before`] / [`Self::rc_after`] diff around
+    /// the append would count them, without walking the elements that were
+    /// there: a leaf native that appends copies ([`common::HostReach::Leaf`])
+    /// counts them itself.
+    pub fn rc_count_appended(&self, a: &ObjArray, from: usize) {
+        if !self.rc_counting() || a.holds_no_refs() {
+            return;
+        }
+        let (k, mask, kind) = (a.lanes(), a.tag_mask, a.gc_elem_kind());
+        let Some(words) = a.gc_words() else { return };
+        if k > 1 {
+            for i in (from * k).min(words.len())..words.len() {
+                if ObjArray::lane_pointer(words, k, mask, i) {
+                    self.rc_inc_word(words[i], common::WORD_POINTER);
+                }
+            }
+        } else {
+            for &v in words.get(from..).unwrap_or(&[]) {
+                self.rc_inc_word(v, kind);
+            }
+        }
+    }
+
     /// [`Self::rc_before`] of element `index` of a lane array only (a
     /// `LaneStore`, which would otherwise diff the whole array).
     pub fn rc_before_lane(&self, v: Value, index: usize) -> Option<(Object, Vec<u64>, usize)> {

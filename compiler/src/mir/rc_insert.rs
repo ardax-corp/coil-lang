@@ -490,7 +490,7 @@ fn may_write_words(inst: &MirInst, pure: &HashSet<ValueId>) -> bool {
         | MirInst::ArrayPush { .. }
         | MirInst::Cow { field: Some(_), .. }
         | MirInst::CowIndex { .. } => false,
-        MirInst::HostInvoke { native_id, .. } if common::host_writes_only_numbers(u64::from(*native_id)) => false,
+        MirInst::HostInvoke { native_id, .. } if common::host_writes_only_numbers(u64::from(*native_id)) || common::host_is_leaf(u64::from(*native_id)) => false,
         MirInst::HostInvoke { native_id, .. } => {
             use common::EffectFlags as E;
             let e = super::effects::host_effects(*native_id);
@@ -731,6 +731,8 @@ fn cancel_pairs(func: &mut MirFunc, homes: &HashMap<ValueId, u16>) -> usize {
             | MirInst::LanePush { .. }
             | MirInst::RcInc { .. } => true,
             MirInst::Cow { unique: false, field: None, .. } => true,
+            // A leaf native releases nothing ([`common::HostReach::Leaf`]).
+            MirInst::HostInvoke { native_id, .. } => common::host_is_leaf(u64::from(*native_id)),
             MirInst::HeapFieldStore { .. } => first_store[i],
             _ => false,
         };
@@ -1687,8 +1689,14 @@ impl Pass {
 }
 
 /// Whether a panic may unwind the frame at `inst`: it calls, traps or may
-/// run code that does.
+/// run code that does. A leaf native does none of that
+/// ([`common::HostReach::Leaf`]): what the frame owns needs no home there.
 fn may_unwind(inst: &MirInst) -> bool {
+    if let MirInst::HostInvoke { native_id, .. } = inst
+        && common::host_is_leaf(u64::from(*native_id))
+    {
+        return false;
+    }
     !matches!(
         inst,
         MirInst::Const { .. }
@@ -1880,6 +1888,40 @@ mod tests {
         assert_eq!(all_rc_ops(&f), 0, "{f}");
         let call = "func @c(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = call.i64 7 v2\n    v4 = iadd v3, v1\n    return v4\n}\n";
         let mut g = crate::mir::parse_func(call).expect(call);
+        insert_rc_all([(None, &mut g)], &HashMap::new());
+        assert!(all_rc_ops(&g) > 0, "{g}");
+    }
+
+    fn homes_stored(f: &MirFunc) -> usize {
+        f.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, MirInst::HomeStore { .. })).count()
+    }
+
+    /// An owned word live across a leaf native's call needs no home: the
+    /// call cannot unwind the frame. Across one that may (here `hash_string`,
+    /// which is not marked a leaf) it is kept in a home.
+    #[test]
+    fn a_leaf_host_call_needs_no_home() {
+        let leaf = "func @f(v1: i64) -> i64 {\nbb0:\n    v2 = call.heapref 9 v1\n    v3 = host.string_byte_at v2, v1\n    v4 = host.string_byte_at v2, v3\n    return v4\n}\n";
+        let mut f = crate::mir::parse_func(leaf).expect(leaf);
+        insert_rc_all([(None, &mut f)], &HashMap::new());
+        assert_eq!(homes_stored(&f), 0, "{f}");
+        let runtime = leaf.replace("v3 = host.string_byte_at v2, v1", "v3 = host.hash_string v2");
+        let mut g = crate::mir::parse_func(&runtime).expect(&runtime);
+        insert_rc_all([(None, &mut g)], &HashMap::new());
+        assert!(homes_stored(&g) > 0, "{g}");
+    }
+
+    /// A field of a borrowed object stays borrowed across a leaf native
+    /// that may change the holder's length (`vec_reserve`): it releases
+    /// nothing, so the load takes no count of its own.
+    #[test]
+    fn a_borrowed_field_stays_borrowed_across_a_leaf() {
+        let src = "func @r(v0: heapref, v1: i64) -> i64 {\nbb0:\n    v2 = productload v0, 0\n    v3 = host.vec_reserve v0, v1\n    v4 = host.string_byte_at v2, v1\n    v5 = iadd v4, v1\n    return v5\n}\n";
+        let mut f = crate::mir::parse_func(src).expect(src);
+        insert_rc_all([(None, &mut f)], &HashMap::new());
+        assert_eq!(all_rc_ops(&f), 0, "{f}");
+        let popped = src.replace("host.vec_reserve v0, v1", "host.vec_pop v0");
+        let mut g = crate::mir::parse_func(&popped).expect(&popped);
         insert_rc_all([(None, &mut g)], &HashMap::new());
         assert!(all_rc_ops(&g) > 0, "{g}");
     }

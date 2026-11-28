@@ -47,6 +47,12 @@ interpreter, wasm) runs the same counted bodies. Its module doc is the reference
   that parameter (matches it or reads its payload, and allocates an enum or an object): the
   argument moves in instead of living on in the caller until after the call. Runtime entries,
   call folding and indirect calls keep the borrowed body.
+- a host call to a *leaf* native (`LEAF` in its `common/src/host.rs` row, `common::HostReach`)
+  cannot panic, collect, run code or overwrite or release a reference it can reach: it needs no
+  unwind homes for what the frame owns, ends no borrow of a load and splits no inc / dec pair. Any
+  other host call is treated as one that may do all of that. The runtime takes no count snapshot of
+  a leaf's arguments either (`host_writes_words`): a leaf that appends copies (`vec_extend_range`,
+  `vec_fill`) counts them itself (`Heap::rc_count_appended`).
 
 Reuse in place (`compiler/src/mir/rc_reuse.rs`, after the insertion pass): a decrement of an enum
 the body matched on, or of an instance whose fields it read, and an enum or object allocation after

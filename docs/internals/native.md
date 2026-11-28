@@ -118,7 +118,10 @@ and `Index` / `StoreIndex` / `ArrayLen` in bounds of the view read and write in
 place. Byte arrays, tuples and an index out of the view take the helpers. Storing
 into a word array never moves its storage; a push may, and another value may name
 the same array, so after an `ArrayPush` every view reads through the helpers until
-its value is defined again. A vector loop drops the views too.
+its value is defined again. A vector loop drops the views too, and so does a host
+call, except to a leaf native (`common::HostReach::Leaf`) that changes no array it
+is handed (no `HEAP_MUT` effect, not `from_bytes_take`): it collects nothing and
+moves no storage, so every view holds across it (`keeps_views`).
 
 A view has a state word (`machine::VIEW_PLAIN` = 1): a view stores and loads in
 place when it is set (`ok != 0`). The state is part of `layout_fingerprint`, so
@@ -532,6 +535,11 @@ up to 30 bytes in place (`slice_in_place`, `machine::native::string_alloc`): whe
 string-class slot, writes a young empty inline string's image, the length byte and the
 bytes, and counts it. Anything else (an end the host clamps or reports, a longer result,
 a closed gate, a spent chunk) takes the host call.
+`from_bytes` and `from_bytes_take` of a byte-storage array of up to 30 bytes, all
+below 0x80, make their string the same way (`string_from_bytes_in_place`, sharing
+`inline_string` with the slice): ASCII is UTF-8 with no further check, and the
+string's word is the result's `Ok` niche. A longer, non-ASCII or word-stored buffer
+takes the host call.
 
 The images come from `machine::memory::inline_object`, probed from real objects:
 `ObjEnum`, `ObjInstance` and their payloads are `repr(C)` / `repr(u8)`, so

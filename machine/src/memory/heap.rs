@@ -2064,6 +2064,21 @@ impl Heap {
         (header.kind.get() == 1).then(|| unsafe { Gc::from_addr(addr) })
     }
 
+    /// The array at `addr`, for a word whose static type is an array or
+    /// `Vec`: a range check and the header kind, as [`Self::str_at`] reads
+    /// a string, without [`Self::find_object_by_addr`]'s slot search.
+    /// `None` for anything else.
+    #[inline]
+    pub fn array_at(&self, addr: u64) -> Option<Gc<ObjArray>> {
+        if addr == 0 || !addr.is_multiple_of(8) || !self.slab.may_contain(addr) {
+            return None;
+        }
+        // SAFETY: as in `str_at`: an array value's word is a slot start in
+        // the slab's mapped range.
+        let header = unsafe { &*(addr as *const GcHeader) };
+        (header.kind.get() == KIND_ARRAY).then(|| unsafe { Gc::from_addr(addr) })
+    }
+
     /// Classify a raw payload / field word as an object or an immediate.
     #[cfg(test)]
     pub(crate) fn member_of(&self, v: Value) -> Member {

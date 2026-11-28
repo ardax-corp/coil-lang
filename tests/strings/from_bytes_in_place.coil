@@ -1,0 +1,72 @@
+// Strings from byte buffers that native code makes itself when they are
+// short and ASCII: empty, one byte, the longest held inline and the first
+// that is not, non-ASCII text and bytes that are not UTF-8, each checked
+// against its source string.
+use tests::assert;
+use string::{from_bytes, to_bytes};
+
+fn round(string s) -> string {
+    return match from_bytes(to_bytes(s)) {
+        Result::Ok(x) => x,
+        Result::Err(_) => "<err>",
+    };
+}
+
+// `n` ASCII bytes, cycling through the lowercase letters.
+fn ascii(int n) -> Vec<byte> {
+    let b: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < n {
+        b.push((97 + i % 26) as byte);
+        i = i + 1;
+    }
+    return b;
+}
+
+test("short ASCII buffers make the string of their bytes") {
+    let n = 0;
+    while n <= 40 {
+        let s = match from_bytes(ascii(n)) {
+            Result::Ok(x) => x,
+            Result::Err(_) => "<err>",
+        };
+        assert!(s.len() == n);
+        let i = 0;
+        while i < n {
+            assert!(s[i] as int == 97 + i % 26);
+            i = i + 1;
+        }
+        assert!(round(s) == s);
+        n = n + 1;
+    }
+}
+
+test("non-ASCII text round-trips through the runtime") {
+    assert!(round("é") == "é");
+    assert!(round("aé€x") == "aé€x");
+}
+
+test("bytes that are not UTF-8 are an error") {
+    let b: Vec<byte> = Vec::new();
+    b.push(104 as byte);
+    b.push(255 as byte);
+    let bad = match from_bytes(b) {
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    };
+    assert!(bad);
+}
+
+test("a buffer built a byte at a time") {
+    let b: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < 12 {
+        b.push((97 + i) as byte);
+        i = i + 1;
+    }
+    let s = match from_bytes(b) {
+        Result::Ok(x) => x,
+        Result::Err(_) => "",
+    };
+    assert!(s == "abcdefghijkl");
+}

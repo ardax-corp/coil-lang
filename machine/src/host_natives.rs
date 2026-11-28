@@ -519,9 +519,10 @@ fn push_string_bytes(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnM
 /// that moves the bytes out of a buffer nothing reads again.
 fn push_from_bytes_take(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn FnMut(&str, usize)) {
     register(out, register_id, common::FROM_BYTES_TAKE_NATIVE, FfiType::Int, |sig| {
-        HostClosureFn::new(sig, |heap, args| {
+        // Direct, as `from_bytes` is: it only moves the buffer's bytes.
+        HostClosureFn::new_direct(sig, |heap, args| {
             let r = crate::io::from_bytes_take(heap, args[0]);
-            Ok(Some(crate::str_bytes::as_string_result_value(heap, r)))
+            crate::str_bytes::as_string_result_value(heap, r)
         })
     });
 }
@@ -562,10 +563,7 @@ fn push_string_compare(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut dyn F
     // strings; anything else orders before every string.
     register(out, register_id, common::STRING_COMPARE_NATIVE, FfiType::Int, |sig| {
         HostClosureFn::new_direct(sig, |heap, args| {
-            let text = |v: Value| match heap.find_object_by_addr(v.bits()) {
-                Some(crate::memory::Object::String(gc)) => Some(gc),
-                _ => None,
-            };
+            let text = |v: Value| heap.str_at(v.bits());
             let order = match (text(args[0]), text(args[1])) {
                 (Some(a), Some(b)) => a.as_ref().data.as_bytes().cmp(b.as_ref().data.as_bytes()),
                 (a, b) => a.is_some().cmp(&b.is_some()),
