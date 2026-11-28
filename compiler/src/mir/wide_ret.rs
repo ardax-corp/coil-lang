@@ -1,5 +1,6 @@
 //! Wide direct calls: a small object of words (a tuple, an `Option` of a
-//! tuple, which is a niche word over the tuple object, or any nesting of
+//! tuple, which is a niche word over the tuple object, a `Result` of a
+//! tuple whose `Err` is a heap word, also a niche word, or any nesting of
 //! those) crosses a direct call as its words when neither side needs the
 //! object, up to four words once flattened.
 //!
@@ -12,7 +13,9 @@
 //! A value's words are its *leaves*, by one rule at any depth: an item of
 //! a tuple is a leaf word (a number, a heap word) or, when it is itself a
 //! tuple the pass takes apart, that tuple's words in place; an `Option`
-//! of a tuple adds a `bool` word, `true` for `Some`, after its tuple's.
+//! of a tuple adds a `bool` word, `true` for `Some`, after its tuple's; a
+//! `Result` too (`true` for `Ok`), and its `Err` payload shares one of the
+//! `Ok` tuple's leaf words (`Lay::res`).
 //! So `((int, int), int)`, `(string, int, int)` and
 //! `Option<((int, int), string)>` are three, three and four words. The
 //! only bound is the word budget (four); a tuple whose nested words do not
@@ -41,7 +44,7 @@ use std::rc::Rc;
 
 use super::cse::dce;
 use super::func::MirFunc;
-use super::inst::{BlockId, MirAllocKind, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator, ValueId, MAX_RET_MORE};
+use super::inst::{BlockId, MirAllocKind, MirBinOp, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator, ValueId, MAX_RET_MORE};
 use super::native_capture::NativeBody;
 use super::ty::MirTy;
 use crate::bodies::Label;
@@ -81,6 +84,42 @@ fn join_word(a: MirTy, b: MirTy) -> Option<MirTy> {
     }
 }
 
+/// The word two values that share a place in a sum's words (an `Ok`'s
+/// and an `Err`'s, `Lay::err`) are carried in: their own type when they
+/// agree, an `int` word for a `float` or `bool` beside an `int` (the same
+/// bits, as a pair's payload), a maybe-object word for a heap word beside
+/// a number or another kind of heap word.
+fn union_word(a: MirTy, b: MirTy) -> Option<MirTy> {
+    if let Some(j) = join_word(a, b) {
+        return Some(j);
+    }
+    let num = |t: MirTy| matches!(t, MirTy::I64 | MirTy::F64 | MirTy::Bool);
+    match (a, b) {
+        (a, b) if num(a) && num(b) && (a == MirTy::I64 || b == MirTy::I64) => Some(MirTy::I64),
+        (a, b) if (a.is_heap_word() || a.is_int()) && (b.is_heap_word() || b.is_int()) => Some(MirTy::MaybeObj),
+        _ => None,
+    }
+}
+
+/// Whether a value of type `t` goes in (or comes out of) a word of type
+/// `word`: as it is, or by a `Word` cast (a heap word in a maybe-object
+/// word a `Result` shares, `Lay::res`).
+fn fits(word: MirTy, t: MirTy) -> bool {
+    join_word(word, t).is_some() || union_word(word, t) == Some(word)
+}
+
+/// `v` as a value of type `to`, by a `Word` cast pushed to `out` when its
+/// type differs (an `int` word and a maybe-object word are one).
+fn as_word(f: &mut MirFunc, v: ValueId, to: MirTy, out: &mut Vec<MirInst>) -> ValueId {
+    let from = f.ty(v);
+    if from.word_class() == to.word_class() {
+        return v;
+    }
+    let d = new_value(f, to);
+    out.push(MirInst::Cast { dest: d, kind: MirCastKind::Word, to, src: v });
+    d
+}
+
 /// An item's word type by its kind: an `int` item the tuple's kinds do
 /// not call a scalar may hold an object.
 fn item_ty(t: MirTy, kind: u8) -> MirTy {
@@ -106,6 +145,12 @@ enum Src {
     Item { parent: usize, slot: usize },
     /// `None`: the niche word `0`.
     None,
+    /// `Err(payload)`: a `Result` niche word, the payload's address with
+    /// bit 0 set.
+    Err { payload: ValueId },
+    /// The `Err` payload of node `parent` (its niche word with bit 0
+    /// cleared), an object word.
+    ErrOf { parent: usize },
     /// Anything else (another kind of tuple, a tuple of boxed values).
     Opaque,
 }
@@ -130,6 +175,14 @@ enum Use {
     /// the words that may be objects to its place (`keep`), as the object
     /// held them: a `drop` they owe runs no earlier.
     Drop { dest: ValueId, keep: bool },
+    /// `iand` of a `Result`'s niche word with `1` into `dest`: whether it
+    /// is an `Err`.
+    ErrBit { dest: ValueId },
+    /// `ixor` of a `Result`'s niche word with `1` into `dest`: its `Err`
+    /// payload.
+    ErrPayload { dest: ValueId },
+    /// The payload of node `parent`, an `Err`.
+    ErrIn { parent: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +195,8 @@ struct Node {
     other: bool,
     /// Some member is an `Option`'s niche word.
     niche: bool,
+    /// Some member is a `Result`'s niche word.
+    res: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -194,7 +249,7 @@ fn twinnable(name: &str, f: &MirFunc) -> bool {
 }
 
 fn object_word(t: MirTy) -> bool {
-    matches!(t, MirTy::HeapRef | MirTy::NicheOpt)
+    matches!(t, MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes)
 }
 
 fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body {
@@ -208,6 +263,17 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
             _ => return false,
         }
     };
+    let is_one = |v: ValueId| matches!(defs.get(&v).map(|(_, i)| *i), Some(MirInst::Const { c: MirConst::I64(1), .. }));
+    // `a op 1` (either way round): `a`.
+    let with_one = |lhs: ValueId, rhs: ValueId| {
+        if is_one(rhs) {
+            Some(lhs)
+        } else if is_one(lhs) {
+            Some(rhs)
+        } else {
+            None
+        }
+    };
     let used: HashSet<ValueId> = f.blocks.iter().flat_map(|b| b.insts.iter().flat_map(|i| i.operands()).chain(b.term.iter().flat_map(|t| t.uses().collect::<Vec<_>>()))).collect();
     let mut nodes: Vec<Node> = Vec::new();
     let mut member: HashMap<ValueId, usize> = HashMap::new();
@@ -216,7 +282,7 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
     let mut params = vec![None; f.params.len()];
     let add = |root: ValueId, src: Src, nodes: &mut Vec<Node>, member: &mut HashMap<ValueId, usize>| {
         member.insert(root, nodes.len());
-        nodes.push(Node { members: vec![root], src, uses: Vec::new(), other: false, niche: f.ty(root) == MirTy::NicheOpt });
+        nodes.push(Node { members: vec![root], src, uses: Vec::new(), other: false, niche: f.ty(root) == MirTy::NicheOpt, res: f.ty(root) == MirTy::NicheRes });
     };
     for (j, &p) in f.params.iter().enumerate() {
         if object_word(f.ty(p)) {
@@ -245,6 +311,11 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                 MirInst::Cast { kind: MirCastKind::Word, dest, src, .. } if f.ty(*dest) == MirTy::NicheOpt && is_zero(*src) => {
                     add(*dest, Src::None, &mut nodes, &mut member);
                 }
+                MirInst::Bin { dest, op: MirBinOp::BitOr, lhs, rhs, .. } if f.ty(*dest) == MirTy::NicheRes => {
+                    if let Some(payload) = with_one(*lhs, *rhs).filter(|p| f.ty(*p).is_heap_word()) {
+                        add(*dest, Src::Err { payload }, &mut nodes, &mut member);
+                    }
+                }
                 _ => {}
             }
         }
@@ -267,6 +338,15 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                     }
                     continue;
                 }
+                MirInst::Bin { dest, op: MirBinOp::Xor, lhs, rhs, .. } if !member.contains_key(dest) => {
+                    if let Some(parent) = with_one(*lhs, *rhs).and_then(|a| member.get(&a).copied())
+                        && nodes[parent].res
+                    {
+                        add(*dest, Src::ErrOf { parent }, &mut nodes, &mut member);
+                        grew = true;
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             if let Some(&n) = member.get(&src)
@@ -275,6 +355,7 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                 member.insert(dest, n);
                 nodes[n].members.push(dest);
                 nodes[n].niche |= f.ty(dest) == MirTy::NicheOpt;
+                nodes[n].res |= f.ty(dest) == MirTy::NicheRes;
                 grew = true;
             }
         }
@@ -289,6 +370,25 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                 MirInst::GcBarrier { dest, object, .. } if member.contains_key(object) && member.get(dest) == member.get(object) => continue,
                 MirInst::Cow { dest, src, unique: false, field: None } if member.contains_key(src) && member.get(dest) == member.get(src) => continue,
                 MirInst::Cast { dest, .. } if member.get(dest).is_some_and(|&n| matches!(nodes[n].src, Src::None) && nodes[n].members[0] == *dest) => continue,
+                MirInst::Bin { dest, .. } if member.get(dest).is_some_and(|&n| matches!(nodes[n].src, Src::Err { .. }) && nodes[n].members[0] == *dest) => {
+                    let parent = member[dest];
+                    if let Src::Err { payload } = nodes[parent].src
+                        && let Some(&n) = member.get(&payload)
+                    {
+                        nodes[n].uses.push(Use::ErrIn { parent });
+                    }
+                    continue;
+                }
+                MirInst::Bin { dest, op: MirBinOp::Xor, lhs, rhs, .. } if member.get(dest).is_some_and(|&n| matches!(nodes[n].src, Src::ErrOf { .. }) && nodes[n].members[0] == *dest) => {
+                    let a = with_one(*lhs, *rhs).expect("an Err payload's word");
+                    nodes[member[&a]].uses.push(Use::ErrPayload { dest: *dest });
+                    continue;
+                }
+                MirInst::Bin { dest, op: MirBinOp::BitAnd, lhs, rhs, .. } if with_one(*lhs, *rhs).is_some_and(|a| member.get(&a).is_some_and(|&n| nodes[n].res)) => {
+                    let a = with_one(*lhs, *rhs).expect("a Result's word");
+                    nodes[member[&a]].uses.push(Use::ErrBit { dest: *dest });
+                    continue;
+                }
                 MirInst::ProductLoad { dest, object, slot } if member.contains_key(object) => {
                     nodes[member[object]].uses.push(Use::Load { dest: *dest, slot: *slot as usize });
                     continue;
@@ -387,12 +487,12 @@ fn wanted(nodes: &[Node]) -> Vec<bool> {
         group[a] = b;
     };
     for (n, node) in nodes.iter().enumerate() {
-        if let Src::Item { parent, .. } = node.src {
+        if let Src::Item { parent, .. } | Src::ErrOf { parent } = node.src {
             join(n, parent, &mut group);
         }
         for u in &node.uses {
             match *u {
-                Use::Phi(p) | Use::Within { parent: p, .. } => join(n, p, &mut group),
+                Use::Phi(p) | Use::Within { parent: p, .. } | Use::ErrIn { parent: p } => join(n, p, &mut group),
                 _ => {}
             }
         }
@@ -429,6 +529,10 @@ struct Tuple {
 struct Class {
     tuple: Option<Tuple>,
     niche: Option<bool>,
+    /// A `Result`'s class: its tuple is the `Ok` payload's.
+    res: Option<bool>,
+    /// A `Result`'s `Err` payload: its class and its word type as a leaf.
+    err: Option<(usize, MirTy)>,
     bad: bool,
     /// Some member stays an object (an item that is no node, a read the
     /// pass does not take): the class is never nested in another's words.
@@ -440,6 +544,13 @@ impl Class {
         match self.niche {
             Some(n) if n != niche => self.bad = true,
             _ => self.niche = Some(niche),
+        }
+    }
+
+    fn set_res(&mut self, res: bool) {
+        match self.res {
+            Some(r) if r != res => self.bad = true,
+            _ => self.res = Some(res),
         }
     }
 }
@@ -491,6 +602,20 @@ impl Classes {
             if let Some(n) = ca.niche {
                 cb.set_niche(n);
             }
+            if let Some(r) = ca.res {
+                cb.set_res(r);
+            }
+            match (ca.err, &mut cb.err) {
+                (None, _) => {}
+                (Some(e), slot @ None) => *slot = Some(e),
+                (Some((c, ty)), Some((uc, uty))) => {
+                    match union_word(ty, *uty) {
+                        Some(j) => *uty = j,
+                        None => cb.bad = true,
+                    }
+                    work.push((c, *uc));
+                }
+            }
             match (ca.tuple, &mut cb.tuple) {
                 (None, _) => {}
                 (Some(t), slot @ None) => *slot = Some(t),
@@ -538,6 +663,9 @@ struct Lay {
     slots: Vec<Slot>,
     /// An `Option` of the tuple: its last word is `Some`'s flag.
     niche: bool,
+    /// A `Result` of the tuple (its `Ok`): its last word is `Ok`'s flag,
+    /// and its `Err` payload shares the word at `err` with an `Ok` leaf.
+    res: Option<usize>,
     kind: MirAllocKind,
     kinds: common::PackedKinds,
     /// It and every tuple nested in it can be built again from the words
@@ -572,6 +700,13 @@ fn layout(cls: &mut Classes, c: usize, memo: &mut HashMap<usize, Option<Rc<Lay>>
         }
         let t = class.tuple?;
         let niche = class.niche == Some(true);
+        let res = class.res == Some(true);
+        if niche && res {
+            return None;
+        }
+        // An `Err` that is never made, or a `Result` with no `Err` payload
+        // type, has no word to share.
+        let err = if res { Some(class.err?.1) } else { None };
         let inner: Vec<Option<Rc<Lay>>> = t
             .slots
             .iter()
@@ -584,7 +719,7 @@ fn layout(cls: &mut Classes, c: usize, memo: &mut HashMap<usize, Option<Rc<Lay>>
         for nest in [true, false] {
             let mut words = Vec::new();
             let mut slots = Vec::new();
-            let mut rebuild = !niche;
+            let mut rebuild = !niche && !res;
             for (k, &(_, ty, _)) in t.slots.iter().enumerate() {
                 match inner[k].as_ref().filter(|_| nest) {
                     Some(l) => {
@@ -601,8 +736,23 @@ fn layout(cls: &mut Classes, c: usize, memo: &mut HashMap<usize, Option<Rc<Lay>>
             if niche {
                 words.push(MirTy::Bool);
             }
+            // The `Err` payload rides a leaf of the `Ok`'s: one of its own
+            // type if there is one, else the first it can share.
+            let mut res_at = None;
+            if let Some(e) = err {
+                let leaves = slots.iter().filter_map(|s| if let Slot::Leaf(at) = s { Some(*at) } else { None });
+                let at = leaves.clone().find(|&at| words[at] == e).or_else(|| leaves.clone().find(|&at| union_word(words[at], e).is_some()));
+                match at {
+                    Some(at) => {
+                        words[at] = union_word(words[at], e).expect("a shared word");
+                        res_at = Some(at);
+                        words.push(MirTy::Bool);
+                    }
+                    None => continue,
+                }
+            }
             if (2..=MAX_WORDS).contains(&words.len()) {
-                return Some(Rc::new(Lay { words, slots, niche, kind: t.kind, kinds, rebuild }));
+                return Some(Rc::new(Lay { words, slots, niche, res: res_at, kind: t.kind, kinds, rebuild }));
             }
             if !inner.iter().any(Option::is_some) {
                 break;
@@ -668,6 +818,13 @@ impl<'a> Program<'a> {
                     let c = cls.find(id);
                     cls.data[c].set_niche(false);
                 }
+                if node.res {
+                    let c = cls.find(id);
+                    cls.data[c].set_res(true);
+                } else if !matches!(node.src, Src::None) {
+                    let c = cls.find(id);
+                    cls.data[c].set_res(false);
+                }
                 match &node.src {
                     Src::Param(j) => cls.union(k, Key::Param(bi, *j)),
                     Src::Call(c) => {
@@ -695,6 +852,12 @@ impl<'a> Program<'a> {
                         let c = cls.find(id);
                         cls.data[c].bad = true;
                     }
+                    // The payload is one word, whatever it holds.
+                    Src::Err { payload } => {
+                        let e = cls.fresh(Class { fixed: true, ..Class::default() });
+                        let r = cls.fresh(Class { res: Some(true), err: Some((e, f.ty(*payload))), ..Class::default() });
+                        cls.unify(id, r);
+                    }
                     _ => {}
                 }
                 for u in &node.uses {
@@ -713,6 +876,7 @@ impl<'a> Program<'a> {
             if b.wide_ret {
                 let c = cls.of(Key::Ret(bi));
                 cls.data[c].set_niche(f.ret_ty == Some(MirTy::NicheOpt));
+                cls.data[c].set_res(f.ret_ty == Some(MirTy::NicheRes));
             }
         }
         // An item load's node is its parent's item, once the parent's
@@ -814,7 +978,7 @@ impl<'a> Program<'a> {
         let viable = |m: usize| self.viable[ctx][b][m];
         let src = match node.src {
             Src::Alloc { ref items, .. } => lay.slots.iter().zip(items).all(|(s, e)| match s {
-                Slot::Leaf(at) => join_word(lay.words[*at], f.ty(*e)).is_some(),
+                Slot::Leaf(at) => fits(lay.words[*at], f.ty(*e)),
                 Slot::Nested { .. } => body.member.get(e).is_some_and(|&m| viable(m)),
             }),
             Src::Param(j) => ctx == TWIN && self.param_w[b][j],
@@ -822,15 +986,20 @@ impl<'a> Program<'a> {
             Src::Phi(ref args) => args.iter().all(|(_, a)| body.member.get(a).is_some_and(|&m| viable(m))),
             Src::Item { parent, slot } => viable(parent) && self.nested(b, parent, slot),
             Src::None => lay.niche,
-            Src::Opaque => false,
+            Src::Err { payload } => lay.res.is_some_and(|at| union_word(lay.words[at], f.ty(payload)) == Some(lay.words[at])),
+            Src::ErrOf { .. } | Src::Opaque => false,
         };
         src && node.uses.iter().all(|u| match *u {
             Use::Load { dest, slot } => match lay.slots.get(slot) {
-                Some(Slot::Leaf(at)) => join_word(lay.words[*at], f.ty(dest)).is_some(),
+                Some(Slot::Leaf(at)) => fits(lay.words[*at], f.ty(dest)),
                 Some(Slot::Nested { .. }) => body.member.get(&dest).is_some_and(|&m| viable(m)),
                 None => false,
             },
             Use::Test => lay.niche,
+            Use::ErrBit { .. } => lay.res.is_some(),
+            Use::ErrPayload { dest } => lay.res.is_some_and(|at| MirCastKind::Word.allows(lay.words[at], f.ty(dest)) || lay.words[at].word_class() == f.ty(dest).word_class()),
+            // An `Err`'s payload is a word of its own, not taken apart.
+            Use::ErrIn { .. } => false,
             Use::Arg { call, j } => self.switch[ctx][b][call] && body.calls[call].callee.is_some_and(|t| self.param_w[t].get(j) == Some(&true)),
             Use::Ret => ctx == TWIN && self.ret_w[b],
             Use::Phi(p) => viable(p),
@@ -1030,6 +1199,25 @@ impl<'a> Program<'a> {
                     }
                     node_words.insert(n, ws);
                 }
+                // An `Err`: its payload in the word it shares, zeros in the
+                // `Ok`'s others, a `false` flag.
+                Src::Err { payload } => {
+                    let l = lay(n);
+                    let share = l.res.expect("a Result's shared word");
+                    let mut out = Vec::new();
+                    let mut ws = Vec::new();
+                    for (k, &t) in l.words.iter().enumerate() {
+                        if k == share {
+                            ws.push(as_word(&mut f, payload, t, &mut out));
+                        } else {
+                            let z = new_value(&mut f, t);
+                            out.push(MirInst::Const { dest: z, c: zero(t) });
+                            ws.push(z);
+                        }
+                    }
+                    at.entry(node.members[0]).or_default().extend(out);
+                    node_words.insert(n, ws);
+                }
                 _ => {}
             }
         }
@@ -1046,9 +1234,10 @@ impl<'a> Program<'a> {
                     Src::Alloc { items, .. } => {
                         let mut ws = Vec::with_capacity(l.words.len());
                         let mut ready = true;
+                        let mut casts = Vec::new();
                         for (s, e) in l.slots.iter().zip(items) {
                             match s {
-                                Slot::Leaf(_) => ws.push(*e),
+                                Slot::Leaf(k) => ws.push(as_word(&mut f, *e, l.words[*k], &mut casts)),
                                 Slot::Nested { .. } => match node_words.get(&info.member[e]) {
                                     Some(inner) => ws.extend(inner.iter().copied()),
                                     None => ready = false,
@@ -1058,13 +1247,15 @@ impl<'a> Program<'a> {
                         if !ready {
                             continue;
                         }
-                        if l.niche {
-                            // `Some`'s flag: where the tuple was made, or, read
-                            // by nothing but a return, at the end of its block.
+                        at.entry(node.members[0]).or_default().extend(casts);
+                        if l.niche || l.res.is_some() {
+                            // `Some`'s (`Ok`'s) flag: where the tuple was
+                            // made, or, read by nothing but a return, at the
+                            // end of its block.
                             let t = new_value(&mut f, MirTy::Bool);
                             let flag = MirInst::Const { dest: t, c: MirConst::Bool(true) };
                             let ret = info.rets.iter().find(|(_, r)| matches!(r, RetSite::Node(m) if *m == n)).map(|(bi, _)| *bi);
-                            match ret.filter(|_| !node.uses.iter().any(|u| matches!(u, Use::Test))) {
+                            match ret.filter(|_| !node.uses.iter().any(|u| matches!(u, Use::Test | Use::ErrBit { .. }))) {
                                 Some(bi) => tail.entry(bi).or_default().push(flag),
                                 None => at.entry(node.members[0]).or_default().push(flag),
                             }
@@ -1098,7 +1289,34 @@ impl<'a> Program<'a> {
                 match *u {
                     Use::Load { dest, slot } => {
                         if let Slot::Leaf(i) = l.slots[slot] {
-                            subst.insert(dest, node_words[&n][i]);
+                            let w = node_words[&n][i];
+                            let to = f.ty(dest);
+                            if f.ty(w).word_class() == to.word_class() {
+                                subst.insert(dest, w);
+                            } else {
+                                at.entry(dest).or_default().push(MirInst::Cast { dest, kind: MirCastKind::Word, to, src: w });
+                            }
+                        }
+                        gone.insert(dest);
+                    }
+                    // Whether it is an `Err`: its flag's `not`, as the `int`
+                    // the test reads.
+                    Use::ErrBit { dest } => {
+                        let flag = *node_words[&n].last().expect("a Result's flag");
+                        let not = new_value(&mut f, MirTy::Bool);
+                        let to = f.ty(dest);
+                        let c = at.entry(dest).or_default();
+                        c.push(MirInst::Unary { op: MirUnaryOp::Not, dest: not, src: flag });
+                        c.push(MirInst::Cast { dest, kind: MirCastKind::Word, to, src: not });
+                        gone.insert(dest);
+                    }
+                    Use::ErrPayload { dest } => {
+                        let w = node_words[&n][l.res.expect("a Result's shared word")];
+                        let to = f.ty(dest);
+                        if f.ty(w) == to {
+                            subst.insert(dest, w);
+                        } else {
+                            at.entry(dest).or_default().push(MirInst::Cast { dest, kind: MirCastKind::Word, to, src: w });
                         }
                         gone.insert(dest);
                     }
@@ -1455,5 +1673,45 @@ mod tests {
         assert_eq!(wide_call_twins(&mut bodies), 2);
         assert_eq!(params_of(&bodies, "first$words"), 4);
         assert_eq!(allocs(&bodies[1].mir), 0);
+    }
+
+    #[test]
+    fn a_result_argument_goes_as_its_words_and_a_flag() {
+        // first(r) = r.0 + (r & 1) + len(r ^ 1): an `Ok`'s item, its tag
+        // and an `Err`'s payload, called with an `Ok` of a fresh tuple and
+        // with an `Err` of a string.
+        let mut b = MirBuilder::new("first");
+        let r = b.add_param(MirTy::NicheRes).unwrap();
+        let one = b.ins_const(MirConst::I64(1)).unwrap();
+        let bit = b.ins_binop(MirBinOp::BitAnd, r, one).unwrap();
+        let t = b.ins_cast(MirCastKind::Word, MirTy::HeapRef, r).unwrap();
+        let x = b.ins_product_load(t, 0, MirTy::I64).unwrap();
+        let e = b.ins_binop(MirBinOp::Xor, r, one).unwrap();
+        let e = b.ins_cast(MirCastKind::Word, MirTy::HeapRef, e).unwrap();
+        let n = b.ins_array_len(e).unwrap();
+        let s = b.ins_binop(MirBinOp::Add, x, bit).unwrap();
+        let s = b.ins_binop(MirBinOp::Add, s, n).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(s)).unwrap();
+        let first = NativeBody { name: "first".into(), entry: Some(Label(1)), mir: b.finish().unwrap() };
+        let mut m = MirBuilder::new("main");
+        let a = m.add_param(MirTy::I64).unwrap();
+        let text = m.add_param(MirTy::HeapRef).unwrap();
+        let tup = m.ins_alloc_kinds(MirAllocKind::TUPLE, vec![a, a, a], scalar3()).unwrap();
+        let ok = m.ins_cast(MirCastKind::Word, MirTy::NicheRes, tup).unwrap();
+        let res_abi = CallAbi { params: vec![MirTy::NicheRes], ret: MirTy::I64, ret_hi: None };
+        let (r1, _) = m.ins_call(Label(1), vec![ok], &res_abi).unwrap();
+        let one = m.ins_const(MirConst::I64(1)).unwrap();
+        let err = m.ins_binop(MirBinOp::BitOr, text, one).unwrap();
+        let (r2, _) = m.ins_call(Label(1), vec![err], &res_abi).unwrap();
+        let r = m.ins_binop(MirBinOp::Add, r1, r2).unwrap();
+        let mut bodies = vec![first, main_of(m, r)];
+        assert_eq!(wide_call_twins(&mut bodies), 2);
+        // Three `Ok` words, one shared with the `Err` payload, and a flag.
+        assert_eq!(params_of(&bodies, "first$words"), 4);
+        assert_eq!(allocs(&bodies[1].mir), 0);
+        let twin = bodies.iter().find(|b| b.name == "first$words").unwrap();
+        twin.mir.verify().unwrap();
+        bodies[1].mir.verify().unwrap();
     }
 }
