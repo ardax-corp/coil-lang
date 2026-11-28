@@ -704,7 +704,14 @@ tuple's words in place; an `Option` of a tuple adds a `bool` after its
 tuple's words, `true` for `Some`. So `(int, int, int)`, `(string, int,
 int)`, `((int, int), int)`, `(((int, int), int), int)` and
 `Option<((int, int), string)>` are three, three, three, four and four
-words. The only bound is the budget of four words (`MAX_RET_MORE` + 2);
+words. A `Result` of a tuple whose `Err` is a heap word (a niche word:
+the tuple object for `Ok`, the payload with bit 0 set for `Err`) is the
+`Ok` tuple's words with the `Err` payload in one of its leaf words (one
+of the payload's own type if there is one, else the first it can share:
+a number beside a heap word is a `MaybeObj` word), then a `bool`, `true`
+for `Ok`; the words an arm does not use are `0`. So
+`Result<(int, int, int), string>` is four words and `Result<(Handle,
+int), Handle>` three. The only bound is the budget of four words (`MAX_RET_MORE` + 2);
 a nest whose leaves do not fit keeps its inner tuples as one heap word
 each (`((int, int, int), (int, int))` goes as two words, the two inner
 tuples), and anything wider than four items stays an object. Shapes are
@@ -737,7 +744,12 @@ An `Option` parameter goes as words when the caller knows its words (a
 `Some` of a fresh tuple, a `None`, a call's or a parameter's words); an
 `Option`, at any depth, is never rebuilt from words (that needs a
 branch), so an `Option` result goes as words only to callers that
-dissolve it. A switched tail call stays a tail call (the twin joins
+dissolve it. A `Result` is the same: an `Ok` of a fresh tuple, an `Err`
+(`payload | 1`), a call's or a parameter's words go in; its reads are an
+`Ok` item load, the tag test (`r & 1`, the flag's `not`) and the `Err`
+payload (`r ^ 1`, the shared word). A `Result` whose `Err` is a number
+is a boxed enum (`alloc.enum`, `jumpifmatch`), not a niche word, and
+stays an object. A switched tail call stays a tail call (the twin joins
 `tail_targets`).
 
 Mono clones, method clones, raw trait instance methods and instance
