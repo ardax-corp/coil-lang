@@ -53,7 +53,7 @@ pub use destprop::destprop;
 pub use from_hir::{lower_body as lower_from_hir, opaque_heap as opaque_heap_ty, scalar as scalar_mir_ty, word as word_mir_ty, HirBoundCall, HirCallSite, HirDictOp, HirFfi, HirFfiOperand, HirFnValue, HirIterLoop, HirPolyCall, HirIterNext, HirLaneCall, HirLaneElem, HirRetItem, HirRetItems, HirOpCall, HirPacks, HirSite, HirParBound, HirParFork, HirParIndex, HirParLoop, HirShow, LowerCx, PairVariants, ScalarLit, HirFieldFact, HirFieldWord, HirHost, HirLaneUses, HirNew, LocalFrame, LocalWords};
 pub use func::MirFunc;
 pub use func::{MirBlock, is_tail_call_inst};
-pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, EXTERN_CALL_MAX_WORDS, MAX_RET_MORE, MirCStruct, MirExternSig, MirFfiOp, MirGcKind, MirInst, MirLaneShape, ValueId};
+pub use inst::{MirAllocKind, MirBinOp, MirCastKind, MirConst, EXTERN_CALL_MAX_WORDS, MAX_RET_MORE, MAX_CALL_RET_MORE, MirCStruct, MirExternSig, MirFfiOp, MirGcKind, MirInst, MirLaneShape, ValueId};
 pub use inst::{LaneExpr, LaneVal, MirCmpOp, VecExpr, VecLoopKind};
 pub use inst::{BlockId, MirUnaryOp, Terminator};
 #[cfg(test)]

@@ -1,0 +1,129 @@
+// A tuple wider than four words crosses a direct call as its words too:
+// the arguments past the registers spill to the stack and the results
+// come back in a return area the caller gives, at any nesting depth, with
+// no tuple object built.
+use tests::assert;
+use gc::collect;
+
+static let drops: int = 0;
+
+class Handle {
+    pub fd: int,
+}
+
+impl Handle {
+    fn drop() {
+        drops = drops + 1;
+    }
+}
+
+#[inline(never)]
+fn spread(int a) -> (int, int, int, int, int, int, int, int) {
+    return (a, a + 1, a + 2, a + 3, a + 4, a + 5, a + 6, a + 7);
+}
+
+#[inline(never)]
+fn weigh((int, int, int, int, int, int, int, int) t) -> int {
+    return t[0] + t[1] * 2 + t[2] * 3 + t[3] * 4 + t[4] * 5 + t[5] * 6 + t[6] * 7 + t[7] * 8;
+}
+
+#[inline(never)]
+fn split(int a) -> ((int, int, int), (int, int, int)) {
+    return ((a, a * 2, a * 3), (a * 4, a * 5, a * 6));
+}
+
+#[inline(never)]
+fn sum6(((int, int, int), (int, int, int)) t) -> int {
+    return t[0][0] + t[0][1] + t[0][2] + t[1][0] + t[1][1] + t[1][2];
+}
+
+#[inline(never)]
+fn find(int a) -> Option<(int, int, int, int, int, int)> {
+    if a % 3 == 0 {
+        return None;
+    }
+    return Some((a, a, a, a, a, a + 1));
+}
+
+#[inline(never)]
+fn total(Option<(int, int, int, int, int, int)> o) -> int {
+    return match o {
+        Some(t) => t[0] + t[1] + t[2] + t[3] + t[4] + t[5],
+        None => -1,
+    };
+}
+
+#[inline(never)]
+fn handles(int a) -> (Handle, int, int, Handle, int, string) {
+    return (new Handle(a), a, a + 1, new Handle(a * 10), 7, "x");
+}
+
+#[inline(never)]
+fn fds((Handle, int, int, Handle, int, string) t) -> int {
+    return t[0].fd + t[1] + t[2] + t[3].fd + t[4] + t[5].len();
+}
+
+#[inline(never)]
+fn step((int, int, int, int, int, int) t) -> (int, int, int, int, int, int) {
+    return (t[1], t[2], t[3], t[4], t[5], t[0] + t[5]);
+}
+
+test("an eight-word tuple goes to a call and comes back as words") {
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += weigh(spread(i));
+        i += 1;
+    }
+    let expect = 0;
+    let j = 0;
+    while j < 10 {
+        expect += 36 * j + 168;
+        j += 1;
+    }
+    assert!(s == expect);
+}
+
+test("a nested tuple of six words, any depth") {
+    let s = 0;
+    let i = 0;
+    while i < 5 {
+        s += sum6(split(i));
+        s += sum6(((i, 1, 1), (1, 1, 1)));
+        i += 1;
+    }
+    assert!(s == 21 * 10 + 10 + 25);
+}
+
+test("an Option of six words") {
+    let s = 0;
+    let i = 0;
+    while i < 6 {
+        s += total(find(i));
+        i += 1;
+    }
+    assert!(s == -1 + 7 + 13 - 1 + 25 + 31);
+}
+
+test("heap words past the registers are counted") {
+    drops = 0;
+    let s = 0;
+    let i = 0;
+    while i < 5 {
+        s += fds(handles(i));
+        i += 1;
+    }
+    collect();
+    assert!(drops == 10);
+    assert!(s == 13 * 10 + 5 * 9);
+}
+
+test("a six-word tuple a loop carries through a call") {
+    let t = (1, 0, 0, 0, 0, 0);
+    let i = 0;
+    while i < 12 {
+        t = step(t);
+        i += 1;
+    }
+    assert!(t[0] + t[1] + t[2] + t[3] + t[4] + t[5] == 27);
+}

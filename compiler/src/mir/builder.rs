@@ -609,7 +609,7 @@ impl MirBuilder {
         if !more.is_empty() && abi.ret_hi.is_none() {
             return Err(MirError::msg("call of more than two words without a second"));
         }
-        if more.len() > super::MAX_RET_MORE {
+        if more.len() > super::MAX_CALL_RET_MORE {
             return Err(MirError::msg(format!("call returns {} words", 2 + more.len())));
         }
         if let Some(ty) = more.iter().find(|t| !t.is_word_lane()) {
@@ -1470,7 +1470,7 @@ impl MirBuilder {
     /// plus words 3.. (`Terminator::Return::more`, typed on
     /// `MirFunc::ret_more_tys`).
     pub fn ret_words(&mut self, lo: ValueId, hi: ValueId, more: &[ValueId]) -> Result<(), MirError> {
-        if more.len() > super::MAX_RET_MORE {
+        if more.len() > super::MAX_CALL_RET_MORE {
             return Err(MirError::msg(format!("return of {} words", 2 + more.len())));
         }
         let lo = self.resolve(lo);

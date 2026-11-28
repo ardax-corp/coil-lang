@@ -1,0 +1,55 @@
+// CPU: tuples wider than four words a direct call takes and returns: an
+// eight-word tuple, a nested six-word one and an Option of six words. Past
+// the registers they go on the stack (arguments) and in a return area
+// (results), never as a tuple object.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn spread(int a) -> (int, int, int, int, int, int, int, int) {
+    return (a & 7, a & 15, a & 31, a & 63, 1, 2, 3, a & 3);
+}
+
+#[inline(never)]
+fn weigh((int, int, int, int, int, int, int, int) t) -> int {
+    return t[0] + t[1] * 2 + t[2] + t[3] + t[4] + t[5] + t[6] + t[7];
+}
+
+#[inline(never)]
+fn split(int a) -> ((int, int, int), (int, int, int)) {
+    return ((a & 7, a & 3, 1), (2, a & 15, 3));
+}
+
+#[inline(never)]
+fn sum6(((int, int, int), (int, int, int)) t) -> int {
+    return t[0][0] + t[0][1] + t[0][2] + t[1][0] + t[1][1] + t[1][2];
+}
+
+#[inline(never)]
+fn find(int a) -> Option<(int, int, int, int, int, int)> {
+    if a % 5 == 0 {
+        return None;
+    }
+    return Some((a & 7, 1, 2, 3, 4, a & 1));
+}
+
+#[inline(never)]
+fn total(Option<(int, int, int, int, int, int)> o) -> int {
+    return match o {
+        Some(t) => t[0] + t[1] + t[2] + t[3] + t[4] + t[5],
+        None => 1,
+    };
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 10000000 {
+        s += weigh(spread(i));
+        s += sum6(split(i));
+        s += total(find(i));
+        s = s & 0xffffff;
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}
