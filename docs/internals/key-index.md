@@ -65,7 +65,7 @@ and each clone keeps only one side. Floats, tuples, enums and classes stay on mo
 
 ## Map tables
 
-`key_index::map_*` (HostInvoke 217–226, archive 8.16) is a second layout of the
+`key_index::map_*` (HostInvoke 217–226, archive 8.16; 227–228, archive 8.19, see "Map objects") is a second layout of the
 same index, for collections that look keys up on every operation
 (`collections::index::KeyIndex`, and through it `HashMap` / `HashSet`). One
 plain `Vec<int>` per index holds everything the natives keep; the caller still
@@ -118,6 +118,42 @@ Native code runs `map_find`, `map_upsert` (when no growth is due and the
 table's storage has room for the slot's word), `map_live` and `map_len` in
 place, with no host call. The MIR interpreter, and so wasm and comptime,
 calls the natives.
+
+## Map objects
+
+`key_index::map_put(m, h, k, v, mode, vmode, replace)` (HostInvoke 227,
+archive 8.19) inserts through the map object itself: `m` is an instance
+whose fields 0, 1 and 2 are the table, the keys `Vec` and the values `Vec`
+(`collections::map::HashMap` is one). It finds `k` (hash `h`, key mode
+`mode` from `eq_mode`). When `k` is there it returns its slot `s`, and
+first replaces the value when `replace` is `1`. When `k` is absent it
+registers a slot, pushes `k` and `v`, and returns `-1 - s`. `vmode` is what
+`key_index::word_mode(v)` gave (228): `1` a number word, `2` one object
+word, `0` anything else (a pair, a niche, a wide or packed value, a type
+parameter). The compiler folds `word_mode` like `eq_mode`; an unfolded call
+answers `0`. Callers use `map_put` only when both modes are above `0`.
+
+`map_put` makes each field it writes unique itself, so the compiler emits
+no copy-on-write for the call: the caller's `self` is passed as a place.
+It is a listed host in `hir/escape.rs` with per-argument facts: the map
+escapes (it is never stack-allocated: the host must find it in the heap)
+and is not kept; `k` and `v` are kept. It writes the first argument only
+(`writes_first_arg_only`), and counts the slots it writes itself, so the
+dispatcher does not wrap it in `rc_before_all` / `rc_after_all`
+(`host_writes_words` in `machine/src/native.rs`).
+
+A malformed object (not an instance with three fields, fields that alias,
+not arrays of one-word elements, a bad table, or keys and values not one
+per slot for an add) gets `-1` and nothing changes. A mode outside `1` and
+`2` is malformed too.
+
+Native code runs `map_put` in place (see [native.md](native.md), "Map table
+ops"): it reads the three fields, takes the host call when any of them is
+shared, probes, and on a miss appends the key and value when no growth is
+due and both `Vec`s have room. Growth (the table's rebuild and the two
+`Vec`s' reallocation) stays in the runtime: it is amortized, about 38
+instructions per new key at a million keys, and would be the same work in
+generated code.
 
 ## Measured (callgrind, 2026-11-02)
 

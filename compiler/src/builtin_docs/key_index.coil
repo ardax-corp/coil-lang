@@ -70,6 +70,19 @@ fn map_find<K>(Vec<int> ix, Vec<K> keys, int h, K k, int mode) -> int {}
 /// returned, and the caller pushes `k` (and its value) next.
 fn map_upsert<K>(Vec<int> ix, Vec<K> keys, int h, K k, int mode) -> int {}
 
+/// Finds or adds `k` (hash `h`) in the map object `m`, an instance whose
+/// first three fields are its table, keys and values. Returns the slot of
+/// a key that is there, after replacing its value with `v` when `replace`
+/// is `1`, or `-1 - s` for a key it added at slot `s` with value `v`.
+/// `mode` is what `eq_mode(k)` gave and `vmode` what `word_mode(v)` gave;
+/// both must be above `0`. A malformed `m` gets `-1` and is not changed.
+fn map_put<M, K, V>(M m, int h, K k, V v, int mode, int vmode, int replace) -> int {}
+
+/// How `map_put` may store values of `v`'s type: `1` a number word, `2`
+/// one object word, `0` otherwise. The compiler turns the call into that
+/// constant wherever the type is known, as with `eq_mode`.
+fn word_mode<V>(V v) -> int {}
+
 /// The next live slot whose hash is `h`, in probe order after slot `after`
 /// (`-1` starts at the first), or `-1`. The caller checks each candidate's
 /// key with `==`.

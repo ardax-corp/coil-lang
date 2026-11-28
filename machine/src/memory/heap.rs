@@ -3059,6 +3059,11 @@ pub struct ObjString {
 }
 
 const HASH_SET: u64 = 1 << 32;
+/// FNV-1a's offset basis and prime, as [`ObjString::hash`] uses them; native
+/// code hashes a string not hashed yet with the same two.
+pub const FNV_BASIS: u32 = 2_166_136_261;
+/// See [`FNV_BASIS`].
+pub const FNV_PRIME: u32 = 16_777_619;
 /// The string is (or was) a key of the heap's intern table
 /// ([`Heap::intern`], [`Heap::intern_ref`]): its release removes it there.
 /// Set only after [`HASH_SET`], so [`ObjString::hash_code`]'s first store
@@ -3117,10 +3122,10 @@ impl ObjString {
 
     #[must_use]
     pub fn hash(s: &str) -> u32 {
-        let mut hash = 2_166_136_261;
+        let mut hash = FNV_BASIS;
         for b in s.bytes() {
             hash = hash.bitxor(u32::from(b));
-            hash = hash.wrapping_mul(16_777_619);
+            hash = hash.wrapping_mul(FNV_PRIME);
         }
         hash
     }

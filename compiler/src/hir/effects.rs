@@ -3424,6 +3424,7 @@ impl Cx<'_> {
         // a host native that writes the heap may write any argument.
         s.mutates = match self.trait_mutates(owner, method) {
             Some(m) => m,
+            None if s.flags.contains(EffectFlags::HEAP_MUT) && escape::writes_first_arg_only(name) => 1,
             None if s.flags.contains(EffectFlags::HEAP_MUT) => u64::MAX,
             None => 0,
         };

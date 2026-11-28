@@ -386,7 +386,128 @@ pub fn host_map_clear(heap: &mut Heap, args: &[Value]) -> Value {
     Value::from(0i64)
 }
 
-/// HostInvoke wiring for `key_index::map_*` (archive 8.16), after
+/// The table, keys and values of the map object `m`: a class instance
+/// whose fields 0, 1 and 2 hold them.
+fn map_fields(heap: &Heap, m: Value) -> Option<[Value; 3]> {
+    let Some(Object::Instance(gc)) = heap.find_object_by_addr(m.bits()) else {
+        return None;
+    };
+    let inst = gc.as_ref();
+    Some([inst.slot(0)?, inst.slot(1)?, inst.slot(2)?])
+}
+
+/// Field `i` of the map object `m` made unique for a write, as `Cow` with a
+/// field makes it (`coil_native_cow_field`): a shared one is copied and
+/// the copy written back. Returns the field's array as it now is.
+fn unique_field(heap: &mut Heap, m: Value, i: usize) -> Option<Gc<ObjArray>> {
+    let Some(Object::Instance(mut gc)) = heap.find_object_by_addr(m.bits()) else {
+        return None;
+    };
+    let v = gc.as_ref().slot(i)?;
+    let v = match heap.cow_unique(v) {
+        Some(copy) => {
+            let before = heap.rc_before(m);
+            gc.as_mut().set_slot(i, copy);
+            heap.rc_after(before);
+            copy
+        }
+        None => v,
+    };
+    array(heap, v)
+}
+
+/// An array of one word per element (not a lane array).
+fn one_word(gc: &Gc<ObjArray>) -> bool {
+    gc.as_ref().lanes() == 1
+}
+
+/// `v` appended to `gc`, which gains it as an owner.
+fn push_counted(heap: &mut Heap, mut gc: Gc<ObjArray>, v: Value) {
+    gc.as_mut().push(v);
+    if heap.rc_counting() {
+        heap.rc_inc_word(v, gc.as_ref().elem_kind());
+    }
+    heap.account_array(gc.as_mut());
+}
+
+/// `key_index::map_put(m, h, k, v, mode, vmode, replace) -> int`: finds `k`
+/// (hash `h`, compared by `mode`, `1` or `2` as `eq_mode` gives them) in the
+/// map object `m` and returns its slot `s`, storing `v` as its value first
+/// when `replace`; or, when `k` is absent, adds it with value `v` in a new
+/// slot `s` (the number of slots so far) and returns `-1 - s`. Each field
+/// it writes is made unique first. `vmode` is `map_word_mode` of the value
+/// type (`1` or `2`): native code reads it; here each store counts its
+/// word by the array's element kind. A malformed map (or another `mode`)
+/// is left as it is and gives `-1`.
+pub fn host_map_put(heap: &mut Heap, args: &[Value]) -> Value {
+    let malformed = Value::from(-1i64);
+    let m = arg(args, 0);
+    let (h, k, v, mode, replace) = (arg(args, 1).as_int(), arg(args, 2), arg(args, 3), arg(args, 4).as_int(), arg(args, 6).as_int() != 0);
+    if !matches!(mode, common::KEY_EQ_WORD | common::KEY_EQ_STRING) {
+        return malformed;
+    }
+    let Some([t, kv, vv]) = map_fields(heap, m) else {
+        return malformed;
+    };
+    if t.bits() == kv.bits() || t.bits() == vv.bits() || kv.bits() == vv.bits() {
+        return malformed;
+    }
+    let (Some(tg), Some(kg), Some(vg)) = (array(heap, t), array(heap, kv), array(heap, vv)) else {
+        return malformed;
+    };
+    if !one_word(&kg) || !one_word(&vg) {
+        return malformed;
+    }
+    let (found, slots) = match (tg.as_ref().words(), kg.as_ref().words()) {
+        (Some(ix), Some(keys)) => match table_cap(ix) {
+            Some(cap) => (find(heap, ix, cap, keys, h, k, mode), ix.len() - (HEADER + 2 * cap)),
+            None => return malformed,
+        },
+        _ => return malformed,
+    };
+    if found >= 0 {
+        if replace {
+            let Some(mut vg) = unique_field(heap, m, 2) else {
+                return malformed;
+            };
+            let Some(old) = vg.as_ref().read_indexed(found, false) else {
+                return malformed;
+            };
+            vg.as_mut().store_indexed(found, v, false);
+            if heap.rc_counting() {
+                let kind = vg.as_ref().elem_kind();
+                heap.rc_inc_word(v, kind);
+                heap.rc_dec_word(old, kind);
+            }
+        }
+        return Value::from(found);
+    }
+    // A new slot's key and value go at its number: both `Vec`s must hold
+    // one element per slot, as the inline path checks.
+    if kg.as_ref().len() != slots || vg.as_ref().len() != slots {
+        return malformed;
+    }
+    let (Some(mut tg), Some(kg), Some(vg)) = (unique_field(heap, m, 0), unique_field(heap, m, 1), unique_field(heap, m, 2)) else {
+        return malformed;
+    };
+    let Some((ix, cap)) = table_mut(&tg) else {
+        return malformed;
+    };
+    let s = add(ix, cap, h);
+    heap.account_array(tg.as_mut());
+    push_counted(heap, kg, k);
+    push_counted(heap, vg, v);
+    Value::from(-1 - s)
+}
+
+/// `key_index::word_mode(v) -> int`: the compiler folds every call it
+/// plans (`common::WORD_MODE_*`); one it could not fold (a type parameter)
+/// answers [`common::WORD_MODE_OTHER`], so the caller takes the general path.
+pub fn host_map_word_mode(_heap: &mut Heap, _args: &[Value]) -> Value {
+    Value::from(common::WORD_MODE_OTHER)
+}
+
+/// HostInvoke wiring for `key_index::map_*` (archive 8.16 and 8.19), after
 /// `thread_par_room`.
 pub const MAP_TABLE_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     (common::MAP_TABLE_NATIVE, 1, host_map_table),
@@ -399,6 +520,8 @@ pub const MAP_TABLE_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     (common::MAP_REMOVE_NATIVE, 2, host_map_remove),
     (common::MAP_COMPACT_NATIVE, 1, host_map_compact),
     (common::MAP_CLEAR_NATIVE, 1, host_map_clear),
+    (common::MAP_PUT_NATIVE, 7, host_map_put),
+    (common::MAP_WORD_MODE_NATIVE, 1, host_map_word_mode),
 ];
 
 #[cfg(test)]

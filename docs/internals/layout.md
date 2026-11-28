@@ -398,11 +398,11 @@ budget too: a free function's (`monomorphize::flat_split`, beside
 clones (`nested_head` in `plan_instance_dict_steps`, and a slot whose
 method's own signature reaches one, `HashMapIter::next -> Option<Pair<K,
 V>>`). A trait instance's method with an `Option` / `Result` in its
-signature (a boundary signature) is cloned there too, which no other
-instance does: its dictionary slot holds the clone's `$dict` adapter,
+signature (a boundary signature) is cloned there, which elsewhere only a
+`for` loop's `next` is (#2909): its dictionary slot holds the clone's `$dict` adapter,
 which converts the result from the clone's own layout to the trait's
 (`instance_clone_own_sig`); a ground call, a direct trait call and
-for-in (`hir_flat_next`) call the clone where the result is wanted in its
+for-in (`hir_next_clone`) call the clone where the result is wanted in its
 own layout, and the adapter where it is wanted in the open type's (a
 mono clone's bound `next`). A call that would
 still reach a shared body there (an instance another module cannot

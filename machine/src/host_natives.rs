@@ -1345,7 +1345,9 @@ mod tests {
         assert_eq!(names.get(215).map(String::as_str), Some(common::VEC_STAMP_NATIVE));
         assert_eq!(names.get(216).map(String::as_str), Some(common::THREAD_PAR_ROOM_NATIVE));
         assert_eq!(names.get(217).map(String::as_str), Some(common::MAP_TABLE_NATIVE));
-        assert_eq!(names.last().map(String::as_str), Some(common::MAP_CLEAR_NATIVE));
+        assert_eq!(names.get(226).map(String::as_str), Some(common::MAP_CLEAR_NATIVE));
+        assert_eq!(names.get(227).map(String::as_str), Some(common::MAP_PUT_NATIVE));
+        assert_eq!(names.last().map(String::as_str), Some(common::MAP_WORD_MODE_NATIVE));
         assert_eq!(attach, 119);
     }
 
@@ -1778,7 +1780,15 @@ mod tests {
             registrations.get(end + 90).map(|(n, _)| n.as_str()),
             Some(common::MAP_CLEAR_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 91);
+        assert_eq!(
+            registrations.get(end + 91).map(|(n, _)| n.as_str()),
+            Some(common::MAP_PUT_NATIVE)
+        );
+        assert_eq!(
+            registrations.get(end + 92).map(|(n, _)| n.as_str()),
+            Some(common::MAP_WORD_MODE_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 93);
     }
 
     #[test]

@@ -2362,6 +2362,10 @@ enum MapOp {
     Find { string: bool },
     /// `map_upsert`, likewise.
     Upsert { string: bool },
+    /// `map_put`, keys likewise; `object` when the value word may name an
+    /// object (counted as it is stored), `replace` when a found key's value
+    /// is overwritten.
+    Put { string: bool, object: bool, replace: bool },
 }
 
 /// The constant `v` holds, when a `Const` defines it.
@@ -2388,6 +2392,20 @@ fn map_op(f: &MirFunc, native_id: u16, args: &[ValueId]) -> Option<MapOp> {
         (common::MAP_LIVE_ID, 2) => Some(MapOp::Live),
         (common::MAP_FIND_ID, 5) => mode(4).map(|string| MapOp::Find { string }),
         (common::MAP_UPSERT_ID, 5) if machine::native::array_slots().inline_push => mode(4).map(|string| MapOp::Upsert { string }),
+        (common::MAP_PUT_ID, 7) if machine::native::array_slots().inline_push => {
+            let string = mode(4)?;
+            let object = match const_i64(f, args[5])? {
+                common::WORD_MODE_NUMBER => false,
+                common::WORD_MODE_OBJECT => true,
+                _ => return None,
+            };
+            let replace = match const_i64(f, args[6])? {
+                0 => false,
+                1 => true,
+                _ => return None,
+            };
+            Some(MapOp::Put { string, object, replace })
+        }
         _ => None,
     }
 }
@@ -7950,6 +7968,24 @@ impl<'a> Lower<'a> {
         [ptr, len, cap]
     }
 
+    /// [`Self::array_words`] of a word its type says is an array (a `Vec`
+    /// field of a map object): only the storage's kind is tested. One a
+    /// field shares with another field is marked shared, which the caller
+    /// tests next.
+    fn vec_words(&mut self, a: cranelift_codegen::ir::Value, slow: Block) -> [cranelift_codegen::ir::Value; 3] {
+        let l = machine::native::array_slots();
+        let t = MemFlagsData::trusted();
+        let words_b = self.b.create_block();
+        let tag = self.b.ins().uload8(types::I64, t, a, l.data_at as i32);
+        let is = self.b.ins().icmp_imm_s(IntCC::Equal, tag, i64::from(l.words_tag));
+        self.b.ins().brif(is, words_b, &[], slow, &[]);
+        self.b.switch_to_block(words_b);
+        let ptr = self.b.ins().load(types::I64, t, a, l.ptr_at as i32);
+        let len = self.b.ins().load(types::I64, t, a, l.len_at as i32);
+        let cap = self.b.ins().load(types::I64, t, a, l.cap_at as i32);
+        [ptr, len, cap]
+    }
+
     /// A well-formed map table `ix` (`machine::map_table::table_cap`):
     /// `(pointer, length, capacity, mask)` of its words in the current
     /// block; a malformed one, or anything but a word array, goes to `slow`.
@@ -8015,9 +8051,44 @@ impl<'a> Lower<'a> {
                 self.b.switch_to_block(str_b);
                 let w = self.b.ins().load(types::I64, t, s, sl.hash_at as i32);
                 let set = self.b.ins().band_imm_u(w, sl.hash_set as i64);
-                self.b.ins().brif(set, have, &[], slow, &[]);
+                let compute = self.b.create_block();
+                self.b.ins().brif(set, have, &[], compute, &[]);
                 self.b.switch_to_block(have);
                 let h = self.b.ins().band_imm_u(w, 0xFFFF_FFFF);
+                self.b.ins().jump(join, &[h.into()]);
+                // Not cached yet (a string just built or sliced): FNV-1a
+                // over its bytes here, as `ObjString::hash`, then cache it
+                // as `ObjString::hash_code` does (`HASH_SET | h`; the
+                // interned bit is only ever set after `HASH_SET`). The
+                // bytes come from the leaf view helper, no host call.
+                self.b.switch_to_block(compute);
+                let out = self.b.ins().stack_addr(types::I64, self.view_slot, 0);
+                self.b.ins().call(self.str_view, &[s, out]);
+                let p = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 0);
+                let n = self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 8);
+                let (head, body, done) = (self.b.create_block(), self.b.create_block(), self.b.create_block());
+                self.b.append_block_param(head, types::I64);
+                self.b.append_block_param(head, types::I32);
+                self.b.append_block_param(done, types::I32);
+                let zero = self.b.ins().iconst(types::I64, 0);
+                let basis = self.b.ins().iconst(types::I32, i64::from(machine::native::FNV_BASIS as i32));
+                self.b.ins().jump(head, &[zero.into(), basis.into()]);
+                self.b.switch_to_block(head);
+                let (i, acc) = (self.b.block_params(head)[0], self.b.block_params(head)[1]);
+                let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, n);
+                self.b.ins().brif(more, body, &[], done, &[acc.into()]);
+                self.b.switch_to_block(body);
+                let at = self.b.ins().iadd(p, i);
+                let byte = self.b.ins().uload8(types::I32, t, at, 0);
+                let x = self.b.ins().bxor(acc, byte);
+                let x = self.b.ins().imul_imm_s(x, i64::from(machine::native::FNV_PRIME as i32));
+                let i1 = self.b.ins().iadd_imm_s(i, 1);
+                self.b.ins().jump(head, &[i1.into(), x.into()]);
+                self.b.switch_to_block(done);
+                let h32 = self.b.block_params(done)[0];
+                let h = self.b.ins().uextend(types::I64, h32);
+                let cached = self.b.ins().bor_imm_u(h, sl.hash_set as i64);
+                self.b.ins().store(t, cached, s, sl.hash_at as i32);
                 self.b.ins().jump(join, &[h.into()]);
             }
             MapOp::Len => {
@@ -8051,14 +8122,49 @@ impl<'a> Lower<'a> {
                 let live = self.b.ins().uextend(types::I64, live);
                 self.b.ins().jump(join, &[live.into()]);
             }
-            MapOp::Find { string } | MapOp::Upsert { string } => {
-                let upsert = matches!(op, MapOp::Upsert { .. });
-                let ix = arg(self, 0);
-                let keys = arg(self, 1);
-                let h = arg(self, 2);
-                let k = arg(self, 3);
+            MapOp::Find { string } | MapOp::Upsert { string } | MapOp::Put { string, .. } => {
+                let upsert = !matches!(op, MapOp::Find { .. });
+                let l = machine::native::array_slots();
+                // `map_put`: the map object's three fields, each a word
+                // array no other place shares (as `Cow`'s test reads the
+                // shared mark: a field holding another field's array is
+                // marked so too); else the native, which makes them unique.
+                let (ix, keys, h, k, put) = if let MapOp::Put { object, replace, .. } = op {
+                    let m = arg(self, 0);
+                    let (fast, other, (sp, _)) = self.product_slot_view(m, 2, true);
+                    self.b.switch_to_block(other);
+                    self.b.ins().jump(slow, &[]);
+                    self.b.switch_to_block(fast);
+                    let ix = self.b.ins().load(types::I64, t, sp, 0);
+                    let keys = self.b.ins().load(types::I64, t, sp, 8);
+                    let vals = self.b.ins().load(types::I64, t, sp, 16);
+                    (ix, keys, arg(self, 1), arg(self, 2), Some((vals, arg(self, 3), object, replace)))
+                } else {
+                    (arg(self, 0), arg(self, 1), arg(self, 2), arg(self, 3), None)
+                };
                 let [p, len, room, mask] = self.map_table_words(ix, slow);
-                let [kp, klen, _] = self.array_words(keys, slow);
+                // A map object's fields are `Vec`s by their types: only
+                // their storage is tested.
+                let [kp, klen, kcap] = if put.is_some() { self.vec_words(keys, slow) } else { self.array_words(keys, slow) };
+                let put = match put {
+                    Some((vals, v, object, replace)) => {
+                        let [vp, vlen, vcap] = self.vec_words(vals, slow);
+                        let mut shared = None;
+                        for a in [ix, keys, vals] {
+                            let bits = self.b.ins().uload8(types::I64, t, a, machine::HEADER_FLAGS_OFFSET);
+                            let bit = self.b.ins().band_imm_u(bits, i64::from(machine::FLAG_SHARED));
+                            shared = Some(match shared {
+                                Some(s) => self.b.ins().bor(s, bit),
+                                None => bit,
+                            });
+                        }
+                        let own = self.b.create_block();
+                        self.b.ins().brif(shared.expect("three fields"), slow, &[], own, &[]);
+                        self.b.switch_to_block(own);
+                        Some((vals, v, object, replace, vp, vlen, vcap))
+                    }
+                    None => None,
+                };
                 let start = self.map_home(h, mask);
                 // The probe: `(cell, cells seen, first tombstone or -1)`.
                 let (head, body, cand, next, empty) = (self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block(), self.b.create_block());
@@ -8115,6 +8221,22 @@ impl<'a> Lower<'a> {
                 }
                 self.b.switch_to_block(hit);
                 let found = self.b.block_params(hit)[0];
+                if let Some((_, v, object, true, vp, vlen, _)) = put {
+                    // A found key's value replaced in place, as `StoreIndex`
+                    // stores it: the new word gains an owner, the old loses one.
+                    let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, found, vlen);
+                    let store = self.b.create_block();
+                    self.b.ins().brif(inb, store, &[], slow, &[]);
+                    self.b.switch_to_block(store);
+                    let off = self.b.ins().ishl_imm_u(found, 3);
+                    let at = self.b.ins().iadd(vp, off);
+                    let old = self.b.ins().load(types::I64, t, at, 0);
+                    self.b.ins().store(t, v, at, 0);
+                    if object {
+                        self.emit_rc(v, false);
+                        self.emit_rc(old, true);
+                    }
+                }
                 self.b.ins().jump(join, &[found.into()]);
                 self.b.switch_to_block(next);
                 let [ni, nseen, ntomb] = [0, 1, 2].map(|n| self.b.block_params(next)[n]);
@@ -8139,6 +8261,24 @@ impl<'a> Lower<'a> {
                     let no_grow = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, twice, cells);
                     let has_room = self.b.ins().icmp(IntCC::UnsignedLessThan, len, room);
                     let ok = self.b.ins().band(no_grow, has_room);
+                    // `map_put` appends the key and the value too: both
+                    // `Vec`s with room, and as long as the table's slots.
+                    let ok = match put {
+                        Some((_, _, _, _, _, vlen, vcap)) => {
+                            let tail = self.b.ins().ishl_imm_u(cells, 1);
+                            let tail = self.b.ins().iadd_imm_s(tail, machine::map_table::HEADER as i64);
+                            let n = self.b.ins().isub(len, tail);
+                            let kroom = self.b.ins().icmp(IntCC::UnsignedLessThan, klen, kcap);
+                            let vroom = self.b.ins().icmp(IntCC::UnsignedLessThan, vlen, vcap);
+                            let ksame = self.b.ins().icmp(IntCC::Equal, klen, n);
+                            let vsame = self.b.ins().icmp(IntCC::Equal, vlen, n);
+                            let ok = self.b.ins().band(ok, kroom);
+                            let ok = self.b.ins().band(ok, vroom);
+                            let ok = self.b.ins().band(ok, ksame);
+                            self.b.ins().band(ok, vsame)
+                        }
+                        None => ok,
+                    };
                     let write = self.b.create_block();
                     self.b.ins().brif(ok, write, &[], slow, &[]);
                     self.b.switch_to_block(write);
@@ -8163,8 +8303,23 @@ impl<'a> Lower<'a> {
                     let end = self.b.ins().iadd(p, loff);
                     self.b.ins().store(t, at, end, 0);
                     let len1 = self.b.ins().iadd_imm_s(len, 1);
-                    let l = machine::native::array_slots();
                     self.b.ins().store(t, len1, ix, l.len_at as i32);
+                    if let Some((vals, v, object, _, vp, vlen, _)) = put {
+                        // The key and the value appended, as `ArrayPush`
+                        // appends: each gains an owner when it may name one.
+                        for (a, ap, alen, w, counted) in [(keys, kp, klen, k, string), (vals, vp, vlen, v, object)] {
+                            let off = self.b.ins().ishl_imm_u(alen, 3);
+                            let at = self.b.ins().iadd(ap, off);
+                            self.b.ins().store(t, w, at, 0);
+                            let n1 = self.b.ins().iadd_imm_s(alen, 1);
+                            self.b.ins().store(t, n1, a, l.len_at as i32);
+                            let one = self.b.ins().iconst(types::I8, 1);
+                            self.b.ins().store(t, one, a, l.refs_at as i32);
+                            if counted {
+                                self.emit_rc(w, false);
+                            }
+                        }
+                    }
                     let res = self.b.ins().isub(none, n);
                     self.b.ins().jump(join, &[res.into()]);
                 }
@@ -8179,7 +8334,7 @@ impl<'a> Lower<'a> {
         let w = self.b.block_params(join)[0];
         // An upsert's table may have grown a word in place: its views (and
         // any other name's of the same storage) are taken again.
-        if matches!(op, MapOp::Upsert { .. }) {
+        if matches!(op, MapOp::Upsert { .. } | MapOp::Put { .. }) {
             self.drop_views();
         }
         self.set(f, dest, w);

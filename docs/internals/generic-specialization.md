@@ -98,10 +98,14 @@ their own layout and bounds resolve statically.
   a clone use the clone, so `sort`'s call to `merge_range` is cloned too.
 - **Gates.** A clone falls back to the shared body (through a boxing thunk)
   when its types mean something else to the old module (`knows_tys`: a
-  class declared later is not in its checker), or when the generic body has
-  an enum over its type parameters (`layout_safe`: `Option<T>` in a shared
-  field would be stored in the clone's layout and read in the shared one,
-  as `task::Channel` did). A generic enum's method, and a generic whose
+  class declared later is not in its checker), or when the generic body
+  holds an enum over its type parameters below the top (`layout_safe`: an
+  element of `Vec<Option<T>>`, a class holding one, an enum's payload, which
+  the clone would read and write in its layout and the shared bodies in
+  theirs, as `task::Channel`'s buffer would). An open enum at the top, the
+  result of `HashMap::get -> Option<V>` or a local, is the clone's own
+  value, and a field holds one in its declared layout in either body
+  (`hir_field_rep`), so such a body clones (#2958). A generic enum's method, and a generic whose
   signature holds a nested open enum (clone-only, `fn_sig_split`), are
   compiled from their body anyway: no ground call of the latter reaches
   its shared body, so nothing reads its values in the other layout
@@ -112,8 +116,25 @@ their own layout and bounds resolve statically.
   types has no flat instance there, so its shared bodies agree with the
   instance's one-word field.
 
-Tests: `perf_metrics::foreign_method_clone_is_specialized`,
-`perf_metrics::foreign_fn_clone_is_specialized`.
+Tests: `namespace::foreign_option_result_method_clone_compiles_from_its_body`,
+`namespace::foreign_for_in_next_takes_its_clone`; benches
+`examples/perf/map_get_hot.coil`, `examples/perf/map_walk_hot.coil`.
+
+## A `for` loop's `next` with an open enum in the trait's signature
+
+A generic instance's `next` has a boundary signature: the trait spells
+its result `Option<Item>`, open over the class parameter. A `for` loop
+over a ground iterator calls `next`'s clone (`hir_next_clone`,
+`instance_clone_own_layout`) and reads its result in the clone's own
+layout, so `for p in m` over a `HashMap<int, int>` runs
+`HashMapIter::next`'s clone, not the shared body through the `Iterator`
+dictionary (#2909). Other callers of such a method keep the shared entry
+(`Compiler::boundary_clone`): a plain method call (`xs.min()` through
+`VecOrd`) reads the trait's layout, and a dictionary slot holds the shared
+entry. So does every caller where the clone would be a thunk around the
+shared entry (another module that does not know the types, `knows_tys`),
+which returns the trait's layout. A flat instance's method is cloned for
+every caller, as before.
 
 ## How many clones
 

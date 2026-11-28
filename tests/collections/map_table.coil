@@ -6,7 +6,7 @@
 // values of one, two and three words.
 use tests::assert;
 use text::Text;
-use key_index::{eq_mode, map_table, map_find, map_upsert, map_probe, map_add, map_live, map_len, map_remove, map_compact, map_clear};
+use key_index::{eq_mode, word_mode, map_table, map_find, map_upsert, map_put, map_probe, map_add, map_live, map_len, map_remove, map_compact, map_clear};
 
 class Map<K, V> {
     pub ix: Vec<int>,
@@ -295,4 +295,164 @@ test("a malformed table finds nothing") {
     assert!(map_len(bad) == 0 && !map_live(bad, 0));
     assert!(map_add(bad, 1) == -1);
     assert!(bad.len() == 4);
+}
+
+// `map_put` on a map object: an instance whose fields 0, 1 and 2 are its
+// table, keys and values.
+class Put<K, V> {
+    pub ix: Vec<int>,
+    pub keys: Vec<K>,
+    pub vals: Vec<V>,
+}
+
+impl Put<K, V> {
+    pub static fn new() -> Put<K, V> {
+        let keys: Vec<K> = Vec::new();
+        let vals: Vec<V> = Vec::new();
+        return new Put(map_table(0), keys, vals);
+    }
+}
+
+// A shared body (a type parameter's `eq_mode` is `0`) probes and compares
+// with `==` instead, as the stdlib `HashMap` does.
+impl Put<K: Eq + Hash, V> {
+    fn find(K k, int h) -> int {
+        let s = map_probe(self.ix, h, -1);
+        while s >= 0 && self.keys[s] != k {
+            s = map_probe(self.ix, h, s);
+        }
+        return s;
+    }
+
+    // `map_put`'s answer, by the general path where it does not apply.
+    fn put_with(K k, V v, int replace) -> int {
+        let h = k.hash();
+        let (mode, vmode) = (eq_mode(k), word_mode(v));
+        if mode > 0 && vmode > 0 {
+            return map_put(self, h, k, v, mode, vmode, replace);
+        }
+        let s = self.find(k, h);
+        if s >= 0 {
+            if replace == 1 {
+                self.vals[s] = v;
+            }
+            return s;
+        }
+        let n = map_add(self.ix, h);
+        self.keys.push(k);
+        self.vals.push(v);
+        return -1 - n;
+    }
+
+    /// `true` when `k` is new.
+    pub fn put(K k, V v) -> bool {
+        return self.put_with(k, v, 1) < 0;
+    }
+
+    /// The value under `k`, storing `v` first when `k` is new.
+    pub fn keep(K k, V v) -> V {
+        let r = self.put_with(k, v, 0);
+        if r >= 0 {
+            return self.vals[r];
+        }
+        return v;
+    }
+
+    pub fn get_or(K k, V d) -> V {
+        let s = self.find(k, k.hash());
+        if s >= 0 {
+            return self.vals[s];
+        }
+        return d;
+    }
+}
+
+test("map_put finds or adds int keys through growth") {
+    let m: Put<int, int> = Put::new();
+    let i = 0;
+    while i < 20000 {
+        assert!(m.put((i * 7919) % 10000019, i));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 20000 {
+        assert!(!m.put((i * 7919) % 10000019, i * 2));
+        i = i + 1;
+    }
+    assert!(map_len(m.ix) == 20000 && m.keys.len() == 20000 && m.vals.len() == 20000);
+    assert!(m.get_or(7919 * 123, -1) == 246 && m.get_or(1, -1) == -1);
+    assert!(m.keep(7919 * 5, 0) == 10 && m.keep(-3, 4) == 4 && m.get_or(-3, 0) == 4);
+}
+
+test("map_put compares string keys that are other objects") {
+    let m: Put<string, string> = Put::new();
+    let i = 0;
+    while i < 2000 {
+        assert!(m.put("k" + i.show(), "v" + i.show()));
+        i = i + 1;
+    }
+    i = 0;
+    while i < 2000 {
+        let k = ("K" + i.show()).to_lower();
+        assert!(!m.put(k, "w" + i.show()));
+        i = i + 1;
+    }
+    assert!(map_len(m.ix) == 2000 && m.get_or("k1999", "") == "w1999");
+    assert!(m.keep("k7", "x") == "w7" && m.keep("new", "n") == "n" && m.keys.len() == 2001);
+}
+
+test("map_put on a copied map leaves the original") {
+    let a: Put<string, int> = Put::new();
+    let _ = a.put("x", 1);
+    let b = a;
+    let _ = b.put("y", 2);
+    let _ = b.put("x", 5);
+    assert!(b.get_or("y", 0) == 2 && b.get_or("x", 0) == 5 && map_len(b.ix) == 2);
+    assert!(
+        a.get_or("y", 0) == 0 && a.get_or("x", 0) == 1 && map_len(a.ix) == 1 && a.vals.len() == 1,
+    );
+}
+
+test("map_put stores object values as their own") {
+    let m: Put<int, Vec<int>> = Put::new();
+    let w: Vec<int> = Vec::with_capacity(9);
+    w.push(4);
+    assert!(m.put(1, w));
+    w.push(5);
+    let got = m.get_or(1, Vec::new());
+    assert!(got.len() == 1 && got[0] == 4 && w.len() == 2);
+    let first = m.keep(2, Vec::with_capacity(7));
+    let again = m.keep(2, Vec::with_capacity(8));
+    assert!(first.capacity() == again.capacity() && map_len(m.ix) == 2);
+    assert!(!m.put(1, Vec::from([7, 8])) && m.get_or(1, Vec::new()).len() == 2);
+}
+
+test("map_put on a malformed map object changes nothing") {
+    let t = map_table(0);
+    let m = new Put(t, Vec::from([1]), Vec::from([2]));
+    m.keys = m.vals;
+    assert!(map_put(m, 1, 1, 3, 1, 1, 1) == -1);
+    assert!(map_len(m.ix) == 0 && m.keys.len() == 1 && m.vals.len() == 1);
+    let bad = new Put(Vec::from([6, 0, 0, 0]), Vec::from([1]), Vec::from([2]));
+    assert!(map_put(bad, 1, 1, 3, 1, 1, 1) == -1 && bad.ix.len() == 4 && bad.vals.len() == 1);
+}
+
+test("a string hashed for the first time hashes as its literal") {
+    // Fresh strings (built, lowered, split) carry no cached hash: native
+    // code computes it in place. Each must match the literal's, before and
+    // after the hash is cached, for short, long, empty and non-ASCII text.
+    let words = ["", "a", "w1234", "a string longer than any inline one, by far", "żółw €"];
+    for w in words {
+        let built = "" + w + "";
+        assert!(built.hash() == w.hash());
+        assert!(built.hash() == w.hash());
+    }
+    let parts = "w1 w22 w1 w333".split(" ");
+    let firsts: Vec<int> = Vec::new();
+    for p in parts {
+        firsts.push(p.hash());
+    }
+    assert!(firsts[0] == "w1".hash() && firsts[2] == "w1".hash());
+    assert!(firsts[1] == "w22".hash() && firsts[3] == "w333".hash());
+    assert!("ABC".to_lower().hash() == "abc".hash());
 }
