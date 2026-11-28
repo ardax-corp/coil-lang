@@ -1,0 +1,28 @@
+// CPU: a class field of a nested tuple of numbers, ((int, int), int),
+// read and written in a loop. Its three leaves are number slots of the
+// object, so a write stores three words and a read loads them: no inner
+// tuple object made per write, none followed per read.
+use io::sync::print;
+use string::format;
+
+class Seg {
+    pub ends: ((int, int), int),
+    pub hits: int,
+}
+
+#[inline(never)]
+fn step(Seg s, int i) {
+    let e = s.ends;
+    s.ends = ((e[0][1] & 1023, (e[0][0] + i) & 1023), (e[1] + e[0][0]) & 4095);
+    s.hits += 1;
+}
+
+fn main() {
+    let s = new Seg(((1, 2), 3), 0);
+    let i = 0;
+    while i < 10000000 {
+        step(s, i);
+        i += 1;
+    }
+    let _ = print(format("%i %i %i %i\n", s.ends[0][0], s.ends[0][1], s.ends[1], s.hits));
+}
