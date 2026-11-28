@@ -1,0 +1,92 @@
+// Element reads in place across host calls: a string native or a byte
+// conversion moves no array, so the array's and the string's views hold
+// across it; a reserve or a bulk append may move an array's storage, so
+// reads after it see the array as it is now, and the copies an append
+// makes are counted (a dropped source leaves them alive).
+use tests::assert;
+use string::{slice_bytes, to_bytes, from_bytes};
+
+fn piece(string s, int a, int e) -> string {
+    return match slice_bytes(s, a, e) {
+        Result::Ok(x) => x,
+        Result::Err(_) => "",
+    };
+}
+
+// Sums `xs` and the bytes of `s` while slicing and converting between reads.
+fn mixed(Vec<int> xs, string s) -> int {
+    let total = 0;
+    let i = 0;
+    while i < xs.len() {
+        total = total + xs[i];
+        let p = piece(s, 0, i % s.len());
+        total = total + p.len() + (s[i % s.len()] as int);
+        let b = to_bytes(p);
+        total = total + b.len();
+        i = i + 1;
+    }
+    return total;
+}
+
+test("views hold across string natives and byte conversions") {
+    let xs: Vec<int> = Vec::new();
+    let i = 0;
+    while i < 50 {
+        xs.push(i);
+        i = i + 1;
+    }
+    let s = "views " + "across host calls";
+    let want = 0;
+    i = 0;
+    while i < 50 {
+        let k = i % s.len();
+        want = want + i + 2 * k + (s[k] as int);
+        i = i + 1;
+    }
+    assert!(mixed(xs, s) == want);
+}
+
+test("reads after a reserve see the moved storage") {
+    let xs: Vec<int> = Vec::new();
+    xs.push(7);
+    let total = 0;
+    let i = 0;
+    while i < 20 {
+        total = total + xs[0] + xs[xs.len() - 1];
+        xs.reserve(100 * (i + 1));
+        xs.push(i);
+        i = i + 1;
+    }
+    assert!(total == 7 * 20 + 7 + 190 - 19);
+}
+
+fn copied(Vec<string> src) -> Vec<string> {
+    let out: Vec<string> = Vec::new();
+    let i = 0;
+    while i < src.len() {
+        out.push(src[i]);
+        i = i + 1;
+    }
+    return out;
+}
+
+test("an appended copy outlives its source") {
+    let src: Vec<string> = Vec::new();
+    let i = 0;
+    while i < 40 {
+        src.push(
+            match from_bytes(to_bytes("word number " + "long enough to own its bytes")) {
+                Result::Ok(w) => w,
+                Result::Err(_) => "",
+            },
+        );
+        i = i + 1;
+    }
+    let out = copied(src);
+    src.clear();
+    let n = 0;
+    for w in out {
+        n = n + w.len();
+    }
+    assert!(n == 40 * 40);
+}

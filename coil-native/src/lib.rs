@@ -1098,6 +1098,17 @@ fn pin_reach(bodies: &[NativeBody], by_label: &HashMap<Label, usize>) -> HashSet
     reach
 }
 
+/// Whether every view holds across a call to host native `id`: a leaf
+/// ([`common::HostReach::Leaf`]) collects nothing and runs no code, and
+/// one that changes no array it is handed (no `HEAP_MUT` effect, and not
+/// `from_bytes_take`, which empties its buffer) moves no storage.
+fn keeps_views(id: u16) -> bool {
+    use common::EffectFlags as E;
+    common::host_is_leaf(u64::from(id))
+        && id != common::FROM_BYTES_TAKE_ID
+        && common::HOST_NATIVES.get(usize::from(id)).is_some_and(|n| !n.effects.contains(E::HEAP_MUT))
+}
+
 /// An instruction that may run interpreted code: a function value's call, a free
 /// (in a program with `drop`s) or collection that may run `drop`s.
 fn reaches_runtime(inst: &MirInst, drops: bool) -> bool {
@@ -6489,7 +6500,9 @@ impl<'a> Lower<'a> {
                 self.b.ins().jump(join, &[w.into()]);
                 self.b.switch_to_block(join);
                 let w = self.b.block_params(join)[0];
-                self.drop_views();
+                if !keeps_views(*native_id) {
+                    self.drop_views();
+                }
                 self.set(f, *dest, w);
                 self.view_of(f, *dest);
             }
@@ -6513,7 +6526,9 @@ impl<'a> Lower<'a> {
                     let w = self.b.block_params(join)[0];
                     self.set(f, *dest, w);
                 } else {
-                    self.drop_views();
+                    if !keeps_views(*native_id) {
+                        self.drop_views();
+                    }
                     self.set(f, *dest, w);
                     self.view_of(f, *dest);
                 }

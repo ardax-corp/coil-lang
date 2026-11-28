@@ -118,7 +118,10 @@ and `Index` / `StoreIndex` / `ArrayLen` in bounds of the view read and write in
 place. Byte arrays, tuples and an index out of the view take the helpers. Storing
 into a word array never moves its storage; a push may, and another value may name
 the same array, so after an `ArrayPush` every view reads through the helpers until
-its value is defined again. A vector loop drops the views too.
+its value is defined again. A vector loop drops the views too, and so does a host
+call, except to a leaf native (`common::HostReach::Leaf`) that changes no array it
+is handed (no `HEAP_MUT` effect, not `from_bytes_take`): it collects nothing and
+moves no storage, so every view holds across it (`keeps_views`).
 
 A view has a state word (`machine::VIEW_PLAIN` = 1): a view stores and loads in
 place when it is set (`ok != 0`). The state is part of `layout_fingerprint`, so
