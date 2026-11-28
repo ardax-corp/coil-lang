@@ -175,7 +175,7 @@ pub const NATIVE_CTX_HAS_FINALIZERS: i32 = std::mem::offset_of!(NativeCtx, has_f
 /// Byte offset of [`NativeCtx::calls`].
 pub const NATIVE_CTX_CALLS: i32 = std::mem::offset_of!(NativeCtx, calls) as i32;
 
-pub use crate::memory::{ArraySlots, InlineObject, InlineShape, ProductSlots, array_slots, inline_object, product_slots, layout_fingerprint};
+pub use crate::memory::{ArraySlots, InlineObject, InlineShape, ProductSlots, StringSlots, array_slots, inline_object, product_slots, layout_fingerprint, string_slots};
 
 /// Byte offsets of [`NativeCtx::alloc_counts`] and [`NativeCtx::alloc_bumps`].
 pub const NATIVE_CTX_ALLOC_COUNTS: i32 = std::mem::offset_of!(NativeCtx, alloc_counts) as i32;
@@ -1566,6 +1566,21 @@ pub unsafe extern "C" fn coil_native_lane_view(addr: u64, for_store: u64, k: u64
             1
         }
         None => 0,
+    }
+}
+
+/// Whether `a` and `b` name strings with the same bytes (`1`) or not (`0`),
+/// as `key_index::map_find` compares string keys: native code's in-place
+/// map probe calls it on a hash match between two different words. Leaf:
+/// no context, never allocates.
+///
+/// # Safety
+/// `a` and `b` are heap words or 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn coil_native_map_str_eq(a: u64, b: u64) -> u64 {
+    match (object(a), object(b)) {
+        (Some(crate::memory::Object::String(ga)), Some(crate::memory::Object::String(gb))) => u64::from(ga.as_ref().data == gb.as_ref().data),
+        _ => 0,
     }
 }
 
@@ -3382,6 +3397,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
         ("coil_native_set_field", coil_native_set_field as *const u8),
         ("coil_native_view", coil_native_view as *const u8),
         ("coil_native_str_view", coil_native_str_view as *const u8),
+        ("coil_native_map_str_eq", coil_native_map_str_eq as *const u8),
         ("coil_native_fn_entry", coil_native_fn_entry as *const u8),
         ("coil_native_fn_entry_pair", coil_native_fn_entry_pair as *const u8),
         ("coil_native_cow", coil_native_cow as *const u8),
@@ -3435,7 +3451,7 @@ pub fn helper_symbols() -> &'static [(&'static str, *const u8)] {
     &TABLE.0
 }
 
-const HELPERS: usize = 59;
+const HELPERS: usize = 60;
 
 #[cfg(test)]
 mod pin_tests {

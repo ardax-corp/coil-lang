@@ -544,6 +544,36 @@ compiler bug and bails, a panic, with no helper call; the interpreter's
 `layout_fingerprint` covers these offsets, so an AOT object made against another
 layout is refused.
 
+## Map table ops
+
+`HostInvoke`s of `map_find`, `map_upsert`, `map_live` and `map_len`
+(`key_index::map_*`, [key-index.md](key-index.md), "Map tables") and of
+`hash_string` run in place (`lower_map_op`), with the host call as the cold
+path. A find or upsert runs in place only when its key mode is a constant
+(after `eq_mode` folds) that the probe compares itself: `1`, words, or `2`,
+strings. An upsert runs in place only where pushes may be written in place
+(`ArraySlots::inline_push`: not in debug or `rc-check` builds).
+
+- The table and the keys are read at the `array_slots` offsets (kind byte,
+  words tag, pointer, length, capacity), as the inline `ArrayPush` reads
+  them. A table must be well formed (`mask + 1` a power of two, the words
+  long enough for the cells) and a candidate slot under the keys' length,
+  or the op takes the host call. So a hand-made `Vec<int>` can never make
+  native code read outside its storage.
+- The probe compares the cell's hash, then the key word. A string key
+  whose word differs calls `coil_native_map_str_eq`, a leaf helper with no
+  context, on a hash match.
+- An upsert of an absent key writes the cell, the two counts and the slot's
+  word, and bumps the table's length, as `map_table::add` does, when the
+  cells stay at most half full and the storage has room. Otherwise
+  (growth, a full `Vec`) it leaves everything to the native. The table's
+  views are dropped after an upsert.
+- `hash_string` reads the hash cached in the string's header
+  (`string_slots`: the kind byte, `ObjString`'s hash word and its "set"
+  bit) and calls the native when the hash is not cached yet.
+
+`layout_fingerprint` covers `string_slots`.
+
 ## Inline share
 
 A copy-on-write share of a word (`Cow` with `unique` false and no field) sets

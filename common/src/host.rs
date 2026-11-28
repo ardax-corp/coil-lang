@@ -426,6 +426,20 @@ host_natives! {
     /// (a forked loop called from inside another runs sequentially once
     /// the outer one fills the pool).
     216 "thread_par_room" (0) THREAD_R, NO_CAP => THREAD_PAR_ROOM_ID, THREAD_PAR_ROOM_NATIVE;
+    /// The map table natives (archive 8.16, `key_index::map_*`): one word
+    /// array of `{hash, slot}` cells plus each slot's cell, indexing keys a
+    /// collection keeps by slot. Native code runs `map_find`, `map_upsert`,
+    /// `map_live` and `map_len` in place. See `docs/internals/key-index.md`.
+    217 "map_table" (1) TEXT_R, NO_CAP => MAP_TABLE_ID, MAP_TABLE_NATIVE;
+    218 "map_find" (5) HOST_R, NO_CAP => MAP_FIND_ID, MAP_FIND_NATIVE;
+    219 "map_upsert" (5) HEAP_R, NO_CAP => MAP_UPSERT_ID, MAP_UPSERT_NATIVE;
+    220 "map_probe" (3) HOST_R, NO_CAP => MAP_PROBE_ID, MAP_PROBE_NATIVE;
+    221 "map_add" (2) HEAP_R, NO_CAP => MAP_ADD_ID, MAP_ADD_NATIVE;
+    222 "map_live" (2) HOST_R, NO_CAP => MAP_LIVE_ID, MAP_LIVE_NATIVE;
+    223 "map_len" (1) HOST_R, NO_CAP => MAP_LEN_ID, MAP_LEN_NATIVE;
+    224 "map_remove" (2) HEAP_R, NO_CAP => MAP_REMOVE_ID, MAP_REMOVE_NATIVE;
+    225 "map_compact" (1) HEAP_R, NO_CAP => MAP_COMPACT_ID, MAP_COMPACT_NATIVE;
+    226 "map_clear" (1) HEAP_R, NO_CAP => MAP_CLEAR_ID, MAP_CLEAR_NATIVE;
 }
 
 /// `eq_mode`: the type's `==` is not one the runtime runs; the caller compares
@@ -518,7 +532,7 @@ pub const PACKED_VEC_ARITH: &str = "packed_vec_arith";
 // Every row's id is its index (so its consts name their row), and the
 // table only grows.
 const _: () = {
-    assert!(HOST_NATIVES.len() == 217);
+    assert!(HOST_NATIVES.len() == 227);
     let mut i = 0;
     while i < HOST_NATIVES.len() {
         assert!(HOST_NATIVES[i].id as usize == i, "a host native's id is not its index");
@@ -570,6 +584,16 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
     "key_index_clear",
     "key_index_find",
     "key_index_eq_mode",
+    "map_table",
+    "map_find",
+    "map_upsert",
+    "map_probe",
+    "map_add",
+    "map_live",
+    "map_len",
+    "map_remove",
+    "map_compact",
+    "map_clear",
 ];
 
 /// Whether standard native `id` is in [`DIRECT_HOST_NATIVES`].
@@ -580,11 +604,25 @@ pub const DIRECT_HOST_NATIVES: &[&str] = &[
 /// Host natives whose result is always a number (a hash, a slot index):
 /// it never names an object, so a frame does not count it.
 pub fn host_returns_number(id: u64) -> bool {
-    [HASH_STRING_ID, KEY_INDEX_FIND_ID].iter().any(|&k| u64::from(k) == id)
+    [HASH_STRING_ID, KEY_INDEX_FIND_ID, MAP_FIND_ID, MAP_UPSERT_ID, MAP_PROBE_ID, MAP_ADD_ID, MAP_LEN_ID]
+        .iter()
+        .any(|&k| u64::from(k) == id)
 }
 
 pub fn host_writes_only_numbers(id: u64) -> bool {
-    [KEY_INDEX_INSERT_ID, KEY_INDEX_REMOVE_ID, KEY_INDEX_COMPACT_ID, KEY_INDEX_CLEAR_ID].iter().any(|&k| u64::from(k) == id)
+    [
+        KEY_INDEX_INSERT_ID,
+        KEY_INDEX_REMOVE_ID,
+        KEY_INDEX_COMPACT_ID,
+        KEY_INDEX_CLEAR_ID,
+        MAP_UPSERT_ID,
+        MAP_ADD_ID,
+        MAP_REMOVE_ID,
+        MAP_COMPACT_ID,
+        MAP_CLEAR_ID,
+    ]
+    .iter()
+    .any(|&k| u64::from(k) == id)
 }
 
 pub fn host_native_is_direct(id: usize) -> bool {
