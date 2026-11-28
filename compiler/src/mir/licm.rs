@@ -534,14 +534,14 @@ enum Motion {
 
 /// The loop's `while` test, copied in front of code that may trap: the
 /// header computes only cheap values and branches into the body or out.
-struct Guard {
+pub(super) struct Guard {
     /// The header's successor in the loop.
-    body: BlockId,
+    pub(super) body: BlockId,
     /// Whether the body runs when the condition holds.
-    when: bool,
+    pub(super) when: bool,
 }
 
-fn guard_shape(func: &MirFunc, lp: &LoopInfo) -> Option<Guard> {
+pub(super) fn guard_shape(func: &MirFunc, lp: &LoopInfo) -> Option<Guard> {
     let header = func.block(lp.header);
     let Some(Terminator::Br { taken, not_taken, .. }) = header.term else {
         return None;
@@ -566,7 +566,7 @@ fn cheap_test(func: &MirFunc, inst: &MirInst) -> bool {
 
 /// Blocks every iteration that enters the body runs before it can leave
 /// the loop or reach the header again.
-fn every_iteration(func: &MirFunc, lp: &LoopInfo, body: BlockId) -> HashSet<BlockId> {
+pub(super) fn every_iteration(func: &MirFunc, lp: &LoopInfo, body: BlockId) -> HashSet<BlockId> {
     let mut every = HashSet::from([lp.header]);
     for &x in &lp.blocks {
         if x == lp.header {
@@ -749,25 +749,30 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
     if let (false, Some(guard)) = (behind.is_empty(), guard) {
         guard_hoisted(func, lp.header, pre, &guard, behind);
     }
-    // New blocks go after the preheader (a new one just ahead of the
-    // header), as the source order would have them: emission reads a back
-    // edge as one to an earlier block.
+    lay_out_new_blocks(func, old_len, pre, lp.header);
+    n
+}
+
+/// The blocks from `old_len` on, which hoisting out of the loop at `header`
+/// with preheader `pre` added, go after the preheader (a new one just ahead
+/// of the header), as the source order would have them: emission reads a
+/// back edge as one to an earlier block.
+pub(super) fn lay_out_new_blocks(func: &mut MirFunc, old_len: usize, pre: BlockId, header: BlockId) {
     if func.blocks.len() > old_len {
         let new: Vec<BlockId> = (old_len..func.blocks.len()).map(|i| BlockId(i as u32)).collect();
-        let at = if pre.index() >= old_len { lp.header } else { pre };
+        let at = if pre.index() >= old_len { header } else { pre };
         let mut layout = Vec::with_capacity(func.blocks.len());
         for b in (0..old_len).map(|b| BlockId(b as u32)) {
-            if b == at && at == lp.header {
+            if b == at && at == header {
                 layout.extend(&new);
             }
             layout.push(b);
-            if b == at && at != lp.header {
+            if b == at && at != header {
                 layout.extend(&new);
             }
         }
         func.relayout(&layout);
     }
-    n
 }
 
 /// `pre` (the preheader, ending in a jump to `header`) tests the loop's
@@ -775,7 +780,7 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
 /// `behind`; a join block then enters the loop, where each moved value is
 /// read through a φ (a dummy zero on the path where the loop runs no
 /// iteration and never reads it).
-fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guard, behind: Vec<MirInst>) {
+pub(super) fn guard_hoisted(func: &mut MirFunc, header: BlockId, pre: BlockId, guard: &Guard, behind: Vec<MirInst>) {
     let then = BlockId(func.blocks.len() as u32);
     let join = BlockId(then.0 + 1);
     // The header's test on the values the loop is entered with.

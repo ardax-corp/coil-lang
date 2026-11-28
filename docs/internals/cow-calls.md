@@ -380,6 +380,29 @@ task that panics mid-walk with a `defer`). Benches:
 `examples/perf/cow_walk_grow_map.coil`, `cow_walk_grow_vec.coil` (the
 control: a read-only `Vec` walk is an index loop and shares nothing).
 
+## Checks of a write path in place
+
+The rewrite puts `place = unique(place)` before a write for each step of its
+path, root first: `ps[i].tags.push(r)` gets `ps = unique(ps)` (when `ps`
+needs it), `ps[i] = unique(ps[i])` and `ps[i].tags = unique(ps[i].tags)`.
+Lowering takes each such statement whole: a field of any place is one
+`Cow { field: Some(slot) }` on the object, and an element of a heap array of
+objects is one `CowIndex { array, index }`. Each writes the slot back only
+when it copied, so the unshared case is a load and a header test, with no
+count changes, no homes and no store back. Neither takes nor drops an owner
+of what it reads; `CowIndex` ends the borrows of loads from its array, as a
+store does, so a word the frame still reads holds its own count across it.
+`for mut row in g` and `let w = mut g[i]` reach the same statements.
+
+Two MIR passes then drop checks (`mir/cow_motion.rs`): a block checks a
+slot once while nothing in between may share an object again or put another
+in a slot (a share, a pin, another unique check, a store of a word that may
+be an object, a call), and a loop with none of those checks the slots it
+does not change once, ahead of it behind a copy of its test (`g[i][j] =
+g[i][j] + j` checks `g[i]` once per row). Hit benches:
+`examples/perf/elem_push_hot.coil`, `elem_field_write_hot.coil`,
+`for_mut_push_hot.coil`, `elem_grid_hot.coil`.
+
 ## Pinned objects
 
 The runtime has a second header bit beside the shared flag, the pin
