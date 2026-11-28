@@ -41,6 +41,13 @@ fn compiled(stats: &str, name: &str) -> bool {
     stats.lines().any(|l| l == format!("  native: {name}"))
 }
 
+/// Whether generic `name` compiled to native code, as its shared body or
+/// as one of its per-type clones (`name$inst$...`): which of them a
+/// program runs is the compiler's choice.
+fn compiled_generic(stats: &str, name: &str) -> bool {
+    compiled(stats, name) || stats.lines().any(|l| l.strip_prefix("  native: ").is_some_and(|f| f.starts_with(&format!("{name}$inst$"))))
+}
+
 /// The native run matches the interpreter's; returns the native run's stderr.
 fn same_as_mir(name: &str, src: &str) -> String {
     let mir = run(name, src, false);
@@ -872,7 +879,8 @@ fn task_ops_and_contracts_run_from_native_code() {
          fn main() {{ let _ = println(format(\"%i\", run())); let _ = println(format(\"%i\", blame(-2))); }}\n"
     );
     let stats = same_as_mir("task_ops_native", &src);
-    for f in ["task::scope", "half", "work"] {
+    assert!(compiled_generic(&stats, "task::scope"), "task::scope: {stats}");
+    for f in ["half", "work"] {
         assert!(compiled(&stats, f), "{f}: {stats}");
     }
     assert!(program_stderr(&run("task_ops_native", &src, true)).contains("called from"));

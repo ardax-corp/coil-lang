@@ -1,0 +1,38 @@
+// A ground call to a generic instance's method whose trait spells its
+// result through an associated type (`Option<Item>`, a boundary
+// signature) reads the result in the layout the method returns it in, at
+// a niche payload (`string`) and a two-word one (`int`). A `for` loop's
+// `next` takes such a method's per-type clone (#2909); a plain call keeps
+// the shared entry, which returns the trait's layout.
+use tests::assert;
+
+trait Pick<V> {
+    type Item;
+
+    fn pick(V xs) -> Option<Item> {}
+}
+
+impl Pick for Vec<T> {
+    type Item = T;
+
+    fn pick(Vec<T> xs) -> Option<T> {
+        if xs.len() == 0 {
+            return None;
+        }
+        return Some(xs[xs.len() - 1]);
+    }
+}
+
+test("a niche payload") {
+    let words: Vec<string> = ["pear", "apple"];
+    let none: Vec<string> = Vec::new();
+    assert!((words.pick() ?? "-") == "apple");
+    assert!((none.pick() ?? "-") == "-");
+}
+
+test("a two-word payload") {
+    let xs: Vec<int> = [3, 9, 1];
+    let none: Vec<int> = Vec::new();
+    assert!(xs.pick() == Some(1));
+    assert!(none.pick() == None);
+}
