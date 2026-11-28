@@ -1,0 +1,33 @@
+// Hit bench: short strings allocated and freed one by one (a formatted
+// word dropped each iteration) and in bulk (a Vec of words dropped whole),
+// the slab's string-class free and alloc fast path. Prints a checksum.
+use io::sync::println;
+use string::format;
+
+fn words(int n, int salt) -> Vec<string> {
+    let out: Vec<string> = Vec::with_capacity(n);
+    let i = 0;
+    while i < n {
+        out.push(format("w%i", (i * 31 + salt) % 5000));
+        i = i + 1;
+    }
+    return out;
+}
+
+fn main() {
+    let total = 0;
+    let i = 0;
+    while i < 600000 {
+        let w = format("k%i", i % 977);
+        let v = w + "-" + w;
+        total = total + v.len();
+        i = i + 1;
+    }
+    let r = 0;
+    while r < 12 {
+        let ws = words(100000, r);
+        total = total + ws[r * 7].len() + ws.len();
+        r = r + 1;
+    }
+    let _ = println(format("%i", total));
+}
