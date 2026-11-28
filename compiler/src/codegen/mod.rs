@@ -1026,25 +1026,17 @@ impl ModuleCtx {
 
     /// Whether the generic method body at `span` can be cloned without
     /// changing the layout of values it shares with the unspecialized
-    /// methods: none of its types holds an enum over its type parameters
-    /// below the top (`Vec<Option<T>>`, a class holding one), whose
-    /// elements both sides would read in their own layout. An open enum
-    /// at the top (`-> Option<V>`, a local `Option<T>`) is the body's own
-    /// value: the clone keeps it in the ground layout, its callers read
-    /// that, and a field holds it in its declared layout either way
-    /// (`hir_field_rep`; layout.md, "Open enums").
+    /// methods: it has a lowered body here. An open enum at the top (`->
+    /// Option<V>`, a local `Option<T>`) is the body's own value: the clone
+    /// keeps it in the ground layout, its callers read that, and a field
+    /// holds it in its declared layout either way (`hir_field_rep`;
+    /// layout.md, "Open enums"). One below the top (`Vec<Option<T>>`,
+    /// `Result<Result<T, E>, E>`) is the clone's own too: a value of that
+    /// type reaches another body only through a signature that holds it,
+    /// and every such signature is clone-only (`fn_sig_split`), so the
+    /// body that receives it is a ground clone reading the same layout.
     fn layout_safe(&self, span: (usize, usize)) -> bool {
-        let (Some(module), Some(&index)) = (self.hir_module.as_ref(), self.hir_fns.get(&span)) else {
-            return false;
-        };
-        let body = &module.bodies[index];
-        let look = crate::layout::nested_open_look(&self.checker);
-        let nested = |t: &Option<Ty>| {
-            t.as_ref().is_some_and(|t| {
-                Compiler::has_enum_over_var(&self.checker, t) && crate::layout::nested_open_enum(&self.checker, t, true, &look, &mut |_| true)
-            })
-        };
-        !nested(&body.ret) && !body.locals.iter().any(|l| nested(&l.ty)) && !body.exprs.iter().any(|e| nested(&e.ty))
+        self.hir_module.is_some() && self.hir_fns.contains_key(&span)
     }
 }
 

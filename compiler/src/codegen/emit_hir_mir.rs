@@ -1249,16 +1249,25 @@ impl Compiler {
     /// The clone a ground instance call goes to: at the instance's types,
     /// then, for a default body with bounds of its own (`fn split<P:
     /// Pattern>`), at the types its own dictionaries are ground at.
-    fn ground_instance_clone(&mut self, call: &HirCall, inst_args: &[Ty]) -> Option<String> {
+    /// `own_layout` when the call reads a boundary signature's result in
+    /// the clone's layout ([`Compiler::own_layout_clone`]).
+    fn ground_instance_clone(&mut self, call: &HirCall, inst_args: &[Ty], own_layout: bool) -> Option<String> {
         let mut lookup = inst_args.to_vec();
         for own in &call.own_dicts {
             match own {
                 super::HirOwnDict::Ground { lookup: l, .. } if l.len() == 1 => lookup.push(l[0].clone()),
                 super::HirOwnDict::Kinds(_) => {}
-                _ => return self.instance_clone(&call.key, inst_args),
+                _ => {
+                    lookup.truncate(inst_args.len());
+                    break;
+                }
             }
         }
-        self.instance_clone(&call.key, &lookup)
+        if own_layout {
+            self.instance_clone_own_layout(&call.key, &lookup)
+        } else {
+            self.instance_clone(&call.key, &lookup)
+        }
     }
 
     /// Call `id` of a function or method, past the builtins: its entry when it is one
@@ -1296,10 +1305,13 @@ impl Compiler {
             // A method whose signature reaches a flat instance takes its
             // clone, which returns its own layout, never the shared
             // entry's enum object (`Compiler::fn_flat_split`).
-            let flat = self.fn_flat_split(&call.key, &inst.args);
+            // So does a method whose trait signature has an open enum over
+            // the class parameter (`min -> Option<Item>`), where its clone
+            // compiles from its body (`Compiler::own_layout_clone`).
+            let flat = self.own_layout_clone(&call.key, &inst.args);
             let key = match self.hir_ret_shape(hir, id, &natural) {
                 Some(true) if !flat => call.key.clone(),
-                _ => self.ground_instance_clone(call, &inst.args).unwrap_or_else(|| call.key.clone()),
+                _ => self.ground_instance_clone(call, &inst.args, flat).unwrap_or_else(|| call.key.clone()),
             };
             // Where the result is wanted in the open type's layout (a mono
             // clone's bound `next` over `Option<I::Item>`) the clone's
@@ -1378,16 +1390,18 @@ impl Compiler {
         if call.method {
             let instance = call.instance.as_deref();
             let key = match instance.and_then(|i| i.recv_box.clone()) {
-                Some(recv) if call.generic.is_none() => self.ground_instance_clone(call, &[recv]).unwrap_or_else(|| call.key.clone()),
+                Some(recv) if call.generic.is_none() => self.ground_instance_clone(call, &[recv], false).unwrap_or_else(|| call.key.clone()),
                 _ => call.key.clone(),
             };
             // A trait method whose signature reaches a flat instance at the
             // instance's ground types (`Iterator::next(it)` over
-            // `Option<Cell<Option<int>>>`) takes its clone, which returns
-            // the result in its own layout (`Compiler::fn_flat_split`).
+            // `Option<Cell<Option<int>>>`), or whose trait signature has an
+            // open enum over the class parameter, takes its clone, which
+            // returns the result in its own layout
+            // (`Compiler::own_layout_clone`).
             let flat_key = instance
-                .filter(|i| key == call.key && call.generic.is_none() && self.fn_flat_split(&call.key, &i.args))
-                .and_then(|i| self.instance_clone(&call.key, &i.args));
+                .filter(|i| key == call.key && call.generic.is_none() && self.own_layout_clone(&call.key, &i.args))
+                .and_then(|i| self.instance_clone_own_layout(&call.key, &i.args));
             // Its own layout where the call's type is ground; else its
             // `$dict` adapter, in the shared entry's layouts, without the
             // instance's dictionary.
@@ -2310,9 +2324,10 @@ impl Compiler {
                 if let Some(inst) = call.instance.as_ref().filter(|i| i.ground.is_some()) {
                     let method = &inst.ground.as_ref().expect("ground call").method;
                     // The entry [`Self::hir_mir_call`] calls (#1595).
+                    let flat = self.own_layout_clone(&call.key, &inst.args);
                     let key = match self.hir_ret_shape(hir, id, &Self::hir_call_rep(call)) {
-                        Some(true) => call.key.clone(),
-                        _ => self.ground_instance_clone(call, &inst.args).unwrap_or_else(|| call.key.clone()),
+                        Some(true) if !flat => call.key.clone(),
+                        _ => self.ground_instance_clone(call, &inst.args, flat).unwrap_or_else(|| call.key.clone()),
                     };
                     return self.hir_mir_probe_unplanned(|this, steps| {
                         this.plan_call_instance_dict(steps, (&inst.class, method, &key), &inst.args, span);
@@ -2334,7 +2349,7 @@ impl Compiler {
                     return false;
                 };
                 let key = match inst.recv_box.clone() {
-                    Some(recv) if call.generic.is_none() => self.ground_instance_clone(call, &[recv]).unwrap_or_else(|| call.key.clone()),
+                    Some(recv) if call.generic.is_none() => self.ground_instance_clone(call, &[recv], false).unwrap_or_else(|| call.key.clone()),
                     _ => call.key.clone(),
                 };
                 !self.raw_instance_methods.contains(&key)

@@ -1,0 +1,18 @@
+// CPU: `p.wait_timeout(ms)` on a resolved `Promise<int>`. The body holds
+// `timeout`'s nested `Result<Result<T, TaskError>, TaskError>`; its
+// per-type clone keeps the ground layout, so the call takes no boxing
+// thunk around the shared body.
+use io::sync::println;
+use string::format;
+use future::Promise;
+
+fn main() {
+    let p: Promise<int> = Promise::resolved(3);
+    let total = 0;
+    let i = 0;
+    while i < 2000000 {
+        total += p.wait_timeout(10).unwrap_or(0);
+        i += 1;
+    }
+    let _ = println(format("%i", total));
+}

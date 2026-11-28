@@ -1,0 +1,18 @@
+// CPU: `xs.first()` and `xs.min()` on a ground `Vec<int>`. The traits
+// spell the result `Option<Item>` (a boundary signature); a plain call
+// takes the method's per-type clone and reads its two-word result, not
+// the shared body through the instance's dictionary.
+use io::sync::println;
+use string::format;
+use collections::vec::{VecOps, VecOrd};
+
+fn main() {
+    let xs: Vec<int> = [5, 3, 8, 1, 9, 2, 7];
+    let total = 0;
+    let i = 0;
+    while i < 2000000 {
+        total += (xs.first() ?? 0) + (xs.min() ?? 0);
+        i += 1;
+    }
+    let _ = println(format("%i", total));
+}
