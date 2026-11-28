@@ -1628,17 +1628,56 @@ impl Compiler {
     /// instance's own words and no dictionary, as a raw instance method.
     /// `None` when `fqn` has no clone there.
     pub(super) fn instance_clone(&mut self, fqn: &str, lookup: &[Ty]) -> Option<String> {
-        self.instance_clone_at(fqn, lookup, false)
+        self.instance_clone_at(fqn, lookup, false, false)
+    }
+
+    /// [`Self::instance_clone`] for a caller that reads the result in the
+    /// clone's own layout, a boundary signature's too (a `for` loop's
+    /// `next`, [`Self::boundary_clone`]).
+    pub(super) fn instance_clone_own_layout(&mut self, fqn: &str, lookup: &[Ty]) -> Option<String> {
+        self.instance_clone_at(fqn, lookup, false, true)
+    }
+
+    /// Whether the clone of trait instance method `fqn` at `lookup` has a
+    /// boundary signature (`Option` / `Result` over a class parameter in
+    /// the trait's signature, `next -> Option<Item>`) that only some
+    /// callers read in the clone's own layout: a `for` loop's `next`
+    /// (#2909). A plain method call reads the trait's layout, and a
+    /// dictionary slot keeps the shared entry there as before, so both
+    /// take the shared entry. A flat instance's
+    /// method is cloned for every caller, and an instance method's clone
+    /// at its own bounds' types has no `$dict` adapter: only ground call
+    /// sites reach it, with its own types' layouts.
+    fn boundary_clone(&self, fqn: &str, lookup: &[Ty]) -> bool {
+        let Some(src) = self.inst_clone_srcs.get(fqn) else {
+            return false;
+        };
+        if src.method_of.is_some() || lookup.len() < src.own_bounds {
+            return false;
+        }
+        let own_only = src.own_bounds > 0 && !Self::is_default_method_fqn(&src.class, &src.method, fqn);
+        let trait_lookup = &lookup[..lookup.len() - src.own_bounds];
+        !own_only
+            && self.trait_method_boundary_sig(&src.class, &src.method, trait_lookup, false).is_some()
+            && !self.fn_flat_split(fqn, lookup)
     }
 
     /// [`Self::instance_clone`]; `needed` when the caller has no use for
     /// the shared entry (a dictionary slot it cannot fill with it), so the
-    /// clone is made past `--clone-budget` too.
-    fn instance_clone_at(&mut self, fqn: &str, lookup: &[Ty], needed: bool) -> Option<String> {
+    /// clone is made past `--clone-budget` too; `own_layout` when it reads
+    /// a boundary signature's result in the clone's layout
+    /// ([`Self::boundary_clone`]).
+    fn instance_clone_at(&mut self, fqn: &str, lookup: &[Ty], needed: bool, own_layout: bool) -> Option<String> {
         let src = self.inst_clone_srcs.get(fqn)?;
         // Keyed without `readonly`, which has no runtime form (#1806).
         let lookup = &lookup.iter().map(crate::typechecking::ty::strip_readonly_deep).collect::<Vec<_>>()[..];
         if lookup.len() != src.head.len() || lookup.iter().any(Ty::has_var) {
+            return None;
+        }
+        // A boundary clone that would be a thunk around the shared entry
+        // (another module that does not know the types) returns the
+        // trait's layout, so no caller takes it.
+        if self.boundary_clone(fqn, lookup) && (!own_layout || !self.inst_clone_has_body(fqn, lookup)) {
             return None;
         }
         let key = (fqn.to_string(), lookup.to_vec());
@@ -1660,29 +1699,13 @@ impl Compiler {
         let chain = self.inst_clone_chain(fqn);
         let (class, method) = (src.class.clone(), src.method.clone());
         let inherent = src.method_of.is_some();
-        // A default body cloned at its own bounds' types too: the trait's
-        // part of the lookup is the instance's.
         let own_bounds = src.own_bounds;
-        let trait_lookup = &lookup[..lookup.len() - own_bounds];
         let vars = self.inst_clone_vars(&src.head, lookup)?;
         let _ = vars;
-        // `Option` / `Result` over a class parameter: the clone's ground
-        // layout and the shared entry's boxed one differ; keep the shared
-        // entry there. (An inherent method's call site planned the clone's
-        // own layouts.)
         // A method with bounds of its own takes their dictionaries, which a
         // clone (no dictionary) has no room for (#1471).
-        // A trait instance's method whose signature reaches a flat
-        // instance has no shared entry a dictionary may hold: its clone's
-        // `$dict` adapter takes and returns the trait's layouts.
-        let flat_only = self.fn_flat_split(fqn, lookup);
-        // An instance method's clone at its own bounds' types has no
-        // `$dict` adapter either: only ground call sites reach it, with
-        // its own types' layouts.
-        let own_only = own_bounds > 0 && !Self::is_default_method_fqn(&class, &method, fqn);
         if !inherent
-            && ((self.trait_method_boundary_sig(&class, &method, trait_lookup, false).is_some() && !flat_only && !own_only)
-                || self.checker.typeclass_method_scheme(&class, &method).is_none()
+            && (self.checker.typeclass_method_scheme(&class, &method).is_none()
                 || self.trait_method_own_bounds(&class, &method).len() != own_bounds)
         {
             return None;
@@ -3431,7 +3454,7 @@ impl Compiler {
                     // `Option<Item>`) stands for: its clone has an adapter
                     // of its own.
                     let method = name.strip_suffix("$dict").filter(|m| self.inst_clone_srcs.contains_key(*m)).unwrap_or(&name).to_string();
-                    match self.instance_clone_at(&method, lookup, takes_object.is_some() || reads.is_some()) {
+                    match self.instance_clone_at(&method, lookup, takes_object.is_some() || reads.is_some(), false) {
                         Some(clone) => Self::dict_adapter_name(&clone),
                         None => {
                             if let Some(why) = takes_object {

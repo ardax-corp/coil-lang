@@ -1015,11 +1015,11 @@ impl Compiler {
         let (Some(next_fqn), &HirPat::Bind(local)) = (next_fqn, pat) else {
             return;
         };
-        // A generic instance's `next` whose signature reaches a flat
-        // instance at the iterator's ground type (`HashMapIter::next ->
-        // Option<Pair<K, V>>`) runs as its clone, which returns the ground
-        // item's layout (`Compiler::fn_flat_split`).
-        let flat_next = self.hir_flat_next(hir, iterable, into_iter_fqn.as_deref(), next_fqn);
+        // A generic instance's `next` at the iterator's ground type
+        // (`HashMapIter<int, int>`) runs as its clone, which returns the
+        // ground item's layout, not as the shared body through the
+        // `Iterator` dictionary (#2909).
+        let flat_next = self.hir_next_clone(hir, iterable, into_iter_fqn.as_deref(), next_fqn);
         let next_fqn = flat_next.as_ref().unwrap_or(next_fqn);
         // `next` may be a generic instance's shared body (`Iterator for
         // ListIter<T>`): its declared `Option<Item>`, open in the head's
@@ -1085,19 +1085,18 @@ impl Compiler {
     }
 
     /// The clone of for-in's generic instance `next_fqn` at the loop's
-    /// ground iterator type, when its signature reaches a flat instance
-    /// there ([`Compiler::fn_flat_split`]).
-    fn hir_flat_next(&mut self, hir: &HirBody, iterable: HirId, into_iter_fqn: Option<&str>, next_fqn: &str) -> Option<String> {
+    /// ground iterator type.
+    fn hir_next_clone(&mut self, hir: &HirBody, iterable: HirId, into_iter_fqn: Option<&str>, next_fqn: &str) -> Option<String> {
         let iterable_ty = apply_ty_prune(self.checker.subst(), hir.expr(iterable).ty.as_ref()?);
         let iterator_ty = match into_iter_fqn {
             Some(f) => self.hir_iter_ty_at(f, &iterable_ty, &self.fn_return_ty(f)?)?,
             None => iterable_ty,
         };
         let lookup = [crate::typechecking::ty::strip_readonly_deep(&iterator_ty)];
-        if lookup[0].has_var() || !self.fn_flat_split(next_fqn, &lookup) {
+        if lookup[0].has_var() {
             return None;
         }
-        self.instance_clone(next_fqn, &lookup)
+        self.instance_clone_own_layout(next_fqn, &lookup)
     }
 
     /// User operator `id` on `operands` calling its instance method
