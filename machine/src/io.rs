@@ -1457,10 +1457,7 @@ pub fn udp_recv_from_wait(heap: &mut Heap, stream: Value, buf: Value) -> Result<
 
 /// The text of heap string `v`, if it is one.
 pub fn heap_string(heap: &Heap, v: Value) -> Option<String> {
-    match heap.str_at(v.bits()) {
-        Some(gc) => Some(gc.as_ref().data.to_string()),
-        _ => None,
-    }
+    heap.str_at(v.bits()).map(|gc| gc.as_ref().data.to_string())
 }
 
 /// [`heap_string`], `InvalidInput` when `v` is not a string.
