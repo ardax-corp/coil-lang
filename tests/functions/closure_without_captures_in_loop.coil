@@ -1,0 +1,67 @@
+// A lambda that captures and fills nothing, written inside a loop, is one
+// shared value (#2251), so loop-invariant motion may make it once before
+// the loop. Lambdas that capture a value the loop changes, or fill a
+// parameter, are made on every pass and see that pass's values.
+use tests::assert;
+
+fn apply(fn(int) -> int f, int x) -> int {
+    return f(x);
+}
+
+fn twice(fn(int) -> int f, int x) -> int {
+    return f(f(x));
+}
+
+test("a lambda without captures in a loop") {
+    let total = 0;
+    let i = 0;
+    while i < 1000 {
+        total += apply(fn (int c) => c + 1, i);
+        i += 1;
+    }
+    assert!(total == 1000 * 999 / 2 + 1000);
+}
+
+test("two lambdas without captures in one loop") {
+    let a = 0;
+    let b = 0;
+    for i in 0..500 {
+        a += twice(fn (int c) => c * 2, i);
+        b += apply(fn (int c) => c - 1, i);
+    }
+    assert!(a == 4 * (500 * 499 / 2));
+    assert!(b == 500 * 499 / 2 - 500);
+}
+
+test("a lambda that captures the loop's value is made each pass") {
+    let fs: Vec<fn(int) -> int> = Vec::new();
+    let i = 0;
+    while i < 10 {
+        let k = i * 3;
+        fs.push(fn (int c) use (k) => c + k);
+        i += 1;
+    }
+    let j = 0;
+    while j < 10 {
+        assert!(fs[j](1) == 1 + j * 3);
+        j += 1;
+    }
+}
+
+test("lambdas without captures kept from a loop") {
+    let fs: Vec<fn(int) -> int> = Vec::new();
+    for i in 0..20 {
+        fs.push(fn (int c) => c * c);
+        assert!(fs[i](i) == i * i);
+    }
+    assert!(fs.len() == 20);
+    assert!(fs[19](3) == 9 && fs[0](4) == 16);
+}
+
+test("a lambda applied to the element a loop writes") {
+    let counts: Vec<int> = [0, 0, 0];
+    for i in 0..300 {
+        counts[i % 3] = apply(fn (int c) => c + 1, counts[i % 3]);
+    }
+    assert!(counts[0] == 100 && counts[1] == 100 && counts[2] == 100);
+}

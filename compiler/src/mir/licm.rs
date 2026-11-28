@@ -725,6 +725,14 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo, dense: bool) -> usize {
             guarded.insert(dest);
         }
         todo.push(dest);
+        // A shared function value's barrier comes with it, right after it.
+        if let Some(barrier) = fn_value_barrier(func, dest) {
+            invariant.insert(barrier);
+            if g {
+                guarded.insert(barrier);
+            }
+            todo.push(barrier);
+        }
     }
     if todo.is_empty() {
         return 0;
@@ -986,9 +994,28 @@ fn motion(
             ..
         }
         | MirInst::GcBarrier { .. } => free(dense && !fx.heap()),
+        // A function value that captures and fills nothing is one shared
+        // object per entry (#2251), the same on every pass.
+        MirInst::Alloc { kind: super::inst::MirAllocKind::Fn { mask: 0, .. }, elems, .. } if elems.is_empty() => free(dense),
         MirInst::String { .. } | MirInst::CodePtr { .. } => free(dense),
         _ => None,
     }
+}
+
+/// The `GcBarrier` right after the shared function value `dest` makes
+/// (a capture-less [`MirAllocKind::Fn`](super::inst::MirAllocKind::Fn)),
+/// which moves with it so it stays the op right after its allocation.
+fn fn_value_barrier(func: &MirFunc, dest: ValueId) -> Option<ValueId> {
+    func.blocks.iter().find_map(|b| {
+        let idx = b.insts.iter().position(|i| i.dest() == dest)?;
+        if !matches!(&b.insts[idx], MirInst::Alloc { kind: super::inst::MirAllocKind::Fn { .. }, .. }) {
+            return None;
+        }
+        match b.insts.get(idx + 1)? {
+            MirInst::GcBarrier { dest: barrier, object, .. } if *object == dest => Some(*barrier),
+            _ => None,
+        }
+    })
 }
 
 /// An int `+ - *`, shift or negation, which traps on overflow or a bad
