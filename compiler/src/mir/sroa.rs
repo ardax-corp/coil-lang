@@ -136,13 +136,30 @@ pub fn forward_tuple_loads(func: &mut MirFunc) -> usize {
         })
         .collect();
     let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
-    for inst in func.blocks.iter().flat_map(|b| &b.insts) {
-        if let MirInst::ProductLoad { dest, object, slot } = inst
-            && !written.contains(object)
-            && let Some(&item) = items.get(object).and_then(|e| e.get(*slot as usize))
-            && super::frame_words::ty_of(func, item) == super::frame_words::ty_of(func, *dest)
-        {
-            subst.insert(*dest, item);
+    // A load of a forwarded load reads the item that load forwards to (a
+    // nested tuple's item, `t[0][1]`), to a fixed point.
+    loop {
+        let before = subst.len();
+        for inst in func.blocks.iter().flat_map(|b| &b.insts) {
+            if let MirInst::ProductLoad { dest, object, slot } = inst
+                && !subst.contains_key(dest)
+            {
+                let read = *object;
+                let mut object = read;
+                while let Some(&o) = subst.get(&object) {
+                    object = o;
+                }
+                if !written.contains(&read)
+                    && !written.contains(&object)
+                    && let Some(&item) = items.get(&object).and_then(|e| e.get(*slot as usize))
+                    && super::frame_words::ty_of(func, item) == super::frame_words::ty_of(func, *dest)
+                {
+                    subst.insert(*dest, item);
+                }
+            }
+        }
+        if subst.len() == before {
+            break;
         }
     }
     if subst.is_empty() {
@@ -262,6 +279,27 @@ mod tests {
         assert_eq!(forward_tuple_loads(&mut func), 2);
         let ret: Vec<ValueId> = func.blocks.iter().filter_map(|bl| bl.term.as_ref()).flat_map(|t| t.uses()).collect();
         assert_eq!(ret, vec![i], "returns the first tuple's item; {func}");
+        let left = func.blocks.iter().flat_map(|bl| bl.insts.iter()).filter(|i| matches!(i, MirInst::Alloc { .. } | MirInst::ProductLoad { .. })).count();
+        assert_eq!(left, 0, "both tuples and loads go; {func:?}");
+    }
+
+    #[test]
+    fn forwards_a_nested_tuples_item_through_its_load() {
+        // `t = ((i, j), i)` then `t[0][1]`: the inner load reads the outer
+        // load, which forwards to the inner tuple.
+        let mut b = MirBuilder::new("nested");
+        let i = b.add_param(MirTy::I64).unwrap();
+        let j = b.add_param(MirTy::I64).unwrap();
+        let inner = b.ins_alloc(MirAllocKind::TUPLE, vec![i, j]).unwrap();
+        let outer = b.ins_alloc(MirAllocKind::TUPLE, vec![inner, i]).unwrap();
+        let p = b.ins_product_load(outer, 0, MirTy::HeapRef).unwrap();
+        let v = b.ins_product_load(p, 1, MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(v)).unwrap();
+        let mut func = b.finish().unwrap();
+        assert_eq!(forward_tuple_loads(&mut func), 2);
+        let ret: Vec<ValueId> = func.blocks.iter().filter_map(|bl| bl.term.as_ref()).flat_map(|t| t.uses()).collect();
+        assert_eq!(ret, vec![j], "returns the inner tuple's item; {func}");
         let left = func.blocks.iter().flat_map(|bl| bl.insts.iter()).filter(|i| matches!(i, MirInst::Alloc { .. } | MirInst::ProductLoad { .. })).count();
         assert_eq!(left, 0, "both tuples and loads go; {func:?}");
     }
