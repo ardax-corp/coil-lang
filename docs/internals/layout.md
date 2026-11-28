@@ -364,7 +364,8 @@ A generic class's field typed by a bare class parameter (`class Cell<V> {
 v: V }`) holds its argument in place at an instance where that argument
 is a closed two-word type whose words' kinds are fixed
 (`layout::pair_word_kinds`: `Option<int>`, `(int, int)`, `Option<float>`)
-or a tuple of three or four immediates (`layout::wide_scalar_items`):
+or a tuple of three to sixteen leaves at any depth, each a number or a
+one-word heap object (`layout::wide_field_shape`):
 `Cell<Option<int>>` keeps both words, as `class G { v: Option<int> }`
 does, and `Cell<int>`, `Cell<string>` and `Cell<Option<string>>` (a
 niche word) keep the shared layout (`Checker::class_instance_tails`).
@@ -647,14 +648,20 @@ from `CalleeFacts` (`escaped`, `coroutine`, `host_native`,
   scalar-replaced into frame slots (`query::sroa_class`).
   A pair field's words are stored as numbers when its class row says they
   are: the tail always, the first word for a scalar pair.
-- A class field of a tuple of three or four immediates (`(int, int,
-  int)`, `(float, float, float, int)`, `layout::wide_scalar_items`) sits
-  flat too, under the same rules: its first item in the field's slot,
-  the others in tail slots after the pair tails
-  (`Checker::class_wide_tails`), all marked scalar (a flat instance's,
-  below, take the same places). `new` and a write
-  store each item (a tuple made in place gives its items; any other value
-  is loaded item by item), and a read loads them into a fresh tuple,
+- A class field of a tuple at any depth whose leaves are numbers or
+  one-word heap objects, three to sixteen of them (`(int, int, int)`,
+  `((int, int), int)`, `(string, (int, int))`, `((Handle, int), int)`,
+  `layout::wide_field_shape`), sits flat too, under the same rules: its
+  first leaf in the field's slot, the others in tail slots after the pair
+  tails (`Checker::class_wide_tails`), each slot of its leaf's word kind
+  (`layout::wide_leaf_kind`: scalar for a number, pointer for a string, a
+  class instance, a `Vec` or a boxed enum; a two-word value, a niche word,
+  a function or a trait value is no leaf, so its tuple stays one heap
+  word). A flat instance's (below) take the same places and the same
+  kinds, in its own kinds. `new` and a write store each leaf, a heap one
+  as a counted store (a tuple made in place gives its items, a nested one
+  made in place its own; any other value is loaded item by item), and a
+  read loads them into fresh tuples,
   which `mir::forward_tuple_loads` takes apart again when the reader only
   reads its items (`let (a, b, c) = p.t`). A read that keeps the tuple
   (pushes it, returns it) allocates one.
