@@ -531,11 +531,16 @@ impl Lower<'_> {
     }
 
     /// The leaves' word types and nesting of `id`'s tuple type, a flat wide
-    /// field's ([`crate::layout::wide_shape_of`]).
+    /// field's ([`crate::layout::wide_field_shape`]).
     fn wide_words(&self, id: HirId) -> Option<WideWords> {
-        let shape = crate::layout::wide_shape_of(self.expr_ty(id)?)?;
-        let tys = shape.leaves.iter().map(scalar).collect::<Option<Vec<_>>>()?;
-        Some(WideWords { tys, nest: shape.nest })
+        let shape = self.cx.wide_shape(self.expr_ty(id)?)?;
+        let tys = shape
+            .leaves
+            .iter()
+            .zip(&shape.kinds)
+            .map(|(t, &k)| if k == common::WORD_SCALAR { scalar(t) } else { self.word_ty(t).filter(|&w| w == MirTy::HeapRef) })
+            .collect::<Option<Vec<_>>>()?;
+        Some(WideWords { tys, kinds: shape.kinds, nest: shape.nest, leaf0: shape.leaves[0].clone() })
     }
 
     /// The slot of item `i` of a flat wide field at `slot` / `tail`.
@@ -676,7 +681,7 @@ impl Lower<'_> {
                 kinds.push(common::WORD_POINTER);
             } else {
                 items.push(words[at.1]);
-                kinds.push(common::WORD_SCALAR);
+                kinds.push(w.kinds[at.1]);
                 at.0 += 1;
                 at.1 += 1;
             }
@@ -830,6 +835,9 @@ pub trait LowerCx {
     /// The word kinds of a closed two-word type's two words
     /// ([`crate::layout::pair_word_kinds`]).
     fn pair_kinds(&self, ty: &Ty) -> Option<[u8; 2]>;
+    /// The leaves, word kinds and nesting of a flat wide field's tuple
+    /// type ([`crate::layout::wide_field_shape`]).
+    fn wide_shape(&self, ty: &Ty) -> Option<crate::layout::WideShape>;
     /// The element of a `Vec` of a closed two-word type: a lane array,
     /// each element's two words in place (`MirAllocKind::Lanes`,
     /// `LaneIndex` / `LaneStore` / `LanePush`).
@@ -1001,7 +1009,7 @@ pub enum HirFieldWord {
     Pair { slot: u32, tail: u32, lo: MirTy, hi: MirTy },
     /// A flat wide class field (`Checker::class_wide_tails`): the slot of
     /// its first leaf, the first of its tail slots (leaves `1..n`, in
-    /// order) and its `n` leaves, all numbers
+    /// order) and its `n` leaves, each a number or a heap word
     /// ([`crate::layout::wide_field_shape`] of its type).
     Wide { slot: u32, tail: u32, n: u32 },
     /// A heap class object's field (or a record variant's payload) that
@@ -1013,20 +1021,23 @@ pub enum HirFieldWord {
     OpenNiche { slot: u32, layout: ValueLayout },
 }
 
-/// A flat wide field's leaves' word types and its type's nesting
-/// ([`crate::layout::WideShape::nest`]).
+/// A flat wide field's leaves' word types and word kinds, its type's
+/// nesting ([`crate::layout::WideShape`]) and its first leaf's type.
 #[derive(Clone, Debug)]
 struct WideWords {
     tys: Vec<MirTy>,
+    kinds: Vec<u8>,
     nest: Vec<u8>,
+    leaf0: Ty,
 }
 
 impl WideWords {
-    /// One tuple of `tys`, nothing nested.
+    /// One tuple of number words `tys`, nothing nested.
     fn flat(tys: Vec<MirTy>) -> Self {
         let mut nest = vec![u8::try_from(tys.len()).expect("a wide tuple's arity")];
         nest.resize(tys.len() + 1, 0);
-        Self { tys, nest }
+        let kinds = vec![common::WORD_SCALAR; tys.len()];
+        Self { tys, kinds, nest, leaf0: Ty::Con(crate::typechecking::ty::INT.into()) }
     }
 }
 
@@ -4361,8 +4372,9 @@ impl Lower<'_> {
                 let Some(obj) = self.word(base)? else {
                     return Ok(Val::Never);
                 };
-                for (i, w) in words.into_iter().enumerate() {
-                    self.b.ins_field_store(obj, w, Self::wide_slot(slot, tail, i), true).map_err(mir)?;
+                for (i, v) in words.into_iter().enumerate() {
+                    let number = w.kinds[i] == common::WORD_SCALAR;
+                    self.b.ins_field_store(obj, v, Self::wide_slot(slot, tail, i), number).map_err(mir)?;
                 }
                 Ok(Val::Unit)
             }
@@ -8073,8 +8085,8 @@ impl Lower<'_> {
                 if matches!(tails.get(i), Some(Some(_))) {
                     None
                 } else if matches!(wide.get(i), Some(Some(_))) {
-                    // A wide field's first leaf, a number.
-                    self.expr_ty(a).and_then(crate::layout::wide_shape_of).and_then(|s| s.leaves.first().cloned())
+                    // A wide field's first leaf.
+                    self.wide_words(a).map(|w| w.leaf0)
                 } else {
                     self.expr_ty(a).cloned()
                 }
@@ -8093,9 +8105,11 @@ impl Lower<'_> {
                     *k = hi;
                 }
             }
-            if let Some(&Some((tail, extra))) = wide.get(i) {
-                for k in slot_kinds.iter_mut().skip(tail as usize).take(extra as usize) {
-                    *k = common::WORD_SCALAR;
+            if let Some(&Some((tail, extra))) = wide.get(i)
+                && let Some(w) = self.wide_words(a)
+            {
+                for (k, &leaf) in slot_kinds.iter_mut().skip(tail as usize).take(extra as usize).zip(&w.kinds[1..]) {
+                    *k = leaf;
                 }
             }
         }

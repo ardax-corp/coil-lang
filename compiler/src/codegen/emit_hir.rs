@@ -13304,6 +13304,10 @@ impl crate::mir::LowerCx for HirLowerCx<'_> {
         crate::layout::pair_word_kinds(checker, &apply_ty_prune(checker.subst(), t))
     }
 
+    fn wide_shape(&self, t: &Ty) -> Option<crate::layout::WideShape> {
+        crate::layout::wide_field_shape(&self.c().checker, t)
+    }
+
     fn lane_elem(&self, t: &Ty) -> Option<crate::mir::HirLaneElem> {
         self.c().hir_lane_elem(t)
     }

@@ -20858,14 +20858,21 @@ impl Checker {
                             }
                         }
                         Some(_) => flat(ty)[0],
-                        None if wide[i].is_some() => common::WORD_SCALAR,
+                        // A flat wide field's first leaf.
+                        None if wide[i].is_some() => crate::layout::wide_field_shape(self, ty).map_or(common::WORD_UNKNOWN, |s| s.kinds[0]),
                         None => crate::layout::word_kind(self, ty),
                     })
                     .collect();
                 // A flat field's second word, in its tail slot.
                 kinds.extend(fields.iter().zip(&tails).filter(|(_, t)| t.is_some()).map(|((_, ty), _)| flat(ty)[1]));
-                // A flat wide field's other words, all numbers.
-                kinds.extend(wide.iter().flatten().flat_map(|&(_, n)| std::iter::repeat_n(common::WORD_SCALAR, n as usize)));
+                // A flat wide field's other leaves, a number or a heap word
+                // each, in its tail slots.
+                for ((_, ty), w) in fields.iter().zip(&wide) {
+                    if let Some((_, n)) = *w {
+                        let leaf = crate::layout::wide_field_shape(self, ty).map(|s| s.kinds).unwrap_or_default();
+                        kinds.extend((1..=n as usize).map(|k| leaf.get(k).copied().unwrap_or(common::WORD_UNKNOWN)));
+                    }
+                }
                 for (slot, mask) in tagged {
                     common::push_tagged_entry(&mut kinds, slot, mask);
                 }
@@ -20949,8 +20956,8 @@ impl Checker {
         }
         let mut next = fields.len() as u32;
         for (i, (name, ty)) in fields.iter().enumerate() {
-            // A tuple of immediates nested in it is a wide field's words
-            // (`((int, int), int)`), not a pair.
+            // A tuple nested in it is a wide field's words
+            // (`((int, int), int)`, `(string, (int, int))`), not a pair.
             if !self.is_borrow_field(key, name)
                 && !ty_names_param(ty, &params)
                 && crate::layout::pair_word_kinds(self, ty).is_some()
@@ -20965,11 +20972,12 @@ impl Checker {
 
     /// For each field of class `key`, in declaration order, the first of
     /// the tail slots that hold words 2.. of a flat wide field and how many
-    /// there are: a field of a tuple of immediates at any depth
+    /// there are: a field of a tuple of numbers and heap words at any depth
     /// ([`crate::layout::wide_field_shape`]) keeps its first leaf in its
     /// own slot and the others after the pair tails
-    /// ([`Self::class_flat_tails`]), all number slots. The same classes and
-    /// fields as a flat pair field qualify.
+    /// ([`Self::class_flat_tails`]), each slot of its leaf's word kind
+    /// ([`Self::class_word_kinds`]). The same classes and fields as a flat
+    /// pair field qualify.
     pub fn class_wide_tails(&self, key: &str) -> Vec<Option<(u32, u32)>> {
         let Some(fields) = self.class_fields(key) else {
             return Vec::new();
@@ -21009,7 +21017,8 @@ impl Checker {
     /// a field typed by a bare class parameter whose argument is a closed
     /// two-word type ([`crate::layout::pair_word_kinds`], both words of a
     /// kind the instance's own packed kinds can say) or a tuple of three or
-    /// more immediates at any depth ([`crate::layout::wide_field_shape`]). Each gets
+    /// more numbers and heap words at any depth
+    /// ([`crate::layout::wide_field_shape`]). Each gets
     /// its tail slots after the class's own ([`Self::class_slot_count`]),
     /// in field order, so the class row (one per class) stays right for
     /// every slot it names, and the instance's own kinds

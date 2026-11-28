@@ -309,38 +309,62 @@ pub fn wide_scalar_items(checker: &Checker, ty: &Ty) -> Option<Vec<Ty>> {
     }
 }
 
-/// A closed tuple of immediates at any depth (`(int, int, int)`,
-/// `((int, int), int)`, `(float, (float, float), float)`) of three to
-/// [`common::PACKED_KIND_WORDS`] leaves, the words a direct call carries
-/// it in: a flat class field keeps its leaves in its slot and tail slots
-/// (`Checker::class_wide_tails`), one number word each, by one rule at
-/// any depth. Its leaves in order and its nesting ([`WideShape`]).
+/// A closed tuple at any depth whose leaves are numbers or heap words
+/// (`(int, int, int)`, `((int, int), int)`, `(string, (int, int))`,
+/// `((Handle, int), int)`) of three to [`common::PACKED_KIND_WORDS`]
+/// leaves, the words a direct call carries it in: a flat class field
+/// keeps its leaves in its slot and tail slots
+/// (`Checker::class_wide_tails`), one word each, by one rule at any depth.
+/// Its leaves in order, their word kinds and its nesting ([`WideShape`]).
 pub fn wide_field_shape(checker: &Checker, ty: &Ty) -> Option<WideShape> {
-    wide_shape_of(&apply_ty_prune(checker.subst(), ty))
+    wide_shape_of(checker, &apply_ty_prune(checker.subst(), ty))
 }
 
 /// The leaves and nesting of a flat wide field's tuple type ([`wide_field_shape`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WideShape {
-    /// The immediates, in order.
+    /// The leaves, in order.
     pub leaves: Vec<Ty>,
+    /// Each leaf's word kind: `common::WORD_SCALAR` for a number,
+    /// `common::WORD_POINTER` for a heap word.
+    pub kinds: Vec<u8>,
     /// Each tuple's arity and `0` for a leaf, in preorder (the outer tuple
     /// first).
     pub nest: Vec<u8>,
 }
 
+/// The word kind of a leaf of a flat wide value ([`wide_field_shape`]): a
+/// number, or a closed one-word heap object (a string, a class instance, a
+/// `Vec`, a boxed enum), the word a tuple holds it in. A two-word value, a
+/// niche word, a function, a trait value or a record is not one.
+pub fn wide_leaf_kind(checker: &Checker, ty: &Ty) -> Option<u8> {
+    let ty = strip_readonly(ty);
+    if is_immediate(ty) {
+        return Some(common::WORD_SCALAR);
+    }
+    (matches!(ty, Ty::Con(_) | Ty::App(..))
+        && ty_is_closed(ty)
+        && !is_unit(ty)
+        && !is_scalar_enum_ty(checker, ty)
+        && crate::typechecking::aggregate_arith::unwrap_matrix_ty(ty).is_none()
+        && of_resolved(checker, ty) == Layout::Word
+        && word_kind(checker, ty) == common::WORD_POINTER)
+        .then_some(common::WORD_POINTER)
+}
+
 /// [`wide_field_shape`] of a resolved type.
-pub fn wide_shape_of(ty: &Ty) -> Option<WideShape> {
-    fn walk(ty: &Ty, out: &mut WideShape) -> Option<()> {
+pub fn wide_shape_of(checker: &Checker, ty: &Ty) -> Option<WideShape> {
+    fn walk(checker: &Checker, ty: &Ty, out: &mut WideShape) -> Option<()> {
         match strip_readonly(ty) {
             Ty::Tuple(items) if !items.is_empty() => {
                 out.nest.push(u8::try_from(items.len()).ok()?);
                 for item in items {
-                    walk(item, out)?;
+                    walk(checker, item, out)?;
                 }
                 Some(())
             }
-            t if is_immediate(t) && out.leaves.len() < common::PACKED_KIND_WORDS => {
+            t if out.leaves.len() < common::PACKED_KIND_WORDS => {
+                out.kinds.push(wide_leaf_kind(checker, t)?);
                 out.nest.push(0);
                 out.leaves.push(t.clone());
                 Some(())
@@ -351,8 +375,8 @@ pub fn wide_shape_of(ty: &Ty) -> Option<WideShape> {
     if !matches!(strip_readonly(ty), Ty::Tuple(_)) {
         return None;
     }
-    let mut out = WideShape { leaves: Vec::new(), nest: Vec::new() };
-    walk(ty, &mut out)?;
+    let mut out = WideShape { leaves: Vec::new(), kinds: Vec::new(), nest: Vec::new() };
+    walk(checker, ty, &mut out)?;
     (out.leaves.len() >= 3).then_some(out)
 }
 
