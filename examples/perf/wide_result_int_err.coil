@@ -1,0 +1,34 @@
+// CPU: a Result<(int, int, int), int> a direct call takes: a call's result,
+// an Ok of a fresh tuple. Its Err is a number, so the Result is a boxed
+// enum over the tuple; its words, the Err payload in a word it shares and
+// the Ok flag go in registers instead, no tuple or enum built per call.
+use io::sync::print;
+use string::format;
+
+#[inline(never)]
+fn get(int a) -> Result<(int, int, int), int> {
+    if a % 7 == 0 {
+        return Err(a & 3);
+    }
+    return Ok((a & 255, a & 15, 7));
+}
+
+#[inline(never)]
+fn total(Result<(int, int, int), int> r) -> int {
+    return match r {
+        Ok(t) => t[0] + t[1] * 2 + t[2],
+        Err(e) => e,
+    };
+}
+
+fn main() {
+    let s = 0;
+    let i = 0;
+    while i < 10000000 {
+        s += total(get(i));
+        s += total(Ok((i & 31, 1, 2)));
+        s = s & 0xffffff;
+        i += 1;
+    }
+    let _ = print(format("%i\n", s));
+}
