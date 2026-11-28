@@ -2216,19 +2216,6 @@ impl Compiler {
         })
     }
 
-    /// Whether a type in the generic body at `span` is an enum over the
-    /// type parameters (`Option<T>`): a clone gives it its own layout,
-    /// which the shared methods reading the same fields do not expect.
-    pub(crate) fn has_enum_over_var(checker: &Checker, ty: &Ty) -> bool {
-        ty.any(|t| match t {
-            Ty::App(head, args) => {
-                matches!(head.as_ref(), Ty::Con(name) if checker.enum_variants(name).is_some())
-                    && args.iter().any(Ty::has_var)
-            }
-            _ => false,
-        })
-    }
-
     /// Programs whose ASTs [`Self::emit_foreign_clones`] may need: none
     /// when no clone is queued, else every program kept for clones, since
     /// a queued clone's body may ask for clones of a third module's
