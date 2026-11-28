@@ -5278,6 +5278,7 @@ impl<'a> Lower<'a> {
             for inst in &blk.insts {
                 let read: Vec<ValueId> = match inst {
                     MirInst::HostInvoke { native_id, args, .. } if *native_id == common::STRING_BYTE_AT_ID && args.len() == 2 => vec![args[0]],
+                    MirInst::HostInvoke { dest_hi: None, native_id, layout, args, .. } if slice_in_place_fits(*native_id, *layout, args) => vec![args[0]],
                     MirInst::ByteScan { streams, .. } => streams.iter().map(|&(s, _)| s).collect(),
                     _ => Vec::new(),
                 };
@@ -6479,6 +6480,18 @@ impl<'a> Lower<'a> {
             MirInst::HostInvoke { dest, dest_hi: None, native_id, layout, args } if map_op(f, *native_id, args).is_some() => {
                 let op = map_op(f, *native_id, args).expect("guarded");
                 self.lower_map_op(f, op, *dest, *native_id, *layout, args);
+            }
+            MirInst::HostInvoke { dest, dest_hi: None, native_id, layout, args } if slice_in_place_fits(*native_id, *layout, args) && self.str_views.contains_key(&args[0]) => {
+                // A short slice of a string whose bytes are in view: made
+                // here (`slice_in_place`), else the host call.
+                let join = self.slice_in_place(f, args);
+                let w = self.host_call(f, *native_id, *layout, args);
+                self.b.ins().jump(join, &[w.into()]);
+                self.b.switch_to_block(join);
+                let w = self.b.block_params(join)[0];
+                self.drop_views();
+                self.set(f, *dest, w);
+                self.view_of(f, *dest);
             }
             MirInst::HostInvoke { dest, dest_hi, native_id, layout, args } => {
                 // `s[i]` on a string: the byte in place when `i` is in range,
@@ -8174,6 +8187,128 @@ impl<'a> Lower<'a> {
     /// block with it. Out of range (or not a string object) continues in a
     /// cold block, current on return, where the caller emits the host call
     /// and jumps to the join with its word.
+    /// `string_slice_bytes(s, a, e)` in place for a result of up to
+    /// `machine::native::string_alloc().max` bytes, as the host native
+    /// copies one (`StrData::slice`): when `0 <= a <= e <= s.len()`, both
+    /// ends are on character boundaries and inline allocation is open, a
+    /// young inline string is bumped or popped from the string class's
+    /// cursor, filled from its image and the bytes, and counted, and its
+    /// word (an `Ok` of a niche result) goes to the returned join block.
+    /// Anything else (out of range or mid-character, which the host clamps
+    /// or reports, a longer result, a closed gate, a spent chunk) is left
+    /// in the current block for the host call.
+    fn slice_in_place(&mut self, f: &MirFunc, args: &[ValueId]) -> Block {
+        use machine::native::{BUMP_BYTES, BUMP_END, BUMP_FREE, BUMP_FREE_LINK, BUMP_NEXT, COUNTS_ALLOC_BYTES, COUNTS_HEADER_XOR, COUNTS_INLINE_GATE, COUNTS_LIVE_COUNT, NATIVE_CTX_ALLOC_BUMPS, NATIVE_CTX_ALLOC_COUNTS};
+        let t = MemFlagsData::trusted();
+        let sa = machine::native::string_alloc();
+        let (p, n) = self.str_bytes(f, args[0]);
+        let a = self.get(f, args[1]);
+        let a = self.coerce(a, types::I64);
+        let e = self.get(f, args[2]);
+        let e = self.coerce(e, types::I64);
+        let join = self.b.create_block();
+        self.b.append_block_param(join, types::I64);
+        let slow = self.b.create_block();
+        let blocks: Vec<Block> = (0..9).map(|_| self.b.create_block()).collect();
+        let [ranged, start_in, start_ok, end_in, gated, bump, spent, popped, fill] = blocks[..] else { unreachable!() };
+        self.b.append_block_param(fill, types::I64);
+        // `a <= e <= n` unsigned (so `a >= 0`), and at most `max` bytes.
+        let lo = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, a, e);
+        let hi = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, e, n);
+        let both = self.b.ins().band(lo, hi);
+        self.b.ins().brif(both, ranged, &[], slow, &[]);
+        self.b.switch_to_block(ranged);
+        let len = self.b.ins().isub(e, a);
+        let short = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, len, i64::from(sa.max));
+        self.b.ins().brif(short, start_in, &[], slow, &[]);
+        // An end is on a boundary at the string's end or before a byte that
+        // does not continue a character (`0b10xx_xxxx`).
+        let boundary = |this: &mut Self, at: cranelift_codegen::ir::Value, ok: Block, test: Block| {
+            let end = this.b.ins().icmp(IntCC::Equal, at, n);
+            this.b.ins().brif(end, ok, &[], test, &[]);
+            this.b.switch_to_block(test);
+            let byte_at = this.b.ins().iadd(p, at);
+            let byte = this.b.ins().uload8(types::I64, t, byte_at, 0);
+            let top = this.b.ins().band_imm_u(byte, 0xc0);
+            let cont = this.b.ins().icmp_imm_s(IntCC::Equal, top, 0x80);
+            this.b.ins().brif(cont, slow, &[], ok, &[]);
+        };
+        self.b.switch_to_block(start_in);
+        let start_test = self.b.create_block();
+        boundary(self, a, start_ok, start_test);
+        self.b.switch_to_block(start_ok);
+        let end_test = self.b.create_block();
+        boundary(self, e, end_in, end_test);
+        self.b.switch_to_block(end_in);
+        let counts = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ALLOC_COUNTS);
+        let gate = self.b.ins().load(types::I64, t, counts, COUNTS_INLINE_GATE);
+        self.b.ins().brif(gate, gated, &[], slow, &[]);
+        self.b.switch_to_block(gated);
+        let bumps = self.b.ins().load(types::I64, t, self.ctx, NATIVE_CTX_ALLOC_BUMPS);
+        let cursor = self.b.ins().iadd_imm_s(bumps, i64::from(sa.class) * i64::from(BUMP_BYTES));
+        let at = self.b.ins().load(types::I64, t, cursor, BUMP_NEXT);
+        let end = self.b.ins().load(types::I64, t, cursor, BUMP_END);
+        let next = self.b.ins().iadd_imm_s(at, i64::from(sa.slot));
+        let fits = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, next, end);
+        self.b.ins().brif(fits, bump, &[], spent, &[]);
+        self.b.switch_to_block(bump);
+        self.b.ins().store(t, next, cursor, BUMP_NEXT);
+        self.b.ins().jump(fill, &[at.into()]);
+        // A spent chunk: a slot freed since, else the host call (which
+        // refills the chunk).
+        self.b.switch_to_block(spent);
+        let free = self.b.ins().load(types::I64, t, cursor, BUMP_FREE);
+        self.b.ins().brif(free, popped, &[], slow, &[]);
+        self.b.switch_to_block(popped);
+        let link = self.b.ins().load(types::I64, t, free, BUMP_FREE_LINK);
+        self.b.ins().store(t, link, cursor, BUMP_FREE);
+        self.b.ins().jump(fill, &[free.into()]);
+        self.b.switch_to_block(fill);
+        let o = self.b.block_params(fill)[0];
+        for (i, &img) in sa.image.iter().enumerate() {
+            let x = if i == 0 {
+                // A steal epoch's mutator makes it old and stamps its epoch
+                // (`HeapCounts::header_xor`, zero else).
+                let xor = self.b.ins().load(types::I64, t, counts, COUNTS_HEADER_XOR);
+                self.b.ins().bxor_imm_s(xor, img as i64)
+            } else {
+                self.b.ins().iconst(types::I64, img as i64)
+            };
+            self.b.ins().store(t, x, o, (i * 8) as i32);
+        }
+        let len8 = self.b.ins().ireduce(types::I8, len);
+        self.b.ins().store(t, len8, o, sa.len_at as i32);
+        // The bytes, one at a time (at most `max`): reading past the
+        // source's last byte could leave its mapping.
+        let (copy, copied) = (self.b.create_block(), self.b.create_block());
+        self.b.append_block_param(copy, types::I64);
+        let zero = self.b.ins().iconst(types::I64, 0);
+        let none = self.b.ins().icmp_imm_s(IntCC::Equal, len, 0);
+        self.b.ins().brif(none, copied, &[], copy, &[zero.into()]);
+        self.b.switch_to_block(copy);
+        let k = self.b.block_params(copy)[0];
+        let from = self.b.ins().iadd(p, a);
+        let from = self.b.ins().iadd(from, k);
+        let byte = self.b.ins().uload8(types::I64, t, from, 0);
+        let byte = self.b.ins().ireduce(types::I8, byte);
+        let to = self.b.ins().iadd(o, k);
+        self.b.ins().store(t, byte, to, sa.bytes_at as i32);
+        let k1 = self.b.ins().iadd_imm_s(k, 1);
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k1, len);
+        self.b.ins().brif(more, copy, &[k1.into()], copied, &[]);
+        self.b.switch_to_block(copied);
+        let bytes = self.b.ins().load(types::I64, t, counts, COUNTS_ALLOC_BYTES);
+        let bytes = self.b.ins().iadd_imm_s(bytes, i64::from(sa.size));
+        self.b.ins().store(t, bytes, counts, COUNTS_ALLOC_BYTES);
+        let live = self.b.ins().load(types::I64, t, counts, COUNTS_LIVE_COUNT);
+        let live = self.b.ins().iadd_imm_s(live, 1);
+        self.b.ins().store(t, live, counts, COUNTS_LIVE_COUNT);
+        self.b.ins().jump(join, &[o.into()]);
+        self.b.set_cold_block(slow);
+        self.b.switch_to_block(slow);
+        join
+    }
+
     fn byte_in_place(&mut self, f: &MirFunc, s: ValueId, i: ValueId) -> Block {
         let i = self.get(f, i);
         let i = self.coerce(i, types::I64);
@@ -8743,6 +8878,16 @@ fn lane_expr_fits(e: &compiler::native_mir::LaneExpr, streams: usize, scalars: u
 
 /// Whether a word of type `t` is an object or null by its type, so native
 /// code counts it inline ([`Lower::emit_rc`]).
+/// Whether a `HostInvoke` is a `string_slice_bytes` whose `Ok` result is
+/// its string's word (a niche result) that native code may make in place
+/// (`Lower::slice_in_place`; `COIL_NATIVE_INLINE_ALLOC=0` turns it off).
+fn slice_in_place_fits(native_id: u16, layout: u8, args: &[ValueId]) -> bool {
+    native_id == common::STRING_SLICE_BYTES_ID
+        && args.len() == 3
+        && common::host_layout_base(u32::from(layout)) == common::HOST_ENUM_LAYOUT_RESULT_NICHE
+        && !std::env::var_os("COIL_NATIVE_INLINE_ALLOC").is_some_and(|v| v == "0")
+}
+
 fn counted_inline(t: MirTy) -> bool {
     matches!(t, MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes)
 }
