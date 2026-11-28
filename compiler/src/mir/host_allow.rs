@@ -35,6 +35,7 @@ const I64_3: &[MirTy] = &[I64, I64, I64];
 const I64_4: &[MirTy] = &[I64, I64, I64, I64];
 const I64_5: &[MirTy] = &[I64, I64, I64, I64, I64];
 const I64_6: &[MirTy] = &[I64, I64, I64, I64, I64, I64];
+const I64_7: &[MirTy] = &[I64, I64, I64, I64, I64, I64, I64];
 
 fn i64_args(arity: u8) -> Option<&'static [MirTy]> {
     Some(match arity {
@@ -45,6 +46,7 @@ fn i64_args(arity: u8) -> Option<&'static [MirTy]> {
         4 => I64_4,
         5 => I64_5,
         6 => I64_6,
+        7 => I64_7,
         _ => return None,
     })
 }

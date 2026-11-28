@@ -934,6 +934,8 @@ impl VirtualModules {
                 ("map_remove", common::MAP_REMOVE_NATIVE),
                 ("map_compact", common::MAP_COMPACT_NATIVE),
                 ("map_clear", common::MAP_CLEAR_NATIVE),
+                ("map_put", common::MAP_PUT_NATIVE),
+                ("word_mode", common::MAP_WORD_MODE_NATIVE),
             ]),
         );
 
