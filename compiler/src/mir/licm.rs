@@ -500,6 +500,9 @@ struct LoopEffects {
     /// A field store, or code that may write. An element store does not
     /// change a field, nor a field store an element (#1559).
     fields: bool,
+    /// When only field stores write fields: the slots they write. A read
+    /// of another slot sees no change, whatever object it reads.
+    field_slots: Option<HashSet<u32>>,
     /// An append, or code that may append; with lengths not steady, any
     /// allocation too (a finalizer may resize).
     lengths: bool,
@@ -513,7 +516,7 @@ impl LoopEffects {
 }
 
 fn loop_effects(func: &MirFunc, lp: &LoopInfo) -> LoopEffects {
-    let mut fx = LoopEffects { elements: false, object_elements: false, fields: false, lengths: false };
+    let mut fx = LoopEffects { elements: false, object_elements: false, fields: false, field_slots: Some(HashSet::new()), lengths: false };
     let calls = func.call_facts();
     for b in &func.blocks {
         if !lp.blocks.contains(&b.id) {
@@ -522,7 +525,15 @@ fn loop_effects(func: &MirFunc, lp: &LoopInfo) -> LoopEffects {
         for inst in &b.insts {
             fx.elements |= inst.writes_elements(&calls);
             fx.object_elements |= inst.writes_elements(&calls) && !matches!(inst, MirInst::StoreIndex { scalar: true, .. });
-            fx.fields |= inst.writes_fields(&calls);
+            if inst.writes_fields(&calls) {
+                fx.fields = true;
+                match (inst.field_slot_written(&calls), &mut fx.field_slots) {
+                    (Some(slot), Some(slots)) => {
+                        slots.insert(slot);
+                    }
+                    _ => fx.field_slots = None,
+                }
+            }
             fx.lengths |= inst.may_resize(&calls);
         }
     }
@@ -963,7 +974,7 @@ fn motion(
         MirInst::ArrayLen { .. } => free(!fx.lengths),
         // A readonly class's field never changes (#1560).
         MirInst::ProductLoad { dest, .. } if func.invariant_loads.contains(dest) => Some(Motion::Free),
-        MirInst::ProductLoad { .. } => free(!fx.fields),
+        MirInst::ProductLoad { slot, .. } => free(fx.field_slots.as_ref().is_some_and(|s| !s.contains(slot))),
         // One word only: the moved value is read through one φ behind the
         // guard, and lowering marks no two-word call pure.
         MirInst::Call { dest, args, dest_hi: None, .. } if func.pure_calls.contains(dest) => {

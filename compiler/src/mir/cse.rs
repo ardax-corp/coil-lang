@@ -18,8 +18,9 @@ use super::ty::MirTy;
 /// Same-block value numbering. Returns how many instructions were removed.
 ///
 /// Besides operators, a scalar read of the heap (an element, a field, a
-/// length) or a pure call's scalar reads the earlier one, until something
-/// between may write the heap (or resize, for a length).
+/// length), a field's object word, or a pure call's scalar reads the
+/// earlier one, until something between may write the heap (or resize,
+/// for a length).
 pub fn cse(func: &mut MirFunc) -> usize {
     cse_with(func, true)
 }
@@ -57,7 +58,7 @@ fn cse_with(func: &mut MirFunc, literals: bool) -> usize {
                 continue;
             }
             let ty = |v: ValueId| types.get(v.index()).copied().unwrap_or(MirTy::Value);
-            if let Some(key) = read_key(inst, &pure_calls, &func.invariant_loads, &ty) {
+            if let Some(key) = read_key(inst, &pure_calls, &func.invariant_loads, &ty, literals) {
                 if let Some(&prev) = reads.get(&key) {
                     subst.insert(dest, prev);
                 } else {
@@ -68,6 +69,7 @@ fn cse_with(func: &mut MirFunc, literals: bool) -> usize {
             let writes = Writes {
                 elements: inst.writes_elements(&calls),
                 fields: inst.writes_fields(&calls),
+                field_slot: inst.field_slot_written(&calls),
                 lengths: inst.may_resize(&calls),
             };
             if writes.elements || writes.fields || writes.lengths {
@@ -105,6 +107,8 @@ enum ReadKey {
 struct Writes {
     elements: bool,
     fields: bool,
+    /// With `fields`: the one slot written, when a field store is all it is.
+    field_slot: Option<u32>,
     lengths: bool,
 }
 
@@ -114,7 +118,7 @@ impl ReadKey {
     fn killed_by(&self, w: &Writes, ty: &impl Fn(ValueId) -> MirTy) -> bool {
         match self {
             Self::Index { .. } => w.elements,
-            Self::Field { .. } => w.fields,
+            Self::Field { index, .. } => w.fields && w.field_slot.is_none_or(|s| s == *index),
             Self::FixedField { .. } | Self::FixedIndex { .. } | Self::FixedLen { .. } => false,
             Self::Len { .. } => w.lengths,
             Self::Call { args, .. } => (w.elements || w.fields || w.lengths) && args.iter().any(|&a| reads_heap(ty(a))),
@@ -132,8 +136,13 @@ fn read_key(
     pure_calls: &HashSet<ValueId>,
     invariant_loads: &HashSet<ValueId>,
     ty: &impl Fn(ValueId) -> MirTy,
+    dense: bool,
 ) -> Option<ReadKey> {
-    if !ty(inst.dest()).is_numeric() {
+    // A field's object word too, in a dense body: the second read of
+    // `self.vals` borrows from the object as the first one does, and a
+    // write that may change the field ends both.
+    let field_word = dense && matches!(inst, MirInst::ProductLoad { .. }) && ty(inst.dest()).is_heap_word();
+    if !ty(inst.dest()).is_numeric() && !field_word {
         return None;
     }
     Some(match inst {

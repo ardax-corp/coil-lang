@@ -52,6 +52,18 @@ pub fn host_may_hoist(id: u16) -> bool {
     }
 }
 
+/// A lookup native: it reads its arguments and writes nothing an element,
+/// field or length read sees (`hash_string` caches the hash in the string's
+/// header, which no load reads). Impure all the same (what it answers
+/// depends on what the table holds), so it stays where it is; only the
+/// reads around it may move past it or merge across it.
+pub fn host_writes_nothing(id: u16) -> bool {
+    matches!(
+        id,
+        common::HASH_STRING_ID | common::KEY_INDEX_FIND_ID | common::MAP_FIND_ID | common::MAP_PROBE_ID | common::MAP_LIVE_ID | common::MAP_LEN_ID
+    )
+}
+
 /// Whether an op may run user code with effects ([`OpProps::effects`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effects {
@@ -194,7 +206,7 @@ impl MirInst {
     /// (`SetField`, `DenseFieldStore`) only `Object::Instance` slots, so
     /// neither kind of store changes what a read of the other sees (#1559).
     pub fn writes_elements(&self, calls: &CallFacts) -> bool {
-        self.runs_effects(calls)
+        self.writes_through(calls)
             || match self {
                 Self::StoreIndex { .. } | Self::LaneStore { .. } | Self::LanesToWords { .. } | Self::VecLoop { kind: super::inst::VecLoopKind::Store { .. }, .. } => true,
                 Self::VecLoop { kind: super::inst::VecLoopKind::Reduce { stores, .. }, .. } => !stores.is_empty(),
@@ -206,7 +218,30 @@ impl MirInst {
     /// slot or an enum payload word): a field store, or code that may
     /// store. See [`Self::writes_elements`].
     pub fn writes_fields(&self, calls: &CallFacts) -> bool {
-        self.runs_effects(calls) || matches!(self, Self::HeapFieldStore { .. })
+        self.writes_through(calls) || matches!(self, Self::HeapFieldStore { .. })
+    }
+
+    /// The one field slot this op stores, when that is all it may write
+    /// of any object's fields: a number field's store writes slot `index`
+    /// of its object and no other slot of any object (its old word is a
+    /// number too, so the store frees nothing whose `drop` could write).
+    /// `None` when it writes no field or may write any
+    /// ([`Self::writes_fields`] says which).
+    pub fn field_slot_written(&self, calls: &CallFacts) -> Option<u32> {
+        match self {
+            Self::HeapFieldStore { index, scalar: true, .. } if !self.writes_through(calls) => Some(*index),
+            _ => None,
+        }
+    }
+
+    /// Code that may store through what it can reach: what
+    /// [`Self::runs_effects`] answers, less the lookup natives
+    /// ([`host_writes_nothing`]).
+    fn writes_through(&self, calls: &CallFacts) -> bool {
+        match self {
+            Self::HostInvoke { native_id, .. } if host_writes_nothing(*native_id) => false,
+            _ => self.runs_effects(calls),
+        }
     }
 
     /// May change an array's length: an append, code that may append (a
@@ -216,7 +251,7 @@ impl MirInst {
         match self {
             Self::Call { dest, .. } => !calls.lengths_steady || !calls.pure.contains(dest) && !calls.steady.contains(dest),
             Self::Alloc { .. } | Self::AllocAt { .. } | Self::GcBarrier { .. } => !calls.lengths_steady,
-            _ => self.runs_effects(calls),
+            _ => self.writes_through(calls),
         }
     }
 
