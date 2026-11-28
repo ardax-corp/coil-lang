@@ -2226,6 +2226,13 @@ impl Compiler {
                 resolved = Some(calls);
                 spliced.extend(sites);
             }
+            // Spliced callees bring their own `eq_mode` / `word_mode`
+            // calls, folded here at the types they have in this body
+            // (#2975).
+            if let Some(moded) = body.as_ref().and_then(|at| self.hir_fold_key_eq_modes(at)) {
+                body = Some(moded);
+                resolved = None;
+            }
         }
         // Local enums split into a tag and field locals, and local tuples
         // into element locals.
