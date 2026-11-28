@@ -1477,6 +1477,46 @@ impl Iterator for BagIter<K, V> {
         return it.next();
     }
 }
+
+trait Last<B> {
+    type Item;
+
+    fn last(B b) -> Option<Item> {}
+}
+
+impl Last for Bag<K, V> {
+    type Item = V;
+    pub fn last(Bag<K, V> b) -> Option<V> {
+        let n = b.vals.len();
+        if n == 0 {
+            return None;
+        }
+        return Some(b.vals[n - 1]);
+    }
+}
+
+fn settle<T>(T x, bool fail) -> Result<T, int> {
+    let r: Result<Result<T, int>, int> = if fail { Err(4) } else { Ok(Ok(x)) };
+    return match r {
+        Ok(inner) => inner,
+        Err(e) => Err(e),
+    };
+}
+
+fn count_some<T>(Vec<T> xs) -> int {
+    let os: Vec<Option<T>> = [];
+    for x in xs {
+        os.push(Some(x));
+    }
+    os.push(None);
+    let n = 0;
+    for o in os {
+        if o.is_some() {
+            n += 1;
+        }
+    }
+    return n;
+}
 "#;
 
 /// Whether `compiled`'s body `name` exists and calls no body whose name
@@ -1581,6 +1621,106 @@ fn main() {
         );
         assert!(!called.iter().any(|c| c.ends_with("$dict")), "`total` calls a dictionary adapter: {called:?}");
         runs_own_body(&compiled, "bag::BagIter::next$inst$int_int", "bag::BagIter::next").unwrap();
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}
+
+/// A plain ground call of another module's trait instance method whose
+/// trait spells its result through an associated type (`last ->
+/// Option<Item>`) calls the method's clone and reads the result in the
+/// clone's layout, a niche word (`string`) and a two-word value (`int`),
+/// not the shared entry through the instance's dictionary.
+#[test]
+fn foreign_boundary_trait_method_call_takes_its_clone() {
+    let files = [
+        ("src/bag.coil", BAG_MODULE),
+        (
+            "src/main.coil",
+            r#"
+use bag::{Bag, Last};
+
+fn words() -> int {
+    let b: Bag<int, string> = Bag::of(1, "one");
+    return match b.last() {
+        Some(w) => w.len(),
+        None => 100,
+    };
+}
+
+fn nums() -> int {
+    let b: Bag<int, int> = Bag::of(1, 7);
+    b.vals.push(9);
+    return b.last() ?? 100;
+}
+
+fn main() {
+    if words() != 3 || nums() != 9 {
+        panic "last";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("foreign_boundary_trait_call", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        pipeline.set_opt_level(compiler::OptLevel::None);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        for caller in ["words", "nums"] {
+            let called = callees(&compiled, caller);
+            assert!(
+                called.iter().any(|c| c.starts_with("Last__bag::Bag<K, V>__last$inst$")),
+                "`{caller}` does not call `last`'s clone: {called:?}"
+            );
+        }
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}
+
+/// A ground call to another module's generic function whose body holds an
+/// open enum below the top (a `Result<Result<T, int>, int>` local, a
+/// `Vec<Option<T>>`) runs a clone compiled from its body: such a value
+/// reaches another body only through a clone-only signature, so the clone
+/// may hold it in the ground layout.
+#[test]
+fn foreign_clone_holding_a_nested_open_enum_compiles_from_its_body() {
+    let files = [
+        ("src/bag.coil", BAG_MODULE),
+        (
+            "src/main.coil",
+            r#"
+use bag::{count_some, settle};
+
+fn main() {
+    let a = settle(7, false).unwrap_or(0);
+    let b = match settle("s", true) {
+        Ok(_) => 0,
+        Err(e) => e,
+    };
+    let w: Vec<string> = ["x", "y"];
+    let v: Vec<int> = [1, 2, 3];
+    if a != 7 || b != 4 || count_some(w) != 2 || count_some(v) != 3 {
+        panic "nested";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("foreign_nested_open_clone", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        pipeline.set_opt_level(compiler::OptLevel::None);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        for (name, shared) in [
+            ("bag::settle$inst$int", "bag::settle"),
+            ("bag::settle$inst$string", "bag::settle"),
+            ("bag::count_some$inst$int", "bag::count_some"),
+            ("bag::count_some$inst$string", "bag::count_some"),
+        ] {
+            runs_own_body(&compiled, name, shared).unwrap();
+        }
         let _ = run_compiled(compiled, &pipeline);
     });
 }
