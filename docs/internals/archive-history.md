@@ -270,8 +270,9 @@ per lane), and `payload_mask` / `unit_mask` hold its nesting
 (`common::lane_nest_pack`; both `0` for a flat tuple, 8.19's only shape).
 `LaneIndex` carries a shape too, written after its index. `ALLOC_WIDE_LANES`
 takes the heap lanes above the word count in `extra`, and the wide lane
-helpers take the shape (`coil_native_lane_index_wide`'s nesting,
-`_store_wide` and `_push_wide`'s three words). The MIR section is a new
+helpers take a shape other than a flat tuple of numbers' as three words in
+their buffer, flagged in `k` (`machine::native::WIDE_SHAPED`), so a flat
+element of numbers calls them as before. The MIR section is a new
 `FORMAT`, 29 (`common::MIR_SECTION_NESTED_LANES_FORMAT`), and the reader
 refuses 28, whose `LaneIndex` has no shape: an 8.19 archive's code is
 compiled again. A snapshot's lane array keeps its mask as before.

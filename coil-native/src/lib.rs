@@ -2512,9 +2512,9 @@ fn declare(module: &mut impl Module, bodies: &[NativeBody], plan: &Plan) -> Resu
     let lane_store = module.declare_function("coil_native_lane_store", Linkage::Import, &s8).map_err(e)?;
     let lane_push = module.declare_function("coil_native_lane_push", Linkage::Import, &s7).map_err(e)?;
     let lanes_to_words = module.declare_function("coil_native_lanes_to_words", Linkage::Import, &s5).map_err(e)?;
-    let lane_index_wide = module.declare_function("coil_native_lane_index_wide", Linkage::Import, &s7).map_err(e)?;
-    let lane_store_wide = module.declare_function("coil_native_lane_store_wide", Linkage::Import, &s8).map_err(e)?;
-    let lane_push_wide = module.declare_function("coil_native_lane_push_wide", Linkage::Import, &s7).map_err(e)?;
+    let lane_index_wide = module.declare_function("coil_native_lane_index_wide", Linkage::Import, &s5).map_err(e)?;
+    let lane_store_wide = module.declare_function("coil_native_lane_store_wide", Linkage::Import, &s5).map_err(e)?;
+    let lane_push_wide = module.declare_function("coil_native_lane_push_wide", Linkage::Import, &s4).map_err(e)?;
     let probe = module.declare_function("coil_native_probe", Linkage::Import, &s2).map_err(e)?;
     let free_early = module.declare_function("coil_native_free_early", Linkage::Import, &s3).map_err(e)?;
     let format = module.declare_function("coil_native_format", Linkage::Import, &s4).map_err(e)?;
@@ -3243,10 +3243,11 @@ impl<'a> Lower<'a> {
         let defer = module.declare_func_in_func(ids.defer, func);
         let claim = module.declare_func_in_func(ids.claim, func);
         let pad_refs = ids.pad.iter().map(|(&i, &id)| (i, module.declare_func_in_func(id, func))).collect();
-        // A view's four words, or a wide lane element's sixteen.
+        // A view's four words, or a wide lane element's sixteen and its
+        // shape's three.
         let view_slot = func.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
             cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-            8 * common::PACKED_KIND_WORDS as u32,
+            8 * (common::PACKED_KIND_WORDS as u32 + 3),
             3,
         ));
         let ret = func.signature.returns[0].value_type;
@@ -3420,6 +3421,20 @@ impl<'a> Lower<'a> {
     /// A lane shape's three masks as constants, for a lane helper.
     fn lane_shape(&mut self, shape: &compiler::native_mir::MirLaneShape) -> [cranelift_codegen::ir::Value; 3] {
         [shape.tag_mask, shape.payload_mask, shape.unit_mask].map(|m| self.b.ins().iconst(types::I64, m as i64))
+    }
+
+    /// A wide lane helper's `k` for an element of `k` words: a shape other
+    /// than a flat tuple of numbers' is stored to the stack buffer at word
+    /// `at` and flagged ([`machine::native::WIDE_SHAPED`]).
+    fn wide_shape_k(&mut self, k: usize, shape: &compiler::native_mir::MirLaneShape, at: usize) -> cranelift_codegen::ir::Value {
+        if *shape == compiler::native_mir::MirLaneShape::default() {
+            return self.b.ins().iconst(types::I64, k as i64);
+        }
+        let ws = self.lane_shape(shape);
+        for (n, w) in ws.into_iter().enumerate() {
+            self.b.ins().stack_store(types::I64, w, self.view_slot, 8 * (at + n) as i32);
+        }
+        self.b.ins().iconst(types::I64, (k as u64 | machine::native::WIDE_SHAPED) as i64)
     }
 
     fn coerce(&mut self, x: cranelift_codegen::ir::Value, want: Type) -> cranelift_codegen::ir::Value {
@@ -6401,10 +6416,9 @@ impl<'a> Lower<'a> {
                 let words: Vec<cranelift_codegen::ir::BlockArg> = (0..k).map(|n| self.b.ins().load(types::I64, MemFlagsData::trusted(), at, 8 * n as i32).into()).collect();
                 self.b.ins().jump(join, &words);
                 self.b.switch_to_block(slow);
-                let kk = self.b.ins().iconst(types::I64, k as i64);
+                let kk = self.wide_shape_k(k, shape, 0);
                 let out = self.b.ins().stack_addr(types::I64, self.view_slot, 0);
-                let [_, nl, nh] = self.lane_shape(shape);
-                self.call_checked(self.lane_index_wide, &[self.ctx, a, i, kk, out, nl, nh]);
+                self.call_checked(self.lane_index_wide, &[self.ctx, a, i, kk, out]);
                 let words: Vec<cranelift_codegen::ir::BlockArg> = (0..k).map(|n| self.b.ins().stack_load(types::I64, types::I64, self.view_slot, 8 * n as i32).into()).collect();
                 self.b.ins().jump(join, &words);
                 self.b.switch_to_block(join);
@@ -6464,9 +6478,8 @@ impl<'a> Lower<'a> {
                 }
                 self.b.switch_to_block(slow);
                 let buf = self.lane_buffer(&words);
-                let k = self.b.ins().iconst(types::I64, words.len() as i64);
-                let [t, nl, nh] = self.lane_shape(shape);
-                self.call_checked(self.lane_store_wide, &[self.ctx, a, i, buf, k, t, nl, nh]);
+                let k = self.wide_shape_k(words.len(), shape, words.len());
+                self.call_checked(self.lane_store_wide, &[self.ctx, a, i, buf, k]);
                 self.b.ins().jump(join, &[]);
                 self.b.switch_to_block(join);
                 let one = self.b.ins().iconst(types::I64, 1);
@@ -6501,9 +6514,8 @@ impl<'a> Lower<'a> {
                     words.push(self.coerce(w, types::I64));
                 }
                 let buf = self.lane_buffer(&words);
-                let k = self.b.ins().iconst(types::I64, words.len() as i64);
-                let [t, nl, nh] = self.lane_shape(shape);
-                let call = self.call_checked(self.lane_push_wide, &[self.ctx, a, buf, k, t, nl, nh]);
+                let k = self.wide_shape_k(words.len(), shape, words.len());
+                let call = self.call_checked(self.lane_push_wide, &[self.ctx, a, buf, k]);
                 let w = self.b.inst_results(call)[0];
                 self.drop_views();
                 self.set(f, *dest, w);

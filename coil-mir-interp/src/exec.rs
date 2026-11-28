@@ -869,9 +869,9 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
             }
             MirInst::LaneIndex { dest, dest_hi, dest_more, array, index, shape } if !dest_more.is_empty() => {
                 // A wide element: its words through a buffer.
-                let mut buf = [0u64; common::PACKED_KIND_WORDS];
-                let k = 2 + dest_more.len();
-                rt::coil_native_lane_index_wide(ctx, get!(*array), get!(*index) as i64, k as u64, buf.as_mut_ptr(), shape.payload_mask, shape.unit_mask);
+                let mut buf = [0u64; common::PACKED_KIND_WORDS + 3];
+                let k = rt::wide_lane_k(2 + dest_more.len(), shape.tag_mask, shape.payload_mask, shape.unit_mask, &mut buf, 0);
+                rt::coil_native_lane_index_wide(ctx, get!(*array), get!(*index) as i64, k, buf.as_mut_ptr());
                 check!();
                 for (d, w) in [*dest, *dest_hi].iter().chain(dest_more).zip(buf) {
                     set_word(f, regs, *d, w);
@@ -884,11 +884,12 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 set_word(f, regs, *dest_hi, (*ctx).ret_hi);
             }
             MirInst::LaneStore { dest, array, index, lo, hi, more, shape } if !more.is_empty() => {
-                let mut buf = [0u64; common::PACKED_KIND_WORDS];
+                let mut buf = [0u64; common::PACKED_KIND_WORDS + 3];
                 for (b, v) in buf.iter_mut().zip([*lo, *hi].iter().chain(more)) {
                     *b = get!(*v);
                 }
-                rt::coil_native_lane_store_wide(ctx, get!(*array), get!(*index) as i64, buf.as_ptr(), 2 + more.len() as u64, shape.tag_mask, shape.payload_mask, shape.unit_mask);
+                let k = rt::wide_lane_k(2 + more.len(), shape.tag_mask, shape.payload_mask, shape.unit_mask, &mut buf, 2 + more.len());
+                rt::coil_native_lane_store_wide(ctx, get!(*array), get!(*index) as i64, buf.as_ptr(), k);
                 check!();
                 set!(*dest, 1);
             }
@@ -898,11 +899,12 @@ unsafe fn step(act: *mut Activation, ctx: *mut NativeCtx, f: &MirFunc, body: &Bo
                 set!(*dest, 1);
             }
             MirInst::LanePush { dest, array, lo, hi, more, shape } if !more.is_empty() => {
-                let mut buf = [0u64; common::PACKED_KIND_WORDS];
+                let mut buf = [0u64; common::PACKED_KIND_WORDS + 3];
                 for (b, v) in buf.iter_mut().zip([*lo, *hi].iter().chain(more)) {
                     *b = get!(*v);
                 }
-                let w = rt::coil_native_lane_push_wide(ctx, get!(*array), buf.as_ptr(), 2 + more.len() as u64, shape.tag_mask, shape.payload_mask, shape.unit_mask);
+                let k = rt::wide_lane_k(2 + more.len(), shape.tag_mask, shape.payload_mask, shape.unit_mask, &mut buf, 2 + more.len());
+                let w = rt::coil_native_lane_push_wide(ctx, get!(*array), buf.as_ptr(), k);
                 check!();
                 set!(*dest, w);
             }

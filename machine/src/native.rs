@@ -1369,37 +1369,70 @@ fn lane_unbox_wide(word: common::Value, nest: &[u8], at: &mut usize, out: &mut V
     true
 }
 
-/// The `k` words of a wide element (`k` > 2) from `words`, as values.
+/// The `k` words of a wide element (`k` > 2) at `words`, as values (a
+/// `Value` is its word, as the native argument words are read).
 ///
 /// # Safety
 /// `words` points at `k` readable words, `k` at most
-/// [`common::PACKED_KIND_WORDS`].
-unsafe fn wide_words(words: *const u64, k: usize) -> Option<[common::Value; common::PACKED_KIND_WORDS]> {
+/// [`common::PACKED_KIND_WORDS`], which stay as they are while the slice
+/// lives.
+unsafe fn wide_words<'a>(words: *const u64, k: usize) -> Option<&'a [common::Value]> {
     if !(3..=common::PACKED_KIND_WORDS).contains(&k) {
         return None;
     }
-    let mut out = [common::Value::default(); common::PACKED_KIND_WORDS];
-    for (i, w) in out.iter_mut().take(k).enumerate() {
-        *w = common::Value::from(unsafe { words.add(i).read() });
-    }
-    Some(out)
+    Some(unsafe { std::slice::from_raw_parts(words.cast::<common::Value>(), k) })
 }
 
-/// `LaneIndex` of a wide element (`k` of 3 to 16 words, its tuple nested
-/// as `nest_lo` / `nest_hi` say, [`common::lane_nest_unpack`]): element
+/// The word count in a wide lane helper's `k` argument.
+const WIDE_K: u64 = 0xff;
+
+/// Set in a wide lane helper's `k` argument when the element's shape is
+/// not a flat tuple of numbers (`MirLaneShape::default`): its three
+/// words wait after the element's in the buffer (a `LaneIndex`'s at the
+/// start of `out`, read before the element is written there). So a flat
+/// element of numbers passes what it did before.
+pub const WIDE_SHAPED: u64 = 0x100;
+
+/// A wide lane helper's `k` argument for an element of `k` words of shape
+/// `[tag_mask, nest_lo, nest_hi]`: the shape written to `buf` at `at` and
+/// [`WIDE_SHAPED`] set when it is not a flat tuple of numbers'.
+pub fn wide_lane_k(k: usize, tag_mask: u64, nest_lo: u64, nest_hi: u64, buf: &mut [u64], at: usize) -> u64 {
+    if tag_mask == 0 && nest_lo == 0 && nest_hi == 0 {
+        return k as u64;
+    }
+    buf[at..at + 3].copy_from_slice(&[tag_mask, nest_lo, nest_hi]);
+    k as u64 | WIDE_SHAPED
+}
+
+/// A wide lane helper's shape: `[tag_mask, nest_lo, nest_hi]` read at
+/// `at` when `k` says it is there, else a flat tuple of numbers'.
+///
+/// # Safety
+/// With [`WIDE_SHAPED`] set in `k`, `at` points at three readable words.
+unsafe fn wide_shape(k: u64, at: *const u64) -> [u64; 3] {
+    if k & WIDE_SHAPED == 0 {
+        return [0; 3];
+    }
+    unsafe { [at.read(), at.add(1).read(), at.add(2).read()] }
+}
+
+/// `LaneIndex` of a wide element (`k` of 3 to 16 words, its shape as
+/// [`WIDE_SHAPED`] says, the nesting [`common::lane_nest_unpack`]'s): element
 /// `index` of a lane array of `k` words per element, or of an array of one
 /// word per element (its tuple's leaves), written to `out`. Returns `1`;
 /// out of bounds traps; anything else: bail.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word; `out` has
-/// room for `k` words.
+/// room for `k` words (and holds the shape when `k` says so).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn coil_native_lane_index_wide(ctx: *mut NativeCtx, addr: u64, index: i64, k: u64, out: *mut u64, nest_lo: u64, nest_hi: u64) -> u64 {
+pub unsafe extern "C" fn coil_native_lane_index_wide(ctx: *mut NativeCtx, addr: u64, index: i64, k: u64, out: *mut u64) -> u64 {
     let Some(crate::memory::Object::Array(gc)) = object(addr) else {
         return unsafe { bail(ctx) };
     };
-    let (arr, k) = (gc.as_ref(), k as usize);
+    // A shaped element's shape waits in `out`.
+    let [_, nest_lo, nest_hi] = unsafe { wide_shape(k, out.cast_const()) };
+    let (arr, k) = (gc.as_ref(), (k & WIDE_K) as usize);
     let write = |w: &mut dyn Iterator<Item = u64>| {
         for (i, v) in w.enumerate() {
             unsafe { out.add(i).write(v) };
@@ -1442,10 +1475,11 @@ pub unsafe extern "C" fn coil_native_lane_index_wide(ctx: *mut NativeCtx, addr: 
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word; `words`
-/// points at `k` words.
+/// points at `k` words, then the shape when `k` says so.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn coil_native_lane_store_wide(ctx: *mut NativeCtx, addr: u64, index: i64, words: *const u64, k: u64, mask: u64, nest_lo: u64, nest_hi: u64) -> u64 {
+pub unsafe extern "C" fn coil_native_lane_store_wide(ctx: *mut NativeCtx, addr: u64, index: i64, words: *const u64, k: u64) -> u64 {
+    let [mask, nest_lo, nest_hi] = unsafe { wide_shape(k, words.add((k & WIDE_K) as usize)) };
+    let k = k & WIDE_K;
     let Some(heap) = (unsafe { heap(ctx) }) else {
         return unsafe { bail(ctx) };
     };
@@ -1457,19 +1491,13 @@ pub unsafe extern "C" fn coil_native_lane_store_wide(ctx: *mut NativeCtx, addr: 
         return unsafe { bail(ctx) };
     };
     let stored = if gc.as_ref().lanes() == k {
-        // One element's words: no diff of the whole array (and none for
-        // numbers only).
-        let before = usize::try_from(index).ok().filter(|_| gc.as_ref().tag_mask() != 0).and_then(|i| heap.rc_before_lane(common::Value::from(addr), i));
-        let stored = usize::try_from(index).is_ok_and(|i| gc.as_mut().set_lanes(i, &w[..k]));
-        if stored {
-            heap.rc_after_lane(before);
-        }
-        stored
+        // One element's heap words counted: no diff of the whole array.
+        usize::try_from(index).is_ok_and(|i| heap.rc_set_wide_lanes(gc.as_mut(), i, w))
     } else if let Some(old) = gc.as_ref().read_indexed(index, false).filter(|_| gc.as_ref().lanes() == 1) {
         let Some(nest) = common::lane_nest_unpack(nest_lo, nest_hi, k) else {
             return unsafe { bail(ctx) };
         };
-        let boxed = lane_box_wide(heap, &w[..k], mask, &nest);
+        let boxed = lane_box_wide(heap, w, mask, &nest);
         gc.as_mut().store_indexed(index, common::Value::from(boxed), false);
         if heap.rc_counting() {
             let kind = gc.as_ref().elem_kind();
@@ -1489,16 +1517,17 @@ pub unsafe extern "C" fn coil_native_lane_store_wide(ctx: *mut NativeCtx, addr: 
 }
 
 /// `LanePush` of a wide element: its `k` words (at `words`) appended to a
-/// lane array of `k` words per element, or boxed as its tuple (`shape`, as
-/// [`coil_native_lane_store_wide`]'s) to an array of one word per element;
+/// lane array of `k` words per element, or boxed as its tuple (the shape
+/// as [`coil_native_lane_store_wide`]'s) to an array of one word per element;
 /// returns the array.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word; `words`
-/// points at `k` words.
+/// points at `k` words, then the shape when `k` says so.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn coil_native_lane_push_wide(ctx: *mut NativeCtx, addr: u64, words: *const u64, k: u64, mask: u64, nest_lo: u64, nest_hi: u64) -> u64 {
+pub unsafe extern "C" fn coil_native_lane_push_wide(ctx: *mut NativeCtx, addr: u64, words: *const u64, k: u64) -> u64 {
+    let [mask, nest_lo, nest_hi] = unsafe { wide_shape(k, words.add((k & WIDE_K) as usize)) };
+    let k = k & WIDE_K;
     let Some(heap) = (unsafe { heap(ctx) }) else {
         return unsafe { bail(ctx) };
     };
@@ -1510,17 +1539,14 @@ pub unsafe extern "C" fn coil_native_lane_push_wide(ctx: *mut NativeCtx, addr: u
         return unsafe { bail(ctx) };
     };
     if gc.as_ref().lanes() == k {
-        gc.as_mut().push_lanes(&w[..k]);
+        gc.as_mut().push_lanes(w);
         // The new element's heap words gain an owner.
-        if gc.as_ref().tag_mask() != 0 {
-            let last = gc.as_ref().len().saturating_sub(1);
-            heap.rc_after_lane(heap.rc_before_lane(common::Value::from(addr), last).map(|(o, _, i)| (o, Vec::new(), i)));
-        }
+        heap.rc_count_appended(gc.as_ref(), gc.as_ref().len().saturating_sub(1));
     } else if gc.as_ref().lanes() == 1 {
         let Some(nest) = common::lane_nest_unpack(nest_lo, nest_hi, k) else {
             return unsafe { bail(ctx) };
         };
-        let boxed = lane_box_wide(heap, &w[..k], mask, &nest);
+        let boxed = lane_box_wide(heap, w, mask, &nest);
         gc.as_mut().push(common::Value::from(boxed));
         if heap.rc_counting() {
             heap.rc_inc_word(common::Value::from(boxed), gc.as_ref().elem_kind());

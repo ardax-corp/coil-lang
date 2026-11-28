@@ -433,6 +433,33 @@ impl Heap {
         }
     }
 
+    /// Store `lanes` as element `index` of wide lane array `arr` (`k` > 2
+    /// words per element, its heap lanes the bits of its tag mask): each
+    /// heap word stored gains an owner and each one it replaces loses one,
+    /// as [`Self::rc_before_lane`] and [`Self::rc_after_lane`] count it,
+    /// with nothing allocated. `false` out of range.
+    pub fn rc_set_wide_lanes(&self, arr: &mut ObjArray, index: usize, lanes: &[Value]) -> bool {
+        let (k, mask) = (arr.lanes(), arr.tag_mask);
+        let old: [Value; common::PACKED_KIND_WORDS] = match arr.get_lanes(index) {
+            Some(w) if self.rc_counting() && mask != 0 => std::array::from_fn(|j| w.get(j).copied().unwrap_or_default()),
+            Some(_) => return arr.set_lanes(index, lanes),
+            None => return false,
+        };
+        arr.set_lanes(index, lanes);
+        for j in (0..k.min(common::PACKED_KIND_WORDS)).filter(|j| mask >> j & 1 == 1) {
+            if old[j] == lanes[j] {
+                continue;
+            }
+            if let Some(o) = self.rc_object(lanes[j]) {
+                self.rc_inc_obj(o);
+            }
+            if let Some(o) = self.rc_object(old[j]) {
+                self.rc_dec_pending(o);
+            }
+        }
+        true
+    }
+
     /// The objects element `index` of the lane array `o` names.
     fn rc_lane_words(&self, o: Object, index: usize) -> Vec<u64> {
         let Object::Array(a) = o else { return Vec::new() };
