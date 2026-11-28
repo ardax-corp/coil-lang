@@ -40,8 +40,10 @@ fn churn(int top, int rounds) -> int {
     return ok;
 }
 
-// Many words at once in a Vec, dropped together (the release of a large
-// array of leaves), then built again into the freed slots.
+// Many words at once in a Vec, dropped together (the release of an array
+// of leaves), then built again into the freed slots. Sizes stay small
+// enough for the count check at every safepoint (`rc-check`);
+// `short_string_chunk_release.coil` frees enough for whole chunks to go.
 fn words(int n, int salt) -> Vec<string> {
     let out: Vec<string> = Vec::with_capacity(n);
     let i = 0;
@@ -102,55 +104,55 @@ fn weak_alive(int i) -> bool {
 }
 
 test("strings of every inline and buffer size are made and freed") {
-    assert!(churn(80, 20) == 80 * 20);
+    assert!(churn(80, 4) == 80 * 4);
 }
 
 test("a large array of words is freed and its slots reused") {
     let r = 0;
-    while r < 6 {
-        let ws = words(60000, r);
-        assert!(ws.len() == 60000);
+    while r < 4 {
+        let ws = words(3000, r);
+        assert!(ws.len() == 3000);
         assert!(check_words(ws, r));
         r = r + 1;
     }
     collect();
-    let again = words(60000, 99);
+    let again = words(3000, 99);
     assert!(check_words(again, 99));
 }
 
 test("split words are freed as they go") {
-    let a = split_total(50000);
-    let b = split_total(50000);
+    let a = split_total(3000);
+    let b = split_total(3000);
     assert!(a == b);
-    assert!(a > 50000 * 4);
+    assert!(a > 3000 * 4);
 }
 
 test("a string that a weak handle names is freed the general way") {
     let i = 0;
     let alive = 0;
-    while i < 2000 {
+    while i < 500 {
         if weak_alive(i) {
             alive = alive + 1;
         }
         i = i + 1;
     }
-    assert!(alive == 2000);
+    assert!(alive == 500);
     collect();
 }
 
 test("map keys outlive the words they were copied from") {
     let m: HashMap<string, int> = HashMap::new();
     let i = 0;
-    while i < 20000 {
+    while i < 3000 {
         let k = format("k%i", i % 300);
         m.insert(k, i);
         i = i + 1;
     }
     assert!(m.len() == 300);
-    assert!(m.get_or("k299", 0) == 19799);
-    let ws = words(30000, 3);
+    assert!(m.get_or("k299", 0) == 2999);
+    let ws = words(3000, 3);
     assert!(check_words(ws, 3));
-    assert!(m.get_or("k0", -1) == 19800);
+    assert!(m.get_or("k0", -1) == 2700);
 }
 
 test("an auto-parallel loop's arms allocate and free short strings") {
