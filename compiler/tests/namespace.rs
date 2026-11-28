@@ -1411,3 +1411,176 @@ fn main() {
         let _ = run_compiled(compiled, &pipeline);
     });
 }
+
+/// Another module's generic class: `get` returns an open `Option<V>`,
+/// `next` an open `Option<Pair<K, V>>`, and `slots` keeps a nested
+/// `Vec<Option<V>>` local.
+const BAG_MODULE: &str = r#"
+class Pair<K, V> {
+    pub key: K,
+    pub value: V,
+}
+
+class Bag<K, V> {
+    pub keys: Vec<K>,
+    pub vals: Vec<V>,
+}
+
+class BagIter<K, V> {
+    bag: Bag<K, V>,
+    slot: int,
+}
+
+impl Bag<K, V> {
+    pub static fn of(K k, V v) -> Bag<K, V> {
+        return new Bag([k], [v]);
+    }
+
+    pub fn at(int i) -> V {
+        return self.vals[i];
+    }
+
+    pub fn get(int i) -> Option<V> {
+        if i >= 0 && i < self.vals.len() {
+            return Some(self.vals[i]);
+        }
+        return None;
+    }
+
+    pub fn iter() -> BagIter<K, V> {
+        return new BagIter(self, 0);
+    }
+}
+
+impl BagIter<K, V> {
+    pub fn next() -> Option<Pair<K, V>> {
+        if self.slot < self.bag.vals.len() {
+            let s = self.slot;
+            self.slot = s + 1;
+            return Some(new Pair(self.bag.keys[s], self.bag.vals[s]));
+        }
+        return None;
+    }
+}
+
+impl IntoIterator for Bag<K, V> {
+    type Item = Pair<K, V>;
+    type IntoIter = BagIter<K, V>;
+    pub fn into_iter(Bag<K, V> b) -> BagIter<K, V> {
+        return b.iter();
+    }
+}
+
+impl Iterator for BagIter<K, V> {
+    type Item = Pair<K, V>;
+    pub fn next(BagIter<K, V> it) -> Option<Pair<K, V>> {
+        return it.next();
+    }
+}
+"#;
+
+/// Whether `compiled`'s body `name` exists and calls no body whose name
+/// is `shared` (the generic's shared entry) or ends in `$dict`.
+fn runs_own_body(compiled: &Compiled, name: &str, shared: &str) -> Result<(), String> {
+    if !compiled.bodies.iter().any(|b| b.name == name) {
+        let names: Vec<&str> = compiled.bodies.iter().map(|b| b.name.as_str()).filter(|n| n.contains("bag::")).collect();
+        return Err(format!("no body `{name}`; bag bodies: {names:?}"));
+    }
+    let called = callees(compiled, name);
+    if called.iter().any(|c| *c == shared || c.ends_with("$dict")) {
+        return Err(format!("`{name}` calls the shared body: {called:?}"));
+    }
+    Ok(())
+}
+
+/// A ground call to another module's generic method whose result is an
+/// open `Option<V>` (`Bag<int, Vec<int>>::get`) runs a per-type clone
+/// compiled from its body, not a thunk that calls the shared body with
+/// dictionaries and unboxes the `Some` it boxed (#2958).
+#[test]
+fn foreign_option_result_method_clone_compiles_from_its_body() {
+    let files = [
+        ("src/bag.coil", BAG_MODULE),
+        (
+            "src/main.coil",
+            r#"
+use bag::Bag;
+
+fn main() {
+    let xs: Vec<int> = [1, 2, 3];
+    let b: Bag<int, Vec<int>> = Bag::of(1, xs);
+    let total = b.at(0).len();
+    let i = 0;
+    while i < 10 {
+        match b.get(i % 2) {
+            Some(v) => { total += v.len(); },
+            None => { total += 100; },
+        }
+        i += 1;
+    }
+    if total != 518 {
+        panic "total";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("foreign_option_result_clone", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        pipeline.set_opt_level(compiler::OptLevel::None);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        runs_own_body(&compiled, "bag::Bag::get$inst$int_Vec<int>", "bag::Bag::get").unwrap();
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}
+
+/// `for p in b` over another module's ground generic iterable calls a
+/// per-type clone of its `Iterator` instance's `next`, which calls the
+/// inherent `next`'s clone, not the shared body through the `Iterator`
+/// dictionary (#2909).
+#[test]
+fn foreign_for_in_next_takes_its_clone() {
+    let files = [
+        ("src/bag.coil", BAG_MODULE),
+        (
+            "src/main.coil",
+            r#"
+use bag::Bag;
+
+fn total(Bag<int, int> b) -> int {
+    let n = 0;
+    for p in b {
+        n += p.key + p.value;
+    }
+    return n;
+}
+
+fn main() {
+    let b: Bag<int, int> = Bag::of(3, 4);
+    b.keys.push(5);
+    b.vals.push(6);
+    if total(b) != 18 {
+        panic "total";
+    }
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project("foreign_for_in_next_clone", &manifest_src_and_stdlib(), &files, "src/main.coil");
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        pipeline.set_opt_level(compiler::OptLevel::None);
+        let compiled = compile_file(&mut pipeline, entry.to_str().unwrap()).unwrap_or_else(|_| panic!("compile failed"));
+        let called = callees(&compiled, "total");
+        assert!(
+            called.iter().any(|c| c.starts_with("Iterator__bag::BagIter<K, V>__next$inst$")),
+            "`total` does not call `next`'s clone: {called:?}"
+        );
+        assert!(!called.iter().any(|c| c.ends_with("$dict")), "`total` calls a dictionary adapter: {called:?}");
+        runs_own_body(&compiled, "bag::BagIter::next$inst$int_int", "bag::BagIter::next").unwrap();
+        let _ = run_compiled(compiled, &pipeline);
+    });
+}
