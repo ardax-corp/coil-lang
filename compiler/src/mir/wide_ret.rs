@@ -1,5 +1,6 @@
 //! Wide direct calls: a small object of words (a tuple, an `Option` of a
-//! tuple, which is a niche word over the tuple object, or any nesting of
+//! tuple, which is a niche word over the tuple object, a `Result` of a
+//! tuple whose `Err` is a heap word, also a niche word, or any nesting of
 //! those) crosses a direct call as its words when neither side needs the
 //! object, up to four words once flattened.
 //!
@@ -12,7 +13,9 @@
 //! A value's words are its *leaves*, by one rule at any depth: an item of
 //! a tuple is a leaf word (a number, a heap word) or, when it is itself a
 //! tuple the pass takes apart, that tuple's words in place; an `Option`
-//! of a tuple adds a `bool` word, `true` for `Some`, after its tuple's.
+//! of a tuple adds a `bool` word, `true` for `Some`, after its tuple's; a
+//! `Result` too (`true` for `Ok`), and its `Err` payload shares one of the
+//! `Ok` tuple's leaf words (`Lay::res`).
 //! So `((int, int), int)`, `(string, int, int)` and
 //! `Option<((int, int), string)>` are three, three and four words. The
 //! only bound is the word budget (four); a tuple whose nested words do not
