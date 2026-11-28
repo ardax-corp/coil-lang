@@ -1,0 +1,119 @@
+// A three- or four-word tuple holding heap words (a string, an object)
+// crosses a direct call as its words: the heap words are counted as any
+// parameter or result of their type, so each object lives exactly as long
+// as something holds it and is freed once nothing does.
+use tests::assert;
+use gc::collect;
+use string::format;
+
+static let drops: int = 0;
+
+class Handle {
+    pub fd: int,
+}
+
+impl Handle {
+    fn drop() {
+        drops = drops + 1;
+    }
+}
+
+#[inline(never)]
+fn weigh((string, int, int) t) -> int {
+    return t[0].len() + t[1] * t[2];
+}
+
+#[inline(never)]
+fn label(string s, int a) -> (string, int, int) {
+    return (s, a, a + 1);
+}
+
+#[inline(never)]
+fn fresh(int a) -> (string, int, int) {
+    return (format("n%i", a), a, 2);
+}
+
+#[inline(never)]
+fn fd_sum((Handle, int, Handle) t) -> int {
+    return t[0].fd * 100 + t[1] * 10 + t[2].fd;
+}
+
+#[inline(never)]
+fn open(int a) -> (Handle, int, Handle) {
+    return (new Handle(a), a + 1, new Handle(a + 2));
+}
+
+#[inline(never)]
+fn swap((Handle, int, Handle) t) -> (Handle, int, Handle) {
+    return (t[2], t[1], t[0]);
+}
+
+#[inline(never)]
+fn keep((string, int, int) t) -> Vec<(string, int, int)> {
+    let v: Vec<(string, int, int)> = [];
+    v.push(t);
+    return v;
+}
+
+test("a string among the words of an argument and a result") {
+    let name = "abc";
+    let s = 0;
+    let i = 0;
+    while i < 20 {
+        s += weigh(label(name, i));
+        s += weigh((name, i, 2));
+        s += weigh(fresh(i));
+        i += 1;
+    }
+    let expect = 0;
+    let j = 0;
+    while j < 20 {
+        expect += 3 + j * (j + 1) + 3 + j * 2 + format("n%i", j).len() + j * 2;
+        j += 1;
+    }
+    assert!(s == expect);
+    assert!(name == "abc");
+}
+
+test("objects among the words are freed once, when nothing holds them") {
+    drops = 0;
+    let s = 0;
+    let i = 0;
+    while i < 10 {
+        s += fd_sum(open(i));
+        s += fd_sum(swap(open(i)));
+        i += 1;
+    }
+    collect();
+    assert!(drops == 40);
+    let expect = 0;
+    let j = 0;
+    while j < 10 {
+        expect += j * 100 + (j + 1) * 10 + j + 2;
+        expect += (j + 2) * 100 + (j + 1) * 10 + j;
+        j += 1;
+    }
+    assert!(s == expect);
+}
+
+test("an object passed in the words outlives the call") {
+    drops = 0;
+    let h = new Handle(7);
+    let k = new Handle(9);
+    let t = fd_sum((h, 1, k));
+    collect();
+    assert!(drops == 0);
+    assert!(t == 719 && h.fd == 7 && k.fd == 9);
+    let u = swap((h, 2, k));
+    collect();
+    assert!(drops == 0);
+    assert!(u[0].fd == 9 && u[2].fd == 7);
+}
+
+test("a result kept as an object holds its heap words") {
+    let v = keep(fresh(5));
+    collect();
+    assert!(v[0][0] == "n5" && v[0][1] == 5 && v[0][2] == 2);
+    let w = keep(label(format("x%i", 3), 4));
+    assert!(w[0][0] == "x3" && w[0][2] == 5);
+}

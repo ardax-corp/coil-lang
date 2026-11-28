@@ -687,38 +687,58 @@ policy.
 
 ### Wide direct calls
 
-A three- or four-word value of scalars (an arity-3 or arity-4 tuple of
-immediates, or an `Option` of a tuple of immediates, which is a niche word
-over the tuple object) is an object in every layout, but a direct call can
-still pass and return its words in registers. `mir::wide_ret` runs on the
-captured bodies before counts are inserted (not on the interpreter's raw
-capture), over the whole program at once. A body gets a twin, `name$words`,
-that takes such a parameter as its words (one MIR parameter per word) and
-returns such a result as its words (`Return { lo, hi, more }`, the items
-and, for an `Option`, a `bool` that is `true` for `Some`); a direct call
-that can hand over and take the words calls the twin instead.
+A small object of words, a tuple, an `Option` of a tuple (a niche word
+over the tuple object) or any nesting of those, is an object in every
+layout, but a direct call can still pass and return its words in
+registers. `mir::wide_ret` runs on the captured bodies before counts are
+inserted (not on the interpreter's raw capture), over the whole program at
+once. A body gets a twin, `name$words`, that takes such a parameter as its
+words (one MIR parameter per word) and returns such a result as its words
+(`Return { lo, hi, more }`); a direct call that can hand over and take the
+words calls the twin instead.
+
+A value's words are its leaves, by one rule at any depth: an item is a
+leaf word (a number, a `MaybeObj`, a heap word: `string`, an object, a
+niche word) or, when it is itself a tuple the pass takes apart, that
+tuple's words in place; an `Option` of a tuple adds a `bool` after its
+tuple's words, `true` for `Some`. So `(int, int, int)`, `(string, int,
+int)`, `((int, int), int)`, `(((int, int), int), int)` and
+`Option<((int, int), string)>` are three, three, three, four and four
+words. The only bound is the budget of four words (`MAX_RET_MORE` + 2);
+a nest whose leaves do not fit keeps its inner tuples as one heap word
+each (`((int, int, int), (int, int))` goes as two words, the two inner
+tuples), and anything wider than four items stays an object. Shapes are
+unified as terms (`Classes::unify`, items pairwise at any depth) along
+every call edge, φ and item, so every place a value's words go agrees on
+them.
 
 Per body, a *node* is a value with its `Word` casts, safepoint barriers
 and copy-on-write shares. Its object is never made when its words are
-known where it is made (a fresh `alloc.tuple` of scalars, a twin's
+known where it is made (a fresh `alloc.tuple`, a `None`, a twin's
 parameter, the result of a call that enters a twin returning words, a φ
-of such nodes, `None`) and every read of it
-takes words: an item load (`ProductLoad`), a `Some` test, an argument the
-callee's twin takes as words, the twin's own return. Whether a parameter
-is taken as words, a result returned as words and a call switched depend
-on each other across calls (`relay(a) { return split3(a + 1); }` returns
-words only if `split3` does; `weigh(split3(i))` passes words only if
-`weigh` takes them), so the pass solves them as one greatest fixpoint:
-everything starts as words and what breaks drops out, to a fixed point.
-Shapes are unified along every call edge, and a class without a fresh
-tuple in it (its item count unknown) or with two shapes stays an object.
+of such nodes, an item load of a node taken apart) and every read of it
+takes words: an item load (`ProductLoad`; an `int` load typed `maybe_obj`
+reads an `i64` item), a `Some` test, an item of a tuple taken apart, an
+argument the callee's twin takes as words, the twin's own return, an
+early free or a frame word's clear (nothing to free once there is no
+object). Whether a parameter is taken as words, a result returned as
+words and a call switched depend on each other across calls (`relay(a) {
+return split3(a + 1); }` returns words only if `split3` does;
+`weigh(split3(i))` passes words only if `weigh` takes them), so the pass
+solves them as one greatest fixpoint: everything starts as words and what
+breaks drops out, to a fixed point. A tuple that meets no call edge is
+taken apart here only when a φ carries it (a loop's mutable local, a
+branch's pick); others are `forward_tuple_loads`' to take apart.
 A call switches only when some object of it dissolves; a caller that
-keeps a plain tuple result as an object (pushes it, shows it, passes it to
-a one-word callee) rebuilds it from the words right after the call, which
-moves the allocation from the callee to the caller. An `Option` is never
-split or rebuilt (that needs a branch), so an `Option` parameter stays one
-word and an `Option` result goes as words only to callers that dissolve it.
-A switched tail call stays a tail call (the twin joins `tail_targets`).
+keeps a result as an object (pushes it, shows it, passes it to a one-word
+callee) builds it again from the words right after the call, nested
+tuples first, which moves the allocation from the callee to the caller.
+An `Option` parameter goes as words when the caller knows its words (a
+`Some` of a fresh tuple, a `None`, a call's or a parameter's words); an
+`Option`, at any depth, is never rebuilt from words (that needs a
+branch), so an `Option` result goes as words only to callers that
+dissolve it. A switched tail call stays a tail call (the twin joins
+`tail_targets`).
 
 Mono clones, method clones, raw trait instance methods and instance
 clones are ground bodies a direct `call` reaches, so they take and return
@@ -729,8 +749,10 @@ words. Not twinned: generators, bodies with a cleanup pad, debugger and
 coverage builds' bodies, `opaque_words` bodies (a shared generic body's
 `T` is an `i64` word there, never taken apart).
 
-The twin's words are numbers to count insertion
-(`rc_insert::number_returns`), so its callers count nothing. The MIR carries
+A twin's heap words are counted as any word of their type: a parameter
+is borrowed (the caller holds it across the call), a result is owned by
+the caller, a word read from no object is no new count. Its scalar words
+are numbers to count insertion (`rc_insert::number_returns`). The MIR carries
 up to four result words on a direct call (`MirInst::Call::dest_more`,
 `Terminator::Return::more`, `MirFunc::ret_more_tys`) and any number of
 parameter words; native code passes and returns them as Cranelift values
@@ -740,7 +762,9 @@ carries twins as ordinary bodies.
 Hit benches: `examples/perf/wide_ret_option_tuple`,
 `examples/perf/wide_ret_tuple3`, `examples/perf/wide_param_ground`,
 `examples/perf/wide_ret_kept`, `examples/perf/wide_generic_clone`,
-`examples/perf/wide_instance_args`.
+`examples/perf/wide_instance_args`, `examples/perf/wide_loop_carried`,
+`examples/perf/wide_heap_items`, `examples/perf/wide_option_param`,
+`examples/perf/wide_nested`.
 
 ## Host calls
 

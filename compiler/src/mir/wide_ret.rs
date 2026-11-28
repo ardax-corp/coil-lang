@@ -1,7 +1,7 @@
-//! Wide direct calls: a small object of immediate words (an arity-3 or
-//! arity-4 tuple of scalars, or for a result an `Option` of a tuple of
-//! scalars, which is a niche word over a tuple object) crosses a direct
-//! call as its three or four words when neither side needs the object.
+//! Wide direct calls: a small object of words (a tuple, an `Option` of a
+//! tuple, which is a niche word over the tuple object, or any nesting of
+//! those) crosses a direct call as its words when neither side needs the
+//! object, up to four words once flattened.
 //!
 //! A body gets a twin, `name$words`, that takes such a parameter as its
 //! words (one MIR parameter per word) and returns such a result as its
@@ -9,33 +9,45 @@
 //! over and take the words calls the twin instead. So neither side builds
 //! the object: not the caller's argument, not the callee's result.
 //!
+//! A value's words are its *leaves*, by one rule at any depth: an item of
+//! a tuple is a leaf word (a number, a heap word) or, when it is itself a
+//! tuple the pass takes apart, that tuple's words in place; an `Option`
+//! of a tuple adds a `bool` word, `true` for `Some`, after its tuple's.
+//! So `((int, int), int)`, `(string, int, int)` and
+//! `Option<((int, int), string)>` are three, three and four words. The
+//! only bound is the word budget (four); a tuple whose nested words do not
+//! fit keeps its inner tuples as heap words.
+//!
 //! What "can" means is one question per value of a body (a *node*: a
 //! value with its `Word` casts, safepoint barriers and copy-on-write
-//! shares): whether its words
-//! are known where it is made (a fresh `alloc.tuple` of immediates, a
-//! twin's parameter, a switched call's result) and every read of it takes
-//! words (an item load, a `Some` test, an argument the twin takes as
-//! words, the twin's return). The answers depend on each other across
-//! calls, so they are a greatest fixpoint over the whole program: start
-//! from "every node dissolves", drop what breaks, repeat.
+//! shares): whether its words are known where it is made (a fresh
+//! `alloc.tuple`, a `None`, a twin's parameter, a switched call's result,
+//! a φ of such, an item load of a node whose words are known) and every
+//! read of it takes words (an item load, a `Some` test, an item of a
+//! tuple taken apart, an argument the twin takes as words, the twin's
+//! return, an early free). The answers depend on each other across calls,
+//! so they are a greatest fixpoint over the whole program: start from
+//! "every node dissolves", drop what breaks, repeat.
 //!
 //! The body itself stays for every other caller (function values,
 //! dictionaries, the runtime's entries, calls that cannot pass words).
 //! Runs on the captured bodies before counts are inserted
-//! ([`super::native_capture`]), so the object's counts never appear.
+//! ([`super::native_capture`]), so the object's counts never appear: a
+//! heap word among the words is counted as any other word of its type (a
+//! parameter borrowed, a call's result owned).
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use super::cse::dce;
 use super::func::MirFunc;
-use super::inst::{MirAllocKind, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator, ValueId, MAX_RET_MORE};
+use super::inst::{BlockId, MirAllocKind, MirCastKind, MirConst, MirInst, MirUnaryOp, Terminator, ValueId, MAX_RET_MORE};
 use super::native_capture::NativeBody;
 use super::ty::MirTy;
 use crate::bodies::Label;
 
-fn immediate(t: MirTy) -> bool {
-    matches!(t, MirTy::I64 | MirTy::MaybeObj | MirTy::F64 | MirTy::Bool)
-}
+/// The most words a value crosses a call in.
+const MAX_WORDS: usize = 2 + MAX_RET_MORE;
 
 fn new_value(f: &mut MirFunc, ty: MirTy) -> ValueId {
     let v = ValueId(f.types.len() as u32);
@@ -59,18 +71,42 @@ fn through_casts(f: &MirFunc, mut v: ValueId) -> ValueId {
     v
 }
 
+/// The word type two items in one place agree on: `int` words join (one
+/// that may hold an object is counted), others must be the same.
+fn join_word(a: MirTy, b: MirTy) -> Option<MirTy> {
+    if a.is_int() && b.is_int() {
+        Some(if a == MirTy::I64 && b == MirTy::I64 { MirTy::I64 } else { MirTy::MaybeObj })
+    } else {
+        (a == b).then_some(a)
+    }
+}
+
+/// An item's word type by its kind: an `int` item the tuple's kinds do
+/// not call a scalar may hold an object.
+fn item_ty(t: MirTy, kind: u8) -> MirTy {
+    match t {
+        t if t.is_int() && kind == common::WORD_SCALAR => MirTy::I64,
+        t if t.is_int() => MirTy::MaybeObj,
+        t => t,
+    }
+}
+
 /// Where a node's object comes from.
 #[derive(Clone, Debug)]
 enum Src {
-    /// A fresh tuple of immediates, each a scalar by its kind.
+    /// A fresh tuple of words.
     Alloc { items: Vec<ValueId>, kind: MirAllocKind, kinds: common::PackedKinds },
     /// Parameter `j` of the body.
     Param(usize),
     /// The result of call `c` (an index into [`Body::calls`]).
     Call(usize),
     /// A φ of other nodes' objects: its incoming values, by block.
-    Phi(Vec<(super::inst::BlockId, ValueId)>),
-    /// Anything else (another kind of tuple, a tuple of heap words).
+    Phi(Vec<(BlockId, ValueId)>),
+    /// Item `slot` of node `parent`, an object word.
+    Item { parent: usize, slot: usize },
+    /// `None`: the niche word `0`.
+    None,
+    /// Anything else (another kind of tuple, a tuple of boxed values).
     Opaque,
 }
 
@@ -87,6 +123,13 @@ enum Use {
     Ret,
     /// An incoming value of the φ of node `n`.
     Phi(usize),
+    /// Item `slot` of node `parent`'s fresh tuple.
+    Within { parent: usize, slot: usize },
+    /// An early free or a frame word's clear (its unit token `dest`):
+    /// nothing to free once there is no object. An early free still holds
+    /// the words that may be objects to its place (`keep`), as the object
+    /// held them: a `drop` they owe runs no earlier.
+    Drop { dest: ValueId, keep: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -133,10 +176,11 @@ struct Body {
     twinnable: bool,
     /// Its one-word result is a heap word an object of words can stand for.
     wide_ret: bool,
-    /// Per node: it, or a node a φ joins it with, meets a call edge (a
-    /// parameter, a call's result or argument, a return). Others are
+    /// Per node: it, or a node a φ joins or a tuple nests it with, meets a
+    /// call edge (a parameter, a call's result or argument, a return) or a
+    /// φ (a value a branch picks or a loop carries). Others are
     /// `forward_tuple_loads`' to take apart, not this pass's.
-    touches: Vec<bool>,
+    wanted: Vec<bool>,
 }
 
 fn twinnable(name: &str, f: &MirFunc) -> bool {
@@ -155,6 +199,16 @@ fn object_word(t: MirTy) -> bool {
 
 fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body {
     let twin = twinnable(name, f);
+    let defs = f.defs();
+    // `v` is `0` through `Word` casts: a `None`.
+    let is_zero = |mut v: ValueId| loop {
+        match defs.get(&v).map(|(_, i)| *i) {
+            Some(MirInst::Cast { kind: MirCastKind::Word, src, .. }) => v = *src,
+            Some(MirInst::Const { c: MirConst::I64(0), .. }) => return true,
+            _ => return false,
+        }
+    };
+    let used: HashSet<ValueId> = f.blocks.iter().flat_map(|b| b.insts.iter().flat_map(|i| i.operands()).chain(b.term.iter().flat_map(|t| t.uses().collect::<Vec<_>>()))).collect();
     let mut nodes: Vec<Node> = Vec::new();
     let mut member: HashMap<ValueId, usize> = HashMap::new();
     let mut calls: Vec<CallSite> = Vec::new();
@@ -174,8 +228,7 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
         for i in &b.insts {
             match i {
                 MirInst::Alloc { dest, kind, elems, kinds } if *kind == MirAllocKind::TUPLE => {
-                    let words = elems.len() < common::PACKED_KIND_WORDS
-                        && elems.iter().enumerate().all(|(k, e)| immediate(f.ty(*e)) && common::packed_word_kind(*kinds, k) == common::WORD_SCALAR);
+                    let words = elems.len() < common::PACKED_KIND_WORDS && elems.iter().all(|e| f.ty(*e).is_word_lane());
                     let src = if words { Src::Alloc { items: elems.clone(), kind: *kind, kinds: *kinds } } else { Src::Opaque };
                     add(*dest, src, &mut nodes, &mut member);
                 }
@@ -189,12 +242,16 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                         add(*dest, Src::Call(calls.len() - 1), &mut nodes, &mut member);
                     }
                 }
+                MirInst::Cast { kind: MirCastKind::Word, dest, src, .. } if f.ty(*dest) == MirTy::NicheOpt && is_zero(*src) => {
+                    add(*dest, Src::None, &mut nodes, &mut member);
+                }
                 _ => {}
             }
         }
     }
-    // Casts and barriers join their source's node, to a fixed point (a cast
-    // of a cast).
+    // Casts and barriers join their source's node, and an object word an
+    // item load reads from a node is a node of its own, to a fixed point
+    // (a cast of a cast, an item of an item).
     loop {
         let mut grew = false;
         for i in f.blocks.iter().flat_map(|b| &b.insts) {
@@ -203,6 +260,13 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                 MirInst::GcBarrier { dest, object, .. } => (*dest, *object),
                 // A share of an object nothing writes (a tuple) is its word.
                 MirInst::Cow { dest, src, unique: false, field: None } => (*dest, *src),
+                MirInst::ProductLoad { dest, object, slot } if object_word(f.ty(*dest)) && !member.contains_key(dest) => {
+                    if let Some(&parent) = member.get(object) {
+                        add(*dest, Src::Item { parent, slot: *slot as usize }, &mut nodes, &mut member);
+                        grew = true;
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             if let Some(&n) = member.get(&src)
@@ -224,8 +288,23 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
                 MirInst::Cast { kind: MirCastKind::Word, dest, src, .. } if member.contains_key(src) && member.get(dest) == member.get(src) => continue,
                 MirInst::GcBarrier { dest, object, .. } if member.contains_key(object) && member.get(dest) == member.get(object) => continue,
                 MirInst::Cow { dest, src, unique: false, field: None } if member.contains_key(src) && member.get(dest) == member.get(src) => continue,
+                MirInst::Cast { dest, .. } if member.get(dest).is_some_and(|&n| matches!(nodes[n].src, Src::None) && nodes[n].members[0] == *dest) => continue,
                 MirInst::ProductLoad { dest, object, slot } if member.contains_key(object) => {
                     nodes[member[object]].uses.push(Use::Load { dest: *dest, slot: *slot as usize });
+                    continue;
+                }
+                MirInst::Alloc { dest, elems, .. } if member.get(dest).is_some_and(|&n| matches!(nodes[n].src, Src::Alloc { .. })) => {
+                    let parent = member[dest];
+                    for (slot, e) in elems.iter().enumerate() {
+                        if let Some(&n) = member.get(e) {
+                            nodes[n].uses.push(Use::Within { parent, slot });
+                        }
+                    }
+                    continue;
+                }
+                MirInst::FreeEarly { dest, value, .. } | MirInst::ClearWord { dest, value } if member.contains_key(value) && !used.contains(dest) => {
+                    let keep = matches!(i, MirInst::FreeEarly { .. });
+                    nodes[member[value]].uses.push(Use::Drop { dest: *dest, keep });
                     continue;
                 }
                 MirInst::Phi { dest, args, .. } if member.contains_key(dest) => {
@@ -288,12 +367,13 @@ fn read_body(name: &str, f: &MirFunc, by_label: &HashMap<Label, usize>) -> Body 
         }
     }
     let wide_ret = twin && f.ret_ty.is_some_and(object_word) && f.ret_hi_ty.is_none() && f.ret_more_tys.is_empty();
-    let touches = touches(&nodes);
-    Body { nodes, member, calls, rets, params, twinnable: twin, wide_ret, touches }
+    let wanted = wanted(&nodes);
+    Body { nodes, member, calls, rets, params, twinnable: twin, wide_ret, wanted }
 }
 
-/// [`Body::touches`]: each node's φ-joined group meets a call edge.
-fn touches(nodes: &[Node]) -> Vec<bool> {
+/// [`Body::wanted`]: each node's group (joined by φs and nesting) meets a
+/// call edge or a φ.
+fn wanted(nodes: &[Node]) -> Vec<bool> {
     let mut group: Vec<usize> = (0..nodes.len()).collect();
     fn find(g: &mut [usize], mut x: usize) -> usize {
         while g[x] != x {
@@ -302,17 +382,24 @@ fn touches(nodes: &[Node]) -> Vec<bool> {
         }
         x
     }
+    let join = |a: usize, b: usize, group: &mut Vec<usize>| {
+        let (a, b) = (find(group, a), find(group, b));
+        group[a] = b;
+    };
     for (n, node) in nodes.iter().enumerate() {
+        if let Src::Item { parent, .. } = node.src {
+            join(n, parent, &mut group);
+        }
         for u in &node.uses {
-            if let Use::Phi(p) = *u {
-                let (a, b) = (find(&mut group, n), find(&mut group, p));
-                group[a] = b;
+            match *u {
+                Use::Phi(p) | Use::Within { parent: p, .. } => join(n, p, &mut group),
+                _ => {}
             }
         }
     }
     let mut hit = vec![false; nodes.len()];
     for (n, node) in nodes.iter().enumerate() {
-        if matches!(node.src, Src::Param(_) | Src::Call(_)) || node.uses.iter().any(|u| matches!(u, Use::Arg { .. } | Use::Ret)) {
+        if matches!(node.src, Src::Param(_) | Src::Call(_) | Src::Phi(_)) || node.uses.iter().any(|u| matches!(u, Use::Arg { .. } | Use::Ret)) {
             let g = find(&mut group, n);
             hit[g] = true;
         }
@@ -329,28 +416,26 @@ enum Key {
     Ret(usize),
 }
 
-/// A class of [`Key`]s that must agree on their words.
+/// A class's tuple: per item, the class of the item and its word type as a
+/// leaf, and the tuple's kind and per-item word kinds.
+#[derive(Clone, Debug)]
+struct Tuple {
+    slots: Vec<(usize, MirTy, u8)>,
+    kind: MirAllocKind,
+}
+
+/// A class of [`Key`]s (and of tuple items) that must agree on their words.
 #[derive(Clone, Debug, Default)]
 struct Class {
-    items: Option<Vec<MirTy>>,
-    kind: Option<MirAllocKind>,
-    kinds: common::PackedKinds,
+    tuple: Option<Tuple>,
     niche: Option<bool>,
     bad: bool,
+    /// Some member stays an object (an item that is no node, a read the
+    /// pass does not take): the class is never nested in another's words.
+    fixed: bool,
 }
 
 impl Class {
-    fn words(&self) -> Option<Vec<MirTy>> {
-        if self.bad {
-            return None;
-        }
-        let mut w = self.items.clone()?;
-        if self.niche == Some(true) {
-            w.push(MirTy::Bool);
-        }
-        (3..=2 + MAX_RET_MORE).contains(&w.len()).then_some(w)
-    }
-
     fn set_niche(&mut self, niche: bool) {
         match self.niche {
             Some(n) if n != niche => self.bad = true,
@@ -361,16 +446,23 @@ impl Class {
 
 struct Classes {
     parent: Vec<usize>,
+    data: Vec<Class>,
     index: HashMap<Key, usize>,
 }
 
 impl Classes {
+    fn fresh(&mut self, c: Class) -> usize {
+        let n = self.parent.len();
+        self.parent.push(n);
+        self.data.push(c);
+        n
+    }
+
     fn id(&mut self, k: Key) -> usize {
         if let Some(&i) = self.index.get(&k) {
             return i;
         }
-        let n = self.parent.len();
-        self.parent.push(n);
+        let n = self.fresh(Class::default());
         self.index.insert(k, n);
         n
     }
@@ -383,18 +475,159 @@ impl Classes {
         x
     }
 
+    /// Join two classes, and their tuples' items pairwise, at any depth.
+    fn unify(&mut self, a: usize, b: usize) {
+        let mut work = vec![(a, b)];
+        while let Some((a, b)) = work.pop() {
+            let (a, b) = (self.find(a), self.find(b));
+            if a == b {
+                continue;
+            }
+            self.parent[a] = b;
+            let ca = std::mem::take(&mut self.data[a]);
+            let cb = &mut self.data[b];
+            cb.bad |= ca.bad;
+            cb.fixed |= ca.fixed;
+            if let Some(n) = ca.niche {
+                cb.set_niche(n);
+            }
+            match (ca.tuple, &mut cb.tuple) {
+                (None, _) => {}
+                (Some(t), slot @ None) => *slot = Some(t),
+                (Some(t), Some(u)) => {
+                    if t.slots.len() != u.slots.len() || t.kind != u.kind {
+                        cb.bad = true;
+                        continue;
+                    }
+                    for (k, &(s, ty, kind)) in t.slots.iter().enumerate() {
+                        let (us, uty, ukind) = u.slots[k];
+                        match join_word(ty, uty) {
+                            Some(j) => u.slots[k] = (us, j, if kind == ukind { kind } else { common::WORD_UNKNOWN }),
+                            None => cb.bad = true,
+                        }
+                        work.push((s, us));
+                    }
+                }
+            }
+        }
+    }
+
     fn union(&mut self, a: Key, b: Key) {
         let (a, b) = (self.id(a), self.id(b));
-        let (a, b) = (self.find(a), self.find(b));
-        if a != b {
-            self.parent[a] = b;
-        }
+        self.unify(a, b);
     }
 
     fn of(&mut self, k: Key) -> usize {
         let i = self.id(k);
         self.find(i)
     }
+
+    /// The class of item `slot` of class `c`'s tuple.
+    fn slot(&mut self, c: usize, slot: usize) -> Option<usize> {
+        let c = self.find(c);
+        let s = self.data[c].tuple.as_ref()?.slots.get(slot)?.0;
+        Some(self.find(s))
+    }
+}
+
+/// A class's words, flattened.
+#[derive(Clone, Debug)]
+struct Lay {
+    words: Vec<MirTy>,
+    /// Per item of the tuple, where its words are.
+    slots: Vec<Slot>,
+    /// An `Option` of the tuple: its last word is `Some`'s flag.
+    niche: bool,
+    kind: MirAllocKind,
+    kinds: common::PackedKinds,
+    /// It and every tuple nested in it can be built again from the words
+    /// with no branch (no `Option` in it).
+    rebuild: bool,
+}
+
+#[derive(Clone, Debug)]
+enum Slot {
+    /// One word, at this index.
+    Leaf(usize),
+    /// A tuple nested in place: its words start at `at`.
+    Nested { at: usize, lay: Rc<Lay> },
+}
+
+/// Class `c`'s words: its tuple's items' leaves, a nested tuple's in place,
+/// within the budget (one rule at any depth). A tuple whose nested words do
+/// not fit keeps its items as one word each.
+fn layout(cls: &mut Classes, c: usize, memo: &mut HashMap<usize, Option<Rc<Lay>>>, busy: &mut HashSet<usize>) -> Option<Rc<Lay>> {
+    let c = cls.find(c);
+    if let Some(l) = memo.get(&c) {
+        return l.clone();
+    }
+    // A class nested in itself has no finite words.
+    if !busy.insert(c) {
+        return None;
+    }
+    let class = cls.data[c].clone();
+    let out = (|| {
+        if class.bad {
+            return None;
+        }
+        let t = class.tuple?;
+        let niche = class.niche == Some(true);
+        let inner: Vec<Option<Rc<Lay>>> = t
+            .slots
+            .iter()
+            .map(|&(s, _, _)| {
+                let s = cls.find(s);
+                if cls.data[s].fixed || cls.data[s].tuple.is_none() { None } else { layout(cls, s, memo, busy) }
+            })
+            .collect();
+        let kinds = common::pack_word_kinds(t.slots.iter().map(|&(_, _, k)| k));
+        for nest in [true, false] {
+            let mut words = Vec::new();
+            let mut slots = Vec::new();
+            let mut rebuild = !niche;
+            for (k, &(_, ty, _)) in t.slots.iter().enumerate() {
+                match inner[k].as_ref().filter(|_| nest) {
+                    Some(l) => {
+                        slots.push(Slot::Nested { at: words.len(), lay: l.clone() });
+                        words.extend(l.words.iter().copied());
+                        rebuild &= l.rebuild;
+                    }
+                    None => {
+                        slots.push(Slot::Leaf(words.len()));
+                        words.push(ty);
+                    }
+                }
+            }
+            if niche {
+                words.push(MirTy::Bool);
+            }
+            if (2..=MAX_WORDS).contains(&words.len()) {
+                return Some(Rc::new(Lay { words, slots, niche, kind: t.kind, kinds, rebuild }));
+            }
+            if !inner.iter().any(Option::is_some) {
+                break;
+            }
+        }
+        None
+    })();
+    busy.remove(&c);
+    memo.insert(c, out.clone());
+    out
+}
+
+/// Build the object of `lay` from its words `ws` (nested tuples first):
+/// its value, `dest` when given.
+fn build(f: &mut MirFunc, lay: &Lay, ws: &[ValueId], dest: Option<ValueId>, out: &mut Vec<MirInst>) -> ValueId {
+    let mut elems = Vec::with_capacity(lay.slots.len());
+    for s in &lay.slots {
+        match s {
+            Slot::Leaf(at) => elems.push(ws[*at]),
+            Slot::Nested { at, lay: l } => elems.push(build(f, l, &ws[*at..*at + l.words.len()], None, out)),
+        }
+    }
+    let d = dest.unwrap_or_else(|| new_value(f, MirTy::HeapRef));
+    out.push(MirInst::Alloc { dest: d, kind: lay.kind, elems, kinds: lay.kinds });
+    d
 }
 
 /// The two ways a body runs: as itself (its parameters and result are
@@ -406,15 +639,9 @@ struct Program<'a> {
     bodies: &'a [NativeBody],
     info: Vec<Body>,
     /// Each node's class's words, by body and node (`None`: never words).
-    words: Vec<Vec<Option<Vec<MirTy>>>>,
-    /// Each node's class is an `Option`'s.
-    niche: Vec<Vec<bool>>,
-    param_words: Vec<Vec<Option<Vec<MirTy>>>>,
-    ret_words: Vec<Option<Vec<MirTy>>>,
-    ret_niche: Vec<bool>,
-    /// The allocation a rebuilt result makes: its class's tuple kind and
-    /// word kinds.
-    ret_alloc: Vec<(MirAllocKind, common::PackedKinds)>,
+    lay: Vec<Vec<Option<Rc<Lay>>>>,
+    param_lay: Vec<Vec<Option<Rc<Lay>>>>,
+    ret_lay: Vec<Option<Rc<Lay>>>,
     // The fixpoint's answers.
     param_w: Vec<Vec<bool>>,
     ret_w: Vec<bool>,
@@ -426,19 +653,49 @@ impl<'a> Program<'a> {
     fn new(bodies: &'a [NativeBody]) -> Self {
         let by_label: HashMap<Label, usize> = bodies.iter().enumerate().filter_map(|(i, b)| Some((b.entry?, i))).collect();
         let info: Vec<Body> = bodies.iter().map(|b| read_body(&b.name, &b.mir, &by_label)).collect();
-        // Shapes: unify every edge words could cross.
-        let mut cls = Classes { parent: Vec::new(), index: HashMap::new() };
+        // Shapes: unify every edge words could cross, and each fresh
+        // tuple's items with what they are made of.
+        let mut cls = Classes { parent: Vec::new(), data: Vec::new(), index: HashMap::new() };
         for (bi, b) in info.iter().enumerate() {
+            let f = &bodies[bi].mir;
             for (n, node) in b.nodes.iter().enumerate() {
                 let k = Key::Node(bi, n);
-                cls.id(k);
-                if let Src::Param(j) = node.src {
-                    cls.union(k, Key::Param(bi, j));
+                let id = cls.id(k);
+                if node.niche {
+                    let c = cls.find(id);
+                    cls.data[c].set_niche(true);
+                } else if !matches!(node.src, Src::None) {
+                    let c = cls.find(id);
+                    cls.data[c].set_niche(false);
                 }
-                if let Src::Call(c) = node.src
-                    && let Some(t) = b.calls[c].callee
-                {
-                    cls.union(k, Key::Ret(t));
+                match &node.src {
+                    Src::Param(j) => cls.union(k, Key::Param(bi, *j)),
+                    Src::Call(c) => {
+                        if let Some(t) = b.calls[*c].callee {
+                            cls.union(k, Key::Ret(t));
+                        }
+                    }
+                    Src::Alloc { items, kind, kinds } => {
+                        let slots = items
+                            .iter()
+                            .enumerate()
+                            .map(|(s, e)| {
+                                let word = common::packed_word_kind(*kinds, s);
+                                let c = match b.member.get(e) {
+                                    Some(&m) => cls.id(Key::Node(bi, m)),
+                                    None => cls.fresh(Class { fixed: true, ..Class::default() }),
+                                };
+                                (c, item_ty(f.ty(*e), word), word)
+                            })
+                            .collect();
+                        let t = cls.fresh(Class { tuple: Some(Tuple { slots, kind: *kind }), ..Class::default() });
+                        cls.unify(id, t);
+                    }
+                    Src::Opaque => {
+                        let c = cls.find(id);
+                        cls.data[c].bad = true;
+                    }
+                    _ => {}
                 }
                 for u in &node.uses {
                     match *u {
@@ -453,123 +710,132 @@ impl<'a> Program<'a> {
                     }
                 }
             }
-        }
-        let mut classes: HashMap<usize, Class> = HashMap::new();
-        for (bi, b) in info.iter().enumerate() {
-            let f = &bodies[bi].mir;
-            for (n, node) in b.nodes.iter().enumerate() {
-                let c = cls.of(Key::Node(bi, n));
-                let class = classes.entry(c).or_default();
-                class.set_niche(node.niche);
-                match &node.src {
-                    Src::Alloc { items, kind, kinds } => {
-                        let tys: Vec<MirTy> = items.iter().map(|e| f.ty(*e)).collect();
-                        match &class.items {
-                            Some(prev) if *prev != tys => class.bad = true,
-                            Some(_) => {}
-                            None => {
-                                class.items = Some(tys);
-                                class.kind = Some(*kind);
-                                class.kinds = *kinds;
-                            }
-                        }
-                    }
-                    Src::Opaque => class.bad = true,
-                    _ => {}
-                }
-            }
             if b.wide_ret {
                 let c = cls.of(Key::Ret(bi));
-                classes.entry(c).or_default().set_niche(f.ret_ty == Some(MirTy::NicheOpt));
+                cls.data[c].set_niche(f.ret_ty == Some(MirTy::NicheOpt));
             }
         }
-        // Item loads must read an item of its type.
+        // An item load's node is its parent's item, once the parent's
+        // tuple is known (an item of an item waits for its parent's).
+        let mut pending: Vec<(usize, usize, usize, usize)> = Vec::new();
         for (bi, b) in info.iter().enumerate() {
-            let f = &bodies[bi].mir;
+            for (n, node) in b.nodes.iter().enumerate() {
+                if let Src::Item { parent, slot } = node.src {
+                    pending.push((bi, n, parent, slot));
+                }
+            }
+        }
+        loop {
+            let before = pending.len();
+            pending.retain(|&(bi, n, parent, slot)| {
+                let p = cls.of(Key::Node(bi, parent));
+                if cls.data[p].tuple.is_none() {
+                    return true;
+                }
+                match cls.slot(p, slot) {
+                    Some(s) => {
+                        let k = cls.id(Key::Node(bi, n));
+                        cls.unify(k, s);
+                    }
+                    None => {
+                        let c = cls.of(Key::Node(bi, n));
+                        cls.data[c].bad = true;
+                    }
+                }
+                false
+            });
+            if pending.len() == before {
+                break;
+            }
+        }
+        // What stays an object is never nested in another's words.
+        for (bi, b) in info.iter().enumerate() {
             for (n, node) in b.nodes.iter().enumerate() {
                 let c = cls.of(Key::Node(bi, n));
-                let class = classes.entry(c).or_default();
+                if node.other || matches!(node.src, Src::Opaque) {
+                    cls.data[c].fixed = true;
+                }
                 for u in &node.uses {
-                    if let Use::Load { dest, slot } = u {
-                        let ok = class.items.as_ref().is_some_and(|items| items.get(*slot) == Some(&f.ty(*dest)));
-                        if !ok {
-                            class.bad = true;
-                        }
+                    if let Use::Load { dest, slot } = *u
+                        && !b.member.contains_key(&dest)
+                        && let Some(s) = cls.slot(c, slot)
+                    {
+                        cls.data[s].fixed = true;
                     }
                 }
             }
         }
-        let ret_alloc: Vec<(MirAllocKind, common::PackedKinds)> = (0..info.len())
-            .map(|bi| {
-                let c = cls.of(Key::Ret(bi));
-                classes.get(&c).and_then(|cl| Some((cl.kind?, cl.kinds))).unwrap_or((MirAllocKind::TUPLE, 0))
-            })
-            .collect();
-        let words_of = |k: Key, cls: &mut Classes| -> (Option<Vec<MirTy>>, bool) {
+        let mut memo = HashMap::new();
+        let mut busy = HashSet::new();
+        let mut lay_of = |k: Key, cls: &mut Classes| -> Option<Rc<Lay>> {
             let c = cls.of(k);
-            classes.get(&c).map_or((None, false), |cl| (cl.words(), cl.niche == Some(true)))
+            layout(cls, c, &mut memo, &mut busy)
         };
-        let mut words = Vec::new();
-        let mut niche = Vec::new();
-        let mut param_words: Vec<Vec<Option<Vec<MirTy>>>> = Vec::new();
-        let mut ret_words = Vec::new();
-        let mut ret_niche = Vec::new();
+        let mut lay = Vec::new();
+        let mut param_lay = Vec::new();
+        let mut ret_lay = Vec::new();
         for (bi, b) in info.iter().enumerate() {
-            let (w, ni): (Vec<_>, Vec<_>) = (0..b.nodes.len()).map(|n| words_of(Key::Node(bi, n), &mut cls)).unzip();
-            words.push(w);
-            niche.push(ni);
-            param_words.push(
+            lay.push((0..b.nodes.len()).map(|n| lay_of(Key::Node(bi, n), &mut cls)).collect::<Vec<_>>());
+            param_lay.push(
                 (0..b.params.len())
                     .map(|j| match b.params[j] {
-                        // A niche parameter would need a branch to split or
-                        // rebuild: it stays one word.
-                        Some(_) if b.twinnable => {
-                            let (w, ni) = words_of(Key::Param(bi, j), &mut cls);
-                            w.filter(|_| !ni)
-                        }
+                        Some(_) if b.twinnable => lay_of(Key::Param(bi, j), &mut cls),
                         _ => None,
                     })
-                    .collect(),
+                    .collect::<Vec<_>>(),
             );
-            let (w, ni) = if b.wide_ret { words_of(Key::Ret(bi), &mut cls) } else { (None, false) };
-            ret_words.push(w);
-            ret_niche.push(ni);
+            ret_lay.push(if b.wide_ret { lay_of(Key::Ret(bi), &mut cls) } else { None });
         }
-        let param_w = param_words.iter().map(|p| p.iter().map(Option::is_some).collect()).collect();
-        let ret_w = ret_words.iter().map(Option::is_some).collect();
-        let viable = [0, 1].map(|_| words.iter().map(|w| w.iter().map(Option::is_some).collect()).collect());
+        let param_w = param_lay.iter().map(|p| p.iter().map(Option::is_some).collect()).collect();
+        let ret_w = ret_lay.iter().map(Option::is_some).collect();
+        let viable = [0, 1].map(|_| lay.iter().map(|w| w.iter().map(Option::is_some).collect()).collect());
         let switch = [0, 1].map(|_| info.iter().map(|b| vec![true; b.calls.len()]).collect());
-        Program { bodies, info, words, niche, param_words, ret_words, ret_niche, ret_alloc, param_w, ret_w, viable, switch }
+        Program { bodies, info, lay, param_lay, ret_lay, param_w, ret_w, viable, switch }
     }
 
     fn has_twin(&self, t: usize) -> bool {
         self.ret_w[t] || self.param_w[t].iter().any(|&w| w)
     }
 
+    /// Item `slot` of node `n` of body `b` is a tuple nested in its words.
+    fn nested(&self, b: usize, n: usize, slot: usize) -> bool {
+        self.lay[b][n].as_ref().is_some_and(|l| matches!(l.slots.get(slot), Some(Slot::Nested { .. })))
+    }
+
     /// Whether node `n` of body `b` keeps no object when `b` runs as `ctx`.
     fn node_ok(&self, b: usize, ctx: usize, n: usize) -> bool {
         let node = &self.info[b].nodes[n];
-        if node.other || self.words[b][n].is_none() {
+        let Some(lay) = self.lay[b][n].as_ref() else { return false };
+        if node.other || !self.info[b].wanted[n] {
             return false;
         }
-        if !self.info[b].touches[n] {
-            return false;
-        }
+        let body = &self.info[b];
+        let f = &self.bodies[b].mir;
+        let viable = |m: usize| self.viable[ctx][b][m];
         let src = match node.src {
-            Src::Alloc { .. } => true,
+            Src::Alloc { ref items, .. } => lay.slots.iter().zip(items).all(|(s, e)| match s {
+                Slot::Leaf(at) => join_word(lay.words[*at], f.ty(*e)).is_some(),
+                Slot::Nested { .. } => body.member.get(e).is_some_and(|&m| viable(m)),
+            }),
             Src::Param(j) => ctx == TWIN && self.param_w[b][j],
-            Src::Call(c) => self.switch[ctx][b][c] && self.info[b].calls[c].callee.is_some_and(|t| self.ret_w[t]),
-            Src::Phi(ref args) => args.iter().all(|(_, a)| self.info[b].member.get(a).is_some_and(|&m| self.viable[ctx][b][m])),
+            Src::Call(c) => self.switch[ctx][b][c] && body.calls[c].callee.is_some_and(|t| self.ret_w[t]),
+            Src::Phi(ref args) => args.iter().all(|(_, a)| body.member.get(a).is_some_and(|&m| viable(m))),
+            Src::Item { parent, slot } => viable(parent) && self.nested(b, parent, slot),
+            Src::None => lay.niche,
             Src::Opaque => false,
         };
         src && node.uses.iter().all(|u| match *u {
-            Use::Load { .. } => true,
-            Use::Test => self.niche[b][n],
-            Use::Arg { call, j } => {
-                self.switch[ctx][b][call] && self.info[b].calls[call].callee.is_some_and(|t| self.param_w[t].get(j) == Some(&true))
-            }
+            Use::Load { dest, slot } => match lay.slots.get(slot) {
+                Some(Slot::Leaf(at)) => join_word(lay.words[*at], f.ty(dest)).is_some(),
+                Some(Slot::Nested { .. }) => body.member.get(&dest).is_some_and(|&m| viable(m)),
+                None => false,
+            },
+            Use::Test => lay.niche,
+            Use::Arg { call, j } => self.switch[ctx][b][call] && body.calls[call].callee.is_some_and(|t| self.param_w[t].get(j) == Some(&true)),
             Use::Ret => ctx == TWIN && self.ret_w[b],
-            Use::Phi(p) => self.viable[ctx][b][p],
+            Use::Phi(p) => viable(p),
+            Use::Within { parent, slot } => viable(parent) && self.nested(b, parent, slot),
+            Use::Drop { .. } => true,
         })
     }
 
@@ -600,9 +866,9 @@ impl<'a> Program<'a> {
             let dest = body.member.get(&call.dest).copied();
             let kept = dest.is_none_or(|n| !self.viable[ctx][b][n]);
             if kept {
-                // A caller that keeps the object rebuilds it from the
+                // A caller that keeps the object builds it again from the
                 // words, past the call; an `Option` would need a branch.
-                if self.ret_niche[t] {
+                if !self.ret_lay[t].as_ref().is_some_and(|l| l.rebuild) {
                     return false;
                 }
             } else {
@@ -614,11 +880,12 @@ impl<'a> Program<'a> {
 
     fn ret_ok(&self, b: usize) -> bool {
         let info = &self.info[b];
+        let niche = self.ret_lay[b].as_ref().is_some_and(|l| l.niche);
         !info.rets.is_empty()
             && info.rets.iter().any(|(_, r)| matches!(r, RetSite::Node(_)))
             && info.rets.iter().all(|&(_, r)| match r {
                 RetSite::Node(n) => self.viable[TWIN][b][n],
-                RetSite::None => self.ret_niche[b],
+                RetSite::None => niche,
                 RetSite::Other => false,
             })
     }
@@ -682,11 +949,17 @@ impl<'a> Program<'a> {
         need
     }
 
+    /// Whether body `b` running as `ctx` takes any node apart.
+    fn changes(&self, b: usize, ctx: usize) -> bool {
+        self.switch[ctx][b].iter().any(|&s| s) || self.viable[ctx][b].iter().any(|&v| v)
+    }
+
     /// Body `b` running as `ctx`, rewritten: its dissolved nodes' objects
     /// gone, its switched calls entering twins (`twin_of`).
     fn rewrite(&self, b: usize, ctx: usize, twin_of: &HashMap<usize, Label>) -> (MirFunc, usize) {
         let mut f = self.bodies[b].mir.clone();
         let info = &self.info[b];
+        let viable = &self.viable[ctx][b];
         // Constants a rewrite adds: in place of a dissolved tuple, and at
         // the end of a block.
         let mut at: HashMap<ValueId, Vec<MirInst>> = HashMap::new();
@@ -695,11 +968,12 @@ impl<'a> Program<'a> {
         let mut node_words: HashMap<usize, Vec<ValueId>> = HashMap::new();
         let mut gone: HashSet<ValueId> = HashSet::new();
         let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
+        let lay = |n: usize| self.lay[b][n].clone().expect("a dissolved node's words");
         if ctx == TWIN {
             let mut params = Vec::new();
             for (j, &p) in f.params.clone().iter().enumerate() {
                 if self.param_w[b][j] {
-                    let tys = self.param_words[b][j].clone().expect("a parameter's words");
+                    let tys = self.param_lay[b][j].clone().expect("a parameter's words").words.clone();
                     let ws: Vec<ValueId> = tys.iter().map(|&t| new_value(&mut f, t)).collect();
                     params.extend(ws.iter().copied());
                     node_words.insert(info.params[j].expect("a parameter's node"), ws);
@@ -717,8 +991,8 @@ impl<'a> Program<'a> {
             }
             let t = call.callee.expect("a switched call's callee");
             if self.ret_w[t] {
-                let tys = self.ret_words[t].clone().expect("a result's words");
-                let dissolved = info.member.get(&call.dest).copied().filter(|&n| self.viable[ctx][b][n]);
+                let tys = self.ret_lay[t].clone().expect("a result's words").words.clone();
+                let dissolved = info.member.get(&call.dest).copied().filter(|&n| viable[n]);
                 // A dissolved result's first word keeps the result's name;
                 // a kept one names the object rebuilt after the call.
                 let mut ws: Vec<ValueId> = Vec::with_capacity(tys.len());
@@ -736,49 +1010,118 @@ impl<'a> Program<'a> {
                 call_words.insert(c, ws);
             }
         }
-        // A dissolved φ's words are φs of its incoming nodes' words.
+        // A dissolved φ's words are φs of its incoming nodes' words; a
+        // `None`'s are zeros and a `false` flag.
         for (n, node) in info.nodes.iter().enumerate() {
-            if self.viable[ctx][b][n]
-                && let Src::Phi(_) = node.src
-            {
-                let tys = self.words[b][n].clone().expect("a φ's words");
-                let ws = tys.iter().map(|&t| new_value(&mut f, t)).collect();
+            if !viable[n] {
+                continue;
+            }
+            match node.src {
+                Src::Phi(_) => {
+                    let ws = lay(n).words.iter().map(|&t| new_value(&mut f, t)).collect();
+                    node_words.insert(n, ws);
+                }
+                Src::None => {
+                    let mut ws = Vec::new();
+                    for &t in &lay(n).words {
+                        let z = new_value(&mut f, t);
+                        at.entry(node.members[0]).or_default().push(MirInst::Const { dest: z, c: zero(t) });
+                        ws.push(z);
+                    }
+                    node_words.insert(n, ws);
+                }
+                _ => {}
+            }
+        }
+        // Fresh tuples (their nested items' words first) and item loads
+        // (their parents' words first), to a fixed point.
+        loop {
+            let mut grew = false;
+            for (n, node) in info.nodes.iter().enumerate() {
+                if !viable[n] || node_words.contains_key(&n) {
+                    continue;
+                }
+                let l = lay(n);
+                let ws = match &node.src {
+                    Src::Alloc { items, .. } => {
+                        let mut ws = Vec::with_capacity(l.words.len());
+                        let mut ready = true;
+                        for (s, e) in l.slots.iter().zip(items) {
+                            match s {
+                                Slot::Leaf(_) => ws.push(*e),
+                                Slot::Nested { .. } => match node_words.get(&info.member[e]) {
+                                    Some(inner) => ws.extend(inner.iter().copied()),
+                                    None => ready = false,
+                                },
+                            }
+                        }
+                        if !ready {
+                            continue;
+                        }
+                        if l.niche {
+                            // `Some`'s flag: where the tuple was made, or, read
+                            // by nothing but a return, at the end of its block.
+                            let t = new_value(&mut f, MirTy::Bool);
+                            let flag = MirInst::Const { dest: t, c: MirConst::Bool(true) };
+                            let ret = info.rets.iter().find(|(_, r)| matches!(r, RetSite::Node(m) if *m == n)).map(|(bi, _)| *bi);
+                            match ret.filter(|_| !node.uses.iter().any(|u| matches!(u, Use::Test))) {
+                                Some(bi) => tail.entry(bi).or_default().push(flag),
+                                None => at.entry(node.members[0]).or_default().push(flag),
+                            }
+                            ws.push(t);
+                        }
+                        ws
+                    }
+                    Src::Item { parent, slot } => {
+                        let Some(pw) = node_words.get(parent) else { continue };
+                        let Some(Slot::Nested { at: off, lay: inner }) = lay(*parent).slots.get(*slot).cloned() else {
+                            unreachable!("a dissolved item is nested in its parent's words")
+                        };
+                        pw[off..off + inner.words.len()].to_vec()
+                    }
+                    _ => unreachable!("words of a dissolved node"),
+                };
                 node_words.insert(n, ws);
+                grew = true;
+            }
+            if !grew {
+                break;
             }
         }
         for (n, node) in info.nodes.iter().enumerate() {
-            if !self.viable[ctx][b][n] {
+            if !viable[n] {
                 continue;
             }
             gone.extend(node.members.iter().copied());
-            if let Src::Alloc { items, .. } = &node.src {
-                let mut ws = items.clone();
-                if self.niche[b][n] {
-                    // `Some`'s flag: where the tuple was made, or, read by
-                    // nothing but a return, at the end of its block.
-                    let t = new_value(&mut f, MirTy::Bool);
-                    let flag = MirInst::Const { dest: t, c: MirConst::Bool(true) };
-                    let ret = info.rets.iter().find(|(_, r)| matches!(r, RetSite::Node(m) if *m == n)).map(|(bi, _)| *bi);
-                    match ret.filter(|_| !node.uses.iter().any(|u| matches!(u, Use::Test))) {
-                        Some(bi) => tail.entry(bi).or_default().push(flag),
-                        None => at.entry(node.members[0]).or_default().push(flag),
-                    }
-                    ws.push(t);
-                }
-                node_words.insert(n, ws);
-            }
+            let l = lay(n);
             for u in &node.uses {
-                if let Use::Load { dest, slot } = u {
-                    subst.insert(*dest, node_words[&n][*slot]);
-                    gone.insert(*dest);
+                match *u {
+                    Use::Load { dest, slot } => {
+                        if let Slot::Leaf(i) = l.slots[slot] {
+                            subst.insert(dest, node_words[&n][i]);
+                        }
+                        gone.insert(dest);
+                    }
+                    Use::Drop { dest, keep } => {
+                        gone.insert(dest);
+                        if keep {
+                            for (k, &w) in node_words[&n].iter().enumerate() {
+                                if l.words[k].is_heap_word() || l.words[k] == MirTy::MaybeObj {
+                                    let t = new_value(&mut f, MirTy::Bool);
+                                    at.entry(dest).or_default().push(MirInst::KeepAlive { dest: t, value: w });
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
         for (n, node) in info.nodes.iter().enumerate() {
-            if self.viable[ctx][b][n]
+            if viable[n]
                 && let Src::Phi(args) = &node.src
             {
-                let tys = self.words[b][n].clone().expect("a φ's words");
+                let tys = lay(n).words.clone();
                 let phis = (0..tys.len())
                     .map(|k| MirInst::Phi { dest: node_words[&n][k], ty: tys[k], args: args.iter().map(|&(blk, a)| (blk, node_words[&info.member[&a]][k])).collect() })
                     .collect::<Vec<_>>();
@@ -787,7 +1130,7 @@ impl<'a> Program<'a> {
         }
         let flag_of = |v: ValueId| -> Option<ValueId> {
             let n = *info.member.get(&v)?;
-            self.viable[ctx][b][n].then(|| *node_words[&n].last().expect("words"))
+            viable[n].then(|| *node_words[&n].last().expect("words"))
         };
         let mut moved = 0;
         let call_index: HashMap<ValueId, usize> = info.calls.iter().enumerate().map(|(c, call)| (call.dest, c)).collect();
@@ -800,7 +1143,7 @@ impl<'a> Program<'a> {
                 {
                     *src = flag;
                 }
-                let mut rebuild = None;
+                let mut rebuild = Vec::new();
                 if let MirInst::Call { dest, dest_hi, dest_more, target, args } = &mut inst
                     && let Some(&c) = call_index.get(dest)
                     && self.switch[ctx][b][c]
@@ -833,10 +1176,10 @@ impl<'a> Program<'a> {
                         if old != ws[0] && f.steady_calls.remove(&old) {
                             f.steady_calls.insert(ws[0]);
                         }
-                        if !info.member.get(&old).is_some_and(|&n| self.viable[ctx][b][n]) {
+                        if !info.member.get(&old).is_some_and(|&n| viable[n]) {
                             // The caller keeps the object: build it here.
-                            let (kind, kinds) = self.ret_alloc[t];
-                            rebuild = Some(MirInst::Alloc { dest: old, kind, elems: ws.clone(), kinds });
+                            let l = self.ret_lay[t].clone().expect("a result's words");
+                            build(&mut f, &l, ws, Some(old), &mut rebuild);
                         }
                     }
                     moved += 1;
@@ -853,7 +1196,7 @@ impl<'a> Program<'a> {
         }
         // Returns of words.
         if ctx == TWIN && self.ret_w[b] {
-            let tys = self.ret_words[b].clone().expect("a result's words");
+            let tys = self.ret_lay[b].clone().expect("a result's words").words.clone();
             for &(bi, site) in &info.rets {
                 let ws: Vec<ValueId> = match site {
                     RetSite::Node(n) => node_words[&n].clone(),
@@ -887,23 +1230,21 @@ impl<'a> Program<'a> {
 }
 
 /// Give each body a `$words` twin when a direct call can use it, and point
-/// those calls at it. Returns how many calls moved.
+/// those calls at it; take apart the tuples a body's φs carry. Returns how
+/// many calls moved.
 pub fn wide_call_twins(bodies: &mut Vec<NativeBody>) -> usize {
     let mut prog = Program::new(bodies);
-    if !(0..prog.info.len()).any(|b| prog.has_twin(b)) {
+    if !(0..prog.info.len()).any(|b| prog.has_twin(b) || prog.viable[ORIG][b].iter().any(|&v| v)) {
         return 0;
     }
     prog.solve();
     let need = prog.twins();
-    if need.is_empty() {
-        return 0;
-    }
     let first = bodies.iter().flat_map(|b| b.entry.into_iter().chain(b.mir.code_targets())).map(|l| l.0).max().unwrap_or(0) + 1;
     let twin_of: HashMap<usize, Label> = need.iter().zip(first..).map(|(&t, l)| (t, Label(l))).collect();
     let mut moved = 0;
     let mut rewritten: Vec<(usize, MirFunc)> = Vec::new();
     for b in 0..bodies.len() {
-        if prog.switch[ORIG][b].iter().any(|&s| s) {
+        if prog.changes(b, ORIG) {
             let (f, n) = prog.rewrite(b, ORIG, &twin_of);
             moved += n;
             rewritten.push((b, f));
@@ -913,7 +1254,7 @@ pub fn wide_call_twins(bodies: &mut Vec<NativeBody>) -> usize {
     for &t in &need {
         let (mut f, n) = prog.rewrite(t, TWIN, &twin_of);
         moved += n;
-        let name = format!("{}$words", bodies[t].name);
+        let name = format!("{}{}", bodies[t].name, common::WORDS_TWIN_SUFFIX);
         f.name = name.clone();
         // Only direct calls reach a twin: no function value's entry.
         f.pair_twin = None;
@@ -926,7 +1267,6 @@ pub fn wide_call_twins(bodies: &mut Vec<NativeBody>) -> usize {
     bodies.extend(twins);
     moved
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1020,5 +1360,100 @@ mod tests {
         let main = &bodies[2].mir;
         assert_eq!(calls(main), vec![(Label(2), 1), (make, 1), (sum, 3)]);
         assert_eq!(allocs(main), 0);
+    }
+    fn kinds(ks: &[u8]) -> common::PackedKinds {
+        common::pack_word_kinds(ks.iter().copied())
+    }
+
+    fn main_of(mut b: MirBuilder, r: ValueId) -> NativeBody {
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(r)).unwrap();
+        NativeBody { name: "main".into(), entry: Some(Label(9)), mir: b.finish().unwrap() }
+    }
+
+    fn params_of(bodies: &[NativeBody], name: &str) -> usize {
+        bodies.iter().find(|b| b.name == name).expect("a twin").mir.params.len()
+    }
+
+    #[test]
+    fn a_nested_tuple_argument_goes_as_its_leaf_words() {
+        // weigh(t) = t.0.0 + t.0.1 + t.1, called with ((a, a), a).
+        let mut b = MirBuilder::new("weigh");
+        let t = b.add_param(MirTy::HeapRef).unwrap();
+        let p = b.ins_product_load(t, 0, MirTy::HeapRef).unwrap();
+        let x = b.ins_product_load(p, 0, MirTy::I64).unwrap();
+        let y = b.ins_product_load(p, 1, MirTy::I64).unwrap();
+        let z = b.ins_product_load(t, 1, MirTy::I64).unwrap();
+        let s = b.ins_binop(crate::mir::MirBinOp::Add, x, y).unwrap();
+        let s = b.ins_binop(crate::mir::MirBinOp::Add, s, z).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(s)).unwrap();
+        let weigh = NativeBody { name: "weigh".into(), entry: Some(Label(1)), mir: b.finish().unwrap() };
+        let mut m = MirBuilder::new("main");
+        let a = m.add_param(MirTy::I64).unwrap();
+        let inner = m.ins_alloc_kinds(MirAllocKind::TUPLE, vec![a, a], kinds(&[common::WORD_SCALAR; 2])).unwrap();
+        let outer = m.ins_alloc_kinds(MirAllocKind::TUPLE, vec![inner, a], kinds(&[common::WORD_POINTER, common::WORD_SCALAR])).unwrap();
+        let (r, _) = m.ins_call(Label(1), vec![outer], &word_abi(1, MirTy::I64)).unwrap();
+        let mut bodies = vec![weigh, main_of(m, r)];
+        assert_eq!(wide_call_twins(&mut bodies), 1);
+        assert_eq!(params_of(&bodies, "weigh$words"), 3);
+        assert_eq!(allocs(&bodies[1].mir), 0);
+        assert_eq!(allocs(&bodies.iter().find(|b| b.name == "weigh$words").unwrap().mir), 0);
+    }
+
+    #[test]
+    fn a_heap_item_goes_as_a_word_beside_the_numbers() {
+        // len3(t) = len(t.0) + t.1 + t.2, called with (s, a, a).
+        let mut b = MirBuilder::new("len3");
+        let t = b.add_param(MirTy::HeapRef).unwrap();
+        let s = b.ins_product_load(t, 0, MirTy::HeapRef).unwrap();
+        let n = b.ins_array_len(s).unwrap();
+        let y = b.ins_product_load(t, 1, MirTy::I64).unwrap();
+        let z = b.ins_product_load(t, 2, MirTy::I64).unwrap();
+        let r = b.ins_binop(crate::mir::MirBinOp::Add, n, y).unwrap();
+        let r = b.ins_binop(crate::mir::MirBinOp::Add, r, z).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(r)).unwrap();
+        let len3 = NativeBody { name: "len3".into(), entry: Some(Label(1)), mir: b.finish().unwrap() };
+        let mut m = MirBuilder::new("main");
+        let a = m.add_param(MirTy::I64).unwrap();
+        let s = m.add_param(MirTy::HeapRef).unwrap();
+        let k = kinds(&[common::WORD_POINTER, common::WORD_SCALAR, common::WORD_SCALAR]);
+        let tup = m.ins_alloc_kinds(MirAllocKind::TUPLE, vec![s, a, a], k).unwrap();
+        let (r, _) = m.ins_call(Label(1), vec![tup], &word_abi(1, MirTy::I64)).unwrap();
+        let mut bodies = vec![len3, main_of(m, r)];
+        assert_eq!(wide_call_twins(&mut bodies), 1);
+        let twin = bodies.iter().find(|b| b.name == "len3$words").unwrap();
+        assert_eq!(twin.mir.params.len(), 3);
+        assert_eq!(twin.mir.ty(twin.mir.params[0]), MirTy::HeapRef);
+        assert_eq!(allocs(&bodies[1].mir), 0);
+    }
+
+    #[test]
+    fn an_option_argument_goes_as_its_words_and_a_flag() {
+        // first(o) = o.0 (read past a `Some` test), called with a `Some`
+        // of a fresh tuple and with a `None`.
+        let mut b = MirBuilder::new("first");
+        let o = b.add_param(MirTy::NicheOpt).unwrap();
+        let _ = b.ins_not(o).unwrap();
+        let t = b.ins_cast(MirCastKind::Word, MirTy::HeapRef, o).unwrap();
+        let x = b.ins_product_load(t, 0, MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(x)).unwrap();
+        let first = NativeBody { name: "first".into(), entry: Some(Label(1)), mir: b.finish().unwrap() };
+        let mut m = MirBuilder::new("main");
+        let a = m.add_param(MirTy::I64).unwrap();
+        let tup = m.ins_alloc_kinds(MirAllocKind::TUPLE, vec![a, a, a], scalar3()).unwrap();
+        let some = m.ins_cast(MirCastKind::Word, MirTy::NicheOpt, tup).unwrap();
+        let niche_abi = CallAbi { params: vec![MirTy::NicheOpt], ret: MirTy::I64, ret_hi: None };
+        let (r1, _) = m.ins_call(Label(1), vec![some], &niche_abi).unwrap();
+        let zero = m.ins_const(MirConst::I64(0)).unwrap();
+        let none = m.ins_cast(MirCastKind::Word, MirTy::NicheOpt, zero).unwrap();
+        let (r2, _) = m.ins_call(Label(1), vec![none], &niche_abi).unwrap();
+        let r = m.ins_binop(crate::mir::MirBinOp::Add, r1, r2).unwrap();
+        let mut bodies = vec![first, main_of(m, r)];
+        assert_eq!(wide_call_twins(&mut bodies), 2);
+        assert_eq!(params_of(&bodies, "first$words"), 4);
+        assert_eq!(allocs(&bodies[1].mir), 0);
     }
 }

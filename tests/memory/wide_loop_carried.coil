@@ -1,0 +1,79 @@
+// A three- or four-word tuple a loop carries as a mutable local: rebound
+// from a call's result or from a fresh tuple of its own items, read after
+// the loop, passed to a call. Its words go around the loop; the object is
+// never made.
+use tests::assert;
+
+#[inline(never)]
+fn step((int, int, int) t) -> (int, int, int) {
+    return (t[1], t[2], t[0] + t[1]);
+}
+
+#[inline(never)]
+fn sum3((int, int, int) t) -> int {
+    return t[0] + t[1] * 10 + t[2] * 100;
+}
+
+#[inline(never)]
+fn shift4((float, int, int, bool) q) -> (float, int, int, bool) {
+    return (q[0] * 0.5, q[2], q[1] + 1, !q[3]);
+}
+
+test("a tuple rebound from a call in a loop") {
+    let t = (0, 1, 1);
+    let i = 0;
+    while i < 10 {
+        t = step(t);
+        i += 1;
+    }
+    assert!(t[0] == 9 && t[1] == 12 && t[2] == 16);
+}
+
+test("a tuple rebound from its own items in a loop") {
+    let u = (0, 1, 2);
+    let j = 0;
+    while j < 10 {
+        u = (u[0] + 1, u[1], u[2] * 2);
+        j += 1;
+    }
+    assert!(u[0] == 10 && u[1] == 1 && u[2] == 2048);
+    assert!(sum3(u) == 10 + 10 + 204800);
+}
+
+test("a loop-carried tuple passed to a call each turn") {
+    let t = (1, 2, 3);
+    let s = 0;
+    let k = 0;
+    while k < 5 {
+        s += sum3(t);
+        t = (t[2], t[0], t[1] + k);
+        k += 1;
+    }
+    assert!(s == 321 + 213 + 232 + 522 + 525);
+    assert!(t[0] == 5 && t[1] == 5 && t[2] == 6);
+}
+
+test("a four-word tuple of mixed words carried around a loop") {
+    let q = (8.0, 1, 2, false);
+    let n = 0;
+    while n < 3 {
+        q = shift4(q);
+        n += 1;
+    }
+    assert!(q[0] == 1.0 && q[1] == 3 && q[2] == 3 && q[3]);
+}
+
+test("a branch inside the loop picks the next tuple") {
+    let t = (0, 0, 0);
+    let i = 0;
+    while i < 6 {
+        if i % 2 == 0 {
+            t = (t[0] + 1, t[1], t[2] + i);
+        } else {
+            t = step(t);
+        }
+        i += 1;
+    }
+    assert!(sum3(t) == t[0] + t[1] * 10 + t[2] * 100);
+    assert!(t[0] == 3 && t[1] == 5 && t[2] == 4);
+}

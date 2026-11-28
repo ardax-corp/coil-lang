@@ -1863,7 +1863,8 @@ pub unsafe extern "C" fn coil_native_cow_field(ctx: *mut NativeCtx, obj: u64, fi
 /// `CowIndex`: element `index` of the array `addr` made unique in place,
 /// `a[i] = unique(a[i])`, writing the element back only when it copied
 /// (the copy gains the array as an owner, the shared original loses it).
-/// Out of bounds it traps, as [`coil_native_index`] does. Returns `addr`.
+/// Out of bounds it traps, as [`coil_native_index`] does. Returns the
+/// element after it: the copy, or the element as it was.
 ///
 /// # Safety
 /// `ctx` is the call's [`NativeCtx`]; `addr` is a heap word.
@@ -1887,8 +1888,9 @@ pub unsafe extern "C" fn coil_native_cow_index(ctx: *mut NativeCtx, addr: u64, i
             heap.rc_dec_word(old, kind);
         }
         unsafe { note_alloc(ctx, heap) };
+        return copy.bits();
     }
-    addr
+    old.bits()
 }
 
 // ---------------------------------------------------------------------------
