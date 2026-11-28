@@ -436,3 +436,23 @@ test("map_put on a malformed map object changes nothing") {
     let bad = new Put(Vec::from([6, 0, 0, 0]), Vec::from([1]), Vec::from([2]));
     assert!(map_put(bad, 1, 1, 3, 1, 1, 1) == -1 && bad.ix.len() == 4 && bad.vals.len() == 1);
 }
+
+test("a string hashed for the first time hashes as its literal") {
+    // Fresh strings (built, lowered, split) carry no cached hash: native
+    // code computes it in place. Each must match the literal's, before and
+    // after the hash is cached, for short, long, empty and non-ASCII text.
+    let words = ["", "a", "w1234", "a string longer than any inline one, by far", "żółw €"];
+    for w in words {
+        let built = "" + w + "";
+        assert!(built.hash() == w.hash());
+        assert!(built.hash() == w.hash());
+    }
+    let parts = "w1 w22 w1 w333".split(" ");
+    let firsts: Vec<int> = Vec::new();
+    for p in parts {
+        firsts.push(p.hash());
+    }
+    assert!(firsts[0] == "w1".hash() && firsts[2] == "w1".hash());
+    assert!(firsts[1] == "w22".hash() && firsts[3] == "w333".hash());
+    assert!("ABC".to_lower().hash() == "abc".hash());
+}
