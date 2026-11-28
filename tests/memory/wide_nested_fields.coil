@@ -1,0 +1,103 @@
+// A class field of a tuple of numbers nested at any depth, such as
+// `((int, int), int)`, keeps its leaves in number slots, one each: its
+// first in the field's own slot, the others in tail slots. Reading it
+// builds the tuple again, writing it takes the value apart, at any depth
+// and past four words.
+use tests::assert;
+
+class Seg {
+    pub ends: ((int, int), int),
+    pub name: string,
+    pub mid: (int, (int, int), int),
+}
+
+class Wide5 {
+    pub w: (int, int, int, int, int),
+    pub k: int,
+}
+
+class Mixed {
+    pub m: (float, (float, bool)),
+    pub deep: (((int, int), int), (int, int)),
+}
+
+class Holder<T> {
+    pub item: T,
+    pub n: int,
+}
+
+readonly class Frozen {
+    pub f: ((int, int), int),
+}
+
+#[inline(never)]
+fn sum3(((int, int), int) t) -> int {
+    return t[0][0] + t[0][1] * 10 + t[1] * 100;
+}
+
+#[inline(never)]
+fn make(int a) -> Seg {
+    return new Seg(((a, a + 1), a + 2), "s", (a, (a * 2, a * 3), a * 4));
+}
+
+test("a nested field reads and writes its leaves") {
+    let s = make(1);
+    assert!(s.ends[0][0] == 1);
+    assert!(s.ends[0][1] == 2);
+    assert!(s.ends[1] == 3);
+    assert!(sum3(s.ends) == 321);
+    assert!(s.mid[1][1] == 3);
+    assert!(s.mid[2] == 4);
+    s.ends = ((7, 8), 9);
+    assert!(sum3(s.ends) == 987);
+    let inner = (4, 5);
+    s.ends = (inner, 6);
+    assert!(sum3(s.ends) == 654);
+    let whole = ((1, 1), 1);
+    s.ends = whole;
+    assert!(sum3(s.ends) == 111);
+    s.mid = (0, inner, 0);
+    assert!(s.mid[1][0] == 4 && s.mid[1][1] == 5);
+    assert!(s.name == "s");
+}
+
+test("a field past four words") {
+    let w = new Wide5((1, 2, 3, 4, 5), 6);
+    assert!(w.w[0] + w.w[4] == 6);
+    w.w = (10, 20, 30, 40, 50);
+    assert!(w.w[2] == 30 && w.w[4] == 50 && w.k == 6);
+}
+
+test("float, bool and deeper nesting") {
+    let m = new Mixed((1.5, (2.5, true)), (((1, 2), 3), (4, 5)));
+    assert!(m.m[0] + m.m[1][0] == 4.0);
+    assert!(m.m[1][1]);
+    assert!(m.deep[0][0][1] == 2);
+    assert!(m.deep[1][1] == 5);
+    m.deep = (((6, 7), 8), (9, 10));
+    assert!(m.deep[0][0][0] + m.deep[0][1] + m.deep[1][0] == 23);
+}
+
+test("a generic instance's nested field") {
+    let h = new Holder(((1, 2), 3), 4);
+    assert!(sum3(h.item) == 321);
+    h.item = ((5, 6), 7);
+    assert!(h.item[0][1] == 6 && h.n == 4);
+    let v: Vec<Seg> = [];
+    let i = 0;
+    while i < 4 {
+        v.push(make(i));
+        i += 1;
+    }
+    let t = 0;
+    for s in v {
+        t += sum3(s.ends);
+    }
+    assert!(t == 210 + 321 + 432 + 543);
+}
+
+test("a readonly class's nested field") {
+    let f = new Frozen(((3, 2), 1));
+    assert!(sum3(f.f) == 123);
+    assert!(f == new Frozen(((3, 2), 1)));
+}
