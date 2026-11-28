@@ -1699,9 +1699,18 @@ bb0:
         assert!(parse_func(src).unwrap().verify().is_err());
         let src = "func @w(v0: i64) -> i64, i64 {\nbb0:\n    return v0, v0, v0\n}\n";
         assert!(parse_func(src).unwrap().verify().is_err());
-        let src = "func @w(v0: i64) -> i64, i64, i64, i64, i64 {\nbb0:\n    return v0, v0, v0, v0, v0\n}\n";
-        assert!(parse_func(src).unwrap().verify().is_err(), "five words");
         let src = "func @w(v0: i64) -> i64, i64, i64 {\nbb0:\n    return v0, v0, v0\n}\n";
         parse_func(src).unwrap().verify().unwrap();
+        // A direct call returns at most `2 + MAX_CALL_RET_MORE` words.
+        let words = |n: usize| {
+            let tys = vec!["i64"; n].join(", ");
+            let vals = vec!["v0"; n].join(", ");
+            format!("func @w(v0: i64) -> {tys} {{\nbb0:\n    return {vals}\n}}\n")
+        };
+        let most = 2 + crate::mir::MAX_CALL_RET_MORE;
+        parse_func(&words(most)).unwrap().verify().unwrap();
+        assert!(parse_func(&words(most + 1)).unwrap().verify().is_err(), "{} words", most + 1);
+        let short = words(most).replacen(", v0\n", "\n", 1);
+        assert!(parse_func(&short).unwrap().verify().is_err(), "{most} words declared, {} returned", most - 1);
     }
 }
