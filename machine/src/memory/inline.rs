@@ -60,6 +60,16 @@ pub(super) fn make_inline_classes(slab: &mut Slab) -> [usize; 3] {
     inline_layouts().map(|l| slab.young_class(l))
 }
 
+/// The cursors [`make_inline_classes`] gives a new slab's classes, without
+/// making one: each new class key takes the next cursor.
+fn inline_class_indices() -> [usize; 3] {
+    let keys = inline_layouts().map(Slab::class_of);
+    std::array::from_fn(|i| {
+        let first = keys.iter().position(|k| *k == keys[i]).expect("its own key");
+        (0..first).filter(|&j| keys[..j].iter().all(|k| *k != keys[j])).count()
+    })
+}
+
 /// Offset of `field` within `base`, both inside one object.
 fn off<A, B>(base: &A, field: &B) -> usize {
     std::ptr::from_ref(field) as usize - std::ptr::from_ref(base) as usize
@@ -96,8 +106,7 @@ fn words(img: &[u8]) -> Vec<u64> {
 /// spilled payload, a fieldless or untyped instance).
 #[must_use]
 pub fn inline_object(shape: InlineShape) -> Option<InlineObject> {
-    let mut slab = Slab::new();
-    let classes = make_inline_classes(&mut slab);
+    let classes = inline_class_indices();
     let placeholder = [Value::default(); ENUM_INLINE_ARITY];
     let (class, layout, data, size, img, words_at) = match shape {
         InlineShape::Enum { tag, kinds, n } => {
@@ -272,8 +281,7 @@ pub fn string_free() -> StringFree {
 }
 
 fn probe_string_free() -> StringFree {
-    let mut slab = Slab::new();
-    let classes = make_inline_classes(&mut slab);
+    let classes = inline_class_indices();
     let obj = ObjString::from("ab");
     let data = std::mem::offset_of!(GcData<ObjString>, data);
     // SAFETY: `StrData` is `repr(u8)`: the discriminant is its first byte.
@@ -349,6 +357,12 @@ pub fn layout_fingerprint() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The computed cursors are the ones a new slab's classes get.
+    #[test]
+    fn class_indices_match_a_new_slab() {
+        assert_eq!(inline_class_indices(), make_inline_classes(&mut Slab::new()));
+    }
 
     /// An inline enum, tuple and instance written from their images read
     /// back as the objects the runtime would have made.
