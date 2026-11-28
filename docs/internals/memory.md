@@ -172,9 +172,22 @@ Releasing an array frees its leaf elements in place (`rc_release_elements`) inst
 one worklist entry per element, so a large array of plain objects frees without a transient
 buffer the size of the array. A string at count zero that no weak handle names and the intern
 table never took is freed in one test (`rc_free_plain_string`), there and in `rc_release`: no
-leaf, releasable or weak-list checks of the general path. Native code's inline decrement that finds
-a typed word's last owner calls the runtime with flag 3 (`coil_native_rc`), which takes the word
-as a slot start without a slot search.
+leaf, releasable or weak-list checks of the general path. A pointer-word array's young inline
+strings at count one free with one header-word test (kind, nursery bit, no weak handle, count)
+and one tag test (`rc_free_young_string`), the same tests native code makes.
+
+Strings are young too (`ObjString::NURSERY`; an interned one is old, `intern_ref`), in a size
+class fixed for every heap (`make_inline_classes`). Native code's inline decrement that takes a
+string's last owner frees it in place when the heap's free gate (`Heap::free_gate`: inline
+allocation open, counts kept and freeing, no host-side zero pending) is open: a young inline
+string, or a view of a shared buffer some other string still holds (its decrement of the
+buffer's count does not reach zero), has its header poisoned, leaves `alloc_bytes` and
+`live_count`, and goes on the string class's nursery free list, which the runtime's young
+allocation pops (`StringFree`, `machine::native::string_free`, probed from real strings and
+covered by `layout_fingerprint`). Anything else, and a view that held its buffer's last
+reference (the decrement is undone), calls the runtime with flag 3 (`coil_native_rc`), which takes
+the word as a slot start without a slot search. Nursery classes find their cursor through a direct
+index (`Slab::young_small`), as old ones do.
 
 The `region` hooks (host ids 177/178) are no-ops kept so later ids do not move.
 
