@@ -1254,7 +1254,7 @@ pub fn wide_call_twins(bodies: &mut Vec<NativeBody>) -> usize {
     for &t in &need {
         let (mut f, n) = prog.rewrite(t, TWIN, &twin_of);
         moved += n;
-        let name = format!("{}$words", bodies[t].name);
+        let name = format!("{}{}", bodies[t].name, common::WORDS_TWIN_SUFFIX);
         f.name = name.clone();
         // Only direct calls reach a twin: no function value's entry.
         f.pair_twin = None;
